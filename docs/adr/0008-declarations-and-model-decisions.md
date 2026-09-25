@@ -2,6 +2,7 @@
 
 Date: 2026-09-26.
 Status: owner selected this direction on 2026-09-26. It changes the decision policy of ADR 0007.
+Update 2026-09-26: [ADR 0010](0010-closing-open-decisions.md) changes step 5 of the decision order. A production declaration always waits for the owner.
 
 ## Owner requirements
 

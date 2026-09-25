@@ -2,6 +2,7 @@
 
 Date: 2026-09-25.
 Status: owner selected this mode on 2026-09-25. It changes the priority in the original concept. It does not remove mediated use from ADR 0004.
+Update 2026-09-26: in [ADR 0010](0010-closing-open-decisions.md), the owner accepts these risks for all environments. A production run always waits for the owner. The gate opens only after the gate items in [the goal](../goal.md).
 
 ## Context
 

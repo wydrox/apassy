@@ -2,6 +2,7 @@
 
 Date: 2026-09-26.
 Status: proposed by the owner on 2026-09-26. The steps below are a plan. Each step needs its own implementation and measurement.
+Update 2026-09-26: [ADR 0010](0010-closing-open-decisions.md) decides the open questions. [The goal](../goal.md) contains all six steps.
 
 ## Context
 

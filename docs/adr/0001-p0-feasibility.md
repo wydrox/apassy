@@ -2,6 +2,7 @@
 
 Date: 2026-09-16
 Status: PARTLY DECIDED. Remaining proposals need evidence or an owner decision.
+Update 2026-09-26: [ADR 0010](0010-closing-open-decisions.md) decides the open questions. [The goal](../goal.md) tracks the evidence.
 
 This record is a feasibility input after approval of `docs/mvp-plan.md`.
 It does not complete P0 or claim a complete MVP.

@@ -2,6 +2,7 @@
 
 Date: 2026-09-25.
 Status: owner approved on 2026-09-25. This decision changes the task order in `docs/mvp-plan.md`. It does not change the MVP acceptance checks.
+Update 2026-09-26: [ADR 0010](0010-closing-open-decisions.md) decides token life and peer identity. Real connectors move to a later plugin ADR.
 
 ## Context
 

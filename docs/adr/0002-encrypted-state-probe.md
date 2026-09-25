@@ -2,6 +2,7 @@
 
 Date: 2026-09-16
 Status: SYNTHETIC PROBE PASSED. Production acceptance remains open.
+Update 2026-09-26: the owner accepts this direction in [ADR 0010](0010-closing-open-decisions.md). The reviews in [the goal](../goal.md) are conditions for real use.
 
 This record proposes one encrypted transactional store for vault items and operational state.
 The owner approved evaluation of SQLCipher for that direction.

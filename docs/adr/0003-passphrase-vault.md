@@ -2,6 +2,7 @@
 
 Date: 2026-09-16.
 Status: owner selected SQLCipher with a master passphrase. The experimental backend passed [local checks](../operations/vault-verification.md).
+Update 2026-09-26: [ADR 0010](0010-closing-open-decisions.md) adds Touch ID unlock as an owner setting. The passphrase stays the root key.
 This decision does not accept production security or complete P2.
 
 ## Decision

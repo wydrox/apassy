@@ -2,6 +2,7 @@
 
 Date: 2026-09-25.
 Status: owner selected rules and a bouncer on a local Jev-compatible model on 2026-09-25. Touch ID is the next stage.
+Update 2026-09-26: [ADR 0010](0010-closing-open-decisions.md) selects a Swift helper for Touch ID.
 
 ## Context
 
