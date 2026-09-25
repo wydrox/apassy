@@ -85,7 +85,7 @@ A locked vault cannot record. The broker does not record requests with an unknow
 
 ## 6. Error codes
 
-`invalid_request`, `outside_project`, `no_env_binding`, `approval_denied`, `approval_timeout`, `start_failed`, `bad_request`, `unsupported_version`, `busy`, `vault_locked`, `unauthenticated`, `not_granted`, `no_destination`, `unknown_profile`, `unknown_operation`, `invalid_params`, `destination_not_permitted`, `wrong_credential_kind`, `missing_secret`, `destination_unreachable`, `tls_failed`, `destination_refused`, `destination_not_found`, `destination_error`, `bad_output`, `output_blocked`, `broker_error`.
+`rule_expired`, `rule_command_not_permitted`, `rule_forbidden_word`, `rule_rate_limit`, `invalid_request`, `outside_project`, `no_env_binding`, `approval_denied`, `approval_timeout`, `start_failed`, `bad_request`, `unsupported_version`, `busy`, `vault_locked`, `unauthenticated`, `not_granted`, `no_destination`, `unknown_profile`, `unknown_operation`, `invalid_params`, `destination_not_permitted`, `wrong_credential_kind`, `missing_secret`, `destination_unreachable`, `tls_failed`, `destination_refused`, `destination_not_found`, `destination_error`, `bad_output`, `output_blocked`, `broker_error`.
 
 ## 7. Connector profile `reporting-api-v0`
 
@@ -119,6 +119,7 @@ Unlock migrates a version 1 file in one immediate transaction. Create writes ver
 - Item delete removes the grants and the destination of the item in the same transaction.
 - Restore revokes all agents and removes all grants. The owner must register the agents again.
 - The activity log keeps the newest 500 entries.
+- Schema version 4 adds the `rule` column to `exec_grant` and the `run_log` table (ADR 0007). A version 3 grant in "allow" mode becomes "bouncer" mode.
 - Schema version 3 adds `env_binding` and `exec_grant`. Unlock migrates version 1 and 2 files. Item delete, agent revoke, and restore also remove the process grants.
 
 ## 10. Limits

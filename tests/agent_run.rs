@@ -2,6 +2,8 @@
 
 //! Process runs with secrets in the environment (ADR 0006). Synthetic values only.
 
+mod common;
+
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -10,6 +12,7 @@ use std::time::Duration;
 
 use apassy::agent::client;
 use apassy::agent::wire::{Action, WireResponse};
+use apassy::broker::bouncer::BouncerClient;
 use apassy::broker::http::TlsClient;
 use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault};
 use apassy::contracts::CredentialKind;
@@ -34,7 +37,13 @@ struct Fixture {
     broker: BrokerHandle,
 }
 
+/// A fixture with a fake bouncer that finds no risk.
 fn fixture(mode: ExecMode, approval_timeout: Duration) -> Fixture {
+    let bouncer = common::fake_bouncer(&[]);
+    fixture_with(mode, approval_timeout, Some(&bouncer.url))
+}
+
+fn fixture_with(mode: ExecMode, approval_timeout: Duration, bouncer: Option<&str>) -> Fixture {
     let dir = TempDir::new().expect("temp dir");
     let project = dir.path().join("project");
     std::fs::create_dir_all(project.join("sub")).expect("project dir");
@@ -66,6 +75,7 @@ fn fixture(mode: ExecMode, approval_timeout: Duration) -> Fixture {
     let mut options = BrokerOptions::with_tls(TlsClient::platform().expect("TLS"));
     options.approval_timeout = approval_timeout;
     options.run_timeout = Duration::from_secs(20);
+    options.bouncer = bouncer.map(|url| BouncerClient::new(url).expect("bouncer url"));
     let broker = broker::start_with(Arc::clone(&shared), &socket, options).expect("broker");
     Fixture {
         vault: shared,
@@ -127,8 +137,10 @@ fn decide_later(fx: &Fixture, approve: bool, before: impl FnOnce() + Send + 'sta
 }
 
 #[test]
-fn allow_mode_runs_with_the_secret_and_masks_output() {
-    let fx = fixture(ExecMode::Allow, Duration::from_secs(2));
+fn approved_run_gets_the_secret_and_masks_output() {
+    // The heuristics flag a command that prints the secret, so the owner approves it.
+    let fx = fixture(ExecMode::Bouncer, Duration::from_secs(5));
+    decide_later(&fx, true, || {});
     let response = run(
         &fx,
         &fx.project.join("sub"),
@@ -165,7 +177,7 @@ fn allow_mode_runs_with_the_secret_and_masks_output() {
 
 #[test]
 fn working_directory_must_stay_in_the_project() {
-    let fx = fixture(ExecMode::Allow, Duration::from_secs(2));
+    let fx = fixture(ExecMode::Bouncer, Duration::from_secs(2));
     assert_eq!(code(&run(&fx, fx.dir.path(), "true")), "outside_project");
 
     let escape = fx.project.join("escape");
@@ -232,7 +244,7 @@ fn revoke_or_lock_during_approval_stops_the_run() {
 
 #[test]
 fn grants_and_bindings_are_checked() {
-    let fx = fixture(ExecMode::Allow, Duration::from_secs(2));
+    let fx = fixture(ExecMode::Bouncer, Duration::from_secs(2));
     with_vault(&fx, |v| {
         let err = v.set_env_binding(fx.item_id, "PATH", "token").unwrap_err();
         assert_eq!(err.kind(), VaultErrorKind::InvalidInput);
@@ -245,7 +257,7 @@ fn grants_and_bindings_are_checked() {
             .unwrap_err();
         assert_eq!(err.kind(), VaultErrorKind::InvalidInput);
         let err = v
-            .set_exec_grant(fx.agent_id, fx.item_id, "relative/dir", ExecMode::Allow)
+            .set_exec_grant(fx.agent_id, fx.item_id, "relative/dir", ExecMode::Bouncer)
             .unwrap_err();
         assert_eq!(err.kind(), VaultErrorKind::InvalidInput);
         v.clear_env_binding(fx.item_id).expect("clear binding");
@@ -274,7 +286,7 @@ fn grants_and_bindings_are_checked() {
 
 #[test]
 fn restore_removes_process_grants() {
-    let fx = fixture(ExecMode::Allow, Duration::from_secs(2));
+    let fx = fixture(ExecMode::Bouncer, Duration::from_secs(2));
     let backup = fx.dir.path().join("backup.db");
     with_vault(&fx, |v| v.backup(&backup).expect("backup"));
     let mut restored =
@@ -291,7 +303,8 @@ fn restore_removes_process_grants() {
 
 #[test]
 fn mcp_adapter_runs_with_masked_output() {
-    let fx = fixture(ExecMode::Allow, Duration::from_secs(2));
+    let fx = fixture(ExecMode::Bouncer, Duration::from_secs(5));
+    decide_later(&fx, true, || {});
     let mut child = Command::new(env!("CARGO_BIN_EXE_apassy-mcp"))
         .env("APASSY_AGENT_TOKEN", &fx.token)
         .env("APASSY_BROKER_SOCKET", &fx.socket)

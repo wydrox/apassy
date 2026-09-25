@@ -17,6 +17,8 @@ pub struct PendingRun {
     pub cwd: String,
     pub env_names: Vec<String>,
     pub purpose: String,
+    /// Bouncer result and heuristic flags. It has no secret value.
+    pub risk: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +152,7 @@ mod tests {
             cwd: "/tmp".to_owned(),
             env_names: vec!["X".to_owned()],
             purpose: "test".to_owned(),
+            risk: String::new(),
         }
     }
 

@@ -18,6 +18,7 @@ use serde_json::{Map, Value, json};
 
 use super::SharedVault;
 use super::approvals::ApprovalQueue;
+use super::bouncer::BouncerClient;
 use super::http::{self, HttpFailure, TlsClient, parse_destination};
 use super::profile::{self, OperationSpec};
 use crate::agent::wire::{Action, WIRE_VERSION, WireRequest, WireResponse};
@@ -35,6 +36,8 @@ pub struct BrokerContext {
     pub approval_timeout: Duration,
     /// How long a process can run before the broker stops it.
     pub run_timeout: Duration,
+    /// Local decision model (ADR 0007). `None` means that every run needs the owner.
+    pub bouncer: Option<BouncerClient>,
 }
 
 /// Handle one request from an agent. The response never contains a secret value.
@@ -171,9 +174,11 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
             "item_name": details.summary.title,
             "env_name": binding.env_name,
             "project_dir": grant.project_dir,
+            "permitted_command_prefixes": grant.rule.allowed_prefixes,
+            "owner_instruction": grant.rule.instruction,
             "approval": match grant.mode {
                 crate::vault::ExecMode::Ask => "the owner approves each run",
-                crate::vault::ExecMode::Allow => "no approval needed",
+                crate::vault::ExecMode::Bouncer => "the bouncer decides; a risky run waits for the owner",
             },
         }));
     }

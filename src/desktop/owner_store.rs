@@ -18,8 +18,8 @@ use crate::contracts::CredentialKind;
 use crate::desktop::model::{ItemDraft, MASKED_VALUE, ModelError, ModelResult};
 use crate::vault::{
     ActivityDecision, AgentSummary, AgentToken, Destination, EnvBinding, ExecGrant, ExecMode,
-    Field, ItemDraft as VaultDraft, MAX_PASSPHRASE_BYTES, MIN_PASSPHRASE_BYTES, SecretValue, Vault,
-    VaultError, VaultErrorKind, checked_env_name,
+    ExecRule, Field, ItemDraft as VaultDraft, MAX_PASSPHRASE_BYTES, MIN_PASSPHRASE_BYTES,
+    SecretValue, Vault, VaultError, VaultErrorKind, checked_env_name,
 };
 
 const MAX_TAG_BYTES: usize = 64;
@@ -86,6 +86,73 @@ impl Drop for Ephemeral {
     }
 }
 
+/// Rule editor fields. Lists are one entry per line.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuleForm {
+    pub prefixes: String,
+    pub forbidden: String,
+    pub expires_hours: String,
+    pub max_runs: String,
+    pub instruction: String,
+}
+
+impl RuleForm {
+    pub fn from_rule(rule: &ExecRule, now: u64) -> Self {
+        Self {
+            prefixes: rule.allowed_prefixes.join("\n"),
+            forbidden: rule.forbidden_words.join("\n"),
+            expires_hours: rule
+                .expires_at
+                .map(|at| at.saturating_sub(now).div_ceil(3600).to_string())
+                .unwrap_or_default(),
+            max_runs: rule
+                .max_runs_per_hour
+                .map(|max| max.to_string())
+                .unwrap_or_default(),
+            instruction: rule.instruction.clone(),
+        }
+    }
+
+    /// Build a rule. Empty number fields mean no limit.
+    pub fn to_rule(&self, now: u64) -> Result<ExecRule, String> {
+        let lines = |text: &str| -> Vec<String> {
+            text.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned)
+                .collect()
+        };
+        let expires_at = match self.expires_hours.trim() {
+            "" => None,
+            hours => Some(
+                hours
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|hours| (1..=24 * 366).contains(hours))
+                    .ok_or("Expiry must be a whole number of hours from 1 to 8784.")?
+                    * 3600
+                    + now,
+            ),
+        };
+        let max_runs_per_hour = match self.max_runs.trim() {
+            "" => None,
+            runs => Some(
+                runs.parse::<u32>()
+                    .ok()
+                    .filter(|runs| (1..=10_000).contains(runs))
+                    .ok_or("The run limit must be a whole number from 1 to 10000.")?,
+            ),
+        };
+        Ok(ExecRule {
+            allowed_prefixes: lines(&self.prefixes),
+            forbidden_words: lines(&self.forbidden),
+            expires_at,
+            max_runs_per_hour,
+            instruction: self.instruction.trim().to_owned(),
+        })
+    }
+}
+
 /// Text fields that bind the vault file controls.
 #[derive(Default)]
 pub struct OwnerUiState {
@@ -108,6 +175,8 @@ pub struct OwnerUiState {
     pub env_field_input: String,
     /// Project directory text for each (agent, item) pair in the Agents view.
     pub exec_dir_inputs: BTreeMap<(u64, u64), String>,
+    /// Rule editor text for each (agent, item) pair.
+    pub rule_inputs: BTreeMap<(u64, u64), RuleForm>,
     /// Pending run IDs that the app already signaled to the owner.
     pub signaled_runs: BTreeSet<u64>,
 }
@@ -544,6 +613,22 @@ impl OwnerSession {
         self.unlocked()?
             .set_exec_grant(agent_id, item_id, &canonical.display().to_string(), mode)
             .map_err(map_err)
+    }
+
+    /// Replace the rule of a process grant (ADR 0007).
+    pub fn set_exec_rule(
+        &mut self,
+        agent_id: u64,
+        item_id: u64,
+        rule: ExecRule,
+    ) -> ModelResult<()> {
+        match self.unlocked()?.set_exec_rule(agent_id, item_id, rule) {
+            Err(err) if err.kind() == VaultErrorKind::InvalidInput => Err(fail(
+                "invalid_input",
+                "The rule is not valid. Use at most 32 entries of 128 characters, an instruction of at most 1000 characters, and a run limit of 1 or more.",
+            )),
+            other => other.map_err(map_err),
+        }
     }
 
     pub fn remove_exec_grant(&mut self, agent_id: u64, item_id: u64) -> ModelResult<()> {

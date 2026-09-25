@@ -18,7 +18,7 @@ pub const MAX_AGENT_NAME_BYTES: usize = 64;
 pub const MAX_OPERATION_BYTES: usize = 64;
 pub const MAX_PROFILE_BYTES: usize = 64;
 pub const MAX_BASE_URL_BYTES: usize = 256;
-pub const MAX_ACTIVITY_REASON_BYTES: usize = 256;
+pub const MAX_ACTIVITY_REASON_BYTES: usize = 700;
 pub const MAX_ACTIVITY_ROWS: usize = 500;
 const TOKEN_BYTES: usize = 32;
 
@@ -82,6 +82,28 @@ pub(super) const SCHEMA_V3_COLUMNS: [&str; 2] = [
     "SELECT item_id, env_name, field FROM env_binding LIMIT 0",
     "SELECT agent_id, item_id, project_dir, mode, created_at FROM exec_grant LIMIT 0",
 ];
+
+/// Tables and columns added in schema version 4 (ADR 0007): rules and a run log.
+pub(super) const SCHEMA_V4_SQL: &str = "
+ALTER TABLE exec_grant ADD COLUMN rule TEXT NOT NULL DEFAULT '{}';
+CREATE TABLE run_log (
+    agent_id INTEGER NOT NULL,
+    item_id INTEGER NOT NULL,
+    at INTEGER NOT NULL
+);
+CREATE INDEX run_log_agent_item ON run_log(agent_id, item_id, at);
+UPDATE vault_meta SET schema_version = 4 WHERE id = 1;
+PRAGMA user_version = 4;
+";
+
+pub(super) const SCHEMA_V4_COLUMNS: [&str; 2] = [
+    "SELECT rule FROM exec_grant LIMIT 0",
+    "SELECT agent_id, item_id, at FROM run_log LIMIT 0",
+];
+
+pub const MAX_RULE_ENTRIES: usize = 32;
+pub const MAX_RULE_ENTRY_BYTES: usize = 128;
+pub const MAX_INSTRUCTION_BYTES: usize = 1000;
 
 pub const MAX_ENV_NAME_BYTES: usize = 64;
 pub const MAX_PROJECT_DIR_BYTES: usize = 1024;
@@ -165,24 +187,75 @@ pub struct EnvBinding {
 pub enum ExecMode {
     /// The owner approves each run.
     Ask,
-    /// The run starts without a prompt.
-    Allow,
+    /// The bouncer decides. A clean run starts without a prompt. A risky run,
+    /// or a run when the bouncer is unavailable, waits for the owner (ADR 0007).
+    Bouncer,
 }
 
 impl ExecMode {
+    /// Stored text. Schema version 3 stored "allow" for a run without a prompt.
+    /// ADR 0007 puts those grants under the bouncer.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Ask => "ask",
-            Self::Allow => "allow",
+            Self::Bouncer => "allow",
         }
     }
 
     fn from_str(text: &str) -> VaultResult<Self> {
         match text {
             "ask" => Ok(Self::Ask),
-            "allow" => Ok(Self::Allow),
+            "allow" => Ok(Self::Bouncer),
             _ => Err(err(VaultErrorKind::Storage)),
         }
+    }
+}
+
+/// Owner rule for one process grant (ADR 0007). Stored as JSON in the vault.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ExecRule {
+    /// The command must start with one of these, at a word boundary. Empty permits any command.
+    pub allowed_prefixes: Vec<String>,
+    /// A command that contains one of these words, without regard to case, is denied.
+    pub forbidden_words: Vec<String>,
+    /// Unix time after which the grant does not work.
+    pub expires_at: Option<u64>,
+    /// Maximum number of runs in one hour.
+    pub max_runs_per_hour: Option<u32>,
+    /// Owner instruction in plain text. The bouncer checks each request against it.
+    pub instruction: String,
+}
+
+impl ExecRule {
+    /// Trim and check the rule. Empty entries are removed.
+    pub fn normalized(mut self) -> VaultResult<Self> {
+        let clean = |list: Vec<String>| -> VaultResult<Vec<String>> {
+            let list: Vec<String> = list
+                .into_iter()
+                .map(|entry| entry.trim().to_owned())
+                .filter(|entry| !entry.is_empty())
+                .collect();
+            let bad = list.len() > MAX_RULE_ENTRIES
+                || list.iter().any(|entry| {
+                    entry.len() > MAX_RULE_ENTRY_BYTES || entry.chars().any(char::is_control)
+                });
+            if bad {
+                Err(err(VaultErrorKind::InvalidInput))
+            } else {
+                Ok(list)
+            }
+        };
+        self.allowed_prefixes = clean(self.allowed_prefixes)?;
+        self.forbidden_words = clean(self.forbidden_words)?;
+        self.instruction = self.instruction.trim().to_owned();
+        if self.instruction.len() > MAX_INSTRUCTION_BYTES
+            || self.instruction.contains('\0')
+            || self.max_runs_per_hour == Some(0)
+        {
+            return Err(err(VaultErrorKind::InvalidInput));
+        }
+        Ok(self)
     }
 }
 
@@ -193,6 +266,7 @@ pub struct ExecGrant {
     pub item_id: u64,
     pub project_dir: String,
     pub mode: ExecMode,
+    pub rule: ExecRule,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -636,7 +710,7 @@ impl Vault {
         let conn = self.conn_ref()?;
         let mut stmt = conn
             .prepare(
-                "SELECT exec_grant.item_id, exec_grant.project_dir, exec_grant.mode
+                "SELECT exec_grant.item_id, exec_grant.project_dir, exec_grant.mode, exec_grant.rule
                  FROM exec_grant JOIN agent ON agent.id = exec_grant.agent_id
                  WHERE exec_grant.agent_id = ?1 AND agent.revoked_at IS NULL
                  ORDER BY exec_grant.item_id ASC",
@@ -648,20 +722,80 @@ impl Vault {
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             })
             .map_err(|_| err(VaultErrorKind::Storage))?;
         let mut grants = Vec::new();
         for row in rows {
-            let (item_id, project_dir, mode) = row.map_err(|_| err(VaultErrorKind::Storage))?;
+            let (item_id, project_dir, mode, rule) =
+                row.map_err(|_| err(VaultErrorKind::Storage))?;
             grants.push(ExecGrant {
                 agent_id,
                 item_id: to_public_id(item_id)?,
                 project_dir,
                 mode: ExecMode::from_str(&mode)?,
+                rule: serde_json::from_str(&rule).map_err(|_| err(VaultErrorKind::Storage))?,
             });
         }
         Ok(grants)
+    }
+
+    /// Replace the rule of a process grant. The grant must exist.
+    pub fn set_exec_rule(
+        &mut self,
+        agent_id: u64,
+        item_id: u64,
+        rule: ExecRule,
+    ) -> VaultResult<()> {
+        let agent = to_sql_id(agent_id)?;
+        let item = to_sql_id(item_id)?;
+        let rule =
+            serde_json::to_string(&rule.normalized()?).map_err(|_| err(VaultErrorKind::Storage))?;
+        let changed = self
+            .conn_mut()?
+            .execute(
+                "UPDATE exec_grant SET rule = ?1 WHERE agent_id = ?2 AND item_id = ?3",
+                (rule, agent, item),
+            )
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        if changed == 0 {
+            Err(err(VaultErrorKind::NotFound))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Record that a run started. The hourly limit counts these entries.
+    pub fn record_run(&mut self, agent_id: u64, item_id: u64) -> VaultResult<()> {
+        let agent = to_sql_id(agent_id)?;
+        let item = to_sql_id(item_id)?;
+        let at = to_sql_time(now_unix())?;
+        let conn = self.conn_mut()?;
+        conn.execute(
+            "INSERT INTO run_log (agent_id, item_id, at) VALUES (?1, ?2, ?3)",
+            (agent, item, at),
+        )
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+        conn.execute("DELETE FROM run_log WHERE at < ?1", [at - 7200])
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        Ok(())
+    }
+
+    /// Runs in the last hour for one agent and one item.
+    pub fn runs_in_last_hour(&self, agent_id: u64, item_id: u64) -> VaultResult<u32> {
+        let agent = to_sql_id(agent_id)?;
+        let item = to_sql_id(item_id)?;
+        let since = to_sql_time(now_unix())? - 3600;
+        let count: i64 = self
+            .conn_ref()?
+            .query_row(
+                "SELECT COUNT(*) FROM run_log WHERE agent_id = ?1 AND item_id = ?2 AND at > ?3",
+                (agent, item, since),
+                |row| row.get(0),
+            )
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        u32::try_from(count).map_err(|_| err(VaultErrorKind::Storage))
     }
 
     pub fn record_activity(&mut self, entry: &NewActivity) -> VaultResult<()> {

@@ -125,7 +125,7 @@ fn banner_status(app: &DesktopApp) -> String {
 fn banner_status(app: &DesktopApp) -> String {
     let status = app.model.foundation_status();
     format!(
-        "{VAULT_STORAGE_SENTENCE} Rules are fixtures. The model is {model}. Isolation is {isolation}.",
+        "{VAULT_STORAGE_SENTENCE} Agent rules are in the vault. The Rules screen is a demo. The model is {model}. Isolation is {isolation}.",
         model = status.model,
         isolation = status.isolation,
     )
@@ -1913,6 +1913,11 @@ mod agents_view {
             match &app.broker {
                 BrokerState::Running(handle) => {
                     ui.label(RichText::new("The broker accepts agent requests.").color(ALLOW));
+                    let bouncer = handle.bouncer_url().map_or_else(
+                        || "Bouncer: not set. Every run waits for you.".to_owned(),
+                        |url| format!("Bouncer: {url} (Jev-compatible, for example Laya). If it does not answer, every run waits for you."),
+                    );
+                    ui.label(RichText::new(bouncer).color(INK_MUTED));
                     ui.label(
                         RichText::new(format!("Socket: {}", handle.socket_path().display()))
                             .color(INK_MUTED),
@@ -2191,6 +2196,9 @@ mod agents_view {
                         RichText::new(format!("Secrets in the environment: {}", run.env_names.join(", ")))
                             .color(INK_MUTED),
                     );
+                    if !run.risk.is_empty() {
+                        ui.label(RichText::new(&run.risk).color(ASK));
+                    }
                     ui.label(
                         RichText::new(
                             "The process can read these secrets. Approve only a command that you trust.",
@@ -2345,7 +2353,7 @@ mod agents_view {
                     format!("Access in {}. You approve each run.", grant.project_dir)
                 }
                 Some(grant) => format!(
-                    "Access in {}. Runs start without approval.",
+                    "Access in {}. The bouncer decides. A risky run waits for you.",
                     grant.project_dir
                 ),
                 None => "No access.".to_owned(),
@@ -2365,16 +2373,16 @@ mod agents_view {
                             .set_exec_grant(agent_id, item_id, &dir, ExecMode::Ask);
                     let _ = app.apply(result, "Process access is saved. You approve each run.");
                 }
-                if ui.button("Allow without asking").clicked() {
+                if ui.button("Let the bouncer decide").clicked() {
                     let result = app.owner_ui.session.set_exec_grant(
                         agent_id,
                         item_id,
                         &dir,
-                        ExecMode::Allow,
+                        ExecMode::Bouncer,
                     );
                     let _ = app.apply(
                         result,
-                        "Process access is saved. Runs start without approval.",
+                        "Process access is saved. The bouncer decides. A risky run waits for you.",
                     );
                 }
                 if grant.is_some() && danger_button(ui, "Remove access").clicked() {
@@ -2382,6 +2390,87 @@ mod agents_view {
                     let _ = app.apply(result, "Process access is removed.");
                 }
             });
+            if let Some(grant) = grant {
+                draw_rule_editor(app, ui, agent_id, item_id, &grant.rule);
+            }
+        }
+    }
+
+    fn now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs())
+    }
+
+    /// Rule for one process grant (ADR 0007).
+    fn draw_rule_editor(
+        app: &mut DesktopApp,
+        ui: &mut egui::Ui,
+        agent_id: u64,
+        item_id: u64,
+        rule: &crate::vault::ExecRule,
+    ) {
+        use crate::desktop::owner_store::RuleForm;
+
+        let key = (agent_id, item_id);
+        let form = app
+            .owner_ui
+            .rule_inputs
+            .entry(key)
+            .or_insert_with(|| RuleForm::from_rule(rule, now()));
+        let mut to_save = None;
+        egui::CollapsingHeader::new(RichText::new("Rule").strong().color(INK))
+            .id_salt(("rule", agent_id, item_id))
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(
+                        "Hard limits are checked before the bouncer. A request that fails a hard limit is denied.",
+                    )
+                    .color(INK_MUTED),
+                );
+                ui.label(RichText::new("Permitted command prefixes, one per line. Empty permits any command.").color(INK));
+                ui.add(
+                    TextEdit::multiline(&mut form.prefixes)
+                        .hint_text("npm run migrate\nnpm test")
+                        .desired_rows(2)
+                        .desired_width(420.0),
+                );
+                ui.label(RichText::new("Forbidden words, one per line.").color(INK));
+                ui.add(
+                    TextEdit::multiline(&mut form.forbidden)
+                        .hint_text("prod\n--force")
+                        .desired_rows(2)
+                        .desired_width(420.0),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Expires after (hours)");
+                    ui.add(TextEdit::singleline(&mut form.expires_hours).hint_text("never").desired_width(80.0));
+                    ui.label("Runs per hour");
+                    ui.add(TextEdit::singleline(&mut form.max_runs).hint_text("no limit").desired_width(80.0));
+                });
+                ui.label(
+                    RichText::new("Your instruction in plain words. The bouncer checks each request against it.")
+                        .color(INK),
+                );
+                ui.add(
+                    TextEdit::multiline(&mut form.instruction)
+                        .hint_text("Only run migrations and tests on staging. Never print or send keys.")
+                        .desired_rows(2)
+                        .desired_width(420.0),
+                );
+                if ui.button("Save rule").clicked() {
+                    to_save = Some(form.clone());
+                }
+            });
+        if let Some(form) = to_save {
+            match form.to_rule(now()) {
+                Ok(rule) => {
+                    let result = app.owner_ui.session.set_exec_rule(agent_id, item_id, rule);
+                    let _ = app.apply(result, "The rule is saved.");
+                }
+                Err(message) => app.set_err(message),
+            }
         }
     }
 

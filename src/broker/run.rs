@@ -7,10 +7,13 @@
 //! 3. The request has a valid form: items, command, working directory, purpose, and `PATH`.
 //! 4. The working directory exists.
 //! 5. For each item: the agent has process access, the working directory is in the
-//!    granted project directory, and the item has an environment binding.
-//! 6. If a grant is in "ask" mode, the owner approves in the desktop app.
-//! 7. After the approval, the broker checks the vault, the agent, and the grants again.
-//! 8. The broker reads the secrets, releases the vault lock, and starts the process.
+//!    granted project directory, the item has an environment binding, and the hard
+//!    rule passes (expiry, command prefixes, forbidden words, hourly limit).
+//! 6. The bouncer scores the request (ADR 0007). Heuristic flags add to the model.
+//! 7. A grant in "ask" mode, a high risk, or an unavailable bouncer needs the owner.
+//!    A clean request with only "bouncer" grants runs without a prompt.
+//! 8. After a decision, the broker checks the vault, the agent, and the rules again.
+//! 9. The broker reads the secrets, releases the vault lock, and starts the process.
 //!
 //! Each refusal after step 2 and each result is stored in the activity log.
 
@@ -20,6 +23,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use super::approvals::{ApprovalOutcome, PendingRun};
+use super::bouncer::{BouncerRequest, BouncerVerdict, heuristic_flags};
 use super::decide::{BrokerContext, authenticate, lock, locked_response};
 use super::exec::{self, SecretEnv};
 use crate::agent::wire::WireResponse;
@@ -95,8 +99,13 @@ impl RunRequest<'_> {
 struct Checked {
     agent: AgentSummary,
     cwd: PathBuf,
+    /// Working directory relative to the project directory of the first item.
+    relative_dir: String,
     env_names: Vec<String>,
-    needs_approval: bool,
+    /// At least one grant is in "ask" mode.
+    any_ask: bool,
+    /// Owner instructions of the grants, joined.
+    instruction: String,
 }
 
 pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) -> WireResponse {
@@ -126,7 +135,32 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         }
     };
 
-    if checked.needs_approval {
+    // The bouncer runs without the vault lock. Its state has no secret value.
+    let flags = heuristic_flags(request.command, request.purpose, &checked.env_names);
+    let verdict = match &ctx.bouncer {
+        Some(bouncer) => bouncer.evaluate(&BouncerRequest {
+            agent: checked.agent.name.clone(),
+            command: request.command.join(" "),
+            relative_dir: checked.relative_dir.clone(),
+            purpose: request.purpose.trim().to_owned(),
+            env_names: checked.env_names.clone(),
+            instruction: checked.instruction.clone(),
+        }),
+        None => BouncerVerdict::Unavailable("no bouncer is set".to_owned()),
+    };
+    let mut risk_note = verdict.summary();
+    if !flags.is_empty() {
+        risk_note.push_str(&format!(". Heuristic flags: {}", flags.join(", ")));
+    }
+    let clean = verdict.is_clean() && flags.is_empty();
+    let needs_approval = checked.any_ask || !clean;
+    let decided_by = if needs_approval {
+        "Owner approved"
+    } else {
+        "Bouncer allowed"
+    };
+
+    if needs_approval {
         let outcome = ctx.approvals.wait_for(
             PendingRun {
                 id: 0,
@@ -135,6 +169,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                 cwd: checked.cwd.display().to_string(),
                 env_names: checked.env_names.clone(),
                 purpose: request.purpose.trim().to_owned(),
+                risk: risk_note.clone(),
             },
             ctx.approval_timeout,
         );
@@ -146,12 +181,13 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
             ApprovalOutcome::TimedOut => Some((
                 "approval_timeout",
                 format!(
-                    "The owner did not decide in {} seconds.",
-                    ctx.approval_timeout.as_secs()
+                    "The owner did not decide in {:.1} seconds.",
+                    ctx.approval_timeout.as_secs_f32()
                 ),
             )),
         };
         if let Some((code, reason)) = refusal {
+            let reason = format!("{reason} {risk_note}.");
             record_locked(
                 ctx,
                 &checked.agent,
@@ -186,7 +222,12 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
             return WireResponse::failure(code, reason);
         }
         match read_secrets(vault, request.items) {
-            Ok(secrets) => secrets,
+            Ok(secrets) => {
+                for item_id in request.items {
+                    let _ = vault.record_run(agent.id, *item_id);
+                }
+                secrets
+            }
             Err(reason) => {
                 record(
                     vault,
@@ -213,12 +254,12 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         Ok(output) => {
             let reason = if output.timed_out {
                 format!(
-                    "The run timed out and was stopped. Directory: {}",
+                    "{decided_by}. The run timed out and was stopped. Directory: {}. {risk_note}.",
                     checked.cwd.display()
                 )
             } else {
                 format!(
-                    "Exit code {}. Directory: {}",
+                    "{decided_by}. Exit code {}. Directory: {}. {risk_note}.",
                     output
                         .exit_code
                         .map_or_else(|| "none".to_owned(), |code| code.to_string()),
@@ -238,6 +279,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                 "stdout": output.stdout,
                 "stderr": output.stderr,
                 "secrets_in_environment": checked.env_names,
+                "decided_by": decided_by,
                 "note": "Secret values in the output are replaced with [apassy:NAME].",
             }))
         }
@@ -275,7 +317,14 @@ fn check(
         )
     })?;
     let mut env_names = Vec::new();
-    let mut needs_approval = false;
+    let mut any_ask = false;
+    let mut instructions: Vec<String> = Vec::new();
+    let mut relative_dir = None;
+    let command_text = request.command.join(" ");
+    let command_lower = command_text.to_lowercase();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
     for item_id in request.items {
         let Some(grant) = grants.iter().find(|grant| grant.item_id == *item_id) else {
             return Err((
@@ -283,8 +332,21 @@ fn check(
                 format!("The owner did not give process access to item {item_id}."),
             ));
         };
-        let inside = canonical_dir(Path::new(&grant.project_dir))
+        let project = canonical_dir(Path::new(&grant.project_dir));
+        let inside = project
+            .as_ref()
             .is_some_and(|project| cwd.starts_with(project));
+        if relative_dir.is_none()
+            && let Some(project) = &project
+            && let Ok(rest) = cwd.strip_prefix(project)
+        {
+            let rest = rest.display().to_string();
+            relative_dir = Some(if rest.is_empty() {
+                ".".to_owned()
+            } else {
+                rest
+            });
+        }
         if !inside {
             return Err((
                 "outside_project",
@@ -297,14 +359,65 @@ fn check(
             "no_env_binding",
             format!("Item {item_id} has no environment variable."),
         ))?;
-        needs_approval |= grant.mode == ExecMode::Ask;
+        let rule = &grant.rule;
+        if rule.expires_at.is_some_and(|at| now >= at) {
+            return Err((
+                "rule_expired",
+                format!("The rule for item {item_id} expired."),
+            ));
+        }
+        let prefix_ok = rule.allowed_prefixes.is_empty()
+            || rule.allowed_prefixes.iter().any(|prefix| {
+                command_text == *prefix || command_text.starts_with(&format!("{prefix} "))
+            });
+        if !prefix_ok {
+            return Err((
+                "rule_command_not_permitted",
+                format!(
+                    "The rule for item {item_id} permits only commands that start with: {}.",
+                    rule.allowed_prefixes.join(", ")
+                ),
+            ));
+        }
+        if let Some(word) = rule
+            .forbidden_words
+            .iter()
+            .find(|word| command_lower.contains(&word.to_lowercase()))
+        {
+            return Err((
+                "rule_forbidden_word",
+                format!("The rule for item {item_id} forbids \"{word}\" in the command."),
+            ));
+        }
+        if let Some(max) = rule.max_runs_per_hour {
+            let used = vault.runs_in_last_hour(agent.id, *item_id).map_err(|_| {
+                (
+                    "broker_error",
+                    "The broker cannot read the run log.".to_owned(),
+                )
+            })?;
+            if used >= max {
+                return Err((
+                    "rule_rate_limit",
+                    format!("The rule for item {item_id} permits {max} runs in one hour."),
+                ));
+            }
+        }
+        if !rule.instruction.is_empty() {
+            instructions.push(rule.instruction.clone());
+        }
+        // ADR 0007: the bouncer alone is not enough. It decides only inside a
+        // command allowlist. Without prefixes, every run waits for the owner.
+        any_ask |= grant.mode == ExecMode::Ask || rule.allowed_prefixes.is_empty();
         env_names.push(binding.env_name);
     }
     Ok(Checked {
         agent: agent.clone(),
         cwd,
+        relative_dir: relative_dir.unwrap_or_else(|| ".".to_owned()),
         env_names,
-        needs_approval,
+        any_ask,
+        instruction: instructions.join(" "),
     })
 }
 

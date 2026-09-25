@@ -232,6 +232,48 @@ pub fn get(
     raw
 }
 
+/// POST a JSON body to a loopback service with one time limit for the whole
+/// exchange. The bouncer uses this for the local decision model (ADR 0007).
+pub fn post_json_loopback(
+    destination: &DestinationUrl,
+    path: &str,
+    body: &[u8],
+    bearer: Option<&str>,
+    timeout: std::time::Duration,
+) -> Result<HttpResponse, HttpFailure> {
+    let DestinationUrl::Loopback { addr, host_header } = destination else {
+        return Err(HttpFailure::Protocol);
+    };
+    if !path.starts_with('/') || path.bytes().any(|b| !(0x21..0x7f).contains(&b)) {
+        return Err(HttpFailure::Protocol);
+    }
+    let auth = match bearer {
+        Some(key) if !key.is_empty() && key.bytes().all(|b| (0x21..0x7f).contains(&b)) => {
+            format!("Authorization: Bearer {key}\r\n")
+        }
+        Some(_) => return Err(HttpFailure::Protocol),
+        None => String::new(),
+    };
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: {host_header}\r\n{auth}Content-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let mut request = head.into_bytes();
+    request.extend_from_slice(body);
+    let stream = TcpStream::connect_timeout(addr, timeout.min(CONNECT_TIMEOUT))
+        .map_err(|_| HttpFailure::Connect)?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|_| HttpFailure::Connect)?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|_| HttpFailure::Connect)?;
+    let mut stream = stream;
+    let result = exchange(&mut stream, &request);
+    request.fill(0);
+    result
+}
+
 fn connect(addrs: &[SocketAddr]) -> Result<TcpStream, HttpFailure> {
     for addr in addrs {
         if let Ok(stream) = TcpStream::connect_timeout(addr, CONNECT_TIMEOUT) {

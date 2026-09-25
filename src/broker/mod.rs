@@ -6,6 +6,7 @@
 //! They are not the rule engine from P3.
 
 pub mod approvals;
+pub mod bouncer;
 pub mod decide;
 pub mod exec;
 pub mod http;

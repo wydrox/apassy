@@ -47,6 +47,11 @@ path = "tests/vault_lifecycle.rs"
 required-features = ["vault"]
 
 [[test]]
+name = "bouncer_rules"
+path = "tests/bouncer_rules.rs"
+required-features = ["vault"]
+
+[[test]]
 name = "agent_run"
 path = "tests/agent_run.rs"
 required-features = ["vault"]

@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use super::SharedVault;
 use super::approvals::ApprovalQueue;
+use super::bouncer::BouncerClient;
 use super::decide::{self, BrokerContext};
 use super::http::TlsClient;
 use crate::agent::wire::{MAX_LINE_BYTES, WireRequest, WireResponse};
@@ -30,12 +31,16 @@ pub struct BrokerOptions {
     pub tls: TlsClient,
     pub approval_timeout: Duration,
     pub run_timeout: Duration,
+    pub bouncer: Option<BouncerClient>,
 }
 
 impl BrokerOptions {
-    /// macOS trust store, 120 s for an owner decision, and 300 s for a process.
+    /// macOS trust store, 120 s for an owner decision, 300 s for a process, and the
+    /// bouncer at `APASSY_BOUNCER_URL` or the default local address.
     pub fn platform() -> io::Result<Self> {
-        Ok(Self::with_tls(TlsClient::platform()?))
+        let mut options = Self::with_tls(TlsClient::platform()?);
+        options.bouncer = BouncerClient::from_env().ok();
+        Ok(options)
     }
 
     pub fn with_tls(tls: TlsClient) -> Self {
@@ -43,6 +48,7 @@ impl BrokerOptions {
             tls,
             approval_timeout: Duration::from_secs(120),
             run_timeout: Duration::from_secs(300),
+            bouncer: None,
         }
     }
 }
@@ -52,6 +58,7 @@ impl BrokerOptions {
 pub struct BrokerHandle {
     socket: PathBuf,
     approvals: Arc<ApprovalQueue>,
+    bouncer_url: Option<String>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -64,6 +71,11 @@ impl BrokerHandle {
     /// Runs that wait for the owner. The desktop app shows them.
     pub fn approvals(&self) -> &Arc<ApprovalQueue> {
         &self.approvals
+    }
+
+    /// Address of the bouncer, if one is set.
+    pub fn bouncer_url(&self) -> Option<&str> {
+        self.bouncer_url.as_deref()
     }
 
     pub fn stop(&mut self) {
@@ -106,12 +118,14 @@ pub fn start_with(
     options: BrokerOptions,
 ) -> io::Result<BrokerHandle> {
     let approvals = Arc::new(ApprovalQueue::new());
+    let bouncer_url = options.bouncer.as_ref().map(|b| b.url().to_owned());
     let ctx = BrokerContext {
         vault,
         tls: options.tls,
         approvals: Arc::clone(&approvals),
         approval_timeout: options.approval_timeout,
         run_timeout: options.run_timeout,
+        bouncer: options.bouncer,
     };
     prepare_directory(socket)?;
     remove_stale_socket(socket)?;
@@ -127,6 +141,7 @@ pub fn start_with(
     Ok(BrokerHandle {
         socket: socket.to_path_buf(),
         approvals,
+        bouncer_url,
         stop,
         thread: Some(thread),
     })
