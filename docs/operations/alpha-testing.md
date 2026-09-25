@@ -1,24 +1,25 @@
-# Alpha testing — owner vault
+# Alpha test — owner vault
 
 Date: 2026-09-25. Branch: `alpha/owner-vault`.
-Scope: the owner vault and item views only. Rules, agents, and activity are in-memory demo data.
-Use synthetic values only. This alpha is not approved for real credentials.
+Scope: the owner vault and the item views only. Rules, agents, and activity use demo data in memory.
+Use only synthetic values. Do not put real credentials in this alpha.
 
-## Build and run
+## Build and start the app
 
 ```
 cargo build --release --locked --features desktop,vault --bin apassy
 ./target/release/apassy
 ```
 
-Headless check: `./target/release/apassy --smoke-test`.
-File paths are typed into text fields. A relative path resolves from the directory where you started the app.
-Use absolute paths in a throwaway folder, for example `/tmp/apassy-alpha/vault.db`.
-The passphrase must have at least 12 bytes.
+To do a check without a window, use `./target/release/apassy --smoke-test`.
+
+You type each file path into a text field. The app has no file dialog.
+A relative path starts from the directory where you started the app. Use absolute paths in a test directory, for example `/tmp/apassy-alpha/vault.db`.
+The passphrase must have a minimum of 12 bytes.
 
 ## Checks on 2026-09-25
 
-Host: macOS arm64. All commands exited with 0.
+Host: macOS arm64. All commands gave exit code 0.
 
 | Command | Result |
 | --- | --- |
@@ -29,52 +30,52 @@ Host: macOS arm64. All commands exited with 0.
 | `cargo build --release --offline --locked --features desktop,vault --bin apassy` | PASS, 14 MB binary |
 | `./target/release/apassy --smoke-test` | PASS |
 
-The native window opened (title "Apassy", 1280×868). No automated visual walkthrough was done.
+## Manual test list and results of the GUI run
 
-## Manual test list
+On 2026-09-25, a script operated the release build in the native window. The script used synthetic mouse and keyboard events and window screenshots.
+The test directory was `/tmp/apassy-alpha/`. The API key and Login categories were in the test. The SSH key, Database, and Custom categories were not in the test.
 
-Mark each row PASS / FAIL and add a note.
+| # | Test | Result |
+| --- | --- | --- |
+| 1 | Create a vault at an absolute path with a passphrase of 12 or more characters. | PASS. The file mode is `0600`. The file has no SQLite header. |
+| 2 | Try to create a vault with a passphrase of less than 12 characters. | PASS. The app refused and made no file. See finding F1. |
+| 3 | Try to create a vault at a path that exists. | PASS. The app refused. The SHA-1 of the file did not change. |
+| 4 | Lock the vault. Then, unlock it with the correct passphrase. | PASS |
+| 5 | Unlock the vault with an incorrect passphrase. | PASS. The message is "the key is wrong or the vault is corrupt". |
+| 6 | Close the app. Start it again and open the vault file. | PASS. The item and its revision were in the file. |
+| 7 | Add an item with a name, notes, project, service, and secret value. | PASS for API key and Login. The form shows the correct fields for each category. |
+| 8 | Change the name. Keep the secret field empty and save. | PASS. The old secret stayed in the item. See finding F4. |
+| 9 | Change the secret and reveal it. | NOT DONE |
+| 10 | Search by the name, notes, project, and service. | PASS. All four searches found the item. |
+| 11 | Search for a part of a secret value. | PASS. The search found no item. |
+| 12 | Delete the item. | PASS. The app asks for a confirmation before it deletes the item. |
+| 13 | Reveal a value. Then, lock the vault. | PASS. The app hid the item details. |
+| 14 | Examine the copy function. | NOT APPLICABLE. The app has no copy control. |
+| 15 | Make a backup to a new absolute path. | PASS. After the backup, the app locks the vault. |
+| 16 | Change the items. Then, restore the backup to a new path. | PASS. The restored vault had the state of the backup. |
+| 17 | Try to restore the backup onto a file that exists. | PASS. The app refused. The SHA-1 of the two files did not change. |
+| 18 | Open a path that does not exist. | PASS. The message is "the item or vault was not found". The app made no file. |
+| 19 | Click "Reset demo". | PASS. The vault files stayed. The vault stayed unlocked. |
+| 20 | Change the window size. Use only the keyboard. | NOT DONE |
+| 21 | Record unclear messages and crashes. | No crash. See the findings. |
 
-### Vault file
+## Findings
 
-1. Create a new vault at an absolute path with a passphrase of 12 or more characters.
-2. Try to create with a passphrase shorter than 12 characters. Expect a clear refusal.
-3. Try to create at a path that already exists. Expect a refusal, and the file must stay unchanged.
-4. Lock, then unlock with the correct passphrase.
-5. Unlock with a wrong passphrase. Expect a refusal, and no revealed values.
-6. Quit the app, start it again, and open the existing file.
-
-### Items (repeat for all five categories)
-
-7. Add an item with name, notes, project, service, and a secret value.
-8. Edit the name. Leave the secret field blank and save. The old secret must stay.
-9. Edit the secret to a new value and reveal it. The new value must show.
-10. Search by name, notes, project, and service. All must match.
-11. Search by part of a secret value. There must be no match.
-12. Delete the item. It must not come back after lock/unlock or restart.
-
-### Reveal, lock, clipboard
-
-13. Reveal a value, then lock. The revealed value must disappear.
-14. Use Copy. By design the app does not write to the clipboard. Check that the clipboard is unchanged and that the message says so.
-
-### Backup and restore
-
-15. Back up to a new absolute path.
-16. Change or delete items, then restore the backup to a new destination path. The restored vault must hold the backup state.
-17. Try to restore onto an existing file. Expect a refusal, and the backup must stay unchanged.
-18. Delete the vault file while the app is closed, then open the path. Expect a clear error.
-
-### General
-
-19. "Reset demo" must not delete the vault file.
-20. Resize the window and use the keyboard only (Tab, Enter, Esc). Note what you cannot reach.
-21. Note error messages that are unclear, and any crash with the steps to reproduce it.
+| ID | Severity | Finding |
+| --- | --- | --- |
+| F1 | Medium | If the passphrase is too short, the message is "the input is invalid". The message does not give the minimum length. |
+| F2 | Medium | In `desktop,vault` mode, the banner and the sidebar show incorrect status. They show "Storage is not connected", "Encryption is not present", and "in-memory only. Not durable". The vault file is encrypted and durable. |
+| F3 | Low | The text fields are almost white on a light background. It is difficult to see an empty field. |
+| F4 | Low | If you save an item with no changes, the revision number increases. |
+| F5 | Low | After you unlock the vault, the item list and the "Add item" form are below the visible area. The user must scroll to find them. |
+| F6 | Low | The warning below a revealed value was cut at the right edge in a narrow card. The card became wider after a later action. |
+| F7 | Low | Error messages start with a lowercase letter, for example "the target already exists". Other messages start with an uppercase letter. |
+| F8 | Low | The search field shows "Name, project, or service". The search also finds text in notes. |
 
 ## Known limits
 
-- No real secrets. Memory erasure, swap, and crash-dump handling are not verified.
-- No agent sessions, rules, approvals, connectors, or notifications.
-- No file picker. Paths are typed.
-- No rekey and no recovery from a lost passphrase.
-- No packaged app, code signing, or update path. SQLCipher and OpenSSL license review is not done.
+- Do not use the alpha for production secrets. There is no test of memory erasure, swap, or crash dumps.
+- The alpha has no agent sessions, rules, approvals, connectors, or notifications.
+- The app has no file dialog. You must type each path.
+- The app cannot change the passphrase. If you do not know the passphrase, you cannot open the vault.
+- The alpha has no app package, code signature, or update procedure. There is no license review of the bundled SQLCipher and OpenSSL.
