@@ -12,7 +12,7 @@ Status: experimental. This contract supports the thin agent path in [ADR 0004](.
 | Broker checks and execution | `src/broker/decide.rs` | `vault` |
 | Socket server | `src/broker/server.rs` | `vault` |
 | Connector profile | `src/broker/profile.rs` | `vault` |
-| Loopback HTTP client | `src/broker/http.rs` | `vault` |
+| HTTP client with TLS (ADR 0005) | `src/broker/http.rs` | `vault` |
 | Agent, grant, destination, and activity records | `src/vault/agents.rs` | `vault` |
 | Synthetic reporting service | `src/bin/apassy-dev-reporting.rs` | none |
 
@@ -60,9 +60,10 @@ The broker does the checks in this order:
 3. The agent has a grant for the item and the operation. If not, the code is `not_granted`.
 4. The item has a destination. The destination profile is known and has the operation.
 5. The parameters match the operation.
-6. The destination is a loopback `http://` URL.
+6. The destination is `https://HOST[:PORT]`, or `http://` on a loopback address. See [ADR 0005](../adr/0005-connector-tls.md).
 7. The item category matches the profile.
 8. The broker reads the secret field. Then it releases the vault lock and calls the destination.
+9. For `https://`, the TLS handshake and the certificate check finish before the broker sends a request byte.
 
 After step 2, the broker records each refusal and each result in the activity log.
 A locked vault cannot record. The broker does not record requests with an unknown token when the vault is locked.
@@ -73,11 +74,12 @@ A locked vault cannot record. The broker does not record requests with an unknow
 - String values have a maximum of 256 bytes. The broker removes control characters.
 - The broker drops arrays and objects in output fields.
 - If the output contains the stored secret, the broker returns `output_blocked` and no output.
+- A TLS failure gives `tls_failed`. A `3xx` status gives `destination_error`. The broker does not follow redirects.
 - Destination status `401` or `403` gives `destination_refused`. Status `404` gives `destination_not_found`. Other errors give `destination_error`. The broker never forwards the destination body.
 
 ## 6. Error codes
 
-`bad_request`, `unsupported_version`, `busy`, `vault_locked`, `unauthenticated`, `not_granted`, `no_destination`, `unknown_profile`, `unknown_operation`, `invalid_params`, `destination_not_permitted`, `wrong_credential_kind`, `missing_secret`, `destination_unreachable`, `destination_refused`, `destination_not_found`, `destination_error`, `bad_output`, `output_blocked`, `broker_error`.
+`bad_request`, `unsupported_version`, `busy`, `vault_locked`, `unauthenticated`, `not_granted`, `no_destination`, `unknown_profile`, `unknown_operation`, `invalid_params`, `destination_not_permitted`, `wrong_credential_kind`, `missing_secret`, `destination_unreachable`, `tls_failed`, `destination_refused`, `destination_not_found`, `destination_error`, `bad_output`, `output_blocked`, `broker_error`.
 
 ## 7. Connector profile `reporting-api-v0`
 
@@ -119,4 +121,4 @@ Unlock migrates a version 1 file in one immediate transaction. Create writes ver
 - The broker holds the secret in process memory during a call. There is no memory erasure proof.
 - A token is valid until revoke or restore. There is no expiry or rotation.
 - There is no rate limit per agent.
-- There is no TLS client. Real services need an approved TLS dependency first.
+- The owner selects each destination. There is no certificate pinning and no list of known providers.

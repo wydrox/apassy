@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::broker::SharedVault;
-use crate::broker::http::parse_loopback_base;
+use crate::broker::http::parse_destination;
 use crate::broker::profile;
 use crate::contracts::CredentialKind;
 use crate::desktop::model::{ItemDraft, MASKED_VALUE, ModelError, ModelResult};
@@ -422,7 +422,7 @@ impl OwnerSession {
         self.unlocked()?.destination(item_id).map_err(map_err)
     }
 
-    /// Register the connector for an item. Only loopback destinations are permitted in this phase.
+    /// Register the connector for an item: `https://`, or `http://` on a loopback address.
     pub fn set_connector(
         &mut self,
         item_id: u64,
@@ -431,7 +431,7 @@ impl OwnerSession {
     ) -> ModelResult<()> {
         let profile = profile::find(profile_id)
             .ok_or_else(|| fail("invalid_input", "The connector profile is not known."))?;
-        parse_loopback_base(base_url).map_err(|message| fail("invalid_input", message))?;
+        parse_destination(base_url).map_err(|message| fail("invalid_input", message))?;
         let mut vault = self.unlocked()?;
         let kind = vault.details(item_id).map_err(map_err)?.summary.kind;
         if kind != profile.credential_kind {

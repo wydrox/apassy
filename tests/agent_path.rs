@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use apassy::agent::client;
 use apassy::agent::wire::{Action, WireResponse};
+use apassy::broker::http::TlsClient;
 use apassy::broker::{self, SharedVault};
 use apassy::contracts::CredentialKind;
 use apassy::vault::{ActivityDecision, Field, ItemDraft, SecretValue, Vault};
@@ -64,7 +65,7 @@ struct Fixture {
     item_id: u64,
     agent_id: u64,
     token: String,
-    _service: DevService,
+    _service: Option<DevService>,
     _broker: broker::BrokerHandle,
 }
 
@@ -83,15 +84,24 @@ fn api_item() -> ItemDraft {
 }
 
 fn fixture() -> Fixture {
-    let dir = TempDir::new().expect("temp dir");
     let service = start_dev_service();
+    let base_url = service.base_url.clone();
+    build_fixture(
+        &base_url,
+        TlsClient::platform().expect("platform TLS"),
+        Some(service),
+    )
+}
+
+fn build_fixture(base_url: &str, tls: TlsClient, service: Option<DevService>) -> Fixture {
+    let dir = TempDir::new().expect("temp dir");
     let vault_dir = dir.path().join("vault");
     std::fs::create_dir(&vault_dir).expect("vault dir");
     let mut vault = Vault::create(&vault_dir.join("vault.db"), PASS).expect("create");
     vault.unlock(PASS).expect("unlock");
     let item = vault.add(api_item()).expect("add item");
     vault
-        .set_destination(item.id, "reporting-api-v0", &service.base_url)
+        .set_destination(item.id, "reporting-api-v0", base_url)
         .expect("destination");
     let (agent, token) = vault.register_agent("Test agent").expect("register");
     vault
@@ -99,7 +109,7 @@ fn fixture() -> Fixture {
         .expect("grant");
     let shared: SharedVault = Arc::new(Mutex::new(Some(vault)));
     let socket = dir.path().join("run").join("broker.sock");
-    let handle = broker::start(Arc::clone(&shared), &socket).expect("start broker");
+    let handle = broker::start_with_tls(Arc::clone(&shared), &socket, tls).expect("start broker");
     Fixture {
         vault: shared,
         socket,
@@ -264,12 +274,8 @@ fn revoke_lock_and_destination_rules() {
 
     with_vault(&fx, |vault| {
         vault
-            .set_destination(
-                fx.item_id,
-                "reporting-api-v0",
-                "https://reporting.example.invalid:443",
-            )
-            .expect("store remote destination");
+            .set_destination(fx.item_id, "reporting-api-v0", "http://10.0.0.1:80")
+            .expect("store plain remote destination");
     });
     let remote = call(
         &fx,
@@ -476,4 +482,280 @@ fn sandboxed_adapter_uses_broker_but_cannot_read_vault() {
         318
     );
     assert!(!reply.to_string().contains(SERVICE_TOKEN));
+}
+
+// ---- HTTPS destinations (ADR 0005). The test CA exists only in a temporary directory. ----
+
+struct TestPki {
+    _dir: TempDir,
+    ca: Vec<u8>,
+    leaf: Vec<u8>,
+    key: Vec<u8>,
+}
+
+/// Make a test CA and a leaf certificate for DNS name `localhost` with the system `openssl`.
+fn make_test_pki() -> Option<TestPki> {
+    let openssl = Path::new("/usr/bin/openssl");
+    if !openssl.exists() {
+        return None;
+    }
+    let dir = TempDir::new().expect("pki dir");
+    let run = |args: &[&str]| {
+        let status = Command::new(openssl)
+            .args(args)
+            .current_dir(dir.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("run openssl");
+        assert!(status.success(), "openssl {args:?}");
+    };
+    std::fs::write(
+        dir.path().join("leaf.ext"),
+        "subjectAltName=DNS:localhost\nbasicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n",
+    )
+    .expect("write ext");
+    run(&[
+        "ecparam",
+        "-name",
+        "prime256v1",
+        "-genkey",
+        "-noout",
+        "-out",
+        "ca.key",
+    ]);
+    run(&[
+        "req",
+        "-x509",
+        "-new",
+        "-key",
+        "ca.key",
+        "-subj",
+        "/CN=Apassy Test CA",
+        "-days",
+        "2",
+        "-addext",
+        "basicConstraints=critical,CA:TRUE",
+        "-addext",
+        "keyUsage=critical,keyCertSign,cRLSign",
+        "-out",
+        "ca.pem",
+    ]);
+    run(&[
+        "ecparam",
+        "-name",
+        "prime256v1",
+        "-genkey",
+        "-noout",
+        "-out",
+        "leaf.key",
+    ]);
+    run(&[
+        "req",
+        "-new",
+        "-key",
+        "leaf.key",
+        "-subj",
+        "/CN=localhost",
+        "-out",
+        "leaf.csr",
+    ]);
+    // LibreSSL signs with SHA-1 by default. macOS refuses SHA-1 certificates.
+    run(&[
+        "x509",
+        "-req",
+        "-sha256",
+        "-in",
+        "leaf.csr",
+        "-CA",
+        "ca.pem",
+        "-CAkey",
+        "ca.key",
+        "-CAcreateserial",
+        "-days",
+        "2",
+        "-extfile",
+        "leaf.ext",
+        "-out",
+        "leaf.pem",
+    ]);
+    run(&["x509", "-in", "ca.pem", "-outform", "DER", "-out", "ca.der"]);
+    run(&[
+        "x509", "-in", "leaf.pem", "-outform", "DER", "-out", "leaf.der",
+    ]);
+    run(&[
+        "pkcs8",
+        "-topk8",
+        "-nocrypt",
+        "-in",
+        "leaf.key",
+        "-outform",
+        "DER",
+        "-out",
+        "leaf.key.der",
+    ]);
+    let read = |name: &str| std::fs::read(dir.path().join(name)).expect("read pki file");
+    Some(TestPki {
+        ca: read("ca.der"),
+        leaf: read("leaf.der"),
+        key: read("leaf.key.der"),
+        _dir: dir,
+    })
+}
+
+/// A TLS reporting service on 127.0.0.1. It counts requests that reach the HTTP layer.
+struct TlsService {
+    port: u16,
+    requests: Arc<std::sync::atomic::AtomicUsize>,
+    authorized: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+fn start_tls_service(pki: &TestPki) -> TlsService {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use std::io::Read;
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("versions")
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![CertificateDer::from(pki.leaf.clone())],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(pki.key.clone())),
+        )
+        .expect("server cert");
+    let config = Arc::new(config);
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind TLS service");
+    let port = listener.local_addr().expect("addr").port();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let authorized = Arc::new(AtomicUsize::new(0));
+    let (req_count, auth_count) = (Arc::clone(&requests), Arc::clone(&authorized));
+    std::thread::spawn(move || {
+        for tcp in listener.incoming().flatten() {
+            let conn = rustls::ServerConnection::new(Arc::clone(&config)).expect("server conn");
+            let mut tls = rustls::StreamOwned::new(conn, tcp);
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                match tls.read(&mut byte) {
+                    Ok(1) => head.push(byte[0]),
+                    _ => break,
+                }
+            }
+            if !head.ends_with(b"\r\n\r\n") {
+                continue; // The handshake failed. No request arrived.
+            }
+            req_count.fetch_add(1, Ordering::SeqCst);
+            let text = String::from_utf8_lossy(&head);
+            if !text.contains(&format!("Authorization: Bearer {SERVICE_TOKEN}")) {
+                let _ = tls.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
+                continue;
+            }
+            auth_count.fetch_add(1, Ordering::SeqCst);
+            let response: &[u8] = if text.contains("/projects/redirect-me/") {
+                b"HTTP/1.1 302 Found\r\nLocation: https://evil.invalid/\r\nContent-Length: 0\r\n\r\n"
+            } else {
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n1c\r\n{\"project_id\":\"project-a-syn\r\n4f\r\nthetic\",\"currency\":\"EUR\",\"total_amount\":\"99.00\",\"order_count\":7,\"extra\":\"drop\"}\r\n0\r\n\r\n"
+            };
+            let _ = tls.write_all(response);
+            let _ = tls.flush();
+            tls.conn.send_close_notify();
+            let _ = tls.conn.complete_io(&mut tls.sock);
+        }
+    });
+    TlsService {
+        port,
+        requests,
+        authorized,
+    }
+}
+
+fn test_root_client(pki: &TestPki) -> TlsClient {
+    TlsClient::with_extra_roots(vec![rustls::pki_types::CertificateDer::from(
+        pki.ca.clone(),
+    )])
+    .expect("TLS client with test root")
+}
+
+#[test]
+fn https_destination_with_trusted_test_root() {
+    let Some(pki) = make_test_pki() else {
+        eprintln!("SKIP: /usr/bin/openssl is not available.");
+        return;
+    };
+    let service = start_tls_service(&pki);
+    let fx = build_fixture(
+        &format!("https://localhost:{}", service.port),
+        test_root_client(&pki),
+        None,
+    );
+    let response = call(
+        &fx,
+        &fx.token,
+        OP_SUMMARY,
+        summary_params("project-a-synthetic"),
+    );
+    assert!(response.ok, "{response:?}");
+    let output = response.result.clone().expect("output");
+    assert_eq!(output["project_id"], "project-a-synthetic");
+    assert_eq!(output["order_count"], 7);
+    assert!(output.get("extra").is_none());
+    assert_no_secret(&response);
+    assert_eq!(
+        service.authorized.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+
+    let redirect = call(&fx, &fx.token, OP_SUMMARY, summary_params("redirect-me"));
+    assert_eq!(error_code(&redirect), "destination_error");
+}
+
+#[test]
+fn https_refuses_untrusted_or_mismatched_certificates_before_the_request() {
+    use std::sync::atomic::Ordering;
+    let Some(pki) = make_test_pki() else {
+        eprintln!("SKIP: /usr/bin/openssl is not available.");
+        return;
+    };
+    let service = start_tls_service(&pki);
+
+    // The macOS trust store does not trust the test CA.
+    let untrusted = build_fixture(
+        &format!("https://localhost:{}", service.port),
+        TlsClient::platform().expect("platform TLS"),
+        None,
+    );
+    let refused = call(
+        &untrusted,
+        &untrusted.token,
+        OP_SUMMARY,
+        summary_params("project-a-synthetic"),
+    );
+    assert_eq!(error_code(&refused), "tls_failed");
+
+    // The certificate names DNS localhost, not the IP address.
+    let mismatch = build_fixture(
+        &format!("https://127.0.0.1:{}", service.port),
+        test_root_client(&pki),
+        None,
+    );
+    let refused = call(
+        &mismatch,
+        &mismatch.token,
+        OP_SUMMARY,
+        summary_params("project-a-synthetic"),
+    );
+    assert_eq!(error_code(&refused), "tls_failed");
+
+    assert_eq!(
+        service.requests.load(Ordering::SeqCst),
+        0,
+        "no HTTP request, and so no token, may reach the service after a failed TLS check"
+    );
+    let activity = with_vault(&mismatch, |vault| {
+        vault.recent_activity(5).expect("activity")
+    });
+    assert_eq!(activity[0].decision, ActivityDecision::Error);
 }

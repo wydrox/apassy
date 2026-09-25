@@ -13,7 +13,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use super::{SharedVault, decide};
+use super::SharedVault;
+use super::decide::{self, BrokerContext};
+use super::http::TlsClient;
 use crate::agent::wire::{MAX_LINE_BYTES, WireRequest, WireResponse};
 
 const MAX_CONNECTIONS: usize = 16;
@@ -52,8 +54,19 @@ impl Drop for BrokerHandle {
     }
 }
 
-/// Start the broker on `socket`. The parent directory is created with mode `0700` if absent.
+/// Start the broker on `socket` with the macOS trust store for TLS.
+/// The parent directory is created with mode `0700` if absent.
 pub fn start(vault: SharedVault, socket: &Path) -> io::Result<BrokerHandle> {
+    start_with_tls(vault, socket, TlsClient::platform()?)
+}
+
+/// Start the broker with a specific TLS client. Tests use a client with a test root.
+pub fn start_with_tls(
+    vault: SharedVault,
+    socket: &Path,
+    tls: TlsClient,
+) -> io::Result<BrokerHandle> {
+    let ctx = BrokerContext { vault, tls };
     prepare_directory(socket)?;
     remove_stale_socket(socket)?;
     let listener = UnixListener::bind(socket)?;
@@ -64,7 +77,7 @@ pub fn start(vault: SharedVault, socket: &Path) -> io::Result<BrokerHandle> {
     let thread_stop = Arc::clone(&stop);
     let thread = thread::Builder::new()
         .name("apassy-broker".to_owned())
-        .spawn(move || accept_loop(&listener, &vault, &thread_stop, &active))?;
+        .spawn(move || accept_loop(&listener, &ctx, &thread_stop, &active))?;
     Ok(BrokerHandle {
         socket: socket.to_path_buf(),
         stop,
@@ -123,7 +136,7 @@ fn remove_stale_socket(socket: &Path) -> io::Result<()> {
 
 fn accept_loop(
     listener: &UnixListener,
-    vault: &SharedVault,
+    ctx: &BrokerContext,
     stop: &Arc<AtomicBool>,
     active: &Arc<AtomicUsize>,
 ) {
@@ -151,12 +164,12 @@ fn accept_loop(
             );
             continue;
         }
-        let vault = Arc::clone(vault);
+        let ctx = ctx.clone();
         let slot = Arc::clone(active);
         let spawned = thread::Builder::new()
             .name("apassy-broker-conn".to_owned())
             .spawn(move || {
-                let _ = serve_connection(stream, &vault);
+                let _ = serve_connection(stream, &ctx);
                 slot.fetch_sub(1, Ordering::SeqCst);
             });
         if spawned.is_err() {
@@ -166,7 +179,7 @@ fn accept_loop(
     }
 }
 
-fn serve_connection(stream: UnixStream, vault: &SharedVault) -> io::Result<()> {
+fn serve_connection(stream: UnixStream, ctx: &BrokerContext) -> io::Result<()> {
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     let mut writer = stream.try_clone()?;
@@ -190,7 +203,7 @@ fn serve_connection(stream: UnixStream, vault: &SharedVault) -> io::Result<()> {
             return Ok(());
         }
         let response = match serde_json::from_slice::<WireRequest>(&line) {
-            Ok(request) => decide::handle(vault, &request),
+            Ok(request) => decide::handle(ctx, &request),
             Err(_) => WireResponse::failure(
                 "bad_request",
                 "The request is not valid wire version 0 JSON.",

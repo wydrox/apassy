@@ -14,15 +14,23 @@ use std::collections::BTreeMap;
 use serde_json::{Map, Value, json};
 
 use super::SharedVault;
-use super::http::{self, parse_loopback_base};
+use super::http::{self, HttpFailure, TlsClient, parse_destination};
 use super::profile::{self, OperationSpec};
 use crate::agent::wire::{Action, WIRE_VERSION, WireRequest, WireResponse};
 use crate::vault::{ActivityDecision, AgentSummary, NewActivity, Vault, VaultErrorKind};
 
 const MAX_OUTPUT_TEXT_BYTES: usize = 256;
 
+/// Shared state for request handling.
+#[derive(Debug, Clone)]
+pub struct BrokerContext {
+    pub vault: SharedVault,
+    pub tls: TlsClient,
+}
+
 /// Handle one request from an agent. The response never contains a secret value.
-pub fn handle(vault: &SharedVault, request: &WireRequest) -> WireResponse {
+pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
+    let vault = &ctx.vault;
     if request.v != WIRE_VERSION {
         return WireResponse::failure("unsupported_version", "The wire version is not supported.");
     }
@@ -32,7 +40,7 @@ pub fn handle(vault: &SharedVault, request: &WireRequest) -> WireResponse {
             item_id,
             operation,
             params,
-        } => call(vault, &request.token, *item_id, operation, params),
+        } => call(ctx, &request.token, *item_id, operation, params),
     }
 }
 
@@ -134,7 +142,7 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
 /// Everything the network step needs. The vault lock is released before the call.
 struct Prepared {
     agent: AgentSummary,
-    base: http::LoopbackBase,
+    destination: http::DestinationUrl,
     path: String,
     secret: String,
     op: &'static OperationSpec,
@@ -147,12 +155,13 @@ impl Drop for Prepared {
 }
 
 fn call(
-    vault: &SharedVault,
+    ctx: &BrokerContext,
     token: &str,
     item_id: u64,
     operation: &str,
     params: &BTreeMap<String, String>,
 ) -> WireResponse {
+    let vault = &ctx.vault;
     let prepared = {
         let mut guard = lock(vault);
         let Some(vault) = guard.as_mut().filter(|vault| !vault.is_locked()) else {
@@ -164,7 +173,7 @@ fn call(
         }
     };
 
-    let outcome = execute(&prepared);
+    let outcome = execute(&prepared, &ctx.tls);
     let (decision, reason) = match &outcome {
         Ok(_) => (ActivityDecision::Allow, "The operation ran.".to_owned()),
         Err(response) => (
@@ -255,11 +264,11 @@ fn prepare(
     if let Err(message) = op.validate(params) {
         return Err(deny(vault, "invalid_params", &message));
     }
-    let Ok(base) = parse_loopback_base(&destination.base_url) else {
+    let Ok(target) = parse_destination(&destination.base_url) else {
         return Err(deny(
             vault,
             "destination_not_permitted",
-            "The destination is not permitted in this phase.",
+            "The destination must be https://, or http:// on this computer.",
         ));
     };
     let kind_matches = vault
@@ -281,22 +290,37 @@ fn prepare(
     };
     Ok(Prepared {
         agent,
-        base,
+        destination: target,
         path: op.path(params),
         secret: secret.expose().to_owned(),
         op,
     })
 }
 
-fn execute(prepared: &Prepared) -> Result<Value, WireResponse> {
-    let response = http::get(&prepared.base, &prepared.path, &prepared.secret).map_err(|_| {
-        WireResponse::failure(
-            "destination_unreachable",
-            "The destination did not answer correctly.",
-        )
-    })?;
+fn execute(prepared: &Prepared, tls: &TlsClient) -> Result<Value, WireResponse> {
+    let response = http::get(&prepared.destination, &prepared.path, &prepared.secret, tls)
+        .map_err(|failure| match failure {
+            HttpFailure::Tls => WireResponse::failure(
+                "tls_failed",
+                "The TLS connection failed. The certificate is not trusted or does not match the host.",
+            ),
+            HttpFailure::TooLarge => WireResponse::failure(
+                "bad_output",
+                "The destination response is larger than 64 KiB.",
+            ),
+            HttpFailure::Connect | HttpFailure::Protocol => WireResponse::failure(
+                "destination_unreachable",
+                "The destination did not answer correctly.",
+            ),
+        })?;
     match response.status {
         200..=299 => {}
+        300..=399 => {
+            return Err(WireResponse::failure(
+                "destination_error",
+                "The destination sent a redirect. Apassy does not follow redirects.",
+            ));
+        }
         401 | 403 => {
             return Err(WireResponse::failure(
                 "destination_refused",

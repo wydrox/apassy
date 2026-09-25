@@ -17,4 +17,4 @@ use crate::vault::Vault;
 /// The one open vault in this process. The desktop app and the broker share it.
 pub type SharedVault = Arc<Mutex<Option<Vault>>>;
 
-pub use server::{BrokerHandle, start};
+pub use server::{BrokerHandle, start, start_with_tls};

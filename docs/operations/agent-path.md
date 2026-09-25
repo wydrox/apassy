@@ -29,7 +29,7 @@ It adds one extra field to each response. The broker must drop that field.
 1. Start `./target/release/apassy`.
 2. Create and unlock a vault.
 3. Add an API key item. Put `FAKE-ALPHA-TOKEN-7731` in the Token field.
-4. In Item details, find "Agent connector". Type `http://127.0.0.1:8787` and click "Save connector".
+4. In Item details, find "Agent connector". Type `http://127.0.0.1:8787` and click "Save connector". A real service uses `https://HOST`.
 5. In Agents, type a name and click "Register agent".
 6. Copy the token. Apassy shows it one time. Click "I saved the token".
 7. Click "Manage grants". Select `get_sales_summary`.
@@ -73,7 +73,8 @@ Host: macOS arm64. All commands gave exit code 0.
 | `cargo clippy --offline --locked --all-features --all-targets -- -D warnings` | PASS |
 | `cargo clippy --offline --locked --features desktop --all-targets -- -D warnings` | PASS |
 | `cargo clippy --offline --locked --all-targets -- -D warnings` | PASS |
-| `cargo test --offline --locked --all-features --all-targets -- --test-threads=1` | PASS, 116 tests. `tests/agent_path.rs` has 6 tests. |
+| `cargo test --offline --locked --all-features --all-targets -- --test-threads=1` | PASS. `tests/agent_path.rs` has 8 tests, 2 of them for HTTPS. |
+| `cargo test --offline --locked --features vault --lib public_https -- --ignored` | PASS. Manual check with network access. `example.com` passes. `wrong.host.badssl.com` gives a TLS failure. |
 | `cargo test --offline --locked --features vault --doc` | PASS, 6 compile-fail checks |
 | `python3 tests/isolation/test_fixture_boundary.py` | PASS |
 

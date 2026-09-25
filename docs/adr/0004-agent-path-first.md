@@ -35,8 +35,8 @@ The thin path contains these parts:
 - A locked vault refuses all agent requests.
 - A restore from backup revokes all agents. The owner must register the agents again.
 - Agent tokens are in the encrypted vault database. Comparison uses constant time.
-- The connector accepts only loopback `http://` destinations in this phase. A TLS client needs a new dependency. The owner must approve that dependency before the first real service.
-- The adapter and the synthetic service use only `std` and `serde_json`. This phase adds no dependency.
+- The connector accepted only loopback `http://` destinations at first. [ADR 0005](0005-connector-tls.md) adds `https://` destinations.
+- The adapter and the synthetic service use only `std` and `serde_json`.
 
 ## Result for the plan
 
@@ -47,6 +47,6 @@ The thin path contains these parts:
 
 ## Open decisions
 
-- TLS client dependency (for example `rustls`) before the first real service.
+- TLS client dependency: closed by [ADR 0005](0005-connector-tls.md).
 - Peer identity on the socket. The `std` library has no safe peer-credential call. The directory mode and the token are the controls in this phase.
 - Token life and rotation. A token is valid until revoke or restore in this phase.

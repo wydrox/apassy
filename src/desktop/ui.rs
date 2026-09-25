@@ -1921,7 +1921,7 @@ mod agents_view {
             }
             ui.label(
                 RichText::new(
-                    "A locked vault refuses all agent requests. The broker accepts only loopback destinations in this phase.",
+                    "A locked vault refuses all agent requests. Destinations use https://, or http:// on this computer only. The broker does not follow redirects.",
                 )
                 .color(INK_MUTED),
             );
@@ -2094,7 +2094,7 @@ mod agents_view {
             ui.label(RichText::new("Agent connector").size(16.0).strong().color(INK));
             ui.label(
                 RichText::new(
-                    "The broker adds this token to requests for permitted agents. The agent never receives the token. Only loopback http:// destinations work in this phase.",
+                    "The broker adds this token to requests for permitted agents. The agent never receives the token. Use https://, or http:// on this computer only.",
                 )
                 .color(INK_MUTED),
             );
