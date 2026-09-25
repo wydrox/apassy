@@ -5,13 +5,17 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::wire::{Action, MAX_LINE_BYTES, WIRE_VERSION, WireRequest, WireResponse};
+use super::wire::{
+    Action, MAX_LINE_BYTES, MAX_RESPONSE_BYTES, WIRE_VERSION, WireRequest, WireResponse,
+};
 
 /// Environment variable that overrides the broker socket path.
 pub const SOCKET_ENV: &str = "APASSY_BROKER_SOCKET";
 /// Environment variable that holds the agent token for the MCP adapter.
 pub const TOKEN_ENV: &str = "APASSY_AGENT_TOKEN";
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
+/// A run can wait for the owner and then for the process.
+const RUN_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// The socket path: `APASSY_BROKER_SOCKET`, or the default in Application Support.
 pub fn default_socket_path() -> PathBuf {
@@ -27,6 +31,11 @@ pub fn default_socket_path() -> PathBuf {
 
 /// Send one request and read one response. The connection closes after the response.
 pub fn send(socket: &Path, token: &str, action: Action) -> io::Result<WireResponse> {
+    let timeout = if matches!(action, Action::Run { .. }) {
+        RUN_TIMEOUT
+    } else {
+        IO_TIMEOUT
+    };
     let request = WireRequest {
         v: WIRE_VERSION,
         token: token.to_owned(),
@@ -41,11 +50,11 @@ pub fn send(socket: &Path, token: &str, action: Action) -> io::Result<WireRespon
         ));
     }
     let mut stream = UnixStream::connect(socket)?;
-    stream.set_read_timeout(Some(IO_TIMEOUT))?;
+    stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     stream.write_all(&line)?;
     stream.flush()?;
-    let mut reader = BufReader::new(stream.take(MAX_LINE_BYTES as u64));
+    let mut reader = BufReader::new(stream.take(MAX_RESPONSE_BYTES as u64));
     let mut response = String::new();
     reader.read_line(&mut response)?;
     if !response.ends_with('\n') {

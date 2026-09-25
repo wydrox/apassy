@@ -5,9 +5,12 @@
 //! only the permitted output fields to the agent. Manual grants are temporary.
 //! They are not the rule engine from P3.
 
+pub mod approvals;
 pub mod decide;
+pub mod exec;
 pub mod http;
 pub mod profile;
+mod run;
 pub mod server;
 
 use std::sync::{Arc, Mutex};
@@ -17,4 +20,4 @@ use crate::vault::Vault;
 /// The one open vault in this process. The desktop app and the broker share it.
 pub type SharedVault = Arc<Mutex<Option<Vault>>>;
 
-pub use server::{BrokerHandle, start, start_with_tls};
+pub use server::{BrokerHandle, BrokerOptions, start, start_with, start_with_tls};

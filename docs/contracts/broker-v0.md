@@ -44,6 +44,12 @@ Request:
 - Parameter values must be strings. Objects and arrays cause `bad_request`.
 - The request has no URL, header, SQL, or secret field.
 
+```json
+{"v":0,"token":"apassy_agt_<64 hex>","action":{"kind":"run","items":[1],"command":["npm","run","migrate"],"cwd":"/Users/me/Dev/odealo","purpose":"Apply the new migration.","path":"/usr/bin:/bin"}}
+```
+
+The `run` action is in [ADR 0006](../adr/0006-process-secrets.md). Its check order is in `src/broker/run.rs`. A run response has `exit_code`, `timed_out`, `truncated`, `stdout`, `stderr`, and `secrets_in_environment`. Each output stream keeps a maximum of 64 KiB. A response line has a maximum of 1 MiB.
+
 Response:
 
 ```json
@@ -79,7 +85,7 @@ A locked vault cannot record. The broker does not record requests with an unknow
 
 ## 6. Error codes
 
-`bad_request`, `unsupported_version`, `busy`, `vault_locked`, `unauthenticated`, `not_granted`, `no_destination`, `unknown_profile`, `unknown_operation`, `invalid_params`, `destination_not_permitted`, `wrong_credential_kind`, `missing_secret`, `destination_unreachable`, `tls_failed`, `destination_refused`, `destination_not_found`, `destination_error`, `bad_output`, `output_blocked`, `broker_error`.
+`invalid_request`, `outside_project`, `no_env_binding`, `approval_denied`, `approval_timeout`, `start_failed`, `bad_request`, `unsupported_version`, `busy`, `vault_locked`, `unauthenticated`, `not_granted`, `no_destination`, `unknown_profile`, `unknown_operation`, `invalid_params`, `destination_not_permitted`, `wrong_credential_kind`, `missing_secret`, `destination_unreachable`, `tls_failed`, `destination_refused`, `destination_not_found`, `destination_error`, `bad_output`, `output_blocked`, `broker_error`.
 
 ## 7. Connector profile `reporting-api-v0`
 
@@ -102,7 +108,7 @@ The broker sends `Authorization: Bearer <token field>`. The agent cannot set a h
 - Tools: `apassy_list_access` and `apassy_use_credential`.
 - A broker refusal is a tool result with `isError: true`. The text starts with the error code.
 
-## 9. Vault schema version 2
+## 9. Vault schema versions 2 and 3
 
 Schema version 2 adds the tables `agent`, `destination`, `grant_rule`, and `activity`.
 Unlock migrates a version 1 file in one immediate transaction. Create writes version 2.
@@ -113,6 +119,7 @@ Unlock migrates a version 1 file in one immediate transaction. Create writes ver
 - Item delete removes the grants and the destination of the item in the same transaction.
 - Restore revokes all agents and removes all grants. The owner must register the agents again.
 - The activity log keeps the newest 500 entries.
+- Schema version 3 adds `env_binding` and `exec_grant`. Unlock migrates version 1 and 2 files. Item delete, agent revoke, and restore also remove the process grants.
 
 ## 10. Limits
 

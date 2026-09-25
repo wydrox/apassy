@@ -25,7 +25,8 @@ use crate::contracts::CredentialKind;
 
 pub use agents::{
     AGENT_TOKEN_PREFIX, ActivityDecision, ActivityRecord, AgentSummary, AgentToken, Destination,
-    GrantSummary, MAX_ACTIVITY_ROWS, NewActivity,
+    EnvBinding, ExecGrant, ExecMode, GrantSummary, MAX_ACTIVITY_ROWS, NewActivity,
+    checked_env_name,
 };
 pub use types::{
     Field, FieldSummary, ItemDetails, ItemDraft, ItemSummary, MAX_PASSPHRASE_BYTES,
@@ -77,8 +78,9 @@ INSERT INTO vault_meta (id, schema_version) VALUES (1, 1);
 PRAGMA user_version = 1;
 ";
 
-/// Schema version 1 files are migrated to version 2 at unlock.
+/// Older schema versions are migrated to the current version at unlock.
 const LEGACY_SCHEMA_VERSION: i64 = 1;
+const AGENT_SCHEMA_VERSION: i64 = 2;
 
 /// Encrypted local vault. Connection state is private. Debug is redacted.
 pub struct Vault {
@@ -681,7 +683,7 @@ fn read_user_version(conn: &Connection) -> VaultResult<i64> {
 
 fn verify_user_version(conn: &Connection) -> VaultResult<i64> {
     match read_user_version(conn)? {
-        version @ (LEGACY_SCHEMA_VERSION | SCHEMA_VERSION) => Ok(version),
+        version @ (LEGACY_SCHEMA_VERSION | AGENT_SCHEMA_VERSION | SCHEMA_VERSION) => Ok(version),
         _ => Err(err(VaultErrorKind::UnsupportedSchema)),
     }
 }
@@ -738,12 +740,17 @@ fn verify_expected_columns(conn: &Connection, version: i64) -> VaultResult<()> {
         "SELECT item_id, position, tag FROM item_tag LIMIT 0",
         "SELECT item_id, position, name, value, secret FROM item_field LIMIT 0",
     ];
-    let v2: &[&str] = if version >= SCHEMA_VERSION {
+    let v2: &[&str] = if version >= AGENT_SCHEMA_VERSION {
         &agents::SCHEMA_V2_COLUMNS
     } else {
         &[]
     };
-    for sql in v1.iter().chain(v2) {
+    let v3: &[&str] = if version >= SCHEMA_VERSION {
+        &agents::SCHEMA_V3_COLUMNS
+    } else {
+        &[]
+    };
+    for sql in v1.iter().chain(v2).chain(v3) {
         drop(
             conn.prepare(sql)
                 .map_err(|_| err(VaultErrorKind::UnsupportedSchema))?,
@@ -761,12 +768,16 @@ fn verify_readable_schema(conn: &Connection) -> VaultResult<i64> {
     Ok(version)
 }
 
-/// Add the schema version 2 tables in one immediate transaction.
-fn migrate_to_current(conn: &mut Connection) -> VaultResult<()> {
+/// Add the missing tables in one immediate transaction.
+fn migrate_to_current(conn: &mut Connection, from: i64) -> VaultResult<()> {
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| err(VaultErrorKind::Storage))?;
-    tx.execute_batch(agents::SCHEMA_V2_SQL)
+    if from < AGENT_SCHEMA_VERSION {
+        tx.execute_batch(agents::SCHEMA_V2_SQL)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+    }
+    tx.execute_batch(agents::SCHEMA_V3_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     verify_expected_columns(conn, SCHEMA_VERSION)
@@ -790,6 +801,8 @@ fn initialize_new_db(path: &Path, passphrase: &str) -> VaultResult<()> {
     tx.execute_batch(SCHEMA_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.execute_batch(agents::SCHEMA_V2_SQL)
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute_batch(agents::SCHEMA_V3_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     close_conn(conn)
@@ -816,8 +829,8 @@ fn open_working_conn(path: &Path, passphrase: &str) -> VaultResult<Connection> {
         drop(conn);
         return Err(pragma_err);
     }
-    if version == LEGACY_SCHEMA_VERSION
-        && let Err(migrate_err) = migrate_to_current(&mut conn)
+    if version < SCHEMA_VERSION
+        && let Err(migrate_err) = migrate_to_current(&mut conn, version)
     {
         drop(conn);
         return Err(migrate_err);

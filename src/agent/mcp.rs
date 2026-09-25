@@ -15,6 +15,7 @@ use super::wire::{Action, MAX_LINE_BYTES, WireResponse};
 
 pub const TOOL_LIST_ACCESS: &str = "apassy_list_access";
 pub const TOOL_USE_CREDENTIAL: &str = "apassy_use_credential";
+pub const TOOL_RUN_WITH_SECRETS: &str = "apassy_run_with_secrets";
 const SUPPORTED_PROTOCOLS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// Adapter settings. `token` is `None` when the environment has no agent token.
@@ -119,7 +120,7 @@ fn initialize_result(params: &Value) -> Value {
         "protocolVersion": version,
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": { "name": "apassy", "version": env!("CARGO_PKG_VERSION") },
-        "instructions": "Apassy lets you use credentials that the owner permits. You never receive secret values. Call apassy_list_access first to see the permitted items and operations.",
+        "instructions": "Apassy lets you use credentials that the owner permits. You never receive secret values. Call apassy_list_access first. To run a command that needs secrets, use apassy_run_with_secrets: Apassy starts the command with the secrets in its environment and returns masked output. Do not ask for secret values, and do not try to print them.",
     })
 }
 
@@ -153,6 +154,22 @@ pub fn tool_list() -> Value {
                 "required": ["item_id", "operation"],
                 "additionalProperties": false
             }
+        },
+        {
+            "name": TOOL_RUN_WITH_SECRETS,
+            "title": "Run a command with secrets in its environment",
+            "description": "Run one command in a project directory. Apassy puts the named vault items into the process environment under the variable names that the owner set (see process_access in apassy_list_access). You never receive the values. Secret values in the output are replaced with [apassy:NAME]. The owner can need to approve the run in the Apassy app, so this call can wait up to 2 minutes. The command is an argument list, not a shell string. Use [\"sh\", \"-c\", \"...\"] only if you need a shell.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "items": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "minItems": 1, "description": "Item IDs from process_access." },
+                    "command": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Program and arguments, for example [\"npm\", \"run\", \"migrate\"]." },
+                    "cwd": { "type": "string", "description": "Absolute working directory inside the granted project directory." },
+                    "purpose": { "type": "string", "description": "Why you need to run this command. The owner sees it." }
+                },
+                "required": ["items", "command", "cwd", "purpose"],
+                "additionalProperties": false
+            }
         }
     ])
 }
@@ -169,6 +186,7 @@ fn call_tool(config: &AdapterConfig, params: &Value) -> Value {
     let action = match name {
         TOOL_LIST_ACCESS => Ok(Action::ListAccess),
         TOOL_USE_CREDENTIAL => call_action(&arguments),
+        TOOL_RUN_WITH_SECRETS => run_action(&arguments),
         _ => Err("The tool name is not known.".to_owned()),
     };
     let action = match action {
@@ -229,6 +247,55 @@ fn call_action(arguments: &Value) -> Result<Action, String> {
     })
 }
 
+fn run_action(arguments: &Value) -> Result<Action, String> {
+    let object = arguments
+        .as_object()
+        .ok_or_else(|| "The arguments must be an object.".to_owned())?;
+    if let Some(extra) = object
+        .keys()
+        .find(|key| !matches!(key.as_str(), "items" | "command" | "cwd" | "purpose"))
+    {
+        return Err(format!("The argument \"{extra}\" is not permitted."));
+    }
+    let items = object
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "The items argument must be an array of item IDs.".to_owned())?
+        .iter()
+        .map(|item| {
+            item.as_u64()
+                .filter(|id| *id > 0)
+                .ok_or_else(|| "Each item ID must be a positive integer.".to_owned())
+        })
+        .collect::<Result<Vec<u64>, String>>()?;
+    let command = object
+        .get("command")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "The command argument must be an array of strings.".to_owned())?
+        .iter()
+        .map(|arg| {
+            arg.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "Each command argument must be a string.".to_owned())
+        })
+        .collect::<Result<Vec<String>, String>>()?;
+    let text = |name: &str| {
+        object
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| format!("The {name} argument must be a string."))
+    };
+    Ok(Action::Run {
+        items,
+        command,
+        cwd: text("cwd")?,
+        purpose: text("purpose")?,
+        // The process uses the PATH of the agent host, so tools such as npm resolve the same way.
+        path: std::env::var("PATH").ok(),
+    })
+}
+
 fn tool_result(response: WireResponse) -> Value {
     if response.ok {
         let result = response.result.unwrap_or(Value::Null);
@@ -283,7 +350,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
         )
         .expect("reply");
-        assert_eq!(reply["result"]["tools"].as_array().map(Vec::len), Some(2));
+        assert_eq!(reply["result"]["tools"].as_array().map(Vec::len), Some(3));
         assert!(
             handle_message(
                 &config(),
@@ -301,6 +368,13 @@ mod tests {
         assert!(call_action(&nested).is_err());
         let zero = json!({"item_id": 0, "operation": "op"});
         assert!(call_action(&zero).is_err());
+        let shell_string =
+            json!({"items": [1], "command": "npm run x", "cwd": "/tmp", "purpose": "p"});
+        assert!(run_action(&shell_string).is_err());
+        let env_override = json!({"items": [1], "command": ["env"], "cwd": "/tmp", "purpose": "p", "env": {"X": "1"}});
+        assert!(run_action(&env_override).is_err());
+        let good = json!({"items": [1], "command": ["env"], "cwd": "/tmp", "purpose": "p"});
+        assert!(matches!(run_action(&good), Ok(Action::Run { .. })));
     }
 
     #[test]

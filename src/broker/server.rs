@@ -14,6 +14,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use super::SharedVault;
+use super::approvals::ApprovalQueue;
 use super::decide::{self, BrokerContext};
 use super::http::TlsClient;
 use crate::agent::wire::{MAX_LINE_BYTES, WireRequest, WireResponse};
@@ -23,10 +24,34 @@ const MAX_REQUESTS_PER_CONNECTION: usize = 64;
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 const ACCEPT_POLL: Duration = Duration::from_millis(50);
 
+/// Broker settings. [`BrokerOptions::platform`] gives the desktop defaults.
+#[derive(Debug, Clone)]
+pub struct BrokerOptions {
+    pub tls: TlsClient,
+    pub approval_timeout: Duration,
+    pub run_timeout: Duration,
+}
+
+impl BrokerOptions {
+    /// macOS trust store, 120 s for an owner decision, and 300 s for a process.
+    pub fn platform() -> io::Result<Self> {
+        Ok(Self::with_tls(TlsClient::platform()?))
+    }
+
+    pub fn with_tls(tls: TlsClient) -> Self {
+        Self {
+            tls,
+            approval_timeout: Duration::from_secs(120),
+            run_timeout: Duration::from_secs(300),
+        }
+    }
+}
+
 /// Running broker. Drop stops the accept loop and removes the socket file.
 #[derive(Debug)]
 pub struct BrokerHandle {
     socket: PathBuf,
+    approvals: Arc<ApprovalQueue>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -34,6 +59,11 @@ pub struct BrokerHandle {
 impl BrokerHandle {
     pub fn socket_path(&self) -> &Path {
         &self.socket
+    }
+
+    /// Runs that wait for the owner. The desktop app shows them.
+    pub fn approvals(&self) -> &Arc<ApprovalQueue> {
+        &self.approvals
     }
 
     pub fn stop(&mut self) {
@@ -57,16 +87,32 @@ impl Drop for BrokerHandle {
 /// Start the broker on `socket` with the macOS trust store for TLS.
 /// The parent directory is created with mode `0700` if absent.
 pub fn start(vault: SharedVault, socket: &Path) -> io::Result<BrokerHandle> {
-    start_with_tls(vault, socket, TlsClient::platform()?)
+    start_with(vault, socket, BrokerOptions::platform()?)
 }
 
-/// Start the broker with a specific TLS client. Tests use a client with a test root.
+/// Start the broker with a specific TLS client and default timeouts.
 pub fn start_with_tls(
     vault: SharedVault,
     socket: &Path,
     tls: TlsClient,
 ) -> io::Result<BrokerHandle> {
-    let ctx = BrokerContext { vault, tls };
+    start_with(vault, socket, BrokerOptions::with_tls(tls))
+}
+
+/// Start the broker with specific options. Tests use short timeouts.
+pub fn start_with(
+    vault: SharedVault,
+    socket: &Path,
+    options: BrokerOptions,
+) -> io::Result<BrokerHandle> {
+    let approvals = Arc::new(ApprovalQueue::new());
+    let ctx = BrokerContext {
+        vault,
+        tls: options.tls,
+        approvals: Arc::clone(&approvals),
+        approval_timeout: options.approval_timeout,
+        run_timeout: options.run_timeout,
+    };
     prepare_directory(socket)?;
     remove_stale_socket(socket)?;
     let listener = UnixListener::bind(socket)?;
@@ -80,6 +126,7 @@ pub fn start_with_tls(
         .spawn(move || accept_loop(&listener, &ctx, &thread_stop, &active))?;
     Ok(BrokerHandle {
         socket: socket.to_path_buf(),
+        approvals,
         stop,
         thread: Some(thread),
     })

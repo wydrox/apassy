@@ -222,6 +222,8 @@ fn draw_sidebar(app: &mut DesktopApp, ui: &mut egui::Ui) {
 fn draw_content(app: &mut DesktopApp, ui: &mut egui::Ui) {
     draw_status(app, ui);
     ui.add_space(8.0);
+    #[cfg(feature = "vault")]
+    agents_view::draw_approvals(app, ui);
     ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| match app.view {
@@ -304,6 +306,10 @@ fn draw_lock_controls(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 .is_some()
             {
                 app.pending_delete = false;
+                // A locked vault refuses agent runs, so waiting runs end now.
+                if let crate::desktop::BrokerState::Running(handle) = &app.broker {
+                    handle.approvals().deny_all();
+                }
             }
         }
     });
@@ -968,6 +974,8 @@ fn draw_owner_item(app: &mut DesktopApp, ui: &mut egui::Ui) {
         }
     });
 
+    ui.add_space(8.0);
+    agents_view::draw_env_card(app, ui, id);
     if details.kind == CredentialKind::ApiKey {
         ui.add_space(8.0);
         agents_view::draw_connector_card(app, ui, id);
@@ -1865,6 +1873,7 @@ mod agents_view {
     use crate::desktop::owner_store::format_utc;
     use crate::desktop::{BrokerState, DesktopApp};
     use crate::vault::ActivityDecision;
+    use crate::vault::ExecMode;
 
     pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
         heading(ui, "Agents");
@@ -2037,6 +2046,8 @@ mod agents_view {
                     }
                 });
                 if app.owner_ui.selected_agent == Some(agent.id) {
+                    draw_process_access(app, ui, agent.id);
+                    ui.add_space(6.0);
                     draw_grants(app, ui, agent.id);
                 }
             });
@@ -2130,6 +2141,248 @@ mod agents_view {
                 }
             });
         });
+    }
+
+    /// Runs that wait for the owner. This card is on every view.
+    pub(super) fn draw_approvals(app: &mut DesktopApp, ui: &mut egui::Ui) {
+        let BrokerState::Running(handle) = &app.broker else {
+            return;
+        };
+        let approvals = std::sync::Arc::clone(handle.approvals());
+        // A broker thread can add a run at any time. Check again soon.
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(500));
+        let pending = approvals.pending();
+        let new_run = pending
+            .iter()
+            .any(|run| !app.owner_ui.signaled_runs.contains(&run.id));
+        if new_run {
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                    egui::UserAttentionType::Critical,
+                ));
+        }
+        app.owner_ui.signaled_runs = pending.iter().map(|run| run.id).collect();
+        for run in pending {
+            Frame::NONE
+                .fill(egui::Color32::from_rgb(252, 238, 214))
+                .stroke(egui::Stroke::new(1.5, ASK))
+                .corner_radius(egui::CornerRadius::same(8))
+                .inner_margin(Margin::symmetric(14, 12))
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(format!("{} asks to run a command with secrets", run.agent))
+                            .size(16.0)
+                            .strong()
+                            .color(INK),
+                    );
+                    ui.label(RichText::new(format!("Purpose: {}", run.purpose)).color(INK));
+                    ui.label(RichText::new("Command:").color(INK_MUTED));
+                    let mut command = shell_words(&run.command);
+                    ui.add(
+                        TextEdit::multiline(&mut command)
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(2)
+                            .interactive(false),
+                    );
+                    ui.label(RichText::new(format!("Directory: {}", run.cwd)).color(INK_MUTED));
+                    ui.label(
+                        RichText::new(format!("Secrets in the environment: {}", run.env_names.join(", ")))
+                            .color(INK_MUTED),
+                    );
+                    ui.label(
+                        RichText::new(
+                            "The process can read these secrets. Approve only a command that you trust.",
+                        )
+                        .color(ASK),
+                    );
+                    ui.horizontal(|ui| {
+                        if accent_button(ui, "Approve once").clicked() {
+                            approvals.decide(run.id, true);
+                            app.set_ok("The run is approved once.");
+                        }
+                        if danger_button(ui, "Deny").clicked() {
+                            approvals.decide(run.id, false);
+                            app.set_ok("The run is denied.");
+                        }
+                    });
+                });
+            ui.add_space(8.0);
+        }
+    }
+
+    /// Arguments as one line. Arguments with spaces or quotes are in single quotes.
+    fn shell_words(command: &[String]) -> String {
+        command
+            .iter()
+            .map(|arg| {
+                let plain = !arg.is_empty()
+                    && arg
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "-_./=:@%+,".contains(c));
+                if plain {
+                    arg.clone()
+                } else {
+                    format!("'{}'", arg.replace('\'', "'\\''"))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Environment variable binding for agent processes. Items with no secret field skip it.
+    pub(super) fn draw_env_card(app: &mut DesktopApp, ui: &mut egui::Ui, item_id: u64) {
+        let fields = app
+            .owner_ui
+            .session
+            .secret_fields(item_id)
+            .unwrap_or_default();
+        if fields.is_empty() {
+            return;
+        }
+        if !fields.contains(&app.owner_ui.env_field_input) {
+            app.owner_ui.env_field_input = fields[0].clone();
+        }
+        card_frame().show(ui, |ui| {
+            ui.label(
+                RichText::new("Environment variable for agent processes")
+                    .size(16.0)
+                    .strong()
+                    .color(INK),
+            );
+            ui.label(
+                RichText::new(
+                    "An agent can ask Apassy to run a command with this secret in the environment. The agent never receives the value. You give process access in Agents.",
+                )
+                .color(INK_MUTED),
+            );
+            let current = app.owner_ui.session.env_binding(item_id).ok().flatten();
+            let status = current.as_ref().map_or_else(
+                || "No variable.".to_owned(),
+                |binding| format!("Variable: {} = field {}", binding.env_name, binding.field),
+            );
+            ui.label(RichText::new(status).color(INK));
+            ui.horizontal_wrapped(|ui| {
+                ui.add(
+                    TextEdit::singleline(&mut app.owner_ui.env_name_input)
+                        .hint_text("SUPABASE_SERVICE_KEY")
+                        .desired_width(260.0),
+                );
+                egui::ComboBox::new(("env-field", item_id), "Field")
+                    .selected_text(app.owner_ui.env_field_input.clone())
+                    .show_ui(ui, |ui| {
+                        for field in &fields {
+                            ui.selectable_value(&mut app.owner_ui.env_field_input, field.clone(), field);
+                        }
+                    });
+            });
+            ui.horizontal_wrapped(|ui| {
+                if accent_button(ui, "Save variable").clicked() {
+                    let name = app.owner_ui.env_name_input.trim().to_owned();
+                    let field = app.owner_ui.env_field_input.clone();
+                    let result = app.owner_ui.session.set_env_binding(item_id, &name, &field);
+                    let _ = app.apply(result, &format!("The item is bound to {name}."));
+                }
+                if current.is_some() && ui.button("Remove variable").clicked() {
+                    let result = app.owner_ui.session.clear_env_binding(item_id);
+                    if app
+                        .apply(result, "The variable and its process grants are removed.")
+                        .is_some()
+                    {
+                        app.owner_ui.env_name_input.clear();
+                    }
+                }
+            });
+        });
+    }
+
+    /// Process access for one agent: one row per item with a variable.
+    fn draw_process_access(app: &mut DesktopApp, ui: &mut egui::Ui, agent_id: u64) {
+        ui.label(RichText::new("Process access").strong().color(INK));
+        let items = match app.owner_ui.session.env_bound_items() {
+            Ok(items) => items,
+            Err(err) => {
+                ui.label(RichText::new(err.message).color(DENY));
+                return;
+            }
+        };
+        if items.is_empty() {
+            ui.label(
+                RichText::new(
+                    "No item has an environment variable. Open an item and set one in Item details.",
+                )
+                .color(INK_MUTED),
+            );
+            return;
+        }
+        let grants = app
+            .owner_ui
+            .session
+            .exec_grants(agent_id)
+            .unwrap_or_default();
+        for (item_id, item_name, env_name) in items {
+            let grant = grants
+                .iter()
+                .find(|grant| grant.item_id == item_id)
+                .cloned();
+            ui.add_space(4.0);
+            ui.label(RichText::new(format!("{item_name} as {env_name}")).color(INK));
+            let key = (agent_id, item_id);
+            let input = app.owner_ui.exec_dir_inputs.entry(key).or_insert_with(|| {
+                grant
+                    .as_ref()
+                    .map(|g| g.project_dir.clone())
+                    .unwrap_or_default()
+            });
+            ui.add(
+                TextEdit::singleline(input)
+                    .hint_text("/Users/you/Dev/project")
+                    .desired_width(360.0),
+            );
+            let status = match &grant {
+                Some(grant) if grant.mode == ExecMode::Ask => {
+                    format!("Access in {}. You approve each run.", grant.project_dir)
+                }
+                Some(grant) => format!(
+                    "Access in {}. Runs start without approval.",
+                    grant.project_dir
+                ),
+                None => "No access.".to_owned(),
+            };
+            ui.label(RichText::new(status).color(INK_MUTED));
+            ui.horizontal_wrapped(|ui| {
+                let dir = app
+                    .owner_ui
+                    .exec_dir_inputs
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_default();
+                if accent_button(ui, "Allow, ask each time").clicked() {
+                    let result =
+                        app.owner_ui
+                            .session
+                            .set_exec_grant(agent_id, item_id, &dir, ExecMode::Ask);
+                    let _ = app.apply(result, "Process access is saved. You approve each run.");
+                }
+                if ui.button("Allow without asking").clicked() {
+                    let result = app.owner_ui.session.set_exec_grant(
+                        agent_id,
+                        item_id,
+                        &dir,
+                        ExecMode::Allow,
+                    );
+                    let _ = app.apply(
+                        result,
+                        "Process access is saved. Runs start without approval.",
+                    );
+                }
+                if grant.is_some() && danger_button(ui, "Remove access").clicked() {
+                    let result = app.owner_ui.session.remove_exec_grant(agent_id, item_id);
+                    let _ = app.apply(result, "Process access is removed.");
+                }
+            });
+        }
     }
 
     pub(super) fn draw_activity_card(app: &mut DesktopApp, ui: &mut egui::Ui) {

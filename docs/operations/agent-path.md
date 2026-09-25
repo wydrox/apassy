@@ -109,6 +109,33 @@ Findings from this run:
 - The broker checks the grant before the profile. An unknown operation name gives `not_granted`, not `unknown_operation`. This does not tell the agent which operations exist. The owner cannot see in Activity that the name is not a real operation.
 - The agent found the correct operation from `apassy_list_access` for the permitted call. It guessed a name for the operation that it did not have.
 
-## 8. Limits
+## 8. Process mode (ADR 0006)
+
+An agent can run a command with vault items in the process environment. The agent does not receive the values.
+
+Setup in the desktop app:
+
+1. In Item details, find "Environment variable for agent processes". Type a name, for example `SUPABASE_SERVICE_KEY`. Select the secret field. Click "Save variable".
+2. In Agents, click "Manage grants" for the agent. In "Process access", type the project directory.
+3. Click "Allow, ask each time" or "Allow without asking".
+
+When an agent calls `apassy_run_with_secrets` in "ask" mode, a card shows on every view. The card shows the agent, the purpose, the command, the directory, and the variable names. Click "Approve once" or "Deny". The request waits a maximum of 120 seconds. A lock of the vault denies every waiting run.
+
+For Claude Code, set `MCP_TOOL_TIMEOUT` to a value higher than 120000, because a run can wait for your approval.
+
+### Run with a real agent host on 2026-09-25
+
+A headless Claude Code 2.1.282 session used `apassy_list_access` and `apassy_run_with_secrets` only. The item had the variable `DEMO_SERVICE_KEY`. The grant was in "ask" mode for `/tmp/apassy-demo-project`.
+
+- The agent ran `./check-connection.sh` in the project. The owner approved the run in the desktop app.
+- The script used the key to call the synthetic service and got `200`. The script also printed the key. The output had `[apassy:DEMO_SERVICE_KEY]` in place of the value.
+- The agent refused to try to get the value in other ways.
+- The transcript had zero copies of the service key and zero copies of the agent token.
+
+A manual request with `sh -c 'echo key=$DEMO_SERVICE_KEY | base64'` showed the risk of this mode: masking does not find an encoded value. The owner denied the request in the approval card. The Activity view shows both runs.
+
+The first GUI run found a defect: the approval card showed only after a click in the window. The broker now asks the window to repaint when a run starts to wait.
+
+## 9. Limits
 
 See section 10 of the [broker contract](../contracts/broker-v0.md). The real-secret gate stays BLOCKED.

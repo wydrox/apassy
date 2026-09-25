@@ -10,8 +10,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const WIRE_VERSION: u32 = 0;
-/// Largest request or response line in bytes, including the newline.
+/// Largest request line in bytes, including the newline.
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
+/// Largest response line in bytes. A run response carries masked process output.
+pub const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,6 +45,17 @@ pub enum Action {
         #[serde(default)]
         params: BTreeMap<String, String>,
     },
+    /// Run one command with vault items in its environment (ADR 0006).
+    /// The broker starts the process. The response never contains a secret value.
+    Run {
+        items: Vec<u64>,
+        command: Vec<String>,
+        cwd: String,
+        purpose: String,
+        /// `PATH` for the process. The adapter sends its own `PATH`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
 }
 
 impl Action {
@@ -50,6 +63,7 @@ impl Action {
         match self {
             Self::ListAccess => "list_access",
             Self::Call { .. } => "call",
+            Self::Run { .. } => "run",
         }
     }
 }

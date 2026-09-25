@@ -8,12 +8,16 @@
 //! 6. Only then does the broker read the secret, release the vault lock, and call the destination.
 //!
 //! Each refusal after step 2 and each call result is stored in the activity log.
+//! Process runs (ADR 0006) have their own check order in [`super::run`].
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
 use super::SharedVault;
+use super::approvals::ApprovalQueue;
 use super::http::{self, HttpFailure, TlsClient, parse_destination};
 use super::profile::{self, OperationSpec};
 use crate::agent::wire::{Action, WIRE_VERSION, WireRequest, WireResponse};
@@ -26,6 +30,11 @@ const MAX_OUTPUT_TEXT_BYTES: usize = 256;
 pub struct BrokerContext {
     pub vault: SharedVault,
     pub tls: TlsClient,
+    pub approvals: Arc<ApprovalQueue>,
+    /// How long a run in "ask" mode waits for the owner.
+    pub approval_timeout: Duration,
+    /// How long a process can run before the broker stops it.
+    pub run_timeout: Duration,
 }
 
 /// Handle one request from an agent. The response never contains a secret value.
@@ -41,10 +50,27 @@ pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
             operation,
             params,
         } => call(ctx, &request.token, *item_id, operation, params),
+        Action::Run {
+            items,
+            command,
+            cwd,
+            purpose,
+            path,
+        } => super::run::run(
+            ctx,
+            &request.token,
+            &super::run::RunRequest {
+                items,
+                command,
+                cwd,
+                purpose,
+                path: path.as_deref(),
+            },
+        ),
     }
 }
 
-fn locked_response() -> WireResponse {
+pub(super) fn locked_response() -> WireResponse {
     WireResponse::failure(
         "vault_locked",
         "The Apassy vault is locked. Ask the owner to unlock it.",
@@ -59,13 +85,13 @@ fn unauthenticated_response() -> WireResponse {
 }
 
 /// Lock the shared vault. A poisoned mutex still holds a consistent SQLite state.
-fn lock(vault: &SharedVault) -> std::sync::MutexGuard<'_, Option<Vault>> {
+pub(super) fn lock(vault: &SharedVault) -> std::sync::MutexGuard<'_, Option<Vault>> {
     vault
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-fn authenticate(
+pub(super) fn authenticate(
     vault: &mut Vault,
     token: &str,
     action: &str,
@@ -132,10 +158,30 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
             "operations": described,
         }));
     }
+    let mut process_access = Vec::new();
+    for grant in vault.exec_grants_for_agent(agent.id).unwrap_or_default() {
+        let Ok(details) = vault.details(grant.item_id) else {
+            continue;
+        };
+        let Ok(Some(binding)) = vault.env_binding(grant.item_id) else {
+            continue;
+        };
+        process_access.push(json!({
+            "item_id": grant.item_id,
+            "item_name": details.summary.title,
+            "env_name": binding.env_name,
+            "project_dir": grant.project_dir,
+            "approval": match grant.mode {
+                crate::vault::ExecMode::Ask => "the owner approves each run",
+                crate::vault::ExecMode::Allow => "no approval needed",
+            },
+        }));
+    }
     WireResponse::success(json!({
         "agent": agent.name,
         "items": items,
-        "note": "Secret values are never returned. Use apassy_use_credential to run an operation.",
+        "process_access": process_access,
+        "note": "Secret values are never returned. Use apassy_use_credential for a connector operation. Use apassy_run_with_secrets to run a command with process_access items in its environment.",
     }))
 }
 

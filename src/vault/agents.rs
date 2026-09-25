@@ -58,6 +58,51 @@ UPDATE vault_meta SET schema_version = 2 WHERE id = 1;
 PRAGMA user_version = 2;
 ";
 
+/// Tables added in schema version 3 (ADR 0006): process secrets.
+pub(super) const SCHEMA_V3_SQL: &str = "
+CREATE TABLE env_binding (
+    item_id INTEGER PRIMARY KEY,
+    env_name TEXT NOT NULL,
+    field TEXT NOT NULL
+);
+CREATE TABLE exec_grant (
+    agent_id INTEGER NOT NULL,
+    item_id INTEGER NOT NULL,
+    project_dir TEXT NOT NULL,
+    mode TEXT NOT NULL CHECK (mode IN ('ask', 'allow')),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (agent_id, item_id)
+);
+CREATE INDEX exec_grant_item_id ON exec_grant(item_id);
+UPDATE vault_meta SET schema_version = 3 WHERE id = 1;
+PRAGMA user_version = 3;
+";
+
+pub(super) const SCHEMA_V3_COLUMNS: [&str; 2] = [
+    "SELECT item_id, env_name, field FROM env_binding LIMIT 0",
+    "SELECT agent_id, item_id, project_dir, mode, created_at FROM exec_grant LIMIT 0",
+];
+
+pub const MAX_ENV_NAME_BYTES: usize = 64;
+pub const MAX_PROJECT_DIR_BYTES: usize = 1024;
+
+/// Environment names that an owner cannot bind. They change how programs load or run.
+const RESERVED_ENV_NAMES: [&str; 12] = [
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TMPDIR",
+    "PWD",
+    "IFS",
+    "ENV",
+    "BASH_ENV",
+    "NODE_OPTIONS",
+    "PYTHONPATH",
+];
+const RESERVED_ENV_PREFIXES: [&str; 4] = ["DYLD_", "LD_", "APASSY_", "__CF"];
+
 pub(super) const SCHEMA_V2_COLUMNS: [&str; 4] = [
     "SELECT id, name, token, created_at, revoked_at FROM agent LIMIT 0",
     "SELECT item_id, profile, base_url FROM destination LIMIT 0",
@@ -106,6 +151,48 @@ pub struct Destination {
     pub item_id: u64,
     pub profile: String,
     pub base_url: String,
+}
+
+/// One vault item bound to one environment variable for agent processes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvBinding {
+    pub item_id: u64,
+    pub env_name: String,
+    pub field: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecMode {
+    /// The owner approves each run.
+    Ask,
+    /// The run starts without a prompt.
+    Allow,
+}
+
+impl ExecMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Allow => "allow",
+        }
+    }
+
+    fn from_str(text: &str) -> VaultResult<Self> {
+        match text {
+            "ask" => Ok(Self::Ask),
+            "allow" => Ok(Self::Allow),
+            _ => Err(err(VaultErrorKind::Storage)),
+        }
+    }
+}
+
+/// Process access for one agent and one item, limited to one project directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecGrant {
+    pub agent_id: u64,
+    pub item_id: u64,
+    pub project_dir: String,
+    pub mode: ExecMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,6 +325,8 @@ impl Vault {
             }
         }
         tx.execute("DELETE FROM grant_rule WHERE agent_id = ?1", [sql_id])
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        tx.execute("DELETE FROM exec_grant WHERE agent_id = ?1", [sql_id])
             .map_err(|_| err(VaultErrorKind::Storage))?;
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))
     }
@@ -409,6 +498,172 @@ impl Vault {
         }))
     }
 
+    /// Bind an item to an environment variable. `field` must be a secret field of the item.
+    pub fn set_env_binding(
+        &mut self,
+        item_id: u64,
+        env_name: &str,
+        field: &str,
+    ) -> VaultResult<()> {
+        let item = to_sql_id(item_id)?;
+        let env_name = checked_env_name(env_name.trim())?;
+        let conn = self.conn_mut()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        require_item(&tx, item)?;
+        let secret: Option<i64> = tx
+            .query_row(
+                "SELECT secret FROM item_field WHERE item_id = ?1 AND name = ?2",
+                (item, field),
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        if secret != Some(1) {
+            return Err(err(VaultErrorKind::InvalidInput));
+        }
+        let taken: Option<i64> = tx
+            .query_row(
+                "SELECT item_id FROM env_binding WHERE env_name = ?1 AND item_id != ?2",
+                (env_name, item),
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        if taken.is_some() {
+            return Err(err(VaultErrorKind::AlreadyExists));
+        }
+        tx.execute(
+            "INSERT INTO env_binding (item_id, env_name, field) VALUES (?1, ?2, ?3)
+             ON CONFLICT(item_id) DO UPDATE SET env_name = excluded.env_name, field = excluded.field",
+            (item, env_name, field),
+        )
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+        tx.commit().map_err(|_| err(VaultErrorKind::Storage))
+    }
+
+    /// Remove the binding and every process grant for the item.
+    pub fn clear_env_binding(&mut self, item_id: u64) -> VaultResult<()> {
+        let item = to_sql_id(item_id)?;
+        let conn = self.conn_mut()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        tx.execute("DELETE FROM env_binding WHERE item_id = ?1", [item])
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        tx.execute("DELETE FROM exec_grant WHERE item_id = ?1", [item])
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        tx.commit().map_err(|_| err(VaultErrorKind::Storage))
+    }
+
+    pub fn env_binding(&self, item_id: u64) -> VaultResult<Option<EnvBinding>> {
+        let item = to_sql_id(item_id)?;
+        let conn = self.conn_ref()?;
+        let row = conn
+            .query_row(
+                "SELECT env_name, field FROM env_binding WHERE item_id = ?1",
+                [item],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        Ok(row.map(|(env_name, field)| EnvBinding {
+            item_id,
+            env_name,
+            field,
+        }))
+    }
+
+    /// Give or change process access. `project_dir` must be an absolute path.
+    pub fn set_exec_grant(
+        &mut self,
+        agent_id: u64,
+        item_id: u64,
+        project_dir: &str,
+        mode: ExecMode,
+    ) -> VaultResult<()> {
+        let agent = to_sql_id(agent_id)?;
+        let item = to_sql_id(item_id)?;
+        let project_dir = checked_text(project_dir.trim(), MAX_PROJECT_DIR_BYTES)?;
+        if !project_dir.starts_with('/') {
+            return Err(err(VaultErrorKind::InvalidInput));
+        }
+        let at = to_sql_time(now_unix())?;
+        let conn = self.conn_mut()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        require_active_agent(&tx, agent)?;
+        require_item(&tx, item)?;
+        let bound: Option<i64> = tx
+            .query_row(
+                "SELECT item_id FROM env_binding WHERE item_id = ?1",
+                [item],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        if bound.is_none() {
+            return Err(err(VaultErrorKind::InvalidInput));
+        }
+        tx.execute(
+            "INSERT INTO exec_grant (agent_id, item_id, project_dir, mode, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(agent_id, item_id) DO UPDATE SET
+                 project_dir = excluded.project_dir, mode = excluded.mode",
+            (agent, item, project_dir, mode.as_str(), at),
+        )
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+        tx.commit().map_err(|_| err(VaultErrorKind::Storage))
+    }
+
+    pub fn remove_exec_grant(&mut self, agent_id: u64, item_id: u64) -> VaultResult<()> {
+        let agent = to_sql_id(agent_id)?;
+        let item = to_sql_id(item_id)?;
+        self.conn_mut()?
+            .execute(
+                "DELETE FROM exec_grant WHERE agent_id = ?1 AND item_id = ?2",
+                (agent, item),
+            )
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        Ok(())
+    }
+
+    /// Process grants of an active agent. A revoked agent has none.
+    pub fn exec_grants_for_agent(&self, agent_id: u64) -> VaultResult<Vec<ExecGrant>> {
+        let agent = to_sql_id(agent_id)?;
+        let conn = self.conn_ref()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT exec_grant.item_id, exec_grant.project_dir, exec_grant.mode
+                 FROM exec_grant JOIN agent ON agent.id = exec_grant.agent_id
+                 WHERE exec_grant.agent_id = ?1 AND agent.revoked_at IS NULL
+                 ORDER BY exec_grant.item_id ASC",
+            )
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let rows = stmt
+            .query_map([agent], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let mut grants = Vec::new();
+        for row in rows {
+            let (item_id, project_dir, mode) = row.map_err(|_| err(VaultErrorKind::Storage))?;
+            grants.push(ExecGrant {
+                agent_id,
+                item_id: to_public_id(item_id)?,
+                project_dir,
+                mode: ExecMode::from_str(&mode)?,
+            });
+        }
+        Ok(grants)
+    }
+
     pub fn record_activity(&mut self, entry: &NewActivity) -> VaultResult<()> {
         let agent_id = entry.agent_id.map(to_sql_id).transpose()?;
         let item_id = entry.item_id.map(to_sql_id).transpose()?;
@@ -497,6 +752,8 @@ pub(super) fn revoke_all_agents(conn: &mut Connection) -> VaultResult<()> {
     .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.execute("DELETE FROM grant_rule", [])
         .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute("DELETE FROM exec_grant", [])
+        .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))
 }
 
@@ -505,6 +762,10 @@ pub(super) fn delete_item_links(tx: &rusqlite::Transaction<'_>, item_id: i64) ->
     tx.execute("DELETE FROM grant_rule WHERE item_id = ?1", [item_id])
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.execute("DELETE FROM destination WHERE item_id = ?1", [item_id])
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute("DELETE FROM env_binding WHERE item_id = ?1", [item_id])
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute("DELETE FROM exec_grant WHERE item_id = ?1", [item_id])
         .map_err(|_| err(VaultErrorKind::Storage))?;
     Ok(())
 }
@@ -553,6 +814,24 @@ fn checked_identifier(text: &str, max: usize) -> VaultResult<&str> {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
     if valid {
         Ok(text)
+    } else {
+        Err(err(VaultErrorKind::InvalidInput))
+    }
+}
+
+/// `[A-Z_][A-Z0-9_]*`, at most 64 bytes, and not a reserved name.
+pub fn checked_env_name(name: &str) -> VaultResult<&str> {
+    let mut bytes = name.bytes();
+    let first_ok = bytes
+        .next()
+        .is_some_and(|b| b.is_ascii_uppercase() || b == b'_');
+    let rest_ok = bytes.all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_');
+    let reserved = RESERVED_ENV_NAMES.contains(&name)
+        || RESERVED_ENV_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix));
+    if first_ok && rest_ok && name.len() <= MAX_ENV_NAME_BYTES && !reserved {
+        Ok(name)
     } else {
         Err(err(VaultErrorKind::InvalidInput))
     }
@@ -650,6 +929,25 @@ mod tests {
         assert!(constant_time_eq(&[1u8; TOKEN_BYTES], &presented));
         assert!(!constant_time_eq(&[2u8; TOKEN_BYTES], &presented));
         assert!(!constant_time_eq(&[1u8; 16], &presented));
+    }
+
+    #[test]
+    fn env_names() {
+        assert!(checked_env_name("SUPABASE_SERVICE_KEY").is_ok());
+        assert!(checked_env_name("_X1").is_ok());
+        for bad in [
+            "",
+            "path",
+            "PATH",
+            "DYLD_INSERT_LIBRARIES",
+            "LD_PRELOAD",
+            "APASSY_X",
+            "1ABC",
+            "A-B",
+            "NODE_OPTIONS",
+        ] {
+            assert!(checked_env_name(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

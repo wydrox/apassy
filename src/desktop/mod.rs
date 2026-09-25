@@ -120,7 +120,15 @@ impl DesktopApp {
         let mut app = Self::new();
         app.styled = true;
         #[cfg(feature = "vault")]
-        app.start_broker(&crate::agent::client::default_socket_path());
+        {
+            app.start_broker(&crate::agent::client::default_socket_path());
+            if let BrokerState::Running(handle) = &app.broker {
+                let ctx = cc.egui_ctx.clone();
+                handle
+                    .approvals()
+                    .set_notifier(move || ctx.request_repaint());
+            }
+        }
         app
     }
 
@@ -190,6 +198,13 @@ impl DesktopApp {
         {
             self.edit_form = details.to_draft();
             self.owner_ui.edit_revision = details.revision;
+            let binding = self.owner_ui.session.env_binding(parsed).ok().flatten();
+            self.owner_ui.env_name_input = binding
+                .as_ref()
+                .map(|binding| binding.env_name.clone())
+                .unwrap_or_default();
+            self.owner_ui.env_field_input =
+                binding.map(|binding| binding.field).unwrap_or_default();
             self.owner_ui.connector_url = self
                 .owner_ui
                 .session

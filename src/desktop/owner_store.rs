@@ -17,8 +17,9 @@ use crate::broker::profile;
 use crate::contracts::CredentialKind;
 use crate::desktop::model::{ItemDraft, MASKED_VALUE, ModelError, ModelResult};
 use crate::vault::{
-    ActivityDecision, AgentSummary, AgentToken, Destination, Field, ItemDraft as VaultDraft,
-    MAX_PASSPHRASE_BYTES, MIN_PASSPHRASE_BYTES, SecretValue, Vault, VaultError, VaultErrorKind,
+    ActivityDecision, AgentSummary, AgentToken, Destination, EnvBinding, ExecGrant, ExecMode,
+    Field, ItemDraft as VaultDraft, MAX_PASSPHRASE_BYTES, MIN_PASSPHRASE_BYTES, SecretValue, Vault,
+    VaultError, VaultErrorKind, checked_env_name,
 };
 
 const MAX_TAG_BYTES: usize = 64;
@@ -103,6 +104,12 @@ pub struct OwnerUiState {
     /// The token of the agent that the owner registered last. It is shown one time.
     pub fresh_token: Option<(String, AgentToken)>,
     pub selected_agent: Option<u64>,
+    pub env_name_input: String,
+    pub env_field_input: String,
+    /// Project directory text for each (agent, item) pair in the Agents view.
+    pub exec_dir_inputs: BTreeMap<(u64, u64), String>,
+    /// Pending run IDs that the app already signaled to the owner.
+    pub signaled_runs: BTreeSet<u64>,
 }
 
 /// One vault file open inside this process. The broker shares the same slot.
@@ -448,6 +455,101 @@ impl OwnerSession {
     /// Remove the connector and every grant for the item.
     pub fn clear_connector(&mut self, item_id: u64) -> ModelResult<()> {
         self.unlocked()?.clear_destination(item_id).map_err(map_err)
+    }
+
+    // ---- Process secrets (ADR 0006). ----
+
+    pub fn env_binding(&self, item_id: u64) -> ModelResult<Option<EnvBinding>> {
+        self.unlocked()?.env_binding(item_id).map_err(map_err)
+    }
+
+    /// Secret field names of an item, in stored order.
+    pub fn secret_fields(&self, item_id: u64) -> ModelResult<Vec<String>> {
+        let details = self.unlocked()?.details(item_id).map_err(map_err)?;
+        Ok(details
+            .fields
+            .into_iter()
+            .filter(|field| field.secret)
+            .map(|field| field.name)
+            .collect())
+    }
+
+    pub fn set_env_binding(
+        &mut self,
+        item_id: u64,
+        env_name: &str,
+        field: &str,
+    ) -> ModelResult<()> {
+        checked_env_name(env_name.trim()).map_err(|_| {
+            fail(
+                "invalid_input",
+                "Use A-Z, 0-9, and _ and start with a letter or _. System names such as PATH or DYLD_* are not permitted.",
+            )
+        })?;
+        match self.unlocked()?.set_env_binding(item_id, env_name, field) {
+            Err(err) if err.kind() == VaultErrorKind::AlreadyExists => Err(fail(
+                "already_exists",
+                "Another item already uses this variable name.",
+            )),
+            other => other.map_err(map_err),
+        }
+    }
+
+    /// Remove the variable and every process grant for the item.
+    pub fn clear_env_binding(&mut self, item_id: u64) -> ModelResult<()> {
+        self.unlocked()?.clear_env_binding(item_id).map_err(map_err)
+    }
+
+    /// Items with a variable name: (item ID, item name, variable name).
+    pub fn env_bound_items(&self) -> ModelResult<Vec<(u64, String, String)>> {
+        let vault = self.unlocked()?;
+        let mut rows = Vec::new();
+        for item in vault.search("").map_err(map_err)? {
+            if let Some(binding) = vault.env_binding(item.id).map_err(map_err)? {
+                rows.push((item.id, item.title, binding.env_name));
+            }
+        }
+        Ok(rows)
+    }
+
+    pub fn exec_grants(&self, agent_id: u64) -> ModelResult<Vec<ExecGrant>> {
+        self.unlocked()?
+            .exec_grants_for_agent(agent_id)
+            .map_err(map_err)
+    }
+
+    pub fn set_exec_grant(
+        &mut self,
+        agent_id: u64,
+        item_id: u64,
+        project_dir: &str,
+        mode: ExecMode,
+    ) -> ModelResult<()> {
+        let dir = project_dir.trim();
+        let canonical = std::fs::canonicalize(dir)
+            .ok()
+            .filter(|path| path.is_dir())
+            .ok_or_else(|| {
+                fail(
+                    "invalid_input",
+                    "Type the absolute path of an existing project directory.",
+                )
+            })?;
+        if canonical == Path::new("/") {
+            return Err(fail(
+                "invalid_input",
+                "The project directory cannot be the root directory.",
+            ));
+        }
+        self.unlocked()?
+            .set_exec_grant(agent_id, item_id, &canonical.display().to_string(), mode)
+            .map_err(map_err)
+    }
+
+    pub fn remove_exec_grant(&mut self, agent_id: u64, item_id: u64) -> ModelResult<()> {
+        self.unlocked()?
+            .remove_exec_grant(agent_id, item_id)
+            .map_err(map_err)
     }
 
     /// Newest entries first. Item names come from the vault. Deleted items show their ID.
