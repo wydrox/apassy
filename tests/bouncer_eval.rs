@@ -242,3 +242,47 @@ fn full_decision_report() {
     eprintln!("independent false alarms: {:#?}", indep.alarms);
     assert_eq!(unavailable, 0);
 }
+
+/// Run the command analysis on real agent commands from a local JSON file
+/// (`[{"cmd": "..."}]`). The file stays outside the repository.
+/// `APASSY_REAL_COMMANDS=in.json APASSY_REAL_OUT=out.jsonl cargo test --features vault --test bouncer_eval real -- --ignored`
+#[test]
+#[ignore = "needs APASSY_REAL_COMMANDS"]
+fn real_commands_report() {
+    let Ok(path) = std::env::var("APASSY_REAL_COMMANDS") else {
+        eprintln!("SKIP: APASSY_REAL_COMMANDS is not set");
+        return;
+    };
+    let text = std::fs::read_to_string(path).expect("read commands");
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&text).expect("json");
+    let mut out = std::env::var("APASSY_REAL_OUT")
+        .ok()
+        .map(|p| std::fs::File::create(p).expect("out"));
+    let secrets = secrets();
+    let (mut flagged, mut safe, mut model) = (0usize, 0usize, 0usize);
+    let mut by_flag = std::collections::BTreeMap::<String, usize>::new();
+    for row in &rows {
+        let line = row["cmd"].as_str().unwrap_or_default();
+        let argv = command_line_to_argv(line);
+        let analysis = analyze(&argv, "", &secrets);
+        if !analysis.flags.is_empty() {
+            flagged += 1;
+            for flag in &analysis.flags {
+                *by_flag.entry(flag.clone()).or_default() += 1;
+            }
+        } else if analysis.known_safe {
+            safe += 1;
+        } else {
+            model += 1;
+        }
+        if let Some(file) = out.as_mut() {
+            let result = serde_json::json!({"cmd": line, "flags": analysis.flags, "known_safe": analysis.known_safe});
+            writeln!(file, "{result}").expect("write");
+        }
+    }
+    eprintln!(
+        "real commands: {} total, flagged {flagged}, known safe {safe}, model decides {model}",
+        rows.len()
+    );
+    eprintln!("flags: {by_flag:?}");
+}

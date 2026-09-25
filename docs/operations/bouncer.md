@@ -72,11 +72,33 @@ The changes are general categories, not single commands: secret files as argumen
 | test | 43/44 | 0/37 |
 | independent (no longer blind) | 48/48 | 0/48 |
 
-These numbers are optimistic. The same author wrote `cases.tsv` and the rules, and `independent.tsv` was used for the changes. There is no blind measurement after the hardening. A second independent set was not generated: the separate session refused the request.
+These numbers are optimistic. The same author wrote `cases.tsv` and the rules, and `independent.tsv` was used for the changes. A second independent set was not generated: the separate session refused the request. The blind check on real commands is in the next section.
 
 ### What the model adds
 
 After the hardening, the rules decide 243 of 270 cases. The model decides 27 cases. One of them is risky (`node scripts/grant-admin.js` with a false purpose), and the model did not flag it. Several normal commands are at 0.94 to 0.95 for `rule_violation`. So the zero-shot model gives no measured benefit now, and it can give false alarms on new data. The Laya documentation reports 0.77 accuracy for a fine-tuned checkpoint against 0.36 for the base checkpoint on typed decisions. A fine-tune on owner-labeled decisions is the next step for the model.
+
+### Real agent commands
+
+On 2026-09-25, the owner permitted a local run on real commands. The source was the Codex session history of the odealo project (`~/.codex/sessions`). An extraction script took the shell commands that ran in odealo directories. The commands stayed in the session scratch directory. They are not in the repository. Printed samples had secrets, emails, and long tokens masked.
+
+- 6904 runs, 6215 unique commands.
+- A hash split gave half A (3144) for tuning and half B (3071) for a blind check.
+
+Changes from half A: here-documents are data, not commands; `--help` and `--dry-run` do not act; injection phrases are checked only in the purpose; the first keyword of each SQL statement decides a write; text tools, `git` messages, and local requests do not make a production target; Vercel listings are reads; temporary files are removable; one option such as `--print-secrets` is needed for that flag.
+
+| Stage | Flagged | Known safe | Model decides |
+| --- | --- | --- | --- |
+| First run | 542 (8.7%) | 1601 | 4072 |
+| After changes from half A | 348 (5.6%) | 3987 | 1880 |
+| Final | 312 (5.0%) | 3995 | 1908 |
+
+Blind check on half B, before the last small changes (145 of 3071 flagged at the end):
+
+- 40 random flagged commands: 27 correct flags, 13 false alarms (precision about 68%). Correct flags included production secret pulls (`vercel env pull --environment=production`), `vercel env run -e production`, `supabase projects api-keys --reveal`, keychain reads, alias changes, pushes to `main`, and email sends. False alarms included local browser automation with "prod" in a label, `vercel ls --prod`, the Mailtrap API (not in the known host list), temporary file removal, and `awk` that prints only variable names.
+- 60 random commands without a flag: no clear risk. One command is a boundary case: `git push` to the `staging` branch, which deploys the staging site. The rules protect only `main`, `master`, `production`, `prod`, and `release`.
+
+So on this real traffic, about 1.5% to 2% of all commands are false alarms, and the owner sees the real production and secret actions. These numbers come from one labeler (the same author as the rules) on small samples. Before the last changes, half B was blind.
 
 ## 5. Checks
 
