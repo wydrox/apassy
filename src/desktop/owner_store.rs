@@ -1,0 +1,901 @@
+//! Owner vault and item session for the desktop shell.
+//!
+//! Rules, agents, and activity stay on the in-memory demo model.
+//! This session is a trusted-process adapter over [`crate::vault`].
+//! It is not an authenticated owner channel. Real-secret use stays blocked.
+
+use std::collections::BTreeMap;
+use std::fmt;
+use std::path::{Path, PathBuf};
+
+use crate::contracts::CredentialKind;
+use crate::desktop::model::{ItemDraft, MASKED_VALUE, ModelError, ModelResult};
+use crate::vault::{
+    Field, ItemDraft as VaultDraft, SecretValue, Vault, VaultError, VaultErrorKind,
+};
+
+const MAX_TAG_BYTES: usize = 64;
+
+const AGENT_USE_LABEL: &str = "Stored in the vault. Agent use is not connected.";
+const REVEAL_WARNING: &str = "The value is visible in this window until you hide it or lock the vault. This is not an authenticated owner channel.";
+
+/// Secret inputs for one item form. Debug output is redacted.
+#[derive(Clone, Default)]
+pub struct SecretForm {
+    pub token: String,
+    pub password: String,
+    pub private_key: String,
+    pub key_passphrase: String,
+    pub custom_value: String,
+}
+
+impl SecretForm {
+    pub fn clear(&mut self) {
+        self.token.clear();
+        self.password.clear();
+        self.private_key.clear();
+        self.key_passphrase.clear();
+        self.custom_value.clear();
+    }
+}
+
+impl fmt::Debug for SecretForm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SecretForm([redacted])")
+    }
+}
+
+impl Drop for SecretForm {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+/// Passphrase or other short-lived secret text. Drop clears the `String`.
+pub struct Ephemeral(String);
+
+impl Ephemeral {
+    pub fn take(slot: &mut String) -> Self {
+        Self(std::mem::take(slot))
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Drop for Ephemeral {
+    fn drop(&mut self) {
+        self.0.clear();
+    }
+}
+
+/// Text fields that bind the vault file controls.
+#[derive(Default)]
+pub struct OwnerUiState {
+    pub session: OwnerSession,
+    pub create_path: String,
+    pub open_path: String,
+    pub passphrase: String,
+    pub backup_path: String,
+    pub restore_source: String,
+    pub restore_dest: String,
+    pub add_secrets: SecretForm,
+    pub edit_secrets: SecretForm,
+    pub edit_revision: u64,
+}
+
+/// One vault file open inside this process.
+#[derive(Debug)]
+pub struct OwnerSession {
+    vault: Option<Vault>,
+    path: Option<PathBuf>,
+    revealed: BTreeMap<(u64, String), RevealedValue>,
+}
+
+impl OwnerSession {
+    pub fn new() -> Self {
+        Self {
+            vault: None,
+            path: None,
+            revealed: BTreeMap::new(),
+        }
+    }
+
+    pub fn has_file(&self) -> bool {
+        self.vault.is_some()
+    }
+
+    pub fn is_locked(&self) -> bool {
+        self.vault.as_ref().is_none_or(Vault::is_locked)
+    }
+
+    pub fn location(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    pub fn lock_label(&self) -> &'static str {
+        if self.vault.is_none() {
+            "The vault is locked. No vault file is open. Item details are hidden."
+        } else if self.is_locked() {
+            "The vault is locked. Item details are hidden."
+        } else {
+            "The vault file is unlocked in this process. This is not an authenticated owner channel."
+        }
+    }
+
+    pub fn create_file(&mut self, path: &Path, passphrase: &str) -> ModelResult<()> {
+        require_path(path)?;
+        let vault = Vault::create(path, passphrase).map_err(map_err)?;
+        self.install(vault, path.to_path_buf());
+        Ok(())
+    }
+
+    pub fn open_file(&mut self, path: &Path) -> ModelResult<()> {
+        require_path(path)?;
+        let previous = self.detach();
+        match Vault::open(path) {
+            Ok(vault) => {
+                self.install(vault, path.to_path_buf());
+                Ok(())
+            }
+            Err(err) => {
+                self.attach(previous);
+                Err(map_err(err))
+            }
+        }
+    }
+
+    pub fn unlock(&mut self, passphrase: &str) -> ModelResult<()> {
+        self.revealed.clear();
+        let vault = self
+            .vault
+            .as_mut()
+            .ok_or_else(|| fail("vault_locked", "No vault file is open."))?;
+        vault.unlock(passphrase).map_err(map_err)
+    }
+
+    pub fn lock(&mut self) -> ModelResult<()> {
+        self.revealed.clear();
+        let Some(vault) = self.vault.as_mut() else {
+            return Ok(());
+        };
+        vault.lock().map_err(map_err)
+    }
+
+    pub fn search(&self, query: &str) -> ModelResult<Vec<OwnerSummary>> {
+        let found = {
+            let vault = self.unlocked()?;
+            vault.search(query).map_err(map_err)?
+        };
+        found
+            .into_iter()
+            .map(|summary| self.row_from(summary))
+            .collect()
+    }
+
+    pub fn details(&self, id: u64) -> ModelResult<OwnerDetails> {
+        if self.vault.is_none() {
+            return Ok(OwnerDetails::hidden(
+                id,
+                "No vault file is open. Item details are hidden.",
+            ));
+        }
+        if self.is_locked() {
+            return Ok(OwnerDetails::hidden(
+                id,
+                "The vault is locked. Item details are hidden.",
+            ));
+        }
+        let meta = {
+            let vault = self.unlocked()?;
+            vault.details(id).map_err(map_err)?
+        };
+        self.details_from_meta(meta)
+    }
+
+    pub fn add(&mut self, draft: &ItemDraft, secrets: &SecretForm) -> ModelResult<OwnerSummary> {
+        let vault_draft = {
+            let vault = self.unlocked()?;
+            build_vault_draft(vault, None, draft, secrets)?
+        };
+        let summary = self.vault_mut()?.add(vault_draft).map_err(map_err)?;
+        self.row_from(summary)
+    }
+
+    pub fn update(
+        &mut self,
+        id: u64,
+        expected_revision: u64,
+        draft: &ItemDraft,
+        secrets: &SecretForm,
+    ) -> ModelResult<OwnerSummary> {
+        let vault_draft = {
+            let vault = self.unlocked()?;
+            build_vault_draft(vault, Some(id), draft, secrets)?
+        };
+        let summary = self
+            .vault_mut()?
+            .update(id, expected_revision, vault_draft)
+            .map_err(map_err)?;
+        self.revealed.retain(|key, _| key.0 != id);
+        self.row_from(summary)
+    }
+
+    pub fn delete(&mut self, id: u64, expected_revision: u64) -> ModelResult<()> {
+        self.unlocked()?;
+        self.vault_mut()?
+            .delete(id, expected_revision)
+            .map_err(map_err)?;
+        self.revealed.retain(|key, _| key.0 != id);
+        Ok(())
+    }
+
+    pub fn reveal(&mut self, id: u64) -> ModelResult<OwnerDetails> {
+        let pairs = {
+            let vault = self.unlocked()?;
+            let meta = vault.details(id).map_err(map_err)?;
+            let mut pairs = Vec::new();
+            for field in &meta.fields {
+                if !field.secret {
+                    continue;
+                }
+                let value = vault.reveal(id, &field.name).map_err(map_err)?;
+                pairs.push((field.name.clone(), RevealedValue(value.expose().to_owned())));
+            }
+            pairs
+        };
+        self.revealed.retain(|key, _| key.0 != id);
+        for (name, value) in pairs {
+            self.revealed.insert((id, name), value);
+        }
+        self.details(id)
+    }
+
+    pub fn hide(&mut self, id: u64) -> ModelResult<OwnerDetails> {
+        self.revealed.retain(|key, _| key.0 != id);
+        self.details(id)
+    }
+
+    pub fn backup(&mut self, destination: &Path) -> ModelResult<()> {
+        require_path(destination)?;
+        self.unlocked()?;
+        let result = self.vault_mut()?.backup(destination);
+        if self.is_locked() {
+            self.revealed.clear();
+        }
+        result.map_err(map_err)
+    }
+
+    pub fn restore(
+        &mut self,
+        backup: &Path,
+        destination: &Path,
+        passphrase: &str,
+    ) -> ModelResult<()> {
+        require_path(backup)?;
+        require_path(destination)?;
+        let previous = self.detach();
+        match Vault::restore(backup, destination, passphrase) {
+            Ok(vault) => {
+                self.install(vault, destination.to_path_buf());
+                Ok(())
+            }
+            Err(err) => {
+                self.attach(previous);
+                Err(map_err(err))
+            }
+        }
+    }
+
+    fn install(&mut self, vault: Vault, path: PathBuf) {
+        self.revealed.clear();
+        self.vault = Some(vault);
+        self.path = Some(path);
+    }
+
+    fn detach(&mut self) -> HeldVault {
+        self.revealed.clear();
+        HeldVault {
+            vault: self.vault.take(),
+            path: self.path.take(),
+        }
+    }
+
+    fn attach(&mut self, held: HeldVault) {
+        self.vault = held.vault;
+        self.path = held.path;
+    }
+
+    fn unlocked(&self) -> ModelResult<&Vault> {
+        match self.vault.as_ref() {
+            Some(vault) if !vault.is_locked() => Ok(vault),
+            Some(_) => Err(fail("vault_locked", "The vault is locked.")),
+            None => Err(fail("vault_locked", "No vault file is open.")),
+        }
+    }
+
+    fn vault_mut(&mut self) -> ModelResult<&mut Vault> {
+        match self.vault.as_mut() {
+            Some(vault) if !vault.is_locked() => Ok(vault),
+            Some(_) => Err(fail("vault_locked", "The vault is locked.")),
+            None => Err(fail("vault_locked", "No vault file is open.")),
+        }
+    }
+
+    fn row_from(&self, summary: crate::vault::ItemSummary) -> ModelResult<OwnerSummary> {
+        let (service, project) = self.service_project(summary.id)?;
+        Ok(OwnerSummary {
+            id: summary.id,
+            name: summary.title,
+            kind: summary.kind,
+            service,
+            project,
+            revision: summary.revision,
+        })
+    }
+
+    fn service_project(&self, id: u64) -> ModelResult<(String, String)> {
+        let vault = self.unlocked()?;
+        Ok((
+            plain_value(vault, id, "service")?,
+            plain_value(vault, id, "project")?,
+        ))
+    }
+
+    fn details_from_meta(&self, meta: crate::vault::ItemDetails) -> ModelResult<OwnerDetails> {
+        let id = meta.summary.id;
+        let (service, project, username, host, database_name, public_label) = {
+            let vault = self.unlocked()?;
+            (
+                plain_value(vault, id, "service")?,
+                plain_value(vault, id, "project")?,
+                plain_value(vault, id, "username")?,
+                plain_value(vault, id, "host")?,
+                plain_value(vault, id, "database")?,
+                plain_value(vault, id, "public_key")?,
+            )
+        };
+        let field_name = meta
+            .fields
+            .iter()
+            .find(|field| field.secret && meta.summary.kind == CredentialKind::Custom)
+            .map(|field| field.name.clone())
+            .unwrap_or_default();
+        let mut secret_lines = Vec::new();
+        for field in &meta.fields {
+            if !field.secret {
+                continue;
+            }
+            let revealed = self.revealed.get(&(id, field.name.clone()));
+            secret_lines.push(SecretLine {
+                name: field.name.clone(),
+                revealed: revealed.is_some(),
+                display: revealed.map_or_else(|| MASKED_VALUE.to_owned(), |value| value.0.clone()),
+            });
+        }
+        Ok(OwnerDetails {
+            id,
+            name: meta.summary.title,
+            kind: meta.summary.kind,
+            service,
+            project,
+            notes: meta.notes,
+            username,
+            host,
+            database_name,
+            field_name,
+            public_label,
+            revision: meta.summary.revision,
+            hidden: false,
+            secret_lines,
+            message: String::new(),
+        })
+    }
+}
+
+impl Default for OwnerSession {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+struct HeldVault {
+    vault: Option<Vault>,
+    path: Option<PathBuf>,
+}
+
+struct RevealedValue(String);
+
+impl fmt::Debug for RevealedValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+
+impl Drop for RevealedValue {
+    fn drop(&mut self) {
+        self.0.clear();
+    }
+}
+
+/// Vault list row. It has no field values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerSummary {
+    pub id: u64,
+    pub name: String,
+    pub kind: CredentialKind,
+    pub service: String,
+    pub project: String,
+    pub revision: u64,
+}
+
+/// Item detail for the owner view. Debug redacts notes and revealed values.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OwnerDetails {
+    pub id: u64,
+    pub name: String,
+    pub kind: CredentialKind,
+    pub service: String,
+    pub project: String,
+    pub notes: String,
+    pub username: String,
+    pub host: String,
+    pub database_name: String,
+    pub field_name: String,
+    pub public_label: String,
+    pub revision: u64,
+    pub hidden: bool,
+    pub secret_lines: Vec<SecretLine>,
+    pub message: String,
+}
+
+impl OwnerDetails {
+    fn hidden(id: u64, message: &str) -> Self {
+        Self {
+            id,
+            name: String::new(),
+            kind: CredentialKind::ApiKey,
+            service: String::new(),
+            project: String::new(),
+            notes: String::new(),
+            username: String::new(),
+            host: String::new(),
+            database_name: String::new(),
+            field_name: String::new(),
+            public_label: String::new(),
+            revision: 0,
+            hidden: true,
+            secret_lines: Vec::new(),
+            message: message.to_owned(),
+        }
+    }
+
+    pub fn to_draft(&self) -> ItemDraft {
+        ItemDraft {
+            name: self.name.clone(),
+            kind: self.kind,
+            service: self.service.clone(),
+            project: self.project.clone(),
+            notes: self.notes.clone(),
+            username: self.username.clone(),
+            host: self.host.clone(),
+            database_name: self.database_name.clone(),
+            field_name: self.field_name.clone(),
+            public_label: self.public_label.clone(),
+        }
+    }
+
+    pub fn agent_use_label(&self) -> &'static str {
+        AGENT_USE_LABEL
+    }
+
+    pub fn reveal_warning(&self) -> &'static str {
+        REVEAL_WARNING
+    }
+
+    pub fn any_revealed(&self) -> bool {
+        self.secret_lines.iter().any(|line| line.revealed)
+    }
+}
+
+impl fmt::Debug for OwnerDetails {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OwnerDetails")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("kind", &self.kind)
+            .field("service", &self.service)
+            .field("project", &self.project)
+            .field("notes", &"[redacted]")
+            .field("username", &self.username)
+            .field("host", &self.host)
+            .field("database_name", &self.database_name)
+            .field("field_name", &self.field_name)
+            .field("public_label", &self.public_label)
+            .field("revision", &self.revision)
+            .field("hidden", &self.hidden)
+            .field("secret_lines", &self.secret_lines)
+            .field("message", &self.message)
+            .finish()
+    }
+}
+
+/// One secret field on the item screen.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SecretLine {
+    pub name: String,
+    pub revealed: bool,
+    pub display: String,
+}
+
+impl fmt::Debug for SecretLine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecretLine")
+            .field("name", &self.name)
+            .field("revealed", &self.revealed)
+            .field(
+                "display",
+                &if self.revealed {
+                    "[redacted]"
+                } else {
+                    MASKED_VALUE
+                },
+            )
+            .finish()
+    }
+}
+
+fn fail(code: &'static str, message: impl Into<String>) -> ModelError {
+    ModelError {
+        code,
+        message: message.into(),
+    }
+}
+
+fn map_err(err: VaultError) -> ModelError {
+    let code = match err.kind() {
+        VaultErrorKind::Locked => "vault_locked",
+        VaultErrorKind::AlreadyExists => "already_exists",
+        VaultErrorKind::NotFound => "not_found",
+        VaultErrorKind::Conflict => "conflict",
+        VaultErrorKind::InvalidInput => "invalid_input",
+        VaultErrorKind::WrongKeyOrCorrupt => "wrong_key",
+        VaultErrorKind::UnsupportedSchema => "unsupported_schema",
+        VaultErrorKind::Busy => "busy",
+        VaultErrorKind::Io => "io",
+        VaultErrorKind::Storage => "storage",
+    };
+    ModelError {
+        code,
+        message: err.to_string(),
+    }
+}
+
+fn require_path(path: &Path) -> ModelResult<()> {
+    if path.as_os_str().is_empty() {
+        Err(fail("invalid_input", "A file path is required."))
+    } else {
+        Ok(())
+    }
+}
+
+fn plain_value(vault: &Vault, id: u64, name: &str) -> ModelResult<String> {
+    match vault.reveal(id, name) {
+        Ok(value) => Ok(value.expose().to_owned()),
+        Err(err) if err.kind() == VaultErrorKind::NotFound => Ok(String::new()),
+        Err(err) => Err(map_err(err)),
+    }
+}
+
+fn build_vault_draft(
+    vault: &Vault,
+    existing: Option<u64>,
+    draft: &ItemDraft,
+    secrets: &SecretForm,
+) -> ModelResult<VaultDraft> {
+    let title = draft.name.trim();
+    if title.is_empty() {
+        return Err(fail("invalid_input", "The item name is required."));
+    }
+    if let Some(id) = existing {
+        let current = vault.details(id).map_err(map_err)?;
+        if current.summary.kind != draft.kind {
+            return Err(fail(
+                "category_locked",
+                "The item category cannot change. Delete the item and add a new one.",
+            ));
+        }
+    }
+
+    let mut fields = Vec::new();
+    push_plain(&mut fields, "service", &draft.service);
+    push_plain(&mut fields, "project", &draft.project);
+    match draft.kind {
+        CredentialKind::ApiKey => {
+            push_secret(
+                &mut fields,
+                vault,
+                existing,
+                "token",
+                &secrets.token,
+                true,
+                "Enter the API token.",
+            )?;
+        }
+        CredentialKind::Login => {
+            push_required_plain(
+                &mut fields,
+                "username",
+                &draft.username,
+                "Enter the username.",
+            )?;
+            push_secret(
+                &mut fields,
+                vault,
+                existing,
+                "password",
+                &secrets.password,
+                true,
+                "Enter the password.",
+            )?;
+        }
+        CredentialKind::SshKey => {
+            push_secret(
+                &mut fields,
+                vault,
+                existing,
+                "private_key",
+                &secrets.private_key,
+                true,
+                "Enter the private key.",
+            )?;
+            push_secret(
+                &mut fields,
+                vault,
+                existing,
+                "passphrase",
+                &secrets.key_passphrase,
+                false,
+                "",
+            )?;
+            push_plain(&mut fields, "public_key", &draft.public_label);
+        }
+        CredentialKind::Database => {
+            push_required_plain(&mut fields, "host", &draft.host, "Enter the database host.")?;
+            push_required_plain(
+                &mut fields,
+                "database",
+                &draft.database_name,
+                "Enter the database name.",
+            )?;
+            push_required_plain(
+                &mut fields,
+                "username",
+                &draft.username,
+                "Enter the database username.",
+            )?;
+            push_secret(
+                &mut fields,
+                vault,
+                existing,
+                "password",
+                &secrets.password,
+                true,
+                "Enter the database password.",
+            )?;
+        }
+        CredentialKind::Custom => {
+            let name = draft.field_name.trim();
+            if name.is_empty()
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                || is_reserved_field(name)
+            {
+                return Err(fail(
+                    "invalid_input",
+                    "The custom field name must use letters, digits, or underscores, and it cannot reuse a built-in field name.",
+                ));
+            }
+            push_secret(
+                &mut fields,
+                vault,
+                existing,
+                name,
+                &secrets.custom_value,
+                true,
+                "Enter the custom secret.",
+            )?;
+        }
+    }
+
+    let mut tags = Vec::new();
+    push_tag(&mut tags, &draft.service)?;
+    push_tag(&mut tags, &draft.project)?;
+    Ok(VaultDraft {
+        title: title.to_owned(),
+        kind: draft.kind,
+        notes: draft.notes.trim().to_owned(),
+        tags,
+        fields,
+    })
+}
+
+fn push_plain(fields: &mut Vec<Field>, name: &str, value: &str) {
+    let value = value.trim();
+    if value.is_empty() {
+        return;
+    }
+    fields.push(Field {
+        name: name.to_owned(),
+        value: SecretValue::new(value.to_owned()),
+        secret: false,
+    });
+}
+
+fn push_required_plain(
+    fields: &mut Vec<Field>,
+    name: &str,
+    value: &str,
+    missing: &str,
+) -> ModelResult<()> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(fail("invalid_input", missing));
+    }
+    push_plain(fields, name, value);
+    Ok(())
+}
+
+fn push_secret(
+    fields: &mut Vec<Field>,
+    vault: &Vault,
+    existing: Option<u64>,
+    name: &str,
+    typed: &str,
+    required: bool,
+    missing: &str,
+) -> ModelResult<()> {
+    let value = if !typed.is_empty() {
+        typed.to_owned()
+    } else if let Some(id) = existing {
+        match vault.reveal(id, name) {
+            Ok(value) => value.expose().to_owned(),
+            Err(err) if err.kind() == VaultErrorKind::NotFound && !required => return Ok(()),
+            Err(err) => return Err(map_err(err)),
+        }
+    } else if required {
+        return Err(fail("invalid_input", missing));
+    } else {
+        return Ok(());
+    };
+    if value.is_empty() {
+        if required {
+            return Err(fail("invalid_input", missing));
+        }
+        return Ok(());
+    }
+    fields.push(Field {
+        name: name.to_owned(),
+        value: SecretValue::new(value),
+        secret: true,
+    });
+    Ok(())
+}
+
+fn push_tag(tags: &mut Vec<String>, value: &str) -> ModelResult<()> {
+    let value = value.trim();
+    if value.is_empty() || tags.iter().any(|tag| tag == value) {
+        return Ok(());
+    }
+    if value.len() > MAX_TAG_BYTES {
+        return Err(fail(
+            "invalid_input",
+            "A project or service label is too long to search.",
+        ));
+    }
+    tags.push(value.to_owned());
+    Ok(())
+}
+
+fn is_reserved_field(name: &str) -> bool {
+    matches!(
+        name,
+        "service"
+            | "project"
+            | "token"
+            | "password"
+            | "private_key"
+            | "passphrase"
+            | "username"
+            | "host"
+            | "database"
+            | "public_key"
+    )
+}
+
+/// Windowless round trip used by `--smoke-test` when the vault feature is on.
+/// Errors do not include secret values.
+pub(crate) fn smoke_roundtrip() -> Result<(), String> {
+    let dir =
+        tempfile::tempdir().map_err(|_| "smoke vault directory was not created".to_owned())?;
+    let path = dir.path().join("smoke.vault");
+    let backup = dir.path().join("smoke.backup");
+    let restored = dir.path().join("smoke.restored");
+    let mut session = OwnerSession::new();
+    session
+        .create_file(&path, "smoke-vault-pass-1")
+        .map_err(|err| err.message)?;
+    if !session.is_locked() {
+        return Err("a new vault file must start locked".to_owned());
+    }
+    if session.unlock("smoke-vault-pass-no").is_ok() {
+        return Err("the wrong passphrase must not unlock the smoke vault".to_owned());
+    }
+    session
+        .unlock("smoke-vault-pass-1")
+        .map_err(|err| err.message)?;
+    let mut secrets = SecretForm::default();
+    secrets.token = "smoke-secret-token".to_owned();
+    let created = session
+        .add(
+            &ItemDraft {
+                name: "Smoke API key".to_owned(),
+                kind: CredentialKind::ApiKey,
+                project: "Smoke project".to_owned(),
+                ..ItemDraft::default()
+            },
+            &secrets,
+        )
+        .map_err(|err| err.message)?;
+    secrets.clear();
+    if session
+        .search("Smoke project")
+        .map_err(|err| err.message)?
+        .len()
+        != 1
+    {
+        return Err("search missed the smoke item".to_owned());
+    }
+    if !session
+        .search("smoke-secret-token")
+        .map_err(|err| err.message)?
+        .is_empty()
+    {
+        return Err("search matched a secret value".to_owned());
+    }
+    let revealed = session.reveal(created.id).map_err(|err| err.message)?;
+    if !revealed.any_revealed() {
+        return Err("reveal did not show a value".to_owned());
+    }
+    session.lock().map_err(|err| err.message)?;
+    if !session
+        .details(created.id)
+        .map_err(|err| err.message)?
+        .hidden
+    {
+        return Err("lock did not hide item details".to_owned());
+    }
+    session
+        .unlock("smoke-vault-pass-1")
+        .map_err(|err| err.message)?;
+    session.backup(&backup).map_err(|err| err.message)?;
+    if !session.is_locked() {
+        return Err("backup must leave the vault locked".to_owned());
+    }
+    session
+        .restore(&backup, &restored, "smoke-vault-pass-1")
+        .map_err(|err| err.message)?;
+    session
+        .unlock("smoke-vault-pass-1")
+        .map_err(|err| err.message)?;
+    let found = session.search("Smoke API key").map_err(|err| err.message)?;
+    if found.len() != 1 {
+        return Err("restore did not keep the smoke item".to_owned());
+    }
+    session
+        .delete(found[0].id, found[0].revision)
+        .map_err(|err| err.message)?;
+    Ok(())
+}

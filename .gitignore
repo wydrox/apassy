@@ -4,3 +4,4 @@
 !.env.example
 *.pem
 *.key
+/target/

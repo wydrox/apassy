@@ -1,106 +1,120 @@
-# apassy — koncepcja produktu
+# Apassy — product concept
 
-Status: projekt funkcji, nie gotowa implementacja. Aktualizacja: 2026-09-16.
+Date: 2026-09-16.
+Status: design, not an implemented product. This revision supports the credential-manager direction in [Product Vision v1](product-vision-v1.md).
 
-## Cel
+## 1. Four concepts the owner should understand
 
-Agent może wykonać dozwoloną operację, ale nie otrzymuje wartości sekretu. Apassy udostępnia kontrolowane działania zamiast ogólnego `get_secret`.
+| Concept | Meaning |
+| --- | --- |
+| Credential | An item in your vault, such as an API key, login, SSH key, or database credential. |
+| Agent | A connected identity that can request use of specific credentials. |
+| Rule | Your instructions about who can use a credential, where, when, and for what purpose. |
+| Bouncer | The gate that checks a request, permits it, asks you, or blocks it and explains why. |
 
-Gwarancja wymaga izolacji brokera od procesu agenta. Agent z dowolnym dostępem do plików, pamięci lub konta brokera może ominąć tę granicę. Ukrycie sekretu przed modelem nie zapobiega samo w sobie nadużyciu dozwolonego API.
+A connector is the technical component that lets Apassy use a credential with a service.
+The owner sees which uses it supports. The agent does not receive unrestricted access simply because the vault stores a compatible credential type.
 
-## Podstawowe funkcje
+## 2. From your words to an active rule
 
-- Lokalny broker z CLI i MCP oraz niewielkim katalogiem jawnie dozwolonych operacji.
-- Integracje z istniejącymi magazynami sekretów zamiast obowiązkowej migracji do nowego sejfu.
-- Schemat konfiguracji dostępny dla agenta: nazwy pól, typy, wymagania i dostępność, bez wartości sekretów.
-- Polityki per agent, sesja, projekt, środowisko, zasób i operacja; domyślna odmowa.
-- Krótkotrwałe uprawnienia, limity użyć i natychmiastowe unieważnianie kolejnych operacji.
-- Delegowanie subagentom wyłącznie podzbioru uprawnień rodzica, bez wydłużania ich ważności.
-- Zgoda człowieka związana z konkretną operacją, nie ogólne udostępnienie klucza.
-- Tryb próbny: podgląd decyzji polityki i planowanego działania bez pobrania sekretu.
-- Audyt decyzji i wykonania bez wartości sekretów.
-- Przekazywanie sekretów przez env jako osobny tryb kompatybilności o słabszych gwarancjach. Proces otrzymujący env może odczytać sekret.
+Example owner rule:
 
-## Bouncer: warstwa oceny ryzyka z Jev
+> My reporting agent can read sales summaries from the staging database for Project A until Friday. Never use production. Ask me when the request does not fit the task.
 
-Inspiracja: [TypeSafe — Introducing System One Models & Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev).
+Apassy turns that text into a reviewable draft, not an immediate permission grant.
+The review identifies the actual agent, credential, registered database, permitted summary operation, exact deadline, and time zone.
+It also shows the contextual check and its limits. A label such as “staging” is not enough without a verified destination mapping.
 
-TypeSafe opisuje System One jako modele podejmujące szybkie, typowane decyzje na podstawie stanu programu. Jev ma zwracać oceny probabilistyczne i informacje o pewności zamiast swobodnego tekstu. Artykuł przedstawia produkt w early access. Deklaracje o kalibracji, wydajności i braku błędów typów pochodzą od dostawcy; nie są niezależnym dowodem bezpieczeństwa dla apassy.
+The rule interpreter must account for every clause:
 
-Poprawny typ wyniku nie gwarantuje poprawnej klasyfikacji ryzyka. Proponowane poniżej metryki są kontraktem apassy, a nie potwierdzonymi polami API Jev. Integracja wymaga sprawdzenia dokumentacji, dostępu do usługi i warunków przetwarzania danych.
+- Enforceable restrictions become validated conditions in a versioned policy.
+- Contextual conditions become explicit bouncer checks, with defined uncertainty behavior.
+- Unclear or unsupported conditions become questions or errors, not omitted restrictions.
+- Conflicts between applicable rules must be resolved. An explicit denial takes precedence over an allowance.
 
-### Miejsce w przepływie
+The owner reviews examples and confirms the draft before activation.
+Apassy stores the original text, confirmed interpretation, resource bindings, policy version, interpreter version, and confirmation record.
+Changing text, resource meaning, or the interpretation requires a new review. A model update cannot silently rewrite active policy.
 
-1. Broker uwierzytelnia agenta i odczytuje zaufany kontekst sesji oraz zadania.
-2. Normalizuje operację i sprawdza twarde reguły: zakres uprawnień, zasób, środowisko, metodę, parametry, TTL i limity.
-3. Naruszenie reguły kończy się odmową przed wywołaniem modelu i pobraniem sekretu.
-4. Bouncer przekazuje do Jev minimalny, zredagowany opis operacji i kontekstu.
-5. Jev klasyfikuje kilka wymiarów ryzyka. Deterministyczny kod apassy waliduje wynik i wyznacza `deny`, `require_approval` albo `allow`.
-6. Jeśli jest wymagana zgoda człowieka, broker czeka na zatwierdzenie dokładnie tej operacji.
-7. Bezpośrednio przed wykonaniem broker ponownie sprawdza ważność uprawnienia, zgodę, limity i unieważnienie. Dopiero wtedy pobiera sekret i wykonuje operację.
-8. Broker kontroluje odpowiedź i zapisuje zdarzenie audytowe bez sekretu.
+The rule interpreter and risk evaluator are separate interfaces.
+A model may help interpret language, but it cannot activate a rule, invent trusted identity, or create a connector capability.
+Jev is the planned risk evaluator. Support for rule interpretation is not assumed.
 
-`allow` z bouncera nigdy nie nadaje nowych uprawnień ani nie uchyla twardej odmowy. Zgoda człowieka również nie omija polityki; jej zmiana jest osobną operacją administracyjną. Zmiana parametrów żądania unieważnia wcześniejszą ocenę i zgodę.
+## 3. How the bouncer handles a request
 
-### Proponowane wymiary klasyfikacji
+1. Authenticate the agent and load the owner-confirmed session and task context.
+2. Resolve the credential reference and registered connector without exposing the vault inventory.
+3. Normalize the operation and bind its parameters, destination, rule version, and credential revision.
+4. Check explicit restrictions, expiry, revocation, operation support, and usage limits.
+5. If an explicit restriction fails, block the request before retrieving the credential or calling a model.
+6. Evaluate the required contextual risks from permitted, minimal information.
+7. Permit, pause for approval, or block according to the decision table below.
+8. Recheck authority before execution and durably record the attempt, limits, and any consumed approval.
+9. Use the credential inside the trusted connector and return only permitted results.
+10. Record the result and deliver any required alert without secret values.
 
-| Wymiar | Pytanie | Źródło sygnału |
+| Condition | Decision | Owner experience |
 | --- | --- | --- |
-| Zgodność z zadaniem | Czy operacja odpowiada zatwierdzonemu celowi użytkownika? | Zaufany opis zadania i znormalizowana operacja |
-| Ryzyko prompt injection | Czy niezaufane treści próbują zmienić cel lub zasady dostępu? | Oznaczone fragmenty treści narzędzi i ich pochodzenie |
-| Ryzyko eksfiltracji | Czy operacja może ujawnić sekret lub chronione dane? | Cel połączenia, schemat parametrów, oczekiwany wynik |
-| Eskalacja uprawnień | Czy operacja wykracza poza potrzebę zadania lub próbuje uzyskać szerszy dostęp? | Zakres operacji, delegowanie i historia sesji |
-| Wrażliwość i skutki | Czy operacja dotyczy produkcji, danych wrażliwych albo nieodwracalnej zmiany? | Zaufana klasyfikacja zasobu i katalog operacji |
-| Anomalia zachowania | Czy sekwencja lub częstotliwość działań odbiega od oczekiwanego przepływu? | Liczniki i ograniczona historia utrzymywana przez broker |
+| No active grant, explicit denial, expired session, or unsupported operation | `deny` | No execution. History explains the restriction; security alerts follow the alert policy. |
+| Grant permits the use and required risk checks return a valid, low-risk result | `allow` | Normal work continues without another approval prompt. |
+| The rule requires approval, or context is uncertain and approval fallback is permitted | `require_approval` | The request waits in the approval inbox. |
+| A verified critical risk exceeds its tested threshold | `deny` | No execution. The owner receives a security alert. |
+| Required evaluator fails, times out, or returns an invalid result | `require_approval` or `deny` | A visible service problem. Never automatic permission because the check failed. |
 
-Dla każdego wymiaru kontrakt powinien zawierać klasę, rozkład prawdopodobieństwa i informację o niepewności, w zakresie faktycznie obsługiwanym przez API. Prawdopodobieństwo ryzyka nie jest tym samym co pewność klasyfikacji. Brak danych nie oznacza niskiego ryzyka.
+An approval cannot override an explicit denial or a critical-risk block.
+The owner can change the rule or correct a classification through a separate review, then submit a new request.
+An approval applies to one exact request and expires. It is not a permanent grant or permission to change parameters.
 
-Nie traktujemy deklaracji agenta typu „użytkownik zatwierdził” jako dowodu. Pochodzenie danych i uprawnienia ustala broker. Tekst pochodzący z narzędzi pozostaje niezaufany również dla bouncera.
+## 4. Contextual risk assessment with Jev
 
-### Reguły decyzji
+The earlier concept took inspiration from [TypeSafe System One and Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev).
+The planned dimensions below belong to Apassy's contract. They are not verified Jev API fields.
 
-- Twarda odmowa polityki: `deny`, niezależnie od modelu.
-- Krytyczny sygnał ryzyka powyżej progu zweryfikowanego w testach: `deny`.
-- Niepewność, niepełny kontekst lub podwyższone ryzyko: `require_approval` albo `deny`, zgodnie z polityką zasobu.
-- Dopuszczalna operacja, kompletna ocena i niskie ryzyko we wszystkich wymaganych wymiarach: kandydat do `allow`.
-- Timeout, niedostępność dostawcy, nieprawidłowy wynik lub nieznana wersja kontraktu: brak automatycznego dopuszczenia. Wymagana zgoda albo odmowa.
+| Dimension | Question |
+| --- | --- |
+| Task alignment | Does the requested use fit the owner-confirmed purpose? |
+| Prompt injection | Does untrusted content try to change the task or access rules? |
+| Data disclosure | Could the operation expose credentials or protected service data? |
+| Privilege escalation | Does the agent seek access beyond the confirmed task and grant? |
+| Resource sensitivity | What data or service could this operation affect? |
+| Behavioral anomaly | Is the rate or sequence unusual for this session? |
 
-Nie używamy jednej średniej ważonej jako jedynej bramki: niskie ryzyko w jednym wymiarze nie może zamaskować krytycznej eksfiltracji w innym. Progi są wersjonowane per typ operacji i środowisko. Nie ustalamy produkcyjnych wartości bez danych ewaluacyjnych.
+The broker supplies trusted identity, resource classification, limits, and bounded history.
+Agent claims and service responses retain their untrusted label. A claim that the owner approved something is not evidence.
+Risk probability and confidence are different concepts. Missing information is not low risk.
+An average score cannot hide a critical finding in one dimension.
 
-### Ochrona danych i egzekwowanie decyzji
+Before integration, verify actual API access, supported outputs, model identity, processing terms, retention, region, limits, and cost.
+Do not invent missing provider fields or treat typed output as proof of correct judgment.
+The interpreter and evaluator receive only owner-permitted context. Neither receives vault values, authentication headers, or complete conversations.
+Rule text and metadata can also contain secrets, so permitted field names alone do not establish safe disclosure.
 
-- Do Jev nie trafiają wartości sekretów, nagłówki uwierzytelniające ani pełne env.
-- Kontekst jest budowany z dozwolonych pól. Parametry, adresy URL, wyniki narzędzi i fragmenty rozmowy również mogą zawierać sekrety; nie wysyłamy ich automatycznie w całości.
-- Zewnętrzne przetwarzanie wymaga jawnej konfiguracji oraz oceny retencji, regionu i warunków dostawcy. Redakcja nie gwarantuje anonimowości.
-- Broker działa poza sandboxem agenta. Agent nie ma dostępu do jego magazynu ani poświadczeń dostawcy modelu.
-- Każde dopuszczenie wiążemy z agentem, sesją, identyfikatorem uprawnienia, wersją polityki i skrótem kanonicznej operacji. Zgody mają TTL i limit użyć.
-- Limity użyć egzekwujemy atomowo. Powtórzenie żądania nie może ponownie wykorzystać jednorazowej zgody.
-- Broker kontroluje host, port, metodę, ścieżkę, parametry i przekierowania. Chroni przed SSRF, zmianą hosta i DNS rebindingiem niezależnie od oceny Jev.
-- Preferujemy typowane operacje i ograniczone odpowiedzi zamiast dowolnego proxy HTTP. Filtrowanie odpowiedzi jest dodatkowym zabezpieczeniem, nie dowodem braku wycieku.
-- Unieważnienie blokuje przyszłe wykonania; nie cofa już wykonanych zmian ani wcześniej ujawnionych danych.
+Observation mode is for synthetic cases and non-executing previews. It provides no evidence that real automatic use is safe.
+Automatic permitted use enters the pilot only after the rule and risk evaluation gates pass.
+A test evaluator supports offline development but cannot satisfy the live Jev gate.
 
-### Audyt
+## 5. Useful alerts, not just logs
 
-Zapis obejmuje identyfikator żądania, tożsamość agenta, referencję sekretu, typ operacji, decyzję twardej polityki, oceny ryzyka, decyzję bouncera, zgodę człowieka, wersję modelu i konfiguracji, opóźnienie oraz wynik wykonania.
+An alert identifies the request, agent, safe credential reference, rule version, decision, reason code, severity, and available actions.
+It can explain, for example, “Blocked: this agent requested production access, but your rule permits staging only.”
+Explanations come from recorded decisions. A model cannot invent an approval, a successful execution, or a delivery confirmation.
 
-Nie zapisujemy surowych promptów, wartości sekretów ani dowolnych odpowiedzi API. Również metadane audytowe wymagają kontroli dostępu i retencji. Kody powodów mają pochodzić ze zdefiniowanego katalogu, nie ze swobodnego wyjaśnienia modelu.
+The local notification points to a durable inbox entry. Its preview hides sensitive details, including private item names by default.
+Repeated events can share a notification, but each decision remains in history with a count and timestamp.
+Read, acknowledged, approved, and denied are separate states.
 
-### Weryfikacja przed wdrożeniem
+An unavailable notification channel does not release a waiting request.
+Apassy shows delivery problems and retries within limits. It does not claim that the owner saw an alert merely because it entered a queue.
 
-- Zestaw przypadków z etykietami: poprawne działania, prompt injection, eksfiltracja, eskalacja i niejednoznaczny kontekst.
-- Pomiar fałszywych dopuszczeń, fałszywych blokad i odsetka eskalacji do człowieka; osobno dla typów operacji i środowisk.
-- Sprawdzenie kalibracji ocen na własnych danych, nie tylko benchmarkach dostawcy.
-- Testy odporności na parafrazy, kodowanie treści, długi kontekst i próby manipulacji bouncerem.
-- Testy deterministycznej polityki, timeoutów, nieprawidłowych wyników, replay, zmian żądania i unieważnienia podczas oczekiwania.
-- Pomiar opóźnień p50/p95/p99 oraz kosztu na operację.
-- Tryb obserwacyjny najpierw w sandboxie: Jev ocenia, ale nie zmienia wyniku bazowej polityki. Następnie ograniczone egzekwowanie i stopniowe rozszerzanie po ocenie błędów.
+## 6. Limits that stay visible
 
-## Zakres pierwszej wersji
+Mediated use keeps the provider credential inside the tested trust boundary.
+Raw delivery to a process, environment, file, or agent context permits copying and weakens continued control.
+MVP does not provide raw delivery as a silent fallback. Owner reveal/copy is a separate, intentional disclosure.
 
-1. Broker CLI + MCP, tożsamości sesji i kilka typowanych operacji.
-2. Jeden adapter magazynu sekretów i deterministyczna polityka z domyślną odmową.
-3. Zgody człowieka, TTL, limity, unieważnianie i audyt.
-4. Interfejs `RiskEvaluator`, adapter Jev oraz deterministyczny adapter testowy. Adapter testowy nie zastępuje oceny ryzyka w produkcji.
-5. Bouncer w trybie obserwacyjnym, potem egzekwowanie progów zweryfikowanych w testach.
+Revocation stops future authorization commitments. It cannot undo an operation that already passed the execution boundary or recover copied information.
+An uncertain remote outcome is not a reason to repeat a state-changing operation automatically.
+The [infrastructure plan](product-infra-v1.md) defines these execution and recovery boundaries.
 
-Bez dostępu do Jev można zbudować i testować kontrakt oraz politykę. Nie można wtedy potwierdzić działania integracji, jakości klasyfikacji ani rzeczywistych opóźnień.
+The product must report test coverage, failures, unsupported uses, and known limits.
+The [MVP plan](mvp-plan.md) separates evidence for the vault, rule interpreter, connectors, bouncer, and human experience.

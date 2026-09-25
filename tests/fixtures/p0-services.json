@@ -1,0 +1,191 @@
+{
+  "document": "p0-service-candidates",
+  "status": "PROPOSED",
+  "date": "2026-09-16",
+  "warning": "Synthetic candidates only. Not confirmed services. Not live credentials. Remote verification is required.",
+  "identities": {
+    "owner": "synthetic-owner",
+    "reporting_agent": "synthetic-reporting-agent",
+    "query_agent": "synthetic-query-agent",
+    "project_id": "project-a-synthetic",
+    "environment_label": "staging"
+  },
+  "services": [
+    {
+      "id": "reporting-api",
+      "candidate_of": "reporting API from the MVP plan",
+      "kind": "http_api",
+      "credential_type": "api_key",
+      "display_name": "Project A reporting service",
+      "verification_status": "unverified-remote",
+      "destination": {
+        "hostname": "reporting.example.invalid",
+        "scheme": "https",
+        "environment_label": "staging",
+        "registration": "owner-registered synthetic destination"
+      },
+      "least_privilege": {
+        "requirement": "read-only reporting grant for Project A staging only",
+        "forbidden": [
+          "production hosts",
+          "arbitrary URLs",
+          "write operations",
+          "agent-controlled headers"
+        ],
+        "remote_verification_required": true
+      },
+      "operations": [
+        {
+          "name": "get_sales_summary",
+          "effect": "read",
+          "raw_url_from_agent": false,
+          "parameters": [
+            {
+              "name": "project_id",
+              "type": "string",
+              "required": true,
+              "allowed_values": ["project-a-synthetic"]
+            },
+            {
+              "name": "period_start",
+              "type": "string",
+              "format": "YYYY-MM-DD",
+              "required": true
+            },
+            {
+              "name": "period_end",
+              "type": "string",
+              "format": "YYYY-MM-DD",
+              "required": true
+            }
+          ],
+          "bounded_output": {
+            "max_records": 1,
+            "fields": [
+              "project_id",
+              "period_start",
+              "period_end",
+              "currency",
+              "total_amount",
+              "order_count"
+            ],
+            "excludes": [
+              "credentials",
+              "raw HTTP bodies",
+              "other projects"
+            ]
+          }
+        },
+        {
+          "name": "get_report_job_status",
+          "effect": "read",
+          "raw_url_from_agent": false,
+          "parameters": [
+            {
+              "name": "job_id",
+              "type": "string",
+              "required": true,
+              "constraint": "must match a job for project-a-synthetic"
+            }
+          ],
+          "bounded_output": {
+            "max_records": 1,
+            "fields": ["job_id", "state", "completed_at"],
+            "excludes": ["credentials", "raw logs"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "staging-sql-database",
+      "candidate_of": "PostgreSQL from the MVP plan",
+      "kind": "sql_database",
+      "engine_candidate": "PostgreSQL",
+      "credential_type": "database_credential",
+      "display_name": "Project A staging database",
+      "verification_status": "unverified-remote",
+      "destination": {
+        "hostname": "db.staging.example.invalid",
+        "port": 5432,
+        "database_name": "project_a_staging_synthetic",
+        "environment_label": "staging",
+        "registration": "owner-registered synthetic destination"
+      },
+      "least_privilege": {
+        "requirement": "read-only role with SELECT on named views only",
+        "forbidden": [
+          "production hosts",
+          "superuser rights",
+          "writes",
+          "raw SQL from the agent",
+          "COPY of whole tables"
+        ],
+        "remote_verification_required": true
+      },
+      "operations": [
+        {
+          "name": "read_sales_summary",
+          "effect": "read",
+          "raw_sql_from_agent": false,
+          "object": "view_sales_summary_synthetic",
+          "parameters": [
+            {
+              "name": "project_id",
+              "type": "string",
+              "required": true,
+              "allowed_values": ["project-a-synthetic"]
+            },
+            {
+              "name": "period_start",
+              "type": "string",
+              "format": "YYYY-MM-DD",
+              "required": true
+            },
+            {
+              "name": "period_end",
+              "type": "string",
+              "format": "YYYY-MM-DD",
+              "required": true
+            }
+          ],
+          "bounded_output": {
+            "max_rows": 31,
+            "fields": [
+              "project_id",
+              "day",
+              "currency",
+              "total_amount",
+              "order_count"
+            ],
+            "excludes": ["credentials", "full table dumps"]
+          }
+        },
+        {
+          "name": "read_daily_order_counts",
+          "effect": "read",
+          "raw_sql_from_agent": false,
+          "object": "view_daily_order_counts_synthetic",
+          "parameters": [
+            {
+              "name": "project_id",
+              "type": "string",
+              "required": true,
+              "allowed_values": ["project-a-synthetic"]
+            },
+            {
+              "name": "day",
+              "type": "string",
+              "format": "YYYY-MM-DD",
+              "required": true
+            }
+          ],
+          "bounded_output": {
+            "max_rows": 1,
+            "fields": ["project_id", "day", "order_count"],
+            "excludes": ["credentials", "other days"]
+          }
+        }
+      ]
+    }
+  ]
+}

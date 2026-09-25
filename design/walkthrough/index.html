@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Apassy synthetic owner walkthrough</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to main content</a>
+
+    <div class="banner" role="note">
+      <p class="banner-kicker">Synthetic walkthrough</p>
+      <p>Synthetic walkthrough. Not a secure vault. Use demo data only.</p>
+      <p>This walkthrough does not save data. It does not call a service or a model.</p>
+      <p>There is no encryption, authenticated owner channel, or verified agent isolation.</p>
+    </div>
+
+    <div class="shell">
+      <aside class="sidebar">
+        <p class="brand">Apassy</p>
+        <p class="brand-note">Owner walkthrough. Demo data only.</p>
+        <nav aria-label="Walkthrough">
+          <ul class="nav-list">
+            <li>
+              <button type="button" class="nav-button" data-view="vault" aria-current="page">Vault</button>
+            </li>
+            <li>
+              <button type="button" class="nav-button" data-view="item">Item</button>
+            </li>
+            <li>
+              <button type="button" class="nav-button" data-view="rules">Rules</button>
+            </li>
+            <li>
+              <button type="button" class="nav-button" data-view="agents">Agents</button>
+            </li>
+            <li>
+              <button type="button" class="nav-button" data-view="activity">Activity</button>
+            </li>
+          </ul>
+        </nav>
+        <div class="sidebar-controls">
+          <p id="lock-state" class="lock-state">The vault is open. Open vault is not owner authentication.</p>
+          <button type="button" id="lock-button">Lock vault</button>
+          <button type="button" id="unlock-button" class="secondary">Open vault</button>
+          <button type="button" id="reset-button" class="secondary">Reset walkthrough</button>
+        </div>
+      </aside>
+
+      <div class="content">
+        <details class="panel">
+          <summary>Walkthrough limits</summary>
+          <p>
+            This browser page is a disposable P0 design prototype. It is not the production user interface.
+          </p>
+          <p>
+            The walkthrough assigns only fixed synthetic values. It does not accept a secret as input.
+          </p>
+          <ul>
+            <li>There is no encryption, authenticated owner channel, or verified agent isolation.</li>
+            <li>The walkthrough does not use localStorage, sessionStorage, IndexedDB, cookies, service workers, or fetch.</li>
+            <li>There is no backup or restore control.</li>
+            <li>All state is in disposable memory. Reset loads the fixture data again.</li>
+          </ul>
+        </details>
+
+        <div id="status" class="status" role="status" aria-live="polite" aria-atomic="true">
+          The walkthrough is ready. Use demo data only.
+        </div>
+
+        <main id="main" tabindex="-1">
+          <section id="view-vault" class="view" data-view-panel="vault">
+            <header class="view-header">
+              <h1>Vault</h1>
+              <p>
+                The vault lists five credential categories. This walkthrough assigns a fixed synthetic value. Real secrets are not valid input.
+              </p>
+            </header>
+
+            <form id="search-form" class="toolbar" role="search">
+              <div class="field">
+                <label for="item-search">Search items</label>
+                <input id="item-search" name="q" type="search" autocomplete="off" spellcheck="true">
+              </div>
+              <button type="submit">Search</button>
+              <button type="button" id="search-clear" class="secondary">Clear</button>
+            </form>
+
+            <div id="category-lists"></div>
+
+            <section class="panel" aria-labelledby="add-item-heading">
+              <h2 id="add-item-heading">Add item</h2>
+              <p class="hint">The form stores labels only. The model creates the synthetic value.</p>
+              <form id="add-item-form" class="stack-form" autocomplete="off">
+                <div class="field">
+                  <label for="add-name">Name</label>
+                  <input id="add-name" name="name" type="text" autocomplete="off" required>
+                </div>
+                <div class="field">
+                  <label for="add-category">Category</label>
+                  <select id="add-category" name="category" required>
+                    <option value="api_key">API key or token</option>
+                    <option value="login">Username and password login</option>
+                    <option value="ssh_key">SSH key</option>
+                    <option value="database">Database credential</option>
+                    <option value="custom">Custom secret fields</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="add-service">Service</label>
+                  <input id="add-service" name="service" type="text" autocomplete="off">
+                </div>
+                <div class="field">
+                  <label for="add-project">Project</label>
+                  <input id="add-project" name="project" type="text" autocomplete="off">
+                </div>
+                <div class="field extra-field" data-extra="username" hidden>
+                  <label for="add-username">Username</label>
+                  <input id="add-username" name="username" type="text" autocomplete="off">
+                </div>
+                <div class="field extra-field" data-extra="host" hidden>
+                  <label for="add-host">Host</label>
+                  <input id="add-host" name="host" type="text" autocomplete="off">
+                </div>
+                <div class="field extra-field" data-extra="databaseName" hidden>
+                  <label for="add-database-name">Database name</label>
+                  <input id="add-database-name" name="databaseName" type="text" autocomplete="off">
+                </div>
+                <div class="field extra-field" data-extra="publicLabel" hidden>
+                  <label for="add-public-label">Public label</label>
+                  <input id="add-public-label" name="publicLabel" type="text" autocomplete="off">
+                </div>
+                <div class="field extra-field" data-extra="fieldName" hidden>
+                  <label for="add-field-name">Field name</label>
+                  <input id="add-field-name" name="fieldName" type="text" autocomplete="off">
+                </div>
+                <div class="field field-wide">
+                  <label for="add-notes">Notes</label>
+                  <textarea id="add-notes" name="notes" rows="3" autocomplete="off"></textarea>
+                </div>
+                <div class="actions">
+                  <button type="submit">Add item</button>
+                </div>
+              </form>
+            </section>
+          </section>
+
+          <section id="view-item" class="view" data-view-panel="item" hidden>
+            <header class="view-header">
+              <h1>Item</h1>
+              <p>Values stay hidden until a demo reveal. Copy does not write to the clipboard.</p>
+            </header>
+            <div id="item-detail"></div>
+          </section>
+
+          <section id="view-rules" class="view" data-view-panel="rules" hidden>
+            <header class="view-header">
+              <h1>Rules</h1>
+              <p>
+                The editor accepts ordinary language. This walkthrough uses a deterministic fixture interpreter. It does not call a language model.
+              </p>
+            </header>
+
+            <section class="panel" aria-labelledby="sample-heading">
+              <h2 id="sample-heading">Supported sample</h2>
+              <p>The interpreter matches this exact sample. Other text is refused.</p>
+              <blockquote id="supported-sample" class="sample-quote"></blockquote>
+              <p class="hint">Refused samples: ambiguous, conflicting, and unsupported fixture text.</p>
+              <div class="actions wrap">
+                <button type="button" id="fill-supported">Fill supported sample</button>
+                <button type="button" id="fill-ambiguous" class="secondary">Fill ambiguous sample</button>
+                <button type="button" id="fill-conflicting" class="secondary">Fill conflicting sample</button>
+                <button type="button" id="fill-unsupported" class="secondary">Fill unsupported sample</button>
+              </div>
+            </section>
+
+            <form id="rule-form" class="panel stack-form" autocomplete="off">
+              <div class="field field-wide">
+                <label for="rule-text">Rule text</label>
+                <textarea id="rule-text" name="rule" rows="6" autocomplete="off" spellcheck="true" required></textarea>
+              </div>
+              <div class="actions wrap">
+                <button type="submit">Review rule</button>
+                <button type="button" id="confirm-rule" class="secondary">Confirm interpretation</button>
+                <button type="button" id="activate-rule">Activate rule</button>
+              </div>
+            </form>
+
+            <section class="panel" aria-labelledby="draft-heading">
+              <h2 id="draft-heading">Clause review</h2>
+              <p id="draft-status" class="hint">A review shows clauses, questions, and examples.</p>
+              <h3>Original text</h3>
+              <blockquote id="draft-original" class="sample-quote">No draft yet.</blockquote>
+              <h3>Clauses</h3>
+              <div id="draft-clauses"></div>
+              <h3>Questions and issues</h3>
+              <div id="draft-questions"></div>
+              <h3>Examples</h3>
+              <div id="draft-examples"></div>
+            </section>
+
+            <section class="panel" aria-labelledby="active-rule-heading">
+              <h2 id="active-rule-heading">Active rule</h2>
+              <div id="active-rule"></div>
+            </section>
+          </section>
+
+          <section id="view-agents" class="view" data-view-panel="agents" hidden>
+            <header class="view-header">
+              <h1>Agents</h1>
+              <p>You can enroll a synthetic catalog agent. Revoke stops future sample use. This is not a verified isolation boundary.</p>
+            </header>
+            <div id="agent-list"></div>
+          </section>
+
+          <section id="view-activity" class="view" data-view-panel="activity" hidden>
+            <header class="view-header">
+              <h1>Activity</h1>
+              <p>
+                A demo request can be sent from this view. A normal grant is permitted. An unclear task waits. Production is denied and cannot be approved.
+              </p>
+            </header>
+
+            <section class="panel" aria-labelledby="simulate-heading">
+              <h2 id="simulate-heading">Demo request</h2>
+              <form id="simulate-form" class="stack-form" autocomplete="off">
+                <div class="field">
+                  <label for="scenario">Request</label>
+                  <select id="scenario" name="scenario">
+                    <option value="normal">Normal staging report</option>
+                    <option value="uncertain">Uncertain task on staging</option>
+                    <option value="production">Production report</option>
+                  </select>
+                </div>
+                <div class="actions wrap">
+                  <button type="submit">Send request</button>
+                </div>
+              </form>
+              <p id="notification-health" class="hint"></p>
+              <div class="actions wrap">
+                <button type="button" id="notify-fail" class="secondary">Set notification to failed</button>
+                <button type="button" id="notify-ok" class="secondary">Set notification to healthy</button>
+              </div>
+            </section>
+
+            <section class="panel" aria-labelledby="inbox-heading">
+              <h2 id="inbox-heading">Inbox and alerts</h2>
+              <div id="inbox"></div>
+            </section>
+
+            <section class="panel" aria-labelledby="history-heading">
+              <h2 id="history-heading">History</h2>
+              <div id="history"></div>
+            </section>
+          </section>
+        </main>
+
+        <footer class="page-foot">
+          <p>
+            This prototype does not complete P0 or MVP. The owner selected a macOS desktop app with eframe. SQLCipher evaluation is approved. Full product isolation, actual connectors, models, and storage acceptance remain open. This browser walkthrough is disposable and is not a secure vault.
+          </p>
+        </footer>
+      </div>
+    </div>
+
+    <noscript>
+      <p class="noscript">This walkthrough needs JavaScript in the browser. The model tests do not need a browser.</p>
+    </noscript>
+    <script type="module" src="./app.mjs"></script>
+  </body>
+</html>

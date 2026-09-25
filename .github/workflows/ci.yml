@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust 1.97.0
+        run: rustup toolchain install 1.97.0 --profile minimal --component rustfmt --component clippy
+
+      - name: Fetch Cargo dependencies
+        run: cargo fetch --locked
+
+      - name: Check Rust format
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --offline --locked --all-features --all-targets -- -D warnings
+
+      - name: Run Cargo tests
+        run: cargo test --offline --locked --all-features --all-targets -- --test-threads=1
+
+      - name: Check vault API compile failures
+        run: cargo test --offline --locked --features vault --doc
+
+      - name: Run P0 Node model tests
+        run: node --test design/walkthrough/model.test.mjs
+
+      - name: Run Python fixture boundary tests
+        run: python3 tests/isolation/test_fixture_boundary.py
+
+      - name: Check git diff whitespace
+        run: git diff --check

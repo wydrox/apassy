@@ -1,114 +1,141 @@
-# apassy — Product Vision v1
+# Apassy — Product Vision v1
 
-Data: 2026-09-16.
+Date: 2026-09-16.
+Status: revised product direction before implementation. The document version is not a production release.
+This revision replaces the earlier GitHub-centered scope. Rust remains confirmed for the core.
 
-Status: wizja produktu i plan zakresu przed implementacją. „v1” w tytule oznacza wersję dokumentu; MVP i wersja produktu v1 są osobnymi etapami opisanymi poniżej. Dokument nie potwierdza wdrożenia funkcji ani gotowości produkcyjnej.
+## 1. The product
 
-Szczegóły architektury bouncera: [koncepcja produktu](concept.md).
+Apassy is a credential manager for you and your agents.
+The ambition is a better 1Password-like experience for a person who also wants agents to use credentials under their control.
+This is a product direction, not a claim of feature parity or proven superiority.
 
-## Wizja
+You keep different credential types in one vault.
+You write rules in ordinary language about who can use them, when, where, and for what purpose.
+A bouncer checks agent requests, permits normal use, pauses uncertain requests, blocks forbidden use, and informs you when something needs attention.
 
-Agent może wykonać dozwoloną operację, ale nie otrzymuje wartości sekretu. Apassy kontroluje użycie uprawnień, zamiast udostępniać agentowi ogólny odczyt sekretów.
+The vault is the product's foundation, not an incidental place to keep a GitHub token.
+A human-facing interface, plain-language rules, and useful alerts belong in MVP.
+CLI and MCP are ways to connect agents. They do not replace the human experience.
 
-MVP jest przeznaczone dla pojedynczego użytkownika i lokalnych agentów. Wersja produktu v1 rozszerza ten model na zespoły, subagentów i CI.
+## 2. The everyday experience
 
-Ukrycie sekretu przed modelem nie zapobiega samo w sobie nadużyciu dozwolonego API. Ochrona wymaga izolacji brokera, twardych polityk i kontroli wykonywanych operacji. Ocena modelu jest dodatkową warstwą, nie zamiennikiem tych mechanizmów.
+The first user is a person who stores credentials and wants an agent to use selected ones without unrestricted access.
+The product is not limited to developers, one repository, or one provider.
 
-## MVP — jeden kompletny, bezpieczny przepływ
+The basic journey is:
 
-### Cel
+1. Add a credential to the vault.
+2. Give it a useful name and choose its type.
+3. Connect an agent and confirm its identity.
+4. Write a rule for that agent's use of the credential.
+5. Review Apassy's interpretation and activate the rule.
+6. Let the agent work within that rule.
+7. Review alerts, answer approval requests, or revoke access when needed.
 
-Agent wykonuje rzeczywiste zadanie przez apassy. Użytkownik kontroluje uprawnienia i widzi powód decyzji.
+For example, you save an API key as “Project A reporting service.” You write:
 
-### Zakres
+> My reporting agent can use this credential for Project A, against staging, until Friday. Never use it for production. Ask me if the request does not fit the task.
 
-1. **Lokalny broker, CLI i MCP.** Osobny interfejs administracyjny dla człowieka. Agent nie może zatwierdzać własnych żądań.
-2. **Jeden wspierany sposób izolacji.** Broker działa poza sandboxem agenta. Agent nie ma dostępu do magazynu, konfiguracji ani poświadczeń brokera. Izolacja jest częścią MVP, nie późniejszym ulepszeniem.
-3. **Jeden adapter magazynu.** Proponowany start: lokalny, szyfrowany magazyn oparty na sprawdzonym narzędziu, bez własnej kryptografii. Interfejs jest przygotowany pod zewnętrznych dostawców.
-4. **Jedna integracja operacyjna.** Proponowany start: GitHub — odczyt statusu workflow, odczyt statusu PR i uruchomienie wskazanego workflow z ograniczonymi parametrami. Bez dowolnych adresów URL i ogólnego proxy.
-5. **Schemat widoczny dla agenta.** Dostępne operacje, wymagane pola i dostępność poświadczeń, bez odczytu ich wartości.
-6. **Twarde polityki.** Agent, sesja, repozytorium, operacja, parametry, TTL i limit użyć. Domyślna odmowa.
-7. **Kontrola człowieka.** Zgoda na konkretną operację, jednorazowe zatwierdzenie, unieważnianie dostępu i tryb próbny bez wykonania.
-8. **Bouncer Jev.** Ocena ryzyka w granicach twardych polityk, zgodnie z opisem poniżej.
-9. **Lokalny audyt.** Tożsamość agenta, operacja, decyzja polityki, oceny bouncera, zgoda i wynik. Bez sekretów i surowych rozmów.
+Before activation, Apassy resolves the named agent, credential, service, environment, exact expiry, and time zone with you.
+It shows what the connector can enforce and what requires a contextual risk assessment.
+It does not silently guess what “staging” or “Friday” means.
 
-### Bouncer Jev w MVP
+A normal permitted report request completes without another approval prompt.
+A request for production is blocked, and you receive an explanation.
+An uncertain request pauses for your decision if your rule permits that fallback.
+You can see which credential and agent were involved without exposing the secret in an alert.
 
-Warstwa inspirowana [TypeSafe System One i Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) ocenia sześć wymiarów:
+## 3. What belongs in MVP
 
-- zgodność operacji z zadaniem;
-- ryzyko prompt injection;
-- ryzyko eksfiltracji;
-- eskalację uprawnień;
-- wrażliwość zasobu i skutki operacji;
-- anomalie zachowania.
+### A useful personal vault
 
-Jev dostarcza klasyfikacje. Deterministyczny kod apassy wyznacza wynik: blokada, wymagana zgoda człowieka albo dopuszczenie.
+- Add, view, edit, search, organize, and delete credentials through a visual interface.
+- Store API keys/tokens, username/password logins, SSH keys, database credentials, and custom secret fields.
+- Keep useful labels, service references, notes, and project tags with each item.
+- Mask values by default. Permit deliberate owner reveal/copy after the required authentication.
+- Lock and unlock the vault, make encrypted backups, and restore it through a documented procedure.
+- Show each item's access rules, connected agents, supported uses, and recent history.
 
-Wdrażanie odbywa się etapami:
+Credential storage and agent-use support are different capabilities.
+MVP stores all the types above, but only claims agent use through tested connectors.
+An unsupported item remains useful to its owner and clearly says that agent use is unavailable.
 
-1. Tryb obserwacyjny w sandboxie, bez zmiany wyniku bazowej polityki.
-2. Blokowanie lub wymaganie zgody na podstawie zweryfikowanych ocen.
-3. Automatyczne dopuszczenie wyłącznie dla wąskiego, przetestowanego zestawu operacji.
+### Rules in ordinary language
 
-Awaria, nieprawidłowy wynik lub niepewność nigdy nie oznaczają automatycznej zgody. Model i zgoda człowieka nie mogą uchylić twardej odmowy. Wartości sekretów nie trafiają do Jev. Kontekst przekazywany dostawcy jest minimalizowany i podlega jawnej konfiguracji.
+The owner should not need to write JSON, YAML, or policy code.
+Rules cover the agent, credential, project, destination, operation, time window, usage limit, and approval or alert conditions where supported.
 
-Proponowane metryki są kontraktem apassy, nie potwierdzonymi polami API Jev. Poprawny typ wyniku nie gwarantuje poprawnej klasyfikacji. Dostęp do usługi, API i warunki przetwarzania wymagają weryfikacji przed integracją.
+Apassy shows the original text beside its interpretation and examples of allowed, blocked, and approval-required requests.
+Unclear, conflicting, or unsupported conditions prevent activation until resolved.
+The product keeps explicit restrictions separate from contextual judgments such as “does this fit the task?”
+A rule change requires owner confirmation and cannot silently expand an existing grant.
 
-### Poza MVP
+### Agent access and the bouncer
 
-- Panel webowy, organizacje, SSO i billing.
-- Rozszerzenie przeglądarkowe i menedżer haseł dla ludzi.
-- Dowolny HTTP proxy, dowolne polecenia shell i przekazywanie sekretów do env agenta.
-- Kubernetes, wiele backendów, automatyczna rotacja i delegowanie subagentom.
-- Deklaracja gotowości do operacji wysokiego ryzyka na produkcji.
+- Connect agents with scoped identities and revocable sessions.
+- Let agents discover only the credential references and supported operations they may use, not the whole vault.
+- Check every request against active rules and trusted identity and destination information.
+- Use contextual risk assessment to detect suspicious requests, prompt injection, possible disclosure, and unusual behavior.
+- Permit routine, low-risk use under an active rule without repeated approval.
+- Pause requests that require a decision. Block explicit violations.
+- Prevent the requesting agent from approving itself or changing its own rules.
 
-### Kryteria gotowości MVP
+Jev remains the planned risk provider, subject to verified API access, processing terms, and evaluation.
+Plain-language rule interpretation is a separate responsibility. It must not assume that Jev supports a rule-authoring API.
+A model cannot override an explicit restriction. A failed or incomplete required assessment never grants automatic access.
 
-1. Pełny scenariusz GitHub działa od żądania agenta do kontrolowanego wyniku.
-2. Testy potwierdzają blokowanie obejścia polityki, zmiany zatwierdzonego żądania, ponownego użycia zgody i przekroczenia limitów.
-3. Testowe sekrety nie pojawiają się w kontekście modelu, odpowiedziach MCP ani logach w sprawdzanych scenariuszach. Wynik testów nie jest uniwersalną gwarancją braku wycieku.
-4. Awaria Jev i unieważnienie sesji mają sprawdzone zachowanie.
-5. Dostępny jest raport błędnych dopuszczeń, blokad, eskalacji, opóźnień i kosztów — nie tylko działające demo.
+### Alerts and control
 
-Dostęp do Jev jest zależnością. Bez niego można zbudować rdzeń i testy, ale nie uznać integracji bouncera za ukończoną.
+MVP includes a persistent activity history, an approval inbox, and a local notification channel.
+Alerts identify the agent, credential reference, requested use, relevant rule, decision, reason, and available next steps.
+They do not contain secret values or raw conversations.
 
-## Wersja produktu v1 — regularna praca zespołu
+The owner can approve one request, deny it, pause an agent, revoke access to an item, or change a rule separately.
+Dismissing a notification is not approval. Notification delivery failure does not turn a paused request into an allowed one.
+Repeated alerts are grouped without hiding their frequency or losing the underlying decisions.
 
-### Cel
+## 4. What access control can promise
 
-Wiele agentów i środowisk korzysta z powtarzalnego zarządzania dostępem, opartego na sprawdzonym przepływie MVP.
+For mediated use, Apassy uses the credential through a controlled connector and returns the permitted result.
+The intended boundary keeps the provider credential out of the agent's context, files, and environment.
+That claim requires tested isolation of the vault, owner interface, and execution service from the agent.
 
-### Zakres ponad MVP
+If a tool receives the raw credential, it can copy and reuse it outside Apassy.
+Rules cannot then guarantee where or how the copied credential is used. Revocation may require a change at the provider.
+MVP does not silently fall back to raw credential delivery. Such a compatibility mode requires a separate scope decision and visible warnings.
+Owner reveal/copy is also deliberate disclosure, not continued control over the copied value.
 
-1. **Projekty, środowiska i role.** Właściciel, administrator polityk, zatwierdzający i operator agenta.
-2. **Panel webowy.** Konfiguracja, kolejka zgód, historia decyzji i natychmiastowe odwołanie sesji.
-3. **Delegowanie subagentom.** Wyłącznie podzbiór uprawnień rodzica, krótsza ważność i śledzenie całego łańcucha.
-4. **OIDC dla CI i workloadów.** Krótkotrwałe tożsamości zamiast stałych tokenów do apassy.
-5. **Dwa zewnętrzne backendy.** Proponowane: OpenBao i Infisical. Dynamiczne poświadczenia tam, gdzie dostawca je zapewnia.
-6. **Kolejne typowane integracje.** Wybór na podstawie pilotażu. Wersjonowane kontrakty i SDK do tworzenia adapterów.
-7. **Dojrzały bouncer.** Wersjonowanie progów, porównywanie modeli, ponowne odtwarzanie ocen na zapisanych bezpiecznych przypadkach, wykrywanie pogorszenia jakości i kontrolowane wdrażanie zmian.
-8. **Polityki jako kod.** Walidacja, podgląd różnic i testy przed aktywacją.
-9. **Eksploatacja i audyt.** Audyt odporniejszy na manipulację, eksport, retencja, kopie zapasowe i procedura odtwarzania.
-10. **Ograniczony tryb env.** Sekrety dla wskazanych procesów, wyraźnie oddzielone od gwarancji „agent nie otrzymuje sekretu”. Proces otrzymujący env może odczytać jego wartości.
+Apassy does not guarantee that all harmful requests will be recognized.
+It cannot undo completed actions, retract disclosed data, or protect against an attacker who controls the trusted host or owner account.
+These limits must appear in the product, not only in technical documentation.
 
-### Kryteria gotowości v1
+## 5. MVP boundaries
 
-- Pilotaż zespołowy obejmuje lokalnych agentów, subagentów i CI.
-- Sprawdzona jest izolacja projektów, odzyskiwanie po awarii i aktualizacje.
-- Przeprowadzono niezależny przegląd bezpieczeństwa i zamknięto krytyczne ustalenia.
-- Udokumentowano granice ochrony, wspierane konfiguracje i zmierzone parametry działania.
+MVP serves one owner, multiple stored credentials, and explicitly enrolled agents on one tested local configuration.
+The [MVP plan](mvp-plan.md) proposes two connector paths that exercise different credential types.
+The first services and supported platform require confirmation. GitHub is an optional integration, not the product definition or a required workflow.
 
-## Kolejność realizacji
+MVP does not attempt full 1Password parity, cloud sync, mobile clients, universal autofill, passkeys, team sharing, billing, or automatic rotation.
+It also excludes arbitrary shell execution, unrestricted HTTP forwarding, delegated subagent identities, and unreviewed plugins.
+These exclusions limit implementation breadth, not the central vault-and-bouncer experience.
 
-1. Izolacja i model zagrożeń.
-2. Broker i twarde polityki.
-3. Jedna integracja operacyjna.
-4. Zgody i audyt.
-5. Jev i ewaluacja bouncera.
-6. Pilotaż MVP.
-7. Rozszerzenia do wersji produktu v1.
+## 6. Readiness and later scope
 
-## Zasada ograniczania zakresu
+MVP is ready only when the owner can complete the full journey through the human interface:
 
-MVP ma udowodnić jedną bezpieczną ścieżkę od początku do końca, a nie obsługiwać wszystkie sekrety i narzędzia. Konkretne narzędzie szyfrujące, sposób izolacji i stos technologiczny pozostają decyzjami implementacyjnymi. Proponowane integracje są kierunkiem planu, a nie już istniejącymi funkcjami.
+- Store and manage the five credential categories.
+- Activate a clear rule and correct an ambiguous one.
+- Connect an agent and observe permitted use without another approval prompt.
+- Receive and resolve an approval request, then observe a blocked request and its alert.
+- Revoke access and verify that future execution is prevented.
+- Recover the vault without restoring old sessions or consumed approvals.
+
+Evidence must cover rule interpretation, bouncer quality, privacy, connector enforcement, notifications, usability, and failure recovery.
+A CLI demo, a vault-only build, or an always-ask bouncer does not satisfy this definition.
+The plan defines measurable gates and separates deterministic tests from live provider evaluation.
+
+Later product versions can add more connectors, imports from existing managers, sync, shared vaults, teams, mobile access, and rotation.
+Their priority should follow actual use. A human interface and normal automatic permitted use are not deferred to those versions.
+
+Related documents: [product concept](concept.md), [infrastructure](product-infra-v1.md), and [implementation plan](mvp-plan.md).
