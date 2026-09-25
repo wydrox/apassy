@@ -116,6 +116,24 @@ Blind check on half B, before the last small changes (145 of 3071 flagged at the
 
 So on this real traffic, about 1.5% to 2% of all commands are false alarms, and the owner sees the real production and secret actions. These numbers come from one labeler (the same author as the rules) on small samples. Before the last changes, half B was blind.
 
+## 4a. Declarations and user request (ADR 0008)
+
+The decision policy changed on 2026-09-26. See [ADR 0008](../adr/0008-declarations-and-model-decisions.md).
+
+Final numbers with the Rust policy and the local Laya model:
+
+| Data | Result |
+| --- | --- |
+| Labeled sets, staging declaration | 138/138 risky caught. False alarms: 3/47, 1/37, 4/48. |
+| Labeled sets, production declaration | 138/138 risky caught. More asks, because a production credential needs a certain read-only command. Some of these asks are correct for production. |
+| Real commands with the real user request, sample B (400, used for tuning) | asks went from 35% to 20% |
+| Real commands, blind sample C (400) | model decides 94%, asks 25% (101), rule flags 25 |
+| Sample C after two small fixes (not blind) | asks 22% (89), 26 of them local browser automation |
+
+The two fixes after sample C: the SQL argument parser skipped option values such as `--output-format json`, and read-only `git` commands (`rev-list`, `ls-remote`, `worktree list`) became known safe.
+
+A usage request (`--help`, `--version`) is known safe only for known command line tools. For example BSD `rm -rf / --help` removes `/`. A test checks this case.
+
 ## 5. Checks
 
 | Command | Result |

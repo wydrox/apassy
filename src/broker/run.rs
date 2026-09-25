@@ -23,12 +23,12 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use super::approvals::{ApprovalOutcome, PendingRun};
-use super::bouncer::{BouncerRequest, BouncerVerdict, decide};
+use super::bouncer::{BouncerRequest, BouncerVerdict, DecisionContext, decide};
 use super::decide::{BrokerContext, authenticate, lock, locked_response};
 use super::exec::{self, SecretEnv};
 use super::shell_risk::analyze;
 use crate::agent::wire::WireResponse;
-use crate::vault::{ActivityDecision, AgentSummary, ExecMode, NewActivity, Vault};
+use crate::vault::{ActivityDecision, AgentSummary, Declaration, ExecMode, NewActivity, Vault};
 
 const MAX_ITEMS: usize = 16;
 const MAX_ARGS: usize = 64;
@@ -44,6 +44,7 @@ pub struct RunRequest<'a> {
     pub cwd: &'a str,
     pub purpose: &'a str,
     pub path: Option<&'a str>,
+    pub user_request: Option<&'a str>,
 }
 
 impl RunRequest<'_> {
@@ -107,6 +108,8 @@ struct Checked {
     any_ask: bool,
     /// Owner instructions of the grants, joined.
     instruction: String,
+    /// Owner declarations, one per item. `None` when an item has none.
+    declarations: Vec<Option<Declaration>>,
 }
 
 pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) -> WireResponse {
@@ -137,14 +140,19 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
     };
 
     // The bouncer runs without the vault lock. Its state has no secret value.
-    // A known safe command with no rule flag does not need the model.
+    // Only a rule flag skips the model (ADR 0008).
     let analysis = analyze(request.command, request.purpose, &checked.env_names);
-    let verdict = if analysis.known_safe || !analysis.flags.is_empty() {
+    let user_request = request
+        .user_request
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .unwrap_or_default();
+    let verdict = if !analysis.flags.is_empty() {
         BouncerVerdict::Unavailable("not asked".to_owned())
     } else {
         match &ctx.bouncer {
             Some(bouncer) => bouncer.evaluate(&BouncerRequest {
-                agent: checked.agent.name.clone(),
+                user_request: user_request.to_owned(),
                 command: request.command.join(" "),
                 relative_dir: checked.relative_dir.clone(),
                 purpose: request.purpose.trim().to_owned(),
@@ -154,7 +162,14 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
             None => BouncerVerdict::Unavailable("no bouncer is set".to_owned()),
         }
     };
-    let decision = decide(&verdict, &analysis);
+    let decision = decide(
+        &verdict,
+        &DecisionContext {
+            analysis: &analysis,
+            declarations: &checked.declarations,
+            has_user_request: !user_request.is_empty(),
+        },
+    );
     let risk_note = decision.note.clone();
     let needs_approval = checked.any_ask || decision.ask_owner;
     let decided_by = if needs_approval {
@@ -173,6 +188,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                 env_names: checked.env_names.clone(),
                 purpose: request.purpose.trim().to_owned(),
                 risk: risk_note.clone(),
+                user_request: user_request.to_owned(),
             },
             ctx.approval_timeout,
         );
@@ -321,6 +337,7 @@ fn check(
     })?;
     let mut env_names = Vec::new();
     let mut any_ask = false;
+    let mut declarations = Vec::new();
     let mut instructions: Vec<String> = Vec::new();
     let mut relative_dir = None;
     let command_text = request.command.join(" ");
@@ -409,9 +426,10 @@ fn check(
         if !rule.instruction.is_empty() {
             instructions.push(rule.instruction.clone());
         }
-        // ADR 0007: the bouncer alone is not enough. It decides only inside a
-        // command allowlist. Without prefixes, every run waits for the owner.
-        any_ask |= grant.mode == ExecMode::Ask || rule.allowed_prefixes.is_empty();
+        // ADR 0008: the bouncer decides with the owner declaration. An item without a
+        // declaration makes the decision ask the owner.
+        any_ask |= grant.mode == ExecMode::Ask;
+        declarations.push(vault.declaration(*item_id).ok().flatten());
         env_names.push(binding.env_name);
     }
     Ok(Checked {
@@ -421,6 +439,7 @@ fn check(
         env_names,
         any_ask,
         instruction: instructions.join(" "),
+        declarations,
     })
 }
 

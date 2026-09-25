@@ -165,9 +165,10 @@ pub fn tool_list() -> Value {
                     "items": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "minItems": 1, "description": "Item IDs from process_access." },
                     "command": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Program and arguments, for example [\"npm\", \"run\", \"migrate\"]." },
                     "cwd": { "type": "string", "description": "Absolute working directory inside the granted project directory." },
-                    "purpose": { "type": "string", "description": "Why you need to run this command. The owner sees it." }
+                    "purpose": { "type": "string", "description": "Why you need to run this command. The owner sees it." },
+                    "user_request": { "type": "string", "description": "The user's own words from the conversation that led to this command. Quote them. Do not summarize or add words. The bouncer compares the command with this request, and the owner sees it." }
                 },
-                "required": ["items", "command", "cwd", "purpose"],
+                "required": ["items", "command", "cwd", "purpose", "user_request"],
                 "additionalProperties": false
             }
         }
@@ -251,10 +252,12 @@ fn run_action(arguments: &Value) -> Result<Action, String> {
     let object = arguments
         .as_object()
         .ok_or_else(|| "The arguments must be an object.".to_owned())?;
-    if let Some(extra) = object
-        .keys()
-        .find(|key| !matches!(key.as_str(), "items" | "command" | "cwd" | "purpose"))
-    {
+    if let Some(extra) = object.keys().find(|key| {
+        !matches!(
+            key.as_str(),
+            "items" | "command" | "cwd" | "purpose" | "user_request"
+        )
+    }) {
         return Err(format!("The argument \"{extra}\" is not permitted."));
     }
     let items = object
@@ -291,6 +294,10 @@ fn run_action(arguments: &Value) -> Result<Action, String> {
         command,
         cwd: text("cwd")?,
         purpose: text("purpose")?,
+        user_request: object
+            .get("user_request")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         // The process uses the PATH of the agent host, so tools such as npm resolve the same way.
         path: std::env::var("PATH").ok(),
     })

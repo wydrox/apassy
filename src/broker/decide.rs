@@ -59,6 +59,7 @@ pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
             cwd,
             purpose,
             path,
+            user_request,
         } => super::run::run(
             ctx,
             &request.token,
@@ -68,6 +69,7 @@ pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
                 cwd,
                 purpose,
                 path: path.as_deref(),
+                user_request: user_request.as_deref(),
             },
         ),
     }

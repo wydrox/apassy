@@ -205,6 +205,9 @@ impl DesktopApp {
                 .unwrap_or_default();
             self.owner_ui.env_field_input =
                 binding.map(|binding| binding.field).unwrap_or_default();
+            self.owner_ui.declaration_form = owner_store::DeclarationForm::from_declaration(
+                self.owner_ui.session.declaration(parsed).ok().flatten(),
+            );
             self.owner_ui.connector_url = self
                 .owner_ui
                 .session

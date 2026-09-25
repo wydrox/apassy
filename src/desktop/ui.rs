@@ -975,6 +975,8 @@ fn draw_owner_item(app: &mut DesktopApp, ui: &mut egui::Ui) {
     });
 
     ui.add_space(8.0);
+    agents_view::draw_declaration_card(app, ui, id);
+    ui.add_space(8.0);
     agents_view::draw_env_card(app, ui, id);
     if details.kind == CredentialKind::ApiKey {
         ui.add_space(8.0);
@@ -2181,6 +2183,12 @@ mod agents_view {
                             .strong()
                             .color(INK),
                     );
+                    let user_request = if run.user_request.is_empty() {
+                        "The agent did not send the user request.".to_owned()
+                    } else {
+                        format!("User request (from the agent): \"{}\"", run.user_request)
+                    };
+                    ui.label(RichText::new(user_request).color(INK));
                     ui.label(RichText::new(format!("Purpose: {}", run.purpose)).color(INK));
                     ui.label(RichText::new("Command:").color(INK_MUTED));
                     let mut command = shell_words(&run.command);
@@ -2240,6 +2248,73 @@ mod agents_view {
     }
 
     /// Environment variable binding for agent processes. Items with no secret field skip it.
+    /// Owner declaration for the bouncer (ADR 0008).
+    pub(super) fn draw_declaration_card(app: &mut DesktopApp, ui: &mut egui::Ui, item_id: u64) {
+        use crate::vault::{Environment, Reversibility, RiskLevel, Scope};
+
+        card_frame().show(ui, |ui| {
+            ui.label(RichText::new("Declaration").size(16.0).strong().color(INK));
+            ui.label(
+                RichText::new(
+                    "The bouncer uses these values for each agent request. Production, high risk, or irreversible means that a command that changes state waits for you.",
+                )
+                .color(INK_MUTED),
+            );
+            let form = &mut app.owner_ui.declaration_form;
+            if !form.stored {
+                ui.label(RichText::new("No declaration. Every agent run with this item waits for you.").color(ASK));
+            }
+            egui::Grid::new(("declaration", item_id)).num_columns(2).show(ui, |ui| {
+                ui.label("Project");
+                ui.add(TextEdit::singleline(&mut form.project).hint_text("odealo").desired_width(220.0));
+                ui.end_row();
+                ui.label("Environment");
+                egui::ComboBox::new(("decl-env", item_id), "")
+                    .selected_text(form.environment.as_str())
+                    .show_ui(ui, |ui| {
+                        for value in Environment::ALL {
+                            ui.selectable_value(&mut form.environment, *value, value.as_str());
+                        }
+                    });
+                ui.end_row();
+                ui.label("Risk");
+                egui::ComboBox::new(("decl-risk", item_id), "")
+                    .selected_text(form.risk.as_str())
+                    .show_ui(ui, |ui| {
+                        for value in RiskLevel::ALL {
+                            ui.selectable_value(&mut form.risk, *value, value.as_str());
+                        }
+                    });
+                ui.end_row();
+                ui.label("Scope");
+                egui::ComboBox::new(("decl-scope", item_id), "")
+                    .selected_text(form.scope.as_str())
+                    .show_ui(ui, |ui| {
+                        for value in Scope::ALL {
+                            ui.selectable_value(&mut form.scope, *value, value.as_str());
+                        }
+                    });
+                ui.end_row();
+                ui.label("Reversibility");
+                egui::ComboBox::new(("decl-rev", item_id), "")
+                    .selected_text(form.reversibility.as_str())
+                    .show_ui(ui, |ui| {
+                        for value in Reversibility::ALL {
+                            ui.selectable_value(&mut form.reversibility, *value, value.as_str());
+                        }
+                    });
+                ui.end_row();
+            });
+            if accent_button(ui, "Save declaration").clicked() {
+                let form = app.owner_ui.declaration_form.clone();
+                let result = app.owner_ui.session.set_declaration(item_id, &form);
+                if app.apply(result, "The declaration is saved.").is_some() {
+                    app.owner_ui.declaration_form.stored = true;
+                }
+            }
+        });
+    }
+
     pub(super) fn draw_env_card(app: &mut DesktopApp, ui: &mut egui::Ui, item_id: u64) {
         let fields = app
             .owner_ui

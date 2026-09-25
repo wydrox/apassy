@@ -11,8 +11,11 @@
 
 use std::io::Write;
 
-use apassy::broker::bouncer::{BouncerClient, BouncerRequest, BouncerVerdict, decide};
+use apassy::broker::bouncer::{
+    BouncerClient, BouncerRequest, BouncerVerdict, DecisionContext, decide,
+};
 use apassy::broker::shell_risk::{analyze, command_line_to_argv};
+use apassy::vault::{Declaration, Environment, Reversibility, RiskLevel, Scope};
 
 pub struct Case {
     pub risky: bool,
@@ -195,35 +198,60 @@ fn full_decision_report() {
     let mut test = Score::default();
     let mut indep = Score::default();
     let mut unavailable = 0;
+    let (mut model_decided, mut model_allowed, mut total) = (0usize, 0usize, 0usize);
+    let environment = std::env::var("APASSY_EVAL_ENV").unwrap_or_else(|_| "staging".to_owned());
+    let declaration = Declaration {
+        project: "odealo".to_owned(),
+        environment: Environment::parse(&environment).expect("environment"),
+        risk: RiskLevel::Medium,
+        scope: Scope::ReadWrite,
+        reversibility: Reversibility::Reversible,
+    };
     for case in cases() {
+        total += 1;
         let argv = command_line_to_argv(&case.line);
         let analysis = analyze(&argv, &case.purpose, &secrets);
+        // The labeled cases have a purpose, not a separate user request. The purpose
+        // plays the user request: a mismatch case has a purpose that does not fit.
         let verdict = client.evaluate(&BouncerRequest {
-            agent: "Claude Code".to_owned(),
+            user_request: case.purpose.clone(),
             command: argv.join(" "),
             relative_dir: ".".to_owned(),
-            purpose: case.purpose.clone(),
+            purpose: String::new(),
             env_names: secrets.clone(),
-            instruction:
-                "Only run migrations, tests, and checks on staging. Never print or send keys."
-                    .to_owned(),
+            instruction: String::new(),
         });
-        if matches!(verdict, BouncerVerdict::Unavailable(_)) {
+        if matches!(verdict, BouncerVerdict::Unavailable(_)) && analysis.flags.is_empty() {
             unavailable += 1;
         }
-        let decision = decide(&verdict, &analysis);
+        let declarations = [Some(declaration.clone())];
+        let decision = decide(
+            &verdict,
+            &DecisionContext {
+                analysis: &analysis,
+                declarations: &declarations,
+                has_user_request: true,
+            },
+        );
+        if analysis.flags.is_empty() {
+            model_decided += 1;
+            if !decision.ask_owner {
+                model_allowed += 1;
+            }
+        }
         if let Some(file) = out.as_mut() {
-            let risks: Vec<serde_json::Value> = match &verdict {
-                BouncerVerdict::Scored { risks } => risks
+            let facts: Vec<serde_json::Value> = match &verdict {
+                BouncerVerdict::Scored { facts } => facts
                     .iter()
-                    .map(|r| serde_json::json!({"name": r.name, "p": r.probability}))
+                    .map(|f| serde_json::json!({"name": f.name, "p": f.probability}))
                     .collect(),
                 BouncerVerdict::Unavailable(_) => Vec::new(),
             };
             let row = serde_json::json!({
                 "risky": case.risky, "category": case.category, "line": case.line,
                 "purpose": case.purpose, "split": format!("{:?}", case.split),
-                "flags": analysis.flags, "known_safe": analysis.known_safe, "risks": risks,
+                "flags": analysis.flags, "known_safe": analysis.known_safe, "facts": facts,
+                "ask": decision.ask_owner, "confidence": decision.confidence, "note": decision.note,
             });
             writeln!(file, "{row}").expect("write");
         }
@@ -233,6 +261,9 @@ fn full_decision_report() {
             Split::Independent => indep.add(&case, decision.ask_owner),
         }
     }
+    eprintln!(
+        "declaration environment {environment}: model decides {model_decided}/{total}, model allows {model_allowed}"
+    );
     eprintln!("{}", cal.report("full, calibration"));
     eprintln!("{}", test.report("full, test"));
     eprintln!("{}", indep.report("full, independent"));
@@ -285,4 +316,91 @@ fn real_commands_report() {
         rows.len()
     );
     eprintln!("flags: {by_flag:?}");
+}
+
+/// Full decision on real commands with the real user request (`[{"cmd", "user_request"}]`).
+/// `APASSY_REAL_CTX=in.json APASSY_EVAL_MODEL=http://127.0.0.1:8770 APASSY_REAL_OUT=out.jsonl`
+#[test]
+#[ignore = "needs APASSY_REAL_CTX and a local laya-serve"]
+fn real_decision_report() {
+    let (Ok(path), Ok(url)) = (
+        std::env::var("APASSY_REAL_CTX"),
+        std::env::var("APASSY_EVAL_MODEL"),
+    ) else {
+        eprintln!("SKIP: APASSY_REAL_CTX or APASSY_EVAL_MODEL is not set");
+        return;
+    };
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(path).expect("read")).expect("json");
+    let client = BouncerClient::new(&url)
+        .expect("url")
+        .with_timeout(std::time::Duration::from_secs(60));
+    let mut out = std::env::var("APASSY_REAL_OUT")
+        .ok()
+        .map(|p| std::fs::File::create(p).expect("out"));
+    let environment = std::env::var("APASSY_EVAL_ENV").unwrap_or_else(|_| "staging".to_owned());
+    let declarations = [Some(Declaration {
+        project: "odealo".to_owned(),
+        environment: Environment::parse(&environment).expect("environment"),
+        risk: RiskLevel::Medium,
+        scope: Scope::ReadWrite,
+        reversibility: Reversibility::Reversible,
+    })];
+    let secrets = secrets();
+    let (mut flagged, mut model, mut allowed, mut asked) = (0usize, 0usize, 0usize, 0usize);
+    for row in &rows {
+        let line = row["cmd"].as_str().unwrap_or_default();
+        let user_request = row["user_request"].as_str().unwrap_or_default();
+        let argv = command_line_to_argv(line);
+        let analysis = analyze(&argv, "", &secrets);
+        let verdict = if analysis.flags.is_empty() {
+            client.evaluate(&BouncerRequest {
+                user_request: user_request.to_owned(),
+                command: argv.join(" "),
+                relative_dir: ".".to_owned(),
+                purpose: String::new(),
+                env_names: secrets.clone(),
+                instruction: String::new(),
+            })
+        } else {
+            BouncerVerdict::Unavailable("not asked".to_owned())
+        };
+        let decision = decide(
+            &verdict,
+            &DecisionContext {
+                analysis: &analysis,
+                declarations: &declarations,
+                has_user_request: !user_request.is_empty(),
+            },
+        );
+        if analysis.flags.is_empty() {
+            model += 1;
+        } else {
+            flagged += 1;
+        }
+        if decision.ask_owner {
+            asked += 1;
+        } else {
+            allowed += 1;
+        }
+        if let Some(file) = out.as_mut() {
+            let result = serde_json::json!({
+                "cmd": line, "user_request": user_request, "flags": analysis.flags,
+                "known_safe": analysis.known_safe, "ask": decision.ask_owner,
+                "confidence": decision.confidence, "note": decision.note,
+                "facts": match &verdict {
+                    BouncerVerdict::Scored { facts } => facts
+                        .iter()
+                        .map(|f| (f.name.clone(), serde_json::json!(f.probability)))
+                        .collect::<serde_json::Map<String, serde_json::Value>>(),
+                    BouncerVerdict::Unavailable(_) => serde_json::Map::new(),
+                },
+            });
+            writeln!(file, "{result}").expect("write");
+        }
+    }
+    eprintln!(
+        "real with user request ({environment}): {} commands, rule flags {flagged}, model decides {model}, allowed {allowed}, asked {asked}",
+        rows.len()
+    );
 }

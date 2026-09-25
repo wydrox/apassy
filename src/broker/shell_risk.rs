@@ -772,6 +772,10 @@ fn check_segment(segment: &Segment, secret_names: &[String], flags: &mut Vec<Str
     let joined = argv.join(" ");
     let joined_lower = joined.to_lowercase();
     let secret = segment_refs_secret(segment, secret_names);
+    // `--help` and `--version` only print usage.
+    if is_usage_request(&prog, &args) && !segment.redirect_out {
+        return;
+    }
     let first_raw = segment
         .argv
         .first()
@@ -823,16 +827,20 @@ fn check_segment(segment: &Segment, secret_names: &[String], flags: &mut Vec<Str
     if reads_credentials {
         flags.push("secret_output".to_owned());
     }
-    // Environment assignments that point at production.
+    // Environment assignments that point at production, by value (`URL=$PROD_URL`) or
+    // by name (`CONFIRM_PROD=1`).
     for assignment in &segment.assignments {
-        let value = assignment
-            .split_once('=')
-            .map_or("", |(_, v)| v)
-            .to_lowercase();
-        if words(&value)
-            .iter()
-            .any(|w| matches!(w.as_str(), "prod" | "production" | "prd" | "live"))
-        {
+        let (name, value) = assignment.split_once('=').unwrap_or((assignment, ""));
+        let prod = |text: &str| {
+            text.to_lowercase()
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .any(|w| matches!(w, "prod" | "production" | "prd" | "live"))
+        };
+        let enabled = !matches!(
+            value.trim().to_lowercase().as_str(),
+            "" | "0" | "false" | "no"
+        );
+        if prod(value) || (prod(name) && enabled) {
             flags.push("production".to_owned());
         }
     }
@@ -852,10 +860,6 @@ fn check_segment(segment: &Segment, secret_names: &[String], flags: &mut Vec<Str
         flags.push("system_change".to_owned());
     }
 
-    // `--help` only prints usage.
-    if args.iter().any(|arg| arg == "--help" || arg == "help") && !segment.redirect_out {
-        return;
-    }
     if !segment.heredoc.is_empty() {
         if matches!(
             prog.as_str(),
@@ -1433,6 +1437,23 @@ fn sql_argument(argv: &[String]) -> Option<String> {
         if after_query && !arg.starts_with('-') {
             return Some(arg.clone());
         }
+        // Options with a separate value, for example `--output-format json`.
+        if after_query
+            && matches!(
+                lower.as_str(),
+                "--output-format"
+                    | "-o"
+                    | "--output"
+                    | "--db-url"
+                    | "--project-ref"
+                    | "--workdir"
+                    | "--schema"
+                    | "-s"
+            )
+        {
+            iter.next();
+            continue;
+        }
         if lower == "query" {
             after_query = true;
         }
@@ -1768,6 +1789,9 @@ fn is_known_safe(segment: &Segment) -> bool {
     }
     let prog = base_name(first);
     let args = lower_args(&argv[1..]);
+    if is_usage_request(&prog, &args) {
+        return true;
+    }
     let sub = args.first().map(String::as_str).unwrap_or_default();
     let second = args.get(1).map(String::as_str).unwrap_or_default();
     match prog.as_str() {
@@ -1830,7 +1854,14 @@ fn is_known_safe(segment: &Segment) -> bool {
         ),
         "git" => match sub {
             "status" | "diff" | "log" | "show" | "fetch" | "blame" | "shortlog" | "describe"
-            | "rev-parse" | "ls-files" | "grep" | "add" | "commit" | "switch" | "pull" => true,
+            | "rev-parse" | "ls-files" | "grep" | "add" | "commit" | "switch" | "pull"
+            | "rev-list" | "ls-remote" | "show-ref" | "for-each-ref" | "cat-file"
+            | "merge-base" | "name-rev" | "reflog" | "count-objects" | "check-ignore" | "var" => {
+                true
+            }
+            "worktree" => matches!(second, "list"),
+            "remote" => args.len() == 1 || matches!(second, "-v" | "show" | "get-url"),
+            "config" => has_arg(&args, &["--get", "--list", "-l", "--get-all"]),
             "stash" => !has_arg(&args, &["drop", "clear"]),
             "rebase" => !has_arg(&args, &["-i", "--interactive", "--exec", "-x", "--root"]),
             "tag" => args.len() == 1,
@@ -1908,7 +1939,22 @@ fn is_known_safe(segment: &Segment) -> bool {
         }
         "supabase" => {
             let a = args.join(" ");
-            a.starts_with("status")
+            let read_query = a.starts_with("db query")
+                && sql_argument(&argv).is_some_and(|sql| {
+                    let w = words(&sql);
+                    matches!(
+                        w.first().map(String::as_str),
+                        Some("select" | "with" | "explain" | "show")
+                    ) && !sql_writes(&sql)
+                });
+            read_query
+                || a.starts_with("db lint")
+                || a.starts_with("db advisors")
+                || a.starts_with("branches list")
+                || a.starts_with("projects list")
+                || a.starts_with("migration list")
+                || a.starts_with("inspect")
+                || a.starts_with("status")
                 || a.starts_with("start")
                 || a.starts_with("stop")
                 || a.starts_with("gen types")
@@ -1933,6 +1979,68 @@ fn is_known_safe(segment: &Segment) -> bool {
         }
         _ => false,
     }
+}
+
+/// Command line tools that print usage and stop for `--help` or `--version`. Other
+/// programs can treat these words as operands. For example BSD `rm -rf / --help`
+/// removes `/`, so the exception must never apply to them.
+const USAGE_CLIS: &[&str] = &[
+    "supabase",
+    "vercel",
+    "git",
+    "gh",
+    "npm",
+    "pnpm",
+    "yarn",
+    "bun",
+    "npx",
+    "node",
+    "deno",
+    "python",
+    "python3",
+    "pip",
+    "cargo",
+    "go",
+    "docker",
+    "prisma",
+    "kubectl",
+    "helm",
+    "terraform",
+    "fly",
+    "flyctl",
+    "aws",
+    "gcloud",
+    "az",
+    "firebase",
+    "wrangler",
+    "netlify",
+    "twilio",
+    "stripe",
+    "heroku",
+    "psql",
+    "pg_dump",
+    "redis-cli",
+    "curl",
+    "jq",
+    "rg",
+    "tsc",
+    "eslint",
+    "vitest",
+    "jest",
+    "playwright",
+    "next",
+    "vite",
+    "turbo",
+    "brew",
+];
+
+/// A request for usage text: `--help` or `--version` anywhere, `help` as the first
+/// word, or `-h` as the only option. Only for [`USAGE_CLIS`].
+fn is_usage_request(prog: &str, args: &[String]) -> bool {
+    USAGE_CLIS.contains(&prog)
+        && (args.iter().any(|arg| arg == "--help" || arg == "--version")
+            || args.first().is_some_and(|arg| arg == "help")
+            || (args.len() == 1 && args[0] == "-h"))
 }
 
 /// A read request to a known provider API: GET only, no body, and no upload.
@@ -2167,6 +2275,46 @@ mod tests {
         for (cmd, flag) in loud {
             let a = analyze(&cmd, "Do the work.", &secrets());
             assert!(a.flags.contains(&flag.to_owned()), "{cmd:?}: {a:?}");
+        }
+    }
+
+    #[test]
+    fn sql_argument_skips_option_values() {
+        let cmd = argv("npx supabase db query --linked --output-format json select_1");
+        assert_eq!(
+            sql_argument(&effective_argv(&Segment {
+                argv: cmd.clone(),
+                ..Segment::default()
+            }))
+            .as_deref(),
+            Some("select_1")
+        );
+        let read =
+            shell("npx supabase db query --linked --output-format json \"select id from offers\"");
+        assert!(analyze(&read, "Read.", &secrets()).known_safe);
+        let write = shell("npx supabase db query --linked -o json \"delete from offers\"");
+        assert!(
+            analyze(&write, "Clean.", &secrets())
+                .flags
+                .contains(&"data_loss".to_owned())
+        );
+    }
+
+    #[test]
+    fn usage_exception_cannot_hide_actions() {
+        let a = analyze(
+            &argv("npx supabase projects api-keys --help"),
+            "Read usage.",
+            &secrets(),
+        );
+        assert!(a.flags.is_empty() && a.known_safe, "{a:?}");
+        for cmd in [
+            "rm -rf / --help",
+            "rm -rf supabase/migrations help",
+            "find . -delete --help",
+        ] {
+            let a = analyze(&argv(cmd), "Read usage.", &secrets());
+            assert!(a.flags.contains(&"data_loss".to_owned()), "{cmd}: {a:?}");
         }
     }
 

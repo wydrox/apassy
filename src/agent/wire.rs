@@ -55,6 +55,10 @@ pub enum Action {
         /// `PATH` for the process. The adapter sends its own `PATH`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
+        /// The user's words that led to this request (ADR 0008). The agent supplies it,
+        /// so it is a claim. The owner sees it in the approval card.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_request: Option<String>,
     },
 }
 

@@ -99,6 +99,7 @@ fn run(fx: &Fixture, cwd: &std::path::Path, script: &str) -> WireResponse {
             cwd: cwd.display().to_string(),
             purpose: "Test the process mode.".into(),
             path: Some("/usr/bin:/bin".into()),
+            user_request: Some("Test the process mode.".into()),
         },
     )
     .expect("broker answer")
@@ -278,6 +279,7 @@ fn grants_and_bindings_are_checked() {
             cwd: fx.project.display().to_string(),
             purpose: "x".into(),
             path: None,
+            user_request: None,
         },
     )
     .expect("answer");

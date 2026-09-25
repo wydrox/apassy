@@ -6,14 +6,15 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 
-/// A fake Jev-compatible bouncer. It answers every question with one probability,
-/// except the names in `high`, which get 0.99. It keeps each request body.
+/// A fake Jev-compatible bouncer (contract v2). By default it answers a clean,
+/// matching, read-only command: `task_match` 0.95 and every other fact 0.02.
+/// `overrides` sets other probabilities. It keeps each request body.
 pub struct FakeBouncer {
     pub url: String,
     pub bodies: Arc<Mutex<Vec<String>>>,
 }
 
-pub fn fake_bouncer(high: &'static [&'static str]) -> FakeBouncer {
+pub fn fake_bouncer(overrides: &'static [(&'static str, f64)]) -> FakeBouncer {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake bouncer");
     let url = format!("http://{}", listener.local_addr().expect("addr"));
     let bodies = Arc::new(Mutex::new(Vec::new()));
@@ -42,11 +43,11 @@ pub fn fake_bouncer(high: &'static [&'static str]) -> FakeBouncer {
             let mut answers = serde_json::Map::new();
             if let Some(questions) = request["questions"].as_object() {
                 for name in questions.keys() {
-                    let p = if high.contains(&name.as_str()) {
-                        0.99
-                    } else {
-                        0.01
-                    };
+                    let default = if name == "task_match" { 0.95 } else { 0.02 };
+                    let p = overrides
+                        .iter()
+                        .find(|(n, _)| n == name)
+                        .map_or(default, |(_, p)| *p);
                     answers.insert(name.clone(), serde_json::json!({"type": "noul", "noul": p}));
                 }
             }

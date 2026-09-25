@@ -24,9 +24,9 @@ use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionB
 use crate::contracts::CredentialKind;
 
 pub use agents::{
-    AGENT_TOKEN_PREFIX, ActivityDecision, ActivityRecord, AgentSummary, AgentToken, Destination,
-    EnvBinding, ExecGrant, ExecMode, ExecRule, GrantSummary, MAX_ACTIVITY_ROWS, NewActivity,
-    checked_env_name,
+    AGENT_TOKEN_PREFIX, ActivityDecision, ActivityRecord, AgentSummary, AgentToken, Declaration,
+    Destination, EnvBinding, Environment, ExecGrant, ExecMode, ExecRule, GrantSummary,
+    MAX_ACTIVITY_ROWS, NewActivity, Reversibility, RiskLevel, Scope, checked_env_name,
 };
 pub use types::{
     Field, FieldSummary, ItemDetails, ItemDraft, ItemSummary, MAX_PASSPHRASE_BYTES,
@@ -82,6 +82,7 @@ PRAGMA user_version = 1;
 const LEGACY_SCHEMA_VERSION: i64 = 1;
 const AGENT_SCHEMA_VERSION: i64 = 2;
 const PROCESS_SCHEMA_VERSION: i64 = 3;
+const RULE_SCHEMA_VERSION: i64 = 4;
 
 /// Encrypted local vault. Connection state is private. Debug is redacted.
 pub struct Vault {
@@ -687,6 +688,7 @@ fn verify_user_version(conn: &Connection) -> VaultResult<i64> {
         version @ (LEGACY_SCHEMA_VERSION
         | AGENT_SCHEMA_VERSION
         | PROCESS_SCHEMA_VERSION
+        | RULE_SCHEMA_VERSION
         | SCHEMA_VERSION) => Ok(version),
         _ => Err(err(VaultErrorKind::UnsupportedSchema)),
     }
@@ -754,12 +756,17 @@ fn verify_expected_columns(conn: &Connection, version: i64) -> VaultResult<()> {
     } else {
         &[]
     };
-    let v4: &[&str] = if version >= SCHEMA_VERSION {
+    let v4: &[&str] = if version >= RULE_SCHEMA_VERSION {
         &agents::SCHEMA_V4_COLUMNS
     } else {
         &[]
     };
-    for sql in v1.iter().chain(v2).chain(v3).chain(v4) {
+    let v5: &[&str] = if version >= SCHEMA_VERSION {
+        &agents::SCHEMA_V5_COLUMNS
+    } else {
+        &[]
+    };
+    for sql in v1.iter().chain(v2).chain(v3).chain(v4).chain(v5) {
         drop(
             conn.prepare(sql)
                 .map_err(|_| err(VaultErrorKind::UnsupportedSchema))?,
@@ -790,7 +797,11 @@ fn migrate_to_current(conn: &mut Connection, from: i64) -> VaultResult<()> {
         tx.execute_batch(agents::SCHEMA_V3_SQL)
             .map_err(|_| err(VaultErrorKind::Storage))?;
     }
-    tx.execute_batch(agents::SCHEMA_V4_SQL)
+    if from < RULE_SCHEMA_VERSION {
+        tx.execute_batch(agents::SCHEMA_V4_SQL)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+    }
+    tx.execute_batch(agents::SCHEMA_V5_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     verify_expected_columns(conn, SCHEMA_VERSION)
@@ -818,6 +829,8 @@ fn initialize_new_db(path: &Path, passphrase: &str) -> VaultResult<()> {
     tx.execute_batch(agents::SCHEMA_V3_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.execute_batch(agents::SCHEMA_V4_SQL)
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute_batch(agents::SCHEMA_V5_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     close_conn(conn)

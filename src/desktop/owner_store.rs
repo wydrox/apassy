@@ -17,9 +17,10 @@ use crate::broker::profile;
 use crate::contracts::CredentialKind;
 use crate::desktop::model::{ItemDraft, MASKED_VALUE, ModelError, ModelResult};
 use crate::vault::{
-    ActivityDecision, AgentSummary, AgentToken, Destination, EnvBinding, ExecGrant, ExecMode,
-    ExecRule, Field, ItemDraft as VaultDraft, MAX_PASSPHRASE_BYTES, MIN_PASSPHRASE_BYTES,
-    SecretValue, Vault, VaultError, VaultErrorKind, checked_env_name,
+    ActivityDecision, AgentSummary, AgentToken, Declaration, Destination, EnvBinding, Environment,
+    ExecGrant, ExecMode, ExecRule, Field, ItemDraft as VaultDraft, MAX_PASSPHRASE_BYTES,
+    MIN_PASSPHRASE_BYTES, Reversibility, RiskLevel, Scope, SecretValue, Vault, VaultError,
+    VaultErrorKind, checked_env_name,
 };
 
 const MAX_TAG_BYTES: usize = 64;
@@ -83,6 +84,55 @@ impl Ephemeral {
 impl Drop for Ephemeral {
     fn drop(&mut self) {
         self.0.clear();
+    }
+}
+
+/// Declaration form fields for one item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclarationForm {
+    pub project: String,
+    pub environment: Environment,
+    pub risk: RiskLevel,
+    pub scope: Scope,
+    pub reversibility: Reversibility,
+    /// The item has a stored declaration.
+    pub stored: bool,
+}
+
+impl Default for DeclarationForm {
+    /// Conservative defaults. The owner changes them on purpose.
+    fn default() -> Self {
+        Self {
+            project: String::new(),
+            environment: Environment::Production,
+            risk: RiskLevel::High,
+            scope: Scope::Admin,
+            reversibility: Reversibility::Irreversible,
+            stored: false,
+        }
+    }
+}
+
+impl DeclarationForm {
+    pub fn from_declaration(declaration: Option<Declaration>) -> Self {
+        declaration.map_or_else(Self::default, |d| Self {
+            project: d.project,
+            environment: d.environment,
+            risk: d.risk,
+            scope: d.scope,
+            reversibility: d.reversibility,
+            stored: true,
+        })
+    }
+
+    pub fn to_declaration(&self) -> Declaration {
+        Declaration {
+            project: self.project.trim().to_owned(),
+            environment: self.environment,
+            risk: self.risk,
+            scope: self.scope,
+            reversibility: self.reversibility,
+        }
     }
 }
 
@@ -173,6 +223,8 @@ pub struct OwnerUiState {
     pub selected_agent: Option<u64>,
     pub env_name_input: String,
     pub env_field_input: String,
+    /// Declaration form of the selected item (ADR 0008).
+    pub declaration_form: DeclarationForm,
     /// Project directory text for each (agent, item) pair in the Agents view.
     pub exec_dir_inputs: BTreeMap<(u64, u64), String>,
     /// Rule editor text for each (agent, item) pair.
@@ -612,6 +664,20 @@ impl OwnerSession {
         }
         self.unlocked()?
             .set_exec_grant(agent_id, item_id, &canonical.display().to_string(), mode)
+            .map_err(map_err)
+    }
+
+    pub fn declaration(&self, item_id: u64) -> ModelResult<Option<Declaration>> {
+        self.unlocked()?.declaration(item_id).map_err(map_err)
+    }
+
+    /// Store the owner declaration of an item (ADR 0008).
+    pub fn set_declaration(&mut self, item_id: u64, form: &DeclarationForm) -> ModelResult<()> {
+        if form.project.trim().is_empty() {
+            return Err(fail("invalid_input", "Type the project name."));
+        }
+        self.unlocked()?
+            .set_declaration(item_id, &form.to_declaration())
             .map_err(map_err)
     }
 

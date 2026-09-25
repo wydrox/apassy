@@ -101,6 +101,25 @@ pub(super) const SCHEMA_V4_COLUMNS: [&str; 2] = [
     "SELECT agent_id, item_id, at FROM run_log LIMIT 0",
 ];
 
+/// Table added in schema version 5 (ADR 0008): owner declarations for each item.
+pub(super) const SCHEMA_V5_SQL: &str = "
+CREATE TABLE declaration (
+    item_id INTEGER PRIMARY KEY,
+    project TEXT NOT NULL,
+    environment TEXT NOT NULL,
+    risk TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    reversibility TEXT NOT NULL
+);
+UPDATE vault_meta SET schema_version = 5 WHERE id = 1;
+PRAGMA user_version = 5;
+";
+
+pub(super) const SCHEMA_V5_COLUMNS: [&str; 1] =
+    ["SELECT item_id, project, environment, risk, scope, reversibility FROM declaration LIMIT 0"];
+
+pub const MAX_PROJECT_BYTES: usize = 64;
+
 pub const MAX_RULE_ENTRIES: usize = 32;
 pub const MAX_RULE_ENTRY_BYTES: usize = 128;
 pub const MAX_INSTRUCTION_BYTES: usize = 1000;
@@ -208,6 +227,62 @@ impl ExecMode {
             "allow" => Ok(Self::Bouncer),
             _ => Err(err(VaultErrorKind::Storage)),
         }
+    }
+}
+
+macro_rules! declaration_enum {
+    ($(#[$meta:meta])* $name:ident { $($variant:ident => $text:literal),+ $(,)? }) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+        pub enum $name { $($variant),+ }
+
+        impl $name {
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+
+            pub fn as_str(self) -> &'static str {
+                match self { $(Self::$variant => $text),+ }
+            }
+
+            pub fn parse(text: &str) -> VaultResult<Self> {
+                match text { $($text => Ok(Self::$variant),)+ _ => Err(err(VaultErrorKind::InvalidInput)) }
+            }
+        }
+    };
+}
+
+declaration_enum!(
+    /// Where the credential acts.
+    Environment { Local => "local", Development => "development", Staging => "staging", Production => "production" }
+);
+declaration_enum!(
+    /// How much harm a misuse can do, in the owner's view.
+    RiskLevel { Low => "low", Medium => "medium", High => "high" }
+);
+declaration_enum!(
+    /// What the credential permits at the provider.
+    Scope { ReadOnly => "read-only", ReadWrite => "read-write", Admin => "admin" }
+);
+declaration_enum!(
+    /// Whether an action with the credential can be undone.
+    Reversibility { Reversible => "reversible", Partial => "partial", Irreversible => "irreversible" }
+);
+
+/// Owner declaration for one item (ADR 0008). The bouncer uses it for each decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Declaration {
+    pub project: String,
+    pub environment: Environment,
+    pub risk: RiskLevel,
+    pub scope: Scope,
+    pub reversibility: Reversibility,
+}
+
+impl Declaration {
+    /// Production, high risk, or irreversible: a run must not change state without the owner.
+    pub fn is_sensitive(&self) -> bool {
+        self.environment == Environment::Production
+            || self.risk == RiskLevel::High
+            || self.reversibility == Reversibility::Irreversible
     }
 }
 
@@ -741,6 +816,66 @@ impl Vault {
         Ok(grants)
     }
 
+    /// Set or replace the declaration of an item.
+    pub fn set_declaration(&mut self, item_id: u64, declaration: &Declaration) -> VaultResult<()> {
+        let item = to_sql_id(item_id)?;
+        let project = checked_text(declaration.project.trim(), MAX_PROJECT_BYTES)?;
+        let conn = self.conn_mut()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        require_item(&tx, item)?;
+        tx.execute(
+            "INSERT INTO declaration (item_id, project, environment, risk, scope, reversibility)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(item_id) DO UPDATE SET project = excluded.project,
+                 environment = excluded.environment, risk = excluded.risk,
+                 scope = excluded.scope, reversibility = excluded.reversibility",
+            (
+                item,
+                project,
+                declaration.environment.as_str(),
+                declaration.risk.as_str(),
+                declaration.scope.as_str(),
+                declaration.reversibility.as_str(),
+            ),
+        )
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+        tx.commit().map_err(|_| err(VaultErrorKind::Storage))
+    }
+
+    pub fn declaration(&self, item_id: u64) -> VaultResult<Option<Declaration>> {
+        let item = to_sql_id(item_id)?;
+        let row = self
+            .conn_ref()?
+            .query_row(
+                "SELECT project, environment, risk, scope, reversibility FROM declaration WHERE item_id = ?1",
+                [item],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let Some((project, environment, risk, scope, reversibility)) = row else {
+            return Ok(None);
+        };
+        let storage = |_| err(VaultErrorKind::Storage);
+        Ok(Some(Declaration {
+            project,
+            environment: Environment::parse(&environment).map_err(storage)?,
+            risk: RiskLevel::parse(&risk).map_err(storage)?,
+            scope: Scope::parse(&scope).map_err(storage)?,
+            reversibility: Reversibility::parse(&reversibility).map_err(storage)?,
+        }))
+    }
+
     /// Replace the rule of a process grant. The grant must exist.
     pub fn set_exec_rule(
         &mut self,
@@ -900,6 +1035,8 @@ pub(super) fn delete_item_links(tx: &rusqlite::Transaction<'_>, item_id: i64) ->
     tx.execute("DELETE FROM env_binding WHERE item_id = ?1", [item_id])
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.execute("DELETE FROM exec_grant WHERE item_id = ?1", [item_id])
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute("DELETE FROM declaration WHERE item_id = ?1", [item_id])
         .map_err(|_| err(VaultErrorKind::Storage))?;
     Ok(())
 }

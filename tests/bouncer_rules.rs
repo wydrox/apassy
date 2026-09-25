@@ -15,7 +15,10 @@ use apassy::broker::bouncer::{BouncerClient, BouncerRequest};
 use apassy::broker::http::TlsClient;
 use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault};
 use apassy::contracts::CredentialKind;
-use apassy::vault::{ExecMode, ExecRule, Field, ItemDraft, SecretValue, Vault};
+use apassy::vault::{
+    Declaration, Environment, ExecMode, ExecRule, Field, ItemDraft, Reversibility, RiskLevel,
+    Scope, SecretValue, Vault,
+};
 use tempfile::TempDir;
 
 const PASS: &str = "bouncer-rules-pass-ok";
@@ -30,6 +33,16 @@ struct Fixture {
     agent_id: u64,
     token: String,
     broker: BrokerHandle,
+}
+
+fn staging_declaration() -> Declaration {
+    Declaration {
+        project: "demo".to_owned(),
+        environment: Environment::Staging,
+        risk: RiskLevel::Medium,
+        scope: Scope::ReadWrite,
+        reversibility: Reversibility::Reversible,
+    }
 }
 
 fn fixture(bouncer: Option<&str>, rule: ExecRule) -> Fixture {
@@ -65,6 +78,9 @@ fn fixture(bouncer: Option<&str>, rule: ExecRule) -> Fixture {
         )
         .expect("grant");
     vault.set_exec_rule(agent.id, item.id, rule).expect("rule");
+    vault
+        .set_declaration(item.id, &staging_declaration())
+        .expect("declaration");
     let shared: SharedVault = Arc::new(Mutex::new(Some(vault)));
     let mut options = BrokerOptions::with_tls(TlsClient::platform().expect("TLS"));
     options.approval_timeout = Duration::from_millis(400);
@@ -106,6 +122,7 @@ fn run(fx: &Fixture, command: &[&str], purpose: &str) -> WireResponse {
             cwd: fx.project.display().to_string(),
             purpose: purpose.to_owned(),
             path: Some("/usr/bin:/bin".to_owned()),
+            user_request: Some("Run the project checks.".to_owned()),
         },
     )
     .expect("answer")
@@ -138,34 +155,91 @@ fn clean_request_runs_without_a_prompt() {
     assert_eq!(result["decided_by"], "Bouncer allowed");
     assert_eq!(result["stdout"], "done\n");
     assert!(fx.broker.approvals().pending().is_empty());
-    assert!(last_reason(&fx).contains("Bouncer: no high risk"));
+    assert!(last_reason(&fx).contains("Model allowed at"));
 
     // The bouncer state has the command and the relative directory, never the secret
     // value or the absolute project path.
     let bodies = bouncer.bodies.lock().expect("bodies");
     assert_eq!(bodies.len(), 1);
     assert!(bodies[0].contains("echo done"));
-    assert!(bodies[0].contains("DEMO_KEY"));
+    assert!(
+        bodies[0].contains("User request: \\\"Run the project checks.\\\""),
+        "{}",
+        bodies[0]
+    );
     assert!(!bodies[0].contains(SECRET));
     assert!(!bodies[0].contains(&fx.project.display().to_string()));
     drop(bodies);
 
-    // A known safe command runs without a model call.
+    // A known safe command also goes to the model (ADR 0008).
     let safe = run(&fx, &["echo", "hi"], "Print.");
     assert!(safe.ok, "{safe:?}");
-    assert!(last_reason(&fx).contains("Known safe development command"));
-    assert_eq!(bouncer.bodies.lock().expect("bodies").len(), 1);
+    assert!(last_reason(&fx).contains("known safe command"));
+    assert_eq!(bouncer.bodies.lock().expect("bodies").len(), 2);
+}
+
+#[test]
+fn low_confidence_and_missing_context_wait_for_the_owner() {
+    // A task match below 80% certainty asks the owner.
+    let unsure = common::fake_bouncer(&[("task_match", 0.7), ("writes", 0.5)]);
+    let fx = fixture(Some(&unsure.url), ExecRule::default());
+    assert_eq!(
+        code(&run(&fx, &["sh", "-c", "node scripts/report.js"], "Test.")),
+        "approval_timeout"
+    );
+    assert!(last_reason(&fx).contains("Below 80% certainty: task_match 70%"));
+
+    // A production declaration needs a certain read-only command.
+    let writes = common::fake_bouncer(&[("writes", 0.9)]);
+    let fx = fixture(Some(&writes.url), ExecRule::default());
+    {
+        let mut guard = fx.vault.lock().expect("vault");
+        let vault = guard.as_mut().expect("open");
+        let mut declaration = staging_declaration();
+        declaration.environment = Environment::Production;
+        vault
+            .set_declaration(fx.item_id, &declaration)
+            .expect("declaration");
+    }
+    assert_eq!(
+        code(&run(&fx, &["sh", "-c", "node scripts/report.js"], "Test.")),
+        "approval_timeout"
+    );
+    assert!(last_reason(&fx).contains("writes not"));
+
+    // No user request asks the owner.
+    let clean = common::fake_bouncer(&[]);
+    let fx = fixture(Some(&clean.url), ExecRule::default());
+    let response = client::send(
+        &fx.socket,
+        &fx.token,
+        Action::Run {
+            items: vec![fx.item_id],
+            command: vec!["echo".to_owned(), "x".to_owned()],
+            cwd: fx.project.display().to_string(),
+            purpose: "Test.".to_owned(),
+            path: None,
+            user_request: None,
+        },
+    )
+    .expect("answer");
+    assert_eq!(code(&response), "approval_timeout");
+    assert!(last_reason(&fx).contains("did not send the user request"));
 }
 
 #[test]
 fn risky_or_unavailable_bouncer_waits_for_the_owner() {
-    let risky = common::fake_bouncer(&["destructive"]);
+    let risky = common::fake_bouncer(&[("destroy", 0.99)]);
     let fx = fixture(Some(&risky.url), echo_only());
     assert_eq!(
         code(&run(&fx, &["sh", "-c", "node scripts/report.js"], "Test.")),
         "approval_timeout"
     );
-    assert!(last_reason(&fx).contains("high risk destructive"));
+    assert!(
+        last_reason(&fx).contains("destroy 99%"),
+        "{}",
+        last_reason(&fx)
+    );
 
     // Port 9 has no service. Unavailable is never an allowance.
     let fx = fixture(Some("http://127.0.0.1:9"), echo_only());
@@ -181,10 +255,60 @@ fn risky_or_unavailable_bouncer_waits_for_the_owner() {
         "approval_timeout"
     );
 
-    // A clean model result is not enough without a command allowlist.
+    // An item without a declaration asks the owner.
     let clean = common::fake_bouncer(&[]);
     let fx = fixture(Some(&clean.url), ExecRule::default());
-    assert_eq!(code(&run(&fx, &["echo", "x"], "Test.")), "approval_timeout");
+    {
+        let mut guard = fx.vault.lock().expect("vault");
+        let vault = guard.as_mut().expect("open");
+        vault
+            .set_env_binding(fx.item_id, "DEMO_KEY", "token")
+            .expect("binding");
+    }
+    let other = {
+        let mut guard = fx.vault.lock().expect("vault");
+        let vault = guard.as_mut().expect("open");
+        let item = vault
+            .add(ItemDraft {
+                title: "Second".to_owned(),
+                kind: CredentialKind::ApiKey,
+                notes: String::new(),
+                tags: Vec::new(),
+                fields: vec![Field {
+                    name: "token".to_owned(),
+                    value: SecretValue::new("FAKE-second-0001".to_owned()),
+                    secret: true,
+                }],
+            })
+            .expect("add");
+        vault
+            .set_env_binding(item.id, "SECOND_KEY", "token")
+            .expect("binding");
+        vault
+            .set_exec_grant(
+                fx.agent_id,
+                item.id,
+                &fx.project.display().to_string(),
+                ExecMode::Bouncer,
+            )
+            .expect("grant");
+        item.id
+    };
+    let response = client::send(
+        &fx.socket,
+        &fx.token,
+        Action::Run {
+            items: vec![other],
+            command: vec!["echo".to_owned(), "x".to_owned()],
+            cwd: fx.project.display().to_string(),
+            purpose: "Test.".to_owned(),
+            path: None,
+            user_request: Some("Print x.".to_owned()),
+        },
+    )
+    .expect("answer");
+    assert_eq!(code(&response), "approval_timeout");
+    assert!(last_reason(&fx).contains("no declaration"));
 }
 
 #[test]
@@ -244,7 +368,7 @@ fn hard_rules_deny_before_the_bouncer() {
 
     let bodies = bouncer.bodies.lock().expect("bodies");
     assert!(bodies[0].contains("Owner rule: Only staging."));
-    assert!(bodies[0].contains("rule_violation"));
+    assert!(bodies[0].contains("rule_break"));
 }
 
 #[test]
@@ -303,7 +427,7 @@ fn live_laya_broker_path() {
         .expect("url")
         .with_timeout(Duration::from_secs(30));
     let _ = warm.evaluate(&BouncerRequest {
-        agent: "warm".to_owned(),
+        user_request: "warm".to_owned(),
         command: "echo".to_owned(),
         relative_dir: ".".to_owned(),
         purpose: "warm".to_owned(),

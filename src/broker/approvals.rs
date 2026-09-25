@@ -19,6 +19,8 @@ pub struct PendingRun {
     pub purpose: String,
     /// Bouncer result and heuristic flags. It has no secret value.
     pub risk: String,
+    /// The user request that the agent sent. Empty when the agent sent none.
+    pub user_request: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +155,7 @@ mod tests {
             env_names: vec!["X".to_owned()],
             purpose: "test".to_owned(),
             risk: String::new(),
+            user_request: String::new(),
         }
     }
 
