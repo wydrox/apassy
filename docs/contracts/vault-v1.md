@@ -116,7 +116,7 @@ Repeated unlock must not preserve a connection after a failed passphrase attempt
 Every constructor, lock, and unlock attempt requests a fresh 32-byte epoch from `getrandom::fill`.
 Unlock closes the previous connection and changes the epoch before it checks the passphrase. A refused or wrong passphrase ends the previous epoch.
 If entropy is unavailable, the operation fails with the connection closed. A new epoch cannot be guaranteed on that error.
-Epochs are invalidation data, not authentication tokens. No agent sessions or approvals exist in this backend yet.
+Epochs are invalidation data, not authentication tokens. The broker binds each run and each owner approval to the epoch of its first check. See section 4a of the [broker contract](broker-v0.md).
 
 Create and backup use exclusive file creation with Unix mode 0600. Refuse symlink targets.
 Hold a nonblocking `std::fs::File::try_lock` on a persistent adjacent `<canonical-db-path>.lock` file for the vault lifetime, including locked state.

@@ -306,11 +306,9 @@ fn draw_lock_controls(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 .is_some()
             {
                 app.pending_delete = false;
-                // A locked vault refuses agent runs, so waiting runs end now.
-                if let crate::desktop::BrokerState::Running(handle) = &app.broker {
-                    handle.approvals().deny_all();
-                }
             }
+            // A locked vault refuses agent runs, so waiting runs end now.
+            app.end_waiting_runs();
         }
     });
 }
@@ -623,6 +621,7 @@ fn draw_vault_file_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 {
                     app.selected_item_id = None;
                     app.pending_delete = false;
+                    app.end_waiting_runs();
                 }
             }
             if ui.button("Open vault file").clicked() {
@@ -634,6 +633,7 @@ fn draw_vault_file_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 {
                     app.selected_item_id = None;
                     app.pending_delete = false;
+                    app.end_waiting_runs();
                 }
             }
             let can_unlock = app.owner_ui.session.has_file() && app.owner_ui.session.is_locked();
@@ -699,6 +699,8 @@ fn draw_backup_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 {
                     app.pending_delete = false;
                 }
+                // Backup locks the vault, also when it fails.
+                app.end_waiting_runs();
             }
             if ui.button("Restore vault").clicked() {
                 let source = app.owner_ui.restore_source.clone();
@@ -716,6 +718,7 @@ fn draw_backup_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 {
                     app.selected_item_id = None;
                     app.pending_delete = false;
+                    app.end_waiting_runs();
                 }
             }
         });

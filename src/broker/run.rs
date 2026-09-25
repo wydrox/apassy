@@ -14,6 +14,8 @@
 //! 8. A grant in "ask" mode, a high risk, or an unavailable bouncer needs the owner.
 //!    A clean request with only "bouncer" grants runs without a prompt.
 //! 9. After a decision, the broker checks the vault, the agent, and the rules again.
+//!    The vault epoch must be the same as in step 1. A lock, an unlock, or a restore
+//!    in between makes the decision invalid (goal item V3).
 //! 10. The broker reads the secrets, releases the vault lock, and starts the process.
 //!
 //! Each refusal after step 2 and each result is stored in the activity log.
@@ -36,6 +38,10 @@ const MAX_ARGS: usize = 64;
 const MAX_ARG_BYTES: usize = 4096;
 const MAX_PURPOSE_BYTES: usize = 500;
 const MAX_PATH_BYTES: usize = 4096;
+
+const INVALIDATED: &str = "The vault was locked, or Apassy stopped, before the run started. The approval is not valid. Send the request again after the owner unlocks the vault.";
+const RELOCKED: &str =
+    "The vault was locked while Apassy checked this request. Send the request again.";
 
 /// A run request from the wire. Borrowed from the parsed request.
 #[derive(Debug)]
@@ -101,6 +107,8 @@ impl RunRequest<'_> {
 
 struct Checked {
     agent: AgentSummary,
+    /// Vault epoch of the first check. Every lock and unlock changes it.
+    epoch: [u8; 32],
     cwd: PathBuf,
     /// Working directory relative to the project directory of the first item.
     relative_dir: String,
@@ -178,6 +186,12 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
     };
 
     if needs_approval {
+        // The wait ends when the vault session of the first check ends.
+        let same_session = || {
+            lock(&ctx.vault)
+                .as_ref()
+                .is_some_and(|vault| !vault.is_locked() && vault.epoch() == checked.epoch)
+        };
         let outcome = ctx.approvals.wait_for(
             PendingRun {
                 id: 0,
@@ -190,6 +204,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                 user_request: user_request.to_owned(),
             },
             ctx.approval_timeout,
+            same_session,
         );
         let refusal = match outcome {
             ApprovalOutcome::Approved => None,
@@ -203,6 +218,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                     ctx.approval_timeout.as_secs_f32()
                 ),
             )),
+            ApprovalOutcome::Invalidated => Some(("approval_invalidated", INVALIDATED.to_owned())),
         };
         if let Some((code, reason)) = refusal {
             let reason = format!("{reason} {risk_note}.");
@@ -222,12 +238,34 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
     let secrets = {
         let mut guard = lock(&ctx.vault);
         let Some(vault) = guard.as_mut().filter(|vault| !vault.is_locked()) else {
-            return locked_response();
+            return if needs_approval {
+                WireResponse::failure("approval_invalidated", INVALIDATED)
+            } else {
+                locked_response()
+            };
         };
         let agent = match authenticate(vault, token, &label) {
             Ok(agent) => agent,
             Err(response) => return response,
         };
+        // A decision belongs to one vault session. After a lock and an unlock, the
+        // agent must send the request again.
+        if vault.epoch() != checked.epoch {
+            let (code, reason) = if needs_approval {
+                ("approval_invalidated", INVALIDATED)
+            } else {
+                ("vault_locked", RELOCKED)
+            };
+            record(
+                vault,
+                &agent,
+                request,
+                &label,
+                ActivityDecision::Deny,
+                reason,
+            );
+            return WireResponse::failure(code, reason);
+        }
         if let Err((code, reason)) = check(vault, &agent, request) {
             record(
                 vault,
@@ -433,6 +471,7 @@ fn check(
     }
     Ok(Checked {
         agent: agent.clone(),
+        epoch: vault.epoch(),
         cwd,
         relative_dir: relative_dir.unwrap_or_else(|| ".".to_owned()),
         env_names,

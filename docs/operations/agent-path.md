@@ -121,7 +121,7 @@ Setup in the desktop app:
 
 The agent must send `user_request`: the user's own words that led to the command. Each item needs a declaration in Item details (ADR 0008).
 
-When an agent calls `apassy_run_with_secrets` in "ask" mode, a card shows on every view. The card shows the agent, the purpose, the command, the directory, and the variable names. Click "Approve once" or "Deny". The request waits a maximum of 120 seconds. A lock of the vault denies every waiting run.
+When an agent calls `apassy_run_with_secrets` in "ask" mode, a card shows on every view. The card shows the agent, the purpose, the command, the directory, and the variable names. Click "Approve once" or "Deny". The request waits a maximum of 120 seconds. A lock, a backup, a restore, or a stop of the app ends every waiting run with `approval_invalidated`. An approval that the broker did not use before a lock is not valid after the unlock. The agent must send the request again.
 
 For Claude Code, set `MCP_TOOL_TIMEOUT` to a value higher than 120000, because a run can wait for your approval.
 
