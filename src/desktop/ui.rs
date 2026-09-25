@@ -125,7 +125,7 @@ fn banner_status(app: &DesktopApp) -> String {
 fn banner_status(app: &DesktopApp) -> String {
     let status = app.model.foundation_status();
     format!(
-        "{VAULT_STORAGE_SENTENCE} Agents, grants, and agent activity are in the vault. Rules and demo approvals stay fixtures. The model is {model}. Isolation is {isolation}.",
+        "{VAULT_STORAGE_SENTENCE} Rules are fixtures. The model is {model}. Isolation is {isolation}.",
         model = status.model,
         isolation = status.isolation,
     )
@@ -147,8 +147,7 @@ fn sidebar_storage(_app: &DesktopApp) -> (String, &'static str) {
 }
 
 #[cfg(feature = "vault")]
-const VAULT_STORAGE_SENTENCE: &str =
-    "Vault items are in an experimental encrypted file on disk. Do not store real credentials.";
+const VAULT_STORAGE_SENTENCE: &str = "Items, agents, and agent activity are in an experimental encrypted file. Do not store real credentials.";
 
 fn draw_sidebar(app: &mut DesktopApp, ui: &mut egui::Ui) {
     ui.label(

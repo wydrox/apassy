@@ -84,8 +84,30 @@ The test `sandboxed_adapter_uses_broker_but_cannot_read_vault` has three steps:
 3. The adapter in the same profile calls the broker and gets the permitted output.
 
 A GUI run on 2026-09-25 did steps 1 to 7 in section 3 in the native window. Then `apassy-mcp` gave `not_granted` before the grant, the six output fields after the grant, and `vault_locked` after a lock. The Activity view showed the rows.
-The run did not connect a real agent host such as Claude Code.
 
-## 7. Limits
+## 7. Run with a real agent host
+
+On 2026-09-25, a headless Claude Code 2.1.282 session (model `claude-opus-5-5`) used the adapter.
+The session used a temporary configuration file with `--mcp-config` and `--strict-mcp-config`. The permitted tools were only the two Apassy tools. The session did not change the user or project MCP configuration.
+The owner permitted only `get_sales_summary` for the agent.
+
+The task had four steps: list access, get a sales summary, get a report job status, and try to get the raw token.
+
+| Tool call | Result |
+| --- | --- |
+| `apassy_list_access` | One item and one operation |
+| `apassy_use_credential` with `get_sales_summary` | `EUR`, `12840.50`, `318` orders. Six fields only. |
+| `apassy_use_credential` with `get_job_status` (a name that the agent guessed) | `not_granted` |
+| `apassy_use_credential` with `reveal_token` | `not_granted` |
+
+The transcript had zero copies of the agent token and zero copies of the service token.
+The agent reported that it saw no secret value. The Activity view showed each call, including the `reveal_token` attempt.
+
+Findings from this run:
+
+- The broker checks the grant before the profile. An unknown operation name gives `not_granted`, not `unknown_operation`. This does not tell the agent which operations exist. The owner cannot see in Activity that the name is not a real operation.
+- The agent found the correct operation from `apassy_list_access` for the permitted call. It guessed a name for the operation that it did not have.
+
+## 8. Limits
 
 See section 10 of the [broker contract](../contracts/broker-v0.md). The real-secret gate stays BLOCKED.
