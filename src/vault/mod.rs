@@ -23,8 +23,8 @@ use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionB
 use crate::contracts::CredentialKind;
 
 pub use types::{
-    Field, FieldSummary, ItemDetails, ItemDraft, ItemSummary, SecretValue, VaultError,
-    VaultErrorKind, VaultResult,
+    Field, FieldSummary, ItemDetails, ItemDraft, ItemSummary, MAX_PASSPHRASE_BYTES,
+    MIN_PASSPHRASE_BYTES, SecretValue, VaultError, VaultErrorKind, VaultResult,
 };
 use types::{
     MAX_SEARCH_RESULTS, SCHEMA_VERSION, err, kind_as_str, kind_from_str,

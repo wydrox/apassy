@@ -17,6 +17,8 @@ const INK_MUTED: Color32 = Color32::from_rgb(83, 77, 68);
 const BG: Color32 = Color32::from_rgb(243, 239, 230);
 const BG_ELEV: Color32 = Color32::from_rgb(255, 253, 248);
 const LINE: Color32 = Color32::from_rgb(215, 208, 195);
+const FIELD_BG: Color32 = Color32::WHITE;
+const FIELD_LINE: Color32 = Color32::from_rgb(160, 150, 132);
 const ACCENT: Color32 = Color32::from_rgb(33, 90, 120);
 const ACCENT_INK: Color32 = Color32::from_rgb(247, 251, 255);
 const ACCENT_WEAK: Color32 = Color32::from_rgb(228, 238, 243);
@@ -39,6 +41,10 @@ pub(crate) fn apply_style(ctx: &egui::Context) {
     visuals.window_fill = BG_ELEV;
     visuals.warn_fg_color = ASK;
     visuals.error_fg_color = DENY;
+    // Text fields need a visible edge on the light cards.
+    visuals.text_edit_bg_color = Some(FIELD_BG);
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, FIELD_LINE);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT);
     ctx.set_visuals_of(Theme::Light, visuals);
 }
 
@@ -100,23 +106,49 @@ fn draw_banner(app: &DesktopApp, ui: &mut egui::Ui) {
         RichText::new("Demo data only").size(12.0).strong(),
     );
     ui.colored_label(BANNER_INK, RichText::new(DEMO_BANNER).size(16.0).strong());
-    let status = app.model.foundation_status();
-    ui.colored_label(
-        BANNER_INK,
-        format!(
-            "Storage is {storage}. The model is {model}. Isolation is {isolation}. Encryption is {encryption}.",
-            storage = status.storage,
-            model = status.model,
-            isolation = status.isolation,
-            encryption = status.encryption,
-        ),
-    );
-    #[cfg(feature = "vault")]
-    ui.colored_label(
-        BANNER_INK,
-        "Vault and item views use an experimental encrypted file. Rules, agents, and activity stay demo fixtures.",
-    );
+    ui.colored_label(BANNER_INK, banner_status(app));
 }
+
+#[cfg(not(feature = "vault"))]
+fn banner_status(app: &DesktopApp) -> String {
+    let status = app.model.foundation_status();
+    format!(
+        "Storage is {storage}. The model is {model}. Isolation is {isolation}. Encryption is {encryption}.",
+        storage = status.storage,
+        model = status.model,
+        isolation = status.isolation,
+        encryption = status.encryption,
+    )
+}
+
+#[cfg(feature = "vault")]
+fn banner_status(app: &DesktopApp) -> String {
+    let status = app.model.foundation_status();
+    format!(
+        "{VAULT_STORAGE_SENTENCE} Rules, agents, and activity stay demo fixtures. The model is {model}. Isolation is {isolation}.",
+        model = status.model,
+        isolation = status.isolation,
+    )
+}
+
+/// Storage and persistence lines for the sidebar.
+#[cfg(not(feature = "vault"))]
+fn sidebar_storage(app: &DesktopApp) -> (String, &'static str) {
+    let status = app.model.foundation_status();
+    (format!("Storage: {}", status.storage), status.persistence)
+}
+
+#[cfg(feature = "vault")]
+fn sidebar_storage(_app: &DesktopApp) -> (String, &'static str) {
+    (
+        "Storage: encrypted vault file".to_owned(),
+        "Rules, agents, and activity: in memory only.",
+    )
+}
+
+#[cfg(feature = "vault")]
+const VAULT_STORAGE_SENTENCE: &str =
+    "Vault items are in an experimental encrypted file on disk. Do not store real credentials.";
 
 fn draw_sidebar(app: &mut DesktopApp, ui: &mut egui::Ui) {
     ui.label(
@@ -164,11 +196,8 @@ fn draw_sidebar(app: &mut DesktopApp, ui: &mut egui::Ui) {
             .color(SIDEBAR_INK)
             .strong(),
     );
-    ui.label(
-        RichText::new(format!("Storage: {}", status.storage))
-            .size(13.0)
-            .color(SIDEBAR_MUTED),
-    );
+    let (storage_line, persistence_line) = sidebar_storage(app);
+    ui.label(RichText::new(storage_line).size(13.0).color(SIDEBAR_MUTED));
     ui.label(
         RichText::new(format!("Model: {}", status.model))
             .size(13.0)
@@ -180,7 +209,7 @@ fn draw_sidebar(app: &mut DesktopApp, ui: &mut egui::Ui) {
             .color(SIDEBAR_MUTED),
     );
     ui.label(
-        RichText::new(status.persistence)
+        RichText::new(persistence_line)
             .size(13.0)
             .color(SIDEBAR_MUTED),
     );
@@ -300,7 +329,7 @@ fn draw_vault(app: &mut DesktopApp, ui: &mut egui::Ui) {
         let edit = ui.add(
             TextEdit::singleline(&mut app.search)
                 .desired_width(280.0)
-                .hint_text("Name, project, or service"),
+                .hint_text("Name, project, service, or notes"),
         );
         edit.labelled_by(label.id);
         if ui.button("Search").clicked() {
@@ -520,10 +549,6 @@ fn draw_item(app: &mut DesktopApp, ui: &mut egui::Ui) {
 
 #[cfg(feature = "vault")]
 fn draw_owner_vault(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    use std::path::Path;
-
-    use super::owner_store::Ephemeral;
-
     heading(ui, "Vault");
     ui.label(
         RichText::new(
@@ -532,6 +557,34 @@ fn draw_owner_vault(app: &mut DesktopApp, ui: &mut egui::Ui) {
         .color(INK_MUTED),
     );
     ui.add_space(8.0);
+
+    if app.owner_ui.session.is_locked() {
+        draw_vault_file_card(app, ui);
+        ui.add_space(8.0);
+        draw_backup_card(app, ui);
+    } else {
+        // When the vault is unlocked, the items come first. The file controls fold below them.
+        draw_owner_items(app, ui);
+        ui.add_space(8.0);
+        egui::CollapsingHeader::new(RichText::new("Vault file and backup").strong().color(INK))
+            .id_salt("vault-file-and-backup")
+            .default_open(false)
+            .show(ui, |ui| {
+                draw_vault_file_card(app, ui);
+                ui.add_space(8.0);
+                draw_backup_card(app, ui);
+            });
+        return;
+    }
+
+    draw_owner_items(app, ui);
+}
+
+#[cfg(feature = "vault")]
+fn draw_vault_file_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    use std::path::Path;
+
+    use super::owner_store::Ephemeral;
 
     card_frame().show(ui, |ui| {
         ui.label(RichText::new("Vault file").size(16.0).strong().color(INK));
@@ -592,8 +645,14 @@ fn draw_owner_vault(app: &mut DesktopApp, ui: &mut egui::Ui) {
             });
         });
     });
+}
 
-    ui.add_space(8.0);
+#[cfg(feature = "vault")]
+fn draw_backup_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    use std::path::Path;
+
+    use super::owner_store::Ephemeral;
+
     card_frame().show(ui, |ui| {
         ui.label(
             RichText::new("Backup and restore")
@@ -656,14 +715,17 @@ fn draw_owner_vault(app: &mut DesktopApp, ui: &mut egui::Ui) {
             }
         });
     });
+}
 
+#[cfg(feature = "vault")]
+fn draw_owner_items(app: &mut DesktopApp, ui: &mut egui::Ui) {
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         let label = ui.label("Search items");
         let edit = ui.add(
             TextEdit::singleline(&mut app.search)
                 .desired_width(280.0)
-                .hint_text("Name, project, or service"),
+                .hint_text("Name, project, service, or notes"),
         );
         edit.labelled_by(label.id);
         if ui.button("Search").clicked() {
@@ -886,14 +948,23 @@ fn draw_owner_item(app: &mut DesktopApp, ui: &mut egui::Ui) {
             let draft = app.edit_form.clone();
             let secrets = app.owner_ui.edit_secrets.clone();
             let revision = app.owner_ui.edit_revision;
-            match app.owner_ui.session.update(id, revision, &draft, &secrets) {
-                Ok(summary) => {
-                    app.owner_ui.edit_secrets.clear();
-                    app.owner_ui.edit_revision = summary.revision;
-                    app.pending_delete = false;
-                    app.set_ok("The item was updated.");
+            let unchanged = app
+                .owner_ui
+                .session
+                .is_unchanged(id, &draft, &secrets)
+                .unwrap_or(false);
+            if unchanged {
+                app.set_ok("There are no changes to save.");
+            } else {
+                match app.owner_ui.session.update(id, revision, &draft, &secrets) {
+                    Ok(summary) => {
+                        app.owner_ui.edit_secrets.clear();
+                        app.owner_ui.edit_revision = summary.revision;
+                        app.pending_delete = false;
+                        app.set_ok("The item was updated.");
+                    }
+                    Err(err) => app.set_err(err.message),
                 }
-                Err(err) => app.set_err(err.message),
             }
         }
     });
@@ -1608,10 +1679,22 @@ mod tests {
             "missing demo warning in {heading}: {text}"
         );
         assert!(text.contains(heading), "missing heading {heading}: {text}");
+        #[cfg(not(feature = "vault"))]
         assert!(
             text.contains("Storage is not connected"),
             "storage must stay not connected: {text}"
         );
+        #[cfg(feature = "vault")]
+        {
+            assert!(
+                text.contains(VAULT_STORAGE_SENTENCE),
+                "the vault build must name the encrypted file: {text}"
+            );
+            assert!(
+                !text.contains("Encryption is not present"),
+                "the vault build must not deny encryption: {text}"
+            );
+        }
         assert!(
             text.contains("The model is unverified"),
             "the model must stay unverified: {text}"

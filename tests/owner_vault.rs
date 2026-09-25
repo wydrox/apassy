@@ -270,3 +270,59 @@ fn missing_file_keeps_the_current_session() {
     assert_eq!(session.location(), Some(path.as_path()));
     assert!(session.is_locked());
 }
+
+#[test]
+fn owner_messages_name_the_problem() {
+    let dir = TempDir::new().expect("temp dir");
+    let mut blank = OwnerSession::new();
+    let err = blank
+        .create_file(&dir.path().join("short.db"), "short")
+        .expect_err("short create passphrase");
+    assert_eq!(err.code, "invalid_input");
+    assert!(err.message.contains("minimum of 12"), "{}", err.message);
+    assert!(!dir.path().join("short.db").exists());
+
+    let (mut session, path) = session_at(&dir, "messages.db");
+    let err = session.unlock("").expect_err("empty passphrase");
+    assert_eq!(err.message, "Type the passphrase.");
+    let err = session.unlock(WRONG).expect_err("wrong passphrase");
+    assert_eq!(err.code, "wrong_key");
+    let err = OwnerSession::new()
+        .create_file(&path, PASS)
+        .expect_err("existing target");
+    assert_eq!(err.code, "already_exists");
+    for message in [&err.message, &session.unlock(WRONG).unwrap_err().message] {
+        assert!(
+            message.starts_with(char::is_uppercase) && message.ends_with('.'),
+            "owner text must be a full sentence: {message}"
+        );
+    }
+}
+
+#[test]
+fn unchanged_form_is_detected_before_a_save() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut session, _) = session_at(&dir, "same.db");
+    unlock(&mut session);
+    let draft = api_draft("Same", "Project Same");
+    let created = session.add(&draft, &token_form(TOKEN)).expect("add");
+    assert!(
+        session
+            .is_unchanged(created.id, &draft, &SecretForm::default())
+            .expect("compare")
+    );
+    assert!(
+        !session
+            .is_unchanged(created.id, &draft, &token_form("owner-secret-new"))
+            .expect("compare secret")
+    );
+    assert!(
+        !session
+            .is_unchanged(
+                created.id,
+                &api_draft("Other", "Project Same"),
+                &SecretForm::default()
+            )
+            .expect("compare name")
+    );
+}

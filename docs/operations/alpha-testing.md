@@ -61,16 +61,20 @@ The test directory was `/tmp/apassy-alpha/`. The API key and Login categories we
 
 ## Findings
 
-| ID | Severity | Finding |
-| --- | --- | --- |
-| F1 | Medium | If the passphrase is too short, the message is "the input is invalid". The message does not give the minimum length. |
-| F2 | Medium | In `desktop,vault` mode, the banner and the sidebar show incorrect status. They show "Storage is not connected", "Encryption is not present", and "in-memory only. Not durable". The vault file is encrypted and durable. |
-| F3 | Low | The text fields are almost white on a light background. It is difficult to see an empty field. |
-| F4 | Low | If you save an item with no changes, the revision number increases. |
-| F5 | Low | After you unlock the vault, the item list and the "Add item" form are below the visible area. The user must scroll to find them. |
-| F6 | Low | The warning below a revealed value was cut at the right edge in a narrow card. The card became wider after a later action. |
-| F7 | Low | Error messages start with a lowercase letter, for example "the target already exists". Other messages start with an uppercase letter. |
-| F8 | Low | The search field shows "Name, project, or service". The search also finds text in notes. |
+Status on 2026-09-25 after the fixes. A second GUI run on a new vault examined each fix.
+
+| ID | Severity | Finding | Status |
+| --- | --- | --- | --- |
+| F1 | Medium | If the passphrase was too short, the message was "the input is invalid". | FIXED. The message is now "The passphrase must have a minimum of 12 characters." |
+| F2 | Medium | In `desktop,vault` mode, the banner and the sidebar showed "Storage is not connected" and "Encryption is not present". | FIXED. The banner and the sidebar show the encrypted vault file. They also show that rules, agents, and activity stay in memory. |
+| F3 | Low | The text fields were almost white on a light background. | FIXED. Text fields have a white fill and a visible border. |
+| F4 | Low | A save with no changes increased the revision number. | FIXED. The app shows "There are no changes to save." The revision does not change. |
+| F5 | Low | After an unlock, the item list was below the visible area. | FIXED. After an unlock, the search, the item list, and "Add item" come first. The file and backup controls are in a folded section below them. |
+| F6 | Low | The warning below a revealed value seemed cut at the right edge. | NOT A DEFECT. The screenshot crop cut the text. The second run showed the full text. |
+| F7 | Low | Error messages started with a lowercase letter. | FIXED. The desktop shows a full sentence for each vault error. `VaultError` text did not change. |
+| F8 | Low | The search hint did not mention notes. | FIXED. The hint is "Name, project, service, or notes". |
+
+After the fixes, all commands in "Checks on 2026-09-25" gave exit code 0. The test count is 99. Two new tests are in `tests/owner_vault.rs`.
 
 ## Known limits
 

@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use crate::contracts::CredentialKind;
 use crate::desktop::model::{ItemDraft, MASKED_VALUE, ModelError, ModelResult};
 use crate::vault::{
-    Field, ItemDraft as VaultDraft, SecretValue, Vault, VaultError, VaultErrorKind,
+    Field, ItemDraft as VaultDraft, MAX_PASSPHRASE_BYTES, MIN_PASSPHRASE_BYTES, SecretValue, Vault,
+    VaultError, VaultErrorKind,
 };
 
 const MAX_TAG_BYTES: usize = 64;
@@ -30,6 +31,14 @@ pub struct SecretForm {
 }
 
 impl SecretForm {
+    pub fn is_blank(&self) -> bool {
+        self.token.is_empty()
+            && self.password.is_empty()
+            && self.private_key.is_empty()
+            && self.key_passphrase.is_empty()
+            && self.custom_value.is_empty()
+    }
+
     pub fn clear(&mut self) {
         self.token.clear();
         self.password.clear();
@@ -126,6 +135,7 @@ impl OwnerSession {
 
     pub fn create_file(&mut self, path: &Path, passphrase: &str) -> ModelResult<()> {
         require_path(path)?;
+        require_new_passphrase(passphrase)?;
         let vault = Vault::create(path, passphrase).map_err(map_err)?;
         self.install(vault, path.to_path_buf());
         Ok(())
@@ -148,6 +158,7 @@ impl OwnerSession {
 
     pub fn unlock(&mut self, passphrase: &str) -> ModelResult<()> {
         self.revealed.clear();
+        require_passphrase(passphrase)?;
         let vault = self
             .vault
             .as_mut()
@@ -222,6 +233,20 @@ impl OwnerSession {
         self.row_from(summary)
     }
 
+    /// True when a save would write the same labels and keep every stored secret.
+    pub fn is_unchanged(
+        &self,
+        id: u64,
+        draft: &ItemDraft,
+        secrets: &SecretForm,
+    ) -> ModelResult<bool> {
+        if !secrets.is_blank() {
+            return Ok(false);
+        }
+        let current = self.details(id)?;
+        Ok(!current.hidden && current.to_draft() == *draft)
+    }
+
     pub fn delete(&mut self, id: u64, expected_revision: u64) -> ModelResult<()> {
         self.unlocked()?;
         self.vault_mut()?
@@ -275,6 +300,7 @@ impl OwnerSession {
     ) -> ModelResult<()> {
         require_path(backup)?;
         require_path(destination)?;
+        require_passphrase(passphrase)?;
         let previous = self.detach();
         match Vault::restore(backup, destination, passphrase) {
             Ok(vault) => {
@@ -568,8 +594,65 @@ fn map_err(err: VaultError) -> ModelError {
     };
     ModelError {
         code,
-        message: err.to_string(),
+        message: owner_message(err.kind()).to_owned(),
     }
+}
+
+/// Owner-facing text for a vault failure. `VaultError` text stays terse for logs and callers.
+fn owner_message(kind: VaultErrorKind) -> &'static str {
+    match kind {
+        VaultErrorKind::Locked => "The vault is locked. Unlock it first.",
+        VaultErrorKind::AlreadyExists => {
+            "A file already exists at this path. Use a different path."
+        }
+        VaultErrorKind::NotFound => "The vault file or the item was not found.",
+        VaultErrorKind::Conflict => "The item changed after you opened it. Open the item again.",
+        VaultErrorKind::InvalidInput => {
+            "A value is not valid. Examine the required fields and the passphrase."
+        }
+        VaultErrorKind::WrongKeyOrCorrupt => {
+            "The passphrase is incorrect, or the vault file is damaged."
+        }
+        VaultErrorKind::UnsupportedSchema => {
+            "The vault file has a format that this app cannot read."
+        }
+        VaultErrorKind::Busy => "Another process uses the vault file. Try again later.",
+        VaultErrorKind::Io => {
+            "The app cannot read or write the file. Examine the path and the file permissions."
+        }
+        VaultErrorKind::Storage => "The vault storage operation failed.",
+    }
+}
+
+fn require_passphrase(passphrase: &str) -> ModelResult<()> {
+    if passphrase.is_empty() {
+        Err(fail("invalid_input", "Type the passphrase."))
+    } else {
+        Ok(())
+    }
+}
+
+fn require_new_passphrase(passphrase: &str) -> ModelResult<()> {
+    require_passphrase(passphrase)?;
+    if passphrase.len() < MIN_PASSPHRASE_BYTES {
+        return Err(fail(
+            "invalid_input",
+            format!("The passphrase must have a minimum of {MIN_PASSPHRASE_BYTES} characters."),
+        ));
+    }
+    if passphrase.len() > MAX_PASSPHRASE_BYTES {
+        return Err(fail(
+            "invalid_input",
+            format!("The passphrase must have a maximum of {MAX_PASSPHRASE_BYTES} bytes."),
+        ));
+    }
+    if passphrase.contains('\0') || passphrase.starts_with("x'") || passphrase.starts_with("X'") {
+        return Err(fail(
+            "invalid_input",
+            "The passphrase cannot start with x' or X'. It cannot contain a NUL character.",
+        ));
+    }
+    Ok(())
 }
 
 fn require_path(path: &Path) -> ModelResult<()> {
