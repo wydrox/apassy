@@ -9,11 +9,12 @@
 //! 5. For each item: the agent has process access, the working directory is in the
 //!    granted project directory, the item has an environment binding, and the hard
 //!    rule passes (expiry, command prefixes, forbidden words, hourly limit).
-//! 6. The bouncer scores the request (ADR 0007). Heuristic flags add to the model.
-//! 7. A grant in "ask" mode, a high risk, or an unavailable bouncer needs the owner.
+//! 6. A production declaration needs the owner (ADR 0010). The model is not asked.
+//! 7. The bouncer scores the request (ADR 0007, ADR 0008). A rule flag skips the model.
+//! 8. A grant in "ask" mode, a high risk, or an unavailable bouncer needs the owner.
 //!    A clean request with only "bouncer" grants runs without a prompt.
-//! 8. After a decision, the broker checks the vault, the agent, and the rules again.
-//! 9. The broker reads the secrets, releases the vault lock, and starts the process.
+//! 9. After a decision, the broker checks the vault, the agent, and the rules again.
+//! 10. The broker reads the secrets, releases the vault lock, and starts the process.
 //!
 //! Each refusal after step 2 and each result is stored in the activity log.
 
@@ -23,7 +24,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use super::approvals::{ApprovalOutcome, PendingRun};
-use super::bouncer::{BouncerRequest, BouncerVerdict, DecisionContext, decide};
+use super::bouncer::{BouncerRequest, BouncerVerdict, DecisionContext, decide, owner_required};
 use super::decide::{BrokerContext, authenticate, lock, locked_response};
 use super::exec::{self, SecretEnv};
 use super::shell_risk::analyze;
@@ -140,14 +141,19 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
     };
 
     // The bouncer runs without the vault lock. Its state has no secret value.
-    // Only a rule flag skips the model (ADR 0008).
+    // A rule flag (ADR 0008) or a hard owner rule (ADR 0010) skips the model.
     let analysis = analyze(request.command, request.purpose, &checked.env_names);
     let user_request = request
         .user_request
         .map(str::trim)
         .filter(|text| !text.is_empty())
         .unwrap_or_default();
-    let verdict = if !analysis.flags.is_empty() {
+    let context = DecisionContext {
+        analysis: &analysis,
+        declarations: &checked.declarations,
+        has_user_request: !user_request.is_empty(),
+    };
+    let verdict = if !analysis.flags.is_empty() || owner_required(&context).is_some() {
         BouncerVerdict::Unavailable("not asked".to_owned())
     } else {
         match &ctx.bouncer {
@@ -162,14 +168,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
             None => BouncerVerdict::Unavailable("no bouncer is set".to_owned()),
         }
     };
-    let decision = decide(
-        &verdict,
-        &DecisionContext {
-            analysis: &analysis,
-            declarations: &checked.declarations,
-            has_user_request: !user_request.is_empty(),
-        },
-    );
+    let decision = decide(&verdict, &context);
     let risk_note = decision.note.clone();
     let needs_approval = checked.any_ask || decision.ask_owner;
     let decided_by = if needs_approval {

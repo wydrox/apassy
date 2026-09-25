@@ -14,7 +14,8 @@ use super::shell_risk::Analysis;
 use crate::vault::Declaration;
 
 /// Version of the question set and the decision policy. Change it when either changes.
-pub const BOUNCER_CONTRACT: &str = "apassy-bouncer-v2";
+/// Version 3 adds the production rule (ADR 0010).
+pub const BOUNCER_CONTRACT: &str = "apassy-bouncer-v3";
 /// Default address of `laya-serve` in the operations guide.
 pub const DEFAULT_URL: &str = "http://127.0.0.1:8770";
 /// Environment variable that changes the bouncer address.
@@ -251,21 +252,48 @@ pub struct DecisionContext<'a> {
     pub has_user_request: bool,
 }
 
+/// Hard owner rules (ADR 0010). A run that matches one always waits for the owner.
+///
+/// [`decide`] checks these rules first. The model, remembered patterns, and calibrated
+/// thresholds come after this check, so they cannot change its result. The broker does
+/// not call the model for such a run.
+pub fn owner_required(context: &DecisionContext<'_>) -> Option<String> {
+    let production = context
+        .declarations
+        .iter()
+        .flatten()
+        .any(Declaration::is_production);
+    production.then(|| {
+        "Production credential: the owner approves every run with it (ADR 0010).".to_owned()
+    })
+}
+
 /// Combine the command analysis, the owner declarations, and the model facts (ADR 0008).
 ///
-/// 1. A rule flag asks the owner. The model is not needed.
-/// 2. A missing user request or declaration asks the owner.
-/// 3. The model decides. A command that is not known safe and not certainly read-only
-///    must match the user request with at least 80% certainty. A production, high-risk,
-///    or irreversible credential also needs 80% certainty that the command does not
+/// 1. A hard owner rule asks the owner: a production declaration ([`owner_required`]).
+///    No later step can change this.
+/// 2. A rule flag asks the owner. The model is not needed.
+/// 3. A missing user request or declaration asks the owner.
+/// 4. The model decides. A command that is not known safe and not certainly read-only
+///    must match the user request with at least 80% certainty. A high-risk or
+///    irreversible credential also needs 80% certainty that the command does not
 ///    change state, unless the command is known safe.
-/// 4. Model vetoes: "destroy" at 90% for an unknown command, "rule_break" at 80%.
+/// 5. Model vetoes: "destroy" at 90% for an unknown command, "rule_break" at 80%.
 pub fn decide(verdict: &BouncerVerdict, context: &DecisionContext<'_>) -> Decision {
     let ask = |confidence, note: String| Decision {
         ask_owner: true,
         confidence,
         note,
     };
+    if let Some(mut note) = owner_required(context) {
+        if !context.analysis.flags.is_empty() {
+            note.push_str(&format!(
+                " Rule flags: {}.",
+                context.analysis.flags.join(", ")
+            ));
+        }
+        return ask(None, note);
+    }
     if !context.analysis.flags.is_empty() {
         return ask(
             None,
@@ -422,9 +450,10 @@ mod tests {
     fn policy() {
         let analysis = Analysis::default();
         let staging = [declaration(Environment::Staging)];
-        let production = [declaration(Environment::Production)];
-        let ctx = |d: &'static [Option<Declaration>]| (d, true);
-        let _ = ctx;
+        let high_risk = [Some(Declaration {
+            risk: RiskLevel::High,
+            ..declaration(Environment::Staging).expect("declaration")
+        })];
         let run = |v: &BouncerVerdict, d: &[Option<Declaration>], user: bool| {
             decide(
                 v,
@@ -442,15 +471,15 @@ mod tests {
             ("destroy", 0.1),
         ]);
         assert!(!run(&clean, &staging, true).ask_owner);
-        // Production needs a certain read-only command.
-        assert!(run(&clean, &production, true).ask_owner);
+        // A high-risk credential needs a certain read-only command.
+        assert!(run(&clean, &high_risk, true).ask_owner);
         let read = verdict(&[
             ("task_match", 0.9),
             ("writes", 0.1),
             ("leak", 0.05),
             ("destroy", 0.1),
         ]);
-        assert!(!run(&read, &production, true).ask_owner);
+        assert!(!run(&read, &high_risk, true).ask_owner);
         // A certain read does not need the task match. A leak answer is not a veto.
         let read_unmatched = verdict(&[
             ("task_match", 0.3),
@@ -476,6 +505,77 @@ mod tests {
         assert!(run(&clean, &staging, false).ask_owner, "no user request");
         assert!(run(&clean, &[None], true).ask_owner, "no declaration");
         assert!(run(&BouncerVerdict::Unavailable("x".into()), &staging, true).ask_owner);
+    }
+
+    /// ADR 0010: a production declaration always waits for the owner. Known safe and
+    /// read-only commands and a fully certain model verdict do not change this.
+    #[test]
+    fn production_always_asks_the_owner() {
+        let certain = verdict(&[
+            ("task_match", 1.0),
+            ("writes", 0.0),
+            ("remote", 0.0),
+            ("leak", 0.0),
+            ("destroy", 0.0),
+            ("rule_break", 0.0),
+        ]);
+        let read_only = verdict(&[
+            ("task_match", 0.3),
+            ("writes", 0.0),
+            ("remote", 0.0),
+            ("leak", 0.0),
+            ("destroy", 0.0),
+        ]);
+        // The mildest production declaration: low risk, read-only, reversible.
+        let mild = Declaration {
+            project: "odealo".to_owned(),
+            environment: Environment::Production,
+            risk: RiskLevel::Low,
+            scope: Scope::ReadOnly,
+            reversibility: Reversibility::Reversible,
+        };
+        let sets: [&[Option<Declaration>]; 3] = [
+            &[Some(mild.clone())],
+            &[declaration(Environment::Staging), Some(mild.clone())],
+            &[declaration(Environment::Production)],
+        ];
+        let known_safe = Analysis {
+            flags: Vec::new(),
+            known_safe: true,
+        };
+        let unknown = Analysis::default();
+        for declarations in sets {
+            for analysis in [&known_safe, &unknown] {
+                for model in [
+                    &certain,
+                    &read_only,
+                    &BouncerVerdict::Unavailable("not asked".into()),
+                ] {
+                    let context = DecisionContext {
+                        analysis,
+                        declarations,
+                        has_user_request: true,
+                    };
+                    let decision = decide(model, &context);
+                    assert!(
+                        decision.ask_owner,
+                        "{declarations:?} {analysis:?} {model:?}"
+                    );
+                    assert_eq!(decision.confidence, None, "the model did not decide");
+                    assert!(decision.note.starts_with("Production credential"));
+                    assert!(owner_required(&context).is_some());
+                }
+            }
+        }
+        // The same fully certain verdict runs a staging credential without the owner.
+        let staging = [declaration(Environment::Staging)];
+        let context = DecisionContext {
+            analysis: &known_safe,
+            declarations: &staging,
+            has_user_request: true,
+        };
+        assert!(owner_required(&context).is_none());
+        assert!(!decide(&certain, &context).ask_owner);
     }
 
     #[test]

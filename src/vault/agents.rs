@@ -278,6 +278,11 @@ pub struct Declaration {
 }
 
 impl Declaration {
+    /// A production credential. Every run with it waits for the owner (ADR 0010).
+    pub fn is_production(&self) -> bool {
+        self.environment == Environment::Production
+    }
+
     /// Production, high risk, or irreversible: a run must not change state without the owner.
     pub fn is_sensitive(&self) -> bool {
         self.environment == Environment::Production

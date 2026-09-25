@@ -189,14 +189,14 @@ fn low_confidence_and_missing_context_wait_for_the_owner() {
     );
     assert!(last_reason(&fx).contains("Below 80% certainty: task_match 70%"));
 
-    // A production declaration needs a certain read-only command.
+    // A high-risk declaration needs a certain read-only command.
     let writes = common::fake_bouncer(&[("writes", 0.9)]);
     let fx = fixture(Some(&writes.url), ExecRule::default());
     {
         let mut guard = fx.vault.lock().expect("vault");
         let vault = guard.as_mut().expect("open");
         let mut declaration = staging_declaration();
-        declaration.environment = Environment::Production;
+        declaration.risk = RiskLevel::High;
         vault
             .set_declaration(fx.item_id, &declaration)
             .expect("declaration");
@@ -309,6 +309,130 @@ fn risky_or_unavailable_bouncer_waits_for_the_owner() {
     .expect("answer");
     assert_eq!(code(&response), "approval_timeout");
     assert!(last_reason(&fx).contains("no declaration"));
+}
+
+fn set_environment(fx: &Fixture, item_id: u64, environment: Environment) {
+    let mut guard = fx.vault.lock().expect("vault");
+    let mut declaration = staging_declaration();
+    declaration.environment = environment;
+    guard
+        .as_mut()
+        .expect("open")
+        .set_declaration(item_id, &declaration)
+        .expect("declaration");
+}
+
+/// ADR 0010: a run with a production item always waits for the owner. The model is
+/// fully certain here, and the commands are known safe or read-only. The broker does
+/// not ask the model at all.
+#[test]
+fn production_declaration_always_waits_for_the_owner() {
+    let certain = common::fake_bouncer(&[
+        ("task_match", 1.0),
+        ("writes", 0.0),
+        ("remote", 0.0),
+        ("leak", 0.0),
+        ("destroy", 0.0),
+    ]);
+    let fx = fixture(Some(&certain.url), ExecRule::default());
+    // The same fully certain model runs a known safe command on staging without a prompt.
+    let staging = run(&fx, &["echo", "hi"], "Print.");
+    assert!(staging.ok, "{staging:?}");
+    assert_eq!(certain.bodies.lock().expect("bodies").len(), 1);
+
+    set_environment(&fx, fx.item_id, Environment::Production);
+    let commands: [&[&str]; 4] = [
+        // Known safe by the command analysis.
+        &["echo", "hi"],
+        &["git", "status"],
+        // Read-only, not on the known safe list.
+        &["sh", "-c", "cat README.md"],
+        // Unknown to the command analysis. The model would allow it.
+        &["sh", "-c", "node scripts/report.js"],
+    ];
+    for command in commands {
+        assert_eq!(
+            code(&run(&fx, command, "Run the project checks.")),
+            "approval_timeout",
+            "{command:?}"
+        );
+        let reason = last_reason(&fx);
+        assert!(reason.contains("Production credential"), "{reason}");
+    }
+    assert_eq!(
+        certain.bodies.lock().expect("bodies").len(),
+        1,
+        "the broker does not ask the model for a production run"
+    );
+
+    // A production item next to a staging item also waits.
+    let second = {
+        let mut guard = fx.vault.lock().expect("vault");
+        let vault = guard.as_mut().expect("open");
+        let item = vault
+            .add(ItemDraft {
+                title: "Staging key".to_owned(),
+                kind: CredentialKind::ApiKey,
+                notes: String::new(),
+                tags: Vec::new(),
+                fields: vec![Field {
+                    name: "token".to_owned(),
+                    value: SecretValue::new("FAKE-second-0002".to_owned()),
+                    secret: true,
+                }],
+            })
+            .expect("add");
+        vault
+            .set_env_binding(item.id, "STAGING_KEY", "token")
+            .expect("binding");
+        vault
+            .set_exec_grant(
+                fx.agent_id,
+                item.id,
+                &fx.project.display().to_string(),
+                ExecMode::Bouncer,
+            )
+            .expect("grant");
+        vault
+            .set_declaration(item.id, &staging_declaration())
+            .expect("declaration");
+        item.id
+    };
+    let mixed = client::send(
+        &fx.socket,
+        &fx.token,
+        Action::Run {
+            items: vec![second, fx.item_id],
+            command: vec!["echo".to_owned(), "hi".to_owned()],
+            cwd: fx.project.display().to_string(),
+            purpose: "Print.".to_owned(),
+            path: None,
+            user_request: Some("Run the project checks.".to_owned()),
+        },
+    )
+    .expect("answer");
+    assert_eq!(code(&mixed), "approval_timeout");
+    assert!(last_reason(&fx).contains("Production credential"));
+
+    // The rule asks the owner. It does not deny: the owner can approve the run.
+    let approvals = Arc::clone(fx.broker.approvals());
+    let approver = std::thread::spawn(move || {
+        loop {
+            if let Some(pending) = approvals.pending().into_iter().next() {
+                assert!(pending.risk.contains("Production credential"));
+                assert!(approvals.decide(pending.id, true));
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    });
+    let approved = run(&fx, &["echo", "hi"], "Print.");
+    approver.join().expect("approver");
+    assert!(approved.ok, "{approved:?}");
+    let result = approved.result.expect("result");
+    assert_eq!(result["decided_by"], "Owner approved");
+    assert_eq!(result["stdout"], "hi\n");
+    assert_eq!(certain.bodies.lock().expect("bodies").len(), 1);
 }
 
 #[test]

@@ -34,11 +34,18 @@ The bouncer decides only if the rule has command prefixes. Without prefixes, eve
 
 ## 3. Decision order
 
+Date of this order: 2026-09-26 (ADR 0008, changed by ADR 0010). Policy version: `apassy-bouncer-v3`. Code: `decide` and `owner_required` in `src/broker/bouncer.rs`.
+
 1. Hard rule: expiry, prefixes, forbidden words, runs per hour. A failure is a denial.
-2. Command analysis (`src/broker/shell_risk.rs`). It parses the command like a shell: quotes, pipes, `&&`, redirects, `$( )`, `sh -c`, and `NAME=value` prefixes. Rules for each program give flags: `secret_output`, `data_loss`, `production`, `real_recipient`, `remote_code`, `remote_access`, `system_change`, `new_dependency`, `privilege`, `injection_phrase`. A flag always asks the owner. The broker does not call the model.
-3. A known safe development command runs without a model call. Examples are tests, lint, builds, local servers, read-only git, cache removal, and GET requests to a known provider API.
-4. Other commands go to the model. Unavailable or a high risk asks the owner.
-5. "Bouncer" mode also needs command prefixes in the rule. Without prefixes, every run waits for the owner.
+2. Production rule (ADR 0010). If an item in the run has a production declaration, the run waits for the owner. The broker does not call the model. This step comes before every model step. The model, remembered patterns, and threshold calibration come after it, so they cannot change it. A known safe command, a read-only command, and a fully certain model answer also wait.
+3. Command analysis (`src/broker/shell_risk.rs`). It parses the command like a shell: quotes, pipes, `&&`, redirects, `$( )`, `sh -c`, and `NAME=value` prefixes. Rules for each program give flags: `secret_output`, `data_loss`, `production`, `real_recipient`, `remote_code`, `remote_access`, `system_change`, `new_dependency`, `privilege`, `injection_phrase`. A flag always asks the owner. The broker does not call the model.
+4. A missing user request, a missing declaration, or an unavailable model asks the owner.
+5. The model answers the facts `task_match`, `writes`, `remote`, `leak`, `destroy`, and `rule_break` when the rule has an instruction.
+6. Needed certainty, 80% each. A command that is not known safe and not certainly read-only needs `task_match` at or above 0.8. A high-risk or irreversible declaration needs `writes` at or below 0.2, unless the command is known safe.
+7. Vetoes: `destroy` at or above 0.9 for a command that is not known safe, and `rule_break` at or above 0.8.
+8. If every needed answer is certain and no veto applies, the run starts without a prompt. A grant in "ask" mode always waits for the owner.
+
+Tests for step 2: `production_always_asks_the_owner` in `src/broker/bouncer.rs` and `production_declaration_always_waits_for_the_owner` in `tests/bouncer_rules.rs`.
 
 ## 4. Measurement
 
