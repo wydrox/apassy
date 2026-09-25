@@ -23,9 +23,10 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use super::approvals::{ApprovalOutcome, PendingRun};
-use super::bouncer::{BouncerRequest, BouncerVerdict, heuristic_flags};
+use super::bouncer::{BouncerRequest, BouncerVerdict, decide};
 use super::decide::{BrokerContext, authenticate, lock, locked_response};
 use super::exec::{self, SecretEnv};
+use super::shell_risk::analyze;
 use crate::agent::wire::WireResponse;
 use crate::vault::{ActivityDecision, AgentSummary, ExecMode, NewActivity, Vault};
 
@@ -136,24 +137,26 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
     };
 
     // The bouncer runs without the vault lock. Its state has no secret value.
-    let flags = heuristic_flags(request.command, request.purpose, &checked.env_names);
-    let verdict = match &ctx.bouncer {
-        Some(bouncer) => bouncer.evaluate(&BouncerRequest {
-            agent: checked.agent.name.clone(),
-            command: request.command.join(" "),
-            relative_dir: checked.relative_dir.clone(),
-            purpose: request.purpose.trim().to_owned(),
-            env_names: checked.env_names.clone(),
-            instruction: checked.instruction.clone(),
-        }),
-        None => BouncerVerdict::Unavailable("no bouncer is set".to_owned()),
+    // A known safe command with no rule flag does not need the model.
+    let analysis = analyze(request.command, request.purpose, &checked.env_names);
+    let verdict = if analysis.known_safe || !analysis.flags.is_empty() {
+        BouncerVerdict::Unavailable("not asked".to_owned())
+    } else {
+        match &ctx.bouncer {
+            Some(bouncer) => bouncer.evaluate(&BouncerRequest {
+                agent: checked.agent.name.clone(),
+                command: request.command.join(" "),
+                relative_dir: checked.relative_dir.clone(),
+                purpose: request.purpose.trim().to_owned(),
+                env_names: checked.env_names.clone(),
+                instruction: checked.instruction.clone(),
+            }),
+            None => BouncerVerdict::Unavailable("no bouncer is set".to_owned()),
+        }
     };
-    let mut risk_note = verdict.summary();
-    if !flags.is_empty() {
-        risk_note.push_str(&format!(". Heuristic flags: {}", flags.join(", ")));
-    }
-    let clean = verdict.is_clean() && flags.is_empty();
-    let needs_approval = checked.any_ask || !clean;
+    let decision = decide(&verdict, &analysis);
+    let risk_note = decision.note.clone();
+    let needs_approval = checked.any_ask || decision.ask_owner;
     let decided_by = if needs_approval {
         "Owner approved"
     } else {

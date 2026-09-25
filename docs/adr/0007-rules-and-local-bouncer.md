@@ -65,6 +65,12 @@ A timeout (3 seconds), a connection error, a response that is not valid, or a mi
 - The owner starts Laya separately. See `docs/operations/bouncer.md`.
 - Each decision in the activity log has the bouncer result and the high risks.
 
+## Hardening on 2026-09-25
+
+- A command analysis with shell parsing replaces the word heuristics. A flag asks the owner without a model call.
+- A known safe development command runs without a model call. This reduces false alarms. It also means that the model cannot flag such a command.
+- The measurement set and its limits are in `docs/operations/bouncer.md`. The zero-shot model gives no measured benefit after the hardening.
+
 ## Limits
 
 - Laya is a zero-shot classifier. Its accuracy on shell commands is not measured. The held-out evaluation (P6) is still necessary.

@@ -13,6 +13,7 @@ pub mod http;
 pub mod profile;
 mod run;
 pub mod server;
+pub mod shell_risk;
 
 use std::sync::{Arc, Mutex};
 
