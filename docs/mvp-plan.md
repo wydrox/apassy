@@ -164,6 +164,10 @@ Workers request shared changes rather than editing shared files concurrently. Ea
 P0 and P1 include current files. Later task paths remain planned outputs.
 See [foundation verification](operations/foundation-verification.md) for local results and remaining gates.
 
+Order change on 2026-09-25: [ADR 0004](adr/0004-agent-path-first.md) builds a thin agent path before P3.
+That path has parts of P2b, P4a, and P4c with temporary manual grants. It does not satisfy their acceptance checks.
+P3 and P5 then build on that path. See the [broker contract](contracts/broker-v0.md).
+
 | Task | Dependencies | Worker scope | Required result |
 | --- | --- | --- | --- |
 | P0 — walkthrough and feasibility | Owner approves this revised plan | `docs/adr/`, `docs/contracts/`, `design/`, `tests/fixtures/`, `tests/isolation/` | Show the complete owner journey with synthetic items. Confirm platform/app form, two services, storage decisions, and isolation evidence. Separate unresolved provider access from completed decisions. |

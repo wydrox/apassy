@@ -1,18 +1,24 @@
 //! Owner vault and item session for the desktop shell.
 //!
-//! Rules, agents, and activity stay on the in-memory demo model.
+//! Agents, grants, and agent activity use the vault (ADR 0004). Rules and demo
+//! approvals stay on the in-memory demo model.
 //! This session is a trusted-process adapter over [`crate::vault`].
 //! It is not an authenticated owner channel. Real-secret use stays blocked.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use crate::broker::SharedVault;
+use crate::broker::http::parse_loopback_base;
+use crate::broker::profile;
 use crate::contracts::CredentialKind;
 use crate::desktop::model::{ItemDraft, MASKED_VALUE, ModelError, ModelResult};
 use crate::vault::{
-    Field, ItemDraft as VaultDraft, MAX_PASSPHRASE_BYTES, MIN_PASSPHRASE_BYTES, SecretValue, Vault,
-    VaultError, VaultErrorKind,
+    ActivityDecision, AgentSummary, AgentToken, Destination, Field, ItemDraft as VaultDraft,
+    MAX_PASSPHRASE_BYTES, MIN_PASSPHRASE_BYTES, SecretValue, Vault, VaultError, VaultErrorKind,
 };
 
 const MAX_TAG_BYTES: usize = 64;
@@ -92,31 +98,62 @@ pub struct OwnerUiState {
     pub add_secrets: SecretForm,
     pub edit_secrets: SecretForm,
     pub edit_revision: u64,
+    pub connector_url: String,
+    pub new_agent_name: String,
+    /// The token of the agent that the owner registered last. It is shown one time.
+    pub fresh_token: Option<(String, AgentToken)>,
+    pub selected_agent: Option<u64>,
 }
 
-/// One vault file open inside this process.
+/// One vault file open inside this process. The broker shares the same slot.
 #[derive(Debug)]
 pub struct OwnerSession {
-    vault: Option<Vault>,
+    vault: SharedVault,
     path: Option<PathBuf>,
     revealed: BTreeMap<(u64, String), RevealedValue>,
+}
+
+/// Mutex guard over an unlocked vault. Hold it only for one short operation.
+struct Unlocked<'a>(MutexGuard<'a, Option<Vault>>);
+
+impl Deref for Unlocked<'_> {
+    type Target = Vault;
+
+    fn deref(&self) -> &Vault {
+        self.0.as_ref().expect("Unlocked holds an open vault")
+    }
+}
+
+impl DerefMut for Unlocked<'_> {
+    fn deref_mut(&mut self) -> &mut Vault {
+        self.0.as_mut().expect("Unlocked holds an open vault")
+    }
 }
 
 impl OwnerSession {
     pub fn new() -> Self {
         Self {
-            vault: None,
+            vault: Arc::new(Mutex::new(None)),
             path: None,
             revealed: BTreeMap::new(),
         }
     }
 
+    /// The vault slot for the broker. The broker sees each open, lock, and restore.
+    pub fn shared_vault(&self) -> SharedVault {
+        Arc::clone(&self.vault)
+    }
+
+    fn slot(&self) -> MutexGuard<'_, Option<Vault>> {
+        self.vault.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     pub fn has_file(&self) -> bool {
-        self.vault.is_some()
+        self.slot().is_some()
     }
 
     pub fn is_locked(&self) -> bool {
-        self.vault.as_ref().is_none_or(Vault::is_locked)
+        self.slot().as_ref().is_none_or(Vault::is_locked)
     }
 
     pub fn location(&self) -> Option<&Path> {
@@ -124,7 +161,7 @@ impl OwnerSession {
     }
 
     pub fn lock_label(&self) -> &'static str {
-        if self.vault.is_none() {
+        if !self.has_file() {
             "The vault is locked. No vault file is open. Item details are hidden."
         } else if self.is_locked() {
             "The vault is locked. Item details are hidden."
@@ -159,8 +196,8 @@ impl OwnerSession {
     pub fn unlock(&mut self, passphrase: &str) -> ModelResult<()> {
         self.revealed.clear();
         require_passphrase(passphrase)?;
-        let vault = self
-            .vault
+        let mut slot = self.slot();
+        let vault = slot
             .as_mut()
             .ok_or_else(|| fail("vault_locked", "No vault file is open."))?;
         vault.unlock(passphrase).map_err(map_err)
@@ -168,7 +205,8 @@ impl OwnerSession {
 
     pub fn lock(&mut self) -> ModelResult<()> {
         self.revealed.clear();
-        let Some(vault) = self.vault.as_mut() else {
+        let mut slot = self.slot();
+        let Some(vault) = slot.as_mut() else {
             return Ok(());
         };
         vault.lock().map_err(map_err)
@@ -186,7 +224,7 @@ impl OwnerSession {
     }
 
     pub fn details(&self, id: u64) -> ModelResult<OwnerDetails> {
-        if self.vault.is_none() {
+        if !self.has_file() {
             return Ok(OwnerDetails::hidden(
                 id,
                 "No vault file is open. Item details are hidden.",
@@ -208,9 +246,9 @@ impl OwnerSession {
     pub fn add(&mut self, draft: &ItemDraft, secrets: &SecretForm) -> ModelResult<OwnerSummary> {
         let vault_draft = {
             let vault = self.unlocked()?;
-            build_vault_draft(vault, None, draft, secrets)?
+            build_vault_draft(&vault, None, draft, secrets)?
         };
-        let summary = self.vault_mut()?.add(vault_draft).map_err(map_err)?;
+        let summary = self.unlocked()?.add(vault_draft).map_err(map_err)?;
         self.row_from(summary)
     }
 
@@ -223,10 +261,10 @@ impl OwnerSession {
     ) -> ModelResult<OwnerSummary> {
         let vault_draft = {
             let vault = self.unlocked()?;
-            build_vault_draft(vault, Some(id), draft, secrets)?
+            build_vault_draft(&vault, Some(id), draft, secrets)?
         };
         let summary = self
-            .vault_mut()?
+            .unlocked()?
             .update(id, expected_revision, vault_draft)
             .map_err(map_err)?;
         self.revealed.retain(|key, _| key.0 != id);
@@ -248,8 +286,7 @@ impl OwnerSession {
     }
 
     pub fn delete(&mut self, id: u64, expected_revision: u64) -> ModelResult<()> {
-        self.unlocked()?;
-        self.vault_mut()?
+        self.unlocked()?
             .delete(id, expected_revision)
             .map_err(map_err)?;
         self.revealed.retain(|key, _| key.0 != id);
@@ -284,8 +321,7 @@ impl OwnerSession {
 
     pub fn backup(&mut self, destination: &Path) -> ModelResult<()> {
         require_path(destination)?;
-        self.unlocked()?;
-        let result = self.vault_mut()?.backup(destination);
+        let result = self.unlocked()?.backup(destination);
         if self.is_locked() {
             self.revealed.clear();
         }
@@ -314,36 +350,155 @@ impl OwnerSession {
         }
     }
 
+    // ---- Agent access (ADR 0004). Manual grants are temporary. ----
+
+    pub fn agents(&self) -> ModelResult<Vec<AgentSummary>> {
+        self.unlocked()?.list_agents().map_err(map_err)
+    }
+
+    /// Register an agent. Show the token to the owner one time only.
+    pub fn register_agent(&mut self, name: &str) -> ModelResult<(AgentSummary, AgentToken)> {
+        if name.trim().is_empty() {
+            return Err(fail("invalid_input", "Type a name for the agent."));
+        }
+        self.unlocked()?.register_agent(name).map_err(map_err)
+    }
+
+    pub fn revoke_agent(&mut self, agent_id: u64) -> ModelResult<()> {
+        self.unlocked()?.revoke_agent(agent_id).map_err(map_err)
+    }
+
+    /// API key items that have a connector destination, with the operations of their profile.
+    pub fn connectors(&self) -> ModelResult<Vec<ConnectorRow>> {
+        let vault = self.unlocked()?;
+        let items = vault.search("").map_err(map_err)?;
+        let mut rows = Vec::new();
+        for item in items {
+            let Some(destination) = vault.destination(item.id).map_err(map_err)? else {
+                continue;
+            };
+            let Some(profile) = profile::find(&destination.profile) else {
+                continue;
+            };
+            rows.push(ConnectorRow {
+                item_id: item.id,
+                item_name: item.title,
+                profile_label: profile.label,
+                base_url: destination.base_url,
+                operations: profile
+                    .operations
+                    .iter()
+                    .map(|op| (op.name, op.description))
+                    .collect(),
+            });
+        }
+        Ok(rows)
+    }
+
+    pub fn grants(&self, agent_id: u64) -> ModelResult<BTreeSet<(u64, String)>> {
+        let grants = self
+            .unlocked()?
+            .grants_for_agent(agent_id)
+            .map_err(map_err)?;
+        Ok(grants
+            .into_iter()
+            .map(|grant| (grant.item_id, grant.operation))
+            .collect())
+    }
+
+    pub fn set_grant(
+        &mut self,
+        agent_id: u64,
+        item_id: u64,
+        operation: &str,
+        allowed: bool,
+    ) -> ModelResult<()> {
+        self.unlocked()?
+            .set_grant(agent_id, item_id, operation, allowed)
+            .map_err(map_err)
+    }
+
+    pub fn connector(&self, item_id: u64) -> ModelResult<Option<Destination>> {
+        self.unlocked()?.destination(item_id).map_err(map_err)
+    }
+
+    /// Register the connector for an item. Only loopback destinations are permitted in this phase.
+    pub fn set_connector(
+        &mut self,
+        item_id: u64,
+        profile_id: &str,
+        base_url: &str,
+    ) -> ModelResult<()> {
+        let profile = profile::find(profile_id)
+            .ok_or_else(|| fail("invalid_input", "The connector profile is not known."))?;
+        parse_loopback_base(base_url).map_err(|message| fail("invalid_input", message))?;
+        let mut vault = self.unlocked()?;
+        let kind = vault.details(item_id).map_err(map_err)?.summary.kind;
+        if kind != profile.credential_kind {
+            return Err(fail(
+                "invalid_input",
+                "This connector needs an API key item.",
+            ));
+        }
+        vault
+            .set_destination(item_id, profile.id, base_url.trim())
+            .map_err(map_err)
+    }
+
+    /// Remove the connector and every grant for the item.
+    pub fn clear_connector(&mut self, item_id: u64) -> ModelResult<()> {
+        self.unlocked()?.clear_destination(item_id).map_err(map_err)
+    }
+
+    /// Newest entries first. Item names come from the vault. Deleted items show their ID.
+    pub fn activity(&self, limit: usize) -> ModelResult<Vec<AgentActivityRow>> {
+        let vault = self.unlocked()?;
+        let records = vault.recent_activity(limit).map_err(map_err)?;
+        Ok(records
+            .into_iter()
+            .map(|record| {
+                let item = match record.item_id {
+                    Some(id) => vault
+                        .details(id)
+                        .map_or_else(|_| format!("Item {id} (deleted)"), |d| d.summary.title),
+                    None => "No item".to_owned(),
+                };
+                AgentActivityRow {
+                    when: format_utc(record.at),
+                    agent: record.agent_name,
+                    item,
+                    operation: record.operation,
+                    decision: record.decision,
+                    reason: record.reason,
+                }
+            })
+            .collect())
+    }
+
     fn install(&mut self, vault: Vault, path: PathBuf) {
         self.revealed.clear();
-        self.vault = Some(vault);
+        *self.slot() = Some(vault);
         self.path = Some(path);
     }
 
     fn detach(&mut self) -> HeldVault {
         self.revealed.clear();
+        let vault = self.slot().take();
         HeldVault {
-            vault: self.vault.take(),
+            vault,
             path: self.path.take(),
         }
     }
 
     fn attach(&mut self, held: HeldVault) {
-        self.vault = held.vault;
+        *self.slot() = held.vault;
         self.path = held.path;
     }
 
-    fn unlocked(&self) -> ModelResult<&Vault> {
-        match self.vault.as_ref() {
-            Some(vault) if !vault.is_locked() => Ok(vault),
-            Some(_) => Err(fail("vault_locked", "The vault is locked.")),
-            None => Err(fail("vault_locked", "No vault file is open.")),
-        }
-    }
-
-    fn vault_mut(&mut self) -> ModelResult<&mut Vault> {
-        match self.vault.as_mut() {
-            Some(vault) if !vault.is_locked() => Ok(vault),
+    fn unlocked(&self) -> ModelResult<Unlocked<'_>> {
+        let slot = self.slot();
+        match slot.as_ref() {
+            Some(vault) if !vault.is_locked() => Ok(Unlocked(slot)),
             Some(_) => Err(fail("vault_locked", "The vault is locked.")),
             None => Err(fail("vault_locked", "No vault file is open.")),
         }
@@ -364,8 +519,8 @@ impl OwnerSession {
     fn service_project(&self, id: u64) -> ModelResult<(String, String)> {
         let vault = self.unlocked()?;
         Ok((
-            plain_value(vault, id, "service")?,
-            plain_value(vault, id, "project")?,
+            plain_value(&vault, id, "service")?,
+            plain_value(&vault, id, "project")?,
         ))
     }
 
@@ -374,12 +529,12 @@ impl OwnerSession {
         let (service, project, username, host, database_name, public_label) = {
             let vault = self.unlocked()?;
             (
-                plain_value(vault, id, "service")?,
-                plain_value(vault, id, "project")?,
-                plain_value(vault, id, "username")?,
-                plain_value(vault, id, "host")?,
-                plain_value(vault, id, "database")?,
-                plain_value(vault, id, "public_key")?,
+                plain_value(&vault, id, "service")?,
+                plain_value(&vault, id, "project")?,
+                plain_value(&vault, id, "username")?,
+                plain_value(&vault, id, "host")?,
+                plain_value(&vault, id, "database")?,
+                plain_value(&vault, id, "public_key")?,
             )
         };
         let field_name = meta
@@ -443,6 +598,44 @@ impl Drop for RevealedValue {
     fn drop(&mut self) {
         self.0.clear();
     }
+}
+
+/// A connector row for the Agents view. It has no secret value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectorRow {
+    pub item_id: u64,
+    pub item_name: String,
+    pub profile_label: &'static str,
+    pub base_url: String,
+    pub operations: Vec<(&'static str, &'static str)>,
+}
+
+/// An activity row for the Activity view. It has no secret value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentActivityRow {
+    pub when: String,
+    pub agent: String,
+    pub item: String,
+    pub operation: String,
+    pub decision: ActivityDecision,
+    pub reason: String,
+}
+
+/// UTC time as `YYYY-MM-DD HH:MM:SS UTC`. Uses the civil-from-days method.
+pub fn format_utc(unix: u64) -> String {
+    let days = unix / 86_400;
+    let rem = unix % 86_400;
+    let (hour, minute, second) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let z = i64::try_from(days).unwrap_or(0) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} UTC")
 }
 
 /// Vault list row. It has no field values.

@@ -69,7 +69,21 @@ pub struct DesktopApp {
     pub(crate) scenario: DemoScenario,
     #[cfg(feature = "vault")]
     pub(crate) owner_ui: owner_store::OwnerUiState,
+    /// The local agent broker. It runs only with a native window.
+    #[cfg(feature = "vault")]
+    pub(crate) broker: BrokerState,
     styled: bool,
+}
+
+/// Broker state for the Agents view.
+#[cfg(feature = "vault")]
+#[derive(Debug, Default)]
+pub(crate) enum BrokerState {
+    /// Tests and the smoke test do not start the broker.
+    #[default]
+    NotStarted,
+    Running(crate::broker::BrokerHandle),
+    Failed(String),
 }
 
 impl Default for DesktopApp {
@@ -95,6 +109,8 @@ impl DesktopApp {
             scenario: DemoScenario::Normal,
             #[cfg(feature = "vault")]
             owner_ui: owner_store::OwnerUiState::default(),
+            #[cfg(feature = "vault")]
+            broker: BrokerState::NotStarted,
             styled: false,
         }
     }
@@ -103,7 +119,21 @@ impl DesktopApp {
         ui::apply_style(&cc.egui_ctx);
         let mut app = Self::new();
         app.styled = true;
+        #[cfg(feature = "vault")]
+        app.start_broker(&crate::agent::client::default_socket_path());
         app
+    }
+
+    /// Start the agent broker on `socket`. It shares the owner vault slot.
+    #[cfg(feature = "vault")]
+    pub fn start_broker(&mut self, socket: &std::path::Path) {
+        self.broker = match crate::broker::start(self.owner_ui.session.shared_vault(), socket) {
+            Ok(handle) => BrokerState::Running(handle),
+            Err(err) => BrokerState::Failed(format!(
+                "The agent broker did not start at {}: {err}",
+                socket.display()
+            )),
+        };
     }
 
     pub fn model(&self) -> &DesktopModel {
@@ -160,6 +190,14 @@ impl DesktopApp {
         {
             self.edit_form = details.to_draft();
             self.owner_ui.edit_revision = details.revision;
+            self.owner_ui.connector_url = self
+                .owner_ui
+                .session
+                .connector(parsed)
+                .ok()
+                .flatten()
+                .map(|destination| destination.base_url)
+                .unwrap_or_default();
         }
         self.selected_item_id = Some(id);
     }

@@ -2,7 +2,12 @@
 //! This crate does not yet provide a secure credential vault or live agent use.
 #![forbid(unsafe_code)]
 
+pub mod agent;
 pub mod contracts;
+
+/// Local agent broker (ADR 0004). It needs the vault.
+#[cfg(feature = "vault")]
+pub mod broker;
 
 #[cfg(feature = "desktop")]
 pub mod desktop;
@@ -10,8 +15,9 @@ pub mod desktop;
 /// Experimental trusted-process vault APIs.
 ///
 /// With `desktop` and `vault` both enabled, the owner vault and item views call
-/// these APIs. Rules, agents, and activity stay in-memory fixtures. These APIs
-/// are not an authenticated owner channel or an agent endpoint.
+/// these APIs. The broker also uses them for agents and grants. Rules stay
+/// in-memory fixtures. These APIs are not an authenticated owner channel. The
+/// broker is the only agent endpoint, and it never returns a secret value.
 ///
 /// Secret-bearing public types do not support automatic serialization.
 ///

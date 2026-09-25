@@ -2,6 +2,7 @@
 
 Date: 2026-09-16.
 Status: experimental backend contract. See [local verification](../operations/vault-verification.md) for measured results and limits.
+Schema version 2 (2026-09-25) adds agent, grant, destination, and activity tables. See section 9 of the [broker contract](broker-v0.md). The item API in this document did not change. Item delete also removes the grants and the destination of the item. Restore also revokes all agents.
 The owner selected SQLCipher with a master passphrase after the synthetic storage probe passed.
 This contract does not permit real-secret use or claim complete P2 acceptance.
 

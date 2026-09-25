@@ -25,6 +25,14 @@ name = "apassy"
 path = "src/main.rs"
 required-features = ["desktop"]
 
+[[bin]]
+name = "apassy-mcp"
+path = "src/bin/apassy-mcp.rs"
+
+[[bin]]
+name = "apassy-dev-reporting"
+path = "src/bin/apassy-dev-reporting.rs"
+
 [[test]]
 name = "sqlcipher_probe"
 path = "tests/sqlcipher_probe.rs"
@@ -33,6 +41,11 @@ required-features = ["storage-probe"]
 [[test]]
 name = "vault_lifecycle"
 path = "tests/vault_lifecycle.rs"
+required-features = ["vault"]
+
+[[test]]
+name = "agent_path"
+path = "tests/agent_path.rs"
 required-features = ["vault"]
 
 [[test]]

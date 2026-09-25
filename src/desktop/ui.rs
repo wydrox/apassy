@@ -125,7 +125,7 @@ fn banner_status(app: &DesktopApp) -> String {
 fn banner_status(app: &DesktopApp) -> String {
     let status = app.model.foundation_status();
     format!(
-        "{VAULT_STORAGE_SENTENCE} Rules, agents, and activity stay demo fixtures. The model is {model}. Isolation is {isolation}.",
+        "{VAULT_STORAGE_SENTENCE} Agents, grants, and agent activity are in the vault. Rules and demo approvals stay fixtures. The model is {model}. Isolation is {isolation}.",
         model = status.model,
         isolation = status.isolation,
     )
@@ -142,7 +142,7 @@ fn sidebar_storage(app: &DesktopApp) -> (String, &'static str) {
 fn sidebar_storage(_app: &DesktopApp) -> (String, &'static str) {
     (
         "Storage: encrypted vault file".to_owned(),
-        "Rules, agents, and activity: in memory only.",
+        "Rules and demo approvals: in memory only.",
     )
 }
 
@@ -552,7 +552,7 @@ fn draw_owner_vault(app: &mut DesktopApp, ui: &mut egui::Ui) {
     heading(ui, "Vault");
     ui.label(
         RichText::new(
-            "Create or open an encrypted vault file, then unlock it with its passphrase. Do not store real credentials. Rules, agents, and activity on the other screens stay demo fixtures.",
+            "Create or open an encrypted vault file, then unlock it with its passphrase. Do not store real credentials. Rules and demo approvals on the other screens stay fixtures.",
         )
         .color(INK_MUTED),
     );
@@ -969,6 +969,11 @@ fn draw_owner_item(app: &mut DesktopApp, ui: &mut egui::Ui) {
         }
     });
 
+    if details.kind == CredentialKind::ApiKey {
+        ui.add_space(8.0);
+        agents_view::draw_connector_card(app, ui, id);
+    }
+
     ui.add_space(8.0);
     card_frame().show(ui, |ui| {
         ui.label(RichText::new("Delete item").size(16.0).strong().color(INK));
@@ -1258,6 +1263,12 @@ fn draw_rules(app: &mut DesktopApp, ui: &mut egui::Ui) {
     });
 }
 
+#[cfg(feature = "vault")]
+fn draw_agents(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    agents_view::draw(app, ui);
+}
+
+#[cfg(not(feature = "vault"))]
 fn draw_agents(app: &mut DesktopApp, ui: &mut egui::Ui) {
     heading(ui, "Agents");
     ui.label(
@@ -1302,6 +1313,11 @@ fn draw_activity(app: &mut DesktopApp, ui: &mut egui::Ui) {
             .color(ASK),
     );
     ui.add_space(8.0);
+    #[cfg(feature = "vault")]
+    {
+        agents_view::draw_activity_card(app, ui);
+        ui.add_space(8.0);
+    }
 
     card_frame().show(ui, |ui| {
         ui.label(RichText::new("Demo request").size(16.0).strong().color(INK));
@@ -1834,5 +1850,334 @@ mod tests {
             tall.contains("The request waits for an owner decision"),
             "original wait must stay in history: {tall}"
         );
+    }
+}
+
+/// Agent access views for the vault build (ADR 0004).
+#[cfg(feature = "vault")]
+mod agents_view {
+    use eframe::egui::{self, Frame, Margin, RichText, TextEdit};
+
+    use super::{
+        ALLOW, ASK, DENY, INK, INK_MUTED, accent_button, card_frame, danger_button, heading,
+        labeled_text,
+    };
+    use crate::broker::profile::REPORTING_API_V0;
+    use crate::desktop::owner_store::format_utc;
+    use crate::desktop::{BrokerState, DesktopApp};
+    use crate::vault::ActivityDecision;
+
+    pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
+        heading(ui, "Agents");
+        ui.label(
+            RichText::new(
+                "An agent uses a credential through the Apassy broker. The agent never receives the secret value. The grants on this screen are temporary manual permissions. Confirmed rules replace them later.",
+            )
+            .color(INK_MUTED),
+        );
+        ui.add_space(8.0);
+        draw_broker_card(app, ui);
+        ui.add_space(8.0);
+        if app.owner_ui.session.is_locked() {
+            // A lock also hides a token that the owner did not dismiss.
+            app.owner_ui.fresh_token = None;
+            ui.label(RichText::new("Unlock the vault to manage agents.").color(INK_MUTED));
+            return;
+        }
+        draw_register_card(app, ui);
+        ui.add_space(8.0);
+        draw_agent_list(app, ui);
+    }
+
+    fn adapter_path() -> String {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("apassy-mcp")))
+            .map_or_else(
+                || "apassy-mcp".to_owned(),
+                |path| path.display().to_string(),
+            )
+    }
+
+    fn draw_broker_card(app: &DesktopApp, ui: &mut egui::Ui) {
+        card_frame().show(ui, |ui| {
+            ui.label(RichText::new("Broker").size(16.0).strong().color(INK));
+            match &app.broker {
+                BrokerState::Running(handle) => {
+                    ui.label(RichText::new("The broker accepts agent requests.").color(ALLOW));
+                    ui.label(
+                        RichText::new(format!("Socket: {}", handle.socket_path().display()))
+                            .color(INK_MUTED),
+                    );
+                }
+                BrokerState::Failed(message) => {
+                    ui.label(RichText::new(message).color(DENY));
+                }
+                BrokerState::NotStarted => {
+                    ui.label(
+                        RichText::new("The broker starts with the desktop window.")
+                            .color(INK_MUTED),
+                    );
+                }
+            }
+            ui.label(
+                RichText::new(
+                    "A locked vault refuses all agent requests. The broker accepts only loopback destinations in this phase.",
+                )
+                .color(INK_MUTED),
+            );
+        });
+    }
+
+    fn draw_register_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
+        card_frame().show(ui, |ui| {
+            ui.label(RichText::new("Register an agent").size(16.0).strong().color(INK));
+            labeled_text(ui, "agent-name", "Agent name", &mut app.owner_ui.new_agent_name);
+            if accent_button(ui, "Register agent").clicked() {
+                let name = app.owner_ui.new_agent_name.clone();
+                match app.owner_ui.session.register_agent(&name) {
+                    Ok((agent, token)) => {
+                        app.owner_ui.new_agent_name.clear();
+                        app.owner_ui.selected_agent = Some(agent.id);
+                        app.owner_ui.fresh_token = Some((agent.name.clone(), token));
+                        app.set_ok(format!(
+                            "{} is registered. Copy its token now.",
+                            agent.name
+                        ));
+                    }
+                    Err(err) => app.set_err(err.message),
+                }
+            }
+            let mut dismiss = false;
+            if let Some((name, token)) = &app.owner_ui.fresh_token {
+                ui.add_space(6.0);
+                Frame::NONE
+                    .fill(egui::Color32::from_rgb(252, 244, 222))
+                    .inner_margin(Margin::symmetric(10, 8))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "Token for {name}. Apassy shows it one time. Select the text and copy it."
+                            ))
+                            .color(ASK),
+                        );
+                        let mut shown = token.expose().to_owned();
+                        ui.add(
+                            TextEdit::singleline(&mut shown)
+                                .font(egui::TextStyle::Monospace)
+                                .desired_width(f32::INFINITY),
+                        );
+                        ui.label(
+                            RichText::new("MCP server configuration for the agent host:")
+                                .color(INK_MUTED),
+                        );
+                        let mut config = format!(
+                            "{{\n  \"mcpServers\": {{\n    \"apassy\": {{\n      \"command\": \"{}\",\n      \"env\": {{ \"APASSY_AGENT_TOKEN\": \"{}\" }}\n    }}\n  }}\n}}",
+                            adapter_path(),
+                            token.expose()
+                        );
+                        ui.add(
+                            TextEdit::multiline(&mut config)
+                                .font(egui::TextStyle::Monospace)
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(7),
+                        );
+                        config.clear();
+                        shown.clear();
+                        if ui.button("I saved the token").clicked() {
+                            dismiss = true;
+                        }
+                    });
+            }
+            if dismiss {
+                app.owner_ui.fresh_token = None;
+                app.set_ok("The token is hidden. Apassy cannot show it again.");
+            }
+        });
+    }
+
+    fn draw_agent_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
+        let agents = match app.owner_ui.session.agents() {
+            Ok(agents) => agents,
+            Err(err) => {
+                ui.label(RichText::new(err.message).color(DENY));
+                return;
+            }
+        };
+        if agents.is_empty() {
+            ui.label(RichText::new("No agent is registered.").color(INK_MUTED));
+            return;
+        }
+        for agent in agents {
+            card_frame().show(ui, |ui| {
+                ui.label(RichText::new(&agent.name).size(16.0).strong().color(INK));
+                ui.label(
+                    RichText::new(format!("Registered {}", format_utc(agent.created_at)))
+                        .color(INK_MUTED),
+                );
+                if agent.revoked {
+                    ui.label(RichText::new("Revoked. The token does not work.").color(DENY));
+                    return;
+                }
+                ui.label(RichText::new("Active").color(ALLOW));
+                ui.horizontal_wrapped(|ui| {
+                    let selected = app.owner_ui.selected_agent == Some(agent.id);
+                    let label = if selected {
+                        "Hide grants"
+                    } else {
+                        "Manage grants"
+                    };
+                    if ui.button(label).clicked() {
+                        app.owner_ui.selected_agent = if selected { None } else { Some(agent.id) };
+                    }
+                    if danger_button(ui, "Revoke agent").clicked() {
+                        let message =
+                            format!("{} is revoked. Its token does not work.", agent.name);
+                        let result = app.owner_ui.session.revoke_agent(agent.id);
+                        let _ = app.apply(result, &message);
+                    }
+                });
+                if app.owner_ui.selected_agent == Some(agent.id) {
+                    draw_grants(app, ui, agent.id);
+                }
+            });
+            ui.add_space(8.0);
+        }
+    }
+
+    fn draw_grants(app: &mut DesktopApp, ui: &mut egui::Ui, agent_id: u64) {
+        let connectors = match app.owner_ui.session.connectors() {
+            Ok(rows) => rows,
+            Err(err) => {
+                ui.label(RichText::new(err.message).color(DENY));
+                return;
+            }
+        };
+        if connectors.is_empty() {
+            ui.label(
+                RichText::new(
+                    "No item has a connector. Open an API key item and add a connector in Item details.",
+                )
+                .color(INK_MUTED),
+            );
+            return;
+        }
+        let granted = app.owner_ui.session.grants(agent_id).unwrap_or_default();
+        for row in connectors {
+            ui.add_space(4.0);
+            ui.label(RichText::new(&row.item_name).strong().color(INK));
+            ui.label(
+                RichText::new(format!("{} at {}", row.profile_label, row.base_url))
+                    .color(INK_MUTED),
+            );
+            for (operation, description) in row.operations {
+                let was = granted.contains(&(row.item_id, operation.to_owned()));
+                let mut allowed = was;
+                ui.checkbox(&mut allowed, format!("{operation}: {description}"));
+                if allowed != was {
+                    let result =
+                        app.owner_ui
+                            .session
+                            .set_grant(agent_id, row.item_id, operation, allowed);
+                    let message = if allowed {
+                        format!("The agent can now use {operation}.")
+                    } else {
+                        format!("The agent can no longer use {operation}.")
+                    };
+                    let _ = app.apply(result, &message);
+                }
+            }
+        }
+    }
+
+    pub(super) fn draw_connector_card(app: &mut DesktopApp, ui: &mut egui::Ui, item_id: u64) {
+        card_frame().show(ui, |ui| {
+            ui.label(RichText::new("Agent connector").size(16.0).strong().color(INK));
+            ui.label(
+                RichText::new(
+                    "The broker adds this token to requests for permitted agents. The agent never receives the token. Only loopback http:// destinations work in this phase.",
+                )
+                .color(INK_MUTED),
+            );
+            let current = app.owner_ui.session.connector(item_id).ok().flatten();
+            let status = current.as_ref().map_or_else(
+                || "No connector.".to_owned(),
+                |destination| format!("Connector: {} at {}", REPORTING_API_V0.label, destination.base_url),
+            );
+            ui.label(RichText::new(status).color(INK));
+            ui.label(RichText::new(format!("Profile: {}", REPORTING_API_V0.label)).color(INK_MUTED));
+            ui.add(
+                TextEdit::singleline(&mut app.owner_ui.connector_url)
+                    .hint_text("http://127.0.0.1:8787")
+                    .desired_width(320.0),
+            );
+            ui.horizontal_wrapped(|ui| {
+                if accent_button(ui, "Save connector").clicked() {
+                    let url = app.owner_ui.connector_url.clone();
+                    let result =
+                        app.owner_ui
+                            .session
+                            .set_connector(item_id, REPORTING_API_V0.id, &url);
+                    let _ = app.apply(result, "The connector is saved.");
+                }
+                if current.is_some() && ui.button("Remove connector").clicked() {
+                    let result = app.owner_ui.session.clear_connector(item_id);
+                    if app
+                        .apply(result, "The connector and its grants are removed.")
+                        .is_some()
+                    {
+                        app.owner_ui.connector_url.clear();
+                    }
+                }
+            });
+        });
+    }
+
+    pub(super) fn draw_activity_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
+        card_frame().show(ui, |ui| {
+            ui.label(
+                RichText::new("Agent activity (vault)")
+                    .size(16.0)
+                    .strong()
+                    .color(INK),
+            );
+            if app.owner_ui.session.is_locked() {
+                ui.label(RichText::new("Unlock the vault to see agent activity.").color(INK_MUTED));
+                return;
+            }
+            let rows = match app.owner_ui.session.activity(50) {
+                Ok(rows) => rows,
+                Err(err) => {
+                    ui.label(RichText::new(err.message).color(DENY));
+                    return;
+                }
+            };
+            if rows.is_empty() {
+                ui.label(RichText::new("No agent request yet.").color(INK_MUTED));
+                return;
+            }
+            egui::Grid::new("agent-activity")
+                .striped(true)
+                .num_columns(5)
+                .show(ui, |ui| {
+                    for title in ["Time", "Agent", "Item", "Operation", "Result"] {
+                        ui.label(RichText::new(title).strong().color(INK));
+                    }
+                    ui.end_row();
+                    for row in rows {
+                        ui.label(RichText::new(&row.when).color(INK_MUTED));
+                        ui.label(&row.agent);
+                        ui.label(&row.item);
+                        ui.label(&row.operation);
+                        let (text, color) = match row.decision {
+                            ActivityDecision::Allow => ("Allowed", ALLOW),
+                            ActivityDecision::Deny => ("Denied", DENY),
+                            ActivityDecision::Error => ("Failed", ASK),
+                        };
+                        ui.label(RichText::new(format!("{text}. {}", row.reason)).color(color));
+                        ui.end_row();
+                    }
+                });
+        });
     }
 }

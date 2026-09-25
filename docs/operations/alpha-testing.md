@@ -76,10 +76,15 @@ Status on 2026-09-25 after the fixes. A second GUI run on a new vault examined e
 
 After the fixes, all commands in "Checks on 2026-09-25" gave exit code 0. The test count is 99. Two new tests are in `tests/owner_vault.rs`.
 
+## Agent path
+
+The alpha also has a thin agent path (ADR 0004). See [agent path](agent-path.md) for the setup and the expected results.
+Testers can connect an MCP agent host to the synthetic reporting service. Do not use a real service or a real token.
+
 ## Known limits
 
 - Do not use the alpha for production secrets. There is no test of memory erasure, swap, or crash dumps.
-- The alpha has no agent sessions, rules, approvals, connectors, or notifications.
+- The agent path has manual grants, one synthetic connector, and loopback destinations only. The alpha has no rules, approvals, or notifications.
 - The app has no file dialog. You must type each path.
 - The app cannot change the passphrase. If you do not know the passphrase, you cannot open the vault.
 - The alpha has no app package, code signature, or update procedure. There is no license review of the bundled SQLCipher and OpenSSL.

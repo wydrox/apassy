@@ -10,6 +10,7 @@
 //! not protect against hostile parent-directory replacement or same-user
 //! arbitrary SQLite clients.
 
+mod agents;
 mod types;
 
 use std::fs::{self, File, OpenOptions};
@@ -22,6 +23,10 @@ use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionB
 
 use crate::contracts::CredentialKind;
 
+pub use agents::{
+    AGENT_TOKEN_PREFIX, ActivityDecision, ActivityRecord, AgentSummary, AgentToken, Destination,
+    GrantSummary, MAX_ACTIVITY_ROWS, NewActivity,
+};
 pub use types::{
     Field, FieldSummary, ItemDetails, ItemDraft, ItemSummary, MAX_PASSPHRASE_BYTES,
     MIN_PASSPHRASE_BYTES, SecretValue, VaultError, VaultErrorKind, VaultResult,
@@ -71,6 +76,9 @@ CREATE INDEX item_field_item_id ON item_field(item_id);
 INSERT INTO vault_meta (id, schema_version) VALUES (1, 1);
 PRAGMA user_version = 1;
 ";
+
+/// Schema version 1 files are migrated to version 2 at unlock.
+const LEGACY_SCHEMA_VERSION: i64 = 1;
 
 /// Encrypted local vault. Connection state is private. Debug is redacted.
 pub struct Vault {
@@ -260,6 +268,7 @@ impl Vault {
             .map_err(|_| err(VaultErrorKind::Storage))?;
         tx.execute("DELETE FROM item_tag WHERE item_id = ?1", [sql_id])
             .map_err(|_| err(VaultErrorKind::Storage))?;
+        agents::delete_item_links(&tx, sql_id)?;
         tx.execute("DELETE FROM item WHERE id = ?1", [sql_id])
             .map_err(|_| err(VaultErrorKind::Storage))?;
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
@@ -343,6 +352,11 @@ impl Vault {
         refuse_sqlite_companions(&source, VaultErrorKind::InvalidInput)?;
         validate_encrypted_source(&source, passphrase)?;
         copy_into_new_file(&source, &dest)?;
+        // Restored agent authority is not trusted. The owner registers agents again.
+        if let Err(revoke_err) = revoke_restored_agents(&dest, passphrase) {
+            let _ = fs::remove_file(&dest);
+            return Err(revoke_err);
+        }
         Ok(Self {
             path: dest,
             _lock_file: dest_lock,
@@ -665,9 +679,9 @@ fn read_user_version(conn: &Connection) -> VaultResult<i64> {
     }
 }
 
-fn verify_user_version(conn: &Connection) -> VaultResult<()> {
+fn verify_user_version(conn: &Connection) -> VaultResult<i64> {
     match read_user_version(conn)? {
-        SCHEMA_VERSION => Ok(()),
+        version @ (LEGACY_SCHEMA_VERSION | SCHEMA_VERSION) => Ok(version),
         _ => Err(err(VaultErrorKind::UnsupportedSchema)),
     }
 }
@@ -709,21 +723,27 @@ fn verify_sqlite_integrity(conn: &Connection) -> VaultResult<()> {
     }
 }
 
-fn verify_expected_columns(conn: &Connection) -> VaultResult<()> {
+fn verify_expected_columns(conn: &Connection, version: i64) -> VaultResult<()> {
     match conn.query_row(
         "SELECT id, schema_version FROM vault_meta WHERE id = 1",
         [],
         |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
     ) {
-        Ok((1, SCHEMA_VERSION)) => {}
+        Ok((1, stored)) if stored == version => {}
         Ok(_) => return Err(err(VaultErrorKind::UnsupportedSchema)),
         Err(_) => return Err(err(VaultErrorKind::UnsupportedSchema)),
     }
-    for sql in [
+    let v1 = [
         "SELECT id, title, kind, notes, revision FROM item LIMIT 0",
         "SELECT item_id, position, tag FROM item_tag LIMIT 0",
         "SELECT item_id, position, name, value, secret FROM item_field LIMIT 0",
-    ] {
+    ];
+    let v2: &[&str] = if version >= SCHEMA_VERSION {
+        &agents::SCHEMA_V2_COLUMNS
+    } else {
+        &[]
+    };
+    for sql in v1.iter().chain(v2) {
         drop(
             conn.prepare(sql)
                 .map_err(|_| err(VaultErrorKind::UnsupportedSchema))?,
@@ -732,11 +752,31 @@ fn verify_expected_columns(conn: &Connection) -> VaultResult<()> {
     Ok(())
 }
 
-fn verify_readable_schema(conn: &Connection) -> VaultResult<()> {
-    verify_user_version(conn)?;
+/// Returns the schema version of a readable file.
+fn verify_readable_schema(conn: &Connection) -> VaultResult<i64> {
+    let version = verify_user_version(conn)?;
     verify_cipher_integrity(conn)?;
     verify_sqlite_integrity(conn)?;
-    verify_expected_columns(conn)
+    verify_expected_columns(conn, version)?;
+    Ok(version)
+}
+
+/// Add the schema version 2 tables in one immediate transaction.
+fn migrate_to_current(conn: &mut Connection) -> VaultResult<()> {
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute_batch(agents::SCHEMA_V2_SQL)
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
+    verify_expected_columns(conn, SCHEMA_VERSION)
+}
+
+fn revoke_restored_agents(path: &Path, passphrase: &str) -> VaultResult<()> {
+    let mut conn = open_working_conn(path, passphrase)?;
+    let result = agents::revoke_all_agents(&mut conn);
+    let close_result = close_conn(conn);
+    result.and(close_result)
 }
 
 fn initialize_new_db(path: &Path, passphrase: &str) -> VaultResult<()> {
@@ -749,12 +789,14 @@ fn initialize_new_db(path: &Path, passphrase: &str) -> VaultResult<()> {
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.execute_batch(SCHEMA_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute_batch(agents::SCHEMA_V2_SQL)
+        .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     close_conn(conn)
 }
 
 fn open_working_conn(path: &Path, passphrase: &str) -> VaultResult<Connection> {
-    let conn = Connection::open_with_flags(path, OPEN_EXISTING).map_err(map_open_err)?;
+    let mut conn = Connection::open_with_flags(path, OPEN_EXISTING).map_err(map_open_err)?;
     if let Err(key_err) = apply_key(&conn, passphrase) {
         drop(conn);
         return Err(key_err);
@@ -763,13 +805,22 @@ fn open_working_conn(path: &Path, passphrase: &str) -> VaultResult<Connection> {
         drop(conn);
         return Err(cipher_err);
     }
-    if let Err(schema_err) = verify_readable_schema(&conn) {
-        drop(conn);
-        return Err(schema_err);
-    }
+    let version = match verify_readable_schema(&conn) {
+        Ok(version) => version,
+        Err(schema_err) => {
+            drop(conn);
+            return Err(schema_err);
+        }
+    };
     if let Err(pragma_err) = apply_session_pragmas(&conn) {
         drop(conn);
         return Err(pragma_err);
+    }
+    if version == LEGACY_SCHEMA_VERSION
+        && let Err(migrate_err) = migrate_to_current(&mut conn)
+    {
+        drop(conn);
+        return Err(migrate_err);
     }
     Ok(conn)
 }
@@ -779,7 +830,7 @@ fn validate_encrypted_source(path: &Path, passphrase: &str) -> VaultResult<()> {
     let conn = Connection::open_with_flags(path, OPEN_READONLY).map_err(map_open_err)?;
     let result = apply_key(&conn, passphrase)
         .and_then(|()| verify_cipher_defaults(&conn))
-        .and_then(|()| verify_readable_schema(&conn));
+        .and_then(|()| verify_readable_schema(&conn).map(|_| ()));
     match close_conn(conn) {
         Ok(()) => result,
         Err(close_err) => {

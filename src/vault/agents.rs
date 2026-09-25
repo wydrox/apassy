@@ -1,0 +1,660 @@
+//! Agent identity, manual grants, connector destinations, and activity (schema v2).
+//!
+//! These records support the thin agent path in ADR 0004. Manual grants are a
+//! temporary substitute for confirmed rules. They are not a policy engine.
+//! Agent tokens stay inside the encrypted database. A token is shown to the
+//! owner one time at registration.
+
+use std::fmt;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
+
+use super::types::{VaultErrorKind, VaultResult, err};
+use super::{Vault, fresh_epoch, to_public_id, to_sql_id};
+
+pub const AGENT_TOKEN_PREFIX: &str = "apassy_agt_";
+pub const MAX_AGENT_NAME_BYTES: usize = 64;
+pub const MAX_OPERATION_BYTES: usize = 64;
+pub const MAX_PROFILE_BYTES: usize = 64;
+pub const MAX_BASE_URL_BYTES: usize = 256;
+pub const MAX_ACTIVITY_REASON_BYTES: usize = 256;
+pub const MAX_ACTIVITY_ROWS: usize = 500;
+const TOKEN_BYTES: usize = 32;
+
+/// Tables added in schema version 2. The statements run in one transaction.
+pub(super) const SCHEMA_V2_SQL: &str = "
+CREATE TABLE agent (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    token BLOB NOT NULL,
+    created_at INTEGER NOT NULL,
+    revoked_at INTEGER
+);
+CREATE TABLE destination (
+    item_id INTEGER PRIMARY KEY,
+    profile TEXT NOT NULL,
+    base_url TEXT NOT NULL
+);
+CREATE TABLE grant_rule (
+    agent_id INTEGER NOT NULL,
+    item_id INTEGER NOT NULL,
+    operation TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (agent_id, item_id, operation)
+);
+CREATE TABLE activity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at INTEGER NOT NULL,
+    agent_id INTEGER,
+    agent_name TEXT NOT NULL,
+    item_id INTEGER,
+    operation TEXT NOT NULL,
+    decision TEXT NOT NULL CHECK (decision IN ('allow', 'deny', 'error')),
+    reason TEXT NOT NULL
+);
+CREATE INDEX grant_rule_item_id ON grant_rule(item_id);
+UPDATE vault_meta SET schema_version = 2 WHERE id = 1;
+PRAGMA user_version = 2;
+";
+
+pub(super) const SCHEMA_V2_COLUMNS: [&str; 4] = [
+    "SELECT id, name, token, created_at, revoked_at FROM agent LIMIT 0",
+    "SELECT item_id, profile, base_url FROM destination LIMIT 0",
+    "SELECT agent_id, item_id, operation, created_at FROM grant_rule LIMIT 0",
+    "SELECT id, at, agent_id, agent_name, item_id, operation, decision, reason FROM activity LIMIT 0",
+];
+
+/// Agent token text. Debug is redacted. There is no `Serialize` impl.
+pub struct AgentToken(String);
+
+impl AgentToken {
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for AgentToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("AgentToken([redacted])")
+    }
+}
+
+impl Drop for AgentToken {
+    fn drop(&mut self) {
+        self.0.clear();
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSummary {
+    pub id: u64,
+    pub name: String,
+    pub created_at: u64,
+    pub revoked: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantSummary {
+    pub agent_id: u64,
+    pub item_id: u64,
+    pub operation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Destination {
+    pub item_id: u64,
+    pub profile: String,
+    pub base_url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityDecision {
+    Allow,
+    Deny,
+    Error,
+}
+
+impl ActivityDecision {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Deny => "deny",
+            Self::Error => "error",
+        }
+    }
+
+    fn from_str(text: &str) -> VaultResult<Self> {
+        match text {
+            "allow" => Ok(Self::Allow),
+            "deny" => Ok(Self::Deny),
+            "error" => Ok(Self::Error),
+            _ => Err(err(VaultErrorKind::Storage)),
+        }
+    }
+}
+
+/// One activity entry to store. Text must not contain secret values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewActivity {
+    pub agent_id: Option<u64>,
+    pub agent_name: String,
+    pub item_id: Option<u64>,
+    pub operation: String,
+    pub decision: ActivityDecision,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityRecord {
+    pub id: u64,
+    pub at: u64,
+    pub agent_id: Option<u64>,
+    pub agent_name: String,
+    pub item_id: Option<u64>,
+    pub operation: String,
+    pub decision: ActivityDecision,
+    pub reason: String,
+}
+
+impl Vault {
+    /// Register an agent. The returned token is the only copy outside the vault.
+    pub fn register_agent(&mut self, name: &str) -> VaultResult<(AgentSummary, AgentToken)> {
+        let name = checked_text(name.trim(), MAX_AGENT_NAME_BYTES)?.to_owned();
+        let token = fresh_epoch()?;
+        let at = now_unix();
+        let conn = self.conn_mut()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        tx.execute(
+            "INSERT INTO agent (name, token, created_at, revoked_at) VALUES (?1, ?2, ?3, NULL)",
+            (name.as_str(), token.as_slice(), to_sql_time(at)?),
+        )
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+        let id = to_public_id(tx.last_insert_rowid())?;
+        tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
+        let summary = AgentSummary {
+            id,
+            name,
+            created_at: at,
+            revoked: false,
+        };
+        Ok((summary, AgentToken(format_token(&token))))
+    }
+
+    pub fn list_agents(&self) -> VaultResult<Vec<AgentSummary>> {
+        let conn = self.conn_ref()?;
+        let mut stmt = conn
+            .prepare("SELECT id, name, created_at, revoked_at FROM agent ORDER BY id ASC")
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            })
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let mut agents = Vec::new();
+        for row in rows {
+            let (id, name, created_at, revoked_at) =
+                row.map_err(|_| err(VaultErrorKind::Storage))?;
+            agents.push(AgentSummary {
+                id: to_public_id(id)?,
+                name,
+                created_at: from_sql_time(created_at)?,
+                revoked: revoked_at.is_some(),
+            });
+        }
+        Ok(agents)
+    }
+
+    /// Revoke an agent. Its token stops working at once. Its grants are removed.
+    pub fn revoke_agent(&mut self, agent_id: u64) -> VaultResult<()> {
+        let sql_id = to_sql_id(agent_id)?;
+        let at = to_sql_time(now_unix())?;
+        let conn = self.conn_mut()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let changed = tx
+            .execute(
+                "UPDATE agent SET revoked_at = ?1 WHERE id = ?2 AND revoked_at IS NULL",
+                (at, sql_id),
+            )
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        if changed == 0 {
+            let exists: Option<i64> = tx
+                .query_row("SELECT id FROM agent WHERE id = ?1", [sql_id], |row| {
+                    row.get(0)
+                })
+                .optional()
+                .map_err(|_| err(VaultErrorKind::Storage))?;
+            if exists.is_none() {
+                return Err(err(VaultErrorKind::NotFound));
+            }
+        }
+        tx.execute("DELETE FROM grant_rule WHERE agent_id = ?1", [sql_id])
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        tx.commit().map_err(|_| err(VaultErrorKind::Storage))
+    }
+
+    /// Find the active agent for a token. Every stored token is compared in constant time.
+    pub fn authenticate_agent(&self, token: &str) -> VaultResult<AgentSummary> {
+        let presented = parse_token(token).ok_or_else(|| err(VaultErrorKind::NotFound))?;
+        let conn = self.conn_ref()?;
+        let mut stmt = conn
+            .prepare("SELECT id, name, token, created_at FROM agent WHERE revoked_at IS NULL")
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let mut found = None;
+        for row in rows {
+            let (id, name, stored, created_at) = row.map_err(|_| err(VaultErrorKind::Storage))?;
+            if constant_time_eq(&stored, &presented) && found.is_none() {
+                found = Some(AgentSummary {
+                    id: to_public_id(id)?,
+                    name,
+                    created_at: from_sql_time(created_at)?,
+                    revoked: false,
+                });
+            }
+        }
+        found.ok_or_else(|| err(VaultErrorKind::NotFound))
+    }
+
+    /// Permit or remove one named operation for one agent and one item.
+    pub fn set_grant(
+        &mut self,
+        agent_id: u64,
+        item_id: u64,
+        operation: &str,
+        allowed: bool,
+    ) -> VaultResult<()> {
+        let agent = to_sql_id(agent_id)?;
+        let item = to_sql_id(item_id)?;
+        let operation = checked_identifier(operation, MAX_OPERATION_BYTES)?;
+        let at = to_sql_time(now_unix())?;
+        let conn = self.conn_mut()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        if allowed {
+            require_active_agent(&tx, agent)?;
+            require_item(&tx, item)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO grant_rule (agent_id, item_id, operation, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                (agent, item, operation, at),
+            )
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        } else {
+            tx.execute(
+                "DELETE FROM grant_rule WHERE agent_id = ?1 AND item_id = ?2 AND operation = ?3",
+                (agent, item, operation),
+            )
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        }
+        tx.commit().map_err(|_| err(VaultErrorKind::Storage))
+    }
+
+    pub fn grants_for_agent(&self, agent_id: u64) -> VaultResult<Vec<GrantSummary>> {
+        let agent = to_sql_id(agent_id)?;
+        let conn = self.conn_ref()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT item_id, operation FROM grant_rule WHERE agent_id = ?1
+                 ORDER BY item_id ASC, operation ASC",
+            )
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let rows = stmt
+            .query_map([agent], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let mut grants = Vec::new();
+        for row in rows {
+            let (item_id, operation) = row.map_err(|_| err(VaultErrorKind::Storage))?;
+            grants.push(GrantSummary {
+                agent_id,
+                item_id: to_public_id(item_id)?,
+                operation,
+            });
+        }
+        Ok(grants)
+    }
+
+    pub fn has_grant(&self, agent_id: u64, item_id: u64, operation: &str) -> VaultResult<bool> {
+        let agent = to_sql_id(agent_id)?;
+        let item = to_sql_id(item_id)?;
+        let conn = self.conn_ref()?;
+        let found: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM grant_rule
+                 JOIN agent ON agent.id = grant_rule.agent_id
+                 WHERE grant_rule.agent_id = ?1 AND grant_rule.item_id = ?2
+                   AND grant_rule.operation = ?3 AND agent.revoked_at IS NULL",
+                (agent, item, operation),
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        Ok(found.is_some())
+    }
+
+    /// Register the connector destination for an item. The broker checks the profile and URL form.
+    pub fn set_destination(
+        &mut self,
+        item_id: u64,
+        profile: &str,
+        base_url: &str,
+    ) -> VaultResult<()> {
+        let item = to_sql_id(item_id)?;
+        let profile = checked_identifier(profile, MAX_PROFILE_BYTES)?;
+        let base_url = checked_text(base_url.trim(), MAX_BASE_URL_BYTES)?;
+        let conn = self.conn_mut()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        require_item(&tx, item)?;
+        tx.execute(
+            "INSERT INTO destination (item_id, profile, base_url) VALUES (?1, ?2, ?3)
+             ON CONFLICT(item_id) DO UPDATE SET profile = excluded.profile, base_url = excluded.base_url",
+            (item, profile, base_url),
+        )
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+        tx.commit().map_err(|_| err(VaultErrorKind::Storage))
+    }
+
+    /// Remove the destination and every grant for the item.
+    pub fn clear_destination(&mut self, item_id: u64) -> VaultResult<()> {
+        let item = to_sql_id(item_id)?;
+        let conn = self.conn_mut()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        tx.execute("DELETE FROM destination WHERE item_id = ?1", [item])
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        tx.execute("DELETE FROM grant_rule WHERE item_id = ?1", [item])
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        tx.commit().map_err(|_| err(VaultErrorKind::Storage))
+    }
+
+    pub fn destination(&self, item_id: u64) -> VaultResult<Option<Destination>> {
+        let item = to_sql_id(item_id)?;
+        let conn = self.conn_ref()?;
+        let row = conn
+            .query_row(
+                "SELECT profile, base_url FROM destination WHERE item_id = ?1",
+                [item],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        Ok(row.map(|(profile, base_url)| Destination {
+            item_id,
+            profile,
+            base_url,
+        }))
+    }
+
+    pub fn record_activity(&mut self, entry: &NewActivity) -> VaultResult<()> {
+        let agent_id = entry.agent_id.map(to_sql_id).transpose()?;
+        let item_id = entry.item_id.map(to_sql_id).transpose()?;
+        let agent_name = truncate_text(&entry.agent_name, MAX_AGENT_NAME_BYTES);
+        let operation = truncate_text(&entry.operation, MAX_OPERATION_BYTES);
+        let reason = truncate_text(&entry.reason, MAX_ACTIVITY_REASON_BYTES);
+        let at = to_sql_time(now_unix())?;
+        let conn = self.conn_mut()?;
+        conn.execute(
+            "INSERT INTO activity (at, agent_id, agent_name, item_id, operation, decision, reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            (
+                at,
+                agent_id,
+                agent_name,
+                item_id,
+                operation,
+                entry.decision.as_str(),
+                reason,
+            ),
+        )
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+        conn.execute(
+            "DELETE FROM activity WHERE id NOT IN
+             (SELECT id FROM activity ORDER BY id DESC LIMIT ?1)",
+            [i64::try_from(MAX_ACTIVITY_ROWS).map_err(|_| err(VaultErrorKind::Storage))?],
+        )
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+        Ok(())
+    }
+
+    /// Newest entries first.
+    pub fn recent_activity(&self, limit: usize) -> VaultResult<Vec<ActivityRecord>> {
+        let limit = i64::try_from(limit.min(MAX_ACTIVITY_ROWS))
+            .map_err(|_| err(VaultErrorKind::InvalidInput))?;
+        let conn = self.conn_ref()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, at, agent_id, agent_name, item_id, operation, decision, reason
+                 FROM activity ORDER BY id DESC LIMIT ?1",
+            )
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let rows = stmt
+            .query_map([limit], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            })
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let mut records = Vec::new();
+        for row in rows {
+            let (id, at, agent_id, agent_name, item_id, operation, decision, reason) =
+                row.map_err(|_| err(VaultErrorKind::Storage))?;
+            records.push(ActivityRecord {
+                id: to_public_id(id)?,
+                at: from_sql_time(at)?,
+                agent_id: agent_id.map(to_public_id).transpose()?,
+                agent_name,
+                item_id: item_id.map(to_public_id).transpose()?,
+                operation,
+                decision: ActivityDecision::from_str(&decision)?,
+                reason,
+            });
+        }
+        Ok(records)
+    }
+}
+
+/// Revoke every active agent. Restore calls this before the restored vault is used.
+pub(super) fn revoke_all_agents(conn: &mut Connection) -> VaultResult<()> {
+    let at = to_sql_time(now_unix())?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute(
+        "UPDATE agent SET revoked_at = ?1 WHERE revoked_at IS NULL",
+        [at],
+    )
+    .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute("DELETE FROM grant_rule", [])
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.commit().map_err(|_| err(VaultErrorKind::Storage))
+}
+
+/// Remove the grants and the destination of a deleted item in the same transaction.
+pub(super) fn delete_item_links(tx: &rusqlite::Transaction<'_>, item_id: i64) -> VaultResult<()> {
+    tx.execute("DELETE FROM grant_rule WHERE item_id = ?1", [item_id])
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute("DELETE FROM destination WHERE item_id = ?1", [item_id])
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    Ok(())
+}
+
+fn require_active_agent(tx: &rusqlite::Transaction<'_>, agent: i64) -> VaultResult<()> {
+    let row: Option<Option<i64>> = tx
+        .query_row(
+            "SELECT revoked_at FROM agent WHERE id = ?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    match row {
+        Some(None) => Ok(()),
+        Some(Some(_)) => Err(err(VaultErrorKind::InvalidInput)),
+        None => Err(err(VaultErrorKind::NotFound)),
+    }
+}
+
+fn require_item(tx: &rusqlite::Transaction<'_>, item: i64) -> VaultResult<()> {
+    let found: Option<i64> = tx
+        .query_row("SELECT id FROM item WHERE id = ?1", [item], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    found
+        .map(|_| ())
+        .ok_or_else(|| err(VaultErrorKind::NotFound))
+}
+
+fn checked_text(text: &str, max: usize) -> VaultResult<&str> {
+    if text.is_empty() || text.len() > max || text.chars().any(char::is_control) {
+        Err(err(VaultErrorKind::InvalidInput))
+    } else {
+        Ok(text)
+    }
+}
+
+fn checked_identifier(text: &str, max: usize) -> VaultResult<&str> {
+    let valid = !text.is_empty()
+        && text.len() <= max
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
+    if valid {
+        Ok(text)
+    } else {
+        Err(err(VaultErrorKind::InvalidInput))
+    }
+}
+
+fn truncate_text(text: &str, max: usize) -> String {
+    let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+    if clean.len() <= max {
+        return clean;
+    }
+    let mut end = max;
+    while !clean.is_char_boundary(end) {
+        end -= 1;
+    }
+    clean[..end].to_owned()
+}
+
+fn format_token(bytes: &[u8; TOKEN_BYTES]) -> String {
+    let mut text = String::with_capacity(AGENT_TOKEN_PREFIX.len() + TOKEN_BYTES * 2);
+    text.push_str(AGENT_TOKEN_PREFIX);
+    for byte in bytes {
+        text.push(hex_digit(byte >> 4));
+        text.push(hex_digit(byte & 0x0f));
+    }
+    text
+}
+
+fn hex_digit(nibble: u8) -> char {
+    char::from(b"0123456789abcdef"[usize::from(nibble & 0x0f)])
+}
+
+fn parse_token(text: &str) -> Option<[u8; TOKEN_BYTES]> {
+    let hex = text.trim().strip_prefix(AGENT_TOKEN_PREFIX)?.as_bytes();
+    if hex.len() != TOKEN_BYTES * 2 {
+        return None;
+    }
+    let mut out = [0u8; TOKEN_BYTES];
+    for (slot, pair) in out.iter_mut().zip(hex.chunks_exact(2)) {
+        *slot = (hex_value(pair[0])? << 4) | hex_value(pair[1])?;
+    }
+    Some(out)
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
+fn constant_time_eq(stored: &[u8], presented: &[u8; TOKEN_BYTES]) -> bool {
+    if stored.len() != TOKEN_BYTES {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in stored.iter().zip(presented.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+fn to_sql_time(at: u64) -> VaultResult<i64> {
+    i64::try_from(at).map_err(|_| err(VaultErrorKind::Storage))
+}
+
+fn from_sql_time(at: i64) -> VaultResult<u64> {
+    u64::try_from(at).map_err(|_| err(VaultErrorKind::Storage))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_round_trip_and_rejects_bad_text() {
+        let bytes = [0xabu8; TOKEN_BYTES];
+        let text = format_token(&bytes);
+        assert!(text.starts_with(AGENT_TOKEN_PREFIX));
+        assert_eq!(parse_token(&text), Some(bytes));
+        assert_eq!(parse_token("apassy_agt_zz"), None);
+        assert_eq!(parse_token(&text.to_uppercase()), None);
+        assert_eq!(parse_token(&text[AGENT_TOKEN_PREFIX.len()..]), None);
+    }
+
+    #[test]
+    fn constant_time_eq_checks_length_and_value() {
+        let presented = [1u8; TOKEN_BYTES];
+        assert!(constant_time_eq(&[1u8; TOKEN_BYTES], &presented));
+        assert!(!constant_time_eq(&[2u8; TOKEN_BYTES], &presented));
+        assert!(!constant_time_eq(&[1u8; 16], &presented));
+    }
+
+    #[test]
+    fn truncate_keeps_char_boundaries_and_drops_controls() {
+        assert_eq!(truncate_text("a\nb", 10), "ab");
+        assert_eq!(truncate_text("ąąą", 3), "ą");
+    }
+}
