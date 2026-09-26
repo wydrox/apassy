@@ -496,6 +496,57 @@ fn unknown_code_needs_the_task_match() {
     assert_eq!(read_unmatched.bodies.lock().expect("bodies").len(), 2);
 }
 
+/// Policy v7 (dev round 3), on the broker path: with an owner instruction, a run needs
+/// `rule_break` at or below 0.2, also for a known safe command. A known write needs the
+/// task match, whatever the model answers for `writes`.
+#[test]
+fn an_owner_instruction_must_be_certainly_kept() {
+    let rule = |instruction: &str| ExecRule {
+        instruction: instruction.to_owned(),
+        ..ExecRule::default()
+    };
+    // `rule_break` 0.25: the value of the base model for `gh pr comment` on held-out v3.
+    let unsure = common::fake_bouncer(&[("rule_break", 0.25)]);
+    let fx = fixture(
+        Some(&unsure.url),
+        rule("Check with me before any comment, review, or PR."),
+    );
+    assert_eq!(
+        code(&run(&fx, &["echo", "hi"], "Print a greeting.")),
+        "approval_timeout"
+    );
+    assert!(
+        last_reason(&fx).contains("rule_break not 75% (needs 80%)"),
+        "{}",
+        last_reason(&fx)
+    );
+    // The same rule with a certain "does not break the rule" runs.
+    let certain = common::fake_bouncer(&[("rule_break", 0.1)]);
+    let fx = fixture(
+        Some(&certain.url),
+        rule("Check with me before any comment, review, or PR."),
+    );
+    let response = run(&fx, &["echo", "hi"], "Print a greeting.");
+    assert!(response.ok, "{response:?}");
+
+    // A known write with a low `writes` answer and a low task match asks.
+    let low_writes = common::fake_bouncer(&[("task_match", 0.38), ("writes", 0.08)]);
+    let fx = fixture(Some(&low_writes.url), ExecRule::default());
+    assert_eq!(
+        code(&run(
+            &fx,
+            &["gh", "pr", "comment", "77", "--body", "LGTM"],
+            "Comment."
+        )),
+        "approval_timeout"
+    );
+    assert!(
+        last_reason(&fx).contains("task_match 38% (needs 75%)"),
+        "{}",
+        last_reason(&fx)
+    );
+}
+
 /// Dev round 2: an instruction to the reviewer in the user request asks the owner, and
 /// the model is not asked.
 #[test]

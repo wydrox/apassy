@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "pack_version": 2,
+  "pack_version": 3,
   "tool": "docker",
-  "description": "Docker, Podman, and Compose: removal of containers, images, and volumes, host access from a container, and read and local commands.",
+  "description": "Docker, Podman, and Compose: removal of containers, images, and volumes, host access from a container, printed Compose configuration, image runs, pushes, and read and local commands.",
   "programs": ["docker", "podman", "docker-compose", "podman-compose"],
   "roles": {
     "usage": ["docker"]
@@ -61,33 +61,52 @@
           }
         ]
       }
+    },
+    {
+      "id": "compose-config-values",
+      "flag": "secret_output",
+      "note": "`compose config` prints the Compose file with the values of the environment and of `.env` in it, secrets included. `--no-interpolate` and the lists of names do not print values (dev round 3).",
+      "when": {
+        "any_of": [
+          { "program": ["docker", "podman"], "subcommand": ["compose"], "action": ["config", "convert"] },
+          { "program": ["docker-compose", "podman-compose"], "subcommand": ["config", "convert"] }
+        ],
+        "not": {
+          "any_arg": [
+            "--no-interpolate", "-q", "--quiet", "--services", "--volumes", "--profiles",
+            "--images", "--networks"
+          ]
+        }
+      }
     }
   ],
   "safe": [
     {
       "id": "read-build-and-compose",
-      "note": "Reads, local builds, and the local Compose project.",
+      "note": "Reads, local builds, and the local Compose project. `inspect` of a container prints its environment, and a build with `--push` uploads the image, so they are not here (dev round 3).",
       "when": {
         "program": ["docker", "podman"],
+        "not": { "any_arg": ["--push"] },
         "any_of": [
-          { "subcommand": ["ps", "images", "logs", "inspect", "version", "info", "build"] },
+          { "subcommand": ["ps", "images", "logs", "version", "info", "build"] },
           {
             "subcommand": ["compose"],
-            "action": ["ps", "logs", "up", "build", "config", "stop", "restart"]
+            "action": ["ps", "logs", "up", "build", "stop", "restart"]
           }
         ]
       }
     },
     {
       "id": "list-commands",
-      "note": "Listings and inspection of local images, containers, volumes, and networks.",
+      "note": "Listings of local images, containers, volumes, and networks, and inspection of images, volumes, and networks. The inspection of a container prints its environment, so it is not here.",
       "when": {
         "program": ["docker", "podman"],
         "any_of": [
           {
-            "subcommand": ["image", "container", "volume", "network", "context"],
+            "subcommand": ["image", "volume", "network", "context"],
             "action": ["ls", "list", "inspect"]
           },
+          { "subcommand": ["container"], "action": ["ls", "list"] },
           { "subcommand": ["compose"], "action": ["images", "top", "ls", "version"] }
         ]
       }
@@ -105,13 +124,38 @@
     },
     {
       "id": "command-in-local-container",
-      "note": "`exec` and `compose run` start a command in a local container. The analysis checks that command like a command on the host, so the whole line is safe only when the inner command is safe.",
+      "note": "`exec` and `compose run` start a command in a local container. The analysis checks that command like a command on the host, so the whole line is safe only when the inner command is safe. Without a command, the container runs its default command, which the project defines: the analysis treats it as project code (dev round 3).",
       "when": {
         "any_of": [
           { "program": ["docker", "podman"], "subcommand": ["exec"] },
           { "program": ["docker", "podman"], "subcommand": ["container"], "action": ["exec"] },
           { "program": ["docker", "podman"], "subcommand": ["compose"], "action": ["exec", "run"] },
           { "program": ["docker-compose", "podman-compose"], "subcommand": ["exec", "run"] }
+        ]
+      }
+    }
+  ],
+  "project_commands": [
+    {
+      "id": "image-run",
+      "note": "`docker run` runs the code of an image, often from a registry. The analysis cannot check it, so it is not a known command (dev round 3).",
+      "when": {
+        "program": ["docker", "podman"],
+        "any_of": [{ "subcommand": ["run"] }, { "subcommand": ["container"], "action": ["run"] }]
+      }
+    }
+  ],
+  "writes": [
+    {
+      "id": "push",
+      "note": "A push uploads an image to a registry. A build with `--push` or a registry output does the same.",
+      "when": {
+        "any_of": [
+          { "program": ["docker", "podman"], "subcommand": ["push"] },
+          { "program": ["docker", "podman"], "subcommand": ["image", "manifest", "compose", "buildx"], "action": ["push"] },
+          { "program": ["docker-compose", "podman-compose"], "subcommand": ["push"] },
+          { "program": ["docker", "podman"], "any_arg": ["--push"] },
+          { "program": ["docker", "podman"], "any_arg_contains": ["type=registry"] }
         ]
       }
     }

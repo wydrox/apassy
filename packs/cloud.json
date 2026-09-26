@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 3,
+  "pack_version": 5,
   "tool": "cloud",
   "description": "Small hosting and deploy tools (Railway, Render, Serverless, Ansible playbooks and ad-hoc commands) and Twilio. Google Cloud, Azure, Fly.io, Heroku, Firebase, Wrangler, and Stripe have their own packs.",
   "programs": [
@@ -12,6 +12,12 @@
     "command_runner": ["railway"]
   },
   "rules": [
+    {
+      "id": "serverless-print",
+      "flag": "secret_output",
+      "note": "`serverless print` prints the configuration with its variables resolved, such as `${env:API_KEY}` and `${ssm:...}`, so it prints secrets (dev round 3).",
+      "when": { "program": ["serverless", "sls"], "subcommand": ["print"] }
+    },
     {
       "id": "platform-deploy",
       "flag": "production",
@@ -81,16 +87,22 @@
   "safe": [
     {
       "id": "railway-reads",
-      "note": "The linked project and environment, logs, the account, and project listings.",
-      "when": { "program": ["railway"], "subcommand": ["status", "logs", "whoami", "list", "environment", "domain", "open"] }
+      "note": "The linked project and environment, logs, the account, and project listings. `railway domain` makes a new domain, and `environment new` makes an environment, so they are not here (dev round 3).",
+      "when": {
+        "program": ["railway"],
+        "any_of": [
+          { "subcommand": ["status", "logs", "whoami", "list", "open"] },
+          { "subcommand": ["environment"], "arg_count": 1 }
+        ]
+      }
     },
     {
       "id": "ansible-checks",
-      "note": "Ping and fact modules, syntax checks, and listings of hosts and tasks do not change a host.",
+      "note": "The ping module, syntax checks, and listings of hosts and tasks do not change a host. The fact module (`setup`) prints the environment of the remote user (`ansible_env`), which can hold secrets, so it is not here (dev round 3).",
       "when": {
         "any_of": [
           { "program": ["ansible-playbook"], "any_arg": ["--syntax-check", "--list-hosts", "--list-tasks", "--list-tags"] },
-          { "program": ["ansible"], "option_value": { "option": ["-m", "--module-name"], "value": ["ping", "setup"] }, "not": { "any_arg_starts": ["-a", "--args"] } }
+          { "program": ["ansible"], "option_value": { "option": ["-m", "--module-name"], "value": ["ping"] }, "not": { "any_arg_starts": ["-a", "--args"] } }
         ]
       }
     },

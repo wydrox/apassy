@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "pack_version": 3,
+  "pack_version": 4,
   "tool": "gh",
-  "description": "GitHub CLI: releases, workflow runs, secrets, repository settings, gists, and API writes.",
+  "description": "GitHub CLI: releases, workflow runs, merges, secrets, repository settings, gists, API writes, write commands, and read commands.",
   "programs": ["gh"],
   "roles": {
     "usage": ["gh"]
@@ -51,6 +51,12 @@
       }
     },
     {
+      "id": "pull-request-merge",
+      "flag": "production",
+      "note": "A merge changes the base branch, usually a release branch such as `main`, and can start a deployment. A push to `main` has the same flag.",
+      "when": { "subcommand": ["pr"], "action": ["merge"] }
+    },
+    {
       "id": "workflow-run",
       "flag": "production",
       "note": "A workflow run or a workflow change can deploy or publish.",
@@ -67,11 +73,41 @@
   ],
   "safe": [
     {
-      "id": "pull-requests-issues-runs",
-      "note": "Reads and creation of pull requests and issues, and reads of runs.",
+      "id": "reads",
+      "note": "Reads of pull requests, issues, runs, repositories, workflows, releases, labels, and caches, and searches. Creation, comments, and other changes are writes (dev round 3).",
       "when": {
-        "subcommand": ["pr", "issue", "run", "repo"],
-        "action": ["create", "view", "list", "status", "checks", "diff", "watch"]
+        "any_of": [
+          { "subcommand": ["pr"], "action": ["view", "list", "status", "checks", "diff"] },
+          { "subcommand": ["issue"], "action": ["view", "list", "status"] },
+          { "subcommand": ["run"], "action": ["view", "list", "watch"] },
+          { "subcommand": ["repo"], "action": ["view", "list"] },
+          { "subcommand": ["workflow", "release", "label", "cache"], "action": ["view", "list"] },
+          { "subcommand": ["search", "status"] }
+        ]
+      }
+    }
+  ],
+  "writes": [
+    {
+      "id": "write-commands",
+      "note": "Commands that change GitHub state: new, changed, closed, or merged pull requests and issues, comments and reviews, new or forked repositories, labels, reruns and cancels of runs, and keys (policy v7). The base model gave `writes` 0.08 to `gh pr comment` on held-out v3.",
+      "when": {
+        "action": [
+          "create", "comment", "edit", "close", "reopen", "ready", "review", "merge", "delete",
+          "transfer", "pin", "unpin", "lock", "unlock", "develop", "fork", "sync", "archive",
+          "unarchive", "rename", "rerun", "cancel", "run", "enable", "disable", "add", "remove",
+          "set", "upload", "item-add", "item-edit", "item-delete", "link", "unlink", "install",
+          "upgrade", "copy", "mark-template", "update-branch"
+        ]
+      }
+    },
+    {
+      "id": "api-with-fields",
+      "note": "`gh api` sends a POST request when the command has fields (`-f`, `-F`, `--input`) and no `GET` method. The analysis compares lowercase arguments, so `-f` also matches `-F`.",
+      "when": {
+        "subcommand": ["api"],
+        "any_arg": ["-f", "--field", "--raw-field", "--input"],
+        "not": { "option_value": { "option": ["-x", "--method"], "value": ["get"] } }
       }
     }
   ]

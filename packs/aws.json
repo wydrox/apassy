@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 2,
+  "pack_version": 3,
   "tool": "aws",
   "description": "AWS CLI and AWS deploy tools (Elastic Beanstalk, CDK, SAM, Amplify): S3 writes, deletions, resource changes, secret reads, remote shells, and read commands.",
   "programs": ["aws", "eb", "cdk", "sam", "amplify"],
@@ -92,6 +92,21 @@
       }
     },
     {
+      "id": "environment-values",
+      "flag": "secret_output",
+      "note": "The command prints the environment variables of a deployed function, task, app, or build project in plain text. Such variables often hold secrets (dev round 3).",
+      "when": {
+        "program": ["aws"],
+        "any_of": [
+          { "subcommand": ["lambda"], "action": ["get-function-configuration", "get-function"] },
+          { "subcommand": ["ecs"], "action": ["describe-task-definition"] },
+          { "subcommand": ["elasticbeanstalk"], "action": ["describe-configuration-settings"] },
+          { "subcommand": ["amplify"], "action": ["get-app", "get-branch", "list-apps", "list-branches"] },
+          { "subcommand": ["codebuild"], "action": ["batch-get-projects"] }
+        ]
+      }
+    },
+    {
       "id": "secret-values",
       "flag": "secret_output",
       "note": "The command prints a secret value, temporary credentials, a decrypted value, or a presigned URL.",
@@ -151,6 +166,19 @@
         "args_start": [
           "s3 ls", "logs tail", "logs filter-log-events", "logs get-log-events",
           "sts get-caller-identity", "configure list"
+        ]
+      }
+    }
+  ],
+  "access_reads": [
+    {
+      "id": "identity-inventory",
+      "note": "Reads of the users, roles, policies, access keys, and accounts of the whole AWS account or organization. They show who and what has access, so they must serve the user request (dev round 3: `aws iam list-users` with the request \"continue\").",
+      "when": {
+        "program": ["aws"],
+        "any_of": [
+          { "subcommand": ["iam", "organizations", "sso-admin", "identitystore", "accessanalyzer"] },
+          { "subcommand": ["sts"], "action": ["get-access-key-info", "decode-authorization-message"] }
         ]
       }
     }

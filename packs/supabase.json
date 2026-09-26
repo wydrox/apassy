@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 2,
+  "pack_version": 3,
   "tool": "supabase",
   "description": "Supabase CLI: database queries and resets, key listings, functions, secrets, and local development.",
   "programs": ["supabase"],
@@ -66,13 +66,14 @@
     },
     {
       "id": "local-and-read-commands",
-      "note": "The local stack, linters, type generation, and listings.",
+      "note": "The local stack, linters, type generation, and listings. `link` stores the database password of the project, and `stop --no-backup` deletes the local data, so they are not here (dev round 3).",
       "when": {
         "args_start": [
           "db lint", "db advisors", "branches list", "projects list", "migration list",
           "inspect", "status", "start", "stop", "gen types", "migration new", "db diff",
-          "functions serve", "link", "--version"
-        ]
+          "functions serve", "--version"
+        ],
+        "not": { "any_arg": ["--no-backup"] }
       }
     }
   ]

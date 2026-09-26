@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 3,
+  "pack_version": 4,
   "tool": "go",
   "description": "Go toolchain and Go tools: new modules, and build, test, lint, and format commands.",
   "programs": ["go", "gofmt", "goimports", "golangci-lint", "staticcheck", "govulncheck"],
@@ -31,8 +31,8 @@
   "safe": [
     {
       "id": "build-and-test",
-      "note": "Build, test, vet, format, run, and module maintenance from go.mod.",
-      "when": { "program": ["go"], "subcommand": ["test", "build", "vet", "fmt", "mod", "run"] }
+      "note": "Build, test, vet, format, and module maintenance from go.mod. Tests are project code with a check contract. `go run` is not here: it runs a program of the project with any effect (dev round 3).",
+      "when": { "program": ["go"], "subcommand": ["test", "build", "vet", "fmt", "mod"] }
     },
     {
       "id": "go-tools",

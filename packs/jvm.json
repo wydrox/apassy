@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 2,
+  "pack_version": 3,
   "tool": "jvm",
   "description": "Gradle and Maven: Flyway and Liquibase tasks that drop or revert, publishing and deployment, and build, test, and check tasks.",
   "programs": ["gradle", "gradlew", "mvn", "mvnw"],
@@ -49,7 +49,7 @@
   "safe": [
     {
       "id": "build-test-and-check",
-      "note": "Every task is a build, test, check, format, or report task, also with a module path such as `:app:test`. The Flyway and Liquibase plugin tasks `info`, `validate`, and `status` only read. The value of options such as `--tests` or `-x` is not a task.",
+      "note": "Every task is a build, test, check, format, or report task, also with a module path such as `:app:test`. Tests and build plugins are project code with a check or build contract. The Flyway and Liquibase plugin tasks `info`, `validate`, and `status` only read. The value of options such as `--tests` or `-x` is not a task. `run`, `bootRun`, and `spring-boot:run` are not here: they run the program of the project with any effect (dev round 3).",
       "when": {
         "operands": {
           "skip": [
@@ -62,8 +62,7 @@
                 "clean", "build", "test", "check", "assemble", "compile", "compilejava",
                 "compilekotlin", "lint", "verify", "package", "validate", "install",
                 "dependencies", "tasks", "javadoc", "spotlesscheck", "spotlessapply",
-                "ktlintcheck", "ktlintformat", "detekt", "jacocotestreport", "bootrun", "run",
-                "test-compile", "surefire:test", "spring-boot:run", "dependency:tree",
+                "ktlintcheck", "ktlintformat", "detekt", "jacocotestreport", "test-compile", "surefire:test", "dependency:tree",
                 "checkstyle:check", "spotbugs:check", "pmd:check", "help", "flywayinfo",
                 "flyway:info", "flywayvalidate", "flyway:validate", "liquibase:status",
                 "liquibase:validate", "liquibase:history"
@@ -73,11 +72,23 @@
               "starts": [":"],
               "ends": [
                 ":clean", ":build", ":test", ":check", ":assemble", ":lint", ":dependencies",
-                ":bootrun", ":run", ":detekt"
+                ":detekt"
               ]
             }
           ]
         }
+      }
+    }
+  ],
+  "writes": [
+    {
+      "id": "database-migrate",
+      "note": "The Flyway and Liquibase plugin tasks `migrate` and `update` change the database.",
+      "when": {
+        "any_arg": [
+          "flywaymigrate", "flyway:migrate", "liquibase:update", "update", "updatecount",
+          "updatetotag"
+        ]
       }
     }
   ]

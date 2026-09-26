@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "glab",
+  "description": "GitLab CLI: merges, releases, pipeline runs, CI/CD variables, deletions, API writes, write commands, and read commands.",
+  "programs": ["glab"],
+  "roles": {
+    "usage": ["glab"]
+  },
+  "rules": [
+    {
+      "id": "secret-argument",
+      "flag": "secret_output",
+      "note": "A secret in a `glab` argument goes to GitLab.",
+      "when": { "refs_secret": true }
+    },
+    {
+      "id": "merge-request-merge",
+      "flag": "production",
+      "note": "A merge changes the target branch, usually a release branch such as `main`, and can start a deployment. `gh pr merge` has the same flag.",
+      "when": { "subcommand": ["mr"], "action": ["merge"] }
+    },
+    {
+      "id": "release-change",
+      "flag": "production",
+      "note": "A release change publishes or removes artifacts for users.",
+      "when": { "subcommand": ["release"], "action": ["create", "upload", "delete"] }
+    },
+    {
+      "id": "pipeline-run",
+      "flag": "production",
+      "note": "A new pipeline can deploy or publish, as `gh workflow run`.",
+      "when": { "subcommand": ["ci", "pipeline"], "action": ["run", "trigger"] }
+    },
+    {
+      "id": "variable-change",
+      "flag": "system_change",
+      "note": "A change to CI/CD variables changes what pipelines get.",
+      "when": { "subcommand": ["variable"], "action": ["set", "update", "delete", "import"] }
+    },
+    {
+      "id": "deletion",
+      "flag": "data_loss",
+      "note": "Deletion of a repository, a pipeline, a label, or other GitLab data.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["repo", "ci", "pipeline", "label", "snippet", "release", "variable", "schedule"], "action": ["delete"] },
+          { "subcommand": ["repo"], "action": ["archive", "transfer"] }
+        ]
+      }
+    },
+    {
+      "id": "api-write",
+      "flag": "system_change",
+      "note": "An API call with a method other than GET changes GitLab state.",
+      "when": {
+        "subcommand": ["api"],
+        "option_value": { "option": ["-x", "--method"], "not_value": ["get"] }
+      }
+    }
+  ],
+  "safe": [
+    {
+      "id": "reads",
+      "note": "Reads of merge requests, issues, pipelines and job logs, repositories, releases, and labels, and the sign-in status.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["mr"], "action": ["list", "view", "diff"] },
+          { "subcommand": ["issue"], "action": ["list", "view"] },
+          { "subcommand": ["ci", "pipeline"], "action": ["status", "list", "trace", "get"] },
+          { "subcommand": ["repo", "release", "label"], "action": ["list", "view"] },
+          { "subcommand": ["auth"], "action": ["status"] }
+        ]
+      }
+    }
+  ],
+  "writes": [
+    {
+      "id": "write-commands",
+      "note": "Commands that change GitLab state: new, changed, approved, closed, or merged merge requests and issues, notes, reruns and cancels of jobs, and forks (policy v7).",
+      "when": {
+        "action": [
+          "create", "note", "update", "close", "reopen", "approve", "revoke", "merge", "delete",
+          "subscribe", "unsubscribe", "rebase", "retry", "cancel", "run", "trigger", "set",
+          "fork", "upload", "import", "archive", "transfer", "todo"
+        ]
+      }
+    },
+    {
+      "id": "api-with-fields",
+      "note": "`glab api` sends a POST request when the command has fields (`-f`, `-F`, `--input`) and no `GET` method.",
+      "when": {
+        "subcommand": ["api"],
+        "any_arg": ["-f", "--field", "--raw-field", "--input"],
+        "not": { "option_value": { "option": ["-x", "--method"], "value": ["get"] } }
+      }
+    }
+  ]
+}

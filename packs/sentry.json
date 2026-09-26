@@ -1,11 +1,12 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "sentry",
-  "description": "Sentry CLI (`sentry-cli`): release deletion, release bookkeeping, and read commands.",
+  "description": "Sentry CLI (`sentry-cli`): release deletion, release bookkeeping and events (writes), commands that it runs, and read commands.",
   "programs": ["sentry-cli"],
   "roles": {
-    "usage": ["sentry-cli"]
+    "usage": ["sentry-cli"],
+    "command_runner": ["sentry-cli"]
   },
   "rules": [
     {
@@ -27,16 +28,20 @@
           { "subcommand": ["releases"], "action": ["files"], "any_arg": ["list"] }
         ]
       }
-    },
+    }
+  ],
+  "writes": [
     {
-      "id": "release-bookkeeping",
-      "note": "Release bookkeeping for the error reports of the project: a new or finalized release, its commits, a deploy record, and source map or debug file uploads. It adds data to Sentry only. It does not change the app or its data, and a release can be deleted. `gh pr create` is known safe for the same reason.",
+      "id": "release-bookkeeping-and-events",
+      "note": "Release bookkeeping for the error reports of the project (a new or finalized release, its commits, a deploy record, and source map or debug file uploads) and new events add data to Sentry. It is a remote write, so it is not known safe (dev round 3). A release can be deleted.",
       "when": {
         "any_of": [
-          { "subcommand": ["releases"], "action": ["new", "finalize", "set-commits"] },
+          { "subcommand": ["releases"], "action": ["new", "finalize", "set-commits", "restore", "archive"] },
           { "subcommand": ["deploys"], "action": ["new"] },
-          { "subcommand": ["sourcemaps"], "action": ["upload", "inject"] },
-          { "subcommand": ["debug-files", "upload-dif"] }
+          { "subcommand": ["sourcemaps"], "action": ["upload"] },
+          { "subcommand": ["monitors"], "action": ["run"] },
+          { "subcommand": ["debug-files"], "action": ["upload"] },
+          { "subcommand": ["upload-dif", "send-event", "send-envelope", "upload-proguard"] }
         ]
       }
     }

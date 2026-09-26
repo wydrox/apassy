@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
-  "pack_version": 3,
+  "pack_version": 6,
   "tool": "databases",
-  "description": "Database clients and tools (psql, mysql, sqlite3, MongoDB, ClickHouse, CockroachDB, Redis, restore tools): writes, drops, and credential columns.",
+  "description": "Database clients and tools (psql, mysql, sqlite3, MongoDB, ClickHouse, CockroachDB, Redis, dump and restore tools): writes, drops, credential columns, schema reads, and reads of local database files.",
   "programs": [
     "psql", "pg_dump", "pg_restore", "dropdb", "dropuser", "mysql", "mysqladmin", "sqlite3",
     "duckdb", "mongo", "mongosh", "mongorestore", "clickhouse-client", "cockroach", "cqlsh",
-    "redis-cli"
+    "redis-cli", "mysqldump", "mariadb-dump"
   ],
   "roles": {
-    "usage": ["psql", "pg_dump", "pg_restore", "redis-cli"],
+    "usage": ["psql", "pg_dump", "pg_restore", "redis-cli", "mysqldump", "mariadb-dump"],
     "heredoc_sql": ["psql", "mysql", "sqlite3"]
   },
   "rules": [
@@ -125,6 +125,26 @@
   ],
   "safe": [
     {
+      "id": "schema-reads",
+      "note": "Reads of the schema, the plan of a query, or server information print no table data: `psql` meta commands such as `\\dt` and `\\d+ orders`, `EXPLAIN` of a read (also `EXPLAIN ANALYZE`, which prints only the plan), `select version()`, the MongoDB `getCollectionNames()` and `getIndexes()`, and a schema-only dump (`pg_dump --schema-only`) to the output or to a file. A query that calls a function outside a short list of read functions is not here, because a function can change data (dev round 3).",
+      "when": {
+        "any_of": [
+          { "program": ["psql", "mongo", "mongosh", "mysql"], "sql": "schema_read" },
+          { "program": ["mysqldump", "mariadb-dump"], "any_arg": ["--no-data", "-d"] },
+          {
+            "program": ["pg_dump"],
+            "any_arg": ["--schema-only", "-s"],
+            "not": { "any_arg": ["--data-only", "-a"] }
+          }
+        ]
+      }
+    },
+    {
+      "id": "local-file-reads",
+      "note": "SQLite and DuckDB work on a local database file. SQL that only reads (`SELECT`, a read `PRAGMA` such as `integrity_check`, `.schema`, `.tables`) does not change it. A file function (`readfile`, `writefile`, `load_extension`), `-init`, and an archive mode are not reads (dev round 3).",
+      "when": { "program": ["sqlite3", "duckdb"], "sql": "plain_args_read" }
+    },
+    {
       "id": "redis-reads",
       "note": "Redis commands that read server state, key metadata, or key names: `PING`, `INFO`, `DBSIZE`, `TTL`, `TYPE`, `EXISTS`, lengths, `SCAN`, and `MEMORY USAGE`. Connection options such as `-u URL` and `-h HOST` take a value. The value commands (`GET`, `HGETALL`) stay with the model.",
       "when": {
@@ -156,6 +176,39 @@
           "skip": ["-u", "-h", "-p", "-a", "-n", "--user", "--pass", "--pattern", "--count", "-i"],
           "count": 0
         }
+      }
+    }
+  ],
+  "writes": [
+    {
+      "id": "sql-changes",
+      "note": "SQL or database shell code that changes data, schema, or access: `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `ALTER`, `COPY ... FROM`, `CALL`, a MongoDB `insertOne`, and more (policy v7). The destructive statements also have the flag `data_loss`.",
+      "when": {
+        "any_of": [
+          {
+            "program": ["psql", "mysql", "mongo", "mongosh", "clickhouse-client", "cockroach", "cqlsh"],
+            "sql": "changes"
+          },
+          { "program": ["sqlite3", "duckdb", "clickhouse-client"], "sql": "any_arg_changes" }
+        ]
+      }
+    },
+    {
+      "id": "redis-writes",
+      "note": "Redis commands that set, change, or remove keys, publish messages, or change the server.",
+      "when": {
+        "program": ["redis-cli"],
+        "any_arg": [
+          "set", "setex", "psetex", "setnx", "mset", "msetnx", "getset", "getdel", "getex",
+          "append", "incr", "incrby", "incrbyfloat", "decr", "decrby", "del", "unlink",
+          "expire", "pexpire", "expireat", "persist", "rename", "renamenx", "copy", "move",
+          "hset", "hsetnx", "hmset", "hdel", "hincrby", "lpush", "rpush", "lpop", "rpop",
+          "lset", "lrem", "ltrim", "linsert", "lmove", "sadd", "srem", "spop", "smove",
+          "zadd", "zrem", "zincrby", "zpopmin", "zpopmax", "xadd", "xdel", "xtrim",
+          "xgroup", "xack", "publish", "restore", "flushall", "flushdb", "config", "eval",
+          "evalsha", "fcall", "script", "function", "save", "bgsave", "bgrewriteaof",
+          "shutdown", "debug", "swapdb", "migrate", "replicaof", "slaveof", "acl"
+        ]
       }
     }
   ]

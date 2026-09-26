@@ -50,7 +50,12 @@ The bouncer decides only if the rule has command prefixes. Without prefixes, eve
 
 ## 3. Decision order
 
-Date of this order: 2026-09-26 (ADR 0008, changed by ADR 0010, learning from ADR 0009, and dev round 2). Policy version: `apassy-bouncer-v6`. Code: `decide_learned`, `before_model`, and `owner_required` in `src/broker/bouncer.rs`. Version 4 added step 4a and the calibrated level in step 6. Version 5 changes step 6: a certain read replaces `task_match` only for a known command. See [dev-round2.md](../evaluation/dev-round2.md). Version 6 sets the default `task_match` level to 75%. The other needed answers and the `rule_break` veto stay at 80%. The development data for this level is in [dev-round2.md](../evaluation/dev-round2.md).
+Date of this order: 2026-09-26 (ADR 0008, changed by ADR 0010, learning from ADR 0009, and dev rounds 2 and 3). Policy version: `apassy-bouncer-v7`. Code: `decide_learned`, `before_model`, and `owner_required` in `src/broker/bouncer.rs`. Version 4 added step 4a and the calibrated level in step 6. Version 5 changes step 6: a certain read replaces `task_match` only for a known command. See [dev-round2.md](../evaluation/dev-round2.md). Version 6 sets the default `task_match` level to 75%. The other needed answers stay at 80%. The development data for this level is in [dev-round2.md](../evaluation/dev-round2.md).
+
+Version 7 (dev round 3, [dev-round3.md](../evaluation/dev-round3.md)) changes steps 6 and 7:
+
+- **An owner instruction must be certainly kept.** When the grant has an owner instruction, a run without the owner needs `rule_break` at or below 0.2. This is the same 80% certainty as the other needed answers. It applies to every command, also a known safe command and a certain read. Before version 7, `rule_break` was only a veto at 0.8. On held-out v3 the base model answered 0.25 to 0.53 for commands that broke the rule, so they ran.
+- **A known write is never a certain read.** The packs list the write commands of known tools (`writes`, for example `gh pr comment`, `gh issue close`, `git push`, SQL `INSERT`). For such a command the model's `writes` answer does not replace `task_match`, and a high-risk or irreversible declaration always asks. On held-out v3 the base model gave `writes` 0.08 and 0.10 to `gh pr comment` and `gh issue close`.
 
 1. Hard rule: expiry, prefixes, forbidden words, runs per hour. A failure is a denial.
 2. Production rule (ADR 0010). If an item in the run has a production declaration, the run waits for the owner. The broker does not call the model. This step comes before every model step. The model, remembered patterns, and threshold calibration come after it, so they cannot change it. A known safe command, a read-only command, and a fully certain model answer also wait.
@@ -58,16 +63,18 @@ Date of this order: 2026-09-26 (ADR 0008, changed by ADR 0010, learning from ADR
 4. A missing user request or a missing declaration asks the owner.
 4a. Remembered pattern (ADR 0009 step 1, ADR 0010). If an active pattern matches the request, the run starts without a prompt. The broker does not call the model. The pattern replaces only steps 5 to 7. It cannot change steps 1 to 4. See [learning](learning.md).
 5. The model answers the facts `task_match`, `writes`, `remote`, `leak`, `destroy`, and `rule_break` when the rule has an instruction. An unavailable model asks the owner.
-6. Needed certainty. A command that is not known safe needs `task_match` at or above the active level: 0.75 by default, or a level from 0.5 to 0.8 that the owner applied after a calibration (ADR 0009 step 3). Only for a known command (below) can a certain read replace this check: `writes` at or below 0.2. A high-risk or irreversible declaration needs `writes` at or below 0.2, unless the command is known safe. A calibration does not change these checks.
+6. Needed certainty. A command that is not known safe needs `task_match` at or above the active level: 0.75 by default, or a level from 0.5 to 0.8 that the owner applied after a calibration (ADR 0009 step 3). Only for a known command (below) that is not a known write can a certain read replace this check: `writes` at or below 0.2. A high-risk or irreversible declaration needs `writes` at or below 0.2, unless the command is known safe. A known write never meets this check. With an owner instruction, every command needs `rule_break` at or below 0.2 (version 7). The model answers `rule_break` only for a grant with an instruction, and an answer without an asked fact is unavailable, so the answer is present exactly when the grant has an instruction. A calibration does not change these checks.
 
-A known command (`Analysis::known_command`) is a command that the built-in packs know. Each segment of the command is known safe, or a built-in pack names its program and three conditions hold:
+A known command (`Analysis::known_command`) is a command that the built-in packs know. Each segment of the command is known safe, or a built-in pack names its program and these conditions hold:
 
 - the program does not run project code (role `project_code`: script runners such as `node`, `python`, `php`, and `bash`, task runners such as `npm`, `make`, and `just`, and framework CLIs such as `artisan`, `mix`, `rails`, `manage.py`, `gradle`, `cargo`, `go`, and `dotnet`);
 - no pack lists the command as a project command (`project_commands`, for example `dbt run-operation`, `airflow dags test`, `mlflow run`);
-- the command is not an HTTP write: a POST, PUT, PATCH, or DELETE request that is not a search.
+- the command is not an HTTP write: a POST, PUT, PATCH, or DELETE request that is not a search;
+- no pack lists the command as a read of the access configuration of a whole account (`access_reads`, for example `aws iam list-users`, `gcloud projects get-iam-policy`, `az role assignment list`; version 7);
+- the command is not a container that runs its default command (`docker compose run --rm migrate`) and not `docker run` of an image.
 
-So unknown programs, project scripts, package scripts, make targets, custom framework subcommands (`php artisan app:repair-ledgers`, `mix run x.exs`, `python manage.py custom`), and API writes always need `task_match`. The decision log does not record `known_command`. A calibration replay (`src/broker/calibration.rs`) reads it as false, so the replay is never less strict than the policy.
-7. Vetoes: `destroy` at or above 0.9 for a command that is not known safe, and `rule_break` at or above 0.8. A calibration does not change the vetoes.
+So unknown programs, project scripts, package scripts, make targets, `cargo run`, `go run`, `dotnet run`, custom framework subcommands (`php artisan app:repair-ledgers`, `mix run x.exs`, `python manage.py custom`), API writes, and account-wide access reads always need `task_match`. A known write (`Analysis::known_write`) can be a known command (`git push`), but it also always needs `task_match`. The decision log does not record `known_command` and `known_write`. A calibration replay (`src/broker/calibration.rs`) reads `known_command` as false, so its task match step is never less strict than the policy. It reads `known_write` as false and uses the model's `writes` answer for a high-risk or irreversible declaration, as version 6 did. That check does not depend on the level, so it changes the replay at the old and at the new level in the same way.
+7. Veto: `destroy` at or above 0.9 for a command that is not known safe. A calibration does not change the veto. The `rule_break` veto of version 6 is now a needed answer in step 6.
 8. If every needed answer is certain and no veto applies, the run starts without a prompt. A grant in "ask" mode always waits for the owner, also with an active pattern.
 
 Each decision goes to the decision log in the vault. An owner denial blocks the pattern of the request.
@@ -75,6 +82,8 @@ Each decision goes to the decision log in the vault. An owner denial blocks the 
 Tests for step 2: `production_always_asks_the_owner` in `src/broker/bouncer.rs` and `production_declaration_always_waits_for_the_owner` in `tests/bouncer_rules.rs`.
 
 Tests for step 6 (version 5): `a_certain_read_skips_the_task_match_only_for_a_known_command` in `src/broker/bouncer.rs`, and `unknown_code_needs_the_task_match` and `an_injection_phrase_in_the_user_request_asks_the_owner` in `tests/bouncer_rules.rs`.
+
+Tests for steps 6 and 7 (version 7): `an_owner_instruction_needs_a_certain_no_rule_break` and `a_known_write_is_never_a_certain_read` in `src/broker/bouncer.rs`, and `an_owner_instruction_must_be_certainly_kept` in `tests/bouncer_rules.rs` (the broker path: `rule_break` 0.25 asks, 0.1 runs, and `gh pr comment` with `writes` 0.08 and `task_match` 0.38 asks). The analysis tests are in `src/broker/shell_risk.rs`: `the_known_safe_audit_of_dev_round_3`, `verbose_http_clients_print_credentials`, `outputs_and_configuration_values_print_secrets`, `the_flags_cover_every_part`, and `sql_changes_and_access_reads`.
 
 Tests for step 4a: `learning_replaces_only_the_model_step` and `calibration_changes_only_the_task_match_level` in `src/broker/bouncer.rs`. `an_active_pattern_never_overrides_the_earlier_steps` in `tests/learning.rs` runs the broker with an active pattern: a forbidden word, an expired rule, and the hourly limit deny (step 1); a production item, a rule flag, a missing user request, and a missing declaration wait for the owner (steps 2 to 4); the model is not called.
 
@@ -171,6 +180,10 @@ Final numbers with the Rust policy and the local Laya model:
 The two fixes after sample C: the SQL argument parser skipped option values such as `--output-format json`, and read-only `git` commands (`rev-list`, `ls-remote`, `worktree list`) became known safe.
 
 A usage request (`--help`, `--version`) is known safe only for known command line tools. For example BSD `rm -rf / --help` removes `/`. A test checks this case.
+
+### Dev round 3 (policy v7)
+
+A known safe audit of every pack, known writes, account-wide access reads, flags for printed secrets (verbose HTTP clients, outputs by name, the Compose configuration, process environments), global options before the subcommand, wrappers, shells inside wrappers, and policy v7 (steps 6 and 7). Measured on v1, v2, v3, and the fixtures with both models, 3 runs each. The base model runs 0 violations and 0 critical cases on all four sets, and 101 of 112, 103 of 120, 104 of 120, and 125 of 132 normal cases. Stock Laya runs 1 critical violation on v2 and 1 on v3 (a migration under an owner rule, `rule_break` 0.14 and 0.18). The recommended default model is the base model. Without the knowledge from v3 cases, the base model runs 91 of 120 normal v3 cases: the estimate for a new set. See [dev-round3.md](../evaluation/dev-round3.md).
 
 ### Dev round 2 (policy v5)
 

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 3,
+  "pack_version": 4,
   "tool": "make",
   "description": "Task runners (make, just, go-task): development targets, and targets named for data loss (role `task_runner`).",
   "programs": ["make", "just", "task"],
@@ -11,8 +11,35 @@
   "safe": [
     {
       "id": "development-targets",
-      "note": "Test, lint, build, check, and format targets. The empty subcommand is the default target.",
-      "when": { "subcommand": ["test", "lint", "build", "check", "fmt", "format", ""] }
+      "note": "Test, lint, build, check, and format targets, or no target (the default target). Every target on the command line runs, so each one must be in the list: `make test deploy` is not safe (dev round 3). Options with a value, such as `-C dir`, are not targets.",
+      "when": {
+        "any_of": [
+          {
+            "program": ["make"],
+            "operands": {
+              "skip": ["-c", "-f", "--directory", "--file", "--makefile"],
+              "all": [{ "equals": ["test", "lint", "build", "check", "fmt", "format"] }],
+              "allow_none": true
+            }
+          },
+          {
+            "program": ["just"],
+            "operands": {
+              "skip": ["-f", "--justfile", "-d", "--working-directory"],
+              "all": [{ "equals": ["test", "lint", "build", "check", "fmt", "format"] }],
+              "allow_none": true
+            }
+          },
+          {
+            "program": ["task"],
+            "operands": {
+              "skip": ["-t", "--taskfile", "-d", "--dir"],
+              "all": [{ "equals": ["test", "lint", "build", "check", "fmt", "format"] }],
+              "allow_none": true
+            }
+          }
+        ]
+      }
     }
   ]
 }

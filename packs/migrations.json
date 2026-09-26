@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "pack_version": 2,
+  "pack_version": 3,
   "tool": "migrations",
-  "description": "Database migration tools (Flyway, Liquibase, Knex, Sequelize, TypeORM, Drizzle Kit, dbmate, goose, golang-migrate, Atlas): clean, drop, rollback, and read commands.",
+  "description": "Database migration tools (Flyway, Liquibase, Knex, Sequelize, TypeORM, Drizzle Kit, dbmate, goose, golang-migrate, Atlas): clean, drop, rollback, migrations that change the database (writes), and read commands.",
   "programs": [
     "flyway", "liquibase", "knex", "sequelize", "sequelize-cli", "typeorm",
     "typeorm-ts-node-commonjs", "typeorm-ts-node-esm", "drizzle-kit", "dbmate", "goose",
@@ -90,7 +90,7 @@
   "safe": [
     {
       "id": "read-and-new-files",
-      "note": "Migration state and listings, validation, SQL previews, and new migration files.",
+      "note": "Migration state and listings, validation, SQL previews, and new migration files. `dbmate create` creates the database, so it is not here (dev round 3); `goose create` and `dbmate new` make a migration file.",
       "when": {
         "any_of": [
           { "program": ["flyway"], "any_arg": ["info", "validate"], "not": { "any_arg": ["clean", "undo", "migrate", "repair", "baseline"] } },
@@ -105,7 +105,27 @@
             "subcommand": ["migration:show", "migration:create", "migration:generate", "schema:log"]
           },
           { "program": ["drizzle-kit"], "subcommand": ["generate", "check", "introspect", "pull", "studio"] },
-          { "program": ["dbmate", "goose"], "subcommand": ["status", "version", "new", "create"] }
+          { "program": ["dbmate"], "subcommand": ["status", "new"] },
+          { "program": ["goose"], "subcommand": ["status", "version", "create"] }
+        ]
+      }
+    }
+  ],
+  "writes": [
+    {
+      "id": "apply-migrations",
+      "note": "Commands that apply migrations or seeds, or push a schema, change the database (policy v7).",
+      "when": {
+        "any_of": [
+          { "program": ["flyway"], "any_arg": ["migrate"] },
+          { "program": ["liquibase"], "any_arg": ["update", "update-count", "update-to-tag", "updatecount", "updatetotag"] },
+          { "program": ["knex"], "subcommand": ["migrate:latest", "migrate:up", "seed:run"] },
+          { "program": ["sequelize", "sequelize-cli"], "subcommand": ["db:migrate", "db:seed", "db:seed:all", "db:create"] },
+          { "program": ["typeorm", "typeorm-ts-node-commonjs", "typeorm-ts-node-esm"], "subcommand": ["migration:run", "query"] },
+          { "program": ["drizzle-kit"], "subcommand": ["push", "migrate"] },
+          { "program": ["dbmate", "goose", "migrate"], "any_arg": ["up", "migrate", "up-by-one", "up-to", "redo", "goto", "force"] },
+          { "program": ["dbmate"], "subcommand": ["create"] },
+          { "program": ["atlas"], "args_start": ["migrate apply", "schema apply"] }
         ]
       }
     }

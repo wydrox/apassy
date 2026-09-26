@@ -123,12 +123,15 @@ fn asks_at(record: &DecisionRecord, thresholds: Thresholds) -> bool {
         return false;
     }
     // The log does not record `known_command`. Without it the replay needs `task_match`
-    // for every command that is not known safe, so it is never less strict than the
-    // policy (v5).
+    // for every command that is not known safe, so the task match step is never less
+    // strict than the policy (v5). The log does not record `known_write` (v7) either.
+    // The replay reads it as false and uses the model's `writes` answer for a sensitive
+    // credential, as policy v6 did. That check does not depend on the level, so it
+    // changes the replay at the old and at the new level in the same way.
     let analysis = Analysis {
         flags: entry.rule_flags.clone(),
         known_safe: entry.known_safe,
-        known_command: false,
+        ..Analysis::default()
     };
     let context = DecisionContext {
         analysis: &analysis,
@@ -176,7 +179,7 @@ fn owner_model_step(record: &DecisionRecord) -> bool {
     let analysis = Analysis {
         flags: entry.rule_flags.clone(),
         known_safe: entry.known_safe,
-        known_command: false,
+        ..Analysis::default()
     };
     before_model(&DecisionContext {
         analysis: &analysis,

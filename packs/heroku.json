@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "heroku",
   "description": "Heroku CLI: every command except known reads changes an app. Destruction of apps, databases, and add-ons, config values, and one-off dynos.",
   "programs": ["heroku"],
@@ -29,11 +29,16 @@
       "id": "destroy-data",
       "flag": "data_loss",
       "dry_run": "skip",
-      "note": "Destruction of an app or an add-on, a database reset, and a copy or a restore over a database.",
+      "note": "Destruction of an app or an add-on, a database reset, and a copy or a restore over a database, also in the old syntax `pg:backups restore`.",
       "when": {
-        "any_arg": [
-          "apps:destroy", "destroy", "pg:reset", "pg:backups:restore", "pg:copy", "pg:push",
-          "addons:destroy", "addons:remove", "pg:backups:delete", "redis:reset"
+        "any_of": [
+          {
+            "any_arg": [
+              "apps:destroy", "destroy", "pg:reset", "pg:backups:restore", "pg:copy", "pg:push",
+              "addons:destroy", "addons:remove", "pg:backups:delete", "redis:reset"
+            ]
+          },
+          { "subcommand": ["pg:backups"], "action": ["restore", "delete"] }
         ]
       }
     },
@@ -58,14 +63,19 @@
   "safe": [
     {
       "id": "read-commands",
-      "note": "Reads of dynos, releases, logs, apps, add-ons, domains, pipelines, access, and database state.",
+      "note": "Reads of dynos, releases, logs, apps, add-ons, domains, pipelines, access, and database state. Log drains and webhooks are not here: their URLs can hold tokens. `pg:backups` is here only as a listing, because the old syntax `pg:backups restore` restores a backup (dev round 3).",
       "when": {
-        "subcommand": [
-          "ps", "releases", "releases:info", "logs", "apps", "apps:info", "info", "status",
-          "pg", "pg:info", "pg:diagnose", "pg:ps", "pg:backups", "addons", "addons:info",
-          "domains", "features", "pipelines", "pipelines:info", "access", "labs", "regions",
-          "stack", "stacks", "auth:whoami", "whoami", "buildpacks", "spaces", "drains",
-          "certs", "certs:info", "webhooks", "maintenance", "redis:info"
+        "any_of": [
+          {
+            "subcommand": [
+              "ps", "releases", "releases:info", "logs", "apps", "apps:info", "info", "status",
+              "pg", "pg:info", "pg:diagnose", "pg:ps", "addons", "addons:info", "domains",
+              "features", "pipelines", "pipelines:info", "access", "labs", "regions", "stack",
+              "stacks", "auth:whoami", "whoami", "buildpacks", "spaces", "certs", "certs:info",
+              "maintenance", "redis:info"
+            ]
+          },
+          { "subcommand": ["pg:backups"], "action": ["", "info", "schedules"] }
         ]
       }
     }

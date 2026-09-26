@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "pack_version": 3,
+  "pack_version": 5,
   "tool": "cargo",
-  "description": "Rust cargo: build and test commands, new crates and tools, and publishing.",
+  "description": "Rust cargo: build and test commands, new crates and tools, publishing, and SQLx database commands.",
   "programs": ["cargo"],
   "roles": {
     "usage": ["cargo"],
@@ -13,8 +13,8 @@
       "id": "publish",
       "flag": "production",
       "dry_run": "skip",
-      "note": "An upload of a crate to the registry.",
-      "when": { "subcommand": ["publish", "unpublish", "deprecate", "dist-tag", "upload"] }
+      "note": "An upload of a crate to the registry, a yanked version, or a change of the crate owners.",
+      "when": { "subcommand": ["publish", "unpublish", "deprecate", "dist-tag", "upload", "yank", "owner"] }
     },
     {
       "id": "new-crate",
@@ -26,15 +26,51 @@
           { "subcommand": ["install"], "operands": { "min": 2 }, "not": { "any_arg": ["--path"] } }
         ]
       }
+    },
+    {
+      "id": "sqlx-drop-or-revert",
+      "flag": "data_loss",
+      "note": "`cargo sqlx database drop` and `database reset` drop the database. `migrate revert` reverts the last migration.",
+      "when": {
+        "subcommand": ["sqlx"],
+        "any_of": [
+          { "action": ["database", "db"], "any_arg": ["drop", "reset"] },
+          { "action": ["migrate"], "any_arg": ["revert"] }
+        ]
+      }
     }
   ],
   "safe": [
     {
       "id": "build-and-test",
-      "note": "Build, test, lint, format, docs, run, and reads of the dependency tree.",
+      "note": "Build, test, lint, format, docs, benchmarks, and reads of the dependency tree. Tests, benchmarks, and build scripts are project code with a check or build contract. `cargo run` is not here: it runs a program of the project with any effect (dev round 3).",
       "when": {
         "subcommand": [
-          "test", "build", "check", "clippy", "fmt", "doc", "run", "bench", "tree", "metadata"
+          "test", "build", "check", "clippy", "fmt", "doc", "bench", "tree", "metadata", "nextest"
+        ]
+      }
+    },
+    {
+      "id": "sqlx-offline-data",
+      "note": "`cargo sqlx prepare` reads the schema of the development database to check the queries, and writes the query data to `.sqlx/` in the project. `migrate info` lists the migrations. Neither changes the database (dev round 3).",
+      "when": {
+        "subcommand": ["sqlx"],
+        "any_of": [
+          { "action": ["prepare"] },
+          { "action": ["migrate"], "any_arg": ["info"] }
+        ]
+      }
+    }
+  ],
+  "writes": [
+    {
+      "id": "sqlx-migrate-or-create",
+      "note": "`cargo sqlx migrate run`, `database create`, and `database setup` change the database.",
+      "when": {
+        "subcommand": ["sqlx"],
+        "any_of": [
+          { "action": ["migrate"], "any_arg": ["run"] },
+          { "action": ["database", "db"], "any_arg": ["create", "setup"] }
         ]
       }
     }

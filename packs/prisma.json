@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "pack_version": 2,
+  "pack_version": 3,
   "tool": "prisma",
-  "description": "Prisma CLI: database resets and schema commands.",
+  "description": "Prisma CLI: database resets, migrations and database writes, and schema commands.",
   "programs": ["prisma"],
   "roles": {
     "usage": ["prisma"]
@@ -28,14 +28,20 @@
       "when": { "args_start": ["generate", "format", "validate", "studio"] }
     },
     {
-      "id": "migrate-dev",
-      "note": "`migrate dev` works on the development database.",
-      "when": { "args_start": ["migrate dev"], "not": { "args_contain": ["--force"] } }
-    },
-    {
       "id": "migrate-read",
       "note": "`migrate status` and `migrate diff` only read and print.",
       "when": { "args_start": ["migrate status", "migrate diff", "version"] }
+    }
+  ],
+  "writes": [
+    {
+      "id": "migrations-and-database-writes",
+      "note": "`migrate dev`, `migrate deploy`, and `migrate resolve` change the database or its migration history. `db push`, `db execute`, and `db seed` change the database. They are remote writes, also on a development database, so they are not known safe (dev round 3).",
+      "when": {
+        "args_start": [
+          "migrate dev", "migrate deploy", "migrate resolve", "db push", "db execute", "db seed"
+        ]
+      }
     }
   ]
 }

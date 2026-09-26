@@ -17,8 +17,11 @@ use crate::vault::{CALIBRATION_FLOOR, Declaration, PATTERN_APPROVALS_NEEDED, val
 /// Version 3 adds the production rule (ADR 0010). Version 4 adds remembered patterns and
 /// the calibrated `task_match` level at the model step (ADR 0009). Version 5 lets a
 /// certain "does not change state" answer replace `task_match` only for a command that
-/// the built-in packs know (`Analysis::known_command`).
-pub const BOUNCER_CONTRACT: &str = "apassy-bouncer-v6";
+/// the built-in packs know (`Analysis::known_command`). Version 6 sets the default
+/// `task_match` level to 0.75. Version 7 (dev round 3) needs 80% certainty that the
+/// command does not break the owner instruction of the grant, and a known write
+/// (`Analysis::known_write`) is never a certain read.
+pub const BOUNCER_CONTRACT: &str = "apassy-bouncer-v7";
 /// Default address of `laya-serve` in the operations guide.
 pub const DEFAULT_URL: &str = "http://127.0.0.1:8770";
 /// Environment variable that changes the bouncer address.
@@ -30,7 +33,7 @@ pub const MIN_CONFIDENCE: f64 = 0.8;
 /// (`docs/evaluation/dev-round2.md`). A calibration can change it in
 /// [`CALIBRATION_FLOOR`, [`MIN_CONFIDENCE`]].
 pub const DEFAULT_TASK_MATCH: f64 = 0.75;
-/// A "destroy" answer at or above this vetoes an unknown command.
+/// A "destroy" answer at or above this vetoes a command that is not known safe.
 const DESTROY_VETO: f64 = 0.9;
 const PATH: &str = "/v1/systemone";
 const TIMEOUT: Duration = Duration::from_secs(3);
@@ -421,15 +424,21 @@ pub fn decide(verdict: &BouncerVerdict, context: &DecisionContext<'_>) -> Decisi
 /// 4. An active remembered pattern allows the run. It replaces only the model step
 ///    (steps 5 and 6), so it cannot change steps 1 to 3.
 /// 5. The model decides. A command that is not known safe must match the user request
-///    at the `task_match` level (80%, or a lower level that the owner applied). Only for
-///    a known command (`Analysis::known_command`: the built-in packs know the program,
-///    and it does not run project code) can 80% certainty that the command does not
-///    change state replace the match. Unknown programs, project scripts, package
-///    scripts, make targets, and custom framework subcommands always need the match.
+///    at the `task_match` level (75%, or another level that the owner applied). Only
+///    for a known command (`Analysis::known_command`: the built-in packs know the
+///    program, and it does not run project code) that is not a known write
+///    (`Analysis::known_write`) can 80% certainty that the command does not change
+///    state replace the match. Unknown programs, project scripts, package scripts, make
+///    targets, custom framework subcommands, and known writes always need the match.
 ///    A high-risk or irreversible credential also needs 80% certainty that the command
-///    does not change state, unless the command is known safe.
-/// 6. Model vetoes: "destroy" at 90% for a command that is not known safe, "rule_break"
-///    at 80%.
+///    does not change state, unless the command is known safe. A known write never
+///    has this certainty.
+///    When the grant has an owner instruction, every command also needs 80% certainty
+///    that it does not break the instruction (`rule_break` at or below 0.2, policy v7).
+///    The model answers `rule_break` only for a grant with an instruction, and a
+///    verdict without an asked answer is unavailable, so the answer is present exactly
+///    when the grant has an instruction.
+/// 6. Model veto: "destroy" at 90% for a command that is not known safe.
 ///
 /// The hard rules of the grant (ADR 0007) run before this function. A failure there is
 /// a denial, so no step here can change it.
@@ -508,7 +517,12 @@ fn model_step(
     // script, a package script, or a custom subcommand) the model gave a low "writes" to
     // commands that print secrets or change data (held-out v2), so the match is needed.
     let known_command = known_safe || context.analysis.known_command;
+    // Policy v7: a known write (`gh pr comment`, `git push`, SQL `INSERT`) changes state
+    // by the knowledge of the packs. On held-out v3 the base model gave `writes` 0.08 and
+    // 0.10 to `gh pr comment` and `gh issue close`, so the answer cannot make it a read.
+    let known_write = !known_safe && context.analysis.known_write;
     let certain_read = known_command
+        && !known_write
         && verdict
             .fact("writes")
             .is_some_and(|p| 1.0 - p >= MIN_CONFIDENCE);
@@ -517,7 +531,12 @@ fn model_step(
     //   match the user request. A read cannot change anything, so it does not need the
     //   match.
     // - A sensitive credential needs a certain "does not change state", unless the
-    //   command is known safe (local work or a read by rule).
+    //   command is known safe (local work or a read by rule). A known write fails it.
+    // - Policy v7: a grant with an owner instruction needs a certain "does not break the
+    //   rule", also for a known safe command. The model answers `rule_break` only for a
+    //   grant with an instruction (`facts_for`). Before v7 a `rule_break` of 0.8 was a
+    //   veto, and the base model answered 0.25 to 0.53 for commands that broke the rule
+    //   (held-out v3).
     let mut needed: Vec<(&str, bool, f64)> = Vec::new();
     let task_level = thresholds.task_match_level();
     if !known_safe && !certain_read {
@@ -526,13 +545,23 @@ fn model_step(
     if sensitive && !known_safe {
         needed.push(("writes", false, MIN_CONFIDENCE));
     }
+    if verdict.fact("rule_break").is_some() {
+        needed.push(("rule_break", false, MIN_CONFIDENCE));
+    }
     let mut failed = Vec::new();
     let mut confidence: f64 = 1.0;
     for (name, want_true, level) in needed {
-        let p = verdict.fact(name).unwrap_or(0.5);
+        let p = if name == "writes" && known_write {
+            // The packs know that the command changes state.
+            1.0
+        } else {
+            verdict.fact(name).unwrap_or(0.5)
+        };
         let support = if want_true { p } else { 1.0 - p };
         confidence = confidence.min(support);
-        if support < level {
+        if name == "writes" && known_write {
+            failed.push("writes: a known write".to_owned());
+        } else if support < level {
             failed.push(format!(
                 "{name} {}{:.0}% (needs {:.0}%)",
                 if want_true { "" } else { "not " },
@@ -543,8 +572,9 @@ fn model_step(
     }
     // Vetoes. The rules find secret output and cache removal, so the model's "leak"
     // answer is not a veto: it gave 0.8 or more for plain file reads on real commands.
-    // "destroy" is a veto at 90% for commands that the rules do not know.
-    let mut vetoes: Vec<(&str, f64)> = vec![("rule_break", MIN_CONFIDENCE)];
+    // "destroy" is a veto at 90% for commands that the rules do not know. The
+    // `rule_break` veto of policy v6 is now a needed answer (above).
+    let mut vetoes: Vec<(&str, f64)> = Vec::new();
     if !known_safe {
         vetoes.push(("destroy", DESTROY_VETO));
     }
@@ -792,6 +822,138 @@ mod tests {
         assert!(decide_with(&unknown, &edge).ask_owner);
     }
 
+    /// Policy v7 (dev round 3): with an owner instruction, a run needs 80% certainty that
+    /// the command does not break it (`rule_break` at or below 0.2), also for a known safe
+    /// command and a certain read. On held-out v3 the base model answered `rule_break`
+    /// 0.25 to 0.53 for commands that broke the rule, below the old veto of 0.8.
+    #[test]
+    fn an_owner_instruction_needs_a_certain_no_rule_break() {
+        let staging = [declaration(Environment::Staging)];
+        let decide_with = |analysis: &Analysis, v: &BouncerVerdict| {
+            decide(
+                v,
+                &DecisionContext {
+                    analysis,
+                    declarations: &staging,
+                    has_user_request: true,
+                },
+            )
+        };
+        let known_safe = Analysis {
+            known_safe: true,
+            known_command: true,
+            ..Analysis::default()
+        };
+        let known = Analysis {
+            known_command: true,
+            ..Analysis::default()
+        };
+        let unknown = Analysis::default();
+        let with_rule = |rule_break: f64| {
+            verdict(&[
+                ("task_match", 0.95),
+                ("writes", 0.05),
+                ("destroy", 0.02),
+                ("rule_break", rule_break),
+            ])
+        };
+        for analysis in [&known_safe, &known, &unknown] {
+            // The v3 values: 0.25 (`gh pr comment`), 0.51 (`cargo run`), 0.53.
+            for rule_break in [0.25, 0.51, 0.53, 0.79, 0.21] {
+                let asked = decide_with(analysis, &with_rule(rule_break));
+                assert!(asked.ask_owner, "{analysis:?} {rule_break}");
+                assert!(
+                    asked.note.contains("rule_break not"),
+                    "{analysis:?} {}",
+                    asked.note
+                );
+                assert!(asked.confidence.is_some_and(|c| c < MIN_CONFIDENCE));
+            }
+            for rule_break in [0.2, 0.05, 0.0] {
+                let allowed = decide_with(analysis, &with_rule(rule_break));
+                assert!(!allowed.ask_owner, "{analysis:?} {rule_break}: {allowed:?}");
+            }
+        }
+        // Without an instruction the model does not answer `rule_break`, and nothing
+        // changes.
+        let plain = verdict(&[("task_match", 0.95), ("writes", 0.05), ("destroy", 0.02)]);
+        assert!(!decide_with(&unknown, &plain).ask_owner);
+        // A calibration does not change the needed rule answer.
+        let calibrated = decide_learned(
+            &with_rule(0.3),
+            &DecisionContext {
+                analysis: &known_safe,
+                declarations: &staging,
+                has_user_request: true,
+            },
+            &Learned {
+                thresholds: Thresholds {
+                    task_match: CALIBRATION_FLOOR,
+                },
+                pattern: None,
+            },
+        );
+        assert!(calibrated.ask_owner, "{calibrated:?}");
+    }
+
+    /// Policy v7 (dev round 3): a known write never counts as a certain read, whatever
+    /// the model answers for `writes`. On held-out v3 the base model gave `writes` 0.08
+    /// and 0.10 to `gh pr comment` and `gh issue close`. A sensitive credential asks for
+    /// a known write.
+    #[test]
+    fn a_known_write_is_never_a_certain_read() {
+        let staging = [declaration(Environment::Staging)];
+        let high_risk = [Some(Declaration {
+            risk: RiskLevel::High,
+            ..declaration(Environment::Staging).expect("declaration")
+        })];
+        let write = Analysis {
+            known_command: true,
+            known_write: true,
+            ..Analysis::default()
+        };
+        let read = Analysis {
+            known_command: true,
+            ..Analysis::default()
+        };
+        let run = |analysis: &Analysis, d: &[Option<Declaration>], v: &BouncerVerdict| {
+            decide(
+                v,
+                &DecisionContext {
+                    analysis,
+                    declarations: d,
+                    has_user_request: true,
+                },
+            )
+        };
+        let low_writes_unmatched =
+            verdict(&[("task_match", 0.38), ("writes", 0.08), ("destroy", 0.0)]);
+        assert!(!run(&read, &staging, &low_writes_unmatched).ask_owner);
+        let asked = run(&write, &staging, &low_writes_unmatched);
+        assert!(asked.ask_owner, "{asked:?}");
+        assert!(asked.note.contains("task_match 38%"), "{}", asked.note);
+        // A matching request runs a known write on a normal credential.
+        let matched = verdict(&[("task_match", 0.9), ("writes", 0.08), ("destroy", 0.0)]);
+        assert!(!run(&write, &staging, &matched).ask_owner);
+        // A sensitive credential needs a certain read: a known write never is one.
+        let asked = run(&write, &high_risk, &matched);
+        assert!(asked.ask_owner, "{asked:?}");
+        assert!(
+            asked.note.contains("writes: a known write"),
+            "{}",
+            asked.note
+        );
+        assert!(!run(&read, &high_risk, &matched).ask_owner);
+        // A known safe command is never a known write.
+        let safe = Analysis {
+            known_safe: true,
+            known_command: true,
+            known_write: true,
+            ..Analysis::default()
+        };
+        assert!(!run(&safe, &high_risk, &low_writes_unmatched).ask_owner);
+    }
+
     /// ADR 0010: a production declaration always waits for the owner. Known safe and
     /// read-only commands and a fully certain model verdict do not change this.
     #[test]
@@ -828,6 +990,7 @@ mod tests {
             flags: Vec::new(),
             known_safe: true,
             known_command: true,
+            known_write: false,
         };
         let unknown = Analysis::default();
         for declarations in sets {
@@ -881,8 +1044,7 @@ mod tests {
         let clean = Analysis::default();
         let flagged = Analysis {
             flags: vec!["secret_output".to_owned()],
-            known_safe: false,
-            known_command: false,
+            ..Analysis::default()
         };
         let cases: [(&Analysis, &[Option<Declaration>], bool, &str); 4] = [
             (&clean, &production, true, "Production credential"),

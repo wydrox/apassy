@@ -55,14 +55,17 @@ pub const RULE_FLAGS: &[&str] = &[
     "ask_owner",
 ];
 
-/// Fields that only a built-in pack can have. Each one except `project_commands` can make
-/// the analysis less strict.
+/// Fields that only a built-in pack can have. Each one except `project_commands`,
+/// `writes`, and `access_reads` can make the analysis less strict. A local pack adds a restriction with a
+/// flag rule, for example `ask_owner`.
 const BUILTIN_ONLY_FIELDS: &[&str] = &[
     "safe",
     "exemptions",
     "roles",
     "known_hosts",
     "project_commands",
+    "writes",
+    "access_reads",
 ];
 
 /// The largest local pack file.
@@ -77,6 +80,7 @@ const BUILTIN: &[(&str, &str)] = &[
     ("aws.json", include_str!("../../packs/aws.json")),
     ("azure.json", include_str!("../../packs/azure.json")),
     ("cargo.json", include_str!("../../packs/cargo.json")),
+    ("celery.json", include_str!("../../packs/celery.json")),
     ("cloud.json", include_str!("../../packs/cloud.json")),
     ("databases.json", include_str!("../../packs/databases.json")),
     ("dbt.json", include_str!("../../packs/dbt.json")),
@@ -97,6 +101,7 @@ const BUILTIN: &[(&str, &str)] = &[
     ("gcloud.json", include_str!("../../packs/gcloud.json")),
     ("gh.json", include_str!("../../packs/gh.json")),
     ("git.json", include_str!("../../packs/git.json")),
+    ("glab.json", include_str!("../../packs/glab.json")),
     ("go.json", include_str!("../../packs/go.json")),
     ("heroku.json", include_str!("../../packs/heroku.json")),
     (
@@ -286,6 +291,20 @@ enum SqlCheck {
     /// SQL as a plain argument or as an option value, such as
     /// `sqlite3 app.db "DELETE FROM users"` or `snowsql -q "DROP SCHEMA x"`.
     AnyArgWrites,
+    /// The SQL argument changes data, schema, or access in any way: an `INSERT`, an
+    /// `UPDATE`, a `CREATE`, a MongoDB `insertOne`, and all statements of `writes`
+    /// (dev round 3). For the `writes` of a pack.
+    Changes,
+    /// As `any_arg_changes`, for the plain arguments and option values of `any_arg_writes`.
+    AnyArgChanges,
+    /// Each argument after the database file is a read: a `SELECT`, a read `PRAGMA`, or
+    /// a dot command that prints the schema, such as `sqlite3 app.db ".schema users"`.
+    /// There is at least one. For clients of a local database file (dev round 3).
+    PlainArgsRead,
+    /// The SQL argument reads only the schema, the plan of a query, or server
+    /// information: `\dt`, `\d+ orders`, `EXPLAIN SELECT ...`, `SHOW TABLES`, or a
+    /// MongoDB `db.getCollectionNames()` (dev round 3).
+    SchemaRead,
 }
 
 #[derive(Debug, Deserialize)]
@@ -314,6 +333,18 @@ struct BuiltinPack {
     /// project code.
     #[serde(default)]
     project_commands: Vec<SafeRule>,
+    /// Commands that change state, such as `gh pr comment`, `git push`, or an SQL
+    /// `INSERT` (policy v7). Such a command is a known write (`Analysis::known_write`):
+    /// the model's "does not change state" answer never makes it a read, and a safe rule
+    /// that also matches does not make it known safe.
+    #[serde(default)]
+    writes: Vec<SafeRule>,
+    /// Reads of the access configuration of a whole account, such as `aws iam list-users`
+    /// or `gcloud projects get-iam-policy` (dev round 3). They show who and what has
+    /// access. Such a command is not a known command, so the model's "does not change
+    /// state" answer does not replace the task match.
+    #[serde(default)]
+    access_reads: Vec<SafeRule>,
 }
 
 /// The schema of a local pack: flag rules only.
@@ -441,6 +472,9 @@ struct Matcher {
     inline_code_leaks: Option<bool>,
     /// The SQL argument (`-c`, `--command`, `-e`, `--eval`, or after `query`).
     sql: Option<SqlCheck>,
+    /// An option asks for names only, such as `--only-names` or `--keys-only`: the
+    /// command prints the names of secrets or variables, not their values (dev round 3).
+    names_only: Option<bool>,
     any_of: Option<Vec<Matcher>>,
     not: Option<Box<Matcher>>,
 }
@@ -509,6 +543,9 @@ struct TextPattern {
     contains: Option<Vec<String>>,
     /// Length in bytes.
     max_len: Option<usize>,
+    /// Every character of the text is one of these characters, for example the option
+    /// letters of BSD `ps` (dev round 3).
+    only_chars: Option<String>,
     /// A path in a temporary folder such as `/tmp/`.
     temp_path: Option<bool>,
 }
@@ -527,6 +564,12 @@ pub(crate) struct Command<'a> {
     pub(crate) raw_program: String,
     /// Arguments after the program, in lowercase.
     pub(crate) args: Vec<String>,
+    /// The arguments from the subcommand on: without the global options that some
+    /// programs take before the subcommand (`git -C dir push`, `kubectl -n ns apply`,
+    /// `terraform -chdir=dir apply`), and without the options of `docker compose` before
+    /// its subcommand (dev round 3). In lowercase.
+    pub(crate) sub_args: Vec<String>,
+    /// `sub_args` joined with spaces.
     pub(crate) args_joined: String,
     /// Program and arguments as written, joined with spaces.
     pub(crate) joined: String,
@@ -541,11 +584,14 @@ pub(crate) struct Command<'a> {
 
 impl Command<'_> {
     fn subcommand(&self) -> &str {
-        self.args.first().map(String::as_str).unwrap_or_default()
+        self.sub_args
+            .first()
+            .map(String::as_str)
+            .unwrap_or_default()
     }
 
     fn action(&self) -> &str {
-        self.args.get(1).map(String::as_str).unwrap_or_default()
+        self.sub_args.get(1).map(String::as_str).unwrap_or_default()
     }
 
     fn script(&self) -> &str {
@@ -562,6 +608,21 @@ impl Command<'_> {
 
 fn has(list: &[String], text: &str) -> bool {
     list.iter().any(|item| item == text)
+}
+
+/// The texts that can be SQL for a client that takes SQL as a plain argument or as an
+/// option value: arguments that are not options, and the values of `--name=value`
+/// options, with a space in them.
+fn sql_plain_texts<'a>(cmd: &'a Command<'_>) -> impl Iterator<Item = &'a str> {
+    cmd.argv
+        .iter()
+        .skip(1)
+        .map(|arg| match arg.strip_prefix("--") {
+            Some(option) => option.split_once('=').map_or("", |(_, value)| value),
+            None if arg.starts_with('-') => "",
+            None => arg.as_str(),
+        })
+        .filter(|text| text.contains(' '))
 }
 
 /// A condition that is absent holds.
@@ -583,7 +644,7 @@ impl Matcher {
             && holds(&self.subcommand, |list| has(list, cmd.subcommand()))
             && holds(&self.action, |list| has(list, cmd.action()))
             && holds(&self.script, |script| script.matches(cmd.script()))
-            && holds(&self.arg_count, |count| cmd.args.len() == *count)
+            && holds(&self.arg_count, |count| cmd.sub_args.len() == *count)
             && holds(&self.only_options, |want| {
                 cmd.args.iter().all(|arg| arg.starts_with('-')) == *want
             })
@@ -687,14 +748,16 @@ impl Matcher {
                     .is_some_and(|sql| shell_risk::sql_writes(&sql)),
                 SqlCheck::Reads => shell_risk::sql_argument(cmd.argv)
                     .is_some_and(|sql| shell_risk::sql_reads(&sql)),
-                SqlCheck::AnyArgWrites => cmd.argv.iter().skip(1).any(|arg| {
-                    let text = match arg.strip_prefix("--") {
-                        Some(option) => option.split_once('=').map_or("", |(_, value)| value),
-                        None if arg.starts_with('-') => "",
-                        None => arg.as_str(),
-                    };
-                    text.contains(' ') && shell_risk::sql_writes(text)
-                }),
+                SqlCheck::AnyArgWrites => sql_plain_texts(cmd).any(shell_risk::sql_writes),
+                SqlCheck::Changes => shell_risk::sql_argument(cmd.argv)
+                    .is_some_and(|sql| shell_risk::sql_changes(&sql)),
+                SqlCheck::AnyArgChanges => sql_plain_texts(cmd).any(shell_risk::sql_changes),
+                SqlCheck::PlainArgsRead => shell_risk::plain_sql_reads(cmd.argv),
+                SqlCheck::SchemaRead => shell_risk::sql_argument(cmd.argv)
+                    .is_some_and(|sql| shell_risk::sql_schema_read(&sql)),
+            })
+            && holds(&self.names_only, |want| {
+                shell_risk::names_only(&cmd.args) == *want
             })
             && holds(&self.any_of, |list| {
                 list.iter().any(|matcher| matcher.matches(cmd))
@@ -726,10 +789,12 @@ impl OptionValue {
 
 impl OperandMatch {
     fn matches(&self, cmd: &Command<'_>) -> bool {
+        // The operands from the subcommand on: the global options of `git -C dir` or
+        // `aws --region r` and their values are not operands (dev round 3).
         let source: &[String] = if self.as_written {
             &cmd.argv[1..]
         } else {
-            &cmd.args
+            &cmd.sub_args
         };
         let mut value_next = false;
         let operands: Vec<&str> = source
@@ -795,6 +860,9 @@ impl TextPattern {
                 list.iter().any(|part| text.contains(part.as_str()))
             })
             && holds(&self.max_len, |max| text.len() <= *max)
+            && holds(&self.only_chars, |chars| {
+                !text.is_empty() && text.chars().all(|c| chars.contains(c))
+            })
             && holds(&self.temp_path, |want| {
                 shell_risk::is_temp_path(text) == *want
             })
@@ -866,6 +934,11 @@ impl TextPattern {
             if let Some(list) = list {
                 check_list(list, field, lowercase, field == "equals")?;
             }
+        }
+        if let Some(chars) = &self.only_chars
+            && (chars.is_empty() || (lowercase && chars.to_lowercase() != *chars))
+        {
+            return Err("`only_chars` must be a lowercase text that is not empty".to_owned());
         }
         Ok(())
     }
@@ -1112,6 +1185,8 @@ pub struct RuleSet {
     exemptions: Vec<Compiled<Exemption>>,
     safe: Vec<Compiled<SafeRule>>,
     project_commands: Vec<Compiled<SafeRule>>,
+    writes: Vec<Compiled<SafeRule>>,
+    access_reads: Vec<Compiled<SafeRule>>,
     roles: BTreeMap<Role, BTreeSet<String>>,
     known_hosts: Vec<String>,
     /// The programs that a built-in pack names. A pack for every program (`*`) and a
@@ -1250,6 +1325,21 @@ impl RuleSet {
                 .validate(&scope)
                 .map_err(|message| fail(format!("project command `{}`: {message}", project.id)))?;
         }
+        for (kind, list) in [("write", &pack.writes), ("access read", &pack.access_reads)] {
+            check_ids(list.iter().map(|entry| entry.id.as_str()), kind).map_err(fail)?;
+            for entry in list {
+                if entry.when == Matcher::default() {
+                    return Err(fail(format!(
+                        "{kind} `{}` has no condition; list the commands",
+                        entry.id
+                    )));
+                }
+                entry
+                    .when
+                    .validate(&scope)
+                    .map_err(|message| fail(format!("{kind} `{}`: {message}", entry.id)))?;
+            }
+        }
         for exemption in &pack.exemptions {
             exemption
                 .when
@@ -1301,6 +1391,22 @@ impl RuleSet {
             self.project_commands.push(Compiled {
                 tool: pack.tool.clone(),
                 item: project,
+            });
+        }
+        for write in &pack.writes {
+            let mut write = write.clone();
+            write.when = scoped(write.when, &pack.programs, any);
+            self.writes.push(Compiled {
+                tool: pack.tool.clone(),
+                item: write,
+            });
+        }
+        for read in &pack.access_reads {
+            let mut read = read.clone();
+            read.when = scoped(read.when, &pack.programs, any);
+            self.access_reads.push(Compiled {
+                tool: pack.tool.clone(),
+                item: read,
             });
         }
         self.packs.push(PackInfo {
@@ -1452,6 +1558,19 @@ impl RuleSet {
             .any(|project| project.item.when.matches(cmd))
     }
 
+    /// A built-in pack lists this command as a write (policy v7).
+    pub(crate) fn known_write(&self, cmd: &Command<'_>) -> bool {
+        self.writes.iter().any(|write| write.item.when.matches(cmd))
+    }
+
+    /// A built-in pack lists this command as a read of the access configuration of an
+    /// account (dev round 3).
+    pub(crate) fn access_read(&self, cmd: &Command<'_>) -> bool {
+        self.access_reads
+            .iter()
+            .any(|read| read.item.when.matches(cmd))
+    }
+
     /// Each rule with its name: `tool/rule/id`, `tool/safe/id`, or `tool/exemption/id`.
     fn named_matchers(&self) -> impl Iterator<Item = (String, &Matcher)> {
         let rules = self.rules.iter().map(|rule| {
@@ -1470,11 +1589,24 @@ impl RuleSet {
             let name = format!("{}/project/{}", project.tool, project.item.id);
             (name, &project.item.when)
         });
-        rules.chain(safe).chain(exemptions).chain(projects)
+        let writes = self.writes.iter().map(|write| {
+            let name = format!("{}/write/{}", write.tool, write.item.id);
+            (name, &write.item.when)
+        });
+        let access = self.access_reads.iter().map(|read| {
+            let name = format!("{}/access/{}", read.tool, read.item.id);
+            (name, &read.item.when)
+        });
+        rules
+            .chain(safe)
+            .chain(exemptions)
+            .chain(projects)
+            .chain(writes)
+            .chain(access)
     }
 
-    /// Names of all rules: `tool/rule/id`, `tool/safe/id`, `tool/exemption/id`, and
-    /// `tool/project/id`.
+    /// Names of all rules: `tool/rule/id`, `tool/safe/id`, `tool/exemption/id`,
+    /// `tool/project/id`, `tool/write/id`, and `tool/access/id`.
     pub fn rule_ids(&self) -> Vec<String> {
         self.named_matchers().map(|(name, _)| name).collect()
     }

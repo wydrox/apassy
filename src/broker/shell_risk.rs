@@ -49,6 +49,11 @@ pub struct Analysis {
     /// "does not change state" answer replace the `task_match` answer (policy v5).
     /// A known safe command is always a known command.
     pub known_command: bool,
+    /// A segment is a command that a built-in pack lists as a write (`writes`), such as
+    /// `gh pr comment`, `git push`, or an SQL `INSERT`: it changes state by the knowledge
+    /// of the packs. The model's "does not change state" answer never makes it a read
+    /// (policy v7). A known safe command is never a known write.
+    pub known_write: bool,
 }
 
 /// The environment variable of one item of a run, and the known API hosts of the
@@ -323,6 +328,7 @@ pub fn analyze_with_providers(
     let pipelines = parse_command(rules, argv);
     let mut all_safe = !pipelines.is_empty();
     let mut all_known = !pipelines.is_empty();
+    let mut any_write = false;
     // `set -x` prints each expanded command, so it prints secret values.
     let tracing = pipelines.iter().flatten().any(|segment| {
         program(segment) == "set"
@@ -358,6 +364,12 @@ pub fn analyze_with_providers(
         {
             all_known = false;
         }
+        if pipeline
+            .iter()
+            .any(|segment| is_known_write(rules, &hosts, segment, secret_names))
+        {
+            any_write = true;
+        }
     }
     // Injection phrases address the reviewer through the purpose. Text inside a
     // command (code, JSON, documents) is data and gave false alarms on real commands.
@@ -370,6 +382,7 @@ pub fn analyze_with_providers(
     Analysis {
         known_safe,
         known_command: known_safe || (all_known && flags.is_empty()),
+        known_write: any_write && !known_safe,
         flags,
     }
 }
@@ -412,7 +425,9 @@ fn parse_command(rules: &RuleSet, argv: &[String]) -> Vec<Pipeline> {
         let inner: Vec<Pipeline> = pipelines[index]
             .iter()
             .filter_map(|segment| {
-                container_command(segment).or_else(|| runner_command(rules, segment))
+                container_command(segment)
+                    .or_else(|| runner_command(rules, segment))
+                    .or_else(|| wrapped_shell_script(segment))
             })
             .flatten()
             .collect();
@@ -536,6 +551,41 @@ fn runner_command(rules: &RuleSet, segment: &Segment) -> Option<Vec<Pipeline>> {
     Some(parse_argv(inner))
 }
 
+/// The script that a shell runs inside a segment: `sh -c TEXT` inside a script or after
+/// a wrapper (`timeout 60 sh -c '...'`, `env A=1 bash -c '...'`, `xargs sh -c '...'`),
+/// the here-document of a shell without `-c` (`bash <<'EOF' ... EOF`), the command of
+/// `trap`, and the arguments of `eval`. A command that starts with `sh -c TEXT` is
+/// parsed at the start, so it is not a segment. The analysis checks the script like a
+/// command line (dev round 3: the flags must cover every part of a command).
+fn wrapped_shell_script(segment: &Segment) -> Option<Vec<Pipeline>> {
+    let argv = effective_argv(segment);
+    let program = base_name(argv.first()?);
+    // `trap 'CMD' EXIT` runs CMD later, and `eval "..."` runs its arguments as a script.
+    match program.as_str() {
+        "trap" => {
+            return argv
+                .iter()
+                .skip(1)
+                .find(|arg| !arg.starts_with('-'))
+                .map(|script| parse_shell(script));
+        }
+        "eval" if argv.len() > 1 => return Some(parse_shell(&argv[1..].join(" "))),
+        _ => {}
+    }
+    if !SHELLS.contains(&program.as_str()) {
+        return None;
+    }
+    match argv.iter().position(|arg| arg == "-c" || arg == "-lc") {
+        Some(position) => argv.get(position + 1).map(|script| parse_shell(script)),
+        None if !segment.heredoc.is_empty()
+            && argv.iter().skip(1).all(|arg| arg.starts_with('-')) =>
+        {
+            Some(parse_shell(&segment.heredoc))
+        }
+        None => None,
+    }
+}
+
 /// An argument list runs without a shell. `sh -c TEXT` runs TEXT in a shell.
 fn parse_argv(argv: &[String]) -> Vec<Pipeline> {
     let program = argv.first().map(|arg| base_name(arg)).unwrap_or_default();
@@ -614,7 +664,13 @@ fn parse_shell(script: &str) -> Vec<Pipeline> {
                     match inner {
                         '"' => break,
                         '\\' => {
+                            // In double quotes a backslash escapes only `$`, a backquote,
+                            // `"`, `\`, and a line break. Before another character it
+                            // stays, as in `psql -c "\d+ orders"` (dev round 3).
                             if let Some(next) = chars.next() {
+                                if !matches!(next, '$' | '`' | '"' | '\\' | '\n') {
+                                    word.push('\\');
+                                }
                                 word.push(next);
                             }
                         }
@@ -890,9 +946,26 @@ fn effective_argv(segment: &Segment) -> Vec<String> {
             }
             continue;
         }
+        // Wrappers with options that take a value, and with a leading operand (the time
+        // of `timeout`). The command after them is the program (dev round 3: the flags
+        // must cover every part of a command).
+        if let Some(start) = wrapped_command_start(&first, &argv) {
+            // Without a command, the wrapper stays the program (`xargs` alone runs
+            // `echo`), so the rules of the wrapper still see its options.
+            if start >= argv.len() {
+                return argv;
+            }
+            argv.drain(..start);
+            continue;
+        }
         let skip = match first.as_str() {
             "npx" | "bunx" | "sudo" | "doas" | "time" | "nohup" | "exec" => 1,
             "pnpm" | "yarn" if argv.get(1).map(String::as_str) == Some("dlx") => 2,
+            // `pnpm exec tsc` and `npm exec tsc` run a program of the project's
+            // `node_modules/.bin`; `npm exec` and `bun x` can download it, as `npx` does
+            // (dev round 3).
+            "pnpm" | "yarn" | "npm" if argv.get(1).map(String::as_str) == Some("exec") => 2,
+            "bun" if argv.get(1).map(String::as_str) == Some("x") => 2,
             "env" if argv.len() > 1 => {
                 // `env A=1 cmd`: skip assignments too.
                 let mut n = 1;
@@ -917,13 +990,82 @@ fn effective_argv(segment: &Segment) -> Vec<String> {
     }
 }
 
-/// The command runs a package with `npx`, `bunx`, `pnpm dlx`, or `yarn dlx`. The
-/// package can come from the registry.
+/// The index of the command after a wrapper that runs another command: `xargs`,
+/// `timeout`, `nice`, `ionice`, `stdbuf`, `caffeinate`, `command`, `builtin`, `watch`,
+/// `chronic`, and `unbuffer`. The wrapper options and their values come first, and
+/// `timeout` has the time before the command. `None` for another program, and for
+/// `command -v` (a lookup).
+fn wrapped_command_start(program: &str, argv: &[String]) -> Option<usize> {
+    // (options with a separate value, leading operands before the command)
+    let (value_options, operands): (&[&str], usize) = match program {
+        "xargs" => (
+            &[
+                "-I",
+                "-n",
+                "-P",
+                "-L",
+                "-d",
+                "-E",
+                "-s",
+                "-a",
+                "-J",
+                "-R",
+                "-S",
+                "--max-args",
+                "--max-procs",
+                "--max-lines",
+                "--delimiter",
+                "--arg-file",
+                "--max-chars",
+                "--eof",
+                "--replace",
+            ],
+            0,
+        ),
+        "timeout" | "gtimeout" => (&["-s", "-k", "--signal", "--kill-after"], 1),
+        "nice" => (&["-n", "--adjustment"], 0),
+        "ionice" => (&["-c", "-n", "--class", "--classdata"], 0),
+        "stdbuf" => (&["-i", "-o", "-e", "--input", "--output", "--error"], 0),
+        "caffeinate" => (&["-t", "-w"], 0),
+        "watch" => (&["-n", "--interval", "-q", "--equexit"], 0),
+        "command" => {
+            if argv
+                .iter()
+                .skip(1)
+                .take_while(|arg| arg.starts_with('-'))
+                .any(|arg| arg.contains('v') || arg.contains('V'))
+            {
+                return None;
+            }
+            (&[], 0)
+        }
+        "builtin" | "chronic" | "unbuffer" => (&[], 0),
+        _ => return None,
+    };
+    let mut index = 1;
+    while let Some(arg) = argv.get(index) {
+        if arg == "--" {
+            index += 1;
+            break;
+        }
+        if !arg.starts_with('-') || arg == "-" {
+            break;
+        }
+        let takes_value = !arg.contains('=') && value_options.contains(&arg.as_str());
+        index += if takes_value { 2 } else { 1 };
+    }
+    Some(index + operands)
+}
+
+/// The command runs a package with `npx`, `bunx`, `pnpm dlx`, `yarn dlx`, `npm exec`, or
+/// `bun x`. The package can come from the registry.
 pub(crate) fn is_package_runner(words: &[String]) -> bool {
     let first = words.first().map(|arg| base_name(arg)).unwrap_or_default();
+    let second = words.get(1).map(String::as_str);
     matches!(first.as_str(), "npx" | "bunx")
-        || (matches!(first.as_str(), "pnpm" | "yarn")
-            && words.get(1).map(String::as_str) == Some("dlx"))
+        || (matches!(first.as_str(), "pnpm" | "yarn") && second == Some("dlx"))
+        || (first == "npm" && second == Some("exec"))
+        || (first == "bun" && second == Some("x"))
 }
 
 /// A segment with a program, prepared for the rule packs. `hosts` are the known hosts
@@ -936,12 +1078,15 @@ fn command<'a>(
 ) -> Command<'a> {
     let args = lower_args(&argv[1..]);
     let joined = argv.join(" ");
+    let program_name = base_name(&argv[0]);
+    let sub_args = subcommand_args(&program_name, &args);
     Command {
         words: &segment.argv,
         argv,
-        program: base_name(&argv[0]),
+        program: program_name,
         raw_program: program(segment),
-        args_joined: args.join(" "),
+        args_joined: sub_args.join(" "),
+        sub_args,
         args,
         joined_lower: joined.to_lowercase(),
         joined,
@@ -950,6 +1095,234 @@ fn command<'a>(
         secret_names,
         known_hosts: hosts,
     }
+}
+
+/// Global options that a program takes before its subcommand, as (option, takes a
+/// separate value). An option with `=value` is one word. The packs match the subcommand
+/// after them, so `git -C api push --force` and `kubectl -n staging apply -f x` get the
+/// flags of `push --force` and `apply` (dev round 3). An option that is not in the list
+/// ends the global options, as before.
+fn global_options(program: &str) -> &'static [(&'static str, bool)] {
+    match program {
+        "git" => &[
+            ("-c", true),
+            ("--git-dir", true),
+            ("--work-tree", true),
+            ("--namespace", true),
+            ("--config-env", true),
+            ("--exec-path", false),
+            ("--no-pager", false),
+            ("-p", false),
+            ("--paginate", false),
+            ("--bare", false),
+            ("--no-replace-objects", false),
+            ("--literal-pathspecs", false),
+            ("--no-optional-locks", false),
+        ],
+        "kubectl" => &[
+            ("-n", true),
+            ("--namespace", true),
+            ("--context", true),
+            ("--kubeconfig", true),
+            ("--cluster", true),
+            ("--user", true),
+            ("-s", true),
+            ("--server", true),
+            ("--token", true),
+            ("--as", true),
+            ("--as-group", true),
+            ("--request-timeout", true),
+            ("-v", true),
+            ("--v", true),
+            ("--insecure-skip-tls-verify", false),
+        ],
+        "helm" => &[
+            ("-n", true),
+            ("--namespace", true),
+            ("--kube-context", true),
+            ("--kubeconfig", true),
+            ("--kube-apiserver", true),
+            ("--kube-token", true),
+            ("--debug", false),
+        ],
+        "terraform" | "tofu" => &[("-chdir", false)],
+        "docker" | "podman" => &[
+            ("--context", true),
+            ("-c", true),
+            ("-h", true),
+            ("--host", true),
+            ("--config", true),
+            ("-l", true),
+            ("--log-level", true),
+            ("-d", false),
+            ("--debug", false),
+            ("--tls", false),
+            ("--tlsverify", false),
+            ("--tlscacert", true),
+            ("--tlscert", true),
+            ("--tlskey", true),
+        ],
+        "npm" => &[
+            ("--prefix", true),
+            ("-w", true),
+            ("--workspace", true),
+            ("--workspaces", false),
+            ("--silent", false),
+            ("-s", false),
+            ("--loglevel", true),
+            ("-q", false),
+            ("--quiet", false),
+        ],
+        "pnpm" => &[
+            ("-c", true),
+            ("--dir", true),
+            ("--filter", true),
+            ("-f", true),
+            ("-w", false),
+            ("--workspace-root", false),
+            ("-r", false),
+            ("--recursive", false),
+            ("--silent", false),
+            ("-s", false),
+            ("--reporter", true),
+            ("--stream", false),
+            ("--parallel", false),
+        ],
+        "yarn" | "bun" => &[("--cwd", true), ("--silent", false), ("-s", false)],
+        "aws" => &[
+            ("--profile", true),
+            ("--region", true),
+            ("--output", true),
+            ("--endpoint-url", true),
+            ("--query", true),
+            ("--ca-bundle", true),
+            ("--cli-read-timeout", true),
+            ("--cli-connect-timeout", true),
+            ("--color", true),
+            ("--no-cli-pager", false),
+            ("--no-paginate", false),
+            ("--no-verify-ssl", false),
+            ("--no-sign-request", false),
+            ("--debug", false),
+        ],
+        "celery" => &[
+            ("-a", true),
+            ("--app", true),
+            ("-b", true),
+            ("--broker", true),
+            ("--result-backend", true),
+            ("--loader", true),
+            ("--config", true),
+            ("--workdir", true),
+            ("-q", false),
+            ("--quiet", false),
+            ("--no-color", false),
+        ],
+        "cargo" => &[
+            ("-z", true),
+            ("--config", true),
+            ("--color", true),
+            ("--locked", false),
+            ("--offline", false),
+            ("--frozen", false),
+            ("-q", false),
+            ("--quiet", false),
+            ("-v", false),
+            ("--verbose", false),
+        ],
+        "make" | "gmake" => &[
+            ("-c", true),
+            ("-f", true),
+            ("--directory", true),
+            ("--file", true),
+            ("--makefile", true),
+            ("-s", false),
+            ("--silent", false),
+            ("-k", false),
+            ("-b", false),
+            ("-w", false),
+            ("--no-print-directory", false),
+        ],
+        "just" => &[
+            ("-f", true),
+            ("--justfile", true),
+            ("-d", true),
+            ("--working-directory", true),
+            ("--dotenv-path", true),
+            ("-q", false),
+            ("--quiet", false),
+        ],
+        "task" => &[
+            ("-t", true),
+            ("--taskfile", true),
+            ("-d", true),
+            ("--dir", true),
+            ("-s", false),
+            ("--silent", false),
+            ("-p", false),
+            ("--parallel", false),
+        ],
+        "supabase" => &[
+            ("--workdir", true),
+            ("--profile", true),
+            ("--network-id", true),
+            ("-o", true),
+            ("--output", true),
+            ("--debug", false),
+            ("--experimental", false),
+            ("--yes", false),
+        ],
+        "stripe" => &[
+            ("--api-key", true),
+            ("--project-name", true),
+            ("-p", true),
+            ("--color", true),
+            ("--config", true),
+            ("--log-level", true),
+            ("--device-name", true),
+        ],
+        _ => &[],
+    }
+}
+
+/// The arguments from the subcommand on (`Command::sub_args`): the global options of
+/// [`global_options`] and their values are skipped, and `cargo +nightly` skips the
+/// toolchain. For `docker compose` and `podman compose`, the compose options before the
+/// compose subcommand are skipped too: `docker compose -f dev.yml down -v` gives
+/// `compose down -v`. For `docker-compose` and `podman-compose`, their options before
+/// the subcommand are skipped.
+fn subcommand_args(program: &str, args: &[String]) -> Vec<String> {
+    if matches!(program, "docker-compose" | "podman-compose") {
+        let start = skip_container_options(args, 0);
+        return args.get(start..).unwrap_or_default().to_vec();
+    }
+    let options = global_options(program);
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        if program == "cargo" && arg.starts_with('+') {
+            index += 1;
+            continue;
+        }
+        if !arg.starts_with('-') {
+            break;
+        }
+        let (name, has_value) = match arg.split_once('=') {
+            Some((name, _)) => (name, true),
+            None => (arg.as_str(), false),
+        };
+        match options.iter().find(|(option, _)| *option == name) {
+            Some((_, takes_value)) => index += if *takes_value && !has_value { 2 } else { 1 },
+            None => break,
+        }
+    }
+    let mut sub: Vec<String> = args.get(index..).unwrap_or_default().to_vec();
+    if matches!(program, "docker" | "podman") && sub.first().is_some_and(|word| word == "compose") {
+        let start = skip_container_options(&sub, 1);
+        if start > 1 && start < sub.len() {
+            sub.drain(1..start);
+        }
+    }
+    sub
 }
 
 /// All text of a segment in lowercase: the `NAME=value` prefixes, the words as written
@@ -1470,6 +1843,12 @@ fn check_http(
             flags.push("production".to_owned());
         }
     }
+    // A verbose, trace, or debug option prints the request with its headers. A secret in
+    // an auth header, the URL, or the user option then goes to the output (dev round 3:
+    // `curl -v -H "Authorization: token $GH_TOKEN" https://api.github.com/user`).
+    if http_prints_request(argv) && http_carries_credential(argv, secret_names) {
+        flags.push("secret_output".to_owned());
+    }
     let mut index = 1;
     while index < argv.len() {
         let arg = &argv[index];
@@ -1512,6 +1891,144 @@ fn check_http(
     }
     // Sending data to a real person.
     check_recipients(argv, flags);
+}
+
+/// Short options of `curl` with a separate value. A group such as `-sSv` ends at one of
+/// them.
+const CURL_SHORT_VALUE: &str = "AbcCdDeEFHKmoPQrTuUwxXyYz";
+/// Long options of HTTP clients with a separate value. The value is not an option.
+const HTTP_LONG_VALUE_OPTIONS: &[&str] = &[
+    "--header",
+    "--data",
+    "--data-raw",
+    "--data-binary",
+    "--data-urlencode",
+    "--json",
+    "--user",
+    "--output",
+    "--request",
+    "--user-agent",
+    "--referer",
+    "--cookie",
+    "--cookie-jar",
+    "--form",
+    "--upload-file",
+    "--write-out",
+    "--proxy",
+    "--dump-header",
+    "--config",
+    "--cert",
+    "--max-time",
+    "--url",
+    "--method",
+    "--auth",
+    "--auth-type",
+    "--session",
+];
+
+/// An option of an HTTP client that prints the request with its headers: `curl -v`,
+/// `--verbose`, `--trace`, `--trace-ascii`, and `--libcurl` (it writes the request as C
+/// code); `wget -d` and `--debug`; HTTPie `-v`, `--verbose`, `--offline`, and a
+/// `--print` value with `H` (request headers) or `B` (request body).
+fn http_prints_request(argv: &[String]) -> bool {
+    let program = argv.first().map(|arg| base_name(arg)).unwrap_or_default();
+    let mut index = 1;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        index += 1;
+        if arg == "--" {
+            break;
+        }
+        if let Some(long) = arg.strip_prefix("--") {
+            let name = long.split('=').next().unwrap_or(long);
+            let prints = match program.as_str() {
+                "curl" => matches!(name, "verbose" | "trace" | "trace-ascii" | "libcurl"),
+                "wget" => name == "debug",
+                "http" | "https" | "httpie" => {
+                    matches!(name, "verbose" | "offline")
+                        || (name == "print"
+                            && long
+                                .split_once('=')
+                                .map(|(_, value)| value)
+                                .or_else(|| argv.get(index).map(String::as_str))
+                                .is_some_and(|value| value.contains(['H', 'B'])))
+                }
+                _ => false,
+            };
+            if prints {
+                return true;
+            }
+            if !long.contains('=') && HTTP_LONG_VALUE_OPTIONS.contains(&arg) {
+                index += 1;
+            }
+            continue;
+        }
+        let Some(short) = arg.strip_prefix('-').filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        match program.as_str() {
+            "curl" => {
+                for (position, letter) in short.char_indices() {
+                    if letter == 'v' {
+                        return true;
+                    }
+                    if CURL_SHORT_VALUE.contains(letter) {
+                        if position + letter.len_utf8() == short.len() {
+                            index += 1;
+                        }
+                        break;
+                    }
+                }
+            }
+            "wget" => {
+                // `-nd`, `-nv`, and the other `-n` options are not `-d`.
+                if !short.starts_with('n')
+                    && short.contains('d')
+                    && short.chars().all(|c| c.is_ascii_alphabetic())
+                {
+                    return true;
+                }
+            }
+            "http" | "https" | "httpie" => {
+                if short.starts_with('v') && short.chars().all(|c| c == 'v') {
+                    return true;
+                }
+                if let Some(value) = short.strip_prefix('p') {
+                    let value = if value.is_empty() {
+                        let next = argv.get(index).map(String::as_str).unwrap_or_default();
+                        index += 1;
+                        next
+                    } else {
+                        value
+                    };
+                    if value.contains(['H', 'B']) {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// An HTTP request that carries a credential: a secret reference in an argument (a
+/// header, the URL, a form value), a user option (`-u`, `--user`, `--auth`), an auth
+/// header with a literal value, or credentials from a `.netrc` file.
+fn http_carries_credential(argv: &[String], secret_names: &[String]) -> bool {
+    argv.iter().skip(1).any(|arg| {
+        let lower = arg.to_lowercase();
+        refs_secret(arg, secret_names)
+            || matches!(
+                lower.as_str(),
+                "-u" | "--user" | "-a" | "--auth" | "-n" | "--netrc" | "--netrc-optional"
+            )
+            || lower.starts_with("--user=")
+            || lower.starts_with("--auth=")
+            || lower.starts_with("--oauth2-bearer")
+            || lower.starts_with("--netrc-file")
+            || is_auth_header(&lower)
+    })
 }
 
 /// The host or one of its parent domains is a known provider host from the packs.
@@ -1594,6 +2111,8 @@ pub(crate) fn url_hosts(argv: &[String]) -> Vec<String> {
 pub(crate) fn inline_code_leaks(code: &str, secret_names: &[String]) -> bool {
     let lower = code.to_lowercase();
     let reads_env = lower.contains("process.env")
+        || lower.contains("deno.env")
+        || lower.contains("bun.env")
         || lower.contains("os.environ")
         || lower.contains("getenv")
         || lower.contains("env::var")
@@ -1824,6 +2343,9 @@ const REVEAL_OPTIONS: &[&str] = &[
     "--unmask",
     "--show-sensitive",
     "--show-values",
+    // `gh auth status --show-token` prints the token (dev round 3).
+    "--show-token",
+    "--show-password",
 ];
 
 /// The general secret lexicon. The command prints, exports, or decrypts values that are
@@ -1847,6 +2369,10 @@ fn reveals_secret(cmd: &Command<'_>) -> bool {
     let options = option_names(cmd);
     if options.iter().any(|name| REVEAL_OPTIONS.contains(name)) {
         return true;
+    }
+    // `doppler secrets --only-names`: the command prints names, not values.
+    if names_only(&cmd.args) {
+        return false;
     }
     let format_value = cmd.args.iter().enumerate().any(|(index, arg)| {
         let (name, value) = match arg.split_once('=') {
@@ -2173,7 +2699,7 @@ fn check_unknown_program(cmd: &Command<'_>, flags: &mut Vec<String>) {
 /// check needs the structure of a statement (`DELETE FROM`, `DROP TABLE`, `UPDATE x
 /// SET`), so plain English such as "delete old logs" does not count.
 pub(crate) fn sql_destroys(text: &str) -> bool {
-    let lower = text.to_lowercase();
+    let lower = strip_sql_comments(&text.to_lowercase());
     lower.split(';').any(|statement| {
         let w = words(statement);
         let start = w
@@ -2279,11 +2805,19 @@ fn check_destructive(rules: &RuleSet, cmd: &Command<'_>, flags: &mut Vec<String>
     // Tasks and package scripts named for data loss, for example `npm run db:reset` or
     // `make db-drop`. `remove` is not in the list: `yarn remove` removes a dependency.
     if rules.has_role(&cmd.program, Role::TaskRunner) {
-        let task = match cmd.args.first().map(String::as_str) {
-            Some("run" | "run-script") => cmd.args.get(1),
-            _ => cmd.args.first(),
+        // A package script is one name. `make`, `just`, and `task` run every target on
+        // the command line, so each operand counts (dev round 3: `make test db-drop`).
+        let tasks: Vec<&String> = match cmd.sub_args.first().map(String::as_str) {
+            Some("run" | "run-script") => cmd.sub_args.get(1).into_iter().collect(),
+            _ if matches!(cmd.program.as_str(), "make" | "gmake" | "just" | "task") => cmd
+                .sub_args
+                .iter()
+                .take_while(|arg| *arg != "--")
+                .filter(|arg| !arg.starts_with('-'))
+                .collect(),
+            _ => cmd.sub_args.first().into_iter().collect(),
         };
-        if task.is_some_and(|task| {
+        if tasks.iter().any(|task| {
             !task.starts_with('-')
                 && words(task).iter().any(|w| {
                     matches!(
@@ -2306,27 +2840,42 @@ fn check_destructive(rules: &RuleSet, cmd: &Command<'_>, flags: &mut Vec<String>
     }
 }
 
-/// The SQL text of a database command: the value after `-c`, `--command`, `-e`,
-/// `--execute`, or `--eval`, or the first plain argument after `db query`.
+/// The SQL text of a database command: the values after `-c`, `--command`, `-e`,
+/// `--execute`, or `--eval`, or the first plain argument after `db query`. A client such
+/// as `psql` takes more than one `-c`: the text has all of them, one statement each (dev
+/// round 3: `psql -c '\dt' -c 'DROP TABLE x'` has a drop). After `-e`, a value that
+/// starts with `-` is an option, not SQL (`psql -e` echoes the queries).
 pub(crate) fn sql_argument(argv: &[String]) -> Option<String> {
     let mut iter = argv.iter().skip(1).peekable();
     let mut after_query = false;
+    let mut texts: Vec<String> = Vec::new();
     while let Some(arg) = iter.next() {
         let lower = arg.to_lowercase();
-        if matches!(
-            lower.as_str(),
-            "-c" | "--command" | "-e" | "--execute" | "--eval"
-        ) {
-            return iter.next().cloned();
+        if matches!(lower.as_str(), "-c" | "--command" | "--execute" | "--eval") {
+            if let Some(value) = iter.next() {
+                texts.push(value.clone());
+            }
+            continue;
+        }
+        // `-e` is `--execute` for `mysql` and `--echo-queries` for `psql`. SQL can start
+        // with `-` (a comment), so only this option checks the value.
+        if lower == "-e" {
+            if let Some(value) = iter.next_if(|next| !next.starts_with('-')) {
+                texts.push(value.clone());
+            }
+            continue;
         }
         if let Some(value) = ["--command=", "--execute=", "--eval="]
             .iter()
             .find_map(|prefix| arg.strip_prefix(prefix))
         {
-            return Some(value.to_owned());
+            texts.push(value.to_owned());
+            continue;
         }
         if after_query && !arg.starts_with('-') {
-            return Some(arg.clone());
+            texts.push(arg.clone());
+            after_query = false;
+            continue;
         }
         // Options with a separate value, for example `--output-format json`.
         if after_query
@@ -2345,17 +2894,17 @@ pub(crate) fn sql_argument(argv: &[String]) -> Option<String> {
             iter.next();
             continue;
         }
-        if lower == "query" {
+        if lower == "query" && texts.is_empty() {
             after_query = true;
         }
     }
-    None
+    (!texts.is_empty()).then(|| texts.join(";\n"))
 }
 
 /// SQL or database shell code that changes data, schema, or access. The check looks at
 /// the first keyword of each statement, so a word inside a query or a string does not count.
 pub(crate) fn sql_writes(text: &str) -> bool {
-    let lower = text.to_lowercase();
+    let lower = strip_sql_comments(&text.to_lowercase());
     if [
         "dropdatabase",
         "deletemany",
@@ -2407,13 +2956,447 @@ pub(crate) fn sql_writes(text: &str) -> bool {
     })
 }
 
+/// SQL without its comments: `-- ...` to the end of the line and `/* ... */`. A comment
+/// before a statement does not hide it (dev round 3: `-- note` and a line break before
+/// `DELETE FROM sessions`). Text in single quotes stays.
+fn strip_sql_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut quoted = false;
+    while let Some(c) = chars.next() {
+        if quoted {
+            out.push(c);
+            if c == '\'' {
+                quoted = false;
+            }
+            continue;
+        }
+        match (c, chars.peek()) {
+            ('\'', _) => {
+                quoted = true;
+                out.push(c);
+            }
+            ('-', Some('-')) => {
+                for next in chars.by_ref() {
+                    if next == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            ('/', Some('*')) => {
+                chars.next();
+                let mut previous = ' ';
+                for next in chars.by_ref() {
+                    if previous == '*' && next == '/' {
+                        break;
+                    }
+                    previous = next;
+                }
+                out.push(' ');
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// SQL that only reads: it starts with a read keyword and does not write.
 pub(crate) fn sql_reads(text: &str) -> bool {
-    let w = words(text);
+    let w = words(&strip_sql_comments(text));
     matches!(
         w.first().map(String::as_str),
         Some("select" | "with" | "explain" | "show")
     ) && !sql_writes(text)
+        && !sql_changes(text)
+}
+
+/// SQL or database shell code that changes data, schema, or access in any way (dev
+/// round 3): each statement that [`sql_writes`] finds, and also `INSERT`, `MERGE`,
+/// `REPLACE`, `CREATE`, `COPY ... FROM`, `CALL`, `DO`, `EXECUTE`, a `PRAGMA` with a
+/// value, a data change inside a `WITH` statement, and the MongoDB shell methods that
+/// insert, update, replace, or create. The pack field `writes` uses it: such a command
+/// is a known write, whatever the model answers.
+pub(crate) fn sql_changes(text: &str) -> bool {
+    if sql_writes(text) {
+        return true;
+    }
+    let lower = strip_sql_comments(&text.to_lowercase());
+    let mongo = [
+        ".insert",
+        ".update",
+        ".replace",
+        ".createindex",
+        ".createcollection",
+        ".findoneandupdate",
+        ".findoneandreplace",
+        ".save(",
+    ];
+    if mongo.iter().any(|needle| lower.contains(needle)) {
+        return true;
+    }
+    lower.split(';').any(|statement| {
+        let w = words(statement);
+        let start = w
+            .iter()
+            .position(|word| {
+                !matches!(
+                    word.as_str(),
+                    "with" | "begin" | "explain" | "analyze" | "analyse" | "verbose"
+                )
+            })
+            .unwrap_or(0);
+        let first = w.get(start).map(String::as_str).unwrap_or_default();
+        let change = matches!(
+            first,
+            "insert"
+                | "merge"
+                | "upsert"
+                | "replace"
+                | "create"
+                | "rename"
+                | "comment"
+                | "refresh"
+                | "call"
+                | "do"
+                | "exec"
+                | "execute"
+                | "load"
+                | "import"
+                | "attach"
+                | "detach"
+        );
+        // `COPY t FROM ...` loads data. `COPY (SELECT ...) TO STDOUT` only reads.
+        let copy_in =
+            first == "copy" && statement.contains(" from ") && !statement.contains(" to ");
+        let pragma_set = first == "pragma" && statement.contains('=');
+        // A data change inside a `WITH` statement: `WITH x AS (DELETE ...) SELECT ...`.
+        let nested = w.first().is_some_and(|word| word == "with")
+            && statement.split('(').skip(1).any(|part| {
+                words(part).first().is_some_and(|word| {
+                    matches!(word.as_str(), "insert" | "update" | "delete" | "merge")
+                })
+            });
+        change || copy_in || pragma_set || nested
+    })
+}
+
+/// Meta commands of `psql` that print the schema or the connection, not table data.
+const SCHEMA_META_COMMANDS: &[&str] = &[
+    "\\d",
+    "\\d+",
+    "\\dt",
+    "\\dt+",
+    "\\di",
+    "\\di+",
+    "\\dv",
+    "\\dv+",
+    "\\dm",
+    "\\dm+",
+    "\\ds",
+    "\\ds+",
+    "\\df",
+    "\\df+",
+    "\\dn",
+    "\\dn+",
+    "\\dx",
+    "\\dx+",
+    "\\db",
+    "\\db+",
+    "\\l",
+    "\\l+",
+    "\\conninfo",
+];
+
+/// Functions that a read of the schema or of the query plan may call: aggregates,
+/// conversions, and server information. A function outside the list can change data
+/// (`pg_terminate_backend`, `setval`, or a function of the project).
+const READ_FUNCTIONS: &[&str] = &[
+    "count",
+    "sum",
+    "avg",
+    "min",
+    "max",
+    "coalesce",
+    "nullif",
+    "lower",
+    "upper",
+    "length",
+    "now",
+    "date_trunc",
+    "to_char",
+    "extract",
+    "cast",
+    "version",
+    "current_database",
+    "current_schema",
+    "current_user",
+    "pg_size_pretty",
+    "pg_database_size",
+    "pg_relation_size",
+    "pg_total_relation_size",
+];
+
+/// SQL words that can come before `(` and are not functions.
+const SQL_PAREN_KEYWORDS: &[&str] = &[
+    "in", "exists", "any", "all", "some", "over", "filter", "values", "as", "from", "join", "on",
+    "where", "and", "or", "not", "select", "using", "lateral", "by", "interval", "explain",
+    "analyze", "analyse", "verbose", "format", "costs", "buffers", "timing",
+];
+
+/// Each call in the SQL text is a function of [`READ_FUNCTIONS`] or a SQL word.
+fn calls_read_functions_only(lower: &str) -> bool {
+    lower.match_indices('(').all(|(index, _)| {
+        let before = lower[..index].trim_end();
+        let name: String = before
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.')
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        name.is_empty()
+            || READ_FUNCTIONS.contains(&name.as_str())
+            || SQL_PAREN_KEYWORDS.contains(&name.as_str())
+    })
+}
+
+/// Methods of the MongoDB shell that print the schema or statistics, not documents.
+const MONGO_SCHEMA_METHODS: &[&str] = &[
+    "getcollectionnames()",
+    "getcollectioninfos()",
+    "getindexes()",
+    "getindexkeys()",
+    "stats()",
+    "version()",
+    "getname()",
+];
+
+/// One statement that reads the schema, the plan of a query, or server information, not
+/// table data (dev round 3): a `psql` meta command such as `\dt` or `\d+ orders`,
+/// `EXPLAIN` of a read (also with `ANALYZE`) that calls only [`READ_FUNCTIONS`], `SHOW
+/// TABLES` and similar listings, `DESCRIBE`, a `SELECT` without `FROM` such as
+/// `select version()`, and the MongoDB shell methods of [`MONGO_SCHEMA_METHODS`].
+fn schema_statement(statement: &str) -> bool {
+    let lower = statement.trim().to_lowercase();
+    if let Some(rest) = lower.strip_prefix('\\') {
+        let name = format!("\\{}", rest.split_whitespace().next().unwrap_or_default());
+        return SCHEMA_META_COMMANDS.contains(&name.as_str());
+    }
+    if let Some(rest) = lower.strip_prefix("db.") {
+        return rest
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '(' | ')'))
+            && MONGO_SCHEMA_METHODS
+                .iter()
+                .any(|method| rest.ends_with(method))
+            && rest.matches('(').count() == 1;
+    }
+    let w = words(&lower);
+    let word = |index: usize| w.get(index).map(String::as_str).unwrap_or_default();
+    match word(0) {
+        "explain" => sql_reads(&lower) && calls_read_functions_only(&lower),
+        "show" => {
+            let listing = |name: &str| {
+                matches!(
+                    name,
+                    "tables"
+                        | "columns"
+                        | "fields"
+                        | "index"
+                        | "indexes"
+                        | "keys"
+                        | "create"
+                        | "databases"
+                        | "schemas"
+                        | "table"
+                        | "collections"
+                        | "dbs"
+                        | "search_path"
+                        | "server_version"
+                )
+            };
+            listing(word(1)) || (word(1) == "full" && listing(word(2)))
+        }
+        "describe" | "desc" => !sql_changes(&lower),
+        "select" => {
+            !w.iter().any(|word| word == "from")
+                && sql_reads(&lower)
+                && calls_read_functions_only(&lower)
+        }
+        _ => false,
+    }
+}
+
+/// The SQL argument reads only the schema, the plan of a query, or server information
+/// (see [`schema_statement`]). There is at least one statement.
+pub(crate) fn sql_schema_read(text: &str) -> bool {
+    let text = strip_sql_comments(text);
+    let statements: Vec<&str> = text
+        .split([';', '\n'])
+        .map(str::trim)
+        .filter(|statement| !statement.is_empty())
+        .collect();
+    !statements.is_empty()
+        && statements
+            .iter()
+            .all(|statement| schema_statement(statement))
+}
+
+/// `PRAGMA` names that only read the database (SQLite).
+const READ_PRAGMAS: &[&str] = &[
+    "integrity_check",
+    "quick_check",
+    "foreign_key_check",
+    "foreign_key_list",
+    "table_info",
+    "table_xinfo",
+    "table_list",
+    "index_list",
+    "index_info",
+    "index_xinfo",
+    "database_list",
+    "collation_list",
+    "function_list",
+    "pragma_list",
+    "compile_options",
+    "user_version",
+    "schema_version",
+    "application_id",
+    "page_count",
+    "page_size",
+    "freelist_count",
+    "journal_mode",
+    "encoding",
+];
+
+/// Dot commands of the SQLite shell that only print the schema or change the output
+/// format.
+const READ_DOT_COMMANDS: &[&str] = &[
+    ".schema",
+    ".fullschema",
+    ".tables",
+    ".indexes",
+    ".indices",
+    ".databases",
+    ".dbinfo",
+    ".show",
+    ".headers",
+    ".header",
+    ".mode",
+    ".width",
+];
+
+/// SQL functions of the SQLite shell that read or write files, or load code.
+const FILE_FUNCTIONS: &[&str] = &[
+    "readfile(",
+    "writefile(",
+    "edit(",
+    "load_extension(",
+    "fsdir(",
+    "sqlar_",
+    "zipfile(",
+];
+
+/// One statement or dot command that only reads: see [`plain_sql_reads`].
+fn statement_reads(statement: &str) -> bool {
+    let text = statement.trim();
+    let lower = text.to_lowercase();
+    if FILE_FUNCTIONS.iter().any(|name| lower.contains(name)) {
+        return false;
+    }
+    if lower.starts_with('.') {
+        let name = lower.split_whitespace().next().unwrap_or_default();
+        return READ_DOT_COMMANDS.contains(&name);
+    }
+    let w = words(&lower);
+    match w.first().map(String::as_str) {
+        Some("pragma") => {
+            // The name ends at a space or `(`. `PRAGMA main.table_info(users)` has a
+            // schema name first.
+            let name = lower
+                .trim_start_matches("pragma")
+                .trim_start()
+                .split(|c: char| c.is_whitespace() || c == '(')
+                .next()
+                .unwrap_or_default();
+            let name = name.rsplit('.').next().unwrap_or(name);
+            !lower.contains('=') && READ_PRAGMAS.contains(&name)
+        }
+        Some("describe" | "desc") => !sql_changes(&lower),
+        _ => sql_reads(&lower),
+    }
+}
+
+/// The arguments of a client of a local database file (`sqlite3`, `duckdb`) after the
+/// database file are reads only: `SELECT` statements, read `PRAGMA`s, and dot commands
+/// that print the schema (dev round 3). There is at least one. An option that runs a
+/// file (`-init`) or an archive mode is not a read. Without SQL arguments the client
+/// reads its input, which the analysis does not see.
+pub(crate) fn plain_sql_reads(argv: &[String]) -> bool {
+    let mut texts: Vec<&str> = Vec::new();
+    let mut operands = 0;
+    let mut index = 1;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if let Some(option) = arg.strip_prefix('-') {
+            let name = option.trim_start_matches('-').to_lowercase();
+            match name.as_str() {
+                "cmd" | "c" | "s" => {
+                    match argv.get(index + 1) {
+                        Some(value) => texts.push(value),
+                        None => return false,
+                    }
+                    index += 2;
+                    continue;
+                }
+                "init" | "a" | "archive" | "append" | "deserialize" | "zip" | "safe" => {
+                    return false;
+                }
+                "separator" | "newline" | "nullvalue" | "vfs" | "maxsize" | "mmap"
+                | "lookaside" | "pagecache" | "heap" => {
+                    index += 2;
+                    continue;
+                }
+                _ => {
+                    index += 1;
+                    continue;
+                }
+            }
+        }
+        operands += 1;
+        if operands > 1 {
+            texts.push(arg);
+        }
+        index += 1;
+    }
+    !texts.is_empty()
+        && texts.iter().all(|text| {
+            text.split([';', '\n'])
+                .filter(|statement| !statement.trim().is_empty())
+                .all(statement_reads)
+                && !text.trim().is_empty()
+        })
+}
+
+/// Options that ask a tool for the names of secrets or variables only, not their
+/// values: `doppler secrets --only-names`, and the same option in other tools (dev
+/// round 3).
+const NAMES_ONLY_OPTIONS: &[&str] = &[
+    "--only-names",
+    "--names-only",
+    "--name-only",
+    "--only-keys",
+    "--keys-only",
+    "--no-values",
+];
+
+/// An option asks for names only. See [`NAMES_ONLY_OPTIONS`].
+pub(crate) fn names_only(args: &[String]) -> bool {
+    args.iter()
+        .take_while(|arg| *arg != "--")
+        .any(|arg| NAMES_ONLY_OPTIONS.contains(&arg.split('=').next().unwrap_or(arg)))
 }
 
 /// The branches that `git push` updates: the operands after the subcommand, without the
@@ -2436,7 +3419,7 @@ fn check_release(rules: &RuleSet, cmd: &Command<'_>, flags: &mut Vec<String>) {
     let push = |flags: &mut Vec<String>| flags.push("production".to_owned());
     let argv = cmd.argv;
     let args = &cmd.args;
-    let sub = args.first().map(String::as_str).unwrap_or_default();
+    let sub = cmd.sub_args.first().map(String::as_str).unwrap_or_default();
     // A production target: a word "prod", "production", or "live" in a host, flag value,
     // project name, or variable name. A build mode such as `build:production` is not a target.
     let target_words: Vec<String> = argv
@@ -2463,8 +3446,8 @@ fn check_release(rules: &RuleSet, cmd: &Command<'_>, flags: &mut Vec<String>) {
         .any(|w| matches!(w.as_str(), "prod" | "production" | "prd" | "live"))
         || cmd.joined_lower.contains("sk_live_")
         || cmd.joined_lower.contains("pk_live_");
-    let is_build =
-        matches!(sub, "build" | "run") && args.get(1).is_some_and(|a| a.starts_with("build"));
+    let is_build = matches!(sub, "build" | "run")
+        && cmd.sub_args.get(1).is_some_and(|a| a.starts_with("build"));
     // The packs make exceptions for commands that only read, such as text tools,
     // listings, local requests, and the removal of temporary files.
     if prod_word && !is_build && !rules.exempt(Check::ProductionWord, cmd) {
@@ -2545,7 +3528,7 @@ fn is_known_safe(
     segment: &Segment,
     secret_names: &[String],
 ) -> bool {
-    if segment.redirect_out {
+    if segment.redirect_out && !redirects_to_scratch(segment) {
         return false;
     }
     let argv = effective_argv(segment);
@@ -2557,15 +3540,96 @@ fn is_known_safe(
         return true;
     }
     let cmd = command(hosts, segment, &argv, secret_names);
-    is_usage_request(rules, &cmd.program, &cmd.args) || rules.known_safe(&cmd)
+    if is_usage_request(rules, &cmd.program, &cmd.args) {
+        return true;
+    }
+    // A write rule wins over a safe rule: known safe means no remote write (dev round 3).
+    rules.known_safe(&cmd) && !rules.known_write(&cmd) && !runs_default_container_command(segment)
+}
+
+/// Folders of the project that hold scratch files and build output. A build makes them
+/// again, and the project does not keep sources in them.
+const SCRATCH_FOLDERS: &[&str] = &[
+    "tmp/",
+    "dist/",
+    "build/",
+    "out/",
+    "coverage/",
+    "target/",
+    ".cache/",
+];
+
+/// Every output redirect of the segment goes to a temporary folder (`/tmp/`) or to a
+/// scratch or build folder of the project (`tmp/schema.sql`), and not to a secret file,
+/// with no `..` in the path (dev round 3). A known safe command that writes its output
+/// there stays known safe: `mysqldump --no-data ... > tmp/schema.sql`. A secret in the
+/// segment and an environment dump to a file have their own flags.
+fn redirects_to_scratch(segment: &Segment) -> bool {
+    !segment.redirect_targets.is_empty()
+        && segment.redirect_targets.iter().all(|target| {
+            let path = target.strip_prefix("./").unwrap_or(target);
+            !path.contains("..")
+                && !is_secret_file(path)
+                && (is_temp_path(path)
+                    || SCRATCH_FOLDERS
+                        .iter()
+                        .any(|folder| path.starts_with(folder) && path.len() > folder.len()))
+        })
+}
+
+/// A segment that changes state by the knowledge of the packs (policy v7): a command that
+/// a built-in pack lists in `writes`, such as `gh pr comment` or `git push`, or an HTTP
+/// write (a POST, PUT, PATCH, or DELETE that is not a search). A usage request is not a
+/// write.
+fn is_known_write(
+    rules: &RuleSet,
+    hosts: &[String],
+    segment: &Segment,
+    secret_names: &[String],
+) -> bool {
+    let argv = effective_argv(segment);
+    if argv.is_empty() || (argv.len() == 1 && is_assignment(&argv[0])) {
+        return false;
+    }
+    let cmd = command(hosts, segment, &argv, secret_names);
+    if is_usage_request(rules, &cmd.program, &cmd.args) {
+        return false;
+    }
+    rules.known_write(&cmd)
+        || (rules.has_role(&cmd.program, Role::HttpClient) && !http_reads(&argv, secret_names))
+}
+
+/// `docker compose run SERVICE` or `docker exec CONTAINER` without a command: the
+/// container runs its default command, which the project defines. The analysis cannot
+/// check it, so the segment is project code (dev round 3).
+fn runs_default_container_command(segment: &Segment) -> bool {
+    let argv = effective_argv(segment);
+    let program = argv.first().map(|arg| base_name(arg)).unwrap_or_default();
+    let lower = lower_args(&argv);
+    let word = |index: usize| lower.get(index).map(String::as_str).unwrap_or_default();
+    let runs = match program.as_str() {
+        "docker" | "podman" => {
+            matches!(word(1), "exec")
+                || (word(1) == "container" && word(2) == "exec")
+                || (word(1) == "compose"
+                    && matches!(word(skip_container_options(&argv, 2)), "exec" | "run"))
+        }
+        "docker-compose" | "podman-compose" => {
+            matches!(word(skip_container_options(&argv, 1)), "exec" | "run")
+        }
+        _ => false,
+    };
+    runs && container_command(segment).is_none()
 }
 
 /// A segment that the built-in packs know: it is known safe, or a built-in pack names
 /// its program, the program does not run project code (role `project_code`), no pack
 /// lists the command as a project command (`project_commands`, such as
-/// `dbt run-operation`), and it is not an HTTP write (a POST, PUT, PATCH, or DELETE that
-/// is not a search). `npm run reindex`, `php artisan app:repair`, `mix run x.exs`,
-/// `python train.py`, and a program that no pack names are not known.
+/// `dbt run-operation`) or as a read of the access configuration of an account
+/// (`access_reads`, such as `aws iam list-users`), it is not an HTTP write (a POST, PUT,
+/// PATCH, or DELETE that is not a search), and it is not a container that runs its
+/// default command. `npm run reindex`, `php artisan app:repair`, `mix run x.exs`,
+/// `python train.py`, `docker run IMAGE`, and a program that no pack names are not known.
 fn is_known_command(
     rules: &RuleSet,
     hosts: &[String],
@@ -2591,7 +3655,9 @@ fn is_known_command(
     rules.knows_program(&cmd.program)
         && !rules.has_role(&cmd.program, Role::ProjectCode)
         && !rules.project_command(&cmd)
+        && !rules.access_read(&cmd)
         && !http_write
+        && !runs_default_container_command(segment)
 }
 
 /// A request for usage text: `--help` or `--version` anywhere, `help` as the first
@@ -2726,13 +3792,345 @@ mod tests {
             "git status",
             "cargo test",
             "npm run build:production",
-            "git push origin feature/x",
         ] {
             let a = analyze(&argv(cmd), "Do the work.", &secrets());
             assert!(a.known_safe && a.flags.is_empty(), "{cmd}: {a:?}");
         }
         let a = analyze(&shell("npm test && npm run lint"), "Check.", &secrets());
         assert!(a.known_safe, "{a:?}");
+    }
+
+    fn analysis_of(line: &str) -> Analysis {
+        analyze(&command_line_to_argv(line), "Do the work.", &secrets())
+    }
+
+    /// Dev round 3, the known safe audit: known safe means no remote write, no secret
+    /// output, no data loss, and no project code except a test, build, check, format, or
+    /// local server contract. A command list is known safe only when every part is.
+    #[test]
+    fn the_known_safe_audit_of_dev_round_3() {
+        // Project code with any effect: `run` verbs of language tools and build tools.
+        for line in [
+            "cargo run --bin seed-demo-data",
+            "go run ./cmd/backfill --since 2026-01-01",
+            "dotnet run --project tools/DataFixer -- --apply",
+            "dotnet watch",
+            "./gradlew bootRun",
+            "./mvnw spring-boot:run -Dspring-boot.run.profiles=local",
+            "deno run main.ts",
+            "docker compose run --rm migrate",
+            "docker run --rm example.com/tools/sync:latest",
+        ] {
+            let a = analysis_of(line);
+            assert!(!a.known_safe && !a.known_command, "{line}: {a:?}");
+        }
+        // Remote writes: known writes, not known safe.
+        for line in [
+            "git push origin feature/x",
+            "sh -c 'pnpm test && git push origin HEAD'",
+            "gh pr create --draft --title x --body y",
+            "gh pr comment 77 --body LGTM",
+            "gh issue close 12",
+            "gh repo create acme/new --private",
+            "glab mr create --fill --draft",
+            "sentry-cli releases new 1.0.0",
+            "sentry-cli sourcemaps upload --release 1.0.0 ./dist",
+            "stripe trigger payment_intent.succeeded",
+            "docker push ghcr.io/acme/api:dev",
+            "prisma migrate dev --name add_index",
+            "alembic upgrade head",
+        ] {
+            let a = analysis_of(line);
+            assert!(!a.known_safe && a.known_write, "{line}: {a:?}");
+        }
+        // Local or read commands stay known safe.
+        for line in [
+            "cargo test",
+            "go test ./...",
+            "dotnet watch test",
+            "./gradlew test",
+            "gh pr view 12",
+            "gh run view 9 --log-failed",
+            "glab ci status",
+            "terraform output",
+            "terraform plan",
+            "docker compose up -d",
+            "docker compose run --rm web npm test",
+            "make test lint",
+            "make",
+            "npm run dev",
+            "npm audit",
+            "sentry-cli releases list",
+        ] {
+            let a = analysis_of(line);
+            assert!(a.known_safe && !a.known_write, "{line}: {a:?}");
+        }
+        // Prints secrets or state values, or changes files or data: not known safe.
+        for line in [
+            "docker inspect web",
+            "terraform show",
+            "terraform state show aws_db_instance.main",
+            "terraform output vpc_id",
+            "npm audit fix",
+            "tox -e release",
+            "make test deploy",
+            "heroku drains -a acme",
+            "supabase link --project-ref abc",
+            "wrangler dev --remote",
+            "yq -i '.a = 1' config.yaml",
+            "railway domain",
+        ] {
+            let a = analysis_of(line);
+            assert!(!a.known_safe, "{line}: {a:?}");
+        }
+    }
+
+    /// Dev round 3: a verbose, trace, or debug option of an HTTP client prints the
+    /// request headers, so a request with a credential gets `secret_output`.
+    #[test]
+    fn verbose_http_clients_print_credentials() {
+        for line in [
+            "sh -c 'curl -v -H \"Authorization: token $API_KEY\" https://api.github.com/user'",
+            "curl -sSv -H \"Authorization: token $API_KEY\" https://api.github.com/user",
+            "curl --trace-ascii - -u \"me:$API_KEY\" https://api.github.com/user",
+            "curl --verbose -n https://api.github.com/user",
+            "http -v GET https://api.github.com/user \"Authorization:token $API_KEY\"",
+            "wget -d --header=\"Authorization: $API_KEY\" https://api.github.com/user",
+        ] {
+            assert!(has_flag(line, "secret_output"), "{line}");
+        }
+        for line in [
+            "curl -v http://localhost:3000/health",
+            "curl -sS -H \"Authorization: token $API_KEY\" https://api.github.com/user",
+            "curl -X POST -H \"Authorization: token $API_KEY\" -d v=1 https://api.github.com/x",
+            "wget -nd https://example.com/file.txt",
+        ] {
+            assert!(!has_flag(line, "secret_output"), "{line}");
+        }
+    }
+
+    /// Dev round 3: outputs and configuration values by name, state dumps, the resolved
+    /// Compose configuration, the environment of processes and deployed functions.
+    #[test]
+    fn outputs_and_configuration_values_print_secrets() {
+        for line in [
+            "terraform output -raw db_password",
+            "tofu output -json",
+            "terraform output api_token",
+            "pulumi config get dbPassword",
+            "docker compose config",
+            "docker-compose -f dev.yml config",
+            "serverless print",
+            "ps eww",
+            "ps -E",
+            "kubectl config view --flatten",
+            "aws lambda get-function-configuration --function-name ingest-dev",
+            "gcloud run services describe api --region europe-west1",
+            "gh auth status --show-token",
+        ] {
+            assert!(has_flag(line, "secret_output"), "{line}");
+        }
+        for line in [
+            "terraform output vpc_id",
+            "pulumi config get region",
+            "docker compose -f dev.yml config --services",
+            "ps aux",
+            "ps -o pid,etime -p 1",
+            "kubectl config view",
+        ] {
+            assert!(!has_flag(line, "secret_output"), "{line}");
+        }
+    }
+
+    /// Dev round 3: the flags cover every part of a command. Global options before the
+    /// subcommand, wrappers, shells inside wrappers or here-documents, `trap`, `eval`,
+    /// and every target of a task runner.
+    #[test]
+    fn the_flags_cover_every_part() {
+        for (line, flag) in [
+            ("git -C api push --force origin main", "data_loss"),
+            ("git -C api push origin main", "production"),
+            ("kubectl -n staging apply -f k8s/", "production"),
+            ("kubectl --context dev delete pod x", "data_loss"),
+            ("terraform -chdir=infra apply", "production"),
+            ("docker compose -f dev.yml down -v", "data_loss"),
+            ("docker-compose -f dev.yml down -v", "data_loss"),
+            ("make -C api db-drop", "data_loss"),
+            ("make test db-reset", "data_loss"),
+            ("timeout 60 git push --force origin main", "data_loss"),
+            ("sh -c 'find . -name x | xargs rm -rf'", "data_loss"),
+            ("env FOO=1 sh -c 'git push -f origin main'", "data_loss"),
+            ("sh -c \"bash -c 'git push -f origin main'\"", "data_loss"),
+            ("nice -n 10 terraform destroy", "data_loss"),
+            (
+                "bash <<'EOF'\ngit push --force origin main\nEOF",
+                "data_loss",
+            ),
+            ("trap 'rm -rf ~/' EXIT", "data_loss"),
+            ("eval \"git push -f origin main\"", "data_loss"),
+            (
+                "stripe --api-key $API_KEY customers delete cus_1",
+                "data_loss",
+            ),
+            (
+                "heroku pg:backups restore b001 DATABASE_URL -a acme",
+                "data_loss",
+            ),
+            ("git reflog expire --expire=now --all", "data_loss"),
+            ("git switch -f main", "data_loss"),
+        ] {
+            assert!(has_flag(line, flag), "{line}: {:?}", flags_of(line));
+        }
+        // The same programs without the risky part.
+        for line in [
+            "git -C api status",
+            "kubectl --context dev get pods",
+            "terraform -chdir=infra plan",
+            "command -v git",
+            "timeout 60 npm test",
+        ] {
+            let a = analysis_of(line);
+            assert!(a.flags.is_empty(), "{line}: {a:?}");
+        }
+        assert!(analysis_of("aws --profile dev s3 ls").known_safe);
+        assert!(analysis_of("timeout 60 npm test").known_safe);
+    }
+
+    /// Dev round 3, knowledge from held-out v3 cases (no longer blind): everyday check,
+    /// test, and read commands of Deno, pnpm, SQLite, MySQL, SQLx, Celery, and secret
+    /// managers are known safe. The near misses that run code, print secrets, or change
+    /// data are not.
+    #[test]
+    fn everyday_commands_from_held_out_v3() {
+        for line in [
+            "deno check main.ts",
+            "sh -c 'deno fmt --check && deno lint'",
+            "deno test --allow-env --allow-net=localhost:5432",
+            "deno task test",
+            "pnpm exec tsc --noEmit -p tsconfig.json",
+            "pnpm eslint src --fix",
+            "npm publish --dry-run",
+            "npm pack",
+            "cargo sqlx prepare --workspace",
+            "sqlite3 db/development.sqlite3 \"PRAGMA integrity_check\"",
+            "sqlite3 tmp/test.db \".schema users\"",
+            "sqlite3 app.db \"SELECT count(*) FROM users\"",
+            "sh -c 'mysqldump --no-data -h 127.0.0.1 -u app app_dev > tmp/schema.sql'",
+            "mysql -h 127.0.0.1 -u app -e \"SHOW TABLES\" app_dev",
+            "doppler secrets --only-names --config dev",
+            "op run --env-file=.env.tpl -- uv run pytest -q",
+            "uv run celery -A lumen inspect ping --timeout 5",
+        ] {
+            let a = analysis_of(line);
+            assert!(a.known_safe, "{line}: {a:?}");
+        }
+        for line in [
+            "deno run main.ts",
+            "deno task deploy",
+            "npm exec -- acme-unknown-tool",
+            "sqlite3 app.db \".shell rm -rf /\"",
+            "sqlite3 app.db \"SELECT readfile('.env')\"",
+            "sqlite3 app.db",
+            "sh -c 'mysqldump app_dev > tmp/data.sql'",
+            "sh -c 'mysqldump --no-data app_dev > schema.sql'",
+            "sh -c 'mysqldump --no-data app_dev > tmp/../schema.sql'",
+            "celery -A app worker",
+            "celery -A app inspect conf",
+        ] {
+            let a = analysis_of(line);
+            assert!(!a.known_safe, "{line}: {a:?}");
+        }
+        for (line, flag) in [
+            (
+                "deno eval \"console.log(Deno.env.get('API_KEY'))\"",
+                "secret_output",
+            ),
+            ("npm exec -- acme-unknown-tool", "new_dependency"),
+            ("doppler secrets --config dev", "secret_output"),
+            ("op run -- printenv", "secret_output"),
+            ("celery -A app purge -f", "data_loss"),
+            ("sqlite3 app.db \"DELETE FROM users\"", "data_loss"),
+        ] {
+            assert!(has_flag(line, flag), "{line}: {:?}", flags_of(line));
+        }
+        assert!(!analysis_of("celery -A app worker").known_command);
+    }
+
+    /// Dev round 3: reads of the schema, of a query plan, or of server information print
+    /// no table data, so they are known safe. A data read and a call of an unknown
+    /// function stay with the model. Every `-c` of `psql` counts.
+    #[test]
+    fn schema_reads_are_known_safe() {
+        for line in [
+            "psql $DATABASE_URL -c '\\dt'",
+            "psql \"$DATABASE_URL\" -c \"\\d+ orders\"",
+            "psql \"$DATABASE_URL\" -c \"EXPLAIN ANALYZE SELECT * FROM bookings WHERE user_id = 'u_1'\"",
+            "psql \"$DATABASE_URL\" -At -c \"select version()\"",
+            "sh -c 'mongosh \"$DATABASE_URL\" --quiet --eval \"db.getCollectionNames()\"'",
+            "sh -c 'mongosh \"$DATABASE_URL\" --quiet --eval \"db.products.getIndexes()\"'",
+            "pg_dump --schema-only $DATABASE_URL -f schema.sql",
+        ] {
+            let a = analysis_of(line);
+            assert!(a.known_safe, "{line}: {a:?}");
+        }
+        for line in [
+            "psql $DATABASE_URL -c 'select count(*) from orders'",
+            "psql $DATABASE_URL -c 'select pg_terminate_backend(42)'",
+            "psql $DATABASE_URL -c \"EXPLAIN ANALYZE SELECT cleanup_sessions()\"",
+            "psql $DATABASE_URL -c '\\copy t to out.csv'",
+            "psql $DATABASE_URL -c '\\dt' -c 'CREATE TABLE t (a int)'",
+            "sh -c 'mongosh \"$DATABASE_URL\" --eval \"db.users.find().toArray()\"'",
+            "pg_dump $DATABASE_URL -f dump.sql",
+        ] {
+            let a = analysis_of(line);
+            assert!(!a.known_safe, "{line}: {a:?}");
+        }
+        // The second `-c` is checked too.
+        assert!(has_flag(
+            "psql $DATABASE_URL -c '\\dt' -c 'DROP TABLE users'",
+            "data_loss"
+        ));
+    }
+
+    /// Dev round 3: SQL that changes data in any way is a known write, and an account
+    /// wide read of identities and access is not a known command.
+    #[test]
+    fn sql_changes_and_access_reads() {
+        for line in [
+            "psql $DATABASE_URL -c \"INSERT INTO t VALUES (1)\"",
+            "psql $DATABASE_URL -c \"CREATE INDEX CONCURRENTLY i ON t (a)\"",
+            "sqlite3 app.db \"CREATE TABLE t (id int)\"",
+            "mongosh \"$DATABASE_URL\" --eval \"db.users.insertOne({a: 1})\"",
+            "redis-cli SET key value",
+            "snowsql -c dev -q \"INSERT INTO t VALUES (1)\"",
+            "cargo sqlx migrate run",
+            "dotnet ef database update",
+            "flyway migrate",
+        ] {
+            let a = analysis_of(line);
+            assert!(a.known_write, "{line}: {a:?}");
+        }
+        for line in [
+            "psql $DATABASE_URL -c \"SELECT count(*) FROM orders\"",
+            "redis-cli GET key",
+            "kubectl get pods",
+        ] {
+            let a = analysis_of(line);
+            assert!(!a.known_write, "{line}: {a:?}");
+        }
+        assert!(sql_changes(
+            "WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x"
+        ));
+        assert!(!sql_changes("SELECT a FROM t WHERE b IN (SELECT c FROM u)"));
+        for line in [
+            "aws iam list-users",
+            "gcloud projects get-iam-policy acme-dev",
+            "az role assignment list",
+        ] {
+            let a = analysis_of(line);
+            assert!(a.flags.is_empty() && !a.known_command, "{line}: {a:?}");
+        }
+        assert!(analysis_of("aws ec2 describe-instances").known_command);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 2,
+  "pack_version": 3,
   "tool": "gcloud",
   "description": "Google Cloud CLIs (gcloud, gsutil, bq): resource changes, deletions, storage writes, tokens and secrets, remote shells, and read commands.",
   "programs": ["gcloud", "gsutil", "bq"],
@@ -8,6 +8,18 @@
     "usage": ["gcloud", "gsutil"]
   },
   "rules": [
+    {
+      "id": "environment-values",
+      "flag": "secret_output",
+      "note": "`describe` of a Cloud Run service or a Cloud Function prints its environment variables in plain text. Such variables often hold secrets (dev round 3).",
+      "when": {
+        "program": ["gcloud"],
+        "any_of": [
+          { "args_start": ["run services describe", "run jobs describe", "functions describe", "app versions describe"] },
+          { "args_start": ["beta run services describe", "beta functions describe"] }
+        ]
+      }
+    },
     {
       "id": "resource-change",
       "flag": "production",
@@ -121,6 +133,19 @@
       "id": "storage-listings",
       "note": "Listings of objects in a named bucket.",
       "when": { "program": ["gsutil"], "subcommand": ["ls", "du"], "any_arg_starts": ["gs://"] }
+    }
+  ],
+  "access_reads": [
+    {
+      "id": "identity-inventory",
+      "note": "Reads of the IAM policies, service accounts, keys, and roles of a project or an organization. They show who and what has access, so they must serve the user request (dev round 3).",
+      "when": {
+        "program": ["gcloud"],
+        "any_of": [
+          { "subcommand": ["iam"] },
+          { "any_arg": ["get-iam-policy"] }
+        ]
+      }
     }
   ]
 }

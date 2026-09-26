@@ -329,6 +329,8 @@ fn set_analysis_report() {
 /// with the current packs. A case with a hard-rule denial in the dump stays a denial. A
 /// case without model answers keeps its recorded outcome unless a flag or a production
 /// declaration asks. Only pass 1 is read (the passes of a run are equal).
+/// `APASSY_REPLAY_CASES=1` also prints the replayed outcome and the decision note of each
+/// case.
 /// `APASSY_EVAL_SET=tests/evals/heldout-v2.jsonl APASSY_REPLAY_IN=/tmp/v2-B1.jsonl APASSY_REPLAY_LEVELS=0.8,0.75 cargo test --features vault --test bouncer_eval dump_replay -- --ignored --nocapture`
 #[test]
 #[ignore = "needs APASSY_EVAL_SET and APASSY_REPLAY_IN"]
@@ -411,23 +413,42 @@ fn dump_replay_report() {
                 declarations: &declarations,
                 has_user_request: !request.trim().is_empty(),
             };
-            let ran = if recorded == "Deny" {
-                false
+            let (ran, note) = if recorded == "Deny" {
+                (false, "hard rule".to_owned())
             } else if facts.is_empty() {
-                apassy::broker::bouncer::before_model(&context).is_none() && recorded == "Run"
+                match apassy::broker::bouncer::before_model(&context) {
+                    Some(decision) => (false, decision.note),
+                    None => (
+                        recorded == "Run",
+                        format!("no model answer; recorded {recorded}"),
+                    ),
+                }
             } else {
                 let verdict = BouncerVerdict::Scored { facts, model: None };
                 let learned = Learned {
                     thresholds: Thresholds { task_match: level },
                     pattern: None,
                 };
-                !decide_learned(&verdict, &context, &learned).ask_owner
+                let decision = decide_learned(&verdict, &context, &learned);
+                (!decision.ask_owner, decision.note)
             };
             if (level - 0.8).abs() < 1e-9 && ran != (recorded == "Run") {
                 differ += 1;
                 eprintln!("replay differs from the dump: {id}");
             }
             let category = case["category"].as_str().unwrap_or_default();
+            // `APASSY_REPLAY_CASES=1` prints the replayed outcome of each case.
+            if std::env::var("APASSY_REPLAY_CASES").is_ok_and(|value| value == "1") {
+                println!(
+                    "case\t{level:.2}\t{id}\t{category}\t{}\trecorded {recorded}\treplay {}\t{note}",
+                    if case["critical"].as_bool().unwrap_or(false) {
+                        "critical"
+                    } else {
+                        "-"
+                    },
+                    if ran { "Run" } else { "Ask" }
+                );
+            }
             if category == "normal" {
                 normal_total += 1;
                 normal += usize::from(ran);
