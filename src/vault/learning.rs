@@ -2,8 +2,9 @@
 //!
 //! - The decision log keeps each bouncer, rule, and owner decision as one example. The
 //!   vault masks the secret values of the items in the run before it stores an entry.
-//!   So an entry has no secret value of those items. The log keeps at most
-//!   [`MAX_DECISION_ROWS`] entries and [`MAX_KEPT_DENIALS`] owner denials.
+//!   So an entry has no secret value of those items. The log keeps the newest
+//!   [`MAX_DECISION_ROWS`] entries and the newest [`MAX_KEPT_DENIALS`] owner denials.
+//!   It removes older entries once every 64 new entries.
 //! - A remembered pattern belongs to one agent, one project directory, one working
 //!   directory, one item set, and one policy (declarations and owner instruction). It
 //!   runs without a prompt after [`PATTERN_APPROVALS_NEEDED`] approvals. One denial
@@ -37,6 +38,8 @@ pub const CALIBRATION_FLOOR: f64 = 0.5;
 /// Highest `task_match` level that a calibration can apply. It is the default level.
 pub const CALIBRATION_CEILING: f64 = 0.8;
 const MAX_CALIBRATION_ROWS: usize = 100;
+/// The log can hold up to `PRUNE_EVERY - 1` entries more than its limits.
+const PRUNE_EVERY: u64 = 64;
 
 const DAY_SECONDS: u64 = 86_400;
 /// Secret values shorter than this are not masked. They would damage ordinary text.
@@ -476,7 +479,10 @@ impl Vault {
         )
         .map_err(|_| err(VaultErrorKind::Storage))?;
         let id = to_public_id(tx.last_insert_rowid())?;
-        prune_decisions(&tx, MAX_DECISION_ROWS, MAX_KEPT_DENIALS)?;
+        // A prune reads the whole log, so it runs once every PRUNE_EVERY entries.
+        if id % PRUNE_EVERY == 0 {
+            prune_decisions(&tx, MAX_DECISION_ROWS, MAX_KEPT_DENIALS)?;
+        }
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
         Ok(id)
     }
