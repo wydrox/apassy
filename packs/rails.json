@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "rails",
+  "description": "Ruby on Rails and Rake: database drops, resets, schema loads, and rollbacks, destructive runner code, credentials, and read and test tasks.",
+  "programs": ["rails", "rake"],
+  "roles": {
+    "usage": ["rails", "rake"]
+  },
+  "rules": [
+    {
+      "id": "drop-or-reset-database",
+      "flag": "data_loss",
+      "note": "These tasks drop the database, empty tables, load the schema over the tables, load fixtures over the rows, or revert migrations.",
+      "when": {
+        "any_arg_starts": [
+          "db:drop", "db:reset", "db:purge", "db:schema:load", "db:structure:load", "db:setup",
+          "db:truncate_all", "db:seed:replant", "db:fixtures:load", "db:rollback",
+          "db:migrate:down", "db:migrate:redo", "db:migrate:reset"
+        ]
+      }
+    },
+    {
+      "id": "migrate-to-version-zero",
+      "flag": "data_loss",
+      "note": "`db:migrate VERSION=0` reverts every migration.",
+      "when": { "any_arg_starts": ["db:migrate"], "any_arg": ["version=0"] }
+    },
+    {
+      "id": "destructive-runner-code",
+      "flag": "data_loss",
+      "note": "Code in `runner` or `console` that deletes or updates many records, or runs destructive SQL.",
+      "when": {
+        "subcommand": ["runner", "r", "console", "c"],
+        "segment_contains": [
+          ".destroy", ".delete", "destroy_all", "delete_all", "update_all", "truncate",
+          "drop_table", "drop table", "delete from", "really_destroy", ".purge"
+        ]
+      }
+    },
+    {
+      "id": "destructive-runner-script",
+      "flag": "data_loss",
+      "note": "A runner script whose name tells about data loss, such as `scripts/purge_users.rb`.",
+      "when": {
+        "subcommand": ["runner", "r"],
+        "operands": {
+          "any": [
+            {
+              "ends": [".rb"],
+              "contains": ["delete", "drop", "wipe", "purge", "destroy", "truncate", "nuke", "reset", "erase", "remove"]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "credentials",
+      "flag": "secret_output",
+      "note": "`credentials:show` prints the decrypted credentials of the app.",
+      "when": { "any_arg_starts": ["credentials:show", "secrets:show", "encrypted:show"] }
+    }
+  ],
+  "safe": [
+    {
+      "id": "read-and-test-tasks",
+      "note": "Tests, routes, information, migration status, asset builds, generators, and the local server.",
+      "when": {
+        "any_of": [
+          {
+            "subcommand": [
+              "test", "spec", "routes", "about", "stats", "notes", "-t", "--tasks",
+              "db:migrate:status", "db:version", "zeitwerk:check", "assets:precompile",
+              "generate", "g", "server", "s", "middleware", "initializers"
+            ]
+          },
+          { "operands": { "at": { "index": 0, "starts": ["test:", "spec:"] } } }
+        ]
+      }
+    }
+  ]
+}

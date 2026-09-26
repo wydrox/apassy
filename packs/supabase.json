@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "supabase",
   "description": "Supabase CLI: database queries and resets, key listings, functions, secrets, and local development.",
   "programs": ["supabase"],
@@ -18,6 +18,7 @@
     {
       "id": "credential-columns",
       "flag": "secret_output",
+      "note": "A query that reads password hashes, tokens, or keys prints credentials.",
       "when": {
         "command_contains": [
           "encrypted_password", "password_hash", "recovery_token", "api_key", "secret_key",
@@ -29,12 +30,14 @@
       "id": "query-write",
       "flag": "data_loss",
       "dry_run": "skip_with_n",
+      "note": "A `db query` that changes data, schema, or access.",
       "when": { "args_start": ["db query"], "sql": "writes" }
     },
     {
       "id": "reset-and-delete",
       "flag": "data_loss",
       "dry_run": "skip_with_n",
+      "note": "A database reset, and deletion of projects, functions, or storage objects.",
       "when": {
         "any_of": [
           { "args_start": ["db reset", "projects delete", "functions delete"] },
@@ -56,9 +59,14 @@
     }
   ],
   "safe": [
-    { "id": "read-query", "when": { "args_start": ["db query"], "sql": "reads" } },
+    {
+      "id": "read-query",
+      "note": "A `db query` with read statements only.",
+      "when": { "args_start": ["db query"], "sql": "reads" }
+    },
     {
       "id": "local-and-read-commands",
+      "note": "The local stack, linters, type generation, and listings.",
       "when": {
         "args_start": [
           "db lint", "db advisors", "branches list", "projects list", "migration list",

@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "host-hooks",
+  "description": "The channel of the host hooks (goal item B6): the `apassy-hook` program, the host settings with the hook configuration, and the host transcripts of Claude Code and Codex. An agent could use them to send a false user request or to change a transcript.",
+  "programs": ["*"],
+  "rules": [
+    {
+      "id": "hook-channel-term",
+      "flag": "hook_channel",
+      "note": "The text of the command names the hook program, a host settings file or directory, or a variable that moves them. The check covers the words, `NAME=value` prefixes, redirect targets, and here-documents, in any case.",
+      "when": {
+        "segment_contains": [
+          "apassy-hook", ".claude/", ".claude.json", ".codex/", "claude_config_dir", "codex_home"
+        ]
+      }
+    },
+    {
+      "id": "host-directory",
+      "flag": "hook_channel",
+      "note": "A word that ends in `.claude` or `.codex` names a host directory, for example `cd ~/.claude`.",
+      "when": { "segment_word_ends": [".claude", ".codex"] }
+    }
+  ]
+}

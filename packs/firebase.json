@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "firebase",
+  "description": "Firebase CLI: deployments, deletion of Firestore, Realtime Database, functions, and hosting data, remote writes, exports of users and secrets, and local and read commands.",
+  "programs": ["firebase"],
+  "roles": {
+    "usage": ["firebase"]
+  },
+  "rules": [
+    {
+      "id": "hosting-deploy",
+      "flag": "production",
+      "dry_run": "skip",
+      "note": "A deployment of hosting, functions, rules, or a preview channel.",
+      "when": { "subcommand": ["deploy", "publish", "hosting:channel:deploy"] }
+    },
+    {
+      "id": "delete-data",
+      "flag": "data_loss",
+      "note": "Deletion of Firestore documents, database paths, functions, sites, channels, extensions, or secrets. `database:set` replaces the data at a path.",
+      "when": {
+        "any_arg": [
+          "firestore:delete", "firestore:databases:delete", "database:remove", "database:set",
+          "functions:delete", "hosting:disable", "hosting:channel:delete",
+          "hosting:sites:delete", "ext:uninstall", "functions:secrets:destroy",
+          "functions:secrets:prune", "functions:config:unset", "remoteconfig:rollback",
+          "auth:delete", "apps:delete", "projects:delete"
+        ]
+      }
+    },
+    {
+      "id": "remote-write",
+      "flag": "production",
+      "note": "A write to the live project: database writes, config and secret changes, user imports, extensions, and app distribution to testers.",
+      "when": {
+        "any_arg": [
+          "database:update", "database:push", "functions:config:set",
+          "functions:secrets:set", "auth:import", "hosting:clone", "ext:install",
+          "ext:update", "ext:configure", "appdistribution:distribute",
+          "firestore:databases:create", "firestore:databases:update", "database:settings:set"
+        ]
+      }
+    },
+    {
+      "id": "exports-and-secrets",
+      "flag": "secret_output",
+      "note": "`auth:export` writes user password hashes. The other commands print config values, a secret, or a CI token.",
+      "when": {
+        "any_arg": [
+          "auth:export", "functions:config:get", "functions:secrets:access", "login:ci"
+        ]
+      }
+    }
+  ],
+  "safe": [
+    {
+      "id": "local-and-read-commands",
+      "note": "Local emulators and server, and listings and logs.",
+      "when": {
+        "subcommand": [
+          "emulators:start", "serve", "functions:list", "functions:log", "firestore:indexes",
+          "projects:list", "apps:list", "hosting:channel:list", "hosting:sites:list",
+          "database:instances:list", "ext:list", "login:list", "target"
+        ]
+      }
+    }
+  ]
+}

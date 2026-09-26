@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "kubernetes",
-  "description": "kubectl and Helm: deletions and changes to a cluster.",
+  "description": "kubectl and Helm: deletions, changes to a cluster, secret reads, shells in a container, and read commands.",
   "programs": ["kubectl", "helm"],
   "roles": {
     "usage": ["kubectl", "helm"]
@@ -11,18 +11,110 @@
     {
       "id": "delete",
       "flag": "data_loss",
-      "dry_run": "skip_with_n",
+      "dry_run": "skip",
+      "note": "Deletion of resources, a Helm release, or the pods of a node. `-n` is the namespace, not a dry run.",
       "when": { "any_arg": ["delete", "uninstall", "drain"] }
     },
     {
       "id": "cluster-change",
       "flag": "production",
       "dry_run": "skip",
+      "note": "The command changes objects in the cluster or runs a command in a pod.",
       "when": {
         "subcommand": [
-          "apply", "create", "replace", "patch", "scale", "rollout", "install", "upgrade", "set",
-          "exec"
+          "apply", "create", "replace", "patch", "scale", "install", "upgrade", "set", "exec",
+          "rollback", "edit", "label", "annotate", "taint", "cordon", "uncordon", "autoscale",
+          "expose", "run", "debug", "attach"
         ]
+      }
+    },
+    {
+      "id": "rollout-change",
+      "flag": "production",
+      "dry_run": "skip",
+      "note": "`rollout restart`, `undo`, `pause`, and `resume` change a workload. `rollout status` and `history` only read.",
+      "when": {
+        "subcommand": ["rollout"],
+        "not": { "action": ["status", "history"] }
+      }
+    },
+    {
+      "id": "copy-from-or-to-pod",
+      "flag": "remote_access",
+      "note": "`kubectl cp` reads or writes files in a container.",
+      "when": { "program": ["kubectl"], "subcommand": ["cp"] }
+    },
+    {
+      "id": "secret-values",
+      "flag": "secret_output",
+      "note": "`get secret -o yaml` or `-o jsonpath` prints the secret data. `describe secret` shows only sizes.",
+      "when": {
+        "program": ["kubectl"],
+        "subcommand": ["get"],
+        "any_of": [
+          { "any_arg": ["secret", "secrets"] },
+          { "any_arg_starts": ["secret/", "secrets/"] }
+        ],
+        "any_arg_starts": ["-o", "--output"]
+      }
+    },
+    {
+      "id": "raw-config-or-token",
+      "flag": "secret_output",
+      "note": "`config view --raw` prints client keys and tokens. `create token` prints a new token.",
+      "when": {
+        "program": ["kubectl"],
+        "any_of": [
+          { "args_start": ["config view"], "any_arg": ["--raw"] },
+          { "args_start": ["create token"] }
+        ]
+      }
+    },
+    {
+      "id": "helm-values",
+      "flag": "secret_output",
+      "note": "`helm get values` and `helm get all` print the release values, which often hold passwords.",
+      "when": { "program": ["helm"], "subcommand": ["get"], "action": ["values", "all", "manifest"] }
+    }
+  ],
+  "exemptions": [
+    {
+      "id": "kubeconfig-option",
+      "check": "secret_file_argument",
+      "note": "`--kubeconfig ~/.kube/config` uses the file to reach the cluster. It does not print or copy it.",
+      "when": { "any_arg_starts": ["--kubeconfig"] }
+    }
+  ],
+  "safe": [
+    {
+      "id": "kubectl-read",
+      "note": "Reads of objects, logs, and cluster information.",
+      "when": {
+        "program": ["kubectl"],
+        "subcommand": [
+          "get", "describe", "logs", "top", "explain", "api-resources", "api-versions",
+          "version", "cluster-info", "events", "diff"
+        ]
+      }
+    },
+    {
+      "id": "kubectl-read-sub",
+      "note": "Rollout state, access checks, and the current configuration without keys.",
+      "when": {
+        "program": ["kubectl"],
+        "any_of": [
+          { "subcommand": ["rollout"], "action": ["status", "history"] },
+          { "subcommand": ["auth"], "action": ["can-i", "whoami"] },
+          { "subcommand": ["config"], "action": ["get-contexts", "current-context", "view"] }
+        ]
+      }
+    },
+    {
+      "id": "helm-read",
+      "note": "Local chart checks and release reads without values.",
+      "when": {
+        "program": ["helm"],
+        "subcommand": ["list", "ls", "status", "history", "template", "lint", "show", "search", "version"]
       }
     }
   ]

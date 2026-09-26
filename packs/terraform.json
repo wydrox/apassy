@@ -1,24 +1,97 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "terraform",
-  "description": "Terraform, OpenTofu, and Pulumi: destroy and apply.",
+  "description": "Terraform, OpenTofu, and Pulumi: destroy, apply, state changes, secret outputs, and read commands.",
   "programs": ["terraform", "tofu", "pulumi"],
   "roles": {
-    "usage": ["terraform"]
+    "usage": ["terraform", "tofu", "pulumi"]
   },
   "rules": [
     {
       "id": "destroy",
       "flag": "data_loss",
-      "dry_run": "skip_with_n",
-      "when": { "any_arg": ["destroy"] }
+      "dry_run": "skip",
+      "note": "`destroy` removes the infrastructure. `apply -destroy` does the same.",
+      "when": {
+        "any_of": [
+          { "any_arg": ["destroy"] },
+          { "subcommand": ["apply"], "any_arg": ["-destroy", "--destroy"] }
+        ]
+      }
     },
     {
       "id": "apply",
       "flag": "production",
       "dry_run": "skip",
-      "when": { "subcommand": ["apply", "up", "import", "state"] }
+      "note": "The command changes real infrastructure or the state.",
+      "when": { "subcommand": ["apply", "up", "import", "refresh", "taint", "untaint", "force-unlock"] }
+    },
+    {
+      "id": "state-change",
+      "flag": "production",
+      "note": "A state change moves or forgets resources. `state list` and `state show` only read.",
+      "when": {
+        "subcommand": ["state"],
+        "not": { "action": ["list", "show", "pull", "ls"] }
+      }
+    },
+    {
+      "id": "state-pull",
+      "flag": "secret_output",
+      "note": "The state file has every attribute in plain text, secrets included.",
+      "when": { "program": ["terraform", "tofu"], "subcommand": ["state"], "action": ["pull"] }
+    },
+    {
+      "id": "json-output",
+      "flag": "secret_output",
+      "note": "`output -json` and `show -json` print sensitive values in plain text.",
+      "when": {
+        "program": ["terraform", "tofu"],
+        "subcommand": ["output", "show"],
+        "any_arg": ["-json", "--json"]
+      }
+    },
+    {
+      "id": "workspace-or-stack-delete",
+      "flag": "data_loss",
+      "note": "A workspace or a stack delete removes its state.",
+      "when": {
+        "any_of": [
+          { "program": ["terraform", "tofu"], "subcommand": ["workspace"], "action": ["delete"] },
+          { "program": ["pulumi"], "subcommand": ["stack"], "action": ["rm", "remove"] }
+        ]
+      }
+    }
+  ],
+  "safe": [
+    {
+      "id": "terraform-read-and-check",
+      "note": "Checks, formatting, plans, and reads of the state without secret values. `init` uses the lock file.",
+      "when": {
+        "program": ["terraform", "tofu"],
+        "any_of": [
+          { "subcommand": ["validate", "fmt", "plan", "version", "providers", "graph"] },
+          { "subcommand": ["output", "show"], "not": { "any_arg": ["-json", "--json"] } },
+          {
+            "subcommand": ["init"],
+            "not": { "any_arg": ["-upgrade", "--upgrade", "-migrate-state", "-force-copy", "-reconfigure"] }
+          },
+          { "subcommand": ["state"], "action": ["list", "show"] },
+          { "subcommand": ["workspace"], "action": ["list", "show"] }
+        ]
+      }
+    },
+    {
+      "id": "pulumi-read",
+      "note": "A preview and reads that hide secret values.",
+      "when": {
+        "program": ["pulumi"],
+        "any_of": [
+          { "subcommand": ["preview", "version", "whoami", "about"] },
+          { "subcommand": ["stack"], "action": ["ls", "output", ""] }
+        ]
+      }
     }
   ]
 }

@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "docker",
-  "description": "Docker, Podman, and Compose: removal of containers, images, and volumes, and read commands.",
-  "programs": ["docker", "podman", "docker-compose"],
+  "description": "Docker, Podman, and Compose: removal of containers, images, and volumes, host access from a container, and read and local commands.",
+  "programs": ["docker", "podman", "docker-compose", "podman-compose"],
   "roles": {
     "usage": ["docker"]
   },
@@ -11,12 +11,14 @@
     {
       "id": "secret-argument",
       "flag": "secret_output",
+      "note": "A secret in an argument goes to the container or to the image history.",
       "when": { "program": ["docker"], "refs_secret": true }
     },
     {
       "id": "remove-data",
       "flag": "data_loss",
       "dry_run": "skip_with_n",
+      "note": "Removal of containers, images, and volumes. A volume can hold a local database.",
       "when": {
         "program": ["docker", "podman"],
         "any_of": [
@@ -30,16 +32,41 @@
       "id": "compose-down-volumes",
       "flag": "data_loss",
       "dry_run": "skip_with_n",
+      "note": "`down -v` removes the named volumes of the project.",
       "when": {
-        "program": ["docker-compose"],
+        "program": ["docker-compose", "podman-compose"],
         "subcommand": ["down"],
         "any_arg": ["-v", "--volumes"]
+      }
+    },
+    {
+      "id": "host-access",
+      "flag": "privilege",
+      "note": "A privileged container, the Docker socket, or a mount of `/`, the home folder, or a credential folder gives the container the owner's machine or keys.",
+      "when": {
+        "any_of": [
+          { "any_arg": ["--privileged", "--pid=host", "--userns=host", "--cap-add=all"] },
+          { "any_arg_contains": ["docker.sock"] },
+          {
+            "any_arg_starts": [
+              "/:", "$home:", "${home}:", "$home/:", "${home}/:", "~:", "~/:"
+            ]
+          },
+          {
+            "any_arg_contains": [
+              "/.ssh:", "/.aws:", "/.kube:", "/.gnupg:", "/.docker:", "/.config/gcloud:",
+              "/.azure:", "source=/,", "src=/,", "source=$home,", "src=$home,",
+              "source=${home},", "src=${home},", "source=~,", "src=~,"
+            ]
+          }
+        ]
       }
     }
   ],
   "safe": [
     {
       "id": "read-build-and-compose",
+      "note": "Reads, local builds, and the local Compose project.",
       "when": {
         "program": ["docker", "podman"],
         "any_of": [
@@ -48,6 +75,43 @@
             "subcommand": ["compose"],
             "action": ["ps", "logs", "up", "build", "config", "stop", "restart"]
           }
+        ]
+      }
+    },
+    {
+      "id": "list-commands",
+      "note": "Listings and inspection of local images, containers, volumes, and networks.",
+      "when": {
+        "program": ["docker", "podman"],
+        "any_of": [
+          {
+            "subcommand": ["image", "container", "volume", "network", "context"],
+            "action": ["ls", "list", "inspect"]
+          },
+          { "subcommand": ["compose"], "action": ["images", "top", "ls", "version"] }
+        ]
+      }
+    },
+    {
+      "id": "compose-down-keep-volumes",
+      "note": "`down` without `-v` or `--rmi` stops the local project and keeps its data.",
+      "when": {
+        "any_of": [
+          { "program": ["docker", "podman"], "subcommand": ["compose"], "action": ["down"] },
+          { "program": ["docker-compose", "podman-compose"], "subcommand": ["down"] }
+        ],
+        "not": { "any_arg": ["-v", "--volumes", "--rmi"] }
+      }
+    },
+    {
+      "id": "command-in-local-container",
+      "note": "`exec` and `compose run` start a command in a local container. The analysis checks that command like a command on the host, so the whole line is safe only when the inner command is safe.",
+      "when": {
+        "any_of": [
+          { "program": ["docker", "podman"], "subcommand": ["exec"] },
+          { "program": ["docker", "podman"], "subcommand": ["container"], "action": ["exec"] },
+          { "program": ["docker", "podman"], "subcommand": ["compose"], "action": ["exec", "run"] },
+          { "program": ["docker-compose", "podman-compose"], "subcommand": ["exec", "run"] }
         ]
       }
     }

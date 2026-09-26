@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "alembic",
+  "description": "Alembic (SQLAlchemy migrations): downgrades and read commands.",
+  "programs": ["alembic"],
+  "roles": {
+    "usage": ["alembic"]
+  },
+  "rules": [
+    {
+      "id": "downgrade",
+      "flag": "data_loss",
+      "note": "`downgrade` reverts migrations and can drop tables and columns. `downgrade base` reverts all. With `--sql` Alembic only prints the SQL.",
+      "when": { "any_arg": ["downgrade"], "not": { "any_arg": ["--sql"] } }
+    }
+  ],
+  "safe": [
+    {
+      "id": "read-and-new-revision",
+      "note": "Revision state and history, SQL output without a database change, and a new revision file.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["current", "history", "heads", "branches", "show", "check", "revision"] },
+          { "subcommand": ["upgrade", "downgrade"], "any_arg": ["--sql"] }
+        ]
+      }
+    }
+  ]
+}

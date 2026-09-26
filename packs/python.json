@@ -1,14 +1,15 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "python",
-  "description": "Python: inline code, pip installs, test and lint tools, Django management commands, and publishing.",
+  "description": "Python: inline code, package installs and sources, test and lint tools, project managers (Poetry, uv, Pipenv, PDM, Hatch), and publishing. Django commands are in the `django` pack. `poetry run`, `uv run`, `pipenv run`, `pdm run`, and `hatch run` are wrappers: the analysis checks the program after them.",
   "programs": [
     "python", "python3", "pip", "pip3", "pytest", "ruff", "mypy", "black", "flake8", "pylint",
-    "isort", "twine", "poetry"
+    "isort", "twine", "poetry", "uv", "pipenv", "pdm", "hatch", "tox", "nox", "pre-commit",
+    "coverage", "bandit", "pyright", "pip-audit"
   ],
   "roles": {
-    "usage": ["python", "python3", "pip"],
+    "usage": ["python", "python3", "pip", "poetry", "uv", "pipenv", "pdm"],
     "heredoc_code": ["python", "python3"],
     "script_runner": ["python", "python3"]
   },
@@ -16,6 +17,7 @@
     {
       "id": "inline-code-prints-secret",
       "flag": "secret_output",
+      "note": "Code in `-c` that reads the environment and prints or sends it.",
       "when": {
         "program": ["python", "python3"],
         "any_arg": ["-e", "-c", "--eval", "-p", "--print", "-r"],
@@ -33,11 +35,49 @@
       }
     },
     {
+      "id": "new-dependency-module-or-manager",
+      "flag": "new_dependency",
+      "note": "`python -m pip install NAME`, `uv pip install NAME`, `poetry add`, `uv add`, `pdm add`, and `pipenv install NAME` add a package.",
+      "when": {
+        "any_of": [
+          {
+            "program": ["python", "python3"],
+            "args_start": ["-m pip install"],
+            "not": { "any_arg": ["-r", "-e", "."] }
+          },
+          {
+            "program": ["uv"],
+            "args_start": ["pip install"],
+            "not": { "any_arg": ["-r", "-e", "."] }
+          },
+          { "program": ["poetry", "uv", "pdm"], "subcommand": ["add"] },
+          { "program": ["pipenv"], "subcommand": ["install"], "operands": { "min": 2 } }
+        ]
+      }
+    },
+    {
+      "id": "package-source-change",
+      "flag": "system_change",
+      "note": "A new package index or repository changes where packages come from.",
+      "when": {
+        "any_of": [
+          { "program": ["pip", "pip3"], "subcommand": ["config"], "any_arg": ["set", "edit"] },
+          { "program": ["poetry"], "subcommand": ["source"], "action": ["add"] },
+          {
+            "program": ["poetry"],
+            "subcommand": ["config"],
+            "any_arg_starts": ["repositories.", "http-basic.", "pypi-token.", "certificates."]
+          }
+        ]
+      }
+    },
+    {
       "id": "publish",
       "flag": "production",
       "dry_run": "skip",
+      "note": "An upload of a package to a public index.",
       "when": {
-        "program": ["twine", "poetry"],
+        "program": ["twine", "poetry", "uv", "hatch", "pdm"],
         "subcommand": ["publish", "unpublish", "deprecate", "dist-tag", "upload"]
       }
     }
@@ -45,22 +85,96 @@
   "safe": [
     {
       "id": "test-and-lint-tools",
-      "when": { "program": ["pytest", "ruff", "mypy", "black", "flake8", "pylint", "isort"] }
-    },
-    {
-      "id": "tool-module",
+      "note": "Test runners, linters, formatters, type checkers, and security scanners of the project.",
       "when": {
-        "program": ["python", "python3"],
-        "subcommand": ["-m"],
-        "action": ["pytest", "unittest", "mypy", "ruff", "black"]
+        "program": [
+          "pytest", "ruff", "mypy", "black", "flake8", "pylint", "isort", "tox", "nox",
+          "bandit", "pyright", "pip-audit"
+        ]
       }
     },
     {
-      "id": "django-development",
+      "id": "tool-module",
+      "note": "`python -m` for a test, lint, or compile tool.",
       "when": {
         "program": ["python", "python3"],
-        "subcommand": ["manage.py"],
-        "action": ["test", "check", "makemigrations", "showmigrations", "runserver"]
+        "subcommand": ["-m"],
+        "action": [
+          "pytest", "unittest", "mypy", "ruff", "black", "compileall", "flake8", "pylint",
+          "isort", "pyright"
+        ]
+      }
+    },
+    {
+      "id": "coverage-reports",
+      "note": "Coverage reports, and a coverage run of the test runner.",
+      "when": {
+        "program": ["coverage"],
+        "any_of": [
+          { "subcommand": ["report", "html", "xml", "json", "combine", "erase", "debug"] },
+          { "subcommand": ["run"], "action": ["-m"], "any_arg": ["pytest", "unittest"] }
+        ]
+      }
+    },
+    {
+      "id": "pre-commit-run",
+      "note": "`pre-commit run` runs the checks of the project.",
+      "when": { "program": ["pre-commit"], "subcommand": ["run"] }
+    },
+    {
+      "id": "pip-read-and-requirements",
+      "note": "Package listings, and an install from one requirements file only.",
+      "when": {
+        "any_of": [
+          { "program": ["pip", "pip3"], "subcommand": ["list", "freeze", "show", "check"] },
+          {
+            "program": ["pip", "pip3"],
+            "subcommand": ["install"],
+            "any_arg": ["-r"],
+            "operands": { "count": 2, "any": [{ "ends": [".txt"] }], "all": [{ "equals": ["install"] }, { "ends": [".txt"] }] }
+          },
+          {
+            "program": ["python", "python3"],
+            "args_start": ["-m pip install"],
+            "any_arg": ["-r"],
+            "operands": { "count": 3, "any": [{ "ends": [".txt"] }], "all": [{ "equals": ["pip", "install"] }, { "ends": [".txt"] }] }
+          },
+          {
+            "program": ["python", "python3"],
+            "args_start": ["-m pip list", "-m pip freeze", "-m pip show", "-m pip check"]
+          }
+        ]
+      }
+    },
+    {
+      "id": "project-manager-lockfile-and-read",
+      "note": "Installs and syncs from the lock file, lock updates, builds, exports, and reads of the project environment.",
+      "when": {
+        "any_of": [
+          {
+            "program": ["poetry"],
+            "subcommand": ["install", "lock", "check", "show", "build", "export", "env", "version"]
+          },
+          {
+            "program": ["uv"],
+            "any_of": [
+              { "subcommand": ["sync", "lock", "tree", "venv", "export", "version"] },
+              { "subcommand": ["pip"], "action": ["list", "freeze", "show", "check", "tree"] },
+              {
+                "subcommand": ["pip"],
+                "action": ["install", "sync"],
+                "any_arg": ["-r"],
+                "operands": { "count": 3, "any": [{ "ends": [".txt"] }], "all": [{ "equals": ["pip", "install", "sync"] }, { "ends": [".txt"] }] }
+              }
+            ]
+          },
+          {
+            "program": ["pipenv"],
+            "subcommand": ["install", "sync", "lock", "graph", "check", "--venv", "--where"],
+            "not": { "operands": { "min": 2 } }
+          },
+          { "program": ["pdm"], "subcommand": ["install", "sync", "lock", "list", "show", "build"] }
+        ]
       }
     }
   ]

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "vercel",
   "description": "Vercel CLI: deployments, aliases, environment variables, and read commands.",
   "programs": ["vercel"],
@@ -20,11 +20,13 @@
     {
       "id": "alias-change",
       "flag": "production",
+      "note": "An alias change points a domain at another deployment.",
       "when": { "subcommand": ["alias"], "action": ["set", "rm", "remove"] }
     },
     {
       "id": "deployment-change",
       "flag": "production",
+      "note": "A deployment, a promotion, a rollback, or a removal.",
       "when": {
         "subcommand": ["deploy", "promote", "rollback", "redeploy", "remove", "rm"]
       }
@@ -39,6 +41,7 @@
       "id": "production-target",
       "flag": "production",
       "dry_run": "skip",
+      "note": "An option or a word that targets production.",
       "when": {
         "not": {
           "any_of": [
@@ -70,6 +73,7 @@
     {
       "id": "alias-list",
       "check": "production_word",
+      "note": "`alias ls` only lists aliases.",
       "when": { "subcommand": ["alias"], "action": ["ls"] }
     },
     {
@@ -85,8 +89,13 @@
   "safe": [
     {
       "id": "local-and-read-commands",
+      "note": "The local server and build, and reads of deployments.",
       "when": { "subcommand": ["dev", "build", "whoami", "ls", "inspect", "logs"] }
     },
-    { "id": "env-list", "when": { "subcommand": ["env"], "action": ["ls"] } }
+    {
+      "id": "env-list",
+      "note": "`env ls` lists names without values.",
+      "when": { "subcommand": ["env"], "action": ["ls"] }
+    }
   ]
 }

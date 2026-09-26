@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "stripe",
+  "description": "Stripe CLI: deletions and cancellations, money movement, API keys, and test and read commands. `--live` and live keys are production words for the general rule.",
+  "programs": ["stripe"],
+  "roles": {
+    "usage": ["stripe"]
+  },
+  "rules": [
+    {
+      "id": "delete-or-cancel",
+      "flag": "data_loss",
+      "note": "Deletion of a Stripe object, and cancellation or voiding of a subscription, payment, or invoice. These cannot be undone.",
+      "when": {
+        "any_of": [
+          { "action": ["delete", "cancel", "void"] },
+          { "subcommand": ["delete"] }
+        ]
+      }
+    },
+    {
+      "id": "money-movement",
+      "flag": "ask_owner",
+      "note": "The command moves money: payouts, transfers, refunds, top-ups, charges, captures, confirmations, and invoice payments.",
+      "when": {
+        "any_of": [
+          {
+            "subcommand": ["payouts", "transfers", "refunds", "topups", "charges"],
+            "action": ["create", "capture"]
+          },
+          { "subcommand": ["payment_intents"], "action": ["confirm", "capture"] },
+          { "subcommand": ["invoices"], "action": ["pay", "send", "finalize_invoice"] },
+          {
+            "subcommand": ["post"],
+            "any_arg_contains": [
+              "/v1/payouts", "/v1/transfers", "/v1/refunds", "/v1/topups", "/v1/charges",
+              "/capture", "/confirm", "/pay"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "api-keys",
+      "flag": "secret_output",
+      "note": "`config --list` prints the stored API keys.",
+      "when": { "subcommand": ["config"], "any_arg": ["--list"] }
+    }
+  ],
+  "safe": [
+    {
+      "id": "test-and-read-commands",
+      "note": "Test events, logs, and reads. `trigger` works in test mode only.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["trigger", "logs", "status", "version", "open"] },
+          { "action": ["list", "retrieve"] }
+        ]
+      }
+    },
+    {
+      "id": "listen-local",
+      "note": "`listen` without forwarding, or with forwarding to this machine. Events hold customer data, so a remote target is not safe.",
+      "when": {
+        "subcommand": ["listen"],
+        "not": { "any_arg_contains": ["://"] },
+        "any_of": [
+          { "not": { "any_arg": ["--forward-to", "-f", "--forward-connect-to", "-c"] } },
+          { "any_arg_starts": ["localhost", "127.0.0.1"] }
+        ]
+      }
+    }
+  ]
+}

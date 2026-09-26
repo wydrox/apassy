@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "jvm",
+  "description": "Gradle and Maven: Flyway and Liquibase tasks that drop or revert, publishing and deployment, and build, test, and check tasks.",
+  "programs": ["gradle", "gradlew", "mvn", "mvnw"],
+  "roles": {
+    "usage": ["gradle", "gradlew", "mvn", "mvnw"]
+  },
+  "rules": [
+    {
+      "id": "database-clean-or-rollback",
+      "flag": "data_loss",
+      "note": "The Flyway and Liquibase plugin tasks `clean`, `undo`, `dropAll`, and `rollback` drop objects or revert migrations.",
+      "when": {
+        "any_arg": [
+          "flywayclean", "flyway:clean", "flywayundo", "flyway:undo", "liquibase:dropall",
+          "dropall", "liquibase:rollback", "rollback", "rollbackcount", "rollbacktodate"
+        ]
+      }
+    },
+    {
+      "id": "publish-or-deploy",
+      "flag": "production",
+      "dry_run": "skip",
+      "note": "`publish`, `deploy`, and release tasks upload artifacts or images, or deploy an app. `publishToMavenLocal` stays on this machine.",
+      "when": {
+        "not": { "any_arg": ["publishtomavenlocal"] },
+        "any_of": [
+          { "any_arg": ["publish", "deploy", "release:perform", "jib", "appenginedeploy", "bootbuildimage:publish"] },
+          { "any_arg_starts": ["publish", "deploy:", "jib:"] },
+          { "any_arg_contains": [":publish"] }
+        ]
+      }
+    }
+  ],
+  "safe": [
+    {
+      "id": "build-test-and-check",
+      "note": "Every task is a build, test, check, format, or report task, also with a module path such as `:app:test`.",
+      "when": {
+        "operands": {
+          "all": [
+            {
+              "equals": [
+                "clean", "build", "test", "check", "assemble", "compile", "compilejava",
+                "compilekotlin", "lint", "verify", "package", "validate", "install",
+                "dependencies", "tasks", "javadoc", "spotlesscheck", "spotlessapply",
+                "ktlintcheck", "ktlintformat", "detekt", "jacocotestreport", "bootrun", "run",
+                "test-compile", "surefire:test", "spring-boot:run", "dependency:tree",
+                "checkstyle:check", "spotbugs:check", "pmd:check", "help"
+              ]
+            },
+            {
+              "starts": [":"],
+              "ends": [
+                ":clean", ":build", ":test", ":check", ":assemble", ":lint", ":dependencies",
+                ":bootrun", ":run", ":detekt"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

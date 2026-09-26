@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "gh",
   "description": "GitHub CLI: releases, workflow runs, secrets, repository settings, gists, and API writes.",
   "programs": ["gh"],
@@ -11,16 +11,19 @@
     {
       "id": "secret-argument",
       "flag": "secret_output",
+      "note": "A secret in a `gh` argument goes to GitHub.",
       "when": { "refs_secret": true }
     },
     {
       "id": "release-change",
       "flag": "production",
+      "note": "A release change publishes or removes artifacts for users.",
       "when": { "subcommand": ["release"], "action": ["create", "upload", "delete", "edit"] }
     },
     {
       "id": "secret-or-variable-change",
       "flag": "system_change",
+      "note": "A change to repository secrets or variables changes what workflows get.",
       "when": { "subcommand": ["secret", "variable"], "action": ["set", "delete", "remove"] }
     },
     {
@@ -32,6 +35,7 @@
     {
       "id": "repository-change",
       "flag": "system_change",
+      "note": "Deletion, archive, rename, transfer, or settings of a repository.",
       "when": {
         "subcommand": ["repo"],
         "action": ["delete", "edit", "archive", "rename", "transfer"]
@@ -49,12 +53,14 @@
     {
       "id": "workflow-run",
       "flag": "production",
+      "note": "A workflow run or a workflow change can deploy or publish.",
       "when": { "subcommand": ["workflow"], "action": ["run", "enable", "disable"] }
     }
   ],
   "safe": [
     {
       "id": "pull-requests-issues-runs",
+      "note": "Reads and creation of pull requests and issues, and reads of runs.",
       "when": {
         "subcommand": ["pr", "issue", "run", "repo"],
         "action": ["create", "view", "list", "status", "checks", "diff", "watch"]

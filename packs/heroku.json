@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "heroku",
+  "description": "Heroku CLI: every command except known reads changes an app. Destruction of apps, databases, and add-ons, config values, and one-off dynos.",
+  "programs": ["heroku"],
+  "roles": {
+    "usage": ["heroku"]
+  },
+  "rules": [
+    {
+      "id": "app-change",
+      "flag": "production",
+      "dry_run": "skip",
+      "note": "Heroku commands change a hosted app. Only the reads in the safe rule do not.",
+      "when": {
+        "not": {
+          "subcommand": [
+            "ps", "releases", "releases:info", "logs", "apps", "apps:info", "info", "status",
+            "pg", "pg:info", "pg:diagnose", "pg:ps", "pg:backups", "addons", "addons:info",
+            "domains", "features", "pipelines", "pipelines:info", "access", "labs", "regions",
+            "stack", "stacks", "auth:whoami", "whoami", "buildpacks", "spaces", "drains",
+            "certs", "certs:info", "webhooks", "maintenance", "redis:info"
+          ]
+        }
+      }
+    },
+    {
+      "id": "destroy-data",
+      "flag": "data_loss",
+      "dry_run": "skip",
+      "note": "Destruction of an app or an add-on, a database reset, and a copy or a restore over a database.",
+      "when": {
+        "any_arg": [
+          "apps:destroy", "destroy", "pg:reset", "pg:backups:restore", "pg:copy", "pg:push",
+          "addons:destroy", "addons:remove", "pg:backups:delete", "redis:reset"
+        ]
+      }
+    },
+    {
+      "id": "config-values",
+      "flag": "secret_output",
+      "note": "`config` and `config:get` print config values, which hold the app secrets. `auth:token` prints the account token.",
+      "when": {
+        "subcommand": [
+          "config", "config:get", "auth:token", "pg:credentials:url", "redis:credentials",
+          "config:pull"
+        ]
+      }
+    },
+    {
+      "id": "one-off-dyno",
+      "flag": "remote_access",
+      "note": "`run` and `ps:exec` start a shell or a command next to the app, with its config.",
+      "when": { "subcommand": ["run", "run:detached", "ps:exec", "run:inside", "pg:psql", "redis:cli"] }
+    }
+  ],
+  "safe": [
+    {
+      "id": "read-commands",
+      "note": "Reads of dynos, releases, logs, apps, add-ons, domains, pipelines, access, and database state.",
+      "when": {
+        "subcommand": [
+          "ps", "releases", "releases:info", "logs", "apps", "apps:info", "info", "status",
+          "pg", "pg:info", "pg:diagnose", "pg:ps", "pg:backups", "addons", "addons:info",
+          "domains", "features", "pipelines", "pipelines:info", "access", "labs", "regions",
+          "stack", "stacks", "auth:whoami", "whoami", "buildpacks", "spaces", "drains",
+          "certs", "certs:info", "webhooks", "maintenance", "redis:info"
+        ]
+      }
+    }
+  ]
+}

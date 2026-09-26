@@ -1,0 +1,139 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "django",
+  "description": "Django management commands (`manage.py`, `django-admin`, `python -m django`): database flush and rollbacks, destructive shell code, admin accounts, printed settings, and development commands.",
+  "programs": ["python", "python3", "manage.py", "django-admin"],
+  "rules": [
+    {
+      "id": "flush-or-reset-database",
+      "flag": "data_loss",
+      "note": "`flush` deletes all rows. `reset_db` (django-extensions) drops the database.",
+      "when": {
+        "any_of": [
+          { "program": ["manage.py", "django-admin"] },
+          { "program": ["python", "python3"], "operands": { "any": [{ "ends": ["manage.py"] }] } },
+          { "program": ["python", "python3"], "args_start": ["-m django"] }
+        ],
+        "any_arg": ["flush", "reset_db", "reset_schema"]
+      }
+    },
+    {
+      "id": "migrate-to-zero",
+      "flag": "data_loss",
+      "note": "`migrate APP zero` reverts every migration of the app and drops its tables.",
+      "when": {
+        "any_of": [
+          { "program": ["manage.py", "django-admin"] },
+          { "program": ["python", "python3"], "operands": { "any": [{ "ends": ["manage.py"] }] } },
+          { "program": ["python", "python3"], "args_start": ["-m django"] }
+        ],
+        "any_arg": ["migrate"],
+        "operands": { "any": [{ "equals": ["zero"] }] }
+      }
+    },
+    {
+      "id": "destructive-shell-code",
+      "flag": "data_loss",
+      "note": "Code for `shell` (`-c` or a here-document) that deletes or updates many rows, or runs destructive SQL.",
+      "when": {
+        "any_of": [
+          { "program": ["manage.py", "django-admin"] },
+          { "program": ["python", "python3"], "operands": { "any": [{ "ends": ["manage.py"] }] } },
+          { "program": ["python", "python3"], "args_start": ["-m django"] }
+        ],
+        "any_arg": ["shell", "shell_plus"],
+        "segment_contains": [
+          ".delete(", ").update(", ".objects.update(", "delete from", "drop table", "truncate",
+          "'flush'", "\"flush\""
+        ]
+      }
+    },
+    {
+      "id": "dbshell-sql-write",
+      "flag": "data_loss",
+      "note": "SQL for `dbshell` that changes data, schema, or access.",
+      "when": {
+        "any_of": [
+          { "program": ["manage.py", "django-admin"] },
+          { "program": ["python", "python3"], "operands": { "any": [{ "ends": ["manage.py"] }] } }
+        ],
+        "any_arg": ["dbshell"],
+        "sql": "writes"
+      }
+    },
+    {
+      "id": "collectstatic-clear",
+      "flag": "data_loss",
+      "note": "`collectstatic --clear` deletes the files in the static storage first. The storage can be a bucket.",
+      "when": {
+        "any_of": [
+          { "program": ["manage.py", "django-admin"] },
+          { "program": ["python", "python3"], "operands": { "any": [{ "ends": ["manage.py"] }] } }
+        ],
+        "any_arg": ["collectstatic"],
+        "any_arg_starts": ["--clear", "-c"]
+      }
+    },
+    {
+      "id": "admin-account",
+      "flag": "privilege",
+      "note": "`createsuperuser` makes an admin account. `changepassword` sets the password of an account.",
+      "when": {
+        "any_of": [
+          { "program": ["manage.py", "django-admin"] },
+          { "program": ["python", "python3"], "operands": { "any": [{ "ends": ["manage.py"] }] } }
+        ],
+        "any_arg": ["createsuperuser", "changepassword"]
+      }
+    },
+    {
+      "id": "print-settings",
+      "flag": "secret_output",
+      "note": "`diffsettings` and `print_settings` print the settings, with `SECRET_KEY` and database passwords.",
+      "when": {
+        "any_of": [
+          { "program": ["manage.py", "django-admin"] },
+          { "program": ["python", "python3"], "operands": { "any": [{ "ends": ["manage.py"] }] } }
+        ],
+        "any_arg": ["diffsettings", "print_settings"]
+      }
+    }
+  ],
+  "safe": [
+    {
+      "id": "django-development",
+      "note": "Tests, checks, new migration files, migration listings, SQL previews, translations, and the local server.",
+      "when": {
+        "any_of": [
+          {
+            "program": ["python", "python3"],
+            "subcommand": ["manage.py", "./manage.py"],
+            "action": [
+              "test", "check", "makemigrations", "showmigrations", "runserver", "sqlmigrate",
+              "show_urls", "validate_templates", "compilemessages", "makemessages", "version"
+            ]
+          },
+          {
+            "program": ["manage.py", "django-admin"],
+            "subcommand": [
+              "test", "check", "makemigrations", "showmigrations", "runserver", "sqlmigrate",
+              "show_urls", "validate_templates", "compilemessages", "makemessages", "version"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "migrate-plan",
+      "note": "`migrate --plan` only prints the plan.",
+      "when": {
+        "any_of": [
+          { "program": ["python", "python3"], "subcommand": ["manage.py", "./manage.py"], "action": ["migrate"] },
+          { "program": ["manage.py", "django-admin"], "subcommand": ["migrate"] }
+        ],
+        "any_arg": ["--plan"]
+      }
+    }
+  ]
+}

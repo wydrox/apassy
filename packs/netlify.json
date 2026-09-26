@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "netlify",
-  "description": "Netlify CLI: production deployments.",
+  "description": "Netlify CLI: production deployments, site deletion, environment variables, and local builds and reads.",
   "programs": ["netlify"],
   "roles": {
     "usage": ["netlify"]
@@ -12,6 +12,7 @@
       "id": "production-target",
       "flag": "production",
       "dry_run": "skip",
+      "note": "A deployment to production, a rollback, or an alias change.",
       "when": {
         "not": {
           "any_of": [
@@ -20,6 +21,46 @@
           ]
         },
         "any_arg": ["--prod", "--production", "promote", "rollback", "alias"]
+      }
+    },
+    {
+      "id": "site-delete",
+      "flag": "data_loss",
+      "note": "`sites:delete` deletes a site with its deploys.",
+      "when": { "subcommand": ["sites:delete"] }
+    },
+    {
+      "id": "environment-change",
+      "flag": "production",
+      "note": "A change to the environment variables of the site.",
+      "when": { "subcommand": ["env:set", "env:unset", "env:import", "env:clone"] }
+    },
+    {
+      "id": "environment-values",
+      "flag": "secret_output",
+      "note": "`env:get` prints a value. `env:list --plain` and `--json` print all values.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["env:get"] },
+          { "subcommand": ["env:list"], "any_arg": ["--plain", "--json"] }
+        ]
+      }
+    }
+  ],
+  "exemptions": [
+    {
+      "id": "local-build",
+      "check": "production_word",
+      "note": "`netlify build --context production` builds on this machine. It does not deploy.",
+      "when": { "subcommand": ["build"] }
+    }
+  ],
+  "safe": [
+    {
+      "id": "local-and-read-commands",
+      "note": "Local builds and the dev server, site status, and listings.",
+      "when": {
+        "subcommand": ["build", "dev", "status", "functions:list", "sites:list", "watch", "open"]
       }
     }
   ]

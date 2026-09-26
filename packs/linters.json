@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "linters",
+  "description": "Linters and scanners for infrastructure, containers, shell scripts, and CI files. They only read the project files.",
+  "programs": [
+    "tflint", "tfsec", "checkov", "kubeconform", "kubeval", "kube-linter", "hadolint",
+    "shellcheck", "yamllint", "actionlint", "markdownlint", "conftest", "cfn-lint"
+  ],
+  "roles": {
+    "usage": ["tflint", "kubeconform", "hadolint", "shellcheck", "yamllint", "actionlint"]
+  },
+  "safe": [
+    {
+      "id": "lint-and-scan",
+      "note": "The tools check files and print findings. `conftest` checks policies on local files.",
+      "when": {
+        "program": [
+          "tflint", "tfsec", "checkov", "kubeconform", "kubeval", "kube-linter", "hadolint",
+          "shellcheck", "yamllint", "actionlint", "markdownlint", "conftest", "cfn-lint"
+        ]
+      }
+    }
+  ]
+}

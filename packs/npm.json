@@ -1,16 +1,18 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 3,
   "tool": "npm",
-  "description": "Node package managers and package runners (npm, pnpm, yarn, bun, npx, bunx): scripts, new dependencies, registry settings, and publishing.",
+  "description": "Node package managers and package runners (npm, pnpm, yarn, bun, npx, bunx): scripts, scripts named for data loss (role `task_runner`), new dependencies, registry settings, and publishing.",
   "programs": ["npm", "pnpm", "yarn", "bun", "npx", "bunx"],
   "roles": {
-    "usage": ["npm", "pnpm", "yarn", "bun", "npx"]
+    "usage": ["npm", "pnpm", "yarn", "bun", "npx"],
+    "task_runner": ["npm", "pnpm", "yarn", "bun"]
   },
   "rules": [
     {
       "id": "secret-argument",
       "flag": "secret_output",
+      "note": "A secret in an `npm` argument can go to the registry or to a log.",
       "when": { "program": ["npm"], "refs_secret": true }
     },
     {
@@ -46,6 +48,7 @@
     {
       "id": "registry-config-change",
       "flag": "system_change",
+      "note": "A change to the package manager settings can change the registry or the tokens.",
       "when": {
         "program": ["npm", "pnpm", "yarn", "bun"],
         "subcommand": ["config"],
@@ -66,6 +69,7 @@
       "id": "publish",
       "flag": "production",
       "dry_run": "skip",
+      "note": "An upload or a change of a package in the registry.",
       "when": {
         "program": ["npm", "pnpm", "yarn", "bun"],
         "subcommand": ["publish", "unpublish", "deprecate", "dist-tag", "upload"]
@@ -75,6 +79,7 @@
   "safe": [
     {
       "id": "test-and-read-commands",
+      "note": "Tests, a clean install from the lock file, and reads of packages.",
       "when": {
         "program": ["npm", "pnpm", "yarn", "bun"],
         "subcommand": [
@@ -84,13 +89,18 @@
     },
     {
       "id": "install-from-lockfile",
+      "note": "An install without a package name uses the lock file.",
       "when": {
         "program": ["npm", "pnpm", "yarn", "bun"],
         "subcommand": ["install", "i"],
         "not": { "operands": { "min": 2 } }
       }
     },
-    { "id": "yarn-install", "when": { "program": ["yarn"], "subcommand": [""] } },
+    {
+      "id": "yarn-install",
+      "note": "`yarn` without arguments installs from the lock file.",
+      "when": { "program": ["yarn"], "subcommand": [""] }
+    },
     {
       "id": "development-script",
       "note": "A script for tests, lint, types, format, or a local server. A name with prod, deploy, release, or publish is not safe.",
