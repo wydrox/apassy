@@ -73,13 +73,67 @@ These changes do not prove memory erasure or removal of data from old backups. T
 
 ## Remaining limits
 
-- Rules, agents, and activity still use synthetic in-memory fixtures. The owner vault and item views can open an encrypted file when both `desktop` and `vault` are enabled. See [desktop vault integration](desktop-vault.md).
+- Agents, grants, rules, declarations, and agent activity are in the vault (schema versions 2 to 6). The Rules screen stays a demo. The owner vault and item views open an encrypted file when both `desktop` and `vault` are enabled. See [desktop vault integration](desktop-vault.md).
 - The APIs are trusted-process internals, not authenticated owner or agent endpoints.
 - Process memory, swap, crash dumps, and key-memory handling need further review. Redacted Debug is not memory erasure.
 - Advisory locks and path checks do not stop arbitrary same-user clients or hostile filesystem races.
-- Completed copies do not prove crash-safe directory persistence. Rekey, migration, recovery UX, and lost-passphrase handling remain future work.
-- Durable agent sessions, rules, approvals, audit, and outbox records are not part of this backend. Epochs alone do not prove restored authority invalidation.
+- Completed copies do not prove crash-safe directory persistence. Lost-passphrase handling remains future work. The rekey, the migration, and the restore review are in the section below.
 - Native-window QA, live connectors, model evaluations, product isolation, and bundled-native-code security and license review remain open.
 - The CI workflow is configured but was not run remotely. No commit, push, publication, or deployment occurred.
 
 The older [foundation results](foundation-verification.md) predate the vault feature. Browser and Python fixtures were not changed in this vault phase.
+
+## Goal items V3 to V6, P1, and P2 (2026-09-26)
+
+Host: macOS 27.0, arm64. Rust: 1.97.0. Schema version: 6. Bouncer policy: `apassy-bouncer-v3`.
+Scope: [the goal](../goal.md), items V3, V4, V5, V6 (section 2) and P1, P2 (section 5). All data is synthetic.
+
+### Checks
+
+All commands ran from the repository root and exited with code 0.
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt --check` | PASS |
+| `cargo clippy --locked --all-targets --features desktop,vault -- -D warnings` | PASS. No warnings. |
+| `cargo clippy --locked --all-targets --all-features -- -D warnings` | PASS. No warnings. |
+| `cargo test --locked --features desktop,vault` | PASS. 167 tests and 6 doc tests. 5 tests are ignored: they need network access or a running `laya-serve`. |
+| `cargo test --locked --all-features --all-targets -- --test-threads=1` | PASS. 179 tests, 5 ignored, as above. |
+| `cargo test --locked --features storage-probe --test sqlcipher_probe` | PASS. 12 tests. |
+| `cargo run --locked --features desktop,vault --bin apassy -- --smoke-test` | PASS. `smoke-test: owner vault round trip passed.` |
+
+### Evidence for each item
+
+| Item | Tests |
+| --- | --- |
+| V3. Startup is locked. Lock and restart end waiting runs and unused approvals. | `startup_is_locked`, `lock_ends_waiting_runs`, `approval_before_lock_is_not_valid_after_unlock`, `restart_ends_waiting_runs_and_old_approvals`, `revoke_or_lock_during_approval_stops_the_run` (`tests/agent_run.rs`). `invalidate_all_ends_waiting_runs`, `invalidate_all_voids_an_unused_approval`, `invalid_session_ends_the_wait`, `a_new_queue_does_not_reuse_ids` (`src/broker/approvals.rs`). |
+| V4. Backup and restore. A restore revokes all agents. The owner reviews before an agent runs. | `restore_needs_owner_review_before_runs` (`tests/agent_run.rs`), `restored_connector_waits_for_the_owner_review`, `delete_item_removes_links_and_restore_revokes_agents` (`tests/agent_path.rs`), `restore_lists_items_for_review_until_the_owner_confirms` (`tests/owner_vault.rs`), `restored_item_shows_the_review_and_confirm_action` (`src/desktop/ui.rs`), `restore_migrates_an_old_backup` (`tests/vault_migration.rs`). Procedure: [backup and restore](backup-restore.md). |
+| V5. Passphrase change. The old passphrase fails and the data stays. | `change_passphrase_rekeys_and_keeps_the_data`, `failed_passphrase_change_keeps_the_old_passphrase`, `wal_mode_file_changes_passphrase_without_a_wal_file` (`tests/vault_passphrase.rs`), `owner_changes_the_passphrase_with_a_repeat` (`tests/owner_vault.rs`), `passphrase_card_asks_for_the_new_passphrase_two_times` (`src/desktop/ui.rs`). |
+| V6. Migration from each earlier schema version. | `unlock_migrates_each_earlier_schema_version_to_the_current_one`, `a_failed_migration_keeps_the_old_version_and_data`, `restore_migrates_an_old_backup` (`tests/vault_migration.rs`). |
+| P1. Token expiry, lifetime, and rotation. | `tokens_expire_and_rotation_replaces_them`, `mcp_adapter_explains_an_expired_token` (`tests/agent_path.rs`), `owner_changes_token_lifetime_and_rotates_a_token` (`tests/owner_vault.rs`), `agents_view_shows_token_expiry_and_rotation` (`src/desktop/ui.rs`), `expired_token_gives_the_user_a_next_step` (`src/agent/mcp.rs`). |
+| P2. A production run always waits for the owner. | `production_always_asks_the_owner` (`src/broker/bouncer.rs`), `production_declaration_always_waits_for_the_owner` (`tests/bouncer_rules.rs`). |
+
+### What the tests show
+
+- V3: the broker refuses every request before the owner unlocks. A lock ends a waiting run within about 100 ms, also when nobody calls `invalidate_all`. An approval that the broker did not use before a lock and an unlock gives `approval_invalidated`, and the command does not run. A stop of the broker ends the waiting run. After a restart, the vault is locked, and the old run ID matches no run in the new queue.
+- V4: a restore revokes every agent, removes every grant and rule, and marks each item with a declaration, an environment variable, or a connector. A run or a connector call with a marked item gives `review_required` until the owner confirms. The model is not asked.
+- V5: after the change, the old passphrase gives `WrongKeyOrCorrupt`, the new passphrase opens the file, and items and agents stay. The file does not open with `kdf_iter` 64000 or with `cipher_compatibility` 3. A backup from before the change opens only with the old passphrase. No journal, WAL, or SHM file stays.
+- V6: files of versions 1 to 5 are built from frozen copies of the historical schema SQL, with data of each version. After unlock, each file is at version 6 and all data is present. A version 3 grant in "allow" mode becomes "bouncer" mode. A failed migration leaves the file at version 5 with its data.
+- P1: a token works for 30 days after its issue time by default. The owner can set 1 to 365 days. The lifetime applies to every token from its issue time. An expired token gives `token_expired`, and the activity log names the agent. A rotation stops the old token at once and keeps the grants. `apassy-mcp` tells the user to rotate the token.
+- P2: a production declaration waits for the owner for known safe commands, read-only commands, and a model answer that is fully certain. The broker does not call the model for such a run. The owner can still approve the run.
+
+### Findings and repairs
+
+Earlier failures are not counted as passes:
+
+- The first passphrase-change test with a second SQLite reader failed. SQLCipher 4.x `sqlite3_rekey_v2` returns success also when the commit of the rekey fails. The pragma answered "ok", the file kept the old key, and a rollback journal stayed. The repair takes the exclusive lock once before the rekey and verifies the change with a new connection. Now the reader case gives `Busy` before a page changes, and no journal stays.
+- The first weaker-settings check placed `PRAGMA kdf_iter` before `PRAGMA key`. SQLCipher ignores cipher settings before the key, so the check passed for the wrong reason. The test now sets the weaker settings after the key.
+- The first run of the lock test after the V3 change gave `approval_invalidated` or `vault_locked` in random order. A locked vault after an approval now always gives `approval_invalidated`.
+
+### Limits of this evidence
+
+- A reader of another SQLite client can start between the exclusive-lock check and the commit of the rekey. The verification then finds the failure, and the vault stays locked with the old passphrase. No test forces this timing.
+- The rekey journal and old backups keep pages with the old key. Free disk blocks and snapshots can keep them too.
+- A migration from version 1 to 5 uses the registration time as the issue time of each token. A token older than 30 days is expired after the migration.
+- The connector path (`reporting-api-v0`) has no bouncer and no owner approval. The production rule applies to process runs. Connectors stay synthetic (ADR 0010).
+- The GUI actions have headless egui drawing tests and model tests. There was no native-window QA of the new cards.
