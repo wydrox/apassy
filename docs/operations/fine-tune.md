@@ -126,6 +126,12 @@ from many stacks, with no owner data. From this study and ADR 0009:
 
 ## 5. On-disk format for an owner decision (B9 export)
 
+The implemented export is `Vault::export_decisions_jsonl`. Its fields are in
+[learning](learning.md), section 6. It uses `cwd_rel` for `relative_dir`,
+`decision` with `decided_by` for `owner_decision`, and `remembered` for `source`.
+It has one declaration per item, in an array. The table below is the plan of this
+study.
+
 The learning worker exports one record per owner decision. Each record is one
 line of JSON. The records stay in the encrypted vault and never leave the
 computer (ADR 0009). A record has no secret value.
