@@ -18,6 +18,8 @@
 //!   --backup-file FILE  The backup database. Default: `<vault-file>.backup`.
 //!   --socket FILE       The broker socket. Default: `$APASSY_BROKER_SOCKET`,
 //!                       else `<data-dir>/broker.sock`.
+//!   --home DIR          The owner home directory. The profile denies a write to
+//!                       the autostart locations under it. Default: `$HOME`.
 //!   --app DIR           The installed Apassy app bundle. Default:
 //!                       `/Applications/Apassy.app`.
 //!   --app-build DIR     A second Apassy app bundle, for example a build. Default:
@@ -117,6 +119,14 @@ fn run(args: &[String]) -> Result<(), String> {
         .map(PathBuf::from)
         .or_else(default_build_app);
 
+    // The home directory, for the autostart denials in the profile.
+    let home_dir = match parsed.home {
+        Some(path) => PathBuf::from(path),
+        None => home
+            .clone()
+            .ok_or("HOME is not set, so --home is required")?,
+    };
+
     let profile = resolve_profile(parsed.profile.as_deref())?;
 
     // Resolve symlinks in each path. Seatbelt matches the resolved path, and on
@@ -127,6 +137,7 @@ fn run(args: &[String]) -> Result<(), String> {
     let vault_file = resolve(&vault_file);
     let backup_file = resolve(&backup_file);
     let socket = resolve(&socket);
+    let home_dir = resolve(&home_dir);
     let app = resolve(&app);
     let app_build = app_build.as_deref().map(resolve);
 
@@ -140,6 +151,7 @@ fn run(args: &[String]) -> Result<(), String> {
         .arg("-D")
         .arg(param("APASSY_BACKUP_FILE", &backup_file)?);
     command.arg("-D").arg(param("APASSY_SOCKET", &socket)?);
+    command.arg("-D").arg(param("APASSY_HOME", &home_dir)?);
     command.arg("-D").arg(param("APASSY_APP", &app)?);
     if let Some(app_build) = &app_build {
         command.arg("-D").arg(param("APASSY_APP_BUILD", app_build)?);
@@ -155,6 +167,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 ("APASSY_VAULT_FILE", Some(&vault_file)),
                 ("APASSY_BACKUP_FILE", Some(&backup_file)),
                 ("APASSY_SOCKET", Some(&socket)),
+                ("APASSY_HOME", Some(&home_dir)),
                 ("APASSY_APP", Some(&app)),
                 ("APASSY_APP_BUILD", app_build.as_ref()),
             ],
@@ -174,6 +187,7 @@ struct Parsed {
     vault_file: Option<String>,
     backup_file: Option<String>,
     socket: Option<String>,
+    home: Option<String>,
     app: Option<String>,
     app_build: Option<String>,
     profile: Option<String>,
@@ -188,6 +202,7 @@ fn parse(args: &[String]) -> Result<Parsed, String> {
         vault_file: None,
         backup_file: None,
         socket: None,
+        home: None,
         app: None,
         app_build: None,
         profile: None,
@@ -208,6 +223,7 @@ fn parse(args: &[String]) -> Result<Parsed, String> {
             "--vault-file" => parsed.vault_file = Some(value(&mut iter, arg)?),
             "--backup-file" => parsed.backup_file = Some(value(&mut iter, arg)?),
             "--socket" => parsed.socket = Some(value(&mut iter, arg)?),
+            "--home" => parsed.home = Some(value(&mut iter, arg)?),
             "--app" => parsed.app = Some(value(&mut iter, arg)?),
             "--app-build" => parsed.app_build = Some(value(&mut iter, arg)?),
             "--profile" => parsed.profile = Some(value(&mut iter, arg)?),
@@ -327,6 +343,7 @@ Options:
   --vault-file FILE   vault database (default: <data-dir>/vault.db)
   --backup-file FILE  backup database (default: <vault-file>.backup)
   --socket FILE       broker socket (default: <data-dir>/broker.sock)
+  --home DIR          owner home directory for the autostart denials (default: $HOME)
   --app DIR           installed app bundle (default: /Applications/Apassy.app)
   --app-build DIR     second app bundle (default: <target>/Apassy.app when this
                       program runs from <target>/<profile>/)
