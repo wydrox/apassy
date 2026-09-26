@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "migrations",
+  "description": "Database migration tools (Flyway, Liquibase, Knex, Sequelize, TypeORM, Drizzle Kit, dbmate, goose, golang-migrate, Atlas): clean, drop, rollback, and read commands.",
+  "programs": [
+    "flyway", "liquibase", "knex", "sequelize", "sequelize-cli", "typeorm",
+    "typeorm-ts-node-commonjs", "typeorm-ts-node-esm", "drizzle-kit", "dbmate", "goose",
+    "migrate", "atlas"
+  ],
+  "roles": {
+    "usage": ["flyway", "liquibase", "knex", "sequelize", "typeorm", "drizzle-kit", "dbmate", "goose", "atlas"]
+  },
+  "rules": [
+    {
+      "id": "flyway-clean-or-undo",
+      "flag": "data_loss",
+      "note": "`flyway clean` drops every object in the schemas. `undo` reverts migrations.",
+      "when": { "program": ["flyway"], "any_arg": ["clean", "undo"] }
+    },
+    {
+      "id": "liquibase-drop-or-rollback",
+      "flag": "data_loss",
+      "note": "`drop-all` drops every object. A rollback reverts changesets. The `-sql` forms only print SQL.",
+      "when": {
+        "program": ["liquibase"],
+        "any_arg": [
+          "drop-all", "dropall", "rollback", "rollback-count", "rollback-to-date",
+          "rollback-one-changeset", "rollback-one-update", "rollbackcount", "rollbacktodate",
+          "rollbackonechangeset", "rollbackoneupdate"
+        ]
+      }
+    },
+    {
+      "id": "js-orm-drop-or-rollback",
+      "flag": "data_loss",
+      "note": "Knex, Sequelize, and TypeORM commands that drop the database or schema, or revert migrations or seeds. `schema:sync` can drop columns.",
+      "when": {
+        "program": [
+          "knex", "sequelize", "sequelize-cli", "typeorm", "typeorm-ts-node-commonjs",
+          "typeorm-ts-node-esm"
+        ],
+        "any_arg": [
+          "migrate:rollback", "migrate:down", "db:drop", "db:migrate:undo",
+          "db:migrate:undo:all", "db:seed:undo", "db:seed:undo:all", "schema:drop",
+          "migration:revert", "schema:sync"
+        ]
+      }
+    },
+    {
+      "id": "drizzle-force-push",
+      "flag": "data_loss",
+      "note": "`drizzle-kit push --force` applies schema changes and accepts data loss without a prompt.",
+      "when": { "program": ["drizzle-kit"], "subcommand": ["push"], "any_arg": ["--force"] }
+    },
+    {
+      "id": "go-migrate-down-or-drop",
+      "flag": "data_loss",
+      "note": "dbmate, goose, and golang-migrate: `drop`, `down`, `rollback`, and `reset` revert migrations or drop the database.",
+      "when": {
+        "program": ["dbmate", "goose", "migrate"],
+        "any_arg": ["drop", "down", "down-to", "rollback", "reset"]
+      }
+    },
+    {
+      "id": "atlas-clean-or-down",
+      "flag": "data_loss",
+      "note": "`atlas schema clean` drops every object. `atlas migrate down` reverts migrations.",
+      "when": { "program": ["atlas"], "args_start": ["schema clean", "migrate down"] }
+    }
+  ],
+  "safe": [
+    {
+      "id": "read-and-new-files",
+      "note": "Migration state and listings, validation, SQL previews, and new migration files.",
+      "when": {
+        "any_of": [
+          { "program": ["flyway"], "any_arg": ["info", "validate"], "not": { "any_arg": ["clean", "undo", "migrate", "repair", "baseline"] } },
+          {
+            "program": ["liquibase"],
+            "any_arg": ["status", "history", "validate", "update-sql", "updatesql", "diff", "rollback-sql", "rollbacksql"]
+          },
+          { "program": ["knex"], "subcommand": ["migrate:status", "migrate:list", "migrate:currentversion", "migrate:make", "seed:make"] },
+          { "program": ["sequelize", "sequelize-cli"], "subcommand": ["db:migrate:status", "migration:generate", "migration:create", "model:generate", "seed:generate"] },
+          {
+            "program": ["typeorm", "typeorm-ts-node-commonjs", "typeorm-ts-node-esm"],
+            "subcommand": ["migration:show", "migration:create", "migration:generate", "schema:log"]
+          },
+          { "program": ["drizzle-kit"], "subcommand": ["generate", "check", "introspect", "pull", "studio"] },
+          { "program": ["dbmate", "goose"], "subcommand": ["status", "version", "new", "create"] }
+        ]
+      }
+    }
+  ]
+}

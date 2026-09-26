@@ -162,7 +162,7 @@ pub fn analyze_with(
     if rules.load_error().is_some() {
         flags.push(packs::LOAD_ERROR_FLAG.to_owned());
     }
-    let pipelines = parse_argv(argv);
+    let pipelines = parse_command(argv);
     let mut all_safe = !pipelines.is_empty();
     // `set -x` prints each expanded command, so it prints secret values.
     let tracing = pipelines.iter().flatten().any(|segment| {
@@ -212,6 +212,121 @@ fn has_injection(text: &str) -> bool {
 }
 
 // ---- Parsing ----
+
+/// The pipelines of a command, and the commands that it runs in a local container.
+fn parse_command(argv: &[String]) -> Vec<Pipeline> {
+    let mut pipelines = parse_argv(argv);
+    let mut index = 0;
+    // A container command can run another container command. Three levels are enough.
+    let mut budget = 3 * pipelines.len().max(1);
+    while index < pipelines.len() && budget > 0 {
+        let inner: Vec<Pipeline> = pipelines[index]
+            .iter()
+            .filter_map(container_command)
+            .flatten()
+            .collect();
+        budget -= 1;
+        pipelines.extend(inner);
+        index += 1;
+    }
+    pipelines
+}
+
+/// Options of `docker exec`, `docker compose exec`, and `docker compose run` with a
+/// separate value. The value is not the container name.
+const CONTAINER_VALUE_OPTIONS: &[&str] = &[
+    "-e",
+    "--env",
+    "--env-file",
+    "-u",
+    "--user",
+    "-w",
+    "--workdir",
+    "--detach-keys",
+    "--index",
+    "-p",
+    "--publish",
+    "-v",
+    "--volume",
+    "--name",
+    "--entrypoint",
+    "-l",
+    "--label",
+    "--cap-add",
+    "--cap-drop",
+    "--pull",
+    "-f",
+    "--file",
+    "--project-name",
+    "--profile",
+    "--project-directory",
+    "--ansi",
+    "--parallel",
+    "--progress",
+];
+
+/// Skip options and their values. Gives the index of the first word that is not an option.
+fn skip_container_options(words: &[String], mut index: usize) -> usize {
+    while let Some(word) = words.get(index) {
+        if !word.starts_with('-') || word == "-" {
+            break;
+        }
+        let takes_value =
+            !word.contains('=') && CONTAINER_VALUE_OPTIONS.contains(&word.to_lowercase().as_str());
+        index += if takes_value { 2 } else { 1 };
+    }
+    index
+}
+
+/// The command that `docker exec`, `docker compose exec`, or `docker compose run` runs in a
+/// local container, as pipelines. The analysis checks it like a command on the host. The
+/// here-document of the segment goes to the command in the container.
+fn container_command(segment: &Segment) -> Option<Vec<Pipeline>> {
+    let argv = effective_argv(segment);
+    let program = base_name(argv.first()?);
+    let lower = lower_args(&argv);
+    let word = |index: usize| lower.get(index).map(String::as_str).unwrap_or_default();
+    let start = match program.as_str() {
+        "docker" | "podman" => match word(1) {
+            "exec" => 2,
+            "container" if word(2) == "exec" => 3,
+            "compose" => {
+                let sub = skip_container_options(&argv, 2);
+                if !matches!(word(sub), "exec" | "run") {
+                    return None;
+                }
+                sub + 1
+            }
+            _ => return None,
+        },
+        "docker-compose" | "podman-compose" => {
+            let sub = skip_container_options(&argv, 1);
+            if !matches!(word(sub), "exec" | "run") {
+                return None;
+            }
+            sub + 1
+        }
+        _ => return None,
+    };
+    // The container or the service, then the command.
+    let name = skip_container_options(&argv, start);
+    let mut inner = argv.get(name + 1..)?.to_vec();
+    if inner.first().is_some_and(|word| word == "--") {
+        inner.remove(0);
+    }
+    if inner.is_empty() {
+        return None;
+    }
+    let mut pipelines = parse_argv(&inner);
+    if let Some(first) = pipelines
+        .first_mut()
+        .and_then(|pipeline| pipeline.first_mut())
+    {
+        first.heredoc.clone_from(&segment.heredoc);
+        first.redirect_in |= segment.redirect_in;
+    }
+    Some(pipelines)
+}
 
 /// An argument list runs without a shell. `sh -c TEXT` runs TEXT in a shell.
 fn parse_argv(argv: &[String]) -> Vec<Pipeline> {
@@ -517,13 +632,56 @@ fn program(segment: &Segment) -> String {
         .unwrap_or_default()
 }
 
-/// The program after `npx`, `pnpm dlx`, `bunx`, `sudo`, or `env`.
+/// Options of the environment runners (`uv run`, `poetry run`, `bundle exec`) with a
+/// separate value. The value is not the program.
+const RUNNER_VALUE_OPTIONS: &[&str] = &[
+    "--with",
+    "--with-requirements",
+    "--python",
+    "-p",
+    "--env-file",
+    "--project",
+    "--directory",
+    "--package",
+    "--extra",
+    "--group",
+    "--index",
+    "-e",
+    "--env",
+];
+
+/// The program after `npx`, `pnpm dlx`, `bunx`, `sudo`, `env`, or an environment runner.
+/// An environment runner (`bundle exec`, `poetry run`, `uv run`, `pipenv run`, `pdm run`,
+/// `hatch run`, `rye run`) runs a program of the project environment.
 fn effective_argv(segment: &Segment) -> Vec<String> {
     let mut argv: Vec<String> = segment.argv.clone();
     loop {
         let Some(first) = argv.first().map(|arg| base_name(arg)) else {
             return argv;
         };
+        let second = argv.get(1).map(String::as_str);
+        let environment_runner = matches!(
+            (first.as_str(), second),
+            ("bundle", Some("exec"))
+                | (
+                    "poetry" | "uv" | "pipenv" | "pdm" | "hatch" | "rye",
+                    Some("run")
+                )
+        );
+        if environment_runner {
+            argv.drain(..2);
+            // Runner options such as `--with requests`, and `--`, come before the program.
+            while argv.first().is_some_and(|arg| arg.starts_with('-')) {
+                let option = argv.remove(0);
+                if !option.contains('=')
+                    && RUNNER_VALUE_OPTIONS.contains(&option.as_str())
+                    && !argv.is_empty()
+                {
+                    argv.remove(0);
+                }
+            }
+            continue;
+        }
         let skip = match first.as_str() {
             "npx" | "bunx" | "sudo" | "doas" | "time" | "nohup" | "exec" => 1,
             "pnpm" | "yarn" if argv.get(1).map(String::as_str) == Some("dlx") => 2,
@@ -578,10 +736,32 @@ fn command<'a>(
         args,
         joined_lower: joined.to_lowercase(),
         joined,
+        segment_text: segment_text(segment),
         secret: segment_refs_secret(segment, secret_names),
         secret_names,
         known_hosts: rules.known_hosts(),
     }
+}
+
+/// All text of a segment in lowercase: the `NAME=value` prefixes, the words as written
+/// (wrappers included), the redirect targets, and the here-document.
+fn segment_text(segment: &Segment) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    parts.extend(segment.assignments.iter().map(String::as_str));
+    parts.extend(segment.argv.iter().map(String::as_str));
+    parts.extend(segment.redirect_targets.iter().map(String::as_str));
+    if !segment.heredoc.is_empty() {
+        parts.push(&segment.heredoc);
+    }
+    parts.join(" ").to_lowercase()
+}
+
+/// Words of a segment text: split at spaces, quotes, `=`, and shell operators, without a
+/// trailing `/`.
+pub(crate) fn text_words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| c.is_whitespace() || "\"'=;&|()<>`".contains(c))
+        .map(|word| word.trim_end_matches('/'))
+        .filter(|word| !word.is_empty())
 }
 
 fn lower_args(argv: &[String]) -> Vec<String> {
@@ -655,14 +835,35 @@ fn segment_refs_secret(segment: &Segment, secret_names: &[String]) -> bool {
 /// A secret file such as `.env`, `.env.local`, or an SSH key.
 pub(crate) fn is_secret_file(arg: &str) -> bool {
     let name = arg.rsplit('/').next().unwrap_or(arg);
+    let lower = name.to_lowercase();
     (name.starts_with(".env") && name != ".env.example")
         || name.starts_with("id_rsa")
         || name.starts_with("id_ed25519")
+        || name.starts_with("id_ecdsa")
         || name.ends_with(".pem")
         || name.ends_with(".key")
         || name == "credentials"
         || name == ".npmrc"
         || name == ".netrc"
+        // Database, Git, and Vault credentials of the user.
+        || matches!(name, ".pgpass" | ".git-credentials" | ".my.cnf" | ".vault-token")
+        // Key stores and certificates with a private key.
+        || [".p12", ".pfx", ".jks", ".keystore", ".ppk"]
+            .iter()
+            .any(|suffix| lower.ends_with(suffix))
+        // Terraform state has every attribute in plain text, secrets included.
+        || lower.ends_with(".tfstate")
+        || lower.ends_with(".tfstate.backup")
+        // Cloud service account keys and OAuth client secrets.
+        || (lower.ends_with(".json")
+            && (lower.contains("service-account")
+                || lower.contains("serviceaccount")
+                || lower.starts_with("client_secret")
+                || lower.starts_with("firebase-adminsdk")
+                || lower.ends_with("credentials.json")))
+        // Kubernetes and Docker client configuration with tokens.
+        || arg.ends_with(".kube/config")
+        || arg.ends_with(".docker/config.json")
 }
 
 /// A path in a system folder.
@@ -758,8 +959,12 @@ fn check_segment(
     let cmd = command(rules, segment, &argv, secret_names);
     let prog = cmd.program.as_str();
     let args = &cmd.args;
-    // `--help` and `--version` only print usage.
+    // `--help` and `--version` only print usage. A package runner still downloads and
+    // runs the package, so the rules about the package runner apply.
     if is_usage_request(rules, prog, args) && !segment.redirect_out {
+        if is_package_runner(&segment.argv) {
+            rules.add_package_runner_flags(&cmd, flags);
+        }
         return;
     }
     // The rules of the rule packs.
@@ -1015,6 +1220,34 @@ fn check_destructive(rules: &RuleSet, cmd: &Command<'_>, flags: &mut Vec<String>
         || cmd.joined_lower.contains("dropdatabase")
     {
         push(flags);
+    }
+    // Tasks and package scripts named for data loss, for example `npm run db:reset` or
+    // `make db-drop`. `remove` is not in the list: `yarn remove` removes a dependency.
+    if rules.has_role(&cmd.program, Role::TaskRunner) {
+        let task = match cmd.args.first().map(String::as_str) {
+            Some("run" | "run-script") => cmd.args.get(1),
+            _ => cmd.args.first(),
+        };
+        if task.is_some_and(|task| {
+            !task.starts_with('-')
+                && words(task).iter().any(|w| {
+                    matches!(
+                        w.as_str(),
+                        "delete"
+                            | "drop"
+                            | "wipe"
+                            | "purge"
+                            | "destroy"
+                            | "truncate"
+                            | "nuke"
+                            | "reset"
+                            | "erase"
+                            | "rollback"
+                    )
+                })
+        }) {
+            push(flags);
+        }
     }
 }
 
@@ -1516,6 +1749,122 @@ mod tests {
     }
 
     #[test]
+    fn environment_runners_show_the_program() {
+        for cmd in [
+            "poetry run pytest -q",
+            "uv run --with requests pytest",
+            "uv run -- pytest",
+            "pipenv run pytest",
+        ] {
+            let a = analyze(&argv(cmd), "Run the tests.", &secrets());
+            assert!(a.known_safe && a.flags.is_empty(), "{cmd}: {a:?}");
+        }
+        let a = analyze(
+            &argv("poetry run twine upload dist/x"),
+            "Publish.",
+            &secrets(),
+        );
+        assert!(a.flags.contains(&"production".to_owned()), "{a:?}");
+        let a = analyze(&argv("poetry run"), "Nothing.", &secrets());
+        assert!(a.flags.is_empty(), "{a:?}");
+    }
+
+    #[test]
+    fn commands_in_a_local_container_are_checked() {
+        let loud: [(Vec<String>, &str); 4] = [
+            (
+                shell("docker exec -it db psql -U app -c 'DROP TABLE users'"),
+                "data_loss",
+            ),
+            (
+                shell(
+                    "docker compose -f compose.yml exec -T api sh -c 'echo $DATABASE_URL | base64'",
+                ),
+                "secret_output",
+            ),
+            (
+                argv("docker container exec -u root app rm -rf /data"),
+                "data_loss",
+            ),
+            (
+                shell("docker exec -i db psql -U app <<'SQL'\nDROP TABLE users;\nSQL"),
+                "data_loss",
+            ),
+        ];
+        for (cmd, flag) in loud {
+            let a = analyze(&cmd, "Do the work.", &secrets());
+            assert!(a.flags.contains(&flag.to_owned()), "{cmd:?}: {a:?}");
+            assert!(!a.known_safe);
+        }
+        // The container name is not the program, and `--help` goes to the inner command.
+        let a = analyze(&argv("docker exec api-prod ls"), "List.", &secrets());
+        assert!(!a.flags.contains(&"data_loss".to_owned()), "{a:?}");
+        assert!(!analyze(&argv("docker exec inspect up --help"), "Help.", &secrets()).known_safe);
+    }
+
+    #[test]
+    fn a_usage_request_through_a_package_runner_keeps_the_download_rules() {
+        // `heroku` prints usage for `--version`, but `npx heroku` first downloads the
+        // `heroku` package, which is not a common project tool.
+        for cmd in [
+            "npx heroku --version",
+            "bunx heroku --help",
+            "npx cowsay --version",
+        ] {
+            let a = analyze(&argv(cmd), "Check.", &secrets());
+            assert_eq!(a.flags, vec!["new_dependency"], "{cmd}");
+            assert!(!a.known_safe);
+        }
+        let a = analyze(&argv("heroku --version"), "Check.", &secrets());
+        assert!(a.flags.is_empty() && a.known_safe, "{a:?}");
+        let a = analyze(&argv("npx prisma --help"), "Read usage.", &secrets());
+        assert!(a.flags.is_empty() && a.known_safe, "{a:?}");
+    }
+
+    #[test]
+    fn more_secret_files() {
+        for name in [
+            "~/.pgpass",
+            ".git-credentials",
+            "terraform.tfstate",
+            "infra/terraform.tfstate.backup",
+            "gcp-service-account.json",
+            "client_secret_123.json",
+            "release.jks",
+            "~/.kube/config",
+        ] {
+            assert!(is_secret_file(name), "{name}");
+            let a = analyze(&argv(&format!("cat {name}")), "Read.", &secrets());
+            assert_eq!(a.flags, vec!["secret_output"], "{name}");
+        }
+        for name in ["package.json", "tsconfig.json", "config", "state.tf"] {
+            assert!(!is_secret_file(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn tasks_named_for_data_loss() {
+        for cmd in [
+            "npm run db:reset",
+            "yarn db:drop",
+            "pnpm run db:wipe",
+            "make db-reset",
+        ] {
+            let a = analyze(&argv(cmd), "Do the work.", &secrets());
+            assert!(a.flags.contains(&"data_loss".to_owned()), "{cmd}: {a:?}");
+        }
+        for cmd in [
+            "npm run test:e2e -- --grep reset",
+            "npm run build:preset",
+            "yarn remove lodash",
+            "make test",
+        ] {
+            let a = analyze(&argv(cmd), "Do the work.", &secrets());
+            assert!(!a.flags.contains(&"data_loss".to_owned()), "{cmd}: {a:?}");
+        }
+    }
+
+    #[test]
     fn injection_in_purpose() {
         let a = analyze(
             &argv("npm test"),
@@ -1558,7 +1907,7 @@ mod tests {
             rules.rule_ids().into_iter().collect();
         assert!(unmatched.len() > 100, "{}", unmatched.len());
         for line in replay_lines() {
-            for segment in parse_argv(&command_line_to_argv(&line)).iter().flatten() {
+            for segment in parse_command(&command_line_to_argv(&line)).iter().flatten() {
                 let argv = effective_argv(segment);
                 if argv.is_empty() {
                     continue;

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "scripting",
   "description": "Ruby, Perl, and PHP: inline code, scripts, and gem publishing.",
   "programs": ["ruby", "perl", "php", "gem"],
@@ -12,6 +12,7 @@
     {
       "id": "inline-code-prints-secret",
       "flag": "secret_output",
+      "note": "Code in `-e` or `-r` that reads the environment and prints or sends it.",
       "when": {
         "program": ["ruby", "perl", "php"],
         "any_arg": ["-e", "-c", "--eval", "-p", "--print", "-r"],
@@ -22,6 +23,7 @@
       "id": "publish",
       "flag": "production",
       "dry_run": "skip",
+      "note": "An upload of a gem to the registry.",
       "when": {
         "program": ["gem"],
         "subcommand": ["publish", "unpublish", "deprecate", "dist-tag", "upload"]

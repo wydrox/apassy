@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "ruby-tools",
+  "description": "Ruby project tools (Bundler, RSpec, RuboCop, Standard, Brakeman): new gems, and install, test, and lint commands. `bundle exec` is a wrapper: the analysis checks the program after it.",
+  "programs": ["bundle", "bundler", "rspec", "rubocop", "standardrb", "brakeman", "bundle-audit"],
+  "roles": {
+    "usage": ["bundle", "bundler", "rspec", "rubocop"]
+  },
+  "rules": [
+    {
+      "id": "new-gem",
+      "flag": "new_dependency",
+      "note": "`bundle add` adds a gem to the Gemfile.",
+      "when": { "program": ["bundle", "bundler"], "subcommand": ["add"] }
+    },
+    {
+      "id": "gem-source-change",
+      "flag": "system_change",
+      "note": "A mirror or a source in the Bundler settings changes where gems come from.",
+      "when": {
+        "program": ["bundle", "bundler"],
+        "subcommand": ["config"],
+        "any_arg_contains": ["mirror", "source", "gems."]
+      }
+    }
+  ],
+  "safe": [
+    {
+      "id": "install-from-lockfile",
+      "note": "`bundle install` installs the gems of Gemfile.lock. The other commands only check or list.",
+      "when": {
+        "program": ["bundle", "bundler"],
+        "subcommand": ["install", "check", "list", "outdated", "info", "show", ""]
+      }
+    },
+    {
+      "id": "test-and-lint-tools",
+      "note": "Tests, style checks, and security scans of the project.",
+      "when": { "program": ["rspec", "rubocop", "standardrb", "brakeman", "bundle-audit"] }
+    }
+  ]
+}

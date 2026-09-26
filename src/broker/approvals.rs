@@ -10,10 +10,22 @@
 //! also checks the vault, so a lock ends the wait even when nobody calls
 //! `invalidate_all`. Run IDs start at a random value, so an ID from an earlier
 //! queue does not match a run in a new queue.
+//!
+//! An approval needs a fresh owner check (goal item A4). [`ApprovalQueue::approve`]
+//! takes an [`OwnerProof`] from [`OwnerGate::authorize`] for exactly the run that
+//! waits. Each approval path, also "Approve and remember", goes through it. A denial
+//! needs no check, because it only takes authority away.
+
+mod owner_auth;
 
 use std::collections::BTreeMap;
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
+
+pub use owner_auth::{
+    CheckMethod, OwnerAction, OwnerAuthError, OwnerCheck, OwnerGate, OwnerProof, PROOF_LIFETIME,
+    ProofRefusal, touch_id_detail,
+};
 
 /// How often a waiting run checks that its vault session is still valid.
 const WATCH_INTERVAL: Duration = Duration::from_millis(100);
@@ -36,16 +48,72 @@ pub struct PendingRun {
     pub request_source: String,
     /// The agent text when a hook request replaced it and the two differ. Else empty.
     pub agent_request: String,
+    /// The pattern that "Approve and remember" teaches (ADR 0010). `None` when the run
+    /// cannot teach a pattern, for example a production run or a run with a rule flag.
+    pub remember: Option<RememberOffer>,
+}
+
+/// A pattern that the owner can teach with "Approve and remember".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RememberOffer {
+    /// The generalized command, for example `git log -n <number>`.
+    pub pattern: String,
+    /// Approvals that the pattern has now.
+    pub approvals: u32,
+    /// Approvals that the pattern needs to run without a prompt.
+    pub needed: u32,
+}
+
+/// The owner answer that a waiting run gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    Approve,
+    /// Approve the run and add one approval to its pattern.
+    ApproveAndRemember,
+    Deny,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalOutcome {
     Approved,
+    /// The owner approved with "Approve and remember".
+    ApprovedAndRemembered,
     Denied,
     TimedOut,
     /// The vault was locked or replaced, or the broker stopped, before the run used a
     /// decision. An approval from before that event is not valid.
     Invalidated,
+}
+
+/// Why [`ApprovalQueue::approve`] refused an approval. The run did not get it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalRefusal {
+    /// The proof is not for an approval.
+    NotAnApproval,
+    /// The owner check is older than [`PROOF_LIFETIME`].
+    Stale,
+    /// No run with this ID waits: it ended, timed out, or belongs to an older queue.
+    NotWaiting,
+    /// The waiting run is not the run that the owner confirmed.
+    Changed,
+    /// "Approve and remember" for a run that cannot teach a pattern.
+    NothingToRemember,
+}
+
+impl ApprovalRefusal {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::NotAnApproval => "The owner check was for another action. Nothing was approved.",
+            Self::Stale => "The owner check is too old. Confirm again. Nothing was approved.",
+            Self::NotWaiting => "The run no longer waits. Nothing was approved.",
+            Self::Changed => {
+                "The request changed after you saw it. Nothing was approved. Review the request again."
+            }
+            Self::NothingToRemember => {
+                "This run cannot teach a pattern. Nothing was approved. Use \"Approve once\"."
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -57,7 +125,7 @@ struct QueueState {
     /// The broker stopped. A new run does not wait.
     closed: bool,
     pending: Vec<PendingRun>,
-    decisions: BTreeMap<u64, bool>,
+    decisions: BTreeMap<u64, Answer>,
 }
 
 type Notifier = Box<dyn Fn() + Send + Sync>;
@@ -126,16 +194,54 @@ impl ApprovalQueue {
         self.state().pending.clone()
     }
 
-    /// Record the owner decision. Returns false when the run no longer waits.
-    pub fn decide(&self, id: u64, approve: bool) -> bool {
+    /// Approve a waiting run (goal item A4). `proof` must come from
+    /// [`OwnerGate::authorize`] for [`OwnerAction::ApproveRun`] or
+    /// [`OwnerAction::ApproveAndRemember`], with the run exactly as it waits now. A
+    /// notification or an acknowledgment cannot make a proof, so it is never an
+    /// approval (goal item N4). "Approve and remember" needs a run with a pattern
+    /// offer. Its run ends with [`ApprovalOutcome::ApprovedAndRemembered`], and the
+    /// broker then adds one approval to the pattern (ADR 0010).
+    pub fn approve(&self, proof: OwnerProof) -> Result<(), ApprovalRefusal> {
+        let Some(confirmed) = proof.action().run() else {
+            return Err(ApprovalRefusal::NotAnApproval);
+        };
+        if !proof.is_fresh() {
+            return Err(ApprovalRefusal::Stale);
+        }
+        let answer = match proof.action() {
+            OwnerAction::ApproveAndRemember(_) => Answer::ApproveAndRemember,
+            _ => Answer::Approve,
+        };
+        let mut state = self.state();
+        match state.pending.iter().find(|run| run.id == confirmed.id) {
+            None => Err(ApprovalRefusal::NotWaiting),
+            Some(waiting) if waiting != confirmed => Err(ApprovalRefusal::Changed),
+            Some(waiting) if answer == Answer::ApproveAndRemember && waiting.remember.is_none() => {
+                Err(ApprovalRefusal::NothingToRemember)
+            }
+            Some(_) => {
+                Self::settle(&mut state, confirmed.id, answer);
+                self.changed.notify_all();
+                Ok(())
+            }
+        }
+    }
+
+    /// Deny a waiting run. A denial needs no owner check. Returns false when the run
+    /// no longer waits.
+    pub fn deny(&self, id: u64) -> bool {
         let mut state = self.state();
         if !state.pending.iter().any(|run| run.id == id) {
             return false;
         }
-        state.pending.retain(|run| run.id != id);
-        state.decisions.insert(id, approve);
+        Self::settle(&mut state, id, Answer::Deny);
         self.changed.notify_all();
         true
+    }
+
+    fn settle(state: &mut QueueState, id: u64, answer: Answer) {
+        state.pending.retain(|run| run.id != id);
+        state.decisions.insert(id, answer);
     }
 
     /// End every waiting run and every decision that a run did not use yet. The
@@ -186,11 +292,11 @@ impl ApprovalQueue {
                 state.decisions.remove(&id);
                 return ApprovalOutcome::Invalidated;
             }
-            if let Some(approved) = state.decisions.remove(&id) {
-                return if approved {
-                    ApprovalOutcome::Approved
-                } else {
-                    ApprovalOutcome::Denied
+            if let Some(answer) = state.decisions.remove(&id) {
+                return match answer {
+                    Answer::Approve => ApprovalOutcome::Approved,
+                    Answer::ApproveAndRemember => ApprovalOutcome::ApprovedAndRemembered,
+                    Answer::Deny => ApprovalOutcome::Denied,
                 };
             }
             let now = Instant::now();
@@ -237,6 +343,7 @@ mod tests {
             user_request: String::new(),
             request_source: String::new(),
             agent_request: String::new(),
+            remember: None,
         }
     }
 
@@ -247,6 +354,83 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// A proof for the waiting run `id`, as the gate makes it after an owner check.
+    fn proof_for(queue: &ApprovalQueue, id: u64) -> OwnerProof {
+        let run = queue
+            .pending()
+            .into_iter()
+            .find(|run| run.id == id)
+            .expect("the run waits");
+        OwnerProof::issue_for_test(OwnerAction::ApproveRun(run), [0; 32], Instant::now())
+    }
+
+    fn start_waiter(queue: &Arc<ApprovalQueue>) -> std::thread::JoinHandle<ApprovalOutcome> {
+        let queue = Arc::clone(queue);
+        std::thread::spawn(move || queue.wait_for(run(), Duration::from_secs(5), || true))
+    }
+
+    /// Goal item A4: an approval needs a fresh proof for exactly the waiting run.
+    #[test]
+    fn approve_refuses_without_a_matching_fresh_proof() {
+        let queue = Arc::new(ApprovalQueue::new());
+        let waiter = start_waiter(&queue);
+        let id = wait_until_pending(&queue);
+        let waiting = queue.pending()[0].clone();
+
+        // A proof for another action is not an approval.
+        let reveal =
+            OwnerProof::issue_for_test(OwnerAction::Reveal { item_id: 1 }, [0; 32], Instant::now());
+        assert_eq!(queue.approve(reveal), Err(ApprovalRefusal::NotAnApproval));
+
+        // An old owner check is not an approval.
+        let old = Instant::now()
+            .checked_sub(PROOF_LIFETIME + Duration::from_secs(1))
+            .expect("old instant");
+        let stale =
+            OwnerProof::issue_for_test(OwnerAction::ApproveRun(waiting.clone()), [0; 32], old);
+        assert_eq!(queue.approve(stale), Err(ApprovalRefusal::Stale));
+
+        // The owner confirmed another command than the one that waits.
+        let mut changed = waiting.clone();
+        changed.command = vec!["rm".to_owned(), "-rf".to_owned(), "/tmp/x".to_owned()];
+        let proof =
+            OwnerProof::issue_for_test(OwnerAction::ApproveRun(changed), [0; 32], Instant::now());
+        assert_eq!(queue.approve(proof), Err(ApprovalRefusal::Changed));
+
+        // Another waiting run with the same content but another ID.
+        let mut other = waiting.clone();
+        other.id = id.wrapping_add(1000);
+        let proof =
+            OwnerProof::issue_for_test(OwnerAction::ApproveRun(other), [0; 32], Instant::now());
+        assert_eq!(queue.approve(proof), Err(ApprovalRefusal::NotWaiting));
+
+        // "Approve and remember" uses the same path. This run has no pattern offer.
+        let remember = OwnerProof::issue_for_test(
+            OwnerAction::ApproveAndRemember(waiting.clone()),
+            [0; 32],
+            Instant::now(),
+        );
+        assert_eq!(
+            queue.approve(remember),
+            Err(ApprovalRefusal::NothingToRemember)
+        );
+
+        // Each refusal left the run waiting.
+        assert_eq!(queue.pending(), vec![waiting.clone()]);
+        let once = OwnerProof::issue_for_test(
+            OwnerAction::ApproveRun(waiting.clone()),
+            [0; 32],
+            Instant::now(),
+        );
+        assert_eq!(queue.approve(once), Ok(()));
+        assert_eq!(waiter.join().expect("join"), ApprovalOutcome::Approved);
+
+        // The run ended. The same approval again finds no run.
+        let again =
+            OwnerProof::issue_for_test(OwnerAction::ApproveRun(waiting), [0; 32], Instant::now());
+        assert_eq!(queue.approve(again), Err(ApprovalRefusal::NotWaiting));
     }
 
     #[test]
@@ -262,17 +446,14 @@ mod tests {
             std::thread::spawn(move || queue.wait_for(run(), Duration::from_secs(5), || true))
         };
         let id = wait_until_pending(&queue);
-        assert!(queue.decide(id, true));
+        assert_eq!(queue.approve(proof_for(&queue, id)), Ok(()));
         assert_eq!(waiter.join().expect("join"), ApprovalOutcome::Approved);
         assert_eq!(signals.load(Ordering::SeqCst), 1);
-        assert!(!queue.decide(id, false));
+        assert!(!queue.deny(id));
 
-        let waiter = {
-            let queue = Arc::clone(&queue);
-            std::thread::spawn(move || queue.wait_for(run(), Duration::from_secs(5), || true))
-        };
+        let waiter = start_waiter(&queue);
         let id = wait_until_pending(&queue);
-        assert!(queue.decide(id, false));
+        assert!(queue.deny(id));
         assert_eq!(waiter.join().expect("join"), ApprovalOutcome::Denied);
 
         assert_eq!(
@@ -280,6 +461,38 @@ mod tests {
             ApprovalOutcome::TimedOut
         );
         assert!(queue.pending().is_empty());
+    }
+
+    /// "Approve and remember" with a proof for a run with a pattern offer ends the wait
+    /// with its own outcome, so the broker adds one approval to the pattern.
+    #[test]
+    fn approve_and_remember_with_an_offer() {
+        let queue = Arc::new(ApprovalQueue::new());
+        let offered = PendingRun {
+            remember: Some(RememberOffer {
+                pattern: "git log -n <number>".to_owned(),
+                approvals: 1,
+                needed: 3,
+            }),
+            ..run()
+        };
+        let waiter = {
+            let queue = Arc::clone(&queue);
+            std::thread::spawn(move || queue.wait_for(offered, Duration::from_secs(5), || true))
+        };
+        let id = wait_until_pending(&queue);
+        let waiting = queue.pending()[0].clone();
+        let proof = OwnerProof::issue_for_test(
+            OwnerAction::ApproveAndRemember(waiting),
+            [0; 32],
+            Instant::now(),
+        );
+        assert_eq!(queue.approve(proof), Ok(()));
+        assert!(!queue.deny(id), "the run no longer waits");
+        assert_eq!(
+            waiter.join().expect("join"),
+            ApprovalOutcome::ApprovedAndRemembered
+        );
     }
 
     #[test]
@@ -290,10 +503,15 @@ mod tests {
             std::thread::spawn(move || queue.wait_for(run(), Duration::from_secs(5), || true))
         };
         let id = wait_until_pending(&queue);
+        let proof = proof_for(&queue, id);
         queue.invalidate_all();
         assert_eq!(waiter.join().expect("join"), ApprovalOutcome::Invalidated);
         assert!(queue.pending().is_empty());
-        assert!(!queue.decide(id, true), "the run no longer waits");
+        assert_eq!(
+            queue.approve(proof),
+            Err(ApprovalRefusal::NotWaiting),
+            "the run no longer waits"
+        );
 
         // An invalidated queue still takes new runs. A closed queue does not.
         let waiter = {
@@ -333,7 +551,7 @@ mod tests {
         };
         in_check.recv().expect("waiter in check");
         let id = queue.pending()[0].id;
-        assert!(queue.decide(id, true));
+        assert_eq!(queue.approve(proof_for(&queue, id)), Ok(()));
         queue.invalidate_all();
         release.send(()).expect("release");
         assert_eq!(waiter.join().expect("join"), ApprovalOutcome::Invalidated);
@@ -362,7 +580,7 @@ mod tests {
         };
         in_check.recv().expect("waiter in check");
         let id = queue.pending()[0].id;
-        assert!(queue.decide(id, true));
+        assert_eq!(queue.approve(proof_for(&queue, id)), Ok(()));
         valid.store(false, Ordering::SeqCst);
         release.send(()).expect("release");
         assert_eq!(waiter.join().expect("join"), ApprovalOutcome::Invalidated);

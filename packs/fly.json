@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "fly",
+  "description": "Fly.io CLI (fly, flyctl): deployments, machine and app changes, destruction, remote shells, tokens, and read commands.",
+  "programs": ["fly", "flyctl"],
+  "roles": {
+    "usage": ["fly", "flyctl"]
+  },
+  "rules": [
+    {
+      "id": "deploy-and-scale",
+      "flag": "production",
+      "dry_run": "skip",
+      "note": "Deployments, scaling, and removal of an app. `scale show` only reads.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["deploy", "up", "destroy", "launch"] },
+          { "subcommand": ["scale"], "not": { "action": ["show"] } }
+        ]
+      }
+    },
+    {
+      "id": "secret-change",
+      "flag": "production",
+      "dry_run": "skip",
+      "note": "A secret change restarts the app with new values. `secrets list` shows only names and digests.",
+      "when": { "subcommand": ["secrets"], "action": ["set", "unset", "import", "deploy"] }
+    },
+    {
+      "id": "resource-change",
+      "flag": "production",
+      "dry_run": "skip",
+      "note": "A change to apps, machines, volumes, databases, IP addresses, or certificates.",
+      "when": {
+        "action": [
+          "create", "update", "restart", "stop", "start", "clone", "run", "attach", "detach",
+          "failover", "allocate-v4", "allocate-v6", "release", "add", "remove", "move",
+          "suspend", "kill", "cordon", "uncordon", "fork", "extend", "import"
+        ]
+      }
+    },
+    {
+      "id": "destroy-data",
+      "flag": "data_loss",
+      "dry_run": "skip",
+      "note": "Destruction of an app, a machine, a volume, or a database.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["destroy"] },
+          { "action": ["destroy", "delete", "rm"] }
+        ]
+      }
+    },
+    {
+      "id": "remote-shell",
+      "flag": "remote_access",
+      "note": "A shell or a command on a machine of the app, or a database console.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["ssh", "console", "sftp"] },
+          { "action": ["connect"] }
+        ]
+      }
+    },
+    {
+      "id": "tokens",
+      "flag": "secret_output",
+      "note": "`auth token` and `tokens create` print an access token.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["auth"], "action": ["token"] },
+          { "subcommand": ["tokens"], "action": ["create"] }
+        ]
+      }
+    }
+  ],
+  "safe": [
+    {
+      "id": "read-commands",
+      "note": "Status, logs, releases, and listings.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["status", "logs", "releases", "version", "doctor", "platform", "info"] },
+          {
+            "subcommand": [
+              "secrets", "apps", "machine", "machines", "m", "volumes", "vol", "ips", "certs",
+              "postgres", "pg", "redis", "config", "checks", "image", "scale", "regions",
+              "auth", "orgs"
+            ],
+            "action": ["list", "ls", "show", "status", "validate", "whoami"]
+          }
+        ]
+      }
+    }
+  ]
+}

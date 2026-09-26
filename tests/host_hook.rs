@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use apassy::agent::client::{self, SendOptions};
 use apassy::agent::wire::{Action, WireResponse};
-use apassy::broker::approvals::PendingRun;
+use apassy::broker::approvals::{ApprovalQueue, OwnerAction, OwnerCheck, OwnerGate, PendingRun};
 use apassy::broker::bouncer::BouncerClient;
 use apassy::broker::http::TlsClient;
 use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault};
@@ -310,16 +310,28 @@ fn hook_request_replaces_the_agent_text_and_matches_the_transcript() {
     assert!(!reason.contains(SECRET));
 }
 
+/// The owner approves `pending` after a fresh passphrase check (goal item A4).
+fn owner_approves(vault: &SharedVault, approvals: &ApprovalQueue, pending: &PendingRun) {
+    let proof = OwnerGate::new(Arc::clone(vault), None)
+        .authorize(
+            OwnerAction::ApproveRun(pending.clone()),
+            OwnerCheck::passphrase(PASS),
+        )
+        .expect("owner check");
+    assert_eq!(approvals.approve(proof), Ok(()));
+}
+
 #[test]
 fn approval_card_shows_the_source_and_the_difference() {
     let fx = fixture(ExecMode::Ask, SHORT);
     let transcript = claude_transcript(&fx, SESSION, PROMPT);
     hook(&fx, &claude_input(&fx, SESSION, &transcript, PROMPT));
     let approvals = Arc::clone(fx.broker.approvals());
+    let vault = Arc::clone(&fx.vault);
     let approver = std::thread::spawn(move || {
         loop {
             if let Some(pending) = approvals.pending().into_iter().next() {
-                assert!(approvals.decide(pending.id, true));
+                owner_approves(&vault, &approvals, &pending);
                 return pending;
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -595,11 +607,12 @@ type Approver = (Arc<AtomicBool>, std::thread::JoinHandle<Option<PendingRun>>);
 fn approver(fx: &Fixture) -> Approver {
     let stop = Arc::new(AtomicBool::new(false));
     let approvals = Arc::clone(fx.broker.approvals());
+    let vault = Arc::clone(&fx.vault);
     let flag = Arc::clone(&stop);
     let handle = std::thread::spawn(move || {
         while !flag.load(Ordering::SeqCst) {
             if let Some(pending) = approvals.pending().into_iter().next() {
-                assert!(approvals.decide(pending.id, true));
+                owner_approves(&vault, &approvals, &pending);
                 return Some(pending);
             }
             std::thread::sleep(Duration::from_millis(20));

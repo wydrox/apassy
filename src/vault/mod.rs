@@ -13,7 +13,9 @@
 //! arbitrary SQLite clients.
 
 mod agents;
+mod learning;
 mod types;
+mod waiting;
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind};
@@ -33,6 +35,12 @@ pub use agents::{
     ExecMode, ExecRule, GrantSummary, MAX_ACTIVITY_ROWS, MAX_TOKEN_LIFETIME_DAYS, NewActivity,
     Reversibility, RiskLevel, Scope, checked_env_name, format_utc,
 };
+pub use learning::{
+    CALIBRATION_CEILING, CALIBRATION_FLOOR, CalibrationRecord, CandidateAgreement, DayRate,
+    DecidedBy, DecisionEntry, DecisionRecord, LoggedDecision, MAX_BLOCKED_PATTERNS,
+    MAX_DECISION_ROWS, MAX_KEPT_DENIALS, MAX_PATTERNS, PATTERN_APPROVALS_NEEDED, PATTERN_IDLE_DAYS,
+    PatternKey, PatternRecord, PatternState, RequestSource,
+};
 pub use types::{
     Field, FieldSummary, ItemDetails, ItemDraft, ItemSummary, MAX_PASSPHRASE_BYTES,
     MIN_PASSPHRASE_BYTES, SecretValue, VaultError, VaultErrorKind, VaultResult,
@@ -41,6 +49,7 @@ use types::{
     MAX_SEARCH_RESULTS, SCHEMA_VERSION, err, kind_as_str, kind_from_str,
     validate_create_passphrase, validate_draft, validate_unlock_passphrase,
 };
+pub use waiting::{ENDED_BY_RESTART, WaitTicket};
 
 const SQLCIPHER4_KDF_ITER: i64 = 256_000;
 const SQLCIPHER4_PAGE_SIZE: i64 = 4096;
@@ -89,6 +98,7 @@ const AGENT_SCHEMA_VERSION: i64 = 2;
 const PROCESS_SCHEMA_VERSION: i64 = 3;
 const RULE_SCHEMA_VERSION: i64 = 4;
 const DECLARATION_SCHEMA_VERSION: i64 = 5;
+const TOKEN_SCHEMA_VERSION: i64 = 6;
 
 /// Encrypted local vault. Connection state is private. Debug is redacted.
 pub struct Vault {
@@ -175,6 +185,10 @@ impl Vault {
         self.lock()?;
         validate_unlock_passphrase(passphrase)?;
         self.conn = Some(open_working_conn(&self.path, passphrase)?);
+        // Goal item N3: a run that waited when the process ended or the vault was
+        // locked has no final entry. It gets one now. A broker thread that still holds
+        // its wait ticket writes its own entry. A failure here does not stop the unlock.
+        let _ = self.end_stale_waits();
         Ok(())
     }
 
@@ -420,6 +434,21 @@ impl Vault {
             }),
             Err(_) => Err(err(VaultErrorKind::WrongKeyOrCorrupt)),
         }
+    }
+
+    /// The canonical path of the vault file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Check `passphrase` against the vault file at `path` (goal items A2, A4).
+    ///
+    /// The check opens a second, read-only connection and closes it at once. It does not
+    /// change an open vault and does not keep the passphrase. The caller does not need
+    /// the vault mutex, so the key derivation does not block the broker. A wrong
+    /// passphrase returns `WrongKeyOrCorrupt`.
+    pub fn verify_passphrase_at(path: &Path, passphrase: &str) -> VaultResult<()> {
+        validate_encrypted_source(path, passphrase)
     }
 
     fn require_unlocked(&self) -> VaultResult<()> {
@@ -852,6 +881,7 @@ fn verify_user_version(conn: &Connection) -> VaultResult<i64> {
         | PROCESS_SCHEMA_VERSION
         | RULE_SCHEMA_VERSION
         | DECLARATION_SCHEMA_VERSION
+        | TOKEN_SCHEMA_VERSION
         | SCHEMA_VERSION) => Ok(version),
         _ => Err(err(VaultErrorKind::UnsupportedSchema)),
     }
@@ -929,12 +959,25 @@ fn verify_expected_columns(conn: &Connection, version: i64) -> VaultResult<()> {
     } else {
         &[]
     };
-    let v6: &[&str] = if version >= SCHEMA_VERSION {
+    let v6: &[&str] = if version >= TOKEN_SCHEMA_VERSION {
         &agents::SCHEMA_V6_COLUMNS
     } else {
         &[]
     };
-    for sql in v1.iter().chain(v2).chain(v3).chain(v4).chain(v5).chain(v6) {
+    let v7: &[&str] = if version >= SCHEMA_VERSION {
+        &learning::SCHEMA_V7_COLUMNS
+    } else {
+        &[]
+    };
+    for sql in v1
+        .iter()
+        .chain(v2)
+        .chain(v3)
+        .chain(v4)
+        .chain(v5)
+        .chain(v6)
+        .chain(v7)
+    {
         drop(
             conn.prepare(sql)
                 .map_err(|_| err(VaultErrorKind::UnsupportedSchema))?,
@@ -974,7 +1017,11 @@ fn migrate_to_current(conn: &mut Connection, from: i64) -> VaultResult<()> {
         tx.execute_batch(agents::SCHEMA_V5_SQL)
             .map_err(|_| err(VaultErrorKind::Storage))?;
     }
-    tx.execute_batch(agents::SCHEMA_V6_SQL)
+    if from < TOKEN_SCHEMA_VERSION {
+        tx.execute_batch(agents::SCHEMA_V6_SQL)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+    }
+    tx.execute_batch(learning::SCHEMA_V7_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     verify_expected_columns(conn, SCHEMA_VERSION)
@@ -1007,6 +1054,8 @@ fn initialize_new_db(path: &Path, passphrase: &str) -> VaultResult<()> {
     tx.execute_batch(agents::SCHEMA_V5_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.execute_batch(agents::SCHEMA_V6_SQL)
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute_batch(learning::SCHEMA_V7_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     close_conn(conn)

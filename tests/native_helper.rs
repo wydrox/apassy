@@ -6,6 +6,15 @@
 //! that can show a Touch ID prompt: an unsigned helper has no keychain access
 //! group, so each keychain command stops with `keychain_unavailable` first,
 //! and `authenticate` gets only an invalid reason. All data is synthetic.
+//!
+//! Caller check: the real helper answers only the signed Apassy app that
+//! contains it. Here the parent is this test process, and the helper has no
+//! signature. So the tests build the helper with `-D APASSY_HELPER_DEV` and set
+//! `APASSY_HELPER_DEV_ANY_CALLER=1` for the protocol checks. Other tests show
+//! that the helper refuses this parent without the override, and that a helper
+//! built without the flag (as `scripts/build-app.sh` builds it) ignores the
+//! override. `scripts/build-app.sh` checks the signed helpers with a signed
+//! parent.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -450,42 +459,91 @@ fn swift_and_rust_error_codes_match() {
     assert_eq!(swift, rust);
 }
 
-/// Build the real helper once, without a signature.
+/// The environment variable of the development caller override.
+const DEV_ANY_CALLER: &str = "APASSY_HELPER_DEV_ANY_CALLER";
+
+/// Build the real helper without a signature. `dev` adds `-D APASSY_HELPER_DEV`.
+fn build_helper(name: &str, dev: bool) -> PathBuf {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let out_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    fs::create_dir_all(&out_dir).expect("create out dir");
+    let out = out_dir.join("apassy-helper");
+    let mut sources: Vec<PathBuf> = fs::read_dir(root.join("native/ApassyHelper"))
+        .expect("read sources")
+        .map(|entry| entry.expect("entry").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "swift"))
+        .collect();
+    sources.sort();
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x86_64"
+    };
+    let mut command = Command::new("xcrun");
+    command
+        .args(["--sdk", "macosx", "swiftc", "-Onone", "-swift-version", "5"])
+        .args(["-warnings-as-errors", "-target"])
+        .arg(format!("{arch}-apple-macos15.0"));
+    if dev {
+        command.args(["-D", "APASSY_HELPER_DEV"]);
+    }
+    let status = command
+        .arg("-o")
+        .arg(&out)
+        .args(&sources)
+        .status()
+        .expect("run xcrun: this test needs Xcode and the Swift compiler");
+    assert!(status.success(), "swiftc failed to build the helper");
+    out
+}
+
+/// The real helper, built once with the development override.
 fn real_helper() -> &'static Path {
     static HELPER: OnceLock<PathBuf> = OnceLock::new();
-    HELPER.get_or_init(|| {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let out_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("native-real");
-        fs::create_dir_all(&out_dir).expect("create out dir");
-        let out = out_dir.join("apassy-helper");
-        let mut sources: Vec<PathBuf> = fs::read_dir(root.join("native/ApassyHelper"))
-            .expect("read sources")
-            .map(|entry| entry.expect("entry").path())
-            .filter(|path| path.extension().is_some_and(|ext| ext == "swift"))
-            .collect();
-        sources.sort();
-        let arch = if cfg!(target_arch = "aarch64") {
-            "arm64"
-        } else {
-            "x86_64"
-        };
-        let status = Command::new("xcrun")
-            .args(["--sdk", "macosx", "swiftc", "-Onone", "-swift-version", "5"])
-            .args(["-warnings-as-errors", "-target"])
-            .arg(format!("{arch}-apple-macos15.0"))
-            .arg("-o")
-            .arg(&out)
-            .args(&sources)
-            .status()
-            .expect("run xcrun: this test needs Xcode and the Swift compiler");
-        assert!(status.success(), "swiftc failed to build the helper");
-        out
-    })
+    HELPER.get_or_init(|| build_helper("native-real", true))
+}
+
+/// The real helper, built once without the development flag, as a release.
+fn real_release_helper() -> &'static Path {
+    static HELPER: OnceLock<PathBuf> = OnceLock::new();
+    HELPER.get_or_init(|| build_helper("native-release", false))
+}
+
+/// A client for the development helper with the caller override on. The
+/// client starts the helper without extra environment, so a small script sets
+/// the variable and then replaces itself with the helper. The parent of the
+/// helper stays this test process.
+fn dev_client() -> NativeHelper {
+    static WRAPPER: OnceLock<PathBuf> = OnceLock::new();
+    let wrapper = WRAPPER.get_or_init(|| {
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("native-real-wrapper");
+        fs::create_dir_all(&dir).expect("create wrapper dir");
+        let path = dir.join("helper");
+        let script = format!(
+            "#!/bin/sh\n{DEV_ANY_CALLER}=1 exec '{}'\n",
+            real_helper().display()
+        );
+        fs::write(&path, script).expect("write wrapper");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+        path
+    });
+    NativeHelper::with_paths(wrapper, wrapper)
 }
 
 fn raw_exchange(helper: &Path, input: &str) -> Vec<Value> {
+    raw_exchange_with(helper, input, Some("1"))
+}
+
+/// Run `helper` with `input`. `any_caller` is the value of the development
+/// override, or `None` for no variable.
+fn raw_exchange_with(helper: &Path, input: &str, any_caller: Option<&str>) -> Vec<Value> {
     use std::io::Write;
-    let mut child = Command::new(helper)
+    let mut command = Command::new(helper);
+    command.env_remove(DEV_ANY_CALLER);
+    if let Some(value) = any_caller {
+        command.env(DEV_ANY_CALLER, value);
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -536,8 +594,7 @@ fn real_helper_answers_each_line_with_one_line() {
 
 #[test]
 fn real_unsigned_helper_reports_missing_keychain_and_bundle() {
-    let helper = real_helper();
-    let client = NativeHelper::with_paths(helper, helper);
+    let client = dev_client();
 
     let info = client.ping().expect("ping");
     assert_eq!(info.protocol, 1);
@@ -568,5 +625,86 @@ fn real_unsigned_helper_reports_missing_keychain_and_bundle() {
     assert_eq!(
         client.notify(&notification).unwrap_err().code(),
         Some(HelperErrorCode::NotificationsUnavailable)
+    );
+}
+
+/// Requests that cannot show a prompt or post a notification, also when the
+/// caller check is broken: each one is invalid or has no visible effect.
+const HARMLESS_REQUESTS: [&str; 8] = [
+    r#"{"cmd":"ping"}"#,
+    r#"{"cmd":"notify_status"}"#,
+    r#"{"cmd":"keychain_exists","account":"synthetic"}"#,
+    r#"{"cmd":"authenticate","reason":""}"#,
+    r#"{"cmd":"keychain_read","account":"bad account","reason":"x"}"#,
+    r#"{"cmd":"notify","id":"event-1","title":"","body":"x"}"#,
+    "not json",
+    r#"{"cmd":"format_disk"}"#,
+];
+
+fn harmless_input() -> String {
+    HARMLESS_REQUESTS.join("\n") + "\n"
+}
+
+fn assert_all_refused(responses: &[Value]) {
+    assert_eq!(responses.len(), HARMLESS_REQUESTS.len(), "{responses:?}");
+    for response in responses {
+        assert_eq!(response["ok"], false, "{response}");
+        assert_eq!(response["error"], "caller_not_allowed", "{response}");
+        assert!(response["message"].is_string(), "{response}");
+        assert!(response.get("protocol").is_none(), "{response}");
+    }
+}
+
+#[test]
+fn real_helper_refuses_a_parent_that_is_not_apassy() {
+    // The parent is this test process, not the signed Apassy app. The helper
+    // answers each request with `caller_not_allowed` before it reads the
+    // request. So an invalid request also gets `caller_not_allowed`, not
+    // `invalid_request`.
+    for any_caller in [None, Some("0"), Some("yes")] {
+        let responses = raw_exchange_with(real_helper(), &harmless_input(), any_caller);
+        assert_all_refused(&responses);
+    }
+
+    // The same through the Rust client: the code maps to a typed error.
+    let helper = real_helper();
+    let client = NativeHelper::with_paths(helper, helper);
+    assert_eq!(
+        client.ping().unwrap_err().code(),
+        Some(HelperErrorCode::CallerNotAllowed)
+    );
+    assert_eq!(
+        client.keychain_exists("synthetic").unwrap_err().code(),
+        Some(HelperErrorCode::CallerNotAllowed)
+    );
+    assert_eq!(
+        client.notify_status().unwrap_err().code(),
+        Some(HelperErrorCode::CallerNotAllowed)
+    );
+
+    // Control: with the override, the same development helper answers.
+    let responses = raw_exchange_with(real_helper(), "{\"cmd\":\"ping\"}\n", Some("1"));
+    assert_eq!(responses[0]["ok"], true, "{responses:?}");
+}
+
+#[test]
+fn a_helper_built_without_the_dev_flag_ignores_the_override() {
+    // `scripts/build-app.sh` builds the helper without `-D APASSY_HELPER_DEV`.
+    // Such a helper does not contain the override, so the variable changes
+    // nothing.
+    for any_caller in [None, Some("1")] {
+        let responses = raw_exchange_with(real_release_helper(), &harmless_input(), any_caller);
+        assert_all_refused(&responses);
+    }
+    let release = fs::read(real_release_helper()).expect("read release helper");
+    let dev = fs::read(real_helper()).expect("read development helper");
+    let name = DEV_ANY_CALLER.as_bytes();
+    assert!(
+        !release.windows(name.len()).any(|window| window == name),
+        "the release helper contains {DEV_ANY_CALLER}"
+    );
+    assert!(
+        dev.windows(name.len()).any(|window| window == name),
+        "control: the development helper contains {DEV_ANY_CALLER}"
     );
 }

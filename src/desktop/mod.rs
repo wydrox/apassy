@@ -3,10 +3,19 @@
 //! This module is a demo UI. It is not a secure vault, authenticated owner
 //! channel, or verified isolation boundary.
 
+#[cfg(feature = "vault")]
+pub mod inbox;
+mod learning_ui;
 pub mod model;
+#[cfg(feature = "vault")]
+pub mod notify;
+#[cfg(feature = "vault")]
+pub mod owner_check;
 #[cfg(feature = "vault")]
 pub mod owner_store;
 mod ui;
+#[cfg(feature = "vault")]
+pub mod unlock;
 
 use eframe::egui;
 
@@ -17,7 +26,7 @@ pub use model::{
     REPORTING_AGENT_ID, REPORTING_ITEM_ID, RequestStatus, SAMPLE_RULE_TEXT,
 };
 
-/// Five owner views in the desktop shell.
+/// Owner views in the desktop shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OwnerView {
     Vault,
@@ -25,15 +34,18 @@ pub enum OwnerView {
     Rules,
     Agents,
     Activity,
+    /// Ask rate, automatic decisions, patterns, and calibration (ADR 0009, goal item B10).
+    Learning,
 }
 
 impl OwnerView {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Vault,
         Self::Item,
         Self::Rules,
         Self::Agents,
         Self::Activity,
+        Self::Learning,
     ];
 
     pub fn label(self) -> &'static str {
@@ -43,6 +55,7 @@ impl OwnerView {
             Self::Rules => "Rules",
             Self::Agents => "Agents",
             Self::Activity => "Activity",
+            Self::Learning => "Learning",
         }
     }
 }
@@ -72,6 +85,13 @@ pub struct DesktopApp {
     /// The local agent broker. It runs only with a native window.
     #[cfg(feature = "vault")]
     pub(crate) broker: BrokerState,
+    /// Owner checks, Touch ID unlock, notifications, and the inbox (goal items A2 to
+    /// A4, N1 to N4).
+    #[cfg(feature = "vault")]
+    pub(crate) owner: owner_check::OwnerFlows,
+    /// Learning view state (goal item B10).
+    #[cfg(feature = "vault")]
+    pub(crate) learning: learning_ui::LearningUiState,
     styled: bool,
 }
 
@@ -111,6 +131,10 @@ impl DesktopApp {
             owner_ui: owner_store::OwnerUiState::default(),
             #[cfg(feature = "vault")]
             broker: BrokerState::NotStarted,
+            #[cfg(feature = "vault")]
+            owner: owner_check::OwnerFlows::default(),
+            #[cfg(feature = "vault")]
+            learning: learning_ui::LearningUiState::default(),
             styled: false,
         }
     }
@@ -122,12 +146,9 @@ impl DesktopApp {
         #[cfg(feature = "vault")]
         {
             app.start_broker(&crate::agent::client::default_socket_path());
-            if let BrokerState::Running(handle) = &app.broker {
-                let ctx = cc.egui_ctx.clone();
-                handle
-                    .approvals()
-                    .set_notifier(move || ctx.request_repaint());
-            }
+            // The notification center sets the notifier of the approval queue. It
+            // wakes its watcher and repaints the window when a run starts to wait.
+            app.start_native(&cc.egui_ctx);
         }
         app
     }
@@ -254,6 +275,13 @@ impl DesktopApp {
 impl eframe::App for DesktopApp {
     fn persist_egui_memory(&self) -> bool {
         false
+    }
+
+    /// Waiting runs end and stay in the inbox. The vault locks. Typed secrets are
+    /// erased (goal items V3, N3; key-memory review F3).
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        #[cfg(feature = "vault")]
+        self.shut_down();
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {

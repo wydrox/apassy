@@ -12,6 +12,9 @@ use std::time::{Duration, Instant};
 
 use apassy::agent::client;
 use apassy::agent::wire::{Action, WireResponse};
+use apassy::broker::approvals::{
+    ApprovalRefusal, OwnerAction, OwnerCheck, OwnerGate, OwnerProof, PendingRun,
+};
 use apassy::broker::bouncer::BouncerClient;
 use apassy::broker::http::TlsClient;
 use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault};
@@ -121,9 +124,18 @@ fn with_vault<T>(fx: &Fixture, f: impl FnOnce(&mut Vault) -> T) -> T {
     f(guard.as_mut().expect("open vault"))
 }
 
-/// Wait for one pending run, then decide it on another thread.
+/// The owner confirms the approval of `run` with the passphrase now (goal item A4).
+fn owner_check(vault: &SharedVault, run: PendingRun) -> OwnerProof {
+    OwnerGate::new(Arc::clone(vault), None)
+        .authorize(OwnerAction::ApproveRun(run), OwnerCheck::passphrase(PASS))
+        .expect("owner check")
+}
+
+/// Wait for one pending run, then decide it on another thread. An approval passes the
+/// owner check before `before` runs, so `before` can change the vault after the check.
 fn decide_later(fx: &Fixture, approve: bool, before: impl FnOnce() + Send + 'static) {
     let approvals = Arc::clone(fx.broker.approvals());
+    let vault = Arc::clone(&fx.vault);
     std::thread::spawn(move || {
         let pending = loop {
             if let Some(run) = approvals.pending().into_iter().next() {
@@ -133,8 +145,16 @@ fn decide_later(fx: &Fixture, approve: bool, before: impl FnOnce() + Send + 'sta
         };
         assert_eq!(pending.env_names, vec![ENV_NAME.to_owned()]);
         assert!(!format!("{pending:?}").contains(SECRET));
+        let proof = approve.then(|| owner_check(&vault, pending.clone()));
         before();
-        approvals.decide(pending.id, approve);
+        match proof {
+            Some(proof) => {
+                let _ = approvals.approve(proof);
+            }
+            None => {
+                approvals.deny(pending.id);
+            }
+        }
     });
 }
 
@@ -248,10 +268,10 @@ fn revoke_or_lock_during_approval_stops_the_run() {
     );
 }
 
-fn first_pending(approvals: &broker::approvals::ApprovalQueue) -> u64 {
+fn first_pending(approvals: &broker::approvals::ApprovalQueue) -> PendingRun {
     loop {
-        if let Some(run) = approvals.pending().first() {
-            return run.id;
+        if let Some(run) = approvals.pending().into_iter().next() {
+            return run;
         }
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -330,15 +350,15 @@ fn lock_ends_waiting_runs() {
     let approvals = Arc::clone(fx.broker.approvals());
     let vault = Arc::clone(&fx.vault);
     let locker = std::thread::spawn(move || {
-        let id = first_pending(&approvals);
+        let old = first_pending(&approvals);
         let mut guard = vault.lock().expect("vault");
         guard.as_mut().expect("open").lock().expect("lock");
-        id
+        old
     });
     let marker = fx.project.join("ran");
     let started = Instant::now();
     let response = run(&fx, &fx.project, &format!("touch '{}'", marker.display()));
-    let old_id = locker.join().expect("locker");
+    let old = locker.join().expect("locker");
     assert_eq!(code(&response), "approval_invalidated");
     assert!(
         started.elapsed() < Duration::from_secs(5),
@@ -347,25 +367,31 @@ fn lock_ends_waiting_runs() {
     assert!(fx.broker.approvals().pending().is_empty());
     assert!(!marker.exists());
 
-    // After the owner unlocks again, the old run cannot be approved.
+    // After the owner unlocks again, the old run cannot be approved, also with a
+    // passed owner check.
     with_vault(&fx, |v| v.unlock(PASS).expect("unlock"));
-    assert!(!fx.broker.approvals().decide(old_id, true));
+    assert_eq!(
+        fx.broker.approvals().approve(owner_check(&fx.vault, old)),
+        Err(ApprovalRefusal::NotWaiting)
+    );
     std::thread::sleep(Duration::from_millis(200));
     assert!(!marker.exists());
 }
 
 /// Goal item V3: an approval that the broker did not use before a lock is not valid
 /// after the unlock. The owner thread holds the vault while it approves, locks, and
-/// unlocks, so the broker cannot use the approval in between.
+/// unlocks, so the broker cannot use the approval in between. The owner check runs
+/// before the thread takes the vault, because the check reads the vault too.
 #[test]
 fn approval_before_lock_is_not_valid_after_unlock() {
     let fx = fixture(ExecMode::Ask, Duration::from_secs(10));
     let approvals = Arc::clone(fx.broker.approvals());
     let vault = Arc::clone(&fx.vault);
     let owner = std::thread::spawn(move || {
-        let id = first_pending(&approvals);
+        let pending = first_pending(&approvals);
+        let proof = owner_check(&vault, pending);
         let mut guard = vault.lock().expect("vault");
-        assert!(approvals.decide(id, true), "the owner approves");
+        assert_eq!(approvals.approve(proof), Ok(()), "the owner approves");
         let vault = guard.as_mut().expect("open");
         vault.lock().expect("lock");
         vault.unlock(PASS).expect("unlock");
@@ -412,12 +438,14 @@ fn restart_ends_waiting_runs_and_old_approvals() {
         std::thread::spawn(move || client::send(&socket, &token, action))
     };
     let old_approvals = Arc::clone(fx.broker.approvals());
-    let old_id = first_pending(&old_approvals);
+    let old = first_pending(&old_approvals);
+    let old_id = old.id;
     fx.broker.stop();
     let response = waiter.join().expect("waiter").expect("answer");
     assert_eq!(code(&response), "approval_invalidated");
-    assert!(
-        !old_approvals.decide(old_id, true),
+    assert_eq!(
+        old_approvals.approve(owner_check(&fx.vault, old.clone())),
+        Err(ApprovalRefusal::NotWaiting),
         "the stopped queue takes no decision"
     );
 
@@ -438,9 +466,11 @@ fn restart_ends_waiting_runs_and_old_approvals() {
         .expect("unlock");
 
     let approvals = Arc::clone(restarted.approvals());
+    let new_slot = Arc::clone(&slot);
     let owner = std::thread::spawn(move || {
-        let new_id = first_pending(&approvals);
-        (new_id, approvals.decide(old_id, true))
+        let new_id = first_pending(&approvals).id;
+        let used_old = approvals.approve(owner_check(&new_slot, old)).is_ok();
+        (new_id, used_old)
     });
     let response = run(&fx, &fx.project, &format!("touch '{}'", marker.display()));
     let (new_id, used_old) = owner.join().expect("owner");

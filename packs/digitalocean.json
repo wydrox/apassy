@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "digitalocean",
+  "description": "DigitalOcean CLI (doctl): deletions, resource changes, credentials, remote shells, and read commands.",
+  "programs": ["doctl"],
+  "roles": {
+    "usage": ["doctl"]
+  },
+  "rules": [
+    {
+      "id": "delete-data",
+      "flag": "data_loss",
+      "note": "Deletion of droplets, databases, volumes, clusters, apps, or records. `rebuild` wipes a droplet.",
+      "when": { "any_arg": ["delete", "rm", "rebuild", "purge"] }
+    },
+    {
+      "id": "resource-change",
+      "flag": "production",
+      "note": "The command creates, changes, deploys, resizes, or powers a resource.",
+      "when": {
+        "any_arg": [
+          "create", "update", "create-deployment", "resize", "power-off", "power-on",
+          "power-cycle", "reboot", "shutdown", "restore", "snapshot", "assign", "apply",
+          "upgrade", "migrate", "tag", "untag", "attach", "detach"
+        ]
+      }
+    },
+    {
+      "id": "credentials",
+      "flag": "secret_output",
+      "note": "The command prints a database connection string, a database password, a kubeconfig, or registry credentials.",
+      "when": {
+        "any_of": [
+          { "args_start": ["databases connection", "databases user get", "databases user reset"] },
+          { "args_contain": ["kubeconfig show", "docker-config", "user get", "user reset"] }
+        ]
+      }
+    },
+    {
+      "id": "remote-shell",
+      "flag": "remote_access",
+      "note": "A shell on a droplet or in an app container.",
+      "when": { "any_arg": ["ssh", "console"] }
+    }
+  ],
+  "safe": [
+    {
+      "id": "targeted-reads",
+      "note": "The account, the balance, the CLI version, and app logs. Inventory reads across the account (`list`, `get`) stay with the model.",
+      "when": {
+        "args_start": ["account get", "balance get", "version", "apps logs", "auth list"]
+      }
+    }
+  ]
+}

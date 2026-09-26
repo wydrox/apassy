@@ -30,12 +30,39 @@ in the product profile and checks the boundary:
 - `ps eww` and `ps -E` in the profile do not show the environment of a process
   outside the profile (F11). A direct system call can still read it. See the
   limit in `docs/operations/isolation.md`.
+- A process in the profile cannot start a program OUTSIDE the sandbox:
+  `profile_denies_lsopen_of_an_application` shows `open` of an application is
+  denied, and a control shows the same application reads the canary outside the
+  profile. `profile_denies_writes_to_autostart_locations` shows the profile
+  denies a write to `~/Library/LaunchAgents`, `~/.zshrc`, and the other
+  autostart locations, and still allows a read of a startup file. Apple Events,
+  Shortcuts, and the browser routes are measured by hand;
+  `docs/operations/isolation.md` section 7 has the commands, the results before
+  and after, and why there is no automated test for each.
 
 If the host is not macOS, or `sandbox-exec` is absent, the test fails. A skip is
 not a pass (goal I4).
 
-A Keychain deny check is pending the Swift Keychain helper. The test
-`keychain_check_is_pending` records this gap. It is not a skip of the test.
+- A process in the profile cannot start, read, copy, hard-link, change, or move
+  the programs in a synthetic `Apassy.app` with the layout of
+  `scripts/build-app.sh`. Its helpers are the real Swift helper without a
+  signature. Outside the profile (control), the same helpers start and answer
+  `caller_not_allowed`.
+- `apassy-mcp` and `apassy-hook` in `Apassy.app/Contents/MacOS` start in the
+  profile and reach the broker.
+- A copy of the keychain helper that the owner put outside the bundle starts in
+  the profile, but it refuses each request with `caller_not_allowed`.
+- The launcher passes `/Applications/Apassy.app` and `<target>/Apassy.app` by
+  default. The profile protects `APASSY_APP_BUILD` also without `APASSY_APP`.
+- A process in the profile cannot read the Touch ID Keychain item
+  (`keychain_item_is_not_readable_in_profile`). `/usr/bin/security` runs in the
+  profile and finds no item with the Apassy service and account. The Apassy
+  keychain helper does not start in the profile. This deny does not depend on
+  the signature or on a provisioning profile.
+
+`scripts/build-app.sh` runs the same helper checks with the signed bundle. See
+`docs/operations/isolation.md` sections 5 and 6, and
+`docs/operations/native-app.md`, section "Caller check".
 
 How to start Claude Code and Codex in the profile, and the measured results, are
 in [docs/operations/isolation.md](../../docs/operations/isolation.md).

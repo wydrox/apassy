@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "mix",
+  "description": "Elixir mix: Ecto drops, resets, and rollbacks, Hex publishing, archives, and build and test tasks.",
+  "programs": ["mix"],
+  "roles": {
+    "usage": ["mix"]
+  },
+  "rules": [
+    {
+      "id": "ecto-drop-reset-rollback",
+      "flag": "data_loss",
+      "note": "`ecto.drop` drops the database. `ecto.reset` drops and creates it again. `ecto.rollback` reverts migrations.",
+      "when": { "any_arg": ["ecto.drop", "ecto.reset", "ecto.rollback"] }
+    },
+    {
+      "id": "hex-publish",
+      "flag": "production",
+      "dry_run": "skip",
+      "note": "`hex.publish` publishes a package. `hex.retire` marks a release as retired.",
+      "when": { "any_arg": ["hex.publish", "hex.retire", "hex.owner"] }
+    },
+    {
+      "id": "archive-install",
+      "flag": "new_dependency",
+      "note": "`archive.install` and `escript.install` install code from outside the project.",
+      "when": { "any_arg": ["archive.install", "escript.install"] }
+    }
+  ],
+  "safe": [
+    {
+      "id": "build-and-test",
+      "note": "Tests, compilation, formatting, static checks, dependencies from mix.lock, migration listings, routes, and the local server.",
+      "when": {
+        "subcommand": [
+          "test", "compile", "format", "credo", "dialyzer", "deps.get", "deps.compile",
+          "deps.tree", "ecto.migrations", "ecto.gen.migration", "phx.routes", "phx.server",
+          "docs", "hex.outdated", "xref", "sobelow"
+        ]
+      }
+    }
+  ]
+}

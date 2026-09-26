@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use apassy::agent::client;
 use apassy::agent::wire::{Action, WireResponse};
+use apassy::broker::approvals::{OwnerAction, OwnerCheck, OwnerGate};
 use apassy::broker::bouncer::{BouncerClient, BouncerRequest};
 use apassy::broker::http::TlsClient;
 use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault};
@@ -419,13 +420,21 @@ fn production_declaration_always_waits_for_the_owner() {
     assert_eq!(code(&mixed), "approval_timeout");
     assert!(last_reason(&fx).contains("Production credential"));
 
-    // The rule asks the owner. It does not deny: the owner can approve the run.
+    // The rule asks the owner. It does not deny: the owner can approve the run after a
+    // fresh passphrase check (goal item A4).
     let approvals = Arc::clone(fx.broker.approvals());
+    let gate = OwnerGate::new(Arc::clone(&fx.vault), None);
     let approver = std::thread::spawn(move || {
         loop {
             if let Some(pending) = approvals.pending().into_iter().next() {
                 assert!(pending.risk.contains("Production credential"));
-                assert!(approvals.decide(pending.id, true));
+                let proof = gate
+                    .authorize(
+                        OwnerAction::ApproveRun(pending),
+                        OwnerCheck::passphrase(PASS),
+                    )
+                    .expect("owner check");
+                assert_eq!(approvals.approve(proof), Ok(()));
                 return;
             }
             std::thread::sleep(Duration::from_millis(5));

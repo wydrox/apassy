@@ -18,8 +18,9 @@
 //! so the owner decides.
 //!
 //! The hook runs in the same sandbox as the agent. An agent can run `apassy-hook`
-//! itself, or write to the host transcript. [`hook_channel_flag`] makes a run with a
-//! command that names the hook channel wait for the owner. See
+//! itself, or write to the host transcript. The built-in rule pack `host-hooks`
+//! (`packs/host-hooks.json`) makes a run with a command that names the hook channel wait
+//! for the owner: the command analysis adds [`FLAG_HOOK_CHANNEL`]. See
 //! `docs/operations/host-hooks.md` for what these checks do not stop.
 //!
 //! The prompts stay in memory. The broker writes a prompt only to the activity log
@@ -65,18 +66,9 @@ pub const FLAG_UNVERIFIED: &str = "hook_unverified";
 /// Rule flag: hook prompts from more than one host session match the run.
 pub const FLAG_AMBIGUOUS: &str = "hook_ambiguous";
 /// Rule flag: the command names the hook program, the host settings, or a transcript.
-pub const FLAG_HOOK_CHANNEL: &str = "hook_channel";
-
-/// Parts of a command that point to the hook channel. The host settings hold the hook
+/// The rules are in the built-in pack `host-hooks`. The host settings hold the hook
 /// configuration. `.claude/projects` and `.codex/sessions` hold the transcripts.
-const HOOK_CHANNEL_TERMS: [&str; 6] = [
-    "apassy-hook",
-    ".claude/",
-    ".claude.json",
-    ".codex/",
-    "claude_config_dir",
-    "codex_home",
-];
+pub const FLAG_HOOK_CHANNEL: &str = "hook_channel";
 
 /// Newest hook prompts, in memory.
 pub struct PromptStore {
@@ -580,19 +572,6 @@ fn block_text(blocks: &[Value]) -> Option<String> {
     (!texts.is_empty()).then(|| texts.join("\n"))
 }
 
-/// A rule flag when the command names the hook channel: the `apassy-hook` program,
-/// the host settings with the hook configuration, or the host transcripts. An agent
-/// could use such a command to send a false user request or to change a transcript.
-pub(super) fn hook_channel_flag(command: &[String]) -> Option<String> {
-    let text = command.join(" ").to_lowercase();
-    let named = HOOK_CHANNEL_TERMS.iter().any(|term| text.contains(term))
-        || text
-            .split(|c: char| c.is_whitespace() || "\"'=;&|()<>`".contains(c))
-            .map(|word| word.trim_end_matches('/'))
-            .any(|word| word.ends_with(".claude") || word.ends_with(".codex"));
-    named.then(|| FLAG_HOOK_CHANNEL.to_owned())
-}
-
 /// The first `max` bytes of `text` at a character boundary, with "..." when cut.
 fn bounded(text: &str, max: usize) -> String {
     if text.len() <= max {
@@ -827,11 +806,13 @@ mod tests {
         assert_eq!(store.check_transcript(&codex), Check::Verified);
     }
 
+    /// The `host-hooks` pack in the command analysis flags the hook channel.
     #[test]
     fn hook_channel_commands_are_flagged() {
         let flagged = |args: &[&str]| {
             let command: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
-            hook_channel_flag(&command).is_some()
+            let analysis = crate::broker::shell_risk::analyze(&command, "", &[]);
+            analysis.flags.iter().any(|flag| flag == FLAG_HOOK_CHANNEL)
         };
         assert!(flagged(&[
             "sh",
@@ -848,6 +829,14 @@ mod tests {
             "echo x >> \"$CODEX_HOME/hooks.json\""
         ]));
         assert!(flagged(&["sh", "-c", "cd $HOME/.codex; cat config.toml"]));
+        assert!(flagged(&["sh", "-c", "cat ~/.cla\"\"ude/projects/x.jsonl"]));
+        assert!(flagged(&[
+            "env",
+            "CLAUDE_CONFIG_DIR=/tmp/c",
+            "claude",
+            "-p",
+            "hi"
+        ]));
         assert!(!flagged(&["npm", "run", "migrate"]));
         assert!(!flagged(&["cat", "CLAUDE.md", "docs/codex-notes.md"]));
     }

@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "cargo",
-  "description": "Rust cargo: build and test commands, and publishing.",
+  "description": "Rust cargo: build and test commands, new crates and tools, and publishing.",
   "programs": ["cargo"],
   "roles": {
     "usage": ["cargo"]
@@ -12,12 +12,25 @@
       "id": "publish",
       "flag": "production",
       "dry_run": "skip",
+      "note": "An upload of a crate to the registry.",
       "when": { "subcommand": ["publish", "unpublish", "deprecate", "dist-tag", "upload"] }
+    },
+    {
+      "id": "new-crate",
+      "flag": "new_dependency",
+      "note": "`cargo add` adds a dependency. `cargo install NAME` downloads and builds a tool.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["add"], "operands": { "min": 2 } },
+          { "subcommand": ["install"], "operands": { "min": 2 }, "not": { "any_arg": ["--path"] } }
+        ]
+      }
     }
   ],
   "safe": [
     {
       "id": "build-and-test",
+      "note": "Build, test, lint, format, docs, run, and reads of the dependency tree.",
       "when": {
         "subcommand": [
           "test", "build", "check", "clippy", "fmt", "doc", "run", "bench", "tree", "metadata"

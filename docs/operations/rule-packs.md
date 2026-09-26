@@ -16,35 +16,57 @@ A new stack needs a new pack, not a code change.
 
 | Pack | Programs | Content |
 | --- | --- | --- |
-| `aws` | aws, eb, cdk, sam, amplify | S3 writes, resource changes, deployments |
-| `cargo` | cargo | build and test commands, publishing |
-| `cloud` | gcloud, az, fly, flyctl, railway, render, heroku, serverless, sls, ansible-playbook, firebase, wrangler, stripe, twilio | deployments and resource changes |
-| `databases` | psql, pg_dump, dropdb, dropuser, mysql, sqlite3, mongo, mongosh, clickhouse-client, cockroach, redis-cli | SQL writes, drops, credential columns |
-| `docker` | docker, podman, docker-compose | removal of containers, images, and volumes; read commands |
+| `alembic` | alembic | downgrades, read commands |
+| `aws` | aws, eb, cdk, sam, amplify | S3 writes and removal, deletions, resource changes, secret reads, remote shells, targeted reads |
+| `azure` | az | deletions, resource changes, keys and secrets, remote shells |
+| `cargo` | cargo | build and test commands, new crates, publishing |
+| `cloud` | railway, render, serverless, sls, ansible-playbook, ansible, twilio | deployments, Ansible ad-hoc commands, Twilio reads |
+| `databases` | psql, pg_dump, pg_restore, dropdb, dropuser, mysql, mysqladmin, sqlite3, duckdb, mongo, mongosh, mongorestore, clickhouse-client, cockroach, cqlsh, redis-cli | SQL writes, SQL as a plain argument, MongoDB writes, drops, restores over data, Redis and MySQL server changes, credential columns |
+| `digitalocean` | doctl | deletions, resource changes, credentials, remote shells |
+| `django` | python, python3, manage.py, django-admin | flush, `migrate APP zero`, destructive `shell` code, `dbshell` writes, admin accounts, printed settings, development commands |
+| `docker` | docker, podman, docker-compose, podman-compose | removal of containers, images, and volumes; host access from a container; read and local commands; commands in a local container |
+| `dotnet` | dotnet | Entity Framework drops and rollbacks, publishing, new packages, user secrets, build and test |
 | `encoding` | base64, xxd, od, hexdump, openssl, gzip, zip, uuencode, rev | the `encoder` role |
 | `file-tools` | ls, cat, grep, sed, awk, find, cp, rm, and 35 others | file removal, secret files, system files, read commands |
+| `firebase` | firebase | deployments, deletion of Firestore, database, function, and hosting data, remote writes, user and config exports |
+| `fly` | fly, flyctl | deployments, secret and machine changes, destruction, remote shells, tokens, read commands |
+| `gcloud` | gcloud, gsutil, bq | deletions, resource changes, storage writes, BigQuery writes, tokens and secrets, remote shells |
 | `gh` | gh | releases, workflow runs, secrets, repository settings, gists, API writes |
 | `git` | git | history changes, pushes to release branches, read commands |
-| `go` | go | build and test commands |
+| `go` | go, gofmt, goimports, golangci-lint, staticcheck, govulncheck | new modules, Go settings, build, test, and lint commands |
+| `heroku` | heroku | every command except known reads, destruction of apps, databases, and add-ons, config values, one-off dynos |
+| `host-hooks` | every program | the host hook channel: `apassy-hook`, host settings, and transcripts (goal item B6) |
 | `http` | curl, wget, http, https, httpie | known provider hosts, broadcasts, local requests, read requests |
 | `js-tools` | tsc, eslint, prettier, test runners, next, vite, astro, playwright, cypress, turbo | check and test commands |
-| `kubernetes` | kubectl, helm | deletions and cluster changes |
-| `macos` | security, defaults, pbcopy, launchctl, diskutil, brew | Keychain, preferences, clipboard, disks |
-| `make` | make | development targets |
-| `netlify` | netlify | production deployments |
+| `jvm` | gradle, gradlew, mvn, mvnw | Flyway and Liquibase tasks, publishing and deployment, build and test tasks |
+| `kubernetes` | kubectl, helm | deletions, cluster changes, secret reads, copies from a pod, read commands |
+| `laravel` | php, artisan, sail, composer, phpunit, pest, phpstan, psalm, php-cs-fixer, phpcs | fresh and reset migrations, database wipes, destructive tinker code, printed config, new packages, development commands |
+| `linters` | tflint, tfsec, checkov, kubeconform, hadolint, shellcheck, and 7 others | linters and scanners (known safe) |
+| `macos` | security, defaults, pbcopy, launchctl, diskutil, brew | Keychain reads, preferences, clipboard, disks |
+| `make` | make, just, task | development targets, task names |
+| `migrations` | flyway, liquibase, knex, sequelize, typeorm, drizzle-kit, dbmate, goose, migrate, atlas, and 3 others | clean, drop, and rollback commands, read commands |
+| `mix` | mix | Ecto drops, resets, and rollbacks, Hex publishing, build and test tasks |
+| `netlify` | netlify | production deployments, site deletion, environment variables, local builds |
 | `node` | node, deno, bun, tsx, ts-node | inline code, scripts, version checks |
-| `npm` | npm, pnpm, yarn, bun, npx, bunx | scripts, new dependencies, unknown packages, registry settings, publishing |
-| `prisma` | prisma | resets and schema commands |
-| `python` | python, python3, pip, pip3, pytest, ruff, mypy, black, flake8, pylint, isort, twine, poetry | inline code, pip installs, test tools, Django commands, publishing |
+| `npm` | npm, pnpm, yarn, bun, npx, bunx | scripts, task names, new dependencies, unknown packages, registry settings, publishing |
+| `prisma` | prisma | resets, schema commands, migration reads |
+| `python` | python, python3, pip, pip3, poetry, uv, pipenv, pdm, hatch, test and lint tools, twine | inline code, new packages, package sources, test tools, lock file installs, publishing |
+| `rails` | rails, rake | database drops, resets, schema loads, rollbacks, destructive runner code, credentials, read and test tasks |
 | `remote` | ssh, scp, sftp, rsync, ftp, telnet, nc, ncat, netcat, socat | remote access, secrets sent to another host |
+| `ruby-tools` | bundle, bundler, rspec, rubocop, standardrb, brakeman, bundle-audit | new gems, gem sources, install, test, and lint commands |
 | `scripting` | ruby, perl, php, gem | inline code, scripts, gem publishing |
+| `secret-managers` | vault, op, doppler, infisical, sops, chamber, bw, pass, gopass, aws-vault, age, gpg, gpg2 | printed secret values, secret changes |
 | `shell` | sh, bash, zsh, echo, test, cd, for, and other keywords and builtins | shell control, text output |
+| `stripe` | stripe | deletions and cancellations, money movement, API keys, test and read commands |
 | `supabase` | supabase | queries, resets, key listings, functions, secrets |
 | `system` | sudo, doas, chmod, crontab, systemctl, dd, mkfs, and others | privilege, permissions, jobs, services, disks |
-| `terraform` | terraform, tofu, pulumi | destroy and apply |
+| `terraform` | terraform, tofu, pulumi | destroy, apply, state changes, secret outputs, read commands |
 | `vercel` | vercel | deployments, aliases, environment variables, read commands |
+| `wrangler` | wrangler | deployments, deletions, KV, R2, D1, and secret writes, local and read commands |
 
-The 27 packs have 83 flag rules, 46 safe rules, and 12 exceptions.
+The 47 packs have 189 flag rules, 89 safe rules, and 14 exceptions. Each rule has a `note` with its reason. The test `every_built_in_rule_has_a_note` checks this.
+
+Inventory reads across a whole cloud account (`aws ... describe-*`, `gcloud ... list`, `az ... list`, `doctl ... list`) are not known safe. The model decides them. Targeted reads, such as logs, the caller identity, and the local configuration, are known safe.
 
 ## 2. What stays in code
 
@@ -54,15 +76,19 @@ These parts are not about one tool. They stay in `src/broker/shell_risk.rs`:
 | --- | --- |
 | Shell parser: quotes, pipes, `&&`, redirects, `$( )`, here-documents, `sh -c` | It is the base of every rule. A pack cannot parse a shell. |
 | Wrappers: `sudo`, `doas`, `env`, `time`, `nohup`, `exec`, `npx`, `bunx`, `pnpm dlx`, `yarn dlx` | The parser removes them to find the program. The `sudo` flag and the unknown-package flag are in packs. |
-| Secret references and secret files (`$KEY`, `.env`, SSH keys) | Secret flow. Every pack uses the same definition. |
+| Environment runners: `bundle exec`, `poetry run`, `uv run`, `pipenv run`, `pdm run`, `hatch run`, `rye run` | The parser removes them and their options to find the program, as for the other wrappers. `poetry run alembic downgrade base` is an `alembic` command. |
+| Commands in a local container: `docker exec`, `docker container exec`, `docker compose exec` and `run`, `docker-compose exec` and `run`, and the same for Podman | The parser adds the inner command as its own pipeline, with the here-document of the line. The packs check it as a command on the host. The line is known safe only when the inner command is known safe. |
+| Secret references and secret files (`$KEY`, `.env`, SSH keys, `.pgpass`, `.git-credentials`, key stores, `*.tfstate`, service account keys, `~/.kube/config`, `~/.docker/config.json`) | Secret flow. Every pack uses the same definition. |
 | Environment dumps (`env`, `printenv`, `set`, `export`) and `set -x` | Secret flow in the shell itself. |
 | Pipes of a secret to an encoder or the network, a secret in a redirect | Secret flow. Packs give the roles `encoder`, `network`, and `output`. |
 | HTTP auth headers, uploads, and `@file` arguments | Secret flow for HTTP clients. Packs give the role `http_client` and the known hosts. |
 | Here-documents as code or SQL | Secret flow and SQL analysis. Packs give the roles `heredoc_code`, `heredoc_sql`, and `file_writer`. |
 | SQL analysis: the first keyword of each statement | General for all database clients. Packs choose the programs (`"sql": "writes"`). |
-| "A dry run does not act" | General rule. A pack rule selects it with `dry_run`. |
+| "A dry run does not act" | General rule. A pack rule selects it with `dry_run`. Use `skip`, not `skip_with_n`, for a program where `-n` has another meaning: a namespace (`kubectl`, `helm`), a database number (`redis-cli`), a name (`prisma`), or a count (`shred`). |
 | Production words, production assignments (`URL=$PROD_URL`), and build modes | General rule. Packs make exceptions, for example for text tools. |
 | Script names such as `delete-users.js`, danger options such as `--accept-data-loss` | General rule for every program. Packs give the role `script_runner`. |
+| Task and package script names such as `db:reset` or `db-drop` | General rule. Packs give the role `task_runner` (npm, pnpm, yarn, bun, make, just, task). |
+| A usage request (`--help`, `--version`) does not act | General rule for programs with the role `usage`. Through `npx`, `bunx`, or `dlx` the runner still downloads and runs the package, so the rules with `"package_runner": true` still apply. |
 | Real recipients, mass messages, system paths, `--print-secrets` options | General rules for every program. |
 | Injection phrases in the purpose | The purpose is not a command. |
 | `git push` refspecs (`HEAD:main`) | A parser for one syntax. The `git` pack gives the protected branches (`push_target`). |
@@ -92,7 +118,8 @@ A pack is one JSON object. The loader rejects unknown fields at every level.
 ```
 
 - `id`: unique in the pack.
-- `flag`: one of `secret_output`, `data_loss`, `production`, `real_recipient`, `remote_code`, `remote_access`, `system_change`, `new_dependency`, `privilege`, `ask_owner`. Each flag asks the owner. `ask_owner` has no other meaning.
+- `flag`: one of `secret_output`, `data_loss`, `production`, `real_recipient`, `remote_code`, `remote_access`, `system_change`, `new_dependency`, `privilege`, `hook_channel`, `ask_owner`. Each flag asks the owner. `ask_owner` has no other meaning. `hook_channel` is for the host hook channel (goal item B6).
+- `note`: the reason for the rule, in one or two sentences. Each built-in rule has one.
 - `dry_run` (optional): `skip` means the rule does not apply with `--dry-run` or `--dryrun`. `skip_with_n` also counts `-n`, except for a program with the role `no_dry_run` (`rm`, `git`). Without `dry_run`, the rule applies to a dry run too.
 - `when`: the matcher. A rule without `program` or `raw_program` applies to the programs of its pack.
 
@@ -116,10 +143,12 @@ All conditions in one matcher must hold. A list means "one of the items". The an
 | `command_contains` | The program and the arguments contain a text. |
 | `command_contains_exact` | As `command_contains`, as written. |
 | `word_contains` | A word of the command as written, wrappers included, contains a text. |
+| `segment_contains` | All text of the segment contains a text: the `NAME=value` prefixes, the words as written, the redirect targets, and the here-document, in lowercase. |
+| `segment_word_ends` | A word of that text ends with a text. Words split at spaces, quotes, `=`, and shell operators. A trailing `/` does not count. |
 | `option_value` | An option in `option` is followed by a value in `value`, or by a value not in `not_value`. |
 | `short_option_letter` | A group of short options such as `-rf` contains the letter. |
 | `option_letter` | An option word, short or long, contains the letter. |
-| `operands` | Conditions on the arguments that do not start with `-`: `count`, `min`, `any`, `all`, `allow_none`, `at` (`index` with `in` or `not_in`), `trim_start`, `trim_end`, and `as_written`. `any` and `all` take text patterns: `equals`, `starts`, `ends`, `contains`, `max_len`, `temp_path`. |
+| `operands` | Conditions on the arguments that do not start with `-`: `count`, `min`, `any`, `all`, `allow_none`, `at` (`index` with `in`, `not_in`, or `starts`), `trim_start`, `trim_end`, and `as_written`. `any` and `all` take text patterns: `equals`, `starts`, `ends`, `contains`, `max_len`, `temp_path`. |
 | `push_target` | A branch that `git push` updates is in the list. |
 | `url_hosts_in` | There is a URL, and every URL host is in the list. |
 | `known_host_read` | A GET request without a body or an upload, to known hosts only. |
@@ -128,7 +157,7 @@ All conditions in one matcher must hold. A list means "one of the items". The an
 | `secret_file_arg`, `secret_file_arg_as_written` | An argument is a secret file, such as `.env`. |
 | `system_path_arg` | An argument is under `/etc/`, `/usr/`, `/Library/`, `/System/`, or `/private/etc/`. |
 | `inline_code_leaks` | Code in the command reads the environment and prints, writes, or sends data. |
-| `sql` | `"writes"` or `"reads"`: the SQL argument (`-c`, `--command`, `-e`, `--eval`, or the text after `query`). |
+| `sql` | `"writes"` or `"reads"`: the SQL argument (`-c`, `--command`, `-e`, `--eval`, or the text after `query`). `"any_arg_writes"`: an argument that is not an option and has a space is SQL that writes, for clients that take SQL as a plain argument (`sqlite3 app.db "DELETE FROM users"`). |
 | `any_of` | One of the matchers in the list holds. |
 | `not` | The matcher does not hold. |
 
@@ -143,6 +172,7 @@ All conditions in one matcher must hold. A list means "one of the items". The an
 | `heredoc_code`, `heredoc_sql` | A here-document is code or SQL. |
 | `file_writer` | A here-document with a secret goes to a file. |
 | `script_runner` | The first argument is a script. Its name can tell about data loss. |
+| `task_runner` | The argument after `run` or `run-script`, or else the first argument, is a task or a package script. Its name can tell about data loss. |
 | `usage` | `--help`, `--version`, `help`, or a lone `-h` only prints usage. |
 | `no_dry_run` | The data-loss rules ignore dry-run options. |
 
@@ -198,9 +228,10 @@ Tests in `tests/rule_packs.rs`:
 | --- | --- |
 | `a_local_pack_adds_a_restriction` | `git push origin feature/x` goes from known safe to `ask_owner`. A pack for every program adds `production` to a known safe `npm test` that names the billing database. Built-in flags stay. |
 | `a_local_pack_cannot_relax_a_restriction` | Seven attempts to relax: a safe rule, an exception, the `usage` role for `rm`, a known host, a replacement of the `git` pack, an `allow` flag, and an unknown field. Each is rejected. The rule set and the analysis of the target command do not change. |
-| `local_rules_only_add_flags_on_the_replay_sets` | Broad local rules with `not` and `any_of` on 1517 replay commands: no built-in flag goes away, and no command becomes known safe. 1279 commands get more flags. |
+| `local_rules_only_add_flags_on_the_replay_sets` | Broad local rules with `not` and `any_of` on 2074 replay commands: no built-in flag goes away, and no command becomes known safe. 1823 commands change. |
 | `a_rejected_local_directory_fails_closed` | A relaxing pack in the directory: the loader names the file, and `npm test` gets `rule_pack_error`. After the owner removes the file, the other local pack is active. |
 | `every_built_in_pack_file_loads` | Each file in `packs/` is embedded, loads, has schema version 1, and has a unique tool name. |
+| `every_built_in_rule_has_a_note` | Each flag rule, safe rule, and exception of a built-in pack has a `note` with its reason. |
 
 ## 5. Replay evidence
 
@@ -216,6 +247,36 @@ The move of the tool knowledge must not change a decision. The evidence:
 5. I changed single entries in three packs by hand (the `release` branch, one known host, one build folder). The replay found each change. Then I removed the changes.
 6. A temporary test compared the old code and the committed code on 22 million random commands (seeds 7, 11, 404, 505, 606, and 707). Half of the commands use a known program and its words. The other half use random words from the old code. Both halves have random case, wrappers, pipes, redirects, here-documents, and argument lists without a shell. There were 0 differences. The test used a copy of the old code. The repository does not keep it.
 
+### Intended changes after the move (goal items B2 and B7)
+
+After the move, new tool knowledge changed the analysis on purpose. Each commit wrote the golden file again. The commit message lists the changed lines, and the table below sums them. The counts compare each commit with the commit before it. The replay now covers 62074 commands: 270 labeled commands, 1804 coverage commands (557 new), and 60000 generated commands.
+
+| Commit | Knowledge | Changed lines of the labeled and coverage sets | New coverage lines | Changed generated lines |
+| --- | --- | --- | --- | --- |
+| Analysis | Environment runners, commands in a local container, task names, usage requests through a package runner, more secret files, new matcher conditions | 0 | 46 | 128: 122 get `new_dependency`, 5 get `data_loss`, 54 are no longer known safe |
+| Host hooks | The `host-hooks` pack (the old check in `prompts.rs`) | 0 | 11 | 0 |
+| Migrations and ORM | `rails`, `ruby-tools`, `django`, `alembic`, `migrations`, `dotnet`, `mix`, `laravel`, `jvm`, `linters`; more in `python`, `cargo`, `go`, `prisma` | 16 | 192 | 115: 38 get `new_dependency`, 5 get `data_loss`, 70 become known safe, 3 lose `production` |
+| Clouds and platforms | `gcloud`, `azure`, `digitalocean`, `heroku`, `fly`, `firebase`, `wrangler`, `stripe` (from `cloud`); more in `aws`, `netlify`, `cloud` | 12 | 170 | 272: 102 get `data_loss`, 3 get `production`, 81 become known safe, 123 lose `production` |
+| Data stores and infrastructure | `secret-managers`; more in `databases`, `docker`, `kubernetes`, `terraform`, `macos`, `file-tools` | 22 | 138 | 798: 676 get `data_loss`, 28 get `secret_output`, 2 get `production`, 88 become known safe, 9 lose a flag |
+| Notes | A `note` for 71 older rules | 0 | 0 | 0 |
+
+On the 1517 lines of the golden file of the move, 41 lines changed:
+
+- 12 get `data_loss`. `-n` is not a dry run for `kubectl` and `helm` (namespace), `psql`, `redis-cli` (database number), `prisma` (`--name`), `terraform`, and `shred` (passes): 5 lines. SQL as a plain argument for `sqlite3` and `clickhouse-client`: 3 lines. `python manage.py flush`, `aws s3 rm`, `aws dynamodb delete-table`, and `fly destroy`: 4 lines.
+- 4 get `new_dependency`: `cargo install x`, `cargo add x`, `go get x`, `python -m pip install x`.
+- 1 gets `secret_output`: `security find-generic-password -s x -w`.
+- 1 gets `remote_access` and keeps `production`: `heroku run rails db:migrate -a odealo-production`.
+- 23 become known safe. Examples: `terraform plan`, `kubectl get pods`, `helm list`, `docker compose down`, `aws sts get-caller-identity`, `npx prisma migrate status`, `twilio api:core:messages:list --limit 10`, `pip install -r requirements.txt`. One of them lost a flag: `heroku logs` had `production`, because the old rule flagged every `heroku` command.
+
+The flags that went away in the generated set, all 135 lines:
+
+- `production` on Heroku reads (78 lines, for example `heroku ps`) and on `fly secrets` without a write action (45 lines, for example `fly secrets` alone). A Heroku command that is not a known read still gets `production`.
+- `production` or `data_loss` on usage requests of `poetry`, `tofu`, and `pulumi` (12 lines, for example `pulumi destroy --help`). These programs now have the role `usage`, like `terraform`.
+
+The unit test `every_pack_rule_matches_a_replay_command` passes for all 292 rules, safe rules, and exceptions.
+
+Review a change: write a dump before and after with `APASSY_REPLAY_DUMP=path`, and compare the flag columns line by line.
+
 The replay compares the analysis, not the final decision. The decision (`src/broker/bouncer.rs`) uses the analysis, the declarations, and the model answers. The same analysis gives the same decision.
 
 Run the replay: `cargo test --features vault --test analysis_replay -- --nocapture`.
@@ -225,22 +286,30 @@ Run the replay: `cargo test --features vault --test analysis_replay -- --nocaptu
 1. Change the JSON file in `packs/`. Increase `pack_version`.
 2. Run `cargo test --features vault --test analysis_replay`. A difference is a changed decision.
 3. For an intended change, write the golden file again with `APASSY_REPLAY_WRITE=1` and review each changed line. `APASSY_REPLAY_DUMP=path` writes the full output of the generated set, to compare two versions.
-4. Add a command for a new rule to `coverage.tsv`. The unit test fails for a rule without a replay command.
-5. A new pack file needs an `include_str!` line in `src/broker/packs.rs`. A test fails for a file that is not embedded.
+4. Add a command for a new rule to `coverage.tsv`, and a near miss. Add new lines at the end, so that the case numbers of the golden file stay. The unit test fails for a rule without a replay command.
+5. Write a `note` for each new rule: the reason in one or two sentences. A test fails for a rule without a note.
+6. Put the summary of the golden difference in the commit message: the changed lines and the flags that come and go.
+7. A new pack file needs an `include_str!` line in `src/broker/packs.rs`. A test fails for a file that is not embedded.
 
 ## 7. Limits
 
-- The rules are heuristics, as before the move. The move did not tune them.
+- The rules are heuristics, as before the move. The move did not tune them. The later packs are general tool knowledge. They are not rules for single cases of the evaluation sets.
+- The environment runners and the container commands skip options with a value from a fixed list. An unknown option with a value hides the program. Then the rules of that program do not apply, and the command is not known safe.
+- `segment_contains` and the other text conditions see the text as written. A name that the shell builds from variables, such as `~/${d}aude/`, does not match.
+- A usage request of a known tool, for example `git --help ~/.claude`, gets no flag from the packs, also not `hook_channel`.
+- Deployments to a named staging target (`wrangler deploy --env staging`, `helm upgrade -n staging`) keep the flag `production`. The packs do not trust the name of a target. The owner decides.
 - The owner does not see which local rule added a flag. The approval card shows the flag name only. Use `ask_owner` or a clear flag for each rule.
 - A local pack that does not load makes every run wait for the owner. A process that can write to the local pack directory can do this.
 - There is no signature on a local pack. Built-in packs are part of the signed app.
 
 ## 8. Checks
 
-Results on 2026-09-26:
+Results on 2026-09-26, after the intended changes of section 5:
 
 | Command | Result |
 | --- | --- |
 | `cargo fmt --check` | PASS |
 | `cargo clippy --locked --all-targets --features desktop,vault -- -D warnings` | PASS |
-| `cargo test --locked --features desktop,vault` | PASS. `analysis_replay`: 1 test, 61517 commands, 0 differences. `rule_packs`: 5 tests, 1 ignored (`owner_local_packs_load` reads the owner's directory). Unit tests in `packs.rs` and `shell_risk.rs` pass. |
+| `cargo test --locked --features desktop,vault` | PASS. `analysis_replay`: 1 test, 62074 commands, 0 differences. `rule_packs`: 6 tests, 1 ignored (`owner_local_packs_load` reads the owner's directory). Library unit tests: 85, 1 ignored. `host_hook`: 7, 2 ignored. |
+
+The effect on the decisions is in [heldout-v1.md](../evaluation/heldout-v1.md), section "Development use after freezing".

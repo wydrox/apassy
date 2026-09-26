@@ -13,6 +13,19 @@
 ;; It re-allows a connection to the broker socket, which lives inside the
 ;; denied data directory.
 ;;
+;; The profile also denies the start, the read, and a change of the programs
+;; in the Apassy app bundle: the desktop app and the native helpers (Touch ID,
+;; keychain, notifications). A process in the profile cannot start a helper,
+;; copy it, or link it. It re-allows only `Contents/MacOS/apassy-mcp` and
+;; `Contents/MacOS/apassy-hook`, because the agent host starts them.
+;;
+;; The profile also denies each route that starts a program OUTSIDE the
+;; sandbox as the same user, because that program is not confined and can read
+;; the vault: LaunchServices (`open`/`lsopen`), Apple Events, the Shortcuts and
+;; Automator services, and a write to an autostart location (LaunchAgents,
+;; LaunchDaemons, login items, application scripts, and shell startup files).
+;; The measurements are in docs/operations/isolation.md.
+;;
 ;; Parameters (pass with `sandbox-exec -D KEY=VALUE`). Use absolute, resolved
 ;; paths. A path with spaces is fine; the profile quotes each value.
 ;;   APASSY_DATA_DIR    the Apassy data directory, for example
@@ -20,9 +33,17 @@
 ;;   APASSY_VAULT_FILE  the vault database file
 ;;   APASSY_BACKUP_FILE the backup database file
 ;;   APASSY_SOCKET      the broker Unix socket
+;;   APASSY_HOME        the owner home directory. The profile denies a write to
+;;                      the autostart locations under it.
+;;   APASSY_APP         the installed app bundle. Optional. Default:
+;;                      "/Applications/Apassy.app"
+;;   APASSY_APP_BUILD   a second app bundle, for example the build output
+;;                      "<repository>/target/Apassy.app". Optional.
 ;;
 ;; Limits: Seatbelt does not protect memory, the clipboard, or processes that
-;; run outside this profile. Apple marks `sandbox-exec` as deprecated.
+;; run outside this profile. A program that the owner runs later, for example
+;; from a project git hook or a Makefile, is not confined; the profile cannot
+;; close every such route. Apple marks `sandbox-exec` as deprecated.
 
 (version 1)
 
@@ -75,6 +96,42 @@
 (apassy-deny-db (param "APASSY_BACKUP_FILE"))
 (apassy-seal-ancestors (param "APASSY_BACKUP_FILE"))
 
+;; --- The Apassy app bundle ------------------------------------------------
+
+;; The programs in the bundle that the agent host must start.
+(define apassy-agent-programs '("apassy-mcp" "apassy-hook"))
+
+;; Protect the app bundle APP:
+;; - No program in the bundle starts in the profile. The keychain helper and
+;;   `apassy-helper` can show a Touch ID prompt and post a notification with
+;;   the text of the caller. With a provisioning profile, the keychain helper
+;;   can also return the Touch ID unlock key.
+;; - No read and no write in the bundle. So a process cannot copy, clone, or
+;;   hard-link a helper (with its signature and its provisioning profile) to
+;;   a path that the profile does not deny, and cannot change the bundle.
+;; - No rename or delete of a parent directory, so the bundle cannot move out
+;;   of the denied path.
+;; - Then re-allow the start and the read of `apassy-mcp` and `apassy-hook`
+;;   in `Contents/MacOS`, and the metadata of the directories on their path.
+;;   A later rule wins in SBPL.
+(define (apassy-protect-app app)
+  (deny process-exec* (subpath app))
+  (deny file-read* file-write* (subpath app))
+  (apassy-seal-ancestors app)
+  (for-each
+    (lambda (name)
+      (allow process-exec* file-read*
+        (literal (string-append app "/Contents/MacOS/" name))))
+    apassy-agent-programs)
+  (allow file-read-metadata
+    (literal app)
+    (literal (string-append app "/Contents"))
+    (literal (string-append app "/Contents/MacOS"))))
+
+(apassy-protect-app (or (param "APASSY_APP") "/Applications/Apassy.app"))
+(if (param "APASSY_APP_BUILD")
+  (apassy-protect-app (param "APASSY_APP_BUILD")))
+
 ;; --- Re-allow the broker socket -----------------------------------------
 
 ;; The socket lives inside the denied data directory. A later rule wins in
@@ -82,3 +139,58 @@
 ;; connect; they still cannot read any other file in the data directory.
 (allow network-outbound (remote unix-socket (path-literal (param "APASSY_SOCKET"))))
 (allow file-read* file-write* (literal (param "APASSY_SOCKET")))
+
+;; --- No start of a program outside the sandbox --------------------------
+
+;; A process in the profile must not start a program that runs OUTSIDE the
+;; sandbox as the same user. That program is not confined, so it can read the
+;; vault. The rules below deny each measured route. The routes, the controls,
+;; and the results are in docs/operations/isolation.md, section "Launching
+;; outside the sandbox". These rules win because SBPL takes the last match and
+;; `(allow default)` is the first rule.
+
+;; LaunchServices. `open` and the `lsopen` operation start an application, a
+;; `.command` or `.tool` script, or a URL scheme handler. The started program
+;; runs outside the sandbox. A measurement started an application bundle this
+;; way and it read the vault canary. Deny the operation. A filter on the URL
+;; or the path does not match here, so the deny is total. So `open https://…`
+;; also fails; the owner runs a browser login flow outside the profile. A
+;; program still starts normally, because a normal start uses `process-exec`,
+;; not `lsopen`.
+(deny lsopen)
+
+;; Apple Events. `osascript` or any automation can tell another application,
+;; for example Terminal with `do script` or System Events, to run code. The
+;; other application runs outside the sandbox. A measurement showed that a send
+;; reaches a running application. Deny the send.
+(deny appleevent-send)
+
+;; Shortcuts and Automator run a "Run Shell Script" action in a helper outside
+;; the sandbox. Deny a lookup of their services. Normal development does not
+;; use them. `open` of the apps is already denied by `lsopen`.
+(deny mach-lookup
+  (global-name-regex #"[Ss]hortcut")
+  (global-name-regex #"WorkflowKit"))
+
+;; Autostart locations. launchd starts a LaunchAgent or a LaunchDaemon outside
+;; the sandbox at the next load or the next login. A login item, an application
+;; script, and a shell startup file also start outside the sandbox. A
+;; measurement wrote a LaunchAgent plist and launchd then ran it and read the
+;; vault canary. Deny a write to each autostart location, so a process in the
+;; profile cannot plant one. The deny is on writes only, so a shell still reads
+;; (sources) its startup files, and a tool still reads them. `APASSY_HOME` is
+;; the owner home directory; a test points it at a temporary home.
+(define (apassy-deny-autostart home)
+  (for-each
+    (lambda (dir) (deny file-write* (subpath (string-append home dir))))
+    '("/Library/LaunchAgents"
+      "/Library/LaunchDaemons"
+      "/Library/Application Scripts"
+      "/Library/Application Support/com.apple.backgroundtaskmanagementagent"))
+  (for-each
+    (lambda (file) (deny file-write* (literal (string-append home file))))
+    '("/Library/Preferences/com.apple.loginitems.plist"
+      "/.zshenv" "/.zprofile" "/.zshrc" "/.zlogin" "/.zlogout"
+      "/.bashrc" "/.bash_profile" "/.bash_login" "/.profile")))
+
+(apassy-deny-autostart (param "APASSY_HOME"))

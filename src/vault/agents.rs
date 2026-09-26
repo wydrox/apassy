@@ -586,6 +586,7 @@ impl Vault {
             .map_err(|_| err(VaultErrorKind::Storage))?;
         tx.execute("DELETE FROM exec_grant WHERE agent_id = ?1", [sql_id])
             .map_err(|_| err(VaultErrorKind::Storage))?;
+        super::learning::forget_agent(&tx, sql_id)?;
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))
     }
 
@@ -1209,6 +1210,7 @@ pub(super) fn prepare_restored(conn: &mut Connection) -> VaultResult<()> {
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.execute("DELETE FROM exec_grant", [])
         .map_err(|_| err(VaultErrorKind::Storage))?;
+    super::learning::forget_all_patterns(&tx)?;
     tx.execute(
         "INSERT OR REPLACE INTO restore_review (item_id, restored_at)
          SELECT id, ?1 FROM item WHERE id IN (
@@ -1235,7 +1237,7 @@ pub(super) fn delete_item_links(tx: &rusqlite::Transaction<'_>, item_id: i64) ->
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.execute("DELETE FROM restore_review WHERE item_id = ?1", [item_id])
         .map_err(|_| err(VaultErrorKind::Storage))?;
-    Ok(())
+    super::learning::forget_item(tx, item_id)
 }
 
 fn require_active_agent(tx: &rusqlite::Transaction<'_>, agent: i64) -> VaultResult<()> {

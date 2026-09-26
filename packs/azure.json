@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "azure",
+  "description": "Azure CLI (az): resource changes, deletions, keys and secrets, remote shells, and read commands.",
+  "programs": ["az"],
+  "roles": {
+    "usage": ["az"]
+  },
+  "rules": [
+    {
+      "id": "resource-change",
+      "flag": "production",
+      "dry_run": "skip",
+      "note": "The command creates, changes, deploys, or deletes a resource.",
+      "when": { "any_arg": ["deploy", "delete", "create", "update", "set-iam-policy"] }
+    },
+    {
+      "id": "resource-change-more",
+      "flag": "production",
+      "dry_run": "skip",
+      "note": "More verbs that change resources: start, stop, restart, swap, scale, restore, import, key renewal, role assignment, and `webapp up`. A `set` outside the local CLI settings changes a resource.",
+      "when": {
+        "any_of": [
+          {
+            "any_arg": [
+              "start", "stop", "restart", "swap", "scale", "restore", "import", "renew",
+              "regenerate", "regenerate-key", "reset", "upgrade", "up", "purge", "assign",
+              "invoke", "run", "sync", "failover"
+            ]
+          },
+          {
+            "any_arg": ["set", "add", "remove"],
+            "not": { "subcommand": ["account", "config", "cloud", "extension", "configure"] }
+          }
+        ]
+      }
+    },
+    {
+      "id": "delete-data",
+      "flag": "data_loss",
+      "dry_run": "skip",
+      "note": "Deletion of a resource, a resource group, or stored data. A purge removes a deleted Key Vault item for good.",
+      "when": { "any_arg": ["delete", "delete-batch", "purge"] }
+    },
+    {
+      "id": "keys-and-secrets",
+      "flag": "secret_output",
+      "note": "The command prints a secret, an access token, storage or service keys, connection strings, app settings, or a new service principal password.",
+      "when": {
+        "any_of": [
+          { "args_contain": ["keyvault secret show", "keyvault secret download", "keyvault key download"] },
+          {
+            "any_arg": [
+              "get-access-token", "list-keys", "show-connection-string",
+              "list-connection-strings", "create-for-rbac", "list-publishing-credentials",
+              "list-publishing-profiles"
+            ]
+          },
+          { "args_contain": ["keys list", "credential show", "appsettings list", "keys renew", "credential reset"] }
+        ]
+      }
+    },
+    {
+      "id": "remote-shell",
+      "flag": "remote_access",
+      "note": "A shell or a command in a remote machine or container.",
+      "when": { "any_arg": ["ssh", "run-command", "exec", "console"] }
+    }
+  ],
+  "safe": [
+    {
+      "id": "targeted-reads",
+      "note": "The signed-in account, the subscriptions, the CLI version, and log streams. Inventory reads across the subscription (`list`, `show`) stay with the model.",
+      "when": {
+        "args_start": [
+          "account show", "account list", "version", "webapp log tail", "functionapp log tail",
+          "monitor activity-log list"
+        ]
+      }
+    }
+  ]
+}

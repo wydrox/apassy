@@ -41,6 +41,11 @@ pub const HELPER_FILE: &str = "apassy-helper";
 /// Path of the keychain helper, relative to `Contents`.
 pub const KEYCHAIN_HELPER_FROM_CONTENTS: &str =
     "Helpers/ApassyKeychain.app/Contents/MacOS/ApassyKeychain";
+/// Keychain service of the Touch ID unlock item. It matches `keychainService` in
+/// `native/ApassyHelper/Keychain.swift`.
+pub const KEYCHAIN_SERVICE: &str = "com.wydrox.apassy.vault-unlock";
+/// Prefix of the keychain account for one vault file.
+pub const UNLOCK_ACCOUNT_PREFIX: &str = "vault-unlock-";
 /// Largest keychain secret, in bytes. The helper has the same limit.
 pub const MAX_SECRET_BYTES: usize = 4096;
 /// Largest Touch ID reason, in characters. The helper has the same limit.
@@ -82,12 +87,16 @@ pub enum HelperErrorCode {
     NotificationsUnavailable,
     /// The owner did not allow notifications. The event stays in the inbox.
     NotificationsDenied,
+    /// The helper refused the request, because its parent process is not the
+    /// signed Apassy app that contains it. A program other than Apassy.app
+    /// started the helper.
+    CallerNotAllowed,
     /// An unexpected helper error.
     Internal,
 }
 
 impl HelperErrorCode {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::InvalidRequest,
         Self::Cancelled,
         Self::Fallback,
@@ -100,6 +109,7 @@ impl HelperErrorCode {
         Self::BiometryChanged,
         Self::NotificationsUnavailable,
         Self::NotificationsDenied,
+        Self::CallerNotAllowed,
         Self::Internal,
     ];
 
@@ -118,6 +128,7 @@ impl HelperErrorCode {
             Self::BiometryChanged => "biometry_changed",
             Self::NotificationsUnavailable => "notifications_unavailable",
             Self::NotificationsDenied => "notifications_denied",
+            Self::CallerNotAllowed => "caller_not_allowed",
             Self::Internal => "internal",
         }
     }
@@ -642,6 +653,22 @@ impl NativeHelper {
     }
 }
 
+/// Keychain account of the Touch ID unlock item for the vault file at `vault_path`
+/// (goal item A3). Use the canonical path. The account is `vault-unlock-` and 16
+/// hexadecimal digits of the 64-bit FNV-1a hash of the path bytes. The hash hides
+/// the path in the keychain attributes. It does not change between Rust releases.
+/// A vault file at another path has another account, so Touch ID unlock is off for
+/// a moved or restored file until the owner turns it on again.
+pub fn vault_unlock_account(vault_path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in vault_path.as_os_str().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{UNLOCK_ACCOUNT_PREFIX}{hash:016x}")
+}
+
 fn env_path(name: &str) -> Option<PathBuf> {
     std::env::var_os(name)
         .filter(|value| !value.is_empty())
@@ -897,6 +924,24 @@ mod tests {
         for bad in ["", "   ", "line\nbreak", &"r".repeat(201)] {
             assert!(check_reason(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn unlock_account_is_stable_and_valid() {
+        // FNV-1a test vectors: the empty input and "a".
+        assert_eq!(
+            vault_unlock_account(Path::new("")),
+            "vault-unlock-cbf29ce484222325"
+        );
+        assert_eq!(
+            vault_unlock_account(Path::new("a")),
+            "vault-unlock-af63dc4c8601ec8c"
+        );
+        let one = vault_unlock_account(Path::new("/Users/owner/vault.db"));
+        let other = vault_unlock_account(Path::new("/Users/owner/vault2.db"));
+        assert_ne!(one, other);
+        assert!(check_identifier(&one, ACCOUNT_RULE).is_ok());
+        assert!(!one.contains("owner"));
     }
 
     #[test]

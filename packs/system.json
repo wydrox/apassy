@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "system",
   "description": "System tools: privilege, permissions, scheduled jobs, services, disks, and process information.",
   "programs": [
@@ -11,11 +11,13 @@
     {
       "id": "privilege",
       "flag": "privilege",
+      "note": "`sudo` and `doas` run the command as another user.",
       "when": { "raw_program": ["sudo", "doas"] }
     },
     {
       "id": "world-writable",
       "flag": "system_change",
+      "note": "Mode `777` lets every user change the file.",
       "when": { "program": ["chmod"], "any_arg_contains": ["777"] }
     },
     {
@@ -27,18 +29,21 @@
     {
       "id": "service-change",
       "flag": "system_change",
+      "note": "A service change, a shutdown, or a kill of processes by name.",
       "when": { "program": ["systemctl", "shutdown", "reboot", "killall"] }
     },
     {
       "id": "disk-write",
       "flag": "data_loss",
       "dry_run": "skip_with_n",
+      "note": "Raw writes, file systems, partitions, and truncation destroy data.",
       "when": { "program": ["dd", "mkfs", "fdisk", "truncate"] }
     }
   ],
   "safe": [
     {
       "id": "information",
+      "note": "Process, time, user, and disk information.",
       "when": { "program": ["ps", "lsof", "date", "whoami", "uname", "df"] }
     }
   ]
