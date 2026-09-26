@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 4,
+  "pack_version": 5,
   "tool": "cloud",
   "description": "Small hosting and deploy tools (Railway, Render, Serverless, Ansible playbooks and ad-hoc commands) and Twilio. Google Cloud, Azure, Fly.io, Heroku, Firebase, Wrangler, and Stripe have their own packs.",
   "programs": [
@@ -98,11 +98,11 @@
     },
     {
       "id": "ansible-checks",
-      "note": "Ping and fact modules, syntax checks, and listings of hosts and tasks do not change a host.",
+      "note": "The ping module, syntax checks, and listings of hosts and tasks do not change a host. The fact module (`setup`) prints the environment of the remote user (`ansible_env`), which can hold secrets, so it is not here (dev round 3).",
       "when": {
         "any_of": [
           { "program": ["ansible-playbook"], "any_arg": ["--syntax-check", "--list-hosts", "--list-tasks", "--list-tags"] },
-          { "program": ["ansible"], "option_value": { "option": ["-m", "--module-name"], "value": ["ping", "setup"] }, "not": { "any_arg_starts": ["-a", "--args"] } }
+          { "program": ["ansible"], "option_value": { "option": ["-m", "--module-name"], "value": ["ping"] }, "not": { "any_arg_starts": ["-a", "--args"] } }
         ]
       }
     },

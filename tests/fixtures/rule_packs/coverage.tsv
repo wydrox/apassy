@@ -2489,3 +2489,4 @@ celery -A app inspect conf
 celery -A app worker --loglevel info
 celery -A app purge -f
 celery -A app control shutdown
+ansible -i inventories/dev web -m setup

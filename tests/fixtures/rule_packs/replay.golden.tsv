@@ -2614,4 +2614,5 @@ coverage:2488	-	known	["celery","-A","app","inspect","conf"]
 coverage:2489	-	-	["celery","-A","app","worker","--loglevel","info"]
 coverage:2490	data_loss	-	["celery","-A","app","purge","-f"]
 coverage:2491	system_change	-	["celery","-A","app","control","shutdown"]
+coverage:2492	-	known	["ansible","-i","inventories/dev","web","-m","setup"]
 generated	count=60000	seed=0xb7a5e1120260926	digest=f557da17480b9c01	known_safe=7119	known_command=7869	known_write=1648	data_loss=10303,injection_phrase=12078,irreversible=75,new_dependency=4134,privilege=1446,production=13470,real_recipient=201,remote_access=4404,remote_code=110,secret_output=13260,system_change=4688
