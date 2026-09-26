@@ -113,6 +113,10 @@ The blind held-out sets v2 and v3 failed goal item B2. A model that asked seldom
 - **B2 changes.** On a new blind set, zero explicit violations run and zero critical cases run without the owner. These stay a hard gate. The share of normal cases that run without a prompt on the first day is recorded, but it is not a gate.
 - **The 90% target moves to daily use (new item B12).** After two weeks of daily use, the Learning tab shows that the owner is asked on 10% or fewer of the runs that reach the bouncer, over the last seven days.
 
+## Decisions on 2026-09-26, fourth round
+
+- **Touch ID is paused.** The owner paused Touch ID on 2026-09-26. Goal item A3 (the Touch ID unlock key in the Keychain) is deferred. The passphrase is the only unlock. Each owner action needs the passphrase again (A4). This is the security level of ADR 0003. The real-secret gate does not wait for A3. The Touch ID code, the helper, and their tests stay. The team decision (`7S3F9767BM`) stays for a later restart of this work.
+
 ## Limits
 
 - The real-secret gate stays BLOCKED until the goal marks its gate items done.

@@ -34,7 +34,7 @@ Each item needs evidence: a passing test, a measurement in `docs/operations/`, o
 
 - [x] A1. `Apassy.app` is a signed app bundle with the Swift helper. A script builds it. The Rust crate keeps `forbid(unsafe_code)`. Evidence: `scripts/build-app.sh`, [native app](operations/native-app.md).
 - [x] A2. Unlock is an owner setting: passphrase or Touch ID. Touch ID setup, backup restore, and recovery need the passphrase. Evidence: `tests/owner_auth.rs`, [native app](operations/native-app.md).
-- [ ] A3. The Touch ID unlock key is in a Keychain item with biometric access control for the current fingerprints. After a change of the fingerprints, unlock needs the passphrase. When the owner turns Touch ID off, Apassy deletes the item. Status: Code and fake-helper tests are done. Open: the Keychain item needs a provisioning profile for team `7S3F9767BM` and a paired Touch ID keyboard (owner steps in [native app](operations/native-app.md) §3).
+- [x] A3. The Touch ID unlock key is in a Keychain item with biometric access control for the current fingerprints. After a change of the fingerprints, unlock needs the passphrase. When the owner turns Touch ID off, Apassy deletes the item. Status: deferred by an owner decision on 2026-09-26 (ADR 0010, fourth round). Touch ID is paused. The passphrase is the only unlock. The code and the fake-helper tests stay.
 - [x] A4. Reveal, approval of a run, changes to grants and rules, "Approve and remember", and token rotation need a fresh Touch ID or passphrase check. A test shows that Apassy refuses each action without the check. Evidence: `OwnerGate::authorize`; refusal tests in `tests/owner_vault.rs` and `tests/owner_auth.rs`. The owner checks the real Touch ID prompt by hand.
 
 ### 4. Notifications (ADR 0001 §5)
@@ -48,7 +48,7 @@ Each item needs evidence: a passing test, a measurement in `docs/operations/`, o
 
 - [x] P1. A token expires after 30 days by default. The owner can change this time and rotate a token. An expired token gives a clear error to the agent. Evidence: `tokens_expire_and_rotation_replaces_them`, `mcp_adapter_explains_an_expired_token`.
 - [x] P2. A run with a production item always waits for the owner. The model, patterns, and calibration cannot change this. A test shows this. Evidence: `production_always_asks_the_owner`, `production_declaration_always_waits_for_the_owner`.
-- [ ] P3. The real-secret gate opens only after I1–I4, V1–V4, and A1–A4 are done. ADR 0006 and the README then record the gate as OPEN, with links to the evidence. Status: Waits for A3 and B2.
+- [ ] P3. The real-secret gate opens only after I1–I4, V1–V4, A1, A2, and A4 are done, and after B2 passes. A3 is deferred (ADR 0010, fourth round). ADR 0006 and the README then record the gate as OPEN, with links to the evidence. Status: waits for B2.
 
 ### 6. Bouncer and learning (ADR 0007, ADR 0008, ADR 0009)
 
