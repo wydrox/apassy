@@ -449,6 +449,18 @@ pub struct Trainer {
     pub name: String,
 }
 
+/// The `tools` folder that `scripts/build-app.sh` puts in the app bundle
+/// (`Contents/Resources/tools`), when this program runs from `Contents/MacOS`.
+fn bundled_tools() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let contents = exe.parent()?.parent()?;
+    let tools = contents.join("Resources/tools");
+    tools
+        .join("finetune/local_train.py")
+        .is_file()
+        .then_some(tools)
+}
+
 fn laya_dir() -> PathBuf {
     match std::env::var_os("APASSY_LAYA_DIR").filter(|dir| !dir.is_empty()) {
         Some(dir) => PathBuf::from(dir),
@@ -460,14 +472,17 @@ fn laya_dir() -> PathBuf {
 impl Trainer {
     /// The Laya environment of `docs/operations/bouncer.md`: the Python of
     /// `$APASSY_LAYA_DIR/.venv`, the script `tools/finetune/local_train.py` in
-    /// `APASSY_TOOLS_DIR` (default `$APASSY_LAYA_DIR/tools`), and the base checkpoint in
+    /// `APASSY_TOOLS_DIR`, else in the app bundle, else in `$APASSY_LAYA_DIR/tools`, and
+    /// the base checkpoint in
     /// the order of `tools/basemodel/start.sh`.
     pub fn from_env() -> Result<Self, String> {
         let laya = laya_dir();
         let python = laya.join(".venv/bin/python");
         let tools = std::env::var_os("APASSY_TOOLS_DIR")
             .filter(|dir| !dir.is_empty())
-            .map_or_else(|| laya.join("tools"), PathBuf::from);
+            .map(PathBuf::from)
+            .or_else(bundled_tools)
+            .unwrap_or_else(|| laya.join("tools"));
         let script = tools.join("finetune/local_train.py");
         if !python.is_file() {
             return Err(format!(
@@ -477,7 +492,7 @@ impl Trainer {
         }
         if !script.is_file() {
             return Err(format!(
-                "Training needs the trainer script. {} is missing. Set APASSY_TOOLS_DIR to the tools folder.",
+                "Training needs the trainer script. {} is missing. Build the app with scripts/build-app.sh, or set APASSY_TOOLS_DIR to the tools folder.",
                 script.display()
             ));
         }

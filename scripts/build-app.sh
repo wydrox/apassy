@@ -283,6 +283,20 @@ if [ -n "${APASSY_BASE_MODEL:-}" ]; then
   echo "Base model: $MODEL_VERSION ($MODEL_SIZE bytes)"
 fi
 
+# The training and serving scripts (goal items B8 and B9). The app starts the local
+# trainer from Contents/Resources/tools. The code signature seals these files.
+TOOLS_DST="$APP/Contents/Resources/tools"
+rm -rf "$TOOLS_DST"
+mkdir -p "$TOOLS_DST/basemodel" "$TOOLS_DST/finetune"
+for f in "$ROOT"/tools/basemodel/*.py "$ROOT"/tools/basemodel/*.sh "$ROOT"/tools/basemodel/requirements.txt "$ROOT"/tools/basemodel/manifest.json; do
+  cp "$f" "$TOOLS_DST/basemodel/"
+done
+for f in "$ROOT"/tools/finetune/*.py "$ROOT"/tools/finetune/requirements.txt; do
+  cp "$f" "$TOOLS_DST/finetune/"
+done
+[ -f "$TOOLS_DST/finetune/local_train.py" ] || fail "the trainer script is missing in the bundle"
+echo "Tools:    Contents/Resources/tools (basemodel, finetune)"
+
 KC_ENTITLEMENTS="$ROOT/packaging/Apassy.entitlements"
 if [ "$KEYCHAIN_MODE" = "enabled" ]; then
   cp "$PROFILE" "$KC_APP/Contents/embedded.provisionprofile"

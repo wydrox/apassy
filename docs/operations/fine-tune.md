@@ -200,8 +200,9 @@ Code: `src/broker/finetune.rs` (gate, examples, trainer supervisor),
 5. The broker starts the trainer in its own process group:
    `$APASSY_LAYA_DIR/.venv/bin/python $APASSY_TOOLS_DIR/finetune/local_train.py
    --data <dir> --out <dir> --name apassy-local-v1 --deadline 3600
-   [--init <base checkpoint>]`. `APASSY_TOOLS_DIR` is the `tools` folder of the
-   repository (default `$APASSY_LAYA_DIR/tools`).
+   [--init <base checkpoint>]`. The `tools` folder is `APASSY_TOOLS_DIR` when it is
+   set, else `Contents/Resources/tools` in the app bundle (`scripts/build-app.sh`
+   copies it there), else `$APASSY_LAYA_DIR/tools`.
 6. `local_train.py` checks the counts again and checks that `--init` has the SHA-256 of
    `tools/basemodel/manifest.json`. Then it runs `train.py` in the same process: heads
    only, 4 epochs, batch 32, learning rate 1e-4, warmup 20. It starts from the heads of
