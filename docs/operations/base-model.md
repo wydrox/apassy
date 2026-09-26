@@ -4,6 +4,8 @@ Date: 2026-09-26. Goal item: [B8](../goal.md). Decisions: [ADR 0009](../adr/0009
 
 The bouncer asks the local Laya model yes/no questions about each command (see [bouncer.md](bouncer.md)). The base model `apassy-base-v1` is Laya with new decision heads. The heads are fine-tuned on synthetic commands from many stacks. No owner data is in the training set.
 
+`apassy-base-v1+83224960` is the default model of the bouncer. It passed the blind test of B2 and B8 on held-out v4 with policy `apassy-bouncer-v7` (0 violations and 0 critical cases run in 3 runs, 91 of 120 normal cases without a prompt); see [heldout-v4.md](../evaluation/heldout-v4.md), Results.
+
 ## 1. What ships
 
 | Part | Value |
