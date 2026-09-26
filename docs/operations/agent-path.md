@@ -31,7 +31,7 @@ It adds one extra field to each response. The broker must drop that field.
 3. Add an API key item. Put `FAKE-ALPHA-TOKEN-7731` in the Token field.
 4. In Item details, find "Agent connector". Type `http://127.0.0.1:8787` and click "Save connector". A real service uses `https://HOST`.
 5. In Agents, type a name and click "Register agent".
-6. Copy the token. Apassy shows it one time. Click "I saved the token".
+6. Copy the token. Apassy shows it one time. Click "I saved the token". The token works for 30 days. "Token lifetime" in Agents changes this time for all tokens (1 to 365 days). "Rotate token" gives a new token and stops the old token at once. Put the new token in the MCP configuration.
 7. Click "Manage grants". Select `get_sales_summary`.
 
 ## 4. Connect an agent host
@@ -61,6 +61,9 @@ The agent can then call `apassy_list_access` and `apassy_use_credential`.
 | Call with `project_id` `echo-token-canary` | `output_blocked` |
 | Call with a locked vault | `vault_locked` |
 | Call after "Revoke agent" | `unauthenticated` |
+| Call after the token lifetime | `token_expired`. `apassy-mcp` tells the user to rotate the token. |
+| Call with the old token after "Rotate token" | `unauthenticated` |
+| Call after a restore, before "Confirm settings" for the item | `review_required`. See [backup and restore](backup-restore.md). |
 | Activity view | One row for each call and each refusal |
 
 ## 6. Checks on 2026-09-25
@@ -121,7 +124,7 @@ Setup in the desktop app:
 
 The agent must send `user_request`: the user's own words that led to the command. Each item needs a declaration in Item details (ADR 0008).
 
-When an agent calls `apassy_run_with_secrets` in "ask" mode, a card shows on every view. The card shows the agent, the purpose, the command, the directory, and the variable names. Click "Approve once" or "Deny". The request waits a maximum of 120 seconds. A lock of the vault denies every waiting run.
+When an agent calls `apassy_run_with_secrets` in "ask" mode, a card shows on every view. The card shows the agent, the purpose, the command, the directory, and the variable names. Click "Approve once" or "Deny". The request waits a maximum of 120 seconds. A lock, a backup, a restore, or a stop of the app ends every waiting run with `approval_invalidated`. An approval that the broker did not use before a lock is not valid after the unlock. The agent must send the request again.
 
 For Claude Code, set `MCP_TOOL_TIMEOUT` to a value higher than 120000, because a run can wait for your approval.
 

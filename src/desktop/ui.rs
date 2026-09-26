@@ -306,11 +306,13 @@ fn draw_lock_controls(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 .is_some()
             {
                 app.pending_delete = false;
-                // A locked vault refuses agent runs, so waiting runs end now.
-                if let crate::desktop::BrokerState::Running(handle) = &app.broker {
-                    handle.approvals().deny_all();
-                }
             }
+            // Typed passphrases do not stay in the form after a lock.
+            app.owner_ui.passphrase_current.clear();
+            app.owner_ui.passphrase_new.clear();
+            app.owner_ui.passphrase_repeat.clear();
+            // A locked vault refuses agent runs, so waiting runs end now.
+            app.end_waiting_runs();
         }
     });
 }
@@ -569,16 +571,23 @@ fn draw_owner_vault(app: &mut DesktopApp, ui: &mut egui::Ui) {
         draw_backup_card(app, ui);
     } else {
         // When the vault is unlocked, the items come first. The file controls fold below them.
+        agents_view::draw_review_list(app, ui);
         draw_owner_items(app, ui);
         ui.add_space(8.0);
-        egui::CollapsingHeader::new(RichText::new("Vault file and backup").strong().color(INK))
-            .id_salt("vault-file-and-backup")
-            .default_open(false)
-            .show(ui, |ui| {
-                draw_vault_file_card(app, ui);
-                ui.add_space(8.0);
-                draw_backup_card(app, ui);
-            });
+        egui::CollapsingHeader::new(
+            RichText::new("Vault file, passphrase, and backup")
+                .strong()
+                .color(INK),
+        )
+        .id_salt("vault-file-and-backup")
+        .default_open(false)
+        .show(ui, |ui| {
+            draw_vault_file_card(app, ui);
+            ui.add_space(8.0);
+            draw_passphrase_card(app, ui);
+            ui.add_space(8.0);
+            draw_backup_card(app, ui);
+        });
         return;
     }
 
@@ -623,6 +632,7 @@ fn draw_vault_file_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 {
                     app.selected_item_id = None;
                     app.pending_delete = false;
+                    app.end_waiting_runs();
                 }
             }
             if ui.button("Open vault file").clicked() {
@@ -634,6 +644,7 @@ fn draw_vault_file_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 {
                     app.selected_item_id = None;
                     app.pending_delete = false;
+                    app.end_waiting_runs();
                 }
             }
             let can_unlock = app.owner_ui.session.has_file() && app.owner_ui.session.is_locked();
@@ -649,6 +660,61 @@ fn draw_vault_file_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 }
             });
         });
+    });
+}
+
+/// Change the master passphrase (goal item V5). The new passphrase is typed two times.
+#[cfg(feature = "vault")]
+fn draw_passphrase_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    use super::owner_store::Ephemeral;
+
+    card_frame().show(ui, |ui| {
+        ui.label(
+            RichText::new("Change passphrase")
+                .size(16.0)
+                .strong()
+                .color(INK),
+        );
+        ui.label(
+            RichText::new(
+                "Type the current passphrase. Then type the new passphrase two times. It needs 12 or more characters. Apassy encrypts the vault file again with the new passphrase and keeps the SQLCipher key settings. Old backups still need the old passphrase. Agent runs that wait for you end.",
+            )
+            .color(INK_MUTED),
+        );
+        password_line(
+            ui,
+            "passphrase-current",
+            "Current passphrase",
+            &mut app.owner_ui.passphrase_current,
+        );
+        password_line(
+            ui,
+            "passphrase-new",
+            "New passphrase",
+            &mut app.owner_ui.passphrase_new,
+        );
+        password_line(
+            ui,
+            "passphrase-repeat",
+            "Repeat the new passphrase",
+            &mut app.owner_ui.passphrase_repeat,
+        );
+        if accent_button(ui, "Change passphrase").clicked() {
+            let current = Ephemeral::take(&mut app.owner_ui.passphrase_current);
+            let new = Ephemeral::take(&mut app.owner_ui.passphrase_new);
+            let repeat = Ephemeral::take(&mut app.owner_ui.passphrase_repeat);
+            let result = app.owner_ui.session.change_passphrase(
+                current.expose(),
+                new.expose(),
+                repeat.expose(),
+            );
+            drop((current, new, repeat));
+            let _ = app.apply(
+                result,
+                "The passphrase is changed. Unlock with the new passphrase from now on. Old backups still need the old passphrase.",
+            );
+            app.end_waiting_runs();
+        }
     });
 }
 
@@ -699,6 +765,8 @@ fn draw_backup_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 {
                     app.pending_delete = false;
                 }
+                // Backup locks the vault, also when it fails.
+                app.end_waiting_runs();
             }
             if ui.button("Restore vault").clicked() {
                 let source = app.owner_ui.restore_source.clone();
@@ -716,6 +784,7 @@ fn draw_backup_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 {
                     app.selected_item_id = None;
                     app.pending_delete = false;
+                    app.end_waiting_runs();
                 }
             }
         });
@@ -938,6 +1007,7 @@ fn draw_owner_item(app: &mut DesktopApp, ui: &mut egui::Ui) {
         return;
     }
 
+    agents_view::draw_review_card(app, ui, id);
     ui.add_space(8.0);
     card_frame().show(ui, |ui| {
         ui.label(RichText::new("Edit item").size(16.0).strong().color(INK));
@@ -1806,6 +1876,156 @@ mod tests {
         }
     }
 
+    /// An unlocked synthetic vault file in the app. The directory must outlive the app.
+    #[cfg(feature = "vault")]
+    fn app_with_vault(dir: &tempfile::TempDir) -> DesktopApp {
+        let mut app = DesktopApp::new();
+        let path = dir.path().join("ui.db");
+        app.owner_ui
+            .session
+            .create_file(&path, UI_PASS)
+            .expect("create");
+        app.owner_ui.session.unlock(UI_PASS).expect("unlock");
+        app
+    }
+
+    #[cfg(feature = "vault")]
+    const UI_PASS: &str = "ui-draw-pass-ok";
+
+    /// Goal item P1: the Agents view shows the token lifetime, the expiry, and rotation.
+    #[cfg(feature = "vault")]
+    #[test]
+    fn agents_view_shows_token_expiry_and_rotation() {
+        use crate::desktop::owner_store::FreshToken;
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let mut app = app_with_vault(&dir);
+        let (agent, _token) = app
+            .owner_ui
+            .session
+            .register_agent("UI agent")
+            .expect("register");
+        app.view = OwnerView::Agents;
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(text.contains("Token lifetime"), "{text}");
+        assert!(text.contains("Current lifetime: 30 days."), "{text}");
+        assert!(text.contains("The token expires on"), "{text}");
+        assert!(text.contains("Rotate token"), "{text}");
+
+        let token = app
+            .owner_ui
+            .session
+            .rotate_agent_token(agent.id)
+            .expect("rotate");
+        let shown = token.expose().to_owned();
+        app.owner_ui.fresh_token = Some(FreshToken {
+            agent_name: agent.name.clone(),
+            token,
+            rotated: true,
+        });
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(text.contains("The old token does not work now"), "{text}");
+        assert!(text.contains(&shown), "the new token shows one time");
+    }
+
+    /// Goal item V5: the passphrase card asks for the current passphrase and for the new
+    /// passphrase two times. The fields are clear after an attempt.
+    #[cfg(feature = "vault")]
+    #[test]
+    fn passphrase_card_asks_for_the_new_passphrase_two_times() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let mut app = app_with_vault(&dir);
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        for _ in 0..2 {
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, DEFAULT_SIZE)),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| super::draw_passphrase_card(&mut app, ui));
+            text = collect_frame_text(&output);
+            output.drop_without_applying_deltas();
+        }
+        for label in [
+            "Change passphrase",
+            "Current passphrase",
+            "New passphrase",
+            "Repeat the new passphrase",
+            "Old backups still need the old passphrase",
+        ] {
+            assert!(text.contains(label), "missing {label}: {text}");
+        }
+        let err = app
+            .owner_ui
+            .session
+            .change_passphrase(UI_PASS, "ui-new-pass-ok-1", "ui-new-pass-ok-2")
+            .expect_err("different repeat");
+        assert!(err.message.contains("different"), "{}", err.message);
+        assert!(!app.owner_ui.session.is_locked());
+        app.owner_ui.session.lock().expect("lock");
+        app.owner_ui
+            .session
+            .unlock(UI_PASS)
+            .expect("the old passphrase works");
+    }
+
+    /// Goal item V4: after a restore, the Vault view lists the items to review, and
+    /// Item details has the review card with "Confirm settings".
+    #[cfg(feature = "vault")]
+    #[test]
+    fn restored_item_shows_the_review_and_confirm_action() {
+        use crate::desktop::owner_store::{DeclarationForm, SecretForm};
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let mut app = app_with_vault(&dir);
+        let mut secrets = SecretForm::default();
+        secrets.token = "ui-review-token-canary".to_owned();
+        let item = app
+            .owner_ui
+            .session
+            .add(
+                &crate::desktop::ItemDraft {
+                    name: "Restored key".to_owned(),
+                    ..crate::desktop::ItemDraft::default()
+                },
+                &secrets,
+            )
+            .expect("add");
+        let form = DeclarationForm {
+            project: "ui".to_owned(),
+            ..DeclarationForm::default()
+        };
+        app.owner_ui
+            .session
+            .set_declaration(item.id, &form)
+            .expect("declaration");
+        let backup = dir.path().join("ui.backup");
+        app.owner_ui.session.backup(&backup).expect("backup");
+        app.owner_ui
+            .session
+            .restore(&backup, &dir.path().join("ui-restored.db"), UI_PASS)
+            .expect("restore");
+        app.owner_ui.session.unlock(UI_PASS).expect("unlock");
+
+        app.view = OwnerView::Vault;
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(text.contains("Review after restore"), "{text}");
+        assert!(text.contains("Restored key"), "{text}");
+
+        app.select_item(item.id.to_string());
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(text.contains("Confirm settings"), "{text}");
+        assert!(text.contains("production, high risk"), "{text}");
+        assert!(!text.contains("ui-review-token-canary"));
+
+        app.owner_ui
+            .session
+            .confirm_review(item.id)
+            .expect("confirm");
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(!text.contains("Confirm settings"), "{text}");
+    }
+
     #[test]
     fn activity_history_after_approve_once_draws_on_a_tall_frame() {
         let mut app = unlocked_app_with_item();
@@ -1872,10 +2092,10 @@ mod agents_view {
         labeled_text,
     };
     use crate::broker::profile::REPORTING_API_V0;
-    use crate::desktop::owner_store::format_utc;
+    use crate::desktop::owner_store::{FreshToken, format_utc};
     use crate::desktop::{BrokerState, DesktopApp};
     use crate::vault::ActivityDecision;
-    use crate::vault::ExecMode;
+    use crate::vault::{DEFAULT_TOKEN_LIFETIME_DAYS, ExecMode};
 
     pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
         heading(ui, "Agents");
@@ -1894,7 +2114,11 @@ mod agents_view {
             ui.label(RichText::new("Unlock the vault to manage agents.").color(INK_MUTED));
             return;
         }
+        draw_review_list(app, ui);
+        draw_fresh_token(app, ui);
         draw_register_card(app, ui);
+        ui.add_space(8.0);
+        draw_token_lifetime_card(app, ui);
         ui.add_space(8.0);
         draw_agent_list(app, ui);
     }
@@ -1946,68 +2170,242 @@ mod agents_view {
 
     fn draw_register_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
         card_frame().show(ui, |ui| {
-            ui.label(RichText::new("Register an agent").size(16.0).strong().color(INK));
-            labeled_text(ui, "agent-name", "Agent name", &mut app.owner_ui.new_agent_name);
+            ui.label(
+                RichText::new("Register an agent")
+                    .size(16.0)
+                    .strong()
+                    .color(INK),
+            );
+            labeled_text(
+                ui,
+                "agent-name",
+                "Agent name",
+                &mut app.owner_ui.new_agent_name,
+            );
             if accent_button(ui, "Register agent").clicked() {
                 let name = app.owner_ui.new_agent_name.clone();
                 match app.owner_ui.session.register_agent(&name) {
                     Ok((agent, token)) => {
                         app.owner_ui.new_agent_name.clear();
                         app.owner_ui.selected_agent = Some(agent.id);
-                        app.owner_ui.fresh_token = Some((agent.name.clone(), token));
-                        app.set_ok(format!(
-                            "{} is registered. Copy its token now.",
-                            agent.name
-                        ));
+                        app.owner_ui.fresh_token = Some(FreshToken {
+                            agent_name: agent.name.clone(),
+                            token,
+                            rotated: false,
+                        });
+                        app.set_ok(format!("{} is registered. Copy its token now.", agent.name));
                     }
                     Err(err) => app.set_err(err.message),
                 }
             }
-            let mut dismiss = false;
-            if let Some((name, token)) = &app.owner_ui.fresh_token {
-                ui.add_space(6.0);
-                Frame::NONE
-                    .fill(egui::Color32::from_rgb(252, 244, 222))
-                    .inner_margin(Margin::symmetric(10, 8))
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new(format!(
-                                "Token for {name}. Apassy shows it one time. Select the text and copy it."
-                            ))
-                            .color(ASK),
-                        );
-                        let mut shown = token.expose().to_owned();
-                        ui.add(
-                            TextEdit::singleline(&mut shown)
-                                .font(egui::TextStyle::Monospace)
-                                .desired_width(f32::INFINITY),
-                        );
-                        ui.label(
-                            RichText::new("MCP server configuration for the agent host:")
-                                .color(INK_MUTED),
-                        );
-                        let mut config = format!(
-                            "{{\n  \"mcpServers\": {{\n    \"apassy\": {{\n      \"command\": \"{}\",\n      \"env\": {{ \"APASSY_AGENT_TOKEN\": \"{}\" }}\n    }}\n  }}\n}}",
-                            adapter_path(),
-                            token.expose()
-                        );
-                        ui.add(
-                            TextEdit::multiline(&mut config)
-                                .font(egui::TextStyle::Monospace)
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(7),
-                        );
-                        config.clear();
-                        shown.clear();
-                        if ui.button("I saved the token").clicked() {
-                            dismiss = true;
+        });
+    }
+
+    fn review_frame() -> Frame {
+        Frame::NONE
+            .fill(egui::Color32::from_rgb(252, 238, 214))
+            .stroke(egui::Stroke::new(1.5, ASK))
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(Margin::symmetric(14, 12))
+    }
+
+    /// Items from a restored backup that wait for the owner review (goal item V4).
+    pub(super) fn draw_review_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
+        let items = app
+            .owner_ui
+            .session
+            .items_needing_review()
+            .unwrap_or_default();
+        if items.is_empty() {
+            return;
+        }
+        let mut open = None;
+        review_frame().show(ui, |ui| {
+            ui.label(
+                RichText::new("Review after restore")
+                    .size(16.0)
+                    .strong()
+                    .color(INK),
+            );
+            ui.label(
+                RichText::new(
+                    "This vault came from a backup. Agents cannot use these items until you confirm their agent settings: the declaration, the environment variable, and the connector. The restore also revoked every agent. Register the agents again.",
+                )
+                .color(INK),
+            );
+            for (item_id, name) in &items {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(name).strong().color(INK));
+                    if ui.button("Open item").clicked() {
+                        open = Some(*item_id);
+                    }
+                });
+            }
+        });
+        ui.add_space(8.0);
+        if let Some(item_id) = open {
+            app.select_item(item_id.to_string());
+        }
+    }
+
+    /// Review and confirm the agent settings of one restored item (goal item V4).
+    pub(super) fn draw_review_card(app: &mut DesktopApp, ui: &mut egui::Ui, item_id: u64) {
+        let session = &app.owner_ui.session;
+        if !session.needs_review(item_id).unwrap_or(false) {
+            return;
+        }
+        let declaration = session.declaration(item_id).ok().flatten().map_or_else(
+            || "None. Every run with this item waits for you.".to_owned(),
+            |d| {
+                format!(
+                    "{}, {} risk, {}, {}, project {}",
+                    d.environment.as_str(),
+                    d.risk.as_str(),
+                    d.scope.as_str(),
+                    d.reversibility.as_str(),
+                    d.project
+                )
+            },
+        );
+        let variable = session.env_binding(item_id).ok().flatten().map_or_else(
+            || "None".to_owned(),
+            |binding| format!("{} = field {}", binding.env_name, binding.field),
+        );
+        let connector = session
+            .connector(item_id)
+            .ok()
+            .flatten()
+            .map_or_else(|| "None".to_owned(), |destination| destination.base_url);
+        let mut confirm = false;
+        ui.add_space(8.0);
+        review_frame().show(ui, |ui| {
+            ui.label(
+                RichText::new("Review after restore")
+                    .size(16.0)
+                    .strong()
+                    .color(INK),
+            );
+            ui.label(
+                RichText::new(
+                    "This item came from a restored backup. An old or changed backup can have wrong agent settings, for example a connector to another host or a production credential with a lower declaration. Examine the settings. Correct them in the cards below. Then confirm. Agents cannot use this item before you confirm.",
+                )
+                .color(INK),
+            );
+            egui::Grid::new(("review", item_id))
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    for (term, value) in [
+                        ("Declaration", &declaration),
+                        ("Environment variable", &variable),
+                        ("Connector", &connector),
+                    ] {
+                        ui.label(RichText::new(term).strong().color(INK_MUTED));
+                        ui.label(RichText::new(value).color(INK));
+                        ui.end_row();
+                    }
+                });
+            if accent_button(ui, "Confirm settings").clicked() {
+                confirm = true;
+            }
+        });
+        if confirm {
+            let result = app.owner_ui.session.confirm_review(item_id);
+            let _ = app.apply(
+                result,
+                "The agent settings are confirmed. Agents with a grant can use the item again.",
+            );
+        }
+    }
+
+    /// A new token after a registration or a rotation. Apassy shows it one time.
+    fn draw_fresh_token(app: &mut DesktopApp, ui: &mut egui::Ui) {
+        let mut dismiss = false;
+        if let Some(fresh) = &app.owner_ui.fresh_token {
+            Frame::NONE
+                .fill(egui::Color32::from_rgb(252, 244, 222))
+                .inner_margin(Margin::symmetric(10, 8))
+                .show(ui, |ui| {
+                    let heading = if fresh.rotated {
+                        format!(
+                            "New token for {}. The old token does not work now. Apassy shows the new token one time. Select the text and copy it.",
+                            fresh.agent_name
+                        )
+                    } else {
+                        format!(
+                            "Token for {}. Apassy shows it one time. Select the text and copy it.",
+                            fresh.agent_name
+                        )
+                    };
+                    ui.label(RichText::new(heading).color(ASK));
+                    let mut shown = fresh.token.expose().to_owned();
+                    ui.add(
+                        TextEdit::singleline(&mut shown)
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.label(
+                        RichText::new("MCP server configuration for the agent host:")
+                            .color(INK_MUTED),
+                    );
+                    let mut config = format!(
+                        "{{\n  \"mcpServers\": {{\n    \"apassy\": {{\n      \"command\": \"{}\",\n      \"env\": {{ \"APASSY_AGENT_TOKEN\": \"{}\" }}\n    }}\n  }}\n}}",
+                        adapter_path(),
+                        fresh.token.expose()
+                    );
+                    ui.add(
+                        TextEdit::multiline(&mut config)
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(7),
+                    );
+                    config.clear();
+                    shown.clear();
+                    if ui.button("I saved the token").clicked() {
+                        dismiss = true;
+                    }
+                });
+            ui.add_space(8.0);
+        }
+        if dismiss {
+            app.owner_ui.fresh_token = None;
+            app.set_ok("The token is hidden. Apassy cannot show it again.");
+        }
+    }
+
+    /// Token lifetime for every agent (goal item P1).
+    fn draw_token_lifetime_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
+        let current = app.owner_ui.session.token_lifetime_days().ok();
+        card_frame().show(ui, |ui| {
+            ui.label(RichText::new("Token lifetime").size(16.0).strong().color(INK));
+            ui.label(
+                RichText::new(format!(
+                    "A token works for this number of days after Apassy issues it. Then the agent gets token_expired, and you rotate the token. The default is {DEFAULT_TOKEN_LIFETIME_DAYS} days. A change applies to every active token from its issue time."
+                ))
+                .color(INK_MUTED),
+            );
+            if let Some(days) = current {
+                ui.label(RichText::new(format!("Current lifetime: {days} days.")).color(INK));
+            }
+            ui.horizontal_wrapped(|ui| {
+                let label = ui.label("Days (1 to 365)");
+                let edit = ui.add(
+                    TextEdit::singleline(&mut app.owner_ui.token_lifetime_input)
+                        .hint_text(current.map_or_else(String::new, |days| days.to_string()))
+                        .desired_width(80.0),
+                );
+                edit.labelled_by(label.id);
+                if ui.button("Save lifetime").clicked() {
+                    let text = app.owner_ui.token_lifetime_input.clone();
+                    match app.owner_ui.session.set_token_lifetime_days(&text) {
+                        Ok(days) => {
+                            app.owner_ui.token_lifetime_input.clear();
+                            app.set_ok(format!("Tokens now work for {days} days after issue."));
                         }
-                    });
-            }
-            if dismiss {
-                app.owner_ui.fresh_token = None;
-                app.set_ok("The token is hidden. Apassy cannot show it again.");
-            }
+                        Err(err) => app.set_err(err.message),
+                    }
+                }
+            });
         });
     }
 
@@ -2034,7 +2432,24 @@ mod agents_view {
                     ui.label(RichText::new("Revoked. The token does not work.").color(DENY));
                     return;
                 }
-                ui.label(RichText::new("Active").color(ALLOW));
+                if agent.token_expired_at(now()) {
+                    ui.label(
+                        RichText::new(format!(
+                            "The token expired on {}. The agent gets token_expired. Rotate the token.",
+                            format_utc(agent.token_expires_at)
+                        ))
+                        .color(DENY),
+                    );
+                } else {
+                    ui.label(RichText::new("Active").color(ALLOW));
+                    ui.label(
+                        RichText::new(format!(
+                            "The token expires on {}.",
+                            format_utc(agent.token_expires_at)
+                        ))
+                        .color(INK_MUTED),
+                    );
+                }
                 ui.horizontal_wrapped(|ui| {
                     let selected = app.owner_ui.selected_agent == Some(agent.id);
                     let label = if selected {
@@ -2044,6 +2459,22 @@ mod agents_view {
                     };
                     if ui.button(label).clicked() {
                         app.owner_ui.selected_agent = if selected { None } else { Some(agent.id) };
+                    }
+                    if ui.button("Rotate token").clicked() {
+                        match app.owner_ui.session.rotate_agent_token(agent.id) {
+                            Ok(token) => {
+                                app.owner_ui.fresh_token = Some(FreshToken {
+                                    agent_name: agent.name.clone(),
+                                    token,
+                                    rotated: true,
+                                });
+                                app.set_ok(format!(
+                                    "{} has a new token. Copy it now. The old token does not work.",
+                                    agent.name
+                                ));
+                            }
+                            Err(err) => app.set_err(err.message),
+                        }
                     }
                     if danger_button(ui, "Revoke agent").clicked() {
                         let message =

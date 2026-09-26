@@ -14,7 +14,7 @@ use apassy::agent::wire::{Action, WireResponse};
 use apassy::broker::http::TlsClient;
 use apassy::broker::{self, SharedVault};
 use apassy::contracts::CredentialKind;
-use apassy::vault::{ActivityDecision, Field, ItemDraft, SecretValue, Vault};
+use apassy::vault::{ActivityDecision, Field, ItemDraft, SecretValue, Vault, VaultErrorKind};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -337,6 +337,205 @@ fn delete_item_removes_links_and_restore_revokes_agents() {
                 .is_none()
         );
     });
+}
+
+/// Goal item V4 on the connector path: a restored item with a connector waits for the
+/// owner review. The item delete removes the review mark.
+#[test]
+fn restored_connector_waits_for_the_owner_review() {
+    let fx = fixture();
+    let backup = fx.dir.path().join("connector.bak");
+    with_vault(&fx, |vault| vault.backup(&backup).expect("backup"));
+    let mut restored =
+        Vault::restore(&backup, &fx.dir.path().join("connector.db"), PASS).expect("restore");
+    restored.unlock(PASS).expect("unlock");
+    assert_eq!(
+        restored.items_needing_review().expect("review"),
+        vec![fx.item_id]
+    );
+    let (agent, token) = restored.register_agent("Test agent").expect("register");
+    restored
+        .set_grant(agent.id, fx.item_id, OP_SUMMARY, true)
+        .expect("grant");
+    let token = token.expose().to_owned();
+    let slot: SharedVault = Arc::new(Mutex::new(Some(restored)));
+    let socket = fx.dir.path().join("run2").join("broker.sock");
+    let _broker = broker::start_with_tls(
+        Arc::clone(&slot),
+        &socket,
+        TlsClient::platform().expect("TLS"),
+    )
+    .expect("broker");
+    let request = || Action::Call {
+        item_id: fx.item_id,
+        operation: OP_SUMMARY.to_owned(),
+        params: summary_params("project-a-synthetic"),
+    };
+    let refused = client::send(&socket, &token, request()).expect("answer");
+    assert_eq!(error_code(&refused), "review_required");
+    let list = client::send(&socket, &token, Action::ListAccess).expect("list");
+    assert_eq!(
+        list.result.as_ref().expect("result")["items"][0]["owner_review_needed"],
+        true
+    );
+    slot.lock()
+        .expect("slot")
+        .as_mut()
+        .expect("open")
+        .confirm_review(fx.item_id)
+        .expect("confirm");
+    let ok = client::send(&socket, &token, request()).expect("answer");
+    assert!(ok.ok, "{ok:?}");
+    assert_no_secret(&ok);
+
+    // A second restore marks the item again. A delete removes the mark with the item.
+    let mut again =
+        Vault::restore(&backup, &fx.dir.path().join("connector-2.db"), PASS).expect("restore");
+    again.unlock(PASS).expect("unlock");
+    assert!(again.needs_review(fx.item_id).expect("review"));
+    let revision = again.details(fx.item_id).expect("details").summary.revision;
+    again.delete(fx.item_id, revision).expect("delete");
+    assert!(again.items_needing_review().expect("review").is_empty());
+}
+
+/// Move every token issue time back by `days`. The vault connection is closed while a raw
+/// SQLCipher connection writes. Tests only: this stands in for the passage of time.
+fn age_tokens(fx: &Fixture, days: i64) {
+    with_vault(fx, |vault| vault.lock().expect("lock"));
+    let conn =
+        rusqlite::Connection::open(fx.dir.path().join("vault").join("vault.db")).expect("raw open");
+    conn.pragma_update(None, "key", PASS).expect("key");
+    conn.execute(
+        "UPDATE agent SET token_issued_at = token_issued_at - ?1",
+        [days * 86_400],
+    )
+    .expect("age tokens");
+    conn.close().map_err(|(_, err)| err).expect("close");
+    with_vault(fx, |vault| vault.unlock(PASS).expect("unlock"));
+}
+
+/// Goal item P1: a token expires after the token lifetime (default 30 days). The owner
+/// can change the lifetime and rotate a token. A restore still revokes every agent.
+#[test]
+fn tokens_expire_and_rotation_replaces_them() {
+    let fx = fixture();
+    let params = || summary_params("project-a-synthetic");
+    let agent = with_vault(&fx, |vault| {
+        assert_eq!(vault.token_lifetime_days().expect("lifetime"), 30);
+        vault.list_agents().expect("agents").remove(0)
+    });
+    assert_eq!(agent.token_expires_at - agent.token_issued_at, 30 * 86_400);
+    with_vault(&fx, |vault| {
+        for bad in [0, 366] {
+            let err = vault.set_token_lifetime_days(bad).unwrap_err();
+            assert_eq!(err.kind(), VaultErrorKind::InvalidInput);
+        }
+        vault.set_token_lifetime_days(7).expect("lifetime");
+        let agent = vault.list_agents().expect("agents").remove(0);
+        assert_eq!(agent.token_expires_at - agent.token_issued_at, 7 * 86_400);
+    });
+
+    age_tokens(&fx, 6);
+    assert!(call(&fx, &fx.token, OP_SUMMARY, params()).ok);
+    age_tokens(&fx, 2);
+    let expired = call(&fx, &fx.token, OP_SUMMARY, params());
+    assert_eq!(error_code(&expired), "token_expired");
+    let message = &expired.error.as_ref().expect("error").message;
+    assert!(message.contains("expired on"), "{message}");
+    assert!(message.contains("Rotate token"), "{message}");
+    let list = client::send(&fx.socket, &fx.token, Action::ListAccess).expect("list");
+    assert_eq!(error_code(&list), "token_expired");
+    with_vault(&fx, |vault| {
+        let err = vault.authenticate_agent(&fx.token).unwrap_err();
+        assert_eq!(err.kind(), VaultErrorKind::Expired);
+        assert_eq!(
+            vault.identify_agent(&fx.token).expect("identify").id,
+            fx.agent_id
+        );
+        let activity = vault.recent_activity(1).expect("activity");
+        assert_eq!(activity[0].agent_name, "Test agent");
+        assert_eq!(activity[0].decision, ActivityDecision::Deny);
+        assert!(activity[0].reason.contains("expired"));
+    });
+
+    // The lifetime applies to every token from its issue time.
+    with_vault(&fx, |vault| {
+        vault.set_token_lifetime_days(30).expect("lifetime")
+    });
+    assert!(call(&fx, &fx.token, OP_SUMMARY, params()).ok);
+    with_vault(&fx, |vault| {
+        vault.set_token_lifetime_days(7).expect("lifetime")
+    });
+    assert_eq!(
+        error_code(&call(&fx, &fx.token, OP_SUMMARY, params())),
+        "token_expired"
+    );
+
+    // Rotation gives a new token with a new issue time. The old token stops working.
+    let rotated = with_vault(&fx, |vault| {
+        vault
+            .rotate_agent_token(fx.agent_id)
+            .expect("rotate")
+            .expose()
+            .to_owned()
+    });
+    assert_ne!(rotated, fx.token);
+    assert_eq!(
+        error_code(&call(&fx, &fx.token, OP_SUMMARY, params())),
+        "unauthenticated"
+    );
+    let ok = call(&fx, &rotated, OP_SUMMARY, params());
+    assert!(ok.ok, "the grants stay after a rotation: {ok:?}");
+    assert_no_secret(&ok);
+    let agent = with_vault(&fx, |vault| vault.list_agents().expect("agents").remove(0));
+    assert!(!agent.token_expired_at(agent.token_issued_at));
+    assert_eq!(agent.token_expires_at - agent.token_issued_at, 7 * 86_400);
+
+    // A restore still revokes every agent, also after a rotation.
+    let backup = fx.dir.path().join("rotated.bak");
+    with_vault(&fx, |vault| vault.backup(&backup).expect("backup"));
+    let mut restored =
+        Vault::restore(&backup, &fx.dir.path().join("rotated.db"), PASS).expect("restore");
+    restored.unlock(PASS).expect("unlock restored");
+    assert_eq!(
+        restored.authenticate_agent(&rotated).unwrap_err().kind(),
+        VaultErrorKind::NotFound
+    );
+    assert!(restored.list_agents().expect("agents")[0].revoked);
+    assert_eq!(
+        restored.rotate_agent_token(fx.agent_id).unwrap_err().kind(),
+        VaultErrorKind::InvalidInput,
+        "a revoked agent cannot rotate"
+    );
+    assert_eq!(
+        restored.rotate_agent_token(999).unwrap_err().kind(),
+        VaultErrorKind::NotFound
+    );
+}
+
+#[test]
+fn mcp_adapter_explains_an_expired_token() {
+    let fx = fixture();
+    with_vault(&fx, |vault| {
+        vault.set_token_lifetime_days(1).expect("lifetime")
+    });
+    age_tokens(&fx, 2);
+    let mut mcp = McpProcess::start(&fx.socket, &fx.token);
+    let reply = mcp.request(&json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "apassy_list_access", "arguments": {}}
+    }));
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    let text = reply["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        text.starts_with("token_expired: The Apassy agent token expired on"),
+        "{text}"
+    );
+    assert!(text.contains("Rotate token"), "{text}");
+    assert!(!text.contains(&fx.token));
+    assert!(!reply.to_string().contains(SERVICE_TOKEN));
 }
 
 struct McpProcess {

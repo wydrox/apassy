@@ -144,6 +144,16 @@ impl DesktopApp {
         };
     }
 
+    /// End every agent run that waits for the owner (goal item V3). Call it after a
+    /// lock, backup, restore, open, or passphrase change. The broker also ends such a
+    /// run when it sees the vault epoch change. This call makes the card go away at once.
+    #[cfg(feature = "vault")]
+    pub(crate) fn end_waiting_runs(&self) {
+        if let BrokerState::Running(handle) = &self.broker {
+            handle.approvals().invalidate_all();
+        }
+    }
+
     pub fn model(&self) -> &DesktopModel {
         &self.model
     }

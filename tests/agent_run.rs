@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use apassy::agent::client;
 use apassy::agent::wire::{Action, WireResponse};
@@ -17,7 +17,8 @@ use apassy::broker::http::TlsClient;
 use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault};
 use apassy::contracts::CredentialKind;
 use apassy::vault::{
-    ActivityDecision, ExecMode, Field, ItemDraft, SecretValue, Vault, VaultErrorKind,
+    ActivityDecision, Declaration, Environment, ExecMode, ExecRule, Field, ItemDraft,
+    Reversibility, RiskLevel, Scope, SecretValue, Vault, VaultErrorKind,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -240,7 +241,216 @@ fn revoke_or_lock_during_approval_stops_the_run() {
         let mut guard = vault.lock().expect("vault");
         guard.as_mut().expect("open").lock().expect("lock");
     });
-    assert_eq!(code(&run(&fx, &fx.project, "echo x")), "vault_locked");
+    // The lock makes the approval invalid, whether it comes before or after the decision.
+    assert_eq!(
+        code(&run(&fx, &fx.project, "echo x")),
+        "approval_invalidated"
+    );
+}
+
+fn first_pending(approvals: &broker::approvals::ApprovalQueue) -> u64 {
+    loop {
+        if let Some(run) = approvals.pending().first() {
+            return run.id;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Goal item V3: the broker starts with no open vault, and an opened vault starts locked.
+#[test]
+fn startup_is_locked() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("vault.db");
+    let (token, item_id) = {
+        let mut vault = Vault::create(&path, PASS).expect("create");
+        assert!(vault.is_locked(), "a new vault starts locked");
+        vault.unlock(PASS).expect("unlock");
+        let item = vault
+            .add(ItemDraft {
+                title: "Startup key".to_owned(),
+                kind: CredentialKind::ApiKey,
+                notes: String::new(),
+                tags: Vec::new(),
+                fields: vec![Field {
+                    name: "token".to_owned(),
+                    value: SecretValue::new(SECRET.to_owned()),
+                    secret: true,
+                }],
+            })
+            .expect("add");
+        let (_, token) = vault.register_agent("Startup agent").expect("register");
+        (token.expose().to_owned(), item.id)
+    };
+    let slot: SharedVault = Arc::new(Mutex::new(None));
+    let socket = dir.path().join("run").join("broker.sock");
+    let options = BrokerOptions::with_tls(TlsClient::platform().expect("TLS"));
+    let _broker = broker::start_with(Arc::clone(&slot), &socket, options).expect("broker");
+    let run_request = || Action::Run {
+        items: vec![item_id],
+        command: vec!["true".into()],
+        cwd: dir.path().display().to_string(),
+        purpose: "Start.".into(),
+        path: None,
+        user_request: Some("Start.".into()),
+    };
+    // No vault file is open when the app starts.
+    for action in [Action::ListAccess, run_request()] {
+        let response = client::send(&socket, &token, action).expect("answer");
+        assert_eq!(code(&response), "vault_locked");
+    }
+    // The owner opens the file. It is locked until the owner types the passphrase.
+    *slot.lock().expect("slot") = Some(Vault::open(&path).expect("open"));
+    assert!(
+        slot.lock()
+            .expect("slot")
+            .as_ref()
+            .expect("open")
+            .is_locked()
+    );
+    for action in [Action::ListAccess, run_request()] {
+        let response = client::send(&socket, &token, action).expect("answer");
+        assert_eq!(code(&response), "vault_locked");
+    }
+    slot.lock()
+        .expect("slot")
+        .as_mut()
+        .expect("open")
+        .unlock(PASS)
+        .expect("unlock");
+    let list = client::send(&socket, &token, Action::ListAccess).expect("answer");
+    assert!(list.ok, "{list:?}");
+}
+
+/// Goal item V3: a lock ends every waiting run. Nobody calls `invalidate_all` here:
+/// the broker sees the new vault epoch by itself.
+#[test]
+fn lock_ends_waiting_runs() {
+    let fx = fixture(ExecMode::Ask, Duration::from_secs(10));
+    let approvals = Arc::clone(fx.broker.approvals());
+    let vault = Arc::clone(&fx.vault);
+    let locker = std::thread::spawn(move || {
+        let id = first_pending(&approvals);
+        let mut guard = vault.lock().expect("vault");
+        guard.as_mut().expect("open").lock().expect("lock");
+        id
+    });
+    let marker = fx.project.join("ran");
+    let started = Instant::now();
+    let response = run(&fx, &fx.project, &format!("touch '{}'", marker.display()));
+    let old_id = locker.join().expect("locker");
+    assert_eq!(code(&response), "approval_invalidated");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the run ended early"
+    );
+    assert!(fx.broker.approvals().pending().is_empty());
+    assert!(!marker.exists());
+
+    // After the owner unlocks again, the old run cannot be approved.
+    with_vault(&fx, |v| v.unlock(PASS).expect("unlock"));
+    assert!(!fx.broker.approvals().decide(old_id, true));
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!marker.exists());
+}
+
+/// Goal item V3: an approval that the broker did not use before a lock is not valid
+/// after the unlock. The owner thread holds the vault while it approves, locks, and
+/// unlocks, so the broker cannot use the approval in between.
+#[test]
+fn approval_before_lock_is_not_valid_after_unlock() {
+    let fx = fixture(ExecMode::Ask, Duration::from_secs(10));
+    let approvals = Arc::clone(fx.broker.approvals());
+    let vault = Arc::clone(&fx.vault);
+    let owner = std::thread::spawn(move || {
+        let id = first_pending(&approvals);
+        let mut guard = vault.lock().expect("vault");
+        assert!(approvals.decide(id, true), "the owner approves");
+        let vault = guard.as_mut().expect("open");
+        vault.lock().expect("lock");
+        vault.unlock(PASS).expect("unlock");
+    });
+    let marker = fx.project.join("ran");
+    let response = run(&fx, &fx.project, &format!("touch '{}'", marker.display()));
+    owner.join().expect("owner");
+    assert_eq!(code(&response), "approval_invalidated");
+    assert!(!marker.exists(), "the approved command did not run");
+    let activity = with_vault(&fx, |v| v.recent_activity(1).expect("activity"));
+    assert_eq!(activity[0].decision, ActivityDecision::Deny);
+    assert!(
+        activity[0].reason.contains("The approval is not valid"),
+        "{}",
+        activity[0].reason
+    );
+
+    // A new request in the new session runs after a new approval.
+    decide_later(&fx, true, || {});
+    let again = run(&fx, &fx.project, "echo again");
+    assert!(again.ok, "{again:?}");
+}
+
+/// Goal item V3: a stop of the broker ends every waiting run. After a restart, the
+/// vault is locked, and an approval from before the restart matches no run.
+#[test]
+fn restart_ends_waiting_runs_and_old_approvals() {
+    let mut fx = fixture(ExecMode::Ask, Duration::from_secs(10));
+    let marker = fx.project.join("ran");
+    let waiter = {
+        let (socket, token) = (fx.socket.clone(), fx.token.clone());
+        let action = Action::Run {
+            items: vec![fx.item_id],
+            command: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!("touch '{}'", marker.display()),
+            ],
+            cwd: fx.project.display().to_string(),
+            purpose: "Test the restart.".into(),
+            path: Some("/usr/bin:/bin".into()),
+            user_request: Some("Test the restart.".into()),
+        };
+        std::thread::spawn(move || client::send(&socket, &token, action))
+    };
+    let old_approvals = Arc::clone(fx.broker.approvals());
+    let old_id = first_pending(&old_approvals);
+    fx.broker.stop();
+    let response = waiter.join().expect("waiter").expect("answer");
+    assert_eq!(code(&response), "approval_invalidated");
+    assert!(
+        !old_approvals.decide(old_id, true),
+        "the stopped queue takes no decision"
+    );
+
+    // Restart: close the vault file, open it again, and start a new broker.
+    *fx.vault.lock().expect("vault") = None;
+    let slot: SharedVault = Arc::new(Mutex::new(Some(
+        Vault::open(&fx.dir.path().join("vault.db")).expect("open"),
+    )));
+    let mut options = BrokerOptions::with_tls(TlsClient::platform().expect("TLS"));
+    options.approval_timeout = Duration::from_millis(500);
+    let restarted = broker::start_with(Arc::clone(&slot), &fx.socket, options).expect("restart");
+    assert_eq!(code(&run(&fx, &fx.project, "true")), "vault_locked");
+    slot.lock()
+        .expect("slot")
+        .as_mut()
+        .expect("open")
+        .unlock(PASS)
+        .expect("unlock");
+
+    let approvals = Arc::clone(restarted.approvals());
+    let owner = std::thread::spawn(move || {
+        let new_id = first_pending(&approvals);
+        (new_id, approvals.decide(old_id, true))
+    });
+    let response = run(&fx, &fx.project, &format!("touch '{}'", marker.display()));
+    let (new_id, used_old) = owner.join().expect("owner");
+    assert_ne!(new_id, old_id);
+    assert!(
+        !used_old,
+        "an approval from before the restart matches no run"
+    );
+    assert_eq!(code(&response), "approval_timeout");
+    assert!(!marker.exists());
 }
 
 #[test]
@@ -301,6 +511,141 @@ fn restore_removes_process_grants() {
             .is_empty()
     );
     assert!(restored.env_binding(fx.item_id).expect("binding").is_some());
+}
+
+/// Goal item V4: a restore revokes every agent and removes every grant and rule. Items
+/// with agent settings wait for the owner review. The broker refuses a run with such an
+/// item until the owner confirms the settings.
+#[test]
+fn restore_needs_owner_review_before_runs() {
+    let fx = fixture(ExecMode::Bouncer, Duration::from_secs(2));
+    let plain = with_vault(&fx, |v| {
+        v.set_declaration(
+            fx.item_id,
+            &Declaration {
+                project: "demo".to_owned(),
+                environment: Environment::Staging,
+                risk: RiskLevel::Medium,
+                scope: Scope::ReadWrite,
+                reversibility: Reversibility::Reversible,
+            },
+        )
+        .expect("declaration");
+        v.set_exec_rule(
+            fx.agent_id,
+            fx.item_id,
+            ExecRule {
+                allowed_prefixes: vec!["echo".to_owned()],
+                ..ExecRule::default()
+            },
+        )
+        .expect("rule");
+        v.add(ItemDraft {
+            title: "No agent settings".to_owned(),
+            kind: CredentialKind::ApiKey,
+            notes: String::new(),
+            tags: Vec::new(),
+            fields: vec![Field {
+                name: "token".to_owned(),
+                value: SecretValue::new("FAKE-plain-0003".to_owned()),
+                secret: true,
+            }],
+        })
+        .expect("add")
+        .id
+    });
+    let backup = fx.dir.path().join("review.bak");
+    with_vault(&fx, |v| v.backup(&backup).expect("backup"));
+    let mut restored =
+        Vault::restore(&backup, &fx.dir.path().join("review.db"), PASS).expect("restore");
+    assert!(restored.is_locked());
+    restored.unlock(PASS).expect("unlock");
+    assert!(
+        restored
+            .list_agents()
+            .expect("agents")
+            .iter()
+            .all(|agent| agent.revoked)
+    );
+    assert!(restored.authenticate_agent(&fx.token).is_err());
+    assert!(
+        restored
+            .exec_grants_for_agent(fx.agent_id)
+            .expect("grants")
+            .is_empty(),
+        "the restore removes grants and rules"
+    );
+    assert_eq!(
+        restored.items_needing_review().expect("review"),
+        vec![fx.item_id]
+    );
+    assert!(!restored.needs_review(plain).expect("plain"));
+    assert!(restored.env_binding(fx.item_id).expect("binding").is_some());
+
+    // The owner registers the agent again and gives process access again.
+    let (agent, token) = restored.register_agent("Run agent").expect("register");
+    restored
+        .set_exec_grant(
+            agent.id,
+            fx.item_id,
+            &fx.project.display().to_string(),
+            ExecMode::Bouncer,
+        )
+        .expect("grant");
+    let token = token.expose().to_owned();
+    let slot: SharedVault = Arc::new(Mutex::new(Some(restored)));
+    let bouncer = common::fake_bouncer(&[]);
+    let mut options = BrokerOptions::with_tls(TlsClient::platform().expect("TLS"));
+    options.approval_timeout = Duration::from_millis(500);
+    options.bouncer = Some(BouncerClient::new(&bouncer.url).expect("bouncer url"));
+    let socket = fx.dir.path().join("run2").join("broker.sock");
+    let _broker = broker::start_with(Arc::clone(&slot), &socket, options).expect("broker");
+    let send = || {
+        client::send(
+            &socket,
+            &token,
+            Action::Run {
+                items: vec![fx.item_id],
+                command: vec!["echo".into(), "ok".into()],
+                cwd: fx.project.display().to_string(),
+                purpose: "Print ok.".into(),
+                path: Some("/usr/bin:/bin".into()),
+                user_request: Some("Print ok.".into()),
+            },
+        )
+        .expect("answer")
+    };
+    let refused = send();
+    assert_eq!(code(&refused), "review_required");
+    let message = &refused.error.as_ref().expect("error").message;
+    assert!(message.contains("restored from a backup"), "{message}");
+    let list = client::send(&socket, &token, Action::ListAccess).expect("list");
+    assert_eq!(
+        list.result.as_ref().expect("result")["process_access"][0]["owner_review_needed"],
+        true
+    );
+    assert!(bouncer.bodies.lock().expect("bodies").is_empty());
+    {
+        let mut guard = slot.lock().expect("slot");
+        let vault = guard.as_mut().expect("open");
+        let activity = vault.recent_activity(2).expect("activity");
+        assert!(activity.iter().any(|entry| {
+            entry.decision == ActivityDecision::Deny && entry.reason.contains("restored")
+        }));
+        assert_eq!(
+            vault.confirm_review(999).unwrap_err().kind(),
+            VaultErrorKind::NotFound
+        );
+        vault.confirm_review(fx.item_id).expect("confirm");
+        vault
+            .confirm_review(fx.item_id)
+            .expect("a second confirm changes nothing");
+        assert!(vault.items_needing_review().expect("review").is_empty());
+    }
+    let ok = send();
+    assert!(ok.ok, "{ok:?}");
+    assert_eq!(ok.result.as_ref().expect("result")["stdout"], "ok\n");
+    no_secret(&ok);
 }
 
 #[test]

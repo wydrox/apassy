@@ -53,7 +53,8 @@ impl BrokerOptions {
     }
 }
 
-/// Running broker. Drop stops the accept loop and removes the socket file.
+/// Running broker. Drop stops the accept loop, ends every waiting run, and removes
+/// the socket file.
 #[derive(Debug)]
 pub struct BrokerHandle {
     socket: PathBuf,
@@ -78,10 +79,13 @@ impl BrokerHandle {
         self.bouncer_url.as_deref()
     }
 
+    /// Stop the broker. A waiting run ends with `approval_invalidated`. An approval
+    /// from this broker is not valid in a later broker (goal item V3).
     pub fn stop(&mut self) {
         if self.stop.swap(true, Ordering::SeqCst) {
             return;
         }
+        self.approvals.close();
         // The accept loop polls the stop flag. It does not need the socket path to exist.
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -228,10 +232,11 @@ fn accept_loop(
         }
         let ctx = ctx.clone();
         let slot = Arc::clone(active);
+        let conn_stop = Arc::clone(stop);
         let spawned = thread::Builder::new()
             .name("apassy-broker-conn".to_owned())
             .spawn(move || {
-                let _ = serve_connection(stream, &ctx);
+                let _ = serve_connection(stream, &ctx, &conn_stop);
                 slot.fetch_sub(1, Ordering::SeqCst);
             });
         if spawned.is_err() {
@@ -241,12 +246,16 @@ fn accept_loop(
     }
 }
 
-fn serve_connection(stream: UnixStream, ctx: &BrokerContext) -> io::Result<()> {
+fn serve_connection(stream: UnixStream, ctx: &BrokerContext, stop: &AtomicBool) -> io::Result<()> {
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     let mut writer = stream.try_clone()?;
     let mut reader = BufReader::new(stream);
     for _ in 0..MAX_REQUESTS_PER_CONNECTION {
+        // A stopped broker answers the request in progress, then closes the connection.
+        if stop.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         let mut line = Vec::new();
         let read = (&mut reader)
             .take(MAX_LINE_BYTES as u64)

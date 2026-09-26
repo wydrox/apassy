@@ -326,9 +326,26 @@ fn tool_result(response: WireResponse) -> Value {
     }
 }
 
+/// Next step for a refusal that only the user can fix. The agent host shows the text.
+fn hint(code: &str) -> Option<&'static str> {
+    match code {
+        "token_expired" => Some(
+            "Tell the user: the Apassy agent token of this MCP server expired. In the Apassy app, open Agents and click \"Rotate token\". Put the new token in APASSY_AGENT_TOKEN of the MCP server configuration, then restart the MCP server. Do not retry before that.",
+        ),
+        "review_required" => Some(
+            "Tell the user: the Apassy vault was restored from a backup. In the Apassy app, open the item, examine its agent settings, and click \"Confirm settings\". Do not retry before that.",
+        ),
+        _ => None,
+    }
+}
+
 fn tool_error(code: &str, message: &str) -> Value {
+    let text = match hint(code) {
+        Some(hint) => format!("{code}: {message}\n{hint}"),
+        None => format!("{code}: {message}"),
+    };
     json!({
-        "content": [{ "type": "text", "text": format!("{code}: {message}") }],
+        "content": [{ "type": "text", "text": text }],
         "isError": true,
     })
 }
@@ -397,5 +414,20 @@ mod tests {
             .unwrap_or_default();
         assert!(text.starts_with("broker_unavailable"));
         assert!(!text.contains("apassy_agt_test"));
+    }
+
+    #[test]
+    fn expired_token_gives_the_user_a_next_step() {
+        let reply = tool_result(WireResponse::failure(
+            "token_expired",
+            "The Apassy agent token expired on 2026-10-26 10:00:00 UTC.",
+        ));
+        assert_eq!(reply["isError"], true);
+        let text = reply["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(text.starts_with("token_expired: The Apassy agent token expired"));
+        assert!(text.contains("Rotate token"), "{text}");
+        assert!(text.contains("APASSY_AGENT_TOKEN"), "{text}");
+        let other = tool_result(WireResponse::failure("not_granted", "No."));
+        assert_eq!(other["content"][0]["text"], "not_granted: No.");
     }
 }

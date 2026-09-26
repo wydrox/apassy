@@ -1,11 +1,12 @@
 //! Request checks and execution. The order of the checks is part of the contract.
 //!
 //! 1. The vault is open and unlocked.
-//! 2. The token belongs to an active agent.
+//! 2. The token belongs to an active agent, and the token has not expired.
 //! 3. The agent has a grant for the item and the operation.
-//! 4. The item has a destination with a known profile and a loopback URL.
-//! 5. The parameters match the operation.
-//! 6. Only then does the broker read the secret, release the vault lock, and call the destination.
+//! 4. After a restore, the owner reviewed the agent settings of the item (goal item V4).
+//! 5. The item has a destination with a known profile and a loopback URL.
+//! 6. The parameters match the operation.
+//! 7. Only then does the broker read the secret, release the vault lock, and call the destination.
 //!
 //! Each refusal after step 2 and each call result is stored in the activity log.
 //! Process runs (ADR 0006) have their own check order in [`super::run`].
@@ -22,7 +23,9 @@ use super::bouncer::BouncerClient;
 use super::http::{self, HttpFailure, TlsClient, parse_destination};
 use super::profile::{self, OperationSpec};
 use crate::agent::wire::{Action, WIRE_VERSION, WireRequest, WireResponse};
-use crate::vault::{ActivityDecision, AgentSummary, NewActivity, Vault, VaultErrorKind};
+use crate::vault::{
+    ActivityDecision, AgentSummary, NewActivity, Vault, VaultErrorKind, format_utc,
+};
 
 const MAX_OUTPUT_TEXT_BYTES: usize = 256;
 
@@ -96,12 +99,36 @@ pub(super) fn lock(vault: &SharedVault) -> std::sync::MutexGuard<'_, Option<Vaul
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Find the agent of the token. An expired token gives `token_expired` (goal item P1).
+/// The activity log names the agent, so the owner knows which token to rotate.
 pub(super) fn authenticate(
     vault: &mut Vault,
     token: &str,
     action: &str,
 ) -> Result<AgentSummary, WireResponse> {
-    match vault.authenticate_agent(token) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    match vault.identify_agent(token) {
+        Ok(agent) if agent.token_expired_at(now) => {
+            let expired = format_utc(agent.token_expires_at);
+            let _ = vault.record_activity(&NewActivity {
+                agent_id: Some(agent.id),
+                agent_name: agent.name.clone(),
+                item_id: None,
+                operation: action.to_owned(),
+                decision: ActivityDecision::Deny,
+                reason: format!(
+                    "The agent token expired on {expired}. Rotate the token in Agents."
+                ),
+            });
+            Err(WireResponse::failure(
+                "token_expired",
+                format!(
+                    "The Apassy agent token expired on {expired}. Ask the owner to rotate the token in the Apassy app (Agents, Rotate token) and to put the new token in APASSY_AGENT_TOKEN of this MCP server."
+                ),
+            ))
+        }
         Ok(agent) => Ok(agent),
         Err(err) if err.kind() == VaultErrorKind::NotFound => {
             let _ = vault.record_activity(&NewActivity {
@@ -161,6 +188,7 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
             "item_name": details.summary.title,
             "profile": profile.id,
             "operations": described,
+            "owner_review_needed": vault.needs_review(item_id).unwrap_or(true),
         }));
     }
     let mut process_access = Vec::new();
@@ -171,6 +199,11 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
         let Ok(Some(binding)) = vault.env_binding(grant.item_id) else {
             continue;
         };
+        let production = vault
+            .declaration(grant.item_id)
+            .ok()
+            .flatten()
+            .is_some_and(|declaration| declaration.is_production());
         process_access.push(json!({
             "item_id": grant.item_id,
             "item_name": details.summary.title,
@@ -180,8 +213,12 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
             "owner_instruction": grant.rule.instruction,
             "approval": match grant.mode {
                 crate::vault::ExecMode::Ask => "the owner approves each run",
+                crate::vault::ExecMode::Bouncer if production => {
+                    "production credential: the owner approves each run"
+                }
                 crate::vault::ExecMode::Bouncer => "the bouncer decides; a risky run waits for the owner",
             },
+            "owner_review_needed": vault.needs_review(grant.item_id).unwrap_or(true),
         }));
     }
     WireResponse::success(json!({
@@ -292,6 +329,10 @@ fn prepare(
                 "The broker cannot read the grants.",
             ));
         }
+    }
+    if vault.needs_review(item_id).unwrap_or(true) {
+        let reason = super::run::review_reason(item_id);
+        return Err(deny(vault, "review_required", &reason));
     }
     let Ok(Some(destination)) = vault.destination(item_id) else {
         return Err(deny(

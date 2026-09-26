@@ -62,8 +62,9 @@ Response:
 The broker does the checks in this order:
 
 1. The vault is open and unlocked. If not, the code is `vault_locked`.
-2. The token belongs to an active agent. If not, the code is `unauthenticated`.
+2. The token belongs to an active agent. If not, the code is `unauthenticated`. If the token is older than the token lifetime, the code is `token_expired`. The activity log names the agent.
 3. The agent has a grant for the item and the operation. If not, the code is `not_granted`.
+3a. If the item came from a restored backup, the owner confirmed its agent settings. If not, the code is `review_required` (goal item V4, [backup and restore](../operations/backup-restore.md)).
 4. The item has a destination. The destination profile is known and has the operation.
 5. The parameters match the operation.
 6. The destination is `https://HOST[:PORT]`, or `http://` on a loopback address. See [ADR 0005](../adr/0005-connector-tls.md).
@@ -73,6 +74,14 @@ The broker does the checks in this order:
 
 After step 2, the broker records each refusal and each result in the activity log.
 A locked vault cannot record. The broker does not record requests with an unknown token when the vault is locked.
+
+### 4a. Vault sessions and owner approvals (goal item V3)
+
+- The desktop app starts with no open vault. An opened, created, or restored vault starts locked. The broker refuses every request with `vault_locked` until the owner unlocks the vault.
+- Each lock and each unlock gives the vault a new random epoch. A run records the epoch at its first check.
+- A run that waits for the owner ends with `approval_invalidated` when the vault is locked, backed up, restored, or replaced, or when the broker stops. The waiting thread checks the vault about every 100 ms. The desktop app also ends the waiting runs at once after these actions.
+- After a decision, the broker checks the epoch again. If the epoch changed, the run does not start. An approval from before a lock is not valid after the unlock. The code is `approval_invalidated`. A run without an approval gets `vault_locked`.
+- A stopped broker takes no new waits and closes each connection after the current request. A new broker has a new queue. Its run IDs start at a random value, so an ID from an earlier queue matches no run.
 
 ## 5. Output rules
 
@@ -85,7 +94,7 @@ A locked vault cannot record. The broker does not record requests with an unknow
 
 ## 6. Error codes
 
-`rule_expired`, `rule_command_not_permitted`, `rule_forbidden_word`, `rule_rate_limit`, `invalid_request`, `outside_project`, `no_env_binding`, `approval_denied`, `approval_timeout`, `start_failed`, `bad_request`, `unsupported_version`, `busy`, `vault_locked`, `unauthenticated`, `not_granted`, `no_destination`, `unknown_profile`, `unknown_operation`, `invalid_params`, `destination_not_permitted`, `wrong_credential_kind`, `missing_secret`, `destination_unreachable`, `tls_failed`, `destination_refused`, `destination_not_found`, `destination_error`, `bad_output`, `output_blocked`, `broker_error`.
+`rule_expired`, `rule_command_not_permitted`, `rule_forbidden_word`, `rule_rate_limit`, `invalid_request`, `outside_project`, `no_env_binding`, `approval_denied`, `approval_timeout`, `approval_invalidated`, `start_failed`, `bad_request`, `unsupported_version`, `busy`, `vault_locked`, `unauthenticated`, `not_granted`, `no_destination`, `unknown_profile`, `unknown_operation`, `invalid_params`, `destination_not_permitted`, `wrong_credential_kind`, `missing_secret`, `destination_unreachable`, `tls_failed`, `destination_refused`, `destination_not_found`, `destination_error`, `bad_output`, `output_blocked`, `broker_error`, `token_expired`, `review_required`.
 
 ## 7. Connector profile `reporting-api-v0`
 
@@ -107,6 +116,9 @@ The broker sends `Authorization: Bearer <token field>`. The agent cannot set a h
 - Methods: `initialize`, `ping`, `tools/list`, `tools/call`. Other methods give JSON-RPC error `-32601`.
 - Tools: `apassy_list_access` and `apassy_use_credential`.
 - A broker refusal is a tool result with `isError: true`. The text starts with the error code.
+- For `token_expired`, the text also tells the user the next step: rotate the token in the Apassy app, put the new token in `APASSY_AGENT_TOKEN`, and restart the MCP server.
+- For `review_required`, the text tells the user to confirm the agent settings of the restored item in the app.
+- `apassy_list_access` shows `owner_review_needed` for each item.
 
 ## 9. Vault schema versions 2 and 3
 
@@ -117,16 +129,18 @@ Unlock migrates a version 1 file in one immediate transaction. Create writes ver
 - Token comparison uses constant time over all active agents.
 - Revoke sets `revoked_at` and removes the grants of the agent.
 - Item delete removes the grants and the destination of the item in the same transaction.
-- Restore revokes all agents and removes all grants. The owner must register the agents again.
+- Restore revokes all agents and removes all grants and rules. The owner must register the agents again. Restore also marks each item with a declaration, an environment variable, or a connector for review (table `restore_review`, schema version 6). The broker refuses a run or a call with a marked item with `review_required` until the owner clicks "Confirm settings".
 - The activity log keeps the newest 500 entries.
 - Schema version 4 adds the `rule` column to `exec_grant` and the `run_log` table (ADR 0007). A version 3 grant in "allow" mode becomes "bouncer" mode.
 - Schema version 3 adds `env_binding` and `exec_grant`. Unlock migrates version 1 and 2 files. Item delete, agent revoke, and restore also remove the process grants.
+- Schema version 5 adds the `declaration` table (ADR 0008).
+- Schema version 6 adds `agent.token_issued_at` and `vault_meta.token_lifetime_days` (goal item P1). A token works from its issue time for the token lifetime: 30 days by default, 1 to 365 days. A change of the lifetime applies to every token from its issue time. A rotation replaces the token bytes and sets a new issue time. The old token stops working at once. The migration uses the registration time as the issue time, so a token older than 30 days is expired after the migration. Unlock migrates files of versions 1 to 5 in one transaction.
 
 ## 10. Limits
 
 - A same-user process without a sandbox can read the vault file and connect to the socket. The token is the only control on the socket.
 - The fixture sandbox test shows one profile. It is not the product isolation profile. The real-secret gate stays BLOCKED.
 - The broker holds the secret in process memory during a call. There is no memory erasure proof.
-- A token is valid until revoke or restore. There is no expiry or rotation.
+- A token works until it expires, or until the owner rotates or revokes it, or restores a backup. The broker does not check the peer process (ADR 0010).
 - There is no rate limit per agent.
 - The owner selects each destination. There is no certificate pinning and no list of known providers.

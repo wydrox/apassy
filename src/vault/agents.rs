@@ -118,6 +118,34 @@ PRAGMA user_version = 5;
 pub(super) const SCHEMA_V5_COLUMNS: [&str; 1] =
     ["SELECT item_id, project, environment, risk, scope, reversibility FROM declaration LIMIT 0"];
 
+/// Columns and a table added in schema version 6: agent token expiry (goal item P1)
+/// and the owner review after a restore (goal item V4).
+///
+/// A migrated token keeps its registration time as its issue time. A token that is
+/// older than the default lifetime is expired after the migration. The owner rotates it.
+pub(super) const SCHEMA_V6_SQL: &str = "
+ALTER TABLE agent ADD COLUMN token_issued_at INTEGER NOT NULL DEFAULT 0;
+UPDATE agent SET token_issued_at = created_at;
+ALTER TABLE vault_meta ADD COLUMN token_lifetime_days INTEGER NOT NULL DEFAULT 30;
+CREATE TABLE restore_review (
+    item_id INTEGER PRIMARY KEY,
+    restored_at INTEGER NOT NULL
+);
+UPDATE vault_meta SET schema_version = 6 WHERE id = 1;
+PRAGMA user_version = 6;
+";
+
+pub(super) const SCHEMA_V6_COLUMNS: [&str; 3] = [
+    "SELECT token_issued_at FROM agent LIMIT 0",
+    "SELECT token_lifetime_days FROM vault_meta LIMIT 0",
+    "SELECT item_id, restored_at FROM restore_review LIMIT 0",
+];
+
+/// A token works for this many days after Apassy issues it, unless the owner changes it.
+pub const DEFAULT_TOKEN_LIFETIME_DAYS: u32 = 30;
+pub const MAX_TOKEN_LIFETIME_DAYS: u32 = 365;
+const DAY_SECONDS: u64 = 86_400;
+
 pub const MAX_PROJECT_BYTES: usize = 64;
 
 pub const MAX_RULE_ENTRIES: usize = 32;
@@ -178,6 +206,16 @@ pub struct AgentSummary {
     pub name: String,
     pub created_at: u64,
     pub revoked: bool,
+    /// Unix time of the registration or of the last rotation.
+    pub token_issued_at: u64,
+    /// Unix time after which the token does not work: issue time plus the token lifetime.
+    pub token_expires_at: u64,
+}
+
+impl AgentSummary {
+    pub fn token_expired_at(&self, now: u64) -> bool {
+        now >= self.token_expires_at
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,6 +316,11 @@ pub struct Declaration {
 }
 
 impl Declaration {
+    /// A production credential. Every run with it waits for the owner (ADR 0010).
+    pub fn is_production(&self) -> bool {
+        self.environment == Environment::Production
+    }
+
     /// Production, high risk, or irreversible: a run must not change state without the owner.
     pub fn is_sensitive(&self) -> bool {
         self.environment == Environment::Production
@@ -399,12 +442,14 @@ impl Vault {
         let name = checked_text(name.trim(), MAX_AGENT_NAME_BYTES)?.to_owned();
         let token = fresh_epoch()?;
         let at = now_unix();
+        let lifetime = self.token_lifetime_days()?;
         let conn = self.conn_mut()?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| err(VaultErrorKind::Storage))?;
         tx.execute(
-            "INSERT INTO agent (name, token, created_at, revoked_at) VALUES (?1, ?2, ?3, NULL)",
+            "INSERT INTO agent (name, token, created_at, revoked_at, token_issued_at)
+             VALUES (?1, ?2, ?3, NULL, ?3)",
             (name.as_str(), token.as_slice(), to_sql_time(at)?),
         )
         .map_err(|_| err(VaultErrorKind::Storage))?;
@@ -415,14 +460,19 @@ impl Vault {
             name,
             created_at: at,
             revoked: false,
+            token_issued_at: at,
+            token_expires_at: expiry(at, lifetime),
         };
         Ok((summary, AgentToken(format_token(&token))))
     }
 
     pub fn list_agents(&self) -> VaultResult<Vec<AgentSummary>> {
+        let lifetime = self.token_lifetime_days()?;
         let conn = self.conn_ref()?;
         let mut stmt = conn
-            .prepare("SELECT id, name, created_at, revoked_at FROM agent ORDER BY id ASC")
+            .prepare(
+                "SELECT id, name, created_at, revoked_at, token_issued_at FROM agent ORDER BY id ASC",
+            )
             .map_err(|_| err(VaultErrorKind::Storage))?;
         let rows = stmt
             .query_map([], |row| {
@@ -431,21 +481,76 @@ impl Vault {
                     row.get::<_, String>(1)?,
                     row.get::<_, i64>(2)?,
                     row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, i64>(4)?,
                 ))
             })
             .map_err(|_| err(VaultErrorKind::Storage))?;
         let mut agents = Vec::new();
         for row in rows {
-            let (id, name, created_at, revoked_at) =
+            let (id, name, created_at, revoked_at, issued_at) =
                 row.map_err(|_| err(VaultErrorKind::Storage))?;
+            let issued_at = from_sql_time(issued_at)?;
             agents.push(AgentSummary {
                 id: to_public_id(id)?,
                 name,
                 created_at: from_sql_time(created_at)?,
                 revoked: revoked_at.is_some(),
+                token_issued_at: issued_at,
+                token_expires_at: expiry(issued_at, lifetime),
             });
         }
         Ok(agents)
+    }
+
+    /// Days that a token works after Apassy issues it (goal item P1). The default is 30.
+    pub fn token_lifetime_days(&self) -> VaultResult<u32> {
+        let days: i64 = self
+            .conn_ref()?
+            .query_row(
+                "SELECT token_lifetime_days FROM vault_meta WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        u32::try_from(days)
+            .ok()
+            .filter(|days| (1..=MAX_TOKEN_LIFETIME_DAYS).contains(days))
+            .ok_or_else(|| err(VaultErrorKind::Storage))
+    }
+
+    /// Change the token lifetime, 1 to 365 days. The new lifetime applies to every
+    /// token from its issue time, so a shorter lifetime can end a token at once.
+    pub fn set_token_lifetime_days(&mut self, days: u32) -> VaultResult<()> {
+        if !(1..=MAX_TOKEN_LIFETIME_DAYS).contains(&days) {
+            return Err(err(VaultErrorKind::InvalidInput));
+        }
+        self.conn_mut()?
+            .execute(
+                "UPDATE vault_meta SET token_lifetime_days = ?1 WHERE id = 1",
+                [i64::from(days)],
+            )
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        Ok(())
+    }
+
+    /// Give an active agent a new token. The old token stops working at once. The
+    /// returned token is the only copy outside the vault. An expired agent can rotate.
+    pub fn rotate_agent_token(&mut self, agent_id: u64) -> VaultResult<AgentToken> {
+        let sql_id = to_sql_id(agent_id)?;
+        let token = fresh_epoch()?;
+        let at = to_sql_time(now_unix())?;
+        let conn = self.conn_mut()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        require_active_agent(&tx, sql_id)?;
+        tx.execute(
+            "UPDATE agent SET token = ?1, token_issued_at = ?2 WHERE id = ?3 AND revoked_at IS NULL",
+            (token.as_slice(), at, sql_id),
+        )
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+        tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
+        Ok(AgentToken(format_token(&token)))
     }
 
     /// Revoke an agent. Its token stops working at once. Its grants are removed.
@@ -480,12 +585,28 @@ impl Vault {
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))
     }
 
-    /// Find the active agent for a token. Every stored token is compared in constant time.
+    /// Find the active agent for a token that has not expired. Every stored token is
+    /// compared in constant time. An expired token gives [`VaultErrorKind::Expired`].
     pub fn authenticate_agent(&self, token: &str) -> VaultResult<AgentSummary> {
+        let agent = self.identify_agent(token)?;
+        if agent.token_expired_at(now_unix()) {
+            Err(err(VaultErrorKind::Expired))
+        } else {
+            Ok(agent)
+        }
+    }
+
+    /// Find the active agent for a token, also when the token expired. The broker uses
+    /// it to name the agent in the refusal. Use [`Vault::authenticate_agent`] for access.
+    pub fn identify_agent(&self, token: &str) -> VaultResult<AgentSummary> {
         let presented = parse_token(token).ok_or_else(|| err(VaultErrorKind::NotFound))?;
+        let lifetime = self.token_lifetime_days()?;
         let conn = self.conn_ref()?;
         let mut stmt = conn
-            .prepare("SELECT id, name, token, created_at FROM agent WHERE revoked_at IS NULL")
+            .prepare(
+                "SELECT id, name, token, created_at, token_issued_at FROM agent
+                 WHERE revoked_at IS NULL",
+            )
             .map_err(|_| err(VaultErrorKind::Storage))?;
         let rows = stmt
             .query_map([], |row| {
@@ -494,18 +615,23 @@ impl Vault {
                     row.get::<_, String>(1)?,
                     row.get::<_, Vec<u8>>(2)?,
                     row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
                 ))
             })
             .map_err(|_| err(VaultErrorKind::Storage))?;
         let mut found = None;
         for row in rows {
-            let (id, name, stored, created_at) = row.map_err(|_| err(VaultErrorKind::Storage))?;
+            let (id, name, stored, created_at, issued_at) =
+                row.map_err(|_| err(VaultErrorKind::Storage))?;
             if constant_time_eq(&stored, &presented) && found.is_none() {
+                let issued_at = from_sql_time(issued_at)?;
                 found = Some(AgentSummary {
                     id: to_public_id(id)?,
                     name,
                     created_at: from_sql_time(created_at)?,
                     revoked: false,
+                    token_issued_at: issued_at,
+                    token_expires_at: expiry(issued_at, lifetime),
                 });
             }
         }
@@ -901,6 +1027,54 @@ impl Vault {
         }
     }
 
+    /// Items from a restored backup whose agent settings the owner did not confirm yet
+    /// (goal item V4). Ascending item IDs.
+    pub fn items_needing_review(&self) -> VaultResult<Vec<u64>> {
+        let conn = self.conn_ref()?;
+        let mut stmt = conn
+            .prepare("SELECT item_id FROM restore_review ORDER BY item_id ASC")
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, i64>(0))
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(to_public_id(
+                row.map_err(|_| err(VaultErrorKind::Storage))?,
+            )?);
+        }
+        Ok(items)
+    }
+
+    /// The item came from a restored backup, and the owner did not confirm its agent settings.
+    pub fn needs_review(&self, item_id: u64) -> VaultResult<bool> {
+        let item = to_sql_id(item_id)?;
+        let found: Option<i64> = self
+            .conn_ref()?
+            .query_row(
+                "SELECT item_id FROM restore_review WHERE item_id = ?1",
+                [item],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        Ok(found.is_some())
+    }
+
+    /// The owner confirms the declaration, the environment variable, and the connector of
+    /// a restored item. Agents can use the item again. A second call changes nothing.
+    pub fn confirm_review(&mut self, item_id: u64) -> VaultResult<()> {
+        let item = to_sql_id(item_id)?;
+        let conn = self.conn_mut()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        require_item(&tx, item)?;
+        tx.execute("DELETE FROM restore_review WHERE item_id = ?1", [item])
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        tx.commit().map_err(|_| err(VaultErrorKind::Storage))
+    }
+
     /// Record that a run started. The hourly limit counts these entries.
     pub fn record_run(&mut self, agent_id: u64, item_id: u64) -> VaultResult<()> {
         let agent = to_sql_id(agent_id)?;
@@ -1008,8 +1182,14 @@ impl Vault {
     }
 }
 
-/// Revoke every active agent. Restore calls this before the restored vault is used.
-pub(super) fn revoke_all_agents(conn: &mut Connection) -> VaultResult<()> {
+/// Restore calls this before the restored vault is used, in one transaction:
+///
+/// - Revoke every active agent. The owner registers the agents again.
+/// - Remove every grant and every rule of a process grant.
+/// - Mark each item with agent settings (declaration, environment variable, or
+///   connector) for an owner review (goal item V4). The broker refuses an agent
+///   request with a marked item until the owner confirms the settings.
+pub(super) fn prepare_restored(conn: &mut Connection) -> VaultResult<()> {
     let at = to_sql_time(now_unix())?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1023,6 +1203,15 @@ pub(super) fn revoke_all_agents(conn: &mut Connection) -> VaultResult<()> {
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.execute("DELETE FROM exec_grant", [])
         .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute(
+        "INSERT OR REPLACE INTO restore_review (item_id, restored_at)
+         SELECT id, ?1 FROM item WHERE id IN (
+             SELECT item_id FROM declaration
+             UNION SELECT item_id FROM env_binding
+             UNION SELECT item_id FROM destination)",
+        [at],
+    )
+    .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))
 }
 
@@ -1037,6 +1226,8 @@ pub(super) fn delete_item_links(tx: &rusqlite::Transaction<'_>, item_id: i64) ->
     tx.execute("DELETE FROM exec_grant WHERE item_id = ?1", [item_id])
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.execute("DELETE FROM declaration WHERE item_id = ?1", [item_id])
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute("DELETE FROM restore_review WHERE item_id = ?1", [item_id])
         .map_err(|_| err(VaultErrorKind::Storage))?;
     Ok(())
 }
@@ -1169,6 +1360,27 @@ fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+fn expiry(issued_at: u64, lifetime_days: u32) -> u64 {
+    issued_at.saturating_add(u64::from(lifetime_days) * DAY_SECONDS)
+}
+
+/// UTC time as `YYYY-MM-DD HH:MM:SS UTC`. Uses the civil-from-days method.
+pub fn format_utc(unix: u64) -> String {
+    let days = unix / DAY_SECONDS;
+    let rem = unix % DAY_SECONDS;
+    let (hour, minute, second) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let z = i64::try_from(days).unwrap_or(0) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} UTC")
 }
 
 fn to_sql_time(at: u64) -> VaultResult<i64> {

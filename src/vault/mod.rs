@@ -24,9 +24,10 @@ use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionB
 use crate::contracts::CredentialKind;
 
 pub use agents::{
-    AGENT_TOKEN_PREFIX, ActivityDecision, ActivityRecord, AgentSummary, AgentToken, Declaration,
-    Destination, EnvBinding, Environment, ExecGrant, ExecMode, ExecRule, GrantSummary,
-    MAX_ACTIVITY_ROWS, NewActivity, Reversibility, RiskLevel, Scope, checked_env_name,
+    AGENT_TOKEN_PREFIX, ActivityDecision, ActivityRecord, AgentSummary, AgentToken,
+    DEFAULT_TOKEN_LIFETIME_DAYS, Declaration, Destination, EnvBinding, Environment, ExecGrant,
+    ExecMode, ExecRule, GrantSummary, MAX_ACTIVITY_ROWS, MAX_TOKEN_LIFETIME_DAYS, NewActivity,
+    Reversibility, RiskLevel, Scope, checked_env_name, format_utc,
 };
 pub use types::{
     Field, FieldSummary, ItemDetails, ItemDraft, ItemSummary, MAX_PASSPHRASE_BYTES,
@@ -83,6 +84,7 @@ const LEGACY_SCHEMA_VERSION: i64 = 1;
 const AGENT_SCHEMA_VERSION: i64 = 2;
 const PROCESS_SCHEMA_VERSION: i64 = 3;
 const RULE_SCHEMA_VERSION: i64 = 4;
+const DECLARATION_SCHEMA_VERSION: i64 = 5;
 
 /// Encrypted local vault. Connection state is private. Debug is redacted.
 pub struct Vault {
@@ -356,10 +358,11 @@ impl Vault {
         refuse_sqlite_companions(&source, VaultErrorKind::InvalidInput)?;
         validate_encrypted_source(&source, passphrase)?;
         copy_into_new_file(&source, &dest)?;
-        // Restored agent authority is not trusted. The owner registers agents again.
-        if let Err(revoke_err) = revoke_restored_agents(&dest, passphrase) {
+        // Restored agent authority is not trusted. The owner registers agents again and
+        // reviews the agent settings of each item (goal item V4).
+        if let Err(prepare_err) = prepare_restored(&dest, passphrase) {
             let _ = fs::remove_file(&dest);
-            return Err(revoke_err);
+            return Err(prepare_err);
         }
         Ok(Self {
             path: dest,
@@ -367,6 +370,52 @@ impl Vault {
             conn: None,
             epoch: fresh_epoch()?,
         })
+    }
+
+    /// Change the master passphrase with SQLCipher `PRAGMA rekey` (goal item V5).
+    ///
+    /// The vault must be unlocked, and `current` must open it. `new` follows the create
+    /// rules. The KDF, HMAC, and page settings do not change: rekey uses the verified
+    /// settings of the open connection, and the new connection checks them again.
+    ///
+    /// The change ends the vault epoch, like a lock and an unlock. On success, the vault
+    /// is unlocked with the new passphrase. A wrong `current` returns `WrongKeyOrCorrupt`
+    /// and leaves the vault unlocked and unchanged. After a later failure, the vault is
+    /// locked. `Busy` or `Storage` then means that the old passphrase still opens the
+    /// file. `WrongKeyOrCorrupt` after the lock means that the check with the old
+    /// passphrase also failed.
+    pub fn change_passphrase(&mut self, current: &str, new: &str) -> VaultResult<()> {
+        self.require_unlocked()?;
+        validate_unlock_passphrase(current)?;
+        validate_create_passphrase(new)?;
+        if current == new {
+            return Err(err(VaultErrorKind::InvalidInput));
+        }
+        // Check the current passphrase on a second, read-only connection first.
+        validate_encrypted_source(&self.path, current)?;
+        self.lock()?;
+        let conn = open_working_conn(&self.path, current)?;
+        let rekeyed = rekey(&conn, &self.path, new);
+        // A close error drops the connection. The checks below decide the result.
+        let _ = close_conn(conn);
+        // SQLCipher answers "ok" also when its rekey transaction rolls back, for example
+        // when another connection holds a read lock. Only a new connection with the new
+        // passphrase proves the change. A read-write connection also rolls back a
+        // journal that a failed rekey left, because the journal has the old pages.
+        if rekeyed.is_ok()
+            && let Ok(conn) = open_working_conn(&self.path, new)
+        {
+            self.conn = Some(conn);
+            return Ok(());
+        }
+        // The old passphrase must still open the file.
+        match open_working_conn(&self.path, current).and_then(close_conn) {
+            Ok(()) => Err(match rekeyed {
+                Err(busy) if busy.kind() == VaultErrorKind::Busy => busy,
+                _ => err(VaultErrorKind::Storage),
+            }),
+            Err(_) => Err(err(VaultErrorKind::WrongKeyOrCorrupt)),
+        }
     }
 
     fn require_unlocked(&self) -> VaultResult<()> {
@@ -589,6 +638,40 @@ fn apply_key(conn: &Connection, passphrase: &str) -> VaultResult<()> {
     Ok(())
 }
 
+/// Re-encrypt every page of the open database with the new passphrase.
+///
+/// The vault uses DELETE journal mode. `apply_session_pragmas` sets it at unlock, and
+/// that also checkpoints and removes a WAL that an external tool left. So no WAL holds
+/// pages with the old key after the rekey. The rekey refuses to start when the mode is
+/// not DELETE or when a journal, WAL, or SHM file is next to the vault file.
+/// The rollback journal of the rekey holds pages with the old key. SQLite deletes the
+/// file at the commit, but the file system can keep the old blocks.
+///
+/// SQLCipher answers "ok" also when the commit of the rekey fails on a lock. So the
+/// rekey first takes the exclusive lock one time. A reader of another SQLite client then
+/// stops the change with `Busy` before a page changes. The caller still verifies the
+/// result with a new connection, because a reader can start between the two steps.
+fn rekey(conn: &Connection, path: &Path, new: &str) -> VaultResult<()> {
+    validate_create_passphrase(new)?;
+    let journal: String = conn
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    if !journal.eq_ignore_ascii_case("delete") {
+        return Err(err(VaultErrorKind::Storage));
+    }
+    refuse_sqlite_companions(path, VaultErrorKind::Storage)?;
+    conn.execute_batch("BEGIN EXCLUSIVE; ROLLBACK;")
+        .map_err(|_| err(VaultErrorKind::Busy))?;
+    let answer: String = conn
+        .pragma_update_and_check(None, "rekey", new, |row| row.get(0))
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    if answer == "ok" {
+        Ok(())
+    } else {
+        Err(err(VaultErrorKind::Storage))
+    }
+}
+
 fn require_cipher_version(conn: &Connection) -> VaultResult<String> {
     let version = conn
         .pragma_query_value(None, "cipher_version", |row| {
@@ -689,6 +772,7 @@ fn verify_user_version(conn: &Connection) -> VaultResult<i64> {
         | AGENT_SCHEMA_VERSION
         | PROCESS_SCHEMA_VERSION
         | RULE_SCHEMA_VERSION
+        | DECLARATION_SCHEMA_VERSION
         | SCHEMA_VERSION) => Ok(version),
         _ => Err(err(VaultErrorKind::UnsupportedSchema)),
     }
@@ -761,12 +845,17 @@ fn verify_expected_columns(conn: &Connection, version: i64) -> VaultResult<()> {
     } else {
         &[]
     };
-    let v5: &[&str] = if version >= SCHEMA_VERSION {
+    let v5: &[&str] = if version >= DECLARATION_SCHEMA_VERSION {
         &agents::SCHEMA_V5_COLUMNS
     } else {
         &[]
     };
-    for sql in v1.iter().chain(v2).chain(v3).chain(v4).chain(v5) {
+    let v6: &[&str] = if version >= SCHEMA_VERSION {
+        &agents::SCHEMA_V6_COLUMNS
+    } else {
+        &[]
+    };
+    for sql in v1.iter().chain(v2).chain(v3).chain(v4).chain(v5).chain(v6) {
         drop(
             conn.prepare(sql)
                 .map_err(|_| err(VaultErrorKind::UnsupportedSchema))?,
@@ -784,7 +873,8 @@ fn verify_readable_schema(conn: &Connection) -> VaultResult<i64> {
     Ok(version)
 }
 
-/// Add the missing tables in one immediate transaction.
+/// Add the missing tables in one immediate transaction. Each step runs only for an
+/// older file. A failure rolls back every step, so the file keeps its old version.
 fn migrate_to_current(conn: &mut Connection, from: i64) -> VaultResult<()> {
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -801,15 +891,20 @@ fn migrate_to_current(conn: &mut Connection, from: i64) -> VaultResult<()> {
         tx.execute_batch(agents::SCHEMA_V4_SQL)
             .map_err(|_| err(VaultErrorKind::Storage))?;
     }
-    tx.execute_batch(agents::SCHEMA_V5_SQL)
+    if from < DECLARATION_SCHEMA_VERSION {
+        tx.execute_batch(agents::SCHEMA_V5_SQL)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+    }
+    tx.execute_batch(agents::SCHEMA_V6_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     verify_expected_columns(conn, SCHEMA_VERSION)
 }
 
-fn revoke_restored_agents(path: &Path, passphrase: &str) -> VaultResult<()> {
+/// Open the restored copy, migrate it to the current schema, and remove its agent authority.
+fn prepare_restored(path: &Path, passphrase: &str) -> VaultResult<()> {
     let mut conn = open_working_conn(path, passphrase)?;
-    let result = agents::revoke_all_agents(&mut conn);
+    let result = agents::prepare_restored(&mut conn);
     let close_result = close_conn(conn);
     result.and(close_result)
 }
@@ -831,6 +926,8 @@ fn initialize_new_db(path: &Path, passphrase: &str) -> VaultResult<()> {
     tx.execute_batch(agents::SCHEMA_V4_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.execute_batch(agents::SCHEMA_V5_SQL)
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute_batch(agents::SCHEMA_V6_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     close_conn(conn)

@@ -3,6 +3,7 @@
 Date: 2026-09-16.
 Status: experimental backend contract. See [local verification](../operations/vault-verification.md) for measured results and limits.
 Schema version 2 (2026-09-25) adds agent, grant, destination, and activity tables. See section 9 of the [broker contract](broker-v0.md). The item API in this document did not change. Item delete also removes the grants and the destination of the item. Restore also revokes all agents.
+Schema version 6 (2026-09-26) adds agent token expiry and rotation (goal item P1) and the owner review after a restore (goal item V4). See section 9 of the broker contract, the agent API below, and [backup and restore](../operations/backup-restore.md).
 The owner selected SQLCipher with a master passphrase after the synthetic storage probe passed.
 This contract does not permit real-secret use or claim complete P2 acceptance.
 
@@ -57,6 +58,7 @@ pub struct ItemDetails {
 pub enum VaultErrorKind {
     Locked, AlreadyExists, NotFound, Conflict, InvalidInput,
     WrongKeyOrCorrupt, UnsupportedSchema, Busy, Io, Storage,
+    Expired, // schema 6: the agent token is older than the token lifetime
 }
 pub struct VaultError; // Debug + Display + std::error::Error; kind(&self) -> VaultErrorKind
 pub type VaultResult<T> = Result<T, VaultError>;
@@ -78,6 +80,30 @@ impl Vault {
     pub fn restore(backup: &std::path::Path, destination: &std::path::Path, passphrase: &str) -> VaultResult<Self>;
 }
 ```
+
+## Agent token API (schema 6)
+
+```rust
+impl Vault {
+    pub fn authenticate_agent(&self, token: &str) -> VaultResult<AgentSummary>; // Expired after the lifetime
+    pub fn identify_agent(&self, token: &str) -> VaultResult<AgentSummary>;     // also an expired token
+    pub fn rotate_agent_token(&mut self, agent_id: u64) -> VaultResult<AgentToken>;
+    pub fn token_lifetime_days(&self) -> VaultResult<u32>;                     // default 30
+    pub fn set_token_lifetime_days(&mut self, days: u32) -> VaultResult<()>;   // 1 to 365
+}
+// AgentSummary has token_issued_at and token_expires_at (Unix seconds).
+```
+
+```rust
+impl Vault {
+    pub fn items_needing_review(&self) -> VaultResult<Vec<u64>>;
+    pub fn needs_review(&self, item_id: u64) -> VaultResult<bool>;
+    pub fn confirm_review(&mut self, item_id: u64) -> VaultResult<()>; // NotFound for a missing item
+}
+```
+
+A token works from its issue time for the token lifetime. A registration and a rotation set the issue time.
+A rotation of a revoked agent returns `InvalidInput`. The returned token is the only copy outside the vault.
 
 ## Data checks
 
@@ -116,7 +142,7 @@ Repeated unlock must not preserve a connection after a failed passphrase attempt
 Every constructor, lock, and unlock attempt requests a fresh 32-byte epoch from `getrandom::fill`.
 Unlock closes the previous connection and changes the epoch before it checks the passphrase. A refused or wrong passphrase ends the previous epoch.
 If entropy is unavailable, the operation fails with the connection closed. A new epoch cannot be guaranteed on that error.
-Epochs are invalidation data, not authentication tokens. No agent sessions or approvals exist in this backend yet.
+Epochs are invalidation data, not authentication tokens. The broker binds each run and each owner approval to the epoch of its first check. See section 4a of the [broker contract](broker-v0.md).
 
 Create and backup use exclusive file creation with Unix mode 0600. Refuse symlink targets.
 Hold a nonblocking `std::fs::File::try_lock` on a persistent adjacent `<canonical-db-path>.lock` file for the vault lifetime, including locked state.
@@ -143,12 +169,29 @@ Restore validates the encrypted source with the supplied passphrase before creat
 It reserves the destination sidecar before key validation and retains that lock without an unlocked gap.
 A refused restore can leave an empty persistent destination sidecar, but it does not create the destination database.
 It must not overwrite either source or destination. The restored instance starts locked with a fresh epoch.
+In one transaction on the destination, restore revokes every agent, removes every grant and rule, and marks each item with agent settings for an owner review.
 Unlock and restore check the encrypted schema, supported `user_version`, expected columns, and database integrity before they succeed.
+
+## Passphrase change (goal item V5)
+
+```rust
+impl Vault {
+    pub fn change_passphrase(&mut self, current: &str, new: &str) -> VaultResult<()>;
+}
+```
+
+The vault must be unlocked. `current` must open the file, and `new` follows the create rules. The same passphrase returns `InvalidInput`.
+Apassy checks `current` on a second read-only connection. A wrong `current` returns `WrongKeyOrCorrupt` and leaves the vault open and unchanged.
+Then Apassy locks the vault, which ends the epoch, and opens a new connection with `current`. That connection verifies the SQLCipher 4 settings and uses DELETE journal mode.
+Before the rekey, Apassy refuses a journal, WAL, or SHM file and takes the exclusive lock one time. A reader of another SQLite client then gives `Busy` before a page changes.
+`PRAGMA rekey` encrypts every page again in one transaction with the same KDF, HMAC, and page settings. SQLCipher answers "ok" also when that transaction rolls back, so Apassy closes the connection and opens the file with `new` again. That check reads every page and checks its HMAC. On success, the vault stays unlocked on this new connection.
+If the check fails, the vault stays locked. Apassy opens the file with `current`. A read-write connection also rolls back a journal that a failed rekey left. `Busy` or `Storage` then means that the old passphrase opens the file. `WrongKeyOrCorrupt` means that neither check passed.
+The new passphrase is in a temporary SQL string, as the key is at unlock. A backup keeps the passphrase of its time. The old rollback journal can stay in free disk blocks, in snapshots, and in earlier copies.
 
 ## Remaining limits
 
 Passphrases and decrypted data exist in process memory. SQLCipher key setup also makes a temporary SQL string.
 Redacted Debug is not memory erasure or a defense against memory inspection, swap, or crash dumps.
 A completed file copy is not proof of crash-safe directory-entry persistence or a complete recovery product.
-Schema migration, rekey, authenticated reveal, durable agent authority, product isolation, and native-code review remain separate gates.
+Authenticated reveal, product isolation, and native-code review remain separate gates. Unlock migrates files from schema versions 1 to 5 in one transaction (goal item V6).
 Tests use temporary synthetic data only. No real credential or passphrase belongs in repository fixtures or logs.

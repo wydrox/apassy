@@ -7,7 +7,7 @@ use std::path::Path;
 
 use apassy::contracts::CredentialKind;
 use apassy::desktop::model::ItemDraft;
-use apassy::desktop::owner_store::{OwnerSession, SecretForm};
+use apassy::desktop::owner_store::{DeclarationForm, OwnerSession, SecretForm};
 use tempfile::TempDir;
 
 const PASS: &str = "owner-vault-pass-ok";
@@ -324,5 +324,155 @@ fn unchanged_form_is_detected_before_a_save() {
                 &SecretForm::default()
             )
             .expect("compare name")
+    );
+}
+
+/// Goal item V4 in the owner session: the backup and restore procedure. The restore
+/// revokes every agent and lists the items that wait for the owner review.
+#[test]
+fn restore_lists_items_for_review_until_the_owner_confirms() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut session, _) = session_at(&dir, "procedure.db");
+    // The app starts locked. A new vault file also starts locked.
+    assert!(OwnerSession::new().is_locked());
+    assert!(session.is_locked());
+    unlock(&mut session);
+    let used = session
+        .add(
+            &api_draft("Used by agents", "Project V4"),
+            &token_form(TOKEN),
+        )
+        .expect("add");
+    let unused = session
+        .add(
+            &api_draft("Not for agents", "Project V4"),
+            &token_form(DB_PASS),
+        )
+        .expect("add");
+    let mut form = DeclarationForm {
+        project: "Project V4".to_owned(),
+        ..DeclarationForm::default()
+    };
+    form.environment = apassy::vault::Environment::Staging;
+    session
+        .set_declaration(used.id, &form)
+        .expect("declaration");
+    session
+        .set_env_binding(used.id, "USED_KEY", "token")
+        .expect("binding");
+    session.register_agent("Before restore").expect("register");
+    assert!(session.items_needing_review().expect("review").is_empty());
+
+    let backup = dir.path().join("procedure.backup");
+    session.backup(&backup).expect("backup");
+    assert!(session.is_locked(), "backup locks the vault");
+    let restored = dir.path().join("procedure-restored.db");
+    session.restore(&backup, &restored, PASS).expect("restore");
+    assert!(session.is_locked(), "the restored vault starts locked");
+    assert_eq!(session.location(), Some(restored.as_path()));
+    unlock(&mut session);
+    assert!(session.agents().expect("agents").iter().all(|a| a.revoked));
+    assert_eq!(
+        session.items_needing_review().expect("review"),
+        vec![(used.id, "Used by agents".to_owned())]
+    );
+    assert!(session.needs_review(used.id).expect("review"));
+    assert!(!session.needs_review(unused.id).expect("review"));
+    assert_eq!(
+        session.declaration(used.id).expect("declaration"),
+        Some(form.to_declaration()),
+        "the restore keeps the settings for the review"
+    );
+    session.confirm_review(used.id).expect("confirm");
+    assert!(session.items_needing_review().expect("review").is_empty());
+    let revealed = session.reveal(used.id).expect("reveal");
+    assert_eq!(revealed.secret_lines[0].display, TOKEN);
+}
+
+/// Goal item V5 in the owner session: the new passphrase two times, clear refusals, and
+/// the old passphrase stays valid after each refusal.
+#[test]
+fn owner_changes_the_passphrase_with_a_repeat() {
+    const NEW: &str = "owner-vault-pass-new";
+    let dir = TempDir::new().expect("temp dir");
+    let (mut session, path) = session_at(&dir, "rekey.db");
+    unlock(&mut session);
+    let created = session
+        .add(&api_draft("Rekey me", "Project V5"), &token_form(TOKEN))
+        .expect("add");
+    let refusals = [
+        ("", NEW, NEW, "Type the current passphrase."),
+        (PASS, NEW, "owner-vault-pass-other", "different"),
+        (PASS, "short", "short", "minimum of 12"),
+        (PASS, PASS, PASS, "same as the current"),
+        (WRONG, NEW, NEW, "current passphrase is incorrect"),
+    ];
+    for (current, new, repeat, expected) in refusals {
+        let err = session
+            .change_passphrase(current, new, repeat)
+            .expect_err("refused change");
+        assert!(err.message.contains(expected), "{}", err.message);
+        assert!(!session.is_locked(), "a refusal keeps the vault open");
+    }
+    session.lock().expect("lock");
+    let err = session
+        .change_passphrase(PASS, NEW, NEW)
+        .expect_err("locked vault");
+    assert_eq!(err.code, "vault_locked");
+    unlock(&mut session);
+
+    session.change_passphrase(PASS, NEW, NEW).expect("change");
+    assert!(!session.is_locked());
+    session.lock().expect("lock");
+    assert_eq!(
+        session.unlock(PASS).expect_err("old passphrase").code,
+        "wrong_key"
+    );
+    session.unlock(NEW).expect("new passphrase");
+    let revealed = session.reveal(created.id).expect("reveal");
+    assert_eq!(revealed.secret_lines[0].display, TOKEN);
+    assert!(!format!("{session:?}").contains(NEW));
+
+    let mut reopened = OwnerSession::new();
+    drop(session);
+    reopened.open_file(&path).expect("open");
+    reopened.unlock(NEW).expect("new passphrase after reopen");
+}
+
+/// Goal item P1 in the owner session: the lifetime text and a token rotation.
+#[test]
+fn owner_changes_token_lifetime_and_rotates_a_token() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut session, _) = session_at(&dir, "tokens.db");
+    unlock(&mut session);
+    let (agent, first) = session.register_agent("Session agent").expect("register");
+    assert_eq!(session.token_lifetime_days().expect("lifetime"), 30);
+    for bad in ["", "0", "366", "abc", "-1"] {
+        let err = session
+            .set_token_lifetime_days(bad)
+            .expect_err("bad lifetime");
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("from 1 to 365"), "{}", err.message);
+    }
+    assert_eq!(
+        session.set_token_lifetime_days(" 14 ").expect("lifetime"),
+        14
+    );
+    let listed = session.agents().expect("agents").remove(0);
+    assert_eq!(
+        listed.token_expires_at - listed.token_issued_at,
+        14 * 86_400
+    );
+    let second = session.rotate_agent_token(agent.id).expect("rotate");
+    assert_ne!(first.expose(), second.expose());
+    assert!(!format!("{second:?}").contains(second.expose()));
+    session.revoke_agent(agent.id).expect("revoke");
+    let err = session
+        .rotate_agent_token(agent.id)
+        .expect_err("revoked agent");
+    assert!(
+        err.message.contains("Register the agent again"),
+        "{}",
+        err.message
     );
 }
