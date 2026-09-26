@@ -24,6 +24,8 @@ If Laya does not answer in 3 seconds, the bouncer is unavailable. Then every run
 
 ### Start command with the base model (goal B8)
 
+The base model `apassy-base-v1+83224960` is the default model of the bouncer. It passed the B2 gate on the blind set held-out v4 with policy `apassy-bouncer-v7`: 0 violations and 0 critical cases ran in 3 runs ([heldout-v4.md](../evaluation/heldout-v4.md), Results).
+
 Apassy ships a fine-tuned base model, `apassy-base-v1`. See [base-model.md](base-model.md). It is a small file with new decision heads for the same Laya checkpoint. Use the start script from the repository instead of `laya-serve`:
 
 ```
