@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
+use zeroize::Zeroizing;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -198,14 +199,20 @@ pub fn get(
     if bearer.is_empty() || bearer.bytes().any(|b| !(0x21..0x7f).contains(&b)) {
         return Err(HttpFailure::Protocol);
     }
-    let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {bearer}\r\nAccept: application/json\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n",
-        host = destination.host_header(),
-    );
-    let raw = match destination {
+    let host = destination.host_header();
+    let request = request_bytes(&[
+        b"GET ",
+        path.as_bytes(),
+        b" HTTP/1.1\r\nHost: ",
+        host.as_bytes(),
+        b"\r\nAuthorization: Bearer ",
+        bearer.as_bytes(),
+        b"\r\nAccept: application/json\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n",
+    ]);
+    match destination {
         DestinationUrl::Loopback { addr, .. } => {
             let mut stream = connect(&[*addr])?;
-            exchange(&mut stream, request.as_bytes())
+            exchange(&mut stream, &request)
         }
         DestinationUrl::Https { host, port } => {
             let addrs: Vec<SocketAddr> = (host.as_str(), *port)
@@ -224,12 +231,21 @@ pub fn get(
                     .complete_io(&mut stream.sock)
                     .map_err(|err| classify(&err))?;
             }
-            exchange(&mut stream, request.as_bytes())
+            exchange(&mut stream, &request)
         }
-    };
-    let mut request = request.into_bytes();
-    request.fill(0);
-    raw
+    }
+}
+
+/// Join the request parts in one buffer of the exact size. The buffer does not
+/// grow, so it leaves no partial copy of a token in freed memory. `Zeroizing`
+/// erases it on each return path, also after an early error.
+fn request_bytes(parts: &[&[u8]]) -> Zeroizing<Vec<u8>> {
+    let size = parts.iter().map(|part| part.len()).sum();
+    let mut request = Zeroizing::new(Vec::with_capacity(size));
+    for part in parts {
+        request.extend_from_slice(part);
+    }
+    request
 }
 
 /// POST a JSON body to a loopback service with one time limit for the whole
@@ -247,19 +263,28 @@ pub fn post_json_loopback(
     if !path.starts_with('/') || path.bytes().any(|b| !(0x21..0x7f).contains(&b)) {
         return Err(HttpFailure::Protocol);
     }
-    let auth = match bearer {
+    let (auth_start, auth_key, auth_end): (&[u8], &[u8], &[u8]) = match bearer {
         Some(key) if !key.is_empty() && key.bytes().all(|b| (0x21..0x7f).contains(&b)) => {
-            format!("Authorization: Bearer {key}\r\n")
+            (b"Authorization: Bearer ", key.as_bytes(), b"\r\n")
         }
         Some(_) => return Err(HttpFailure::Protocol),
-        None => String::new(),
+        None => (b"", b"", b""),
     };
-    let head = format!(
-        "POST {path} HTTP/1.1\r\nHost: {host_header}\r\n{auth}Content-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    let mut request = head.into_bytes();
-    request.extend_from_slice(body);
+    let length = body.len().to_string();
+    let request = request_bytes(&[
+        b"POST ",
+        path.as_bytes(),
+        b" HTTP/1.1\r\nHost: ",
+        host_header.as_bytes(),
+        b"\r\n",
+        auth_start,
+        auth_key,
+        auth_end,
+        b"Content-Type: application/json\r\nAccept: application/json\r\nContent-Length: ",
+        length.as_bytes(),
+        b"\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n",
+        body,
+    ]);
     let stream = TcpStream::connect_timeout(addr, timeout.min(CONNECT_TIMEOUT))
         .map_err(|_| HttpFailure::Connect)?;
     stream
@@ -269,9 +294,7 @@ pub fn post_json_loopback(
         .set_write_timeout(Some(timeout))
         .map_err(|_| HttpFailure::Connect)?;
     let mut stream = stream;
-    let result = exchange(&mut stream, &request);
-    request.fill(0);
-    result
+    exchange(&mut stream, &request)
 }
 
 fn connect(addrs: &[SocketAddr]) -> Result<TcpStream, HttpFailure> {
@@ -500,6 +523,83 @@ mod tests {
             get(&wrong_name, "/", "dummy-not-a-secret", &tls).unwrap_err(),
             HttpFailure::Tls
         );
+    }
+
+    /// Accept one connection, read one request with its body, and answer `{}`.
+    fn capture_one_request(listener: std::net::TcpListener) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut seen = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                let read = stream.read(&mut buf).expect("read");
+                seen.extend_from_slice(&buf[..read]);
+                let Some(end) = seen.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    assert!(read > 0, "the request ended before its head");
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&seen[..end]).into_owned();
+                let length = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Content-Length: "))
+                    .map_or(0, |value| value.parse::<usize>().expect("length"));
+                if seen.len() >= end + 4 + length || read == 0 {
+                    break;
+                }
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                .expect("write");
+            seen
+        })
+    }
+
+    #[test]
+    fn requests_are_built_in_exact_buffers_with_unchanged_bytes() {
+        let parts: [&[u8]; 3] = [b"ab", b"", b"cde"];
+        let joined = request_bytes(&parts);
+        assert_eq!(joined.as_slice(), b"abcde");
+        assert_eq!(joined.capacity(), joined.len());
+
+        let tls = TlsClient::platform().expect("platform TLS");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let destination = parse_destination(&format!("http://127.0.0.1:{port}")).expect("url");
+        let server = capture_one_request(listener);
+        let response = get(&destination, "/v1/report", "synthetic-bearer-1", &tls).expect("get");
+        assert_eq!(response.body, b"{}");
+        assert_eq!(
+            String::from_utf8(server.join().expect("server")).expect("text"),
+            format!(
+                "GET /v1/report HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer synthetic-bearer-1\r\nAccept: application/json\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n"
+            )
+        );
+
+        for bearer in [Some("synthetic-model-key"), None] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            let port = listener.local_addr().expect("addr").port();
+            let destination = parse_destination(&format!("http://127.0.0.1:{port}")).expect("url");
+            let server = capture_one_request(listener);
+            let body = br#"{"synthetic":true}"#;
+            let response = post_json_loopback(
+                &destination,
+                "/v1/score",
+                body,
+                bearer,
+                Duration::from_secs(5),
+            )
+            .expect("post");
+            assert_eq!(response.body, b"{}");
+            let auth = bearer.map_or(String::new(), |key| {
+                format!("Authorization: Bearer {key}\r\n")
+            });
+            assert_eq!(
+                String::from_utf8(server.join().expect("server")).expect("text"),
+                format!(
+                    "POST /v1/score HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{auth}Content-Type: application/json\r\nAccept: application/json\r\nContent-Length: 18\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n{{\"synthetic\":true}}"
+                )
+            );
+        }
     }
 
     #[test]

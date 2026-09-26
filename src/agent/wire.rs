@@ -8,6 +8,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub const WIRE_VERSION: u32 = 0;
 /// Largest request line in bytes, including the newline.
@@ -41,6 +42,15 @@ impl fmt::Debug for WireRequest {
             .finish()
     }
 }
+
+/// The agent token is erased on drop.
+impl Drop for WireRequest {
+    fn drop(&mut self) {
+        self.token.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for WireRequest {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

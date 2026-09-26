@@ -13,6 +13,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use zeroize::{Zeroize, Zeroizing};
+
 use super::SharedVault;
 use super::approvals::ApprovalQueue;
 use super::bouncer::BouncerClient;
@@ -256,12 +258,15 @@ fn serve_connection(stream: UnixStream, ctx: &BrokerContext, stop: &AtomicBool) 
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     let mut writer = stream.try_clone()?;
     let mut reader = BufReader::new(stream);
+    // The line has the agent token. Full size at the start, so it does not move and
+    // leave copies. `Zeroizing` erases it also after an early return.
+    let mut line = Zeroizing::new(Vec::with_capacity(MAX_LINE_BYTES));
     for _ in 0..MAX_REQUESTS_PER_CONNECTION {
         // A stopped broker answers the request in progress, then closes the connection.
         if stop.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let mut line = Vec::new();
+        line.zeroize();
         let read = (&mut reader)
             .take(MAX_LINE_BYTES as u64)
             .read_until(b'\n', &mut line)?;
@@ -285,7 +290,7 @@ fn serve_connection(stream: UnixStream, ctx: &BrokerContext, stop: &AtomicBool) 
                 "The request is not valid wire version 0 JSON.",
             ),
         };
-        line.fill(0);
+        line.zeroize();
         write_response(&mut writer, &response)?;
     }
     Ok(())

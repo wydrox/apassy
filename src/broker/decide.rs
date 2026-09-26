@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Map, Value, json};
+use zeroize::Zeroizing;
 
 use super::SharedVault;
 use super::approvals::ApprovalQueue;
@@ -257,14 +258,9 @@ struct Prepared {
     agent: AgentSummary,
     destination: http::DestinationUrl,
     path: String,
-    secret: String,
+    /// Erased on drop.
+    secret: Zeroizing<String>,
     op: &'static OperationSpec,
-}
-
-impl Drop for Prepared {
-    fn drop(&mut self) {
-        self.secret.clear();
-    }
 }
 
 fn call(
@@ -409,7 +405,7 @@ fn prepare(
         agent,
         destination: target,
         path: op.path(params),
-        secret: secret.expose().to_owned(),
+        secret: secret.into_zeroizing(),
         op,
     })
 }

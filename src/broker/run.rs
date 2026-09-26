@@ -527,7 +527,7 @@ fn read_secrets(vault: &Vault, items: &[u64]) -> Result<Vec<SecretEnv>, String> 
             .map_err(|_| format!("Item {item_id} has no value in field {}.", binding.field))?;
         secrets.push(SecretEnv {
             name: binding.env_name,
-            value: value.expose().to_owned(),
+            value: value.into_zeroizing(),
         });
     }
     Ok(secrets)
