@@ -218,6 +218,39 @@ fn a_local_pack_adds_a_restriction() {
     let after = run(&local, line);
     assert_eq!(after.flags, vec!["production"]);
     assert!(!after.known_safe);
+
+    // Dev round 4: a local rule can read the environment of the program. This owner
+    // asks before any `LOG_LEVEL=debug` run that has a bound secret.
+    local
+        .add_local(
+            "log-level.json",
+            r#"{
+              "schema_version": 1,
+              "pack_version": 1,
+              "tool": "log-level",
+              "description": "Debug logs of the owner's services print request headers.",
+              "programs": ["*"],
+              "rules": [
+                {
+                  "id": "debug-log-level",
+                  "flag": "ask_owner",
+                  "when": { "env": { "name": ["log_level"], "value": ["debug", "trace"] }, "bound_secret": true }
+                }
+              ]
+            }"#,
+        )
+        .expect("third local pack");
+    let line = "sh -c 'export LOG_LEVEL=debug; npm test'";
+    let before = run(&base, line);
+    assert!(
+        before.flags.is_empty() && before.known_command,
+        "{before:?}"
+    );
+    assert_eq!(run(&local, line).flags, vec!["ask_owner"]);
+    assert_eq!(
+        run(&local, "LOG_LEVEL=info npm test"),
+        run(&base, "LOG_LEVEL=info npm test")
+    );
 }
 
 #[test]

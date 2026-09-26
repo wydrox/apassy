@@ -77,6 +77,10 @@ struct Segment {
     redirect_targets: Vec<String>,
     /// Body of a here-document (`<<EOF ... EOF`). It is input data or code, not commands.
     heredoc: String,
+    /// The `NAME=value` settings in the environment of the program, in lowercase: the
+    /// prefixes, the assignments after a wrapper such as `env`, and each `export` of the
+    /// command line (dev round 4). [`parse_command`] fills it.
+    environment: Vec<String>,
 }
 
 /// One pipeline: segments joined by `|`.
@@ -338,11 +342,25 @@ pub fn analyze_with_providers(
                 .skip(1)
                 .any(|arg| (arg.starts_with('-') && arg.contains('x')) || arg == "xtrace")
     });
+    // A shell with `-x` or `-o xtrace` does the same for its script (dev round 4). The
+    // analysis reads the text of `bash -xc TEXT` and a here-document. A script file or the
+    // input of the shell is not seen, so a secret that the run binds is enough.
+    let shell_traces: Vec<bool> = std::iter::once(shell_trace(argv, ""))
+        .chain(
+            pipelines
+                .iter()
+                .flatten()
+                .map(|segment| shell_trace(&effective_argv(segment), &segment.heredoc)),
+        )
+        .flatten()
+        .collect();
     let any_secret = pipelines
         .iter()
         .flatten()
         .any(|segment| segment_refs_secret(segment, secret_names));
-    if tracing && any_secret {
+    let traced_text = tracing || shell_traces.contains(&true);
+    let traced_file = shell_traces.contains(&false);
+    if (traced_text && any_secret) || (traced_file && !secret_names.is_empty()) {
         flags.push("secret_output".to_owned());
     }
     for pipeline in &pipelines {
@@ -435,7 +453,164 @@ fn parse_command(rules: &RuleSet, argv: &[String]) -> Vec<Pipeline> {
         pipelines.extend(inner);
         index += 1;
     }
+    // An `export` anywhere in the command line sets the environment of the programs
+    // after it. The analysis does not follow the order, so each segment gets it: this can
+    // only add a match (dev round 4).
+    let exported: Vec<String> = pipelines
+        .iter()
+        .flatten()
+        .flat_map(exported_settings)
+        .collect();
+    for segment in pipelines.iter_mut().flatten() {
+        let mut environment = own_settings(segment);
+        environment.extend(exported.iter().cloned());
+        segment.environment = environment;
+    }
     pipelines
+}
+
+/// The `NAME=value` settings of the program of a segment, in lowercase: the prefixes of
+/// the segment, and the assignments after a wrapper such as `env` or `sudo env`.
+fn own_settings(segment: &Segment) -> Vec<String> {
+    // The command after the wrappers is the end of the words.
+    let start = segment.argv.len() - effective_argv(segment).len();
+    segment
+        .assignments
+        .iter()
+        .chain(
+            segment.argv[..start]
+                .iter()
+                .filter(|word| is_assignment(word)),
+        )
+        .map(|word| word.to_lowercase())
+        .collect()
+}
+
+/// The settings that a segment keeps for the commands after it, in lowercase:
+/// `export NAME=value`, `declare -x` or `typeset -x NAME=value`, and a statement with
+/// assignments only (a shell variable; an earlier `export` of the name makes it part of
+/// the environment).
+fn exported_settings(segment: &Segment) -> Vec<String> {
+    let lower = |words: &mut dyn Iterator<Item = &String>| -> Vec<String> {
+        words
+            .filter(|word| is_assignment(word))
+            .map(|word| word.to_lowercase())
+            .collect()
+    };
+    if segment.argv.iter().all(|word| is_assignment(word)) {
+        return lower(&mut segment.assignments.iter().chain(&segment.argv));
+    }
+    let exports = match program(segment).as_str() {
+        "export" => true,
+        "declare" | "typeset" => segment
+            .argv
+            .iter()
+            .skip(1)
+            .any(|arg| arg.starts_with('-') && arg.contains('x')),
+        _ => false,
+    };
+    if exports {
+        lower(&mut segment.argv.iter().skip(1))
+    } else {
+        Vec::new()
+    }
+}
+
+/// The options of a shell before its script (dev round 4). `bash -ex -o pipefail -c
+/// TEXT` has the letters `ex`, the option name `pipefail`, and the script text.
+struct ShellOptions {
+    /// The letters of the short option groups, as written.
+    letters: String,
+    /// The names after `-o`, in lowercase.
+    names: Vec<String>,
+    /// The index of the first word after the options: the script text with `-c`, or
+    /// else a script file.
+    operand: usize,
+}
+
+impl ShellOptions {
+    fn of(argv: &[String]) -> Self {
+        let mut letters = String::new();
+        let mut names = Vec::new();
+        let mut index = 1;
+        while let Some(arg) = argv.get(index) {
+            index += 1;
+            if arg == "--" || arg == "-" {
+                break;
+            }
+            if let Some(long) = arg.strip_prefix("--") {
+                // `--rcfile FILE` and `--init-file FILE` take a value.
+                if matches!(long, "rcfile" | "init-file") {
+                    index += 1;
+                }
+                continue;
+            }
+            let Some(group) = arg.strip_prefix(['-', '+']) else {
+                index -= 1;
+                break;
+            };
+            // `-o NAME` and `-O NAME` take the name of an option, also at the end of a
+            // group (`-eo pipefail`). `+` turns the options off.
+            let mut group = group;
+            if let Some(rest) = group.strip_suffix(['o', 'O']) {
+                if arg.starts_with('-')
+                    && let Some(name) = argv.get(index)
+                {
+                    names.push(name.to_lowercase());
+                }
+                index += 1;
+                group = rest;
+            }
+            if arg.starts_with('-') {
+                letters.push_str(group);
+            }
+        }
+        Self {
+            letters,
+            names,
+            operand: index,
+        }
+    }
+
+    /// The shell runs the text after its options (`-c`, also in a group such as `-ec`).
+    fn command(&self) -> bool {
+        self.letters.contains('c')
+    }
+
+    /// `-x` or `-o xtrace`: the shell prints each command after it expands the words,
+    /// secret values included.
+    fn xtrace(&self) -> bool {
+        self.letters.contains('x') || self.names.iter().any(|name| name == "xtrace")
+    }
+}
+
+/// The script text of a shell with `-c`: `sh -c TEXT`, `bash -ec TEXT`, or `bash -o
+/// pipefail -c TEXT`. `None` for another program, or for a shell that runs a script file.
+fn shell_command_text(argv: &[String]) -> Option<&String> {
+    let program = base_name(argv.first()?);
+    if !SHELLS.contains(&program.as_str()) {
+        return None;
+    }
+    let options = ShellOptions::of(argv);
+    if options.command() {
+        argv.get(options.operand)
+    } else {
+        None
+    }
+}
+
+/// A shell with `-x` or `-o xtrace` (dev round 4). `Some(true)`: the shell runs a text
+/// or a here-document that the analysis reads as its own pipelines. `Some(false)`: the
+/// shell runs a script file or its input, which the analysis does not see.
+fn shell_trace(argv: &[String], heredoc: &str) -> Option<bool> {
+    let program = base_name(argv.first()?);
+    if !SHELLS.contains(&program.as_str()) {
+        return None;
+    }
+    let options = ShellOptions::of(argv);
+    options
+        .xtrace()
+        .then(|| options.command() || (!heredoc.is_empty() && options.operand >= argv.len()))
 }
 
 /// Options of `docker exec`, `docker compose exec`, and `docker compose run` with a
@@ -575,25 +750,40 @@ fn wrapped_shell_script(segment: &Segment) -> Option<Vec<Pipeline>> {
     if !SHELLS.contains(&program.as_str()) {
         return None;
     }
-    match argv.iter().position(|arg| arg == "-c" || arg == "-lc") {
-        Some(position) => argv.get(position + 1).map(|script| parse_shell(script)),
-        None if !segment.heredoc.is_empty()
-            && argv.iter().skip(1).all(|arg| arg.starts_with('-')) =>
-        {
+    // The options come before the text: `-c`, also in a group such as `-ec` or `-xc`
+    // (dev round 4; before, only `-c` and `-lc` were read).
+    match shell_command_text(&argv) {
+        Some(script) => Some(parse_shell(script)),
+        None if !segment.heredoc.is_empty() && ShellOptions::of(&argv).operand >= argv.len() => {
             Some(parse_shell(&segment.heredoc))
         }
-        None => None,
+        None => late_command_text(&argv).map(|script| parse_shell(script)),
     }
+}
+
+/// The word after a `-c` or `-lc` that comes after a script file: `bash deploy.sh -c
+/// TEXT`. The shell gives both words to the script as arguments. The analysis reads the
+/// word as a script too, as before dev round 4, so that no flag goes away.
+fn late_command_text(argv: &[String]) -> Option<&String> {
+    let position = argv.iter().position(|arg| arg == "-c" || arg == "-lc")?;
+    argv.get(position + 1)
 }
 
 /// An argument list runs without a shell. `sh -c TEXT` runs TEXT in a shell.
 fn parse_argv(argv: &[String]) -> Vec<Pipeline> {
     let program = argv.first().map(|arg| base_name(arg)).unwrap_or_default();
     if SHELLS.contains(&program.as_str()) {
-        if let Some(pos) = argv.iter().position(|arg| arg == "-c" || arg == "-lc")
-            && let Some(script) = argv.get(pos + 1)
-        {
+        if let Some(script) = shell_command_text(argv) {
             return parse_shell(script);
+        }
+        // A shell that runs a script file, and a late `-c` (see `late_command_text`).
+        if let Some(script) = late_command_text(argv) {
+            let mut pipelines = vec![vec![Segment {
+                argv: argv.to_vec(),
+                ..Segment::default()
+            }]];
+            pipelines.extend(parse_shell(script));
+            return pipelines;
         }
         // A shell that runs a script file. The script content is not known.
         return vec![vec![Segment {
@@ -1094,6 +1284,7 @@ fn command<'a>(
         secret: segment_refs_secret(segment, secret_names),
         secret_names,
         known_hosts: hosts,
+        environment: &segment.environment,
     }
 }
 
@@ -4882,5 +5073,48 @@ mod tests {
         ] {
             assert_eq!(injection_flag(text), None, "{text}");
         }
+    }
+
+    /// Dev round 4: the options of a shell come before its text. `-c` in a group
+    /// (`-ec`, `-xc`) runs the text, and `-o NAME` takes a name. A `-c` after a script file
+    /// is an argument of the script; the analysis still reads the word after it, as before.
+    #[test]
+    fn shell_options_come_before_the_text() {
+        assert!(has_flag(
+            "sh -ec 'psql \"$DATABASE_URL\" -c \"DROP TABLE users\"'",
+            "data_loss"
+        ));
+        assert!(has_flag(
+            "bash -o pipefail -c 'git push -f origin main'",
+            "data_loss"
+        ));
+        assert!(has_flag("bash scripts/deploy.sh -c ./drop.sh", "data_loss"));
+        assert!(analysis_of("bash -eo pipefail -c 'rm -rf build'").known_safe);
+        let options = ShellOptions::of(&argv("bash -eux -o pipefail -c true"));
+        assert_eq!(options.letters, "euxc");
+        assert_eq!(options.names, vec!["pipefail"]);
+        assert!(options.command() && options.xtrace());
+        assert_eq!(options.operand, 5, "the index of `true`");
+        assert_eq!(
+            shell_command_text(&argv("bash deploy.sh -c x")),
+            None,
+            "a script file ends the options"
+        );
+    }
+
+    /// Dev round 4: `export` and `env` settings reach the program.
+    #[test]
+    fn the_environment_of_a_program() {
+        let rules = packs::active();
+        let pipelines = parse_command(
+            &rules,
+            &command_line_to_argv("export A=1; B=2 env C=3 terraform plan; D=4"),
+        );
+        let terraform = pipelines
+            .iter()
+            .flatten()
+            .find(|segment| program(segment) == "env")
+            .expect("terraform segment");
+        assert_eq!(terraform.environment, vec!["b=2", "c=3", "a=1", "d=4"]);
     }
 }
