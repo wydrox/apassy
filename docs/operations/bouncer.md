@@ -58,7 +58,7 @@ Date of this order: 2026-09-26 (ADR 0008, changed by ADR 0010, learning from ADR
 4. A missing user request or a missing declaration asks the owner.
 4a. Remembered pattern (ADR 0009 step 1, ADR 0010). If an active pattern matches the request, the run starts without a prompt. The broker does not call the model. The pattern replaces only steps 5 to 7. It cannot change steps 1 to 4. See [learning](learning.md).
 5. The model answers the facts `task_match`, `writes`, `remote`, `leak`, `destroy`, and `rule_break` when the rule has an instruction. An unavailable model asks the owner.
-6. Needed certainty. A command that is not known safe needs `task_match` at or above the active level: 0.8, or a lower level that the owner applied after a calibration (ADR 0009 step 3). The level is never lower than 0.5. Only for a known command (below) can a certain read replace this check: `writes` at or below 0.2. A high-risk or irreversible declaration needs `writes` at or below 0.2, unless the command is known safe. A calibration does not change these checks.
+6. Needed certainty. A command that is not known safe needs `task_match` at or above the active level: 0.75 by default, or a level from 0.5 to 0.8 that the owner applied after a calibration (ADR 0009 step 3). Only for a known command (below) can a certain read replace this check: `writes` at or below 0.2. A high-risk or irreversible declaration needs `writes` at or below 0.2, unless the command is known safe. A calibration does not change these checks.
 
 A known command (`Analysis::known_command`) is a command that the built-in packs know. Each segment of the command is known safe, or a built-in pack names its program and three conditions hold:
 
