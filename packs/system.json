@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "system",
+  "description": "System tools: privilege, permissions, scheduled jobs, services, disks, and process information.",
+  "programs": [
+    "sudo", "doas", "chmod", "crontab", "systemctl", "shutdown", "reboot", "killall", "dd",
+    "mkfs", "fdisk", "truncate", "ps", "lsof", "date", "whoami", "uname", "df"
+  ],
+  "rules": [
+    {
+      "id": "privilege",
+      "flag": "privilege",
+      "when": { "raw_program": ["sudo", "doas"] }
+    },
+    {
+      "id": "world-writable",
+      "flag": "system_change",
+      "when": { "program": ["chmod"], "any_arg_contains": ["777"] }
+    },
+    {
+      "id": "crontab-change",
+      "flag": "system_change",
+      "note": "`crontab -l` only lists the jobs.",
+      "when": { "program": ["crontab"], "not": { "arg_count": 1, "subcommand": ["-l"] } }
+    },
+    {
+      "id": "service-change",
+      "flag": "system_change",
+      "when": { "program": ["systemctl", "shutdown", "reboot", "killall"] }
+    },
+    {
+      "id": "disk-write",
+      "flag": "data_loss",
+      "dry_run": "skip_with_n",
+      "when": { "program": ["dd", "mkfs", "fdisk", "truncate"] }
+    }
+  ],
+  "safe": [
+    {
+      "id": "information",
+      "when": { "program": ["ps", "lsof", "date", "whoami", "uname", "df"] }
+    }
+  ]
+}

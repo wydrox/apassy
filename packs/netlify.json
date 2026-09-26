@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "netlify",
+  "description": "Netlify CLI: production deployments.",
+  "programs": ["netlify"],
+  "roles": {
+    "usage": ["netlify"]
+  },
+  "rules": [
+    {
+      "id": "production-target",
+      "flag": "production",
+      "dry_run": "skip",
+      "when": {
+        "not": {
+          "any_of": [
+            { "subcommand": ["ls", "list", "inspect", "logs"] },
+            { "subcommand": ["alias"], "action": ["ls"] }
+          ]
+        },
+        "any_arg": ["--prod", "--production", "promote", "rollback", "alias"]
+      }
+    }
+  ]
+}

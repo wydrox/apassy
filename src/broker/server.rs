@@ -108,7 +108,10 @@ impl Drop for BrokerHandle {
 
 /// Start the broker on `socket` with the macOS trust store for TLS.
 /// The parent directory is created with mode `0700` if absent.
+/// The command analysis also uses the owner's local rule packs. If one does not load,
+/// every run waits for the owner (see `packs::activate_local_dir`).
 pub fn start(vault: SharedVault, socket: &Path) -> io::Result<BrokerHandle> {
+    let _ = super::packs::activate_local_dir(&super::packs::default_local_dir());
     start_with(vault, socket, BrokerOptions::platform()?)
 }
 

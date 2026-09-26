@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "databases",
+  "description": "Database clients (psql, mysql, sqlite3, MongoDB, ClickHouse, CockroachDB, Redis): writes, drops, and credential columns.",
+  "programs": [
+    "psql", "pg_dump", "dropdb", "dropuser", "mysql", "sqlite3", "mongo", "mongosh",
+    "clickhouse-client", "cockroach", "redis-cli"
+  ],
+  "roles": {
+    "usage": ["psql", "pg_dump", "redis-cli"],
+    "heredoc_sql": ["psql", "mysql", "sqlite3"]
+  },
+  "rules": [
+    {
+      "id": "credential-columns",
+      "flag": "secret_output",
+      "note": "A query that reads password hashes, tokens, or keys prints credentials.",
+      "when": {
+        "program": ["psql", "mysql", "sqlite3", "mongosh"],
+        "command_contains": [
+          "encrypted_password", "password_hash", "recovery_token", "api_key", "secret_key",
+          "refresh_token", "access_token"
+        ]
+      }
+    },
+    {
+      "id": "drop-database-or-user",
+      "flag": "data_loss",
+      "dry_run": "skip_with_n",
+      "when": { "program": ["dropdb", "dropuser"] }
+    },
+    {
+      "id": "sql-write",
+      "flag": "data_loss",
+      "dry_run": "skip_with_n",
+      "when": {
+        "program": [
+          "psql", "mysql", "sqlite3", "mongo", "mongosh", "clickhouse-client", "cockroach"
+        ],
+        "sql": "writes"
+      }
+    },
+    {
+      "id": "redis-delete",
+      "flag": "data_loss",
+      "dry_run": "skip_with_n",
+      "when": { "program": ["redis-cli"], "any_arg": ["flushall", "flushdb", "del", "unlink"] }
+    }
+  ]
+}

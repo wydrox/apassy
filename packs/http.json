@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "http",
+  "description": "HTTP clients (curl, wget, HTTPie): known provider hosts, broadcasts, local requests, and read requests.",
+  "programs": ["curl", "wget", "http", "https", "httpie"],
+  "roles": {
+    "usage": ["curl"],
+    "network": ["curl", "wget", "http", "https", "httpie"],
+    "http_client": ["curl", "wget", "http", "https", "httpie"]
+  },
+  "known_hosts": [
+    "supabase.co",
+    "supabase.com",
+    "api.resend.com",
+    "api.twilio.com",
+    "api.github.com",
+    "api.stripe.com",
+    "api.openai.com",
+    "api.anthropic.com",
+    "localhost",
+    "127.0.0.1"
+  ],
+  "rules": [
+    {
+      "id": "broadcast",
+      "flag": "production",
+      "note": "A broadcast endpoint sends a message to many real people.",
+      "when": { "program": ["curl", "wget", "http", "https"], "word_contains": ["broadcast"] }
+    }
+  ],
+  "exemptions": [
+    {
+      "id": "local-request",
+      "check": "production_word",
+      "note": "A request to this computer, for example a local browser automation service, does not target production.",
+      "when": { "program": ["curl", "wget", "http"], "url_hosts_in": ["127.0.0.1", "localhost"] }
+    }
+  ],
+  "safe": [
+    {
+      "id": "known-provider-read",
+      "note": "A GET request to a known provider host, with no body and no upload.",
+      "when": { "program": ["curl", "wget"], "known_host_read": true }
+    }
+  ]
+}

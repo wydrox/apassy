@@ -1,0 +1,206 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "file-tools",
+  "description": "File and text tools (ls, cat, grep, sed, awk, find, cp, rm, and others): file removal, secret files, system files, and read commands.",
+  "programs": [
+    "ls", "cat", "head", "tail", "less", "more", "tee", "grep", "egrep", "rg", "ag", "sed",
+    "awk", "find", "wc", "sort", "uniq", "cut", "tr", "diff", "jq", "yq", "nl", "column",
+    "basename", "dirname", "realpath", "stat", "file", "du", "tree", "touch", "mkdir", "cp",
+    "mv", "ln", "install", "rm", "rmdir", "unlink", "shred", "srm", "xargs"
+  ],
+  "roles": {
+    "usage": ["jq", "rg"],
+    "output": ["cat", "tee", "head", "tail", "less", "more"],
+    "file_writer": ["tee"],
+    "no_dry_run": ["rm"]
+  },
+  "rules": [
+    {
+      "id": "print-secret-file",
+      "flag": "secret_output",
+      "when": { "program": ["cat", "tee", "less", "head", "tail"], "secret_file_arg": true }
+    },
+    {
+      "id": "write-system-file",
+      "flag": "system_change",
+      "when": { "program": ["tee", "cp", "mv", "ln", "install"], "system_path_arg": true }
+    },
+    {
+      "id": "edit-system-file",
+      "flag": "system_change",
+      "when": { "program": ["sed"], "any_arg_starts": ["-i"], "system_path_arg": true }
+    },
+    {
+      "id": "secure-delete",
+      "flag": "data_loss",
+      "dry_run": "skip_with_n",
+      "when": { "program": ["shred", "srm"] }
+    },
+    {
+      "id": "remove-protected-path",
+      "flag": "data_loss",
+      "dry_run": "skip_with_n",
+      "note": "The root, the home folder, a parent folder, all files, an absolute path outside the temporary folders, migrations, or the git folder.",
+      "when": {
+        "program": ["rm", "rmdir", "unlink", "shred", "srm"],
+        "operands": {
+          "trim_end": "/",
+          "any": [
+            {
+              "equals": [
+                "", "/", "~", "$home", "*", ".", "supabase", "migrations", ".git"
+              ]
+            },
+            { "starts": ["~/"], "max_len": 3 },
+            { "starts": ["/"], "temp_path": false },
+            { "starts": ["..", "supabase/migrations", ".git/"] },
+            { "ends": ["/migrations", "/.git"] }
+          ]
+        }
+      }
+    },
+    {
+      "id": "remove-recursive",
+      "flag": "data_loss",
+      "dry_run": "skip_with_n",
+      "note": "A recursive removal of anything other than build, cache, dependency, or temporary folders.",
+      "when": {
+        "program": ["rm", "rmdir", "unlink", "shred", "srm"],
+        "any_of": [{ "short_option_letter": "r" }, { "any_arg": ["--recursive"] }],
+        "not": {
+          "operands": {
+            "trim_start": "./",
+            "trim_end": "/",
+            "all": [
+              {
+                "equals": [
+                  "node_modules", ".next", "dist", "build", "out", ".turbo", "coverage", "tmp",
+                  ".cache", "target", ".parcel-cache", ".svelte-kit"
+                ]
+              },
+              {
+                "starts": [
+                  "node_modules/", ".next/", "dist/", "build/", "out/", ".turbo/", "coverage/",
+                  "tmp/", ".cache/", "target/", ".parcel-cache/", ".svelte-kit/"
+                ]
+              },
+              { "temp_path": true }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "find-delete",
+      "flag": "data_loss",
+      "dry_run": "skip_with_n",
+      "when": {
+        "program": ["find"],
+        "any_of": [
+          { "any_arg": ["-delete"] },
+          { "option_value": { "option": ["-exec"], "value": ["rm", "shred"] } }
+        ]
+      }
+    }
+  ],
+  "exemptions": [
+    {
+      "id": "metadata-only",
+      "check": "secret_file_argument",
+      "note": "These tools read names, sizes, or dates. They do not print the content of a secret file.",
+      "when": { "program": ["ls", "stat", "touch", "rm", "find", "wc", "du"] }
+    },
+    {
+      "id": "file-names-only",
+      "check": "secret_file_argument",
+      "note": "A search that prints only file names.",
+      "when": {
+        "program": ["rg", "grep"],
+        "any_arg": ["-l", "--files-with-matches", "--files"]
+      }
+    },
+    {
+      "id": "text-tools",
+      "check": "production_word",
+      "note": "Text tools only read or print text. A production word is a search term or a file name.",
+      "when": {
+        "program": [
+          "rg", "grep", "egrep", "ag", "sed", "awk", "cat", "head", "tail", "less", "more", "nl",
+          "wc", "sort", "uniq", "cut", "tr", "diff", "jq", "yq", "find", "ls", "basename",
+          "dirname", "realpath", "stat", "file", "column", "tee", "xargs"
+        ]
+      }
+    },
+    {
+      "id": "temporary-files",
+      "check": "production_word",
+      "note": "The removal of temporary files is not a production action.",
+      "when": {
+        "program": ["rm", "unlink"],
+        "operands": { "as_written": true, "all": [{ "temp_path": true }], "allow_none": true }
+      }
+    }
+  ],
+  "safe": [
+    {
+      "id": "read-tools",
+      "when": {
+        "program": [
+          "ls", "du", "wc", "tree", "file", "stat", "sort", "uniq", "cut", "diff", "jq", "yq",
+          "nl", "tr", "column", "basename", "dirname", "realpath"
+        ]
+      }
+    },
+    {
+      "id": "sed-without-edit",
+      "when": {
+        "program": ["sed"],
+        "not": { "any_of": [{ "any_arg_starts": ["-i"] }, { "any_arg": ["--in-place"] }] }
+      }
+    },
+    {
+      "id": "awk-without-system",
+      "when": { "program": ["awk"], "not": { "command_contains_exact": ["system("] } }
+    },
+    {
+      "id": "read-files",
+      "when": {
+        "program": ["cat", "head", "tail", "less", "grep", "rg", "ag"],
+        "not": { "secret_file_arg": true }
+      }
+    },
+    {
+      "id": "find-without-action",
+      "when": {
+        "program": ["find"],
+        "not": { "any_arg": ["-delete", "-exec", "-execdir", "-ok"] }
+      }
+    },
+    { "id": "create", "when": { "program": ["mkdir", "touch"] } },
+    {
+      "id": "remove-build-output",
+      "when": {
+        "program": ["rm"],
+        "operands": {
+          "trim_start": "./",
+          "trim_end": "/",
+          "all": [
+            {
+              "equals": [
+                "node_modules", ".next", "dist", "build", "out", ".turbo", "coverage", "tmp",
+                ".cache", "target", ".parcel-cache", ".svelte-kit"
+              ]
+            },
+            {
+              "starts": [
+                "node_modules/", ".next/", "dist/", "build/", "out/", ".turbo/", "coverage/",
+                "tmp/", ".cache/", "target/", ".parcel-cache/", ".svelte-kit/"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
