@@ -18,7 +18,7 @@ pub const MAX_FIELD_NAME_BYTES: usize = 64;
 pub const MAX_FIELD_VALUE_BYTES: usize = 65_536;
 pub const MAX_PAYLOAD_BYTES: usize = 1_048_576;
 pub const MAX_SEARCH_RESULTS: usize = 1000;
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Owned secret text. Debug is redacted. There is no public `Serialize` impl.
 #[derive(Clone, PartialEq, Eq)]
@@ -129,6 +129,8 @@ pub enum VaultErrorKind {
     Busy,
     Io,
     Storage,
+    /// The agent token is older than the token lifetime (goal item P1).
+    Expired,
 }
 
 impl VaultErrorKind {
@@ -144,6 +146,7 @@ impl VaultErrorKind {
             Self::Busy => "the vault is busy",
             Self::Io => "the vault I/O operation failed",
             Self::Storage => "the vault storage operation failed",
+            Self::Expired => "the agent token expired",
         }
     }
 }

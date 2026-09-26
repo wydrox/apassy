@@ -326,3 +326,41 @@ fn unchanged_form_is_detected_before_a_save() {
             .expect("compare name")
     );
 }
+
+/// Goal item P1 in the owner session: the lifetime text and a token rotation.
+#[test]
+fn owner_changes_token_lifetime_and_rotates_a_token() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut session, _) = session_at(&dir, "tokens.db");
+    unlock(&mut session);
+    let (agent, first) = session.register_agent("Session agent").expect("register");
+    assert_eq!(session.token_lifetime_days().expect("lifetime"), 30);
+    for bad in ["", "0", "366", "abc", "-1"] {
+        let err = session
+            .set_token_lifetime_days(bad)
+            .expect_err("bad lifetime");
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("from 1 to 365"), "{}", err.message);
+    }
+    assert_eq!(
+        session.set_token_lifetime_days(" 14 ").expect("lifetime"),
+        14
+    );
+    let listed = session.agents().expect("agents").remove(0);
+    assert_eq!(
+        listed.token_expires_at - listed.token_issued_at,
+        14 * 86_400
+    );
+    let second = session.rotate_agent_token(agent.id).expect("rotate");
+    assert_ne!(first.expose(), second.expose());
+    assert!(!format!("{second:?}").contains(second.expose()));
+    session.revoke_agent(agent.id).expect("revoke");
+    let err = session
+        .rotate_agent_token(agent.id)
+        .expect_err("revoked agent");
+    assert!(
+        err.message.contains("Register the agent again"),
+        "{}",
+        err.message
+    );
+}

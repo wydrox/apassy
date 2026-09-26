@@ -3,6 +3,7 @@
 Date: 2026-09-16.
 Status: experimental backend contract. See [local verification](../operations/vault-verification.md) for measured results and limits.
 Schema version 2 (2026-09-25) adds agent, grant, destination, and activity tables. See section 9 of the [broker contract](broker-v0.md). The item API in this document did not change. Item delete also removes the grants and the destination of the item. Restore also revokes all agents.
+Schema version 6 (2026-09-26) adds agent token expiry and rotation (goal item P1). See section 9 of the broker contract and the agent API below.
 The owner selected SQLCipher with a master passphrase after the synthetic storage probe passed.
 This contract does not permit real-secret use or claim complete P2 acceptance.
 
@@ -57,6 +58,7 @@ pub struct ItemDetails {
 pub enum VaultErrorKind {
     Locked, AlreadyExists, NotFound, Conflict, InvalidInput,
     WrongKeyOrCorrupt, UnsupportedSchema, Busy, Io, Storage,
+    Expired, // schema 6: the agent token is older than the token lifetime
 }
 pub struct VaultError; // Debug + Display + std::error::Error; kind(&self) -> VaultErrorKind
 pub type VaultResult<T> = Result<T, VaultError>;
@@ -78,6 +80,22 @@ impl Vault {
     pub fn restore(backup: &std::path::Path, destination: &std::path::Path, passphrase: &str) -> VaultResult<Self>;
 }
 ```
+
+## Agent token API (schema 6)
+
+```rust
+impl Vault {
+    pub fn authenticate_agent(&self, token: &str) -> VaultResult<AgentSummary>; // Expired after the lifetime
+    pub fn identify_agent(&self, token: &str) -> VaultResult<AgentSummary>;     // also an expired token
+    pub fn rotate_agent_token(&mut self, agent_id: u64) -> VaultResult<AgentToken>;
+    pub fn token_lifetime_days(&self) -> VaultResult<u32>;                     // default 30
+    pub fn set_token_lifetime_days(&mut self, days: u32) -> VaultResult<()>;   // 1 to 365
+}
+// AgentSummary has token_issued_at and token_expires_at (Unix seconds).
+```
+
+A token works from its issue time for the token lifetime. A registration and a rotation set the issue time.
+A rotation of a revoked agent returns `InvalidInput`. The returned token is the only copy outside the vault.
 
 ## Data checks
 

@@ -1,7 +1,7 @@
 //! Request checks and execution. The order of the checks is part of the contract.
 //!
 //! 1. The vault is open and unlocked.
-//! 2. The token belongs to an active agent.
+//! 2. The token belongs to an active agent, and the token has not expired.
 //! 3. The agent has a grant for the item and the operation.
 //! 4. The item has a destination with a known profile and a loopback URL.
 //! 5. The parameters match the operation.
@@ -22,7 +22,9 @@ use super::bouncer::BouncerClient;
 use super::http::{self, HttpFailure, TlsClient, parse_destination};
 use super::profile::{self, OperationSpec};
 use crate::agent::wire::{Action, WIRE_VERSION, WireRequest, WireResponse};
-use crate::vault::{ActivityDecision, AgentSummary, NewActivity, Vault, VaultErrorKind};
+use crate::vault::{
+    ActivityDecision, AgentSummary, NewActivity, Vault, VaultErrorKind, format_utc,
+};
 
 const MAX_OUTPUT_TEXT_BYTES: usize = 256;
 
@@ -96,12 +98,36 @@ pub(super) fn lock(vault: &SharedVault) -> std::sync::MutexGuard<'_, Option<Vaul
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Find the agent of the token. An expired token gives `token_expired` (goal item P1).
+/// The activity log names the agent, so the owner knows which token to rotate.
 pub(super) fn authenticate(
     vault: &mut Vault,
     token: &str,
     action: &str,
 ) -> Result<AgentSummary, WireResponse> {
-    match vault.authenticate_agent(token) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    match vault.identify_agent(token) {
+        Ok(agent) if agent.token_expired_at(now) => {
+            let expired = format_utc(agent.token_expires_at);
+            let _ = vault.record_activity(&NewActivity {
+                agent_id: Some(agent.id),
+                agent_name: agent.name.clone(),
+                item_id: None,
+                operation: action.to_owned(),
+                decision: ActivityDecision::Deny,
+                reason: format!(
+                    "The agent token expired on {expired}. Rotate the token in Agents."
+                ),
+            });
+            Err(WireResponse::failure(
+                "token_expired",
+                format!(
+                    "The Apassy agent token expired on {expired}. Ask the owner to rotate the token in the Apassy app (Agents, Rotate token) and to put the new token in APASSY_AGENT_TOKEN of this MCP server."
+                ),
+            ))
+        }
         Ok(agent) => Ok(agent),
         Err(err) if err.kind() == VaultErrorKind::NotFound => {
             let _ = vault.record_activity(&NewActivity {

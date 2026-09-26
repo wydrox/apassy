@@ -3,7 +3,7 @@
 //! Check order:
 //!
 //! 1. The vault is open and unlocked.
-//! 2. The token belongs to an active agent.
+//! 2. The token belongs to an active agent, and the token has not expired.
 //! 3. The request has a valid form: items, command, working directory, purpose, and `PATH`.
 //! 4. The working directory exists.
 //! 5. For each item: the agent has process access, the working directory is in the

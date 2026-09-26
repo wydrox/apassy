@@ -1809,6 +1809,58 @@ mod tests {
         }
     }
 
+    /// An unlocked synthetic vault file in the app. The directory must outlive the app.
+    #[cfg(feature = "vault")]
+    fn app_with_vault(dir: &tempfile::TempDir) -> DesktopApp {
+        let mut app = DesktopApp::new();
+        let path = dir.path().join("ui.db");
+        app.owner_ui
+            .session
+            .create_file(&path, UI_PASS)
+            .expect("create");
+        app.owner_ui.session.unlock(UI_PASS).expect("unlock");
+        app
+    }
+
+    #[cfg(feature = "vault")]
+    const UI_PASS: &str = "ui-draw-pass-ok";
+
+    /// Goal item P1: the Agents view shows the token lifetime, the expiry, and rotation.
+    #[cfg(feature = "vault")]
+    #[test]
+    fn agents_view_shows_token_expiry_and_rotation() {
+        use crate::desktop::owner_store::FreshToken;
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let mut app = app_with_vault(&dir);
+        let (agent, _token) = app
+            .owner_ui
+            .session
+            .register_agent("UI agent")
+            .expect("register");
+        app.view = OwnerView::Agents;
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(text.contains("Token lifetime"), "{text}");
+        assert!(text.contains("Current lifetime: 30 days."), "{text}");
+        assert!(text.contains("The token expires on"), "{text}");
+        assert!(text.contains("Rotate token"), "{text}");
+
+        let token = app
+            .owner_ui
+            .session
+            .rotate_agent_token(agent.id)
+            .expect("rotate");
+        let shown = token.expose().to_owned();
+        app.owner_ui.fresh_token = Some(FreshToken {
+            agent_name: agent.name.clone(),
+            token,
+            rotated: true,
+        });
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(text.contains("The old token does not work now"), "{text}");
+        assert!(text.contains(&shown), "the new token shows one time");
+    }
+
     #[test]
     fn activity_history_after_approve_once_draws_on_a_tall_frame() {
         let mut app = unlocked_app_with_item();
@@ -1875,10 +1927,10 @@ mod agents_view {
         labeled_text,
     };
     use crate::broker::profile::REPORTING_API_V0;
-    use crate::desktop::owner_store::format_utc;
+    use crate::desktop::owner_store::{FreshToken, format_utc};
     use crate::desktop::{BrokerState, DesktopApp};
     use crate::vault::ActivityDecision;
-    use crate::vault::ExecMode;
+    use crate::vault::{DEFAULT_TOKEN_LIFETIME_DAYS, ExecMode};
 
     pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
         heading(ui, "Agents");
@@ -1897,7 +1949,10 @@ mod agents_view {
             ui.label(RichText::new("Unlock the vault to manage agents.").color(INK_MUTED));
             return;
         }
+        draw_fresh_token(app, ui);
         draw_register_card(app, ui);
+        ui.add_space(8.0);
+        draw_token_lifetime_card(app, ui);
         ui.add_space(8.0);
         draw_agent_list(app, ui);
     }
@@ -1949,68 +2004,125 @@ mod agents_view {
 
     fn draw_register_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
         card_frame().show(ui, |ui| {
-            ui.label(RichText::new("Register an agent").size(16.0).strong().color(INK));
-            labeled_text(ui, "agent-name", "Agent name", &mut app.owner_ui.new_agent_name);
+            ui.label(
+                RichText::new("Register an agent")
+                    .size(16.0)
+                    .strong()
+                    .color(INK),
+            );
+            labeled_text(
+                ui,
+                "agent-name",
+                "Agent name",
+                &mut app.owner_ui.new_agent_name,
+            );
             if accent_button(ui, "Register agent").clicked() {
                 let name = app.owner_ui.new_agent_name.clone();
                 match app.owner_ui.session.register_agent(&name) {
                     Ok((agent, token)) => {
                         app.owner_ui.new_agent_name.clear();
                         app.owner_ui.selected_agent = Some(agent.id);
-                        app.owner_ui.fresh_token = Some((agent.name.clone(), token));
-                        app.set_ok(format!(
-                            "{} is registered. Copy its token now.",
-                            agent.name
-                        ));
+                        app.owner_ui.fresh_token = Some(FreshToken {
+                            agent_name: agent.name.clone(),
+                            token,
+                            rotated: false,
+                        });
+                        app.set_ok(format!("{} is registered. Copy its token now.", agent.name));
                     }
                     Err(err) => app.set_err(err.message),
                 }
             }
-            let mut dismiss = false;
-            if let Some((name, token)) = &app.owner_ui.fresh_token {
-                ui.add_space(6.0);
-                Frame::NONE
-                    .fill(egui::Color32::from_rgb(252, 244, 222))
-                    .inner_margin(Margin::symmetric(10, 8))
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new(format!(
-                                "Token for {name}. Apassy shows it one time. Select the text and copy it."
-                            ))
-                            .color(ASK),
-                        );
-                        let mut shown = token.expose().to_owned();
-                        ui.add(
-                            TextEdit::singleline(&mut shown)
-                                .font(egui::TextStyle::Monospace)
-                                .desired_width(f32::INFINITY),
-                        );
-                        ui.label(
-                            RichText::new("MCP server configuration for the agent host:")
-                                .color(INK_MUTED),
-                        );
-                        let mut config = format!(
-                            "{{\n  \"mcpServers\": {{\n    \"apassy\": {{\n      \"command\": \"{}\",\n      \"env\": {{ \"APASSY_AGENT_TOKEN\": \"{}\" }}\n    }}\n  }}\n}}",
-                            adapter_path(),
-                            token.expose()
-                        );
-                        ui.add(
-                            TextEdit::multiline(&mut config)
-                                .font(egui::TextStyle::Monospace)
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(7),
-                        );
-                        config.clear();
-                        shown.clear();
-                        if ui.button("I saved the token").clicked() {
-                            dismiss = true;
+        });
+    }
+
+    /// A new token after a registration or a rotation. Apassy shows it one time.
+    fn draw_fresh_token(app: &mut DesktopApp, ui: &mut egui::Ui) {
+        let mut dismiss = false;
+        if let Some(fresh) = &app.owner_ui.fresh_token {
+            Frame::NONE
+                .fill(egui::Color32::from_rgb(252, 244, 222))
+                .inner_margin(Margin::symmetric(10, 8))
+                .show(ui, |ui| {
+                    let heading = if fresh.rotated {
+                        format!(
+                            "New token for {}. The old token does not work now. Apassy shows the new token one time. Select the text and copy it.",
+                            fresh.agent_name
+                        )
+                    } else {
+                        format!(
+                            "Token for {}. Apassy shows it one time. Select the text and copy it.",
+                            fresh.agent_name
+                        )
+                    };
+                    ui.label(RichText::new(heading).color(ASK));
+                    let mut shown = fresh.token.expose().to_owned();
+                    ui.add(
+                        TextEdit::singleline(&mut shown)
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.label(
+                        RichText::new("MCP server configuration for the agent host:")
+                            .color(INK_MUTED),
+                    );
+                    let mut config = format!(
+                        "{{\n  \"mcpServers\": {{\n    \"apassy\": {{\n      \"command\": \"{}\",\n      \"env\": {{ \"APASSY_AGENT_TOKEN\": \"{}\" }}\n    }}\n  }}\n}}",
+                        adapter_path(),
+                        fresh.token.expose()
+                    );
+                    ui.add(
+                        TextEdit::multiline(&mut config)
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(7),
+                    );
+                    config.clear();
+                    shown.clear();
+                    if ui.button("I saved the token").clicked() {
+                        dismiss = true;
+                    }
+                });
+            ui.add_space(8.0);
+        }
+        if dismiss {
+            app.owner_ui.fresh_token = None;
+            app.set_ok("The token is hidden. Apassy cannot show it again.");
+        }
+    }
+
+    /// Token lifetime for every agent (goal item P1).
+    fn draw_token_lifetime_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
+        let current = app.owner_ui.session.token_lifetime_days().ok();
+        card_frame().show(ui, |ui| {
+            ui.label(RichText::new("Token lifetime").size(16.0).strong().color(INK));
+            ui.label(
+                RichText::new(format!(
+                    "A token works for this number of days after Apassy issues it. Then the agent gets token_expired, and you rotate the token. The default is {DEFAULT_TOKEN_LIFETIME_DAYS} days. A change applies to every active token from its issue time."
+                ))
+                .color(INK_MUTED),
+            );
+            if let Some(days) = current {
+                ui.label(RichText::new(format!("Current lifetime: {days} days.")).color(INK));
+            }
+            ui.horizontal_wrapped(|ui| {
+                let label = ui.label("Days (1 to 365)");
+                let edit = ui.add(
+                    TextEdit::singleline(&mut app.owner_ui.token_lifetime_input)
+                        .hint_text(current.map_or_else(String::new, |days| days.to_string()))
+                        .desired_width(80.0),
+                );
+                edit.labelled_by(label.id);
+                if ui.button("Save lifetime").clicked() {
+                    let text = app.owner_ui.token_lifetime_input.clone();
+                    match app.owner_ui.session.set_token_lifetime_days(&text) {
+                        Ok(days) => {
+                            app.owner_ui.token_lifetime_input.clear();
+                            app.set_ok(format!("Tokens now work for {days} days after issue."));
                         }
-                    });
-            }
-            if dismiss {
-                app.owner_ui.fresh_token = None;
-                app.set_ok("The token is hidden. Apassy cannot show it again.");
-            }
+                        Err(err) => app.set_err(err.message),
+                    }
+                }
+            });
         });
     }
 
@@ -2037,7 +2149,24 @@ mod agents_view {
                     ui.label(RichText::new("Revoked. The token does not work.").color(DENY));
                     return;
                 }
-                ui.label(RichText::new("Active").color(ALLOW));
+                if agent.token_expired_at(now()) {
+                    ui.label(
+                        RichText::new(format!(
+                            "The token expired on {}. The agent gets token_expired. Rotate the token.",
+                            format_utc(agent.token_expires_at)
+                        ))
+                        .color(DENY),
+                    );
+                } else {
+                    ui.label(RichText::new("Active").color(ALLOW));
+                    ui.label(
+                        RichText::new(format!(
+                            "The token expires on {}.",
+                            format_utc(agent.token_expires_at)
+                        ))
+                        .color(INK_MUTED),
+                    );
+                }
                 ui.horizontal_wrapped(|ui| {
                     let selected = app.owner_ui.selected_agent == Some(agent.id);
                     let label = if selected {
@@ -2047,6 +2176,22 @@ mod agents_view {
                     };
                     if ui.button(label).clicked() {
                         app.owner_ui.selected_agent = if selected { None } else { Some(agent.id) };
+                    }
+                    if ui.button("Rotate token").clicked() {
+                        match app.owner_ui.session.rotate_agent_token(agent.id) {
+                            Ok(token) => {
+                                app.owner_ui.fresh_token = Some(FreshToken {
+                                    agent_name: agent.name.clone(),
+                                    token,
+                                    rotated: true,
+                                });
+                                app.set_ok(format!(
+                                    "{} has a new token. Copy it now. The old token does not work.",
+                                    agent.name
+                                ));
+                            }
+                            Err(err) => app.set_err(err.message),
+                        }
                     }
                     if danger_button(ui, "Revoke agent").clicked() {
                         let message =

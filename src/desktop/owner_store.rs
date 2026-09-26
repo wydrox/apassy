@@ -19,8 +19,8 @@ use crate::desktop::model::{ItemDraft, MASKED_VALUE, ModelError, ModelResult};
 use crate::vault::{
     ActivityDecision, AgentSummary, AgentToken, Declaration, Destination, EnvBinding, Environment,
     ExecGrant, ExecMode, ExecRule, Field, ItemDraft as VaultDraft, MAX_PASSPHRASE_BYTES,
-    MIN_PASSPHRASE_BYTES, Reversibility, RiskLevel, Scope, SecretValue, Vault, VaultError,
-    VaultErrorKind, checked_env_name,
+    MAX_TOKEN_LIFETIME_DAYS, MIN_PASSPHRASE_BYTES, Reversibility, RiskLevel, Scope, SecretValue,
+    Vault, VaultError, VaultErrorKind, checked_env_name,
 };
 
 const MAX_TAG_BYTES: usize = 64;
@@ -203,6 +203,15 @@ impl RuleForm {
     }
 }
 
+/// A token that the app shows one time, after a registration or a rotation.
+#[derive(Debug)]
+pub struct FreshToken {
+    pub agent_name: String,
+    pub token: AgentToken,
+    /// The token replaces an older token. The old token does not work.
+    pub rotated: bool,
+}
+
 /// Text fields that bind the vault file controls.
 #[derive(Default)]
 pub struct OwnerUiState {
@@ -218,8 +227,10 @@ pub struct OwnerUiState {
     pub edit_revision: u64,
     pub connector_url: String,
     pub new_agent_name: String,
-    /// The token of the agent that the owner registered last. It is shown one time.
-    pub fresh_token: Option<(String, AgentToken)>,
+    /// The token of the agent that the owner registered or rotated last. It is shown one time.
+    pub fresh_token: Option<FreshToken>,
+    /// Token lifetime text in the Agents view, in days.
+    pub token_lifetime_input: String,
     pub selected_agent: Option<u64>,
     pub env_name_input: String,
     pub env_field_input: String,
@@ -494,6 +505,42 @@ impl OwnerSession {
 
     pub fn revoke_agent(&mut self, agent_id: u64) -> ModelResult<()> {
         self.unlocked()?.revoke_agent(agent_id).map_err(map_err)
+    }
+
+    /// Give the agent a new token. Show it to the owner one time. The old token stops working.
+    pub fn rotate_agent_token(&mut self, agent_id: u64) -> ModelResult<AgentToken> {
+        match self.unlocked()?.rotate_agent_token(agent_id) {
+            Err(err) if err.kind() == VaultErrorKind::InvalidInput => Err(fail(
+                "invalid_input",
+                "A revoked agent cannot get a new token. Register the agent again.",
+            )),
+            other => other.map_err(map_err),
+        }
+    }
+
+    pub fn token_lifetime_days(&self) -> ModelResult<u32> {
+        self.unlocked()?.token_lifetime_days().map_err(map_err)
+    }
+
+    /// Change the token lifetime from the text in the Agents view.
+    pub fn set_token_lifetime_days(&mut self, days: &str) -> ModelResult<u32> {
+        let days = days
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|days| (1..=MAX_TOKEN_LIFETIME_DAYS).contains(days))
+            .ok_or_else(|| {
+                fail(
+                    "invalid_input",
+                    format!(
+                        "The token lifetime must be a whole number of days from 1 to {MAX_TOKEN_LIFETIME_DAYS}."
+                    ),
+                )
+            })?;
+        self.unlocked()?
+            .set_token_lifetime_days(days)
+            .map_err(map_err)?;
+        Ok(days)
     }
 
     /// API key items that have a connector destination, with the operations of their profile.
@@ -874,22 +921,7 @@ pub struct AgentActivityRow {
     pub reason: String,
 }
 
-/// UTC time as `YYYY-MM-DD HH:MM:SS UTC`. Uses the civil-from-days method.
-pub fn format_utc(unix: u64) -> String {
-    let days = unix / 86_400;
-    let rem = unix % 86_400;
-    let (hour, minute, second) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-    let z = i64::try_from(days).unwrap_or(0) + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} UTC")
-}
+pub use crate::vault::format_utc;
 
 /// Vault list row. It has no field values.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1037,6 +1069,7 @@ fn map_err(err: VaultError) -> ModelError {
         VaultErrorKind::Busy => "busy",
         VaultErrorKind::Io => "io",
         VaultErrorKind::Storage => "storage",
+        VaultErrorKind::Expired => "token_expired",
     };
     ModelError {
         code,
@@ -1067,6 +1100,7 @@ fn owner_message(kind: VaultErrorKind) -> &'static str {
             "The app cannot read or write the file. Examine the path and the file permissions."
         }
         VaultErrorKind::Storage => "The vault storage operation failed.",
+        VaultErrorKind::Expired => "The agent token expired. Rotate the token in Agents.",
     }
 }
 
