@@ -1,11 +1,46 @@
-# Isolation fixture
+# Isolation tests
 
-This directory holds a P0 filesystem boundary fixture.
-It is not product isolation evidence for the Apassy broker.
+This directory holds two things:
+
+1. `product_profile.rs` — the product isolation test for goal items I1, I2, and
+   I4. It uses the real Seatbelt profile in `sandbox/apassy-agent-host.sb` and
+   the `apassy-sandbox` launcher.
+2. `test_fixture_boundary.py` — the older P0 filesystem boundary fixture. It is
+   not product isolation evidence.
 
 Real-secret gate: BLOCKED.
 
-## Command
+## Product isolation test (I1, I2, I4)
+
+Run it with the normal test command:
+
+```
+cargo test --locked --features desktop,vault --test isolation_profile
+```
+
+It starts a real broker on a synthetic temporary vault. Then it runs processes
+in the product profile and checks the boundary:
+
+- `apassy-mcp` in the profile calls the broker and gets a permitted credential
+  result. No secret leaks.
+- A process in the profile cannot read, copy, overwrite, or replace the vault,
+  a backup, or a file under a fake Laya directory.
+- Ordinary work still runs: it reads the project directory and writes a
+  temporary file. Child processes of the sandboxed process work.
+- `ps eww` and `ps -E` in the profile do not show the environment of a process
+  outside the profile (F11). A direct system call can still read it. See the
+  limit in `docs/operations/isolation.md`.
+
+If the host is not macOS, or `sandbox-exec` is absent, the test fails. A skip is
+not a pass (goal I4).
+
+A Keychain deny check is pending the Swift Keychain helper. The test
+`keychain_check_is_pending` records this gap. It is not a skip of the test.
+
+How to start Claude Code and Codex in the profile, and the measured results, are
+in [docs/operations/isolation.md](../../docs/operations/isolation.md).
+
+## P0 filesystem boundary fixture
 
 Run this command from the repository root:
 

@@ -36,6 +36,10 @@ path = "src/bin/apassy-mcp.rs"
 name = "apassy-dev-reporting"
 path = "src/bin/apassy-dev-reporting.rs"
 
+[[bin]]
+name = "apassy-sandbox"
+path = "src/bin/apassy-sandbox.rs"
+
 [[test]]
 name = "sqlcipher_probe"
 path = "tests/sqlcipher_probe.rs"
@@ -64,6 +68,11 @@ required-features = ["vault"]
 [[test]]
 name = "vault_passphrase"
 path = "tests/vault_passphrase.rs"
+required-features = ["vault"]
+
+[[test]]
+name = "isolation_profile"
+path = "tests/isolation/product_profile.rs"
 required-features = ["vault"]
 
 [lints.rust]
