@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "huggingface",
+  "description": "Hugging Face CLI (`huggingface-cli` and `hf`): logins that store the token, token output, repository deletion, uploads that delete files, and read commands.",
+  "programs": ["huggingface-cli", "hf"],
+  "roles": {
+    "usage": ["huggingface-cli", "hf"]
+  },
+  "rules": [
+    {
+      "id": "login-stores-token",
+      "flag": "secret_output",
+      "note": "`login` writes the token to the token file of the user, and `--add-to-git-credential` also writes it to the git credential store. The token then stays on the disk after the run. `auth token` prints the token.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["login"], "any_arg_starts": ["--token", "--add-to-git-credential"] },
+          { "subcommand": ["auth"], "action": ["login", "token"] }
+        ]
+      }
+    },
+    {
+      "id": "upload-project-folder",
+      "flag": "secret_output",
+      "note": "`upload REPO .` uploads the whole working folder, with files such as `.env` and keys, unless the command excludes them. The third operand is the path in the repository, not a local path.",
+      "when": {
+        "subcommand": ["upload"],
+        "operands": { "at": { "index": 2, "in": [".", "./", "*"] } },
+        "not": { "any_arg_starts": ["--exclude"] }
+      }
+    },
+    {
+      "id": "delete-repository-or-files",
+      "flag": "data_loss",
+      "note": "`repo delete` removes a model, dataset, or Space. `upload --delete` removes remote files that match a pattern.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["repo"], "action": ["delete"] },
+          { "subcommand": ["upload"], "any_arg_starts": ["--delete"] },
+          { "subcommand": ["repo-files"], "action": ["delete"] }
+        ]
+      }
+    }
+  ],
+  "safe": [
+    {
+      "id": "reads",
+      "note": "The account name, the environment report (it names the token file, not the token), cache scans, and downloads to this computer.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["whoami", "env", "scan-cache", "download", "version"] },
+          { "subcommand": ["auth"], "action": ["whoami", "list"] },
+          { "subcommand": ["cache"], "action": ["scan", "ls"] }
+        ]
+      }
+    }
+  ]
+}

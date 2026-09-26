@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 2,
+  "pack_version": 3,
   "tool": "git",
   "description": "Git: history changes, pushes to protected branches, and read commands.",
   "programs": ["git"],
@@ -103,6 +103,12 @@
     }
   ],
   "exemptions": [
+    {
+      "id": "text-and-refs",
+      "check": "command_lexicon",
+      "note": "Git arguments are refs, paths, and messages. The `git` rules check secrets in arguments. `git credential` prints or stores credentials, so the general lexicon still checks it.",
+      "when": { "not": { "subcommand": ["credential"] } }
+    },
     {
       "id": "production-word",
       "check": "production_word",

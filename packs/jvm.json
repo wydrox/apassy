@@ -1,11 +1,12 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "jvm",
   "description": "Gradle and Maven: Flyway and Liquibase tasks that drop or revert, publishing and deployment, and build, test, and check tasks.",
   "programs": ["gradle", "gradlew", "mvn", "mvnw"],
   "roles": {
-    "usage": ["gradle", "gradlew", "mvn", "mvnw"]
+    "usage": ["gradle", "gradlew", "mvn", "mvnw"],
+    "project_code": ["gradle", "gradlew", "mvn", "mvnw"]
   },
   "rules": [
     {
@@ -16,6 +17,17 @@
         "any_arg": [
           "flywayclean", "flyway:clean", "flywayundo", "flyway:undo", "liquibase:dropall",
           "dropall", "liquibase:rollback", "rollback", "rollbackcount", "rollbacktodate"
+        ]
+      }
+    },
+    {
+      "id": "database-history-change",
+      "flag": "irreversible",
+      "note": "The Flyway plugin tasks `repair` and `baseline` and the Liquibase task `changelogSync` change the migration history without running migrations.",
+      "when": {
+        "any_arg": [
+          "flywayrepair", "flyway:repair", "flywaybaseline", "flyway:baseline",
+          "liquibase:changelogsync", "changelogsync", "liquibase:clearchecksums"
         ]
       }
     },
@@ -37,9 +49,13 @@
   "safe": [
     {
       "id": "build-test-and-check",
-      "note": "Every task is a build, test, check, format, or report task, also with a module path such as `:app:test`.",
+      "note": "Every task is a build, test, check, format, or report task, also with a module path such as `:app:test`. The Flyway and Liquibase plugin tasks `info`, `validate`, and `status` only read. The value of options such as `--tests` or `-x` is not a task.",
       "when": {
         "operands": {
+          "skip": [
+            "--tests", "-x", "--exclude-task", "-p", "--project-dir", "-pl", "--projects",
+            "-f", "--file", "--settings", "--init-script"
+          ],
           "all": [
             {
               "equals": [
@@ -48,7 +64,9 @@
                 "dependencies", "tasks", "javadoc", "spotlesscheck", "spotlessapply",
                 "ktlintcheck", "ktlintformat", "detekt", "jacocotestreport", "bootrun", "run",
                 "test-compile", "surefire:test", "spring-boot:run", "dependency:tree",
-                "checkstyle:check", "spotbugs:check", "pmd:check", "help"
+                "checkstyle:check", "spotbugs:check", "pmd:check", "help", "flywayinfo",
+                "flyway:info", "flywayvalidate", "flyway:validate", "liquibase:status",
+                "liquibase:validate", "liquibase:history"
               ]
             },
             {

@@ -1,20 +1,29 @@
 {
   "schema_version": 1,
-  "pack_version": 2,
+  "pack_version": 3,
   "tool": "shell",
   "description": "Shells, shell keywords, and builtins (sh, bash, echo, test, cd, for, and others).",
   "programs": [
     "sh", "bash", "zsh", "dash", "ksh", "fish", "echo", "printf", "print", "test", "[", "true",
     "false", ":", "read", "cd", "pushd", "popd", "for", "do", "done", "if", "then", "else",
     "elif", "fi", "while", "until", "case", "esac", "in", "local", "return", "break",
-    "continue", "trap", "wait", "shift", "mktemp", "pwd", "which", "type", "sleep"
+    "continue", "trap", "wait", "shift", "mktemp", "pwd", "which", "type", "sleep",
+    "set", "export", "unset", "declare", "typeset", "readonly", "source", ".", "eval",
+    "alias", "unalias", "let", "umask", "exit", "hash", "getopts", "ulimit"
   ],
   "roles": {
     "output": ["echo", "printf", "print"],
     "heredoc_code": ["sh", "bash", "zsh"],
-    "script_runner": ["bash", "sh"]
+    "script_runner": ["bash", "sh"],
+    "project_code": ["sh", "bash", "zsh", "dash", "ksh", "fish", "source", ".", "eval"]
   },
   "exemptions": [
+    {
+      "id": "text-arguments",
+      "check": "command_lexicon",
+      "note": "The arguments of shell builtins are text, file names, or conditions, not the subcommands of a tool.",
+      "when": {}
+    },
     {
       "id": "file-tests",
       "check": "secret_file_argument",

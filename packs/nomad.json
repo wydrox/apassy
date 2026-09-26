@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "nomad",
+  "description": "HashiCorp Nomad CLI: job runs and changes, purges and garbage collection, variables, ACL tokens, shells in an allocation, node and operator changes, and read commands.",
+  "programs": ["nomad"],
+  "roles": {
+    "usage": ["nomad"]
+  },
+  "rules": [
+    {
+      "id": "job-deploy-or-change",
+      "flag": "production",
+      "note": "`job run` deploys a job. Stop, revert, scale, restart, dispatch, and deployment actions change the running services. The packs do not trust the name of a target, as for `kubectl apply`.",
+      "when": {
+        "any_of": [
+          {
+            "subcommand": ["job"],
+            "action": ["run", "stop", "revert", "scale", "restart", "dispatch", "periodic", "promote"]
+          },
+          { "subcommand": ["run", "stop"] },
+          { "subcommand": ["deployment"], "action": ["promote", "fail", "pause", "resume", "unblock"] }
+        ]
+      }
+    },
+    {
+      "id": "purge-and-delete",
+      "flag": "data_loss",
+      "note": "`job stop -purge`, `system gc`, `var purge`, and deletions of volumes, services, namespaces, and ACL objects remove state for good. A snapshot restore replaces the cluster state.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["job", "stop"], "any_arg": ["-purge", "--purge"] },
+          { "subcommand": ["system"], "action": ["gc"] },
+          { "subcommand": ["var"], "action": ["purge"] },
+          {
+            "subcommand": ["volume", "service", "namespace", "quota", "sentinel"],
+            "action": ["delete", "deregister"]
+          },
+          { "subcommand": ["acl"], "any_arg": ["delete"] },
+          { "subcommand": ["operator"], "any_arg": ["restore"] }
+        ]
+      }
+    },
+    {
+      "id": "variables-and-tokens",
+      "flag": "secret_output",
+      "note": "`var get` prints the values of a variable. ACL token commands print a token secret. An operator snapshot has every variable and token. The `secrets/` folder of an allocation has the rendered secrets.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["var"], "action": ["get", "read"] },
+          { "subcommand": ["acl"], "action": ["bootstrap"] },
+          { "subcommand": ["acl"], "action": ["token"], "any_arg": ["create", "self", "info"] },
+          { "subcommand": ["operator"], "any_arg": ["snapshot"], "not": { "any_arg": ["inspect"] } },
+          { "subcommand": ["alloc", "fs"], "any_arg_contains": ["secrets"] }
+        ]
+      }
+    },
+    {
+      "id": "variable-change",
+      "flag": "production",
+      "note": "`var put` changes a variable that running jobs read.",
+      "when": { "subcommand": ["var"], "action": ["put", "lock"] }
+    },
+    {
+      "id": "allocation-shell",
+      "flag": "remote_access",
+      "note": "`alloc exec` runs a command in a running allocation on a remote node.",
+      "when": { "subcommand": ["alloc", "exec"], "any_arg": ["exec"] }
+    },
+    {
+      "id": "node-and-cluster-change",
+      "flag": "system_change",
+      "note": "Allocation restarts and signals, node drains and eligibility, server membership, and operator settings change the cluster.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["alloc"], "action": ["restart", "stop", "signal"] },
+          { "subcommand": ["node"], "action": ["drain", "eligibility", "config"] },
+          { "subcommand": ["server"], "action": ["force-leave", "join"] },
+          { "subcommand": ["operator"], "not": { "any_arg": ["list-peers", "inspect", "get-config"] } },
+          { "subcommand": ["acl"], "action": ["policy", "role", "binding-rule", "auth-method"], "any_arg": ["apply", "create", "update"] }
+        ]
+      }
+    }
+  ],
+  "exemptions": [
+    {
+      "id": "variable-names",
+      "check": "command_lexicon",
+      "note": "`var list` prints the paths of variables, not their values. The rule `variables-and-tokens` decides `var get`.",
+      "when": { "subcommand": ["var"], "action": ["list", "get", "read"] }
+    }
+  ],
+  "safe": [
+    {
+      "id": "reads",
+      "note": "Status, plans (a dry run), job specs and history, allocation status and logs, node and server lists, deployments, evaluations, variable paths, and the version.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["status", "version"] },
+          {
+            "subcommand": ["job"],
+            "action": ["status", "plan", "inspect", "history", "validate", "allocs", "deployments"]
+          },
+          { "subcommand": ["alloc"], "action": ["status", "logs"] },
+          { "subcommand": ["node"], "action": ["status"] },
+          { "subcommand": ["server"], "action": ["members"] },
+          { "subcommand": ["deployment", "eval", "namespace", "service", "volume", "plugin"], "action": ["list", "status", "info"] },
+          { "subcommand": ["var"], "action": ["list"] },
+          { "subcommand": ["plan", "validate", "inspect"] }
+        ]
+      }
+    }
+  ]
+}

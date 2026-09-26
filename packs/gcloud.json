@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "gcloud",
   "description": "Google Cloud CLIs (gcloud, gsutil, bq): resource changes, deletions, storage writes, tokens and secrets, remote shells, and read commands.",
   "programs": ["gcloud", "gsutil", "bq"],
@@ -53,6 +53,18 @@
       "when": { "program": ["bq"], "subcommand": ["query"], "sql": "writes" }
     },
     {
+      "id": "bq-overwrite",
+      "flag": "data_loss",
+      "note": "`--replace` overwrites the destination table of a query or a load. `bq cp -f` overwrites the destination table without a prompt.",
+      "when": {
+        "program": ["bq"],
+        "any_of": [
+          { "any_arg_starts": ["--replace"], "not": { "any_arg": ["--replace=false"] } },
+          { "subcommand": ["cp"], "any_arg": ["-f", "--force", "--force=true"] }
+        ]
+      }
+    },
+    {
       "id": "storage-write",
       "flag": "production",
       "dry_run": "skip",
@@ -91,6 +103,17 @@
         "args_start": [
           "config list", "config get-value", "config configurations list", "auth list",
           "logging read", "info", "version"
+        ]
+      }
+    },
+    {
+      "id": "bq-targeted-reads",
+      "note": "`bq show` prints the schema and metadata of one dataset or table. `bq query --dry_run` only estimates the bytes of a query and does not run it.",
+      "when": {
+        "program": ["bq"],
+        "any_of": [
+          { "subcommand": ["show"] },
+          { "subcommand": ["query"], "any_arg": ["--dry_run", "--dry_run=true"] }
         ]
       }
     },

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 3,
+  "pack_version": 4,
   "tool": "file-tools",
   "description": "File and text tools (ls, cat, grep, sed, awk, find, cp, rm, and others): file removal, secret files, system files, and read commands.",
   "programs": [
@@ -110,6 +110,12 @@
     }
   ],
   "exemptions": [
+    {
+      "id": "file-and-text-arguments",
+      "check": "command_lexicon",
+      "note": "The arguments of file and text tools are file names, patterns, or text. A word such as `secrets` or `0.0.0.0/0` is a name or a search term, not a subcommand. `xargs` runs a command, so the exception does not cover it.",
+      "when": { "not": { "program": ["xargs"] } }
+    },
     {
       "id": "metadata-only",
       "check": "secret_file_argument",

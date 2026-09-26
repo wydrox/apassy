@@ -1,11 +1,12 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "linters",
   "description": "Linters and scanners for infrastructure, containers, shell scripts, and CI files. They only read the project files.",
   "programs": [
     "tflint", "tfsec", "checkov", "kubeconform", "kubeval", "kube-linter", "hadolint",
-    "shellcheck", "yamllint", "actionlint", "markdownlint", "conftest", "cfn-lint"
+    "shellcheck", "yamllint", "actionlint", "markdownlint", "conftest", "cfn-lint",
+    "ansible-lint", "sqlfluff"
   ],
   "roles": {
     "usage": ["tflint", "kubeconform", "hadolint", "shellcheck", "yamllint", "actionlint"]
@@ -13,13 +14,19 @@
   "safe": [
     {
       "id": "lint-and-scan",
-      "note": "The tools check files and print findings. `conftest` checks policies on local files.",
+      "note": "The tools check files and print findings. `conftest` checks policies on local files. `ansible-lint` and `sqlfluff lint` check playbooks and SQL files.",
       "when": {
         "program": [
           "tflint", "tfsec", "checkov", "kubeconform", "kubeval", "kube-linter", "hadolint",
-          "shellcheck", "yamllint", "actionlint", "markdownlint", "conftest", "cfn-lint"
+          "shellcheck", "yamllint", "actionlint", "markdownlint", "conftest", "cfn-lint",
+          "ansible-lint"
         ]
       }
+    },
+    {
+      "id": "sqlfluff-lint",
+      "note": "`sqlfluff lint` and `parse` read SQL files. `fix` changes them.",
+      "when": { "program": ["sqlfluff"], "subcommand": ["lint", "parse", "version"] }
     }
   ]
 }

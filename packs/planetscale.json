@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "planetscale",
+  "description": "PlanetScale CLI (`pscale`): deploy requests and branch promotion, deletions, passwords and service tokens, database shells, and read commands.",
+  "programs": ["pscale"],
+  "roles": {
+    "usage": ["pscale"]
+  },
+  "rules": [
+    {
+      "id": "deploy-or-promote",
+      "flag": "production",
+      "note": "`deploy-request deploy` applies a schema change to the target branch, usually production. `branch promote` makes a branch a production branch.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["deploy-request"], "action": ["deploy", "apply", "revert"] },
+          { "subcommand": ["branch"], "action": ["promote", "demote"] }
+        ]
+      }
+    },
+    {
+      "id": "delete",
+      "flag": "data_loss",
+      "note": "A delete removes a database, a branch with its data, a backup, or a password.",
+      "when": {
+        "subcommand": ["database", "branch", "backup", "password", "service-token"],
+        "action": ["delete"]
+      }
+    },
+    {
+      "id": "new-credentials",
+      "flag": "secret_output",
+      "note": "`password create` and `service-token create` print a new credential once.",
+      "when": { "subcommand": ["password", "service-token"], "action": ["create"] }
+    }
+  ],
+  "safe": [
+    {
+      "id": "reads",
+      "note": "Listings and details of databases, branches, deploy requests, backups, organizations, regions, and password names, schema diffs, and the sign-in check.",
+      "when": {
+        "any_of": [
+          {
+            "subcommand": ["database", "branch", "deploy-request", "backup", "org", "region", "password"],
+            "action": ["list", "show", "diff", "schema"]
+          },
+          { "subcommand": ["auth"], "action": ["check"] }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "airflow",
+  "description": "Apache Airflow CLI: connections, variables, and configuration with secrets, metadata database resets, DAG deletion, users, and read commands. DAG runs and task tests run the code of the project.",
+  "programs": ["airflow"],
+  "roles": {
+    "usage": ["airflow"]
+  },
+  "rules": [
+    {
+      "id": "connections-variables-config",
+      "flag": "secret_output",
+      "note": "Connections hold passwords and keys. `connections list`, `get`, and `export`, `variables list`, `get`, and `export`, and `config list` and `get-value` print or write them. `info` prints the configuration too.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["connections", "variables"], "action": ["list", "get", "export"] },
+          { "subcommand": ["config"], "action": ["list", "get-value"] },
+          { "subcommand": ["info"] }
+        ]
+      }
+    },
+    {
+      "id": "metadata-reset-and-deletion",
+      "flag": "data_loss",
+      "note": "`db reset`, `db clean`, and `db downgrade` delete or revert the metadata database. `dags delete` removes the run history of a DAG. `tasks clear` resets task instances so they run again.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["db"], "action": ["reset", "clean", "downgrade"] },
+          { "subcommand": ["dags"], "action": ["delete"] },
+          { "subcommand": ["tasks"], "action": ["clear"] },
+          { "subcommand": ["connections", "variables", "pools", "roles", "users"], "action": ["delete"] }
+        ]
+      }
+    },
+    {
+      "id": "users-and-roles",
+      "flag": "privilege",
+      "note": "User and role changes decide who can run DAGs and read connections.",
+      "when": {
+        "subcommand": ["users", "roles"],
+        "action": ["create", "add-role", "remove-role", "import", "add-perms", "del-perms"]
+      }
+    }
+  ],
+  "project_commands": [
+    {
+      "id": "dag-and-task-runs",
+      "note": "`dags test`, `dags trigger`, `dags backfill`, `tasks test`, and `tasks run` run the task code of the project, which can call any system.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["dags"], "action": ["test", "trigger", "backfill"] },
+          { "subcommand": ["tasks"], "action": ["test", "run"] },
+          { "subcommand": ["standalone", "scheduler", "celery", "triggerer"] }
+        ]
+      }
+    }
+  ],
+  "safe": [
+    {
+      "id": "reads",
+      "note": "Listings of DAGs, import errors, runs, and tasks, DAG and task states, the version, and checks of the database and jobs.",
+      "when": {
+        "any_of": [
+          {
+            "subcommand": ["dags"],
+            "action": ["list", "list-import-errors", "list-runs", "list-jobs", "state", "details", "show"]
+          },
+          { "subcommand": ["tasks"], "action": ["list", "state", "states-for-dag-run"] },
+          { "subcommand": ["db"], "action": ["check", "check-migrations"] },
+          { "subcommand": ["jobs"], "action": ["check"] },
+          { "subcommand": ["version", "cheat-sheet"] }
+        ]
+      }
+    }
+  ]
+}

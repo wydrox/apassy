@@ -1,10 +1,18 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "encoding",
   "description": "Encoders and compressors (base64, xxd, openssl, gzip, and others). A secret that reaches one of them can leave in a hidden form.",
   "programs": ["base64", "xxd", "od", "hexdump", "openssl", "gzip", "zip", "uuencode", "rev"],
   "roles": {
     "encoder": ["base64", "xxd", "od", "hexdump", "openssl", "gzip", "zip", "uuencode", "rev"]
-  }
+  },
+  "exemptions": [
+    {
+      "id": "file-arguments",
+      "check": "command_lexicon",
+      "note": "The arguments of encoders are file names and options. The secret flow rules check what goes into an encoder.",
+      "when": {}
+    }
+  ]
 }

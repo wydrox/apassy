@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "auth0",
+  "description": "Auth0 CLI: revealed client secrets, test tokens, deletions, user and role changes, and read commands.",
+  "programs": ["auth0"],
+  "roles": {
+    "usage": ["auth0"]
+  },
+  "rules": [
+    {
+      "id": "reveal-and-tokens",
+      "flag": "secret_output",
+      "note": "`--reveal` and `--reveal-secrets` print client secrets. `test token` prints an access token. `apps create` with a reveal option prints the new secret.",
+      "when": {
+        "any_of": [
+          { "any_arg_starts": ["--reveal"] },
+          { "subcommand": ["test"], "action": ["token"] }
+        ]
+      }
+    },
+    {
+      "id": "delete",
+      "flag": "data_loss",
+      "note": "A delete removes an application, an API, a user, a role, an organization, an action, or a rule, with its settings.",
+      "when": { "any_arg": ["delete", "rm"] }
+    },
+    {
+      "id": "access-change",
+      "flag": "privilege",
+      "note": "Role assignments, user blocks, and organization members decide who can sign in and what they can do.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["users", "roles", "orgs"], "any_arg": ["assign", "unassign", "add", "remove", "block", "unblock"] },
+          { "subcommand": ["roles"], "action": ["permissions"] }
+        ]
+      }
+    }
+  ],
+  "safe": [
+    {
+      "id": "reads",
+      "note": "Listings and details of applications, APIs, actions, roles, organizations, and tenants without revealed secrets, and log listings and tails.",
+      "when": {
+        "not": { "any_arg_starts": ["--reveal"] },
+        "any_of": [
+          {
+            "subcommand": ["apps", "apis", "actions", "roles", "orgs", "tenants", "rules", "domains"],
+            "action": ["list", "ls", "show"]
+          },
+          { "subcommand": ["logs"], "action": ["list", "ls", "tail"] }
+        ]
+      }
+    }
+  ]
+}

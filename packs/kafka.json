@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "kafka",
+  "description": "Apache Kafka command line tools (`kafka-topics`, `kafka-consumer-groups`, `kafka-configs`, `kafka-acls`, and others, with or without `.sh`) and kcat: deletions, offset resets, access changes, and read commands.",
+  "programs": [
+    "kafka-topics", "kafka-topics.sh", "kafka-consumer-groups", "kafka-consumer-groups.sh",
+    "kafka-configs", "kafka-configs.sh", "kafka-acls", "kafka-acls.sh", "kafka-delete-records",
+    "kafka-delete-records.sh", "kafka-reassign-partitions", "kafka-reassign-partitions.sh",
+    "kafka-leader-election", "kafka-leader-election.sh", "kafka-console-consumer",
+    "kafka-console-consumer.sh", "kafka-console-producer", "kafka-console-producer.sh",
+    "kafka-broker-api-versions", "kafka-broker-api-versions.sh", "kafka-log-dirs",
+    "kafka-log-dirs.sh", "kcat", "kafkacat"
+  ],
+  "rules": [
+    {
+      "id": "delete-topics-groups-records",
+      "flag": "data_loss",
+      "note": "`--delete` removes a topic or a consumer group with its messages or offsets. `--delete-offsets` removes committed offsets. `kafka-delete-records` removes messages before an offset.",
+      "when": {
+        "any_of": [
+          { "program": ["kafka-delete-records", "kafka-delete-records.sh"] },
+          { "any_arg": ["--delete", "--delete-offsets"] }
+        ]
+      }
+    },
+    {
+      "id": "reset-offsets-execute",
+      "flag": "data_loss",
+      "note": "`--reset-offsets --execute` moves the committed offsets of a group. The consumers then skip or read again every message in the range. Without `--execute` the tool prints the plan only.",
+      "when": { "any_arg": ["--reset-offsets"], "any_arg_starts": ["--execute"] }
+    },
+    {
+      "id": "cluster-change",
+      "flag": "system_change",
+      "note": "`--alter` changes topic or broker settings such as retention, which can delete old messages. Partition moves and leader elections change the cluster for every client.",
+      "when": {
+        "any_of": [
+          { "any_arg": ["--alter"] },
+          {
+            "program": [
+              "kafka-reassign-partitions", "kafka-reassign-partitions.sh", "kafka-leader-election",
+              "kafka-leader-election.sh"
+            ],
+            "any_arg": ["--execute"]
+          }
+        ]
+      }
+    },
+    {
+      "id": "access-change",
+      "flag": "privilege",
+      "note": "`kafka-acls --add` or `--remove` changes who can read or write topics.",
+      "when": {
+        "program": ["kafka-acls", "kafka-acls.sh"],
+        "any_arg": ["--add", "--remove"]
+      }
+    }
+  ],
+  "safe": [
+    {
+      "id": "list-and-describe",
+      "note": "`--list` and `--describe` print topics, groups, lag, configs, or ACLs. No other action is in the command.",
+      "when": {
+        "program": [
+          "kafka-topics", "kafka-topics.sh", "kafka-consumer-groups", "kafka-consumer-groups.sh",
+          "kafka-configs", "kafka-configs.sh", "kafka-acls", "kafka-acls.sh"
+        ],
+        "any_arg": ["--list", "--describe"],
+        "not": {
+          "any_arg": [
+            "--create", "--delete", "--alter", "--reset-offsets", "--delete-offsets", "--add",
+            "--remove", "--execute"
+          ]
+        }
+      }
+    },
+    {
+      "id": "cluster-reads",
+      "note": "Broker versions and log directory sizes are reads.",
+      "when": {
+        "program": [
+          "kafka-broker-api-versions", "kafka-broker-api-versions.sh", "kafka-log-dirs",
+          "kafka-log-dirs.sh"
+        ],
+        "not": { "any_arg": ["--execute", "--alter"] }
+      }
+    }
+  ]
+}

@@ -1,12 +1,15 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "laravel",
   "description": "Laravel artisan (`php artisan`, `./artisan`, `sail artisan`) and Composer: fresh and reset migrations, database wipes, destructive tinker code, printed config, new packages, and development commands.",
   "programs": [
     "php", "artisan", "sail", "composer", "phpunit", "pest", "phpstan", "psalm", "php-cs-fixer",
     "phpcs"
   ],
+  "roles": {
+    "project_code": ["artisan", "sail", "composer"]
+  },
   "rules": [
     {
       "id": "migrate-fresh-reset-wipe",
@@ -49,6 +52,56 @@
       }
     },
     {
+      "id": "queue-flush-or-retry-all",
+      "flag": "data_loss",
+      "note": "`queue:flush` and `queue:forget` delete failed jobs. `queue:clear` deletes the jobs of a queue. `horizon:clear` deletes the jobs of Horizon queues.",
+      "when": {
+        "any_of": [
+          { "program": ["artisan"] },
+          { "program": ["php", "sail"], "subcommand": ["artisan"] }
+        ],
+        "any_arg": ["queue:flush", "queue:forget", "queue:clear", "horizon:clear", "queue:prune-failed"]
+      }
+    },
+    {
+      "id": "queue-retry",
+      "flag": "irreversible",
+      "note": "`queue:retry` pushes failed jobs to the queue again, with all their side effects such as emails or payments. `all` retries every failed job.",
+      "when": {
+        "any_of": [
+          { "program": ["artisan"] },
+          { "program": ["php", "sail"], "subcommand": ["artisan"] }
+        ],
+        "any_arg": ["queue:retry", "queue:retry-batch", "horizon:retry"]
+      }
+    },
+    {
+      "id": "app-key",
+      "flag": "irreversible",
+      "note": "`key:generate` replaces the application key in `.env`. Encrypted values and sessions made with the old key can no longer be read.",
+      "when": {
+        "any_of": [
+          { "program": ["artisan"] },
+          { "program": ["php", "sail"], "subcommand": ["artisan"] }
+        ],
+        "any_arg": ["key:generate"],
+        "not": { "any_arg": ["--show"] }
+      }
+    },
+    {
+      "id": "app-key-show",
+      "flag": "secret_output",
+      "note": "`key:generate --show` prints a new application key.",
+      "when": {
+        "any_of": [
+          { "program": ["artisan"] },
+          { "program": ["php", "sail"], "subcommand": ["artisan"] }
+        ],
+        "any_arg": ["key:generate"],
+        "any_arg_starts": ["--show"]
+      }
+    },
+    {
       "id": "composer-new-package",
       "flag": "new_dependency",
       "note": "`composer require` adds a package. `global require` installs a tool.",
@@ -65,14 +118,14 @@
             "program": ["php", "sail"],
             "subcommand": ["artisan"],
             "any_of": [
-              { "action": ["test", "route:list", "migrate:status", "list", "about", "serve", "--version"] },
+              { "action": ["test", "route:list", "migrate:status", "list", "about", "serve", "--version", "env"] },
               { "operands": { "at": { "index": 1, "starts": ["make:"] } } }
             ]
           },
           {
             "program": ["artisan"],
             "any_of": [
-              { "subcommand": ["test", "route:list", "migrate:status", "list", "about", "serve", "--version"] },
+              { "subcommand": ["test", "route:list", "migrate:status", "list", "about", "serve", "--version", "env"] },
               { "operands": { "at": { "index": 0, "starts": ["make:"] } } }
             ]
           }

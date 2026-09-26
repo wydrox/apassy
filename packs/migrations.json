@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "migrations",
   "description": "Database migration tools (Flyway, Liquibase, Knex, Sequelize, TypeORM, Drizzle Kit, dbmate, goose, golang-migrate, Atlas): clean, drop, rollback, and read commands.",
   "programs": [
@@ -17,6 +17,24 @@
       "flag": "data_loss",
       "note": "`flyway clean` drops every object in the schemas. `undo` reverts migrations.",
       "when": { "program": ["flyway"], "any_arg": ["clean", "undo"] }
+    },
+    {
+      "id": "flyway-repair-or-baseline",
+      "flag": "irreversible",
+      "note": "`flyway repair` removes failed entries from the schema history table and changes the stored checksums. `baseline` marks a version as applied. Both change the migration history for good.",
+      "when": { "program": ["flyway"], "any_arg": ["repair", "baseline"] }
+    },
+    {
+      "id": "liquibase-history-change",
+      "flag": "irreversible",
+      "note": "`changelog-sync`, `mark-next-changeset-ran`, and `clear-checksums` change the record of applied changesets without running them.",
+      "when": {
+        "program": ["liquibase"],
+        "any_arg": [
+          "changelog-sync", "changelogsync", "changelog-sync-to-tag", "mark-next-changeset-ran",
+          "marknextchangesetran", "clear-checksums", "clearchecksums"
+        ]
+      }
     },
     {
       "id": "liquibase-drop-or-rollback",

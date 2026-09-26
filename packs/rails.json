@@ -1,11 +1,12 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "rails",
   "description": "Ruby on Rails and Rake: database drops, resets, schema loads, and rollbacks, destructive runner code, credentials, and read and test tasks.",
   "programs": ["rails", "rake"],
   "roles": {
-    "usage": ["rails", "rake"]
+    "usage": ["rails", "rake"],
+    "project_code": ["rails", "rake"]
   },
   "rules": [
     {

@@ -275,6 +275,55 @@ fn full_decision_report() {
     assert_eq!(unavailable, 0);
 }
 
+/// Print the command analysis of each case of an evaluation set in the `apassy-eval`
+/// format (JSONL: `id`, `category`, `command`, `user_request`, `env_names`). The purpose
+/// is the user request, as in `apassy-eval`. No model is called.
+/// `APASSY_EVAL_SET=tests/evals/heldout-v2.jsonl cargo test --features vault --test bouncer_eval set_analysis -- --ignored --nocapture`
+#[test]
+#[ignore = "needs APASSY_EVAL_SET"]
+fn set_analysis_report() {
+    let Ok(path) = std::env::var("APASSY_EVAL_SET") else {
+        eprintln!("SKIP: APASSY_EVAL_SET is not set");
+        return;
+    };
+    let text = std::fs::read_to_string(path).expect("read the set");
+    let (mut flagged, mut safe, mut known, mut unknown) = (0usize, 0usize, 0usize, 0usize);
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let case: serde_json::Value = serde_json::from_str(line).expect("case");
+        let names: Vec<String> = case["env_names"]
+            .as_array()
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(|name| name.as_str().map(str::to_ascii_uppercase))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let command = case["command"].as_str().unwrap_or_default();
+        let request = case["user_request"].as_str().unwrap_or_default();
+        let analysis = analyze(&command_line_to_argv(command), request, &names);
+        let state = if !analysis.flags.is_empty() {
+            flagged += 1;
+            analysis.flags.join(",")
+        } else if analysis.known_safe {
+            safe += 1;
+            "safe".to_owned()
+        } else if analysis.known_command {
+            known += 1;
+            "known".to_owned()
+        } else {
+            unknown += 1;
+            "unknown".to_owned()
+        };
+        println!(
+            "{}\t{}\t{state}\t{command}",
+            case["id"].as_str().unwrap_or_default(),
+            case["category"].as_str().unwrap_or_default(),
+        );
+    }
+    eprintln!("flagged {flagged}, known safe {safe}, known command {known}, unknown {unknown}");
+}
+
 /// Run the command analysis on real agent commands from a local JSON file
 /// (`[{"cmd": "..."}]`). The file stays outside the repository.
 /// `APASSY_REAL_COMMANDS=in.json APASSY_REAL_OUT=out.jsonl cargo test --features vault --test bouncer_eval real -- --ignored`

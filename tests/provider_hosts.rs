@@ -141,9 +141,10 @@ fn read_to(host: &str) -> String {
 
 #[test]
 fn a_provider_host_is_allowed() {
-    // api.sendgrid.com is a known host of SendGrid only, not a global known host.
-    let fx = fixture(Some("sendgrid"));
-    let response = run(&fx, &read_to("api.sendgrid.com"));
+    // sentry.io is a known host of Sentry only, not a global known host. (Dev round 2
+    // made api.sendgrid.com a global known host, so this test uses Sentry.)
+    let fx = fixture(Some("sentry"));
+    let response = run(&fx, &read_to("sentry.io"));
     assert!(response.ok, "{response:?}");
     assert!(last_flags(&fx).is_empty(), "{:?}", last_flags(&fx));
     let text = format!("{response:?}");
@@ -151,7 +152,7 @@ fn a_provider_host_is_allowed() {
 
     // The same item without a provider: the host is not known, and the run waits.
     let plain = fixture(None);
-    let response = run(&plain, &read_to("api.sendgrid.com"));
+    let response = run(&plain, &read_to("sentry.io"));
     assert!(!response.ok);
     assert_eq!(
         response.error.as_ref().map(|e| e.code.as_str()),

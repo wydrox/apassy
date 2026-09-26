@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "mlflow",
+  "description": "MLflow CLI: garbage collection and deletion of runs, experiments, and models, database migrations, and read commands. `mlflow run` runs the code of an MLflow project.",
+  "programs": ["mlflow"],
+  "roles": {
+    "usage": ["mlflow"]
+  },
+  "rules": [
+    {
+      "id": "gc-and-delete",
+      "flag": "data_loss",
+      "note": "`gc` deletes runs and their artifacts for good. `experiments delete`, `runs delete`, and model deletions remove tracking data.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["gc"] },
+          { "subcommand": ["experiments", "runs", "models", "artifacts"], "action": ["delete"] }
+        ]
+      }
+    },
+    {
+      "id": "tracking-database-migration",
+      "flag": "irreversible",
+      "note": "`db upgrade` migrates the tracking database schema. An older server cannot read it after the change.",
+      "when": { "subcommand": ["db"], "action": ["upgrade"] }
+    }
+  ],
+  "project_commands": [
+    {
+      "id": "project-run",
+      "note": "`mlflow run` runs the entry point of an MLflow project, local or from a Git URL. `models serve` and `models predict` load and run a model.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["run", "recipes"] },
+          { "subcommand": ["models"], "action": ["serve", "predict"] }
+        ]
+      }
+    }
+  ],
+  "safe": [
+    {
+      "id": "reads",
+      "note": "Searches and listings of experiments, runs, and artifacts, run details, and artifact downloads to this computer.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["experiments"], "action": ["search", "list", "get", "csv"] },
+          { "subcommand": ["runs"], "action": ["list", "describe"] },
+          { "subcommand": ["artifacts"], "action": ["list", "download"] }
+        ]
+      }
+    }
+  ]
+}

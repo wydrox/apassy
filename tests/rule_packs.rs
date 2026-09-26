@@ -145,7 +145,7 @@ fn every_built_in_rule_has_a_note() {
     for name in packs::builtin_pack_files() {
         let text = std::fs::read_to_string(root().join("packs").join(name)).expect("pack");
         let value: serde_json::Value = serde_json::from_str(&text).expect("JSON");
-        for kind in ["rules", "safe", "exemptions"] {
+        for kind in ["rules", "safe", "exemptions", "project_commands"] {
             for rule in value[kind].as_array().into_iter().flatten() {
                 count += 1;
                 let note = rule["note"].as_str().unwrap_or_default().trim();
@@ -155,7 +155,7 @@ fn every_built_in_rule_has_a_note() {
             }
         }
     }
-    assert!(count > 250, "{count}");
+    assert!(count > 350, "{count}");
     assert!(missing.is_empty(), "rules without a note: {missing:?}");
 }
 
@@ -331,6 +331,11 @@ fn local_rules_only_add_flags_on_the_replay_sets() {
             !after.known_safe || before.known_safe,
             "{line}: {before:?} -> {after:?}"
         );
+        // Policy v5: a local pack cannot make a command a known command either.
+        assert!(
+            !after.known_command || before.known_command,
+            "{line}: {before:?} -> {after:?}"
+        );
         if after != before {
             changed += 1;
         }
@@ -340,6 +345,39 @@ fn local_rules_only_add_flags_on_the_replay_sets() {
         lines.len()
     );
     assert!(changed > lines.len() / 2, "{changed}");
+}
+
+/// Policy v5: only a built-in pack makes a program known. A local pack that names an
+/// unknown program adds its flags, but the command stays unknown code, so the model must
+/// match it to the user request. A local pack cannot list project commands.
+#[test]
+fn a_local_pack_does_not_make_a_program_known() {
+    let base = builtin();
+    let before = run(&base, "acme-tool status");
+    assert!(
+        before.flags.is_empty() && !before.known_command,
+        "{before:?}"
+    );
+    let local = with_local(
+        r#"{"schema_version": 1, "pack_version": 1, "tool": "acme-local",
+            "description": "Ask before an acme purge.", "programs": ["acme-tool"],
+            "rules": [{"id": "purge", "flag": "ask_owner", "when": {"subcommand": ["purge"]}}]}"#,
+    )
+    .expect("local pack");
+    let after = run(&local, "acme-tool status");
+    assert!(after.flags.is_empty() && !after.known_command, "{after:?}");
+    assert_eq!(
+        run(&local, "acme-tool purge").flags,
+        vec!["ask_owner", "data_loss"]
+    );
+    let error = with_local(
+        r#"{"schema_version": 1, "pack_version": 1, "tool": "acme-local",
+            "description": "Try to list project commands.", "programs": ["acme-tool"],
+            "rules": [{"id": "x", "flag": "ask_owner", "when": {"subcommand": ["x"]}}],
+            "project_commands": [{"id": "run", "when": {"subcommand": ["run"]}}]}"#,
+    )
+    .expect_err("local project commands");
+    assert!(error.message.contains("built-in packs only"), "{error}");
 }
 
 /// A local directory with a pack that does not load: the loader names the file, and

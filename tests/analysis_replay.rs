@@ -107,7 +107,14 @@ fn result_line(case: &Case) -> String {
     } else {
         analysis.flags.join(",")
     };
-    let safe = if analysis.known_safe { "safe" } else { "-" };
+    // Policy v5: `known` is a known command that is not known safe (`known_command`).
+    let safe = if analysis.known_safe {
+        "safe"
+    } else if analysis.known_command {
+        "known"
+    } else {
+        "-"
+    };
     let command = serde_json::to_string(&case.argv).expect("json");
     format!("{}\t{flags}\t{safe}\t{command}", case.id)
 }
@@ -706,6 +713,7 @@ fn digest(lines: &[String]) -> u64 {
 fn generated_summary(lines: &[String]) -> String {
     let mut flags = BTreeMap::<String, usize>::new();
     let mut safe = 0usize;
+    let mut known = 0usize;
     for line in lines {
         let parts: Vec<&str> = line.split('\t').collect();
         if parts[1] != "-" {
@@ -713,8 +721,10 @@ fn generated_summary(lines: &[String]) -> String {
                 *flags.entry(flag.to_owned()).or_default() += 1;
             }
         }
-        if parts[2] == "safe" {
-            safe += 1;
+        match parts[2] {
+            "safe" => safe += 1,
+            "known" => known += 1,
+            _ => {}
         }
     }
     let counts: Vec<String> = flags
@@ -722,7 +732,7 @@ fn generated_summary(lines: &[String]) -> String {
         .map(|(flag, count)| format!("{flag}={count}"))
         .collect();
     format!(
-        "generated\tcount={}\tseed={GENERATED_SEED:#x}\tdigest={:016x}\tknown_safe={safe}\t{}",
+        "generated\tcount={}\tseed={GENERATED_SEED:#x}\tdigest={:016x}\tknown_safe={safe}\tknown_command={known}\t{}",
         lines.len(),
         digest(lines),
         counts.join(",")
@@ -733,7 +743,7 @@ fn golden_text() -> String {
     let mut text = String::new();
     text.push_str("# Analysis replay golden file (goal B7). tests/analysis_replay.rs writes it.\n");
     text.push_str(
-        "# Columns: case, flags (- for none), known safe (safe or -), argument list (JSON).\n",
+        "# Columns: case, flags (- for none), known (safe, known, or -), argument list (JSON).\n",
     );
     text.push_str("# The last line is the count and the digest of the generated set.\n");
     for case in fixture_cases() {

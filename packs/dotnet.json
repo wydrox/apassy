@@ -1,11 +1,12 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "dotnet",
   "description": ".NET CLI: Entity Framework drops and rollbacks, package publishing, new packages and tools, user secrets, and build and test commands.",
   "programs": ["dotnet"],
   "roles": {
-    "usage": ["dotnet"]
+    "usage": ["dotnet"],
+    "project_code": ["dotnet"]
   },
   "rules": [
     {

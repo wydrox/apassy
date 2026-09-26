@@ -1,9 +1,12 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "django",
   "description": "Django management commands (`manage.py`, `django-admin`, `python -m django`): database flush and rollbacks, destructive shell code, admin accounts, printed settings, and development commands.",
   "programs": ["python", "python3", "manage.py", "django-admin"],
+  "roles": {
+    "project_code": ["manage.py", "django-admin"]
+  },
   "rules": [
     {
       "id": "flush-or-reset-database",

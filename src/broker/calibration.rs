@@ -122,9 +122,13 @@ fn asks_at(record: &DecisionRecord, thresholds: Thresholds) -> bool {
     if entry.decided_by == DecidedBy::Pattern {
         return false;
     }
+    // The log does not record `known_command`. Without it the replay needs `task_match`
+    // for every command that is not known safe, so it is never less strict than the
+    // policy (v5).
     let analysis = Analysis {
         flags: entry.rule_flags.clone(),
         known_safe: entry.known_safe,
+        known_command: false,
     };
     let context = DecisionContext {
         analysis: &analysis,
@@ -172,6 +176,7 @@ fn owner_model_step(record: &DecisionRecord) -> bool {
     let analysis = Analysis {
         flags: entry.rule_flags.clone(),
         known_safe: entry.known_safe,
+        known_command: false,
     };
     before_model(&DecisionContext {
         analysis: &analysis,
