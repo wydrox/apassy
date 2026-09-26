@@ -29,16 +29,38 @@ pub fn default_socket_path() -> PathBuf {
         .join("broker.sock")
 }
 
+/// Settings of one request besides the token and the action.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SendOptions<'a> {
+    /// The agent host session of the sender (goal item B6).
+    pub host_session: Option<&'a str>,
+    /// Read and write timeout. `None` uses the default for the action.
+    pub timeout: Option<Duration>,
+}
+
 /// Send one request and read one response. The connection closes after the response.
 pub fn send(socket: &Path, token: &str, action: Action) -> io::Result<WireResponse> {
-    let timeout = if matches!(action, Action::Run { .. }) {
-        RUN_TIMEOUT
-    } else {
-        IO_TIMEOUT
-    };
+    send_with(socket, token, action, SendOptions::default())
+}
+
+/// [`send`] with a host session or a shorter timeout.
+pub fn send_with(
+    socket: &Path,
+    token: &str,
+    action: Action,
+    options: SendOptions<'_>,
+) -> io::Result<WireResponse> {
+    let timeout = options
+        .timeout
+        .unwrap_or(if matches!(action, Action::Run { .. }) {
+            RUN_TIMEOUT
+        } else {
+            IO_TIMEOUT
+        });
     let request = WireRequest {
         v: WIRE_VERSION,
         token: token.to_owned(),
+        host_session: options.host_session.map(str::to_owned),
         action,
     };
     let mut line = serde_json::to_vec(&request).map_err(io::Error::other)?;
@@ -51,7 +73,7 @@ pub fn send(socket: &Path, token: &str, action: Action) -> io::Result<WireRespon
     }
     let mut stream = UnixStream::connect(socket)?;
     stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(timeout.min(IO_TIMEOUT)))?;
     stream.write_all(&line)?;
     stream.flush()?;
     let mut reader = BufReader::new(stream.take(MAX_RESPONSE_BYTES as u64));

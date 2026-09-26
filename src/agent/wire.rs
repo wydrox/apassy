@@ -15,11 +15,19 @@ pub const MAX_LINE_BYTES: usize = 64 * 1024;
 /// Largest response line in bytes. A run response carries masked process output.
 pub const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
+/// Largest user prompt that a host hook sends, in bytes (goal item B6).
+pub const MAX_HOOK_PROMPT_BYTES: usize = 32 * 1024;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WireRequest {
     pub v: u32,
     pub token: String,
+    /// The agent host session of the sender, if the sender knows it (goal item B6).
+    /// Claude Code gives its MCP servers and hooks the session ID. The broker uses it
+    /// to find the user request that the host hook sent for the same session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_session: Option<String>,
     pub action: Action,
 }
 
@@ -28,6 +36,7 @@ impl fmt::Debug for WireRequest {
         f.debug_struct("WireRequest")
             .field("v", &self.v)
             .field("token", &"[redacted]")
+            .field("host_session", &self.host_session)
             .field("action", &self.action)
             .finish()
     }
@@ -60,6 +69,22 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         user_request: Option<String>,
     },
+    /// The user prompt from a host hook, for example Claude Code `UserPromptSubmit`
+    /// (goal item B6). `apassy-hook` sends it. The broker keeps it in memory and uses
+    /// it as the user request of later runs in the same host session.
+    SubmitUserRequest {
+        /// Host name for the owner: `claude-code` or `codex`. It is a label only.
+        host: String,
+        /// The working directory of the host session.
+        cwd: String,
+        /// The user prompt. It is cut at [`MAX_HOOK_PROMPT_BYTES`] when `truncated` is set.
+        prompt: String,
+        /// The host transcript file. The broker checks the prompt in this file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transcript_path: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        truncated: bool,
+    },
 }
 
 impl Action {
@@ -68,6 +93,7 @@ impl Action {
             Self::ListAccess => "list_access",
             Self::Call { .. } => "call",
             Self::Run { .. } => "run",
+            Self::SubmitUserRequest { .. } => "submit_user_request",
         }
     }
 }
@@ -123,5 +149,33 @@ mod tests {
         assert!(serde_json::from_str::<WireRequest>(extra).is_err());
         let nested = r#"{"v":0,"token":"t","action":{"kind":"call","item_id":1,"operation":"op","params":{"a":{"b":1}}}}"#;
         assert!(serde_json::from_str::<WireRequest>(nested).is_err());
+    }
+
+    #[test]
+    fn hook_request_and_host_session() {
+        let text = r#"{"v":0,"token":"t","host_session":"s-1","action":{"kind":"submit_user_request","host":"claude-code","cwd":"/p","prompt":"Fix the tests."}}"#;
+        let request: WireRequest = serde_json::from_str(text).expect("valid request");
+        assert_eq!(request.host_session.as_deref(), Some("s-1"));
+        assert_eq!(request.action.name(), "submit_user_request");
+        let Action::SubmitUserRequest {
+            transcript_path,
+            truncated,
+            ..
+        } = &request.action
+        else {
+            panic!("wrong action");
+        };
+        assert!(transcript_path.is_none() && !truncated);
+        // An older request without a host session stays valid.
+        let old = r#"{"v":0,"token":"t","action":{"kind":"list_access"}}"#;
+        let old: WireRequest = serde_json::from_str(old).expect("valid request");
+        assert!(old.host_session.is_none());
+        assert!(
+            !serde_json::to_string(&old)
+                .expect("json")
+                .contains("host_session")
+        );
+        let extra = r#"{"v":0,"token":"t","action":{"kind":"submit_user_request","host":"x","cwd":"/p","prompt":"p","trusted":true}}"#;
+        assert!(serde_json::from_str::<WireRequest>(extra).is_err());
     }
 }
