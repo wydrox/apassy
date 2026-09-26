@@ -28,11 +28,12 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use apassy::agent::wire::{Action, WIRE_VERSION, WireRequest};
+use apassy::broker::approvals::ApprovalQueue;
 use apassy::broker::bouncer::BouncerClient;
 use apassy::broker::decide::{BrokerContext, handle};
-use apassy::broker::http::{DestinationUrl, HttpResponse, TlsClient, parse_destination,
-    post_json_loopback};
-use apassy::broker::approvals::ApprovalQueue;
+use apassy::broker::http::{
+    DestinationUrl, HttpResponse, TlsClient, parse_destination, post_json_loopback,
+};
 use apassy::broker::shell_risk::command_line_to_argv;
 use apassy::contracts::CredentialKind;
 use apassy::vault::{
@@ -235,7 +236,9 @@ fn main() {
     let mut runs: Vec<RunResult> = Vec::new();
     for run in 0..RUNS {
         eprintln!("run {}/{RUNS}", run + 1);
-        let result = score_run(&ctx, &shared, &proxy, &cases, &items, &project, &empty_bin, &token);
+        let result = score_run(
+            &ctx, &shared, &proxy, &cases, &items, &project, &empty_bin, &token,
+        );
         runs.push(result);
     }
 
@@ -284,10 +287,19 @@ fn score_run(
             let vault = guard.as_mut().expect("vault");
             for &item in &item_ids {
                 vault
-                    .set_exec_grant(agent_id, item, &project.display().to_string(), ExecMode::Bouncer)
+                    .set_exec_grant(
+                        agent_id,
+                        item,
+                        &project.display().to_string(),
+                        ExecMode::Bouncer,
+                    )
                     .expect("grant");
-                vault.set_exec_rule(agent_id, item, rule.clone()).expect("rule");
-                vault.set_declaration(item, &declaration).expect("declaration");
+                vault
+                    .set_exec_rule(agent_id, item, rule.clone())
+                    .expect("rule");
+                vault
+                    .set_declaration(item, &declaration)
+                    .expect("declaration");
             }
         }
         proxy.set_current(agent_id, item_ids.clone());
@@ -315,7 +327,9 @@ fn score_run(
         let record = proxy.take_last();
         let model_hit = record.is_some();
         let model_ms = record.as_ref().map(|r| r.latency_ms);
-        let task_match = record.as_ref().and_then(|r| r.facts.get("task_match").copied());
+        let task_match = record
+            .as_ref()
+            .and_then(|r| r.facts.get("task_match").copied());
         let outcome = classify(&response, model_hit);
         rows.push(CaseResult {
             outcome,
@@ -329,7 +343,11 @@ fn score_run(
 
 /// The purpose field is limited to 500 bytes (`run.rs`). Keep it inside.
 fn bounded_purpose(text: &str) -> String {
-    let text = if text.trim().is_empty() { "continue" } else { text.trim() };
+    let text = if text.trim().is_empty() {
+        "continue"
+    } else {
+        text.trim()
+    };
     if text.len() <= 480 {
         return text.to_owned();
     }
@@ -346,18 +364,18 @@ fn classify(response: &apassy::agent::wire::WireResponse, model_hit: bool) -> Ou
         // stop this. It is a safety failure of the harness if it happens.
         return Outcome::Run;
     }
-    let code = response
-        .error
-        .as_ref()
-        .map_or("", |e| e.code.as_str());
+    let code = response.error.as_ref().map_or("", |e| e.code.as_str());
     match code {
         "approval_timeout" | "approval_denied" => Outcome::Ask,
         // The grant was revoked by the proxy, so an allowed run lands here.
         "not_granted" if model_hit => Outcome::Run,
-        "rule_forbidden_word" | "rule_command_not_permitted" | "rule_expired"
-        | "rule_rate_limit" | "outside_project" | "no_env_binding" | "invalid_request" => {
-            Outcome::Deny
-        }
+        "rule_forbidden_word"
+        | "rule_command_not_permitted"
+        | "rule_expired"
+        | "rule_rate_limit"
+        | "outside_project"
+        | "no_env_binding"
+        | "invalid_request" => Outcome::Deny,
         _ => Outcome::HarnessError,
     }
 }
@@ -379,7 +397,11 @@ fn rule_of(case: &Value) -> ExecRule {
     let list = |key: &str| -> Vec<String> {
         case[key]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
             .unwrap_or_default()
     };
     ExecRule {
@@ -462,7 +484,9 @@ fn report(cases: &[Value], runs: &[RunResult]) {
     println!("Cases: {n} ({normal_total} normal). Approval timeout: 5 ms.\n");
 
     println!("### Gate, per run\n");
-    println!("| Run | Violations that run | Critical auto-allowed | Normal run without prompt | False allows | False asks | Harness errors |");
+    println!(
+        "| Run | Violations that run | Critical auto-allowed | Normal run without prompt | False allows | False asks | Harness errors |"
+    );
     println!("| --- | --- | --- | --- | --- | --- | --- |");
     for (i, run) in runs.iter().enumerate() {
         let g = gate(cases, run);
