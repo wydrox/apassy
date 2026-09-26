@@ -1,0 +1,179 @@
+{
+  "schema": 1,
+  "name": "apassy-base-v1",
+  "version": "apassy-base-v1+83224960",
+  "checkpoint": {
+    "file": "apassy-base-v1.safetensors",
+    "sha256": "832249609f0cfd978cc7697326d55bc6d2676507eec13e5fb3f4bc6b35cfe850",
+    "size_bytes": 104996060,
+    "format": "safetensors, float32 head tensors: head., type_emb., scorer."
+  },
+  "base": {
+    "repo": "convaiinnovations/laya",
+    "revision": "55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851",
+    "weights_file": "model.safetensors",
+    "weights_sha256": "891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c",
+    "package": "laya[serve]==0.3.20"
+  },
+  "serve": {
+    "zero_shot_questions": [
+      "leak"
+    ]
+  },
+  "training": {
+    "method": "heads only (encoder frozen, encoder states cached once in float16), cross-entropy on noul logits divided by the noul temperature",
+    "noul_temperature": 1.983399510383606,
+    "config": {
+      "epochs": 4,
+      "batch": 32,
+      "lr": 0.0003,
+      "weight_decay": 0.01,
+      "warmup": 100,
+      "seed": 7,
+      "limit": 0,
+      "max_steps": 0
+    },
+    "best_epoch": 4,
+    "trainable_parameters": 26248193,
+    "train_examples": 32288,
+    "val_examples": 2704,
+    "encoder_cache_seconds": 1435.4,
+    "train_seconds": 1238.7,
+    "peak_mps_driver_gb": 3.65,
+    "peak_mps_tensors_gb": 0.44,
+    "ac_power": true,
+    "device": "mps",
+    "versions": {
+      "torch": "2.14.0",
+      "laya": "0.3.20",
+      "transformers": "5.17.0"
+    },
+    "data": {
+      "seed": 20260926,
+      "commands": {
+        "replay_realistic": 50198,
+        "replay_used": 30000,
+        "coverage": 1247,
+        "composed": 813,
+        "pool": 33307,
+        "after_dedupe_and_exclusion": 32928,
+        "dropped_dev_equal": 317,
+        "dev_commands_checked": 486
+      },
+      "train": {
+        "task_match": {
+          "no": 4240,
+          "yes": 4247
+        },
+        "writes": {
+          "no": 2733,
+          "yes": 2763
+        },
+        "remote": {
+          "no": 1851,
+          "yes": 1827
+        },
+        "leak": {
+          "no": 2266,
+          "yes": 2309
+        },
+        "destroy": {
+          "no": 2735,
+          "yes": 2746
+        },
+        "rule_break": {
+          "no": 2268,
+          "yes": 2303
+        }
+      },
+      "val": {
+        "task_match": {
+          "no": 260,
+          "yes": 253
+        },
+        "writes": {
+          "no": 267,
+          "yes": 237
+        },
+        "remote": {
+          "no": 149,
+          "yes": 173
+        },
+        "leak": {
+          "no": 234,
+          "yes": 191
+        },
+        "destroy": {
+          "no": 265,
+          "yes": 254
+        },
+        "rule_break": {
+          "no": 228,
+          "yes": 193
+        }
+      },
+      "sources": {
+        "replay": 19644,
+        "coverage": 6148,
+        "composed": 9200
+      }
+    },
+    "val_metrics": {
+      "task_match": {
+        "n": 513,
+        "accuracy": 0.7777777777777778,
+        "nll": 0.4635724266209311,
+        "brier": 0.152441411113305,
+        "ece": 0.06934590721012732,
+        "mean_p_yes": 0.6347673331265864,
+        "mean_p_no": 0.2783145911525935
+      },
+      "writes": {
+        "n": 504,
+        "accuracy": 0.8829365079365079,
+        "nll": 0.2772826364747941,
+        "brier": 0.08376356632417595,
+        "ece": 0.03575605687607702,
+        "mean_p_yes": 0.8091369561442343,
+        "mean_p_no": 0.12704519190989463
+      },
+      "remote": {
+        "n": 322,
+        "accuracy": 0.8571428571428571,
+        "nll": 0.4203283428776889,
+        "brier": 0.11808336606791718,
+        "ece": 0.06483307373579822,
+        "mean_p_yes": 0.7850726593145831,
+        "mean_p_no": 0.14682732383570565
+      },
+      "leak": {
+        "n": 425,
+        "accuracy": 0.84,
+        "nll": 0.337876052281478,
+        "brier": 0.10919808897153584,
+        "ece": 0.03696800446377464,
+        "mean_p_yes": 0.784370156014777,
+        "mean_p_no": 0.18497000576325784
+      },
+      "destroy": {
+        "n": 519,
+        "accuracy": 0.9229287090558767,
+        "nll": 0.22523059791961164,
+        "brier": 0.06104509333282108,
+        "ece": 0.04039941427961501,
+        "mean_p_yes": 0.9080866354326974,
+        "mean_p_no": 0.11733542664458685
+      },
+      "rule_break": {
+        "n": 421,
+        "accuracy": 0.8812351543942993,
+        "nll": 0.30492987286696077,
+        "brier": 0.09069718848330005,
+        "ece": 0.03937656591223846,
+        "mean_p_yes": 0.7975771836839963,
+        "mean_p_no": 0.12961025000141377
+      },
+      "all_nll": 0.33820332150691074
+    }
+  }
+}

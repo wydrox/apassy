@@ -93,13 +93,99 @@ def collate(items, pad):
     }
 
 
-def encoder_states(model, batch, device, amp):
-    with torch.no_grad():
+class LoRALinear(torch.nn.Module):
+    """A frozen linear layer plus a trainable low-rank update B @ A (LoRA)."""
+
+    def __init__(self, base, rank, alpha):
+        super().__init__()
+        self.base = base
+        self.lora_A = torch.nn.Parameter(torch.randn(rank, base.in_features, device=base.weight.device) / rank)
+        self.lora_B = torch.nn.Parameter(torch.zeros(base.out_features, rank, device=base.weight.device))
+        self.scale = alpha / rank
+
+    def forward(self, x):
+        return self.base(x) + (x @ self.lora_A.t() @ self.lora_B.t()) * self.scale
+
+
+def add_lora(model, layers, rank, alpha):
+    """Wrap the attention and MLP projections of the last `layers` encoder layers."""
+    params = []
+    for layer in model.encoder.layers[-layers:]:
+        for parent, name in ((layer.attn, "Wqkv"), (layer.attn, "Wo"), (layer.mlp, "Wi"), (layer.mlp, "Wo")):
+            wrapped = LoRALinear(getattr(parent, name), rank, alpha)
+            setattr(parent, name, wrapped)
+            params += [wrapped.lora_A, wrapped.lora_B]
+    return params
+
+
+def encoder_states(model, batch, device, amp, grad=False):
+    """Encoder output. With LoRA (`grad=True`), autograd records only the adapted layers,
+    because the earlier layers have no parameter that needs a gradient."""
+    with torch.set_grad_enabled(grad):
         ctx = torch.autocast(device_type=device.type, dtype=torch.float16) if amp else torch.autocast(device_type="cpu", enabled=False)
         with ctx:
             h = model.encoder(input_ids=batch["input_ids"].to(device),
                               attention_mask=batch["attention_mask"].to(device)).last_hidden_state
     return h.float()
+
+
+class FeatureCache:
+    """Frozen encoder outputs on disk (float16), one row per real token.
+
+    The encoder does not change during a heads-only fine-tune, so one encoder pass
+    over the data is enough. The head sees padded positions only as masked keys,
+    so a zero row for a padded position gives the same answer.
+    """
+
+    def __init__(self, folder, name):
+        self.path = os.path.join(folder, name + ".f16")
+        self.index_path = os.path.join(folder, name + ".json")
+        self.index = None
+        self.data = None
+
+    def ready(self, fingerprint):
+        if not (os.path.exists(self.path) and os.path.exists(self.index_path)):
+            return False
+        meta = json.load(open(self.index_path))
+        return meta.get("fingerprint") == fingerprint
+
+    def build(self, model, items, pad, device, amp, batch_size, fingerprint, hidden):
+        total = sum(len(it["ids"]) for it in items)
+        data = np.lib.format.open_memmap(self.path + ".tmp", mode="w+", dtype=np.float16, shape=(total, hidden))
+        offsets, pos = [], 0
+        for it in items:
+            offsets.append(pos)
+            pos += len(it["ids"])
+        t = time.time()
+        with torch.no_grad():
+            for n, idx in enumerate(batches(items, batch_size, random.Random(0), False)):
+                b = collate([items[i] for i in idx], pad)
+                h = encoder_states(model, b, device, amp).half().cpu().numpy()
+                for row, i in enumerate(idx):
+                    length = len(items[i]["ids"])
+                    data[offsets[i]:offsets[i] + length] = h[row, :length]
+                if n % 100 == 0:
+                    print("cache %s: batch %d, %.0fs" % (os.path.basename(self.path), n, time.time() - t), flush=True)
+                    release_cache()
+        data.flush()
+        del data
+        os.replace(self.path + ".tmp", self.path)
+        with open(self.index_path, "w") as f:
+            json.dump({"fingerprint": fingerprint, "offsets": offsets,
+                       "lengths": [len(it["ids"]) for it in items]}, f)
+
+    def open(self):
+        meta = json.load(open(self.index_path))
+        self.offsets, self.lengths = meta["offsets"], meta["lengths"]
+        self.data = np.load(self.path, mmap_mode="r")
+
+    def batch(self, idx, device):
+        length = min(512, (max(self.lengths[i] for i in idx) + 31) // 32 * 32)
+        out = np.zeros((len(idx), length, self.data.shape[1]), dtype=np.float16)
+        for row, i in enumerate(idx):
+            n = self.lengths[i]
+            out[row, :n] = self.data[self.offsets[i]:self.offsets[i] + n]
+        return torch.from_numpy(out).to(device).float()
 
 
 def head_logits(model, h, batch, device):
@@ -144,13 +230,13 @@ def ece(p, y, bins=10):
     return float(total)
 
 
-def evaluate(model, items, pad, device, amp, temperature, batch_size):
+def evaluate(model, items, pad, device, amp, temperature, batch_size, cache=None):
     model.eval()
     probs, ys, qs = [], [], []
     with torch.no_grad():
         for idx in batches(items, batch_size, random.Random(0), False):
             b = collate([items[i] for i in idx], pad)
-            h = encoder_states(model, b, device, amp)
+            h = cache.batch(idx, device) if cache else encoder_states(model, b, device, amp)
             logits = head_logits(model, h, b, device)
             p = torch.softmax(logits / temperature, -1)[:, 1]
             probs.extend(p.cpu().tolist())
@@ -202,7 +288,7 @@ def main():
     ap.add_argument("--data", required=True, help="folder with train.jsonl and val.jsonl")
     ap.add_argument("--out", required=True, help="checkpoint path (.safetensors)")
     ap.add_argument("--report", default="", help="JSON report path (default: <out>.report.json)")
-    ap.add_argument("--epochs", type=int, default=2)
+    ap.add_argument("--epochs", type=int, default=4)
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--weight-decay", type=float, default=0.01)
@@ -213,6 +299,12 @@ def main():
     ap.add_argument("--max-steps", type=int, default=0)
     ap.add_argument("--no-amp", action="store_true")
     ap.add_argument("--skip-baseline", action="store_true")
+    ap.add_argument("--lora-layers", type=int, default=0,
+                    help="also train LoRA adapters in the last N encoder layers (measurement only, no checkpoint)")
+    ap.add_argument("--lora-rank", type=int, default=8)
+    ap.add_argument("--lora-alpha", type=float, default=16.0)
+    ap.add_argument("--cache-dir", default="", help="folder for the encoder cache (default: next to --out)")
+    ap.add_argument("--keep-cache", action="store_true", help="keep the encoder cache after training")
     args = ap.parse_args()
 
     random.seed(args.seed)
@@ -246,13 +338,43 @@ def main():
     trainable = [p for n, p in model.named_parameters() if n.startswith(common.TRAINED_PREFIXES)]
     for p in trainable:
         p.requires_grad_(True)
+    if args.lora_layers:
+        trainable += add_lora(model, args.lora_layers, args.lora_rank, args.lora_alpha)
     n_train = sum(p.numel() for p in trainable)
-    print("trainable %.1fM parameters (heads only)" % (n_train / 1e6), flush=True)
+    print("trainable %.1fM parameters (%s)" % (n_train / 1e6, "heads and LoRA r%d in the last %d layers" % (
+        args.lora_rank, args.lora_layers) if args.lora_layers else "heads only"), flush=True)
+
+    # Heads only: one encoder pass over the data, stored on disk in float16.
+    train_cache = val_cache = None
+    cache_seconds = 0.0
+    cache_dir = args.cache_dir or os.path.join(os.path.dirname(os.path.abspath(args.out)), "encoder-cache")
+    if not args.lora_layers:
+        os.makedirs(cache_dir, exist_ok=True)
+        fingerprint = {}
+        for name in ("train", "val"):
+            digest = common.sha256_file(os.path.join(args.data, name + ".jsonl"))
+            limit = args.limit if name == "train" else 0
+            fingerprint[name] = "%s:%s:%s:%s:%d" % (digest, common.BASE_REVISION, amp, device.type, limit)
+        t_c = time.time()
+        caches = {}
+        for name, items in (("train", train_items), ("val", val_items)):
+            cache = FeatureCache(cache_dir, name)
+            if not cache.ready(fingerprint[name]):
+                cache.build(model, items, pad, device, amp, args.batch, fingerprint[name],
+                            model.encoder.config.hidden_size)
+            cache.open()
+            caches[name] = cache
+        cache_seconds = time.time() - t_c
+        train_cache, val_cache = caches["train"], caches["val"]
+        # The heads read the cache. Free the GPU memory of the encoder.
+        model.encoder.to("cpu")
+        release_cache()
+        print("encoder cache ready in %.0fs" % cache_seconds, flush=True)
 
     baseline = None
     if not args.skip_baseline:
         t_b = time.time()
-        baseline = evaluate(model, val_items, pad, device, amp, temperature, args.batch)
+        baseline = evaluate(model, val_items, pad, device, amp, temperature, args.batch, val_cache)
         print("zero-shot val: %s (%.0fs)" % (json.dumps({k: round(v["nll"], 3) for k, v in baseline.items() if isinstance(v, dict)}), time.time() - t_b), flush=True)
 
     opt = torch.optim.AdamW(trainable, lr=args.lr, weight_decay=args.weight_decay)
@@ -281,7 +403,10 @@ def main():
         window, window_n = 0.0, 0
         for idx in batches(train_items, args.batch, rng, True):
             b = collate([train_items[i] for i in idx], pad)
-            h = encoder_states(model, b, device, amp)
+            if train_cache:
+                h = train_cache.batch(idx, device)
+            else:
+                h = encoder_states(model, b, device, amp, grad=bool(args.lora_layers))
             logits = head_logits(model, h, b, device)
             loss = F.cross_entropy(logits / temperature, b["y"].to(device))
             for g in opt.param_groups:
@@ -309,7 +434,13 @@ def main():
                 break
         peak = max(peak, mps_memory_gb())
         release_cache()
-        val = evaluate(model, val_items, pad, device, amp, temperature, args.batch)
+        if args.lora_layers:
+            # A LoRA run is a time and memory measurement. serve.py loads heads only.
+            print("LORA %d steps in %.1fs (%.2f s/step), peak driver %.2f GB, tensors %.2f GB, last loss %.4f" % (
+                step, time.time() - t_train, (time.time() - t_train) / max(1, step), peak, peak_tensors,
+                running / max(1, count)), flush=True)
+            return
+        val = evaluate(model, val_items, pad, device, amp, temperature, args.batch, val_cache)
         release_cache()
         history.append({"epoch": epoch + 1, "train_loss": running / max(1, count), "val": val,
                         "seconds": time.time() - t_train})
@@ -340,6 +471,7 @@ def main():
         "size_bytes": os.path.getsize(args.out),
         "version": common.model_version(args.out),
         "best_epoch": best_epoch,
+        "encoder_cache_seconds": round(cache_seconds, 1),
         "train_seconds": round(train_seconds, 1),
         "total_seconds": round(time.time() - t0, 1),
         "peak_mps_driver_gb": round(peak, 2),
@@ -368,7 +500,13 @@ def main():
         json.dump(report, f, indent=2)
     print("CHECKPOINT %s sha256 %s size %.1f MB version %s" % (
         args.out, report["sha256"], report["size_bytes"] / 1e6, report["version"]), flush=True)
-    print("TRAIN %.1fs, peak MPS driver memory %.2f GB, report %s" % (train_seconds, peak, path), flush=True)
+    print("TRAIN %.1fs (encoder cache %.1fs), peak MPS driver memory %.2f GB, report %s" % (
+        train_seconds, cache_seconds, peak, path), flush=True)
+    if train_cache and not args.keep_cache:
+        for name in ("train", "val"):
+            for suffix in (".f16", ".json"):
+                os.remove(os.path.join(cache_dir, name + suffix))
+        os.rmdir(cache_dir)
 
 
 if __name__ == "__main__":
