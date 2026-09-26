@@ -1,0 +1,15 @@
+# Pinned dependencies of the base-model trainer and server (goal B8).
+# Install into the Laya virtual environment (docs/operations/bouncer.md section 1):
+#
+#   uv pip install --python .venv/bin/python -r tools/basemodel/requirements.txt
+#
+# These are the versions that trained and measured apassy-base-v1.
+laya[serve]==0.3.20
+torch==2.14.0
+transformers==5.17.0
+huggingface_hub==1.33.0
+safetensors==0.8.0
+tokenizers==0.23.2
+numpy==2.5.3
+fastapi==0.141.1
+uvicorn==0.54.0
