@@ -1,0 +1,84 @@
+;; Apassy agent-host isolation profile (macOS Seatbelt / SBPL).
+;;
+;; Goal: an agent host (Claude Code, Codex) and every command it starts cannot
+;; read, copy, or replace Apassy's protected files. The host can still connect
+;; to the broker socket, so `apassy-mcp` keeps working. Everything else stays
+;; usable for normal development: git, cargo, npm, the network, and the host's
+;; own configuration and credentials.
+;;
+;; The profile denies read and write to:
+;;   - the Apassy data directory (vault, broker socket, Laya model),
+;;   - the vault file and its SQLite companions,
+;;   - the backup file and its SQLite companions.
+;; It re-allows a connection to the broker socket, which lives inside the
+;; denied data directory.
+;;
+;; Parameters (pass with `sandbox-exec -D KEY=VALUE`). Use absolute, resolved
+;; paths. A path with spaces is fine; the profile quotes each value.
+;;   APASSY_DATA_DIR    the Apassy data directory, for example
+;;                      "$HOME/Library/Application Support/Apassy"
+;;   APASSY_VAULT_FILE  the vault database file
+;;   APASSY_BACKUP_FILE the backup database file
+;;   APASSY_SOCKET      the broker Unix socket
+;;
+;; Limits: Seatbelt does not protect memory, the clipboard, or processes that
+;; run outside this profile. Apple marks `sandbox-exec` as deprecated.
+
+(version 1)
+
+;; Start from the normal user environment. The denials below carve the
+;; protected paths out of it.
+(allow default)
+
+;; --- Helpers -------------------------------------------------------------
+
+;; The parent directories of PATH, from the shallowest to "PATH minus the last
+;; segment". The list does not include PATH itself or the root "/".
+;; Example: "/a/b/c" gives ("/a" "/a/b").
+(define (apassy-ancestors path)
+  (let loop ((i (- (string-length path) 1)) (acc '()))
+    (cond ((<= i 0) acc)
+          ((char=? (string-ref path i) #\/)
+           (loop (- i 1) (cons (substring path 0 i) acc)))
+          (else (loop (- i 1) acc)))))
+
+;; Deny a rename or a delete of each parent directory of PATH. Without this a
+;; sandboxed process can rename a parent directory and then read the protected
+;; file at its new, un-denied path. A subpath deny blocks a rename of the
+;; denied directory itself, but not a rename of a directory above it.
+(define (apassy-seal-ancestors path)
+  (for-each
+    (lambda (dir) (deny file-write-unlink (literal dir)))
+    (apassy-ancestors path)))
+
+;; Deny read and write to PATH and to the SQLite sidecar files that a vault or
+;; a backup can have next to it.
+(define (apassy-deny-db path)
+  (deny file-read* file-write* (literal path))
+  (deny file-read* file-write* (literal (string-append path "-wal")))
+  (deny file-read* file-write* (literal (string-append path "-shm")))
+  (deny file-read* file-write* (literal (string-append path "-journal")))
+  (deny file-read* file-write* (literal (string-append path ".lock"))))
+
+;; --- Denials -------------------------------------------------------------
+
+;; The Apassy data directory holds the vault, the broker socket, and the Laya
+;; model at <data dir>/laya. Deny the whole subtree.
+(deny file-read* file-write* (subpath (param "APASSY_DATA_DIR")))
+(apassy-seal-ancestors (param "APASSY_DATA_DIR"))
+
+;; The vault file. The owner can place it outside the data directory.
+(apassy-deny-db (param "APASSY_VAULT_FILE"))
+(apassy-seal-ancestors (param "APASSY_VAULT_FILE"))
+
+;; The backup file. The owner can place it outside the data directory.
+(apassy-deny-db (param "APASSY_BACKUP_FILE"))
+(apassy-seal-ancestors (param "APASSY_BACKUP_FILE"))
+
+;; --- Re-allow the broker socket -----------------------------------------
+
+;; The socket lives inside the denied data directory. A later rule wins in
+;; SBPL, so this re-opens only the socket node. The host and `apassy-mcp` can
+;; connect; they still cannot read any other file in the data directory.
+(allow network-outbound (remote unix-socket (path-literal (param "APASSY_SOCKET"))))
+(allow file-read* file-write* (literal (param "APASSY_SOCKET")))
