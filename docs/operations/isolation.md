@@ -422,9 +422,9 @@ header showed `sandbox: danger-full-access`. Codex started with no nested
 Seatbelt error. This shows the launcher, the profile, and the Codex overrides
 work together.
 
-The agent turn did not finish. The account hit its usage limit: "You've hit your
-usage limit." The owner must run the Codex check again after the limit resets,
-with credits available:
+The first agent turn did not finish, because the account hit its usage limit.
+The check ran again on 2026-09-26 at 17:55 with the same Codex version, with
+this command:
 
 ```
 cd <a git repository>
@@ -435,11 +435,20 @@ apassy-sandbox \
   --socket /tmp/apassy-i3/d/broker.sock \
   -- codex exec --skip-git-repo-check \
        -c sandbox_mode=danger-full-access -c approval_policy=never \
-       "Run: cat /tmp/apassy-i3/d/vault.db ; ls /tmp/apassy-i3/d ; sh -c 'echo ok > \"$TMPDIR/x\" && cat \"$TMPDIR/x\"'. Report each result."
+       "Run: cat /tmp/apassy-i3/d/vault.db ; ls /tmp/apassy-i3/d ; sh -c 'echo ok > \"$TMPDIR/x\" && cat \"$TMPDIR/x\"'. Report each result verbatim."
 ```
 
-The expected result is the same as the Claude Code run: the first two commands
-give `Operation not permitted`, and the temporary write gives `ok`.
+The session header showed `sandbox: danger-full-access` and `approval: never`.
+The vault file and the data directory were synthetic canaries.
+
+| Command that Codex ran | Result |
+| --- | --- |
+| `cat /tmp/apassy-i3/d/vault.db` | `Operation not permitted`, exit 1 |
+| `ls /tmp/apassy-i3/d` | `Operation not permitted`, exit 1 |
+| `sh -c 'echo ok > "$TMPDIR/x" && cat "$TMPDIR/x"'` | `ok`, exit 0 |
+
+The canary file was unchanged after the run. The result is the same as the
+Claude Code run. Goal item I3 is done for both hosts.
 
 ## 6. Keychain and the helper caller check
 
