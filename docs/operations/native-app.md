@@ -343,6 +343,35 @@ These failures are not counted as passes:
 - In case C2, the probe first had no entitlements. The signature of the bundle replaced the signature of the main executable, and that signature had no `--entitlements`. The script signs the keychain helper at the bundle level with its entitlements for this reason.
 - Clippy failed once with `manual implementation of .is_multiple_of()` in the base64 decoder. The code now uses `is_multiple_of`.
 
+### Checks for the desktop integration (A2 to A4, N1 to N4)
+
+Worktree branch of the desktop worker, after a merge with `goal-v1` at `6e64c69`. All commands ran from the repository root.
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt --check` | PASS |
+| `cargo clippy --locked --all-targets --features desktop,vault -- -D warnings` | PASS. No warnings. |
+| `cargo clippy --locked --all-targets -- -D warnings` and `--features desktop` | PASS. The build without the vault feature keeps working. |
+| `cargo test --locked --features desktop,vault` | PASS. lib 88, main 1, agent_path 11, agent_run 13, analysis_replay 1, bouncer_eval 2, bouncer_rules 8, contracts 14, desktop_model 29, host_hook 7, isolation_profile 10, native_helper 15, notifications 6, owner_auth 8, owner_vault 12, rule_packs 5, vault_lifecycle 28, vault_migration 3, vault_passphrase 8, doc tests 6. No failures. The 8 ignored tests are earlier tests that need the network, a live Laya model, or a real host. |
+| `scripts/build-app.sh` | PASS, exit 0. Hardened runtime on all 4 programs. `ok:` for the smoke test, `apassy-mcp --version`, helper `ping`, `notify_status`, an unknown command, keychain helper `ping`, and `keychain_exists`. "Keychain: DISABLED (no provisioning profile)." |
+
+New tests for this work: `tests/owner_auth.rs` (A2, A3, A4 with a fake helper), `tests/notifications.rs` (N1 to N4 with a real broker and a fake helper), `tests/owner_vault.rs` (`owner_actions_refuse_without_a_matching_check`, `revealed_values_hide_on_time_hide_and_lock`), `src/desktop/ui/owner_tests.rs` (F1, F4, the owner check dialog, "Mark as seen"), `src/broker/approvals.rs` (`approve_refuses_without_a_matching_fresh_proof`), `src/desktop/inbox.rs`, and `tests/isolation/product_profile.rs` (`keychain_item_is_not_readable_in_profile`, with the signed helper from `target/Apassy.app`).
+
+Start of the built app without a window check (the process has a window, but the agent did not look at the screen). The data directory on this Mac has mode `0755`, so the broker refuses it. The start used a temporary socket directory with mode `0700`:
+
+```
+$ APASSY_BROKER_SOCKET=/tmp/apassy-launch-check2/broker.sock target/Apassy.app/Contents/MacOS/apassy &
+$ ps -o pid,stat,etime,command -p <pid>        # after 7 s: running
+$ ls -la /tmp/apassy-launch-check2              # srw------- broker.sock
+$ printf '%s\n' '{"cmd":"ping"}' '{"cmd":"notify_status"}' | target/Apassy.app/Contents/MacOS/apassy-helper
+{"biometry":"not_available","bundle_id":"com.wydrox.apassy","helper_version":"0.1.0","keychain_access_group":null,"ok":true,"protocol":1}
+{"alert":"not_supported","alert_style":"none","authorization":"not_determined","lock_screen":"not_supported","notification_center":"not_supported","ok":true,"sound":"not_supported"}
+$ printf '%s\n' '{"cmd":"ping"}' | target/Apassy.app/Contents/Helpers/ApassyKeychain.app/Contents/MacOS/ApassyKeychain
+{"biometry":"not_available","bundle_id":"com.wydrox.apassy.keychain","helper_version":"0.1.0","keychain_access_group":null,"ok":true,"protocol":1}
+```
+
+The app started, the broker listened, and the app wrote nothing to stdout or stderr. The agent stopped it with `SIGTERM`. Touch ID answers `not_available` (the keyboard is not paired), the keychain helper has no access group, and the owner has not decided about notifications yet. So on this Mac today: the owner check uses the passphrase, the vault unlocks with the passphrase, and the Inbox card shows "You did not allow notifications yet."
+
 ## Not verified by the agent
 
 - A real Touch ID prompt. The keyboard is not paired, and a real prompt needs a finger.
