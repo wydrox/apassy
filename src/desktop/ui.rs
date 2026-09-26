@@ -307,6 +307,10 @@ fn draw_lock_controls(app: &mut DesktopApp, ui: &mut egui::Ui) {
             {
                 app.pending_delete = false;
             }
+            // Typed passphrases do not stay in the form after a lock.
+            app.owner_ui.passphrase_current.clear();
+            app.owner_ui.passphrase_new.clear();
+            app.owner_ui.passphrase_repeat.clear();
             // A locked vault refuses agent runs, so waiting runs end now.
             app.end_waiting_runs();
         }
