@@ -3,33 +3,54 @@
 //! Agents, grants, and agent activity use the vault (ADR 0004). Rules and demo
 //! approvals stay on the in-memory demo model.
 //! This session is a trusted-process adapter over [`crate::vault`].
-//! It is not an authenticated owner channel. Real-secret use stays blocked.
+//! Reveal, grant and rule changes, and token rotation take an [`OwnerProof`] from
+//! [`crate::broker::approvals::OwnerGate::authorize`] (goal item A4). Real-secret
+//! use stays blocked.
+//!
+//! Secret text in this module is erased with `zeroize` when it is dropped or cleared
+//! (key-memory review F3). This is best effort: copies in egui, SQLite, the
+//! allocator, and swap can stay.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
+
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::broker::SharedVault;
+use crate::broker::approvals::{ApprovalQueue, OwnerAction, OwnerProof, PendingRun};
 use crate::broker::http::parse_destination;
 use crate::broker::profile;
 use crate::contracts::CredentialKind;
-use crate::desktop::model::{ItemDraft, MASKED_VALUE, ModelError, ModelResult};
+use crate::desktop::model::{ItemDraft, ModelError, ModelResult};
 use crate::vault::{
     ActivityDecision, AgentSummary, AgentToken, Declaration, Destination, EnvBinding, Environment,
     ExecGrant, ExecMode, ExecRule, Field, ItemDraft as VaultDraft, MAX_PASSPHRASE_BYTES,
-    MAX_TOKEN_LIFETIME_DAYS, MIN_PASSPHRASE_BYTES, Reversibility, RiskLevel, Scope, SecretValue,
-    Vault, VaultError, VaultErrorKind, checked_env_name,
+    MAX_TOKEN_LIFETIME_DAYS, MIN_PASSPHRASE_BYTES, NewActivity, Reversibility, RiskLevel, Scope,
+    SecretValue, Vault, VaultError, VaultErrorKind, checked_env_name,
 };
 
 const MAX_TAG_BYTES: usize = 64;
 
-const AGENT_USE_LABEL: &str = "Stored in the vault. Agent use is not connected.";
-const REVEAL_WARNING: &str = "The value is visible in this window until you hide it or lock the vault. This is not an authenticated owner channel.";
+/// A revealed value hides itself after this time (key-memory review F10).
+pub const REVEAL_TIME: Duration = Duration::from_secs(30);
 
-/// Secret inputs for one item form. Debug output is redacted.
-#[derive(Clone, Default)]
+const AGENT_USE_LABEL: &str = "Stored in the vault. Agent use is not connected.";
+const REVEAL_WARNING: &str =
+    "The value is visible in this window for 30 seconds, or until you hide it or lock the vault.";
+
+/// Activity text when the owner locks the vault while runs wait (goal item N3).
+pub const ENDED_BY_LOCK: &str =
+    "The owner locked the vault before a decision. The run did not start.";
+/// Activity text when Apassy quits while runs wait (goal item N3).
+pub const ENDED_BY_QUIT: &str = "Apassy stopped before the owner decided. The run did not start.";
+
+/// Secret inputs for one item form. Debug output is redacted. There is no `Clone`,
+/// so the form is the only copy that the app keeps.
+#[derive(Default)]
 pub struct SecretForm {
     pub token: String,
     pub password: String,
@@ -47,12 +68,24 @@ impl SecretForm {
             && self.custom_value.is_empty()
     }
 
+    /// Erase every field. The buffers keep their capacity (key-memory review F4).
     pub fn clear(&mut self) {
-        self.token.clear();
-        self.password.clear();
-        self.private_key.clear();
-        self.key_passphrase.clear();
-        self.custom_value.clear();
+        self.token.zeroize();
+        self.password.zeroize();
+        self.private_key.zeroize();
+        self.key_passphrase.zeroize();
+        self.custom_value.zeroize();
+    }
+
+    /// The fields and their widget names in the item forms.
+    pub fn fields_mut(&mut self) -> [(&'static str, &mut String); 5] {
+        [
+            ("token", &mut self.token),
+            ("password", &mut self.password),
+            ("private", &mut self.private_key),
+            ("phrase", &mut self.key_passphrase),
+            ("custom", &mut self.custom_value),
+        ]
     }
 }
 
@@ -68,22 +101,36 @@ impl Drop for SecretForm {
     }
 }
 
-/// Passphrase or other short-lived secret text. Drop clears the `String`.
+/// Passphrase or other short-lived secret text. Drop erases the bytes.
 pub struct Ephemeral(String);
 
 impl Ephemeral {
+    /// Move the text out of `slot`. The slot gets a new empty buffer with the same
+    /// capacity, so the next typing does not move the text (key-memory review F4).
     pub fn take(slot: &mut String) -> Self {
-        Self(std::mem::take(slot))
+        let capacity = slot.capacity();
+        Self(std::mem::replace(slot, String::with_capacity(capacity)))
     }
 
     pub fn expose(&self) -> &str {
         &self.0
     }
+
+    /// Move the text into an erasing buffer without a copy.
+    pub fn into_zeroizing(mut self) -> Zeroizing<String> {
+        Zeroizing::new(std::mem::take(&mut self.0))
+    }
 }
 
 impl Drop for Ephemeral {
     fn drop(&mut self) {
-        self.0.clear();
+        self.0.zeroize();
+    }
+}
+
+impl fmt::Debug for Ephemeral {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Ephemeral([redacted])")
     }
 }
 
@@ -392,12 +439,44 @@ impl OwnerSession {
     }
 
     pub fn lock(&mut self) -> ModelResult<()> {
+        self.lock_ending_runs(None, ENDED_BY_LOCK)
+    }
+
+    /// Lock the vault and end every run that waits in `approvals` (goal items V3, N3).
+    ///
+    /// Before the lock, each waiting run gets a denial in the activity log with `why`,
+    /// so the inbox keeps the event after a restart. The vault mutex is held from the
+    /// record to the invalidation, so the broker does not record the same run again:
+    /// it finds the vault locked.
+    pub fn lock_ending_runs(
+        &mut self,
+        approvals: Option<&ApprovalQueue>,
+        why: &str,
+    ) -> ModelResult<()> {
         self.revealed.clear();
         let mut slot = self.slot();
-        let Some(vault) = slot.as_mut() else {
-            return Ok(());
+        let result = match slot.as_mut() {
+            None => Ok(()),
+            Some(vault) => {
+                if let Some(queue) = approvals
+                    && !vault.is_locked()
+                {
+                    for run in queue.pending() {
+                        let _ = vault.record_activity(&ended_run_entry(&run, why));
+                    }
+                }
+                vault.lock().map_err(map_err)
+            }
         };
-        vault.lock().map_err(map_err)
+        if let Some(queue) = approvals {
+            queue.invalidate_all();
+        }
+        result
+    }
+
+    /// The canonical path of the open vault file, also when it is locked.
+    pub fn vault_path(&self) -> Option<PathBuf> {
+        self.slot().as_ref().map(|vault| vault.path().to_path_buf())
     }
 
     pub fn search(&self, query: &str) -> ModelResult<Vec<OwnerSummary>> {
@@ -481,9 +560,11 @@ impl OwnerSession {
         Ok(())
     }
 
-    pub fn reveal(&mut self, id: u64) -> ModelResult<OwnerDetails> {
+    /// Show the secret values of an item for [`REVEAL_TIME`]. Needs a fresh owner
+    /// check for [`OwnerAction::Reveal`] of this item (goal item A4).
+    pub fn reveal(&mut self, id: u64, proof: OwnerProof) -> ModelResult<OwnerDetails> {
         let pairs = {
-            let vault = self.unlocked()?;
+            let vault = self.unlocked_for(proof, &OwnerAction::Reveal { item_id: id })?;
             let meta = vault.details(id).map_err(map_err)?;
             let mut pairs = Vec::new();
             for field in &meta.fields {
@@ -491,7 +572,13 @@ impl OwnerSession {
                     continue;
                 }
                 let value = vault.reveal(id, &field.name).map_err(map_err)?;
-                pairs.push((field.name.clone(), RevealedValue(value.expose().to_owned())));
+                pairs.push((
+                    field.name.clone(),
+                    RevealedValue {
+                        value: Zeroizing::new(value.expose().to_owned()),
+                        shown_at: Instant::now(),
+                    },
+                ));
             }
             pairs
         };
@@ -505,6 +592,34 @@ impl OwnerSession {
     pub fn hide(&mut self, id: u64) -> ModelResult<OwnerDetails> {
         self.revealed.retain(|key, _| key.0 != id);
         self.details(id)
+    }
+
+    /// The revealed value of one field. The view borrows it. There is no copy in
+    /// [`OwnerDetails`] (key-memory review F10). `None` after [`REVEAL_TIME`].
+    pub fn revealed_value(&self, id: u64, field: &str) -> Option<&str> {
+        self.revealed
+            .get(&(id, field.to_owned()))
+            .filter(|value| value.shown_at.elapsed() < REVEAL_TIME)
+            .map(|value| value.value.as_str())
+    }
+
+    /// Hide values that are older than [`REVEAL_TIME`]. The app calls this each frame.
+    pub fn expire_reveals(&mut self) {
+        self.expire_reveals_at(Instant::now());
+    }
+
+    /// Hide values that are older than [`REVEAL_TIME`] at `now`.
+    pub fn expire_reveals_at(&mut self, now: Instant) {
+        self.revealed
+            .retain(|_, value| now.saturating_duration_since(value.shown_at) < REVEAL_TIME);
+    }
+
+    /// Time until the next revealed value hides itself.
+    pub fn next_reveal_expiry(&self) -> Option<Duration> {
+        self.revealed
+            .values()
+            .map(|value| REVEAL_TIME.saturating_sub(value.shown_at.elapsed()))
+            .min()
     }
 
     pub fn backup(&mut self, destination: &Path) -> ModelResult<()> {
@@ -557,8 +672,14 @@ impl OwnerSession {
     }
 
     /// Give the agent a new token. Show it to the owner one time. The old token stops working.
-    pub fn rotate_agent_token(&mut self, agent_id: u64) -> ModelResult<AgentToken> {
-        match self.unlocked()?.rotate_agent_token(agent_id) {
+    /// Needs a fresh owner check (goal item A4).
+    pub fn rotate_agent_token(
+        &mut self,
+        agent_id: u64,
+        proof: OwnerProof,
+    ) -> ModelResult<AgentToken> {
+        let mut vault = self.unlocked_for(proof, &OwnerAction::RotateToken { agent_id })?;
+        match vault.rotate_agent_token(agent_id) {
             Err(err) if err.kind() == VaultErrorKind::InvalidInput => Err(fail(
                 "invalid_input",
                 "A revoked agent cannot get a new token. Register the agent again.",
@@ -571,22 +692,11 @@ impl OwnerSession {
         self.unlocked()?.token_lifetime_days().map_err(map_err)
     }
 
-    /// Change the token lifetime from the text in the Agents view.
-    pub fn set_token_lifetime_days(&mut self, days: &str) -> ModelResult<u32> {
-        let days = days
-            .trim()
-            .parse::<u32>()
-            .ok()
-            .filter(|days| (1..=MAX_TOKEN_LIFETIME_DAYS).contains(days))
-            .ok_or_else(|| {
-                fail(
-                    "invalid_input",
-                    format!(
-                        "The token lifetime must be a whole number of days from 1 to {MAX_TOKEN_LIFETIME_DAYS}."
-                    ),
-                )
-            })?;
-        self.unlocked()?
+    /// Change the token lifetime from the text in the Agents view. Needs a fresh owner
+    /// check (goal item A4).
+    pub fn set_token_lifetime_days(&mut self, days: &str, proof: OwnerProof) -> ModelResult<u32> {
+        let days = parse_lifetime_days(days)?;
+        self.unlocked_for(proof, &OwnerAction::ChangeTokenLifetime)?
             .set_token_lifetime_days(days)
             .map_err(map_err)?;
         Ok(days)
@@ -630,15 +740,30 @@ impl OwnerSession {
             .collect())
     }
 
-    pub fn set_grant(
+    /// Let the agent use a connector operation of the item. Needs a fresh owner check
+    /// (goal item A4).
+    pub fn allow_operation(
         &mut self,
         agent_id: u64,
         item_id: u64,
         operation: &str,
-        allowed: bool,
+        proof: OwnerProof,
+    ) -> ModelResult<()> {
+        self.unlocked_for(proof, &OwnerAction::ChangeGrant { agent_id, item_id })?
+            .set_grant(agent_id, item_id, operation, true)
+            .map_err(map_err)
+    }
+
+    /// Take a connector operation away from the agent. This only removes authority, so
+    /// it needs no owner check.
+    pub fn remove_operation(
+        &mut self,
+        agent_id: u64,
+        item_id: u64,
+        operation: &str,
     ) -> ModelResult<()> {
         self.unlocked()?
-            .set_grant(agent_id, item_id, operation, allowed)
+            .set_grant(agent_id, item_id, operation, false)
             .map_err(map_err)
     }
 
@@ -647,16 +772,18 @@ impl OwnerSession {
     }
 
     /// Register the connector for an item: `https://`, or `http://` on a loopback address.
+    /// The connector decides where the secret goes, so it needs a fresh owner check.
     pub fn set_connector(
         &mut self,
         item_id: u64,
         profile_id: &str,
         base_url: &str,
+        proof: OwnerProof,
     ) -> ModelResult<()> {
         let profile = profile::find(profile_id)
             .ok_or_else(|| fail("invalid_input", "The connector profile is not known."))?;
         parse_destination(base_url).map_err(|message| fail("invalid_input", message))?;
-        let mut vault = self.unlocked()?;
+        let mut vault = self.unlocked_for(proof, &OwnerAction::ChangeItemRules { item_id })?;
         let kind = vault.details(item_id).map_err(map_err)?.summary.kind;
         if kind != profile.credential_kind {
             return Err(fail(
@@ -691,11 +818,14 @@ impl OwnerSession {
             .collect())
     }
 
+    /// Bind a secret field of the item to an environment variable for agent processes.
+    /// Needs a fresh owner check (goal item A4).
     pub fn set_env_binding(
         &mut self,
         item_id: u64,
         env_name: &str,
         field: &str,
+        proof: OwnerProof,
     ) -> ModelResult<()> {
         checked_env_name(env_name.trim()).map_err(|_| {
             fail(
@@ -703,7 +833,8 @@ impl OwnerSession {
                 "Use A-Z, 0-9, and _ and start with a letter or _. System names such as PATH or DYLD_* are not permitted.",
             )
         })?;
-        match self.unlocked()?.set_env_binding(item_id, env_name, field) {
+        let mut vault = self.unlocked_for(proof, &OwnerAction::ChangeItemRules { item_id })?;
+        match vault.set_env_binding(item_id, env_name, field) {
             Err(err) if err.kind() == VaultErrorKind::AlreadyExists => Err(fail(
                 "already_exists",
                 "Another item already uses this variable name.",
@@ -735,12 +866,15 @@ impl OwnerSession {
             .map_err(map_err)
     }
 
+    /// Give an agent process access to an item, or change the mode. Needs a fresh owner
+    /// check (goal item A4).
     pub fn set_exec_grant(
         &mut self,
         agent_id: u64,
         item_id: u64,
         project_dir: &str,
         mode: ExecMode,
+        proof: OwnerProof,
     ) -> ModelResult<()> {
         let dir = project_dir.trim();
         let canonical = std::fs::canonicalize(dir)
@@ -758,7 +892,7 @@ impl OwnerSession {
                 "The project directory cannot be the root directory.",
             ));
         }
-        self.unlocked()?
+        self.unlocked_for(proof, &OwnerAction::ChangeGrant { agent_id, item_id })?
             .set_exec_grant(agent_id, item_id, &canonical.display().to_string(), mode)
             .map_err(map_err)
     }
@@ -767,24 +901,33 @@ impl OwnerSession {
         self.unlocked()?.declaration(item_id).map_err(map_err)
     }
 
-    /// Store the owner declaration of an item (ADR 0008).
-    pub fn set_declaration(&mut self, item_id: u64, form: &DeclarationForm) -> ModelResult<()> {
+    /// Store the owner declaration of an item (ADR 0008). The declaration is a rule
+    /// input for the bouncer, so it needs a fresh owner check (goal item A4).
+    pub fn set_declaration(
+        &mut self,
+        item_id: u64,
+        form: &DeclarationForm,
+        proof: OwnerProof,
+    ) -> ModelResult<()> {
         if form.project.trim().is_empty() {
             return Err(fail("invalid_input", "Type the project name."));
         }
-        self.unlocked()?
+        self.unlocked_for(proof, &OwnerAction::ChangeItemRules { item_id })?
             .set_declaration(item_id, &form.to_declaration())
             .map_err(map_err)
     }
 
-    /// Replace the rule of a process grant (ADR 0007).
+    /// Replace the rule of a process grant (ADR 0007). Needs a fresh owner check (goal
+    /// item A4).
     pub fn set_exec_rule(
         &mut self,
         agent_id: u64,
         item_id: u64,
         rule: ExecRule,
+        proof: OwnerProof,
     ) -> ModelResult<()> {
-        match self.unlocked()?.set_exec_rule(agent_id, item_id, rule) {
+        let mut vault = self.unlocked_for(proof, &OwnerAction::ChangeRule { agent_id, item_id })?;
+        match vault.set_exec_rule(agent_id, item_id, rule) {
             Err(err) if err.kind() == VaultErrorKind::InvalidInput => Err(fail(
                 "invalid_input",
                 "The rule is not valid. Use at most 32 entries of 128 characters, an instruction of at most 1000 characters, and a run limit of 1 or more.",
@@ -818,9 +961,12 @@ impl OwnerSession {
         self.unlocked()?.needs_review(item_id).map_err(map_err)
     }
 
-    /// The owner confirms the agent settings of a restored item. Agents can use it again.
-    pub fn confirm_review(&mut self, item_id: u64) -> ModelResult<()> {
-        self.unlocked()?.confirm_review(item_id).map_err(map_err)
+    /// The owner confirms the agent settings of a restored item. Agents can use it again,
+    /// so this needs a fresh owner check (goal item A4).
+    pub fn confirm_review(&mut self, item_id: u64, proof: OwnerProof) -> ModelResult<()> {
+        self.unlocked_for(proof, &OwnerAction::ChangeItemRules { item_id })?
+            .confirm_review(item_id)
+            .map_err(map_err)
     }
 
     /// Newest entries first. Item names come from the vault. Deleted items show their ID.
@@ -837,6 +983,7 @@ impl OwnerSession {
                     None => "No item".to_owned(),
                 };
                 AgentActivityRow {
+                    id: record.id,
                     when: format_utc(record.at),
                     agent: record.agent_name,
                     item,
@@ -875,6 +1022,16 @@ impl OwnerSession {
             Some(_) => Err(fail("vault_locked", "The vault is locked.")),
             None => Err(fail("vault_locked", "No vault file is open.")),
         }
+    }
+
+    /// The unlocked vault, after a check of `proof` for `expected` in this vault
+    /// session (goal item A4). The proof is used up, also when the check fails.
+    fn unlocked_for(&self, proof: OwnerProof, expected: &OwnerAction) -> ModelResult<Unlocked<'_>> {
+        let vault = self.unlocked()?;
+        proof
+            .check(expected, &vault.epoch())
+            .map_err(|refusal| fail("owner_check_required", refusal.message()))?;
+        Ok(vault)
     }
 
     fn row_from(&self, summary: crate::vault::ItemSummary) -> ModelResult<OwnerSummary> {
@@ -916,18 +1073,17 @@ impl OwnerSession {
             .find(|field| field.secret && meta.summary.kind == CredentialKind::Custom)
             .map(|field| field.name.clone())
             .unwrap_or_default();
-        let mut secret_lines = Vec::new();
-        for field in &meta.fields {
-            if !field.secret {
-                continue;
-            }
-            let revealed = self.revealed.get(&(id, field.name.clone()));
-            secret_lines.push(SecretLine {
+        // The lines say only which values are revealed. The view borrows a revealed value
+        // from the session (key-memory review F10).
+        let secret_lines = meta
+            .fields
+            .iter()
+            .filter(|field| field.secret)
+            .map(|field| SecretLine {
                 name: field.name.clone(),
-                revealed: revealed.is_some(),
-                display: revealed.map_or_else(|| MASKED_VALUE.to_owned(), |value| value.0.clone()),
-            });
-        }
+                revealed: self.revealed_value(id, &field.name).is_some(),
+            })
+            .collect();
         Ok(OwnerDetails {
             id,
             name: meta.summary.title,
@@ -959,7 +1115,12 @@ struct HeldVault {
     path: Option<PathBuf>,
 }
 
-struct RevealedValue(String);
+/// One revealed value. `Zeroizing` erases it when it is hidden, expires, or the vault
+/// locks. There is no `Clone`.
+struct RevealedValue {
+    value: Zeroizing<String>,
+    shown_at: Instant,
+}
 
 impl fmt::Debug for RevealedValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -967,9 +1128,24 @@ impl fmt::Debug for RevealedValue {
     }
 }
 
-impl Drop for RevealedValue {
-    fn drop(&mut self) {
-        self.0.clear();
+/// A denial for a run that ended without a decision. It has no secret value.
+fn ended_run_entry(run: &PendingRun, why: &str) -> NewActivity {
+    let mut operation = format!("run {}", run.command.join(" "));
+    if operation.len() > 64 {
+        let mut end = 61;
+        while !operation.is_char_boundary(end) {
+            end -= 1;
+        }
+        operation.truncate(end);
+        operation.push_str("...");
+    }
+    NewActivity {
+        agent_id: None,
+        agent_name: run.agent.clone(),
+        item_id: None,
+        operation,
+        decision: ActivityDecision::Deny,
+        reason: format!("{why} Purpose: {}", run.purpose),
     }
 }
 
@@ -986,6 +1162,8 @@ pub struct ConnectorRow {
 /// An activity row for the Activity view. It has no secret value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentActivityRow {
+    /// The ID of the activity entry. It grows with each entry.
+    pub id: u64,
     pub when: String,
     pub agent: String,
     pub item: String,
@@ -1098,29 +1276,12 @@ impl fmt::Debug for OwnerDetails {
     }
 }
 
-/// One secret field on the item screen.
-#[derive(Clone, PartialEq, Eq)]
+/// One secret field on the item screen. It has no value: the view borrows a revealed
+/// value with [`OwnerSession::revealed_value`].
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecretLine {
     pub name: String,
     pub revealed: bool,
-    pub display: String,
-}
-
-impl fmt::Debug for SecretLine {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SecretLine")
-            .field("name", &self.name)
-            .field("revealed", &self.revealed)
-            .field(
-                "display",
-                &if self.revealed {
-                    "[redacted]"
-                } else {
-                    MASKED_VALUE
-                },
-            )
-            .finish()
-    }
 }
 
 fn fail(code: &'static str, message: impl Into<String>) -> ModelError {
@@ -1175,6 +1336,22 @@ fn owner_message(kind: VaultErrorKind) -> &'static str {
         VaultErrorKind::Storage => "The vault storage operation failed.",
         VaultErrorKind::Expired => "The agent token expired. Rotate the token in Agents.",
     }
+}
+
+/// The token lifetime from the text in the Agents view, in days.
+pub fn parse_lifetime_days(days: &str) -> ModelResult<u32> {
+    days.trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|days| (1..=MAX_TOKEN_LIFETIME_DAYS).contains(days))
+        .ok_or_else(|| {
+            fail(
+                "invalid_input",
+                format!(
+                    "The token lifetime must be a whole number of days from 1 to {MAX_TOKEN_LIFETIME_DAYS}."
+                ),
+            )
+        })
 }
 
 fn require_passphrase(passphrase: &str) -> ModelResult<()> {
@@ -1454,6 +1631,8 @@ fn is_reserved_field(name: &str) -> bool {
 /// Windowless round trip used by `--smoke-test` when the vault feature is on.
 /// Errors do not include secret values.
 pub(crate) fn smoke_roundtrip() -> Result<(), String> {
+    use crate::broker::approvals::{OwnerCheck, OwnerGate};
+
     let dir =
         tempfile::tempdir().map_err(|_| "smoke vault directory was not created".to_owned())?;
     let path = dir.path().join("smoke.vault");
@@ -1501,8 +1680,25 @@ pub(crate) fn smoke_roundtrip() -> Result<(), String> {
     {
         return Err("search matched a secret value".to_owned());
     }
-    let revealed = session.reveal(created.id).map_err(|err| err.message)?;
-    if !revealed.any_revealed() {
+    // Reveal needs a fresh owner check for this item (goal item A4).
+    let gate = OwnerGate::new(session.shared_vault(), None);
+    let owner_check = |item_id: u64| {
+        gate.authorize(
+            OwnerAction::Reveal { item_id },
+            OwnerCheck::passphrase("smoke-vault-pass-1"),
+        )
+        .map_err(|err| err.message())
+    };
+    if session
+        .reveal(created.id, owner_check(created.id + 1)?)
+        .is_ok()
+    {
+        return Err("reveal accepted a check for another item".to_owned());
+    }
+    let revealed = session
+        .reveal(created.id, owner_check(created.id)?)
+        .map_err(|err| err.message)?;
+    if !revealed.any_revealed() || session.revealed_value(created.id, "token").is_none() {
         return Err("reveal did not show a value".to_owned());
     }
     session.lock().map_err(|err| err.message)?;
