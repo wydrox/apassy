@@ -26,6 +26,9 @@ The protocol is one JSON line in and one JSON line out.
 Each program uses the hardened runtime. The bundle ID `com.wydrox.apassy` matches the GitHub owner `wydrox`.
 The keychain access group is `<TEAM_ID>.com.wydrox.apassy`.
 
+The helpers answer only the signed Apassy app that contains them. See [Caller check](#caller-check).
+The agent profile denies the start, the read, and a change of each program in the bundle, except `apassy-mcp` and `apassy-hook` ([isolation.md](isolation.md), section 1).
+
 Why two copies of the helper:
 
 - AMFI permits the keychain entitlements only for the main executable of a bundle that has a matching `embedded.provisionprofile`. A second executable in `Contents/MacOS` does not get the profile of the app (evidence C1 below).
@@ -43,12 +46,13 @@ The script:
 
 1. Selects the only valid "Apple Development" identity, or `APASSY_SIGN_IDENTITY`. It refuses ad hoc signing.
 2. Finds a profile for the keychain helper: `APASSY_KEYCHAIN_PROFILE`, or a valid profile in the Xcode profile folders. It checks the platform, team, App ID, expiry, keychain group, this Mac, and the signing certificate.
-3. Runs `cargo build --release --locked --features desktop,vault --bin apassy --bin apassy-mcp`.
-4. Builds the helper with `xcrun --sdk macosx swiftc -O -swift-version 5 -warnings-as-errors -target arm64-apple-macos15.0`.
+3. Runs `cargo build --release --locked --features desktop,vault --bin apassy --bin apassy-mcp --bin apassy-sandbox`. `apassy-sandbox` does not go into the bundle. Step 8 uses it.
+4. Builds the helper with `xcrun --sdk macosx swiftc -O -swift-version 5 -warnings-as-errors -target arm64-apple-macos15.0`, without `-D APASSY_HELPER_DEV`. It fails when the helper contains the development override `APASSY_HELPER_DEV_ANY_CALLER`. It builds the caller probe (`native/ApassyCallerProbe/main.swift`) in a temporary directory. The probe never goes into the bundle.
 5. Assembles the bundle in `target/app-stage`, signs from the inside out, and verifies with `codesign --verify --deep --strict`.
 6. Checks the hardened runtime flag, the team, and the entitlements of each program. `apassy`, `apassy-mcp`, and `apassy-helper` must have no entitlements.
-7. Runs the signed programs: `apassy --smoke-test`, `apassy-mcp --version`, and helper requests.
-8. Moves the bundle to `target/Apassy.app`.
+7. Runs the signed programs: `apassy --smoke-test`, `apassy-mcp --version`, and the caller checks of the helpers (see [Caller check](#caller-check)).
+8. Runs the agent profile with the signed bundle: the helpers and the main program do not start, `apassy-mcp` starts, a copy of the keychain helper fails, and a copy that exists outside the bundle refuses the caller.
+9. Moves the bundle to `target/Apassy.app`.
 
 Each run starts from an empty bundle. A failed step stops the script with `build-app: FAILED:` and a non-zero exit.
 
@@ -145,6 +149,7 @@ build-app: FAILED: APASSY_KEYCHAIN_PROFILE is not usable: the App ID is "7S3F976
 The helper reads JSON lines on stdin. It writes exactly one JSON line on stdout for each request. It skips empty lines and exits at end of input.
 It takes no arguments. It writes nothing to stderr during normal work.
 A request is an object with `cmd` and the fields of the command. The largest request is 64 KiB.
+Before each request, the helper checks its caller ([Caller check](#caller-check)). When the caller is not allowed, each request, also `ping` and a malformed request, gets `caller_not_allowed`.
 
 A success has `"ok": true` and the result fields. A failure has `"ok": false`, `"error"`, and `"message"`.
 A message is English text for logs. It never contains a secret. Code must use `error`, not `message`.
@@ -181,6 +186,7 @@ Error codes:
 | `biometry_changed` | The fingerprints changed after setup | Unlock with the passphrase. Delete the item. Offer Touch ID setup again. |
 | `notifications_unavailable` | The helper is not in an app bundle | Delivery failure. Keep the event in the inbox. |
 | `notifications_denied` | Notifications are not allowed | Delivery failure. Keep the event in the inbox. |
+| `caller_not_allowed` | The parent process of the helper is not the signed Apassy app that contains the helper | Do not retry. Touch ID, the keychain, and notifications are not available to this caller. In the app, this means a broken or changed bundle. |
 | `internal` | Unexpected helper error | Show the message |
 
 Touch ID policy: `authenticate` uses `LAPolicy.deviceOwnerAuthenticationWithBiometrics`. The macOS login password is not a fallback. The fallback button is "Use Apassy Passphrase" and gives `fallback`.
@@ -190,6 +196,59 @@ The access control is `SecAccessControlCreateWithFlags(kSecAttrAccessibleWhenPas
 `kSecAttrGeneric` holds `LAContext.domainState.biometry.stateHash` from the store time. This hash is not a secret. When the current hash is different, `keychain_exists` gives `biometry_changed: true`, and `keychain_read` gives `biometry_changed` without a prompt.
 `keychain_store` needs Touch ID to work at store time, and it replaces an earlier item with the same account.
 
+## Caller check
+
+Code: `native/ApassyHelper/Caller.swift`. Goal I2: a process in the agent profile must not use the helpers.
+
+The agent profile denies the start of the helpers ([isolation.md](isolation.md)). The caller check is a second layer. It stops a helper that another program started, for example LaunchServices (`open`), launchctl, a terminal, or a copy of the helper bundle in another place.
+
+Before each request, the helper checks its parent process:
+
+1. The parent is not launchd (pid 1). LaunchServices, launchctl, and login items start a program with launchd as the parent.
+2. The helper gets the audit token of the parent: `task_name_for_pid(mach_task_self_, getppid(), &port)`, then `task_info(port, TASK_AUDIT_TOKEN, ...)`. An audit token names one process image. A later exec in the parent gives a different token.
+3. `SecCodeCopyGuestWithAttributes(nil, [kSecGuestAttributeAudit: token], [], &code)` gives the running code of the parent. `SecCodeCheckValidityWithErrors(code, [], requirement, nil)` checks it against this requirement:
+
+   ```
+   anchor apple generic and identifier "com.wydrox.apassy" and certificate leaf[subject.OU] = "<TEAM_ID>"
+   ```
+
+   `<TEAM_ID>` is the team of the helper itself: `SecCodeCopySelf`, `SecCodeCheckValidity`, `SecCodeCopyStaticCode`, and `SecCodeCopySigningInformation` with `kSecCSSigningInformation` (`kSecCodeInfoTeamIdentifier`). A helper without a team signature (unsigned or ad hoc) refuses every request.
+4. The parent is the app bundle that contains the helper. The helper compares `SecCodeCopyPath` of the parent with its own bundle: its main executable (`kSecCodeInfoMainExecutable`, resolved with `realpath`) without `/Contents/MacOS/apassy-helper` or `/Contents/Helpers/ApassyKeychain.app/Contents/MacOS/ApassyKeychain`. So a program signed as `com.wydrox.apassy` in another place does not pass.
+5. After the check, `getppid()` is the same, and the audit token of the parent is the same.
+
+A failed step gives `caller_not_allowed` with a message for logs. The helper does not parse the request.
+`SecCodeCheckValidity` checks the dynamic validity of the running parent. Its documentation says that the call "is secure against attempts to modify the file system source of the SecCode".
+Measured on this Mac: 20 starts and `ping` requests through a signed parent took 75.4 ms each on average, with the start of the parent and the helper.
+
+### Development override
+
+A helper built with `-D APASSY_HELPER_DEV` skips the check when its environment has `APASSY_HELPER_DEV_ANY_CALLER=1`.
+Only the tests use this flag: `tests/native_helper.rs` builds the helper with it, and a small script sets the variable for the protocol checks. The isolation tests build the helper with the flag, but never set the variable.
+`scripts/build-app.sh` does not use the flag. The release helper does not contain the override code or the variable name. The script and the test `a_helper_built_without_the_dev_flag_ignores_the_override` check this.
+To run the debug desktop app with a helper outside the bundle, build the helper with `-D APASSY_HELPER_DEV`, and set `APASSY_NATIVE_HELPER`, `APASSY_NATIVE_KEYCHAIN_HELPER`, and `APASSY_HELPER_DEV_ANY_CALLER=1` in the environment of the app. The app passes its environment to the helper.
+
+### Measured results
+
+`scripts/build-app.sh` starts the signed helpers with these parents. The caller probe (`native/ApassyCallerProbe/main.swift`) starts one program as its child. The script signs it as the main program of scratch copies of the bundle in a temporary directory, and deletes them at the end. The script checks the error code. The messages in the table are from a manual run of the same cases with `target/Apassy.app`.
+
+| Parent | Helper | Answer |
+| --- | --- | --- |
+| the shell of the script | `apassy-helper`, the keychain helper | `caller_not_allowed`: "The parent process is not the signed Apassy app (-67050)." `-67050` is `errSecCSReqFailed`. |
+| the shell, with `APASSY_HELPER_DEV_ANY_CALLER=1` | `apassy-helper` | `caller_not_allowed` |
+| the probe, signed as `com.wydrox.apassy`, main program of the copy that contains the helper | `apassy-helper` | `ping` with `"bundle_id":"com.wydrox.apassy"`, `notify_status`, and `invalid_request` for an unknown command |
+| the same probe | the keychain helper of the copy | `ping` with `"bundle_id":"com.wydrox.apassy.keychain"`, and `keychain_unavailable` (no provisioning profile) |
+| the same probe | a helper of another bundle (the staged `Apassy.app` in the script, `target/Apassy.app` in a manual run) | `caller_not_allowed`: "The parent process is not the Apassy app that contains this helper." |
+| a probe signed as `com.wydrox.apassy.probe`, in its own copy | both helpers of that copy | `caller_not_allowed` (-67050) |
+| launchd: `open -W -n --stdin req --stdout out <keychain helper app>` outside any sandbox (manual) | the keychain helper | `caller_not_allowed`: "launchd started the helper. Only Apassy.app can start it." |
+
+The desktop app starts the helpers as their parent from `Contents/MacOS/apassy`. The probe stands for it: the same bundle layout, bundle ID, team, and signature. The agent did not watch a helper start from the real desktop window.
+
+### Limits of the caller check
+
+- The check trusts each program that is signed by the team with the identifier `com.wydrox.apassy`, at the path of the app that contains the helper. A process that can sign with the owner's certificate and write that path passes the check. The agent profile denies a write to the protected bundles.
+- The check uses the parent process at the time of each request. A program that starts the helper and then replaces itself with the real `Apassy.app/Contents/MacOS/apassy` (exec) before the check can pass it with its own request in the pipe. This needs a start of the Apassy program. The agent profile denies it. A program outside the profile is not in the scope of this check (ADR 0010, Limits).
+- A copy of the whole bundle in another place is a new "app that contains the helper". The agent profile denies a read of the protected bundles, so a process in the profile cannot make such a copy. A copy that the owner makes is not protected by the profile.
+
 ## Rust client
 
 `apassy::native::NativeHelper`:
@@ -198,7 +257,7 @@ The access control is `SecAccessControlCreateWithFlags(kSecAttrAccessibleWhenPas
 - `NativeHelper::with_paths(helper, keychain_helper)` is for tests.
 - Methods: `ping`, `ping_keychain`, `authenticate`, `keychain_store`, `keychain_read`, `keychain_delete`, `keychain_exists`, `notify`, `notify_status`, `notify_authorize`. Keychain methods use the keychain helper. The other methods use `apassy-helper`.
 - Time limits: 10 s for quick commands, 40 s for `notify`, 180 s for commands that wait for the owner. After the limit, the client stops the helper and returns `NativeError::Timeout`.
-- Errors: `NativeError::Helper { code: HelperErrorCode, message }` for a helper error. Other variants: `InvalidArgument` (the client did not start the helper), `HelperMissing`, `Io`, `Timeout`, `Protocol`.
+- Errors: `NativeError::Helper { code: HelperErrorCode, message }` for a helper error. `HelperErrorCode::CallerNotAllowed` is `caller_not_allowed`. Other variants: `InvalidArgument` (the client did not start the helper), `HelperMissing`, `Io`, `Timeout`, `Protocol`. The test `swift_and_rust_error_codes_match` compares the Swift and the Rust lists.
 - `KeychainSecret` holds the secret bytes. `Debug` prints `KeychainSecret([redacted])`. It has no `Clone`. Drop overwrites the bytes.
 - The client overwrites its request and response buffers after use. This is best effort. Copies in the helper, the allocator, swap, and crash dumps stay possible.
 - The crate keeps `#![forbid(unsafe_code)]`. The client uses std and serde_json only. Base64 is a small std implementation.
@@ -319,7 +378,7 @@ Keychain: DISABLED (no provisioning profile). Touch ID can confirm actions but c
 
 `codesign --verify --deep --strict --verbose=2 target/Apassy.app`: "valid on disk" and "satisfies its Designated Requirement".
 
-The helper in the bundle, without a prompt:
+The helper in the bundle, without a prompt (this run was before the caller check; now a start from a shell gives `caller_not_allowed`):
 
 ```
 $ printf '%s\n' '{"cmd":"ping"}' '{"cmd":"notify_status"}' | target/Apassy.app/Contents/MacOS/apassy-helper
@@ -372,6 +431,52 @@ $ printf '%s\n' '{"cmd":"ping"}' | target/Apassy.app/Contents/Helpers/ApassyKeyc
 
 The app started, the broker listened, and the app wrote nothing to stdout or stderr. The agent stopped it with `SIGTERM`. Touch ID answers `not_available` (the keyboard is not paired), the keychain helper has no access group, and the owner has not decided about notifications yet. So on this Mac today: the owner check uses the passphrase, the vault unlocks with the passphrase, and the Inbox card shows "You did not allow notifications yet."
 
+### Checks for the caller check and the agent profile (I2)
+
+Worktree branch of the isolation worker, after a fast-forward to `goal-v1` at `85e0a55`. All commands ran from the repository root.
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt --check` | PASS |
+| `cargo clippy --locked --all-targets --features desktop,vault -- -D warnings` | PASS. No warnings. |
+| `cargo test --locked --features desktop,vault` | PASS. 283 tests passed, 0 failed, 8 ignored (the earlier tests that need the network, a live Laya model, or a real host). `isolation_profile` 16, `native_helper` 17. |
+| `cargo test --locked --features desktop,vault --test native_helper` | PASS. New: `real_helper_refuses_a_parent_that_is_not_apassy` (each request, also `ping` and a malformed request, gets `caller_not_allowed`; the Rust client maps it to `HelperErrorCode::CallerNotAllowed`), `a_helper_built_without_the_dev_flag_ignores_the_override`. `swift_and_rust_error_codes_match` includes `caller_not_allowed`. |
+| `scripts/build-app.sh` | PASS, exit 0. See the lines below. "Keychain: DISABLED (no provisioning profile)." |
+
+`scripts/build-app.sh`, the new lines:
+
+```
+ok: the helper has no development caller override
+ok: apassy --smoke-test
+ok: apassy-mcp --version
+ok: apassy-helper refuses the shell, line 1
+ok: apassy-helper refuses the shell, line 2
+ok: apassy-helper refuses the shell, line 3
+ok: apassy-helper ignores APASSY_HELPER_DEV_ANY_CALLER
+ok: keychain helper refuses the shell, line 1
+ok: keychain helper refuses the shell, line 2
+ok: apassy-helper with the signed parent, line 1
+ok: apassy-helper with the signed parent, line 2
+ok: apassy-helper with the signed parent, line 3
+ok: keychain helper with the signed parent, line 1
+ok: keychain helper with the signed parent, line 2
+ok: helper refuses the signed parent of another bundle
+ok: keychain helper refuses the signed parent of another bundle
+ok: helper refuses a parent with another identifier
+ok: keychain helper refuses a parent with another identifier
+
+==> Check the agent profile with the signed bundle
+ok: the agent profile denies the start of Contents/Helpers/ApassyKeychain.app/Contents/MacOS/ApassyKeychain
+ok: the agent profile denies the start of Contents/MacOS/apassy-helper
+ok: the agent profile denies the start of Contents/MacOS/apassy
+ok: apassy-mcp --version in the agent profile
+ok: the agent profile denies a copy of the keychain helper
+ok: keychain helper copy in the agent profile refuses the caller, line 1
+ok: keychain helper copy in the agent profile refuses the caller, line 2
+```
+
+Research runs before the code (scratch bundle signed with the Apple Development identity and the hardened runtime): `task_name_for_pid` and `task_info(TASK_AUDIT_TOKEN)` for the parent returned `KERN_SUCCESS` from a signed helper with the hardened runtime. `SecCodeCopyGuestWithAttributes` with the audit token returned `0`. For the signed parent, `SecCodeCopyPath` gave the bundle directory `.../Apassy.app`, and `kSecCodeInfoMainExecutable` gave `.../Apassy.app/Contents/MacOS/apassy`. For `apassy-helper`, `SecCodeCopySelf` gave the helper file itself, not the app bundle. For the keychain helper, it gave `ApassyKeychain.app`. `kSecCodeInfoTeamIdentifier` of both helpers was `7S3F9767BM`. With `/bin/bash` as the parent, `SecCodeCheckValidityWithErrors` returned `-67050`.
+
 ## Not verified by the agent
 
 - A real Touch ID prompt. The keyboard is not paired, and a real prompt needs a finger.
@@ -404,12 +509,26 @@ Alternative without Xcode sign-in: in the developer portal, register the macOS A
 ### 2. Manual checks
 
 Use synthetic values only. Record each result in this document.
-Run the steps from the repository root, in one shell. First set:
+Run the steps from the repository root, in one shell, outside the agent profile.
+The helpers answer only the signed Apassy app (see [Caller check](#caller-check)). So the steps use a temporary signed parent: a copy of the app with the caller probe as the main program, as in `scripts/build-app.sh`.
+Stop the agent hosts during the checks, and delete the copy after the checks: the copy is not in a path that the agent profile protects.
+First set, with the SHA-1 of your signing identity:
 
 ```
-H=target/Apassy.app/Contents/MacOS/apassy-helper
-KC=target/Apassy.app/Contents/Helpers/ApassyKeychain.app/Contents/MacOS/ApassyKeychain
+SIGN=<SHA-1 of the Apple Development identity>
+P="$(mktemp -d)"
+cp -R target/Apassy.app "$P/Apassy.app"
+xcrun --sdk macosx swiftc -O -swift-version 5 -target arm64-apple-macos15.0 \
+  -o "$P/Apassy.app/Contents/MacOS/apassy" native/ApassyCallerProbe/main.swift
+codesign --force --sign "$SIGN" --options runtime --timestamp=none \
+  --identifier com.wydrox.apassy --entitlements packaging/Apassy.entitlements "$P/Apassy.app"
+H() { "$P/Apassy.app/Contents/MacOS/apassy" "$P/Apassy.app/Contents/MacOS/apassy-helper"; }
+KC() { "$P/Apassy.app/Contents/MacOS/apassy" "$P/Apassy.app/Contents/Helpers/ApassyKeychain.app/Contents/MacOS/ApassyKeychain"; }
+H=H; KC=KC
 ```
+
+In the steps, `| $H` and `| $KC` then run the helper through the signed parent. After the checks, run `rm -rf "$P"`.
+The copy has the bundle ID `com.wydrox.apassy` at another path. The notification steps 6 to 8 were written for `target/Apassy.app`. The agent did not check them with the copy.
 
 1. Touch ID confirmation (A4). Run `printf '%s\n' '{"cmd":"authenticate","reason":"confirm a manual check"}' | $H`. Touch the sensor. Expect `{"ok":true}`. Run it again and press Cancel. Expect `cancelled`. Run it again. Touch the sensor with a finger that is not enrolled, then select "Use Apassy Passphrase". Expect `fallback`.
 2. Store and read (A3). Run `printf '%s\n' '{"cmd":"keychain_store","account":"manual-check","secret_b64":"bWFudWFsLWNoZWNr"}' '{"cmd":"keychain_read","account":"manual-check","reason":"read a manual check value"}' | $KC`. Touch the sensor. Expect `{"access_group":"<TEAM_ID>.com.wydrox.apassy","ok":true}` and `"secret_b64":"bWFudWFsLWNoZWNr"`.
@@ -431,13 +550,13 @@ Use a vault file with synthetic values. Start the app with `open target/Apassy.a
 5. Fingerprint change (A3). Add a fingerprint in System Settings. Open the vault file again. Expect "The fingerprints on this Mac changed ..." without a prompt, and passphrase unlock. Expect "Current: passphrase." after unlock.
 6. Turn off (A3). Turn Touch ID unlock on again, then select "Turn off Touch ID unlock". Expect "Apassy deleted the unlock key", and after a lock, no "Unlock with Touch ID" button.
 7. Passphrase change (A3). With Touch ID unlock on, change the passphrase. Expect "Touch ID unlock is off, because the passphrase changed."
-8. Agent profile (I2). After owner step 1, run `cargo test --locked --features desktop,vault --test isolation_profile keychain`. The test fails on purpose while a process in the agent profile can start the keychain helper of a provisioned build. Record the result.
+8. Agent profile (I2). After owner step 1, run `APASSY_REQUIRE_KEYCHAIN=1 scripts/build-app.sh` and `cargo test --locked --features desktop,vault --test isolation_profile`. Expect the lines under "Check the agent profile with the signed bundle", and "keychain helper with the signed parent" with `"keychain_access_group":"<TEAM_ID>.com.wydrox.apassy"`. The provisioned keychain helper does not start in the agent profile, and a copy outside the bundle answers `caller_not_allowed`. Record the result.
 
 ## Limits
 
 - A development signature is valid on Macs in the profile only. It is not a release.
 - Touch ID unlock needs a provisioning profile. Without one, Touch ID can confirm owner actions (A4), but the vault unlocks with the passphrase only.
 - The Touch ID unlock item holds the master passphrase. Anyone who passes Touch ID on this Mac for Apassy gets the passphrase through the helper. The passphrase stays the root key.
-- The keychain helper and `apassy-helper` are not inside the denied paths of the agent profile. A process in the agent profile can start them. Today the keychain helper has no access group, so it cannot read an item (`keychain_item_is_not_readable_in_profile`). With a provisioning profile, such a process could ask for a Touch ID prompt with its own reason text, and only the owner's finger would stop it. Before a provisioned build is used with agents, the agent profile must deny the start of the Apassy helpers, or the keychain helper must accept requests from the signed Apassy app only. The isolation test fails until then.
+- The agent profile denies the start, the read, and a change of the helpers in `/Applications/Apassy.app` and in the build bundle ([isolation.md](isolation.md)). A copy of the app in another place is not protected by the profile. The helper caller check still refuses each caller that is not the signed Apassy app that contains the helper. See [Limits of the caller check](#limits-of-the-caller-check).
 - `KeychainSecret` and the buffer overwrites do not protect against memory inspection, swap, or crash dumps. The key-memory review (V2) covers this.
 - A process that can replace files in `Apassy.app` can replace the helper. The bundle signature does not stop that at run time.
