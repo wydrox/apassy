@@ -36,6 +36,8 @@ pub const LOAD_ERROR_FLAG: &str = "rule_pack_error";
 pub const PACKS_DIR_ENV: &str = "APASSY_PACKS_DIR";
 
 /// Flags that a rule can add. `ask_owner` has no other meaning: the owner decides.
+/// `hook_channel`: the command names the host hook program, the host settings, or a
+/// host transcript (goal item B6).
 pub const RULE_FLAGS: &[&str] = &[
     "secret_output",
     "data_loss",
@@ -46,6 +48,7 @@ pub const RULE_FLAGS: &[&str] = &[
     "system_change",
     "new_dependency",
     "privilege",
+    "hook_channel",
     "ask_owner",
 ];
 
@@ -161,6 +164,9 @@ pub(crate) enum Role {
     FileWriter,
     /// Runs a script file. The name of the script can tell about data loss.
     ScriptRunner,
+    /// Runs a named task or package script: the argument after `run` or `run-script`,
+    /// or else the first argument. The name of the task can tell about data loss.
+    TaskRunner,
     /// Prints usage and stops for `--help`, `--version`, `help`, or a lone `-h`.
     Usage,
     /// The data-loss checks ignore dry-run options for this program.
@@ -195,6 +201,10 @@ enum SqlCheck {
     Writes,
     /// The SQL argument is a read statement only.
     Reads,
+    /// An argument that is not an option, with a space in it, is SQL that changes data,
+    /// schema, or access. For clients that take SQL as a plain argument, such as
+    /// `sqlite3 app.db "DELETE FROM users"`.
+    AnyArgWrites,
 }
 
 #[derive(Debug, Deserialize)]
@@ -308,6 +318,12 @@ struct Matcher {
     command_contains_exact: Option<Vec<String>>,
     /// A word of the command as written, wrappers included, contains one of these texts.
     word_contains: Option<Vec<String>>,
+    /// All text of the segment contains one of these texts: the `NAME=value` prefixes,
+    /// the words as written, the redirect targets, and the here-document, in lowercase.
+    segment_contains: Option<Vec<String>>,
+    /// A word of the segment text ends with one of these texts. Words split at spaces,
+    /// quotes, `=`, and shell operators. A trailing `/` does not count.
+    segment_word_ends: Option<Vec<String>>,
     /// An option and the next argument.
     option_value: Option<OptionValue>,
     /// A group of short options, such as `-rf`, contains this letter.
@@ -387,6 +403,8 @@ struct OperandAt {
     #[serde(rename = "in")]
     in_list: Option<Vec<String>>,
     not_in: Option<Vec<String>>,
+    /// The operand starts with one of these texts.
+    starts: Option<Vec<String>>,
 }
 
 /// A text pattern. All present conditions must hold.
@@ -421,6 +439,8 @@ pub(crate) struct Command<'a> {
     /// Program and arguments as written, joined with spaces.
     pub(crate) joined: String,
     pub(crate) joined_lower: String,
+    /// All text of the segment in lowercase. See `segment_contains`.
+    pub(crate) segment_text: String,
     /// A word refers to a secret.
     pub(crate) secret: bool,
     pub(crate) secret_names: &'a [String],
@@ -509,6 +529,14 @@ impl Matcher {
                     list.iter().any(|text| word.contains(text.as_str()))
                 })
             })
+            && holds(&self.segment_contains, |list| {
+                list.iter()
+                    .any(|text| cmd.segment_text.contains(text.as_str()))
+            })
+            && holds(&self.segment_word_ends, |list| {
+                shell_risk::text_words(&cmd.segment_text)
+                    .any(|word| list.iter().any(|end| word.ends_with(end.as_str())))
+            })
             && holds(&self.option_value, |option| option.matches(&cmd.args))
             && holds(&self.short_option_letter, |letter| {
                 cmd.args.iter().any(|arg| {
@@ -561,11 +589,14 @@ impl Matcher {
             && holds(&self.inline_code_leaks, |want| {
                 shell_risk::inline_code_leaks(&cmd.joined, cmd.secret_names) == *want
             })
-            && holds(&self.sql, |check| {
-                shell_risk::sql_argument(cmd.argv).is_some_and(|sql| match check {
-                    SqlCheck::Writes => shell_risk::sql_writes(&sql),
-                    SqlCheck::Reads => shell_risk::sql_reads(&sql),
-                })
+            && holds(&self.sql, |check| match check {
+                SqlCheck::Writes => shell_risk::sql_argument(cmd.argv)
+                    .is_some_and(|sql| shell_risk::sql_writes(&sql)),
+                SqlCheck::Reads => shell_risk::sql_argument(cmd.argv)
+                    .is_some_and(|sql| shell_risk::sql_reads(&sql)),
+                SqlCheck::AnyArgWrites => cmd.argv.iter().skip(1).any(|arg| {
+                    !arg.starts_with('-') && arg.contains(' ') && shell_risk::sql_writes(arg)
+                }),
             })
             && holds(&self.any_of, |list| {
                 list.iter().any(|matcher| matcher.matches(cmd))
@@ -632,6 +663,9 @@ impl OperandMatch {
                 operands.get(at.index).is_some_and(|text| {
                     holds(&at.in_list, |list| has(list, text))
                         && holds(&at.not_in, |list| !has(list, text))
+                        && holds(&at.starts, |list| {
+                            list.iter().any(|prefix| text.starts_with(prefix.as_str()))
+                        })
                 })
             })
     }
@@ -745,6 +779,8 @@ impl Matcher {
             ("args_contain", &self.args_contain, false),
             ("command_contains", &self.command_contains, false),
             ("word_contains", &self.word_contains, false),
+            ("segment_contains", &self.segment_contains, false),
+            ("segment_word_ends", &self.segment_word_ends, false),
             ("push_target", &self.push_target, false),
             ("url_hosts_in", &self.url_hosts_in, false),
         ] {
@@ -837,11 +873,16 @@ impl OperandMatch {
             return Err("`allow_none` needs `all`".to_owned());
         }
         if let Some(at) = &self.at {
-            match (&at.in_list, &at.not_in) {
-                (Some(list), None) | (None, Some(list)) => {
+            match (&at.in_list, &at.not_in, &at.starts) {
+                (Some(list), None, None) | (None, Some(list), None) | (None, None, Some(list)) => {
                     check_list(list, "operands.at", lowercase, false)?;
                 }
-                _ => return Err("`operands.at` needs exactly one of `in` and `not_in`".to_owned()),
+                _ => {
+                    return Err(
+                        "`operands.at` needs exactly one of `in`, `not_in`, and `starts`"
+                            .to_owned(),
+                    );
+                }
             }
         }
         Ok(())
@@ -1225,6 +1266,18 @@ impl RuleSet {
         }
     }
 
+    /// Add the flag of each rule about the package runner (`"package_runner": true`) that
+    /// matches. The analysis uses this for a usage request such as `npx tool --help`:
+    /// the request does not act, but the runner still downloads and runs the package.
+    pub(crate) fn add_package_runner_flags(&self, cmd: &Command<'_>, flags: &mut Vec<String>) {
+        for rule in &self.rules {
+            let rule = &rule.item;
+            if rule.when.package_runner == Some(true) && rule.when.matches(cmd) {
+                flags.push(rule.flag.clone());
+            }
+        }
+    }
+
     /// A built-in pack makes an exception to the general rule `check` for this command.
     pub(crate) fn exempt(&self, check: Check, cmd: &Command<'_>) -> bool {
         self.exemptions
@@ -1358,6 +1411,8 @@ mod tests {
             ("git", Role::Usage),
             ("rm", Role::NoDryRun),
             ("git", Role::NoDryRun),
+            ("npm", Role::TaskRunner),
+            ("make", Role::TaskRunner),
         ] {
             assert!(set.has_role(program, role), "{program}: {role:?}");
         }
@@ -1430,6 +1485,17 @@ mod tests {
                 r#"{"schema_version": 1, "pack_version": 1, "tool": "t", "description": "Test.", "programs": ["*"], "safe": [{"id": "all"}]}"#
                     .to_owned(),
                 "every command as safe",
+            ),
+            (
+                rule(r#"{"operands": {"at": {"index": 0, "in": ["a"], "starts": ["b"]}}}"#),
+                "exactly one of `in`, `not_in`, and `starts`",
+            ),
+            (rule(r#"{"segment_contains": ["Apassy"]}"#), "use lowercase"),
+            (rule(r#"{"segment_word_ends": []}"#), "empty list"),
+            (rule(r#"{"sql": "any_write"}"#), "unknown variant `any_write`"),
+            (
+                pack(r#""roles": {"task_runners": ["tool"]}"#),
+                "unknown variant `task_runners`",
             ),
         ];
         for (text, expected) in cases {

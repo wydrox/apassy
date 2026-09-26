@@ -1,13 +1,16 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "make",
-  "description": "make: common development targets.",
-  "programs": ["make"],
+  "description": "Task runners (make, just, go-task): development targets, and targets named for data loss (role `task_runner`).",
+  "programs": ["make", "just", "task"],
+  "roles": {
+    "task_runner": ["make", "just", "task"]
+  },
   "safe": [
     {
       "id": "development-targets",
-      "note": "The empty subcommand is `make` without a target.",
+      "note": "Test, lint, build, check, and format targets. The empty subcommand is the default target.",
       "when": { "subcommand": ["test", "lint", "build", "check", "fmt", "format", ""] }
     }
   ]

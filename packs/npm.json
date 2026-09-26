@@ -1,11 +1,12 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "npm",
-  "description": "Node package managers and package runners (npm, pnpm, yarn, bun, npx, bunx): scripts, new dependencies, registry settings, and publishing.",
+  "description": "Node package managers and package runners (npm, pnpm, yarn, bun, npx, bunx): scripts, scripts named for data loss (role `task_runner`), new dependencies, registry settings, and publishing.",
   "programs": ["npm", "pnpm", "yarn", "bun", "npx", "bunx"],
   "roles": {
-    "usage": ["npm", "pnpm", "yarn", "bun", "npx"]
+    "usage": ["npm", "pnpm", "yarn", "bun", "npx"],
+    "task_runner": ["npm", "pnpm", "yarn", "bun"]
   },
   "rules": [
     {

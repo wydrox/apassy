@@ -1322,3 +1322,56 @@ gem upload x
 poetry upload
 twine upload --dry-run dist/x
 cargo publish -n
+#
+# ---- Stacks beyond odealo (goal B2, B7): added 2026-09-26 ----
+# Each block touches the rules of one pack, with near misses.
+# ---- Environment runners and local containers (shell_risk.rs) ----
+bundle exec rspec spec/models
+bundle exec rails db:drop
+poetry run pytest -q
+poetry run alembic downgrade base
+uv run --with requests python manage.py flush
+uv run -- pytest
+pipenv run python manage.py test
+pdm run pytest
+hatch run test
+poetry run
+docker compose exec -T api pytest -q
+docker exec -it db psql -U app -c "DROP TABLE users"
+docker exec -it db psql -U app -c "select 1"
+docker compose -f compose.yml exec web python manage.py flush --no-input
+docker-compose run --rm web bundle exec rails db:reset
+docker container exec app rm -rf /data
+docker exec -e FOO=1 -w /app app sh -c "rm -rf /data && echo done"
+docker exec -i db psql -U app <<'SQL'<NL>DROP TABLE users;<NL>SQL
+podman exec app npm test
+docker exec app
+# ---- Secret files (shell_risk.rs) ----
+cat ~/.pgpass
+cat ~/.git-credentials
+cat terraform.tfstate
+cp terraform.tfstate.backup /tmp/x
+cat service-account.json
+openssl pkcs12 -in cert.p12 -nodes
+cat ~/.kube/config
+cat package.json
+cat ~/.docker/config.json
+# ---- Task and script names (task_runner role) ----
+npm run db:reset
+yarn db:drop
+pnpm run db:wipe
+bun run db:rollback
+npm run test:e2e -- --grep "password reset"
+npm run build:preset
+yarn remove lodash
+make db-reset
+make nuke
+just db-drop
+task db:reset
+make test
+just test
+make -C api db-reset
+# ---- Package runner usage requests ----
+npx cowsay --version
+npx prisma --help
+bunx some-tool --help
