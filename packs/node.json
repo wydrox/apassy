@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 3,
+  "pack_version": 4,
   "tool": "node",
   "description": "JavaScript runtimes (node, deno, bun, tsx, ts-node): inline code, scripts, and version checks.",
   "programs": ["node", "deno", "bun", "tsx", "ts-node"],
@@ -27,6 +27,28 @@
       "id": "version",
       "note": "`node -v` and `deno --version` only print the version.",
       "when": { "program": ["node", "deno"], "arg_count": 1, "subcommand": ["-v", "--version"] }
+    },
+    {
+      "id": "deno-check-test-and-format",
+      "note": "Deno type checks, lint, format, tests, benchmarks, docs, dependency information, coverage reports, and a compiled build. Tests and benchmarks are project code with a check contract, as `npm test`. `deno run`, `deno eval`, and `deno serve` run a program of the project, so they are not here (dev round 3).",
+      "when": {
+        "program": ["deno"],
+        "subcommand": ["check", "lint", "fmt", "test", "bench", "doc", "info", "coverage", "compile", "types"]
+      }
+    },
+    {
+      "id": "deno-development-task",
+      "note": "A `deno task` for tests, lint, types, format, a build, or a local server, as the package scripts of `npm`. A name with prod, deploy, release, or publish is not safe.",
+      "when": {
+        "program": ["deno"],
+        "subcommand": ["task"],
+        "operands": {
+          "at": {
+            "index": 1,
+            "in": ["test", "tests", "lint", "check", "fmt", "format", "typecheck", "dev", "start", "build", "preview", "coverage"]
+          }
+        }
+      }
     }
   ]
 }

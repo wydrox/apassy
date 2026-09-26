@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 5,
+  "pack_version": 6,
   "tool": "npm",
   "description": "Node package managers and package runners (npm, pnpm, yarn, bun, npx, bunx): scripts, scripts named for data loss (role `task_runner`), new dependencies, registry settings, and publishing.",
   "programs": ["npm", "pnpm", "yarn", "bun", "npx", "bunx"],
@@ -19,9 +19,9 @@
     {
       "id": "unknown-package",
       "flag": "new_dependency",
-      "note": "A package runner downloads and runs a package that is not a common project tool.",
+      "note": "A package runner (`npx`, `bunx`, `pnpm dlx`, `yarn dlx`, `npm exec`, `bun x`) downloads and runs a package that is not a common project tool.",
       "when": {
-        "raw_program": ["npx", "bunx", "pnpm", "yarn"],
+        "raw_program": ["npx", "bunx", "pnpm", "yarn", "npm", "bun"],
         "package_runner": true,
         "not": {
           "package": [
@@ -41,7 +41,7 @@
       "flag": "new_dependency",
       "note": "`@latest` takes a new version from the registry.",
       "when": {
-        "raw_program": ["npx", "bunx", "pnpm", "yarn"],
+        "raw_program": ["npx", "bunx", "pnpm", "yarn", "npm", "bun"],
         "package_runner": true,
         "program_word_contains": ["@latest"]
       }
@@ -124,10 +124,22 @@
         "script": {
           "base": [
             "test", "tests", "lint", "typecheck", "type-check", "check", "format", "fmt",
-            "dev", "start", "preview", "storybook", "e2e", "coverage", "prettier", "tsc"
+            "dev", "start", "preview", "storybook", "e2e", "coverage", "prettier", "tsc",
+            "eslint", "vitest", "jest", "mocha", "biome", "stylelint", "svelte-check"
           ],
           "not_contains": ["prod", "deploy", "release", "publish"]
         }
+      }
+    },
+    {
+      "id": "publish-dry-run",
+      "note": "`publish --dry-run` and `pack` build the package and list its files. They do not upload it (dev round 3). They run the `prepack` script of the project, as a build does.",
+      "when": {
+        "program": ["npm", "pnpm", "yarn", "bun"],
+        "any_of": [
+          { "subcommand": ["publish"], "any_arg": ["--dry-run"] },
+          { "subcommand": ["pack"], "not": { "any_arg": ["--pack-destination"] } }
+        ]
       }
     },
     {

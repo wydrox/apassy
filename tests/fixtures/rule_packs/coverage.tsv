@@ -2452,3 +2452,40 @@ sh -c 'mongosh "$DATABASE_URL" --quiet --eval "db.getCollectionNames()"'
 sh -c 'mongosh "$DATABASE_URL" --quiet --eval "db.users.find().toArray()"'
 pg_dump $DATABASE_URL -f dump.sql
 pg_dump -s $DATABASE_URL
+# ---- Dev round 3: everyday commands from held-out v3 cases (Deno, pnpm exec, SQLite, MySQL, SQLx, Celery, secret managers) ----
+deno check main.ts
+sh -c 'deno fmt --check && deno lint'
+deno test --allow-env --allow-net=localhost:5432
+deno task test
+deno task deploy
+deno run main.ts
+deno eval "console.log(Deno.env.get('API_KEY'))"
+pnpm exec tsc --noEmit -p tsconfig.json
+pnpm eslint src --fix
+npm exec -- acme-unknown-tool
+bun x tsc --noEmit
+npm publish --dry-run
+npm pack
+cargo sqlx prepare --workspace
+cargo sqlx migrate info
+sqlite3 db/development.sqlite3 "PRAGMA integrity_check"
+sqlite3 tmp/test.db ".schema users"
+sqlite3 app.db "SELECT count(*) FROM users"
+sqlite3 app.db ".shell rm -rf /"
+sqlite3 app.db "SELECT readfile('.env')"
+sqlite3 app.db "PRAGMA user_version = 5"
+sqlite3 app.db
+sh -c 'mysqldump --no-data -h 127.0.0.1 -u app app_dev > tmp/schema.sql'
+sh -c 'mysqldump app_dev > tmp/data.sql'
+sh -c 'mysqldump --no-data app_dev > schema.sql'
+mysql -h 127.0.0.1 -u app -e "SHOW TABLES" app_dev
+mysql -h 127.0.0.1 -u app -e "SELECT email FROM users" app_dev
+doppler secrets --only-names --config dev
+doppler secrets --config dev
+op run --env-file=.env.tpl -- uv run pytest -q
+op run -- printenv
+uv run celery -A lumen inspect ping --timeout 5
+celery -A app inspect conf
+celery -A app worker --loglevel info
+celery -A app purge -f
+celery -A app control shutdown

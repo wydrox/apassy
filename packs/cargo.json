@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 4,
+  "pack_version": 5,
   "tool": "cargo",
   "description": "Rust cargo: build and test commands, new crates and tools, publishing, and SQLx database commands.",
   "programs": ["cargo"],
@@ -47,6 +47,17 @@
       "when": {
         "subcommand": [
           "test", "build", "check", "clippy", "fmt", "doc", "bench", "tree", "metadata", "nextest"
+        ]
+      }
+    },
+    {
+      "id": "sqlx-offline-data",
+      "note": "`cargo sqlx prepare` reads the schema of the development database to check the queries, and writes the query data to `.sqlx/` in the project. `migrate info` lists the migrations. Neither changes the database (dev round 3).",
+      "when": {
+        "subcommand": ["sqlx"],
+        "any_of": [
+          { "action": ["prepare"] },
+          { "action": ["migrate"], "any_arg": ["info"] }
         ]
       }
     }

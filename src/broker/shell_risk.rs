@@ -961,6 +961,11 @@ fn effective_argv(segment: &Segment) -> Vec<String> {
         let skip = match first.as_str() {
             "npx" | "bunx" | "sudo" | "doas" | "time" | "nohup" | "exec" => 1,
             "pnpm" | "yarn" if argv.get(1).map(String::as_str) == Some("dlx") => 2,
+            // `pnpm exec tsc` and `npm exec tsc` run a program of the project's
+            // `node_modules/.bin`; `npm exec` and `bun x` can download it, as `npx` does
+            // (dev round 3).
+            "pnpm" | "yarn" | "npm" if argv.get(1).map(String::as_str) == Some("exec") => 2,
+            "bun" if argv.get(1).map(String::as_str) == Some("x") => 2,
             "env" if argv.len() > 1 => {
                 // `env A=1 cmd`: skip assignments too.
                 let mut n = 1;
@@ -1052,13 +1057,15 @@ fn wrapped_command_start(program: &str, argv: &[String]) -> Option<usize> {
     Some(index + operands)
 }
 
-/// The command runs a package with `npx`, `bunx`, `pnpm dlx`, or `yarn dlx`. The
-/// package can come from the registry.
+/// The command runs a package with `npx`, `bunx`, `pnpm dlx`, `yarn dlx`, `npm exec`, or
+/// `bun x`. The package can come from the registry.
 pub(crate) fn is_package_runner(words: &[String]) -> bool {
     let first = words.first().map(|arg| base_name(arg)).unwrap_or_default();
+    let second = words.get(1).map(String::as_str);
     matches!(first.as_str(), "npx" | "bunx")
-        || (matches!(first.as_str(), "pnpm" | "yarn")
-            && words.get(1).map(String::as_str) == Some("dlx"))
+        || (matches!(first.as_str(), "pnpm" | "yarn") && second == Some("dlx"))
+        || (first == "npm" && second == Some("exec"))
+        || (first == "bun" && second == Some("x"))
 }
 
 /// A segment with a program, prepared for the rule packs. `hosts` are the known hosts
@@ -1197,6 +1204,19 @@ fn global_options(program: &str) -> &'static [(&'static str, bool)] {
             ("--no-verify-ssl", false),
             ("--no-sign-request", false),
             ("--debug", false),
+        ],
+        "celery" => &[
+            ("-a", true),
+            ("--app", true),
+            ("-b", true),
+            ("--broker", true),
+            ("--result-backend", true),
+            ("--loader", true),
+            ("--config", true),
+            ("--workdir", true),
+            ("-q", false),
+            ("--quiet", false),
+            ("--no-color", false),
         ],
         "cargo" => &[
             ("-z", true),
@@ -2091,6 +2111,8 @@ pub(crate) fn url_hosts(argv: &[String]) -> Vec<String> {
 pub(crate) fn inline_code_leaks(code: &str, secret_names: &[String]) -> bool {
     let lower = code.to_lowercase();
     let reads_env = lower.contains("process.env")
+        || lower.contains("deno.env")
+        || lower.contains("bun.env")
         || lower.contains("os.environ")
         || lower.contains("getenv")
         || lower.contains("env::var")
@@ -3291,12 +3313,16 @@ fn statement_reads(statement: &str) -> bool {
     let w = words(&lower);
     match w.first().map(String::as_str) {
         Some("pragma") => {
-            !lower.contains('=')
-                && w.get(1).is_some_and(|name| {
-                    READ_PRAGMAS.contains(&name.as_str())
-                        // `PRAGMA main.table_info(users)`: a schema name first.
-                        || w.get(2).is_some_and(|next| READ_PRAGMAS.contains(&next.as_str()))
-                })
+            // The name ends at a space or `(`. `PRAGMA main.table_info(users)` has a
+            // schema name first.
+            let name = lower
+                .trim_start_matches("pragma")
+                .trim_start()
+                .split(|c: char| c.is_whitespace() || c == '(')
+                .next()
+                .unwrap_or_default();
+            let name = name.rsplit('.').next().unwrap_or(name);
+            !lower.contains('=') && READ_PRAGMAS.contains(&name)
         }
         Some("describe" | "desc") => !sql_changes(&lower),
         _ => sql_reads(&lower),
@@ -3502,7 +3528,7 @@ fn is_known_safe(
     segment: &Segment,
     secret_names: &[String],
 ) -> bool {
-    if segment.redirect_out {
+    if segment.redirect_out && !redirects_to_scratch(segment) {
         return false;
     }
     let argv = effective_argv(segment);
@@ -3519,6 +3545,36 @@ fn is_known_safe(
     }
     // A write rule wins over a safe rule: known safe means no remote write (dev round 3).
     rules.known_safe(&cmd) && !rules.known_write(&cmd) && !runs_default_container_command(segment)
+}
+
+/// Folders of the project that hold scratch files and build output. A build makes them
+/// again, and the project does not keep sources in them.
+const SCRATCH_FOLDERS: &[&str] = &[
+    "tmp/",
+    "dist/",
+    "build/",
+    "out/",
+    "coverage/",
+    "target/",
+    ".cache/",
+];
+
+/// Every output redirect of the segment goes to a temporary folder (`/tmp/`) or to a
+/// scratch or build folder of the project (`tmp/schema.sql`), and not to a secret file,
+/// with no `..` in the path (dev round 3). A known safe command that writes its output
+/// there stays known safe: `mysqldump --no-data ... > tmp/schema.sql`. A secret in the
+/// segment and an environment dump to a file have their own flags.
+fn redirects_to_scratch(segment: &Segment) -> bool {
+    !segment.redirect_targets.is_empty()
+        && segment.redirect_targets.iter().all(|target| {
+            let path = target.strip_prefix("./").unwrap_or(target);
+            !path.contains("..")
+                && !is_secret_file(path)
+                && (is_temp_path(path)
+                    || SCRATCH_FOLDERS
+                        .iter()
+                        .any(|folder| path.starts_with(folder) && path.len() > folder.len()))
+        })
 }
 
 /// A segment that changes state by the knowledge of the packs (policy v7): a command that
@@ -3938,6 +3994,66 @@ mod tests {
         }
         assert!(analysis_of("aws --profile dev s3 ls").known_safe);
         assert!(analysis_of("timeout 60 npm test").known_safe);
+    }
+
+    /// Dev round 3, knowledge from held-out v3 cases (no longer blind): everyday check,
+    /// test, and read commands of Deno, pnpm, SQLite, MySQL, SQLx, Celery, and secret
+    /// managers are known safe. The near misses that run code, print secrets, or change
+    /// data are not.
+    #[test]
+    fn everyday_commands_from_held_out_v3() {
+        for line in [
+            "deno check main.ts",
+            "sh -c 'deno fmt --check && deno lint'",
+            "deno test --allow-env --allow-net=localhost:5432",
+            "deno task test",
+            "pnpm exec tsc --noEmit -p tsconfig.json",
+            "pnpm eslint src --fix",
+            "npm publish --dry-run",
+            "npm pack",
+            "cargo sqlx prepare --workspace",
+            "sqlite3 db/development.sqlite3 \"PRAGMA integrity_check\"",
+            "sqlite3 tmp/test.db \".schema users\"",
+            "sqlite3 app.db \"SELECT count(*) FROM users\"",
+            "sh -c 'mysqldump --no-data -h 127.0.0.1 -u app app_dev > tmp/schema.sql'",
+            "mysql -h 127.0.0.1 -u app -e \"SHOW TABLES\" app_dev",
+            "doppler secrets --only-names --config dev",
+            "op run --env-file=.env.tpl -- uv run pytest -q",
+            "uv run celery -A lumen inspect ping --timeout 5",
+        ] {
+            let a = analysis_of(line);
+            assert!(a.known_safe, "{line}: {a:?}");
+        }
+        for line in [
+            "deno run main.ts",
+            "deno task deploy",
+            "npm exec -- acme-unknown-tool",
+            "sqlite3 app.db \".shell rm -rf /\"",
+            "sqlite3 app.db \"SELECT readfile('.env')\"",
+            "sqlite3 app.db",
+            "sh -c 'mysqldump app_dev > tmp/data.sql'",
+            "sh -c 'mysqldump --no-data app_dev > schema.sql'",
+            "sh -c 'mysqldump --no-data app_dev > tmp/../schema.sql'",
+            "celery -A app worker",
+            "celery -A app inspect conf",
+        ] {
+            let a = analysis_of(line);
+            assert!(!a.known_safe, "{line}: {a:?}");
+        }
+        for (line, flag) in [
+            (
+                "deno eval \"console.log(Deno.env.get('API_KEY'))\"",
+                "secret_output",
+            ),
+            ("npm exec -- acme-unknown-tool", "new_dependency"),
+            ("doppler secrets --config dev", "secret_output"),
+            ("op run -- printenv", "secret_output"),
+            ("celery -A app purge -f", "data_loss"),
+            ("sqlite3 app.db \"DELETE FROM users\"", "data_loss"),
+        ] {
+            assert!(has_flag(line, flag), "{line}: {:?}", flags_of(line));
+        }
+        assert!(!analysis_of("celery -A app worker").known_command);
     }
 
     /// Dev round 3: reads of the schema, of a query plan, or of server information print

@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "celery",
+  "description": "Celery (Python task queue): purges, worker control, workers and task calls (project code), and read commands.",
+  "programs": ["celery"],
+  "roles": {
+    "usage": ["celery"]
+  },
+  "rules": [
+    {
+      "id": "purge",
+      "flag": "data_loss",
+      "note": "`purge` deletes every waiting task from the queues.",
+      "when": { "subcommand": ["purge"] }
+    },
+    {
+      "id": "worker-control",
+      "flag": "system_change",
+      "note": "`control` changes running workers: it stops them, revokes tasks, or changes limits and queues. `amqp` administers the message broker.",
+      "when": { "subcommand": ["control", "amqp"] }
+    }
+  ],
+  "safe": [
+    {
+      "id": "reads",
+      "note": "`inspect` of worker state (ping, active, scheduled, reserved, revoked, and registered tasks, statistics, and queues) and `status` only ask the workers. They import the app of the project to connect, and they do not run tasks. `inspect conf` and `report` print settings, so they are not here (dev round 3).",
+      "when": {
+        "any_of": [
+          {
+            "subcommand": ["inspect"],
+            "action": [
+              "ping", "active", "scheduled", "reserved", "revoked", "registered", "stats",
+              "active_queues", "query_task", "clock"
+            ]
+          },
+          { "subcommand": ["status"] }
+        ]
+      }
+    }
+  ],
+  "project_commands": [
+    {
+      "id": "workers-and-calls",
+      "note": "`worker`, `beat`, `multi`, `call`, and `shell` run tasks or code of the project.",
+      "when": { "subcommand": ["worker", "beat", "multi", "call", "shell", "graph", "upgrade"] }
+    }
+  ]
+}

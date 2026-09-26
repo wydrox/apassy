@@ -80,6 +80,7 @@ const BUILTIN: &[(&str, &str)] = &[
     ("aws.json", include_str!("../../packs/aws.json")),
     ("azure.json", include_str!("../../packs/azure.json")),
     ("cargo.json", include_str!("../../packs/cargo.json")),
+    ("celery.json", include_str!("../../packs/celery.json")),
     ("cloud.json", include_str!("../../packs/cloud.json")),
     ("databases.json", include_str!("../../packs/databases.json")),
     ("dbt.json", include_str!("../../packs/dbt.json")),
