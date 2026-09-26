@@ -60,11 +60,14 @@ const MAX_LOCAL_PACK_BYTES: u64 = 1024 * 1024;
 
 /// Built-in packs, embedded at build time. Only an app release changes them.
 const BUILTIN: &[(&str, &str)] = &[
+    ("alembic.json", include_str!("../../packs/alembic.json")),
     ("aws.json", include_str!("../../packs/aws.json")),
     ("cargo.json", include_str!("../../packs/cargo.json")),
     ("cloud.json", include_str!("../../packs/cloud.json")),
     ("databases.json", include_str!("../../packs/databases.json")),
+    ("django.json", include_str!("../../packs/django.json")),
     ("docker.json", include_str!("../../packs/docker.json")),
+    ("dotnet.json", include_str!("../../packs/dotnet.json")),
     ("encoding.json", include_str!("../../packs/encoding.json")),
     (
         "file-tools.json",
@@ -79,18 +82,31 @@ const BUILTIN: &[(&str, &str)] = &[
     ),
     ("http.json", include_str!("../../packs/http.json")),
     ("js-tools.json", include_str!("../../packs/js-tools.json")),
+    ("jvm.json", include_str!("../../packs/jvm.json")),
     (
         "kubernetes.json",
         include_str!("../../packs/kubernetes.json"),
     ),
+    ("laravel.json", include_str!("../../packs/laravel.json")),
+    ("linters.json", include_str!("../../packs/linters.json")),
     ("macos.json", include_str!("../../packs/macos.json")),
     ("make.json", include_str!("../../packs/make.json")),
+    (
+        "migrations.json",
+        include_str!("../../packs/migrations.json"),
+    ),
+    ("mix.json", include_str!("../../packs/mix.json")),
     ("netlify.json", include_str!("../../packs/netlify.json")),
     ("node.json", include_str!("../../packs/node.json")),
     ("npm.json", include_str!("../../packs/npm.json")),
     ("prisma.json", include_str!("../../packs/prisma.json")),
     ("python.json", include_str!("../../packs/python.json")),
+    ("rails.json", include_str!("../../packs/rails.json")),
     ("remote.json", include_str!("../../packs/remote.json")),
+    (
+        "ruby-tools.json",
+        include_str!("../../packs/ruby-tools.json"),
+    ),
     ("scripting.json", include_str!("../../packs/scripting.json")),
     ("shell.json", include_str!("../../packs/shell.json")),
     ("supabase.json", include_str!("../../packs/supabase.json")),

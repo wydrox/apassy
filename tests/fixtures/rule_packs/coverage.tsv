@@ -1387,3 +1387,208 @@ CLAUDE_CONFIG_DIR=/tmp/c claude -p hi
 python3 - <<'PY'<NL>open('/Users/me/.claude/settings.json', 'w').write('{}')<NL>PY
 cat CLAUDE.md docs/codex-notes.md
 git --help ~/.claude
+# ---- Rails and Rake (rails pack) ----
+bin/rails db:drop
+bundle exec rake db:reset
+rails db:schema:load
+rails db:migrate:down VERSION=1
+rails db:rollback STEP=3
+rails db:migrate VERSION=0
+rails db:migrate
+rails db:seed
+rails db:migrate:status
+rails runner "User.destroy_all"
+rails runner "puts User.count"
+rails runner scripts/purge_inactive_users.rb
+rails runner scripts/report.rb
+rails c <<'RUBY'<NL>Order.delete_all<NL>RUBY
+rails credentials:show
+rails credentials:show --environment production
+rails routes
+rails test test/models/user_test.rb
+rails test:system
+rake -T
+rails generate migration AddIndex
+rails db:drop --help
+# ---- Ruby tools (ruby-tools pack) ----
+bundle install
+bundle add httparty
+bundle config set --global mirror.https://rubygems.org https://gems.example.invalid
+bundle config set --local path vendor/bundle
+rspec spec/models
+rubocop -a
+brakeman -q
+# ---- Django (django pack) ----
+python manage.py flush --no-input
+python3 src/manage.py flush
+./manage.py flush
+django-admin flush --settings=app.settings
+python -m django reset_db
+python manage.py migrate accounts zero
+python manage.py migrate accounts 0003
+python manage.py migrate
+python manage.py migrate --plan
+python manage.py shell -c "User.objects.all().delete()"
+python manage.py shell -c "from django.contrib.auth.models import User; print(User.objects.count())"
+python manage.py shell <<'PY'<NL>Order.objects.filter(paid=False).update(status='x')<NL>PY
+python manage.py dbshell -- -c "DELETE FROM accounts_user"
+python manage.py dbshell -- -c "SELECT count(*) FROM accounts_user"
+python manage.py collectstatic --noinput --clear
+python manage.py collectstatic --noinput
+python manage.py createsuperuser --noinput --username admin
+python manage.py changepassword admin
+python manage.py diffsettings
+python manage.py test accounts
+python manage.py sqlmigrate accounts 0001
+./manage.py check
+python manage.py loaddata fixtures/sample.json
+# ---- Alembic (alembic pack) ----
+alembic downgrade base
+alembic -c alembic.ini downgrade -1
+alembic downgrade base --sql
+alembic upgrade head
+alembic current
+alembic history
+alembic revision --autogenerate -m add_index
+# ---- Migration tools (migrations pack) ----
+flyway clean
+flyway -cleanDisabled=false clean
+flyway info
+flyway migrate info
+flyway migrate
+liquibase drop-all
+liquibase rollback-count 1
+liquibase rollbackCount 1
+liquibase rollback-count-sql 1
+liquibase update-sql
+liquibase update
+npx knex migrate:rollback --all
+npx knex migrate:status
+npx sequelize db:drop
+npx sequelize db:migrate:undo:all
+npx sequelize db:migrate:status
+npx typeorm schema:drop
+npx typeorm migration:show
+npx drizzle-kit push --force
+npx drizzle-kit push
+npx drizzle-kit generate
+dbmate drop
+dbmate rollback
+dbmate status
+goose postgres "$DATABASE_URL" down
+goose status
+migrate -path db/migrations -database "$DATABASE_URL" down 1
+migrate -path db/migrations -database "$DATABASE_URL" up
+atlas schema clean -u "$DATABASE_URL"
+atlas migrate down --env local
+atlas migrate apply --env local
+# ---- .NET (dotnet pack) ----
+dotnet ef database drop --force
+dotnet ef database update 0
+dotnet ef database update
+dotnet ef migrations remove --force
+dotnet ef migrations remove
+dotnet ef migrations list
+dotnet ef migrations add AddIndex
+dotnet nuget push pkg.nupkg --source https://api.nuget.org/v3/index.json
+dotnet add package Newtonsoft.Json
+dotnet tool install -g dotnet-ef
+dotnet user-secrets list
+dotnet user-secrets set Key Value
+dotnet build
+dotnet test
+# ---- Elixir mix (mix pack) ----
+mix ecto.drop
+mix ecto.reset
+mix ecto.rollback --step 1
+mix ecto.migrate
+mix hex.publish
+mix archive.install hex phx_new
+mix test
+mix deps.get
+mix --help
+# ---- Laravel and Composer (laravel pack) ----
+php artisan migrate:fresh --seed
+./artisan db:wipe
+sail artisan migrate:rollback
+php artisan migrate
+php artisan migrate --force
+php artisan tinker --execute="User::truncate()"
+php artisan tinker --execute="echo User::count();"
+php artisan config:show database
+php artisan test
+php artisan route:list
+php artisan make:model Post
+artisan make:controller PostController
+composer require guzzlehttp/guzzle
+composer install
+vendor/bin/phpunit
+php vendor/bin/phpstan analyse
+# ---- JVM (jvm pack) ----
+./gradlew flywayClean
+mvn flyway:clean
+mvn liquibase:dropAll
+./gradlew publish
+./gradlew publishToMavenLocal
+mvn deploy
+mvn clean verify
+./gradlew clean build
+./gradlew :app:test
+./gradlew test --tests Foo
+# ---- Go (go pack) ----
+go get github.com/x/y@v1.2.3
+go get
+go install golang.org/x/tools/cmd/goimports@latest
+go install ./cmd/app
+go env -w GOPROXY=https://proxy.example.invalid
+go env GOPATH
+golangci-lint run
+gofmt -l .
+staticcheck ./...
+# ---- Linters (linters pack) ----
+tflint
+kubeconform -summary k8s/
+hadolint Dockerfile
+shellcheck scripts/*.sh
+actionlint
+# ---- Python project tools (python pack) ----
+python -m pip install requests
+python -m pip install -r requirements-dev.txt
+pip install -r requirements.txt
+pip install -r requirements.txt requests
+pip list
+uv add httpx
+uv pip install httpx
+uv pip install -r requirements.txt
+uv sync
+uv lock
+poetry add requests-oauth-helper
+poetry install
+poetry lock --no-update
+poetry export -f requirements.txt -o requirements.txt
+poetry source add private https://pypi.example.invalid/simple
+poetry config repositories.private https://pypi.example.invalid
+poetry config virtualenvs.in-project true
+pip config set global.index-url https://pypi.example.invalid/simple
+pipenv install requests
+pipenv install
+pdm add httpx
+pdm install
+uv publish
+hatch publish
+tox
+nox -s tests
+pre-commit run --all-files
+coverage run -m pytest
+coverage run scripts/x.py
+coverage report
+python -m compileall src
+cargo add serde
+cargo add
+cargo install ripgrep
+cargo install --path .
+# ---- Prisma (prisma pack) ----
+npx prisma migrate status
+npx prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma
+npx prisma migrate dev -n init
+npx prisma db push --accept-data-loss -n x

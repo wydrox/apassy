@@ -1,16 +1,47 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "go",
-  "description": "Go toolchain: build and test commands.",
-  "programs": ["go"],
+  "description": "Go toolchain and Go tools: new modules, and build, test, lint, and format commands.",
+  "programs": ["go", "gofmt", "goimports", "golangci-lint", "staticcheck", "govulncheck"],
   "roles": {
-    "usage": ["go"]
+    "usage": ["go", "golangci-lint"]
   },
+  "rules": [
+    {
+      "id": "new-module",
+      "flag": "new_dependency",
+      "note": "`go get` adds or updates a module. `go install PKG@VERSION` downloads and installs a tool.",
+      "when": {
+        "program": ["go"],
+        "any_of": [
+          { "subcommand": ["get"], "operands": { "min": 2 } },
+          { "subcommand": ["install"], "any_arg_contains": ["@"] }
+        ]
+      }
+    },
+    {
+      "id": "go-settings-change",
+      "flag": "system_change",
+      "note": "`go env -w` changes the Go settings of the user, such as the module proxy or the checksum database.",
+      "when": { "program": ["go"], "subcommand": ["env"], "any_arg": ["-w", "-u"] }
+    }
+  ],
   "safe": [
     {
       "id": "build-and-test",
-      "when": { "subcommand": ["test", "build", "vet", "fmt", "mod", "run"] }
+      "note": "Build, test, vet, format, run, and module maintenance from go.mod.",
+      "when": { "program": ["go"], "subcommand": ["test", "build", "vet", "fmt", "mod", "run"] }
+    },
+    {
+      "id": "go-tools",
+      "note": "Format, lint, and vulnerability checks.",
+      "when": { "program": ["gofmt", "goimports", "golangci-lint", "staticcheck", "govulncheck"] }
+    },
+    {
+      "id": "go-read",
+      "note": "Environment, version, and package listings.",
+      "when": { "program": ["go"], "subcommand": ["env", "version", "list", "doc"] }
     }
   ]
 }
