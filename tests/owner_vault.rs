@@ -389,6 +389,56 @@ fn restore_lists_items_for_review_until_the_owner_confirms() {
     assert_eq!(revealed.secret_lines[0].display, TOKEN);
 }
 
+/// Goal item V5 in the owner session: the new passphrase two times, clear refusals, and
+/// the old passphrase stays valid after each refusal.
+#[test]
+fn owner_changes_the_passphrase_with_a_repeat() {
+    const NEW: &str = "owner-vault-pass-new";
+    let dir = TempDir::new().expect("temp dir");
+    let (mut session, path) = session_at(&dir, "rekey.db");
+    unlock(&mut session);
+    let created = session
+        .add(&api_draft("Rekey me", "Project V5"), &token_form(TOKEN))
+        .expect("add");
+    let refusals = [
+        ("", NEW, NEW, "Type the current passphrase."),
+        (PASS, NEW, "owner-vault-pass-other", "different"),
+        (PASS, "short", "short", "minimum of 12"),
+        (PASS, PASS, PASS, "same as the current"),
+        (WRONG, NEW, NEW, "current passphrase is incorrect"),
+    ];
+    for (current, new, repeat, expected) in refusals {
+        let err = session
+            .change_passphrase(current, new, repeat)
+            .expect_err("refused change");
+        assert!(err.message.contains(expected), "{}", err.message);
+        assert!(!session.is_locked(), "a refusal keeps the vault open");
+    }
+    session.lock().expect("lock");
+    let err = session
+        .change_passphrase(PASS, NEW, NEW)
+        .expect_err("locked vault");
+    assert_eq!(err.code, "vault_locked");
+    unlock(&mut session);
+
+    session.change_passphrase(PASS, NEW, NEW).expect("change");
+    assert!(!session.is_locked());
+    session.lock().expect("lock");
+    assert_eq!(
+        session.unlock(PASS).expect_err("old passphrase").code,
+        "wrong_key"
+    );
+    session.unlock(NEW).expect("new passphrase");
+    let revealed = session.reveal(created.id).expect("reveal");
+    assert_eq!(revealed.secret_lines[0].display, TOKEN);
+    assert!(!format!("{session:?}").contains(NEW));
+
+    let mut reopened = OwnerSession::new();
+    drop(session);
+    reopened.open_file(&path).expect("open");
+    reopened.unlock(NEW).expect("new passphrase after reopen");
+}
+
 /// Goal item P1 in the owner session: the lifetime text and a token rotation.
 #[test]
 fn owner_changes_token_lifetime_and_rotates_a_token() {

@@ -372,6 +372,53 @@ impl Vault {
         })
     }
 
+    /// Change the master passphrase with SQLCipher `PRAGMA rekey` (goal item V5).
+    ///
+    /// The vault must be unlocked, and `current` must open it. `new` follows the create
+    /// rules. The KDF, HMAC, and page settings do not change: rekey uses the verified
+    /// settings of the open connection, and the new connection checks them again.
+    ///
+    /// The change ends the vault epoch, like a lock and an unlock. On success, the vault
+    /// is unlocked with the new passphrase. A wrong `current` returns `WrongKeyOrCorrupt`
+    /// and leaves the vault unlocked and unchanged. After a later failure, the vault is
+    /// locked. `Busy` or `Storage` then means that the old passphrase still opens the
+    /// file. `WrongKeyOrCorrupt` after the lock means that the check with the old
+    /// passphrase also failed.
+    pub fn change_passphrase(&mut self, current: &str, new: &str) -> VaultResult<()> {
+        self.require_unlocked()?;
+        validate_unlock_passphrase(current)?;
+        validate_create_passphrase(new)?;
+        if current == new {
+            return Err(err(VaultErrorKind::InvalidInput));
+        }
+        // Check the current passphrase on a second, read-only connection first.
+        validate_encrypted_source(&self.path, current)?;
+        self.lock()?;
+        let conn = open_working_conn(&self.path, current)?;
+        let rekeyed = rekey(&conn, &self.path, new);
+        let closed = close_conn(conn);
+        // SQLCipher answers "ok" also when its rekey transaction rolls back, for example
+        // when another connection holds a read lock. Only a new connection with the new
+        // passphrase proves the change.
+        let verified = rekeyed
+            .and(closed)
+            .and_then(|()| refuse_sqlite_companions(&self.path, VaultErrorKind::Storage))
+            .and_then(|()| open_working_conn(&self.path, new));
+        match verified {
+            Ok(conn) => {
+                self.conn = Some(conn);
+                Ok(())
+            }
+            // A failed rekey can leave a rollback journal with the old pages. A read-write
+            // connection with the old passphrase rolls it back and checks the file.
+            Err(change_err) => match open_working_conn(&self.path, current).and_then(close_conn) {
+                Ok(()) if change_err.kind() == VaultErrorKind::Busy => Err(change_err),
+                Ok(()) => Err(err(VaultErrorKind::Storage)),
+                Err(_) => Err(err(VaultErrorKind::WrongKeyOrCorrupt)),
+            },
+        }
+    }
+
     fn require_unlocked(&self) -> VaultResult<()> {
         if self.conn.is_none() {
             Err(err(VaultErrorKind::Locked))
@@ -590,6 +637,40 @@ fn apply_key(conn: &Connection, passphrase: &str) -> VaultResult<()> {
         return Err(err(VaultErrorKind::Storage));
     }
     Ok(())
+}
+
+/// Re-encrypt every page of the open database with the new passphrase.
+///
+/// The vault uses DELETE journal mode. `apply_session_pragmas` sets it at unlock, and
+/// that also checkpoints and removes a WAL that an external tool left. So no WAL holds
+/// pages with the old key after the rekey. The rekey refuses to start when the mode is
+/// not DELETE or when a journal, WAL, or SHM file is next to the vault file.
+/// The rollback journal of the rekey holds pages with the old key. SQLite deletes the
+/// file at the commit, but the file system can keep the old blocks.
+///
+/// SQLCipher answers "ok" also when the commit of the rekey fails on a lock. So the
+/// rekey first takes the exclusive lock one time. A reader of another SQLite client then
+/// stops the change with `Busy` before a page changes. The caller still verifies the
+/// result with a new connection, because a reader can start between the two steps.
+fn rekey(conn: &Connection, path: &Path, new: &str) -> VaultResult<()> {
+    validate_create_passphrase(new)?;
+    let journal: String = conn
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    if !journal.eq_ignore_ascii_case("delete") {
+        return Err(err(VaultErrorKind::Storage));
+    }
+    refuse_sqlite_companions(path, VaultErrorKind::Storage)?;
+    conn.execute_batch("BEGIN EXCLUSIVE; ROLLBACK;")
+        .map_err(|_| err(VaultErrorKind::Busy))?;
+    let answer: String = conn
+        .pragma_update_and_check(None, "rekey", new, |row| row.get(0))
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    if answer == "ok" {
+        Ok(())
+    } else {
+        Err(err(VaultErrorKind::Storage))
+    }
 }
 
 fn require_cipher_version(conn: &Connection) -> VaultResult<String> {

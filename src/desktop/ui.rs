@@ -570,14 +570,20 @@ fn draw_owner_vault(app: &mut DesktopApp, ui: &mut egui::Ui) {
         agents_view::draw_review_list(app, ui);
         draw_owner_items(app, ui);
         ui.add_space(8.0);
-        egui::CollapsingHeader::new(RichText::new("Vault file and backup").strong().color(INK))
-            .id_salt("vault-file-and-backup")
-            .default_open(false)
-            .show(ui, |ui| {
-                draw_vault_file_card(app, ui);
-                ui.add_space(8.0);
-                draw_backup_card(app, ui);
-            });
+        egui::CollapsingHeader::new(
+            RichText::new("Vault file, passphrase, and backup")
+                .strong()
+                .color(INK),
+        )
+        .id_salt("vault-file-and-backup")
+        .default_open(false)
+        .show(ui, |ui| {
+            draw_vault_file_card(app, ui);
+            ui.add_space(8.0);
+            draw_passphrase_card(app, ui);
+            ui.add_space(8.0);
+            draw_backup_card(app, ui);
+        });
         return;
     }
 
@@ -650,6 +656,61 @@ fn draw_vault_file_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 }
             });
         });
+    });
+}
+
+/// Change the master passphrase (goal item V5). The new passphrase is typed two times.
+#[cfg(feature = "vault")]
+fn draw_passphrase_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    use super::owner_store::Ephemeral;
+
+    card_frame().show(ui, |ui| {
+        ui.label(
+            RichText::new("Change passphrase")
+                .size(16.0)
+                .strong()
+                .color(INK),
+        );
+        ui.label(
+            RichText::new(
+                "Type the current passphrase. Then type the new passphrase two times. It needs 12 or more characters. Apassy encrypts the vault file again with the new passphrase and keeps the SQLCipher key settings. Old backups still need the old passphrase. Agent runs that wait for you end.",
+            )
+            .color(INK_MUTED),
+        );
+        password_line(
+            ui,
+            "passphrase-current",
+            "Current passphrase",
+            &mut app.owner_ui.passphrase_current,
+        );
+        password_line(
+            ui,
+            "passphrase-new",
+            "New passphrase",
+            &mut app.owner_ui.passphrase_new,
+        );
+        password_line(
+            ui,
+            "passphrase-repeat",
+            "Repeat the new passphrase",
+            &mut app.owner_ui.passphrase_repeat,
+        );
+        if accent_button(ui, "Change passphrase").clicked() {
+            let current = Ephemeral::take(&mut app.owner_ui.passphrase_current);
+            let new = Ephemeral::take(&mut app.owner_ui.passphrase_new);
+            let repeat = Ephemeral::take(&mut app.owner_ui.passphrase_repeat);
+            let result = app.owner_ui.session.change_passphrase(
+                current.expose(),
+                new.expose(),
+                repeat.expose(),
+            );
+            drop((current, new, repeat));
+            let _ = app.apply(
+                result,
+                "The passphrase is changed. Unlock with the new passphrase from now on. Old backups still need the old passphrase.",
+            );
+            app.end_waiting_runs();
+        }
     });
 }
 
@@ -1861,6 +1922,47 @@ mod tests {
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
         assert!(text.contains("The old token does not work now"), "{text}");
         assert!(text.contains(&shown), "the new token shows one time");
+    }
+
+    /// Goal item V5: the passphrase card asks for the current passphrase and for the new
+    /// passphrase two times. The fields are clear after an attempt.
+    #[cfg(feature = "vault")]
+    #[test]
+    fn passphrase_card_asks_for_the_new_passphrase_two_times() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let mut app = app_with_vault(&dir);
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        for _ in 0..2 {
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, DEFAULT_SIZE)),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| super::draw_passphrase_card(&mut app, ui));
+            text = collect_frame_text(&output);
+            output.drop_without_applying_deltas();
+        }
+        for label in [
+            "Change passphrase",
+            "Current passphrase",
+            "New passphrase",
+            "Repeat the new passphrase",
+            "Old backups still need the old passphrase",
+        ] {
+            assert!(text.contains(label), "missing {label}: {text}");
+        }
+        let err = app
+            .owner_ui
+            .session
+            .change_passphrase(UI_PASS, "ui-new-pass-ok-1", "ui-new-pass-ok-2")
+            .expect_err("different repeat");
+        assert!(err.message.contains("different"), "{}", err.message);
+        assert!(!app.owner_ui.session.is_locked());
+        app.owner_ui.session.lock().expect("lock");
+        app.owner_ui
+            .session
+            .unlock(UI_PASS)
+            .expect("the old passphrase works");
     }
 
     /// Goal item V4: after a restore, the Vault view lists the items to review, and

@@ -219,6 +219,10 @@ pub struct OwnerUiState {
     pub create_path: String,
     pub open_path: String,
     pub passphrase: String,
+    /// Passphrase change fields (goal item V5). The app clears them after each attempt.
+    pub passphrase_current: String,
+    pub passphrase_new: String,
+    pub passphrase_repeat: String,
     pub backup_path: String,
     pub restore_source: String,
     pub restore_dest: String,
@@ -340,6 +344,51 @@ impl OwnerSession {
             .as_mut()
             .ok_or_else(|| fail("vault_locked", "No vault file is open."))?;
         vault.unlock(passphrase).map_err(map_err)
+    }
+
+    /// Change the master passphrase (goal item V5). The owner types the new passphrase
+    /// two times. After a failure, the old passphrase stays valid.
+    pub fn change_passphrase(&mut self, current: &str, new: &str, repeat: &str) -> ModelResult<()> {
+        if current.is_empty() {
+            return Err(fail("invalid_input", "Type the current passphrase."));
+        }
+        if new != repeat {
+            return Err(fail(
+                "invalid_input",
+                "The two new passphrases are different. Type the new passphrase two times.",
+            ));
+        }
+        require_new_passphrase(new)?;
+        if new == current {
+            return Err(fail(
+                "invalid_input",
+                "The new passphrase is the same as the current passphrase.",
+            ));
+        }
+        self.revealed.clear();
+        let result = self.unlocked()?.change_passphrase(current, new);
+        let Err(err) = result else {
+            return Ok(());
+        };
+        Err(match (err.kind(), self.is_locked()) {
+            (VaultErrorKind::WrongKeyOrCorrupt, false) => fail(
+                "wrong_key",
+                "The current passphrase is incorrect. The passphrase did not change.",
+            ),
+            (VaultErrorKind::Busy, true) => fail(
+                "busy",
+                "Another program uses the vault file. The passphrase did not change. The vault is locked. Close the other program, then unlock with the old passphrase.",
+            ),
+            (VaultErrorKind::Storage, true) => fail(
+                "storage",
+                "The passphrase did not change. The vault is locked. Unlock it with the old passphrase.",
+            ),
+            (VaultErrorKind::WrongKeyOrCorrupt, true) => fail(
+                "wrong_key",
+                "The passphrase change did not finish. Unlock the vault with the old passphrase. If it does not open, use the new passphrase. If neither opens, restore a backup.",
+            ),
+            _ => map_err(err),
+        })
     }
 
     pub fn lock(&mut self) -> ModelResult<()> {

@@ -172,10 +172,26 @@ It must not overwrite either source or destination. The restored instance starts
 In one transaction on the destination, restore revokes every agent, removes every grant and rule, and marks each item with agent settings for an owner review.
 Unlock and restore check the encrypted schema, supported `user_version`, expected columns, and database integrity before they succeed.
 
+## Passphrase change (goal item V5)
+
+```rust
+impl Vault {
+    pub fn change_passphrase(&mut self, current: &str, new: &str) -> VaultResult<()>;
+}
+```
+
+The vault must be unlocked. `current` must open the file, and `new` follows the create rules. The same passphrase returns `InvalidInput`.
+Apassy checks `current` on a second read-only connection. A wrong `current` returns `WrongKeyOrCorrupt` and leaves the vault open and unchanged.
+Then Apassy locks the vault, which ends the epoch, and opens a new connection with `current`. That connection verifies the SQLCipher 4 settings and uses DELETE journal mode.
+Before the rekey, Apassy refuses a journal, WAL, or SHM file and takes the exclusive lock one time. A reader of another SQLite client then gives `Busy` before a page changes.
+`PRAGMA rekey` encrypts every page again in one transaction with the same KDF, HMAC, and page settings. SQLCipher answers "ok" also when that transaction rolls back, so Apassy closes the connection and opens the file with `new` again. That check reads every page and checks its HMAC.
+After a failure past the lock, the vault stays locked. Apassy opens the file with `current` to roll back a journal. `Busy` or `Storage` then means that the old passphrase opens the file.
+The new passphrase is in a temporary SQL string, as the key is at unlock. A backup keeps the passphrase of its time. The old rollback journal can stay in free disk blocks, in snapshots, and in earlier copies.
+
 ## Remaining limits
 
 Passphrases and decrypted data exist in process memory. SQLCipher key setup also makes a temporary SQL string.
 Redacted Debug is not memory erasure or a defense against memory inspection, swap, or crash dumps.
 A completed file copy is not proof of crash-safe directory-entry persistence or a complete recovery product.
-Schema migration, rekey, authenticated reveal, durable agent authority, product isolation, and native-code review remain separate gates.
+Authenticated reveal, product isolation, and native-code review remain separate gates. Unlock migrates files from schema versions 1 to 5 in one transaction (goal item V6).
 Tests use temporary synthetic data only. No real credential or passphrase belongs in repository fixtures or logs.
