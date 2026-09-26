@@ -9,12 +9,16 @@
 //!   app release changes them. A built-in pack can add flags, mark a command as known
 //!   safe, give a program a role for the general rules, name known provider hosts,
 //!   and make an exception to a general rule.
+//! - Local packs are owner files. Their schema has flag rules only. A local pack
+//!   can add a flag. It cannot mark a command as safe, remove a flag, or replace a
+//!   built-in pack. The analysis joins the flags of all packs.
 //!
-//! If a pack does not load, every analysis adds the flag [`LOAD_ERROR_FLAG`].
-//! Then every run waits for the owner.
+//! If a local pack does not load, every analysis adds the flag
+//! [`LOAD_ERROR_FLAG`]. Then every run waits for the owner.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, PoisonError, RwLock};
 
 use serde::Deserialize;
@@ -25,8 +29,11 @@ use super::shell_risk;
 /// The pack format that this version of Apassy reads.
 pub const SCHEMA_VERSION: u64 = 1;
 
-/// The flag of every analysis when a pack does not load.
+/// The flag of every analysis when a local pack does not load.
 pub const LOAD_ERROR_FLAG: &str = "rule_pack_error";
+
+/// The directory of local packs. The default is [`default_local_dir`].
+pub const PACKS_DIR_ENV: &str = "APASSY_PACKS_DIR";
 
 /// Flags that a rule can add. `ask_owner` has no other meaning: the owner decides.
 pub const RULE_FLAGS: &[&str] = &[
@@ -41,6 +48,12 @@ pub const RULE_FLAGS: &[&str] = &[
     "privilege",
     "ask_owner",
 ];
+
+/// Fields that only a built-in pack can have. Each one can make the analysis less strict.
+const BUILTIN_ONLY_FIELDS: &[&str] = &["safe", "exemptions", "roles", "known_hosts"];
+
+/// The largest local pack file.
+const MAX_LOCAL_PACK_BYTES: u64 = 1024 * 1024;
 
 /// Built-in packs, embedded at build time. Only an app release changes them.
 const BUILTIN: &[(&str, &str)] = &[
@@ -114,6 +127,7 @@ impl std::error::Error for PackError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Origin {
     BuiltIn,
+    Local(String),
 }
 
 /// A loaded pack.
@@ -202,6 +216,19 @@ struct BuiltinPack {
     exemptions: Vec<Exemption>,
     #[serde(default)]
     safe: Vec<SafeRule>,
+}
+
+/// The schema of a local pack: flag rules only.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalPack {
+    #[allow(dead_code)]
+    schema_version: u64,
+    pack_version: u64,
+    tool: String,
+    description: String,
+    programs: Vec<String>,
+    rules: Vec<FlagRule>,
 }
 
 /// A rule that adds a flag when its matcher matches.
@@ -970,7 +997,7 @@ impl RuleSet {
         self.load_error.as_deref()
     }
 
-    /// Checks for every pack. Gives true for a pack of every program.
+    /// Checks that built-in and local packs share. Gives true for a pack of every program.
     fn check_common(
         &self,
         source: &str,
@@ -983,10 +1010,12 @@ impl RuleSet {
         let fail = |message: String| PackError::new(source, message);
         check_tool_name(tool).map_err(fail)?;
         if let Some(existing) = self.packs.iter().find(|pack| pack.tool == tool) {
-            return Err(fail(format!(
-                "tool `{tool}` is already loaded from {:?}",
-                existing.origin
-            )));
+            return Err(fail(match existing.origin {
+                Origin::BuiltIn => format!(
+                    "tool `{tool}` is a built-in pack; a local pack cannot replace it, use another name such as `{tool}-local`"
+                ),
+                Origin::Local(_) => format!("tool `{tool}` is already loaded"),
+            }));
         }
         if pack_version == 0 {
             return Err(fail("`pack_version` starts at 1".to_owned()));
@@ -1093,6 +1122,84 @@ impl RuleSet {
         Ok(())
     }
 
+    /// Add one local pack. The pack can only add flags. A pack that does not validate
+    /// changes nothing and gives an error.
+    pub fn add_local(&mut self, source: &str, text: &str) -> Result<(), PackError> {
+        let value = parse(source, text)?;
+        if let Some(field) = BUILTIN_ONLY_FIELDS
+            .iter()
+            .find(|field| value.get(**field).is_some())
+        {
+            return Err(PackError::new(
+                source,
+                format!(
+                    "`{field}` is for built-in packs only; a local pack can only add flags, it cannot mark a command as safe or make an exception"
+                ),
+            ));
+        }
+        let pack: LocalPack = serde_json::from_value(value)
+            .map_err(|error| PackError::new(source, error.to_string()))?;
+        let any = self.check_common(
+            source,
+            &pack.tool,
+            pack.pack_version,
+            &pack.description,
+            &pack.programs,
+            &pack.rules,
+        )?;
+        if pack.rules.is_empty() {
+            return Err(PackError::new(
+                source,
+                "a local pack needs at least one rule",
+            ));
+        }
+        self.push_rules(&pack.tool, &pack.rules, &pack.programs, any);
+        self.packs.push(PackInfo {
+            tool: pack.tool,
+            pack_version: pack.pack_version,
+            origin: Origin::Local(source.to_owned()),
+            rules: pack.rules.len(),
+        });
+        Ok(())
+    }
+
+    /// Add every `*.json` file in `dir`, in name order. A missing directory adds nothing.
+    /// One pack that does not load is an error for the whole directory.
+    pub fn with_local_dir(mut self, dir: &Path) -> Result<Self, PackError> {
+        let source = dir.display().to_string();
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(self),
+            Err(error) => return Err(PackError::new(&source, error.to_string())),
+        };
+        let mut files: Vec<PathBuf> = Vec::new();
+        for entry in entries {
+            let path = entry
+                .map_err(|error| PackError::new(&source, error.to_string()))?
+                .path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                files.push(path);
+            }
+        }
+        files.sort();
+        for path in files {
+            let name = path.display().to_string();
+            let size = std::fs::metadata(&path)
+                .map_err(|error| PackError::new(&name, error.to_string()))?
+                .len();
+            if size > MAX_LOCAL_PACK_BYTES {
+                return Err(PackError::new(&name, "the file is larger than 1 MiB"));
+            }
+            let text = std::fs::read_to_string(&path)
+                .map_err(|error| PackError::new(&name, error.to_string()))?;
+            self.add_local(&name, &text)?;
+        }
+        Ok(self)
+    }
+
     // ---- Queries for the analysis ----
 
     pub(crate) fn has_role(&self, program: &str, role: Role) -> bool {
@@ -1179,6 +1286,36 @@ pub fn active() -> Arc<RuleSet> {
 /// Replace the active rule set.
 pub fn activate(set: RuleSet) {
     *ACTIVE.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(set);
+}
+
+/// Load the built-in packs and the local packs in `dir`, and make them active. If a
+/// local pack does not load, the active set has the built-in packs and adds
+/// [`LOAD_ERROR_FLAG`] to every analysis, so every run waits for the owner.
+pub fn activate_local_dir(dir: &Path) -> Result<Vec<PackInfo>, PackError> {
+    let builtin = builtin_or_failed();
+    match builtin.clone().with_local_dir(dir) {
+        Ok(set) => {
+            let packs = set.packs().to_vec();
+            activate(set);
+            Ok(packs)
+        }
+        Err(error) => {
+            activate(builtin.fail_closed(&error));
+            Err(error)
+        }
+    }
+}
+
+/// `APASSY_PACKS_DIR`, or `~/Library/Application Support/Apassy/packs`.
+pub fn default_local_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os(PACKS_DIR_ENV).filter(|value| !value.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from);
+    home.join("Library")
+        .join("Application Support")
+        .join("Apassy")
+        .join("packs")
 }
 
 #[cfg(test)]
