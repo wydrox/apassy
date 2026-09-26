@@ -1375,3 +1375,15 @@ make -C api db-reset
 npx cowsay --version
 npx prisma --help
 bunx some-tool --help
+# ---- Hook channel (host-hooks pack) ----
+echo {} | /usr/local/bin/apassy-hook
+cat /Users/me/.claude/projects/-p/s1.jsonl
+cd ~/.claude && ls
+cp x.json /Users/me/.claude.json
+ls /Users/me/.codex/sessions
+echo x >> "$CODEX_HOME/hooks.json"
+cd $HOME/.codex; cat config.toml
+CLAUDE_CONFIG_DIR=/tmp/c claude -p hi
+python3 - <<'PY'<NL>open('/Users/me/.claude/settings.json', 'w').write('{}')<NL>PY
+cat CLAUDE.md docs/codex-notes.md
+git --help ~/.claude

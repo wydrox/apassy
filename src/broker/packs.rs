@@ -73,6 +73,10 @@ const BUILTIN: &[(&str, &str)] = &[
     ("gh.json", include_str!("../../packs/gh.json")),
     ("git.json", include_str!("../../packs/git.json")),
     ("go.json", include_str!("../../packs/go.json")),
+    (
+        "host-hooks.json",
+        include_str!("../../packs/host-hooks.json"),
+    ),
     ("http.json", include_str!("../../packs/http.json")),
     ("js-tools.json", include_str!("../../packs/js-tools.json")),
     (
