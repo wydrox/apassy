@@ -26,11 +26,12 @@ use crate::broker::http::parse_destination;
 use crate::broker::profile;
 use crate::contracts::CredentialKind;
 use crate::desktop::model::{ItemDraft, ModelError, ModelResult};
+use crate::vault::providers::{self, Suggestion};
 use crate::vault::{
     ActivityDecision, AgentSummary, AgentToken, Declaration, Destination, EnvBinding, Environment,
     ExecGrant, ExecMode, ExecRule, Field, ItemDraft as VaultDraft, MAX_PASSPHRASE_BYTES,
     MAX_TOKEN_LIFETIME_DAYS, MIN_PASSPHRASE_BYTES, Reversibility, RiskLevel, Scope, SecretValue,
-    Vault, VaultError, VaultErrorKind, checked_env_name,
+    SuggestionStats, Vault, VaultError, VaultErrorKind, checked_env_name,
 };
 
 const MAX_TAG_BYTES: usize = 64;
@@ -144,6 +145,10 @@ pub struct DeclarationForm {
     pub reversibility: Reversibility,
     /// The item has a stored declaration.
     pub stored: bool,
+    /// The provider ID (schema 8). The command analysis gets its known hosts.
+    pub provider: Option<String>,
+    /// The suggestion from the item (goal item B4). `None` when no signal matched.
+    pub suggestion: Option<Suggestion>,
 }
 
 impl Default for DeclarationForm {
@@ -151,11 +156,13 @@ impl Default for DeclarationForm {
     fn default() -> Self {
         Self {
             project: String::new(),
-            environment: Environment::Production,
-            risk: RiskLevel::High,
-            scope: Scope::Admin,
-            reversibility: Reversibility::Irreversible,
+            environment: providers::DEFAULT_ENVIRONMENT,
+            risk: providers::DEFAULT_RISK,
+            scope: providers::DEFAULT_SCOPE,
+            reversibility: providers::DEFAULT_REVERSIBILITY,
             stored: false,
+            provider: None,
+            suggestion: None,
         }
     }
 }
@@ -169,7 +176,44 @@ impl DeclarationForm {
             scope: d.scope,
             reversibility: d.reversibility,
             stored: true,
+            ..Self::default()
         })
+    }
+
+    /// The form of one item (goal item B4). A stored declaration fills the form, and the
+    /// suggestion stays as a hint. Without one, each suggested field fills the form, and
+    /// a field without a suggestion keeps the most sensitive default. The project name
+    /// comes from the project of the item.
+    pub fn for_item(
+        stored: Option<(Declaration, Option<String>)>,
+        suggestion: Suggestion,
+        project: &str,
+    ) -> Self {
+        let suggestion = (!suggestion.is_empty()).then_some(suggestion);
+        if let Some((declaration, provider)) = stored {
+            return Self {
+                provider,
+                suggestion,
+                ..Self::from_declaration(Some(declaration))
+            };
+        }
+        let Some(suggestion) = suggestion else {
+            return Self {
+                project: project.trim().to_owned(),
+                ..Self::default()
+            };
+        };
+        let form = suggestion.prefilled();
+        Self {
+            project: project.trim().to_owned(),
+            environment: form.environment,
+            risk: form.risk,
+            scope: form.scope,
+            reversibility: form.reversibility,
+            stored: false,
+            provider: form.provider,
+            suggestion: Some(suggestion),
+        }
     }
 
     pub fn to_declaration(&self) -> Declaration {
@@ -901,8 +945,31 @@ impl OwnerSession {
         self.unlocked()?.declaration(item_id).map_err(map_err)
     }
 
-    /// Store the owner declaration of an item (ADR 0008). The declaration is a rule
-    /// input for the bouncer, so it needs a fresh owner check (goal item A4).
+    /// The declaration form of an item: the stored declaration, or the suggestion from
+    /// the item (goal item B4). The detection runs here, in the owner flow, with the
+    /// vault unlocked.
+    pub fn declaration_form(&self, item_id: u64) -> ModelResult<DeclarationForm> {
+        let (_, project) = self.service_project(item_id)?;
+        let vault = self.unlocked()?;
+        let suggestion = vault.suggest_declaration(item_id).map_err(map_err)?;
+        let stored = match vault.declaration(item_id).map_err(map_err)? {
+            Some(declaration) => Some((
+                declaration,
+                vault.declaration_provider(item_id).map_err(map_err)?,
+            )),
+            None => None,
+        };
+        Ok(DeclarationForm::for_item(stored, suggestion, &project))
+    }
+
+    /// The share of suggested declarations that the owner saved without a change.
+    pub fn suggestion_stats(&self) -> ModelResult<SuggestionStats> {
+        self.unlocked()?.suggestion_stats().map_err(map_err)
+    }
+
+    /// Store the owner declaration of an item and its provider (ADR 0008, goal item
+    /// B4). The declaration is a rule input for the bouncer, so it needs a fresh owner
+    /// check (goal item A4). The first save with a suggestion records its outcome.
     pub fn set_declaration(
         &mut self,
         item_id: u64,
@@ -912,8 +979,22 @@ impl OwnerSession {
         if form.project.trim().is_empty() {
             return Err(fail("invalid_input", "Type the project name."));
         }
+        if form
+            .provider
+            .as_deref()
+            .is_some_and(|id| providers::find(id).is_none())
+        {
+            return Err(fail("invalid_input", "The provider is not known."));
+        }
+        let suggested = form.suggestion.as_ref().map(Suggestion::prefilled);
         self.unlocked_for(proof, &OwnerAction::ChangeItemRules { item_id })?
-            .set_declaration(item_id, &form.to_declaration())
+            .save_declaration(
+                item_id,
+                &form.to_declaration(),
+                form.provider.as_deref(),
+                suggested.as_ref(),
+            )
+            .map(|_| ())
             .map_err(map_err)
     }
 
