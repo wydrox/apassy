@@ -9,7 +9,7 @@ This document does not open the real-secret gate.
 ## What this is
 
 The Rust crate forbids unsafe code. Touch ID, the data protection keychain, and native notifications need Apple APIs.
-A small Swift helper calls these APIs. The Rust module `apassy::native` starts the helper for each request.
+A small Swift helper and a Swift notifier call these APIs. The Rust module `apassy::native` starts the helper or the notifier for each request.
 The protocol is one JSON line in and one JSON line out.
 
 ## Bundle layout
@@ -20,19 +20,20 @@ The protocol is one JSON line in and one JSON line out.
 | --- | --- | --- | --- |
 | `MacOS/apassy` | Rust desktop app, main executable | `com.wydrox.apassy` | none |
 | `MacOS/apassy-mcp` | Rust MCP adapter for agents | `com.wydrox.apassy.mcp` | none |
-| `MacOS/apassy-helper` | Swift helper: `authenticate`, notifications | `com.wydrox.apassy.helper` | none |
+| `MacOS/apassy-helper` | Swift helper: `authenticate` | `com.wydrox.apassy.helper` | none |
 | `Helpers/ApassyKeychain.app` | the same Swift helper, in its own bundle: keychain commands | `com.wydrox.apassy.keychain` | keychain entitlements, only with a profile |
+| `Helpers/ApassyNotify.app` | Swift notifier (`native/ApassyNotify`), in its own bundle, display name "Apassy": notification commands | `com.wydrox.apassy.notify` (signing ID = bundle ID) | none |
 
 Each program uses the hardened runtime. The bundle ID `com.wydrox.apassy` matches the GitHub owner `wydrox`.
 The keychain access group is `<TEAM_ID>.com.wydrox.apassy`.
 
-The helpers answer only the signed Apassy app that contains them. See [Caller check](#caller-check).
+The helpers and the notifier answer only the signed Apassy app that contains them. See [Caller check](#caller-check).
 The agent profile denies the start, the read, and a change of each program in the bundle, except `apassy-mcp` and `apassy-hook` ([isolation.md](isolation.md), section 1).
 
-Why two copies of the helper:
+Why separate bundles:
 
 - AMFI permits the keychain entitlements only for the main executable of a bundle that has a matching `embedded.provisionprofile`. A second executable in `Contents/MacOS` does not get the profile of the app (evidence C1 below).
-- Notifications belong to the bundle of the process. The copy in `Contents/MacOS` belongs to `com.wydrox.apassy`. A notification click then opens Apassy, not a background helper.
+- usernotificationsd accepts a notification client only when the signing identifier of the process is the bundle ID of its bundle. `apassy-helper` has the signing ID `com.wydrox.apassy.helper` in the bundle `com.wydrox.apassy`, so macOS refuses all its notification requests. The notifier is the main program of its own bundle, with the signing ID `com.wydrox.apassy.notify`. See [Notification research](#notification-research-n1).
 
 The `apassy` program does not need a restricted entitlement. So the main app does not need a profile.
 
@@ -47,11 +48,11 @@ The script:
 1. Selects the only valid "Apple Development" identity, or `APASSY_SIGN_IDENTITY`. It refuses ad hoc signing.
 2. Finds a profile for the keychain helper: `APASSY_KEYCHAIN_PROFILE`, or a valid profile in the Xcode profile folders. It checks the platform, team, App ID, expiry, keychain group, this Mac, and the signing certificate.
 3. Runs `cargo build --release --locked --features desktop,vault --bin apassy --bin apassy-mcp --bin apassy-sandbox`. `apassy-sandbox` does not go into the bundle. Step 8 uses it.
-4. Builds the helper with `xcrun --sdk macosx swiftc -O -swift-version 5 -warnings-as-errors -target arm64-apple-macos15.0`, without `-D APASSY_HELPER_DEV`. It fails when the helper contains the development override `APASSY_HELPER_DEV_ANY_CALLER`. It builds the caller probe (`native/ApassyCallerProbe/main.swift`) in a temporary directory. The probe never goes into the bundle.
-5. Assembles the bundle in `target/app-stage`, signs from the inside out, and verifies with `codesign --verify --deep --strict`.
-6. Checks the hardened runtime flag, the team, and the entitlements of each program. `apassy`, `apassy-mcp`, and `apassy-helper` must have no entitlements.
-7. Runs the signed programs: `apassy --smoke-test`, `apassy-mcp --version`, and the caller checks of the helpers (see [Caller check](#caller-check)).
-8. Runs the agent profile with the signed bundle: the helpers and the main program do not start, `apassy-mcp` starts, a copy of the keychain helper fails, and a copy that exists outside the bundle refuses the caller.
+4. Builds the helper with `xcrun --sdk macosx swiftc -O -swift-version 5 -warnings-as-errors -target arm64-apple-macos15.0`, without `-D APASSY_HELPER_DEV`. It builds the notifier the same way from `native/ApassyNotify/*.swift` and the shared `Protocol.swift` and `Caller.swift`. It fails when the helper or the notifier contains the development override `APASSY_HELPER_DEV_ANY_CALLER`. It builds the caller probe (`native/ApassyCallerProbe/main.swift`) in a temporary directory. The probe never goes into the bundle.
+5. Assembles the bundle in `target/app-stage`, signs from the inside out, and verifies with `codesign --verify --deep --strict`. The notifier gets `packaging/ApassyNotify-Info.plist` and a bundle-level signature, so its signing identifier is its bundle ID.
+6. Checks the hardened runtime flag, the team, and the entitlements of each of the 5 programs. `apassy`, `apassy-mcp`, `apassy-helper`, and the notifier must have no entitlements. The signing identifier of the notifier must be `com.wydrox.apassy.notify`.
+7. Runs the signed programs: `apassy --smoke-test`, `apassy-mcp --version`, and the caller checks of the helpers and the notifier (see [Caller check](#caller-check)). The notifier requests of the script never ask for permission and never post.
+8. Runs the agent profile with the signed bundle: the helpers, the notifier, and the main program do not start, `open` of the notifier bundle fails, `apassy-mcp` starts, a copy of the keychain helper fails, and a copy that exists outside the bundle refuses the caller.
 9. Moves the bundle to `target/Apassy.app`.
 
 Each run starts from an empty bundle. A failed step stops the script with `build-app: FAILED:` and a non-zero exit.
@@ -146,7 +147,7 @@ build-app: FAILED: APASSY_KEYCHAIN_PROFILE is not usable: the App ID is "7S3F976
 
 ## Helper protocol
 
-The helper reads JSON lines on stdin. It writes exactly one JSON line on stdout for each request. It skips empty lines and exits at end of input.
+The helper and the notifier read JSON lines on stdin. They write exactly one JSON line on stdout for each request. They skip empty lines and exit at end of input.
 It takes no arguments. It writes nothing to stderr during normal work.
 A request is an object with `cmd` and the fields of the command. The largest request is 64 KiB.
 Before each request, the helper checks its caller ([Caller check](#caller-check)). When the caller is not allowed, each request, also `ping` and a malformed request, gets `caller_not_allowed`.
@@ -156,18 +157,23 @@ A message is English text for logs. It never contains a secret. Code must use `e
 
 | Command | Request fields | Success fields | Runs in | Prompt |
 | --- | --- | --- | --- | --- |
-| `ping` | none | `protocol` (1), `helper_version`, `bundle_id` (or null), `keychain_access_group` (or null), `biometry` (`available` or an error code) | both | no |
+| `ping` | none | `protocol` (1), `helper_version`, `bundle_id` (or null); the helpers also `keychain_access_group` (or null) and `biometry` (`available` or an error code) | all | no |
 | `authenticate` | `reason` (1 to 200 characters) | none | `apassy-helper` | Touch ID |
 | `keychain_store` | `account`, `secret_b64` (standard base64, 1 to 4096 bytes) | `access_group` | keychain helper | no |
 | `keychain_read` | `account`, `reason` | `secret_b64` | keychain helper | Touch ID |
 | `keychain_delete` | `account` | `deleted` (bool) | keychain helper | no |
 | `keychain_exists` | `account` | `exists`, `biometry_changed` (bool) | keychain helper | no |
-| `notify` | `id`, `title` (1 to 80), `body` (0 to 200) | `delivered` (bool) and the status fields | `apassy-helper` | permission, first use only |
-| `notify_status` | none | `authorization`, `alert`, `alert_style`, `notification_center`, `lock_screen`, `sound` | `apassy-helper` | no |
-| `notify_authorize` | none | `granted` and the status fields | `apassy-helper` | permission |
+| `notify` | `id`, `event` (`approval_waiting` or `request_blocked`), `agent` (1 to 40 characters). No other field. | `delivered` (bool) and the status fields | notifier | never |
+| `notify_status` | none | `authorization`, `alert`, `alert_style`, `notification_center`, `lock_screen`, `sound` | notifier | no |
+| `notify_authorize` | none | `granted`, `detail` (when the owner did not answer), and the status fields | notifier | permission, at most 120 s |
+| `preview` | `event`, `agent` | `title`, `body`: the text that `notify` shows. Posts nothing. | notifier | no |
 
 An `account` or an `id` has 1 to 64 characters from `A-Z`, `a-z`, `0-9`, `.`, `_`, `-`.
 Text fields have no control characters.
+The helpers answer each notification command with `notifications_unavailable`. The notifier answers only `ping` and the notification commands.
+
+`notify` never asks for permission. When the owner has not decided, it returns `notifications_denied` with "The owner has not allowed notifications for Apassy yet". Reason: an unanswered prompt ends as "denied" (see [Notification research](#notification-research-n1)).
+`notify_authorize` returns `failed` when macOS refuses the request without a prompt, for example after a denial.
 `authorization` is `not_determined`, `denied`, `authorized`, or `provisional`. A setting is `enabled`, `disabled`, or `not_supported`. `alert_style` is `none`, `banner`, or `alert`.
 
 Error codes:
@@ -184,9 +190,9 @@ Error codes:
 | `keychain_unavailable` | No profile or entitlement for the keychain helper | Touch ID confirms actions only. Unlock needs the passphrase. |
 | `not_found` | No unlock key in the keychain | Unlock with the passphrase |
 | `biometry_changed` | The fingerprints changed after setup | Unlock with the passphrase. Delete the item. Offer Touch ID setup again. |
-| `notifications_unavailable` | The helper is not in an app bundle | Delivery failure. Keep the event in the inbox. |
-| `notifications_denied` | Notifications are not allowed | Delivery failure. Keep the event in the inbox. |
-| `caller_not_allowed` | The parent process of the helper is not the signed Apassy app that contains the helper | Do not retry. Touch ID, the keychain, and notifications are not available to this caller. In the app, this means a broken or changed bundle. |
+| `notifications_unavailable` | The notifier is not inside `ApassyNotify.app`, or a helper got a notification command | Delivery failure. Keep the event in the inbox. |
+| `notifications_denied` | Notifications are not allowed, or the owner has not decided yet | Delivery failure. Keep the event in the inbox. Read `notify_status` for the next step. |
+| `caller_not_allowed` | The parent process of the helper or the notifier is not the signed Apassy app that contains it | Do not retry. Touch ID, the keychain, and notifications are not available to this caller. In the app, this means a broken or changed bundle. |
 | `internal` | Unexpected helper error | Show the message |
 
 Touch ID policy: `authenticate` uses `LAPolicy.deviceOwnerAuthenticationWithBiometrics`. The macOS login password is not a fallback. The fallback button is "Use Apassy Passphrase" and gives `fallback`.
@@ -213,7 +219,7 @@ Before each request, the helper checks its parent process:
    ```
 
    `<TEAM_ID>` is the team of the helper itself: `SecCodeCopySelf`, `SecCodeCheckValidity`, `SecCodeCopyStaticCode`, and `SecCodeCopySigningInformation` with `kSecCSSigningInformation` (`kSecCodeInfoTeamIdentifier`). A helper without a team signature (unsigned or ad hoc) refuses every request.
-4. The parent is the app bundle that contains the helper. The helper compares `SecCodeCopyPath` of the parent with its own bundle: its main executable (`kSecCodeInfoMainExecutable`, resolved with `realpath`) without `/Contents/MacOS/apassy-helper` or `/Contents/Helpers/ApassyKeychain.app/Contents/MacOS/ApassyKeychain`. So a program signed as `com.wydrox.apassy` in another place does not pass.
+4. The parent is the app bundle that contains the helper. The helper compares `SecCodeCopyPath` of the parent with its own bundle: its main executable (`kSecCodeInfoMainExecutable`, resolved with `realpath`) without `/Contents/MacOS/apassy-helper`, `/Contents/Helpers/ApassyKeychain.app/Contents/MacOS/ApassyKeychain`, or `/Contents/Helpers/ApassyNotify.app/Contents/MacOS/ApassyNotify`. So a program signed as `com.wydrox.apassy` in another place does not pass.
 5. After the check, `getppid()` is the same, and the audit token of the parent is the same.
 
 A failed step gives `caller_not_allowed` with a message for logs. The helper does not parse the request.
@@ -224,8 +230,8 @@ Measured on this Mac: 20 starts and `ping` requests through a signed parent took
 
 A helper built with `-D APASSY_HELPER_DEV` skips the check when its environment has `APASSY_HELPER_DEV_ANY_CALLER=1`.
 Only the tests use this flag: `tests/native_helper.rs` builds the helper with it, and a small script sets the variable for the protocol checks. The isolation tests build the helper with the flag, but never set the variable.
-`scripts/build-app.sh` does not use the flag. The release helper does not contain the override code or the variable name. The script and the test `a_helper_built_without_the_dev_flag_ignores_the_override` check this.
-To run the debug desktop app with a helper outside the bundle, build the helper with `-D APASSY_HELPER_DEV`, and set `APASSY_NATIVE_HELPER`, `APASSY_NATIVE_KEYCHAIN_HELPER`, and `APASSY_HELPER_DEV_ANY_CALLER=1` in the environment of the app. The app passes its environment to the helper.
+`scripts/build-app.sh` does not use the flag. The release helper and the release notifier do not contain the override code or the variable name. The script and the tests `a_helper_built_without_the_dev_flag_ignores_the_override` and `a_notifier_built_without_the_dev_flag_ignores_the_override` check this.
+To run the debug desktop app with a helper outside the bundle, build the helper with `-D APASSY_HELPER_DEV`, and set `APASSY_NATIVE_HELPER`, `APASSY_NATIVE_KEYCHAIN_HELPER`, `APASSY_NATIVE_NOTIFIER`, and `APASSY_HELPER_DEV_ANY_CALLER=1` in the environment of the app. The app passes its environment to the helper. A notifier outside `ApassyNotify.app` answers each notification command with `notifications_unavailable`.
 
 ### Measured results
 
@@ -235,13 +241,18 @@ To run the debug desktop app with a helper outside the bundle, build the helper 
 | --- | --- | --- |
 | the shell of the script | `apassy-helper`, the keychain helper | `caller_not_allowed`: "The parent process is not the signed Apassy app (-67050)." `-67050` is `errSecCSReqFailed`. |
 | the shell, with `APASSY_HELPER_DEV_ANY_CALLER=1` | `apassy-helper` | `caller_not_allowed` |
-| the probe, signed as `com.wydrox.apassy`, main program of the copy that contains the helper | `apassy-helper` | `ping` with `"bundle_id":"com.wydrox.apassy"`, `notify_status`, and `invalid_request` for an unknown command |
+| the probe, signed as `com.wydrox.apassy`, main program of the copy that contains the helper | `apassy-helper` | `ping` with `"bundle_id":"com.wydrox.apassy"`, `notifications_unavailable` for `notify_status`, and `invalid_request` for an unknown command |
 | the same probe | the keychain helper of the copy | `ping` with `"bundle_id":"com.wydrox.apassy.keychain"`, and `keychain_unavailable` (no provisioning profile) |
-| the same probe | a helper of another bundle (the staged `Apassy.app` in the script, `target/Apassy.app` in a manual run) | `caller_not_allowed`: "The parent process is not the Apassy app that contains this helper." |
-| a probe signed as `com.wydrox.apassy.probe`, in its own copy | both helpers of that copy | `caller_not_allowed` (-67050) |
+| the same probe | the notifier of the copy | `ping` with `"bundle_id":"com.wydrox.apassy.notify"`, `notify_status` with an `authorization` value, `preview` with the fixed "Approval waiting" text, and `invalid_request` for a `notify` with `title` and `body` fields and for an unknown command |
+| the same probe | a helper or the notifier of another bundle (the staged `Apassy.app` in the script, `target/Apassy.app` in a manual run) | `caller_not_allowed`: "The parent process is not the Apassy app that contains this helper." |
+| a probe signed as `com.wydrox.apassy.probe`, in its own copy | both helpers and the notifier of that copy | `caller_not_allowed` (-67050) |
+| the shell of the script, also with `APASSY_HELPER_DEV_ANY_CALLER=1` | the notifier | `caller_not_allowed` |
 | launchd: `open -W -n --stdin req --stdout out <keychain helper app>` outside any sandbox (manual) | the keychain helper | `caller_not_allowed`: "launchd started the helper. Only Apassy.app can start it." |
+| the real `target/Apassy.app/Contents/MacOS/apassy --notify-check status` (manual, 2026-09-26) | the notifier of `target/Apassy.app` | `status authorization=not_determined ...`: the notifier accepted the real signed app as its parent |
 
-The desktop app starts the helpers as their parent from `Contents/MacOS/apassy`. The probe stands for it: the same bundle layout, bundle ID, team, and signature. The agent did not watch a helper start from the real desktop window.
+The desktop app starts the helpers and the notifier as their parent from `Contents/MacOS/apassy`. The probe stands for it: the same bundle layout, bundle ID, team, and signature. `apassy --notify-check` uses the real program and the real Rust client. The agent did not watch a helper start from the real desktop window.
+
+When LaunchServices starts the notifier (launchd is the parent), for example after a click on a notification, the notifier serves no request. It opens the Apassy app that contains it (`NSWorkspace.openApplication`) and exits.
 
 ### Limits of the caller check
 
@@ -253,10 +264,12 @@ The desktop app starts the helpers as their parent from `Contents/MacOS/apassy`.
 
 `apassy::native::NativeHelper`:
 
-- `NativeHelper::locate()` finds the helpers next to the running `apassy` in the bundle. Debug builds first read `APASSY_NATIVE_HELPER` and `APASSY_NATIVE_KEYCHAIN_HELPER`. Release builds ignore these variables, so a process that sets the app environment cannot replace Touch ID with a fake helper.
-- `NativeHelper::with_paths(helper, keychain_helper)` is for tests.
-- Methods: `ping`, `ping_keychain`, `authenticate`, `keychain_store`, `keychain_read`, `keychain_delete`, `keychain_exists`, `notify`, `notify_status`, `notify_authorize`. Keychain methods use the keychain helper. The other methods use `apassy-helper`.
+- `NativeHelper::locate()` finds the helpers and the notifier next to the running `apassy` in the bundle. Debug builds first read `APASSY_NATIVE_HELPER`, `APASSY_NATIVE_KEYCHAIN_HELPER`, and `APASSY_NATIVE_NOTIFIER`. Release builds ignore these variables, so a process that sets the app environment cannot replace Touch ID with a fake helper.
+- `NativeHelper::with_paths(helper, keychain_helper)` is for tests. It uses `helper` as the notifier too. `with_notifier(path)` sets the notifier.
+- Methods: `ping`, `ping_keychain`, `authenticate`, `keychain_store`, `keychain_read`, `keychain_delete`, `keychain_exists`, `notify`, `notify_status`, `notify_authorize`. Keychain methods use the keychain helper. `notify`, `notify_status`, and `notify_authorize` use the notifier (`Contents/Helpers/ApassyNotify.app/Contents/MacOS/ApassyNotify`). `ping` and `authenticate` use `apassy-helper`.
+- `notify` sends `id`, `event`, and `agent`. `NotificationStatus` has the same fields as before.
 - Time limits: 10 s for quick commands, 40 s for `notify`, 180 s for commands that wait for the owner. After the limit, the client stops the helper and returns `NativeError::Timeout`.
+- `apassy --notify-check status|authorize|post` (`src/native/check.rs`) runs the notifier through the real signed program. `scripts/n1-check.sh` uses it. `post` sends the two fixed templates with the agent name `n1-check`.
 - Errors: `NativeError::Helper { code: HelperErrorCode, message }` for a helper error. `HelperErrorCode::CallerNotAllowed` is `caller_not_allowed`. Other variants: `InvalidArgument` (the client did not start the helper), `HelperMissing`, `Io`, `Timeout`, `Protocol`. The test `swift_and_rust_error_codes_match` compares the Swift and the Rust lists.
 - `KeychainSecret` holds the secret bytes. `Debug` prints `KeychainSecret([redacted])`. It has no `Clone`. Drop overwrites the bytes.
 - The client overwrites its request and response buffers after use. This is best effort. Copies in the helper, the allocator, swap, and crash dumps stay possible.
@@ -275,10 +288,54 @@ A preview shows the agent name and the event type only. It never shows the comma
 | `RequestBlocked` | Request blocked | Apassy blocked a request from agent "NAME". |
 
 The agent name has 1 to 40 characters and no control characters.
-The helper cannot check the meaning of a title or a body. It only limits the length and refuses control characters. A caller that uses the raw protocol must follow the rule.
+The notifier builds the title and the body itself, from the same fixed templates (`native/ApassyNotify/Notify.swift`, `preview`). A request has only `id`, `event`, and `agent`. The notifier refuses a request with any other field, for example `title`, `body`, or `command` (`invalid_request`). So also a caller that uses the raw protocol cannot put free text into a notification. The test `swift_and_rust_previews_match` compares the Swift and the Rust text.
 A notification only tells the owner about an event. It is not an approval (N4).
 
 When Apassy is the front app, macOS can put the notification in Notification Center without a banner.
+
+## Notification research (N1)
+
+Date: 2026-09-26 and 2026-09-27. Host: this Mac, macOS 27.0 (26A428).
+Question: which mechanism gets a permission prompt and a delivered notification? The first design posted from `Contents/MacOS/apassy-helper`. With a signed parent, `notify_status` gave `not_determined`, and `notify_authorize` failed at once with `UNErrorDomain error 1`, without a prompt. A nested bundle started as a child failed with "Notifications are not allowed for this application".
+Hypothesis of the orchestrator: macOS needs a LaunchServices start of the program. The measurements refute this. macOS needs two other things.
+
+Method: scratch bundles in `target/n1-lab`, signed with the Apple Development identity (SHA-1 `392C5116…`) and the hardened runtime. A Swift probe called `UNUserNotificationCenter`. Permission requests used `.provisional`, which never shows a prompt, until the final design. The reasons come from the unified log of `usernotificationsd` and `usernoted`. After the research, the agent unregistered the scratch bundles (`lsregister -u`) and deleted them.
+
+| # | Mechanism | Prompt? | Delivered? | Notes |
+| --- | --- | --- | --- | --- |
+| R1 | Second program in `Contents/MacOS`, signing ID different from the bundle ID (the first design: `apassy-helper` = `com.wydrox.apassy.helper` in `com.wydrox.apassy`) | No. The request fails in 1 to 3 ms with `UNErrorDomain 1`. | No. `add` fails with `UNErrorDomain 1`. The status stays `not_determined`, also after the bundle has a permission. | usernotificationsd: "Entitlement 'com.apple.private.usernotifications.bundle-identifiers' required to request user notifications". This is a private Apple entitlement. |
+| R2 | Second program in `Contents/MacOS`, signed with the bundle ID as its signing ID | Provisional only | Yes, listed in Notification Center after 13 ms | Works. Not selected: a helper with the identifier `com.wydrox.apassy` weakens the caller check, which trusts that identifier. |
+| R3 | Main program of a nested bundle, direct child, bundle not known to LaunchServices | No. Fails at once: "Notifications are not allowed for this application". | No | usernoted: `LSCopyApplicationURLsForBundleIdentifier` returns `-10814` (`kLSApplicationNotFoundErr`), then "Failed to find or validate client". |
+| R4 | The same, after `lsregister -f` of the nested bundle | Provisional granted in 6.7 ms | Not tested | A LaunchServices registration is sufficient. No LaunchServices start. |
+| R5 | The same, with an AppKit check-in (`NSApplication.shared`, `setActivationPolicy(.prohibited)`, `finishLaunching`) before the first use of `UNUserNotificationCenter`, direct child | Provisional granted | Yes, listed after 10 to 17 ms | The check-in registers the bundle. The registration stays: later direct starts work without the check-in. The check-in adds about 30 ms (66 to 86 ms per process, against 32 to 39 ms). |
+| R6 | (a) LaunchServices start: `open -g -j -n --stdout FILE -a <nested bundle> --args …`, parent launchd | Provisional granted in 13.8 ms | Not tested | `open` took about 120 ms. `open -W` did not wait: "Unable to block on application". A caller check by parent is not possible here. |
+| R7 | (b) Main program of the app bundle | Provisional granted, after the bundle was known | Yes | The Rust app cannot call `UserNotifications` without unsafe code or a new crate. |
+| R8 | (c) `.provisional` | Never a prompt | Quiet delivery to Notification Center, listed after 10 to 17 ms | `alert_style` is `none`: no banner. Not sufficient for N1. |
+| R9 | Final notifier, first build: `UNUserNotificationCenter.current()` before the AppKit check-in | No. `notify_authorize` answered after 124 ms. | Not tested | usernoted looked up the client at the first connection, before the check-in, and failed with `-10814`. The connection kept the failure. |
+| R10 | Final notifier, check-in first, real permission request (`.alert`, `.sound`) through `apassy --notify-check authorize` | Yes. usernoted, 2026-09-26 23:57:13.700: "Sending request for permission for com.wydrox.apassy.notify with path …/target/Apassy.app/Contents/Helpers/ApassyNotify.app". The request blocked for 120 s. | The owner did not answer | At 120 s the notifier stopped waiting and exited. usernoted then removed the prompt (`fromUserAction: false`). The permission was `denied`. The log has no "Authorization set" event for Apassy. |
+| R11 | A new real permission request after R10 | No. Fails in about 1 s: `UNErrorDomain 1`, "Notifications are not allowed for this application". | No | After a denial, also an unanswered prompt, only System Settings can turn the notifications on. |
+
+Findings:
+
+1. The signing identifier of the process must be the bundle ID of its bundle (R1, R2).
+2. LaunchServices must know the bundle ID before the process connects to the notification center (R3 to R5, R9). A registration is sufficient. A LaunchServices start is not necessary (R6 is not better than R5).
+3. macOS shows the prompt only while the requesting process waits. An unanswered prompt ends as `denied`, and macOS does not ask again (R10, R11).
+
+### Chosen design
+
+- `Contents/Helpers/ApassyNotify.app`: the notifier is the main program of its own bundle. Bundle ID and signing ID `com.wydrox.apassy.notify`, display name "Apassy", `LSUIElement`. No entitlements. `native/ApassyNotify/*.swift`, with the shared `Protocol.swift` and `Caller.swift`.
+- The Apassy app starts the notifier as its child, as it starts the keychain helper. Before `notify_authorize` and `notify`, the notifier does the AppKit check-in, and then it gets the notification center (R5, R9).
+- `notify` never asks for permission. Only the "Allow notifications" button asks, with a 120 s prompt. After a denial, the Inbox card shows "Open notification settings". It opens `x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=com.wydrox.apassy.notify`. Measured: System Settings opened the Notifications pane (`newSelection: 'com.apple.settings.notifications'`). The agent did not check that the pane selects the Apassy entry.
+
+### Guard
+
+A LaunchServices start (R6) would have launchd as the parent, so the parent check could not apply. The chosen design does not need that start. So the notifier keeps the guard of the helpers:
+
+- Before each request, the notifier checks its parent by audit token: the signed Apassy app (`identifier "com.wydrox.apassy"`, the team of the notifier) that contains the notifier. See [Caller check](#caller-check). Any other parent gets `caller_not_allowed`, also for `ping`.
+- When launchd is the parent (a LaunchServices start, for example a click on a notification), the notifier serves no request. It opens the Apassy app that contains it and exits.
+- The notifier posts only the fixed N2 templates. It takes the event type and the agent name, and it refuses other fields.
+- The agent profile denies the start and each read of the programs in the bundle, and `lsopen`. Tests: `apassy_programs_cannot_start_in_profile` (the notifier: direct start, from a shell pipe, with the override variable), `apassy_programs_cannot_be_read_copied_linked_or_changed_in_profile` (copy of the notifier bundle), `notifier_bundle_cannot_be_opened_in_profile` (`open` of the path and `open -b` of a registered bundle ID fail in the profile; the same `open` outside the profile starts the bundle). `scripts/build-app.sh` checks the signed notifier the same way.
+- The Keychain and Touch ID helper did not change.
 
 ## Desktop integration
 
@@ -477,13 +534,48 @@ ok: keychain helper copy in the agent profile refuses the caller, line 2
 
 Research runs before the code (scratch bundle signed with the Apple Development identity and the hardened runtime): `task_name_for_pid` and `task_info(TASK_AUDIT_TOKEN)` for the parent returned `KERN_SUCCESS` from a signed helper with the hardened runtime. `SecCodeCopyGuestWithAttributes` with the audit token returned `0`. For the signed parent, `SecCodeCopyPath` gave the bundle directory `.../Apassy.app`, and `kSecCodeInfoMainExecutable` gave `.../Apassy.app/Contents/MacOS/apassy`. For `apassy-helper`, `SecCodeCopySelf` gave the helper file itself, not the app bundle. For the keychain helper, it gave `ApassyKeychain.app`. `kSecCodeInfoTeamIdentifier` of both helpers was `7S3F9767BM`. With `/bin/bash` as the parent, `SecCodeCheckValidityWithErrors` returned `-67050`.
 
+### Checks for the notifier (N1)
+
+Worktree branch of the notifier worker, after a fast-forward to `goal-v1` at `de28ce2`. All commands ran from the repository root.
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt --check` | PASS |
+| `cargo clippy --locked --all-targets --features desktop,vault -- -D warnings` | PASS. No warnings. |
+| `cargo test --locked --features desktop,vault` | PASS. 391 passed, 0 failed, 14 ignored (the earlier tests that need the network, a live Laya model, a real host, or owner files). lib 153, `native_helper` 23, `notifications` 7, `isolation_profile` 19. |
+| `scripts/build-app.sh` | PASS, exit 0. 40 `ok:` lines. Hardened runtime on all 5 programs. `Identifier=com.wydrox.apassy.notify`. "Keychain: DISABLED (no provisioning profile)." |
+| `target/Apassy.app/Contents/MacOS/apassy --notify-check status` | `status authorization=denied alert=enabled alert_style=banner notification_center=enabled can_deliver=false` (after research R10) |
+
+New lines of `scripts/build-app.sh`:
+
+```
+ok: the notifier has no development caller override
+ok: the signing identifier of the notifier is its bundle ID
+Entitlements of apassy, apassy-mcp, apassy-helper, ApassyNotify.app: {}
+ok: notifier refuses the shell, line 1 .. line 3
+ok: notifier ignores APASSY_HELPER_DEV_ANY_CALLER
+ok: notifier with the signed parent, line 1 .. line 5
+ok: notifier refuses the signed parent of another bundle
+ok: notifier refuses a parent with another identifier
+ok: the agent profile denies the start of Contents/Helpers/ApassyNotify.app/Contents/MacOS/ApassyNotify
+ok: the agent profile denies open of Contents/Helpers/ApassyNotify.app
+```
+
+Earlier failures in this work, not counted as passes:
+
+- The first `scripts/n1-check.sh` run: `notify_authorize` answered after 124 ms with `not_determined` and no prompt (research R9). The notifier now does the check-in before its first use of the notification center, and a refusal without a prompt is the error `failed`.
+- The first version of `notifier_bundle_cannot_be_opened_in_profile` expected a LaunchServices error. `open` of the path failed earlier: "The file … does not exist", because the profile denies each read in the bundle. The test now also runs `open -b` of a registered bundle ID, which needs no read and fails at the `lsopen` denial.
+
 ## Not verified by the agent
 
 - A real Touch ID prompt. The keyboard is not paired, and a real prompt needs a finger.
 - `keychain_store` and `keychain_read` of an item with `.biometryCurrentSet`. They need a profile for the App ID and a paired Touch ID keyboard.
 - The invalid item after a fingerprint change.
-- The notification permission prompt, a delivered notification, and the 5-second limit of N1. They need a click on "Allow".
-- Notifications from a second executable in `Contents/MacOS`. `notify_status` works from it. If macOS does not show its notifications, move the notification commands into a nested bundle, as for the keychain.
+- A delivered banner from `ApassyNotify.app`, and the 5-second limit of N1 with the real notifier. The permission prompt showed (R10), but nobody answered it. The permission is now `denied`. The owner turns it on in System Settings and runs `scripts/n1-check.sh` (owner step 2, item 6).
+- That the deep link `x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=com.wydrox.apassy.notify` selects the Apassy entry. The log shows that it opens the Notifications pane.
+- A click on an Apassy notification. The notifier then starts through LaunchServices and opens Apassy. The agent did not click a notification.
+- A prompt from the "Allow notifications" button in the real desktop window. `apassy --notify-check authorize` uses the same client call and the same notifier.
+- Whether the four scratch bundle IDs of the research (`com.wydrox.apassy.n1lab`, `.n1lab.notify`, `.n1lab.x1`, `.n1lab.x2`, all with a provisional permission) still show in System Settings > Notifications. The bundles are unregistered and deleted. The usernoted store is protected, so the agent cannot read it.
 - The desktop flows with the real helper: Touch ID unlock, the owner check with a real finger, and a real banner from the app. The tests use a fake helper with the same protocol. Section 3 of the owner steps has the checks.
 
 ## Owner steps
@@ -528,16 +620,15 @@ H=H; KC=KC
 ```
 
 In the steps, `| $H` and `| $KC` then run the helper through the signed parent. After the checks, run `rm -rf "$P"`.
-The copy has the bundle ID `com.wydrox.apassy` at another path. The notification steps 6 to 8 were written for `target/Apassy.app`. The agent did not check them with the copy.
+The notification steps 6 and 7 use `target/Apassy.app` itself, not the copy. The copy has the same notifier bundle ID at another path.
 
 1. Touch ID confirmation (A4). Run `printf '%s\n' '{"cmd":"authenticate","reason":"confirm a manual check"}' | $H`. Touch the sensor. Expect `{"ok":true}`. Run it again and press Cancel. Expect `cancelled`. Run it again. Touch the sensor with a finger that is not enrolled, then select "Use Apassy Passphrase". Expect `fallback`.
 2. Store and read (A3). Run `printf '%s\n' '{"cmd":"keychain_store","account":"manual-check","secret_b64":"bWFudWFsLWNoZWNr"}' '{"cmd":"keychain_read","account":"manual-check","reason":"read a manual check value"}' | $KC`. Touch the sensor. Expect `{"access_group":"<TEAM_ID>.com.wydrox.apassy","ok":true}` and `"secret_b64":"bWFudWFsLWNoZWNr"`.
 3. Other process. Run `security find-generic-password -s com.wydrox.apassy.vault-unlock`. Expect "The specified item could not be found". The login keychain does not show the item.
 4. Fingerprint change (A3). Add a fingerprint in System Settings. Run `printf '%s\n' '{"cmd":"keychain_exists","account":"manual-check"}' '{"cmd":"keychain_read","account":"manual-check","reason":"read a manual check value"}' | $KC`. Expect `"biometry_changed":true` and the error `biometry_changed`, with no prompt. Remove the new fingerprint if you do not need it.
 5. Delete (A3). Run `printf '%s\n' '{"cmd":"keychain_delete","account":"manual-check"}' '{"cmd":"keychain_exists","account":"manual-check"}' | $KC`. Expect `"deleted":true`, then `"exists":false`.
-6. Notification permission (N1). Run `open target/Apassy.app` once, then quit it. This registers the bundle. Run `printf '%s\n' '{"cmd":"notify_authorize"}' | $H`. Click "Allow". Expect `"authorization":"authorized"`.
-7. Notification time and preview (N1, N2). Run `time (printf '%s\n' '{"cmd":"notify","id":"manual-1","title":"Approval waiting","body":"Agent \"Manual\" waits for your decision. Open Apassy to review."}' | $H)`. Expect a banner from Apassy within 5 seconds and `"delivered":true`. The banner must show only the title and the body.
-8. Delivery failure (N3). Turn off notifications for Apassy in System Settings > Notifications. Run step 7 again. Expect `notifications_denied`, or `"delivered":false` with `alert` and `notification_center` set to `disabled`. Turn notifications on again.
+6. Notification permission, time, and preview (N1, N2). Run `scripts/n1-check.sh`. The permission is `denied` now (research R10), so the script opens System Settings > Notifications. Select "Apassy", turn on "Allow notifications", and select "Banners". The script waits up to 300 s, then posts "Approval waiting" and "Request blocked" for the agent "n1-check" and prints the time of each delivery. Expect two banners from "Apassy" with only that text, and `n1-check: PASS`. Record the table in [notifications.md](notifications.md).
+7. Delivery failure (N3). Turn off "Allow notifications" for Apassy in System Settings > Notifications. Run `target/Apassy.app/Contents/MacOS/apassy --notify-check post`. Expect `post error=notifications_denied` twice. Turn notifications on again.
 
 ### 3. App checks (A2, A3, A4)
 
