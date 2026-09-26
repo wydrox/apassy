@@ -391,9 +391,16 @@ fn real_commands_replay() {
         .ok()
         .and_then(|text| text.parse().ok())
         .unwrap_or(usize::MAX);
+    // Only commands up to `APASSY_REPLAY_MAX_CHARS` characters. A long script makes a
+    // long model state, and the model takes seconds for each.
+    let max_chars = std::env::var("APASSY_REPLAY_MAX_CHARS")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(usize::MAX);
     let env_names = vec!["SUPABASE_SERVICE_KEY".to_owned()];
     let requests: Vec<ReplayRequest> = rows
         .iter()
+        .filter(|row| row["cmd"].as_str().unwrap_or_default().chars().count() <= max_chars)
         .take(limit)
         .map(|row| {
             let line = row["cmd"].as_str().unwrap_or_default();

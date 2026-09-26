@@ -610,4 +610,124 @@ mod tests {
         );
         assert!(some[1].ends_with("You can promote it."));
     }
+
+    fn text_of(shape: &egui::Shape, out: &mut String) {
+        match shape {
+            egui::Shape::Text(text) => {
+                out.push_str(text.galley.text());
+                out.push('\n');
+            }
+            egui::Shape::Vec(nested) => nested.iter().for_each(|inner| text_of(inner, out)),
+            _ => {}
+        }
+    }
+
+    fn draw_view(app: &mut DesktopApp) -> String {
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::Vec2::new(1280.0, 3000.0),
+                )),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| draw(app, ui));
+            text.clear();
+            for clipped in &output.shapes {
+                text_of(&clipped.shape, &mut text);
+            }
+            output.drop_without_applying_deltas();
+        }
+        text
+    }
+
+    /// Goal item B10: the view shows the ask rate, an automatic decision with its
+    /// details, a pattern, the calibration, and the empty candidate slot.
+    #[test]
+    fn learning_view_shows_the_ask_rate_decisions_patterns_and_candidate_slot() {
+        use crate::broker::learning::now;
+        use crate::vault::{DecidedBy, DecisionEntry, LoggedDecision, PatternKey, RequestSource};
+
+        let dir = tempfile::TempDir::new().expect("dir");
+        let pass = "learning-view-pass";
+        let mut app = DesktopApp::new();
+        app.owner_ui
+            .session
+            .create_file(&dir.path().join("view.db"), pass)
+            .expect("create");
+        app.owner_ui.session.unlock(pass).expect("unlock");
+        let at = now();
+        {
+            let shared = app.owner_ui.session.shared_vault();
+            let mut guard = shared.lock().expect("vault");
+            let vault = guard.as_mut().expect("open");
+            let id = vault
+                .record_decision(&DecisionEntry {
+                    at,
+                    agent_id: 1,
+                    agent_name: "View agent".to_owned(),
+                    project_dir: "/work/app".to_owned(),
+                    cwd_rel: ".".to_owned(),
+                    items: vec![1],
+                    user_request: "Show the last commits.".to_owned(),
+                    user_request_source: RequestSource::Host,
+                    command: vec![
+                        "git".to_owned(),
+                        "log".to_owned(),
+                        "-n".to_owned(),
+                        "5".to_owned(),
+                    ],
+                    purpose: "List commits.".to_owned(),
+                    env_names: vec!["DEMO_KEY".to_owned()],
+                    declarations: vec![None],
+                    rule_flags: Vec::new(),
+                    known_safe: true,
+                    model_facts: vec![("task_match".to_owned(), 0.93)],
+                    pattern: "git log -n <number>".to_owned(),
+                    grant_asks: false,
+                    asked: false,
+                    decision: LoggedDecision::Allow,
+                    decided_by: DecidedBy::Model,
+                    remembered: false,
+                    policy: "apassy-bouncer-v4; task_match 0.80".to_owned(),
+                    note: "Model allowed.".to_owned(),
+                    instruction: String::new(),
+                })
+                .expect("decision");
+            app.learning.inspected = Some(id);
+            let key = PatternKey {
+                agent_id: 1,
+                project_dir: "/work/app".to_owned(),
+                items: vec![1],
+                policy: String::new(),
+                cwd_rel: ".".to_owned(),
+                template: "[]".to_owned(),
+            };
+            for _ in 0..3 {
+                vault
+                    .remember_approval(&key, "git log -n <number>", at)
+                    .expect("pattern");
+            }
+        }
+        let text = draw_view(&mut app);
+        for expected in [
+            "Ask rate over time",
+            "Automatic decisions",
+            "git log -n 5",
+            "Show the last commits. (source: host)",
+            "task_match 93%",
+            "Remembered patterns",
+            "git log -n <number>",
+            "Runs without a prompt",
+            "Active task_match level: 80% (default).",
+            "No candidate model.",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
+
+        app.owner_ui.session.lock().expect("lock");
+        assert!(draw_view(&mut app).contains("Unlock the vault to see learning."));
+    }
 }
