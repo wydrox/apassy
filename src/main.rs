@@ -33,7 +33,11 @@ fn main() -> eframe::Result {
             }
         }
     }
-    eprintln!("Unknown option. Permitted option: --smoke-test");
+    // Goal item N1: scripts/n1-check.sh runs the notifier through the signed app.
+    if args.len() == 2 && args[0] == "--notify-check" {
+        std::process::exit(apassy::native::check::run_notify_check(&args[1]));
+    }
+    eprintln!("Unknown option. Permitted options: --smoke-test, --notify-check STEP");
     std::process::exit(2);
 }
 

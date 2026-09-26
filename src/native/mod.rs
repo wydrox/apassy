@@ -6,13 +6,21 @@
 //! request line, and reads one JSON response line within a time limit. The
 //! protocol and the error codes are in `docs/operations/native-app.md`.
 //!
-//! The bundle has two copies of the helper:
-//! - `Contents/MacOS/apassy-helper` runs `authenticate` and the notification
-//!   commands. Notifications then belong to the `com.wydrox.apassy` bundle.
+//! The bundle has three native programs:
+//! - `Contents/MacOS/apassy-helper` runs `authenticate`.
 //! - `Contents/Helpers/ApassyKeychain.app/Contents/MacOS/ApassyKeychain` runs
-//!   the keychain commands. It has its own provisioning profile, because
-//!   macOS permits the keychain entitlements only for the main executable of
-//!   a bundle with a matching profile.
+//!   the keychain commands. It is a copy of `apassy-helper` with its own
+//!   provisioning profile, because macOS permits the keychain entitlements
+//!   only for the main executable of a bundle with a matching profile.
+//! - `Contents/Helpers/ApassyNotify.app/Contents/MacOS/ApassyNotify` (bundle
+//!   ID `com.wydrox.apassy.notify`, display name "Apassy") runs the
+//!   notification commands. macOS accepts a notification client only when
+//!   its signing identifier is the bundle ID of its app bundle, so the
+//!   notifier is the main program of its own bundle. The notifier builds the
+//!   text from fixed templates (goal item N2).
+//!
+//! The app starts each program as its child. Each program checks that its
+//! parent is the signed Apassy app that contains it.
 //!
 //! Secret handling: [`KeychainSecret`] has a redacted `Debug` and no
 //! `Clone`. The client overwrites its own request and response buffers after
@@ -20,6 +28,7 @@
 //! allocator, in swap, or in crash dumps.
 
 mod base64;
+pub mod check;
 
 use std::fmt;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -36,11 +45,17 @@ pub const PROTOCOL_VERSION: u64 = 1;
 pub const HELPER_ENV: &str = "APASSY_NATIVE_HELPER";
 /// Debug builds only: path of the keychain helper. Defaults to [`HELPER_ENV`].
 pub const KEYCHAIN_HELPER_ENV: &str = "APASSY_NATIVE_KEYCHAIN_HELPER";
+/// Debug builds only: path of the notifier. Defaults to [`HELPER_ENV`].
+pub const NOTIFIER_ENV: &str = "APASSY_NATIVE_NOTIFIER";
 /// File name of the helper next to the `apassy` executable.
 pub const HELPER_FILE: &str = "apassy-helper";
 /// Path of the keychain helper, relative to `Contents`.
 pub const KEYCHAIN_HELPER_FROM_CONTENTS: &str =
     "Helpers/ApassyKeychain.app/Contents/MacOS/ApassyKeychain";
+/// Path of the notifier, relative to `Contents`.
+pub const NOTIFIER_FROM_CONTENTS: &str = "Helpers/ApassyNotify.app/Contents/MacOS/ApassyNotify";
+/// Bundle ID of the notifier. The notifications and the permission belong to it.
+pub const NOTIFIER_BUNDLE_ID: &str = "com.wydrox.apassy.notify";
 /// Keychain service of the Touch ID unlock item. It matches `keychainService` in
 /// `native/ApassyHelper/Keychain.swift`.
 pub const KEYCHAIN_SERVICE: &str = "com.wydrox.apassy.vault-unlock";
@@ -83,7 +98,8 @@ pub enum HelperErrorCode {
     /// The fingerprints changed after setup. The item is not usable.
     /// Unlock with the passphrase, delete the item, and set up again.
     BiometryChanged,
-    /// The helper is not inside an app bundle.
+    /// The notifier is not inside `ApassyNotify.app`, or a program other than
+    /// the notifier got a notification command.
     NotificationsUnavailable,
     /// The owner did not allow notifications. The event stays in the inbox.
     NotificationsDenied,
@@ -338,12 +354,29 @@ pub enum NotificationEvent {
     RequestBlocked,
 }
 
+impl NotificationEvent {
+    /// The event name on the wire. It matches `NotificationEvent` in
+    /// `native/ApassyNotify/Notify.swift`.
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::ApprovalWaiting => "approval_waiting",
+            Self::RequestBlocked => "request_blocked",
+        }
+    }
+}
+
 /// A notification preview. The only inputs are the agent name and the event
 /// type (goal N2). There is no constructor for free text, so a command, a
 /// user request, or a value cannot get into a preview through this type.
+///
+/// The request to the notifier has the id, the event, and the agent name only.
+/// The notifier builds the same title and body from its own fixed templates.
+/// The test `swift_and_rust_previews_match` compares the two.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notification {
     id: String,
+    event: NotificationEvent,
+    agent: String,
     title: String,
     body: String,
 }
@@ -378,6 +411,8 @@ impl Notification {
         };
         Ok(Self {
             id: event_id.to_owned(),
+            event,
+            agent: agent_name.to_owned(),
             title: title.to_owned(),
             body,
         })
@@ -385,6 +420,14 @@ impl Notification {
 
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    pub fn event(&self) -> NotificationEvent {
+        self.event
+    }
+
+    pub fn agent(&self) -> &str {
+        &self.agent
     }
 
     pub fn title(&self) -> &str {
@@ -424,17 +467,27 @@ impl Default for Timeouts {
 pub struct NativeHelper {
     helper: PathBuf,
     keychain_helper: PathBuf,
+    notifier: PathBuf,
     timeouts: Timeouts,
 }
 
 impl NativeHelper {
-    /// Use explicit helper paths. Tests use this with a fake helper.
+    /// Use explicit helper paths. Tests use this with a fake helper. The
+    /// notifier is `helper` too; [`NativeHelper::with_notifier`] changes it.
     pub fn with_paths(helper: impl Into<PathBuf>, keychain_helper: impl Into<PathBuf>) -> Self {
+        let helper = helper.into();
         Self {
-            helper: helper.into(),
+            notifier: helper.clone(),
+            helper,
             keychain_helper: keychain_helper.into(),
             timeouts: Timeouts::default(),
         }
+    }
+
+    /// Use `notifier` for the notification commands.
+    pub fn with_notifier(mut self, notifier: impl Into<PathBuf>) -> Self {
+        self.notifier = notifier.into();
+        self
     }
 
     pub fn with_timeouts(mut self, timeouts: Timeouts) -> Self {
@@ -444,9 +497,10 @@ impl NativeHelper {
 
     /// Find the helpers in the bundle of the running executable.
     ///
-    /// Debug builds first read [`HELPER_ENV`] and [`KEYCHAIN_HELPER_ENV`].
-    /// Release builds ignore them: a process that can set the environment
-    /// of the app must not replace the Touch ID check with a fake helper.
+    /// Debug builds first read [`HELPER_ENV`], [`KEYCHAIN_HELPER_ENV`], and
+    /// [`NOTIFIER_ENV`]. Release builds ignore them: a process that can set
+    /// the environment of the app must not replace the Touch ID check with a
+    /// fake helper.
     pub fn locate() -> Result<Self, NativeError> {
         let exe = std::env::current_exe()
             .and_then(std::fs::canonicalize)
@@ -455,6 +509,7 @@ impl NativeHelper {
             cfg!(debug_assertions),
             env_path(HELPER_ENV),
             env_path(KEYCHAIN_HELPER_ENV),
+            env_path(NOTIFIER_ENV),
             &exe,
         ))
     }
@@ -463,12 +518,14 @@ impl NativeHelper {
         allow_env: bool,
         env_helper: Option<PathBuf>,
         env_keychain: Option<PathBuf>,
+        env_notifier: Option<PathBuf>,
         exe: &Path,
     ) -> Self {
         match env_helper {
             Some(helper) if allow_env => {
                 let keychain = env_keychain.unwrap_or_else(|| helper.clone());
-                Self::with_paths(helper, keychain)
+                let notifier = env_notifier.unwrap_or_else(|| helper.clone());
+                Self::with_paths(helper, keychain).with_notifier(notifier)
             }
             _ => Self::for_executable(exe),
         }
@@ -483,6 +540,7 @@ impl NativeHelper {
             macos.join(HELPER_FILE),
             contents.join(KEYCHAIN_HELPER_FROM_CONTENTS),
         )
+        .with_notifier(contents.join(NOTIFIER_FROM_CONTENTS))
     }
 
     pub fn helper_path(&self) -> &Path {
@@ -491,6 +549,10 @@ impl NativeHelper {
 
     pub fn keychain_helper_path(&self) -> &Path {
         &self.keychain_helper
+    }
+
+    pub fn notifier_path(&self) -> &Path {
+        &self.notifier
     }
 
     /// `ping` on the main helper.
@@ -582,29 +644,40 @@ impl NativeHelper {
         })
     }
 
-    /// Post a notification. On first use, macOS asks the owner for
-    /// permission. A notification is not an approval (goal N4).
+    /// Post a notification through the notifier. On first use, macOS asks the
+    /// owner for permission. The request has the id, the event, and the agent
+    /// name only; the notifier builds the text. A notification is not an
+    /// approval (goal N4).
     pub fn notify(&self, notification: &Notification) -> Result<NotifyOutcome, NativeError> {
         let mut req = request("notify");
         req.insert("id".into(), Value::String(notification.id.clone()));
-        req.insert("title".into(), Value::String(notification.title.clone()));
-        req.insert("body".into(), Value::String(notification.body.clone()));
-        let response = self.call(&self.helper, req, self.timeouts.notify)?;
+        req.insert(
+            "event".into(),
+            Value::String(notification.event.as_wire().to_owned()),
+        );
+        req.insert("agent".into(), Value::String(notification.agent.clone()));
+        let response = self.call(&self.notifier, req, self.timeouts.notify)?;
         Ok(NotifyOutcome {
             delivered: bool_field(&response, "delivered")?,
             status: parse_status(&response)?,
         })
     }
 
-    /// Notification permission and settings. Never shows a prompt.
+    /// Notification permission and settings of the notifier bundle. Never
+    /// shows a prompt.
     pub fn notify_status(&self) -> Result<NotificationStatus, NativeError> {
-        parse_status(&self.call(&self.helper, request("notify_status"), self.timeouts.quick)?)
+        parse_status(&self.call(
+            &self.notifier,
+            request("notify_status"),
+            self.timeouts.quick,
+        )?)
     }
 
     /// Show the notification permission prompt if the owner has not decided.
+    /// Waits for the owner's answer.
     pub fn notify_authorize(&self) -> Result<NotificationStatus, NativeError> {
         parse_status(&self.call(
-            &self.helper,
+            &self.notifier,
             request("notify_authorize"),
             self.timeouts.interactive,
         )?)
@@ -957,6 +1030,18 @@ mod tests {
                 "/A/Apassy.app/Contents/Helpers/ApassyKeychain.app/Contents/MacOS/ApassyKeychain"
             )
         );
+        assert_eq!(
+            helper.notifier_path(),
+            Path::new(
+                "/A/Apassy.app/Contents/Helpers/ApassyNotify.app/Contents/MacOS/ApassyNotify"
+            )
+        );
+        let fake = NativeHelper::with_paths("/tmp/h", "/tmp/k");
+        assert_eq!(fake.notifier_path(), Path::new("/tmp/h"));
+        assert_eq!(
+            fake.with_notifier("/tmp/n").notifier_path(),
+            Path::new("/tmp/n")
+        );
     }
 
     #[test]
@@ -964,19 +1049,50 @@ mod tests {
         let exe = Path::new("/A/Apassy.app/Contents/MacOS/apassy");
         let fake = PathBuf::from("/tmp/fake-helper");
         let fake_kc = PathBuf::from("/tmp/fake-keychain");
+        let fake_nt = PathBuf::from("/tmp/fake-notifier");
 
-        let release = NativeHelper::resolve(false, Some(fake.clone()), Some(fake_kc.clone()), exe);
+        let release = NativeHelper::resolve(
+            false,
+            Some(fake.clone()),
+            Some(fake_kc.clone()),
+            Some(fake_nt.clone()),
+            exe,
+        );
         assert_eq!(release, NativeHelper::for_executable(exe));
 
-        let debug = NativeHelper::resolve(true, Some(fake.clone()), Some(fake_kc.clone()), exe);
+        let debug = NativeHelper::resolve(
+            true,
+            Some(fake.clone()),
+            Some(fake_kc.clone()),
+            Some(fake_nt.clone()),
+            exe,
+        );
         assert_eq!(debug.helper_path(), fake);
         assert_eq!(debug.keychain_helper_path(), fake_kc);
+        assert_eq!(debug.notifier_path(), fake_nt);
 
-        let one = NativeHelper::resolve(true, Some(fake.clone()), None, exe);
+        let one = NativeHelper::resolve(true, Some(fake.clone()), None, None, exe);
         assert_eq!(one.keychain_helper_path(), fake);
+        assert_eq!(one.notifier_path(), fake);
 
-        let none = NativeHelper::resolve(true, None, Some(fake_kc), exe);
+        let none = NativeHelper::resolve(true, None, Some(fake_kc), Some(fake_nt), exe);
         assert_eq!(none, NativeHelper::for_executable(exe));
+    }
+
+    #[test]
+    fn event_wire_names_match_the_notifier() {
+        assert_eq!(
+            NotificationEvent::ApprovalWaiting.as_wire(),
+            "approval_waiting"
+        );
+        assert_eq!(
+            NotificationEvent::RequestBlocked.as_wire(),
+            "request_blocked"
+        );
+        let notification =
+            Notification::new("run-1", "Codex", NotificationEvent::RequestBlocked).expect("valid");
+        assert_eq!(notification.event(), NotificationEvent::RequestBlocked);
+        assert_eq!(notification.agent(), "Codex");
     }
 
     #[test]

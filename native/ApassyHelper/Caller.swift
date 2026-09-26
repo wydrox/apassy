@@ -25,6 +25,11 @@
 // 4. The parent is the app bundle that contains this helper
 //    (`SecCodeCopyPath`). So a program signed as `com.wydrox.apassy` in another
 //    place does not pass.
+//
+// The notifier (native/ApassyNotify) compiles this file too, so it has the
+// same check. The Apassy app starts it as its child, like the keychain
+// helper. Measured: macOS does not need a LaunchServices start of the
+// notifier (docs/operations/native-app.md, "Notification research").
 // 5. After the check, the parent is still the same process with the same
 //    audit token.
 //
@@ -42,10 +47,12 @@ import Security
 /// Signing identifier and bundle ID of the only allowed parent.
 let apassyAppIdentifier = "com.wydrox.apassy"
 
-/// The helper paths inside Apassy.app, relative to the app bundle.
+/// The helper paths inside Apassy.app, relative to the app bundle. The
+/// notifier (native/ApassyNotify) uses this file too.
 let helperPathsInApp = [
     "/Contents/MacOS/apassy-helper",
     "/Contents/Helpers/ApassyKeychain.app/Contents/MacOS/ApassyKeychain",
+    "/Contents/Helpers/ApassyNotify.app/Contents/MacOS/ApassyNotify",
 ]
 
 #if APASSY_HELPER_DEV

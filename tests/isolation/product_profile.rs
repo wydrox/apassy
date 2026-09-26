@@ -22,7 +22,10 @@
 //! Apassy app bundle: the profile denies the start, the read, and a change of
 //! the programs in `Apassy.app`, except `apassy-mcp` and `apassy-hook`. The
 //! tests use a synthetic bundle with the layout of `scripts/build-app.sh`. Its
-//! helpers are the real Swift helper, built without a signature.
+//! helpers are the real Swift helper, built without a signature. The notifier
+//! bundle `Contents/Helpers/ApassyNotify.app` (goal item N1) has the real Swift
+//! notifier. The profile denies its start, and its start through LaunchServices
+//! (`notifier_bundle_cannot_be_opened_in_profile`).
 //!
 //! Keychain: goal item I2 also needs proof that the process cannot read the
 //! Touch ID Keychain item. `keychain_item_is_not_readable_in_profile` checks it
@@ -253,28 +256,69 @@ fn dev_helper() -> &'static Path {
     })
 }
 
+/// The real Swift notifier (`native/ApassyNotify`), built once without a
+/// signature and with `-D APASSY_HELPER_DEV`, as `dev_helper`. It refuses every
+/// caller.
+fn dev_notifier() -> &'static Path {
+    static NOTIFIER: OnceLock<PathBuf> = OnceLock::new();
+    NOTIFIER.get_or_init(|| {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let out_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("isolation-notifier");
+        std::fs::create_dir_all(&out_dir).expect("notifier dir");
+        let out = out_dir.join("ApassyNotify");
+        let mut sources: Vec<PathBuf> = std::fs::read_dir(root.join("native/ApassyNotify"))
+            .expect("notifier sources")
+            .map(|entry| entry.expect("entry").path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "swift"))
+            .collect();
+        sources.sort();
+        sources.push(root.join("native/ApassyHelper/Protocol.swift"));
+        sources.push(root.join("native/ApassyHelper/Caller.swift"));
+        let arch = if cfg!(target_arch = "aarch64") {
+            "arm64"
+        } else {
+            "x86_64"
+        };
+        let status = Command::new("xcrun")
+            .args(["--sdk", "macosx", "swiftc", "-Onone", "-swift-version", "5"])
+            .args(["-D", "APASSY_HELPER_DEV"])
+            .args(["-target", &format!("{arch}-apple-macos15.0"), "-o"])
+            .arg(&out)
+            .args(&sources)
+            .status()
+            .expect("run xcrun: the notifier checks need Xcode. This is a failure, not a skip.");
+        assert!(status.success(), "swiftc failed to build the notifier");
+        out
+    })
+}
+
 /// The programs of the app bundle, relative to `Apassy.app`.
 const APP_MAIN: &str = "Contents/MacOS/apassy";
 const APP_HELPER: &str = "Contents/MacOS/apassy-helper";
 const APP_KEYCHAIN_BUNDLE: &str = "Contents/Helpers/ApassyKeychain.app";
+const APP_NOTIFIER_BUNDLE: &str = "Contents/Helpers/ApassyNotify.app";
 const APP_MCP: &str = "Contents/MacOS/apassy-mcp";
 const APP_HOOK: &str = "Contents/MacOS/apassy-hook";
 
 /// A synthetic `Apassy.app` in `dir` with the layout of `scripts/build-app.sh`.
-/// The helpers are copies of the real Swift helper. The main program is also a
-/// copy of the helper: it only stands for a program in the bundle.
-/// `apassy-mcp` and `apassy-hook` are the programs of this build.
+/// The helpers are copies of the real Swift helper, and the notifier is the
+/// real Swift notifier. The main program is also a copy of the helper: it only
+/// stands for a program in the bundle. `apassy-mcp` and `apassy-hook` are the
+/// programs of this build.
 fn make_app(dir: &Path) -> PathBuf {
     let app = dir.join("Apassy.app");
     let keychain = app
         .join("Contents")
         .join(apassy::native::KEYCHAIN_HELPER_FROM_CONTENTS);
+    let notifier = notifier_program(&app);
     std::fs::create_dir_all(app.join("Contents/MacOS")).expect("MacOS dir");
     std::fs::create_dir_all(keychain.parent().expect("keychain dir")).expect("keychain dir");
+    std::fs::create_dir_all(notifier.parent().expect("notifier dir")).expect("notifier dir");
     for (from, to) in [
         (dev_helper(), app.join(APP_MAIN)),
         (dev_helper(), app.join(APP_HELPER)),
         (dev_helper(), keychain),
+        (dev_notifier(), notifier),
         (
             Path::new(env!("CARGO_BIN_EXE_apassy-mcp")),
             app.join(APP_MCP),
@@ -298,6 +342,12 @@ fn make_app(dir: &Path) -> PathBuf {
 fn keychain_program(app: &Path) -> PathBuf {
     app.join("Contents")
         .join(apassy::native::KEYCHAIN_HELPER_FROM_CONTENTS)
+}
+
+/// The notifier program in `app` (goal item N1).
+fn notifier_program(app: &Path) -> PathBuf {
+    app.join("Contents")
+        .join(apassy::native::NOTIFIER_FROM_CONTENTS)
 }
 
 /// The path of the SBPL profile in the repository.
@@ -920,6 +970,7 @@ fn apassy_programs_cannot_start_in_profile() {
     let app = fx.app.clone().expect("app");
     for (label, program) in [
         ("the keychain helper", keychain_program(&app)),
+        ("the notifier", notifier_program(&app)),
         ("apassy-helper", app.join(APP_HELPER)),
         ("the main program", app.join(APP_MAIN)),
     ] {
@@ -928,6 +979,106 @@ fn apassy_programs_cannot_start_in_profile() {
         assert_eq!(answer["error"], "caller_not_allowed", "{label}: {answer}");
         assert_cannot_start_in_profile(&fx, label, &program);
     }
+}
+
+#[test]
+fn notifier_bundle_cannot_be_opened_in_profile() {
+    // Goal item N1: the notifier is the main program of its own app bundle,
+    // `Contents/Helpers/ApassyNotify.app`. A process in the profile must not
+    // start it through LaunchServices either: the started program runs outside
+    // the sandbox, and it can post a notification. The profile denies `lsopen`
+    // and each read in the bundle.
+    //
+    // A marker program stands for the notifier, so the test sees each start.
+    // The bundle ID is synthetic, so the test does not register the Apassy
+    // notifier with LaunchServices.
+    require_sandbox();
+    let fx = fixture_with_app();
+    let app = fx.app.clone().expect("app");
+    let bundle = app.join(APP_NOTIFIER_BUNDLE);
+    let marker = fx.layout.data_dir.with_file_name("notifier-started.txt");
+    std::fs::write(
+        bundle.join("Contents/Info.plist"),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\"><dict>\
+         <key>CFBundleName</key><string>IsoNotify</string>\
+         <key>CFBundleIdentifier</key><string>com.apassy.iso-notify</string>\
+         <key>CFBundleExecutable</key><string>ApassyNotify</string>\
+         <key>CFBundlePackageType</key><string>APPL</string>\
+         <key>LSUIElement</key><true/></dict></plist>\n",
+    )
+    .expect("notifier Info.plist");
+    let program = notifier_program(&app);
+    std::fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\necho NOTIFIER-STARTED >> '{}'\n",
+            marker.display()
+        ),
+    )
+    .expect("marker program");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+        .expect("marker mode");
+    let bundle_s = bundle.display().to_string();
+
+    // Control first: outside the profile, `open` starts the bundle. So the
+    // bundle is valid, and LaunchServices now knows its bundle ID, as it knows
+    // the real notifier after its first notification.
+    let control = Command::new("/usr/bin/open")
+        .args(["-g", "-j", "-n"])
+        .arg(&bundle)
+        .output()
+        .expect("control open");
+    assert!(
+        control.status.success(),
+        "control: `open` outside the profile must start the bundle: {}",
+        String::from_utf8_lossy(&control.stderr)
+    );
+    assert!(
+        wait_for(&marker, 20),
+        "control: the notifier bundle did not start outside the profile"
+    );
+    std::fs::remove_file(&marker).expect("remove marker");
+
+    // In the profile: `open` of the path fails, because the profile denies each
+    // read in the bundle. `open -b` of the bundle ID needs no read of the path,
+    // and the `lsopen` denial stops it.
+    let (ok, _out, err) = in_sandbox(&fx, &["/usr/bin/open", "-g", "-j", "-n", &bundle_s]);
+    assert!(!ok, "the profile must deny `open` of the notifier bundle");
+    assert!(
+        err.contains("does not exist") || err.contains("-54") || err.contains("failed"),
+        "the `open` denial must be a sandbox or LaunchServices failure: {err}"
+    );
+    let (ok, _out, err) = in_sandbox(
+        &fx,
+        &[
+            "/usr/bin/open",
+            "-g",
+            "-j",
+            "-n",
+            "-b",
+            "com.apassy.iso-notify",
+        ],
+    );
+    assert!(!ok, "the profile must deny `open -b` of the notifier");
+    assert!(
+        err.contains("-54") || err.contains("failed"),
+        "the `open -b` denial must be a LaunchServices failure: {err}"
+    );
+    assert!(
+        !wait_for(&marker, 3),
+        "the notifier bundle started from the profile"
+    );
+
+    // Remove the synthetic bundle from the LaunchServices database.
+    let _ = Command::new(
+        "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
+    )
+    .arg("-u")
+    .arg(&bundle)
+    .output();
 }
 
 /// Every file and link below `dir`, at any depth. Directories are not listed.
@@ -986,6 +1137,15 @@ fn apassy_programs_cannot_be_read_copied_linked_or_changed_in_profile() {
                 "-R".into(),
                 app.join(APP_KEYCHAIN_BUNDLE).display().to_string(),
                 out("ApassyKeychain.app"),
+            ],
+        ),
+        (
+            "copy of the notifier bundle",
+            vec![
+                "/bin/cp".into(),
+                "-R".into(),
+                app.join(APP_NOTIFIER_BUNDLE).display().to_string(),
+                out("ApassyNotify.app"),
             ],
         ),
         (

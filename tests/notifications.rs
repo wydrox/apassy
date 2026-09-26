@@ -178,6 +178,17 @@ fn wait_for_delivery(center: &NotificationCenter, key: EventKey) -> Delivery {
     }
 }
 
+/// N2: the request to the notifier has the id, the event type, and the agent name
+/// only. The notifier builds the title and the body from fixed templates
+/// (`tests/native_helper.rs`, `swift_and_rust_previews_match`).
+fn assert_preview_fields(request: &Value, event: &str) {
+    let mut fields: Vec<&String> = request.as_object().expect("object").keys().collect();
+    fields.sort();
+    assert_eq!(fields, ["agent", "cmd", "event", "id"], "{request}");
+    assert_eq!(request["event"], event);
+    assert_eq!(request["agent"], AGENT);
+}
+
 fn no_canary(text: &str) {
     for canary in [COMMAND_CANARY, PURPOSE_CANARY, REQUEST_CANARY, SECRET] {
         assert!(!text.contains(canary), "the preview has {canary}: {text}");
@@ -211,11 +222,9 @@ fn waiting_approval_notifies_within_five_seconds() {
     let (request, took) = notify_request(&fake, &id, waiting_since);
     eprintln!("N1: approval waiting -> notify request after {took:?}");
     assert!(took < LIMIT, "the notification took {took:?}");
-    assert_eq!(request["title"], "Approval waiting");
-    assert_eq!(
-        request["body"],
-        format!("Agent \"{AGENT}\" waits for your decision. Open Apassy to review.")
-    );
+    // The notifier builds the text "Approval waiting" / "Agent "NAME" waits for
+    // your decision. Open Apassy to review." from these two fields only.
+    assert_preview_fields(&request, "approval_waiting");
     no_canary(&fake.raw_requests());
     assert_eq!(
         wait_for_delivery(&center, EventKey::Run(run.id)),
@@ -273,11 +282,7 @@ fn blocked_request_notifies_within_five_seconds() {
     );
     eprintln!("N1: request blocked -> notify request after {took:?}");
     assert!(took < LIMIT, "the notification took {took:?}");
-    assert_eq!(request["title"], "Request blocked");
-    assert_eq!(
-        request["body"],
-        format!("Apassy blocked a request from agent \"{AGENT}\".")
-    );
+    assert_preview_fields(&request, "request_blocked");
     no_canary(&fake.raw_requests());
     assert_eq!(
         wait_for_delivery(&center, EventKey::Activity(entry.id)),
@@ -299,7 +304,7 @@ fn blocked_request_notifies_within_five_seconds() {
     let blocked: Vec<_> = fake
         .requests_for("notify")
         .into_iter()
-        .filter(|request| request["title"] == "Request blocked")
+        .filter(|request| request["event"] == "request_blocked")
         .collect();
     assert_eq!(blocked.len(), 1, "{blocked:?}");
 }
@@ -327,6 +332,9 @@ fn delivery_failure_is_visible_and_the_request_stays() {
     assert!(delivery.label().contains("The event stays in this inbox"));
     let view = center.view();
     assert!(!view.channel.can_deliver());
+    // macOS shows no new prompt after a denial: the app offers System Settings.
+    assert!(view.channel.needs_settings(), "{:?}", view.channel);
+    assert!(!view.channel.needs_permission());
     assert!(
         view.channel.summary().contains("Events stay in the inbox"),
         "{}",
@@ -339,6 +347,35 @@ fn delivery_failure_is_visible_and_the_request_stays() {
     assert_eq!(events[0].key, EventKey::Run(run.id));
     assert_eq!(events[0].kind, InboxKind::ApprovalWaiting);
     assert_eq!(events[0].agent, AGENT);
+
+    assert!(fx.broker.approvals().deny(run.id));
+    assert_eq!(code(&response.join().expect("waiter")), "approval_denied");
+}
+
+/// N1, N3: the notifier never asks for permission on its own, because an unanswered
+/// prompt ends as "denied" (measured on macOS 27). When the owner has not decided, the
+/// delivery fails, the run still waits, and the app keeps the "Allow notifications"
+/// button.
+#[test]
+fn an_undecided_permission_keeps_the_allow_button() {
+    let fx = fixture(Duration::from_secs(20));
+    let fake = FakeNative::new("undecided");
+    fake.fail("notify", "notifications_denied");
+    fake.respond(
+        "notify_status",
+        r#"{"ok":true,"authorization":"not_determined","alert":"not_supported","alert_style":"none","notification_center":"not_supported","lock_screen":"not_supported","sound":"not_supported"}"#,
+    );
+    let center = start_center(&fx, &fake);
+
+    let response = send_run(&fx, fx.project.clone());
+    let (run, _) = first_pending(&fx);
+    let delivery = wait_for_delivery(&center, EventKey::Run(run.id));
+    assert!(matches!(delivery, Delivery::Failed(_)), "{delivery:?}");
+    let view = center.view();
+    assert!(view.channel.needs_permission(), "{:?}", view.channel);
+    assert!(!view.channel.needs_settings(), "{:?}", view.channel);
+    assert!(fake.requests_for("notify_authorize").is_empty());
+    assert_eq!(fx.broker.approvals().pending(), vec![run.clone()]);
 
     assert!(fx.broker.approvals().deny(run.id));
     assert_eq!(code(&response.join().expect("waiter")), "approval_denied");

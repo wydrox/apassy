@@ -4,18 +4,22 @@
 # Layout:
 #   Apassy.app/Contents/MacOS/apassy          Rust desktop app (main executable)
 #   Apassy.app/Contents/MacOS/apassy-mcp      Rust MCP adapter for agents
-#   Apassy.app/Contents/MacOS/apassy-helper   Swift helper: Touch ID, notifications
+#   Apassy.app/Contents/MacOS/apassy-helper   Swift helper: Touch ID
 #   Apassy.app/Contents/Helpers/ApassyKeychain.app
 #                                             Swift helper with its own bundle
 #                                             and profile: Keychain commands
+#   Apassy.app/Contents/Helpers/ApassyNotify.app
+#                                             Swift notifier with its own bundle
+#                                             (com.wydrox.apassy.notify):
+#                                             notifications (goal item N1)
 #
 # The keychain helper needs a provisioning profile for the App ID
 # com.wydrox.apassy.keychain. Without a profile, the script still builds a
 # signed app. Then each keychain command returns keychain_unavailable: Touch ID
 # can confirm actions but cannot unlock the vault (ADR 0010, Limits).
 #
-# The helpers answer only the signed Apassy app that contains them
-# (native/ApassyHelper/Caller.swift). The checks at the end start them through
+# The helpers and the notifier answer only the signed Apassy app that contains
+# them (native/ApassyHelper/Caller.swift). The checks at the end start them through
 # a signed probe parent, and check the agent profile with the signed bundle.
 #
 # Usage: scripts/build-app.sh [--provision]
@@ -50,6 +54,10 @@ cd "$ROOT"
 APP_ID="com.wydrox.apassy"
 KEYCHAIN_APP_ID="${APASSY_KEYCHAIN_BUNDLE_ID:-com.wydrox.apassy.keychain}"
 KEYCHAIN_EXE="ApassyKeychain"
+# The notifier. Its signing identifier must be its bundle ID: macOS refuses a
+# notification client with another identifier (docs/operations/native-app.md).
+NOTIFY_APP_ID="com.wydrox.apassy.notify"
+NOTIFY_EXE="ApassyNotify"
 OUT="$ROOT/target/Apassy.app"
 STAGE="$ROOT/target/app-stage"
 NATIVE_OUT="$ROOT/target/native"
@@ -59,7 +67,7 @@ PROVISION=0
 for arg in "$@"; do
   case "$arg" in
     --provision) PROVISION=1 ;;
-    -h|--help) sed -n '2,44p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,48p' "$0"; exit 0 ;;
     *) echo "build-app: unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -223,6 +231,15 @@ if LC_ALL=C grep -aq "APASSY_HELPER_DEV_ANY_CALLER" "$NATIVE_OUT/apassy-helper";
   fail "the helper contains the development caller override"
 fi
 echo "ok: the helper has no development caller override"
+# The notifier shares the protocol and the caller check with the helper.
+xcrun --sdk macosx swiftc -sdk "$SDK" -O -swift-version 5 -warnings-as-errors \
+  -target "arm64-apple-macos$DEPLOYMENT_TARGET" \
+  -o "$NATIVE_OUT/$NOTIFY_EXE" native/ApassyNotify/*.swift \
+  native/ApassyHelper/Protocol.swift native/ApassyHelper/Caller.swift
+if LC_ALL=C grep -aq "APASSY_HELPER_DEV_ANY_CALLER" "$NATIVE_OUT/$NOTIFY_EXE"; then
+  fail "the notifier contains the development caller override"
+fi
+echo "ok: the notifier has no development caller override"
 # The caller probe starts a helper as its child. It never goes into the bundle.
 xcrun --sdk macosx swiftc -sdk "$SDK" -O -swift-version 5 -warnings-as-errors \
   -target "arm64-apple-macos$DEPLOYMENT_TARGET" \
@@ -235,7 +252,8 @@ VERSION="$(awk -F'"' '/^version = / {print $2; exit}' Cargo.toml)"
 rm -rf "$STAGE" "$OUT"
 APP="$STAGE/Apassy.app"
 KC_APP="$APP/Contents/Helpers/ApassyKeychain.app"
-mkdir -p "$APP/Contents/MacOS" "$KC_APP/Contents/MacOS"
+NT_APP="$APP/Contents/Helpers/ApassyNotify.app"
+mkdir -p "$APP/Contents/MacOS" "$KC_APP/Contents/MacOS" "$NT_APP/Contents/MacOS"
 # The plist templates use Xcode build-setting names, so the Xcode project in
 # native/ApassyKeychain can read the same file.
 fill_plist() { # template, output
@@ -247,11 +265,18 @@ fill_plist() { # template, output
 }
 fill_plist packaging/Info.plist "$APP/Contents/Info.plist"
 fill_plist packaging/ApassyKeychain-Info.plist "$KC_APP/Contents/Info.plist"
+fill_plist packaging/ApassyNotify-Info.plist "$NT_APP/Contents/Info.plist"
+[ "$(plutil -extract CFBundleIdentifier raw -o - "$NT_APP/Contents/Info.plist")" = "$NOTIFY_APP_ID" ] \
+  || fail "the notifier Info.plist does not have the bundle ID $NOTIFY_APP_ID"
+[ "$(plutil -extract CFBundleExecutable raw -o - "$NT_APP/Contents/Info.plist")" = "$NOTIFY_EXE" ] \
+  || fail "the notifier Info.plist does not name $NOTIFY_EXE"
 printf 'APPL????' >"$APP/Contents/PkgInfo"
 printf 'APPL????' >"$KC_APP/Contents/PkgInfo"
+printf 'APPL????' >"$NT_APP/Contents/PkgInfo"
 cp target/release/apassy target/release/apassy-mcp "$APP/Contents/MacOS/"
 cp "$NATIVE_OUT/apassy-helper" "$APP/Contents/MacOS/apassy-helper"
 cp "$NATIVE_OUT/apassy-helper" "$KC_APP/Contents/MacOS/$KEYCHAIN_EXE"
+cp "$NATIVE_OUT/$NOTIFY_EXE" "$NT_APP/Contents/MacOS/$NOTIFY_EXE"
 
 # Goal B8: the base-model checkpoint goes into the bundle before the signature,
 # so the signature seals it. The copy must match tools/basemodel/manifest.json.
@@ -311,6 +336,8 @@ fi
 step "Sign from the inside out (hardened runtime)"
 sign() { codesign --force --sign "$SIGN_SHA1" --options runtime --timestamp=none "$@"; }
 sign --entitlements "$KC_ENTITLEMENTS" "$KC_APP"
+# A bundle signature takes the identifier from CFBundleIdentifier.
+sign --entitlements packaging/Apassy.entitlements "$NT_APP"
 sign --identifier "$APP_ID.helper" --entitlements packaging/Apassy.entitlements "$APP/Contents/MacOS/apassy-helper"
 sign --identifier "$APP_ID.mcp" --entitlements packaging/Apassy.entitlements "$APP/Contents/MacOS/apassy-mcp"
 sign --entitlements packaging/Apassy.entitlements "$APP"
@@ -318,12 +345,16 @@ sign --entitlements packaging/Apassy.entitlements "$APP"
 # ---------------------------------------------------------------- verify
 step "Verify the signatures"
 codesign --verify --deep --strict --verbose=2 "$APP"
-for code in "$APP" "$APP/Contents/MacOS/apassy-mcp" "$APP/Contents/MacOS/apassy-helper" "$KC_APP"; do
+for code in "$APP" "$APP/Contents/MacOS/apassy-mcp" "$APP/Contents/MacOS/apassy-helper" "$KC_APP" "$NT_APP"; do
   codesign -d --verbose=2 "$code" >"$TMP/info.txt" 2>&1
   grep -q "flags=.*(runtime)" "$TMP/info.txt" || fail "hardened runtime is off for $code"
   grep -q "TeamIdentifier=${CERT_TEAM:-}" "$TMP/info.txt" || fail "unexpected team for $code"
   echo "$(grep '^Identifier=' "$TMP/info.txt") $(grep '^CodeDirectory' "$TMP/info.txt" | grep -o 'flags=[^ ]*')"
 done
+codesign -d --verbose=2 "$NT_APP" >"$TMP/info.txt" 2>&1
+grep -qx "Identifier=$NOTIFY_APP_ID" "$TMP/info.txt" \
+  || fail "the signing identifier of the notifier is not its bundle ID $NOTIFY_APP_ID. macOS refuses such a notification client."
+echo "ok: the signing identifier of the notifier is its bundle ID"
 # Print the entitlements of CODE as JSON. No entitlements blob prints {}.
 entitlements_json() {
   local xml
@@ -331,11 +362,11 @@ entitlements_json() {
   if [ -z "$xml" ]; then echo "{}"; else printf '%s' "$xml" | plutil -convert json -o - -; echo; fi
 }
 echo "Entitlements of ApassyKeychain.app: $(entitlements_json "$KC_APP")"
-for code in "$APP" "$APP/Contents/MacOS/apassy-mcp" "$APP/Contents/MacOS/apassy-helper"; do
+for code in "$APP" "$APP/Contents/MacOS/apassy-mcp" "$APP/Contents/MacOS/apassy-helper" "$NT_APP"; do
   ENT="$(entitlements_json "$code")"
   [ "$ENT" = "{}" ] || fail "$code has unexpected entitlements: $ENT"
 done
-echo "Entitlements of apassy, apassy-mcp, apassy-helper: {}"
+echo "Entitlements of apassy, apassy-mcp, apassy-helper, ApassyNotify.app: {}"
 
 # Key-memory review F7: each program in the bundle has the hardened runtime,
 # and no program has an entitlement that lets a debugger read its memory or
@@ -371,7 +402,7 @@ while IFS= read -r -d '' code; do
   FOUND="$(forbidden_entitlements "$code" | tr '\n' ' ')"
   [ -z "$FOUND" ] || fail "$code has forbidden entitlements: $FOUND"
 done < <(find "$APP" -type f -print0)
-[ "$PROGRAMS" = "4" ] || fail "expected 4 programs in the bundle, found $PROGRAMS"
+[ "$PROGRAMS" = "5" ] || fail "expected 5 programs in the bundle, found $PROGRAMS"
 echo "Hardened runtime on all $PROGRAMS programs. None has get-task-allow, disable-library-validation, or allow-dyld-environment-variables."
 
 # ---------------------------------------------------------------- self-check
@@ -386,6 +417,7 @@ check_output "apassy-mcp --version" "$("$APP/Contents/MacOS/apassy-mcp" --versio
 
 H_EXE="$APP/Contents/MacOS/apassy-helper"
 KC_EXE="$KC_APP/Contents/MacOS/$KEYCHAIN_EXE"
+NT_EXE="$NT_APP/Contents/MacOS/$NOTIFY_EXE"
 REFUSED='"error":"caller_not_allowed".*"ok":false'
 # check_lines LABEL OUTPUT PATTERN...: line N of OUTPUT matches PATTERN N.
 check_lines() {
@@ -407,6 +439,16 @@ check_output "apassy-helper ignores APASSY_HELPER_DEV_ANY_CALLER" \
 KC_OUT="$(printf '%s\n' '{"cmd":"ping"}' '{"cmd":"keychain_exists","account":"build-check"}' | "$KC_EXE")" \
   || fail "the keychain helper did not run. Check: log show --last 2m --predicate 'process == \"amfid\"'"
 check_lines "keychain helper refuses the shell" "$KC_OUT" "$REFUSED" "$REFUSED"
+# The notifier requests in these checks never ask for permission and never
+# post: a caller that is not Apassy gets a refusal, and the signed parent
+# below sends only ping, notify_status, preview, and invalid requests.
+NOTIFY_WAITING='{"cmd":"preview","event":"approval_waiting","agent":"build-check"}'
+NOTIFY_FREE_TEXT='{"cmd":"notify","id":"build-check","event":"request_blocked","agent":"build-check","title":"free text","body":"free text"}'
+NT_OUT="$(printf '%s\n' '{"cmd":"ping"}' '{"cmd":"notify_status"}' "$NOTIFY_WAITING" | "$NT_EXE")" \
+  || fail "the notifier did not run"
+check_lines "notifier refuses the shell" "$NT_OUT" "$REFUSED" "$REFUSED" "$REFUSED"
+check_output "notifier ignores APASSY_HELPER_DEV_ANY_CALLER" \
+  "$(printf '%s\n' '{"cmd":"ping"}' | APASSY_HELPER_DEV_ANY_CALLER=1 "$NT_EXE")" "$REFUSED"
 
 # probe_app DIR IDENTIFIER: a scratch copy of the bundle in DIR. The caller
 # probe replaces the main program, and the copy is signed with IDENTIFIER. The
@@ -429,7 +471,16 @@ HELPER_OUT="$(printf '%s\n' '{"cmd":"ping"}' '{"cmd":"notify_status"}' '{"cmd":"
   | "$PROBE" "$PROBE_APP/Contents/MacOS/apassy-helper")" || fail "apassy-helper did not run under the signed parent"
 check_lines "apassy-helper with the signed parent" "$HELPER_OUT" \
   "\"bundle_id\":\"$APP_ID\".*\"keychain_access_group\":null.*\"ok\":true" \
+  '"error":"notifications_unavailable"' \
+  '"error":"invalid_request"'
+NT_OUT="$(printf '%s\n' '{"cmd":"ping"}' '{"cmd":"notify_status"}' "$NOTIFY_WAITING" "$NOTIFY_FREE_TEXT" '{"cmd":"bogus"}' \
+  | "$PROBE" "$PROBE_APP/Contents/Helpers/ApassyNotify.app/Contents/MacOS/$NOTIFY_EXE")" \
+  || fail "the notifier did not run under the signed parent"
+check_lines "notifier with the signed parent" "$NT_OUT" \
+  "\"bundle_id\":\"$NOTIFY_APP_ID\".*\"ok\":true" \
   '"authorization":"[a-z_]+".*"ok":true' \
+  '^\{"body":"Agent \\"build-check\\" waits for your decision\. Open Apassy to review\.","ok":true,"title":"Approval waiting"\}$' \
+  '"error":"invalid_request"' \
   '"error":"invalid_request"'
 KC_OUT="$(printf '%s\n' '{"cmd":"ping"}' '{"cmd":"keychain_exists","account":"build-check"}' \
   | "$PROBE" "$PROBE_APP/Contents/Helpers/ApassyKeychain.app/Contents/MacOS/$KEYCHAIN_EXE")" \
@@ -449,11 +500,15 @@ check_output "helper refuses the signed parent of another bundle" \
   "$(printf '%s\n' '{"cmd":"ping"}' | "$PROBE" "$H_EXE")" "$REFUSED"
 check_output "keychain helper refuses the signed parent of another bundle" \
   "$(printf '%s\n' '{"cmd":"ping"}' | "$PROBE" "$KC_EXE")" "$REFUSED"
+check_output "notifier refuses the signed parent of another bundle" \
+  "$(printf '%s\n' '{"cmd":"ping"}' | "$PROBE" "$NT_EXE")" "$REFUSED"
 OTHER_APP="$(probe_app "$TMP/probe-other" "$APP_ID.probe")"
 check_output "helper refuses a parent with another identifier" \
   "$(printf '%s\n' '{"cmd":"ping"}' | "$OTHER_APP/Contents/MacOS/apassy" "$OTHER_APP/Contents/MacOS/apassy-helper")" "$REFUSED"
 check_output "keychain helper refuses a parent with another identifier" \
   "$(printf '%s\n' '{"cmd":"ping"}' | "$OTHER_APP/Contents/MacOS/apassy" "$OTHER_APP/Contents/Helpers/ApassyKeychain.app/Contents/MacOS/$KEYCHAIN_EXE")" "$REFUSED"
+check_output "notifier refuses a parent with another identifier" \
+  "$(printf '%s\n' '{"cmd":"ping"}' | "$OTHER_APP/Contents/MacOS/apassy" "$OTHER_APP/Contents/Helpers/ApassyNotify.app/Contents/MacOS/$NOTIFY_EXE")" "$REFUSED"
 
 step "Check the agent profile with the signed bundle"
 SANDBOX_BIN="$ROOT/target/release/apassy-sandbox"
@@ -464,7 +519,7 @@ in_profile() {
   "$SANDBOX_BIN" --profile "$ROOT/sandbox/apassy-agent-host.sb" \
     --data-dir "$PROFILE_DIR/d" --app-build "$APP" -- "$@"
 }
-for program in "$KC_EXE" "$H_EXE" "$APP/Contents/MacOS/apassy"; do
+for program in "$KC_EXE" "$NT_EXE" "$H_EXE" "$APP/Contents/MacOS/apassy"; do
   if PROFILE_OUT="$(printf '%s\n' '{"cmd":"ping"}' | in_profile "$program" 2>&1)"; then
     fail "${program#"$APP"/} started in the agent profile: $PROFILE_OUT"
   fi
@@ -472,6 +527,14 @@ for program in "$KC_EXE" "$H_EXE" "$APP/Contents/MacOS/apassy"; do
 done
 check_output "apassy-mcp --version in the agent profile" \
   "$(in_profile "$APP/Contents/MacOS/apassy-mcp" --version)" "^apassy-mcp $VERSION$"
+# LaunchServices is the other way to start the notifier. The profile denies
+# each read in the bundle and `lsopen`, so `open` fails before a start.
+# tests/isolation/product_profile.rs also checks `open -b` of a registered
+# bundle ID.
+if PROFILE_OUT="$(in_profile /usr/bin/open -g -j -n "$NT_APP" 2>&1)"; then
+  fail "open of ApassyNotify.app worked in the agent profile: $PROFILE_OUT"
+fi
+check_output "the agent profile denies open of Contents/Helpers/ApassyNotify.app" "$PROFILE_OUT" "(does not exist|-54|failed)"
 if in_profile /bin/cp -R "$KC_APP" "$PROFILE_DIR/copy.app" 2>/dev/null; then
   fail "a process in the agent profile copied the keychain helper"
 fi

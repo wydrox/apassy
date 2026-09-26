@@ -15,6 +15,12 @@
 //! built without the flag (as `scripts/build-app.sh` builds it) ignores the
 //! override. `scripts/build-app.sh` checks the signed helpers with a signed
 //! parent.
+//!
+//! The notifier (`native/ApassyNotify`, goal items N1 and N2) has the same
+//! caller check. The tests build it the same way. An unbundled notifier
+//! answers each notification command with `notifications_unavailable` before
+//! it contacts macOS, so these tests never show a permission prompt and never
+//! post a notification.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -253,7 +259,49 @@ fn keychain_commands_go_to_the_keychain_helper() {
             "keychain_read"
         ]
     );
+    // `with_paths` uses the main helper as the notifier too (one fake for tests).
     assert_eq!(main_cmds, ["authenticate", "notify_status"]);
+}
+
+#[test]
+fn notification_commands_go_to_the_notifier() {
+    let main = Fake::new("n-main");
+    let keychain = Fake::new("n-keychain");
+    let notifier = Fake::new("n-notifier");
+    let client =
+        NativeHelper::with_paths(main.path(), keychain.path()).with_notifier(notifier.path());
+    assert_eq!(client.notifier_path(), notifier.path());
+
+    notifier.respond(&format!(
+        "{{\"ok\":true,\"delivered\":true,{STATUS_FIELDS}}}"
+    ));
+    let notification = Notification::new("run-7", "Codex", NotificationEvent::ApprovalWaiting)
+        .expect("notification");
+    assert!(client.notify(&notification).expect("notify").delivered);
+    client.notify_status().expect("status");
+    client.notify_authorize().expect("authorize");
+    main.respond(r#"{"ok":true}"#);
+    client.authenticate("Synthetic reason").expect("auth");
+
+    let notifier_cmds: Vec<Value> = notifier
+        .requests()
+        .iter()
+        .map(|r| r["cmd"].clone())
+        .collect();
+    assert_eq!(
+        notifier_cmds,
+        ["notify", "notify_status", "notify_authorize"]
+    );
+    let main_cmds: Vec<Value> = main.requests().iter().map(|r| r["cmd"].clone()).collect();
+    assert_eq!(main_cmds, ["authenticate"]);
+    assert!(keychain.requests().is_empty());
+
+    // The bundle layout: the notifier is the main program of its own bundle.
+    let bundled = NativeHelper::for_executable(Path::new("/A/Apassy.app/Contents/MacOS/apassy"));
+    assert_eq!(
+        bundled.notifier_path(),
+        Path::new("/A/Apassy.app/Contents/Helpers/ApassyNotify.app/Contents/MacOS/ApassyNotify")
+    );
 }
 
 #[test]
@@ -343,13 +391,16 @@ fn notification_preview_has_only_agent_name_and_event_type() {
     assert!(outcome.delivered);
     assert!(outcome.status.can_deliver());
 
+    // The request has no text field: the notifier builds the text itself.
     let request = fake.last_request();
     let fields: Vec<&String> = request.as_object().expect("object").keys().collect();
-    assert_eq!(fields, ["body", "cmd", "id", "title"]);
+    assert_eq!(fields, ["agent", "cmd", "event", "id"]);
     assert_eq!(request["id"], "event-17");
-    assert_eq!(request["title"], "Approval waiting");
+    assert_eq!(request["event"], "approval_waiting");
+    assert_eq!(request["agent"], "Claude Code");
+    assert_eq!(notification.title(), "Approval waiting");
     assert_eq!(
-        request["body"],
+        notification.body(),
         "Agent \"Claude Code\" waits for your decision. Open Apassy to review."
     );
 
@@ -462,18 +513,40 @@ fn swift_and_rust_error_codes_match() {
 /// The environment variable of the development caller override.
 const DEV_ANY_CALLER: &str = "APASSY_HELPER_DEV_ANY_CALLER";
 
-/// Build the real helper without a signature. `dev` adds `-D APASSY_HELPER_DEV`.
-fn build_helper(name: &str, dev: bool) -> PathBuf {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let out_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
-    fs::create_dir_all(&out_dir).expect("create out dir");
-    let out = out_dir.join("apassy-helper");
-    let mut sources: Vec<PathBuf> = fs::read_dir(root.join("native/ApassyHelper"))
+/// The Swift files in `native/<dir>`, sorted.
+fn swift_sources(dir: &str) -> Vec<PathBuf> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("native")
+        .join(dir);
+    let mut sources: Vec<PathBuf> = fs::read_dir(root)
         .expect("read sources")
         .map(|entry| entry.expect("entry").path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "swift"))
         .collect();
     sources.sort();
+    sources
+}
+
+/// Build the real helper without a signature. `dev` adds `-D APASSY_HELPER_DEV`.
+fn build_helper(name: &str, dev: bool) -> PathBuf {
+    build_swift(name, "apassy-helper", dev, &swift_sources("ApassyHelper"))
+}
+
+/// Build the real notifier as `scripts/build-app.sh` does: its own files and the
+/// protocol and caller check of the helper.
+fn build_notifier(name: &str, dev: bool) -> PathBuf {
+    let helper_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("native/ApassyHelper");
+    let mut sources = swift_sources("ApassyNotify");
+    sources.push(helper_dir.join("Protocol.swift"));
+    sources.push(helper_dir.join("Caller.swift"));
+    build_swift(name, "ApassyNotify", dev, &sources)
+}
+
+/// Compile `sources` into `<tmp>/<name>/<program>` without a signature.
+fn build_swift(name: &str, program: &str, dev: bool, sources: &[PathBuf]) -> PathBuf {
+    let out_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    fs::create_dir_all(&out_dir).expect("create out dir");
+    let out = out_dir.join(program);
     let arch = if cfg!(target_arch = "aarch64") {
         "arm64"
     } else {
@@ -490,10 +563,10 @@ fn build_helper(name: &str, dev: bool) -> PathBuf {
     let status = command
         .arg("-o")
         .arg(&out)
-        .args(&sources)
+        .args(sources)
         .status()
         .expect("run xcrun: this test needs Xcode and the Swift compiler");
-    assert!(status.success(), "swiftc failed to build the helper");
+    assert!(status.success(), "swiftc failed to build {program}");
     out
 }
 
@@ -509,25 +582,47 @@ fn real_release_helper() -> &'static Path {
     HELPER.get_or_init(|| build_helper("native-release", false))
 }
 
+/// The real notifier, built once with the development override.
+fn real_notifier() -> &'static Path {
+    static NOTIFIER: OnceLock<PathBuf> = OnceLock::new();
+    NOTIFIER.get_or_init(|| build_notifier("notifier-real", true))
+}
+
+/// The real notifier, built once without the development flag, as a release.
+fn real_release_notifier() -> &'static Path {
+    static NOTIFIER: OnceLock<PathBuf> = OnceLock::new();
+    NOTIFIER.get_or_init(|| build_notifier("notifier-release", false))
+}
+
 /// A client for the development helper with the caller override on. The
 /// client starts the helper without extra environment, so a small script sets
 /// the variable and then replaces itself with the helper. The parent of the
-/// helper stays this test process.
+/// helper stays this test process. The notifier is the development notifier,
+/// started the same way.
 fn dev_client() -> NativeHelper {
-    static WRAPPER: OnceLock<PathBuf> = OnceLock::new();
-    let wrapper = WRAPPER.get_or_init(|| {
-        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("native-real-wrapper");
-        fs::create_dir_all(&dir).expect("create wrapper dir");
-        let path = dir.join("helper");
-        let script = format!(
-            "#!/bin/sh\n{DEV_ANY_CALLER}=1 exec '{}'\n",
-            real_helper().display()
-        );
-        fs::write(&path, script).expect("write wrapper");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
-        path
+    static WRAPPERS: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
+    let (helper, notifier) = WRAPPERS.get_or_init(|| {
+        (
+            dev_wrapper("native-real-wrapper", real_helper()),
+            dev_wrapper("notifier-real-wrapper", real_notifier()),
+        )
     });
-    NativeHelper::with_paths(wrapper, wrapper)
+    NativeHelper::with_paths(helper, helper).with_notifier(notifier)
+}
+
+/// A script in `<tmp>/<name>` that sets the development override and then
+/// replaces itself with `program`.
+fn dev_wrapper(name: &str, program: &Path) -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    fs::create_dir_all(&dir).expect("create wrapper dir");
+    let path = dir.join("program");
+    let script = format!(
+        "#!/bin/sh\n{DEV_ANY_CALLER}=1 exec '{}'\n",
+        program.display()
+    );
+    fs::write(&path, script).expect("write wrapper");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+    path
 }
 
 fn raw_exchange(helper: &Path, input: &str) -> Vec<Value> {
@@ -577,18 +672,44 @@ fn real_helper_answers_each_line_with_one_line() {
         r#"{"cmd":"authenticate","reason":"line\nbreak"}"#,
         r#"{"cmd":"keychain_store","account":"bad account","secret_b64":"AQID"}"#,
         r#"{"cmd":"keychain_store","account":"synthetic","secret_b64":"%%%"}"#,
-        r#"{"cmd":"notify","id":"event-1","title":"","body":"x"}"#,
     ]
     .join("\n")
         + "\n";
     let responses = raw_exchange(helper, &input);
-    assert_eq!(responses.len(), 9, "{responses:?}");
+    assert_eq!(responses.len(), 8, "{responses:?}");
     assert_eq!(responses[0]["ok"], true);
     assert_eq!(responses[0]["protocol"], 1);
     for response in &responses[1..] {
         assert_eq!(response["ok"], false, "{response}");
         assert_eq!(response["error"], "invalid_request", "{response}");
         assert!(response["message"].is_string());
+    }
+}
+
+#[test]
+fn the_helper_sends_no_notifications() {
+    // Notifications run only in the notifier. The helper answers each
+    // notification command with `notifications_unavailable` and does not
+    // contact macOS.
+    let input = [
+        r#"{"cmd":"notify","id":"event-1","event":"request_blocked","agent":"Codex"}"#,
+        r#"{"cmd":"notify_status"}"#,
+        r#"{"cmd":"notify_authorize"}"#,
+    ]
+    .join("\n")
+        + "\n";
+    let responses = raw_exchange(real_helper(), &input);
+    assert_eq!(responses.len(), 3, "{responses:?}");
+    for response in &responses {
+        assert_eq!(response["error"], "notifications_unavailable", "{response}");
+    }
+    for source in swift_sources("ApassyHelper") {
+        let text = fs::read_to_string(&source).expect("read helper source");
+        assert!(
+            !text.contains("import UserNotifications"),
+            "{} imports UserNotifications",
+            source.display()
+        );
     }
 }
 
@@ -616,8 +737,14 @@ fn real_unsigned_helper_reports_missing_keychain_and_bundle() {
             Some(HelperErrorCode::KeychainUnavailable)
         );
     }
+    // The notifier outside `ApassyNotify.app` refuses each notification command
+    // before it contacts macOS. So no prompt shows and nothing is posted.
     assert_eq!(
         client.notify_status().unwrap_err().code(),
+        Some(HelperErrorCode::NotificationsUnavailable)
+    );
+    assert_eq!(
+        client.notify_authorize().unwrap_err().code(),
         Some(HelperErrorCode::NotificationsUnavailable)
     );
     let notification = Notification::new("event-1", "Codex", NotificationEvent::RequestBlocked)
@@ -706,5 +833,146 @@ fn a_helper_built_without_the_dev_flag_ignores_the_override() {
     assert!(
         dev.windows(name.len()).any(|window| window == name),
         "control: the development helper contains {DEV_ANY_CALLER}"
+    );
+}
+
+/// Notifier requests that cannot show a prompt or post a notification, also
+/// when the caller check is broken: an unbundled notifier refuses each
+/// notification command before it contacts macOS, and the others are invalid.
+const HARMLESS_NOTIFIER_REQUESTS: [&str; 7] = [
+    r#"{"cmd":"ping"}"#,
+    r#"{"cmd":"notify_status"}"#,
+    r#"{"cmd":"notify_authorize"}"#,
+    r#"{"cmd":"preview","event":"approval_waiting","agent":"Codex"}"#,
+    r#"{"cmd":"notify","id":"event-1","event":"request_blocked","agent":"Codex"}"#,
+    r#"{"cmd":"notify","id":"event-1","title":"free text","body":"free text"}"#,
+    "not json",
+];
+
+fn harmless_notifier_input() -> String {
+    HARMLESS_NOTIFIER_REQUESTS.join("\n") + "\n"
+}
+
+fn assert_notifier_refused(responses: &[Value]) {
+    assert_eq!(
+        responses.len(),
+        HARMLESS_NOTIFIER_REQUESTS.len(),
+        "{responses:?}"
+    );
+    for response in responses {
+        assert_eq!(response["ok"], false, "{response}");
+        assert_eq!(response["error"], "caller_not_allowed", "{response}");
+        assert!(response.get("title").is_none(), "{response}");
+    }
+}
+
+#[test]
+fn real_notifier_refuses_a_parent_that_is_not_apassy() {
+    // The guard of the notifier: the parent is this test process, not the
+    // signed Apassy app that contains the notifier. Each request, also `ping`,
+    // `preview`, and a malformed request, gets `caller_not_allowed`.
+    for any_caller in [None, Some("0"), Some("yes")] {
+        let responses = raw_exchange_with(real_notifier(), &harmless_notifier_input(), any_caller);
+        assert_notifier_refused(&responses);
+    }
+    // The same through the Rust client.
+    let client =
+        NativeHelper::with_paths(real_helper(), real_helper()).with_notifier(real_notifier());
+    assert_eq!(
+        client.notify_status().unwrap_err().code(),
+        Some(HelperErrorCode::CallerNotAllowed)
+    );
+    assert_eq!(
+        client.notify_authorize().unwrap_err().code(),
+        Some(HelperErrorCode::CallerNotAllowed)
+    );
+    let notification = Notification::new("event-3", "Codex", NotificationEvent::ApprovalWaiting)
+        .expect("notification");
+    assert_eq!(
+        client.notify(&notification).unwrap_err().code(),
+        Some(HelperErrorCode::CallerNotAllowed)
+    );
+    // Control: with the override, the same development notifier answers.
+    let responses = raw_exchange_with(real_notifier(), "{\"cmd\":\"ping\"}\n", Some("1"));
+    assert_eq!(responses[0]["ok"], true, "{responses:?}");
+    assert_eq!(responses[0]["bundle_id"], Value::Null, "{responses:?}");
+}
+
+#[test]
+fn a_notifier_built_without_the_dev_flag_ignores_the_override() {
+    for any_caller in [None, Some("1")] {
+        let responses = raw_exchange_with(
+            real_release_notifier(),
+            &harmless_notifier_input(),
+            any_caller,
+        );
+        assert_notifier_refused(&responses);
+    }
+    let release = fs::read(real_release_notifier()).expect("read release notifier");
+    let name = DEV_ANY_CALLER.as_bytes();
+    assert!(
+        !release.windows(name.len()).any(|window| window == name),
+        "the release notifier contains {DEV_ANY_CALLER}"
+    );
+}
+
+#[test]
+fn swift_and_rust_previews_match() {
+    // The notifier builds the text from its own templates (goal item N2). The
+    // Rust `Notification` shows the same text in the app and in the tests.
+    for event in [
+        NotificationEvent::ApprovalWaiting,
+        NotificationEvent::RequestBlocked,
+    ] {
+        for agent in ["Codex", "Claude Code", "n1-check", "a \"quoted\" name"] {
+            let request = serde_json::json!({
+                "cmd": "preview",
+                "event": event.as_wire(),
+                "agent": agent,
+            });
+            let responses = raw_exchange(real_notifier(), &format!("{request}\n"));
+            let rust = Notification::new("event-4", agent, event).expect("notification");
+            assert_eq!(responses[0]["ok"], true, "{responses:?}");
+            assert_eq!(responses[0]["title"], rust.title(), "{event:?} {agent}");
+            assert_eq!(responses[0]["body"], rust.body(), "{event:?} {agent}");
+        }
+    }
+}
+
+#[test]
+fn the_notifier_takes_no_free_text() {
+    // Goal item N2: a request has the id, the event type, and the agent name
+    // only. Any other field, an unknown event, and a bad agent name are refused
+    // before the notifier contacts macOS.
+    let long_name = "n".repeat(41);
+    let bad = [
+        serde_json::json!({"cmd": "notify", "id": "event-5", "event": "request_blocked", "agent": "Codex", "title": "free text"}),
+        serde_json::json!({"cmd": "notify", "id": "event-5", "event": "request_blocked", "agent": "Codex", "body": "rm -rf canary"}),
+        serde_json::json!({"cmd": "notify", "id": "event-5", "event": "request_blocked", "agent": "Codex", "command": "canary"}),
+        serde_json::json!({"cmd": "notify", "id": "event-5", "title": "Approval waiting", "body": "x"}),
+        serde_json::json!({"cmd": "notify", "id": "event-5", "event": "custom", "agent": "Codex"}),
+        serde_json::json!({"cmd": "notify", "id": "event-5", "event": "request_blocked", "agent": ""}),
+        serde_json::json!({"cmd": "notify", "id": "event-5", "event": "request_blocked", "agent": "   "}),
+        serde_json::json!({"cmd": "notify", "id": "event-5", "event": "request_blocked", "agent": "two\nlines"}),
+        serde_json::json!({"cmd": "notify", "id": "event-5", "event": "request_blocked", "agent": long_name}),
+        serde_json::json!({"cmd": "notify", "id": "bad id", "event": "request_blocked", "agent": "Codex"}),
+        serde_json::json!({"cmd": "preview", "event": "approval_waiting", "agent": "Codex", "body": "x"}),
+    ];
+    let input: String = bad.iter().map(|request| format!("{request}\n")).collect();
+    let responses = raw_exchange(real_notifier(), &input);
+    assert_eq!(responses.len(), bad.len(), "{responses:?}");
+    for (request, response) in bad.iter().zip(&responses) {
+        assert_eq!(
+            response["error"], "invalid_request",
+            "{request} gave {response}"
+        );
+    }
+    // A valid request passes the checks. Outside `ApassyNotify.app`, the
+    // notifier then stops with `notifications_unavailable`, before macOS.
+    let valid = serde_json::json!({"cmd": "notify", "id": "event-5", "event": "request_blocked", "agent": "Codex"});
+    let responses = raw_exchange(real_notifier(), &format!("{valid}\n"));
+    assert_eq!(
+        responses[0]["error"], "notifications_unavailable",
+        "{responses:?}"
     );
 }
