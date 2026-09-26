@@ -273,7 +273,17 @@ On 2026-09-26, Codex 0.156.1 (`codex exec`) ran inside the Apassy profile with `
 | Approval card source | `from the Codex hook, matched by the project directory, verified in the host transcript` |
 | Activity log | the prompt, and `The agent sent: "check the key".` |
 
-The agent part of the Codex check is open. The owner must run the same test again after the usage limit resets, with credits available. The test then checks that the Codex agent itself calls `apassy_run_with_secrets`, and that the card shows the hook prompt. If the limit still applies, the test prints "The model turn did not run: usage limit" and checks only the hook part.
+The test ran again on 2026-09-26 at 18:00, after the usage limit reset. The Codex agent itself called `apassy_run_with_secrets` through `apassy-mcp`.
+
+| Check | Result |
+| --- | --- |
+| Model turn | ran; the agent called the tool once |
+| Approval card source | `from the Codex hook, matched by the project directory, verified in the host transcript` |
+| Activity log | "Owner approved. Exit code 0." The user request is the hook prompt, verified in the host transcript. |
+| Model facts in the log | `task_match` 95%, `writes` 2%, `remote` 2%, `leak` 2%, `destroy` 2% |
+| Test result | `1 passed; 0 failed`, 25.5 seconds |
+
+Goal item B6 is done for both hosts.
 
 ## 10. Limits
 
