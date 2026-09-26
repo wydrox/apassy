@@ -3,7 +3,9 @@
 //! The process gets a small base environment, the requested `PATH`, and the
 //! bound secrets. There is no shell. Output is limited and masked. The masking
 //! finds only exact secret values. It cannot stop a process that encodes or
-//! sends a secret.
+//! sends a secret. When the main process ends, the broker stops its process
+//! group, so no descendant keeps the secrets after the run. A descendant that
+//! leaves the group is not stopped.
 
 use std::borrow::Cow;
 use std::io::{self, Read};
@@ -108,6 +110,10 @@ pub fn run(
 
     let (mut out, out_cut) = collect(&stdout, &mut child);
     let (mut err, err_cut) = collect(&stderr, &mut child);
+    // The run ends with the main process. A descendant that stays in the group
+    // keeps the secrets in its environment, and a same-user process can read that
+    // environment (key-memory review K12, F11). So stop the group.
+    stop_group(&mut child);
     let masked_out = mask_output(&out, secrets);
     let masked_err = mask_output(&err, secrets);
     // The raw output can contain a secret. Only the masked text leaves.
@@ -266,6 +272,79 @@ mod tests {
         .expect("run");
         assert!(out.timed_out);
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    fn process_exists(pid: &str) -> bool {
+        Command::new("/bin/kill")
+            .args(["-0", pid])
+            .stderr(Stdio::null())
+            .status()
+            .expect("kill -0")
+            .success()
+    }
+
+    #[test]
+    fn run_stops_descendants_that_outlive_the_main_process() {
+        // The background process has the secret in its environment and closes its
+        // output, so the output drain does not wait for it.
+        let secrets = [secret("DEMO_TOKEN", "FAKE-background-value")];
+        let command = [
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "sleep 30 >/dev/null 2>&1 & echo $!".to_owned(),
+        ];
+        let started = Instant::now();
+        let out = run(
+            &command,
+            Path::new("/tmp"),
+            None,
+            &secrets,
+            Duration::from_secs(10),
+        )
+        .expect("run");
+        assert_eq!(out.exit_code, Some(0));
+        assert!(!out.timed_out);
+        let pid = out.stdout.trim().to_owned();
+        assert!(pid.parse::<u32>().is_ok(), "{out:?}");
+        // launchd reaps the stopped process a short time after the kill.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process_exists(&pid) {
+            assert!(
+                Instant::now() < deadline,
+                "process {pid} with the secret still runs after the run ended"
+            );
+            thread::sleep(POLL);
+        }
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn environment_has_only_base_names_path_and_bound_secrets() {
+        // Control: cargo test gives this process variables that the child must not get.
+        assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
+        let secrets = [secret("DEMO_TOKEN", "FAKE-env-value-77")];
+        let out = run(
+            &["/usr/bin/env".to_owned()],
+            Path::new("/tmp"),
+            Some("/usr/bin:/bin"),
+            &secrets,
+            Duration::from_secs(10),
+        )
+        .expect("run");
+        assert_eq!(out.exit_code, Some(0));
+        let names: Vec<&str> = out
+            .stdout
+            .lines()
+            .filter_map(|line| line.split_once('=').map(|(name, _)| name))
+            .collect();
+        assert!(names.contains(&"PATH") && names.contains(&"DEMO_TOKEN"));
+        for name in names {
+            assert!(
+                BASE_ENV.contains(&name) || name == "PATH" || name == "DEMO_TOKEN",
+                "unexpected variable {name}"
+            );
+        }
+        assert!(out.stdout.contains("DEMO_TOKEN=[apassy:DEMO_TOKEN]"));
     }
 
     #[test]
