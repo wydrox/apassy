@@ -198,8 +198,15 @@ fn main() {
                     }],
                 })
                 .expect("add item");
+            // The vault accepts only upper-case names (`checked_env_name`). A name such
+            // as the .NET `ConnectionStrings__OrdersDb` is bound in upper case: .NET
+            // reads environment keys without regard to case.
+            let bound = name.to_ascii_uppercase();
+            if bound != name {
+                eprintln!("env name {name} is bound as {bound}");
+            }
             vault
-                .set_env_binding(item.id, name, "token")
+                .set_env_binding(item.id, &bound, "token")
                 .expect("env binding");
             items.insert(name.to_owned(), item.id);
         }

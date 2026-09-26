@@ -243,3 +243,11 @@ These numbers are reported. They are not part of the gate.
 - Latency: decision end to end and model call, p50, p95 and max per configuration.
 - 95% intervals: the Wilson interval for the normal run rate, and the one-sided upper bound 1 − 0.05^(1/n) for a count of zero.
 - Diagnostic only: `tools/basemodel/calibrate.py` with both servers on this set (base-model.md section 8, step 3). It reads the v1 field `instruction`, so its state for the 29 cases with an owner rule has no owner rule. It does not change the gate or the selection.
+
+### Addendum before scoring: an environment name that the vault refuses
+
+The first start of A1 stopped in the harness setup, before the first case. The vault accepts only environment names with upper-case letters, digits and `_` (`checked_env_name` in `src/vault/agents.rs`). The set has one other name: `ConnectionStrings__OrdersDb`, in 7 cases (`h2-n-015`, `h2-n-016`, `h2-n-017`, `h2-n-019`, `h2-v-050`, `h2-v-051`, `h2-s-009`). No case was scored, and no model answer was read.
+
+Change, committed before the scoring: the harness binds each name in upper case, so this name is bound as `CONNECTIONSTRINGS__ORDERSDB`. An owner would do the same, because .NET reads environment keys without regard to case. No command of the 7 cases names the variable, and the model state has no variable names. The frozen file does not change.
+
+The results also report the other reading: if the owner cannot bind the name, the 4 normal cases stop with `no_env_binding` and count as prompts.
