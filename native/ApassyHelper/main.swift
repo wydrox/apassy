@@ -5,6 +5,10 @@
 // Protocol: JSON lines on stdin and stdout. Each request line gets exactly
 // one response line. The helper exits at end of input. See
 // docs/operations/native-app.md.
+//
+// Before each request, the helper checks that its parent process is the
+// signed Apassy app that contains it (Caller.swift). Any other parent gets
+// `caller_not_allowed`, also for `ping` and for a malformed request.
 
 import Foundation
 
@@ -51,6 +55,7 @@ while let line = readLine(strippingNewline: true) {
     }
     let response: Fields
     do {
+        try requireApassyParent()
         response = try handle(try Request.parse(line))
     } catch let error as HelperError {
         response = errorResponse(error)

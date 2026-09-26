@@ -3,8 +3,10 @@
 //! It resolves the protected paths, finds the SBPL profile, and replaces
 //! itself with `/usr/bin/sandbox-exec`. The host (Claude Code, Codex) and every
 //! command that the host starts then run inside the profile. They cannot read,
-//! copy, or replace the vault, the backup, or the Laya model. They can still
-//! connect to the broker socket, so `apassy-mcp` keeps working.
+//! copy, or replace the vault, the backup, or the Laya model. They cannot
+//! start, read, or change the programs in the Apassy app bundle, except
+//! `apassy-mcp` and `apassy-hook`. They can still connect to the broker
+//! socket, so `apassy-mcp` keeps working.
 //!
 //! Usage:
 //!   apassy-sandbox [OPTIONS] -- <host> [host args...]
@@ -16,6 +18,11 @@
 //!   --backup-file FILE  The backup database. Default: `<vault-file>.backup`.
 //!   --socket FILE       The broker socket. Default: `$APASSY_BROKER_SOCKET`,
 //!                       else `<data-dir>/broker.sock`.
+//!   --app DIR           The installed Apassy app bundle. Default:
+//!                       `/Applications/Apassy.app`.
+//!   --app-build DIR     A second Apassy app bundle, for example a build. Default:
+//!                       `<target>/Apassy.app` when this program runs from
+//!                       `<target>/<profile>/`, else none.
 //!   --profile FILE      The SBPL profile. Default: `$APASSY_SANDBOX_PROFILE`,
 //!                       else a file found next to this program or in `sandbox/`.
 //!   --print             Print the resolved sandbox-exec command. Do not run it.
@@ -41,6 +48,10 @@ const PROFILE_NAME: &str = "apassy-agent-host.sb";
 const PROFILE_ENV: &str = "APASSY_SANDBOX_PROFILE";
 /// Environment override for the broker socket path. It matches the client.
 const SOCKET_ENV: &str = "APASSY_BROKER_SOCKET";
+/// The default installed app bundle.
+const DEFAULT_APP: &str = "/Applications/Apassy.app";
+/// The app bundle that `scripts/build-app.sh` writes into the target directory.
+const BUILD_APP_NAME: &str = "Apassy.app";
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -98,6 +109,14 @@ fn run(args: &[String]) -> Result<(), String> {
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| data_dir.join("broker.sock"));
 
+    let app = parsed
+        .app
+        .map_or_else(|| PathBuf::from(DEFAULT_APP), PathBuf::from);
+    let app_build = parsed
+        .app_build
+        .map(PathBuf::from)
+        .or_else(default_build_app);
+
     let profile = resolve_profile(parsed.profile.as_deref())?;
 
     // Resolve symlinks in each path. Seatbelt matches the resolved path, and on
@@ -108,6 +127,8 @@ fn run(args: &[String]) -> Result<(), String> {
     let vault_file = resolve(&vault_file);
     let backup_file = resolve(&backup_file);
     let socket = resolve(&socket);
+    let app = resolve(&app);
+    let app_build = app_build.as_deref().map(resolve);
 
     let mut command = Command::new(SANDBOX_EXEC);
     command.arg("-f").arg(&profile);
@@ -119,16 +140,24 @@ fn run(args: &[String]) -> Result<(), String> {
         .arg("-D")
         .arg(param("APASSY_BACKUP_FILE", &backup_file)?);
     command.arg("-D").arg(param("APASSY_SOCKET", &socket)?);
+    command.arg("-D").arg(param("APASSY_APP", &app)?);
+    if let Some(app_build) = &app_build {
+        command.arg("-D").arg(param("APASSY_APP_BUILD", app_build)?);
+    }
     command.arg(&parsed.host[0]);
     command.args(&parsed.host[1..]);
 
     if parsed.print {
         print_command(
             &profile,
-            &data_dir,
-            &vault_file,
-            &backup_file,
-            &socket,
+            &[
+                ("APASSY_DATA_DIR", Some(&data_dir)),
+                ("APASSY_VAULT_FILE", Some(&vault_file)),
+                ("APASSY_BACKUP_FILE", Some(&backup_file)),
+                ("APASSY_SOCKET", Some(&socket)),
+                ("APASSY_APP", Some(&app)),
+                ("APASSY_APP_BUILD", app_build.as_ref()),
+            ],
             &parsed.host,
         );
         return Ok(());
@@ -145,6 +174,8 @@ struct Parsed {
     vault_file: Option<String>,
     backup_file: Option<String>,
     socket: Option<String>,
+    app: Option<String>,
+    app_build: Option<String>,
     profile: Option<String>,
     print: bool,
     help: bool,
@@ -157,6 +188,8 @@ fn parse(args: &[String]) -> Result<Parsed, String> {
         vault_file: None,
         backup_file: None,
         socket: None,
+        app: None,
+        app_build: None,
         profile: None,
         print: false,
         help: false,
@@ -175,6 +208,8 @@ fn parse(args: &[String]) -> Result<Parsed, String> {
             "--vault-file" => parsed.vault_file = Some(value(&mut iter, arg)?),
             "--backup-file" => parsed.backup_file = Some(value(&mut iter, arg)?),
             "--socket" => parsed.socket = Some(value(&mut iter, arg)?),
+            "--app" => parsed.app = Some(value(&mut iter, arg)?),
+            "--app-build" => parsed.app_build = Some(value(&mut iter, arg)?),
             "--profile" => parsed.profile = Some(value(&mut iter, arg)?),
             other => {
                 return Err(format!(
@@ -226,6 +261,16 @@ fn resolve(path: &Path) -> PathBuf {
     path.to_owned()
 }
 
+/// The build app bundle next to the target directory of this program:
+/// `<target>/Apassy.app` when the program is `<target>/<profile>/apassy-sandbox`
+/// and the directory is named `target`. `scripts/build-app.sh` writes the app
+/// there.
+fn default_build_app() -> Option<PathBuf> {
+    let exe = env::current_exe().ok()?;
+    let target = exe.parent()?.parent()?;
+    (target.file_name()? == "target").then(|| target.join(BUILD_APP_NAME))
+}
+
 /// Find the SBPL profile. Order: the flag, the environment, next to the
 /// program, then `sandbox/` in the working directory.
 fn resolve_profile(flag: Option<&str>) -> Result<PathBuf, String> {
@@ -258,19 +303,13 @@ fn resolve_profile(flag: Option<&str>) -> Result<PathBuf, String> {
     ))
 }
 
-fn print_command(
-    profile: &Path,
-    data_dir: &Path,
-    vault_file: &Path,
-    backup_file: &Path,
-    socket: &Path,
-    host: &[String],
-) {
+fn print_command(profile: &Path, params: &[(&str, Option<&PathBuf>)], host: &[String]) {
     print!("{SANDBOX_EXEC} -f {}", profile.display());
-    print!(" -D APASSY_DATA_DIR={}", data_dir.display());
-    print!(" -D APASSY_VAULT_FILE={}", vault_file.display());
-    print!(" -D APASSY_BACKUP_FILE={}", backup_file.display());
-    print!(" -D APASSY_SOCKET={}", socket.display());
+    for (key, path) in params {
+        if let Some(path) = path {
+            print!(" -D {key}={}", path.display());
+        }
+    }
     for part in host {
         print!(" {part}");
     }
@@ -288,6 +327,9 @@ Options:
   --vault-file FILE   vault database (default: <data-dir>/vault.db)
   --backup-file FILE  backup database (default: <vault-file>.backup)
   --socket FILE       broker socket (default: <data-dir>/broker.sock)
+  --app DIR           installed app bundle (default: /Applications/Apassy.app)
+  --app-build DIR     second app bundle (default: <target>/Apassy.app when this
+                      program runs from <target>/<profile>/)
   --profile FILE      SBPL profile (default: found near the program)
   --print             print the resolved sandbox-exec command; do not run it
   -h, --help          print this help

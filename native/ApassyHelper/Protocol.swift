@@ -28,6 +28,7 @@ enum ErrorCode: String {
     case biometryChanged = "biometry_changed"
     case notificationsUnavailable = "notifications_unavailable"
     case notificationsDenied = "notifications_denied"
+    case callerNotAllowed = "caller_not_allowed"
     case internalError = "internal"
 }
 
