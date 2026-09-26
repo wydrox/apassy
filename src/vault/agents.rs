@@ -9,6 +9,7 @@ use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use super::types::{VaultErrorKind, VaultResult, err};
 use super::{Vault, fresh_epoch, to_public_id, to_sql_id};
@@ -180,6 +181,7 @@ pub(super) const SCHEMA_V2_COLUMNS: [&str; 4] = [
 ];
 
 /// Agent token text. Debug is redacted. There is no `Serialize` impl.
+/// Drop erases the text with `zeroize`.
 pub struct AgentToken(String);
 
 impl AgentToken {
@@ -196,9 +198,11 @@ impl fmt::Debug for AgentToken {
 
 impl Drop for AgentToken {
     fn drop(&mut self) {
-        self.0.clear();
+        self.0.zeroize();
     }
 }
+
+impl ZeroizeOnDrop for AgentToken {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentSummary {
@@ -440,7 +444,7 @@ impl Vault {
     /// Register an agent. The returned token is the only copy outside the vault.
     pub fn register_agent(&mut self, name: &str) -> VaultResult<(AgentSummary, AgentToken)> {
         let name = checked_text(name.trim(), MAX_AGENT_NAME_BYTES)?.to_owned();
-        let token = fresh_epoch()?;
+        let token = Zeroizing::new(fresh_epoch()?);
         let at = now_unix();
         let lifetime = self.token_lifetime_days()?;
         let conn = self.conn_mut()?;
@@ -537,7 +541,7 @@ impl Vault {
     /// returned token is the only copy outside the vault. An expired agent can rotate.
     pub fn rotate_agent_token(&mut self, agent_id: u64) -> VaultResult<AgentToken> {
         let sql_id = to_sql_id(agent_id)?;
-        let token = fresh_epoch()?;
+        let token = Zeroizing::new(fresh_epoch()?);
         let at = to_sql_time(now_unix())?;
         let conn = self.conn_mut()?;
         let tx = conn
@@ -599,7 +603,8 @@ impl Vault {
     /// Find the active agent for a token, also when the token expired. The broker uses
     /// it to name the agent in the refusal. Use [`Vault::authenticate_agent`] for access.
     pub fn identify_agent(&self, token: &str) -> VaultResult<AgentSummary> {
-        let presented = parse_token(token).ok_or_else(|| err(VaultErrorKind::NotFound))?;
+        let presented =
+            Zeroizing::new(parse_token(token).ok_or_else(|| err(VaultErrorKind::NotFound))?);
         let lifetime = self.token_lifetime_days()?;
         let conn = self.conn_ref()?;
         let mut stmt = conn
@@ -623,6 +628,7 @@ impl Vault {
         for row in rows {
             let (id, name, stored, created_at, issued_at) =
                 row.map_err(|_| err(VaultErrorKind::Storage))?;
+            let stored = Zeroizing::new(stored);
             if constant_time_eq(&stored, &presented) && found.is_none() {
                 let issued_at = from_sql_time(issued_at)?;
                 found = Some(AgentSummary {
@@ -1394,6 +1400,14 @@ fn from_sql_time(at: i64) -> VaultResult<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn requires_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+
+    #[test]
+    fn agent_token_is_zeroize_on_drop() {
+        // Compile-time check. Safe Rust cannot read freed memory to prove the erase.
+        requires_zeroize_on_drop::<AgentToken>();
+    }
 
     #[test]
     fn token_round_trip_and_rejects_bad_text() {
