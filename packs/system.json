@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 3,
+  "pack_version": 4,
   "tool": "system",
   "description": "System tools: privilege, permissions, scheduled jobs, services, disks, and process information.",
   "programs": [
@@ -15,6 +15,23 @@
       "flag": "privilege",
       "note": "`sudo` and `doas` run the command as another user.",
       "when": { "raw_program": ["sudo", "doas"] }
+    },
+    {
+      "id": "process-environment",
+      "flag": "secret_output",
+      "note": "`ps -E` (macOS) and the BSD option letter `e` without a dash (`ps eww`, `ps auxe`) print the environment of processes, with the secrets of this run (dev round 3).",
+      "when": {
+        "program": ["ps"],
+        "any_of": [
+          { "command_contains_exact": [" -E", " -AE", " -eE", " -axE"] },
+          {
+            "operands": {
+              "skip": ["-o", "-p", "-u", "-g", "-t", "-c"],
+              "any": [{ "contains": ["e"], "only_chars": "aceghjlmnrstuvwx" }]
+            }
+          }
+        ]
+      }
     },
     {
       "id": "world-writable",

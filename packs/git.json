@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 3,
+  "pack_version": 4,
   "tool": "git",
   "description": "Git: history changes, pushes to protected branches, and read commands.",
   "programs": ["git"],
@@ -71,8 +71,20 @@
       "id": "discard-changes",
       "flag": "data_loss",
       "dry_run": "skip_with_n",
-      "note": "`checkout .`, `restore .`, and `-f` discard local changes.",
-      "when": { "subcommand": ["checkout", "restore"], "any_arg": [".", "--force", "-f"] }
+      "note": "`checkout .`, `restore .`, and `-f` discard local changes. `switch -f` and `--discard-changes` do the same.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["checkout", "restore"], "any_arg": [".", "--force", "-f"] },
+          { "subcommand": ["switch"], "any_arg": ["--force", "-f", "--discard-changes"] }
+        ]
+      }
+    },
+    {
+      "id": "reflog-expire",
+      "flag": "data_loss",
+      "dry_run": "skip_with_n",
+      "note": "`reflog expire` and `reflog delete` remove the record of old commits, so a later garbage collection loses them.",
+      "when": { "subcommand": ["reflog"], "action": ["expire", "delete"] }
     },
     {
       "id": "stash-drop",
@@ -175,26 +187,25 @@
     },
     {
       "id": "checkout-branch",
-      "note": "A switch to a branch, or a new branch with `-b`.",
+      "note": "A switch to a branch, or a new branch with `-b`. An operand with a dot can be a file (`git checkout src/app.js` discards its changes), so it is not here (dev round 3).",
       "when": {
         "subcommand": ["checkout"],
         "any_of": [
           { "action": ["-b"] },
-          { "arg_count": 2, "operands": { "count": 2 }, "not": { "action": ["."] } }
+          {
+            "arg_count": 2,
+            "operands": { "count": 2 },
+            "not": { "operands": { "any": [{ "contains": ["."] }] } }
+          }
         ]
       }
-    },
+    }
+  ],
+  "writes": [
     {
-      "id": "push-feature-branch",
-      "note": "Exactly a remote and a branch, no options, and not a release branch.",
-      "when": {
-        "subcommand": ["push"],
-        "not": { "any_arg_starts": ["-"] },
-        "operands": {
-          "count": 3,
-          "at": { "index": 2, "not_in": ["main", "master", "production", "prod", "release"] }
-        }
-      }
+      "id": "push",
+      "note": "A push changes the remote repository, also for a feature branch. It is not known safe (dev round 3). A push to a release branch or a forced push also has a flag.",
+      "when": { "subcommand": ["push"] }
     }
   ]
 }

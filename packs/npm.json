@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 4,
+  "pack_version": 5,
   "tool": "npm",
   "description": "Node package managers and package runners (npm, pnpm, yarn, bun, npx, bunx): scripts, scripts named for data loss (role `task_runner`), new dependencies, registry settings, and publishing.",
   "programs": ["npm", "pnpm", "yarn", "bun", "npx", "bunx"],
@@ -47,6 +47,19 @@
       }
     },
     {
+      "id": "registry-access-change",
+      "flag": "privilege",
+      "note": "A change of the owners, teams, or access of a package in the registry changes who can publish it.",
+      "when": {
+        "program": ["npm", "pnpm", "yarn", "bun"],
+        "any_of": [
+          { "subcommand": ["owner", "team"], "action": ["add", "rm", "remove"] },
+          { "subcommand": ["access"], "action": ["grant", "revoke", "set", "public", "restricted"] },
+          { "subcommand": ["org"], "action": ["set", "rm"] }
+        ]
+      }
+    },
+    {
       "id": "registry-config-change",
       "flag": "system_change",
       "note": "A change to the package manager settings can change the registry or the tokens.",
@@ -80,12 +93,13 @@
   "safe": [
     {
       "id": "test-and-read-commands",
-      "note": "Tests, a clean install from the lock file, and reads of packages.",
+      "note": "Tests, a clean install from the lock file, and reads of packages. `audit fix` changes the dependencies, so it is not here (dev round 3).",
       "when": {
         "program": ["npm", "pnpm", "yarn", "bun"],
         "subcommand": [
           "test", "t", "ci", "ls", "outdated", "audit", "why", "version", "-v", "--version"
-        ]
+        ],
+        "not": { "subcommand": ["audit"], "any_arg": ["fix", "--fix"] }
       }
     },
     {

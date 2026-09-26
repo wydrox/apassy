@@ -2276,3 +2276,167 @@ ruby bin/make_superuser.rb bob
 node scripts/admin-report.js
 sh -c 'psql "$DATABASE_URL" -c "EXPLAIN ANALYZE DELETE FROM orders"'
 sh -c 'psql "$DATABASE_URL" -c "EXPLAIN ANALYZE SELECT * FROM orders"'
+# ---- Dev round 3: the known safe audit, known writes, access reads, verbose HTTP clients, outputs by name, global options, and wrappers ----
+cargo run --bin seed-demo-data
+cargo run --release
+go run ./cmd/backfill --since 2026-01-01
+go test ./...
+dotnet run --project tools/DataFixer -- --apply
+dotnet watch
+dotnet watch test
+dotnet test
+./gradlew bootRun
+./mvnw spring-boot:run -Dspring-boot.run.profiles=local
+./gradlew :app:run
+./gradlew test
+git push -u origin feature/invoice-pagination
+sh -c 'pnpm test && git push origin HEAD'
+gh pr create --draft --title "Fix pagination" --body "Fixes #42"
+gh pr comment 77 --body "LGTM, merging after CI"
+gh issue close 12
+gh issue comment 88 --body "Looking into this now"
+gh pr merge 231 --squash
+gh repo create acme/new --private
+gh api repos/acme/web/issues -f title=x
+gh api -X GET search/issues -f q=bug
+gh api repos/acme/web/pulls
+gh pr view 12
+gh workflow list
+gh search prs --author @me
+gh auth status --show-token
+gh auth status
+glab mr list --assignee=@me
+glab mr create --fill --draft --target-branch main
+glab mr merge 12
+glab release create v1.0.0
+glab ci run
+glab ci status
+glab variable set API_TOKEN value
+glab repo delete acme/x --yes
+glab api -X POST projects/1/issues
+glab api projects/1/issues -f title=x
+glab api projects/1/issues
+glab mr note 12 -m "$API_KEY"
+sentry-cli releases new 1.0.0
+sentry-cli sourcemaps upload --release 1.0.0 ./dist
+sentry-cli send-event -m "checkout test event"
+sentry-cli monitors run nightly -- rm -rf /
+sentry-cli sourcemaps inject ./dist
+sentry-cli releases list
+stripe trigger payment_intent.succeeded
+stripe customers create --email a@example.test
+stripe products list --limit 3
+stripe --api-key $API_KEY customers delete cus_1
+docker inspect web
+docker container inspect web
+docker image inspect node:20
+docker compose config
+docker compose -f dev.yml config --services
+docker compose -f dev.yml down -v
+docker compose run --rm migrate
+docker compose run --rm web npm test
+docker run --rm -e AWS_SECRET_ACCESS_KEY example.com/tools/s3-sync:latest
+docker push ghcr.io/acme/api:dev
+docker build --push -t ghcr.io/acme/api:dev .
+docker build -t acme/api:dev .
+docker-compose -f dev.yml config
+docker-compose -f dev.yml down -v
+terraform output
+terraform output vpc_id
+terraform output -raw db_password
+tofu output -json
+terraform show
+terraform state show aws_db_instance.main
+terraform -chdir=infra apply
+terraform -chdir=infra plan
+pulumi config get dbPassword
+pulumi config get region
+prisma migrate dev --name add_index
+alembic upgrade head
+alembic upgrade head --sql
+alembic stamp head
+dotnet ef database update
+flyway migrate
+./gradlew flywayMigrate
+knex migrate:latest
+dbmate create
+dbmate new add_users
+goose create add_users sql
+cargo sqlx migrate run
+cargo sqlx database drop
+cargo sqlx migrate revert
+cargo +nightly test
+cargo yank --version 1.0.0
+psql $DATABASE_URL -c "INSERT INTO t VALUES (1)"
+psql $DATABASE_URL -c "SELECT count(*) FROM orders"
+psql $DATABASE_URL -c "WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x"
+sqlite3 app.db "CREATE TABLE t (id int)"
+sqlite3 app.db "SELECT count(*) FROM users"
+mongosh "$DATABASE_URL" --eval "db.users.insertOne({a: 1})"
+redis-cli SET key value
+redis-cli GET key
+snowsql -c dev -q "INSERT INTO t VALUES (1)"
+curl -v -H "Authorization: token $API_KEY" https://api.github.com/user
+curl -sSv -H "Authorization: token $API_KEY" https://api.github.com/user
+curl --trace-ascii - -u "me:$API_KEY" https://api.github.com/user
+curl -v http://localhost:3000/health
+curl -sS -H "Authorization: token $API_KEY" https://api.github.com/user
+http -v GET https://api.github.com/user "Authorization:token $API_KEY"
+wget -d --header="Authorization: $API_KEY" https://api.github.com/user
+wget -nd https://example.com/file.txt
+git -C api push --force origin main
+git -C api status
+kubectl -n staging apply -f k8s/
+kubectl --context dev get pods
+make -C api db-drop
+make test deploy
+make test lint
+just --justfile ci.just test
+timeout 60 git push --force origin main
+find . -name '*.log' | xargs rm -rf
+env FOO=1 sh -c 'git push -f origin main'
+nice -n 10 terraform destroy
+bash <<'EOF'<NL>git push --force origin main<NL>EOF
+trap 'rm -rf ~/' EXIT
+eval "git push -f origin main"
+command -v git
+ps eww
+ps aux
+ps -E
+aws iam list-users
+aws --profile dev s3 ls
+aws lambda get-function-configuration --function-name ingest-dev
+gcloud projects get-iam-policy acme-dev
+gcloud run services describe api --region europe-west1
+az role assignment list
+npm owner add bob acme-lib
+npm audit fix
+npm audit
+tox -e release
+nox -s deploy
+tox
+pip-audit --fix
+yq -i '.a = 1' config.yaml
+sort -o out.txt in.txt
+uniq in.txt out.txt
+find . -fprint list.txt
+heroku drains -a acme
+heroku pg:backups restore b001 DATABASE_URL -a acme
+heroku pg:backups -a acme
+railway domain
+railway environment
+railway environment new preview
+serverless print
+sls print --stage dev
+supabase link --project-ref abc
+supabase stop --no-backup
+supabase stop
+wrangler dev --remote
+op account add --address x.1password.com
+op account list
+rabbitmqadmin list users
+rabbitmqadmin list queues
+kubectl config view --flatten
+git switch -f main
+git reflog expire --expire=now --all
+git switch main

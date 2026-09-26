@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "wrangler",
   "description": "Cloudflare Wrangler: deployments, deletions, writes to KV, R2, D1, and secrets, and local and read commands.",
   "programs": ["wrangler"],
@@ -47,8 +47,9 @@
   "safe": [
     {
       "id": "local-and-read-commands",
-      "note": "The local server, types, logs, identity, and listings.",
+      "note": "The local server, types, logs, identity, and listings. `dev --remote` runs the Worker on Cloudflare with the real bindings, so it is not here (dev round 3).",
       "when": {
+        "not": { "any_arg": ["--remote", "-r"] },
         "any_of": [
           { "subcommand": ["dev", "types", "tail", "whoami"] },
           {

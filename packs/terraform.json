@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 2,
+  "pack_version": 3,
   "tool": "terraform",
   "description": "Terraform, OpenTofu, and Pulumi: destroy, apply, state changes, secret outputs, and read commands.",
   "programs": ["terraform", "tofu", "pulumi"],
@@ -53,6 +53,27 @@
       }
     },
     {
+      "id": "secret-output-by-name",
+      "flag": "secret_output",
+      "note": "An output or a configuration value that a command prints by name is in plain text, also when it is sensitive: `terraform output -raw db_password`, `pulumi config get dbPassword`. The rule reads secret words in the name (dev round 3).",
+      "when": {
+        "any_of": [
+          { "program": ["terraform", "tofu"], "subcommand": ["output"] },
+          { "program": ["pulumi"], "subcommand": ["config"], "action": ["get"] }
+        ],
+        "operands": {
+          "any": [
+            {
+              "contains": [
+                "password", "passwd", "secret", "token", "apikey", "api_key", "private_key",
+                "access_key", "credential", "dsn", "connection_string", "conn_str", "auth"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
       "id": "workspace-or-stack-delete",
       "flag": "data_loss",
       "note": "A workspace or a stack delete removes its state.",
@@ -67,17 +88,21 @@
   "safe": [
     {
       "id": "terraform-read-and-check",
-      "note": "Checks, formatting, plans, and reads of the state without secret values. `init` uses the lock file.",
+      "note": "Checks, formatting, plans, the list of all outputs (Terraform hides sensitive outputs in it), and lists of resources and workspaces. `init` uses the lock file. `show`, `state show`, and an output by name print attribute values in plain text, so they are not here (dev round 3).",
       "when": {
         "program": ["terraform", "tofu"],
         "any_of": [
           { "subcommand": ["validate", "fmt", "plan", "version", "providers", "graph"] },
-          { "subcommand": ["output", "show"], "not": { "any_arg": ["-json", "--json"] } },
+          {
+            "subcommand": ["output"],
+            "operands": { "count": 1 },
+            "not": { "any_arg": ["-json", "--json", "-raw", "--raw"] }
+          },
           {
             "subcommand": ["init"],
             "not": { "any_arg": ["-upgrade", "--upgrade", "-migrate-state", "-force-copy", "-reconfigure"] }
           },
-          { "subcommand": ["state"], "action": ["list", "show"] },
+          { "subcommand": ["state"], "action": ["list"] },
           { "subcommand": ["workspace"], "action": ["list", "show"] }
         ]
       }

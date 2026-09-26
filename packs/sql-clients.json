@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "sql-clients",
   "description": "SQL command line clients that take SQL as an argument or an option value (Snowflake `snowsql` and `snow`, Trino, Presto, Spark SQL, Hive, Beeline, Impala, `sqlcmd`, `usql`, `mycli`, `pgcli`, `litecli`, MariaDB, Vertica, ClickHouse): SQL that changes data, schema, or access.",
   "programs": [
@@ -28,6 +28,13 @@
           { "subcommand": ["stage"], "action": ["remove"] }
         ]
       }
+    }
+  ],
+  "writes": [
+    {
+      "id": "sql-changes",
+      "note": "SQL in an argument or an option value that changes data, schema, or access in any way, such as `INSERT` or `CREATE` (policy v7). The destructive statements also have the flag `data_loss`.",
+      "when": { "sql": "any_arg_changes" }
     }
   ]
 }

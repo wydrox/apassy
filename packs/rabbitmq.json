@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "rabbitmq",
   "description": "RabbitMQ tools (`rabbitmqctl`, `rabbitmqadmin`, `rabbitmq-diagnostics`, `rabbitmq-plugins`, `rabbitmq-queues`): purges, deletions, node resets, users and permissions, definition exports, and read commands.",
   "programs": [
@@ -85,9 +85,10 @@
     },
     {
       "id": "rabbitmqadmin-reads",
-      "note": "`list` and `show` print objects and message counts. Connection options such as `--host` and `--password` take a value.",
+      "note": "`list` and `show` print objects and message counts. Connection options such as `--host` and `--password` take a value. `list users` prints password hashes, so it is not here (dev round 3).",
       "when": {
         "program": ["rabbitmqadmin"],
+        "not": { "any_arg": ["users"] },
         "operands": {
           "skip": [
             "--host", "-h", "--port", "-p", "--username", "-u", "--password", "--vhost", "-v",

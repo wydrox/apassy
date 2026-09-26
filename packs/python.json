@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 3,
+  "pack_version": 4,
   "tool": "python",
   "description": "Python: inline code, package installs and sources, test and lint tools, project managers (Poetry, uv, Pipenv, PDM, Hatch), and publishing. Django commands are in the `django` pack. `poetry run`, `uv run`, `pipenv run`, `pdm run`, and `hatch run` are wrappers: the analysis checks the program after them.",
   "programs": [
@@ -86,12 +86,18 @@
   "safe": [
     {
       "id": "test-and-lint-tools",
-      "note": "Test runners, linters, formatters, type checkers, and security scanners of the project.",
+      "note": "Test runners, linters, formatters, type checkers, and security scanners of the project. A `tox` environment or a `nox` session that the command names is project code with any effect, for example a release session, and `pip-audit --fix` changes the dependencies, so they are not here (dev round 3).",
       "when": {
         "program": [
           "pytest", "ruff", "mypy", "black", "flake8", "pylint", "isort", "tox", "nox",
           "bandit", "pyright", "pip-audit"
-        ]
+        ],
+        "not": {
+          "any_of": [
+            { "program": ["tox", "nox"], "any_arg_starts": ["-e", "-s", "--session", "-k", "--keywords", "-t", "--tags"] },
+            { "program": ["pip-audit"], "any_arg": ["--fix"] }
+          ]
+        }
       }
     },
     {

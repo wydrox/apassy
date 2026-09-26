@@ -343,8 +343,7 @@ mod tests {
         let flagged = ShadowInput {
             analysis: Analysis {
                 flags: vec!["data_loss".to_owned()],
-                known_safe: false,
-                known_command: false,
+                ..Analysis::default()
             },
             ..input()
         };

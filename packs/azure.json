@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 2,
+  "pack_version": 3,
   "tool": "azure",
   "description": "Azure CLI (az): resource changes, deletions, keys and secrets, remote shells, and read commands.",
   "programs": ["az"],
@@ -79,6 +79,13 @@
           "storage container show"
         ]
       }
+    }
+  ],
+  "access_reads": [
+    {
+      "id": "identity-inventory",
+      "note": "Reads of the role assignments, users, groups, and service principals of the directory or subscription. They show who and what has access, so they must serve the user request (dev round 3).",
+      "when": { "subcommand": ["role", "ad"] }
     }
   ]
 }

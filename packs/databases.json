@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 3,
+  "pack_version": 4,
   "tool": "databases",
   "description": "Database clients and tools (psql, mysql, sqlite3, MongoDB, ClickHouse, CockroachDB, Redis, restore tools): writes, drops, and credential columns.",
   "programs": [
@@ -156,6 +156,39 @@
           "skip": ["-u", "-h", "-p", "-a", "-n", "--user", "--pass", "--pattern", "--count", "-i"],
           "count": 0
         }
+      }
+    }
+  ],
+  "writes": [
+    {
+      "id": "sql-changes",
+      "note": "SQL or database shell code that changes data, schema, or access: `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `ALTER`, `COPY ... FROM`, `CALL`, a MongoDB `insertOne`, and more (policy v7). The destructive statements also have the flag `data_loss`.",
+      "when": {
+        "any_of": [
+          {
+            "program": ["psql", "mysql", "mongo", "mongosh", "clickhouse-client", "cockroach", "cqlsh"],
+            "sql": "changes"
+          },
+          { "program": ["sqlite3", "duckdb", "clickhouse-client"], "sql": "any_arg_changes" }
+        ]
+      }
+    },
+    {
+      "id": "redis-writes",
+      "note": "Redis commands that set, change, or remove keys, publish messages, or change the server.",
+      "when": {
+        "program": ["redis-cli"],
+        "any_arg": [
+          "set", "setex", "psetex", "setnx", "mset", "msetnx", "getset", "getdel", "getex",
+          "append", "incr", "incrby", "incrbyfloat", "decr", "decrby", "del", "unlink",
+          "expire", "pexpire", "expireat", "persist", "rename", "renamenx", "copy", "move",
+          "hset", "hsetnx", "hmset", "hdel", "hincrby", "lpush", "rpush", "lpop", "rpop",
+          "lset", "lrem", "ltrim", "linsert", "lmove", "sadd", "srem", "spop", "smove",
+          "zadd", "zrem", "zincrby", "zpopmin", "zpopmax", "xadd", "xdel", "xtrim",
+          "xgroup", "xack", "publish", "restore", "flushall", "flushdb", "config", "eval",
+          "evalsha", "fcall", "script", "function", "save", "bgsave", "bgrewriteaof",
+          "shutdown", "debug", "swapdb", "migrate", "replicaof", "slaveof", "acl"
+        ]
       }
     }
   ]

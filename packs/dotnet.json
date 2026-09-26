@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 2,
+  "pack_version": 3,
   "tool": "dotnet",
   "description": ".NET CLI: Entity Framework drops and rollbacks, package publishing, new packages and tools, user secrets, and build and test commands.",
   "programs": ["dotnet"],
@@ -49,10 +49,11 @@
   "safe": [
     {
       "id": "build-and-test",
-      "note": "Build, test, format, restore from the project, run, and reads of migrations and packages.",
+      "note": "Build, test, format, restore from the project, and reads of migrations and packages. Tests are project code with a check contract. `dotnet run` and `dotnet watch` without `test` or `build` are not here: they run a program of the project with any effect (dev round 3).",
       "when": {
         "any_of": [
-          { "subcommand": ["build", "test", "format", "restore", "run", "clean", "watch", "--info", "--list-sdks"] },
+          { "subcommand": ["build", "test", "format", "restore", "clean", "--info", "--list-sdks"] },
+          { "subcommand": ["watch"], "action": ["test", "build"] },
           {
             "args_start": [
               "ef migrations list", "ef migrations add", "ef migrations script",
@@ -61,6 +62,13 @@
           }
         ]
       }
+    }
+  ],
+  "writes": [
+    {
+      "id": "ef-database-update",
+      "note": "`dotnet ef database update` applies migrations to the database.",
+      "when": { "args_start": ["ef database update"] }
     }
   ]
 }

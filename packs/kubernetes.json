@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 3,
+  "pack_version": 4,
   "tool": "kubernetes",
   "description": "kubectl and Helm: deletions, changes to a cluster, secret reads, shells in a container, and read commands.",
   "programs": ["kubectl", "helm"],
@@ -61,11 +61,11 @@
     {
       "id": "raw-config-or-token",
       "flag": "secret_output",
-      "note": "`config view --raw` prints client keys and tokens. `create token` prints a new token.",
+      "note": "`config view --raw` and `--flatten` print client keys and tokens. `create token` prints a new token.",
       "when": {
         "program": ["kubectl"],
         "any_of": [
-          { "args_start": ["config view"], "any_arg": ["--raw"] },
+          { "args_start": ["config view"], "any_arg": ["--raw", "--flatten"] },
           { "args_start": ["create token"] }
         ]
       }

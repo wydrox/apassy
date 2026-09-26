@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "stripe",
   "description": "Stripe CLI: deletions and cancellations, money movement, API keys, and test and read commands. `--live` and live keys are production words for the general rule.",
   "programs": ["stripe"],
@@ -51,23 +51,41 @@
   "safe": [
     {
       "id": "test-and-read-commands",
-      "note": "Test events, logs, and reads. `trigger` works in test mode only.",
+      "note": "Logs, status, and reads. `trigger` is not here: it creates objects and events in the Stripe account, also in test mode (dev round 3).",
       "when": {
         "any_of": [
-          { "subcommand": ["trigger", "logs", "status", "version", "open"] },
+          { "subcommand": ["logs", "status", "version", "open"] },
           { "action": ["list", "retrieve"] }
         ]
       }
     },
     {
       "id": "listen-local",
-      "note": "`listen` without forwarding, or with forwarding to this machine. Events hold customer data, so a remote target is not safe.",
+      "note": "`listen` without forwarding, or with forwarding to this machine. Events hold customer data, so a remote target is not safe. `listen` prints the webhook signing secret of the local listener, not a bound credential; the audit of dev round 3 keeps it known safe.",
       "when": {
         "subcommand": ["listen"],
         "not": { "any_arg_contains": ["://"] },
         "any_of": [
           { "not": { "any_arg": ["--forward-to", "-f", "--forward-connect-to", "-c"] } },
           { "any_arg_starts": ["localhost", "127.0.0.1"] }
+        ]
+      }
+    }
+  ],
+  "writes": [
+    {
+      "id": "account-changes",
+      "note": "Commands that create, change, or send Stripe objects: test events from `trigger`, API requests with `post`, and resource actions such as `create` and `update`. They change the Stripe account, also in test mode.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["trigger", "post", "delete", "fixtures", "resend"] },
+          {
+            "action": [
+              "create", "update", "delete", "cancel", "capture", "confirm", "pay", "send",
+              "finalize_invoice", "void", "attach", "detach", "reject", "approve", "verify",
+              "close", "resume", "mark_uncollectible", "apply_customer_balance", "expire"
+            ]
+          }
         ]
       }
     }

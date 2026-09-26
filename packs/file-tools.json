@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 4,
+  "pack_version": 5,
   "tool": "file-tools",
   "description": "File and text tools (ls, cat, grep, sed, awk, find, cp, rm, and others): file removal, secret files, system files, and read commands.",
   "programs": [
@@ -156,12 +156,19 @@
   "safe": [
     {
       "id": "read-tools",
-      "note": "Tools that list, count, compare, or format text only read.",
+      "note": "Tools that list, count, compare, or format text only read. An option that writes a file (`yq -i`, `sort -o`, `tree -o`) or a second `uniq` operand (the output file) changes a file, so it is not here (dev round 3).",
       "when": {
         "program": [
           "ls", "du", "wc", "tree", "file", "stat", "sort", "uniq", "cut", "diff", "jq", "yq",
           "nl", "tr", "column", "basename", "dirname", "realpath"
-        ]
+        ],
+        "not": {
+          "any_of": [
+            { "program": ["yq"], "any_arg_starts": ["-i", "--inplace"] },
+            { "program": ["sort", "tree"], "any_arg_starts": ["-o", "--output"] },
+            { "program": ["uniq"], "operands": { "min": 2 } }
+          ]
+        }
       }
     },
     {
@@ -187,10 +194,15 @@
     },
     {
       "id": "find-without-action",
-      "note": "`find` without `-delete`, `-exec`, or `-ok` only lists files.",
+      "note": "`find` without `-delete`, `-exec`, `-ok`, or an option that writes a file (`-fprint`, `-fls`) only lists files.",
       "when": {
         "program": ["find"],
-        "not": { "any_arg": ["-delete", "-exec", "-execdir", "-ok"] }
+        "not": {
+          "any_arg": [
+            "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf",
+            "-fls"
+          ]
+        }
       }
     },
     {

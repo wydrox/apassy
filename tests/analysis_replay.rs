@@ -108,12 +108,17 @@ fn result_line(case: &Case) -> String {
         analysis.flags.join(",")
     };
     // Policy v5: `known` is a known command that is not known safe (`known_command`).
-    let safe = if analysis.known_safe {
-        "safe"
-    } else if analysis.known_command {
-        "known"
-    } else {
-        "-"
+    // Policy v7: `write` is a known write (`known_write`), alone or after `known+`.
+    let safe = match (
+        analysis.known_safe,
+        analysis.known_command,
+        analysis.known_write,
+    ) {
+        (true, _, _) => "safe",
+        (false, true, true) => "known+write",
+        (false, true, false) => "known",
+        (false, false, true) => "write",
+        (false, false, false) => "-",
     };
     let command = serde_json::to_string(&case.argv).expect("json");
     format!("{}\t{flags}\t{safe}\t{command}", case.id)
@@ -714,6 +719,7 @@ fn generated_summary(lines: &[String]) -> String {
     let mut flags = BTreeMap::<String, usize>::new();
     let mut safe = 0usize;
     let mut known = 0usize;
+    let mut writes = 0usize;
     for line in lines {
         let parts: Vec<&str> = line.split('\t').collect();
         if parts[1] != "-" {
@@ -724,6 +730,11 @@ fn generated_summary(lines: &[String]) -> String {
         match parts[2] {
             "safe" => safe += 1,
             "known" => known += 1,
+            "known+write" => {
+                known += 1;
+                writes += 1;
+            }
+            "write" => writes += 1,
             _ => {}
         }
     }
@@ -732,7 +743,7 @@ fn generated_summary(lines: &[String]) -> String {
         .map(|(flag, count)| format!("{flag}={count}"))
         .collect();
     format!(
-        "generated\tcount={}\tseed={GENERATED_SEED:#x}\tdigest={:016x}\tknown_safe={safe}\tknown_command={known}\t{}",
+        "generated\tcount={}\tseed={GENERATED_SEED:#x}\tdigest={:016x}\tknown_safe={safe}\tknown_command={known}\tknown_write={writes}\t{}",
         lines.len(),
         digest(lines),
         counts.join(",")
@@ -743,7 +754,7 @@ fn golden_text() -> String {
     let mut text = String::new();
     text.push_str("# Analysis replay golden file (goal B7). tests/analysis_replay.rs writes it.\n");
     text.push_str(
-        "# Columns: case, flags (- for none), known (safe, known, or -), argument list (JSON).\n",
+        "# Columns: case, flags (- for none), known (safe, known, known+write, write, or -),\n# argument list (JSON).\n",
     );
     text.push_str("# The last line is the count and the digest of the generated set.\n");
     for case in fixture_cases() {

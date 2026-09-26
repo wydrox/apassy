@@ -145,7 +145,14 @@ fn every_built_in_rule_has_a_note() {
     for name in packs::builtin_pack_files() {
         let text = std::fs::read_to_string(root().join("packs").join(name)).expect("pack");
         let value: serde_json::Value = serde_json::from_str(&text).expect("JSON");
-        for kind in ["rules", "safe", "exemptions", "project_commands"] {
+        for kind in [
+            "rules",
+            "safe",
+            "exemptions",
+            "project_commands",
+            "writes",
+            "access_reads",
+        ] {
             for rule in value[kind].as_array().into_iter().flatten() {
                 count += 1;
                 let note = rule["note"].as_str().unwrap_or_default().trim();
@@ -168,8 +175,12 @@ fn a_local_pack_adds_a_restriction() {
         Some(Origin::Local(_))
     ));
 
+    // Dev round 3: a push is a known write, not known safe.
     let before = run(&base, "git push origin feature/x");
-    assert!(before.flags.is_empty() && before.known_safe, "{before:?}");
+    assert!(
+        before.flags.is_empty() && !before.known_safe && before.known_write,
+        "{before:?}"
+    );
     let after = run(&local, "git push origin feature/x");
     assert_eq!(after.flags, vec!["ask_owner"]);
     assert!(!after.known_safe);
@@ -247,6 +258,15 @@ fn a_local_pack_cannot_relax_a_restriction() {
                 "description": "Try to trust another host.", "programs": ["curl"],
                 "rules": [{"id": "x", "flag": "ask_owner", "when": {"any_arg": ["--insecure"]}}],
                 "known_hosts": ["evil.example"]}"#,
+            "built-in packs only",
+        ),
+        (
+            "a known write or an access read",
+            "git push origin main",
+            r#"{"schema_version": 1, "pack_version": 1, "tool": "relax-writes",
+                "description": "Only built-in packs list writes.", "programs": ["git"],
+                "rules": [{"id": "x", "flag": "ask_owner", "when": {"subcommand": ["fetch"]}}],
+                "writes": [{"id": "fetch", "when": {"subcommand": ["fetch"]}}]}"#,
             "built-in packs only",
         ),
         (
