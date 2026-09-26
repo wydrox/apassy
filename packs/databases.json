@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 2,
+  "pack_version": 3,
   "tool": "databases",
   "description": "Database clients and tools (psql, mysql, sqlite3, MongoDB, ClickHouse, CockroachDB, Redis, restore tools): writes, drops, and credential columns.",
   "programs": [
@@ -62,6 +62,19 @@
       }
     },
     {
+      "id": "redis-config-secrets",
+      "flag": "secret_output",
+      "note": "`CONFIG GET` with a pattern such as `*`, `requirepass`, or `masterauth` prints the server password.",
+      "when": {
+        "program": ["redis-cli"],
+        "any_arg": ["config"],
+        "operands": {
+          "skip": ["-u", "-h", "-p", "-a", "-n", "--user", "--pass", "--askpass", "-s", "--sni"],
+          "any": [{ "equals": ["*"] }, { "contains": ["pass", "auth"] }]
+        }
+      }
+    },
+    {
       "id": "redis-server-change",
       "flag": "system_change",
       "note": "Server settings, replication, and shutdown change the Redis server for every client.",
@@ -108,6 +121,42 @@
       "flag": "system_change",
       "note": "Shutdown and password changes affect the server and every client.",
       "when": { "program": ["mysqladmin"], "any_arg": ["shutdown", "password", "kill"] }
+    }
+  ],
+  "safe": [
+    {
+      "id": "redis-reads",
+      "note": "Redis commands that read server state, key metadata, or key names: `PING`, `INFO`, `DBSIZE`, `TTL`, `TYPE`, `EXISTS`, lengths, `SCAN`, and `MEMORY USAGE`. Connection options such as `-u URL` and `-h HOST` take a value. The value commands (`GET`, `HGETALL`) stay with the model.",
+      "when": {
+        "program": ["redis-cli"],
+        "operands": {
+          "skip": [
+            "-u", "-h", "-p", "-a", "-n", "--user", "--pass", "--askpass", "-s", "--sni",
+            "--cacert", "--cert", "--key", "--pattern", "--count", "-i", "-r"
+          ],
+          "at": {
+            "index": 0,
+            "in": [
+              "ping", "info", "dbsize", "ttl", "pttl", "type", "exists", "strlen", "llen",
+              "scard", "zcard", "hlen", "xlen", "scan", "memory", "lastsave", "time", "role",
+              "slowlog", "object"
+            ]
+          }
+        },
+        "not": { "any_arg": ["reset", "doctor", "purge"] }
+      }
+    },
+    {
+      "id": "redis-scan-and-stats",
+      "note": "`--scan`, `--bigkeys`, `--memkeys`, `--stat`, and latency modes list key names or measure the server.",
+      "when": {
+        "program": ["redis-cli"],
+        "any_arg": ["--scan", "--bigkeys", "--memkeys", "--stat", "--latency", "--latency-history"],
+        "operands": {
+          "skip": ["-u", "-h", "-p", "-a", "-n", "--user", "--pass", "--pattern", "--count", "-i"],
+          "count": 0
+        }
+      }
     }
   ]
 }

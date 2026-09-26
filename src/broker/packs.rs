@@ -37,10 +37,13 @@ pub const PACKS_DIR_ENV: &str = "APASSY_PACKS_DIR";
 
 /// Flags that a rule can add. `ask_owner` has no other meaning: the owner decides.
 /// `hook_channel`: the command names the host hook program, the host settings, or a
-/// host transcript (goal item B6).
+/// host transcript (goal item B6). `irreversible`: a change that cannot be undone and
+/// is not a deletion, for example a repair of a migration history or a retry of all
+/// failed jobs.
 pub const RULE_FLAGS: &[&str] = &[
     "secret_output",
     "data_loss",
+    "irreversible",
     "production",
     "real_recipient",
     "remote_code",
@@ -52,20 +55,31 @@ pub const RULE_FLAGS: &[&str] = &[
     "ask_owner",
 ];
 
-/// Fields that only a built-in pack can have. Each one can make the analysis less strict.
-const BUILTIN_ONLY_FIELDS: &[&str] = &["safe", "exemptions", "roles", "known_hosts"];
+/// Fields that only a built-in pack can have. Each one except `project_commands` can make
+/// the analysis less strict.
+const BUILTIN_ONLY_FIELDS: &[&str] = &[
+    "safe",
+    "exemptions",
+    "roles",
+    "known_hosts",
+    "project_commands",
+];
 
 /// The largest local pack file.
 const MAX_LOCAL_PACK_BYTES: u64 = 1024 * 1024;
 
 /// Built-in packs, embedded at build time. Only an app release changes them.
 const BUILTIN: &[(&str, &str)] = &[
+    ("airflow.json", include_str!("../../packs/airflow.json")),
     ("alembic.json", include_str!("../../packs/alembic.json")),
+    ("algolia.json", include_str!("../../packs/algolia.json")),
+    ("auth0.json", include_str!("../../packs/auth0.json")),
     ("aws.json", include_str!("../../packs/aws.json")),
     ("azure.json", include_str!("../../packs/azure.json")),
     ("cargo.json", include_str!("../../packs/cargo.json")),
     ("cloud.json", include_str!("../../packs/cloud.json")),
     ("databases.json", include_str!("../../packs/databases.json")),
+    ("dbt.json", include_str!("../../packs/dbt.json")),
     (
         "digitalocean.json",
         include_str!("../../packs/digitalocean.json"),
@@ -90,8 +104,13 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("../../packs/host-hooks.json"),
     ),
     ("http.json", include_str!("../../packs/http.json")),
+    (
+        "huggingface.json",
+        include_str!("../../packs/huggingface.json"),
+    ),
     ("js-tools.json", include_str!("../../packs/js-tools.json")),
     ("jvm.json", include_str!("../../packs/jvm.json")),
+    ("kafka.json", include_str!("../../packs/kafka.json")),
     (
         "kubernetes.json",
         include_str!("../../packs/kubernetes.json"),
@@ -105,11 +124,18 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("../../packs/migrations.json"),
     ),
     ("mix.json", include_str!("../../packs/mix.json")),
+    ("mlflow.json", include_str!("../../packs/mlflow.json")),
     ("netlify.json", include_str!("../../packs/netlify.json")),
     ("node.json", include_str!("../../packs/node.json")),
+    ("nomad.json", include_str!("../../packs/nomad.json")),
     ("npm.json", include_str!("../../packs/npm.json")),
+    (
+        "planetscale.json",
+        include_str!("../../packs/planetscale.json"),
+    ),
     ("prisma.json", include_str!("../../packs/prisma.json")),
     ("python.json", include_str!("../../packs/python.json")),
+    ("rabbitmq.json", include_str!("../../packs/rabbitmq.json")),
     ("rails.json", include_str!("../../packs/rails.json")),
     ("remote.json", include_str!("../../packs/remote.json")),
     (
@@ -121,9 +147,15 @@ const BUILTIN: &[(&str, &str)] = &[
         "secret-managers.json",
         include_str!("../../packs/secret-managers.json"),
     ),
+    ("sentry.json", include_str!("../../packs/sentry.json")),
     ("shell.json", include_str!("../../packs/shell.json")),
+    (
+        "sql-clients.json",
+        include_str!("../../packs/sql-clients.json"),
+    ),
     ("stripe.json", include_str!("../../packs/stripe.json")),
     ("supabase.json", include_str!("../../packs/supabase.json")),
+    ("symfony.json", include_str!("../../packs/symfony.json")),
     ("system.json", include_str!("../../packs/system.json")),
     ("terraform.json", include_str!("../../packs/terraform.json")),
     ("vercel.json", include_str!("../../packs/vercel.json")),
@@ -206,6 +238,14 @@ pub(crate) enum Role {
     Usage,
     /// The data-loss checks ignore dry-run options for this program.
     NoDryRun,
+    /// Runs code or commands that the project defines: script files, package scripts,
+    /// make targets, or custom subcommands of a framework CLI. A command of this program
+    /// that is not known safe is unknown code (see `Analysis::known_command`).
+    ProjectCode,
+    /// Runs another command after `--` with secrets in its environment, for example
+    /// `doppler run -- npm test`. The analysis checks the inner command as its own
+    /// pipeline.
+    CommandRunner,
 }
 
 /// A general rule that a built-in pack can make an exception to.
@@ -216,6 +256,11 @@ pub(crate) enum Check {
     SecretFileArgument,
     /// A production word in an argument is a production target.
     ProductionWord,
+    /// The general lexicons of command words: a subcommand that prints, exports, or
+    /// decrypts secrets, variables, credentials, or connections, and an argument that
+    /// gives everyone access. An exception fits a program whose arguments are text,
+    /// patterns, or file names, or a subcommand that the pack knows better.
+    CommandLexicon,
 }
 
 /// The general rule "a dry run does not act" for a flag rule.
@@ -236,9 +281,10 @@ enum SqlCheck {
     Writes,
     /// The SQL argument is a read statement only.
     Reads,
-    /// An argument that is not an option, with a space in it, is SQL that changes data,
-    /// schema, or access. For clients that take SQL as a plain argument, such as
-    /// `sqlite3 app.db "DELETE FROM users"`.
+    /// An argument that is not an option, or the value of a `--name=value` option, with a
+    /// space in it, is SQL that changes data, schema, or access. For clients that take
+    /// SQL as a plain argument or as an option value, such as
+    /// `sqlite3 app.db "DELETE FROM users"` or `snowsql -q "DROP SCHEMA x"`.
     AnyArgWrites,
 }
 
@@ -261,6 +307,13 @@ struct BuiltinPack {
     exemptions: Vec<Exemption>,
     #[serde(default)]
     safe: Vec<SafeRule>,
+    /// Commands that run code the project defines, such as `dbt run-operation` or
+    /// `airflow dags test`. Such a command is not a known command (see
+    /// `Analysis::known_command`) unless a safe rule matches it. A program with the role
+    /// `project_code` needs no entry: every command of it that is not known safe is
+    /// project code.
+    #[serde(default)]
+    project_commands: Vec<SafeRule>,
 }
 
 /// The schema of a local pack: flag rules only.
@@ -371,7 +424,8 @@ struct Matcher {
     push_target: Option<Vec<String>>,
     /// There is at least one URL, and every URL host is one of these hosts.
     url_hosts_in: Option<Vec<String>>,
-    /// A GET request without a body or an upload, to known provider hosts only.
+    /// A GET request without a body or an upload, to known provider hosts or to an
+    /// endpoint in a bound variable of the run (`"$ES_URL/_count"`) only.
     known_host_read: Option<bool>,
     /// A word of the command refers to a secret.
     refs_secret: Option<bool>,
@@ -419,6 +473,9 @@ struct OperandMatch {
     trim_start: Option<String>,
     /// Text to remove from the end of each operand, repeatedly.
     trim_end: Option<String>,
+    /// Options with a separate value, such as `-u URL` or `--host HOST`. The value is
+    /// not an operand.
+    skip: Option<Vec<String>>,
     count: Option<usize>,
     min: Option<usize>,
     /// One operand matches one pattern.
@@ -594,7 +651,8 @@ impl Matcher {
                 !hosts.is_empty() && hosts.iter().all(|host| has(list, host))
             })
             && holds(&self.known_host_read, |want| {
-                shell_risk::is_authenticated_read(cmd.argv, cmd.known_hosts) == *want
+                shell_risk::is_authenticated_read(cmd.argv, cmd.known_hosts, cmd.secret_names)
+                    == *want
             })
             && holds(&self.refs_secret, |want| cmd.secret == *want)
             && holds(&self.arg_refs_secret, |want| {
@@ -630,7 +688,12 @@ impl Matcher {
                 SqlCheck::Reads => shell_risk::sql_argument(cmd.argv)
                     .is_some_and(|sql| shell_risk::sql_reads(&sql)),
                 SqlCheck::AnyArgWrites => cmd.argv.iter().skip(1).any(|arg| {
-                    !arg.starts_with('-') && arg.contains(' ') && shell_risk::sql_writes(arg)
+                    let text = match arg.strip_prefix("--") {
+                        Some(option) => option.split_once('=').map_or("", |(_, value)| value),
+                        None if arg.starts_with('-') => "",
+                        None => arg.as_str(),
+                    };
+                    text.contains(' ') && shell_risk::sql_writes(text)
                 }),
             })
             && holds(&self.any_of, |list| {
@@ -668,9 +731,22 @@ impl OperandMatch {
         } else {
             &cmd.args
         };
+        let mut value_next = false;
         let operands: Vec<&str> = source
             .iter()
-            .filter(|arg| !arg.starts_with('-'))
+            .filter(|arg| {
+                if std::mem::take(&mut value_next) {
+                    return false;
+                }
+                if arg.starts_with('-') {
+                    value_next = self
+                        .skip
+                        .as_ref()
+                        .is_some_and(|options| options.iter().any(|o| o.eq_ignore_ascii_case(arg)));
+                    return false;
+                }
+                true
+            })
             .map(|arg| {
                 let mut text = arg.as_str();
                 if let Some(prefix) = &self.trim_start {
@@ -891,6 +967,12 @@ impl OperandMatch {
             return Err("`operands` needs `count`, `min`, `any`, `all`, or `at`".to_owned());
         }
         let lowercase = !self.as_written;
+        if let Some(list) = &self.skip {
+            check_list(list, "operands.skip", true, false)?;
+            if let Some(word) = list.iter().find(|word| !word.starts_with('-')) {
+                return Err(format!("`operands.skip` has `{word}`: list options only"));
+            }
+        }
         for text in [&self.trim_start, &self.trim_end].into_iter().flatten() {
             if text.is_empty() {
                 return Err("`operands` has an empty trim text".to_owned());
@@ -1029,8 +1111,12 @@ pub struct RuleSet {
     rules: Vec<Compiled<FlagRule>>,
     exemptions: Vec<Compiled<Exemption>>,
     safe: Vec<Compiled<SafeRule>>,
+    project_commands: Vec<Compiled<SafeRule>>,
     roles: BTreeMap<Role, BTreeSet<String>>,
     known_hosts: Vec<String>,
+    /// The programs that a built-in pack names. A pack for every program (`*`) and a
+    /// local pack do not add to this set.
+    programs: BTreeSet<String>,
     load_error: Option<String>,
 }
 
@@ -1147,6 +1233,23 @@ impl RuleSet {
         }
         check_ids(pack.exemptions.iter().map(|e| e.id.as_str()), "exemption").map_err(fail)?;
         check_ids(pack.safe.iter().map(|s| s.id.as_str()), "safe rule").map_err(fail)?;
+        check_ids(
+            pack.project_commands.iter().map(|p| p.id.as_str()),
+            "project command",
+        )
+        .map_err(fail)?;
+        for project in &pack.project_commands {
+            if project.when == Matcher::default() {
+                return Err(fail(format!(
+                    "project command `{}` has no condition; use the role `project_code`",
+                    project.id
+                )));
+            }
+            project
+                .when
+                .validate(&scope)
+                .map_err(|message| fail(format!("project command `{}`: {message}", project.id)))?;
+        }
         for exemption in &pack.exemptions {
             exemption
                 .when
@@ -1172,6 +1275,9 @@ impl RuleSet {
                 .extend(programs.iter().cloned());
         }
         self.known_hosts.extend(pack.known_hosts.iter().cloned());
+        if !any {
+            self.programs.extend(pack.programs.iter().cloned());
+        }
         self.push_rules(&pack.tool, &pack.rules, &pack.programs, any);
         for exemption in &pack.exemptions {
             let mut exemption = exemption.clone();
@@ -1187,6 +1293,14 @@ impl RuleSet {
             self.safe.push(Compiled {
                 tool: pack.tool.clone(),
                 item: safe,
+            });
+        }
+        for project in &pack.project_commands {
+            let mut project = project.clone();
+            project.when = scoped(project.when, &pack.programs, any);
+            self.project_commands.push(Compiled {
+                tool: pack.tool.clone(),
+                item: project,
             });
         }
         self.packs.push(PackInfo {
@@ -1288,6 +1402,12 @@ impl RuleSet {
         &self.known_hosts
     }
 
+    /// A built-in pack names this program. Only a built-in pack gives this knowledge:
+    /// a local pack can only add flags.
+    pub(crate) fn knows_program(&self, program: &str) -> bool {
+        self.programs.contains(program)
+    }
+
     /// Add the flag of each rule that matches. Rules only add flags.
     pub(crate) fn add_flags(&self, cmd: &Command<'_>, flags: &mut Vec<String>) {
         for rule in &self.rules {
@@ -1325,6 +1445,13 @@ impl RuleSet {
         self.safe.iter().any(|safe| safe.item.when.matches(cmd))
     }
 
+    /// A built-in pack marks this command as a command that runs project code.
+    pub(crate) fn project_command(&self, cmd: &Command<'_>) -> bool {
+        self.project_commands
+            .iter()
+            .any(|project| project.item.when.matches(cmd))
+    }
+
     /// Each rule with its name: `tool/rule/id`, `tool/safe/id`, or `tool/exemption/id`.
     fn named_matchers(&self) -> impl Iterator<Item = (String, &Matcher)> {
         let rules = self.rules.iter().map(|rule| {
@@ -1339,10 +1466,15 @@ impl RuleSet {
             let name = format!("{}/exemption/{}", exemption.tool, exemption.item.id);
             (name, &exemption.item.when)
         });
-        rules.chain(safe).chain(exemptions)
+        let projects = self.project_commands.iter().map(|project| {
+            let name = format!("{}/project/{}", project.tool, project.item.id);
+            (name, &project.item.when)
+        });
+        rules.chain(safe).chain(exemptions).chain(projects)
     }
 
-    /// Names of all rules: `tool/rule/id`, `tool/safe/id`, and `tool/exemption/id`.
+    /// Names of all rules: `tool/rule/id`, `tool/safe/id`, `tool/exemption/id`, and
+    /// `tool/project/id`.
     pub fn rule_ids(&self) -> Vec<String> {
         self.named_matchers().map(|(name, _)| name).collect()
     }
@@ -1448,11 +1580,31 @@ mod tests {
             ("git", Role::NoDryRun),
             ("npm", Role::TaskRunner),
             ("make", Role::TaskRunner),
+            ("npm", Role::ProjectCode),
+            ("python", Role::ProjectCode),
+            ("php", Role::ProjectCode),
+            ("mix", Role::ProjectCode),
+            ("manage.py", Role::ProjectCode),
+            ("doppler", Role::CommandRunner),
+            ("railway", Role::CommandRunner),
         ] {
             assert!(set.has_role(program, role), "{program}: {role:?}");
         }
         // BSD `rm -rf / --help` removes `/`. `rm` must never print only usage.
         assert!(!set.has_role("rm", Role::Usage));
+        // Policy v5: the built-in packs name the programs that the analysis knows.
+        for program in [
+            "kubectl",
+            "redis-cli",
+            "kafka-topics.sh",
+            "nomad",
+            "dbt",
+            "curl",
+        ] {
+            assert!(set.knows_program(program), "{program}");
+        }
+        assert!(!set.knows_program("acme-tool"));
+        assert!(!set.knows_program("*"));
         assert!(
             set.known_hosts()
                 .iter()
@@ -1531,6 +1683,18 @@ mod tests {
             (
                 pack(r#""roles": {"task_runners": ["tool"]}"#),
                 "unknown variant `task_runners`",
+            ),
+            (
+                rule(r#"{"operands": {"skip": ["host"], "count": 0}}"#),
+                "list options only",
+            ),
+            (
+                pack(r#""project_commands": [{"id": "run"}]"#),
+                "has no condition",
+            ),
+            (
+                pack(r#""exemptions": [{"id": "a", "check": "secret_reveal"}]"#),
+                "unknown variant `secret_reveal`",
             ),
         ];
         for (text, expected) in cases {

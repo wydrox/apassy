@@ -15,8 +15,10 @@ use crate::vault::{CALIBRATION_FLOOR, Declaration, PATTERN_APPROVALS_NEEDED};
 
 /// Version of the question set and the decision policy. Change it when either changes.
 /// Version 3 adds the production rule (ADR 0010). Version 4 adds remembered patterns and
-/// the calibrated `task_match` level at the model step (ADR 0009).
-pub const BOUNCER_CONTRACT: &str = "apassy-bouncer-v4";
+/// the calibrated `task_match` level at the model step (ADR 0009). Version 5 lets a
+/// certain "does not change state" answer replace `task_match` only for a command that
+/// the built-in packs know (`Analysis::known_command`).
+pub const BOUNCER_CONTRACT: &str = "apassy-bouncer-v5";
 /// Default address of `laya-serve` in the operations guide.
 pub const DEFAULT_URL: &str = "http://127.0.0.1:8770";
 /// Environment variable that changes the bouncer address.
@@ -369,11 +371,16 @@ pub fn decide(verdict: &BouncerVerdict, context: &DecisionContext<'_>) -> Decisi
 /// 3. A missing user request or declaration asks the owner.
 /// 4. An active remembered pattern allows the run. It replaces only the model step
 ///    (steps 5 and 6), so it cannot change steps 1 to 3.
-/// 5. The model decides. A command that is not known safe and not certainly read-only
-///    must match the user request at the `task_match` level (80%, or a lower level
-///    that the owner applied). A high-risk or irreversible credential also needs 80%
-///    certainty that the command does not change state, unless the command is known safe.
-/// 6. Model vetoes: "destroy" at 90% for an unknown command, "rule_break" at 80%.
+/// 5. The model decides. A command that is not known safe must match the user request
+///    at the `task_match` level (80%, or a lower level that the owner applied). Only for
+///    a known command (`Analysis::known_command`: the built-in packs know the program,
+///    and it does not run project code) can 80% certainty that the command does not
+///    change state replace the match. Unknown programs, project scripts, package
+///    scripts, make targets, and custom framework subcommands always need the match.
+///    A high-risk or irreversible credential also needs 80% certainty that the command
+///    does not change state, unless the command is known safe.
+/// 6. Model vetoes: "destroy" at 90% for a command that is not known safe, "rule_break"
+///    at 80%.
 ///
 /// The hard rules of the grant (ADR 0007) run before this function. A failure there is
 /// a denial, so no step here can change it.
@@ -447,12 +454,19 @@ fn model_step(
         .flatten()
         .any(Declaration::is_sensitive);
     let known_safe = context.analysis.known_safe;
-    let certain_read = verdict
-        .fact("writes")
-        .is_some_and(|p| 1.0 - p >= MIN_CONFIDENCE);
+    // Policy v5: the model's "writes" answer can replace the task match only for a
+    // command that the packs know. For unknown code (an unknown program, a project
+    // script, a package script, or a custom subcommand) the model gave a low "writes" to
+    // commands that print secrets or change data (held-out v2), so the match is needed.
+    let known_command = known_safe || context.analysis.known_command;
+    let certain_read = known_command
+        && verdict
+            .fact("writes")
+            .is_some_and(|p| 1.0 - p >= MIN_CONFIDENCE);
     // Needed facts: (fact, must be true, needed certainty).
-    // - A command that is not known safe and not certainly read-only must match the
-    //   user request. A read cannot change anything, so it does not need the match.
+    // - A command that is not known safe and not a certain read of a known command must
+    //   match the user request. A read cannot change anything, so it does not need the
+    //   match.
     // - A sensitive credential needs a certain "does not change state", unless the
     //   command is known safe (local work or a read by rule).
     let mut needed: Vec<(&str, bool, f64)> = Vec::new();
@@ -615,7 +629,10 @@ mod tests {
 
     #[test]
     fn policy() {
-        let analysis = Analysis::default();
+        let analysis = Analysis {
+            known_command: true,
+            ..Analysis::default()
+        };
         let staging = [declaration(Environment::Staging)];
         let high_risk = [Some(Declaration {
             risk: RiskLevel::High,
@@ -674,6 +691,58 @@ mod tests {
         assert!(run(&BouncerVerdict::Unavailable("x".into()), &staging, true).ask_owner);
     }
 
+    /// Policy v5 (dev round 2): a certain "does not change state" answer replaces the task
+    /// match only for a command that the packs know. On held-out v2 the base model gave
+    /// `writes` 0.2 or lower to `php artisan queue:retry all`, `mix run x.exs`, and
+    /// `airflow connections export`, so unknown code needs the match.
+    #[test]
+    fn a_certain_read_skips_the_task_match_only_for_a_known_command() {
+        let staging = [declaration(Environment::Staging)];
+        let read_unmatched = verdict(&[
+            ("task_match", 0.3),
+            ("writes", 0.05),
+            ("leak", 0.2),
+            ("destroy", 0.05),
+        ]);
+        let decide_with = |analysis: &Analysis, v: &BouncerVerdict| {
+            decide(
+                v,
+                &DecisionContext {
+                    analysis,
+                    declarations: &staging,
+                    has_user_request: true,
+                },
+            )
+        };
+        let known = Analysis {
+            known_command: true,
+            ..Analysis::default()
+        };
+        let unknown = Analysis::default();
+        assert!(!decide_with(&known, &read_unmatched).ask_owner);
+        let asked = decide_with(&unknown, &read_unmatched);
+        assert!(asked.ask_owner, "{asked:?}");
+        assert!(asked.note.contains("task_match 30%"), "{}", asked.note);
+        assert_eq!(asked.confidence, Some(0.3));
+        // Unknown code with a matching request still runs.
+        let matched = verdict(&[("task_match", 0.85), ("writes", 0.05), ("destroy", 0.05)]);
+        assert!(!decide_with(&unknown, &matched).ask_owner);
+        // A known safe command is a known command, whatever the field says.
+        let safe = Analysis {
+            known_safe: true,
+            known_command: false,
+            ..Analysis::default()
+        };
+        assert!(!decide_with(&safe, &read_unmatched).ask_owner);
+        // Without a certain read, a known command needs the match too.
+        let write_unmatched = verdict(&[("task_match", 0.3), ("writes", 0.6), ("destroy", 0.05)]);
+        assert!(decide_with(&known, &write_unmatched).ask_owner);
+        // A writes answer at exactly 0.2 is a certain read.
+        let edge = verdict(&[("task_match", 0.3), ("writes", 0.2), ("destroy", 0.05)]);
+        assert!(!decide_with(&known, &edge).ask_owner);
+        assert!(decide_with(&unknown, &edge).ask_owner);
+    }
+
     /// ADR 0010: a production declaration always waits for the owner. Known safe and
     /// read-only commands and a fully certain model verdict do not change this.
     #[test]
@@ -709,6 +778,7 @@ mod tests {
         let known_safe = Analysis {
             flags: Vec::new(),
             known_safe: true,
+            known_command: true,
         };
         let unknown = Analysis::default();
         for declarations in sets {
@@ -763,6 +833,7 @@ mod tests {
         let flagged = Analysis {
             flags: vec!["secret_output".to_owned()],
             known_safe: false,
+            known_command: false,
         };
         let cases: [(&Analysis, &[Option<Declaration>], bool, &str); 4] = [
             (&clean, &production, true, "Production credential"),

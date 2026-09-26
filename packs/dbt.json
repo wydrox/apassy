@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "dbt",
+  "description": "dbt (data build tool): full refreshes, project operations, and read and check commands. `run`, `build`, `seed`, and `snapshot` build the models of the project in the target warehouse. `run-operation` runs a macro of the project.",
+  "programs": ["dbt"],
+  "roles": {
+    "usage": ["dbt"]
+  },
+  "rules": [
+    {
+      "id": "full-refresh",
+      "flag": "data_loss",
+      "dry_run": "skip",
+      "note": "`--full-refresh` drops incremental models and seeds and builds them again from scratch. Data that the source no longer has is lost.",
+      "when": { "any_arg": ["--full-refresh", "-f"], "subcommand": ["run", "build", "seed"] }
+    }
+  ],
+  "project_commands": [
+    {
+      "id": "run-operation",
+      "note": "`run-operation` runs a macro of the project. The macro can run any SQL, so its effect is not known.",
+      "when": { "subcommand": ["run-operation"] }
+    }
+  ],
+  "safe": [
+    {
+      "id": "check-and-read",
+      "note": "Compilation, parsing, listings, documentation, the connection check, packages from `packages.yml`, source freshness, data tests that do not store failures, and the removal of the local `target` folder. They do not write to the warehouse.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["compile", "parse", "ls", "list", "debug", "deps", "clean"] },
+          { "subcommand": ["test"], "not": { "any_arg": ["--store-failures"] } },
+          { "subcommand": ["docs"], "action": ["generate"] },
+          { "subcommand": ["source"], "action": ["freshness"] }
+        ]
+      }
+    }
+  ]
+}

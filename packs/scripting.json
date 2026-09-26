@@ -1,12 +1,13 @@
 {
   "schema_version": 1,
-  "pack_version": 2,
+  "pack_version": 3,
   "tool": "scripting",
   "description": "Ruby, Perl, and PHP: inline code, scripts, and gem publishing.",
   "programs": ["ruby", "perl", "php", "gem"],
   "roles": {
     "heredoc_code": ["ruby", "perl", "php"],
-    "script_runner": ["ruby"]
+    "script_runner": ["ruby"],
+    "project_code": ["ruby", "perl", "php"]
   },
   "rules": [
     {

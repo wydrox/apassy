@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "azure",
   "description": "Azure CLI (az): resource changes, deletions, keys and secrets, remote shells, and read commands.",
   "programs": ["az"],
@@ -71,11 +71,12 @@
   "safe": [
     {
       "id": "targeted-reads",
-      "note": "The signed-in account, the subscriptions, the CLI version, and log streams. Inventory reads across the subscription (`list`, `show`) stay with the model.",
+      "note": "The signed-in account, the subscriptions, the CLI version, log streams, and listings of blobs in a named storage container. Inventory reads across the subscription (`list`, `show`) stay with the model.",
       "when": {
         "args_start": [
           "account show", "account list", "version", "webapp log tail", "functionapp log tail",
-          "monitor activity-log list"
+          "monitor activity-log list", "storage blob list", "storage blob show",
+          "storage container show"
         ]
       }
     }

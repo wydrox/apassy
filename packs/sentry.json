@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "sentry",
+  "description": "Sentry CLI (`sentry-cli`): release deletion, release bookkeeping, and read commands.",
+  "programs": ["sentry-cli"],
+  "roles": {
+    "usage": ["sentry-cli"]
+  },
+  "rules": [
+    {
+      "id": "release-delete",
+      "flag": "data_loss",
+      "note": "`releases delete` removes a release with its files and deploy data.",
+      "when": { "subcommand": ["releases"], "action": ["delete"] }
+    }
+  ],
+  "safe": [
+    {
+      "id": "reads",
+      "note": "The configuration check (it does not print the token), listings of releases, projects, organizations, repositories, deploys, and files, release details, and a proposed version name.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["info", "--version"] },
+          { "subcommand": ["releases"], "action": ["list", "info", "propose-version"] },
+          { "subcommand": ["projects", "organizations", "repos", "deploys", "issues"], "action": ["list"] },
+          { "subcommand": ["releases"], "action": ["files"], "any_arg": ["list"] }
+        ]
+      }
+    },
+    {
+      "id": "release-bookkeeping",
+      "note": "Release bookkeeping for the error reports of the project: a new or finalized release, its commits, a deploy record, and source map or debug file uploads. It adds data to Sentry only. It does not change the app or its data, and a release can be deleted. `gh pr create` is known safe for the same reason.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["releases"], "action": ["new", "finalize", "set-commits"] },
+          { "subcommand": ["deploys"], "action": ["new"] },
+          { "subcommand": ["sourcemaps"], "action": ["upload", "inject"] },
+          { "subcommand": ["debug-files", "upload-dif"] }
+        ]
+      }
+    }
+  ]
+}

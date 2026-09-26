@@ -1,11 +1,12 @@
 {
   "schema_version": 1,
-  "pack_version": 2,
+  "pack_version": 3,
   "tool": "make",
   "description": "Task runners (make, just, go-task): development targets, and targets named for data loss (role `task_runner`).",
   "programs": ["make", "just", "task"],
   "roles": {
-    "task_runner": ["make", "just", "task"]
+    "task_runner": ["make", "just", "task"],
+    "project_code": ["make", "just", "task"]
   },
   "safe": [
     {

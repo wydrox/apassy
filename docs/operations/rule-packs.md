@@ -16,12 +16,16 @@ A new stack needs a new pack, not a code change.
 
 | Pack | Programs | Content |
 | --- | --- | --- |
+| `airflow` | airflow | connections, variables, and configuration with secrets, metadata resets, DAG deletion, users, project commands (DAG and task runs), read commands |
 | `alembic` | alembic | downgrades, read commands |
+| `algolia` | algolia | index deletion, clearing, and overwrites, record deletion, API keys, read commands |
+| `auth0` | auth0 | revealed client secrets, test tokens, deletions, user and role changes, read commands |
 | `aws` | aws, eb, cdk, sam, amplify | S3 writes and removal, deletions, resource changes, secret reads, remote shells, targeted reads |
-| `azure` | az | deletions, resource changes, keys and secrets, remote shells |
+| `azure` | az | deletions, resource changes, keys and secrets, remote shells, blob listings in a named container |
 | `cargo` | cargo | build and test commands, new crates, publishing |
-| `cloud` | railway, render, serverless, sls, ansible-playbook, ansible, twilio | deployments, Ansible ad-hoc commands, Twilio reads |
-| `databases` | psql, pg_dump, pg_restore, dropdb, dropuser, mysql, mysqladmin, sqlite3, duckdb, mongo, mongosh, mongorestore, clickhouse-client, cockroach, cqlsh, redis-cli | SQL writes, SQL as a plain argument, MongoDB writes, drops, restores over data, Redis and MySQL server changes, credential columns |
+| `cloud` | railway, render, serverless, sls, ansible-playbook, ansible, ansible-vault, ansible-galaxy, ansible-inventory, twilio | deployments, Ansible check mode and ad-hoc commands, vault plaintext, Railway variables, shells, and reads, Twilio reads |
+| `databases` | psql, pg_dump, pg_restore, dropdb, dropuser, mysql, mysqladmin, sqlite3, duckdb, mongo, mongosh, mongorestore, clickhouse-client, cockroach, cqlsh, redis-cli | SQL writes, SQL as a plain argument, MongoDB writes, drops, restores over data, Redis and MySQL server changes, Redis passwords, Redis reads, credential columns |
+| `dbt` | dbt | full refreshes, project commands (`run-operation`), check and read commands |
 | `digitalocean` | doctl | deletions, resource changes, credentials, remote shells |
 | `django` | python, python3, manage.py, django-admin | flush, `migrate APP zero`, destructive `shell` code, `dbshell` writes, admin accounts, printed settings, development commands |
 | `docker` | docker, podman, docker-compose, podman-compose | removal of containers, images, and volumes; host access from a container; read and local commands; commands in a local container |
@@ -30,41 +34,50 @@ A new stack needs a new pack, not a code change.
 | `file-tools` | ls, cat, grep, sed, awk, find, cp, rm, and 35 others | file removal, secret files, system files, read commands |
 | `firebase` | firebase | deployments, deletion of Firestore, database, function, and hosting data, remote writes, user and config exports |
 | `fly` | fly, flyctl | deployments, secret and machine changes, destruction, remote shells, tokens, read commands |
-| `gcloud` | gcloud, gsutil, bq | deletions, resource changes, storage writes, BigQuery writes, tokens and secrets, remote shells |
+| `gcloud` | gcloud, gsutil, bq | deletions, resource changes, storage writes, BigQuery writes and overwrites, tokens and secrets, remote shells, BigQuery schema reads and dry runs |
 | `gh` | gh | releases, workflow runs, secrets, repository settings, gists, API writes |
 | `git` | git | history changes, pushes to release branches, read commands |
 | `go` | go, gofmt, goimports, golangci-lint, staticcheck, govulncheck | new modules, Go settings, build, test, and lint commands |
 | `heroku` | heroku | every command except known reads, destruction of apps, databases, and add-ons, config values, one-off dynos |
 | `host-hooks` | every program | the host hook channel: `apassy-hook`, host settings, and transcripts (goal item B6) |
 | `http` | curl, wget, http, https, httpie | known provider hosts, broadcasts, local requests, read requests |
+| `huggingface` | huggingface-cli, hf | logins that store the token, token output, uploads of the project folder, repository deletion, read commands |
 | `js-tools` | tsc, eslint, prettier, test runners, next, vite, astro, playwright, cypress, turbo | check and test commands |
-| `jvm` | gradle, gradlew, mvn, mvnw | Flyway and Liquibase tasks, publishing and deployment, build and test tasks |
+| `jvm` | gradle, gradlew, mvn, mvnw | Flyway and Liquibase tasks, history changes, publishing and deployment, build, test, and read tasks |
+| `kafka` | kafka-topics, kafka-consumer-groups, kafka-configs, kafka-acls, and 8 others (with or without `.sh`), kcat | deletions, offset resets, cluster and access changes, list and describe commands |
 | `kubernetes` | kubectl, helm | deletions, cluster changes, secret reads, copies from a pod, read commands |
-| `laravel` | php, artisan, sail, composer, phpunit, pest, phpstan, psalm, php-cs-fixer, phpcs | fresh and reset migrations, database wipes, destructive tinker code, printed config, new packages, development commands |
-| `linters` | tflint, tfsec, checkov, kubeconform, hadolint, shellcheck, and 7 others | linters and scanners (known safe) |
+| `laravel` | php, artisan, sail, composer, phpunit, pest, phpstan, psalm, php-cs-fixer, phpcs | fresh and reset migrations, database wipes, destructive tinker code, printed config, queue flushes and retries, the app key, new packages, development commands |
+| `linters` | tflint, tfsec, checkov, kubeconform, hadolint, shellcheck, ansible-lint, sqlfluff, and 7 others | linters and scanners (known safe) |
 | `macos` | security, defaults, pbcopy, launchctl, diskutil, brew | Keychain reads, preferences, clipboard, disks |
 | `make` | make, just, task | development targets, task names |
-| `migrations` | flyway, liquibase, knex, sequelize, typeorm, drizzle-kit, dbmate, goose, migrate, atlas, and 3 others | clean, drop, and rollback commands, read commands |
+| `migrations` | flyway, liquibase, knex, sequelize, typeorm, drizzle-kit, dbmate, goose, migrate, atlas, and 3 others | clean, drop, and rollback commands, history repairs, read commands |
 | `mix` | mix | Ecto drops, resets, and rollbacks, Hex publishing, build and test tasks |
+| `mlflow` | mlflow | garbage collection and deletions, tracking database upgrades, project commands (`mlflow run`), read commands |
 | `netlify` | netlify | production deployments, site deletion, environment variables, local builds |
 | `node` | node, deno, bun, tsx, ts-node | inline code, scripts, version checks |
+| `nomad` | nomad | job runs and changes, purges and garbage collection, variables, ACL tokens, shells in an allocation, node and operator changes, read commands |
 | `npm` | npm, pnpm, yarn, bun, npx, bunx | scripts, task names, new dependencies, unknown packages, registry settings, publishing |
+| `planetscale` | pscale | deploy requests and promotions, deletions, new passwords and tokens, read commands |
 | `prisma` | prisma | resets, schema commands, migration reads |
 | `python` | python, python3, pip, pip3, poetry, uv, pipenv, pdm, hatch, test and lint tools, twine | inline code, new packages, package sources, test tools, lock file installs, publishing |
+| `rabbitmq` | rabbitmqctl, rabbitmqadmin, rabbitmq-diagnostics, rabbitmq-plugins, rabbitmq-queues, rabbitmq-upgrade | purges, deletions, node resets, users and permissions, definition exports, node stops, read commands |
 | `rails` | rails, rake | database drops, resets, schema loads, rollbacks, destructive runner code, credentials, read and test tasks |
 | `remote` | ssh, scp, sftp, rsync, ftp, telnet, nc, ncat, netcat, socat | remote access, secrets sent to another host |
 | `ruby-tools` | bundle, bundler, rspec, rubocop, standardrb, brakeman, bundle-audit | new gems, gem sources, install, test, and lint commands |
 | `scripting` | ruby, perl, php, gem | inline code, scripts, gem publishing |
 | `secret-managers` | vault, op, doppler, infisical, sops, chamber, bw, pass, gopass, aws-vault, age, gpg, gpg2 | printed secret values, secret changes |
-| `shell` | sh, bash, zsh, echo, test, cd, for, and other keywords and builtins | shell control, text output |
+| `sentry` | sentry-cli | release deletion, release bookkeeping, read commands |
+| `shell` | sh, bash, zsh, echo, test, cd, for, set, export, source, eval, and other keywords and builtins | shell control, text output |
+| `sql-clients` | snowsql, snow, trino, presto, spark-sql, beeline, hive, impala-shell, sqlcmd, usql, mycli, pgcli, litecli, mariadb, vsql, clickhouse | SQL writes in an argument or an option value, Snowflake object drops |
 | `stripe` | stripe | deletions and cancellations, money movement, API keys, test and read commands |
 | `supabase` | supabase | queries, resets, key listings, functions, secrets |
-| `system` | sudo, doas, chmod, crontab, systemctl, dd, mkfs, and others | privilege, permissions, jobs, services, disks |
+| `symfony` | php (`bin/console`), symfony | database drops, fixture loads, message retries, printed environment values and secrets, development commands |
+| `system` | sudo, doas, chmod, crontab, systemctl, dd, mkfs, kill, pkill, dig, and others | privilege, permissions, jobs, services, disks, process and host information |
 | `terraform` | terraform, tofu, pulumi | destroy, apply, state changes, secret outputs, read commands |
 | `vercel` | vercel | deployments, aliases, environment variables, read commands |
 | `wrangler` | wrangler | deployments, deletions, KV, R2, D1, and secret writes, local and read commands |
 
-The 47 packs have 189 flag rules, 89 safe rules, and 14 exceptions. Each rule has a `note` with its reason. The test `every_built_in_rule_has_a_note` checks this.
+The 60 packs have 239 flag rules, 111 safe rules, 21 exceptions, and 3 project command entries. Each has a `note` with its reason. The test `every_built_in_rule_has_a_note` checks this. Dev round 2 added 13 packs and more knowledge in 20 packs ([dev-round2.md](../evaluation/dev-round2.md)).
 
 Inventory reads across a whole cloud account (`aws ... describe-*`, `gcloud ... list`, `az ... list`, `doctl ... list`) are not known safe. The model decides them. Targeted reads, such as logs, the caller identity, and the local configuration, are known safe.
 
@@ -90,7 +103,15 @@ These parts are not about one tool. They stay in `src/broker/shell_risk.rs`:
 | Task and package script names such as `db:reset` or `db-drop` | General rule. Packs give the role `task_runner` (npm, pnpm, yarn, bun, make, just, task). |
 | A usage request (`--help`, `--version`) does not act | General rule for programs with the role `usage`. Through `npx`, `bunx`, or `dlx` the runner still downloads and runs the package, so the rules with `"package_runner": true` still apply. |
 | Real recipients, mass messages, system paths, `--print-secrets` options | General rules for every program. |
-| Injection phrases in the purpose | The purpose is not a command. |
+| Injection phrases in the purpose and the user request | Text, not a command. The broker checks the user request in `run.rs` with `shell_risk::injection_flag`. |
+| Known commands (`Analysis::known_command`) | Policy v5: only for a known command can a certain read replace `task_match` ([bouncer.md](bouncer.md), step 6). A known program is named by a built-in pack. Packs give the role `project_code` and the field `project_commands`. An HTTP write is not a known command. |
+| The general secret lexicon | General for every program. A reveal verb (`get`, `show`, `view`, `export`, `decrypt`, `pull`, and others) with a secret or value noun (`secrets`, `vault`, `password`, `token`, `variables`, `vars`, `credentials`, `connections`, `dotenv`, `appsettings`), a listing of values, a value noun as the subcommand, a new secret (`password create`), or a reveal option (`--reveal`, `--show-secrets`, `--kv`, `--with-decryption`, `--format dotenv`). Packs make exceptions with the check `command_lexicon`. |
+| A secret stored in another store | A login, a store or configuration entry, or a remote URL with a secret of the run after the verb, and `--add-to-git-credential`. |
+| Public access | `allUsers`, `allAuthenticatedUsers`, `0.0.0.0/0`, `::/0`, and `public-read` give the flag `privilege`. |
+| Programs that no pack knows | Verbs and options that delete or reset (`delete`, `drop`, `purge`, `gc`, `clear`, `reset`, `--reset-offsets`, `--full-refresh`, `--replace`) give `data_loss`. Verbs of an irreversible change (`repair`, `replay`, `revert`), a retry of all jobs, and confirmation options (`--force`, `--yes`, `--execute`) give `irreversible`. A destructive SQL statement in an argument gives `data_loss`. |
+| Connection URLs with a written host | A bound secret and a `jdbc:`, `postgresql://`, `mongodb://`, `redis://`, or similar URL whose host is written in the command and is not this computer: `secret_output`. |
+| HTTP methods, paths, and headers | A DELETE, or a write to a path with `delete`, `purge`, `flush`, or `reset`, is `data_loss`. A write to a marketing, campaign, newsletter, or broadcast path is `production`. A header name with `key`, `token`, `auth`, or `secret` is an auth header. A URL that starts with a bound variable with an endpoint name (`$ES_URL/...`) goes to the endpoint that the owner bound. A POST to a search path is a read. |
+| Command runners | `doppler run --`, `op run --`, `railway run --`, and other programs with the role `command_runner`: the command after `--` is its own pipeline. |
 | `git push` refspecs (`HEAD:main`) | A parser for one syntax. The `git` pack gives the protected branches (`push_target`). |
 
 ## 3. Pack format
@@ -109,6 +130,7 @@ A pack is one JSON object. The loader rejects unknown fields at every level.
 | `known_hosts` | yes | no | Provider API hosts. A secret in an auth header to these hosts is normal use. |
 | `exemptions` | yes | no | Exceptions to a general rule. |
 | `safe` | yes | no | Known safe commands. |
+| `project_commands` | yes | no | Commands that run code of the project, such as `dbt run-operation`. They are not known commands (policy v5). |
 
 ### Flag rules
 
@@ -118,7 +140,7 @@ A pack is one JSON object. The loader rejects unknown fields at every level.
 ```
 
 - `id`: unique in the pack.
-- `flag`: one of `secret_output`, `data_loss`, `production`, `real_recipient`, `remote_code`, `remote_access`, `system_change`, `new_dependency`, `privilege`, `hook_channel`, `ask_owner`. Each flag asks the owner. `ask_owner` has no other meaning. `hook_channel` is for the host hook channel (goal item B6).
+- `flag`: one of `secret_output`, `data_loss`, `irreversible`, `production`, `real_recipient`, `remote_code`, `remote_access`, `system_change`, `new_dependency`, `privilege`, `hook_channel`, `ask_owner`. Each flag asks the owner. `ask_owner` has no other meaning. `hook_channel` is for the host hook channel (goal item B6). `irreversible` is a change that cannot be undone and is not a deletion, for example `flyway repair` or `queue:retry all`.
 - `note`: the reason for the rule, in one or two sentences. Each built-in rule has one.
 - `dry_run` (optional): `skip` means the rule does not apply with `--dry-run` or `--dryrun`. `skip_with_n` also counts `-n`, except for a program with the role `no_dry_run` (`rm`, `git`). Without `dry_run`, the rule applies to a dry run too.
 - `when`: the matcher. A rule without `program` or `raw_program` applies to the programs of its pack.
@@ -148,7 +170,7 @@ All conditions in one matcher must hold. A list means "one of the items". The an
 | `option_value` | An option in `option` is followed by a value in `value`, or by a value not in `not_value`. |
 | `short_option_letter` | A group of short options such as `-rf` contains the letter. |
 | `option_letter` | An option word, short or long, contains the letter. |
-| `operands` | Conditions on the arguments that do not start with `-`: `count`, `min`, `any`, `all`, `allow_none`, `at` (`index` with `in`, `not_in`, or `starts`), `trim_start`, `trim_end`, and `as_written`. `any` and `all` take text patterns: `equals`, `starts`, `ends`, `contains`, `max_len`, `temp_path`. |
+| `operands` | Conditions on the arguments that do not start with `-`: `count`, `min`, `any`, `all`, `allow_none`, `at` (`index` with `in`, `not_in`, or `starts`), `trim_start`, `trim_end`, `as_written`, and `skip` (options with a separate value, such as `-u URL`; the value is not an operand). `any` and `all` take text patterns: `equals`, `starts`, `ends`, `contains`, `max_len`, `temp_path`. |
 | `push_target` | A branch that `git push` updates is in the list. |
 | `url_hosts_in` | There is a URL, and every URL host is in the list. |
 | `known_host_read` | A GET request without a body or an upload, to known hosts only. |
@@ -157,7 +179,7 @@ All conditions in one matcher must hold. A list means "one of the items". The an
 | `secret_file_arg`, `secret_file_arg_as_written` | An argument is a secret file, such as `.env`. |
 | `system_path_arg` | An argument is under `/etc/`, `/usr/`, `/Library/`, `/System/`, or `/private/etc/`. |
 | `inline_code_leaks` | Code in the command reads the environment and prints, writes, or sends data. |
-| `sql` | `"writes"` or `"reads"`: the SQL argument (`-c`, `--command`, `-e`, `--eval`, or the text after `query`). `"any_arg_writes"`: an argument that is not an option and has a space is SQL that writes, for clients that take SQL as a plain argument (`sqlite3 app.db "DELETE FROM users"`). |
+| `sql` | `"writes"` or `"reads"`: the SQL argument (`-c`, `--command`, `-e`, `--eval`, or the text after `query`). `"any_arg_writes"`: an argument that is not an option, or the value of a `--name=value` option, has a space and is SQL that writes, for clients that take SQL as an argument (`sqlite3 app.db "DELETE FROM users"`, `snowsql -q "DROP SCHEMA x"`). |
 | `any_of` | One of the matchers in the list holds. |
 | `not` | The matcher does not hold. |
 
@@ -175,8 +197,10 @@ All conditions in one matcher must hold. A list means "one of the items". The an
 | `task_runner` | The argument after `run` or `run-script`, or else the first argument, is a task or a package script. Its name can tell about data loss. |
 | `usage` | `--help`, `--version`, `help`, or a lone `-h` only prints usage. |
 | `no_dry_run` | The data-loss rules ignore dry-run options. |
+| `project_code` | The program runs code that the project defines: script files, package scripts, make targets, or custom framework subcommands. A command of it that is not known safe is not a known command (policy v5). |
+| `command_runner` | The program runs another command after `--` with secrets in its environment. The analysis checks that command as its own pipeline. |
 
-An exception (`exemptions`) has an `id`, a `check`, and a matcher. The checks are `secret_file_argument` and `production_word`. A safe rule (`safe`) has an `id` and a matcher.
+An exception (`exemptions`) has an `id`, a `check`, and a matcher. The checks are `secret_file_argument`, `production_word`, and `command_lexicon` (the general secret lexicon and the public access words, for programs whose arguments are text or file names, or for a subcommand that the pack knows better). A safe rule (`safe`) and a project command (`project_commands`) have an `id` and a matcher.
 
 ## 4. Local packs
 
@@ -216,7 +240,8 @@ Write a local pack:
 ### Guarantees
 
 - A local pack can add a flag. Each flag asks the owner.
-- A local pack cannot mark a command as safe, remove a flag, make an exception, give a role, or name a known host. Its schema has no `safe`, `exemptions`, `roles`, or `known_hosts`. The loader rejects these fields and every other unknown field.
+- A local pack cannot mark a command as safe, remove a flag, make an exception, give a role, name a known host, or list project commands. Its schema has no `safe`, `exemptions`, `roles`, `known_hosts`, or `project_commands`. The loader rejects these fields and every other unknown field.
+- A local pack cannot make a program known (policy v5). Only a built-in pack does. Test: `a_local_pack_does_not_make_a_program_known`.
 - A local pack cannot replace a built-in pack. The loader rejects a local pack with the tool name of a built-in pack.
 - The analysis joins the flags of all packs. A command is known safe only when it has no flag, so a local flag can only remove "known safe".
 - `not` and `any_of` in a local rule change only when that rule adds its flag.
@@ -259,6 +284,7 @@ After the move, new tool knowledge changed the analysis on purpose. Each commit 
 | Clouds and platforms | `gcloud`, `azure`, `digitalocean`, `heroku`, `fly`, `firebase`, `wrangler`, `stripe` (from `cloud`); more in `aws`, `netlify`, `cloud` | 12 | 170 | 272: 102 get `data_loss`, 3 get `production`, 81 become known safe, 123 lose `production` |
 | Data stores and infrastructure | `secret-managers`; more in `databases`, `docker`, `kubernetes`, `terraform`, `macos`, `file-tools` | 22 | 138 | 798: 676 get `data_loss`, 28 get `secret_output`, 2 get `production`, 88 become known safe, 9 lose a flag |
 | Notes | A `note` for 71 older rules | 0 | 0 | 0 |
+| Dev round 2 | General secret, store, irreversible, public access, connection URL, HTTP, and injection rules; known commands; 13 new packs; more knowledge in 20 packs | 8 of 2074 | 328 | 592 (see below) |
 
 On the 1517 lines of the golden file of the move, 41 lines changed:
 
@@ -274,6 +300,21 @@ The flags that went away in the generated set, all 135 lines:
 - `production` or `data_loss` on usage requests of `poetry`, `tofu`, and `pulumi` (12 lines, for example `pulumi destroy --help`). These programs now have the role `usage`, like `terraform`.
 
 The unit test `every_pack_rule_matches_a_replay_command` passes for all 292 rules, safe rules, and exceptions.
+
+#### Dev round 2
+
+The golden file has a new third column value. It was `safe` or `-`. It is now `safe` (known safe), `known` (a known command that is not known safe, policy v5), or `-`. The generated summary has a new count `known_command`. The comparison below reads `known` as `-` for the flags and the "known safe" result.
+
+On the 2074 lines of the fixture and coverage sets before this round, 8 lines change:
+
+- 3 get `data_loss`: `curl --request DELETE https://api.github.com/x`, and two `explain analyze update` and `explain analyze delete` statements. `EXPLAIN ANALYZE` runs the statement, but the SQL check read `analyze` as the first keyword. One of the two was known safe.
+- 1 gets `secret_output`: `gh auth token` prints the token.
+- 2 get `privilege`: `node scripts/grant-admin.js` (in `cases.tsv` and in the coverage set). A script named for an access change is like a script named for data loss.
+- 2 become known safe: `./gradlew test --tests Foo` (the value of `--tests` is not a task) and `ansible all -m ping`.
+
+328 coverage lines are new. They touch each new rule, safe rule, exception, and project command, with near misses. The replay now covers 62402 commands: 270 labeled commands, 2132 coverage commands, and 60000 generated commands. The unit test `every_pack_rule_matches_a_replay_command` passes for all 374 rules, safe rules, exceptions, and project commands.
+
+The generated set (60000 commands, same seed): 592 lines change. 366 get `data_loss`, 74 get `irreversible`, and 48 get `secret_output`. Most are the words of unknown programs (`unknown-tool delete`), script names with `-n` (`./scripts/destroy-env.sh -n`: `-n` is not a dry run for an unknown program), and `--force`. 71 lose `secret_output`: a secret in a later segment of a pipe no longer counts as input to an earlier network program or encoder (`nc host | ./bin/wipe $PROD_DATABASE_URL`), and a URL that starts with a bound endpoint variable is the destination (`curl "$DATABASE_URL"`). 4 lose `production`: `--version` of `ansible-playbook` and `railway`, which now have the role `usage`. 42 become known safe, mostly `railway logs` and `railway status`. 8065 generated lines are known commands.
 
 Review a change: write a dump before and after with `APASSY_REPLAY_DUMP=path`, and compare the flag columns line by line.
 
@@ -301,15 +342,20 @@ Run the replay: `cargo test --features vault --test analysis_replay -- --nocaptu
 - The owner does not see which local rule added a flag. The approval card shows the flag name only. Use `ask_owner` or a clear flag for each rule.
 - A local pack that does not load makes every run wait for the owner. A process that can write to the local pack directory can do this.
 - There is no signature on a local pack. Built-in packs are part of the signed app.
+- The general lexicons read words. A program that no pack knows and that uses other words for a deletion (`tool expire`, `tool compact`) gets no flag. The model decides it, and it needs `task_match` because the program is unknown.
+- The secret lexicon flags a listing of values (`variables list`) also for a tool that prints only names. A pack exception fixes such a tool (`gh variable`, `nomad var list`, `kubectl get secrets`).
+- The irreversible lexicon applies only to programs that no built-in pack knows. A known program with a destructive subcommand that its pack does not list gets no flag from the lexicon.
+- A bound endpoint needs a variable name that ends with an endpoint word (`URL`, `URI`, `HOST`, `ENDPOINT`, `ADDR`, `ADDRESS`, `SERVER`, `BASE`, `DOMAIN`).
+- The global known hosts are API hosts where the host and its subdomains serve only the API of the provider. `sentry.io` is not one of them: it also serves the ingestion hosts of every Sentry organization. Such a provider needs the provider of the item (goal item B4).
 
 ## 8. Checks
 
-Results on 2026-09-26, after the intended changes of section 5:
+Results on 2026-09-26, after dev round 2 ([dev-round2.md](../evaluation/dev-round2.md)):
 
 | Command | Result |
 | --- | --- |
 | `cargo fmt --check` | PASS |
 | `cargo clippy --locked --all-targets --features desktop,vault -- -D warnings` | PASS |
-| `cargo test --locked --features desktop,vault` | PASS. `analysis_replay`: 1 test, 62074 commands, 0 differences. `rule_packs`: 6 tests, 1 ignored (`owner_local_packs_load` reads the owner's directory). Library unit tests: 85, 1 ignored. `host_hook`: 7, 2 ignored. |
+| `cargo test --locked --features desktop,vault` | PASS. `analysis_replay`: 1 test, 62402 commands, 0 differences. `rule_packs`: 7 tests, 1 ignored (`owner_local_packs_load` reads the owner's directory). `bouncer_rules`: 10, 1 ignored. `bouncer_eval`: 2, 5 ignored (they need a model, a set, or a dump). `provider_hosts`: 3. Library unit tests: 136, 1 ignored. |
 
 The effect on the decisions is in [heldout-v1.md](../evaluation/heldout-v1.md), section "Development use after freezing".

@@ -1,11 +1,12 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "mix",
   "description": "Elixir mix: Ecto drops, resets, and rollbacks, Hex publishing, archives, and build and test tasks.",
   "programs": ["mix"],
   "roles": {
-    "usage": ["mix"]
+    "usage": ["mix"],
+    "project_code": ["mix"]
   },
   "rules": [
     {

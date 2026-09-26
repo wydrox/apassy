@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "algolia",
+  "description": "Algolia CLI: index deletion, clearing, and overwrites, record deletion, API keys, and read commands.",
+  "programs": ["algolia"],
+  "roles": {
+    "usage": ["algolia"]
+  },
+  "rules": [
+    {
+      "id": "delete-clear-overwrite",
+      "flag": "data_loss",
+      "note": "`indices delete` and `indices clear` remove an index or all its records. `indices move` and `indices copy` overwrite the destination index. `objects delete`, `rules delete`, `synonyms delete`, and `apikeys delete` remove data or keys.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["indices", "index"], "action": ["delete", "clear", "move", "copy"] },
+          { "subcommand": ["objects", "rules", "synonyms", "apikeys"], "action": ["delete", "clear"] },
+          { "any_arg": ["--clear-existing-rules", "--replace-existing-synonyms", "--clear-existing-synonyms"] }
+        ]
+      }
+    },
+    {
+      "id": "api-keys",
+      "flag": "secret_output",
+      "note": "`apikeys list` and `apikeys get` print key values. `apikeys create` makes a new key and prints it.",
+      "when": { "subcommand": ["apikeys"], "action": ["list", "get", "create"] }
+    }
+  ],
+  "safe": [
+    {
+      "id": "reads",
+      "note": "Index lists, searches, settings, and browses of records, rules, and synonyms only read.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["search"] },
+          { "subcommand": ["indices", "index"], "action": ["list", "browse"] },
+          { "subcommand": ["settings"], "action": ["get"] },
+          { "subcommand": ["objects", "rules", "synonyms"], "action": ["browse"] },
+          { "subcommand": ["profile"], "action": ["list"] }
+        ]
+      }
+    }
+  ]
+}

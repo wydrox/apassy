@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "rabbitmq",
+  "description": "RabbitMQ tools (`rabbitmqctl`, `rabbitmqadmin`, `rabbitmq-diagnostics`, `rabbitmq-plugins`, `rabbitmq-queues`): purges, deletions, node resets, users and permissions, definition exports, and read commands.",
+  "programs": [
+    "rabbitmqctl", "rabbitmqadmin", "rabbitmq-diagnostics", "rabbitmq-plugins",
+    "rabbitmq-queues", "rabbitmq-upgrade"
+  ],
+  "rules": [
+    {
+      "id": "purge-delete-reset",
+      "flag": "data_loss",
+      "note": "A purge removes every message of a queue. A delete removes a queue, an exchange, a binding, a virtual host, or a user. `reset` and `force_reset` remove all data of a node.",
+      "when": {
+        "any_of": [
+          {
+            "program": ["rabbitmqctl"],
+            "any_arg": [
+              "purge_queue", "delete_queue", "delete_vhost", "reset", "force_reset",
+              "delete_user", "clear_policy", "clear_parameter", "close_all_connections"
+            ]
+          },
+          { "program": ["rabbitmqadmin"], "any_arg": ["purge", "delete", "close"] },
+          { "program": ["rabbitmq-queues"], "any_arg": ["delete_member", "shrink"] }
+        ]
+      }
+    },
+    {
+      "id": "users-and-permissions",
+      "flag": "privilege",
+      "note": "User, password, tag, and permission changes decide who can read and write messages.",
+      "when": {
+        "program": ["rabbitmqctl"],
+        "any_arg": [
+          "add_user", "change_password", "set_user_tags", "set_permissions",
+          "set_topic_permissions", "clear_permissions", "authenticate_user"
+        ]
+      }
+    },
+    {
+      "id": "definitions-export",
+      "flag": "secret_output",
+      "note": "An export of the definitions has the password hashes of every user. `environment` prints the node settings, the default password included.",
+      "when": {
+        "any_of": [
+          { "program": ["rabbitmqctl"], "any_arg": ["export_definitions", "environment"] },
+          { "program": ["rabbitmqadmin"], "any_arg": ["export"] },
+          { "program": ["rabbitmq-diagnostics"], "any_arg": ["environment"] }
+        ]
+      }
+    },
+    {
+      "id": "node-stop",
+      "flag": "system_change",
+      "note": "Stopping the app, the node, or a plugin stops the broker for every client.",
+      "when": {
+        "any_of": [
+          { "program": ["rabbitmqctl"], "any_arg": ["stop_app", "stop", "shutdown", "rotate_logs"] },
+          { "program": ["rabbitmq-plugins"], "any_arg": ["enable", "disable", "set"] },
+          { "program": ["rabbitmq-upgrade"] }
+        ]
+      }
+    }
+  ],
+  "safe": [
+    {
+      "id": "rabbitmqctl-reads",
+      "note": "Listings and status commands only read.",
+      "when": {
+        "program": ["rabbitmqctl"],
+        "operands": {
+          "skip": ["-n", "--node", "-p", "--vhost", "-t", "--timeout"],
+          "at": {
+            "index": 0,
+            "in": [
+              "list_queues", "list_exchanges", "list_bindings", "list_connections",
+              "list_channels", "list_consumers", "list_vhosts", "list_users", "list_policies",
+              "list_permissions", "status", "cluster_status", "node_health_check", "version",
+              "list_parameters", "list_global_parameters"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "rabbitmqadmin-reads",
+      "note": "`list` and `show` print objects and message counts. Connection options such as `--host` and `--password` take a value.",
+      "when": {
+        "program": ["rabbitmqadmin"],
+        "operands": {
+          "skip": [
+            "--host", "-h", "--port", "-p", "--username", "-u", "--password", "--vhost", "-v",
+            "--base-uri", "--format", "-f", "--depth", "-d", "--config", "-c", "--node", "-n",
+            "--ssl-key-file", "--ssl-cert-file", "--ssl-ca-cert-file"
+          ],
+          "at": { "index": 0, "in": ["list", "show"] }
+        }
+      }
+    },
+    {
+      "id": "diagnostics-and-plugin-list",
+      "note": "Diagnostics read the state of the node. `rabbitmq-plugins list` prints the plugins.",
+      "when": {
+        "any_of": [
+          { "program": ["rabbitmq-diagnostics"] },
+          { "program": ["rabbitmq-plugins"], "subcommand": ["list"] }
+        ]
+      }
+    }
+  ]
+}

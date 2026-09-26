@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 2,
+  "pack_version": 3,
   "tool": "kubernetes",
   "description": "kubectl and Helm: deletions, changes to a cluster, secret reads, shells in a container, and read commands.",
   "programs": ["kubectl", "helm"],
@@ -78,6 +78,19 @@
     }
   ],
   "exemptions": [
+    {
+      "id": "secret-reads",
+      "check": "command_lexicon",
+      "note": "`kubectl get secrets` lists names and `describe secret` shows sizes. The rule `secret-values` flags the output options that print the data.",
+      "when": {
+        "program": ["kubectl"],
+        "subcommand": ["get", "describe"],
+        "any_of": [
+          { "any_arg": ["secret", "secrets"] },
+          { "any_arg_starts": ["secret/", "secrets/"] }
+        ]
+      }
+    },
     {
       "id": "kubeconfig-option",
       "check": "secret_file_argument",

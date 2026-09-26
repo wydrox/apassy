@@ -1,11 +1,12 @@
 {
   "schema_version": 1,
-  "pack_version": 2,
+  "pack_version": 3,
   "tool": "go",
   "description": "Go toolchain and Go tools: new modules, and build, test, lint, and format commands.",
   "programs": ["go", "gofmt", "goimports", "golangci-lint", "staticcheck", "govulncheck"],
   "roles": {
-    "usage": ["go", "golangci-lint"]
+    "usage": ["go", "golangci-lint"],
+    "project_code": ["go"]
   },
   "rules": [
     {

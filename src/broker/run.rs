@@ -41,7 +41,7 @@ use super::bouncer::{
 use super::decide::{BrokerContext, authenticate, lock, locked_response};
 use super::exec::{self, SecretEnv};
 use super::learning::{self, LoggedRequest, Outcome, RuleDenial, RunScope};
-use super::shell_risk::{ProviderHosts, analyze_run};
+use super::shell_risk::{ProviderHosts, analyze_run, injection_flag};
 use crate::agent::wire::WireResponse;
 use crate::vault::providers;
 use crate::vault::{
@@ -202,6 +202,16 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
     );
     analysis.flags.extend(resolved.flags.iter().cloned());
     let user_request = resolved.text.as_str();
+    // Dev round 2: an instruction to the reviewer in the user request asks the owner,
+    // as one in the purpose does (`shell_risk::injection_flag`).
+    if let Some(flag) = injection_flag(user_request)
+        && !analysis.flags.iter().any(|known| known == flag)
+    {
+        analysis.flags.push(flag.to_owned());
+        analysis.flags.sort();
+        analysis.known_safe = false;
+        analysis.known_command = false;
+    }
     let context = DecisionContext {
         analysis: &analysis,
         declarations: &checked.declarations,

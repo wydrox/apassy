@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 2,
+  "pack_version": 3,
   "tool": "python",
   "description": "Python: inline code, package installs and sources, test and lint tools, project managers (Poetry, uv, Pipenv, PDM, Hatch), and publishing. Django commands are in the `django` pack. `poetry run`, `uv run`, `pipenv run`, `pdm run`, and `hatch run` are wrappers: the analysis checks the program after them.",
   "programs": [
@@ -11,7 +11,8 @@
   "roles": {
     "usage": ["python", "python3", "pip", "poetry", "uv", "pipenv", "pdm"],
     "heredoc_code": ["python", "python3"],
-    "script_runner": ["python", "python3"]
+    "script_runner": ["python", "python3"],
+    "project_code": ["python", "python3"]
   },
   "rules": [
     {

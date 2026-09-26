@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 2,
+  "pack_version": 3,
   "tool": "gh",
   "description": "GitHub CLI: releases, workflow runs, secrets, repository settings, gists, and API writes.",
   "programs": ["gh"],
@@ -55,6 +55,14 @@
       "flag": "production",
       "note": "A workflow run or a workflow change can deploy or publish.",
       "when": { "subcommand": ["workflow"], "action": ["run", "enable", "disable"] }
+    }
+  ],
+  "exemptions": [
+    {
+      "id": "variables-are-not-secret",
+      "check": "command_lexicon",
+      "note": "GitHub Actions variables are plain configuration, not secrets. A change still gets the flag of `secret-or-variable-change`, and a secret value in an argument gets `secret-argument`.",
+      "when": { "subcommand": ["variable"] }
     }
   ],
   "safe": [

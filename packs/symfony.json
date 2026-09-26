@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "symfony",
+  "description": "Symfony console (`php bin/console`, `symfony console`) and the Symfony CLI: database drops, fixture loads, message retries, printed environment values and secrets, and development commands. Other console commands are commands of the project.",
+  "programs": ["php", "symfony"],
+  "roles": {
+    "project_code": ["symfony"]
+  },
+  "rules": [
+    {
+      "id": "drop-purge-revert",
+      "flag": "data_loss",
+      "note": "`doctrine:database:drop` and `doctrine:schema:drop` drop the database or its tables. `doctrine:fixtures:load` purges the database first, unless `--append`. `doctrine:migrations:migrate prev` or `first` and `--down` revert migrations. `cache:pool:clear` empties shared cache pools, and `messenger:failed:remove` deletes failed messages.",
+      "when": {
+        "any_of": [
+          { "any_arg": ["doctrine:database:drop", "doctrine:schema:drop", "cache:pool:clear", "messenger:failed:remove"] },
+          { "any_arg": ["doctrine:fixtures:load"], "not": { "any_arg": ["--append"] } },
+          { "any_arg": ["doctrine:migrations:migrate"], "operands": { "any": [{ "equals": ["prev", "first", "0"] }] } },
+          { "any_arg": ["doctrine:migrations:execute"], "any_arg_starts": ["--down"] }
+        ]
+      }
+    },
+    {
+      "id": "environment-values",
+      "flag": "secret_output",
+      "note": "`debug:dotenv`, `debug:container --env-vars`, and `secrets:reveal` print environment values and secrets. `symfony var:export` prints the variables of the environment.",
+      "when": {
+        "any_of": [
+          { "any_arg": ["debug:dotenv", "secrets:reveal", "var:export", "var:expose-from-tunnel"] },
+          { "any_arg": ["debug:container"], "any_arg_starts": ["--env-var"] }
+        ]
+      }
+    },
+    {
+      "id": "failed-message-retry",
+      "flag": "irreversible",
+      "note": "`messenger:failed:retry` dispatches failed messages again, with all their side effects, such as emails or payments.",
+      "when": { "any_arg": ["messenger:failed:retry"] }
+    }
+  ],
+  "safe": [
+    {
+      "id": "console-development",
+      "note": "Information, routes, lint checks, migration status, schema validation, and the kernel cache on this computer.",
+      "when": {
+        "any_of": [
+          {
+            "program": ["php"],
+            "operands": {
+              "at": { "index": 0, "in": ["bin/console", "./bin/console"] }
+            },
+            "any_arg": [
+              "about", "list", "debug:router", "debug:autowiring", "doctrine:migrations:status",
+              "doctrine:migrations:list", "doctrine:migrations:up-to-date",
+              "doctrine:migrations:current", "doctrine:migrations:latest",
+              "doctrine:schema:validate", "cache:clear", "cache:warmup", "lint:twig",
+              "lint:yaml", "lint:container", "lint:xliff", "debug:translation"
+            ]
+          },
+          {
+            "program": ["php"],
+            "operands": {
+              "at": { "index": 0, "in": ["bin/phpunit", "./bin/phpunit", "vendor/bin/simple-phpunit"] }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

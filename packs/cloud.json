@@ -1,11 +1,15 @@
 {
   "schema_version": 1,
-  "pack_version": 2,
+  "pack_version": 3,
   "tool": "cloud",
   "description": "Small hosting and deploy tools (Railway, Render, Serverless, Ansible playbooks and ad-hoc commands) and Twilio. Google Cloud, Azure, Fly.io, Heroku, Firebase, Wrangler, and Stripe have their own packs.",
-  "programs": ["railway", "render", "serverless", "sls", "ansible-playbook", "ansible", "twilio"],
+  "programs": [
+    "railway", "render", "serverless", "sls", "ansible-playbook", "ansible", "twilio",
+    "ansible-vault", "ansible-galaxy", "ansible-inventory"
+  ],
   "roles": {
-    "usage": ["twilio"]
+    "usage": ["twilio", "railway", "ansible-playbook", "ansible-vault", "ansible-galaxy"],
+    "command_runner": ["railway"]
   },
   "rules": [
     {
@@ -22,8 +26,44 @@
       "id": "deploy-tools",
       "flag": "production",
       "dry_run": "skip",
-      "note": "Serverless and Ansible playbooks deploy or change servers.",
-      "when": { "program": ["serverless", "sls", "ansible-playbook"] }
+      "note": "Serverless and Ansible playbooks deploy or change servers. The Ansible check mode (`--check`), `--syntax-check`, and the `--list-*` options only show what the playbook would do.",
+      "when": {
+        "program": ["serverless", "sls", "ansible-playbook"],
+        "not": {
+          "program": ["ansible-playbook"],
+          "any_arg": ["--check", "--syntax-check", "--list-hosts", "--list-tasks", "--list-tags"]
+        }
+      }
+    },
+    {
+      "id": "railway-variables-and-shell",
+      "flag": "secret_output",
+      "note": "`railway variables` prints the values of the environment variables, unless the command sets or deletes one. `railway connect` opens a database shell with the credentials of the service.",
+      "when": {
+        "program": ["railway"],
+        "any_of": [
+          { "subcommand": ["variables", "variable", "vars"], "not": { "any_arg": ["--set", "set", "delete", "--remove"] } },
+          { "subcommand": ["connect"] }
+        ]
+      }
+    },
+    {
+      "id": "railway-down",
+      "flag": "data_loss",
+      "note": "`railway down` removes the latest deployment of the service. `railway delete` removes a project.",
+      "when": { "program": ["railway"], "subcommand": ["down", "delete"] }
+    },
+    {
+      "id": "ansible-vault-plaintext",
+      "flag": "secret_output",
+      "note": "`ansible-vault view` prints decrypted secrets. `decrypt` writes them to the file as plain text. `edit` opens them in an editor.",
+      "when": { "program": ["ansible-vault"], "subcommand": ["view", "decrypt", "edit"] }
+    },
+    {
+      "id": "ansible-galaxy-install",
+      "flag": "new_dependency",
+      "note": "`ansible-galaxy install` downloads roles or collections from outside the project.",
+      "when": { "program": ["ansible-galaxy"], "any_arg": ["install"] }
     },
     {
       "id": "ansible-ad-hoc",
@@ -39,6 +79,21 @@
     }
   ],
   "safe": [
+    {
+      "id": "railway-reads",
+      "note": "The linked project and environment, logs, the account, and project listings.",
+      "when": { "program": ["railway"], "subcommand": ["status", "logs", "whoami", "list", "environment", "domain", "open"] }
+    },
+    {
+      "id": "ansible-checks",
+      "note": "Ping and fact modules, syntax checks, and listings of hosts and tasks do not change a host.",
+      "when": {
+        "any_of": [
+          { "program": ["ansible-playbook"], "any_arg": ["--syntax-check", "--list-hosts", "--list-tasks", "--list-tags"] },
+          { "program": ["ansible"], "option_value": { "option": ["-m", "--module-name"], "value": ["ping", "setup"] }, "not": { "any_arg_starts": ["-a", "--args"] } }
+        ]
+      }
+    },
     {
       "id": "twilio-read",
       "note": "Twilio `...:list` and `...:fetch` commands only read.",

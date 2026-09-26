@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "sql-clients",
+  "description": "SQL command line clients that take SQL as an argument or an option value (Snowflake `snowsql` and `snow`, Trino, Presto, Spark SQL, Hive, Beeline, Impala, `sqlcmd`, `usql`, `mycli`, `pgcli`, `litecli`, MariaDB, Vertica, ClickHouse): SQL that changes data, schema, or access.",
+  "programs": [
+    "snowsql", "snow", "trino", "presto", "spark-sql", "beeline", "hive", "impala-shell",
+    "sqlcmd", "usql", "mycli", "pgcli", "litecli", "mariadb", "vsql", "clickhouse"
+  ],
+  "roles": {
+    "heredoc_sql": ["snowsql", "trino", "presto", "spark-sql", "beeline", "hive", "sqlcmd", "usql", "mycli", "pgcli", "litecli", "mariadb", "vsql", "clickhouse"]
+  },
+  "rules": [
+    {
+      "id": "sql-write",
+      "flag": "data_loss",
+      "note": "SQL in an argument or an option value (`-q`, `--query`, `-e`, `--execute`, `-Q`) that changes data, schema, or access. The first keyword of each statement decides.",
+      "when": { "sql": "any_arg_writes" }
+    },
+    {
+      "id": "snow-object-drop",
+      "flag": "data_loss",
+      "note": "`snow object drop` drops a Snowflake object. `snow stage remove` removes staged files.",
+      "when": {
+        "program": ["snow"],
+        "any_of": [
+          { "subcommand": ["object"], "action": ["drop"] },
+          { "subcommand": ["stage"], "action": ["remove"] }
+        ]
+      }
+    }
+  ]
+}

@@ -1,13 +1,14 @@
 {
   "schema_version": 1,
-  "pack_version": 2,
+  "pack_version": 3,
   "tool": "node",
   "description": "JavaScript runtimes (node, deno, bun, tsx, ts-node): inline code, scripts, and version checks.",
   "programs": ["node", "deno", "bun", "tsx", "ts-node"],
   "roles": {
     "usage": ["node", "deno"],
     "heredoc_code": ["node", "deno", "bun"],
-    "script_runner": ["node", "tsx", "ts-node", "deno", "bun"]
+    "script_runner": ["node", "tsx", "ts-node", "deno", "bun"],
+    "project_code": ["node", "tsx", "ts-node", "deno", "bun"]
   },
   "rules": [
     {
