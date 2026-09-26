@@ -339,6 +339,65 @@ fn delete_item_removes_links_and_restore_revokes_agents() {
     });
 }
 
+/// Goal item V4 on the connector path: a restored item with a connector waits for the
+/// owner review. The item delete removes the review mark.
+#[test]
+fn restored_connector_waits_for_the_owner_review() {
+    let fx = fixture();
+    let backup = fx.dir.path().join("connector.bak");
+    with_vault(&fx, |vault| vault.backup(&backup).expect("backup"));
+    let mut restored =
+        Vault::restore(&backup, &fx.dir.path().join("connector.db"), PASS).expect("restore");
+    restored.unlock(PASS).expect("unlock");
+    assert_eq!(
+        restored.items_needing_review().expect("review"),
+        vec![fx.item_id]
+    );
+    let (agent, token) = restored.register_agent("Test agent").expect("register");
+    restored
+        .set_grant(agent.id, fx.item_id, OP_SUMMARY, true)
+        .expect("grant");
+    let token = token.expose().to_owned();
+    let slot: SharedVault = Arc::new(Mutex::new(Some(restored)));
+    let socket = fx.dir.path().join("run2").join("broker.sock");
+    let _broker = broker::start_with_tls(
+        Arc::clone(&slot),
+        &socket,
+        TlsClient::platform().expect("TLS"),
+    )
+    .expect("broker");
+    let request = || Action::Call {
+        item_id: fx.item_id,
+        operation: OP_SUMMARY.to_owned(),
+        params: summary_params("project-a-synthetic"),
+    };
+    let refused = client::send(&socket, &token, request()).expect("answer");
+    assert_eq!(error_code(&refused), "review_required");
+    let list = client::send(&socket, &token, Action::ListAccess).expect("list");
+    assert_eq!(
+        list.result.as_ref().expect("result")["items"][0]["owner_review_needed"],
+        true
+    );
+    slot.lock()
+        .expect("slot")
+        .as_mut()
+        .expect("open")
+        .confirm_review(fx.item_id)
+        .expect("confirm");
+    let ok = client::send(&socket, &token, request()).expect("answer");
+    assert!(ok.ok, "{ok:?}");
+    assert_no_secret(&ok);
+
+    // A second restore marks the item again. A delete removes the mark with the item.
+    let mut again =
+        Vault::restore(&backup, &fx.dir.path().join("connector-2.db"), PASS).expect("restore");
+    again.unlock(PASS).expect("unlock");
+    assert!(again.needs_review(fx.item_id).expect("review"));
+    let revision = again.details(fx.item_id).expect("details").summary.revision;
+    again.delete(fx.item_id, revision).expect("delete");
+    assert!(again.items_needing_review().expect("review").is_empty());
+}
+
 /// Move every token issue time back by `days`. The vault connection is closed while a raw
 /// SQLCipher connection writes. Tests only: this stands in for the passage of time.
 fn age_tokens(fx: &Fixture, days: i64) {

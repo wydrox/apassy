@@ -7,7 +7,7 @@ use std::path::Path;
 
 use apassy::contracts::CredentialKind;
 use apassy::desktop::model::ItemDraft;
-use apassy::desktop::owner_store::{OwnerSession, SecretForm};
+use apassy::desktop::owner_store::{DeclarationForm, OwnerSession, SecretForm};
 use tempfile::TempDir;
 
 const PASS: &str = "owner-vault-pass-ok";
@@ -325,6 +325,68 @@ fn unchanged_form_is_detected_before_a_save() {
             )
             .expect("compare name")
     );
+}
+
+/// Goal item V4 in the owner session: the backup and restore procedure. The restore
+/// revokes every agent and lists the items that wait for the owner review.
+#[test]
+fn restore_lists_items_for_review_until_the_owner_confirms() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut session, _) = session_at(&dir, "procedure.db");
+    // The app starts locked. A new vault file also starts locked.
+    assert!(OwnerSession::new().is_locked());
+    assert!(session.is_locked());
+    unlock(&mut session);
+    let used = session
+        .add(
+            &api_draft("Used by agents", "Project V4"),
+            &token_form(TOKEN),
+        )
+        .expect("add");
+    let unused = session
+        .add(
+            &api_draft("Not for agents", "Project V4"),
+            &token_form(DB_PASS),
+        )
+        .expect("add");
+    let mut form = DeclarationForm {
+        project: "Project V4".to_owned(),
+        ..DeclarationForm::default()
+    };
+    form.environment = apassy::vault::Environment::Staging;
+    session
+        .set_declaration(used.id, &form)
+        .expect("declaration");
+    session
+        .set_env_binding(used.id, "USED_KEY", "token")
+        .expect("binding");
+    session.register_agent("Before restore").expect("register");
+    assert!(session.items_needing_review().expect("review").is_empty());
+
+    let backup = dir.path().join("procedure.backup");
+    session.backup(&backup).expect("backup");
+    assert!(session.is_locked(), "backup locks the vault");
+    let restored = dir.path().join("procedure-restored.db");
+    session.restore(&backup, &restored, PASS).expect("restore");
+    assert!(session.is_locked(), "the restored vault starts locked");
+    assert_eq!(session.location(), Some(restored.as_path()));
+    unlock(&mut session);
+    assert!(session.agents().expect("agents").iter().all(|a| a.revoked));
+    assert_eq!(
+        session.items_needing_review().expect("review"),
+        vec![(used.id, "Used by agents".to_owned())]
+    );
+    assert!(session.needs_review(used.id).expect("review"));
+    assert!(!session.needs_review(unused.id).expect("review"));
+    assert_eq!(
+        session.declaration(used.id).expect("declaration"),
+        Some(form.to_declaration()),
+        "the restore keeps the settings for the review"
+    );
+    session.confirm_review(used.id).expect("confirm");
+    assert!(session.items_needing_review().expect("review").is_empty());
+    let revealed = session.reveal(used.id).expect("reveal");
+    assert_eq!(revealed.secret_lines[0].display, TOKEN);
 }
 
 /// Goal item P1 in the owner session: the lifetime text and a token rotation.

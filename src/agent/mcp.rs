@@ -332,6 +332,9 @@ fn hint(code: &str) -> Option<&'static str> {
         "token_expired" => Some(
             "Tell the user: the Apassy agent token of this MCP server expired. In the Apassy app, open Agents and click \"Rotate token\". Put the new token in APASSY_AGENT_TOKEN of the MCP server configuration, then restart the MCP server. Do not retry before that.",
         ),
+        "review_required" => Some(
+            "Tell the user: the Apassy vault was restored from a backup. In the Apassy app, open the item, examine its agent settings, and click \"Confirm settings\". Do not retry before that.",
+        ),
         _ => None,
     }
 }

@@ -64,6 +64,7 @@ The broker does the checks in this order:
 1. The vault is open and unlocked. If not, the code is `vault_locked`.
 2. The token belongs to an active agent. If not, the code is `unauthenticated`. If the token is older than the token lifetime, the code is `token_expired`. The activity log names the agent.
 3. The agent has a grant for the item and the operation. If not, the code is `not_granted`.
+3a. If the item came from a restored backup, the owner confirmed its agent settings. If not, the code is `review_required` (goal item V4, [backup and restore](../operations/backup-restore.md)).
 4. The item has a destination. The destination profile is known and has the operation.
 5. The parameters match the operation.
 6. The destination is `https://HOST[:PORT]`, or `http://` on a loopback address. See [ADR 0005](../adr/0005-connector-tls.md).
@@ -93,7 +94,7 @@ A locked vault cannot record. The broker does not record requests with an unknow
 
 ## 6. Error codes
 
-`rule_expired`, `rule_command_not_permitted`, `rule_forbidden_word`, `rule_rate_limit`, `invalid_request`, `outside_project`, `no_env_binding`, `approval_denied`, `approval_timeout`, `approval_invalidated`, `start_failed`, `bad_request`, `unsupported_version`, `busy`, `vault_locked`, `unauthenticated`, `not_granted`, `no_destination`, `unknown_profile`, `unknown_operation`, `invalid_params`, `destination_not_permitted`, `wrong_credential_kind`, `missing_secret`, `destination_unreachable`, `tls_failed`, `destination_refused`, `destination_not_found`, `destination_error`, `bad_output`, `output_blocked`, `broker_error`, `token_expired`.
+`rule_expired`, `rule_command_not_permitted`, `rule_forbidden_word`, `rule_rate_limit`, `invalid_request`, `outside_project`, `no_env_binding`, `approval_denied`, `approval_timeout`, `approval_invalidated`, `start_failed`, `bad_request`, `unsupported_version`, `busy`, `vault_locked`, `unauthenticated`, `not_granted`, `no_destination`, `unknown_profile`, `unknown_operation`, `invalid_params`, `destination_not_permitted`, `wrong_credential_kind`, `missing_secret`, `destination_unreachable`, `tls_failed`, `destination_refused`, `destination_not_found`, `destination_error`, `bad_output`, `output_blocked`, `broker_error`, `token_expired`, `review_required`.
 
 ## 7. Connector profile `reporting-api-v0`
 
@@ -116,6 +117,8 @@ The broker sends `Authorization: Bearer <token field>`. The agent cannot set a h
 - Tools: `apassy_list_access` and `apassy_use_credential`.
 - A broker refusal is a tool result with `isError: true`. The text starts with the error code.
 - For `token_expired`, the text also tells the user the next step: rotate the token in the Apassy app, put the new token in `APASSY_AGENT_TOKEN`, and restart the MCP server.
+- For `review_required`, the text tells the user to confirm the agent settings of the restored item in the app.
+- `apassy_list_access` shows `owner_review_needed` for each item.
 
 ## 9. Vault schema versions 2 and 3
 
@@ -126,7 +129,7 @@ Unlock migrates a version 1 file in one immediate transaction. Create writes ver
 - Token comparison uses constant time over all active agents.
 - Revoke sets `revoked_at` and removes the grants of the agent.
 - Item delete removes the grants and the destination of the item in the same transaction.
-- Restore revokes all agents and removes all grants. The owner must register the agents again.
+- Restore revokes all agents and removes all grants and rules. The owner must register the agents again. Restore also marks each item with a declaration, an environment variable, or a connector for review (table `restore_review`, schema version 6). The broker refuses a run or a call with a marked item with `review_required` until the owner clicks "Confirm settings".
 - The activity log keeps the newest 500 entries.
 - Schema version 4 adds the `rule` column to `exec_grant` and the `run_log` table (ADR 0007). A version 3 grant in "allow" mode becomes "bouncer" mode.
 - Schema version 3 adds `env_binding` and `exec_grant`. Unlock migrates version 1 and 2 files. Item delete, agent revoke, and restore also remove the process grants.

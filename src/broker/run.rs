@@ -6,9 +6,10 @@
 //! 2. The token belongs to an active agent, and the token has not expired.
 //! 3. The request has a valid form: items, command, working directory, purpose, and `PATH`.
 //! 4. The working directory exists.
-//! 5. For each item: the agent has process access, the working directory is in the
-//!    granted project directory, the item has an environment binding, and the hard
-//!    rule passes (expiry, command prefixes, forbidden words, hourly limit).
+//! 5. For each item: the agent has process access, the owner reviewed the item after a
+//!    restore, the working directory is in the granted project directory, the item has
+//!    an environment binding, and the hard rule passes (expiry, command prefixes,
+//!    forbidden words, hourly limit).
 //! 6. A production declaration needs the owner (ADR 0010). The model is not asked.
 //! 7. The bouncer scores the request (ADR 0007, ADR 0008). A rule flag skips the model.
 //! 8. A grant in "ask" mode, a high risk, or an unavailable bouncer needs the owner.
@@ -389,6 +390,10 @@ fn check(
                 format!("The owner did not give process access to item {item_id}."),
             ));
         };
+        // Goal item V4: settings from a restored backup wait for the owner review.
+        if vault.needs_review(*item_id).unwrap_or(true) {
+            return Err(("review_required", review_reason(*item_id)));
+        }
         let project = canonical_dir(Path::new(&grant.project_dir));
         let inside = project
             .as_ref()
@@ -479,6 +484,13 @@ fn check(
         instruction: instructions.join(" "),
         declarations,
     })
+}
+
+/// Refusal text for an item from a restored backup that the owner did not review yet.
+pub(super) fn review_reason(item_id: u64) -> String {
+    format!(
+        "The vault was restored from a backup. The owner must review the agent settings of item {item_id} in Apassy (Item details, Confirm settings) before an agent can use it."
+    )
 }
 
 fn canonical_dir(path: &Path) -> Option<PathBuf> {

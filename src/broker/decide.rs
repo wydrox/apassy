@@ -3,9 +3,10 @@
 //! 1. The vault is open and unlocked.
 //! 2. The token belongs to an active agent, and the token has not expired.
 //! 3. The agent has a grant for the item and the operation.
-//! 4. The item has a destination with a known profile and a loopback URL.
-//! 5. The parameters match the operation.
-//! 6. Only then does the broker read the secret, release the vault lock, and call the destination.
+//! 4. After a restore, the owner reviewed the agent settings of the item (goal item V4).
+//! 5. The item has a destination with a known profile and a loopback URL.
+//! 6. The parameters match the operation.
+//! 7. Only then does the broker read the secret, release the vault lock, and call the destination.
 //!
 //! Each refusal after step 2 and each call result is stored in the activity log.
 //! Process runs (ADR 0006) have their own check order in [`super::run`].
@@ -187,6 +188,7 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
             "item_name": details.summary.title,
             "profile": profile.id,
             "operations": described,
+            "owner_review_needed": vault.needs_review(item_id).unwrap_or(true),
         }));
     }
     let mut process_access = Vec::new();
@@ -208,6 +210,7 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
                 crate::vault::ExecMode::Ask => "the owner approves each run",
                 crate::vault::ExecMode::Bouncer => "the bouncer decides; a risky run waits for the owner",
             },
+            "owner_review_needed": vault.needs_review(grant.item_id).unwrap_or(true),
         }));
     }
     WireResponse::success(json!({
@@ -318,6 +321,10 @@ fn prepare(
                 "The broker cannot read the grants.",
             ));
         }
+    }
+    if vault.needs_review(item_id).unwrap_or(true) {
+        let reason = super::run::review_reason(item_id);
+        return Err(deny(vault, "review_required", &reason));
     }
     let Ok(Some(destination)) = vault.destination(item_id) else {
         return Err(deny(

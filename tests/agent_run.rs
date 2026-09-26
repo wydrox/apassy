@@ -17,7 +17,8 @@ use apassy::broker::http::TlsClient;
 use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault};
 use apassy::contracts::CredentialKind;
 use apassy::vault::{
-    ActivityDecision, ExecMode, Field, ItemDraft, SecretValue, Vault, VaultErrorKind,
+    ActivityDecision, Declaration, Environment, ExecMode, ExecRule, Field, ItemDraft,
+    Reversibility, RiskLevel, Scope, SecretValue, Vault, VaultErrorKind,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -510,6 +511,141 @@ fn restore_removes_process_grants() {
             .is_empty()
     );
     assert!(restored.env_binding(fx.item_id).expect("binding").is_some());
+}
+
+/// Goal item V4: a restore revokes every agent and removes every grant and rule. Items
+/// with agent settings wait for the owner review. The broker refuses a run with such an
+/// item until the owner confirms the settings.
+#[test]
+fn restore_needs_owner_review_before_runs() {
+    let fx = fixture(ExecMode::Bouncer, Duration::from_secs(2));
+    let plain = with_vault(&fx, |v| {
+        v.set_declaration(
+            fx.item_id,
+            &Declaration {
+                project: "demo".to_owned(),
+                environment: Environment::Staging,
+                risk: RiskLevel::Medium,
+                scope: Scope::ReadWrite,
+                reversibility: Reversibility::Reversible,
+            },
+        )
+        .expect("declaration");
+        v.set_exec_rule(
+            fx.agent_id,
+            fx.item_id,
+            ExecRule {
+                allowed_prefixes: vec!["echo".to_owned()],
+                ..ExecRule::default()
+            },
+        )
+        .expect("rule");
+        v.add(ItemDraft {
+            title: "No agent settings".to_owned(),
+            kind: CredentialKind::ApiKey,
+            notes: String::new(),
+            tags: Vec::new(),
+            fields: vec![Field {
+                name: "token".to_owned(),
+                value: SecretValue::new("FAKE-plain-0003".to_owned()),
+                secret: true,
+            }],
+        })
+        .expect("add")
+        .id
+    });
+    let backup = fx.dir.path().join("review.bak");
+    with_vault(&fx, |v| v.backup(&backup).expect("backup"));
+    let mut restored =
+        Vault::restore(&backup, &fx.dir.path().join("review.db"), PASS).expect("restore");
+    assert!(restored.is_locked());
+    restored.unlock(PASS).expect("unlock");
+    assert!(
+        restored
+            .list_agents()
+            .expect("agents")
+            .iter()
+            .all(|agent| agent.revoked)
+    );
+    assert!(restored.authenticate_agent(&fx.token).is_err());
+    assert!(
+        restored
+            .exec_grants_for_agent(fx.agent_id)
+            .expect("grants")
+            .is_empty(),
+        "the restore removes grants and rules"
+    );
+    assert_eq!(
+        restored.items_needing_review().expect("review"),
+        vec![fx.item_id]
+    );
+    assert!(!restored.needs_review(plain).expect("plain"));
+    assert!(restored.env_binding(fx.item_id).expect("binding").is_some());
+
+    // The owner registers the agent again and gives process access again.
+    let (agent, token) = restored.register_agent("Run agent").expect("register");
+    restored
+        .set_exec_grant(
+            agent.id,
+            fx.item_id,
+            &fx.project.display().to_string(),
+            ExecMode::Bouncer,
+        )
+        .expect("grant");
+    let token = token.expose().to_owned();
+    let slot: SharedVault = Arc::new(Mutex::new(Some(restored)));
+    let bouncer = common::fake_bouncer(&[]);
+    let mut options = BrokerOptions::with_tls(TlsClient::platform().expect("TLS"));
+    options.approval_timeout = Duration::from_millis(500);
+    options.bouncer = Some(BouncerClient::new(&bouncer.url).expect("bouncer url"));
+    let socket = fx.dir.path().join("run2").join("broker.sock");
+    let _broker = broker::start_with(Arc::clone(&slot), &socket, options).expect("broker");
+    let send = || {
+        client::send(
+            &socket,
+            &token,
+            Action::Run {
+                items: vec![fx.item_id],
+                command: vec!["echo".into(), "ok".into()],
+                cwd: fx.project.display().to_string(),
+                purpose: "Print ok.".into(),
+                path: Some("/usr/bin:/bin".into()),
+                user_request: Some("Print ok.".into()),
+            },
+        )
+        .expect("answer")
+    };
+    let refused = send();
+    assert_eq!(code(&refused), "review_required");
+    let message = &refused.error.as_ref().expect("error").message;
+    assert!(message.contains("restored from a backup"), "{message}");
+    let list = client::send(&socket, &token, Action::ListAccess).expect("list");
+    assert_eq!(
+        list.result.as_ref().expect("result")["process_access"][0]["owner_review_needed"],
+        true
+    );
+    assert!(bouncer.bodies.lock().expect("bodies").is_empty());
+    {
+        let mut guard = slot.lock().expect("slot");
+        let vault = guard.as_mut().expect("open");
+        let activity = vault.recent_activity(2).expect("activity");
+        assert!(activity.iter().any(|entry| {
+            entry.decision == ActivityDecision::Deny && entry.reason.contains("restored")
+        }));
+        assert_eq!(
+            vault.confirm_review(999).unwrap_err().kind(),
+            VaultErrorKind::NotFound
+        );
+        vault.confirm_review(fx.item_id).expect("confirm");
+        vault
+            .confirm_review(fx.item_id)
+            .expect("a second confirm changes nothing");
+        assert!(vault.items_needing_review().expect("review").is_empty());
+    }
+    let ok = send();
+    assert!(ok.ok, "{ok:?}");
+    assert_eq!(ok.result.as_ref().expect("result")["stdout"], "ok\n");
+    no_secret(&ok);
 }
 
 #[test]

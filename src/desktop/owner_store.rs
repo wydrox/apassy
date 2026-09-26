@@ -750,6 +750,30 @@ impl OwnerSession {
             .map_err(map_err)
     }
 
+    // ---- Review after a restore (goal item V4). ----
+
+    /// Items from a restored backup that wait for the owner review: (item ID, item name).
+    pub fn items_needing_review(&self) -> ModelResult<Vec<(u64, String)>> {
+        let vault = self.unlocked()?;
+        let mut rows = Vec::new();
+        for id in vault.items_needing_review().map_err(map_err)? {
+            let name = vault
+                .details(id)
+                .map_or_else(|_| format!("Item {id}"), |details| details.summary.title);
+            rows.push((id, name));
+        }
+        Ok(rows)
+    }
+
+    pub fn needs_review(&self, item_id: u64) -> ModelResult<bool> {
+        self.unlocked()?.needs_review(item_id).map_err(map_err)
+    }
+
+    /// The owner confirms the agent settings of a restored item. Agents can use it again.
+    pub fn confirm_review(&mut self, item_id: u64) -> ModelResult<()> {
+        self.unlocked()?.confirm_review(item_id).map_err(map_err)
+    }
+
     /// Newest entries first. Item names come from the vault. Deleted items show their ID.
     pub fn activity(&self, limit: usize) -> ModelResult<Vec<AgentActivityRow>> {
         let vault = self.unlocked()?;

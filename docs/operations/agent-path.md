@@ -63,6 +63,7 @@ The agent can then call `apassy_list_access` and `apassy_use_credential`.
 | Call after "Revoke agent" | `unauthenticated` |
 | Call after the token lifetime | `token_expired`. `apassy-mcp` tells the user to rotate the token. |
 | Call with the old token after "Rotate token" | `unauthenticated` |
+| Call after a restore, before "Confirm settings" for the item | `review_required`. See [backup and restore](backup-restore.md). |
 | Activity view | One row for each call and each refusal |
 
 ## 6. Checks on 2026-09-25

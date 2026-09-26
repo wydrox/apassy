@@ -118,7 +118,8 @@ PRAGMA user_version = 5;
 pub(super) const SCHEMA_V5_COLUMNS: [&str; 1] =
     ["SELECT item_id, project, environment, risk, scope, reversibility FROM declaration LIMIT 0"];
 
-/// Columns added in schema version 6: agent token expiry (goal item P1).
+/// Columns and a table added in schema version 6: agent token expiry (goal item P1)
+/// and the owner review after a restore (goal item V4).
 ///
 /// A migrated token keeps its registration time as its issue time. A token that is
 /// older than the default lifetime is expired after the migration. The owner rotates it.
@@ -126,13 +127,18 @@ pub(super) const SCHEMA_V6_SQL: &str = "
 ALTER TABLE agent ADD COLUMN token_issued_at INTEGER NOT NULL DEFAULT 0;
 UPDATE agent SET token_issued_at = created_at;
 ALTER TABLE vault_meta ADD COLUMN token_lifetime_days INTEGER NOT NULL DEFAULT 30;
+CREATE TABLE restore_review (
+    item_id INTEGER PRIMARY KEY,
+    restored_at INTEGER NOT NULL
+);
 UPDATE vault_meta SET schema_version = 6 WHERE id = 1;
 PRAGMA user_version = 6;
 ";
 
-pub(super) const SCHEMA_V6_COLUMNS: [&str; 2] = [
+pub(super) const SCHEMA_V6_COLUMNS: [&str; 3] = [
     "SELECT token_issued_at FROM agent LIMIT 0",
     "SELECT token_lifetime_days FROM vault_meta LIMIT 0",
+    "SELECT item_id, restored_at FROM restore_review LIMIT 0",
 ];
 
 /// A token works for this many days after Apassy issues it, unless the owner changes it.
@@ -1021,6 +1027,54 @@ impl Vault {
         }
     }
 
+    /// Items from a restored backup whose agent settings the owner did not confirm yet
+    /// (goal item V4). Ascending item IDs.
+    pub fn items_needing_review(&self) -> VaultResult<Vec<u64>> {
+        let conn = self.conn_ref()?;
+        let mut stmt = conn
+            .prepare("SELECT item_id FROM restore_review ORDER BY item_id ASC")
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, i64>(0))
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(to_public_id(
+                row.map_err(|_| err(VaultErrorKind::Storage))?,
+            )?);
+        }
+        Ok(items)
+    }
+
+    /// The item came from a restored backup, and the owner did not confirm its agent settings.
+    pub fn needs_review(&self, item_id: u64) -> VaultResult<bool> {
+        let item = to_sql_id(item_id)?;
+        let found: Option<i64> = self
+            .conn_ref()?
+            .query_row(
+                "SELECT item_id FROM restore_review WHERE item_id = ?1",
+                [item],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        Ok(found.is_some())
+    }
+
+    /// The owner confirms the declaration, the environment variable, and the connector of
+    /// a restored item. Agents can use the item again. A second call changes nothing.
+    pub fn confirm_review(&mut self, item_id: u64) -> VaultResult<()> {
+        let item = to_sql_id(item_id)?;
+        let conn = self.conn_mut()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        require_item(&tx, item)?;
+        tx.execute("DELETE FROM restore_review WHERE item_id = ?1", [item])
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        tx.commit().map_err(|_| err(VaultErrorKind::Storage))
+    }
+
     /// Record that a run started. The hourly limit counts these entries.
     pub fn record_run(&mut self, agent_id: u64, item_id: u64) -> VaultResult<()> {
         let agent = to_sql_id(agent_id)?;
@@ -1128,8 +1182,14 @@ impl Vault {
     }
 }
 
-/// Revoke every active agent. Restore calls this before the restored vault is used.
-pub(super) fn revoke_all_agents(conn: &mut Connection) -> VaultResult<()> {
+/// Restore calls this before the restored vault is used, in one transaction:
+///
+/// - Revoke every active agent. The owner registers the agents again.
+/// - Remove every grant and every rule of a process grant.
+/// - Mark each item with agent settings (declaration, environment variable, or
+///   connector) for an owner review (goal item V4). The broker refuses an agent
+///   request with a marked item until the owner confirms the settings.
+pub(super) fn prepare_restored(conn: &mut Connection) -> VaultResult<()> {
     let at = to_sql_time(now_unix())?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1143,6 +1203,15 @@ pub(super) fn revoke_all_agents(conn: &mut Connection) -> VaultResult<()> {
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.execute("DELETE FROM exec_grant", [])
         .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute(
+        "INSERT OR REPLACE INTO restore_review (item_id, restored_at)
+         SELECT id, ?1 FROM item WHERE id IN (
+             SELECT item_id FROM declaration
+             UNION SELECT item_id FROM env_binding
+             UNION SELECT item_id FROM destination)",
+        [at],
+    )
+    .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))
 }
 
@@ -1157,6 +1226,8 @@ pub(super) fn delete_item_links(tx: &rusqlite::Transaction<'_>, item_id: i64) ->
     tx.execute("DELETE FROM exec_grant WHERE item_id = ?1", [item_id])
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.execute("DELETE FROM declaration WHERE item_id = ?1", [item_id])
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute("DELETE FROM restore_review WHERE item_id = ?1", [item_id])
         .map_err(|_| err(VaultErrorKind::Storage))?;
     Ok(())
 }

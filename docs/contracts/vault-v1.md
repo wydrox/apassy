@@ -3,7 +3,7 @@
 Date: 2026-09-16.
 Status: experimental backend contract. See [local verification](../operations/vault-verification.md) for measured results and limits.
 Schema version 2 (2026-09-25) adds agent, grant, destination, and activity tables. See section 9 of the [broker contract](broker-v0.md). The item API in this document did not change. Item delete also removes the grants and the destination of the item. Restore also revokes all agents.
-Schema version 6 (2026-09-26) adds agent token expiry and rotation (goal item P1). See section 9 of the broker contract and the agent API below.
+Schema version 6 (2026-09-26) adds agent token expiry and rotation (goal item P1) and the owner review after a restore (goal item V4). See section 9 of the broker contract, the agent API below, and [backup and restore](../operations/backup-restore.md).
 The owner selected SQLCipher with a master passphrase after the synthetic storage probe passed.
 This contract does not permit real-secret use or claim complete P2 acceptance.
 
@@ -94,6 +94,14 @@ impl Vault {
 // AgentSummary has token_issued_at and token_expires_at (Unix seconds).
 ```
 
+```rust
+impl Vault {
+    pub fn items_needing_review(&self) -> VaultResult<Vec<u64>>;
+    pub fn needs_review(&self, item_id: u64) -> VaultResult<bool>;
+    pub fn confirm_review(&mut self, item_id: u64) -> VaultResult<()>; // NotFound for a missing item
+}
+```
+
 A token works from its issue time for the token lifetime. A registration and a rotation set the issue time.
 A rotation of a revoked agent returns `InvalidInput`. The returned token is the only copy outside the vault.
 
@@ -161,6 +169,7 @@ Restore validates the encrypted source with the supplied passphrase before creat
 It reserves the destination sidecar before key validation and retains that lock without an unlocked gap.
 A refused restore can leave an empty persistent destination sidecar, but it does not create the destination database.
 It must not overwrite either source or destination. The restored instance starts locked with a fresh epoch.
+In one transaction on the destination, restore revokes every agent, removes every grant and rule, and marks each item with agent settings for an owner review.
 Unlock and restore check the encrypted schema, supported `user_version`, expected columns, and database integrity before they succeed.
 
 ## Remaining limits

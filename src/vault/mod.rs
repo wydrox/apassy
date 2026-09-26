@@ -358,10 +358,11 @@ impl Vault {
         refuse_sqlite_companions(&source, VaultErrorKind::InvalidInput)?;
         validate_encrypted_source(&source, passphrase)?;
         copy_into_new_file(&source, &dest)?;
-        // Restored agent authority is not trusted. The owner registers agents again.
-        if let Err(revoke_err) = revoke_restored_agents(&dest, passphrase) {
+        // Restored agent authority is not trusted. The owner registers agents again and
+        // reviews the agent settings of each item (goal item V4).
+        if let Err(prepare_err) = prepare_restored(&dest, passphrase) {
             let _ = fs::remove_file(&dest);
-            return Err(revoke_err);
+            return Err(prepare_err);
         }
         Ok(Self {
             path: dest,
@@ -820,9 +821,10 @@ fn migrate_to_current(conn: &mut Connection, from: i64) -> VaultResult<()> {
     verify_expected_columns(conn, SCHEMA_VERSION)
 }
 
-fn revoke_restored_agents(path: &Path, passphrase: &str) -> VaultResult<()> {
+/// Open the restored copy, migrate it to the current schema, and remove its agent authority.
+fn prepare_restored(path: &Path, passphrase: &str) -> VaultResult<()> {
     let mut conn = open_working_conn(path, passphrase)?;
-    let result = agents::revoke_all_agents(&mut conn);
+    let result = agents::prepare_restored(&mut conn);
     let close_result = close_conn(conn);
     result.and(close_result)
 }

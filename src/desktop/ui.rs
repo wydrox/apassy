@@ -567,6 +567,7 @@ fn draw_owner_vault(app: &mut DesktopApp, ui: &mut egui::Ui) {
         draw_backup_card(app, ui);
     } else {
         // When the vault is unlocked, the items come first. The file controls fold below them.
+        agents_view::draw_review_list(app, ui);
         draw_owner_items(app, ui);
         ui.add_space(8.0);
         egui::CollapsingHeader::new(RichText::new("Vault file and backup").strong().color(INK))
@@ -941,6 +942,7 @@ fn draw_owner_item(app: &mut DesktopApp, ui: &mut egui::Ui) {
         return;
     }
 
+    agents_view::draw_review_card(app, ui, id);
     ui.add_space(8.0);
     card_frame().show(ui, |ui| {
         ui.label(RichText::new("Edit item").size(16.0).strong().color(INK));
@@ -1861,6 +1863,63 @@ mod tests {
         assert!(text.contains(&shown), "the new token shows one time");
     }
 
+    /// Goal item V4: after a restore, the Vault view lists the items to review, and
+    /// Item details has the review card with "Confirm settings".
+    #[cfg(feature = "vault")]
+    #[test]
+    fn restored_item_shows_the_review_and_confirm_action() {
+        use crate::desktop::owner_store::{DeclarationForm, SecretForm};
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let mut app = app_with_vault(&dir);
+        let mut secrets = SecretForm::default();
+        secrets.token = "ui-review-token-canary".to_owned();
+        let item = app
+            .owner_ui
+            .session
+            .add(
+                &crate::desktop::ItemDraft {
+                    name: "Restored key".to_owned(),
+                    ..crate::desktop::ItemDraft::default()
+                },
+                &secrets,
+            )
+            .expect("add");
+        let form = DeclarationForm {
+            project: "ui".to_owned(),
+            ..DeclarationForm::default()
+        };
+        app.owner_ui
+            .session
+            .set_declaration(item.id, &form)
+            .expect("declaration");
+        let backup = dir.path().join("ui.backup");
+        app.owner_ui.session.backup(&backup).expect("backup");
+        app.owner_ui
+            .session
+            .restore(&backup, &dir.path().join("ui-restored.db"), UI_PASS)
+            .expect("restore");
+        app.owner_ui.session.unlock(UI_PASS).expect("unlock");
+
+        app.view = OwnerView::Vault;
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(text.contains("Review after restore"), "{text}");
+        assert!(text.contains("Restored key"), "{text}");
+
+        app.select_item(item.id.to_string());
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(text.contains("Confirm settings"), "{text}");
+        assert!(text.contains("production, high risk"), "{text}");
+        assert!(!text.contains("ui-review-token-canary"));
+
+        app.owner_ui
+            .session
+            .confirm_review(item.id)
+            .expect("confirm");
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(!text.contains("Confirm settings"), "{text}");
+    }
+
     #[test]
     fn activity_history_after_approve_once_draws_on_a_tall_frame() {
         let mut app = unlocked_app_with_item();
@@ -1949,6 +2008,7 @@ mod agents_view {
             ui.label(RichText::new("Unlock the vault to manage agents.").color(INK_MUTED));
             return;
         }
+        draw_review_list(app, ui);
         draw_fresh_token(app, ui);
         draw_register_card(app, ui);
         ui.add_space(8.0);
@@ -2033,6 +2093,123 @@ mod agents_view {
                 }
             }
         });
+    }
+
+    fn review_frame() -> Frame {
+        Frame::NONE
+            .fill(egui::Color32::from_rgb(252, 238, 214))
+            .stroke(egui::Stroke::new(1.5, ASK))
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(Margin::symmetric(14, 12))
+    }
+
+    /// Items from a restored backup that wait for the owner review (goal item V4).
+    pub(super) fn draw_review_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
+        let items = app
+            .owner_ui
+            .session
+            .items_needing_review()
+            .unwrap_or_default();
+        if items.is_empty() {
+            return;
+        }
+        let mut open = None;
+        review_frame().show(ui, |ui| {
+            ui.label(
+                RichText::new("Review after restore")
+                    .size(16.0)
+                    .strong()
+                    .color(INK),
+            );
+            ui.label(
+                RichText::new(
+                    "This vault came from a backup. Agents cannot use these items until you confirm their agent settings: the declaration, the environment variable, and the connector. The restore also revoked every agent. Register the agents again.",
+                )
+                .color(INK),
+            );
+            for (item_id, name) in &items {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(name).strong().color(INK));
+                    if ui.button("Open item").clicked() {
+                        open = Some(*item_id);
+                    }
+                });
+            }
+        });
+        ui.add_space(8.0);
+        if let Some(item_id) = open {
+            app.select_item(item_id.to_string());
+        }
+    }
+
+    /// Review and confirm the agent settings of one restored item (goal item V4).
+    pub(super) fn draw_review_card(app: &mut DesktopApp, ui: &mut egui::Ui, item_id: u64) {
+        let session = &app.owner_ui.session;
+        if !session.needs_review(item_id).unwrap_or(false) {
+            return;
+        }
+        let declaration = session.declaration(item_id).ok().flatten().map_or_else(
+            || "None. Every run with this item waits for you.".to_owned(),
+            |d| {
+                format!(
+                    "{}, {} risk, {}, {}, project {}",
+                    d.environment.as_str(),
+                    d.risk.as_str(),
+                    d.scope.as_str(),
+                    d.reversibility.as_str(),
+                    d.project
+                )
+            },
+        );
+        let variable = session.env_binding(item_id).ok().flatten().map_or_else(
+            || "None".to_owned(),
+            |binding| format!("{} = field {}", binding.env_name, binding.field),
+        );
+        let connector = session
+            .connector(item_id)
+            .ok()
+            .flatten()
+            .map_or_else(|| "None".to_owned(), |destination| destination.base_url);
+        let mut confirm = false;
+        ui.add_space(8.0);
+        review_frame().show(ui, |ui| {
+            ui.label(
+                RichText::new("Review after restore")
+                    .size(16.0)
+                    .strong()
+                    .color(INK),
+            );
+            ui.label(
+                RichText::new(
+                    "This item came from a restored backup. An old or changed backup can have wrong agent settings, for example a connector to another host or a production credential with a lower declaration. Examine the settings. Correct them in the cards below. Then confirm. Agents cannot use this item before you confirm.",
+                )
+                .color(INK),
+            );
+            egui::Grid::new(("review", item_id))
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    for (term, value) in [
+                        ("Declaration", &declaration),
+                        ("Environment variable", &variable),
+                        ("Connector", &connector),
+                    ] {
+                        ui.label(RichText::new(term).strong().color(INK_MUTED));
+                        ui.label(RichText::new(value).color(INK));
+                        ui.end_row();
+                    }
+                });
+            if accent_button(ui, "Confirm settings").clicked() {
+                confirm = true;
+            }
+        });
+        if confirm {
+            let result = app.owner_ui.session.confirm_review(item_id);
+            let _ = app.apply(
+                result,
+                "The agent settings are confirmed. Agents with a grant can use the item again.",
+            );
+        }
     }
 
     /// A new token after a registration or a rotation. Apassy shows it one time.
