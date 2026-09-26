@@ -12,6 +12,8 @@ pub mod broker;
 #[cfg(feature = "desktop")]
 pub mod desktop;
 
+pub mod native;
+
 /// Experimental trusted-process vault APIs.
 ///
 /// With `desktop` and `vault` both enabled, the owner vault and item views call
