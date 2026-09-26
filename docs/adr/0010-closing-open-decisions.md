@@ -97,6 +97,15 @@ The goal closes each open item in ADRs 0001 to 0009. [goal.md](../goal.md) lists
 | 0008 | A production declaration always waits for the owner. |
 | 0009 | The open questions are decided. All six steps are in the goal. |
 
+## Decisions on 2026-09-26, second round
+
+The workers found new limits. The owner decided on them on 2026-09-26.
+
+- **Environment of a running command (F11).** A process of the same user can read the environment of a running secret command through the kernel. A sandboxed agent can do this too. The owner accepts this limit, as 1Password CLI does for `op run`. The mitigations stay: the environment has only the bound secrets, a run lasts at most 300 seconds, the broker stops the process group, and `ps` does not start in the profile. See ADR 0006.
+- **Code that an agent writes.** An agent can write a git hook, a script, or a Makefile target in the project. When the owner runs it outside the profile, it has full access. Seatbelt cannot stop this. The limit is recorded in [isolation](../operations/isolation.md). The recommendation is to start the owner's terminal in the profile for projects that agents edit.
+- **Apple Developer team.** The team `7S3F9767BM` (Apprife) owns the App ID `com.wydrox.apassy.keychain`. The owner signs in to Xcode with an Apple ID of that team and runs `APASSY_TEAM_ID=7S3F9767BM scripts/build-app.sh --provision`.
+- **Opening URLs and apps in the sandbox.** The profile blocks LaunchServices (`open`), Apple Events, and writes to autostart files. These are proven escapes, and Seatbelt cannot limit `open` to `https://` only. Browser logins (`gh auth login --web`, `claude /login`) run before the host starts in the profile, or the owner opens the link by hand.
+
 ## Limits
 
 - The real-secret gate stays BLOCKED until the goal marks its gate items done.

@@ -661,6 +661,11 @@ the block is the profile, not a broken tool.
   the project file is normal work and the run is a separate, later action of the
   owner. The bouncer and the owner approval (ADR 0006) are the control for what
   a running command does.
+- Recommendation (owner decision, [ADR 0010](../adr/0010-closing-open-decisions.md)):
+  in a project that agents edit, start your own terminal in the profile too, with
+  `apassy-sandbox -- zsh`. Commands that you run there, and the git hooks that
+  they start, then have the same limits. You lose no access to secrets, because
+  secrets come from the Apassy app.
 - The Shortcuts deny uses a name match on the service. A future macOS can rename
   the service. The `lsopen` and `appleevent-send` denies do not depend on a
   service name.
