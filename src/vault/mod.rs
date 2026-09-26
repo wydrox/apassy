@@ -422,6 +422,21 @@ impl Vault {
         }
     }
 
+    /// The canonical path of the vault file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Check `passphrase` against the vault file at `path` (goal items A2, A4).
+    ///
+    /// The check opens a second, read-only connection and closes it at once. It does not
+    /// change an open vault and does not keep the passphrase. The caller does not need
+    /// the vault mutex, so the key derivation does not block the broker. A wrong
+    /// passphrase returns `WrongKeyOrCorrupt`.
+    pub fn verify_passphrase_at(path: &Path, passphrase: &str) -> VaultResult<()> {
+        validate_encrypted_source(path, passphrase)
+    }
+
     fn require_unlocked(&self) -> VaultResult<()> {
         if self.conn.is_none() {
             Err(err(VaultErrorKind::Locked))

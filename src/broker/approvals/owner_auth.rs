@@ -1,0 +1,398 @@
+//! Owner authorization for sensitive owner actions (goal item A4, ADR 0010).
+//!
+//! Reveal, approval of a run, "Approve and remember", changes to grants and rules, and
+//! token rotation need a fresh owner check: Touch ID now, or the master passphrase now.
+//! [`OwnerGate::authorize`] is the only function that does this check. It is also the
+//! only way to make an [`OwnerProof`]. Each guarded action takes a proof by value:
+//!
+//! - a proof names one action and its target, for example one waiting run exactly as
+//!   the owner saw it,
+//! - a proof is valid for [`PROOF_LIFETIME`] after the check,
+//! - a proof is valid only in the vault session of the check. A lock or an unlock
+//!   makes it invalid,
+//! - a proof has no `Clone`, so each proof allows one action.
+//!
+//! The passphrase check opens a second, read-only SQLCipher connection and closes it
+//! at once ([`Vault::verify_passphrase_at`]). The gate does not keep the passphrase.
+//! [`OwnerCheck::Passphrase`] erases its copy on drop. A notification, an inbox
+//! acknowledgment, or an agent request cannot make a proof (goal item N4).
+
+use std::fmt;
+use std::path::PathBuf;
+use std::sync::PoisonError;
+use std::time::{Duration, Instant};
+
+use zeroize::Zeroizing;
+
+use super::PendingRun;
+use crate::broker::SharedVault;
+use crate::native::{HelperErrorCode, MAX_AGENT_NAME_CHARS, NativeError, NativeHelper};
+use crate::vault::{Vault, VaultErrorKind};
+
+/// How long a proof stays valid after the owner check.
+pub const PROOF_LIFETIME: Duration = Duration::from_secs(60);
+
+/// An owner action that needs a fresh owner check. The target is part of the action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnerAction {
+    /// Show the secret values of one item.
+    Reveal { item_id: u64 },
+    /// Approve one waiting run, exactly as the owner saw it.
+    ApproveRun(PendingRun),
+    /// Approve one waiting run and remember a narrow pattern for later runs (ADR 0010).
+    ApproveAndRemember(PendingRun),
+    /// Give an agent access to an item or change that access: a connector operation
+    /// or process access.
+    ChangeGrant { agent_id: u64, item_id: u64 },
+    /// Change the hard rule of a process grant (ADR 0007).
+    ChangeRule { agent_id: u64, item_id: u64 },
+    /// Change the agent settings of an item: the declaration, the environment
+    /// variable, the connector, or the review after a restore.
+    ChangeItemRules { item_id: u64 },
+    /// Give an agent a new token.
+    RotateToken { agent_id: u64 },
+    /// Change the token lifetime of all agents.
+    ChangeTokenLifetime,
+}
+
+impl OwnerAction {
+    /// The text for the Touch ID prompt. macOS shows it after "Apassy is trying to".
+    /// It has no secret value and no command.
+    pub fn reason(&self) -> String {
+        match self {
+            Self::Reveal { .. } => "show the secret values of an item".to_owned(),
+            Self::ApproveRun(run) => format!("approve a run of agent \"{}\"", short_name(run)),
+            Self::ApproveAndRemember(run) => {
+                format!(
+                    "approve and remember a run of agent \"{}\"",
+                    short_name(run)
+                )
+            }
+            Self::ChangeGrant { .. } => "change the access of an agent".to_owned(),
+            Self::ChangeRule { .. } => "change an agent rule".to_owned(),
+            Self::ChangeItemRules { .. } => "change the agent settings of an item".to_owned(),
+            Self::RotateToken { .. } => "give an agent a new token".to_owned(),
+            Self::ChangeTokenLifetime => "change the agent token lifetime".to_owned(),
+        }
+    }
+
+    /// The waiting run of an approval action.
+    pub fn run(&self) -> Option<&PendingRun> {
+        match self {
+            Self::ApproveRun(run) | Self::ApproveAndRemember(run) => Some(run),
+            _ => None,
+        }
+    }
+}
+
+/// Agent name for the prompt: printable characters only, at most 40 characters.
+fn short_name(run: &PendingRun) -> String {
+    let name: String = run
+        .agent
+        .chars()
+        .filter(|c| !c.is_control() && *c != '"')
+        .take(MAX_AGENT_NAME_CHARS)
+        .collect();
+    if name.trim().is_empty() {
+        "unknown".to_owned()
+    } else {
+        name
+    }
+}
+
+/// How the owner confirmed an action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckMethod {
+    TouchId,
+    Passphrase,
+}
+
+/// The check that the owner does now.
+pub enum OwnerCheck {
+    /// Touch ID through the native helper.
+    TouchId,
+    /// The master passphrase. The buffer is erased on drop.
+    Passphrase(Zeroizing<String>),
+}
+
+impl OwnerCheck {
+    /// Copy `text` into an erasing buffer.
+    pub fn passphrase(text: &str) -> Self {
+        Self::Passphrase(Zeroizing::new(text.to_owned()))
+    }
+
+    pub fn method(&self) -> CheckMethod {
+        match self {
+            Self::TouchId => CheckMethod::TouchId,
+            Self::Passphrase(_) => CheckMethod::Passphrase,
+        }
+    }
+}
+
+impl fmt::Debug for OwnerCheck {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TouchId => f.write_str("OwnerCheck::TouchId"),
+            Self::Passphrase(_) => f.write_str("OwnerCheck::Passphrase([redacted])"),
+        }
+    }
+}
+
+/// Why the gate did not confirm the owner. No variant holds a secret value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnerAuthError {
+    /// No vault is open, or the vault is locked.
+    VaultLocked,
+    /// The passphrase does not open the vault.
+    WrongPassphrase,
+    /// The passphrase field is empty.
+    EmptyPassphrase,
+    /// Touch ID cannot run now. The owner types the passphrase.
+    TouchIdUnavailable { detail: String },
+    /// The owner or the system cancelled Touch ID.
+    TouchIdCancelled,
+    /// The owner selected "Use Apassy Passphrase".
+    PassphraseRequested,
+    /// Touch ID did not confirm the owner.
+    TouchIdFailed,
+    /// The vault was locked, unlocked, or replaced during the check.
+    SessionChanged,
+    /// Another failure. The text has no secret value.
+    Other(String),
+}
+
+impl OwnerAuthError {
+    /// Text for the owner.
+    pub fn message(&self) -> String {
+        match self {
+            Self::VaultLocked => "The vault is locked. Unlock it first.".to_owned(),
+            Self::WrongPassphrase => "The passphrase is incorrect. Apassy did nothing.".to_owned(),
+            Self::EmptyPassphrase => "Type the passphrase.".to_owned(),
+            Self::TouchIdUnavailable { detail } => {
+                format!("Touch ID is not available: {detail} Type the passphrase to confirm.")
+            }
+            Self::TouchIdCancelled => {
+                "Touch ID was cancelled. Try again, or type the passphrase.".to_owned()
+            }
+            Self::PassphraseRequested => "Type the passphrase to confirm.".to_owned(),
+            Self::TouchIdFailed => {
+                "Touch ID did not confirm you. Try again, or type the passphrase.".to_owned()
+            }
+            Self::SessionChanged => {
+                "The vault was locked or changed during the check. Apassy did nothing.".to_owned()
+            }
+            Self::Other(text) => format!("The owner check failed: {text}"),
+        }
+    }
+
+    /// True when the owner can still confirm with the passphrase.
+    pub fn passphrase_fallback(&self) -> bool {
+        matches!(
+            self,
+            Self::TouchIdUnavailable { .. }
+                | Self::TouchIdCancelled
+                | Self::PassphraseRequested
+                | Self::TouchIdFailed
+        )
+    }
+}
+
+/// Text for a Touch ID state that is not "available". It names the cause.
+pub fn touch_id_detail(code: HelperErrorCode) -> &'static str {
+    match code {
+        HelperErrorCode::NotAvailable => {
+            "the Touch ID keyboard is not connected or not paired, or this Mac has no Touch ID sensor."
+        }
+        HelperErrorCode::NotEnrolled => "no fingerprint is enrolled in System Settings.",
+        HelperErrorCode::LockedOut => {
+            "Touch ID is locked after failed attempts. Unlock the Mac with its password to reset it."
+        }
+        _ => "the Touch ID check did not start.",
+    }
+}
+
+fn from_native(err: NativeError) -> OwnerAuthError {
+    match err.code() {
+        Some(HelperErrorCode::Cancelled) => OwnerAuthError::TouchIdCancelled,
+        Some(HelperErrorCode::Fallback) => OwnerAuthError::PassphraseRequested,
+        Some(HelperErrorCode::Failed) => OwnerAuthError::TouchIdFailed,
+        Some(
+            code @ (HelperErrorCode::NotAvailable
+            | HelperErrorCode::NotEnrolled
+            | HelperErrorCode::LockedOut),
+        ) => OwnerAuthError::TouchIdUnavailable {
+            detail: touch_id_detail(code).to_owned(),
+        },
+        Some(code) => OwnerAuthError::Other(format!("the Touch ID helper answered {code}.")),
+        None => match err {
+            NativeError::HelperMissing(_) => OwnerAuthError::TouchIdUnavailable {
+                detail:
+                    "the Touch ID helper is not in this build. Touch ID works only in Apassy.app."
+                        .to_owned(),
+            },
+            NativeError::Timeout(_) => OwnerAuthError::TouchIdCancelled,
+            other => OwnerAuthError::Other(other.to_string()),
+        },
+    }
+}
+
+/// Proof that the owner passed a fresh check for one action. Only
+/// [`OwnerGate::authorize`] makes it. It has no `Clone`.
+#[derive(Debug)]
+pub struct OwnerProof {
+    action: OwnerAction,
+    method: CheckMethod,
+    epoch: [u8; 32],
+    issued: Instant,
+}
+
+/// Why a guarded action refused a proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProofRefusal {
+    /// The proof names another action or another target.
+    WrongAction,
+    /// The vault was locked or unlocked after the check.
+    OtherSession,
+    /// The check is older than [`PROOF_LIFETIME`].
+    Stale,
+}
+
+impl ProofRefusal {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::WrongAction => "The owner check was for another action. Apassy did nothing.",
+            Self::OtherSession => {
+                "The vault was locked after the owner check. Confirm again. Apassy did nothing."
+            }
+            Self::Stale => "The owner check is too old. Confirm again. Apassy did nothing.",
+        }
+    }
+}
+
+impl OwnerProof {
+    fn issue(action: OwnerAction, method: CheckMethod, epoch: [u8; 32]) -> Self {
+        Self {
+            action,
+            method,
+            epoch,
+            issued: Instant::now(),
+        }
+    }
+
+    /// A proof with a chosen issue time, for the unit tests of the approval queue.
+    #[cfg(test)]
+    pub(in crate::broker::approvals) fn issue_for_test(
+        action: OwnerAction,
+        epoch: [u8; 32],
+        issued: Instant,
+    ) -> Self {
+        Self {
+            action,
+            method: CheckMethod::Passphrase,
+            epoch,
+            issued,
+        }
+    }
+
+    pub fn action(&self) -> &OwnerAction {
+        &self.action
+    }
+
+    pub fn method(&self) -> CheckMethod {
+        self.method
+    }
+
+    /// True while the proof is younger than [`PROOF_LIFETIME`].
+    pub fn is_fresh(&self) -> bool {
+        self.issued.elapsed() <= PROOF_LIFETIME
+    }
+
+    /// Check the proof for `expected` in the vault session `epoch`. Call it just before
+    /// the action, with the vault mutex held.
+    pub fn check(&self, expected: &OwnerAction, epoch: &[u8; 32]) -> Result<(), ProofRefusal> {
+        if &self.action != expected {
+            return Err(ProofRefusal::WrongAction);
+        }
+        if &self.epoch != epoch {
+            return Err(ProofRefusal::OtherSession);
+        }
+        if !self.is_fresh() {
+            return Err(ProofRefusal::Stale);
+        }
+        Ok(())
+    }
+}
+
+/// The owner-authorization gate. It holds the shared vault and, when the app has one,
+/// the native helper for Touch ID.
+#[derive(Debug, Clone)]
+pub struct OwnerGate {
+    vault: SharedVault,
+    touch_id: Option<NativeHelper>,
+}
+
+impl OwnerGate {
+    /// `touch_id` is `None` when this build has no native helper. Then only the
+    /// passphrase check works.
+    pub fn new(vault: SharedVault, touch_id: Option<NativeHelper>) -> Self {
+        Self { vault, touch_id }
+    }
+
+    /// The one owner-authorization function (goal item A4).
+    ///
+    /// It checks the owner now, with Touch ID or the passphrase, and returns a proof
+    /// for `action` only. The call blocks: Touch ID waits for the owner, and the
+    /// passphrase check derives the SQLCipher key. Call it from a worker thread.
+    pub fn authorize(
+        &self,
+        action: OwnerAction,
+        check: OwnerCheck,
+    ) -> Result<OwnerProof, OwnerAuthError> {
+        let (path, epoch) = self.session()?;
+        let method = check.method();
+        match check {
+            OwnerCheck::TouchId => {
+                let Some(helper) = &self.touch_id else {
+                    return Err(OwnerAuthError::TouchIdUnavailable {
+                        detail: "this build has no Touch ID helper.".to_owned(),
+                    });
+                };
+                helper.authenticate(&action.reason()).map_err(from_native)?;
+            }
+            OwnerCheck::Passphrase(passphrase) => {
+                if passphrase.is_empty() {
+                    return Err(OwnerAuthError::EmptyPassphrase);
+                }
+                match Vault::verify_passphrase_at(&path, &passphrase) {
+                    Ok(()) => {}
+                    Err(err)
+                        if matches!(
+                            err.kind(),
+                            VaultErrorKind::WrongKeyOrCorrupt | VaultErrorKind::InvalidInput
+                        ) =>
+                    {
+                        return Err(OwnerAuthError::WrongPassphrase);
+                    }
+                    Err(err) => return Err(OwnerAuthError::Other(err.to_string())),
+                }
+                // `passphrase` drops here and erases its buffer.
+            }
+        }
+        // A lock, an unlock, or another vault during the check ends the session.
+        match self.session() {
+            Ok((now_path, now_epoch)) if now_path == path && now_epoch == epoch => {
+                Ok(OwnerProof::issue(action, method, epoch))
+            }
+            _ => Err(OwnerAuthError::SessionChanged),
+        }
+    }
+
+    /// The path and the epoch of the unlocked vault. The vault mutex is held only here.
+    fn session(&self) -> Result<(PathBuf, [u8; 32]), OwnerAuthError> {
+        let guard = self.vault.lock().unwrap_or_else(PoisonError::into_inner);
+        match guard.as_ref() {
+            Some(vault) if !vault.is_locked() => Ok((vault.path().to_path_buf(), vault.epoch())),
+            _ => Err(OwnerAuthError::VaultLocked),
+        }
+    }
+}

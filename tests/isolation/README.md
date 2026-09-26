@@ -34,8 +34,18 @@ in the product profile and checks the boundary:
 If the host is not macOS, or `sandbox-exec` is absent, the test fails. A skip is
 not a pass (goal I4).
 
-A Keychain deny check is pending the Swift Keychain helper. The test
-`keychain_check_is_pending` records this gap. It is not a skip of the test.
+- A process in the profile cannot read the Touch ID Keychain item
+  (`keychain_item_is_not_readable_in_profile`). `/usr/bin/security` runs in the
+  profile and finds no item with the Apassy service and account. The Apassy
+  keychain helper runs in the profile, has no keychain access group, and answers
+  `keychain_unavailable`. The test uses the helper in `target/Apassy.app` when
+  `scripts/build-app.sh` ran, else the helper code without a signature.
+
+Pending for the Keychain part: the real biometric item needs a provisioning
+profile. With a profile, the helper gets an access group, and a process in the
+profile could start it and ask for a Touch ID prompt. The test then fails on
+purpose, until the profile denies the start of the Apassy helpers. See
+`docs/operations/native-app.md`.
 
 How to start Claude Code and Codex in the profile, and the measured results, are
 in [docs/operations/isolation.md](../../docs/operations/isolation.md).
