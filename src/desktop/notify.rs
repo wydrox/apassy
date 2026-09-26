@@ -5,8 +5,9 @@
 //! - The watcher wakes when a run starts to wait (the approval queue calls it) and
 //!   every [`POLL_INTERVAL`]. It finds new waiting runs and new blocked requests in
 //!   the activity log.
-//! - The sender posts each notification through the native helper. A call can block
-//!   up to 40 s, so the sender never delays the watcher.
+//! - The sender posts each notification through the notifier
+//!   (`Contents/Helpers/ApassyNotify.app`, see `apassy::native`). A call can block up
+//!   to 40 s, so the sender never delays the watcher.
 //!
 //! A preview has the agent name and the event type only. [`Notification::new`] takes
 //! no other text (N2). The result of each delivery and the channel state are visible
@@ -34,6 +35,23 @@ use crate::native::{
 pub const POLL_INTERVAL: Duration = Duration::from_millis(1000);
 /// How many new activity entries the watcher reads in one pass.
 const ACTIVITY_WINDOW: usize = 50;
+/// System Settings > Notifications, at the entry of the notifier bundle ("Apassy").
+pub const NOTIFICATION_SETTINGS_URL: &str = "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=com.wydrox.apassy.notify";
+
+/// Open System Settings > Notifications > Apassy. The URL is fixed text. A thread
+/// waits for `open`, so no finished process stays.
+pub fn open_notification_settings() -> std::io::Result<()> {
+    let mut child = std::process::Command::new("/usr/bin/open")
+        .arg(NOTIFICATION_SETTINGS_URL)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
 
 /// The result of one delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,11 +79,14 @@ impl Delivery {
 /// What the app knows about the notification channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChannelState {
-    /// No answer from the helper yet.
+    /// No answer from the notifier yet.
     Unknown,
-    /// The settings of the Apassy bundle.
+    /// The notifier asked macOS for permission. macOS shows its prompt until the
+    /// owner answers, at most 120 s.
+    Asking,
+    /// The settings of the notifier bundle (display name "Apassy").
     Ready(NotificationStatus),
-    /// The helper did not answer. The text has no secret value.
+    /// The notifier did not answer. The text has no secret value.
     Problem(String),
 }
 
@@ -75,7 +96,8 @@ impl ChannelState {
         matches!(self, Self::Ready(status) if status.can_deliver())
     }
 
-    /// True when the owner has not decided about notifications.
+    /// True when the owner has not decided about notifications, and no prompt is
+    /// on the screen now.
     pub fn needs_permission(&self) -> bool {
         matches!(
             self,
@@ -83,10 +105,26 @@ impl ChannelState {
         )
     }
 
+    /// True when only System Settings can turn the notifications on: the owner or
+    /// macOS denied them, or alerts and Notification Center are off. macOS shows no
+    /// new permission prompt after a denial.
+    pub fn needs_settings(&self) -> bool {
+        matches!(
+            self,
+            Self::Ready(status)
+                if status.authorization == NotificationAuthorization::Denied
+                    || (!status.can_deliver()
+                        && status.authorization != NotificationAuthorization::NotDetermined)
+        )
+    }
+
     /// Text for the owner.
     pub fn summary(&self) -> String {
         match self {
             Self::Unknown => "Apassy is checking the notification settings.".to_owned(),
+            Self::Asking => {
+                "macOS asks you now: select \"Allow\" in the Apassy notification at the top right of the screen. Until then, events stay in the inbox only.".to_owned()
+            }
             Self::Problem(text) => {
                 format!("Notifications do not work: {text} Events stay in the inbox.")
             }
@@ -95,7 +133,7 @@ impl ChannelState {
                     "You did not allow notifications yet. Select \"Allow notifications\". Until then, events stay in the inbox only.".to_owned()
                 }
                 NotificationAuthorization::Denied => {
-                    "Notifications are not allowed for Apassy. Allow them in System Settings > Notifications > Apassy. Events stay in the inbox.".to_owned()
+                    "Notifications are not allowed for Apassy. macOS does not ask again: allow them in System Settings > Notifications > Apassy. Events stay in the inbox.".to_owned()
                 }
                 NotificationAuthorization::Authorized | NotificationAuthorization::Provisional
                     if status.can_deliver() =>
@@ -260,8 +298,18 @@ impl NotificationCenter {
         self.send(Job::Status);
     }
 
-    /// Show the macOS permission prompt when the owner has not decided.
+    /// Show a channel problem, for example when System Settings does not open. The
+    /// text must not contain a secret value.
+    pub fn report_problem(&self, text: String) {
+        self.shared
+            .update(|view| view.channel = ChannelState::Problem(text));
+    }
+
+    /// Show the macOS permission prompt when the owner has not decided. The channel
+    /// shows [`ChannelState::Asking`] until the notifier answers.
     pub fn request_permission(&self) {
+        self.shared
+            .update(|view| view.channel = ChannelState::Asking);
         self.send(Job::Authorize);
     }
 
@@ -389,7 +437,15 @@ fn send_loop(shared: &Shared, helper: &NativeHelper, jobs: &Receiver<Job>) {
             Job::Notify { key, agent, event } => {
                 let result = Notification::new(&key.notification_id(), &agent, event)
                     .and_then(|notification| helper.notify(&notification));
-                let (delivery, channel) = delivery_of(result);
+                let denied = matches!(&result, Err(err) if err.code() == Some(HelperErrorCode::NotificationsDenied));
+                let (delivery, mut channel) = delivery_of(result);
+                if denied {
+                    // Show the real permission state: "not decided" keeps the "Allow
+                    // notifications" button, "denied" shows the settings button.
+                    if let Ok(status) = helper.notify_status() {
+                        channel = Some(ChannelState::Ready(status));
+                    }
+                }
                 shared.update(|view| {
                     view.deliveries.insert(key, delivery);
                     if let Some(channel) = channel {
@@ -437,6 +493,7 @@ fn delivery_of(result: Result<NotifyOutcome, NativeError>) -> (Delivery, Option<
                 Some(
                     HelperErrorCode::NotificationsDenied
                         | HelperErrorCode::NotificationsUnavailable
+                        | HelperErrorCode::CallerNotAllowed
                 )
             ) || matches!(err, NativeError::HelperMissing(_));
             (
@@ -447,7 +504,7 @@ fn delivery_of(result: Result<NotifyOutcome, NativeError>) -> (Delivery, Option<
     }
 }
 
-/// Text for the owner. It has no secret value: the helper messages are fixed text.
+/// Text for the owner. It has no secret value: the notifier messages are fixed text.
 fn failure_text(err: &NativeError) -> String {
     match err {
         NativeError::Helper {
@@ -457,14 +514,103 @@ fn failure_text(err: &NativeError) -> String {
         NativeError::Helper {
             code: HelperErrorCode::NotificationsUnavailable,
             ..
-        } => "the notification helper is not inside Apassy.app.".to_owned(),
+        } => {
+            "the notifier is not inside Apassy.app (Contents/Helpers/ApassyNotify.app).".to_owned()
+        }
+        NativeError::Helper {
+            code: HelperErrorCode::CallerNotAllowed,
+            ..
+        } => {
+            "the notifier refused this app. The Apassy.app bundle is broken or changed.".to_owned()
+        }
         NativeError::HelperMissing(_) => {
-            "this build has no notification helper. Notifications work only in Apassy.app."
-                .to_owned()
+            "this build has no notifier. Notifications work only in Apassy.app.".to_owned()
         }
         NativeError::Timeout(limit) => {
-            format!("the helper did not answer in {} s.", limit.as_secs())
+            format!("the notifier did not answer in {} s.", limit.as_secs())
         }
         other => format!("{other}."),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status(authorization: NotificationAuthorization) -> NotificationStatus {
+        NotificationStatus {
+            authorization,
+            alert: NotificationSetting::Enabled,
+            alert_style: crate::native::AlertStyle::Banner,
+            notification_center: NotificationSetting::Enabled,
+            lock_screen: NotificationSetting::Enabled,
+            sound: NotificationSetting::Enabled,
+        }
+    }
+
+    #[test]
+    fn the_button_shows_only_before_a_decision_and_not_during_the_prompt() {
+        assert!(
+            ChannelState::Ready(status(NotificationAuthorization::NotDetermined))
+                .needs_permission()
+        );
+        assert!(!ChannelState::Asking.needs_permission());
+        assert!(!ChannelState::Asking.can_deliver());
+        assert!(ChannelState::Asking.summary().contains("\"Allow\""));
+        assert!(!ChannelState::Ready(status(NotificationAuthorization::Denied)).needs_permission());
+        assert!(
+            !ChannelState::Ready(status(NotificationAuthorization::Authorized)).needs_permission()
+        );
+        assert!(ChannelState::Ready(status(NotificationAuthorization::Authorized)).can_deliver());
+    }
+
+    #[test]
+    fn only_system_settings_can_help_after_a_denial() {
+        // Measured on macOS 27: after a denial, or after an unanswered prompt, a new
+        // permission request fails at once with no prompt.
+        assert!(ChannelState::Ready(status(NotificationAuthorization::Denied)).needs_settings());
+        let mut off = status(NotificationAuthorization::Authorized);
+        off.alert = NotificationSetting::Disabled;
+        off.notification_center = NotificationSetting::Disabled;
+        assert!(ChannelState::Ready(off).needs_settings());
+        for state in [
+            ChannelState::Ready(status(NotificationAuthorization::NotDetermined)),
+            ChannelState::Ready(status(NotificationAuthorization::Authorized)),
+            ChannelState::Asking,
+            ChannelState::Unknown,
+        ] {
+            assert!(!state.needs_settings(), "{state:?}");
+        }
+        assert!(NOTIFICATION_SETTINGS_URL.ends_with("?id=com.wydrox.apassy.notify"));
+        assert!(NOTIFICATION_SETTINGS_URL.ends_with(crate::native::NOTIFIER_BUNDLE_ID));
+    }
+
+    #[test]
+    fn a_refused_or_missing_notifier_is_a_visible_channel_problem() {
+        for err in [
+            NativeError::Helper {
+                code: HelperErrorCode::CallerNotAllowed,
+                message: "synthetic".to_owned(),
+            },
+            NativeError::Helper {
+                code: HelperErrorCode::NotificationsUnavailable,
+                message: "synthetic".to_owned(),
+            },
+            NativeError::HelperMissing("/nowhere/ApassyNotify".into()),
+        ] {
+            let (delivery, channel) = delivery_of(Err(err.clone()));
+            let Delivery::Failed(text) = &delivery else {
+                panic!("{err:?} gave {delivery:?}");
+            };
+            assert!(text.contains("notifier"), "{text}");
+            assert!(
+                matches!(channel, Some(ChannelState::Problem(_))),
+                "{err:?} gave {channel:?}"
+            );
+        }
+        // A timeout is a failed delivery, but it says nothing about the channel.
+        let (delivery, channel) = delivery_of(Err(NativeError::Timeout(Duration::from_secs(40))));
+        assert!(matches!(delivery, Delivery::Failed(_)));
+        assert_eq!(channel, None);
     }
 }

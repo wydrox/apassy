@@ -5,7 +5,7 @@ use eframe::egui::{self, CornerRadius, Frame, Margin, RichText, Stroke};
 
 use super::{ALLOW, ASK, DENY, INK, INK_MUTED, LINE, card_frame};
 use crate::desktop::inbox::{self, InboxKind};
-use crate::desktop::notify::Delivery;
+use crate::desktop::notify::{self, Delivery};
 use crate::desktop::{BrokerState, DesktopApp};
 
 /// How many inbox events the card shows.
@@ -139,8 +139,31 @@ fn draw_channel(app: &mut DesktopApp, ui: &mut egui::Ui) {
         if ui.button("Check notification settings").clicked() {
             center.refresh_status();
         }
-        if view.channel.needs_permission() && ui.button("Allow notifications").clicked() {
+        // The notifier (Contents/Helpers/ApassyNotify.app, display name "Apassy")
+        // asks macOS. The button hides while the macOS prompt is on the screen.
+        if view.channel.needs_permission()
+            && ui
+                .button("Allow notifications")
+                .on_hover_text(
+                    "macOS shows a prompt for \"Apassy\" at the top right of the screen. Select \"Allow\".",
+                )
+                .clicked()
+        {
             center.request_permission();
+        }
+        // After a denial, macOS shows no new prompt. Only System Settings helps.
+        if view.channel.needs_settings()
+            && ui
+                .button("Open notification settings")
+                .on_hover_text("System Settings > Notifications > Apassy. Turn on \"Allow notifications\" and select \"Banners\".")
+                .clicked()
+        {
+            match notify::open_notification_settings() {
+                Ok(()) => center.refresh_status(),
+                Err(err) => center.report_problem(format!(
+                    "Apassy cannot open System Settings ({err}). Open System Settings > Notifications > Apassy."
+                )),
+            }
         }
     });
 }

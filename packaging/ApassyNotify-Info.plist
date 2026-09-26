@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Info.plist of Contents/Helpers/ApassyNotify.app, the notifier (goal item N1).
+  macOS shows the notifications and the permission prompt with the display
+  name "Apassy". The signing identifier must be the same as the bundle ID:
+  usernotificationsd refuses a client with another identifier.
+  LSUIElement: no Dock icon and no menu.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Apassy</string>
+	<key>CFBundleExecutable</key>
+	<string>ApassyNotify</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.wydrox.apassy.notify</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Apassy</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>LSUIElement</key>
+	<true/>
+</dict>
+</plist>
