@@ -396,10 +396,15 @@ pub fn analyze_with_providers(
     }
     flags.sort();
     flags.dedup();
-    let known_safe = all_safe && flags.is_empty();
+    // A read of contact or payment data of people must serve the user request (dev round
+    // 4): it is not known safe and not a known command, so `task_match` decides.
+    let personal = pipelines
+        .iter()
+        .any(|pipeline| personal_read(rules, pipeline));
+    let known_safe = all_safe && flags.is_empty() && !personal;
     Analysis {
         known_safe,
-        known_command: known_safe || (all_known && flags.is_empty()),
+        known_command: known_safe || (all_known && flags.is_empty() && !personal),
         known_write: any_write && !known_safe,
         flags,
     }
@@ -3571,6 +3576,451 @@ pub(crate) fn plain_sql_reads(argv: &[String]) -> bool {
         })
 }
 
+// ---- Reads of personal data (dev round 4) ----
+
+/// Words of a table, a collection, or an API resource that holds people or their
+/// payments. The check splits a name at `_`, `.`, `/`, and other signs, so `auth_user`,
+/// `pii.customers`, and `/v1/customers` match.
+const PEOPLE_WORDS: &[&str] = &[
+    "user",
+    "users",
+    "customer",
+    "customers",
+    "account",
+    "accounts",
+    "member",
+    "members",
+    "payment",
+    "payments",
+    "person",
+    "persons",
+    "people",
+    "contact",
+    "contacts",
+    "subscriber",
+    "subscribers",
+    "employee",
+    "employees",
+    "patient",
+    "patients",
+    "client",
+    "clients",
+    "profile",
+    "profiles",
+];
+
+/// Parts of a column or field name for contact or payment data. The check splits a name
+/// at `_`, `.`, and other signs: `email_address`, `billing_details.phone`, and
+/// `card_last4` match, `emailed_at` does not. A part that ends with `email` or `phone`
+/// matches too (`mobilePhone`).
+const CONTACT_PARTS: &[&str] = &[
+    "email",
+    "emails",
+    "phone",
+    "phones",
+    "mobile",
+    "telephone",
+    "address",
+    "addresses",
+    "street",
+    "postcode",
+    "zipcode",
+    "firstname",
+    "lastname",
+    "fullname",
+    "surname",
+    "iban",
+    "card",
+    "cardholder",
+    "last4",
+    "cvc",
+    "cvv",
+    "ssn",
+    "dob",
+    "birthdate",
+    "birthday",
+    "passport",
+];
+
+/// Whole column or field names for contact or payment data whose parts are too common
+/// alone (`name`, `number`).
+const CONTACT_NAMES: &[&str] = &[
+    "first_name",
+    "last_name",
+    "full_name",
+    "given_name",
+    "family_name",
+    "account_number",
+    "routing_number",
+    "sort_code",
+    "tax_id",
+    "national_id",
+    "date_of_birth",
+    "billing_details",
+    "shipping_details",
+];
+
+/// Programs that read or filter local text. Such a program is not the source of a read
+/// of personal data: `rg email src/users/` searches code.
+const LOCAL_TEXT_TOOLS: &[&str] = &[
+    "cat", "head", "tail", "less", "more", "bat", "tee", "echo", "printf", "grep", "egrep",
+    "fgrep", "rg", "ag", "ack", "sed", "awk", "gawk", "cut", "sort", "uniq", "wc", "tr", "ls",
+    "find", "tree", "jq", "yq", "gojq", "jaq", "jp", "fx", "xargs", "column", "paste", "diff",
+    "file", "stat", "git",
+];
+
+/// Programs that select fields from the output of an earlier part of a pipe.
+const FIELD_FILTERS: &[&str] = &[
+    "jq", "yq", "gojq", "jaq", "jp", "fx", "grep", "egrep", "fgrep", "rg", "awk", "gawk", "sed",
+];
+
+/// Options that select the fields of an API answer: `gh api --jq`, `aws --query`,
+/// `gcloud --format`, templates, and field lists. Short options such as `-q` and `-o`
+/// have other meanings in other tools, so they are not here.
+const SELECT_OPTIONS: &[&str] = &[
+    "--jq",
+    "--query",
+    "--format",
+    "--fields",
+    "--select",
+    "--columns",
+    "--properties",
+    "--template",
+];
+
+/// URL query parameters that select the fields of an answer, such as PostgREST
+/// `?select=email,phone`.
+const SELECT_PARAMETERS: &[&str] = &["select", "$select", "fields", "properties", "attributes"];
+
+/// The parts of a name, in lowercase, split at signs that are not letters or digits.
+fn name_parts(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(str::to_lowercase)
+}
+
+fn names_people(text: &str) -> bool {
+    name_parts(text).any(|part| PEOPLE_WORDS.contains(&part.as_str()))
+}
+
+/// The text names a contact or payment field: a name of [`CONTACT_NAMES`], or a part of
+/// [`CONTACT_PARTS`].
+fn names_contact(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|name| CONTACT_NAMES.contains(&name))
+        || name_parts(&lower).any(|part| {
+            CONTACT_PARTS.contains(&part.as_str())
+                || part.ends_with("email")
+                || part.ends_with("phone")
+        })
+}
+
+/// Words of SQL text for [`sql_personal_read`]: names with `.`, `*`, and `$`, and the
+/// signs `(`, `)`, and `,`. Quotes around names go.
+fn sql_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut word = String::new();
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '*' | '$') {
+            word.push(c.to_ascii_lowercase());
+            continue;
+        }
+        if !word.is_empty() {
+            tokens.push(std::mem::take(&mut word));
+        }
+        if matches!(c, '(' | ')' | ',' | ';') {
+            tokens.push(c.to_string());
+        }
+    }
+    if !word.is_empty() {
+        tokens.push(word);
+    }
+    tokens
+}
+
+/// SQL words that end the table list of a `FROM`.
+const FROM_END: &[&str] = &[
+    "where",
+    "group",
+    "order",
+    "limit",
+    "having",
+    "union",
+    "except",
+    "intersect",
+    "on",
+    "using",
+    "offset",
+    "fetch",
+    "window",
+    "for",
+    "returning",
+    ";",
+];
+
+/// SQL that reads contact or payment columns of people (dev round 4): a `SELECT` whose
+/// list has a contact or payment column, or `*`, and whose `FROM` or `JOIN` names a
+/// table of people or payments. `select email, phone from users` and `select * from
+/// customers` match. `select count(*) from users` and `select id from users` do not.
+pub(crate) fn sql_personal_read(text: &str) -> bool {
+    let tokens = sql_tokens(&strip_sql_comments(text));
+    let mut index = 0;
+    while index < tokens.len() {
+        if tokens[index] != "select" {
+            index += 1;
+            continue;
+        }
+        // The select list, to the `FROM` at the same depth. A column inside `count(...)`
+        // gives a number, not the values.
+        let (mut star, mut contact) = (false, false);
+        let mut calls: Vec<&str> = Vec::new();
+        let mut next = index + 1;
+        while let Some(token) = tokens.get(next) {
+            match token.as_str() {
+                "(" => calls.push(tokens[next - 1].as_str()),
+                ")" if calls.is_empty() => break,
+                ")" => {
+                    calls.pop();
+                }
+                "from" | ";" if calls.is_empty() => break,
+                _ => {
+                    star |= calls.is_empty() && (token == "*" || token.ends_with(".*"));
+                    contact |= !calls.contains(&"count") && names_contact(token);
+                }
+            }
+            next += 1;
+        }
+        // The tables: the name after `FROM`, after a `,` at the same depth, and after
+        // `JOIN`, to the end of the list.
+        let mut people = false;
+        if tokens.get(next).is_some_and(|token| token == "from") {
+            let mut depth = 0usize;
+            let mut expect_table = true;
+            for token in &tokens[next + 1..] {
+                match token.as_str() {
+                    "(" => depth += 1,
+                    ")" if depth == 0 => break,
+                    ")" => depth -= 1,
+                    word if depth == 0 && FROM_END.contains(&word) => break,
+                    "," | "join" if depth == 0 => {
+                        expect_table = true;
+                        continue;
+                    }
+                    word if depth == 0 && expect_table => {
+                        people |= names_people(word);
+                        expect_table = false;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if people && (star || contact) {
+            return true;
+        }
+        index = next.max(index + 1);
+    }
+    false
+}
+
+/// MongoDB shell code that reads contact or payment fields of people (dev round 4):
+/// `db.users.find({}, {email: 1})`, a `find` or `findOne` without a projection (every
+/// field), an `aggregate` without a `$project`, `$group`, or `$count` stage, or a
+/// `distinct` of a contact field, on a collection of people or payments.
+fn mongo_personal_read(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.match_indices("db.").any(|(start, _)| {
+        let rest = &lower[start + 3..];
+        // `db.users.find(`, `db.getcollection("users").find(`, or `db["users"].find(`.
+        let (collection, after) = if let Some(inner) = rest.strip_prefix("getcollection(") {
+            match inner.split_once(')') {
+                Some((name, after)) => (name.trim_matches(['"', '\'', ' ']), after),
+                None => return false,
+            }
+        } else {
+            let end = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(rest.len());
+            (&rest[..end], &rest[end..])
+        };
+        if !names_people(collection) {
+            return false;
+        }
+        let Some(call) = after.strip_prefix('.') else {
+            return false;
+        };
+        let Some((method, args)) = call.split_once('(') else {
+            return false;
+        };
+        // The arguments of the call, to the matching `)`.
+        let mut depth = 0usize;
+        let end = args
+            .char_indices()
+            .find(|(_, c)| match c {
+                '(' | '{' | '[' => {
+                    depth += 1;
+                    false
+                }
+                ')' if depth == 0 => true,
+                ')' | '}' | ']' => {
+                    depth = depth.saturating_sub(1);
+                    false
+                }
+                _ => false,
+            })
+            .map_or(args.len(), |(index, _)| index);
+        let args = &args[..end];
+        let top_level_commas = {
+            let mut depth = 0usize;
+            args.chars()
+                .filter(|c| {
+                    match c {
+                        '(' | '{' | '[' => depth += 1,
+                        ')' | '}' | ']' => depth = depth.saturating_sub(1),
+                        _ => {}
+                    }
+                    *c == ',' && depth == 0
+                })
+                .count()
+        };
+        match method {
+            "find" | "findone" => names_contact(args) || top_level_commas == 0,
+            "aggregate" => {
+                names_contact(args)
+                    || !["$project", "$group", "$count"]
+                        .iter()
+                        .any(|stage| args.contains(stage))
+            }
+            "distinct" => names_contact(args),
+            _ => false,
+        }
+    })
+}
+
+/// The URL of an argument selects contact fields of people: a path with a people word
+/// and a later contact word (`/user/emails`), or a select parameter with a contact field
+/// (`/rest/v1/users?select=email,phone`).
+fn url_selects_contact(arg: &str) -> bool {
+    let lower = arg.to_lowercase();
+    let Some(rest) = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let path_parts: Vec<String> = name_parts(path.split_once('/').map_or("", |(_, p)| p)).collect();
+    let people_at = path_parts
+        .iter()
+        .position(|part| PEOPLE_WORDS.contains(&part.as_str()));
+    let path_contact =
+        people_at.is_some_and(|at| path_parts[at + 1..].iter().any(|part| names_contact(part)));
+    let query_contact = people_at.is_some()
+        && query.split('&').any(|pair| {
+            pair.split_once('=').is_some_and(|(name, value)| {
+                SELECT_PARAMETERS.contains(&name) && names_contact(value)
+            })
+        });
+    path_contact || query_contact
+}
+
+/// The SQL or MongoDB text of a segment: the SQL argument (`-c`, `--command`, `-e`,
+/// `--execute`, `--eval`, or after `query`), the plain arguments with a space of an SQL
+/// client, and the here-document of an SQL client.
+fn data_query_texts(
+    rules: &RuleSet,
+    program: &str,
+    argv: &[String],
+    segment: &Segment,
+) -> Vec<String> {
+    let mut texts: Vec<String> = sql_argument(argv).into_iter().collect();
+    if rules.has_role(program, Role::HeredocSql) {
+        texts.extend(
+            argv.iter()
+                .skip(1)
+                .filter(|arg| !arg.starts_with('-') && arg.contains(' '))
+                .cloned(),
+        );
+        if !segment.heredoc.is_empty() {
+            texts.push(segment.heredoc.clone());
+        }
+    }
+    texts
+}
+
+/// A pipeline reads contact or payment data of people (dev round 4). Such a read must
+/// serve the user request: it is not known safe and not a known command, so the model's
+/// `task_match` answer decides. The check covers:
+///
+/// - SQL and MongoDB reads of contact columns of people ([`sql_personal_read`],
+///   [`mongo_personal_read`]);
+/// - an API read of a resource of people with a field selection in the same command:
+///   `gh api orgs/x/members --jq '.[].email'`, a URL `?select=email`;
+/// - an API read of a resource of people, and a later part of the pipe that selects a
+///   contact field: `stripe customers list | jq -r '.data[].email'`.
+///
+/// A read without a selection, such as `stripe customers list --limit 3`, is not here:
+/// it shows the objects the user asked for.
+fn personal_read(rules: &RuleSet, pipeline: &Pipeline) -> bool {
+    let mut source = false;
+    for segment in pipeline {
+        let argv = effective_argv(segment);
+        let Some(first) = argv.first() else {
+            continue;
+        };
+        let program = base_name(first);
+        if data_query_texts(rules, &program, &argv, segment)
+            .iter()
+            .any(|text| sql_personal_read(text) || mongo_personal_read(text))
+        {
+            return true;
+        }
+        if argv.iter().skip(1).any(|arg| url_selects_contact(arg)) {
+            return true;
+        }
+        let local = LOCAL_TEXT_TOOLS.contains(&program.as_str());
+        if source
+            && FIELD_FILTERS.contains(&program.as_str())
+            && argv.iter().skip(1).any(|arg| names_contact(arg))
+        {
+            return true;
+        }
+        if local {
+            continue;
+        }
+        // A resource of people: an operand or a URL path of a program that does not
+        // read local text.
+        let people = argv
+            .iter()
+            .skip(1)
+            .filter(|arg| !arg.starts_with('-'))
+            .any(|arg| names_people(arg));
+        if !people {
+            continue;
+        }
+        let selects = argv.iter().enumerate().skip(1).any(|(index, arg)| {
+            let lower = arg.to_lowercase();
+            let (name, value) = match lower.split_once('=') {
+                Some((name, value)) if name.starts_with('-') => {
+                    (name.to_owned(), Some(value.to_owned()))
+                }
+                _ => (
+                    lower.clone(),
+                    argv.get(index + 1).map(|next| next.to_lowercase()),
+                ),
+            };
+            SELECT_OPTIONS.contains(&name.as_str())
+                && value.is_some_and(|value| names_contact(&value))
+        });
+        if selects {
+            return true;
+        }
+        source = true;
+    }
+    false
+}
+
 /// Options that ask a tool for the names of secrets or variables only, not their
 /// values: `doppler secrets --only-names`, and the same option in other tools (dev
 /// round 3).
@@ -5221,5 +5671,71 @@ mod tests {
             let a = analysis_of(line);
             assert!(a.flags.is_empty() && a.known_safe, "{line}: {a:?}");
         }
+    }
+
+    /// Dev round 4: a read of contact or payment data of people is not known safe and not
+    /// a known command, so the model's `task_match` decides. A read without such a
+    /// selection keeps its path.
+    #[test]
+    fn personal_data_reads_need_the_task_match() {
+        for line in [
+            "psql \"$DATABASE_URL\" -c 'select email, phone from users limit 50'",
+            "psql \"$DATABASE_URL\" -c 'select * from customers limit 5'",
+            "psql \"$DATABASE_URL\" -c 'select u.email from orders o join users u on u.id = o.user_id'",
+            "sh -c 'stripe customers list --limit 100 | jq -r \".data[].email\"'",
+            "mongosh \"$DATABASE_URL\" --eval 'db.users.find({}, {email: 1, phone: 1})'",
+            "mongosh \"$DATABASE_URL\" --eval 'db.customers.find().limit(50)'",
+            "mongosh \"$DATABASE_URL\" --eval 'db.users.distinct(\"email\")'",
+            "bq query 'SELECT email, phone FROM pii.customers LIMIT 100'",
+            "sqlite3 app.db \"select email from users\"",
+            "curl -s \"https://x.supabase.co/rest/v1/users?select=email,phone\" -H \"apikey: $API_KEY\"",
+            "gh api orgs/acme/members --jq '.[].email'",
+            "sh -c 'curl -s https://api.github.com/users/octocat | jq .email'",
+        ] {
+            let a = analysis_of(line);
+            assert!(!a.known_safe && !a.known_command, "{line}: {a:?}");
+        }
+        for (line, safe) in [
+            ("stripe customers list --limit 3", true),
+            (
+                "psql \"$DATABASE_URL\" -c 'select count(*) from users'",
+                false,
+            ),
+            (
+                "psql \"$DATABASE_URL\" -c 'select count(email) from users'",
+                false,
+            ),
+            (
+                "psql \"$DATABASE_URL\" -c 'select id, status from orders limit 5'",
+                false,
+            ),
+            (
+                "psql \"$DATABASE_URL\" -c \"EXPLAIN ANALYZE SELECT * FROM bookings WHERE user_id = 'u'\"",
+                true,
+            ),
+            (
+                "mongosh \"$DATABASE_URL\" --eval 'db.users.countDocuments()'",
+                false,
+            ),
+            ("sqlite3 tmp/test.db \".schema users\"", true),
+            (
+                "curl -s \"https://x.supabase.co/rest/v1/profiles?select=id,created_at\" -H \"apikey: $API_KEY\"",
+                true,
+            ),
+            ("rg email src/users/", true),
+            ("grep -rn phone app/models/user.rb", true),
+            ("pytest -q tests/users/test_email.py", true),
+        ] {
+            let a = analysis_of(line);
+            assert!(a.known_command, "{line}: {a:?}");
+            assert_eq!(a.known_safe, safe, "{line}: {a:?}");
+        }
+        assert!(sql_personal_read(
+            "SELECT first_name, last_name FROM public.customers"
+        ));
+        assert!(!sql_personal_read("SELECT first_name FROM products"));
+        assert!(!sql_personal_read(
+            "select status, count(*) from jobs group by status"
+        ));
     }
 }
