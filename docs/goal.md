@@ -39,7 +39,7 @@ Each item needs evidence: a passing test, a measurement in `docs/operations/`, o
 
 ### 4. Notifications (ADR 0001 §5)
 
-- [ ] N1. A waiting approval and a blocked request cause a native macOS notification within 5 seconds. Status: Measured with the fake helper (0.1 ms and 0.67 s). Open: the owner allows notifications and times a real banner ([notifications](operations/notifications.md)).
+- [ ] N1. A waiting approval and a blocked request cause a native macOS notification within 5 seconds. Status: the notifier (`ApassyNotify.app`) is built and tested ([native app](operations/native-app.md), [notifications](operations/notifications.md)). macOS shows the permission prompt. Open: the owner turns on System Settings > Notifications > Apassy, then runs `scripts/n1-check.sh`, which times two real banners against 5 seconds.
 - [x] N2. The preview shows the agent name and the event type only. It does not show the command, the user request, or a value. Evidence: The notification type accepts only the agent name and the event type; tests in `tests/native_helper.rs`.
 - [x] N3. The inbox keeps each event after a restart. A delivery failure is visible in the app, and the request stays in the inbox. Evidence: Inbox from the activity log and `waiting_run` (schema 7); restart tests.
 - [x] N4. A notification or an acknowledgment is not an approval. An approval of an old or changed request fails. Evidence: [Notifications](operations/notifications.md); `NotWaiting` and `Changed` refusals.
