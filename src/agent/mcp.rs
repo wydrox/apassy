@@ -18,10 +18,16 @@ pub const TOOL_USE_CREDENTIAL: &str = "apassy_use_credential";
 pub const TOOL_RUN_WITH_SECRETS: &str = "apassy_run_with_secrets";
 const SUPPORTED_PROTOCOLS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
+/// Claude Code sets this variable for its stdio MCP servers to the session ID. The
+/// `UserPromptSubmit` hook gets the same ID as `session_id` (goal item B6).
+pub const CLAUDE_SESSION_ENV: &str = "CLAUDE_CODE_SESSION_ID";
+
 /// Adapter settings. `token` is `None` when the environment has no agent token.
 pub struct AdapterConfig {
     pub socket: PathBuf,
     pub token: Option<String>,
+    /// The agent host session, if the host tells its MCP servers.
+    pub host_session: Option<String>,
 }
 
 impl std::fmt::Debug for AdapterConfig {
@@ -29,6 +35,7 @@ impl std::fmt::Debug for AdapterConfig {
         f.debug_struct("AdapterConfig")
             .field("socket", &self.socket)
             .field("token", &self.token.as_ref().map(|_| "[redacted]"))
+            .field("host_session", &self.host_session)
             .finish()
     }
 }
@@ -40,6 +47,9 @@ impl AdapterConfig {
             token: std::env::var(client::TOKEN_ENV)
                 .ok()
                 .filter(|token| !token.trim().is_empty()),
+            host_session: std::env::var(CLAUDE_SESSION_ENV)
+                .ok()
+                .filter(|session| !session.trim().is_empty()),
         }
     }
 }
@@ -200,7 +210,11 @@ fn call_tool(config: &AdapterConfig, params: &Value) -> Value {
             "The adapter has no agent token. Set APASSY_AGENT_TOKEN in the MCP server configuration.",
         );
     };
-    match client::send(&config.socket, token, action) {
+    let options = client::SendOptions {
+        host_session: config.host_session.as_deref(),
+        timeout: None,
+    };
+    match client::send_with(&config.socket, token, action, options) {
         Ok(response) => tool_result(response),
         Err(_) => tool_error(
             "broker_unavailable",
@@ -358,6 +372,7 @@ mod tests {
         AdapterConfig {
             socket: PathBuf::from("/nonexistent/apassy-test.sock"),
             token: Some("apassy_agt_test".to_owned()),
+            host_session: None,
         }
     }
 

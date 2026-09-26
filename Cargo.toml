@@ -33,6 +33,10 @@ name = "apassy-mcp"
 path = "src/bin/apassy-mcp.rs"
 
 [[bin]]
+name = "apassy-hook"
+path = "src/bin/apassy-hook.rs"
+
+[[bin]]
 name = "apassy-dev-reporting"
 path = "src/bin/apassy-dev-reporting.rs"
 
@@ -75,6 +79,11 @@ required-features = ["vault"]
 [[test]]
 name = "vault_passphrase"
 path = "tests/vault_passphrase.rs"
+required-features = ["vault"]
+
+[[test]]
+name = "host_hook"
+path = "tests/host_hook.rs"
 required-features = ["vault"]
 
 [[test]]

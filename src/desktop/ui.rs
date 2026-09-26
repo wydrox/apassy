@@ -2617,9 +2617,24 @@ mod agents_view {
                     let user_request = if run.user_request.is_empty() {
                         "The agent did not send the user request.".to_owned()
                     } else {
-                        format!("User request (from the agent): \"{}\"", run.user_request)
+                        let source = if run.request_source.is_empty() {
+                            "from the agent"
+                        } else {
+                            run.request_source.as_str()
+                        };
+                        format!("User request ({source}): \"{}\"", run.user_request)
                     };
                     ui.label(RichText::new(user_request).color(INK));
+                    // Goal item B6: the hook request replaced a different text from the agent.
+                    if !run.agent_request.is_empty() {
+                        ui.label(
+                            RichText::new(format!(
+                                "The agent sent a different user request: \"{}\"",
+                                run.agent_request
+                            ))
+                            .color(ASK),
+                        );
+                    }
                     ui.label(RichText::new(format!("Purpose: {}", run.purpose)).color(INK));
                     ui.label(RichText::new("Command:").color(INK_MUTED));
                     let mut command = shell_words(&run.command);

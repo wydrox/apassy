@@ -11,6 +11,7 @@ pub mod decide;
 pub mod exec;
 pub mod http;
 pub mod profile;
+pub mod prompts;
 mod run;
 pub mod server;
 pub mod shell_risk;

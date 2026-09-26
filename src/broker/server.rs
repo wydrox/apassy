@@ -18,6 +18,7 @@ use super::approvals::ApprovalQueue;
 use super::bouncer::BouncerClient;
 use super::decide::{self, BrokerContext};
 use super::http::TlsClient;
+use super::prompts::{self, PromptStore};
 use crate::agent::wire::{MAX_LINE_BYTES, WireRequest, WireResponse};
 
 const MAX_CONNECTIONS: usize = 16;
@@ -32,6 +33,8 @@ pub struct BrokerOptions {
     pub approval_timeout: Duration,
     pub run_timeout: Duration,
     pub bouncer: Option<BouncerClient>,
+    /// Host transcript directories for the check of hook prompts (goal item B6).
+    pub transcript_roots: Vec<PathBuf>,
 }
 
 impl BrokerOptions {
@@ -49,6 +52,7 @@ impl BrokerOptions {
             approval_timeout: Duration::from_secs(120),
             run_timeout: Duration::from_secs(300),
             bouncer: None,
+            transcript_roots: prompts::default_transcript_roots(),
         }
     }
 }
@@ -130,6 +134,7 @@ pub fn start_with(
         approval_timeout: options.approval_timeout,
         run_timeout: options.run_timeout,
         bouncer: options.bouncer,
+        prompts: Arc::new(PromptStore::new(options.transcript_roots)),
     };
     prepare_directory(socket)?;
     remove_stale_socket(socket)?;

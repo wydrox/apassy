@@ -12,6 +12,9 @@
 //!    forbidden words, hourly limit).
 //! 6. A production declaration needs the owner (ADR 0010). The model is not asked.
 //! 7. The bouncer scores the request (ADR 0007, ADR 0008). A rule flag skips the model.
+//!    The user request comes from the host hook when there is one (goal item B6,
+//!    [`super::prompts`]). An unverified hook request or a command that names the hook
+//!    channel is a rule flag.
 //! 8. A grant in "ask" mode, a high risk, or an unavailable bouncer needs the owner.
 //!    A clean request with only "bouncer" grants runs without a prompt.
 //! 9. After a decision, the broker checks the vault, the agent, and the rules again.
@@ -53,6 +56,8 @@ pub struct RunRequest<'a> {
     pub purpose: &'a str,
     pub path: Option<&'a str>,
     pub user_request: Option<&'a str>,
+    /// The agent host session of the adapter (goal item B6).
+    pub host_session: Option<&'a str>,
 }
 
 impl RunRequest<'_> {
@@ -151,12 +156,20 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
 
     // The bouncer runs without the vault lock. Its state has no secret value.
     // A rule flag (ADR 0008) or a hard owner rule (ADR 0010) skips the model.
-    let analysis = analyze(request.command, request.purpose, &checked.env_names);
-    let user_request = request
-        .user_request
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .unwrap_or_default();
+    let mut analysis = analyze(request.command, request.purpose, &checked.env_names);
+    // Goal item B6: a user request from the host hook replaces the text from the agent.
+    let resolved = ctx.prompts.resolve(
+        checked.agent.id,
+        &checked.epoch,
+        request.host_session,
+        &checked.cwd,
+        request.user_request.unwrap_or_default(),
+    );
+    analysis.flags.extend(resolved.flags.iter().cloned());
+    analysis
+        .flags
+        .extend(super::prompts::hook_channel_flag(request.command));
+    let user_request = resolved.text.as_str();
     let context = DecisionContext {
         analysis: &analysis,
         declarations: &checked.declarations,
@@ -179,6 +192,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
     };
     let decision = decide(&verdict, &context);
     let risk_note = decision.note.clone();
+    let log_note = format!("{} {risk_note}", resolved.log_note());
     let needs_approval = checked.any_ask || decision.ask_owner;
     let decided_by = if needs_approval {
         "Owner approved"
@@ -203,6 +217,8 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                 purpose: request.purpose.trim().to_owned(),
                 risk: risk_note.clone(),
                 user_request: user_request.to_owned(),
+                request_source: resolved.source.clone(),
+                agent_request: resolved.agent_text.clone().unwrap_or_default(),
             },
             ctx.approval_timeout,
             same_session,
@@ -222,7 +238,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
             ApprovalOutcome::Invalidated => Some(("approval_invalidated", INVALIDATED.to_owned())),
         };
         if let Some((code, reason)) = refusal {
-            let reason = format!("{reason} {risk_note}.");
+            let reason = format!("{reason} {log_note}.");
             record_locked(
                 ctx,
                 &checked.agent,
@@ -311,12 +327,12 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         Ok(output) => {
             let reason = if output.timed_out {
                 format!(
-                    "{decided_by}. The run timed out and was stopped. Directory: {}. {risk_note}.",
+                    "{decided_by}. The run timed out and was stopped. Directory: {}. {log_note}.",
                     checked.cwd.display()
                 )
             } else {
                 format!(
-                    "{decided_by}. Exit code {}. Directory: {}. {risk_note}.",
+                    "{decided_by}. Exit code {}. Directory: {}. {log_note}.",
                     output
                         .exit_code
                         .map_or_else(|| "none".to_owned(), |code| code.to_string()),
