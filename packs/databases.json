@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 4,
+  "pack_version": 5,
   "tool": "databases",
   "description": "Database clients and tools (psql, mysql, sqlite3, MongoDB, ClickHouse, CockroachDB, Redis, restore tools): writes, drops, and credential columns.",
   "programs": [
@@ -124,6 +124,20 @@
     }
   ],
   "safe": [
+    {
+      "id": "schema-reads",
+      "note": "Reads of the schema, the plan of a query, or server information print no table data: `psql` meta commands such as `\\dt` and `\\d+ orders`, `EXPLAIN` of a read (also `EXPLAIN ANALYZE`, which prints only the plan), `select version()`, the MongoDB `getCollectionNames()` and `getIndexes()`, and a schema-only dump (`pg_dump --schema-only`) to the output or to a file. A query that calls a function outside a short list of read functions is not here, because a function can change data (dev round 3).",
+      "when": {
+        "any_of": [
+          { "program": ["psql", "mongo", "mongosh"], "sql": "schema_read" },
+          {
+            "program": ["pg_dump"],
+            "any_arg": ["--schema-only", "-s"],
+            "not": { "any_arg": ["--data-only", "-a"] }
+          }
+        ]
+      }
+    },
     {
       "id": "redis-reads",
       "note": "Redis commands that read server state, key metadata, or key names: `PING`, `INFO`, `DBSIZE`, `TTL`, `TYPE`, `EXISTS`, lengths, `SCAN`, and `MEMORY USAGE`. Connection options such as `-u URL` and `-h HOST` take a value. The value commands (`GET`, `HGETALL`) stay with the model.",

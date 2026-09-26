@@ -300,6 +300,10 @@ enum SqlCheck {
     /// a dot command that prints the schema, such as `sqlite3 app.db ".schema users"`.
     /// There is at least one. For clients of a local database file (dev round 3).
     PlainArgsRead,
+    /// The SQL argument reads only the schema, the plan of a query, or server
+    /// information: `\dt`, `\d+ orders`, `EXPLAIN SELECT ...`, `SHOW TABLES`, or a
+    /// MongoDB `db.getCollectionNames()` (dev round 3).
+    SchemaRead,
 }
 
 #[derive(Debug, Deserialize)]
@@ -748,6 +752,8 @@ impl Matcher {
                     .is_some_and(|sql| shell_risk::sql_changes(&sql)),
                 SqlCheck::AnyArgChanges => sql_plain_texts(cmd).any(shell_risk::sql_changes),
                 SqlCheck::PlainArgsRead => shell_risk::plain_sql_reads(cmd.argv),
+                SqlCheck::SchemaRead => shell_risk::sql_argument(cmd.argv)
+                    .is_some_and(|sql| shell_risk::sql_schema_read(&sql)),
             })
             && holds(&self.names_only, |want| {
                 shell_risk::names_only(&cmd.args) == *want

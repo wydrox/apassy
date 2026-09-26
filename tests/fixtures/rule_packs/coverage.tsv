@@ -2440,3 +2440,15 @@ kubectl config view --flatten
 git switch -f main
 git reflog expire --expire=now --all
 git switch main
+# ---- Dev round 3: reads of the schema, of a query plan, or of server information ----
+psql "$DATABASE_URL" -c "\d+ orders"
+psql "$DATABASE_URL" -At -c "select version()"
+psql $DATABASE_URL -c 'select pg_terminate_backend(42)'
+psql $DATABASE_URL -c "EXPLAIN ANALYZE SELECT cleanup_sessions()"
+psql $DATABASE_URL -c '\copy t to out.csv'
+psql $DATABASE_URL -c '\dt' -c 'DROP TABLE users'
+psql -e $DATABASE_URL -c "-- remove old rows<NL>DELETE FROM sessions"
+sh -c 'mongosh "$DATABASE_URL" --quiet --eval "db.getCollectionNames()"'
+sh -c 'mongosh "$DATABASE_URL" --quiet --eval "db.users.find().toArray()"'
+pg_dump $DATABASE_URL -f dump.sql
+pg_dump -s $DATABASE_URL

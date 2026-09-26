@@ -664,7 +664,13 @@ fn parse_shell(script: &str) -> Vec<Pipeline> {
                     match inner {
                         '"' => break,
                         '\\' => {
+                            // In double quotes a backslash escapes only `$`, a backquote,
+                            // `"`, `\`, and a line break. Before another character it
+                            // stays, as in `psql -c "\d+ orders"` (dev round 3).
                             if let Some(next) = chars.next() {
+                                if !matches!(next, '$' | '`' | '"' | '\\' | '\n') {
+                                    word.push('\\');
+                                }
                                 word.push(next);
                             }
                         }
@@ -2671,7 +2677,7 @@ fn check_unknown_program(cmd: &Command<'_>, flags: &mut Vec<String>) {
 /// check needs the structure of a statement (`DELETE FROM`, `DROP TABLE`, `UPDATE x
 /// SET`), so plain English such as "delete old logs" does not count.
 pub(crate) fn sql_destroys(text: &str) -> bool {
-    let lower = text.to_lowercase();
+    let lower = strip_sql_comments(&text.to_lowercase());
     lower.split(';').any(|statement| {
         let w = words(statement);
         let start = w
@@ -2812,27 +2818,42 @@ fn check_destructive(rules: &RuleSet, cmd: &Command<'_>, flags: &mut Vec<String>
     }
 }
 
-/// The SQL text of a database command: the value after `-c`, `--command`, `-e`,
-/// `--execute`, or `--eval`, or the first plain argument after `db query`.
+/// The SQL text of a database command: the values after `-c`, `--command`, `-e`,
+/// `--execute`, or `--eval`, or the first plain argument after `db query`. A client such
+/// as `psql` takes more than one `-c`: the text has all of them, one statement each (dev
+/// round 3: `psql -c '\dt' -c 'DROP TABLE x'` has a drop). After `-e`, a value that
+/// starts with `-` is an option, not SQL (`psql -e` echoes the queries).
 pub(crate) fn sql_argument(argv: &[String]) -> Option<String> {
     let mut iter = argv.iter().skip(1).peekable();
     let mut after_query = false;
+    let mut texts: Vec<String> = Vec::new();
     while let Some(arg) = iter.next() {
         let lower = arg.to_lowercase();
-        if matches!(
-            lower.as_str(),
-            "-c" | "--command" | "-e" | "--execute" | "--eval"
-        ) {
-            return iter.next().cloned();
+        if matches!(lower.as_str(), "-c" | "--command" | "--execute" | "--eval") {
+            if let Some(value) = iter.next() {
+                texts.push(value.clone());
+            }
+            continue;
+        }
+        // `-e` is `--execute` for `mysql` and `--echo-queries` for `psql`. SQL can start
+        // with `-` (a comment), so only this option checks the value.
+        if lower == "-e" {
+            if let Some(value) = iter.next_if(|next| !next.starts_with('-')) {
+                texts.push(value.clone());
+            }
+            continue;
         }
         if let Some(value) = ["--command=", "--execute=", "--eval="]
             .iter()
             .find_map(|prefix| arg.strip_prefix(prefix))
         {
-            return Some(value.to_owned());
+            texts.push(value.to_owned());
+            continue;
         }
         if after_query && !arg.starts_with('-') {
-            return Some(arg.clone());
+            texts.push(arg.clone());
+            after_query = false;
+            continue;
         }
         // Options with a separate value, for example `--output-format json`.
         if after_query
@@ -2851,17 +2872,17 @@ pub(crate) fn sql_argument(argv: &[String]) -> Option<String> {
             iter.next();
             continue;
         }
-        if lower == "query" {
+        if lower == "query" && texts.is_empty() {
             after_query = true;
         }
     }
-    None
+    (!texts.is_empty()).then(|| texts.join(";\n"))
 }
 
 /// SQL or database shell code that changes data, schema, or access. The check looks at
 /// the first keyword of each statement, so a word inside a query or a string does not count.
 pub(crate) fn sql_writes(text: &str) -> bool {
-    let lower = text.to_lowercase();
+    let lower = strip_sql_comments(&text.to_lowercase());
     if [
         "dropdatabase",
         "deletemany",
@@ -2913,9 +2934,54 @@ pub(crate) fn sql_writes(text: &str) -> bool {
     })
 }
 
+/// SQL without its comments: `-- ...` to the end of the line and `/* ... */`. A comment
+/// before a statement does not hide it (dev round 3: `-- note` and a line break before
+/// `DELETE FROM sessions`). Text in single quotes stays.
+fn strip_sql_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut quoted = false;
+    while let Some(c) = chars.next() {
+        if quoted {
+            out.push(c);
+            if c == '\'' {
+                quoted = false;
+            }
+            continue;
+        }
+        match (c, chars.peek()) {
+            ('\'', _) => {
+                quoted = true;
+                out.push(c);
+            }
+            ('-', Some('-')) => {
+                for next in chars.by_ref() {
+                    if next == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            ('/', Some('*')) => {
+                chars.next();
+                let mut previous = ' ';
+                for next in chars.by_ref() {
+                    if previous == '*' && next == '/' {
+                        break;
+                    }
+                    previous = next;
+                }
+                out.push(' ');
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// SQL that only reads: it starts with a read keyword and does not write.
 pub(crate) fn sql_reads(text: &str) -> bool {
-    let w = words(text);
+    let w = words(&strip_sql_comments(text));
     matches!(
         w.first().map(String::as_str),
         Some("select" | "with" | "explain" | "show")
@@ -2933,7 +2999,7 @@ pub(crate) fn sql_changes(text: &str) -> bool {
     if sql_writes(text) {
         return true;
     }
-    let lower = text.to_lowercase();
+    let lower = strip_sql_comments(&text.to_lowercase());
     let mongo = [
         ".insert",
         ".update",
@@ -2991,6 +3057,169 @@ pub(crate) fn sql_changes(text: &str) -> bool {
             });
         change || copy_in || pragma_set || nested
     })
+}
+
+/// Meta commands of `psql` that print the schema or the connection, not table data.
+const SCHEMA_META_COMMANDS: &[&str] = &[
+    "\\d",
+    "\\d+",
+    "\\dt",
+    "\\dt+",
+    "\\di",
+    "\\di+",
+    "\\dv",
+    "\\dv+",
+    "\\dm",
+    "\\dm+",
+    "\\ds",
+    "\\ds+",
+    "\\df",
+    "\\df+",
+    "\\dn",
+    "\\dn+",
+    "\\dx",
+    "\\dx+",
+    "\\db",
+    "\\db+",
+    "\\l",
+    "\\l+",
+    "\\conninfo",
+];
+
+/// Functions that a read of the schema or of the query plan may call: aggregates,
+/// conversions, and server information. A function outside the list can change data
+/// (`pg_terminate_backend`, `setval`, or a function of the project).
+const READ_FUNCTIONS: &[&str] = &[
+    "count",
+    "sum",
+    "avg",
+    "min",
+    "max",
+    "coalesce",
+    "nullif",
+    "lower",
+    "upper",
+    "length",
+    "now",
+    "date_trunc",
+    "to_char",
+    "extract",
+    "cast",
+    "version",
+    "current_database",
+    "current_schema",
+    "current_user",
+    "pg_size_pretty",
+    "pg_database_size",
+    "pg_relation_size",
+    "pg_total_relation_size",
+];
+
+/// SQL words that can come before `(` and are not functions.
+const SQL_PAREN_KEYWORDS: &[&str] = &[
+    "in", "exists", "any", "all", "some", "over", "filter", "values", "as", "from", "join", "on",
+    "where", "and", "or", "not", "select", "using", "lateral", "by", "interval", "explain",
+    "analyze", "analyse", "verbose", "format", "costs", "buffers", "timing",
+];
+
+/// Each call in the SQL text is a function of [`READ_FUNCTIONS`] or a SQL word.
+fn calls_read_functions_only(lower: &str) -> bool {
+    lower.match_indices('(').all(|(index, _)| {
+        let before = lower[..index].trim_end();
+        let name: String = before
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.')
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        name.is_empty()
+            || READ_FUNCTIONS.contains(&name.as_str())
+            || SQL_PAREN_KEYWORDS.contains(&name.as_str())
+    })
+}
+
+/// Methods of the MongoDB shell that print the schema or statistics, not documents.
+const MONGO_SCHEMA_METHODS: &[&str] = &[
+    "getcollectionnames()",
+    "getcollectioninfos()",
+    "getindexes()",
+    "getindexkeys()",
+    "stats()",
+    "version()",
+    "getname()",
+];
+
+/// One statement that reads the schema, the plan of a query, or server information, not
+/// table data (dev round 3): a `psql` meta command such as `\dt` or `\d+ orders`,
+/// `EXPLAIN` of a read (also with `ANALYZE`) that calls only [`READ_FUNCTIONS`], `SHOW
+/// TABLES` and similar listings, `DESCRIBE`, a `SELECT` without `FROM` such as
+/// `select version()`, and the MongoDB shell methods of [`MONGO_SCHEMA_METHODS`].
+fn schema_statement(statement: &str) -> bool {
+    let lower = statement.trim().to_lowercase();
+    if let Some(rest) = lower.strip_prefix('\\') {
+        let name = format!("\\{}", rest.split_whitespace().next().unwrap_or_default());
+        return SCHEMA_META_COMMANDS.contains(&name.as_str());
+    }
+    if let Some(rest) = lower.strip_prefix("db.") {
+        return rest
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '(' | ')'))
+            && MONGO_SCHEMA_METHODS
+                .iter()
+                .any(|method| rest.ends_with(method))
+            && rest.matches('(').count() == 1;
+    }
+    let w = words(&lower);
+    let word = |index: usize| w.get(index).map(String::as_str).unwrap_or_default();
+    match word(0) {
+        "explain" => sql_reads(&lower) && calls_read_functions_only(&lower),
+        "show" => {
+            let listing = |name: &str| {
+                matches!(
+                    name,
+                    "tables"
+                        | "columns"
+                        | "fields"
+                        | "index"
+                        | "indexes"
+                        | "keys"
+                        | "create"
+                        | "databases"
+                        | "schemas"
+                        | "table"
+                        | "collections"
+                        | "dbs"
+                        | "search_path"
+                        | "server_version"
+                )
+            };
+            listing(word(1)) || (word(1) == "full" && listing(word(2)))
+        }
+        "describe" | "desc" => !sql_changes(&lower),
+        "select" => {
+            !w.iter().any(|word| word == "from")
+                && sql_reads(&lower)
+                && calls_read_functions_only(&lower)
+        }
+        _ => false,
+    }
+}
+
+/// The SQL argument reads only the schema, the plan of a query, or server information
+/// (see [`schema_statement`]). There is at least one statement.
+pub(crate) fn sql_schema_read(text: &str) -> bool {
+    let text = strip_sql_comments(text);
+    let statements: Vec<&str> = text
+        .split([';', '\n'])
+        .map(str::trim)
+        .filter(|statement| !statement.is_empty())
+        .collect();
+    !statements.is_empty()
+        && statements
+            .iter()
+            .all(|statement| schema_statement(statement))
 }
 
 /// `PRAGMA` names that only read the database (SQLite).
@@ -3709,6 +3938,42 @@ mod tests {
         }
         assert!(analysis_of("aws --profile dev s3 ls").known_safe);
         assert!(analysis_of("timeout 60 npm test").known_safe);
+    }
+
+    /// Dev round 3: reads of the schema, of a query plan, or of server information print
+    /// no table data, so they are known safe. A data read and a call of an unknown
+    /// function stay with the model. Every `-c` of `psql` counts.
+    #[test]
+    fn schema_reads_are_known_safe() {
+        for line in [
+            "psql $DATABASE_URL -c '\\dt'",
+            "psql \"$DATABASE_URL\" -c \"\\d+ orders\"",
+            "psql \"$DATABASE_URL\" -c \"EXPLAIN ANALYZE SELECT * FROM bookings WHERE user_id = 'u_1'\"",
+            "psql \"$DATABASE_URL\" -At -c \"select version()\"",
+            "sh -c 'mongosh \"$DATABASE_URL\" --quiet --eval \"db.getCollectionNames()\"'",
+            "sh -c 'mongosh \"$DATABASE_URL\" --quiet --eval \"db.products.getIndexes()\"'",
+            "pg_dump --schema-only $DATABASE_URL -f schema.sql",
+        ] {
+            let a = analysis_of(line);
+            assert!(a.known_safe, "{line}: {a:?}");
+        }
+        for line in [
+            "psql $DATABASE_URL -c 'select count(*) from orders'",
+            "psql $DATABASE_URL -c 'select pg_terminate_backend(42)'",
+            "psql $DATABASE_URL -c \"EXPLAIN ANALYZE SELECT cleanup_sessions()\"",
+            "psql $DATABASE_URL -c '\\copy t to out.csv'",
+            "psql $DATABASE_URL -c '\\dt' -c 'CREATE TABLE t (a int)'",
+            "sh -c 'mongosh \"$DATABASE_URL\" --eval \"db.users.find().toArray()\"'",
+            "pg_dump $DATABASE_URL -f dump.sql",
+        ] {
+            let a = analysis_of(line);
+            assert!(!a.known_safe, "{line}: {a:?}");
+        }
+        // The second `-c` is checked too.
+        assert!(has_flag(
+            "psql $DATABASE_URL -c '\\dt' -c 'DROP TABLE users'",
+            "data_loss"
+        ));
     }
 
     /// Dev round 3: SQL that changes data in any way is a known write, and an account
