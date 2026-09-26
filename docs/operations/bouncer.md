@@ -8,7 +8,7 @@ Laya is an open-source decision model with the Jev wire protocol. The model has 
 
 ```
 D="$HOME/Library/Application Support/Apassy/laya"
-mkdir -p "$D" && cd "$D"
+mkdir -p "$D" && chmod 700 "$(dirname "$D")" && cd "$D"
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python "laya[serve]==0.3.20"
 LAYA_HOST=127.0.0.1 LAYA_PORT=8770 LAYA_MODELS=english .venv/bin/laya-serve
@@ -17,6 +17,7 @@ LAYA_HOST=127.0.0.1 LAYA_PORT=8770 LAYA_MODELS=english .venv/bin/laya-serve
 - The first start downloads the weights from Hugging Face (`convaiinnovations/laya`).
 - The first decision loads the model. It took about 8 seconds on an M1 Pro. After that, one decision took about 0.4 seconds.
 - Keep `LAYA_HOST=127.0.0.1`. Apassy accepts only a loopback bouncer.
+- The Apassy data directory must have mode `0700`. The broker does not start in a directory with a wider mode.
 - `APASSY_BOUNCER_URL` changes the address. The default is `http://127.0.0.1:8770`. `APASSY_BOUNCER_KEY` sends a bearer key if `LAYA_API_KEY` is set.
 
 If Laya does not answer in 3 seconds, the bouncer is unavailable. Then every run waits for the owner.
