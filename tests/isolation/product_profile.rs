@@ -100,6 +100,9 @@ struct Layout {
     laya_file: PathBuf,
     socket: PathBuf,
     scratch: PathBuf,
+    /// A synthetic owner home directory. The profile denies a write to the
+    /// autostart locations under it. A test never touches the real `$HOME`.
+    home: PathBuf,
 }
 
 fn make_layout() -> Layout {
@@ -122,6 +125,22 @@ fn make_layout() -> Layout {
     let backup_file = backup_dir.join("apassy.backup");
     std::fs::write(&laya_file, LAYA_TEXT).expect("laya");
     std::fs::write(&backup_file, BACKUP_TEXT).expect("backup");
+    // A synthetic owner home directory with the autostart locations. The
+    // profile denies a write under each of them. The test writes a control
+    // file with the same layout under a temporary "outside" home, so the deny
+    // is the only difference.
+    let home = dir.path().join("home");
+    for sub in [
+        "Library/LaunchAgents",
+        "Library/LaunchDaemons",
+        "Library/Application Scripts",
+        "Library/Preferences",
+    ] {
+        std::fs::create_dir_all(home.join(sub)).expect("home subdir");
+    }
+    // An existing shell startup file, to show that a read (a source) still
+    // works while a write is denied.
+    std::fs::write(home.join(".zshrc"), "# synthetic startup file\n").expect("zshrc");
     Layout {
         data_dir,
         vault_file,
@@ -129,6 +148,7 @@ fn make_layout() -> Layout {
         laya_file,
         socket,
         scratch: dir.path().join("scratch.txt"),
+        home,
         _dir: dir,
     }
 }
@@ -301,6 +321,8 @@ fn sandbox_args(fx: &Fixture) -> Vec<String> {
         l.backup_file.display().to_string(),
         "--socket".to_owned(),
         l.socket.display().to_string(),
+        "--home".to_owned(),
+        l.home.display().to_string(),
     ]
     .into_iter()
     .chain(
@@ -567,6 +589,210 @@ fn ordinary_work_still_runs_in_profile() {
     assert_eq!(
         std::fs::read_to_string(&fx.layout.scratch).unwrap(),
         "work-ok\n"
+    );
+}
+
+// --- Launching outside the sandbox ---------------------------------------
+//
+// A process in the profile must not start a program that runs OUTSIDE the
+// sandbox as the same user. Such a program is not confined, so it can read the
+// vault. The tests below prove that the measured escape routes fail in the
+// profile. The routes and the manual measurements (Apple Events, Shortcuts,
+// and the LaunchServices control) are in
+// `docs/operations/isolation.md`, section "Launching outside the sandbox".
+
+/// Try a write to `path` from inside the profile. Return true when the profile
+/// denies it. The command runs through `/bin/sh`, so a shell redirection
+/// failure gives a non-zero exit with the sandbox message. The caller checks,
+/// after the loop, that no file was planted and that an existing file did not
+/// change.
+fn write_is_denied(fx: &Fixture, path: &Path) -> bool {
+    let target = path.display().to_string();
+    let (ok, _out, err) = in_sandbox(
+        fx,
+        &["/bin/sh", "-c", &format!("echo planted > '{target}'")],
+    );
+    !ok && err.contains("Operation not permitted")
+}
+
+#[test]
+fn profile_denies_writes_to_autostart_locations() {
+    // launchd starts a LaunchAgent or a LaunchDaemon outside the sandbox at the
+    // next load or login. A shell startup file runs outside the sandbox the next
+    // time the owner opens a terminal. A login item and an application script
+    // start outside the sandbox too. The profile denies a write to each of
+    // these, so a process in the profile cannot plant one.
+    require_sandbox();
+    let fx = fixture();
+    let home = &fx.layout.home;
+
+    // Control: a write to an ordinary file in the same home directory works in
+    // the profile. So the deny is on the specific autostart paths, not on the
+    // home directory as a whole.
+    let ordinary = home.join("notes.txt");
+    let (ok, _o, err) = in_sandbox(
+        &fx,
+        &[
+            "/bin/sh",
+            "-c",
+            &format!("echo hello > '{}'", ordinary.display()),
+        ],
+    );
+    assert!(ok, "an ordinary home write must work in the profile: {err}");
+    assert_eq!(std::fs::read_to_string(&ordinary).unwrap(), "hello\n");
+
+    // Each autostart location: the profile denies a write.
+    let denied = [
+        home.join("Library/LaunchAgents/com.example.iso.plist"),
+        home.join("Library/LaunchDaemons/com.example.iso.plist"),
+        home.join("Library/Application Scripts/com.example.iso"),
+        home.join("Library/Preferences/com.apple.loginitems.plist"),
+        home.join(".zshenv"),
+        home.join(".zprofile"),
+        home.join(".zshrc"),
+        home.join(".zlogin"),
+        home.join(".zlogout"),
+        home.join(".bashrc"),
+        home.join(".bash_profile"),
+        home.join(".bash_login"),
+        home.join(".profile"),
+    ];
+    for path in &denied {
+        assert!(
+            write_is_denied(&fx, path),
+            "the profile must deny a write to {}",
+            path.display()
+        );
+        // No file holds the planted content. A path that did not exist stays
+        // absent; an existing file keeps its bytes.
+        if let Ok(content) = std::fs::read_to_string(path) {
+            assert!(
+                !content.contains("planted"),
+                "a write landed at {}",
+                path.display()
+            );
+        }
+    }
+
+    // The existing startup file did not change: the deny does not corrupt it.
+    assert_eq!(
+        std::fs::read_to_string(home.join(".zshrc")).unwrap(),
+        "# synthetic startup file\n",
+        "the startup file changed"
+    );
+
+    // A read (a source) of a startup file still works in the profile, because
+    // the deny is on writes only.
+    let (ok, out, err) = in_sandbox(
+        &fx,
+        &["/bin/cat", &home.join(".zshrc").display().to_string()],
+    );
+    assert!(
+        ok,
+        "a startup file must stay readable in the profile: {err}"
+    );
+    assert!(out.contains("synthetic startup file"), "{out}");
+}
+
+/// A minimal headless application bundle in `dir`. Its executable reads the
+/// vault canary and appends the result to `marker`. `LSBackgroundOnly` means it
+/// shows no window. It exits at once, so it leaves no process. A build of this
+/// bundle, started with `open`, runs OUTSIDE the sandbox.
+fn make_canary_app(dir: &Path, vault_file: &Path, marker: &Path) -> PathBuf {
+    let app = dir.join("IsoCanary.app");
+    let macos = app.join("Contents/MacOS");
+    std::fs::create_dir_all(&macos).expect("app MacOS dir");
+    std::fs::write(
+        app.join("Contents/Info.plist"),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\"><dict>\
+         <key>CFBundleName</key><string>IsoCanary</string>\
+         <key>CFBundleIdentifier</key><string>com.apassy.iso-canary</string>\
+         <key>CFBundleExecutable</key><string>iso-canary</string>\
+         <key>CFBundlePackageType</key><string>APPL</string>\
+         <key>LSBackgroundOnly</key><true/></dict></plist>\n",
+    )
+    .expect("Info.plist");
+    let exe = macos.join("iso-canary");
+    std::fs::write(
+        &exe,
+        format!(
+            "#!/bin/sh\n\
+             if /bin/cat '{vault}' > '{marker}' 2>/dev/null; then\n\
+             \techo ESCAPED-READ >> '{marker}'\n\
+             else\n\
+             \techo READ-DENIED >> '{marker}'\n\
+             fi\n",
+            vault = vault_file.display(),
+            marker = marker.display(),
+        ),
+    )
+    .expect("app executable");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).expect("exe mode");
+    app
+}
+
+/// Wait up to about `secs` seconds for `path` to appear.
+fn wait_for(path: &Path, secs: u64) -> bool {
+    for _ in 0..(secs * 10) {
+        if path.exists() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    path.exists()
+}
+
+#[test]
+fn profile_denies_lsopen_of_an_application() {
+    // `open` and the `lsopen` operation start an application through
+    // LaunchServices. The started application runs outside the sandbox. The
+    // profile denies the operation. So a process in the profile cannot use
+    // `open` to escape.
+    require_sandbox();
+    let fx = fixture();
+    let app_dir = fx.layout.data_dir.with_file_name("lsopen");
+    std::fs::create_dir_all(&app_dir).expect("app dir");
+    let marker = app_dir.join("marker.txt");
+    let app = make_canary_app(&app_dir, &fx.layout.vault_file, &marker);
+
+    // In the profile: `open` is denied. The application does not start, so it
+    // does not read the vault canary.
+    let _ = std::fs::remove_file(&marker);
+    let (ok, _out, err) = in_sandbox(&fx, &["/usr/bin/open", &app.display().to_string()]);
+    assert!(!ok, "the profile must deny `open` of an application");
+    assert!(
+        err.contains("-54") || err.contains("failed"),
+        "the `open` denial must be a LaunchServices failure: {err}"
+    );
+    assert!(
+        !wait_for(&marker, 3),
+        "the application started and read the canary in the profile"
+    );
+
+    // Control: outside the profile, the same `open` starts the application and
+    // it reads the canary. This shows the route is a real escape and the test
+    // host supports LaunchServices, so the deny above is meaningful.
+    let _ = std::fs::remove_file(&marker);
+    let control = Command::new("/usr/bin/open")
+        .arg(&app)
+        .output()
+        .expect("control open");
+    assert!(
+        control.status.success(),
+        "control: `open` outside the profile must start the application: {}",
+        String::from_utf8_lossy(&control.stderr)
+    );
+    assert!(
+        wait_for(&marker, 20),
+        "control: the application did not run outside the profile"
+    );
+    let escaped = std::fs::read_to_string(&marker).expect("marker");
+    assert!(
+        escaped.contains("SYNTHETIC-VAULT-CANARY") && escaped.contains("ESCAPED-READ"),
+        "control: the application outside the profile must read the canary: {escaped}"
     );
 }
 
@@ -955,6 +1181,8 @@ fn profile_protects_the_build_app_without_the_installed_app_parameter() {
         "-D".to_owned(),
         format!("APASSY_SOCKET={}", resolved(&l.socket)),
         "-D".to_owned(),
+        format!("APASSY_HOME={}", resolved(&l.home)),
+        "-D".to_owned(),
         format!("APASSY_APP_BUILD={}", app.display()),
     ];
     let denied = Command::new(SANDBOX_EXEC)
@@ -1003,6 +1231,8 @@ fn launcher_passes_the_installed_and_the_build_app() {
         defaults.contains(" -D APASSY_APP=/Applications/Apassy.app "),
         "{defaults}"
     );
+    // The launcher passes the owner home for the autostart denials.
+    assert!(defaults.contains(" -D APASSY_HOME="), "{defaults}");
     assert!(
         defaults.contains(&format!(
             " -D APASSY_APP_BUILD={} ",
