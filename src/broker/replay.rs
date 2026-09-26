@@ -345,8 +345,19 @@ fn prepare(vault: &mut Vault, setup: &ReplaySetup) -> VaultResult<Actors> {
     })
 }
 
+/// One request: the command, the directory, the purpose, and the user request. The same
+/// command with another purpose is another request, for example a purpose with an
+/// injection phrase (a rule flag) and a normal purpose.
 fn fingerprint(request: &ReplayRequest) -> (String, String) {
-    (request.command.join("\u{1f}"), request.cwd_rel.clone())
+    (
+        request.command.join("\u{1f}"),
+        format!(
+            "{}\u{1f}{}\u{1f}{}",
+            request.cwd_rel,
+            request.purpose.trim(),
+            request.user_request.trim()
+        ),
+    )
 }
 
 /// A short command line for the report. Long tokens are masked, so a printed sample

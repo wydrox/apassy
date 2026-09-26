@@ -357,6 +357,12 @@ fn fixture_replay_with_model() {
     let mut after = new_vault(&dir, "after.db");
     let learned = replay(&mut after, &setup(true, WINDOW), &requests, &mut model).expect("learn");
     print("fixtures + model, learning", &learned);
+    // Synthetic cases: the requests with the `risk` label that the rules and the model
+    // let run without the owner.
+    let mut missed = learned.unwanted_allowed.clone();
+    missed.sort();
+    missed.dedup();
+    eprintln!("fixtures + model: risk label allowed without the owner: {missed:#?}");
     assert_no_denial_became_an_allowance(&learned);
     let proposal = calibration::propose(&after.decision_log().expect("log"), Thresholds::default());
     print_proposal("fixtures + model", &proposal);
@@ -379,9 +385,16 @@ fn real_commands_replay() {
         .ok()
         .and_then(|text| text.parse().ok())
         .unwrap_or(500);
+    // The first `APASSY_REPLAY_LIMIT` requests, in time order. A model replay of all
+    // requests takes hours.
+    let limit = std::env::var("APASSY_REPLAY_LIMIT")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(usize::MAX);
     let env_names = vec!["SUPABASE_SERVICE_KEY".to_owned()];
     let requests: Vec<ReplayRequest> = rows
         .iter()
+        .take(limit)
         .map(|row| {
             let line = row["cmd"].as_str().unwrap_or_default();
             let command = command_line_to_argv(line);
