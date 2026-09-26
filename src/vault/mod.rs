@@ -11,6 +11,7 @@
 //! arbitrary SQLite clients.
 
 mod agents;
+mod learning;
 mod types;
 
 use std::fs::{self, File, OpenOptions};
@@ -28,6 +29,12 @@ pub use agents::{
     DEFAULT_TOKEN_LIFETIME_DAYS, Declaration, Destination, EnvBinding, Environment, ExecGrant,
     ExecMode, ExecRule, GrantSummary, MAX_ACTIVITY_ROWS, MAX_TOKEN_LIFETIME_DAYS, NewActivity,
     Reversibility, RiskLevel, Scope, checked_env_name, format_utc,
+};
+pub use learning::{
+    CALIBRATION_CEILING, CALIBRATION_FLOOR, CalibrationRecord, CandidateAgreement, DayRate,
+    DecidedBy, DecisionEntry, DecisionRecord, LoggedDecision, MAX_BLOCKED_PATTERNS,
+    MAX_DECISION_ROWS, MAX_KEPT_DENIALS, MAX_PATTERNS, PATTERN_APPROVALS_NEEDED, PATTERN_IDLE_DAYS,
+    PatternKey, PatternRecord, PatternState, RequestSource,
 };
 pub use types::{
     Field, FieldSummary, ItemDetails, ItemDraft, ItemSummary, MAX_PASSPHRASE_BYTES,
@@ -85,6 +92,7 @@ const AGENT_SCHEMA_VERSION: i64 = 2;
 const PROCESS_SCHEMA_VERSION: i64 = 3;
 const RULE_SCHEMA_VERSION: i64 = 4;
 const DECLARATION_SCHEMA_VERSION: i64 = 5;
+const TOKEN_SCHEMA_VERSION: i64 = 6;
 
 /// Encrypted local vault. Connection state is private. Debug is redacted.
 pub struct Vault {
@@ -773,6 +781,7 @@ fn verify_user_version(conn: &Connection) -> VaultResult<i64> {
         | PROCESS_SCHEMA_VERSION
         | RULE_SCHEMA_VERSION
         | DECLARATION_SCHEMA_VERSION
+        | TOKEN_SCHEMA_VERSION
         | SCHEMA_VERSION) => Ok(version),
         _ => Err(err(VaultErrorKind::UnsupportedSchema)),
     }
@@ -850,12 +859,25 @@ fn verify_expected_columns(conn: &Connection, version: i64) -> VaultResult<()> {
     } else {
         &[]
     };
-    let v6: &[&str] = if version >= SCHEMA_VERSION {
+    let v6: &[&str] = if version >= TOKEN_SCHEMA_VERSION {
         &agents::SCHEMA_V6_COLUMNS
     } else {
         &[]
     };
-    for sql in v1.iter().chain(v2).chain(v3).chain(v4).chain(v5).chain(v6) {
+    let v7: &[&str] = if version >= SCHEMA_VERSION {
+        &learning::SCHEMA_V7_COLUMNS
+    } else {
+        &[]
+    };
+    for sql in v1
+        .iter()
+        .chain(v2)
+        .chain(v3)
+        .chain(v4)
+        .chain(v5)
+        .chain(v6)
+        .chain(v7)
+    {
         drop(
             conn.prepare(sql)
                 .map_err(|_| err(VaultErrorKind::UnsupportedSchema))?,
@@ -895,7 +917,11 @@ fn migrate_to_current(conn: &mut Connection, from: i64) -> VaultResult<()> {
         tx.execute_batch(agents::SCHEMA_V5_SQL)
             .map_err(|_| err(VaultErrorKind::Storage))?;
     }
-    tx.execute_batch(agents::SCHEMA_V6_SQL)
+    if from < TOKEN_SCHEMA_VERSION {
+        tx.execute_batch(agents::SCHEMA_V6_SQL)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+    }
+    tx.execute_batch(learning::SCHEMA_V7_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     verify_expected_columns(conn, SCHEMA_VERSION)
@@ -928,6 +954,8 @@ fn initialize_new_db(path: &Path, passphrase: &str) -> VaultResult<()> {
     tx.execute_batch(agents::SCHEMA_V5_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.execute_batch(agents::SCHEMA_V6_SQL)
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute_batch(learning::SCHEMA_V7_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     close_conn(conn)

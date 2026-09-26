@@ -1,23 +1,25 @@
 #![cfg(feature = "vault")]
 
-//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 5) to the
+//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 6) to the
 //! current version, with data at each version. Synthetic values only.
 //!
 //! The schema SQL below is a frozen copy of the statements that each earlier version ran
-//! at create: version 1 in commit a2f860a, 2 in 4ffdb5e, 3 in 22d1784, 4 in 2eb8366, and
-//! 5 in 9ce2e01. Do not change these copies when the current schema changes.
+//! at create: version 1 in commit a2f860a, 2 in 4ffdb5e, 3 in 22d1784, 4 in 2eb8366,
+//! 5 in 9ce2e01, and 6 in 4193991. Do not change these copies when the current schema
+//! changes.
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use apassy::contracts::CredentialKind;
 use apassy::vault::{
-    Environment, ExecMode, ExecRule, Reversibility, RiskLevel, Scope, Vault, VaultErrorKind,
+    DecidedBy, DecisionEntry, Environment, ExecMode, ExecRule, LoggedDecision, PatternKey,
+    PatternState, RequestSource, Reversibility, RiskLevel, Scope, Vault, VaultErrorKind,
 };
 use tempfile::TempDir;
 
 const PASS: &str = "synthetic-migration-passphrase";
-const CURRENT_VERSION: i64 = 6;
+const CURRENT_VERSION: i64 = 7;
 
 const V1_SQL: &str = "
 CREATE TABLE vault_meta (
@@ -128,6 +130,18 @@ UPDATE vault_meta SET schema_version = 5 WHERE id = 1;
 PRAGMA user_version = 5;
 ";
 
+const V6_SQL: &str = "
+ALTER TABLE agent ADD COLUMN token_issued_at INTEGER NOT NULL DEFAULT 0;
+UPDATE agent SET token_issued_at = created_at;
+ALTER TABLE vault_meta ADD COLUMN token_lifetime_days INTEGER NOT NULL DEFAULT 30;
+CREATE TABLE restore_review (
+    item_id INTEGER PRIMARY KEY,
+    restored_at INTEGER NOT NULL
+);
+UPDATE vault_meta SET schema_version = 6 WHERE id = 1;
+PRAGMA user_version = 6;
+";
+
 /// Five items, one of each kind: (title, kind, notes, tags, fields as (name, value, secret)).
 type ItemRow = (
     &'static str,
@@ -221,7 +235,7 @@ fn build_legacy(path: &Path, version: i64) {
         .expect("journal mode");
     assert_eq!(journal, "delete");
     let tx = conn.transaction().expect("transaction");
-    let steps = [V1_SQL, V2_SQL, V3_SQL, V4_SQL, V5_SQL];
+    let steps = [V1_SQL, V2_SQL, V3_SQL, V4_SQL, V5_SQL, V6_SQL];
     for sql in &steps[..usize::try_from(version).expect("version")] {
         tx.execute_batch(sql).expect("legacy schema");
     }
@@ -336,6 +350,24 @@ fn build_legacy(path: &Path, version: i64) {
         )
         .expect("declaration");
     }
+    if version >= 6 {
+        // Version 6 registration sets the issue time. The owner rotated the old token an
+        // hour ago, changed the token lifetime, and did not review item 2 after a restore.
+        tx.execute("UPDATE agent SET token_issued_at = created_at", [])
+            .expect("issue time");
+        tx.execute(
+            "UPDATE agent SET token_issued_at = ?1 WHERE name = 'MIG old agent'",
+            [now - 3600],
+        )
+        .expect("rotation");
+        tx.execute("UPDATE vault_meta SET token_lifetime_days = 45", [])
+            .expect("lifetime");
+        tx.execute(
+            "INSERT INTO restore_review (item_id, restored_at) VALUES (2, ?1)",
+            [now - 120],
+        )
+        .expect("review");
+    }
     tx.commit().expect("commit");
     conn.close().map_err(|(_, err)| err).expect("close");
 }
@@ -404,11 +436,21 @@ fn assert_items(vault: &Vault) {
 
 fn assert_version_data(vault: &mut Vault, version: i64) {
     assert_items(vault);
-    assert_eq!(vault.token_lifetime_days().expect("lifetime"), 30);
-    assert!(
-        vault.items_needing_review().expect("review").is_empty(),
-        "a migration is not a restore"
+    let lifetime: u64 = if version >= 6 { 45 } else { 30 };
+    assert_eq!(
+        u64::from(vault.token_lifetime_days().expect("lifetime")),
+        lifetime
     );
+    let review = vault.items_needing_review().expect("review");
+    if version >= 6 {
+        assert_eq!(review, vec![2], "a review that waits stays");
+    } else {
+        assert!(review.is_empty(), "a migration is not a restore");
+    }
+    // The learning tables of version 7 start empty. The default level is active.
+    assert!(vault.decision_log().expect("log").is_empty());
+    assert!(vault.patterns().expect("patterns").is_empty());
+    assert!(vault.calibration().expect("calibration").is_none());
     if version < 2 {
         assert!(vault.list_agents().expect("agents").is_empty());
         return;
@@ -419,21 +461,34 @@ fn assert_version_data(vault: &mut Vault, version: i64) {
     assert!(!agents[0].revoked);
     assert!(agents[2].revoked);
     for agent in &agents {
-        assert_eq!(agent.token_issued_at, agent.created_at);
-        assert_eq!(agent.token_expires_at, agent.created_at + 30 * 86_400);
+        let rotated = version >= 6 && agent.name == "MIG old agent";
+        if !rotated {
+            assert_eq!(agent.token_issued_at, agent.created_at);
+        }
+        assert_eq!(
+            agent.token_expires_at,
+            agent.token_issued_at + lifetime * 86_400
+        );
     }
     let active = vault
         .authenticate_agent(&token_text(&ACTIVE_TOKEN))
         .expect("the active token works after the migration");
     assert_eq!(active.id, agents[0].id);
-    // The registration time is the issue time. A token older than 30 days expires.
-    assert_eq!(
+    if version >= 6 {
+        // The owner rotated the old token under version 6. It works.
         vault
             .authenticate_agent(&token_text(&OLD_TOKEN))
-            .unwrap_err()
-            .kind(),
-        VaultErrorKind::Expired
-    );
+            .expect("the rotated token works after the migration");
+    } else {
+        // The registration time is the issue time. A token older than 30 days expires.
+        assert_eq!(
+            vault
+                .authenticate_agent(&token_text(&OLD_TOKEN))
+                .unwrap_err()
+                .kind(),
+            VaultErrorKind::Expired
+        );
+    }
     assert_eq!(
         vault
             .authenticate_agent(&token_text(&REVOKED_TOKEN))
@@ -514,6 +569,14 @@ fn unlock_migrates_each_earlier_schema_version_to_the_current_one() {
                 .id,
             agent.id
         );
+        // The decision log and remembered patterns of version 7 work on the migrated file.
+        vault
+            .record_decision(&migrated_decision(agent.id))
+            .expect("decision");
+        let key = migrated_pattern(agent.id);
+        vault
+            .remember_approval(&key, "npm test", u64::try_from(now()).expect("now"))
+            .expect("pattern");
         drop(vault);
         assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
 
@@ -522,7 +585,95 @@ fn unlock_migrates_each_earlier_schema_version_to_the_current_one() {
         again.unlock(PASS).expect("unlock");
         assert_items(&again);
         assert_eq!(again.token_lifetime_days().expect("lifetime"), 60);
+        let log = again.decision_log().expect("log");
+        assert_eq!(log.len(), 1);
+        assert_eq!(
+            log[0].entry.user_request, "Use [apassy:secret].",
+            "the secret value of item 1 is masked"
+        );
+        let pattern = again.pattern(&key).expect("read").expect("pattern");
+        assert_eq!(
+            pattern.state(u64::try_from(now()).expect("now")),
+            PatternState::Learning { approvals: 1 }
+        );
     }
+}
+
+fn migrated_decision(agent_id: u64) -> DecisionEntry {
+    DecisionEntry {
+        at: u64::try_from(now()).expect("now"),
+        agent_id,
+        agent_name: "MIG new agent".to_owned(),
+        project_dir: "/tmp/mig-project".to_owned(),
+        cwd_rel: ".".to_owned(),
+        items: vec![1],
+        user_request: "Use MIG-SECRET-api-token.".to_owned(),
+        user_request_source: RequestSource::Agent,
+        command: vec!["npm".to_owned(), "test".to_owned()],
+        purpose: "Test.".to_owned(),
+        env_names: vec!["MIG_API_KEY".to_owned()],
+        declarations: vec![None],
+        rule_flags: Vec::new(),
+        known_safe: true,
+        model_facts: Vec::new(),
+        pattern: "npm test".to_owned(),
+        grant_asks: false,
+        asked: true,
+        decision: LoggedDecision::Allow,
+        decided_by: DecidedBy::Owner,
+        remembered: true,
+        policy: "apassy-bouncer-v4".to_owned(),
+        note: String::new(),
+    }
+}
+
+fn migrated_pattern(agent_id: u64) -> PatternKey {
+    PatternKey {
+        agent_id,
+        project_dir: "/tmp/mig-project".to_owned(),
+        items: vec![1],
+        policy: "1=none|".to_owned(),
+        cwd_rel: ".".to_owned(),
+        template: "[{\"Lit\":\"npm\"},{\"Lit\":\"test\"}]".to_owned(),
+    }
+}
+
+/// The step from version 6 to 7 also runs in one transaction.
+#[test]
+fn a_failed_migration_from_version_6_keeps_the_old_version_and_data() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("blocked6.db");
+    build_legacy(&path, 6);
+    {
+        // A table with the name of a version 7 table makes the migration fail.
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        conn.execute_batch("CREATE TABLE calibration (x INTEGER);")
+            .expect("blocking table");
+        conn.close().map_err(|(_, err)| err).expect("close");
+    }
+    let mut vault = Vault::open(&path).expect("open");
+    assert_eq!(
+        vault.unlock(PASS).unwrap_err().kind(),
+        VaultErrorKind::Storage
+    );
+    drop(vault);
+    assert_eq!(raw_versions(&path), (6, 6), "no partial migration");
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        let log_table = conn.prepare("SELECT id FROM decision_log LIMIT 0");
+        assert!(log_table.is_err(), "no table of version 7");
+        drop(log_table);
+        conn.execute_batch("DROP TABLE calibration;")
+            .expect("drop blocking table");
+        conn.close().map_err(|(_, err)| err).expect("close");
+    }
+    let mut vault = Vault::open(&path).expect("open");
+    vault.unlock(PASS).expect("unlock migrates");
+    assert_version_data(&mut vault, 6);
+    drop(vault);
+    assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
 }
 
 /// The migration runs in one transaction. A failure leaves the file at its old version.
