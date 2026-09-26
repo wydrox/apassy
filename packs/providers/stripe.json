@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "provider_version": 1,
+  "id": "stripe",
+  "kind": "provider",
+  "label": "Stripe",
+  "description": "Stripe API keys: live and test mode secret keys, restricted keys, and publishable keys.",
+  "known_hosts": ["api.stripe.com", "files.stripe.com", "connect.stripe.com", "uploads.stripe.com"],
+  "signals": [
+    {
+      "id": "live-secret-key",
+      "when": { "value_starts": ["sk_live_"] },
+      "suggest": { "environment": "production", "risk": "high", "scope": "admin", "reversibility": "irreversible" },
+      "reason": "A live secret key (sk_live_) acts on real payments with full access. A charge, a refund, or a payout cannot be undone."
+    },
+    {
+      "id": "live-restricted-key",
+      "when": { "value_starts": ["rk_live_"] },
+      "suggest": { "environment": "production", "risk": "high", "reversibility": "irreversible" },
+      "reason": "A live restricted key (rk_live_) acts on real payments. Its permissions come from the Stripe dashboard, so Apassy does not suggest the scope."
+    },
+    {
+      "id": "test-secret-key",
+      "when": { "value_starts": ["sk_test_"] },
+      "suggest": { "environment": "staging", "risk": "low", "scope": "admin", "reversibility": "reversible" },
+      "reason": "A test mode secret key (sk_test_) reaches test data only. It moves no real money."
+    },
+    {
+      "id": "test-restricted-key",
+      "when": { "value_starts": ["rk_test_"] },
+      "suggest": { "environment": "staging", "risk": "low", "reversibility": "reversible" },
+      "reason": "A test mode restricted key (rk_test_) reaches test data only. Its permissions come from the Stripe dashboard."
+    },
+    {
+      "id": "live-publishable-key",
+      "when": { "value_starts": ["pk_live_"] },
+      "suggest": { "environment": "production", "risk": "low", "scope": "read-only", "reversibility": "reversible" },
+      "reason": "A publishable key (pk_live_) is public in the browser. It can only collect payment details for a token."
+    },
+    {
+      "id": "test-publishable-key",
+      "when": { "value_starts": ["pk_test_"] },
+      "suggest": { "environment": "staging", "risk": "low", "scope": "read-only", "reversibility": "reversible" },
+      "reason": "A test mode publishable key (pk_test_) is public and reaches test data only."
+    },
+    {
+      "id": "variable-name",
+      "when": { "env_name_contains": ["stripe"] },
+      "reason": "The variable name names Stripe."
+    },
+    {
+      "id": "name",
+      "when": { "words": ["stripe"] },
+      "reason": "The item name or a label names Stripe."
+    },
+    {
+      "id": "host",
+      "when": { "hosts": ["stripe.com"] },
+      "reason": "A host of the item is a Stripe host."
+    }
+  ]
+}

@@ -89,15 +89,12 @@ const ASK_BEFORE_PUSH: &str = r#"{
 fn every_built_in_pack_file_loads() {
     let set = builtin();
     assert!(set.load_error().is_none());
+    // `packs/providers/` holds the provider data of goal item B4, not rule packs.
     let mut files: Vec<String> = std::fs::read_dir(root().join("packs"))
         .expect("packs directory")
-        .map(|entry| {
-            entry
-                .expect("entry")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
+        .map(|entry| entry.expect("entry"))
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect();
     files.sort();
     let mut embedded: Vec<String> = packs::builtin_pack_files()

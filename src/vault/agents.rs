@@ -1237,6 +1237,7 @@ pub(super) fn delete_item_links(tx: &rusqlite::Transaction<'_>, item_id: i64) ->
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.execute("DELETE FROM restore_review WHERE item_id = ?1", [item_id])
         .map_err(|_| err(VaultErrorKind::Storage))?;
+    super::suggestions::forget_item(tx, item_id)?;
     super::learning::forget_item(tx, item_id)
 }
 
@@ -1268,7 +1269,7 @@ fn require_item(tx: &rusqlite::Transaction<'_>, item: i64) -> VaultResult<()> {
         .ok_or_else(|| err(VaultErrorKind::NotFound))
 }
 
-fn checked_text(text: &str, max: usize) -> VaultResult<&str> {
+pub(super) fn checked_text(text: &str, max: usize) -> VaultResult<&str> {
     if text.is_empty() || text.len() > max || text.chars().any(char::is_control) {
         Err(err(VaultErrorKind::InvalidInput))
     } else {

@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "provider_version": 1,
+  "id": "github",
+  "kind": "provider",
+  "label": "GitHub",
+  "description": "GitHub tokens: classic and fine-grained personal access tokens, OAuth, app, and refresh tokens.",
+  "known_hosts": ["api.github.com", "github.com", "uploads.github.com"],
+  "signals": [
+    {
+      "id": "classic-token",
+      "when": { "value_shape": { "starts": ["ghp_"], "min_len": 36, "max_len": 36, "chars": "alnum" } },
+      "suggest": { "risk": "high" },
+      "reason": "A classic personal access token (ghp_) acts on every repository that the account can reach, with the scopes of the token."
+    },
+    {
+      "id": "fine-grained-token",
+      "when": { "value_starts": ["github_pat_"] },
+      "reason": "A fine-grained token (github_pat_) acts only on the repositories and permissions that the owner selected."
+    },
+    {
+      "id": "oauth-token",
+      "when": { "value_shape": { "starts": ["gho_"], "min_len": 36, "max_len": 36, "chars": "alnum" } },
+      "suggest": { "risk": "high" },
+      "reason": "An OAuth token (gho_) acts for the user on every repository that the user can reach, with the scopes of the app."
+    },
+    {
+      "id": "user-to-server-token",
+      "when": { "value_shape": { "starts": ["ghu_"], "min_len": 36, "max_len": 36, "chars": "alnum" } },
+      "reason": "A user-to-server token (ghu_) acts for a user with the permissions of a GitHub App."
+    },
+    {
+      "id": "installation-token",
+      "when": { "value_shape": { "starts": ["ghs_"], "min_len": 36, "max_len": 36, "chars": "alnum" } },
+      "suggest": { "risk": "medium" },
+      "reason": "An installation token (ghs_) expires after one hour. It has the permissions of the app installation."
+    },
+    {
+      "id": "refresh-token",
+      "when": { "value_shape": { "starts": ["ghr_"], "min_len": 36, "max_len": 76, "chars": "alnum" } },
+      "reason": "A refresh token (ghr_) gets new user-to-server tokens for a GitHub App."
+    },
+    {
+      "id": "cli-variable",
+      "when": { "env_names": ["gh_token", "gh_enterprise_token"] },
+      "reason": "The variable name is the GitHub CLI token variable."
+    },
+    {
+      "id": "variable-name",
+      "when": { "env_name_contains": ["github"] },
+      "reason": "The variable name names GitHub."
+    },
+    {
+      "id": "name",
+      "when": { "words": ["github"] },
+      "reason": "The item name or a label names GitHub."
+    },
+    {
+      "id": "host",
+      "when": { "hosts": ["github.com"] },
+      "reason": "A host of the item is a GitHub host."
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "provider_version": 1,
+  "id": "planetscale",
+  "kind": "provider",
+  "label": "PlanetScale",
+  "description": "PlanetScale service tokens, OAuth tokens, database passwords, and connection hosts.",
+  "known_hosts": ["api.planetscale.com", "psdb.cloud"],
+  "signals": [
+    {
+      "id": "service-token",
+      "when": { "value_starts": ["pscale_tkn_"] },
+      "reason": "A service token (pscale_tkn_) calls the PlanetScale API with the permissions that the owner gave it."
+    },
+    {
+      "id": "oauth-token",
+      "when": { "value_starts": ["pscale_oauth_"] },
+      "reason": "An OAuth token (pscale_oauth_) calls the PlanetScale API for a user."
+    },
+    {
+      "id": "password",
+      "when": { "value_contains": ["pscale_pw_"] },
+      "reason": "A database password (pscale_pw_) connects to one branch with the role of the password."
+    },
+    {
+      "id": "variable-name",
+      "when": { "env_name_contains": ["planetscale", "pscale"] },
+      "reason": "The variable name names PlanetScale."
+    },
+    {
+      "id": "name",
+      "when": { "words": ["planetscale"] },
+      "reason": "The item name or a label names PlanetScale."
+    },
+    {
+      "id": "host",
+      "when": { "hosts": ["psdb.cloud", "planetscale.com"] },
+      "reason": "A host of the item is a PlanetScale host."
+    }
+  ]
+}

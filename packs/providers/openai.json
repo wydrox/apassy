@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "provider_version": 1,
+  "id": "openai",
+  "kind": "provider",
+  "label": "OpenAI",
+  "description": "OpenAI API keys: project keys, service account keys, and admin keys.",
+  "known_hosts": ["api.openai.com"],
+  "signals": [
+    {
+      "id": "admin-key",
+      "when": { "value_starts": ["sk-admin-"] },
+      "suggest": { "risk": "high", "scope": "admin", "reversibility": "irreversible" },
+      "reason": "An admin key (sk-admin-) manages the users, projects, and keys of the organization."
+    },
+    {
+      "id": "project-key",
+      "when": { "value_starts": ["sk-proj-", "sk-svcacct-"] },
+      "suggest": { "risk": "medium", "scope": "read-write", "reversibility": "partial" },
+      "reason": "A project key (sk-proj-, sk-svcacct-) calls the models and changes the files of one project. Each call costs money."
+    },
+    {
+      "id": "variable-name",
+      "when": { "env_name_contains": ["openai"] },
+      "reason": "The variable name names OpenAI."
+    },
+    {
+      "id": "name",
+      "when": { "words": ["openai"] },
+      "reason": "The item name or a label names OpenAI."
+    },
+    {
+      "id": "host",
+      "when": { "hosts": ["openai.com"] },
+      "reason": "A host of the item is an OpenAI host."
+    }
+  ]
+}

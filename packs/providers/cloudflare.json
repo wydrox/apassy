@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "provider_version": 1,
+  "id": "cloudflare",
+  "kind": "provider",
+  "label": "Cloudflare",
+  "description": "Cloudflare API tokens and the global API key, for the API and Wrangler.",
+  "known_hosts": ["api.cloudflare.com"],
+  "signals": [
+    {
+      "id": "global-api-key",
+      "when": { "env_names": ["cloudflare_api_key", "cf_api_key"] },
+      "suggest": { "risk": "high", "scope": "admin", "reversibility": "irreversible" },
+      "reason": "The global API key acts on the whole account, with R2, D1, and KV data. A deleted bucket or database cannot be restored."
+    },
+    {
+      "id": "api-token",
+      "when": { "env_names": ["cloudflare_api_token", "cf_api_token"] },
+      "reason": "A Cloudflare API token has the permissions that the owner selected, so Apassy does not suggest the scope."
+    },
+    {
+      "id": "variable-name",
+      "when": { "env_name_contains": ["cloudflare"] },
+      "reason": "The variable name names Cloudflare."
+    },
+    {
+      "id": "name",
+      "when": { "words": ["cloudflare", "wrangler"] },
+      "reason": "The item name or a label names Cloudflare or Wrangler."
+    },
+    {
+      "id": "host",
+      "when": { "hosts": ["cloudflare.com"] },
+      "reason": "A host of the item is a Cloudflare host."
+    }
+  ]
+}

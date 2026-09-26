@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "provider_version": 1,
+  "id": "resend",
+  "kind": "provider",
+  "label": "Resend",
+  "description": "Resend API keys (re_) for email.",
+  "known_hosts": ["api.resend.com"],
+  "signals": [
+    {
+      "id": "api-key",
+      "when": { "value_shape": { "starts": ["re_"], "min_len": 20, "max_len": 64, "chars": "token" } },
+      "suggest": { "risk": "high", "reversibility": "irreversible" },
+      "reason": "A Resend API key (re_) sends real email. A sent email cannot be recalled."
+    },
+    {
+      "id": "variable-name",
+      "when": { "env_name_contains": ["resend"] },
+      "suggest": { "reversibility": "irreversible" },
+      "reason": "The variable name names Resend. A sent email cannot be recalled."
+    },
+    {
+      "id": "name",
+      "when": { "words": ["resend"] },
+      "reason": "The item name or a label names Resend."
+    },
+    {
+      "id": "host",
+      "when": { "hosts": ["resend.com"] },
+      "reason": "A host of the item is a Resend host."
+    }
+  ]
+}
