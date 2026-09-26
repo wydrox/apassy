@@ -221,7 +221,7 @@ impl LoggedRequest<'_> {
             }
         };
         let model_facts = match self.verdict {
-            BouncerVerdict::Scored { facts } => facts
+            BouncerVerdict::Scored { facts, .. } => facts
                 .iter()
                 .map(|fact| (fact.name.clone(), fact.probability))
                 .collect(),

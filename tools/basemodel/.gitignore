@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+# Generated data and checkpoints. Never commit a checkpoint.
+data/
+*.safetensors
+*.safetensors.tmp
+*.report.json

@@ -35,8 +35,13 @@
 #   APASSY_REQUIRE_KEYCHAIN  set to 1 to fail when no valid profile is found.
 #   APASSY_KEYCHAIN_BUNDLE_ID  bundle ID and App ID suffix of the keychain
 #                            helper. Default: com.wydrox.apassy.keychain.
+#   APASSY_BASE_MODEL        path to the base-model checkpoint
+#                            (apassy-base-v1.safetensors, goal B8). The script
+#                            checks it against tools/basemodel/manifest.json
+#                            and copies it with the manifest to
+#                            Contents/Resources/models/. Default: no model.
 #
-# See docs/operations/native-app.md.
+# See docs/operations/native-app.md and docs/operations/base-model.md.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -54,7 +59,7 @@ PROVISION=0
 for arg in "$@"; do
   case "$arg" in
     --provision) PROVISION=1 ;;
-    -h|--help) sed -n '2,39p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,44p' "$0"; exit 0 ;;
     *) echo "build-app: unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -247,6 +252,36 @@ printf 'APPL????' >"$KC_APP/Contents/PkgInfo"
 cp target/release/apassy target/release/apassy-mcp "$APP/Contents/MacOS/"
 cp "$NATIVE_OUT/apassy-helper" "$APP/Contents/MacOS/apassy-helper"
 cp "$NATIVE_OUT/apassy-helper" "$KC_APP/Contents/MacOS/$KEYCHAIN_EXE"
+
+# Goal B8: the base-model checkpoint goes into the bundle before the signature,
+# so the signature seals it. The copy must match tools/basemodel/manifest.json.
+MODEL_MODE="none"
+if [ -n "${APASSY_BASE_MODEL:-}" ]; then
+  step "Copy the base-model checkpoint"
+  MANIFEST="$ROOT/tools/basemodel/manifest.json"
+  [ -f "$APASSY_BASE_MODEL" ] || fail "APASSY_BASE_MODEL does not exist: $APASSY_BASE_MODEL"
+  [ -f "$MANIFEST" ] || fail "missing $MANIFEST"
+  command -v shasum >/dev/null 2>&1 || fail "missing tool: shasum"
+  manifest_get() { plutil -extract "$1" raw -o - "$MANIFEST" 2>/dev/null || fail "manifest has no $1"; }
+  MODEL_FILE="$(manifest_get checkpoint.file)"
+  MODEL_SHA="$(manifest_get checkpoint.sha256)"
+  MODEL_SIZE="$(manifest_get checkpoint.size_bytes)"
+  MODEL_VERSION="$(manifest_get version)"
+  [[ "$MODEL_FILE" =~ ^[A-Za-z0-9._-]+\.safetensors$ ]] || fail "invalid checkpoint.file in the manifest: $MODEL_FILE"
+  [[ "$MODEL_SHA" =~ ^[0-9a-f]{64}$ ]] || fail "invalid checkpoint.sha256 in the manifest"
+  GOT_SIZE="$(stat -f %z "$APASSY_BASE_MODEL")"
+  [ "$GOT_SIZE" = "$MODEL_SIZE" ] || fail "checkpoint size $GOT_SIZE does not match the manifest ($MODEL_SIZE)"
+  GOT_SHA="$(shasum -a 256 "$APASSY_BASE_MODEL" | awk '{print $1}')"
+  [ "$GOT_SHA" = "$MODEL_SHA" ] || fail "checkpoint SHA-256 $GOT_SHA does not match the manifest ($MODEL_SHA)"
+  [ "$MODEL_VERSION" = "apassy-base-v1+${MODEL_SHA:0:8}" ] || fail "manifest version $MODEL_VERSION does not match the SHA-256"
+  mkdir -p "$APP/Contents/Resources/models"
+  cp "$APASSY_BASE_MODEL" "$APP/Contents/Resources/models/$MODEL_FILE"
+  cp "$MANIFEST" "$APP/Contents/Resources/models/manifest.json"
+  COPY_SHA="$(shasum -a 256 "$APP/Contents/Resources/models/$MODEL_FILE" | awk '{print $1}')"
+  [ "$COPY_SHA" = "$MODEL_SHA" ] || fail "the copied checkpoint does not match the manifest"
+  MODEL_MODE="$MODEL_VERSION"
+  echo "Base model: $MODEL_VERSION ($MODEL_SIZE bytes)"
+fi
 
 KC_ENTITLEMENTS="$ROOT/packaging/Apassy.entitlements"
 if [ "$KEYCHAIN_MODE" = "enabled" ]; then
@@ -443,6 +478,11 @@ step "Done"
 echo "App:      $OUT"
 echo "Version:  $VERSION"
 echo "Signed:   $SIGN_NAME"
+if [ "$MODEL_MODE" = "none" ]; then
+  echo "Model:    none (set APASSY_BASE_MODEL to ship the base model)"
+else
+  echo "Model:    $MODEL_MODE in Contents/Resources/models"
+fi
 if [ "$KEYCHAIN_MODE" = "enabled" ]; then
   echo "Keychain: enabled (team $TEAM_ID, group $TEAM_ID.$APP_ID)"
 else

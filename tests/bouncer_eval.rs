@@ -241,7 +241,7 @@ fn full_decision_report() {
         }
         if let Some(file) = out.as_mut() {
             let facts: Vec<serde_json::Value> = match &verdict {
-                BouncerVerdict::Scored { facts } => facts
+                BouncerVerdict::Scored { facts, .. } => facts
                     .iter()
                     .map(|f| serde_json::json!({"name": f.name, "p": f.probability}))
                     .collect(),
@@ -251,6 +251,7 @@ fn full_decision_report() {
                 "risky": case.risky, "category": case.category, "line": case.line,
                 "purpose": case.purpose, "split": format!("{:?}", case.split),
                 "flags": analysis.flags, "known_safe": analysis.known_safe, "facts": facts,
+                "model": verdict.model(),
                 "ask": decision.ask_owner, "confidence": decision.confidence, "note": decision.note,
             });
             writeln!(file, "{row}").expect("write");
@@ -388,8 +389,9 @@ fn real_decision_report() {
                 "cmd": line, "user_request": user_request, "flags": analysis.flags,
                 "known_safe": analysis.known_safe, "ask": decision.ask_owner,
                 "confidence": decision.confidence, "note": decision.note,
+                "model": verdict.model(),
                 "facts": match &verdict {
-                    BouncerVerdict::Scored { facts } => facts
+                    BouncerVerdict::Scored { facts, .. } => facts
                         .iter()
                         .map(|f| (f.name.clone(), serde_json::json!(f.probability)))
                         .collect::<serde_json::Map<String, serde_json::Value>>(),

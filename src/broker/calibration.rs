@@ -157,6 +157,7 @@ fn verdict_of(record: &DecisionRecord) -> BouncerVerdict {
                     probability: *probability,
                 })
                 .collect(),
+            model: None,
         }
     }
 }

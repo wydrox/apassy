@@ -22,6 +22,21 @@ LAYA_HOST=127.0.0.1 LAYA_PORT=8770 LAYA_MODELS=english .venv/bin/laya-serve
 
 If Laya does not answer in 3 seconds, the bouncer is unavailable. Then every run waits for the owner.
 
+### Start command with the base model (goal B8)
+
+Apassy ships a fine-tuned base model, `apassy-base-v1`. See [base-model.md](base-model.md). It is a small file with new decision heads for the same Laya checkpoint. Use the start script from the repository instead of `laya-serve`:
+
+```
+D="$HOME/Library/Application Support/Apassy/laya"
+uv pip install --python "$D/.venv/bin/python" -r tools/basemodel/requirements.txt
+LAYA_HOST=127.0.0.1 LAYA_PORT=8770 tools/basemodel/start.sh
+```
+
+- The script looks for the checkpoint in this order: `APASSY_BASE_MODEL`, `$D/models/apassy-base-v1.safetensors`, and `/Applications/Apassy.app/Contents/Resources/models/apassy-base-v1.safetensors`.
+- With a checkpoint, it starts `tools/basemodel/serve.py`. The server checks the checkpoint and the base weights against `manifest.json`. It stops with an error if a hash does not match. Each answer has the model version in the `model` field, for example `apassy-base-v1+1a2b3c4d`.
+- Without a checkpoint, it starts the stock `laya-serve` (zero-shot). Each answer then has `laya-rl-agent` in the `model` field.
+- The activity log shows the version after the model answers, for example `task_match 91%, writes 4%. Model: apassy-base-v1+1a2b3c4d`.
+
 ## 2. Set a rule
 
 In Agents, click "Manage grants" for an agent. In "Process access":
