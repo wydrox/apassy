@@ -1,5 +1,14 @@
 //! Drawing code for the desktop shell. Keep state changes in [`super::DesktopApp`].
 
+#[cfg(feature = "vault")]
+mod inbox_view;
+#[cfg(feature = "vault")]
+mod owner_check_view;
+#[cfg(all(test, feature = "vault"))]
+mod owner_tests;
+#[cfg(feature = "vault")]
+mod unlock_view;
+
 use eframe::egui::{
     self, Color32, ComboBox, CornerRadius, FontId, Frame, Margin, RichText, ScrollArea, Stroke,
     TextEdit, Theme, ThemePreference, Vec2,
@@ -10,7 +19,94 @@ use crate::desktop::model::{
     AMBIGUOUS_SAMPLE_TEXT, CONFLICTING_SAMPLE_TEXT, DEMO_BANNER, ExtraField, INTERPRETER_ID,
     SAMPLE_RULE_TEXT, UNSUPPORTED_SAMPLE_TEXT,
 };
+#[cfg(feature = "vault")]
+use crate::desktop::owner_check::OwnerRequest;
 use crate::desktop::{DesktopApp, OwnerView, StatusKind};
+
+/// Byte capacity of a passphrase field. A field holds at most `MAX_PASSPHRASE_BYTES`
+/// characters, and a character has at most 4 bytes, so typing never moves the text
+/// (key-memory review F4).
+#[cfg(feature = "vault")]
+pub(crate) const PASSPHRASE_CAPACITY: usize = 4 * crate::vault::MAX_PASSPHRASE_BYTES;
+/// Byte capacity of an item secret field, with the same rule. The vault takes at most
+/// 65536 bytes in a field value (`MAX_FIELD_VALUE_BYTES` in `src/vault/types.rs`).
+#[cfg(feature = "vault")]
+const SECRET_VALUE_CAPACITY: usize = 4 * 65_536;
+/// The passphrase field of the owner check.
+#[cfg(feature = "vault")]
+pub(crate) const OWNER_CHECK_FIELD: &str = "owner-check-passphrase";
+/// The passphrase field of the Touch ID setup.
+#[cfg(feature = "vault")]
+pub(crate) const TOUCH_ID_SETUP_FIELD: &str = "touch-id-setup-passphrase";
+/// Every passphrase field.
+#[cfg(feature = "vault")]
+const PASSPHRASE_FIELDS: [&str; 6] = [
+    "vault-passphrase",
+    "passphrase-current",
+    "passphrase-new",
+    "passphrase-repeat",
+    OWNER_CHECK_FIELD,
+    TOUCH_ID_SETUP_FIELD,
+];
+/// The item forms that have secret fields.
+#[cfg(feature = "vault")]
+const SECRET_FORMS: [&str; 2] = ["add", "edit"];
+/// The secret fields of an item form. They match [`super::owner_store::SecretForm::fields_mut`].
+#[cfg(feature = "vault")]
+const SECRET_FORM_FIELDS: [&str; 5] = ["token", "password", "private", "phrase", "custom"];
+
+/// A global widget ID for a secret field, so the app can clear its undo history from
+/// any place.
+#[cfg(feature = "vault")]
+fn secret_field_id(salt: &str) -> egui::Id {
+    egui::Id::new(("apassy-secret-field", salt))
+}
+
+/// Forget the undo history of one secret field (key-memory review F1). Without this,
+/// Cmd+Z in the field brings back the text after the app took it.
+#[cfg(feature = "vault")]
+pub(crate) fn forget_secret_field(ctx: &egui::Context, salt: &str) {
+    let id = secret_field_id(salt);
+    if let Some(mut state) = TextEdit::load_state(ctx, id) {
+        state.clear_undoer();
+        TextEdit::store_state(ctx, id, state);
+    }
+}
+
+/// Forget the undo history of each field in an item secret form.
+#[cfg(feature = "vault")]
+fn forget_secret_form(ctx: &egui::Context, form: &str) {
+    for field in SECRET_FORM_FIELDS {
+        forget_secret_field(ctx, &format!("{form}-{field}"));
+    }
+}
+
+/// Forget the undo history of every passphrase and secret field. The app calls this on
+/// lock.
+#[cfg(feature = "vault")]
+pub(crate) fn forget_all_secret_fields(ctx: &egui::Context) {
+    for salt in PASSPHRASE_FIELDS {
+        forget_secret_field(ctx, salt);
+    }
+    for form in SECRET_FORMS {
+        forget_secret_form(ctx, form);
+    }
+}
+
+/// Give `value` its full capacity before typing starts (key-memory review F4). A
+/// field with text moves once. The old buffer is erased.
+#[cfg(feature = "vault")]
+fn presize(value: &mut String, capacity: usize) {
+    use zeroize::Zeroize;
+
+    if value.capacity() >= capacity {
+        return;
+    }
+    let mut sized = String::with_capacity(capacity);
+    sized.push_str(value);
+    value.zeroize();
+    *value = sized;
+}
 
 pub(super) const INK: Color32 = Color32::from_rgb(28, 25, 20);
 pub(super) const INK_MUTED: Color32 = Color32::from_rgb(83, 77, 68);
@@ -55,6 +151,8 @@ pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
         spacing.button_padding = Vec2::new(12.0, 8.0);
         spacing.interact_size.y = 32.0;
     }
+    #[cfg(feature = "vault")]
+    app.poll_owner_flows(ui.ctx());
 
     egui::Panel::top("demo_banner")
         .resizable(false)
@@ -73,6 +171,9 @@ pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     egui::CentralPanel::default()
         .frame(content_frame())
         .show(ui, |ui| draw_content(app, ui));
+
+    #[cfg(feature = "vault")]
+    owner_check_view::draw(app, ui.ctx());
 }
 
 fn banner_frame() -> Frame {
@@ -301,19 +402,10 @@ fn draw_lock_controls(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let unlocked = app.owner_ui.session.has_file() && !app.owner_ui.session.is_locked();
     ui.add_enabled_ui(unlocked, |ui| {
         if accent_button(ui, "Lock vault").clicked() {
-            let result = app.owner_ui.session.lock();
-            if app
-                .apply(result, "The vault is locked. Item details are hidden.")
-                .is_some()
-            {
-                app.pending_delete = false;
-            }
-            // Typed passphrases do not stay in the form after a lock.
-            app.owner_ui.passphrase_current.clear();
-            app.owner_ui.passphrase_new.clear();
-            app.owner_ui.passphrase_repeat.clear();
-            // A locked vault refuses agent runs, so waiting runs end now.
-            app.end_waiting_runs();
+            // Waiting runs end and stay in the inbox. Typed passphrases, typed secrets,
+            // and their undo history do not stay after a lock.
+            let ctx = ui.ctx().clone();
+            app.lock_vault(Some(&ctx));
         }
     });
 }
@@ -576,7 +668,7 @@ fn draw_owner_vault(app: &mut DesktopApp, ui: &mut egui::Ui) {
         draw_owner_items(app, ui);
         ui.add_space(8.0);
         egui::CollapsingHeader::new(
-            RichText::new("Vault file, passphrase, and backup")
+            RichText::new("Vault file, passphrase, unlock method, and backup")
                 .strong()
                 .color(INK),
         )
@@ -586,6 +678,8 @@ fn draw_owner_vault(app: &mut DesktopApp, ui: &mut egui::Ui) {
             draw_vault_file_card(app, ui);
             ui.add_space(8.0);
             draw_passphrase_card(app, ui);
+            ui.add_space(8.0);
+            unlock_view::draw_unlock_method_card(app, ui);
             ui.add_space(8.0);
             draw_backup_card(app, ui);
         });
@@ -613,15 +707,23 @@ fn draw_vault_file_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
         ui.label(RichText::new(app.owner_ui.session.lock_label()).color(INK_MUTED));
         labeled_text(ui, "vault-create-path", "New file path", &mut app.owner_ui.create_path);
         labeled_text(ui, "vault-open-path", "Existing file path", &mut app.owner_ui.open_path);
-        password_line(ui, "vault-passphrase", "Passphrase", &mut app.owner_ui.passphrase);
+        password_line(
+            ui,
+            "vault-passphrase",
+            "Passphrase",
+            &mut app.owner_ui.passphrase,
+            PASSPHRASE_CAPACITY,
+        );
         ui.label(
-            RichText::new("The passphrase field is cleared after create, unlock, or restore. It is not written into the item list.")
+            RichText::new("The passphrase field and its undo history are erased after create, unlock, or restore. It is not written into the item list.")
                 .color(INK_MUTED),
         );
+        let ctx = ui.ctx().clone();
         ui.horizontal_wrapped(|ui| {
             if accent_button(ui, "Create vault file").clicked() {
                 let path = app.owner_ui.create_path.clone();
                 let passphrase = Ephemeral::take(&mut app.owner_ui.passphrase);
+                forget_secret_field(&ctx, "vault-passphrase");
                 let result = app
                     .owner_ui
                     .session
@@ -634,6 +736,7 @@ fn draw_vault_file_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     app.selected_item_id = None;
                     app.pending_delete = false;
                     app.end_waiting_runs();
+                    app.refresh_unlock_setting(Some(&ctx));
                 }
             }
             if ui.button("Open vault file").clicked() {
@@ -646,22 +749,34 @@ fn draw_vault_file_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     app.selected_item_id = None;
                     app.pending_delete = false;
                     app.end_waiting_runs();
+                    app.refresh_unlock_setting(Some(&ctx));
                 }
             }
             let can_unlock = app.owner_ui.session.has_file() && app.owner_ui.session.is_locked();
             ui.add_enabled_ui(can_unlock, |ui| {
                 if ui.button("Unlock vault").clicked() {
-                    let passphrase = Ephemeral::take(&mut app.owner_ui.passphrase);
-                    let result = app.owner_ui.session.unlock(passphrase.expose());
-                    drop(passphrase);
-                    let _ = app.apply(
-                        result,
-                        "The vault file is unlocked in this process. This is not an authenticated owner channel.",
-                    );
+                    unlock_with_passphrase(app, &ctx);
                 }
             });
         });
+        unlock_view::draw_touch_id_unlock(app, ui);
     });
+}
+
+/// Unlock with the typed passphrase. The field and its undo history are erased first
+/// (key-memory review F1, F3).
+#[cfg(feature = "vault")]
+pub(crate) fn unlock_with_passphrase(app: &mut DesktopApp, ctx: &egui::Context) {
+    use super::owner_store::Ephemeral;
+
+    let passphrase = Ephemeral::take(&mut app.owner_ui.passphrase);
+    forget_secret_field(ctx, "vault-passphrase");
+    let result = app.owner_ui.session.unlock(passphrase.expose());
+    drop(passphrase);
+    let _ = app.apply(
+        result,
+        "The vault file is unlocked in this process. Reveal, approvals, and changes to agent access need a new Touch ID or passphrase check.",
+    );
 }
 
 /// Change the master passphrase (goal item V5). The new passphrase is typed two times.
@@ -687,33 +802,46 @@ fn draw_passphrase_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
             "passphrase-current",
             "Current passphrase",
             &mut app.owner_ui.passphrase_current,
+            PASSPHRASE_CAPACITY,
         );
         password_line(
             ui,
             "passphrase-new",
             "New passphrase",
             &mut app.owner_ui.passphrase_new,
+            PASSPHRASE_CAPACITY,
         );
         password_line(
             ui,
             "passphrase-repeat",
             "Repeat the new passphrase",
             &mut app.owner_ui.passphrase_repeat,
+            PASSPHRASE_CAPACITY,
         );
         if accent_button(ui, "Change passphrase").clicked() {
+            let ctx = ui.ctx().clone();
             let current = Ephemeral::take(&mut app.owner_ui.passphrase_current);
             let new = Ephemeral::take(&mut app.owner_ui.passphrase_new);
             let repeat = Ephemeral::take(&mut app.owner_ui.passphrase_repeat);
+            for field in ["passphrase-current", "passphrase-new", "passphrase-repeat"] {
+                forget_secret_field(&ctx, field);
+            }
             let result = app.owner_ui.session.change_passphrase(
                 current.expose(),
                 new.expose(),
                 repeat.expose(),
             );
             drop((current, new, repeat));
-            let _ = app.apply(
-                result,
-                "The passphrase is changed. Unlock with the new passphrase from now on. Old backups still need the old passphrase.",
-            );
+            if app
+                .apply(
+                    result,
+                    "The passphrase is changed. Unlock with the new passphrase from now on. Old backups still need the old passphrase.",
+                )
+                .is_some()
+            {
+                // The Touch ID unlock key holds the old passphrase (goal item A3).
+                app.after_passphrase_change(&ctx);
+            }
             app.end_waiting_runs();
         }
     });
@@ -734,7 +862,7 @@ fn draw_backup_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
         );
         ui.label(
             RichText::new(
-                "Backup locks the open vault. Restore opens the restored file in the locked state.",
+                "Backup locks the open vault. Restore opens the restored file in the locked state. Restore needs the passphrase in the Vault file card. Touch ID unlock is off for a restored file until you turn it on.",
             )
             .color(INK_MUTED),
         );
@@ -770,9 +898,12 @@ fn draw_backup_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 app.end_waiting_runs();
             }
             if ui.button("Restore vault").clicked() {
+                // Restore needs the typed passphrase. Touch ID never supplies it (A2).
+                let ctx = ui.ctx().clone();
                 let source = app.owner_ui.restore_source.clone();
                 let dest = app.owner_ui.restore_dest.clone();
                 let passphrase = Ephemeral::take(&mut app.owner_ui.passphrase);
+                forget_secret_field(&ctx, "vault-passphrase");
                 let result = app.owner_ui.session.restore(
                     Path::new(&source),
                     Path::new(&dest),
@@ -786,6 +917,7 @@ fn draw_backup_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     app.selected_item_id = None;
                     app.pending_delete = false;
                     app.end_waiting_runs();
+                    app.refresh_unlock_setting(Some(&ctx));
                 }
             }
         });
@@ -879,10 +1011,11 @@ fn draw_owner_items(app: &mut DesktopApp, ui: &mut egui::Ui) {
         ui.add_enabled_ui(!app.owner_ui.session.is_locked(), |ui| {
             if accent_button(ui, "Add item").clicked() {
                 let draft = app.add_form.clone();
-                let secrets = app.owner_ui.add_secrets.clone();
-                match app.owner_ui.session.add(&draft, &secrets) {
+                // Borrow the form. A clone would be one more copy of each secret (F3).
+                match app.owner_ui.session.add(&draft, &app.owner_ui.add_secrets) {
                     Ok(item) => {
                         app.owner_ui.add_secrets.clear();
+                        forget_secret_form(ui.ctx(), "add");
                         app.add_form = Default::default();
                         app.set_ok(format!("The vault stored {}.", item.name));
                         app.select_item(item.id.to_string());
@@ -952,10 +1085,13 @@ fn draw_owner_item(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 ui.label(RichText::new("Stored secrets").color(INK_MUTED));
                 for line in &details.secret_lines {
                     ui.label(RichText::new(&line.name).color(INK_MUTED));
-                    let value = if line.revealed {
-                        RichText::new(&line.display).monospace().color(INK)
-                    } else {
-                        RichText::new(&line.display).monospace().color(INK_MUTED)
+                    // The view borrows the revealed value from the session. egui still
+                    // copies it for the layout (key-memory review F10, §5).
+                    let value = match app.owner_ui.session.revealed_value(id, &line.name) {
+                        Some(value) => RichText::new(value).monospace().color(INK),
+                        None => RichText::new(crate::desktop::MASKED_VALUE)
+                            .monospace()
+                            .color(INK_MUTED),
                     };
                     ui.label(value);
                 }
@@ -980,10 +1116,9 @@ fn draw_owner_item(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     let result = app.owner_ui.session.hide(id);
                     let _ = app.apply(result, "The values are hidden.");
                 } else {
-                    match app.owner_ui.session.reveal(id) {
-                        Ok(_) => app.set_ok(details.reveal_warning()),
-                        Err(err) => app.set_err(err.message),
-                    }
+                    // Reveal needs a fresh Touch ID or passphrase check (goal item A4).
+                    let ctx = ui.ctx().clone();
+                    app.ask_owner(OwnerRequest::Reveal { item_id: id }, Some(&ctx));
                 }
             }
         });
@@ -1022,19 +1157,23 @@ fn draw_owner_item(app: &mut DesktopApp, ui: &mut egui::Ui) {
         );
         if accent_button(ui, "Save item").clicked() {
             let draft = app.edit_form.clone();
-            let secrets = app.owner_ui.edit_secrets.clone();
             let revision = app.owner_ui.edit_revision;
             let unchanged = app
                 .owner_ui
                 .session
-                .is_unchanged(id, &draft, &secrets)
+                .is_unchanged(id, &draft, &app.owner_ui.edit_secrets)
                 .unwrap_or(false);
             if unchanged {
                 app.set_ok("There are no changes to save.");
             } else {
-                match app.owner_ui.session.update(id, revision, &draft, &secrets) {
+                match app
+                    .owner_ui
+                    .session
+                    .update(id, revision, &draft, &app.owner_ui.edit_secrets)
+                {
                     Ok(summary) => {
                         app.owner_ui.edit_secrets.clear();
+                        forget_secret_form(ui.ctx(), "edit");
                         app.owner_ui.edit_revision = summary.revision;
                         app.pending_delete = false;
                         app.set_ok("The item was updated.");
@@ -1087,9 +1226,16 @@ fn secret_inputs(
     kind: CredentialKind,
     secrets: &mut super::owner_store::SecretForm,
 ) {
+    let cap = SECRET_VALUE_CAPACITY;
     match kind {
         CredentialKind::ApiKey => {
-            password_line(ui, &format!("{salt}-token"), "Token", &mut secrets.token);
+            password_line(
+                ui,
+                &format!("{salt}-token"),
+                "Token",
+                &mut secrets.token,
+                cap,
+            );
         }
         CredentialKind::Login => {
             password_line(
@@ -1097,6 +1243,7 @@ fn secret_inputs(
                 &format!("{salt}-password"),
                 "Password",
                 &mut secrets.password,
+                cap,
             );
         }
         CredentialKind::SshKey => {
@@ -1105,12 +1252,14 @@ fn secret_inputs(
                 &format!("{salt}-private"),
                 "Private key",
                 &mut secrets.private_key,
+                cap,
             );
             password_line(
                 ui,
                 &format!("{salt}-phrase"),
                 "Key passphrase",
                 &mut secrets.key_passphrase,
+                cap,
             );
         }
         CredentialKind::Database => {
@@ -1119,6 +1268,7 @@ fn secret_inputs(
                 &format!("{salt}-password"),
                 "Password",
                 &mut secrets.password,
+                cap,
             );
         }
         CredentialKind::Custom => {
@@ -1127,21 +1277,34 @@ fn secret_inputs(
                 &format!("{salt}-custom"),
                 "Secret value",
                 &mut secrets.custom_value,
+                cap,
             );
         }
     }
 }
 
+/// A masked field for a passphrase or a secret. `capacity` is the byte capacity. The
+/// field takes at most `capacity / 4` characters, so the text never grows past the
+/// buffer (key-memory review F4). The widget ID is global ([`secret_field_id`]), so
+/// the app can clear the undo history (F1).
 #[cfg(feature = "vault")]
-fn password_line(ui: &mut egui::Ui, salt: &str, caption: &str, value: &mut String) {
+fn password_line(
+    ui: &mut egui::Ui,
+    salt: &str,
+    caption: &str,
+    value: &mut String,
+    capacity: usize,
+) -> egui::Response {
+    presize(value, capacity);
     let label = ui.label(caption);
     let edit = ui.add(
         TextEdit::singleline(value)
             .password(true)
-            .id_salt(salt)
+            .id(secret_field_id(salt))
+            .char_limit(capacity / 4)
             .desired_width(320.0),
     );
-    edit.labelled_by(label.id);
+    edit.labelled_by(label.id)
 }
 
 fn draw_rules(app: &mut DesktopApp, ui: &mut egui::Ui) {
@@ -1395,6 +1558,8 @@ fn draw_activity(app: &mut DesktopApp, ui: &mut egui::Ui) {
     ui.add_space(8.0);
     #[cfg(feature = "vault")]
     {
+        inbox_view::draw_inbox(app, ui);
+        ui.add_space(8.0);
         agents_view::draw_activity_card(app, ui);
         ui.add_space(8.0);
     }
@@ -1420,23 +1585,19 @@ fn draw_activity(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 Err(err) => app.set_err(err.message),
             }
         }
-        ui.label(RichText::new(app.model.notification_health().label).color(INK_MUTED));
-        ui.horizontal(|ui| {
-            if ui.button("Set notification to failed").clicked() {
-                let result = app.model.set_notification_healthy(false);
-                let _ = app.apply(
-                    result,
-                    "Notification delivery will fail. Waiting requests stay in the inbox.",
-                );
-            }
-            if ui.button("Set notification to healthy").clicked() {
-                let result = app.model.set_notification_healthy(true);
-                let _ = app.apply(result, "The demo notification channel is healthy.");
-            }
-        });
+        #[cfg(feature = "vault")]
         ui.label(
-            RichText::new("The inbox is in memory. This desktop does not claim durability.")
-                .color(INK_MUTED),
+            RichText::new(
+                "Demo requests and their alerts are in memory. They cause no native notification. The Inbox card above has the real notification channel and the agent events from the vault.",
+            )
+            .color(INK_MUTED),
+        );
+        #[cfg(not(feature = "vault"))]
+        ui.label(
+            RichText::new(
+                "Demo requests and their alerts are in memory. This build has no notification channel: native notifications need the vault build of Apassy.app.",
+            )
+            .color(INK_MUTED),
         );
     });
 
@@ -1694,11 +1855,15 @@ fn decision_color_from_status(status: &str) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "vault")]
+    use crate::broker::approvals::{OwnerAction, OwnerCheck};
     #[cfg(not(feature = "vault"))]
     use crate::desktop::model::MASKED_VALUE;
     use crate::desktop::model::{
         DEMO_BANNER, REPORTING_AGENT_ID, REPORTING_ITEM_ID, SAMPLE_RULE_TEXT,
     };
+    #[cfg(feature = "vault")]
+    use crate::desktop::owner_check::OwnerRequest;
     use crate::desktop::{DemoScenario, DesktopApp, OwnerView};
     use eframe::egui::{self, Pos2, RawInput, Rect, Shape, Vec2};
 
@@ -1894,6 +2059,17 @@ mod tests {
     #[cfg(feature = "vault")]
     const UI_PASS: &str = "ui-draw-pass-ok";
 
+    /// A proof after a passed passphrase check (goal item A4).
+    #[cfg(feature = "vault")]
+    fn owner_ok(
+        app: &DesktopApp,
+        action: crate::broker::approvals::OwnerAction,
+    ) -> crate::broker::approvals::OwnerProof {
+        app.owner_gate()
+            .authorize(action, OwnerCheck::passphrase(UI_PASS))
+            .expect("owner check")
+    }
+
     /// Goal item P1: the Agents view shows the token lifetime, the expiry, and rotation.
     #[cfg(feature = "vault")]
     #[test]
@@ -1914,17 +2090,28 @@ mod tests {
         assert!(text.contains("The token expires on"), "{text}");
         assert!(text.contains("Rotate token"), "{text}");
 
-        let token = app
+        // Rotation waits for the owner check (goal item A4).
+        app.ask_owner(
+            OwnerRequest::RotateToken {
+                agent_id: agent.id,
+                agent_name: agent.name.clone(),
+            },
+            None,
+        );
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(text.contains("Confirm that it is you"), "{text}");
+        assert!(
+            app.owner_ui.fresh_token.is_none(),
+            "no rotation before the check"
+        );
+        app.confirm_owner_now(OwnerCheck::passphrase(UI_PASS))
+            .expect("owner check");
+        let shown = app
             .owner_ui
-            .session
-            .rotate_agent_token(agent.id)
-            .expect("rotate");
-        let shown = token.expose().to_owned();
-        app.owner_ui.fresh_token = Some(FreshToken {
-            agent_name: agent.name.clone(),
-            token,
-            rotated: true,
-        });
+            .fresh_token
+            .as_ref()
+            .map(|fresh: &FreshToken| fresh.token.expose().to_owned())
+            .expect("rotated");
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
         assert!(text.contains("The old token does not work now"), "{text}");
         assert!(text.contains(&shown), "the new token shows one time");
@@ -1997,9 +2184,10 @@ mod tests {
             project: "ui".to_owned(),
             ..DeclarationForm::default()
         };
+        let proof = owner_ok(&app, OwnerAction::ChangeItemRules { item_id: item.id });
         app.owner_ui
             .session
-            .set_declaration(item.id, &form)
+            .set_declaration(item.id, &form, proof)
             .expect("declaration");
         let backup = dir.path().join("ui.backup");
         app.owner_ui.session.backup(&backup).expect("backup");
@@ -2020,10 +2208,13 @@ mod tests {
         assert!(text.contains("production, high risk"), "{text}");
         assert!(!text.contains("ui-review-token-canary"));
 
-        app.owner_ui
-            .session
-            .confirm_review(item.id)
-            .expect("confirm");
+        // The confirmation waits for the owner check (goal item A4).
+        app.ask_owner(OwnerRequest::ConfirmReview { item_id: item.id }, None);
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(text.contains("Confirm that it is you"), "{text}");
+        assert!(text.contains("Confirm settings"), "{text}");
+        app.confirm_owner_now(OwnerCheck::passphrase(UI_PASS))
+            .expect("owner check");
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
         assert!(!text.contains("Confirm settings"), "{text}");
     }
@@ -2093,8 +2284,9 @@ mod agents_view {
         ALLOW, ASK, DENY, INK, INK_MUTED, accent_button, card_frame, danger_button, heading,
         labeled_text,
     };
-    use crate::broker::approvals::{OwnerAnswer, RememberOffer};
+    use crate::broker::approvals::RememberOffer;
     use crate::broker::profile::REPORTING_API_V0;
+    use crate::desktop::owner_check::OwnerRequest;
     use crate::desktop::owner_store::{FreshToken, format_utc};
     use crate::desktop::{BrokerState, DesktopApp};
     use crate::vault::ActivityDecision;
@@ -2313,11 +2505,9 @@ mod agents_view {
             }
         });
         if confirm {
-            let result = app.owner_ui.session.confirm_review(item_id);
-            let _ = app.apply(
-                result,
-                "The agent settings are confirmed. Agents with a grant can use the item again.",
-            );
+            // Agents can use the item again after this, so it needs an owner check (A4).
+            let ctx = ui.ctx().clone();
+            app.ask_owner(OwnerRequest::ConfirmReview { item_id }, Some(&ctx));
         }
     }
 
@@ -2399,11 +2589,11 @@ mod agents_view {
                 );
                 edit.labelled_by(label.id);
                 if ui.button("Save lifetime").clicked() {
-                    let text = app.owner_ui.token_lifetime_input.clone();
-                    match app.owner_ui.session.set_token_lifetime_days(&text) {
-                        Ok(days) => {
-                            app.owner_ui.token_lifetime_input.clear();
-                            app.set_ok(format!("Tokens now work for {days} days after issue."));
+                    let days = app.owner_ui.token_lifetime_input.clone();
+                    match crate::desktop::owner_store::parse_lifetime_days(&days) {
+                        Ok(_) => {
+                            let ctx = ui.ctx().clone();
+                            app.ask_owner(OwnerRequest::SetTokenLifetime { days }, Some(&ctx));
                         }
                         Err(err) => app.set_err(err.message),
                     }
@@ -2464,20 +2654,14 @@ mod agents_view {
                         app.owner_ui.selected_agent = if selected { None } else { Some(agent.id) };
                     }
                     if ui.button("Rotate token").clicked() {
-                        match app.owner_ui.session.rotate_agent_token(agent.id) {
-                            Ok(token) => {
-                                app.owner_ui.fresh_token = Some(FreshToken {
-                                    agent_name: agent.name.clone(),
-                                    token,
-                                    rotated: true,
-                                });
-                                app.set_ok(format!(
-                                    "{} has a new token. Copy it now. The old token does not work.",
-                                    agent.name
-                                ));
-                            }
-                            Err(err) => app.set_err(err.message),
-                        }
+                        let ctx = ui.ctx().clone();
+                        app.ask_owner(
+                            OwnerRequest::RotateToken {
+                                agent_id: agent.id,
+                                agent_name: agent.name.clone(),
+                            },
+                            Some(&ctx),
+                        );
                     }
                     if danger_button(ui, "Revoke agent").clicked() {
                         let message =
@@ -2525,17 +2709,24 @@ mod agents_view {
                 let was = granted.contains(&(row.item_id, operation.to_owned()));
                 let mut allowed = was;
                 ui.checkbox(&mut allowed, format!("{operation}: {description}"));
-                if allowed != was {
+                if allowed && !was {
+                    // A new grant needs an owner check (goal item A4).
+                    let ctx = ui.ctx().clone();
+                    app.ask_owner(
+                        OwnerRequest::AllowOperation {
+                            agent_id,
+                            item_id: row.item_id,
+                            operation: operation.to_owned(),
+                        },
+                        Some(&ctx),
+                    );
+                } else if !allowed && was {
+                    // A removal only takes authority away.
                     let result =
                         app.owner_ui
                             .session
-                            .set_grant(agent_id, row.item_id, operation, allowed);
-                    let message = if allowed {
-                        format!("The agent can now use {operation}.")
-                    } else {
-                        format!("The agent can no longer use {operation}.")
-                    };
-                    let _ = app.apply(result, &message);
+                            .remove_operation(agent_id, row.item_id, operation);
+                    let _ = app.apply(result, &format!("The agent can no longer use {operation}."));
                 }
             }
         }
@@ -2564,12 +2755,18 @@ mod agents_view {
             );
             ui.horizontal_wrapped(|ui| {
                 if accent_button(ui, "Save connector").clicked() {
-                    let url = app.owner_ui.connector_url.clone();
-                    let result =
-                        app.owner_ui
-                            .session
-                            .set_connector(item_id, REPORTING_API_V0.id, &url);
-                    let _ = app.apply(result, "The connector is saved.");
+                    let base_url = app.owner_ui.connector_url.trim().to_owned();
+                    match crate::broker::http::parse_destination(&base_url) {
+                        Ok(_) => {
+                            // The connector decides where the token goes (goal item A4).
+                            let ctx = ui.ctx().clone();
+                            app.ask_owner(
+                                OwnerRequest::SaveConnector { item_id, base_url },
+                                Some(&ctx),
+                            );
+                        }
+                        Err(message) => app.set_err(message),
+                    }
                 }
                 if current.is_some() && ui.button("Remove connector").clicked() {
                     let result = app.owner_ui.session.clear_connector(item_id);
@@ -2620,9 +2817,24 @@ mod agents_view {
                     let user_request = if run.user_request.is_empty() {
                         "The agent did not send the user request.".to_owned()
                     } else {
-                        format!("User request (from the agent): \"{}\"", run.user_request)
+                        let source = if run.request_source.is_empty() {
+                            "from the agent"
+                        } else {
+                            run.request_source.as_str()
+                        };
+                        format!("User request ({source}): \"{}\"", run.user_request)
                     };
                     ui.label(RichText::new(user_request).color(INK));
+                    // Goal item B6: the hook request replaced a different text from the agent.
+                    if !run.agent_request.is_empty() {
+                        ui.label(
+                            RichText::new(format!(
+                                "The agent sent a different user request: \"{}\"",
+                                run.agent_request
+                            ))
+                            .color(ASK),
+                        );
+                    }
                     ui.label(RichText::new(format!("Purpose: {}", run.purpose)).color(INK));
                     ui.label(RichText::new("Command:").color(INK_MUTED));
                     let mut command = shell_words(&run.command);
@@ -2643,7 +2855,7 @@ mod agents_view {
                     }
                     ui.label(
                         RichText::new(
-                            "The process can read these secrets. Approve only a command that you trust.",
+                            "The process can read these secrets. Approve only a command that you trust. An approval needs Touch ID or the passphrase now. A notification is not an approval.",
                         )
                         .color(ASK),
                     );
@@ -2652,20 +2864,24 @@ mod agents_view {
                     }
                     ui.horizontal(|ui| {
                         if accent_button(ui, "Approve once").clicked() {
-                            approvals.decide(run.id, true);
-                            app.set_ok("The run is approved once.");
+                            // The proof names this run exactly as shown (goal items A4, N4).
+                            let ctx = ui.ctx().clone();
+                            app.ask_owner(OwnerRequest::ApproveRun(run.clone()), Some(&ctx));
                         }
-                        // "Approve and remember" is an approval: the same queue path as
-                        // "Approve once" (ADR 0010, goal item A4).
+                        // "Approve and remember" is an approval: the owner check and the
+                        // queue path of "Approve once" (ADR 0010, goal item A4).
                         if run.remember.is_some()
                             && accent_button(ui, "Approve and remember").clicked()
                         {
-                            approvals.answer(run.id, OwnerAnswer::ApproveAndRemember);
-                            app.set_ok("The run is approved. Its pattern has one more approval.");
+                            let ctx = ui.ctx().clone();
+                            app.ask_owner(OwnerRequest::ApproveAndRemember(run.clone()), Some(&ctx));
                         }
                         if danger_button(ui, "Deny").clicked() {
-                            approvals.decide(run.id, false);
-                            app.set_ok("The run is denied.");
+                            if approvals.deny(run.id) {
+                                app.set_ok("The run is denied.");
+                            } else {
+                                app.set_err("The run no longer waits.");
+                            }
                         }
                     });
                 });
@@ -2760,9 +2976,12 @@ mod agents_view {
             });
             if accent_button(ui, "Save declaration").clicked() {
                 let form = app.owner_ui.declaration_form.clone();
-                let result = app.owner_ui.session.set_declaration(item_id, &form);
-                if app.apply(result, "The declaration is saved.").is_some() {
-                    app.owner_ui.declaration_form.stored = true;
+                if form.project.trim().is_empty() {
+                    app.set_err("Type the project name.");
+                } else {
+                    // The declaration is a rule input for the bouncer (goal item A4).
+                    let ctx = ui.ctx().clone();
+                    app.ask_owner(OwnerRequest::SaveDeclaration { item_id, form }, Some(&ctx));
                 }
             }
         });
@@ -2815,10 +3034,18 @@ mod agents_view {
             });
             ui.horizontal_wrapped(|ui| {
                 if accent_button(ui, "Save variable").clicked() {
-                    let name = app.owner_ui.env_name_input.trim().to_owned();
+                    let env_name = app.owner_ui.env_name_input.trim().to_owned();
                     let field = app.owner_ui.env_field_input.clone();
-                    let result = app.owner_ui.session.set_env_binding(item_id, &name, &field);
-                    let _ = app.apply(result, &format!("The item is bound to {name}."));
+                    if crate::vault::checked_env_name(&env_name).is_err() {
+                        app.set_err("Use A-Z, 0-9, and _ and start with a letter or _. System names such as PATH or DYLD_* are not permitted.");
+                    } else {
+                        // The variable decides which secret a process gets (goal item A4).
+                        let ctx = ui.ctx().clone();
+                        app.ask_owner(
+                            OwnerRequest::SaveVariable { item_id, env_name, field },
+                            Some(&ctx),
+                        );
+                    }
                 }
                 if current.is_some() && ui.button("Remove variable").clicked() {
                     let result = app.owner_ui.session.clear_env_binding(item_id);
@@ -2894,23 +3121,26 @@ mod agents_view {
                     .get(&key)
                     .cloned()
                     .unwrap_or_default();
-                if accent_button(ui, "Allow, ask each time").clicked() {
-                    let result =
-                        app.owner_ui
-                            .session
-                            .set_exec_grant(agent_id, item_id, &dir, ExecMode::Ask);
-                    let _ = app.apply(result, "Process access is saved. You approve each run.");
-                }
-                if ui.button("Let the bouncer decide").clicked() {
-                    let result = app.owner_ui.session.set_exec_grant(
-                        agent_id,
-                        item_id,
-                        &dir,
-                        ExecMode::Bouncer,
-                    );
-                    let _ = app.apply(
-                        result,
-                        "Process access is saved. The bouncer decides. A risky run waits for you.",
+                // A new or changed grant needs an owner check (goal item A4).
+                let ask = accent_button(ui, "Allow, ask each time").clicked();
+                let bouncer = ui.button("Let the bouncer decide").clicked();
+                let mode = if ask {
+                    Some(ExecMode::Ask)
+                } else if bouncer {
+                    Some(ExecMode::Bouncer)
+                } else {
+                    None
+                };
+                if let Some(mode) = mode {
+                    let ctx = ui.ctx().clone();
+                    app.ask_owner(
+                        OwnerRequest::SetProcessAccess {
+                            agent_id,
+                            item_id,
+                            project_dir: dir,
+                            mode,
+                        },
+                        Some(&ctx),
                     );
                 }
                 if grant.is_some() && danger_button(ui, "Remove access").clicked() {
@@ -2994,8 +3224,16 @@ mod agents_view {
         if let Some(form) = to_save {
             match form.to_rule(now()) {
                 Ok(rule) => {
-                    let result = app.owner_ui.session.set_exec_rule(agent_id, item_id, rule);
-                    let _ = app.apply(result, "The rule is saved.");
+                    // A rule change needs an owner check (goal item A4).
+                    let ctx = ui.ctx().clone();
+                    app.ask_owner(
+                        OwnerRequest::SaveRule {
+                            agent_id,
+                            item_id,
+                            rule,
+                        },
+                        Some(&ctx),
+                    );
                 }
                 Err(message) => app.set_err(message),
             }

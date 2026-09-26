@@ -98,9 +98,11 @@ mod vault_view {
         ALLOW, ASK, DENY, INK, INK_MUTED, accent_button, card_frame, danger_button, property_grid,
     };
     use super::{CandidateView, DesktopApp, draw_candidate};
+    use crate::broker::approvals::{OwnerAction, OwnerProof};
     use crate::broker::bouncer::{MIN_CONFIDENCE, Thresholds};
     use crate::broker::calibration::{self, Proposal};
     use crate::broker::learning;
+    use crate::desktop::owner_check::OwnerRequest;
     use crate::vault::{
         CalibrationRecord, CandidateAgreement, DayRate, DecidedBy, DecisionRecord, PatternRecord,
         PatternState, format_utc,
@@ -342,6 +344,7 @@ mod vault_view {
                 ),
                 ("Command", entry.command.join(" ")),
                 ("Directory", entry.cwd_rel.clone()),
+                ("Owner rule", entry.instruction.clone()),
                 ("Secrets", none(entry.env_names.clone())),
                 ("Declarations", none(declarations)),
                 ("Rule flags", none(entry.rule_flags.clone())),
@@ -518,7 +521,15 @@ mod vault_view {
                 }
             }
         });
-        if !(compute || reset || apply.is_some()) {
+        if let Some(task_match) = apply {
+            // Goal item A4: a lower level is a rule change. It needs the owner check. The
+            // request completes in `apply_calibration`.
+            let level = (task_match * 100.0).round() as u32;
+            let ctx = ui.ctx().clone();
+            app.ask_owner(OwnerRequest::ApplyCalibration { level }, Some(&ctx));
+            return;
+        }
+        if !(compute || reset) {
             return;
         }
         let shared = app.owner_ui.session.shared_vault();
@@ -537,19 +548,6 @@ mod vault_view {
                 Ok(proposal) => app.learning.proposal = Some(proposal),
                 Err(_) => app.set_err("The vault did not return the decision log."),
             }
-        } else if let Some(task_match) = apply {
-            // Goal item A4: this is a rule change. The owner check covers it.
-            let result = calibration::apply(vault, task_match, now);
-            drop(guard);
-            app.learning.proposal = None;
-            match result {
-                Ok(report) => app.set_ok(format!(
-                    "The task_match level is {:.0}%. The replay of {} past decisions allows no request that you denied.",
-                    report.proposed * 100.0,
-                    report.all_after.decisions
-                )),
-                Err(message) => app.set_err(message),
-            }
         } else {
             let result = calibration::reset(vault, now);
             drop(guard);
@@ -560,10 +558,36 @@ mod vault_view {
             }
         }
     }
+
+    /// Apply a calibrated level with a fresh owner check (goal item A4). The proof must
+    /// name this level, in this vault session. The replay gate runs again first.
+    pub(crate) fn apply_calibration(app: &mut DesktopApp, level: u32, proof: OwnerProof) {
+        let shared = app.owner_ui.session.shared_vault();
+        let mut guard = shared.lock().unwrap_or_else(PoisonError::into_inner);
+        let result = match guard.as_mut().filter(|vault| !vault.is_locked()) {
+            None => Err("The vault is locked.".to_owned()),
+            Some(vault) => proof
+                .check(&OwnerAction::ChangeCalibration { level }, &vault.epoch())
+                .map_err(|refusal| refusal.message().to_owned())
+                .and_then(|()| {
+                    calibration::apply(vault, f64::from(level) / 100.0, learning::now())
+                }),
+        };
+        drop(guard);
+        app.learning.proposal = None;
+        match result {
+            Ok(report) => app.set_ok(format!(
+                "The task_match level is {:.0}%. The replay of {} past decisions allows no request that you denied.",
+                report.proposed * 100.0,
+                report.all_after.decisions
+            )),
+            Err(message) => app.set_err(message),
+        }
+    }
 }
 
 #[cfg(feature = "vault")]
-pub(crate) use vault_view::LearningUiState;
+pub(crate) use vault_view::{LearningUiState, apply_calibration};
 
 #[cfg(all(test, feature = "vault"))]
 mod tests {

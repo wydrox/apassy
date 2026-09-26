@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "cloud",
+  "description": "Cloud and hosting command line tools (Google Cloud, Azure, Fly.io, Railway, Render, Heroku, Serverless, Ansible, Firebase, Cloudflare Wrangler) and provider CLIs (Stripe, Twilio).",
+  "programs": [
+    "gcloud", "az", "fly", "flyctl", "railway", "render", "heroku", "serverless", "sls",
+    "ansible-playbook", "firebase", "wrangler", "stripe", "twilio"
+  ],
+  "roles": {
+    "usage": [
+      "gcloud", "az", "fly", "flyctl", "heroku", "firebase", "wrangler", "stripe", "twilio"
+    ]
+  },
+  "rules": [
+    {
+      "id": "resource-change",
+      "flag": "production",
+      "dry_run": "skip",
+      "when": {
+        "program": ["gcloud", "az"],
+        "any_arg": ["deploy", "delete", "create", "update", "set-iam-policy"]
+      }
+    },
+    {
+      "id": "platform-deploy",
+      "flag": "production",
+      "dry_run": "skip",
+      "when": {
+        "program": ["fly", "flyctl", "railway", "render"],
+        "subcommand": ["deploy", "up", "secrets", "scale", "destroy"]
+      }
+    },
+    {
+      "id": "deploy-tools",
+      "flag": "production",
+      "dry_run": "skip",
+      "when": { "program": ["heroku", "serverless", "sls", "ansible-playbook"] }
+    },
+    {
+      "id": "hosting-deploy",
+      "flag": "production",
+      "dry_run": "skip",
+      "when": {
+        "program": ["firebase", "wrangler"],
+        "subcommand": ["deploy", "publish", "hosting:channel:deploy"]
+      }
+    }
+  ]
+}

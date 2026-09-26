@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use serde::Serialize;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::contracts::CredentialKind;
 
@@ -21,6 +22,7 @@ pub const MAX_SEARCH_RESULTS: usize = 1000;
 pub const SCHEMA_VERSION: i64 = 7;
 
 /// Owned secret text. Debug is redacted. There is no public `Serialize` impl.
+/// Drop erases the text with `zeroize`. A clone is a second copy with its own erase.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SecretValue(String);
 
@@ -32,7 +34,20 @@ impl SecretValue {
     pub fn expose(&self) -> &str {
         &self.0
     }
+
+    /// Move the text out without a copy. The result erases the text on drop.
+    pub fn into_zeroizing(mut self) -> Zeroizing<String> {
+        Zeroizing::new(std::mem::take(&mut self.0))
+    }
 }
+
+impl Drop for SecretValue {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for SecretValue {}
 
 impl fmt::Debug for SecretValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -388,8 +403,20 @@ fn reject_oversized_payload(
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_PAYLOAD_BYTES, PayloadSize};
+    use super::{MAX_PAYLOAD_BYTES, PayloadSize, SecretValue};
     use std::io::Write;
+
+    fn requires_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+
+    #[test]
+    fn secret_value_is_erased_on_drop_and_moves_without_a_copy() {
+        requires_zeroize_on_drop::<SecretValue>();
+        let value = SecretValue::new("synthetic-secret-value".to_owned());
+        let bytes = value.expose().as_ptr();
+        let moved = value.into_zeroizing();
+        assert_eq!(moved.as_str(), "synthetic-secret-value");
+        assert_eq!(moved.as_ptr(), bytes);
+    }
 
     #[test]
     fn payload_counter_matches_json_escaping_and_refuses_overflow() {

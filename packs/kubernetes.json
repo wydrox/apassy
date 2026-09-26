@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "kubernetes",
+  "description": "kubectl and Helm: deletions and changes to a cluster.",
+  "programs": ["kubectl", "helm"],
+  "roles": {
+    "usage": ["kubectl", "helm"]
+  },
+  "rules": [
+    {
+      "id": "delete",
+      "flag": "data_loss",
+      "dry_run": "skip_with_n",
+      "when": { "any_arg": ["delete", "uninstall", "drain"] }
+    },
+    {
+      "id": "cluster-change",
+      "flag": "production",
+      "dry_run": "skip",
+      "when": {
+        "subcommand": [
+          "apply", "create", "replace", "patch", "scale", "rollout", "install", "upgrade", "set",
+          "exec"
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "node",
+  "description": "JavaScript runtimes (node, deno, bun, tsx, ts-node): inline code, scripts, and version checks.",
+  "programs": ["node", "deno", "bun", "tsx", "ts-node"],
+  "roles": {
+    "usage": ["node", "deno"],
+    "heredoc_code": ["node", "deno", "bun"],
+    "script_runner": ["node", "tsx", "ts-node", "deno", "bun"]
+  },
+  "rules": [
+    {
+      "id": "inline-code-prints-secret",
+      "flag": "secret_output",
+      "note": "Code in `-e` or `-p` that reads the environment and prints or sends it.",
+      "when": {
+        "program": ["node", "deno", "bun"],
+        "any_arg": ["-e", "-c", "--eval", "-p", "--print", "-r"],
+        "inline_code_leaks": true
+      }
+    }
+  ],
+  "safe": [
+    {
+      "id": "version",
+      "when": { "program": ["node", "deno"], "arg_count": 1, "subcommand": ["-v", "--version"] }
+    }
+  ]
+}

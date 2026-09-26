@@ -20,9 +20,10 @@
 //! because Apassy is a macOS product and isolation is a release gate.
 //!
 //! Keychain: goal item I2 also needs proof that the process cannot read the
-//! Touch ID Keychain item. The Swift Keychain helper is built in parallel.
-//! `keychain_check_is_pending` records this gap and checks that the tool for
-//! the future check exists. It is not a skip of this test.
+//! Touch ID Keychain item. `keychain_item_is_not_readable_in_profile` checks it
+//! with `/usr/bin/security` and with the Apassy keychain helper. Its comment
+//! says what it proves and what stays pending until the app has a
+//! provisioning profile.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -524,18 +525,153 @@ fn own_child_processes_work_in_profile() {
     assert_eq!(out.trim(), "child-ok");
 }
 
-#[test]
-fn keychain_check_is_pending() {
-    // Goal I2 also needs proof that a process in the profile cannot read the
-    // Touch ID Keychain item. The Swift Keychain helper is built in parallel
-    // (goal A1, A3). When it lands, add a check here that reads the item
-    // outside the profile (control) and is denied inside the profile.
-    //
-    // This is not a skip of the isolation test. It records the pending part and
-    // checks that the tool for the future check exists.
-    require_sandbox();
+/// The keychain helper of the signed app, or `None` when `scripts/build-app.sh` did not
+/// run in this checkout.
+fn bundled_keychain_helper() -> Option<PathBuf> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target/Apassy.app/Contents")
+        .join(apassy::native::KEYCHAIN_HELPER_FROM_CONTENTS);
+    path.is_file().then_some(path)
+}
+
+/// The helper code without a signature, built once with the Swift compiler.
+fn unsigned_keychain_helper() -> PathBuf {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let out_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("isolation-keychain-helper");
+    std::fs::create_dir_all(&out_dir).expect("helper dir");
+    let out = out_dir.join("ApassyKeychain");
+    let mut sources: Vec<PathBuf> = std::fs::read_dir(root.join("native/ApassyHelper"))
+        .expect("helper sources")
+        .map(|entry| entry.expect("entry").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "swift"))
+        .collect();
+    sources.sort();
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x86_64"
+    };
+    let status = Command::new("xcrun")
+        .args(["--sdk", "macosx", "swiftc", "-Onone", "-swift-version", "5"])
+        .args(["-target", &format!("{arch}-apple-macos15.0"), "-o"])
+        .arg(&out)
+        .args(&sources)
+        .status()
+        .expect("run xcrun: the Keychain check needs Xcode. This is a failure, not a skip.");
     assert!(
-        Path::new("/usr/bin/security").exists(),
-        "the Keychain tool is absent; the pending Keychain check needs it"
+        status.success(),
+        "swiftc failed to build the keychain helper"
     );
+    out
+}
+
+/// Send JSON lines to `helper` inside the profile. Returns one JSON value per line.
+fn helper_in_sandbox(fx: &Fixture, helper: &Path, requests: &[Value]) -> Vec<Value> {
+    let lines: Vec<String> = requests
+        .iter()
+        .map(|request| format!("'{request}'"))
+        .collect();
+    let script = format!(
+        "printf '%s\\n' {} | '{}'",
+        lines.join(" "),
+        helper.display()
+    );
+    let (ok, out, err) = in_sandbox(fx, &["/bin/sh", "-c", &script]);
+    assert!(ok, "the helper did not answer in the profile: {err}");
+    out.lines()
+        .map(|line| serde_json::from_str(line).expect("helper answer is JSON"))
+        .collect()
+}
+
+/// Goal I2, Keychain part. A process in the profile cannot read the Apassy Touch ID
+/// item: not with `/usr/bin/security`, and not through the Apassy keychain helper.
+///
+/// What this proves now:
+/// - `security` runs in the profile (so a "not found" is not a broken tool), and it
+///   finds no item with the service and the account that the helper uses, inside and
+///   outside the profile. The item is in the data protection keychain, which the
+///   `security` tool does not search, and it needs the Apassy access group.
+/// - The keychain helper from `target/Apassy.app` (or the helper code without a
+///   signature, when the app is not built) runs in the profile, has no keychain access
+///   group, and answers `keychain_unavailable` to `keychain_exists` and to
+///   `keychain_read`. So no process can read an unlock key from this build.
+///
+/// What stays pending (see `docs/operations/native-app.md`): the real
+/// `.biometryCurrentSet` item needs a provisioning profile. With a profile, the helper
+/// has an access group. Then a process in the profile could start the helper and ask
+/// for a Touch ID prompt, and only the owner's finger would stop it. This test then
+/// fails on purpose, until the agent profile denies the start of the Apassy helpers.
+#[test]
+fn keychain_item_is_not_readable_in_profile() {
+    require_sandbox();
+    let fx = fixture();
+    let service = apassy::native::KEYCHAIN_SERVICE;
+    let account = apassy::native::vault_unlock_account(&fx.layout.vault_file);
+
+    // The tool runs in the profile.
+    let (ok, out, err) = in_sandbox(&fx, &["/usr/bin/security", "list-keychains"]);
+    assert!(ok, "security must run in the profile: {err}");
+    assert!(out.contains(".keychain"), "{out}");
+
+    // Control outside the profile, then the same query inside it.
+    let query = [
+        "/usr/bin/security",
+        "find-generic-password",
+        "-s",
+        service,
+        "-a",
+        &account,
+        "-w",
+    ];
+    let outside = Command::new(query[0])
+        .args(&query[1..])
+        .output()
+        .expect("security outside");
+    assert_eq!(
+        outside.status.code(),
+        Some(44),
+        "control: no item in the file keychains"
+    );
+    let inside = Command::new(env!("CARGO_BIN_EXE_apassy-sandbox"))
+        .args(sandbox_args(&fx))
+        .args(query)
+        .output()
+        .expect("security inside");
+    assert_eq!(
+        inside.status.code(),
+        Some(44),
+        "security in the profile: {}",
+        String::from_utf8_lossy(&inside.stderr)
+    );
+    assert!(
+        inside.stdout.is_empty(),
+        "security printed a value in the profile"
+    );
+
+    // The Apassy keychain helper, started from inside the profile.
+    let helper = bundled_keychain_helper().unwrap_or_else(unsigned_keychain_helper);
+    eprintln!("keychain check uses {}", helper.display());
+    let ping = helper_in_sandbox(&fx, &helper, &[json!({"cmd": "ping"})]);
+    assert_eq!(ping[0]["ok"], true, "{ping:?}");
+    assert!(
+        ping[0]["keychain_access_group"].is_null(),
+        "The keychain helper runs in the agent profile and has the keychain access group {}. \
+         A process in the profile can then ask for the Touch ID unlock key. Deny the start of \
+         the Apassy helpers in sandbox/apassy-agent-host.sb before a provisioned build is used.",
+        ping[0]["keychain_access_group"]
+    );
+    let answers = helper_in_sandbox(
+        &fx,
+        &helper,
+        &[
+            json!({"cmd": "keychain_exists", "account": account}),
+            json!({"cmd": "keychain_read", "account": account, "reason": "isolation check"}),
+        ],
+    );
+    assert_eq!(answers.len(), 2, "{answers:?}");
+    for answer in &answers {
+        assert_eq!(answer["ok"], false, "{answer}");
+        assert_eq!(answer["error"], "keychain_unavailable", "{answer}");
+        assert!(answer.get("secret_b64").is_none(), "{answer}");
+    }
 }

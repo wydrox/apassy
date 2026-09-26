@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "gh",
+  "description": "GitHub CLI: releases, workflow runs, secrets, repository settings, gists, and API writes.",
+  "programs": ["gh"],
+  "roles": {
+    "usage": ["gh"]
+  },
+  "rules": [
+    {
+      "id": "secret-argument",
+      "flag": "secret_output",
+      "when": { "refs_secret": true }
+    },
+    {
+      "id": "release-change",
+      "flag": "production",
+      "when": { "subcommand": ["release"], "action": ["create", "upload", "delete", "edit"] }
+    },
+    {
+      "id": "secret-or-variable-change",
+      "flag": "system_change",
+      "when": { "subcommand": ["secret", "variable"], "action": ["set", "delete", "remove"] }
+    },
+    {
+      "id": "gist-upload",
+      "flag": "secret_output",
+      "note": "A gist publishes file content.",
+      "when": { "subcommand": ["gist"], "action": ["create", "edit"] }
+    },
+    {
+      "id": "repository-change",
+      "flag": "system_change",
+      "when": {
+        "subcommand": ["repo"],
+        "action": ["delete", "edit", "archive", "rename", "transfer"]
+      }
+    },
+    {
+      "id": "api-write",
+      "flag": "system_change",
+      "note": "An API call with a method other than GET changes GitHub state.",
+      "when": {
+        "subcommand": ["api"],
+        "option_value": { "option": ["-x", "--method"], "not_value": ["get"] }
+      }
+    },
+    {
+      "id": "workflow-run",
+      "flag": "production",
+      "when": { "subcommand": ["workflow"], "action": ["run", "enable", "disable"] }
+    }
+  ],
+  "safe": [
+    {
+      "id": "pull-requests-issues-runs",
+      "when": {
+        "subcommand": ["pr", "issue", "run", "repo"],
+        "action": ["create", "view", "list", "status", "checks", "diff", "watch"]
+      }
+    }
+  ]
+}

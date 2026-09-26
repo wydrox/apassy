@@ -39,6 +39,8 @@ pub const CALIBRATION_FLOOR: f64 = 0.5;
 /// Highest `task_match` level that a calibration can apply. It is the default level.
 pub const CALIBRATION_CEILING: f64 = 0.8;
 const MAX_CALIBRATION_ROWS: usize = 100;
+/// Format version of one export line (`docs/operations/learning.md`).
+pub const EXPORT_SCHEMA: &str = "apassy-decision-v1";
 /// The log can hold up to `PRUNE_EVERY - 1` entries more than its limits.
 const PRUNE_EVERY: u64 = 64;
 
@@ -53,7 +55,8 @@ const MAX_NOTE_BYTES: usize = 1000;
 const MAX_TEXT_BYTES: usize = 2048;
 
 /// Tables added in schema version 7 (ADR 0009, ADR 0010): the decision log, remembered
-/// patterns, and calibrations.
+/// patterns, and calibrations. Also the durable record of a run that waits for the
+/// owner (goal item N3, `super::waiting`).
 pub(super) const SCHEMA_V7_SQL: &str = "
 CREATE TABLE decision_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,7 +83,8 @@ CREATE TABLE decision_log (
         CHECK (decided_by IN ('rule', 'model', 'pattern', 'owner', 'no_answer')),
     remembered INTEGER NOT NULL,
     policy TEXT NOT NULL,
-    note TEXT NOT NULL
+    note TEXT NOT NULL,
+    instruction TEXT NOT NULL
 );
 CREATE INDEX decision_log_at ON decision_log(at);
 CREATE TABLE remembered_pattern (
@@ -105,15 +109,25 @@ CREATE TABLE calibration (
     task_match REAL NOT NULL,
     report TEXT NOT NULL
 );
+CREATE TABLE waiting_run (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at INTEGER NOT NULL,
+    agent_id INTEGER,
+    agent_name TEXT NOT NULL,
+    item_id INTEGER,
+    operation TEXT NOT NULL,
+    purpose TEXT NOT NULL
+);
 UPDATE vault_meta SET schema_version = 7 WHERE id = 1;
 PRAGMA user_version = 7;
 ";
 
-pub(super) const SCHEMA_V7_COLUMNS: [&str; 3] = [
+pub(super) const SCHEMA_V7_COLUMNS: [&str; 4] = [
+    "SELECT id, at, agent_id, agent_name, item_id, operation, purpose FROM waiting_run LIMIT 0",
     "SELECT id, at, agent_id, agent_name, project_dir, cwd_rel, items, user_request,
             user_request_source, command, purpose, env_names, declarations, rule_flags,
             known_safe, model_facts, pattern, grant_asks, asked, decision, decided_by,
-            remembered, policy, note FROM decision_log LIMIT 0",
+            remembered, policy, note, instruction FROM decision_log LIMIT 0",
     "SELECT id, agent_id, project_dir, items, policy, cwd_rel, template, display, approvals,
             blocked, created_at, last_used_at, uses FROM remembered_pattern LIMIT 0",
     "SELECT id, at, task_match, report FROM calibration LIMIT 0",
@@ -122,7 +136,7 @@ pub(super) const SCHEMA_V7_COLUMNS: [&str; 3] = [
 const DECISION_COLUMNS: &str = "id, at, agent_id, agent_name, project_dir, cwd_rel, items,
     user_request, user_request_source, command, purpose, env_names, declarations, rule_flags,
     known_safe, model_facts, pattern, grant_asks, asked, decision, decided_by, remembered,
-    policy, note";
+    policy, note, instruction";
 const PATTERN_COLUMNS: &str = "id, agent_id, project_dir, items, policy, cwd_rel, template,
     display, approvals, blocked, created_at, last_used_at, uses";
 
@@ -261,6 +275,8 @@ pub struct DecisionEntry {
     pub policy: String,
     /// The decision note. No secret values.
     pub note: String,
+    /// Owner instructions of the grants, joined. The model gets them as the owner rule.
+    pub instruction: String,
 }
 
 impl DecisionEntry {
@@ -449,9 +465,9 @@ impl Vault {
             "INSERT INTO decision_log (at, agent_id, agent_name, project_dir, cwd_rel, items,
                  user_request, user_request_source, command, purpose, env_names, declarations,
                  rule_flags, known_safe, model_facts, pattern, grant_asks, asked, decision,
-                 decided_by, remembered, policy, note)
+                 decided_by, remembered, policy, note, instruction)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                 ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                 ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
             rusqlite::params![
                 at,
                 agent,
@@ -476,6 +492,7 @@ impl Vault {
                 entry.remembered,
                 cut(&entry.policy, MAX_TEXT_BYTES),
                 mask(&entry.note, MAX_NOTE_BYTES),
+                mask(&entry.instruction, MAX_TEXT_BYTES),
             ],
         )
         .map_err(|_| err(VaultErrorKind::Storage))?;
@@ -1059,7 +1076,7 @@ fn insert_pattern(
     Ok(())
 }
 
-type DecisionRow = ([i64; 3], [String; 17], [i64; 4]);
+type DecisionRow = ([i64; 3], [String; 18], [i64; 4]);
 
 fn decision_row(row: &Row<'_>) -> rusqlite::Result<DecisionRow> {
     // Columns in DECISION_COLUMNS order.
@@ -1083,6 +1100,7 @@ fn decision_row(row: &Row<'_>) -> rusqlite::Result<DecisionRow> {
             row.get(20)?,
             row.get(22)?,
             row.get(23)?,
+            row.get(24)?,
         ],
         [row.get(14)?, row.get(17)?, row.get(18)?, row.get(21)?],
     ))
@@ -1108,6 +1126,7 @@ fn decision_from(row: DecisionRow) -> VaultResult<DecisionRecord> {
         decided_by,
         policy,
         note,
+        instruction,
     ] = text;
     let storage = |_| err(VaultErrorKind::Storage);
     let declarations: Vec<Value> = serde_json::from_str(&declarations).map_err(storage)?;
@@ -1148,6 +1167,7 @@ fn decision_from(row: DecisionRow) -> VaultResult<DecisionRecord> {
             remembered: remembered != 0,
             policy,
             note,
+            instruction,
         },
     })
 }
@@ -1190,11 +1210,16 @@ fn export_line(entry: &DecisionEntry) -> Value {
         .map(|(name, p)| (name.clone(), json!(p)))
         .collect();
     json!({
+        "schema": EXPORT_SCHEMA,
         "time": rfc3339(entry.at),
+        "at": entry.at,
+        "agent": entry.agent_name,
         "user_request": entry.user_request,
         "user_request_source": entry.user_request_source.as_str(),
-        "command": entry.command.join(" "),
+        "command": entry.command,
         "cwd_rel": entry.cwd_rel,
+        "purpose": entry.purpose,
+        "instruction": entry.instruction,
         "env_names": entry.env_names,
         "declaration": entry
             .declarations
@@ -1205,6 +1230,7 @@ fn export_line(entry: &DecisionEntry) -> Value {
         "model_facts": facts,
         "decision": entry.decision.as_str(),
         "decided_by": entry.decided_by.as_str(),
+        "remembered": entry.remembered,
     })
 }
 
@@ -1283,6 +1309,7 @@ mod tests {
             remembered: false,
             policy: String::new(),
             note: String::new(),
+            instruction: String::new(),
         }
     }
 

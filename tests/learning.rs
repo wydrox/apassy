@@ -13,7 +13,9 @@ use std::time::Duration;
 
 use apassy::agent::client;
 use apassy::agent::wire::{Action, WireResponse};
-use apassy::broker::approvals::{OwnerAnswer, PendingRun};
+use apassy::broker::approvals::{
+    ApprovalRefusal, OwnerAction, OwnerCheck, OwnerGate, OwnerProof, PendingRun,
+};
 use apassy::broker::bouncer::{BouncerClient, Thresholds};
 use apassy::broker::http::TlsClient;
 use apassy::broker::learning::{self, RunScope};
@@ -161,13 +163,41 @@ fn run(fx: &Fixture, command: &[String]) -> WireResponse {
     )
 }
 
-/// The next waiting run gets `answer`. The thread returns the run as the card saw it.
+/// The answer of the simulated owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnerAnswer {
+    Approve,
+    ApproveAndRemember,
+    Deny,
+}
+
+/// The owner confirms `action` with the passphrase now (goal item A4).
+fn owner_check(vault: &SharedVault, action: OwnerAction) -> OwnerProof {
+    OwnerGate::new(Arc::clone(vault), None)
+        .authorize(action, OwnerCheck::passphrase(PASS))
+        .expect("owner check")
+}
+
+/// The next waiting run gets `answer`. An approval passes the owner check, the same
+/// path as the approval card. The thread returns the run as the card saw it.
 fn owner(fx: &Fixture, answer: OwnerAnswer) -> JoinHandle<PendingRun> {
     let approvals = Arc::clone(fx.broker.approvals());
+    let vault = Arc::clone(&fx.vault);
     std::thread::spawn(move || {
         loop {
             if let Some(pending) = approvals.pending().into_iter().next() {
-                assert!(approvals.answer(pending.id, answer), "{answer:?}");
+                match answer {
+                    OwnerAnswer::Approve => {
+                        let proof = owner_check(&vault, OwnerAction::ApproveRun(pending.clone()));
+                        assert_eq!(approvals.approve(proof), Ok(()));
+                    }
+                    OwnerAnswer::ApproveAndRemember => {
+                        let proof =
+                            owner_check(&vault, OwnerAction::ApproveAndRemember(pending.clone()));
+                        assert_eq!(approvals.approve(proof), Ok(()));
+                    }
+                    OwnerAnswer::Deny => assert!(approvals.deny(pending.id)),
+                }
                 return pending;
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -363,14 +393,22 @@ fn one_denial_blocks_the_pattern() {
         2
     );
 
-    // The next matching run asks. The card has no "Approve and remember".
+    // The next matching run asks. The card has no "Approve and remember", and the queue
+    // refuses it even with a fresh owner check.
     let approvals = Arc::clone(fx.broker.approvals());
+    let vault = Arc::clone(&fx.vault);
     let refused = std::thread::spawn(move || {
         loop {
             if let Some(pending) = approvals.pending().into_iter().next() {
                 assert!(pending.remember.is_none());
-                assert!(!approvals.answer(pending.id, OwnerAnswer::ApproveAndRemember));
-                assert!(approvals.answer(pending.id, OwnerAnswer::Approve));
+                let remember =
+                    owner_check(&vault, OwnerAction::ApproveAndRemember(pending.clone()));
+                assert_eq!(
+                    approvals.approve(remember),
+                    Err(ApprovalRefusal::NothingToRemember)
+                );
+                let once = owner_check(&vault, OwnerAction::ApproveRun(pending));
+                assert_eq!(approvals.approve(once), Ok(()));
                 return;
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -640,21 +678,33 @@ fn decision_log_and_export_have_no_secret_values() {
     assert_eq!(
         keys,
         vec![
+            "agent",
+            "at",
             "command",
             "cwd_rel",
             "decided_by",
             "decision",
             "declaration",
             "env_names",
+            "instruction",
             "model_facts",
+            "purpose",
+            "remembered",
             "rule_flags",
+            "schema",
             "time",
             "user_request",
             "user_request_source",
         ]
     );
-    assert_eq!(lines[0]["command"], "sh -c ./report.sh --limit 1");
+    assert_eq!(lines[0]["schema"], "apassy-decision-v1");
+    assert_eq!(
+        lines[0]["command"],
+        serde_json::json!(["sh", "-c", "./report.sh --limit 1"])
+    );
     assert_eq!(lines[0]["declaration"][0]["environment"], "staging");
+    assert_eq!(lines[0]["user_request_source"], "agent");
+    assert_eq!(lines[0]["model_facts"]["task_match"], 0.95);
     assert_eq!(lines[3]["decided_by"], "owner");
     assert_eq!(lines[3]["decision"], "deny");
 
@@ -771,6 +821,7 @@ fn owner_entry(at: u64, task_match: f64, approve: bool) -> DecisionEntry {
         remembered: false,
         policy: Thresholds::default().policy_label(),
         note: String::new(),
+        instruction: String::new(),
     }
 }
 

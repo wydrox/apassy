@@ -10,18 +10,21 @@
 //!
 //! Each refusal after step 2 and each call result is stored in the activity log.
 //! Process runs (ADR 0006) have their own check order in [`super::run`].
+//! User prompts from host hooks (goal item B6) are in [`super::prompts`].
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Map, Value, json};
+use zeroize::Zeroizing;
 
 use super::SharedVault;
 use super::approvals::ApprovalQueue;
 use super::bouncer::BouncerClient;
 use super::http::{self, HttpFailure, TlsClient, parse_destination};
 use super::profile::{self, OperationSpec};
+use super::prompts::PromptStore;
 use crate::agent::wire::{Action, WIRE_VERSION, WireRequest, WireResponse};
 use crate::vault::{
     ActivityDecision, AgentSummary, NewActivity, Vault, VaultErrorKind, format_utc,
@@ -41,6 +44,8 @@ pub struct BrokerContext {
     pub run_timeout: Duration,
     /// Local decision model (ADR 0007). `None` means that every run needs the owner.
     pub bouncer: Option<BouncerClient>,
+    /// User requests from host hooks (goal item B6).
+    pub prompts: Arc<PromptStore>,
 }
 
 /// Handle one request from an agent. The response never contains a secret value.
@@ -73,6 +78,25 @@ pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
                 purpose,
                 path: path.as_deref(),
                 user_request: user_request.as_deref(),
+                host_session: request.host_session.as_deref(),
+            },
+        ),
+        Action::SubmitUserRequest {
+            host,
+            cwd,
+            prompt,
+            transcript_path,
+            truncated,
+        } => super::prompts::submit(
+            ctx,
+            &request.token,
+            &super::prompts::Submission {
+                host,
+                host_session: request.host_session.as_deref(),
+                cwd,
+                prompt,
+                transcript_path: transcript_path.as_deref(),
+                truncated: *truncated,
             },
         ),
     }
@@ -234,14 +258,9 @@ struct Prepared {
     agent: AgentSummary,
     destination: http::DestinationUrl,
     path: String,
-    secret: String,
+    /// Erased on drop.
+    secret: Zeroizing<String>,
     op: &'static OperationSpec,
-}
-
-impl Drop for Prepared {
-    fn drop(&mut self) {
-        self.secret.clear();
-    }
 }
 
 fn call(
@@ -386,7 +405,7 @@ fn prepare(
         agent,
         destination: target,
         path: op.path(params),
-        secret: secret.expose().to_owned(),
+        secret: secret.into_zeroizing(),
         op,
     })
 }

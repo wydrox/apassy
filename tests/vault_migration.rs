@@ -624,6 +624,7 @@ fn migrated_decision(agent_id: u64) -> DecisionEntry {
         remembered: true,
         policy: "apassy-bouncer-v4".to_owned(),
         note: String::new(),
+        instruction: String::new(),
     }
 }
 

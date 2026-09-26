@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "go",
+  "description": "Go toolchain: build and test commands.",
+  "programs": ["go"],
+  "roles": {
+    "usage": ["go"]
+  },
+  "safe": [
+    {
+      "id": "build-and-test",
+      "when": { "subcommand": ["test", "build", "vet", "fmt", "mod", "run"] }
+    }
+  ]
+}

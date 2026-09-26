@@ -68,7 +68,7 @@ trap 'rm -rf "$TMP"' EXIT
 step "Check the host and tools"
 [ "$(uname -s)" = "Darwin" ] || fail "this script runs on macOS only"
 [ "$(uname -m)" = "arm64" ] || fail "this script builds for arm64 only"
-for tool in cargo xcrun codesign security plutil openssl /usr/libexec/PlistBuddy; do
+for tool in cargo xcrun codesign security plutil openssl file /usr/libexec/PlistBuddy; do
   command -v "$tool" >/dev/null 2>&1 || fail "missing tool: $tool"
 done
 # Use the SDK of the selected Xcode. A bare `xcrun` can select a Command
@@ -271,6 +271,43 @@ for code in "$APP" "$APP/Contents/MacOS/apassy-mcp" "$APP/Contents/MacOS/apassy-
   [ "$ENT" = "{}" ] || fail "$code has unexpected entitlements: $ENT"
 done
 echo "Entitlements of apassy, apassy-mcp, apassy-helper: {}"
+
+# Key-memory review F7: each program in the bundle has the hardened runtime,
+# and no program has an entitlement that lets a debugger read its memory or
+# lets injected code run in it.
+FORBIDDEN_ENTITLEMENTS="com.apple.security.get-task-allow com.apple.security.cs.disable-library-validation com.apple.security.cs.allow-dyld-environment-variables"
+# Print each forbidden entitlement of CODE, one per line.
+forbidden_entitlements() {
+  local json key
+  json="$(entitlements_json "$1")"
+  for key in $FORBIDDEN_ENTITLEMENTS; do
+    if printf '%s' "$json" | grep -qF "\"$key\""; then echo "$key"; fi
+  done
+}
+# The check must find each forbidden entitlement: sign a copy of the helper
+# with all of them. The copy stays in $TMP and never runs.
+cp "$NATIVE_OUT/apassy-helper" "$TMP/entitlement-probe"
+{
+  printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n'
+  for key in $FORBIDDEN_ENTITLEMENTS; do printf '<key>%s</key><true/>\n' "$key"; done
+  printf '</dict>\n</plist>\n'
+} >"$TMP/probe.entitlements"
+plutil -lint "$TMP/probe.entitlements" >/dev/null
+sign --entitlements "$TMP/probe.entitlements" "$TMP/entitlement-probe" \
+  || fail "cannot sign the entitlement probe"
+[ "$(forbidden_entitlements "$TMP/entitlement-probe" | tr '\n' ' ')" = "$FORBIDDEN_ENTITLEMENTS " ] \
+  || fail "the entitlement check does not find the forbidden entitlements"
+PROGRAMS=0
+while IFS= read -r -d '' code; do
+  file -b "$code" | grep -q '^Mach-O' || continue
+  PROGRAMS=$((PROGRAMS + 1))
+  codesign -d --verbose=2 "$code" >"$TMP/info.txt" 2>&1 || fail "$code is not signed"
+  grep -q "flags=.*(runtime)" "$TMP/info.txt" || fail "hardened runtime is off for $code"
+  FOUND="$(forbidden_entitlements "$code" | tr '\n' ' ')"
+  [ -z "$FOUND" ] || fail "$code has forbidden entitlements: $FOUND"
+done < <(find "$APP" -type f -print0)
+[ "$PROGRAMS" = "4" ] || fail "expected 4 programs in the bundle, found $PROGRAMS"
+echo "Hardened runtime on all $PROGRAMS programs. None has get-task-allow, disable-library-validation, or allow-dyld-environment-variables."
 
 # ---------------------------------------------------------------- self-check
 step "Run the signed programs"

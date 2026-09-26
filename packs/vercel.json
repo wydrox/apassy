@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "vercel",
+  "description": "Vercel CLI: deployments, aliases, environment variables, and read commands.",
+  "programs": ["vercel"],
+  "roles": {
+    "usage": ["vercel"]
+  },
+  "rules": [
+    {
+      "id": "bare-deploy",
+      "flag": "production",
+      "note": "`vercel` with only options deploys the project.",
+      "when": {
+        "only_options": true,
+        "not": { "any_arg": ["--version", "-v", "--help", "-h"] }
+      }
+    },
+    {
+      "id": "alias-change",
+      "flag": "production",
+      "when": { "subcommand": ["alias"], "action": ["set", "rm", "remove"] }
+    },
+    {
+      "id": "deployment-change",
+      "flag": "production",
+      "when": {
+        "subcommand": ["deploy", "promote", "rollback", "redeploy", "remove", "rm"]
+      }
+    },
+    {
+      "id": "environment-secrets",
+      "flag": "secret_output",
+      "note": "`vercel env pull` writes secret values to a file.",
+      "when": { "subcommand": ["env"], "action": ["pull", "add", "rm", "remove"] }
+    },
+    {
+      "id": "production-target",
+      "flag": "production",
+      "dry_run": "skip",
+      "when": {
+        "not": {
+          "any_of": [
+            { "subcommand": ["ls", "list", "inspect", "logs"] },
+            { "subcommand": ["alias"], "action": ["ls"] }
+          ]
+        },
+        "any_arg": ["--prod", "--production", "promote", "rollback", "alias"]
+      }
+    }
+  ],
+  "exemptions": [
+    {
+      "id": "read-commands",
+      "check": "production_word",
+      "note": "Listings, inspection, and logs only read. `vercel ls --prod` lists production deployments.",
+      "when": {
+        "subcommand": [
+          "ls", "list", "inspect", "logs", "whoami", "domains", "project", "projects"
+        ]
+      }
+    },
+    {
+      "id": "env-list",
+      "check": "production_word",
+      "note": "`vercel env ls` lists names without values.",
+      "when": { "subcommand": ["env"], "action": ["ls"] }
+    },
+    {
+      "id": "alias-list",
+      "check": "production_word",
+      "when": { "subcommand": ["alias"], "action": ["ls"] }
+    },
+    {
+      "id": "api-read",
+      "check": "production_word",
+      "note": "An API call without a method option is a GET request.",
+      "when": {
+        "subcommand": ["api"],
+        "not": { "any_of": [{ "any_arg": ["--method"] }, { "any_arg_starts": ["-x"] }] }
+      }
+    }
+  ],
+  "safe": [
+    {
+      "id": "local-and-read-commands",
+      "when": { "subcommand": ["dev", "build", "whoami", "ls", "inspect", "logs"] }
+    },
+    { "id": "env-list", "when": { "subcommand": ["env"], "action": ["ls"] } }
+  ]
+}

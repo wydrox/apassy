@@ -3,7 +3,7 @@
 Date: 2026-09-26.
 Host: Mac16,10 (Mac mini, Apple M4), macOS 27.0 (26A428), arm64. Xcode 26.3 (17C529), Swift 6.2.4, Rust 1.97.0.
 Scope: goal item A1, and the native side of A3, A4, N1, and N2 ([goal](../goal.md), [ADR 0010](../adr/0010-closing-open-decisions.md)).
-The desktop app does not call the helper yet. A later task connects the desktop to `apassy::native`.
+The desktop app calls the helper for the unlock method (A2, A3), the owner check (A4), and notifications (N1 to N3). See [Desktop integration](#desktop-integration) and [notifications.md](notifications.md).
 This document does not open the real-secret gate.
 
 ## What this is
@@ -221,6 +221,68 @@ A notification only tells the owner about an event. It is not an approval (N4).
 
 When Apassy is the front app, macOS can put the notification in Notification Center without a banner.
 
+## Desktop integration
+
+The desktop calls the helper from worker threads only (`src/desktop/owner_check.rs`, `Task`). The UI thread reads the results each frame.
+At start, the window runs `ping` once. The result tells the owner check if Touch ID is available.
+
+### Unlock method (A2, A3)
+
+Code: `src/desktop/unlock.rs`, the "Unlock method" card, and "Unlock with Touch ID" in the Vault file card (`src/desktop/ui/unlock_view.rs`).
+
+- The unlock method is an owner setting: passphrase or Touch ID. The master passphrase stays the root key.
+- Source of truth: the keychain item itself. `keychain_exists` answers without a prompt, so Apassy reads the setting before unlock, when the owner opens, creates, or restores a vault file. The encrypted vault cannot hold the setting, because Apassy needs it before the vault opens. Apassy keeps no preference file. An item means "Touch ID". No item means "passphrase".
+- Keychain item: service `com.wydrox.apassy.vault-unlock` (`KEYCHAIN_SERVICE`), account `vault-unlock-` and 16 hexadecimal digits of the FNV-1a hash of the canonical vault path (`vault_unlock_account`). Each vault file has its own item. A moved or restored file has Touch ID unlock off until the owner turns it on.
+- The item holds the master passphrase. The helper stores it with `.biometryCurrentSet` access control.
+- Turn on: the vault is unlocked, and the owner types the passphrase now. Apassy checks it on a second, read-only SQLCipher connection (`Vault::verify_passphrase_at`), then calls `keychain_store`. The typed text is in a `Zeroizing` buffer.
+- Unlock: `keychain_read` with the fixed reason "unlock the Apassy vault". The key goes to `OwnerSession::unlock` on the UI thread and is erased after.
+- `biometry_changed` from `keychain_exists` or `keychain_read`: Apassy deletes the item, shows "The fingerprints on this Mac changed ...", and the owner unlocks with the passphrase.
+- A key that does not open the vault, for example after a passphrase change in another copy: Apassy deletes the item. After a passphrase change in this app, Apassy deletes the item and asks the owner to turn Touch ID unlock on again.
+- Turn off: `keychain_delete`.
+- Backup restore, passphrase change, and recovery need the typed passphrase. Touch ID never supplies it.
+- `keychain_unavailable` (no provisioning profile, the state on this Mac): the Vault file card and the Unlock method card show "Touch ID can confirm actions, but cannot unlock the vault until the app has a provisioning profile. Unlock with the passphrase." The setup controls are hidden. Passphrase unlock works as before.
+
+### Owner check (A4)
+
+Code: `src/broker/approvals/owner_auth.rs`, `src/desktop/owner_check.rs`, `src/desktop/ui/owner_check_view.rs`.
+
+`OwnerGate::authorize(action, check)` is the one owner-authorization function. It checks the owner now and returns an `OwnerProof` for that action only:
+
+- The check is Touch ID (`authenticate`, the reason names the action) or the master passphrase (a second, read-only SQLCipher connection, then the buffer is erased).
+- A proof names one action and its target. For an approval, the target is the waiting run exactly as the owner saw it.
+- A proof is valid for 60 s, only in the vault session of the check, and for one use. It has no `Clone`. Only `authorize` makes one.
+- If the vault locks or changes during the check, the gate gives no proof.
+
+These calls take a proof. Without a matching proof, they refuse with `owner_check_required` and change nothing:
+
+| Owner action | Call | Proof action |
+| --- | --- | --- |
+| Reveal | `OwnerSession::reveal` | `Reveal { item_id }` |
+| Approval of a run | `ApprovalQueue::approve` | `ApproveRun(run)` |
+| "Approve and remember" | `ApprovalQueue::approve` | `ApproveAndRemember(run)` |
+| New connector operation | `OwnerSession::allow_operation` | `ChangeGrant { agent_id, item_id }` |
+| Process access (new or changed mode) | `OwnerSession::set_exec_grant` | `ChangeGrant { agent_id, item_id }` |
+| Rule of a process grant | `OwnerSession::set_exec_rule` | `ChangeRule { agent_id, item_id }` |
+| Declaration, environment variable, connector, review after restore | `set_declaration`, `set_env_binding`, `set_connector`, `confirm_review` | `ChangeItemRules { item_id }` |
+| Token rotation | `OwnerSession::rotate_agent_token` | `RotateToken { agent_id }` |
+| Token lifetime | `OwnerSession::set_token_lifetime_days` | `ChangeTokenLifetime` |
+
+A denial of a run, a revoke, and a removal of access need no check. They only take authority away.
+`ApprovalQueue::decide(id, bool)` does not exist anymore, so an approval button that skips the gate does not compile.
+
+The dialog starts Touch ID at once when `ping` reported Touch ID as available. Otherwise it says why, for example "Touch ID is not available: the Touch ID keyboard is not connected or not paired, or this Mac has no Touch ID sensor. Type the passphrase to confirm." The owner can try Touch ID again or type the passphrase. `cancelled`, `fallback`, `failed`, `not_available`, `not_enrolled`, and `locked_out` keep the dialog open for the passphrase.
+
+### Key memory in the desktop (review F1, F3, F4, F10)
+
+- F1: each passphrase and secret field has a global widget ID. After Create, Unlock, Restore, a passphrase change, a save of an item, the owner check, and on lock, the app clears the egui undo history of the field. A headless test shows that Cmd+Z restores the typed passphrase without this and restores nothing with it.
+- F3: `Ephemeral`, `SecretForm`, and `RevealedValue` erase their text with `zeroize`. `SecretForm` has no `Clone`, and the forms are borrowed, not cloned.
+- F4: a passphrase field has 4096 bytes of capacity and takes at most 1024 characters. An item secret field has 256 KiB and takes at most 65536 characters. So typing never moves the text. `Ephemeral::take` leaves a buffer with the same capacity.
+- F10: `OwnerDetails` has no revealed value. The view borrows it from the session. A revealed value hides after 30 s, on "Hide values", and on lock. egui still copies the text for its layout.
+
+### Notifications (N1 to N4)
+
+See [notifications.md](notifications.md).
+
 ## Checks run by the agent
 
 All commands ran from the repository root in the worktree.
@@ -281,6 +343,35 @@ These failures are not counted as passes:
 - In case C2, the probe first had no entitlements. The signature of the bundle replaced the signature of the main executable, and that signature had no `--entitlements`. The script signs the keychain helper at the bundle level with its entitlements for this reason.
 - Clippy failed once with `manual implementation of .is_multiple_of()` in the base64 decoder. The code now uses `is_multiple_of`.
 
+### Checks for the desktop integration (A2 to A4, N1 to N4)
+
+Worktree branch of the desktop worker, after a merge with `goal-v1` at `6e64c69`. All commands ran from the repository root.
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt --check` | PASS |
+| `cargo clippy --locked --all-targets --features desktop,vault -- -D warnings` | PASS. No warnings. |
+| `cargo clippy --locked --all-targets -- -D warnings` and `--features desktop` | PASS. The build without the vault feature keeps working. |
+| `cargo test --locked --features desktop,vault` | PASS. lib 88, main 1, agent_path 11, agent_run 13, analysis_replay 1, bouncer_eval 2, bouncer_rules 8, contracts 14, desktop_model 29, host_hook 7, isolation_profile 10, native_helper 15, notifications 6, owner_auth 8, owner_vault 12, rule_packs 5, vault_lifecycle 28, vault_migration 3, vault_passphrase 8, doc tests 6. No failures. The 8 ignored tests are earlier tests that need the network, a live Laya model, or a real host. |
+| `scripts/build-app.sh` | PASS, exit 0. Hardened runtime on all 4 programs. `ok:` for the smoke test, `apassy-mcp --version`, helper `ping`, `notify_status`, an unknown command, keychain helper `ping`, and `keychain_exists`. "Keychain: DISABLED (no provisioning profile)." |
+
+New tests for this work: `tests/owner_auth.rs` (A2, A3, A4 with a fake helper), `tests/notifications.rs` (N1 to N4 with a real broker and a fake helper), `tests/owner_vault.rs` (`owner_actions_refuse_without_a_matching_check`, `revealed_values_hide_on_time_hide_and_lock`), `src/desktop/ui/owner_tests.rs` (F1, F4, the owner check dialog, "Mark as seen"), `src/broker/approvals.rs` (`approve_refuses_without_a_matching_fresh_proof`), `src/desktop/inbox.rs`, and `tests/isolation/product_profile.rs` (`keychain_item_is_not_readable_in_profile`, with the signed helper from `target/Apassy.app`).
+
+Start of the built app without a window check (the process has a window, but the agent did not look at the screen). The data directory on this Mac has mode `0755`, so the broker refuses it. The start used a temporary socket directory with mode `0700`:
+
+```
+$ APASSY_BROKER_SOCKET=/tmp/apassy-launch-check2/broker.sock target/Apassy.app/Contents/MacOS/apassy &
+$ ps -o pid,stat,etime,command -p <pid>        # after 7 s: running
+$ ls -la /tmp/apassy-launch-check2              # srw------- broker.sock
+$ printf '%s\n' '{"cmd":"ping"}' '{"cmd":"notify_status"}' | target/Apassy.app/Contents/MacOS/apassy-helper
+{"biometry":"not_available","bundle_id":"com.wydrox.apassy","helper_version":"0.1.0","keychain_access_group":null,"ok":true,"protocol":1}
+{"alert":"not_supported","alert_style":"none","authorization":"not_determined","lock_screen":"not_supported","notification_center":"not_supported","ok":true,"sound":"not_supported"}
+$ printf '%s\n' '{"cmd":"ping"}' | target/Apassy.app/Contents/Helpers/ApassyKeychain.app/Contents/MacOS/ApassyKeychain
+{"biometry":"not_available","bundle_id":"com.wydrox.apassy.keychain","helper_version":"0.1.0","keychain_access_group":null,"ok":true,"protocol":1}
+```
+
+The app started, the broker listened, and the app wrote nothing to stdout or stderr. The agent stopped it with `SIGTERM`. Touch ID answers `not_available` (the keyboard is not paired), the keychain helper has no access group, and the owner has not decided about notifications yet. So on this Mac today: the owner check uses the passphrase, the vault unlocks with the passphrase, and the Inbox card shows "You did not allow notifications yet."
+
 ## Not verified by the agent
 
 - A real Touch ID prompt. The keyboard is not paired, and a real prompt needs a finger.
@@ -288,6 +379,7 @@ These failures are not counted as passes:
 - The invalid item after a fingerprint change.
 - The notification permission prompt, a delivered notification, and the 5-second limit of N1. They need a click on "Allow".
 - Notifications from a second executable in `Contents/MacOS`. `notify_status` works from it. If macOS does not show its notifications, move the notification commands into a nested bundle, as for the keychain.
+- The desktop flows with the real helper: Touch ID unlock, the owner check with a real finger, and a real banner from the app. The tests use a fake helper with the same protocol. Section 3 of the owner steps has the checks.
 
 ## Owner steps
 
@@ -328,9 +420,24 @@ KC=target/Apassy.app/Contents/Helpers/ApassyKeychain.app/Contents/MacOS/ApassyKe
 7. Notification time and preview (N1, N2). Run `time (printf '%s\n' '{"cmd":"notify","id":"manual-1","title":"Approval waiting","body":"Agent \"Manual\" waits for your decision. Open Apassy to review."}' | $H)`. Expect a banner from Apassy within 5 seconds and `"delivered":true`. The banner must show only the title and the body.
 8. Delivery failure (N3). Turn off notifications for Apassy in System Settings > Notifications. Run step 7 again. Expect `notifications_denied`, or `"delivered":false` with `alert` and `notification_center` set to `disabled`. Turn notifications on again.
 
+### 3. App checks (A2, A3, A4)
+
+Use a vault file with synthetic values. Start the app with `open target/Apassy.app`. Record each result in this document.
+
+1. Owner check without Touch ID (A4, this Mac today). Unlock the vault with the passphrase. Open an item and select "Reveal values". Expect the dialog "Confirm that it is you" with "Touch ID is not available: the Touch ID keyboard is not connected or not paired ...". Type a wrong passphrase: expect "The passphrase is incorrect" and no value. Type the passphrase: expect the value, and that it hides after 30 s.
+2. Owner check with Touch ID (A4). With the keyboard paired, select "Reveal values". Expect the macOS prompt "Apassy is trying to show the secret values of an item". Touch the sensor: expect the value. Repeat and select Cancel: expect "Touch ID was cancelled" and no value. Repeat for "Approve once", "Rotate token", a grant checkbox, and "Save rule": each shows a prompt, and nothing changes before the check.
+3. Setup without a profile (A2, this Mac today). Open Vault > "Vault file, passphrase, unlock method, and backup". Expect "Touch ID can confirm actions, but cannot unlock the vault until the app has a provisioning profile." and no setup button. Lock: the Vault file card shows the same text, and passphrase unlock works.
+4. Setup with a profile (A2, A3). After owner step 1, type the passphrase in the Unlock method card and select "Turn on Touch ID unlock". Touch the sensor. Expect "Touch ID unlock is on". Run `security find-generic-password -s com.wydrox.apassy.vault-unlock`: expect "could not be found". Lock, then select "Unlock with Touch ID" and touch the sensor: expect the vault unlocked.
+5. Fingerprint change (A3). Add a fingerprint in System Settings. Open the vault file again. Expect "The fingerprints on this Mac changed ..." without a prompt, and passphrase unlock. Expect "Current: passphrase." after unlock.
+6. Turn off (A3). Turn Touch ID unlock on again, then select "Turn off Touch ID unlock". Expect "Apassy deleted the unlock key", and after a lock, no "Unlock with Touch ID" button.
+7. Passphrase change (A3). With Touch ID unlock on, change the passphrase. Expect "Touch ID unlock is off, because the passphrase changed."
+8. Agent profile (I2). After owner step 1, run `cargo test --locked --features desktop,vault --test isolation_profile keychain`. The test fails on purpose while a process in the agent profile can start the keychain helper of a provisioned build. Record the result.
+
 ## Limits
 
 - A development signature is valid on Macs in the profile only. It is not a release.
-- The Rust side of Touch ID unlock (A2), the fresh-check rule for owner actions (A4), and the inbox (N3) are desktop and vault work. This task supplies the native calls only.
+- Touch ID unlock needs a provisioning profile. Without one, Touch ID can confirm owner actions (A4), but the vault unlocks with the passphrase only.
+- The Touch ID unlock item holds the master passphrase. Anyone who passes Touch ID on this Mac for Apassy gets the passphrase through the helper. The passphrase stays the root key.
+- The keychain helper and `apassy-helper` are not inside the denied paths of the agent profile. A process in the agent profile can start them. Today the keychain helper has no access group, so it cannot read an item (`keychain_item_is_not_readable_in_profile`). With a provisioning profile, such a process could ask for a Touch ID prompt with its own reason text, and only the owner's finger would stop it. Before a provisioned build is used with agents, the agent profile must deny the start of the Apassy helpers, or the keychain helper must accept requests from the signed Apassy app only. The isolation test fails until then.
 - `KeychainSecret` and the buffer overwrites do not protect against memory inspection, swap, or crash dumps. The key-memory review (V2) covers this.
 - A process that can replace files in `Apassy.app` can replace the helper. The bundle signature does not stop that at run time.

@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "terraform",
+  "description": "Terraform, OpenTofu, and Pulumi: destroy and apply.",
+  "programs": ["terraform", "tofu", "pulumi"],
+  "roles": {
+    "usage": ["terraform"]
+  },
+  "rules": [
+    {
+      "id": "destroy",
+      "flag": "data_loss",
+      "dry_run": "skip_with_n",
+      "when": { "any_arg": ["destroy"] }
+    },
+    {
+      "id": "apply",
+      "flag": "production",
+      "dry_run": "skip",
+      "when": { "subcommand": ["apply", "up", "import", "state"] }
+    }
+  ]
+}

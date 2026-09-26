@@ -12,8 +12,11 @@
 //!    forbidden words, hourly limit).
 //! 6. A production declaration needs the owner (ADR 0010). The model is not asked.
 //! 7. The bouncer scores the request (ADR 0007, ADR 0008). A rule flag skips the model.
-//!    An active remembered pattern replaces the model step (ADR 0009, ADR 0010). It
-//!    cannot change steps 5 and 6, a rule flag, or a missing user request or declaration.
+//!    The user request comes from the host hook when there is one (goal item B6,
+//!    [`super::prompts`]). An unverified hook request or a command that names the hook
+//!    channel is a rule flag. An active remembered pattern replaces the model step
+//!    (ADR 0009, ADR 0010). It cannot change steps 5 and 6, a rule flag, or a missing
+//!    user request or declaration.
 //! 8. A grant in "ask" mode, a high risk, or an unavailable bouncer needs the owner.
 //!    A clean request with only "bouncer" grants runs without a prompt. Each decision
 //!    goes to the decision log. An owner denial blocks the pattern of the request.
@@ -61,6 +64,8 @@ pub struct RunRequest<'a> {
     pub purpose: &'a str,
     pub path: Option<&'a str>,
     pub user_request: Option<&'a str>,
+    /// The agent host session of the adapter (goal item B6).
+    pub host_session: Option<&'a str>,
 }
 
 impl RunRequest<'_> {
@@ -176,12 +181,20 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
 
     // The bouncer runs without the vault lock. Its state has no secret value.
     // A rule flag (ADR 0008) or a hard owner rule (ADR 0010) skips the model.
-    let analysis = analyze(request.command, request.purpose, &checked.env_names);
-    let user_request = request
-        .user_request
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .unwrap_or_default();
+    let mut analysis = analyze(request.command, request.purpose, &checked.env_names);
+    // Goal item B6: a user request from the host hook replaces the text from the agent.
+    let resolved = ctx.prompts.resolve(
+        checked.agent.id,
+        &checked.epoch,
+        request.host_session,
+        &checked.cwd,
+        request.user_request.unwrap_or_default(),
+    );
+    analysis.flags.extend(resolved.flags.iter().cloned());
+    analysis
+        .flags
+        .extend(super::prompts::hook_channel_flag(request.command));
+    let user_request = resolved.text.as_str();
     let context = DecisionContext {
         analysis: &analysis,
         declarations: &checked.declarations,
@@ -225,6 +238,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
     };
     let decision = decide_learned(&verdict, &context, &learned.learned);
     let risk_note = decision.note.clone();
+    let log_note = format!("{} {risk_note}", resolved.log_note());
     let needs_approval = checked.any_ask || decision.ask_owner;
     let by_pattern = !decision.ask_owner && learned.learned.pattern.is_some();
     let decided_by = if needs_approval {
@@ -241,7 +255,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         agent_name: &checked.agent.name,
         scope,
         user_request,
-        user_request_source: learning::agent_source(user_request),
+        user_request_source: learning::resolved_source(user_request, &resolved.source),
         command: request.command,
         purpose: request.purpose.trim(),
         env_names: &checked.env_names,
@@ -258,6 +272,23 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         record_decision_locked(ctx, &entry, pattern.as_ref());
     }
     if needs_approval {
+        // Goal item N3: a durable record of the wait. A crash leaves it, and the next
+        // unlock gives the run its final entry.
+        let wait = lock(&ctx.vault)
+            .as_mut()
+            .filter(|vault| !vault.is_locked())
+            .and_then(|vault| {
+                vault
+                    .start_wait(&NewActivity {
+                        agent_id: Some(checked.agent.id),
+                        agent_name: checked.agent.name.clone(),
+                        item_id: request.items.first().copied(),
+                        operation: label.clone(),
+                        decision: ActivityDecision::Deny,
+                        reason: request.purpose.trim().to_owned(),
+                    })
+                    .ok()
+            });
         // The wait ends when the vault session of the first check ends.
         let same_session = || {
             lock(&ctx.vault)
@@ -274,11 +305,27 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                 purpose: request.purpose.trim().to_owned(),
                 risk: risk_note.clone(),
                 user_request: user_request.to_owned(),
+                request_source: resolved.source.clone(),
+                agent_request: resolved.agent_text.clone().unwrap_or_default(),
                 remember: learned.offer(pattern.as_ref(), &context, checked.any_ask),
             },
             ctx.approval_timeout,
             same_session,
         );
+        // The wait record goes. False when a lock or a quit already gave the run its
+        // final entry, or when the vault is locked now. Then the ticket goes, so the
+        // next unlock ends a record that is still there.
+        let own_entry = {
+            let mut guard = lock(&ctx.vault);
+            guard
+                .as_mut()
+                .filter(|vault| !vault.is_locked())
+                .is_some_and(|vault| {
+                    wait.as_ref()
+                        .is_none_or(|ticket| vault.end_wait(ticket).unwrap_or(true))
+                })
+        };
+        drop(wait);
         // Every owner answer goes to the decision log. A denial blocks the pattern.
         let mut entry = logged.entry(Outcome::Owner(outcome), &risk_note);
         entry.at = learning::now();
@@ -299,15 +346,17 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
             ApprovalOutcome::Invalidated => Some(("approval_invalidated", INVALIDATED.to_owned())),
         };
         if let Some((code, reason)) = refusal {
-            let reason = format!("{reason} {risk_note}.");
-            record_locked(
-                ctx,
-                &checked.agent,
-                request,
-                &label,
-                ActivityDecision::Deny,
-                &reason,
-            );
+            let reason = format!("{reason} {log_note}.");
+            if own_entry {
+                record_locked(
+                    ctx,
+                    &checked.agent,
+                    request,
+                    &label,
+                    ActivityDecision::Deny,
+                    &reason,
+                );
+            }
             return WireResponse::failure(code, reason);
         }
     }
@@ -395,12 +444,12 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         Ok(output) => {
             let reason = if output.timed_out {
                 format!(
-                    "{decided_by}. The run timed out and was stopped. Directory: {}. {risk_note}.",
+                    "{decided_by}. The run timed out and was stopped. Directory: {}. {log_note}.",
                     checked.cwd.display()
                 )
             } else {
                 format!(
-                    "{decided_by}. Exit code {}. Directory: {}. {risk_note}.",
+                    "{decided_by}. Exit code {}. Directory: {}. {log_note}.",
                     output
                         .exit_code
                         .map_or_else(|| "none".to_owned(), |code| code.to_string()),
@@ -598,7 +647,7 @@ fn read_secrets(vault: &Vault, items: &[u64]) -> Result<Vec<SecretEnv>, String> 
             .map_err(|_| format!("Item {item_id} has no value in field {}.", binding.field))?;
         secrets.push(SecretEnv {
             name: binding.env_name,
-            value: value.expose().to_owned(),
+            value: value.into_zeroizing(),
         });
     }
     Ok(secrets)

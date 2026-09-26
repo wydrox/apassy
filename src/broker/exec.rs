@@ -3,8 +3,11 @@
 //! The process gets a small base environment, the requested `PATH`, and the
 //! bound secrets. There is no shell. Output is limited and masked. The masking
 //! finds only exact secret values. It cannot stop a process that encodes or
-//! sends a secret.
+//! sends a secret. When the main process ends, the broker stops its process
+//! group, so no descendant keeps the secrets after the run. A descendant that
+//! leaves the group is not stopped.
 
+use std::borrow::Cow;
 use std::io::{self, Read};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -13,6 +16,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use std::os::unix::process::CommandExt;
+
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Output bytes kept for each stream. The rest is read and dropped.
 pub const MAX_OUTPUT_BYTES: usize = 64 * 1024;
@@ -26,9 +31,10 @@ const BASE_ENV: [&str; 6] = ["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG
 const DEFAULT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 
 /// One environment variable with a secret value. Debug is redacted.
+/// The value is erased on drop.
 pub struct SecretEnv {
     pub name: String,
-    pub value: String,
+    pub value: Zeroizing<String>,
 }
 
 impl std::fmt::Debug for SecretEnv {
@@ -37,11 +43,7 @@ impl std::fmt::Debug for SecretEnv {
     }
 }
 
-impl Drop for SecretEnv {
-    fn drop(&mut self) {
-        self.value.clear();
-    }
-}
+impl ZeroizeOnDrop for SecretEnv {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunOutput {
@@ -82,9 +84,13 @@ pub fn run(
         path.filter(|p| !p.is_empty()).unwrap_or(DEFAULT_PATH),
     );
     for secret in secrets {
-        cmd.env(&secret.name, &secret.value);
+        cmd.env(&secret.name, secret.value.as_str());
     }
-    let mut child = cmd.spawn()?;
+    let spawned = cmd.spawn();
+    // The command keeps a copy of each value. The standard library cannot erase
+    // it, so free it now and not at the end of the run.
+    drop(cmd);
+    let mut child = spawned?;
     let stdout = spawn_reader(child.stdout.take());
     let stderr = spawn_reader(child.stderr.take());
 
@@ -102,12 +108,21 @@ pub fn run(
         thread::sleep(POLL);
     };
 
-    let (out, out_cut) = collect(&stdout, &mut child);
-    let (err, err_cut) = collect(&stderr, &mut child);
+    let (mut out, out_cut) = collect(&stdout, &mut child);
+    let (mut err, err_cut) = collect(&stderr, &mut child);
+    // The run ends with the main process. A descendant that stays in the group
+    // keeps the secrets in its environment, and a same-user process can read that
+    // environment (key-memory review K12, F11). So stop the group.
+    stop_group(&mut child);
+    let masked_out = mask_output(&out, secrets);
+    let masked_err = mask_output(&err, secrets);
+    // The raw output can contain a secret. Only the masked text leaves.
+    out.zeroize();
+    err.zeroize();
     Ok(RunOutput {
         exit_code: status.and_then(|status| status.code()),
-        stdout: mask(&String::from_utf8_lossy(&out), secrets),
-        stderr: mask(&String::from_utf8_lossy(&err), secrets),
+        stdout: masked_out,
+        stderr: masked_err,
         truncated: out_cut || err_cut,
         timed_out,
     })
@@ -118,7 +133,8 @@ type Collected = (Vec<u8>, bool);
 fn spawn_reader<R: Read + Send + 'static>(pipe: Option<R>) -> mpsc::Receiver<Collected> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let mut kept = Vec::new();
+        // Full size at the start, so the buffer does not move and leave copies.
+        let mut kept = Vec::with_capacity(MAX_OUTPUT_BYTES);
         let mut cut = false;
         if let Some(mut pipe) = pipe {
             let mut buf = [0u8; 8192];
@@ -134,8 +150,12 @@ fn spawn_reader<R: Read + Send + 'static>(pipe: Option<R>) -> mpsc::Receiver<Col
                     }
                 }
             }
+            buf.zeroize();
         }
-        let _ = tx.send((kept, cut));
+        // The run can end before this send. Then nobody reads the output.
+        if let Err(mpsc::SendError((mut unread, _))) = tx.send((kept, cut)) {
+            unread.zeroize();
+        }
     });
     rx
 }
@@ -160,7 +180,20 @@ fn stop_group(child: &mut Child) {
     let _ = child.kill();
 }
 
+/// Mask raw output. A lossy UTF-8 copy can contain a secret, so it is erased.
+fn mask_output(raw: &[u8], secrets: &[SecretEnv]) -> String {
+    match String::from_utf8_lossy(raw) {
+        Cow::Borrowed(text) => mask(text, secrets),
+        Cow::Owned(mut text) => {
+            let masked = mask(&text, secrets);
+            text.zeroize();
+            masked
+        }
+    }
+}
+
 /// Replace each secret value with `[apassy:NAME]`. Longer values go first.
+/// Each intermediate text can still contain a later secret, so it is erased.
 pub fn mask(text: &str, secrets: &[SecretEnv]) -> String {
     let mut ordered: Vec<&SecretEnv> = secrets
         .iter()
@@ -169,7 +202,9 @@ pub fn mask(text: &str, secrets: &[SecretEnv]) -> String {
     ordered.sort_by_key(|secret| std::cmp::Reverse(secret.value.len()));
     let mut out = text.to_owned();
     for secret in ordered {
-        out = out.replace(&secret.value, &format!("[apassy:{}]", secret.name));
+        let mut replaced = out.replace(secret.value.as_str(), &format!("[apassy:{}]", secret.name));
+        std::mem::swap(&mut out, &mut replaced);
+        replaced.zeroize();
     }
     out
 }
@@ -181,8 +216,17 @@ mod tests {
     fn secret(name: &str, value: &str) -> SecretEnv {
         SecretEnv {
             name: name.to_owned(),
-            value: value.to_owned(),
+            value: Zeroizing::new(value.to_owned()),
         }
+    }
+
+    fn requires_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+
+    #[test]
+    fn secret_env_value_is_zeroize_on_drop() {
+        // Compile-time check. Safe Rust cannot read freed memory to prove the erase.
+        requires_zeroize_on_drop::<SecretEnv>();
+        requires_zeroize_on_drop::<Zeroizing<String>>();
     }
 
     #[test]
@@ -228,6 +272,79 @@ mod tests {
         .expect("run");
         assert!(out.timed_out);
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    fn process_exists(pid: &str) -> bool {
+        Command::new("/bin/kill")
+            .args(["-0", pid])
+            .stderr(Stdio::null())
+            .status()
+            .expect("kill -0")
+            .success()
+    }
+
+    #[test]
+    fn run_stops_descendants_that_outlive_the_main_process() {
+        // The background process has the secret in its environment and closes its
+        // output, so the output drain does not wait for it.
+        let secrets = [secret("DEMO_TOKEN", "FAKE-background-value")];
+        let command = [
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "sleep 30 >/dev/null 2>&1 & echo $!".to_owned(),
+        ];
+        let started = Instant::now();
+        let out = run(
+            &command,
+            Path::new("/tmp"),
+            None,
+            &secrets,
+            Duration::from_secs(10),
+        )
+        .expect("run");
+        assert_eq!(out.exit_code, Some(0));
+        assert!(!out.timed_out);
+        let pid = out.stdout.trim().to_owned();
+        assert!(pid.parse::<u32>().is_ok(), "{out:?}");
+        // launchd reaps the stopped process a short time after the kill.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process_exists(&pid) {
+            assert!(
+                Instant::now() < deadline,
+                "process {pid} with the secret still runs after the run ended"
+            );
+            thread::sleep(POLL);
+        }
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn environment_has_only_base_names_path_and_bound_secrets() {
+        // Control: cargo test gives this process variables that the child must not get.
+        assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
+        let secrets = [secret("DEMO_TOKEN", "FAKE-env-value-77")];
+        let out = run(
+            &["/usr/bin/env".to_owned()],
+            Path::new("/tmp"),
+            Some("/usr/bin:/bin"),
+            &secrets,
+            Duration::from_secs(10),
+        )
+        .expect("run");
+        assert_eq!(out.exit_code, Some(0));
+        let names: Vec<&str> = out
+            .stdout
+            .lines()
+            .filter_map(|line| line.split_once('=').map(|(name, _)| name))
+            .collect();
+        assert!(names.contains(&"PATH") && names.contains(&"DEMO_TOKEN"));
+        for name in names {
+            assert!(
+                BASE_ENV.contains(&name) || name == "PATH" || name == "DEMO_TOKEN",
+                "unexpected variable {name}"
+            );
+        }
+        assert!(out.stdout.contains("DEMO_TOKEN=[apassy:DEMO_TOKEN]"));
     }
 
     #[test]

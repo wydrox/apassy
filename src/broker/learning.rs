@@ -254,6 +254,7 @@ impl LoggedRequest<'_> {
             remembered,
             policy: self.thresholds.policy_label(),
             note: note.to_owned(),
+            instruction: self.scope.instruction.trim().to_owned(),
         }
     }
 }
@@ -297,6 +298,7 @@ impl RuleDenial<'_> {
             remembered: false,
             policy: Thresholds::default().policy_label(),
             note: self.reason.to_owned(),
+            instruction: String::new(),
         }
     }
 }
@@ -332,12 +334,24 @@ pub fn now() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
-/// Where the user request came from. The agent sends it today. A host adapter (goal
-/// item B6) sets [`RequestSource::Host`].
+/// The source of a user request that the agent sent.
 pub fn agent_source(user_request: &str) -> RequestSource {
     if user_request.trim().is_empty() {
         RequestSource::None
     } else {
         RequestSource::Agent
+    }
+}
+
+/// The source of a user request after the host hook check (goal item B6). `label` is
+/// the source text of `broker::prompts`: it starts with "from the agent" when the text
+/// comes from the agent, and names the hook when the text comes from the host.
+pub fn resolved_source(user_request: &str, label: &str) -> RequestSource {
+    if user_request.trim().is_empty() {
+        RequestSource::None
+    } else if label.starts_with("from the agent") {
+        RequestSource::Agent
+    } else {
+        RequestSource::Host
     }
 }

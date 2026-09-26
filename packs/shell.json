@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "shell",
+  "description": "Shells, shell keywords, and builtins (sh, bash, echo, test, cd, for, and others).",
+  "programs": [
+    "sh", "bash", "zsh", "dash", "ksh", "fish", "echo", "printf", "print", "test", "[", "true",
+    "false", ":", "read", "cd", "pushd", "popd", "for", "do", "done", "if", "then", "else",
+    "elif", "fi", "while", "until", "case", "esac", "in", "local", "return", "break",
+    "continue", "trap", "wait", "shift", "mktemp", "pwd", "which", "type", "sleep"
+  ],
+  "roles": {
+    "output": ["echo", "printf", "print"],
+    "heredoc_code": ["sh", "bash", "zsh"],
+    "script_runner": ["bash", "sh"]
+  },
+  "exemptions": [
+    {
+      "id": "file-tests",
+      "check": "secret_file_argument",
+      "note": "`test -f .env` checks that the file exists. It does not read it.",
+      "when": { "program": ["test", "["] }
+    },
+    {
+      "id": "text-and-control",
+      "check": "production_word",
+      "when": {
+        "program": [
+          "echo", "printf", "test", "[", "for", "do", "done", "if", "then", "else", "fi",
+          "while", "case", "esac", "read", "cd"
+        ]
+      }
+    }
+  ],
+  "safe": [
+    {
+      "id": "script-control",
+      "when": {
+        "program": [
+          "for", "do", "done", "if", "then", "else", "elif", "fi", "while", "until", "case",
+          "esac", "in", "cd", "pushd", "popd", "local", "return", "break", "continue", "trap",
+          "wait", "shift", ":", "true", "false", "mktemp", "read"
+        ]
+      }
+    },
+    { "id": "print-text", "when": { "program": ["echo", "printf"] } },
+    { "id": "tests", "when": { "program": ["test", "["] } },
+    { "id": "information", "when": { "program": ["pwd", "which", "type", "sleep"] } }
+  ]
+}
