@@ -191,9 +191,6 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         request.user_request.unwrap_or_default(),
     );
     analysis.flags.extend(resolved.flags.iter().cloned());
-    analysis
-        .flags
-        .extend(super::prompts::hook_channel_flag(request.command));
     let user_request = resolved.text.as_str();
     let context = DecisionContext {
         analysis: &analysis,

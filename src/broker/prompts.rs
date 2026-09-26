@@ -572,15 +572,6 @@ fn block_text(blocks: &[Value]) -> Option<String> {
     (!texts.is_empty()).then(|| texts.join("\n"))
 }
 
-/// The hook channel check before goal item B7. The rule is now data: the built-in pack
-/// `host-hooks` (`packs/host-hooks.json`). The command analysis adds
-/// [`FLAG_HOOK_CHANNEL`] for such a command on every run (`shell_risk::analyze`), so this
-/// function gives no second flag. It stays only for its call in `run.rs`; remove both
-/// together.
-pub(super) fn hook_channel_flag(_command: &[String]) -> Option<String> {
-    None
-}
-
 /// The first `max` bytes of `text` at a character boundary, with "..." when cut.
 fn bounded(text: &str, max: usize) -> String {
     if text.len() <= max {
@@ -815,13 +806,11 @@ mod tests {
         assert_eq!(store.check_transcript(&codex), Check::Verified);
     }
 
-    /// The `host-hooks` pack in the command analysis flags the hook channel, and the old
-    /// check in this file gives no second flag.
+    /// The `host-hooks` pack in the command analysis flags the hook channel.
     #[test]
     fn hook_channel_commands_are_flagged() {
         let flagged = |args: &[&str]| {
             let command: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
-            assert_eq!(hook_channel_flag(&command), None);
             let analysis = crate::broker::shell_risk::analyze(&command, "", &[]);
             analysis.flags.iter().any(|flag| flag == FLAG_HOOK_CHANNEL)
         };
