@@ -11,6 +11,14 @@ Input: `train.jsonl` and `val.jsonl` from `gen_data.py`.
 Output: one safetensors file with the head tensors and a metadata block, and a
 JSON report with the time, the memory, and the validation metrics.
 
+The local fine-tune (goal B9, `tools/finetune/local_train.py`) uses the same
+trainer with three options:
+- `--init <checkpoint>` starts from the heads of the shipped base model.
+- A row can have a soft `answer` from 0 to 1. The loss is the cross-entropy with
+  the target distribution (1 - answer, answer). For 0 and 1 it is the same loss.
+- A row with `"teacher": true` gets the answer of the starting heads as its
+  target, so the fine-tune keeps that answer ("learning without forgetting").
+
 Run inside the Laya virtual environment (see docs/operations/base-model.md):
   TMPDIR=/tmp .venv/bin/python tools/basemodel/train.py --data <dir> --out <file>
 """
@@ -65,7 +73,8 @@ def encode(agent, rows):
             internal_by_text[text] = Agent._to_internal({"type": "noul", "instructions": text})
         it = agent._encode_state(r["state"], ["q"], {"q": internal_by_text[text]})[0]
         items.append({"ids": it["ids"], "markers": it["markers"], "qtype": it["qtype"],
-                      "y": int(r["answer"]), "q": QUESTIONS.index(r["question"])})
+                      "y": float(r["answer"]), "q": QUESTIONS.index(r["question"]),
+                      "teacher": bool(r.get("teacher", False))})
     return items
 
 
@@ -88,9 +97,14 @@ def collate(items, pad):
         "marker_pos": mpos,
         "marker_mask": torch.ones((n, 2), dtype=torch.bool),
         "qtype": torch.tensor([it["qtype"] for it in items]),
-        "y": torch.tensor([it["y"] for it in items]),
+        "y": torch.tensor([it["y"] for it in items], dtype=torch.float32),
         "q": torch.tensor([it["q"] for it in items]),
     }
+
+
+def targets(y):
+    """The two-option target distribution (no, yes) for a soft or hard answer."""
+    return torch.stack([1.0 - y, y], -1)
 
 
 class LoRALinear(torch.nn.Module):
@@ -251,17 +265,37 @@ def evaluate(model, items, pad, device, amp, temperature, batch_size, cache=None
         p, y = probs[sel], ys[sel]
         eps = 1e-6
         nll = float(-np.mean(y * np.log(p + eps) + (1 - y) * np.log(1 - p + eps)))
+        yes = y >= 0.5
         report[name] = {
             "n": int(sel.sum()),
-            "accuracy": float(np.mean((p >= 0.5) == (y == 1))),
+            "accuracy": float(np.mean((p >= 0.5) == yes)),
             "nll": nll,
             "brier": float(np.mean((p - y) ** 2)),
             "ece": ece(p, y),
-            "mean_p_yes": float(p[y == 1].mean()) if (y == 1).any() else None,
-            "mean_p_no": float(p[y == 0].mean()) if (y == 0).any() else None,
+            "mean_p_yes": float(p[yes].mean()) if yes.any() else None,
+            "mean_p_no": float(p[~yes].mean()) if (~yes).any() else None,
         }
     report["all_nll"] = float(np.mean([v["nll"] for k, v in report.items() if isinstance(v, dict)]))
     return report
+
+
+def teacher_targets(model, items, pad, device, amp, temperature, batch_size, cache=None):
+    """Give each teacher row the answer of the current heads as its target.
+
+    Call it before the first step, so the target is the answer of the starting
+    model. Returns the number of teacher rows.
+    """
+    rows = [i for i, it in enumerate(items) if it.get("teacher")]
+    model.eval()
+    with torch.no_grad():
+        for start in range(0, len(rows), batch_size):
+            idx = rows[start:start + batch_size]
+            b = collate([items[i] for i in idx], pad)
+            h = cache.batch(idx, device) if cache else encoder_states(model, b, device, amp)
+            p = torch.softmax(head_logits(model, h, b, device) / temperature, -1)[:, 1]
+            for i, value in zip(idx, p.cpu().tolist()):
+                items[i]["y"] = float(value)
+    return len(rows)
 
 
 def mps_memory_gb():
@@ -283,10 +317,12 @@ def release_cache():
         torch.mps.empty_cache()
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True, help="folder with train.jsonl and val.jsonl")
     ap.add_argument("--out", required=True, help="checkpoint path (.safetensors)")
+    ap.add_argument("--init", default="", help="start from the heads of this checkpoint (goal B9)")
+    ap.add_argument("--name", default=common.MODEL_NAME, help="model name in the version <name>+<hash8>")
     ap.add_argument("--report", default="", help="JSON report path (default: <out>.report.json)")
     ap.add_argument("--epochs", type=int, default=4)
     ap.add_argument("--batch", type=int, default=32)
@@ -305,7 +341,7 @@ def main():
     ap.add_argument("--lora-alpha", type=float, default=16.0)
     ap.add_argument("--cache-dir", default="", help="folder for the encoder cache (default: next to --out)")
     ap.add_argument("--keep-cache", action="store_true", help="keep the encoder cache after training")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -325,6 +361,12 @@ def main():
     temperature = common.noul_temperature(agent)
     print("base %s@%s loaded in %.1fs on %s, noul temperature %.4f" % (
         common.BASE_REPO, common.BASE_REVISION[:12], time.time() - t0, device, temperature), flush=True)
+    init_sha = None
+    if args.init:
+        tensors, _meta = common.load_checkpoint(args.init)
+        common.apply_heads(model, tensors)
+        init_sha = common.sha256_file(args.init)
+        print("heads from %s (sha256 %s)" % (args.init, init_sha[:8]), flush=True)
 
     train_rows = load_rows(os.path.join(args.data, "train.jsonl"), args.limit)
     val_rows = load_rows(os.path.join(args.data, "val.jsonl"))
@@ -371,6 +413,12 @@ def main():
         release_cache()
         print("encoder cache ready in %.0fs" % cache_seconds, flush=True)
 
+    # Teacher rows get the answer of the starting heads, before any step.
+    teachers = teacher_targets(model, train_items, pad, device, amp, temperature, args.batch, train_cache)
+    teachers += teacher_targets(model, val_items, pad, device, amp, temperature, args.batch, val_cache)
+    if teachers:
+        print("teacher targets for %d rows" % teachers, flush=True)
+
     baseline = None
     if not args.skip_baseline:
         t_b = time.time()
@@ -408,7 +456,7 @@ def main():
             else:
                 h = encoder_states(model, b, device, amp, grad=bool(args.lora_layers))
             logits = head_logits(model, h, b, device)
-            loss = F.cross_entropy(logits / temperature, b["y"].to(device))
+            loss = F.cross_entropy(logits / temperature, targets(b["y"]).to(device))
             for g in opt.param_groups:
                 g["lr"] = lr_at(step)
             opt.zero_grad(set_to_none=True)
@@ -450,7 +498,7 @@ def main():
             best = val
             best_epoch = epoch + 1
             meta = {
-                "name": common.MODEL_NAME,
+                "name": args.name,
                 "base_repo": common.BASE_REPO,
                 "base_revision": common.BASE_REVISION,
                 "trained": list(common.TRAINED_PREFIXES),
@@ -465,11 +513,15 @@ def main():
     train_seconds = time.time() - t_train
     peak = max(peak, mps_memory_gb())
 
+    digest = common.sha256_file(args.out)
     report = {
         "checkpoint": os.path.abspath(args.out),
-        "sha256": common.sha256_file(args.out),
+        "sha256": digest,
         "size_bytes": os.path.getsize(args.out),
-        "version": common.model_version(args.out),
+        "version": "%s+%s" % (args.name, digest[:8]),
+        "init": os.path.abspath(args.init) if args.init else None,
+        "init_sha256": init_sha,
+        "teacher_rows": teachers,
         "best_epoch": best_epoch,
         "encoder_cache_seconds": round(cache_seconds, 1),
         "train_seconds": round(train_seconds, 1),
@@ -507,6 +559,7 @@ def main():
             for suffix in (".f16", ".json"):
                 os.remove(os.path.join(cache_dir, name + suffix))
         os.rmdir(cache_dir)
+    return report
 
 
 if __name__ == "__main__":

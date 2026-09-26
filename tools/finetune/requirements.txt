@@ -1,13 +1,18 @@
-# Pinned dependencies for the local fine-tune study (goal B8/B9).
+# Pinned dependencies for the local fine-tune (goal B8/B9).
 # Install into the same virtual environment as laya-serve (see
 # docs/operations/bouncer.md section 1). laya[serve] pulls torch and
-# transformers; the versions below are the ones the study measured.
+# transformers. The versions below are the ones that the study and the local
+# fine-tune measured. They are the same as tools/basemodel/requirements.txt,
+# because local_train.py runs tools/basemodel/train.py.
 #
 #   uv pip install --python .venv/bin/python -r requirements.txt
 #
 laya[serve]==0.3.20
 torch==2.14.0
 transformers==5.17.0
+huggingface_hub==1.33.0
 numpy==2.5.3
 safetensors==0.8.0
 tokenizers==0.23.2
+fastapi==0.141.1
+uvicorn==0.54.0

@@ -88,6 +88,17 @@ pub enum OwnerRequest {
     ApplyCalibration {
         level: u32,
     },
+    /// Make a candidate model the active model of the bouncer (ADR 0010, goal item B9).
+    PromoteModel {
+        candidate_id: u64,
+        version: String,
+    },
+    /// Return the bouncer to the model before one promotion (goal item B9).
+    RollbackModel {
+        activation_id: u64,
+        from: String,
+        to: String,
+    },
     AllowOperation {
         agent_id: u64,
         item_id: u64,
@@ -137,6 +148,16 @@ impl OwnerRequest {
             Self::ApproveRun(run) => OwnerAction::ApproveRun(run.clone()),
             Self::ApproveAndRemember(run) => OwnerAction::ApproveAndRemember(run.clone()),
             Self::ApplyCalibration { level } => OwnerAction::ChangeCalibration { level: *level },
+            Self::PromoteModel {
+                candidate_id,
+                version,
+            } => OwnerAction::PromoteModel {
+                candidate_id: *candidate_id,
+                version: version.clone(),
+            },
+            Self::RollbackModel { activation_id, .. } => OwnerAction::RollbackModel {
+                activation_id: *activation_id,
+            },
             Self::AllowOperation {
                 agent_id, item_id, ..
             }
@@ -188,6 +209,12 @@ impl OwnerRequest {
             Self::ApplyCalibration { level } => format!(
                 "Set the task_match level of the bouncer to {level}%. Apassy replays all past decisions again first."
             ),
+            Self::PromoteModel { version, .. } => format!(
+                "Make the candidate model {version} the active model of the bouncer. Apassy checks its shadow numbers again first."
+            ),
+            Self::RollbackModel { from, to, .. } => {
+                format!("Roll back the bouncer model from {from} to {to}.")
+            }
             Self::AllowOperation { operation, .. } => {
                 format!("Let the agent use the operation {operation}.")
             }
@@ -435,6 +462,12 @@ impl DesktopApp {
             }
             OwnerRequest::ApplyCalibration { level } => {
                 super::learning_ui::apply_calibration(self, level, proof);
+            }
+            OwnerRequest::PromoteModel { candidate_id, .. } => {
+                super::learning_ui::promote_model(self, candidate_id, proof);
+            }
+            OwnerRequest::RollbackModel { activation_id, .. } => {
+                super::learning_ui::roll_back_model(self, activation_id, proof);
             }
             OwnerRequest::AllowOperation {
                 agent_id,
@@ -803,5 +836,7 @@ impl DesktopApp {
         if let Some(mut center) = self.owner.notifications.take() {
             center.stop();
         }
+        // A local fine-tune stops with the app (goal item B9).
+        self.learning.stop_training();
     }
 }
