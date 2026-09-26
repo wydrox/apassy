@@ -184,8 +184,8 @@ The vault must be unlocked. `current` must open the file, and `new` follows the 
 Apassy checks `current` on a second read-only connection. A wrong `current` returns `WrongKeyOrCorrupt` and leaves the vault open and unchanged.
 Then Apassy locks the vault, which ends the epoch, and opens a new connection with `current`. That connection verifies the SQLCipher 4 settings and uses DELETE journal mode.
 Before the rekey, Apassy refuses a journal, WAL, or SHM file and takes the exclusive lock one time. A reader of another SQLite client then gives `Busy` before a page changes.
-`PRAGMA rekey` encrypts every page again in one transaction with the same KDF, HMAC, and page settings. SQLCipher answers "ok" also when that transaction rolls back, so Apassy closes the connection and opens the file with `new` again. That check reads every page and checks its HMAC.
-After a failure past the lock, the vault stays locked. Apassy opens the file with `current` to roll back a journal. `Busy` or `Storage` then means that the old passphrase opens the file.
+`PRAGMA rekey` encrypts every page again in one transaction with the same KDF, HMAC, and page settings. SQLCipher answers "ok" also when that transaction rolls back, so Apassy closes the connection and opens the file with `new` again. That check reads every page and checks its HMAC. On success, the vault stays unlocked on this new connection.
+If the check fails, the vault stays locked. Apassy opens the file with `current`. A read-write connection also rolls back a journal that a failed rekey left. `Busy` or `Storage` then means that the old passphrase opens the file. `WrongKeyOrCorrupt` means that neither check passed.
 The new passphrase is in a temporary SQL string, as the key is at unlock. A backup keeps the passphrase of its time. The old rollback journal can stay in free disk blocks, in snapshots, and in earlier copies.
 
 ## Remaining limits

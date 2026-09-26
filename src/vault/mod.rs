@@ -396,26 +396,25 @@ impl Vault {
         self.lock()?;
         let conn = open_working_conn(&self.path, current)?;
         let rekeyed = rekey(&conn, &self.path, new);
-        let closed = close_conn(conn);
+        // A close error drops the connection. The checks below decide the result.
+        let _ = close_conn(conn);
         // SQLCipher answers "ok" also when its rekey transaction rolls back, for example
         // when another connection holds a read lock. Only a new connection with the new
-        // passphrase proves the change.
-        let verified = rekeyed
-            .and(closed)
-            .and_then(|()| refuse_sqlite_companions(&self.path, VaultErrorKind::Storage))
-            .and_then(|()| open_working_conn(&self.path, new));
-        match verified {
-            Ok(conn) => {
-                self.conn = Some(conn);
-                Ok(())
-            }
-            // A failed rekey can leave a rollback journal with the old pages. A read-write
-            // connection with the old passphrase rolls it back and checks the file.
-            Err(change_err) => match open_working_conn(&self.path, current).and_then(close_conn) {
-                Ok(()) if change_err.kind() == VaultErrorKind::Busy => Err(change_err),
-                Ok(()) => Err(err(VaultErrorKind::Storage)),
-                Err(_) => Err(err(VaultErrorKind::WrongKeyOrCorrupt)),
-            },
+        // passphrase proves the change. A read-write connection also rolls back a
+        // journal that a failed rekey left, because the journal has the old pages.
+        if rekeyed.is_ok()
+            && let Ok(conn) = open_working_conn(&self.path, new)
+        {
+            self.conn = Some(conn);
+            return Ok(());
+        }
+        // The old passphrase must still open the file.
+        match open_working_conn(&self.path, current).and_then(close_conn) {
+            Ok(()) => Err(match rekeyed {
+                Err(busy) if busy.kind() == VaultErrorKind::Busy => busy,
+                _ => err(VaultErrorKind::Storage),
+            }),
+            Err(_) => Err(err(VaultErrorKind::WrongKeyOrCorrupt)),
         }
     }
 
