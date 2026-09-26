@@ -26,7 +26,10 @@ in the product profile and checks the boundary:
 - A process in the profile cannot read, copy, overwrite, or replace the vault,
   a backup, or a file under a fake Laya directory.
 - Ordinary work still runs: it reads the project directory and writes a
-  temporary file.
+  temporary file. Child processes of the sandboxed process work.
+- `ps eww` and `ps -E` in the profile do not show the environment of a process
+  outside the profile (F11). A direct system call can still read it. See the
+  limit in `docs/operations/isolation.md`.
 
 If the host is not macOS, or `sandbox-exec` is absent, the test fails. A skip is
 not a pass (goal I4).

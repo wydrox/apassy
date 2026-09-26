@@ -451,6 +451,79 @@ fn ordinary_work_still_runs_in_profile() {
     );
 }
 
+/// A synthetic environment canary, like a secret that the broker puts in the
+/// environment of an agent command.
+const ENV_CANARY_NAME: &str = "APASSY_ISO_ENV_CANARY";
+const ENV_CANARY_VALUE: &str = "FAKE-ENV-CANARY-4471-not-a-secret";
+
+#[test]
+fn ps_in_profile_cannot_show_environment_of_outside_process() {
+    // F11: `ps eww` and `ps -E` show the environment of another process of the
+    // same user. A broker child runs outside the profile with a secret in its
+    // environment. The synthetic service stands in for that child. It is a
+    // third-party binary, so macOS shows its environment to `ps`.
+    require_sandbox();
+    let service = Command::new(env!("CARGO_BIN_EXE_apassy-dev-reporting"))
+        .env("APASSY_DEV_REPORTING_TOKEN", SERVICE_TOKEN)
+        .env(ENV_CANARY_NAME, ENV_CANARY_VALUE)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start outside process");
+    let mut outside = DevService {
+        child: service,
+        base_url: String::new(),
+    };
+    let stdout = outside.child.stdout.take().expect("outside stdout");
+    let mut line = String::new();
+    BufReader::new(stdout)
+        .read_line(&mut line)
+        .expect("outside process is ready");
+    let pid = outside.child.id().to_string();
+
+    // Control: outside the profile, `ps eww` shows the canary.
+    let control = Command::new("/bin/ps")
+        .args(["eww", "-p", &pid])
+        .output()
+        .expect("control ps");
+    assert!(
+        String::from_utf8_lossy(&control.stdout).contains(ENV_CANARY_VALUE),
+        "control: ps outside the profile must show the canary, or this check proves nothing"
+    );
+
+    // Inside the profile, neither `ps` form shows the canary.
+    let fx = fixture();
+    for args in [
+        vec!["/bin/ps", "eww", "-p", pid.as_str()],
+        vec!["/bin/ps", "-E", "-p", pid.as_str(), "-o", "command"],
+    ] {
+        let (_ok, out, err) = in_sandbox(&fx, &args);
+        assert!(
+            !out.contains(ENV_CANARY_VALUE) && !err.contains(ENV_CANARY_VALUE),
+            "{args:?} in the profile showed the canary"
+        );
+    }
+    drop(outside);
+}
+
+#[test]
+fn own_child_processes_work_in_profile() {
+    // The host starts child processes and passes them an environment. This
+    // must keep working inside the profile.
+    require_sandbox();
+    let fx = fixture();
+    let (ok, out, err) = in_sandbox(
+        &fx,
+        &[
+            "/bin/sh",
+            "-c",
+            "CHILD_VAR=child-ok /bin/sh -c 'echo $CHILD_VAR' & wait",
+        ],
+    );
+    assert!(ok, "a child process must run in the profile: {err}");
+    assert_eq!(out.trim(), "child-ok");
+}
+
 #[test]
 fn keychain_check_is_pending() {
     // Goal I2 also needs proof that a process in the profile cannot read the

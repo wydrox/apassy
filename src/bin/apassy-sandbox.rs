@@ -292,7 +292,7 @@ Options:
   --print             print the resolved sandbox-exec command; do not run it
   -h, --help          print this help
 
-Examples:
-  apassy-sandbox -- claude -p --settings '{\"sandbox\":{\"enabled\":false}}' 'hello'
-  apassy-sandbox -- codex exec -c sandbox_mode=danger-full-access -c approval_policy=never 'hi'
+Examples (turn off only the host's inner sandbox; keep its approval prompts):
+  apassy-sandbox -- claude --settings '{\"sandbox\":{\"enabled\":false}}'
+  apassy-sandbox -- codex -c sandbox_mode=danger-full-access
 ";

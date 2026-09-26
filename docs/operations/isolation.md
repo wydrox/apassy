@@ -101,11 +101,8 @@ Start Claude Code in the profile:
 apassy-sandbox -- claude --settings /path/to/nosandbox.json
 ```
 
-A non-interactive example:
-
-```
-apassy-sandbox -- claude -p "your task" --settings /path/to/nosandbox.json
-```
+This changes only the inner sandbox. Keep your normal permission mode and
+approval prompts. Do not add `--dangerously-skip-permissions` for daily use.
 
 Claude Code runs `apassy-mcp` as an MCP server. An MCP server can run outside the
 Claude Code Bash sandbox, but it is still a child of the host, so it runs inside
@@ -118,14 +115,16 @@ Turn off the Codex sandbox for the run, so Codex does not start its own
 Seatbelt:
 
 ```
-apassy-sandbox -- codex exec -c sandbox_mode=danger-full-access -c approval_policy=never "your task"
+apassy-sandbox -- codex -c sandbox_mode=danger-full-access
 ```
 
-An interactive session uses the same overrides:
+This changes only the inner sandbox. Codex keeps the `approval_policy` from your
+configuration. Do not add `approval_policy=never` for daily use.
 
-```
-apassy-sandbox -- codex -c sandbox_mode=danger-full-access -c approval_policy=never
-```
+The one-off test runs in section 5 use `--dangerously-skip-permissions` and
+`approval_policy=never`. Those runs use synthetic paths only. They turn off the
+host prompts so that the run is non-interactive, and so that the test shows the
+boundary holds even when the host approves every command.
 
 ### Tradeoffs
 
@@ -151,6 +150,12 @@ apassy-sandbox -- codex -c sandbox_mode=danger-full-access -c approval_policy=ne
   from the broker in "allow" mode and then sends it to a network host. The
   bouncer and the owner approval control that path (ADR 0006).
 - A Keychain deny check is pending. See section 6.
+- The profile does not fully hide the environment of other processes of the
+  same user. See "Process information (F11)" in section 5.
+- `ps` and `top` are setuid programs. They cannot start inside any
+  `sandbox-exec` profile on this macOS, also with `(allow default)` only. A host
+  feature that runs `ps` fails in the profile. The measured Claude Code run did
+  not need `ps`.
 
 ## 5. Measured results
 
@@ -205,8 +210,46 @@ socket in the denied data directory.
 | `apassy_use_credential` (`get_sales_summary`) | 318 orders, permitted fields only. No secret. |
 
 The evidence for these checks is `cargo test --locked --features desktop,vault
---test isolation_profile`. It has 8 tests. All pass. If `sandbox-exec` is
+--test isolation_profile`. It has 10 tests. All pass. If `sandbox-exec` is
 absent, or the host is not macOS, the test fails. There is no skip (goal I4).
+
+### Process information (F11)
+
+The key-memory review (goal V2) found that `ps eww` and `ps -E` show the
+environment of another process of the same user. The broker starts agent
+commands with secrets in their environment. So an agent could try to read a
+secret from the environment of a broker child.
+
+Measured on this macOS:
+
+| Check | Result |
+| --- | --- |
+| `ps eww -p PID` outside the profile, target is a third-party program with a canary variable | shows the canary |
+| same, target is an Apple platform program (for example `/bin/sleep`) | does not show the environment |
+| `ps eww -p PID` and `ps -E -p PID` inside the profile | fail. `ps` cannot start (setuid program). No canary. |
+| a child process of the sandboxed process, with its own environment | runs and works |
+| `(deny process-info* (target others))` | did not stop a direct read of the process arguments of an outside process |
+| `(deny process-info*)` | broke ordinary programs (Python stopped with a trap) |
+
+Result:
+
+- The test `ps_in_profile_cannot_show_environment_of_outside_process` shows the
+  `ps` path is closed in the profile. It uses a control: outside the profile,
+  `ps` shows the canary.
+- The test `own_child_processes_work_in_profile` shows that children of the
+  sandboxed process still work.
+- No tested Seatbelt rule both hides the environment of an outside process from
+  a direct system call and keeps ordinary programs working. So the profile has
+  no `process-info` rule. A program in the profile that calls the system
+  interface for process arguments directly can still read the environment of a
+  same-user third-party process. This is an open limit.
+- Mitigation belongs to the broker (ADR 0006 process mode): keep secret runs
+  short, and do not treat the environment of a running broker child as hidden
+  from other processes of the same user. The owner decides if more work is
+  needed before the real-secret gate opens.
+- Host tooling: `ps` and `top` cannot start in any `sandbox-exec` profile, so a
+  host feature that runs them fails. No SBPL allowance for this was verified.
+  The measured Claude Code run did not break.
 
 ### Real Claude Code session (goal I3)
 
