@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "node",
   "description": "JavaScript runtimes (node, deno, bun, tsx, ts-node): inline code, scripts, and version checks.",
   "programs": ["node", "deno", "bun", "tsx", "ts-node"],
@@ -24,6 +24,7 @@
   "safe": [
     {
       "id": "version",
+      "note": "`node -v` and `deno --version` only print the version.",
       "when": { "program": ["node", "deno"], "arg_count": 1, "subcommand": ["-v", "--version"] }
     }
   ]

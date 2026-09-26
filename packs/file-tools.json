@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 2,
+  "pack_version": 3,
   "tool": "file-tools",
   "description": "File and text tools (ls, cat, grep, sed, awk, find, cp, rm, and others): file removal, secret files, system files, and read commands.",
   "programs": [
@@ -19,16 +19,19 @@
     {
       "id": "print-secret-file",
       "flag": "secret_output",
+      "note": "A read tool prints a secret file, such as `.env` or a private key.",
       "when": { "program": ["cat", "tee", "less", "head", "tail"], "secret_file_arg": true }
     },
     {
       "id": "write-system-file",
       "flag": "system_change",
+      "note": "A copy, move, link, or install into a system folder changes the system.",
       "when": { "program": ["tee", "cp", "mv", "ln", "install"], "system_path_arg": true }
     },
     {
       "id": "edit-system-file",
       "flag": "system_change",
+      "note": "`sed -i` on a file in a system folder changes the system.",
       "when": { "program": ["sed"], "any_arg_starts": ["-i"], "system_path_arg": true }
     },
     {
@@ -96,6 +99,7 @@
       "id": "find-delete",
       "flag": "data_loss",
       "dry_run": "skip_with_n",
+      "note": "`find -delete` and `find -exec rm` remove every file that matches.",
       "when": {
         "program": ["find"],
         "any_of": [
@@ -146,6 +150,7 @@
   "safe": [
     {
       "id": "read-tools",
+      "note": "Tools that list, count, compare, or format text only read.",
       "when": {
         "program": [
           "ls", "du", "wc", "tree", "file", "stat", "sort", "uniq", "cut", "diff", "jq", "yq",
@@ -155,6 +160,7 @@
     },
     {
       "id": "sed-without-edit",
+      "note": "`sed` without `-i` prints to standard output and does not change files.",
       "when": {
         "program": ["sed"],
         "not": { "any_of": [{ "any_arg_starts": ["-i"] }, { "any_arg": ["--in-place"] }] }
@@ -162,10 +168,12 @@
     },
     {
       "id": "awk-without-system",
+      "note": "`awk` without `system(` does not run commands.",
       "when": { "program": ["awk"], "not": { "command_contains_exact": ["system("] } }
     },
     {
       "id": "read-files",
+      "note": "Reads and searches of files that are not secret files.",
       "when": {
         "program": ["cat", "head", "tail", "less", "grep", "rg", "ag"],
         "not": { "secret_file_arg": true }
@@ -173,14 +181,20 @@
     },
     {
       "id": "find-without-action",
+      "note": "`find` without `-delete`, `-exec`, or `-ok` only lists files.",
       "when": {
         "program": ["find"],
         "not": { "any_arg": ["-delete", "-exec", "-execdir", "-ok"] }
       }
     },
-    { "id": "create", "when": { "program": ["mkdir", "touch"] } },
+    {
+      "id": "create",
+      "note": "`mkdir` and `touch` only create folders and empty files.",
+      "when": { "program": ["mkdir", "touch"] }
+    },
     {
       "id": "remove-build-output",
+      "note": "Removal of build output and caches that a build makes again.",
       "when": {
         "program": ["rm"],
         "operands": {
