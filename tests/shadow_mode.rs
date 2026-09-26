@@ -768,10 +768,19 @@ fn shadow_session_on_synthetic_requests() {
     let socket = dir.path().join("run").join("broker.sock");
     let broker = broker::start_with(Arc::clone(&shared), &socket, options).expect("broker");
 
-    let cases = fixture_cases("tests/fixtures/bouncer/independent.tsv");
+    // `APASSY_SHADOW_CASES` can name another labeled file, for example the training
+    // cases for an in-sample check.
+    let cases = fixture_cases(
+        &std::env::var("APASSY_SHADOW_CASES")
+            .unwrap_or_else(|_| "tests/fixtures/bouncer/independent.tsv".to_owned()),
+    );
+    // The same command can have two labels with two purposes, so the key has both.
+    let key = |command: &[String], purpose: &str| {
+        format!("{}\u{1e}{}", command.join("\u{1f}"), purpose.trim())
+    };
     let labels: BTreeMap<String, bool> = cases
         .iter()
-        .map(|(ok, line, _)| (command_line_to_argv(line).join("\u{1f}"), *ok))
+        .map(|(ok, line, purpose)| (key(&command_line_to_argv(line), purpose), *ok))
         .collect();
     let stop = Arc::new(AtomicBool::new(false));
     let owner = {
@@ -782,7 +791,7 @@ fn shadow_session_on_synthetic_requests() {
             while !stop.load(Ordering::SeqCst) {
                 for pending in approvals.pending() {
                     let ok = labels
-                        .get(&pending.command.join("\u{1f}"))
+                        .get(&key(&pending.command, &pending.purpose))
                         .copied()
                         .unwrap_or(false);
                     if ok {
