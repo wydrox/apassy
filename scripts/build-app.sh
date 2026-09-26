@@ -14,6 +14,10 @@
 # signed app. Then each keychain command returns keychain_unavailable: Touch ID
 # can confirm actions but cannot unlock the vault (ADR 0010, Limits).
 #
+# The helpers answer only the signed Apassy app that contains them
+# (native/ApassyHelper/Caller.swift). The checks at the end start them through
+# a signed probe parent, and check the agent profile with the signed bundle.
+#
 # Usage: scripts/build-app.sh [--provision]
 #   --provision   Before the build, run Xcode automatic signing
 #                 (xcodebuild -allowProvisioningUpdates) to register the App ID
@@ -50,7 +54,7 @@ PROVISION=0
 for arg in "$@"; do
   case "$arg" in
     --provision) PROVISION=1 ;;
-    -h|--help) sed -n '2,35p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,39p' "$0"; exit 0 ;;
     *) echo "build-app: unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -199,13 +203,25 @@ fi
 
 # ---------------------------------------------------------------- build
 step "Build the Rust binaries (release)"
-cargo build --release --locked --features desktop,vault --bin apassy --bin apassy-mcp
+# apassy-sandbox does not go into the bundle. The agent profile check at the
+# end uses it.
+cargo build --release --locked --features desktop,vault --bin apassy --bin apassy-mcp --bin apassy-sandbox
 
 step "Build the Swift helper"
 mkdir -p "$NATIVE_OUT"
+# No `-D APASSY_HELPER_DEV`: a release helper does not contain the development
+# override of the caller check.
 xcrun --sdk macosx swiftc -sdk "$SDK" -O -swift-version 5 -warnings-as-errors \
   -target "arm64-apple-macos$DEPLOYMENT_TARGET" \
   -o "$NATIVE_OUT/apassy-helper" native/ApassyHelper/*.swift
+if LC_ALL=C grep -aq "APASSY_HELPER_DEV_ANY_CALLER" "$NATIVE_OUT/apassy-helper"; then
+  fail "the helper contains the development caller override"
+fi
+echo "ok: the helper has no development caller override"
+# The caller probe starts a helper as its child. It never goes into the bundle.
+xcrun --sdk macosx swiftc -sdk "$SDK" -O -swift-version 5 -warnings-as-errors \
+  -target "arm64-apple-macos$DEPLOYMENT_TARGET" \
+  -o "$TMP/caller-probe" native/ApassyCallerProbe/main.swift
 
 # ---------------------------------------------------------------- assemble
 step "Assemble the app bundle"
@@ -318,20 +334,107 @@ check_output() { # label, output, pattern
 "$APP/Contents/MacOS/apassy" --smoke-test >"$TMP/smoke.txt" 2>&1 || { cat "$TMP/smoke.txt" >&2; fail "apassy --smoke-test failed"; }
 echo "ok: apassy --smoke-test"
 check_output "apassy-mcp --version" "$("$APP/Contents/MacOS/apassy-mcp" --version)" "^apassy-mcp $VERSION$"
-HELPER_OUT="$(printf '%s\n' '{"cmd":"ping"}' '{"cmd":"notify_status"}' '{"cmd":"bogus"}' | "$APP/Contents/MacOS/apassy-helper")" \
+
+H_EXE="$APP/Contents/MacOS/apassy-helper"
+KC_EXE="$KC_APP/Contents/MacOS/$KEYCHAIN_EXE"
+REFUSED='"error":"caller_not_allowed".*"ok":false'
+# check_lines LABEL OUTPUT PATTERN...: line N of OUTPUT matches PATTERN N.
+check_lines() {
+  local label="$1" output="$2" n=1
+  shift 2
+  for pattern in "$@"; do
+    check_output "$label, line $n" "$(sed -n "${n}p" <<<"$output")" "$pattern"
+    n=$((n + 1))
+  done
+}
+
+# This shell is not the signed Apassy app. Each helper starts and refuses
+# each request, also with the development override in the environment.
+HELPER_OUT="$(printf '%s\n' '{"cmd":"ping"}' '{"cmd":"notify_status"}' '{"cmd":"bogus"}' | "$H_EXE")" \
   || fail "apassy-helper did not run"
-check_output "helper ping" "$(sed -n 1p <<<"$HELPER_OUT")" "\"bundle_id\":\"$APP_ID\".*\"keychain_access_group\":null.*\"ok\":true"
-check_output "helper notify_status" "$(sed -n 2p <<<"$HELPER_OUT")" '"authorization":"[a-z_]+".*"ok":true'
-check_output "helper unknown command" "$(sed -n 3p <<<"$HELPER_OUT")" '"error":"invalid_request"'
-KC_OUT="$(printf '%s\n' '{"cmd":"ping"}' '{"cmd":"keychain_exists","account":"build-check"}' | "$KC_APP/Contents/MacOS/$KEYCHAIN_EXE")" \
+check_lines "apassy-helper refuses the shell" "$HELPER_OUT" "$REFUSED" "$REFUSED" "$REFUSED"
+check_output "apassy-helper ignores APASSY_HELPER_DEV_ANY_CALLER" \
+  "$(printf '%s\n' '{"cmd":"ping"}' | APASSY_HELPER_DEV_ANY_CALLER=1 "$H_EXE")" "$REFUSED"
+KC_OUT="$(printf '%s\n' '{"cmd":"ping"}' '{"cmd":"keychain_exists","account":"build-check"}' | "$KC_EXE")" \
   || fail "the keychain helper did not run. Check: log show --last 2m --predicate 'process == \"amfid\"'"
+check_lines "keychain helper refuses the shell" "$KC_OUT" "$REFUSED" "$REFUSED"
+
+# probe_app DIR IDENTIFIER: a scratch copy of the bundle in DIR. The caller
+# probe replaces the main program, and the copy is signed with IDENTIFIER. The
+# helpers in the copy keep their signatures. Print the path of the copy.
+probe_app() {
+  local copy="$1/Apassy.app"
+  mkdir -p "$1" || fail "cannot make $1"
+  cp -R "$APP" "$copy" || fail "cannot copy the bundle to $1"
+  cp "$TMP/caller-probe" "$copy/Contents/MacOS/apassy" || fail "cannot copy the probe to $1"
+  sign --identifier "$2" --entitlements packaging/Apassy.entitlements "$copy" 2>/dev/null \
+    || fail "cannot sign the scratch copy in $1"
+  codesign --verify --deep --strict "$copy" 2>/dev/null || fail "the scratch copy in $1 is not valid"
+  echo "$copy"
+}
+PROBE_APP="$(probe_app "$TMP/probe-apassy" "$APP_ID")"
+PROBE="$PROBE_APP/Contents/MacOS/apassy"
+
+# The signed parent: the helpers of the copy answer.
+HELPER_OUT="$(printf '%s\n' '{"cmd":"ping"}' '{"cmd":"notify_status"}' '{"cmd":"bogus"}' \
+  | "$PROBE" "$PROBE_APP/Contents/MacOS/apassy-helper")" || fail "apassy-helper did not run under the signed parent"
+check_lines "apassy-helper with the signed parent" "$HELPER_OUT" \
+  "\"bundle_id\":\"$APP_ID\".*\"keychain_access_group\":null.*\"ok\":true" \
+  '"authorization":"[a-z_]+".*"ok":true' \
+  '"error":"invalid_request"'
+KC_OUT="$(printf '%s\n' '{"cmd":"ping"}' '{"cmd":"keychain_exists","account":"build-check"}' \
+  | "$PROBE" "$PROBE_APP/Contents/Helpers/ApassyKeychain.app/Contents/MacOS/$KEYCHAIN_EXE")" \
+  || fail "the keychain helper did not run under the signed parent"
 if [ "$KEYCHAIN_MODE" = "enabled" ]; then
-  check_output "keychain helper ping" "$(sed -n 1p <<<"$KC_OUT")" "\"bundle_id\":\"$KEYCHAIN_APP_ID\".*\"keychain_access_group\":\"$TEAM_ID\\.$APP_ID\""
-  check_output "keychain_exists" "$(sed -n 2p <<<"$KC_OUT")" '"exists":(true|false).*"ok":true'
+  check_lines "keychain helper with the signed parent" "$KC_OUT" \
+    "\"bundle_id\":\"$KEYCHAIN_APP_ID\".*\"keychain_access_group\":\"$TEAM_ID\\.$APP_ID\"" \
+    '"exists":(true|false).*"ok":true'
 else
-  check_output "keychain helper ping" "$(sed -n 1p <<<"$KC_OUT")" "\"bundle_id\":\"$KEYCHAIN_APP_ID\".*\"keychain_access_group\":null"
-  check_output "keychain_exists" "$(sed -n 2p <<<"$KC_OUT")" '"error":"keychain_unavailable"'
+  check_lines "keychain helper with the signed parent" "$KC_OUT" \
+    "\"bundle_id\":\"$KEYCHAIN_APP_ID\".*\"keychain_access_group\":null" \
+    '"error":"keychain_unavailable"'
 fi
+
+# Other parents that are signed by the same team: the helpers refuse them.
+check_output "helper refuses the signed parent of another bundle" \
+  "$(printf '%s\n' '{"cmd":"ping"}' | "$PROBE" "$H_EXE")" "$REFUSED"
+check_output "keychain helper refuses the signed parent of another bundle" \
+  "$(printf '%s\n' '{"cmd":"ping"}' | "$PROBE" "$KC_EXE")" "$REFUSED"
+OTHER_APP="$(probe_app "$TMP/probe-other" "$APP_ID.probe")"
+check_output "helper refuses a parent with another identifier" \
+  "$(printf '%s\n' '{"cmd":"ping"}' | "$OTHER_APP/Contents/MacOS/apassy" "$OTHER_APP/Contents/MacOS/apassy-helper")" "$REFUSED"
+check_output "keychain helper refuses a parent with another identifier" \
+  "$(printf '%s\n' '{"cmd":"ping"}' | "$OTHER_APP/Contents/MacOS/apassy" "$OTHER_APP/Contents/Helpers/ApassyKeychain.app/Contents/MacOS/$KEYCHAIN_EXE")" "$REFUSED"
+
+step "Check the agent profile with the signed bundle"
+SANDBOX_BIN="$ROOT/target/release/apassy-sandbox"
+PROFILE_DIR="$TMP/agent-profile"
+mkdir -p "$PROFILE_DIR/d"
+chmod 700 "$PROFILE_DIR/d"
+in_profile() {
+  "$SANDBOX_BIN" --profile "$ROOT/sandbox/apassy-agent-host.sb" \
+    --data-dir "$PROFILE_DIR/d" --app-build "$APP" -- "$@"
+}
+for program in "$KC_EXE" "$H_EXE" "$APP/Contents/MacOS/apassy"; do
+  if PROFILE_OUT="$(printf '%s\n' '{"cmd":"ping"}' | in_profile "$program" 2>&1)"; then
+    fail "${program#"$APP"/} started in the agent profile: $PROFILE_OUT"
+  fi
+  check_output "the agent profile denies the start of ${program#"$APP"/}" "$PROFILE_OUT" "Operation not permitted"
+done
+check_output "apassy-mcp --version in the agent profile" \
+  "$(in_profile "$APP/Contents/MacOS/apassy-mcp" --version)" "^apassy-mcp $VERSION$"
+if in_profile /bin/cp -R "$KC_APP" "$PROFILE_DIR/copy.app" 2>/dev/null; then
+  fail "a process in the agent profile copied the keychain helper"
+fi
+[ -z "$(find "$PROFILE_DIR/copy.app" -type f 2>/dev/null)" ] || fail "a copy of the keychain helper exists"
+echo "ok: the agent profile denies a copy of the keychain helper"
+# A copy that exists outside the bundle starts in the profile, but the helper
+# refuses the caller: its parent is not the signed Apassy app.
+cp -R "$KC_APP" "$PROFILE_DIR/ApassyKeychain.app"
+KC_OUT="$(printf '%s\n' '{"cmd":"ping"}' '{"cmd":"keychain_exists","account":"build-check"}' \
+  | in_profile "$PROFILE_DIR/ApassyKeychain.app/Contents/MacOS/$KEYCHAIN_EXE")" \
+  || fail "the keychain helper copy did not start in the agent profile"
+check_lines "keychain helper copy in the agent profile refuses the caller" "$KC_OUT" "$REFUSED" "$REFUSED"
 
 mv "$APP" "$OUT"
 rm -rf "$STAGE"

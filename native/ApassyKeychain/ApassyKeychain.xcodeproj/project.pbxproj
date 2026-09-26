@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		0309CDA7725CC60698B5A64C /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 341204F7FEF786DA77F74474 /* Keychain.swift */; };
 		7418F6B2AD0886DC536255A1 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FC3E930B0873F645B7BD574 /* main.swift */; };
+		9E13FC56F09EBB75D9824CCA /* Caller.swift in Sources */ = {isa = PBXBuildFile; fileRef = 498B9522CDF2988CE9DD0C92 /* Caller.swift */; };
 		A966B83CD0571E6070D4AB2A /* Auth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 780C38547DCB396D0319892B /* Auth.swift */; };
 		DCB80B6ADEFECCE21150DEB6 /* Notify.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71DD43B52FF6289C12EA28EB /* Notify.swift */; };
 		E3F3B7BA6EEE5EFA4E4122A9 /* Protocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51DC05F704230CB85612518E /* Protocol.swift */; };
@@ -18,6 +19,7 @@
 		336EF5E174E99C26F86FB2A5 /* ApassyKeychain.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ApassyKeychain.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		341204F7FEF786DA77F74474 /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
 		3FC3E930B0873F645B7BD574 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		498B9522CDF2988CE9DD0C92 /* Caller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Caller.swift; sourceTree = "<group>"; };
 		51DC05F704230CB85612518E /* Protocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Protocol.swift; sourceTree = "<group>"; };
 		71DD43B52FF6289C12EA28EB /* Notify.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Notify.swift; sourceTree = "<group>"; };
 		780C38547DCB396D0319892B /* Auth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Auth.swift; sourceTree = "<group>"; };
@@ -53,6 +55,7 @@
 			isa = PBXGroup;
 			children = (
 				780C38547DCB396D0319892B /* Auth.swift */,
+				498B9522CDF2988CE9DD0C92 /* Caller.swift */,
 				341204F7FEF786DA77F74474 /* Keychain.swift */,
 				3FC3E930B0873F645B7BD574 /* main.swift */,
 				71DD43B52FF6289C12EA28EB /* Notify.swift */,
@@ -120,6 +123,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A966B83CD0571E6070D4AB2A /* Auth.swift in Sources */,
+				9E13FC56F09EBB75D9824CCA /* Caller.swift in Sources */,
 				0309CDA7725CC60698B5A64C /* Keychain.swift in Sources */,
 				DCB80B6ADEFECCE21150DEB6 /* Notify.swift in Sources */,
 				E3F3B7BA6EEE5EFA4E4122A9 /* Protocol.swift in Sources */,

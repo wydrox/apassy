@@ -34,18 +34,26 @@ in the product profile and checks the boundary:
 If the host is not macOS, or `sandbox-exec` is absent, the test fails. A skip is
 not a pass (goal I4).
 
+- A process in the profile cannot start, read, copy, hard-link, change, or move
+  the programs in a synthetic `Apassy.app` with the layout of
+  `scripts/build-app.sh`. Its helpers are the real Swift helper without a
+  signature. Outside the profile (control), the same helpers start and answer
+  `caller_not_allowed`.
+- `apassy-mcp` and `apassy-hook` in `Apassy.app/Contents/MacOS` start in the
+  profile and reach the broker.
+- A copy of the keychain helper that the owner put outside the bundle starts in
+  the profile, but it refuses each request with `caller_not_allowed`.
+- The launcher passes `/Applications/Apassy.app` and `<target>/Apassy.app` by
+  default. The profile protects `APASSY_APP_BUILD` also without `APASSY_APP`.
 - A process in the profile cannot read the Touch ID Keychain item
   (`keychain_item_is_not_readable_in_profile`). `/usr/bin/security` runs in the
   profile and finds no item with the Apassy service and account. The Apassy
-  keychain helper runs in the profile, has no keychain access group, and answers
-  `keychain_unavailable`. The test uses the helper in `target/Apassy.app` when
-  `scripts/build-app.sh` ran, else the helper code without a signature.
+  keychain helper does not start in the profile. This deny does not depend on
+  the signature or on a provisioning profile.
 
-Pending for the Keychain part: the real biometric item needs a provisioning
-profile. With a profile, the helper gets an access group, and a process in the
-profile could start it and ask for a Touch ID prompt. The test then fails on
-purpose, until the profile denies the start of the Apassy helpers. See
-`docs/operations/native-app.md`.
+`scripts/build-app.sh` runs the same helper checks with the signed bundle. See
+`docs/operations/isolation.md` sections 5 and 6, and
+`docs/operations/native-app.md`, section "Caller check".
 
 How to start Claude Code and Codex in the profile, and the measured results, are
 in [docs/operations/isolation.md](../../docs/operations/isolation.md).
