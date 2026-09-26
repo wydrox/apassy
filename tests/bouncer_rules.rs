@@ -341,6 +341,11 @@ fn production_declaration_always_waits_for_the_owner() {
     assert_eq!(certain.bodies.lock().expect("bodies").len(), 1);
 
     set_environment(&fx, fx.item_id, Environment::Production);
+    let list = client::send(&fx.socket, &fx.token, Action::ListAccess).expect("list");
+    assert_eq!(
+        list.result.as_ref().expect("result")["process_access"][0]["approval"],
+        "production credential: the owner approves each run"
+    );
     let commands: [&[&str]; 4] = [
         // Known safe by the command analysis.
         &["echo", "hi"],

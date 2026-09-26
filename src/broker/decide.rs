@@ -199,6 +199,11 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
         let Ok(Some(binding)) = vault.env_binding(grant.item_id) else {
             continue;
         };
+        let production = vault
+            .declaration(grant.item_id)
+            .ok()
+            .flatten()
+            .is_some_and(|declaration| declaration.is_production());
         process_access.push(json!({
             "item_id": grant.item_id,
             "item_name": details.summary.title,
@@ -208,6 +213,9 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
             "owner_instruction": grant.rule.instruction,
             "approval": match grant.mode {
                 crate::vault::ExecMode::Ask => "the owner approves each run",
+                crate::vault::ExecMode::Bouncer if production => {
+                    "production credential: the owner approves each run"
+                }
                 crate::vault::ExecMode::Bouncer => "the bouncer decides; a risky run waits for the owner",
             },
             "owner_review_needed": vault.needs_review(grant.item_id).unwrap_or(true),
