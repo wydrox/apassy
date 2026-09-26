@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "gcloud",
+  "description": "Google Cloud CLIs (gcloud, gsutil, bq): resource changes, deletions, storage writes, tokens and secrets, remote shells, and read commands.",
+  "programs": ["gcloud", "gsutil", "bq"],
+  "roles": {
+    "usage": ["gcloud", "gsutil"]
+  },
+  "rules": [
+    {
+      "id": "resource-change",
+      "flag": "production",
+      "dry_run": "skip",
+      "note": "The command creates, changes, deploys, or deletes a resource.",
+      "when": {
+        "program": ["gcloud"],
+        "any_arg": ["deploy", "delete", "create", "update", "set-iam-policy"]
+      }
+    },
+    {
+      "id": "resource-change-more",
+      "flag": "production",
+      "dry_run": "skip",
+      "note": "More verbs that change resources: patch, access bindings, start, stop, restart, resize, rollback, restore, import, traffic, submit, execute, call, publish, enable, disable, and cancel.",
+      "when": {
+        "program": ["gcloud"],
+        "any_arg": [
+          "patch", "add-iam-policy-binding", "remove-iam-policy-binding", "stop", "start",
+          "reset", "restart", "resize", "rollback", "restore", "restore-backup", "import",
+          "failover", "promote-replica", "update-traffic", "set-traffic", "submit", "execute",
+          "call", "publish", "enable", "disable", "cancel", "set-password", "rotate"
+        ]
+      }
+    },
+    {
+      "id": "delete-data",
+      "flag": "data_loss",
+      "dry_run": "skip",
+      "note": "Deletion of resources, objects, buckets, or tables, and a restore over existing data.",
+      "when": {
+        "any_of": [
+          { "program": ["gcloud"], "any_arg": ["delete", "rm", "restore-backup"] },
+          { "program": ["gsutil"], "any_arg": ["rm", "rb"] },
+          { "program": ["bq"], "any_arg": ["rm"] }
+        ]
+      }
+    },
+    {
+      "id": "bq-sql-write",
+      "flag": "data_loss",
+      "note": "A BigQuery query that changes data or schema.",
+      "when": { "program": ["bq"], "subcommand": ["query"], "sql": "writes" }
+    },
+    {
+      "id": "storage-write",
+      "flag": "production",
+      "dry_run": "skip",
+      "note": "A copy, move, or sync with a Cloud Storage location.",
+      "when": {
+        "program": ["gcloud", "gsutil"],
+        "any_arg_starts": ["gs://"],
+        "any_arg": ["cp", "mv", "rsync"]
+      }
+    },
+    {
+      "id": "tokens-and-secrets",
+      "flag": "secret_output",
+      "note": "The command prints an access token, an identity token, or a secret version.",
+      "when": {
+        "program": ["gcloud"],
+        "any_of": [
+          { "any_arg": ["print-access-token", "print-identity-token", "config-helper"] },
+          { "args_contain": ["secrets versions access"] }
+        ]
+      }
+    },
+    {
+      "id": "remote-shell",
+      "flag": "remote_access",
+      "note": "A shell or a file copy on a remote machine.",
+      "when": { "program": ["gcloud"], "any_arg": ["ssh", "scp", "start-iap-tunnel"] }
+    }
+  ],
+  "safe": [
+    {
+      "id": "targeted-reads",
+      "note": "The local configuration, the signed-in accounts, log reads, and the CLI version. Inventory reads across the project (`list`, `describe`) stay with the model.",
+      "when": {
+        "program": ["gcloud"],
+        "args_start": [
+          "config list", "config get-value", "config configurations list", "auth list",
+          "logging read", "info", "version"
+        ]
+      }
+    },
+    {
+      "id": "storage-listings",
+      "note": "Listings of objects in a named bucket.",
+      "when": { "program": ["gsutil"], "subcommand": ["ls", "du"], "any_arg_starts": ["gs://"] }
+    }
+  ]
+}

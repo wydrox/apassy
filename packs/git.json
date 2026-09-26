@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "git",
   "description": "Git: history changes, pushes to protected branches, and read commands.",
   "programs": ["git"],
@@ -24,23 +24,27 @@
     {
       "id": "remote-change",
       "flag": "system_change",
+      "note": "A new or changed remote changes where pushes go.",
       "when": { "subcommand": ["remote"], "any_arg": ["set-url", "add"] }
     },
     {
       "id": "global-config",
       "flag": "system_change",
+      "note": "`--global` and `--system` change Git for every repository of the user.",
       "when": { "subcommand": ["config"], "any_arg": ["--global", "--system"] }
     },
     {
       "id": "reset-hard",
       "flag": "data_loss",
       "dry_run": "skip_with_n",
+      "note": "`reset --hard`, `--merge`, and `--keep` discard local changes.",
       "when": { "subcommand": ["reset"], "any_arg": ["--hard", "--merge", "--keep"] }
     },
     {
       "id": "push-force-or-delete",
       "flag": "data_loss",
       "dry_run": "skip_with_n",
+      "note": "A forced push, a mirror push, or a branch deletion on the remote loses commits.",
       "when": {
         "subcommand": ["push"],
         "any_of": [
@@ -53,30 +57,35 @@
       "id": "clean-force",
       "flag": "data_loss",
       "dry_run": "skip_with_n",
+      "note": "`clean -f` deletes untracked files.",
       "when": { "subcommand": ["clean"], "option_letter": "f" }
     },
     {
       "id": "branch-delete",
       "flag": "data_loss",
       "dry_run": "skip_with_n",
+      "note": "Deletion of a local branch can lose commits.",
       "when": { "subcommand": ["branch"], "any_arg": ["-d", "--delete"] }
     },
     {
       "id": "discard-changes",
       "flag": "data_loss",
       "dry_run": "skip_with_n",
+      "note": "`checkout .`, `restore .`, and `-f` discard local changes.",
       "when": { "subcommand": ["checkout", "restore"], "any_arg": [".", "--force", "-f"] }
     },
     {
       "id": "stash-drop",
       "flag": "data_loss",
       "dry_run": "skip_with_n",
+      "note": "`stash drop` and `stash clear` delete saved changes.",
       "when": { "subcommand": ["stash"], "any_arg": ["drop", "clear"] }
     },
     {
       "id": "history-rewrite",
       "flag": "data_loss",
       "dry_run": "skip_with_n",
+      "note": "`filter-branch` and `filter-repo` rewrite the history.",
       "when": { "subcommand": ["filter-branch", "filter-repo"] }
     },
     {
@@ -104,6 +113,7 @@
   "safe": [
     {
       "id": "read-and-local-commands",
+      "note": "Reads of the repository, and local commits and pulls.",
       "when": {
         "subcommand": [
           "status", "diff", "log", "show", "fetch", "blame", "shortlog", "describe",
@@ -113,9 +123,14 @@
         ]
       }
     },
-    { "id": "worktree-list", "when": { "subcommand": ["worktree"], "action": ["list"] } },
+    {
+      "id": "worktree-list",
+      "note": "`worktree list` only reads.",
+      "when": { "subcommand": ["worktree"], "action": ["list"] }
+    },
     {
       "id": "remote-read",
+      "note": "Listings of remotes and their URLs.",
       "when": {
         "subcommand": ["remote"],
         "any_of": [{ "arg_count": 1 }, { "action": ["-v", "show", "get-url"] }]
@@ -123,19 +138,30 @@
     },
     {
       "id": "config-read",
+      "note": "Reads of the Git configuration.",
       "when": { "subcommand": ["config"], "any_arg": ["--get", "--list", "-l", "--get-all"] }
     },
-    { "id": "stash", "when": { "subcommand": ["stash"], "not": { "any_arg": ["drop", "clear"] } } },
+    {
+      "id": "stash",
+      "note": "A stash saves local changes. `drop` and `clear` are not safe.",
+      "when": { "subcommand": ["stash"], "not": { "any_arg": ["drop", "clear"] } }
+    },
     {
       "id": "rebase",
+      "note": "A plain rebase. Interactive rebases, `--exec`, and `--root` are not safe.",
       "when": {
         "subcommand": ["rebase"],
         "not": { "any_arg": ["-i", "--interactive", "--exec", "-x", "--root"] }
       }
     },
-    { "id": "tag-list", "when": { "subcommand": ["tag"], "arg_count": 1 } },
+    {
+      "id": "tag-list",
+      "note": "`tag` without arguments lists tags.",
+      "when": { "subcommand": ["tag"], "arg_count": 1 }
+    },
     {
       "id": "branch",
+      "note": "Listing and creation of branches. Deletion, rename, and force are not safe.",
       "when": {
         "subcommand": ["branch"],
         "not": { "any_arg": ["-d", "--delete", "-m", "--force", "-f"] }
@@ -143,6 +169,7 @@
     },
     {
       "id": "checkout-branch",
+      "note": "A switch to a branch, or a new branch with `-b`.",
       "when": {
         "subcommand": ["checkout"],
         "any_of": [

@@ -139,6 +139,29 @@ fn every_built_in_pack_file_loads() {
     assert!(ids.len() > 100, "{}", ids.len());
 }
 
+/// Each flag rule, safe rule, and exception of a built-in pack has a `note`: a short
+/// reason that a person can check against the tool documentation.
+#[test]
+fn every_built_in_rule_has_a_note() {
+    let mut missing = Vec::new();
+    let mut count = 0usize;
+    for name in packs::builtin_pack_files() {
+        let text = std::fs::read_to_string(root().join("packs").join(name)).expect("pack");
+        let value: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+        for kind in ["rules", "safe", "exemptions"] {
+            for rule in value[kind].as_array().into_iter().flatten() {
+                count += 1;
+                let note = rule["note"].as_str().unwrap_or_default().trim();
+                if note.len() < 10 {
+                    missing.push(format!("{name}: {kind}/{}", rule["id"]));
+                }
+            }
+        }
+    }
+    assert!(count > 250, "{count}");
+    assert!(missing.is_empty(), "rules without a note: {missing:?}");
+}
+
 #[test]
 fn a_local_pack_adds_a_restriction() {
     let base = builtin();

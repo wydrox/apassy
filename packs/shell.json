@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "shell",
   "description": "Shells, shell keywords, and builtins (sh, bash, echo, test, cd, for, and others).",
   "programs": [
@@ -24,6 +24,7 @@
     {
       "id": "text-and-control",
       "check": "production_word",
+      "note": "Text output and shell control do not target production.",
       "when": {
         "program": [
           "echo", "printf", "test", "[", "for", "do", "done", "if", "then", "else", "fi",
@@ -35,6 +36,7 @@
   "safe": [
     {
       "id": "script-control",
+      "note": "Shell keywords and builtins that control a script.",
       "when": {
         "program": [
           "for", "do", "done", "if", "then", "else", "elif", "fi", "while", "until", "case",
@@ -43,8 +45,20 @@
         ]
       }
     },
-    { "id": "print-text", "when": { "program": ["echo", "printf"] } },
-    { "id": "tests", "when": { "program": ["test", "["] } },
-    { "id": "information", "when": { "program": ["pwd", "which", "type", "sleep"] } }
+    {
+      "id": "print-text",
+      "note": "`echo` and `printf` print text. A secret in the text has its own flag.",
+      "when": { "program": ["echo", "printf"] }
+    },
+    {
+      "id": "tests",
+      "note": "`test` and `[` only check files and values.",
+      "when": { "program": ["test", "["] }
+    },
+    {
+      "id": "information",
+      "note": "`pwd`, `which`, `type`, and `sleep` do not change anything.",
+      "when": { "program": ["pwd", "which", "type", "sleep"] }
+    }
   ]
 }

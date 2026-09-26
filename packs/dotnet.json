@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "dotnet",
+  "description": ".NET CLI: Entity Framework drops and rollbacks, package publishing, new packages and tools, user secrets, and build and test commands.",
+  "programs": ["dotnet"],
+  "roles": {
+    "usage": ["dotnet"]
+  },
+  "rules": [
+    {
+      "id": "ef-drop-or-revert",
+      "flag": "data_loss",
+      "note": "`ef database drop` drops the database. `ef database update 0` reverts every migration. `ef migrations remove --force` reverts the last migration in the database.",
+      "when": {
+        "any_of": [
+          { "args_start": ["ef database drop"] },
+          { "args_start": ["ef database update"], "operands": { "any": [{ "equals": ["0"] }] } },
+          { "args_start": ["ef migrations remove"], "any_arg": ["--force", "-f"] }
+        ]
+      }
+    },
+    {
+      "id": "package-publish",
+      "flag": "production",
+      "dry_run": "skip",
+      "note": "`nuget push` publishes a package. `nuget delete` unlists it.",
+      "when": { "args_start": ["nuget push", "nuget delete"] }
+    },
+    {
+      "id": "new-package-or-tool",
+      "flag": "new_dependency",
+      "note": "`add package` adds a NuGet package. `tool install` installs a tool.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["add"], "any_arg": ["package"] },
+          { "args_start": ["tool install", "tool update"] }
+        ]
+      }
+    },
+    {
+      "id": "user-secrets",
+      "flag": "secret_output",
+      "note": "`user-secrets list` prints the secret values of the project.",
+      "when": { "args_start": ["user-secrets list"] }
+    }
+  ],
+  "safe": [
+    {
+      "id": "build-and-test",
+      "note": "Build, test, format, restore from the project, run, and reads of migrations and packages.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["build", "test", "format", "restore", "run", "clean", "watch", "--info", "--list-sdks"] },
+          {
+            "args_start": [
+              "ef migrations list", "ef migrations add", "ef migrations script",
+              "ef dbcontext info", "ef dbcontext list", "list package", "list reference"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

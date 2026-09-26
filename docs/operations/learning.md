@@ -219,18 +219,18 @@ The owner permitted a local run on the real odealo commands. Source: the Codex s
 
 `APASSY_REAL_CTX=OUT.json cargo test --locked --release --features vault --test learning_replay real_commands_replay -- --ignored --nocapture`
 
-Without a model:
+Without a model, with the rule packs of `goal-v1` at commit 17b1095:
 
 | Run | Asked | Rule flags | Pattern allowed | Denied, then allowed |
 | --- | --- | --- | --- | --- |
-| No learning | 19,275 (100%) | 742 | 0 | 0 |
-| Learning | 17,770 (92.2%) | 742 | 1,505 | 0 |
+| No learning | 19,275 (100%) | 2,531 | 0 | 0 |
+| Learning | 17,864 (92.7%) | 2,531 | 1,411 | 0 |
 
-Ask rate per window of 2,000 requests, with learning: 89%, 89%, 96%, 93%, 97%, 96%, 96%, 84%, 86%, 98%. At the end: 205 active, 795 learning, and 689 blocked patterns.
+Ask rate per window of 2,000 requests, with learning: 89%, 90%, 96%, 94%, 97%, 96%, 97%, 85%, 87%, 98%. At the end: 191 active, 809 learning, and 2,205 blocked patterns. With the earlier rule packs (742 rule flags), the same run gave 92.2% asks and 1,505 pattern allowances.
 
 Patterns alone remove few asks on real commands. The commands vary much: 18,015 of 19,275 are unique. 5,529 have a here-document, 628 have a command substitution, and 5,159 start with an interpreter (`python3`, `node`). The narrow rules keep these literal on purpose. The model step and the calibration must give the larger part of the reduction.
 
-With the local Laya model, on the first 3,000 commands of up to 300 characters, in time order (2026-09-05 to 2026-09-11). A long script gives a long model state, and the model then takes seconds for each request. So this run skips commands over 300 characters. Model answers took about 1 second each. The run took 24 minutes.
+With the local Laya model, on the first 3,000 commands of up to 300 characters, in time order (2026-09-05 to 2026-09-11). This run and the model run on the labeled sets used the rule packs before commit 17b1095. A long script gives a long model state, and the model then takes seconds for each request. So this run skips commands over 300 characters. Model answers took about 1 second each. The run took 24 minutes.
 
 `APASSY_EVAL_MODEL=http://127.0.0.1:8770 APASSY_REAL_CTX=OUT.json APASSY_REPLAY_LIMIT=3000 APASSY_REPLAY_MAX_CHARS=300 APASSY_REPLAY_WINDOW=300 cargo test --locked --release --features vault --test learning_replay real_commands_replay -- --ignored --nocapture`
 
@@ -261,7 +261,7 @@ Calibration on the decision log of this run (goal item B5):
 
 Limit of this number: the simulated owner denies only requests with a rule flag, and a rule flag always asks. So no owner denial is at the model step, and the gate cannot fail here. The gate does fail when the owner denies at the model step: see `calibration_proposal_passes_the_replay_gate_and_the_owner_applies_it` in section 4. With the real owner, the proposal can be higher.
 
-An earlier version of the generalizer kept every multi-line script and every script with a backslash literal, and refused new patterns when the list was full. It gave 94.7% asks on the same data. The current version gives 92.2%.
+An earlier version of the generalizer kept every multi-line script and every script with a backslash literal, and refused new patterns when the list was full. With the earlier rule packs, it gave 94.7% asks on the same data. The current version gives 92.2% with those packs.
 
 ## 8. Wait records (goal item N3)
 

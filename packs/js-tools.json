@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "js-tools",
   "description": "JavaScript build, lint, and test tools: tsc, eslint, test runners, Next.js, Vite, Astro, Playwright, Cypress, and Turborepo.",
   "programs": [
@@ -13,6 +13,7 @@
   "safe": [
     {
       "id": "check-and-test-tools",
+      "note": "Type checks, linters, formatters, and test runners of the project.",
       "when": {
         "program": [
           "tsc", "eslint", "prettier", "vitest", "jest", "mocha", "ava", "biome", "stylelint",
@@ -22,6 +23,7 @@
     },
     {
       "id": "framework-development",
+      "note": "Local builds, the dev server, and checks of the framework.",
       "when": {
         "program": ["next", "vite", "astro"],
         "subcommand": ["build", "dev", "lint", "check", "start", "preview"]
@@ -29,6 +31,7 @@
     },
     {
       "id": "browser-tests",
+      "note": "End-to-end tests against the local app.",
       "when": { "program": ["playwright", "cypress"], "subcommand": ["test", "run", "open"] }
     }
   ]

@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "aws",
-  "description": "AWS CLI and AWS deploy tools (Elastic Beanstalk, CDK, SAM, Amplify).",
+  "description": "AWS CLI and AWS deploy tools (Elastic Beanstalk, CDK, SAM, Amplify): S3 writes, deletions, resource changes, secret reads, remote shells, and read commands.",
   "programs": ["aws", "eb", "cdk", "sam", "amplify"],
   "roles": {
     "usage": ["aws"]
@@ -12,6 +12,7 @@
       "id": "s3-write",
       "flag": "production",
       "dry_run": "skip",
+      "note": "A copy, move, sync, or removal with an S3 location.",
       "when": {
         "program": ["aws"],
         "any_arg_starts": ["s3://"],
@@ -22,6 +23,7 @@
       "id": "resource-change",
       "flag": "production",
       "dry_run": "skip",
+      "note": "An operation that creates, changes, or deletes a resource.",
       "when": {
         "program": ["aws"],
         "any_of": [
@@ -31,18 +33,125 @@
       }
     },
     {
+      "id": "resource-change-more",
+      "flag": "production",
+      "dry_run": "skip",
+      "note": "More operations that change resources: start, stop, reboot, modify, attach, grant, revoke, restore, invoke, publish, and send. The operation is the second word, or any word when global options come first. `logs start-query` only reads.",
+      "when": {
+        "program": ["aws"],
+        "not": { "any_arg": ["start-query"] },
+        "any_of": [
+          {
+            "operands": {
+              "at": {
+                "index": 1,
+                "starts": [
+                  "modify-", "reboot-", "stop-", "terminate-", "restore-", "reset-", "rotate-",
+                  "attach-", "detach-", "associate-", "disassociate-", "authorize-", "revoke-",
+                  "register-", "deregister-", "enable-", "disable-", "add-", "remove-",
+                  "import-", "copy-", "replace-", "cancel-", "set-", "tag-", "untag-",
+                  "upload-", "batch-", "execute-", "invoke", "publish", "send-", "purge-",
+                  "run-", "start-"
+                ]
+              }
+            }
+          },
+          {
+            "args_start": ["-"],
+            "any_arg_starts": [
+              "modify-", "reboot-", "stop-", "terminate-", "restore-", "reset-", "rotate-",
+              "attach-", "detach-", "associate-", "disassociate-", "authorize-", "revoke-",
+              "register-", "deregister-", "enable-", "disable-", "add-", "remove-", "import-",
+              "copy-", "replace-", "cancel-", "set-", "tag-", "untag-", "upload-", "batch-",
+              "execute-", "invoke", "publish", "send-", "purge-", "run-", "start-"
+            ]
+          },
+          { "subcommand": ["s3"], "action": ["mb", "rb"] }
+        ]
+      }
+    },
+    {
+      "id": "delete-data",
+      "flag": "data_loss",
+      "dry_run": "skip",
+      "note": "Deletion of data or resources: delete, batch delete, terminate, purge, and S3 removal. The operation is the second word, or any word when global options come first.",
+      "when": {
+        "program": ["aws"],
+        "any_of": [
+          {
+            "operands": {
+              "at": { "index": 1, "starts": ["delete-", "batch-delete-", "terminate-", "purge-"] }
+            }
+          },
+          {
+            "args_start": ["-"],
+            "any_arg_starts": ["delete-", "batch-delete-", "terminate-", "purge-"]
+          },
+          { "subcommand": ["s3"], "action": ["rm", "rb"] }
+        ]
+      }
+    },
+    {
+      "id": "secret-values",
+      "flag": "secret_output",
+      "note": "The command prints a secret value, temporary credentials, a decrypted value, or a presigned URL.",
+      "when": {
+        "program": ["aws"],
+        "any_of": [
+          { "any_arg": ["get-secret-value", "batch-get-secret-value"] },
+          {
+            "any_arg": ["get-parameter", "get-parameters", "get-parameters-by-path"],
+            "any_arg_starts": ["--with-decryption"]
+          },
+          {
+            "any_arg": [
+              "get-session-token", "assume-role", "assume-role-with-web-identity",
+              "assume-role-with-saml", "get-federation-token", "export-credentials",
+              "generate-db-auth-token", "presign"
+            ]
+          },
+          { "subcommand": ["kms"], "action": ["decrypt"] },
+          { "args_start": ["configure get"], "any_arg_contains": ["secret", "token"] }
+        ]
+      }
+    },
+    {
+      "id": "remote-shell",
+      "flag": "remote_access",
+      "note": "A shell or a command on a remote machine or container: SSM sessions and commands, ECS exec, EC2 Instance Connect.",
+      "when": {
+        "program": ["aws"],
+        "any_arg": ["start-session", "send-command", "execute-command", "send-ssh-public-key", "ssh"]
+      }
+    },
+    {
       "id": "deploy-tools",
       "flag": "production",
       "dry_run": "skip",
+      "note": "Elastic Beanstalk, CDK, and SAM commands deploy or change stacks.",
       "when": { "program": ["eb", "cdk", "sam"] }
     },
     {
       "id": "amplify-publish",
       "flag": "production",
       "dry_run": "skip",
+      "note": "Amplify publishing deploys the app.",
       "when": {
         "program": ["amplify"],
         "subcommand": ["deploy", "publish", "hosting:channel:deploy"]
+      }
+    }
+  ],
+  "safe": [
+    {
+      "id": "targeted-reads",
+      "note": "S3 listings, log reads, the caller identity, and the local configuration. Inventory reads across the account (`describe-*`, `list-*`) stay with the model.",
+      "when": {
+        "program": ["aws"],
+        "args_start": [
+          "s3 ls", "logs tail", "logs filter-log-events", "logs get-log-events",
+          "sts get-caller-identity", "configure list"
+        ]
       }
     }
   ]

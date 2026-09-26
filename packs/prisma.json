@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "prisma",
   "description": "Prisma CLI: database resets and schema commands.",
   "programs": ["prisma"],
@@ -11,7 +11,8 @@
     {
       "id": "reset",
       "flag": "data_loss",
-      "dry_run": "skip_with_n",
+      "dry_run": "skip",
+      "note": "`migrate reset` drops the database. The two options accept data loss. `-n` is `--name`, not a dry run.",
       "when": {
         "any_of": [
           { "args_start": ["migrate reset"] },
@@ -23,11 +24,18 @@
   "safe": [
     {
       "id": "schema-commands",
+      "note": "Client generation, schema checks, and the local data browser.",
       "when": { "args_start": ["generate", "format", "validate", "studio"] }
     },
     {
       "id": "migrate-dev",
+      "note": "`migrate dev` works on the development database.",
       "when": { "args_start": ["migrate dev"], "not": { "args_contain": ["--force"] } }
+    },
+    {
+      "id": "migrate-read",
+      "note": "`migrate status` and `migrate diff` only read and print.",
+      "when": { "args_start": ["migrate status", "migrate diff", "version"] }
     }
   ]
 }

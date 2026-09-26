@@ -202,18 +202,19 @@ What they do not stop:
 - **Pasted text.** Claude Code can mark pasted text in the prompt. If the transcript has other text, the check fails and the owner decides.
 - **A general request.** A hook prompt such as "continue" is the true request, but it still gives a low `task_match` (ADR 0008).
 
-## 8. Rule for a pack (goal item B7)
+## 8. Rule pack (goal item B7)
 
-The `hook_channel` check is in `hook_channel_flag` in `src/broker/prompts.rs`, because the rule packs of goal item B7 were not in this branch. Move it to a built-in pack when B7 lands. The rule adds a restriction only, so a local pack can also carry it.
+The `hook_channel` check is the built-in pack `host-hooks` (`packs/host-hooks.json`). The command analysis adds the flag on every run. `hook_channel_flag` in `src/broker/prompts.rs` gives no second flag. It stays only for its call in `src/broker/run.rs`. Remove both together. The rule adds a restriction only, so a local pack can also carry more names.
 
 | Field | Value |
 | --- | --- |
-| Pack | host tools (built-in) |
+| Pack | `host-hooks` (built-in, all programs) |
 | Flag | `hook_channel` |
-| Match (any argument, case does not matter) | contains `apassy-hook`, `.claude/`, `.claude.json`, `.codex/`, `claude_config_dir`, or `codex_home`; or a word ends with `.claude` or `.codex` (after a trailing `/` is removed) |
+| Match (case does not matter) | The text of each command segment: the words, the `NAME=value` prefixes, the redirect targets, and the here-document. The text contains `apassy-hook`, `.claude/`, `.claude.json`, `.codex/`, `claude_config_dir`, or `codex_home`; or a word ends with `.claude` or `.codex` (after a trailing `/` is removed). |
 | Effect | ask the owner |
 | Reason | the command can send a false user request or change a host transcript or hook setting |
-| Tests | `hook_channel_commands_are_flagged` in `src/broker/prompts.rs`, `a_command_that_names_the_hook_channel_waits_for_the_owner` in `tests/host_hook.rs` |
+| Difference to the old check | The old check read the argument list as one text. The pack reads the parsed segments, so it also finds a name after the shell removes quotes, for example `~/.cla""ude/`. A usage request of a known tool, for example `git --help ~/.claude`, does not get the flag, because it only prints usage. |
+| Tests | `hook_channel_commands_are_flagged` in `src/broker/prompts.rs` (through the analysis), `a_command_that_names_the_hook_channel_waits_for_the_owner` in `tests/host_hook.rs`, and the hook lines of `tests/fixtures/rule_packs/coverage.tsv` |
 
 ## 9. Measured results
 

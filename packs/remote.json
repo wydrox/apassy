@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "remote",
   "description": "Remote shells and file copies (ssh, scp, sftp, rsync, netcat, socat, telnet, ftp).",
   "programs": [
@@ -15,6 +15,7 @@
     {
       "id": "copy-secret",
       "flag": "secret_output",
+      "note": "A copy of a secret file or a secret value to another host.",
       "when": {
         "program": ["scp", "sftp", "rsync"],
         "any_of": [{ "secret_file_arg_as_written": true }, { "arg_refs_secret": true }]
@@ -23,6 +24,7 @@
     {
       "id": "send-secret",
       "flag": "secret_output",
+      "note": "A secret value in a command for another host.",
       "when": {
         "program": ["ssh", "telnet", "nc", "ncat", "netcat", "socat", "ftp"],
         "arg_refs_secret": true
@@ -31,6 +33,7 @@
     {
       "id": "remote-access",
       "flag": "remote_access",
+      "note": "A shell, a copy, or a connection to another host.",
       "when": {}
     },
     {
