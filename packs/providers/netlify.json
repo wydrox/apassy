@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "provider_version": 1,
+  "id": "netlify",
+  "kind": "provider",
+  "label": "Netlify",
+  "description": "Netlify personal access tokens for the API and the CLI.",
+  "known_hosts": ["api.netlify.com"],
+  "signals": [
+    {
+      "id": "personal-access-token",
+      "when": { "value_starts": ["nfp_"] },
+      "suggest": { "risk": "high", "scope": "admin", "reversibility": "partial" },
+      "reason": "A personal access token (nfp_) acts on every site of the account. A deploy can be rolled back. A deleted site cannot."
+    },
+    {
+      "id": "access-token-name",
+      "when": { "env_names": ["netlify_auth_token", "netlify_token"] },
+      "suggest": { "risk": "high", "scope": "admin", "reversibility": "partial" },
+      "reason": "The variable name is the Netlify CLI token variable. The token acts on every site of the account."
+    },
+    {
+      "id": "variable-name",
+      "when": { "env_name_contains": ["netlify"] },
+      "reason": "The variable name names Netlify."
+    },
+    {
+      "id": "name",
+      "when": { "words": ["netlify"] },
+      "reason": "The item name or a label names Netlify."
+    },
+    {
+      "id": "host",
+      "when": { "hosts": ["netlify.com"] },
+      "reason": "A host of the item is a Netlify host."
+    }
+  ]
+}

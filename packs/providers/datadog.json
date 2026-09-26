@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "provider_version": 1,
+  "id": "datadog",
+  "kind": "provider",
+  "label": "Datadog",
+  "description": "Datadog API keys and application keys, for all Datadog sites.",
+  "known_hosts": ["datadoghq.com", "datadoghq.eu", "ddog-gov.com"],
+  "signals": [
+    {
+      "id": "api-key",
+      "when": { "env_names": ["dd_api_key", "datadog_api_key"] },
+      "suggest": { "risk": "medium", "scope": "read-write", "reversibility": "partial" },
+      "reason": "An API key sends metrics, logs, and events. It cannot read data. Sent data stays until it expires."
+    },
+    {
+      "id": "application-key",
+      "when": { "env_names": ["dd_app_key", "dd_application_key", "datadog_app_key", "datadog_application_key"] },
+      "suggest": { "risk": "high", "scope": "admin", "reversibility": "partial" },
+      "reason": "An application key acts with the permissions of its user. It reads data and changes monitors and dashboards."
+    },
+    {
+      "id": "variable-name",
+      "when": { "env_name_contains": ["datadog"] },
+      "reason": "The variable name names Datadog."
+    },
+    {
+      "id": "name",
+      "when": { "words": ["datadog"] },
+      "reason": "The item name or a label names Datadog."
+    },
+    {
+      "id": "host",
+      "when": { "hosts": ["datadoghq.com", "datadoghq.eu", "ddog-gov.com"] },
+      "reason": "A host of the item is a Datadog host."
+    }
+  ]
+}

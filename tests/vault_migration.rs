@@ -1,25 +1,26 @@
 #![cfg(feature = "vault")]
 
-//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 6) to the
+//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 7) to the
 //! current version, with data at each version. Synthetic values only.
 //!
 //! The schema SQL below is a frozen copy of the statements that each earlier version ran
 //! at create: version 1 in commit a2f860a, 2 in 4ffdb5e, 3 in 22d1784, 4 in 2eb8366,
-//! 5 in 9ce2e01, and 6 in 4193991. Do not change these copies when the current schema
-//! changes.
+//! 5 in 9ce2e01, 6 in 4193991, and 7 in c5a91c0. Do not change these copies when the
+//! current schema changes.
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use apassy::contracts::CredentialKind;
 use apassy::vault::{
-    DecidedBy, DecisionEntry, Environment, ExecMode, ExecRule, LoggedDecision, PatternKey,
-    PatternState, RequestSource, Reversibility, RiskLevel, Scope, Vault, VaultErrorKind,
+    DecidedBy, DecisionEntry, Declaration, DeclarationField, Environment, ExecMode, ExecRule,
+    LoggedDecision, PatternKey, PatternState, RequestSource, Reversibility, RiskLevel, Scope,
+    SuggestedDeclaration, Vault, VaultErrorKind,
 };
 use tempfile::TempDir;
 
 const PASS: &str = "synthetic-migration-passphrase";
-const CURRENT_VERSION: i64 = 7;
+const CURRENT_VERSION: i64 = 8;
 
 const V1_SQL: &str = "
 CREATE TABLE vault_meta (
@@ -142,6 +143,71 @@ UPDATE vault_meta SET schema_version = 6 WHERE id = 1;
 PRAGMA user_version = 6;
 ";
 
+const V7_SQL: &str = "
+CREATE TABLE decision_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at INTEGER NOT NULL,
+    agent_id INTEGER NOT NULL,
+    agent_name TEXT NOT NULL,
+    project_dir TEXT NOT NULL,
+    cwd_rel TEXT NOT NULL,
+    items TEXT NOT NULL,
+    user_request TEXT NOT NULL,
+    user_request_source TEXT NOT NULL,
+    command TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    env_names TEXT NOT NULL,
+    declarations TEXT NOT NULL,
+    rule_flags TEXT NOT NULL,
+    known_safe INTEGER NOT NULL,
+    model_facts TEXT NOT NULL,
+    pattern TEXT NOT NULL,
+    grant_asks INTEGER NOT NULL,
+    asked INTEGER NOT NULL,
+    decision TEXT NOT NULL CHECK (decision IN ('allow', 'deny')),
+    decided_by TEXT NOT NULL
+        CHECK (decided_by IN ('rule', 'model', 'pattern', 'owner', 'no_answer')),
+    remembered INTEGER NOT NULL,
+    policy TEXT NOT NULL,
+    note TEXT NOT NULL,
+    instruction TEXT NOT NULL
+);
+CREATE INDEX decision_log_at ON decision_log(at);
+CREATE TABLE remembered_pattern (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id INTEGER NOT NULL,
+    project_dir TEXT NOT NULL,
+    items TEXT NOT NULL,
+    policy TEXT NOT NULL,
+    cwd_rel TEXT NOT NULL,
+    template TEXT NOT NULL,
+    display TEXT NOT NULL,
+    approvals INTEGER NOT NULL,
+    blocked INTEGER NOT NULL CHECK (blocked IN (0, 1)),
+    created_at INTEGER NOT NULL,
+    last_used_at INTEGER NOT NULL,
+    uses INTEGER NOT NULL,
+    UNIQUE (agent_id, project_dir, items, policy, cwd_rel, template)
+);
+CREATE TABLE calibration (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at INTEGER NOT NULL,
+    task_match REAL NOT NULL,
+    report TEXT NOT NULL
+);
+CREATE TABLE waiting_run (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at INTEGER NOT NULL,
+    agent_id INTEGER,
+    agent_name TEXT NOT NULL,
+    item_id INTEGER,
+    operation TEXT NOT NULL,
+    purpose TEXT NOT NULL
+);
+UPDATE vault_meta SET schema_version = 7 WHERE id = 1;
+PRAGMA user_version = 7;
+";
+
 /// Five items, one of each kind: (title, kind, notes, tags, fields as (name, value, secret)).
 type ItemRow = (
     &'static str,
@@ -235,7 +301,7 @@ fn build_legacy(path: &Path, version: i64) {
         .expect("journal mode");
     assert_eq!(journal, "delete");
     let tx = conn.transaction().expect("transaction");
-    let steps = [V1_SQL, V2_SQL, V3_SQL, V4_SQL, V5_SQL, V6_SQL];
+    let steps = [V1_SQL, V2_SQL, V3_SQL, V4_SQL, V5_SQL, V6_SQL, V7_SQL];
     for sql in &steps[..usize::try_from(version).expect("version")] {
         tx.execute_batch(sql).expect("legacy schema");
     }
@@ -368,6 +434,34 @@ fn build_legacy(path: &Path, version: i64) {
         )
         .expect("review");
     }
+    if version >= 7 {
+        // Version 7 learning: one owner denial, its blocked pattern, and a calibration.
+        tx.execute(
+            r#"INSERT INTO decision_log (at, agent_id, agent_name, project_dir, cwd_rel, items,
+                 user_request, user_request_source, command, purpose, env_names, declarations,
+                 rule_flags, known_safe, model_facts, pattern, grant_asks, asked, decision,
+                 decided_by, remembered, policy, note, instruction)
+             VALUES (?1, 1, 'MIG active agent', '/tmp/mig-project', '.', '[1]',
+                 'Run the old tests.', 'agent', '["npm","run","old"]', 'Old.',
+                 '["MIG_API_KEY"]', '[null]', '[]', 0, '{"task_match":0.4}',
+                 'npm run old', 0, 1, 'deny', 'owner', 0, 'apassy-bouncer-v4', '', '')"#,
+            [now - 600],
+        )
+        .expect("decision");
+        tx.execute(
+            "INSERT INTO remembered_pattern (agent_id, project_dir, items, policy, cwd_rel,
+                 template, display, approvals, blocked, created_at, last_used_at, uses)
+             VALUES (1, '/tmp/mig-project', '[1]', '1=none|', '.', 'mig-old-template',
+                 'npm run old', 0, 1, ?1, ?1, 0)",
+            [now - 600],
+        )
+        .expect("pattern");
+        tx.execute(
+            "INSERT INTO calibration (at, task_match, report) VALUES (?1, 0.7, 'MIG report')",
+            [now - 300],
+        )
+        .expect("calibration");
+    }
     tx.commit().expect("commit");
     conn.close().map_err(|(_, err)| err).expect("close");
 }
@@ -447,10 +541,26 @@ fn assert_version_data(vault: &mut Vault, version: i64) {
     } else {
         assert!(review.is_empty(), "a migration is not a restore");
     }
-    // The learning tables of version 7 start empty. The default level is active.
-    assert!(vault.decision_log().expect("log").is_empty());
-    assert!(vault.patterns().expect("patterns").is_empty());
-    assert!(vault.calibration().expect("calibration").is_none());
+    if version >= 7 {
+        // The learning data of version 7 stays.
+        let log = vault.decision_log().expect("log");
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].entry.pattern, "npm run old");
+        assert_eq!(log[0].entry.decision, LoggedDecision::Deny);
+        let patterns = vault.patterns().expect("patterns");
+        assert_eq!(patterns.len(), 1);
+        assert!(patterns[0].blocked);
+        let calibration = vault.calibration().expect("calibration").expect("some");
+        assert!((calibration.task_match - 0.7).abs() < 1e-9);
+    } else {
+        // The learning tables of version 7 start empty. The default level is active.
+        assert!(vault.decision_log().expect("log").is_empty());
+        assert!(vault.patterns().expect("patterns").is_empty());
+        assert!(vault.calibration().expect("calibration").is_none());
+    }
+    // Schema 8: a migrated declaration names no provider, and no suggestion is recorded.
+    assert_eq!(vault.declaration_provider(1).expect("provider"), None);
+    assert_eq!(vault.suggestion_stats().expect("stats").total, 0);
     if version < 2 {
         assert!(vault.list_agents().expect("agents").is_empty());
         return;
@@ -577,6 +687,18 @@ fn unlock_migrates_each_earlier_schema_version_to_the_current_one() {
         vault
             .remember_approval(&key, "npm test", u64::try_from(now()).expect("now"))
             .expect("pattern");
+        // The provider and the suggestion outcome of version 8 work on the migrated file.
+        // Item 3 has no declaration in any version.
+        let outcome = vault
+            .save_declaration(
+                3,
+                &migrated_declaration(),
+                Some("github"),
+                Some(&migrated_form()),
+            )
+            .expect("declaration")
+            .expect("the first declaration records the outcome");
+        assert_eq!(outcome.changed, vec![DeclarationField::Risk]);
         drop(vault);
         assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
 
@@ -586,11 +708,18 @@ fn unlock_migrates_each_earlier_schema_version_to_the_current_one() {
         assert_items(&again);
         assert_eq!(again.token_lifetime_days().expect("lifetime"), 60);
         let log = again.decision_log().expect("log");
-        assert_eq!(log.len(), 1);
-        assert_eq!(
-            log[0].entry.user_request, "Use [apassy:secret].",
+        assert_eq!(log.len(), if version >= 7 { 2 } else { 1 });
+        assert!(
+            log.iter()
+                .any(|record| record.entry.user_request == "Use [apassy:secret]."),
             "the secret value of item 1 is masked"
         );
+        assert_eq!(
+            again.declaration_provider(3).expect("provider").as_deref(),
+            Some("github")
+        );
+        let stats = again.suggestion_stats().expect("stats");
+        assert_eq!((stats.total, stats.accepted), (1, 0));
         let pattern = again.pattern(&key).expect("read").expect("pattern");
         assert_eq!(
             pattern.state(u64::try_from(now()).expect("now")),
@@ -628,6 +757,28 @@ fn migrated_decision(agent_id: u64) -> DecisionEntry {
     }
 }
 
+fn migrated_declaration() -> Declaration {
+    Declaration {
+        project: "mig".to_owned(),
+        environment: Environment::Production,
+        risk: RiskLevel::Medium,
+        scope: Scope::Admin,
+        reversibility: Reversibility::Irreversible,
+    }
+}
+
+/// The form that a suggestion for a GitHub token gives.
+fn migrated_form() -> SuggestedDeclaration {
+    SuggestedDeclaration {
+        provider: Some("github".to_owned()),
+        environment: Environment::Production,
+        risk: RiskLevel::High,
+        scope: Scope::Admin,
+        reversibility: Reversibility::Irreversible,
+        from_signals: vec![DeclarationField::Provider, DeclarationField::Risk],
+    }
+}
+
 fn migrated_pattern(agent_id: u64) -> PatternKey {
     PatternKey {
         agent_id,
@@ -637,6 +788,45 @@ fn migrated_pattern(agent_id: u64) -> PatternKey {
         cwd_rel: ".".to_owned(),
         template: "[{\"Lit\":\"npm\"},{\"Lit\":\"test\"}]".to_owned(),
     }
+}
+
+/// The step from version 7 to 8 runs in one transaction. A failure leaves version 7 and
+/// its learning data.
+#[test]
+fn a_failed_migration_from_version_7_keeps_the_old_version_and_data() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("blocked7.db");
+    build_legacy(&path, 7);
+    {
+        // A table with the name of the version 8 table makes the migration fail.
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        conn.execute_batch("CREATE TABLE suggestion_outcome (x INTEGER);")
+            .expect("blocking table");
+        conn.close().map_err(|(_, err)| err).expect("close");
+    }
+    let mut vault = Vault::open(&path).expect("open");
+    assert_eq!(
+        vault.unlock(PASS).unwrap_err().kind(),
+        VaultErrorKind::Storage
+    );
+    drop(vault);
+    assert_eq!(raw_versions(&path), (7, 7), "no partial migration");
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        let provider_column = conn.prepare("SELECT provider FROM declaration LIMIT 0");
+        assert!(provider_column.is_err(), "no column of version 8");
+        drop(provider_column);
+        conn.execute_batch("DROP TABLE suggestion_outcome;")
+            .expect("drop blocking table");
+        conn.close().map_err(|(_, err)| err).expect("close");
+    }
+    let mut vault = Vault::open(&path).expect("open");
+    vault.unlock(PASS).expect("unlock migrates");
+    assert_version_data(&mut vault, 7);
+    drop(vault);
+    assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
 }
 
 /// The step from version 6 to 7 also runs in one transaction.

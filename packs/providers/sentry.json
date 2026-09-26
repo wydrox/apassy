@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "provider_version": 1,
+  "id": "sentry",
+  "kind": "provider",
+  "label": "Sentry",
+  "description": "Sentry DSNs, organization tokens, and user tokens.",
+  "known_hosts": ["sentry.io"],
+  "signals": [
+    {
+      "id": "dsn",
+      "when": { "hosts": ["ingest.sentry.io", "ingest.us.sentry.io", "ingest.de.sentry.io"] },
+      "suggest": { "risk": "low", "scope": "read-write", "reversibility": "reversible" },
+      "reason": "A DSN only sends error events. It is public in the browser, and it cannot read data."
+    },
+    {
+      "id": "organization-token",
+      "when": { "value_starts": ["sntrys_"] },
+      "suggest": { "risk": "medium", "scope": "read-write", "reversibility": "reversible" },
+      "reason": "An organization token (sntrys_) creates releases and uploads source maps. It cannot read events."
+    },
+    {
+      "id": "user-token",
+      "when": { "value_starts": ["sntryu_"] },
+      "reason": "A user token (sntryu_) has the scopes that the user selected, so Apassy does not suggest the scope."
+    },
+    {
+      "id": "variable-name",
+      "when": { "env_name_contains": ["sentry"] },
+      "reason": "The variable name names Sentry."
+    },
+    {
+      "id": "name",
+      "when": { "words": ["sentry"] },
+      "reason": "The item name or a label names Sentry."
+    },
+    {
+      "id": "host",
+      "when": { "hosts": ["sentry.io"] },
+      "reason": "A host of the item is a Sentry host."
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "provider_version": 1,
+  "id": "sendgrid",
+  "kind": "provider",
+  "label": "SendGrid",
+  "description": "SendGrid API keys (SG.) for email.",
+  "known_hosts": ["api.sendgrid.com"],
+  "signals": [
+    {
+      "id": "api-key",
+      "when": { "value_shape": { "starts": ["SG."], "min_len": 66, "max_len": 66, "chars": "token" } },
+      "suggest": { "risk": "high", "reversibility": "irreversible" },
+      "reason": "A SendGrid API key (SG.) sends real email. A sent email cannot be recalled. Its permissions come from the SendGrid settings."
+    },
+    {
+      "id": "variable-name",
+      "when": { "env_name_contains": ["sendgrid"] },
+      "suggest": { "reversibility": "irreversible" },
+      "reason": "The variable name names SendGrid. A sent email cannot be recalled."
+    },
+    {
+      "id": "name",
+      "when": { "words": ["sendgrid"] },
+      "reason": "The item name or a label names SendGrid."
+    },
+    {
+      "id": "host",
+      "when": { "hosts": ["sendgrid.com", "sendgrid.net"] },
+      "reason": "A host of the item is a SendGrid host."
+    }
+  ]
+}

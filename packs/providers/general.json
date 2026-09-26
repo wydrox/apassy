@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "provider_version": 1,
+  "id": "general",
+  "kind": "general",
+  "label": "General",
+  "description": "Words and hosts that tell the environment or the scope of any credential.",
+  "signals": [
+    {
+      "id": "production-word",
+      "when": { "words": ["prod", "production", "prd", "live"] },
+      "suggest": { "environment": "production" },
+      "reason": "A name, a label, or a host says production (prod, production, live)."
+    },
+    {
+      "id": "staging-word",
+      "when": { "words": ["staging", "stage", "stg", "preprod", "uat", "qa", "preview"] },
+      "suggest": { "environment": "staging" },
+      "reason": "A name, a label, or a host says staging."
+    },
+    {
+      "id": "test-word",
+      "when": { "words": ["test", "testing", "sandbox"] },
+      "suggest": { "environment": "staging" },
+      "reason": "A name, a label, or a host says test or sandbox. Apassy puts a test system in staging."
+    },
+    {
+      "id": "development-word",
+      "when": { "words": ["dev", "development", "develop"] },
+      "suggest": { "environment": "development" },
+      "reason": "A name, a label, or a host says development (dev)."
+    },
+    {
+      "id": "local-word",
+      "when": { "words": ["local"] },
+      "suggest": { "environment": "local" },
+      "reason": "A name or a label says local."
+    },
+    {
+      "id": "local-host",
+      "when": { "hosts": ["localhost", "127.0.0.1", "0.0.0.0", "host.docker.internal"] },
+      "suggest": { "environment": "local", "risk": "low", "reversibility": "reversible" },
+      "reason": "A host of the item is this computer (localhost). Local data is for development."
+    },
+    {
+      "id": "read-only-word",
+      "when": { "words": ["readonly", "read only", "reader", "viewer"] },
+      "suggest": { "scope": "read-only" },
+      "reason": "A name or a label says read-only."
+    },
+    {
+      "id": "admin-word",
+      "when": { "words": ["admin", "root", "superuser"] },
+      "suggest": { "scope": "admin" },
+      "reason": "A name or a label says admin or root."
+    }
+  ]
+}

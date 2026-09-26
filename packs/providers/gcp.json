@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "provider_version": 1,
+  "id": "gcp",
+  "kind": "provider",
+  "label": "Google Cloud",
+  "description": "Google Cloud service account keys (JSON), Google API keys (AIza), and the standard variable names.",
+  "known_hosts": ["googleapis.com"],
+  "signals": [
+    {
+      "id": "service-account-key",
+      "when": { "json_fields": { "type": ["service_account"] } },
+      "suggest": { "risk": "high" },
+      "reason": "A service account key (JSON) does not expire. It acts with the roles of the service account."
+    },
+    {
+      "id": "api-key",
+      "when": { "value_shape": { "starts": ["AIza"], "min_len": 35, "max_len": 35, "chars": "token" } },
+      "reason": "A Google API key (AIza) calls the APIs that its project enables. Key restrictions in the console limit it."
+    },
+    {
+      "id": "variable-name",
+      "when": { "env_name_contains": ["google", "gcp", "gcloud"] },
+      "reason": "The variable name names Google Cloud."
+    },
+    {
+      "id": "name",
+      "when": { "words": ["gcp", "gcloud", "google cloud"] },
+      "reason": "The item name or a label names Google Cloud."
+    },
+    {
+      "id": "host",
+      "when": { "hosts": ["googleapis.com"] },
+      "reason": "A host of the item is a Google API host (googleapis.com)."
+    }
+  ]
+}

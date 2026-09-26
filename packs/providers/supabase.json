@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "provider_version": 1,
+  "id": "supabase",
+  "kind": "provider",
+  "label": "Supabase",
+  "description": "Supabase project keys (service_role, anon, secret, publishable), personal access tokens, and project hosts.",
+  "known_hosts": ["supabase.co", "supabase.com"],
+  "signals": [
+    {
+      "id": "service-role-key",
+      "when": { "jwt_claims": { "iss": ["supabase"], "role": ["service_role"] } },
+      "suggest": { "risk": "high", "scope": "admin" },
+      "reason": "A service_role key skips row level security. It reads and changes all data of the project."
+    },
+    {
+      "id": "secret-key",
+      "when": { "value_starts": ["sb_secret_"] },
+      "suggest": { "risk": "high", "scope": "admin" },
+      "reason": "A secret key (sb_secret_) skips row level security. It reads and changes all data of the project."
+    },
+    {
+      "id": "anon-key",
+      "when": { "jwt_claims": { "iss": ["supabase"], "role": ["anon"] } },
+      "suggest": { "risk": "low", "scope": "read-only", "reversibility": "reversible" },
+      "reason": "The anon key is public in the browser. Row level security limits what it can do."
+    },
+    {
+      "id": "publishable-key",
+      "when": { "value_starts": ["sb_publishable_"] },
+      "suggest": { "risk": "low", "scope": "read-only", "reversibility": "reversible" },
+      "reason": "A publishable key (sb_publishable_) is public in the browser. Row level security limits what it can do."
+    },
+    {
+      "id": "access-token",
+      "when": { "value_starts": ["sbp_"] },
+      "suggest": { "risk": "high", "scope": "admin", "reversibility": "irreversible" },
+      "reason": "A personal access token (sbp_) manages every project of the account. It can delete a project and its data."
+    },
+    {
+      "id": "service-role-name",
+      "when": { "env_name_contains": ["service_role"] },
+      "suggest": { "risk": "high", "scope": "admin" },
+      "reason": "The variable name says service_role. That key skips row level security."
+    },
+    {
+      "id": "anon-name",
+      "when": { "env_name_contains": ["supabase_anon"] },
+      "suggest": { "risk": "low", "scope": "read-only", "reversibility": "reversible" },
+      "reason": "The variable name says anon. The anon key is public, and row level security limits it."
+    },
+    {
+      "id": "variable-name",
+      "when": { "env_name_contains": ["supabase"] },
+      "reason": "The variable name names Supabase."
+    },
+    {
+      "id": "name",
+      "when": { "words": ["supabase"] },
+      "reason": "The item name or a label names Supabase."
+    },
+    {
+      "id": "host",
+      "when": { "hosts": ["supabase.co", "supabase.com"] },
+      "reason": "A host of the item is a Supabase host."
+    }
+  ]
+}

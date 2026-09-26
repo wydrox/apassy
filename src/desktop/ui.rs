@@ -1176,6 +1176,12 @@ fn draw_owner_item(app: &mut DesktopApp, ui: &mut egui::Ui) {
                         forget_secret_form(ui.ctx(), "edit");
                         app.owner_ui.edit_revision = summary.revision;
                         app.pending_delete = false;
+                        // The item changed, so the suggestion can change (goal item B4).
+                        app.owner_ui.declaration_form = app
+                            .owner_ui
+                            .session
+                            .declaration_form(id)
+                            .unwrap_or_default();
                         app.set_ok("The item was updated.");
                     }
                     Err(err) => app.set_err(err.message),
@@ -2219,6 +2225,95 @@ mod tests {
         assert!(!text.contains("Confirm settings"), "{text}");
     }
 
+    /// Goal item B4: a new item gets a suggested declaration with a reason for each value.
+    /// The save waits for the owner check, and the card then shows the acceptance share.
+    #[cfg(feature = "vault")]
+    #[test]
+    fn declaration_card_shows_the_suggestion_and_the_acceptance_share() {
+        use crate::desktop::owner_store::SecretForm;
+        use crate::vault::{Environment, RiskLevel};
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let mut app = app_with_vault(&dir);
+        let secret = format!("sk_live_{}", "EXAMPLE0".repeat(3));
+        let mut secrets = SecretForm::default();
+        secrets.token.clone_from(&secret);
+        let item = app
+            .owner_ui
+            .session
+            .add(
+                &crate::desktop::ItemDraft {
+                    name: "Payments".to_owned(),
+                    project: "shop".to_owned(),
+                    ..crate::desktop::ItemDraft::default()
+                },
+                &secrets,
+            )
+            .expect("add");
+        app.select_item(item.id.to_string());
+        let form = &app.owner_ui.declaration_form;
+        assert!(!form.stored);
+        assert_eq!(form.provider.as_deref(), Some("stripe"));
+        assert_eq!(
+            form.project, "shop",
+            "the project of the item fills the form"
+        );
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(text.contains("Apassy suggests the values below"), "{text}");
+        assert!(text.contains("Environment: suggested production"), "{text}");
+        assert!(
+            text.contains("Known hosts of Stripe: api.stripe.com"),
+            "{text}"
+        );
+        assert!(
+            text.contains("No suggested declaration is saved yet"),
+            "{text}"
+        );
+        assert!(!text.contains(&secret), "the value stays hidden");
+
+        // The owner lowers the risk. The save waits for the owner check (goal item A4).
+        app.owner_ui.declaration_form.risk = RiskLevel::Medium;
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(text.contains("You changed it."), "{text}");
+        let form = app.owner_ui.declaration_form.clone();
+        app.ask_owner(
+            OwnerRequest::SaveDeclaration {
+                item_id: item.id,
+                form,
+            },
+            None,
+        );
+        assert!(
+            app.owner_ui
+                .session
+                .declaration(item.id)
+                .expect("read")
+                .is_none()
+        );
+        app.confirm_owner_now(OwnerCheck::passphrase(UI_PASS))
+            .expect("owner check");
+        let stored = app
+            .owner_ui
+            .session
+            .declaration(item.id)
+            .expect("read")
+            .expect("saved");
+        assert_eq!(stored.environment, Environment::Production);
+        assert_eq!(stored.risk, RiskLevel::Medium);
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(
+            text.contains("Suggested declarations saved without a change: 0 of 1 (0%). Changed fields: risk 1."),
+            "{text}"
+        );
+        // The stored declaration fills the form again, with the provider.
+        app.select_item(item.id.to_string());
+        assert!(app.owner_ui.declaration_form.stored);
+        assert_eq!(
+            app.owner_ui.declaration_form.provider.as_deref(),
+            Some("stripe")
+        );
+    }
+
     #[test]
     fn activity_history_after_approve_once_draws_on_a_tall_frame() {
         let mut app = unlocked_app_with_item();
@@ -2287,7 +2382,7 @@ mod agents_view {
     use crate::broker::approvals::RememberOffer;
     use crate::broker::profile::REPORTING_API_V0;
     use crate::desktop::owner_check::OwnerRequest;
-    use crate::desktop::owner_store::{FreshToken, format_utc};
+    use crate::desktop::owner_store::{DeclarationForm, FreshToken, format_utc};
     use crate::desktop::{BrokerState, DesktopApp};
     use crate::vault::ActivityDecision;
     use crate::vault::{DEFAULT_TOKEN_LIFETIME_DAYS, ExecMode};
@@ -2449,11 +2544,18 @@ mod agents_view {
         if !session.needs_review(item_id).unwrap_or(false) {
             return;
         }
+        // The provider gives known hosts to the command analysis, so the owner reviews it.
+        let provider = session
+            .declaration_form(item_id)
+            .ok()
+            .and_then(|form| form.provider)
+            .and_then(|id| crate::vault::providers::find(&id))
+            .map_or_else(String::new, |p| format!(", provider {}", p.label));
         let declaration = session.declaration(item_id).ok().flatten().map_or_else(
             || "None. Every run with this item waits for you.".to_owned(),
             |d| {
                 format!(
-                    "{}, {} risk, {}, {}, project {}",
+                    "{}, {} risk, {}, {}, project {}{provider}",
                     d.environment.as_str(),
                     d.risk.as_str(),
                     d.scope.as_str(),
@@ -2916,11 +3018,14 @@ mod agents_view {
             .join(" ")
     }
 
-    /// Environment variable binding for agent processes. Items with no secret field skip it.
-    /// Owner declaration for the bouncer (ADR 0008).
+    /// Owner declaration for the bouncer (ADR 0008). The form shows the suggestion from
+    /// the item, the reason for each value, and the known hosts of the provider (goal
+    /// item B4).
     pub(super) fn draw_declaration_card(app: &mut DesktopApp, ui: &mut egui::Ui, item_id: u64) {
+        use crate::vault::providers;
         use crate::vault::{Environment, Reversibility, RiskLevel, Scope};
 
+        let stats = app.owner_ui.session.suggestion_stats().ok();
         card_frame().show(ui, |ui| {
             ui.label(RichText::new("Declaration").size(16.0).strong().color(INK));
             ui.label(
@@ -2932,10 +3037,39 @@ mod agents_view {
             let form = &mut app.owner_ui.declaration_form;
             if !form.stored {
                 ui.label(RichText::new("No declaration. Every agent run with this item waits for you.").color(ASK));
+                ui.label(
+                    RichText::new(if form.suggestion.is_some() {
+                        "Apassy suggests the values below from the item. Confirm or change each value, then save."
+                    } else {
+                        "Apassy found no signal in the item. The form starts with the most sensitive values."
+                    })
+                    .color(INK_MUTED),
+                );
             }
             egui::Grid::new(("declaration", item_id)).num_columns(2).show(ui, |ui| {
                 ui.label("Project");
                 ui.add(TextEdit::singleline(&mut form.project).hint_text("odealo").desired_width(220.0));
+                ui.end_row();
+                ui.label("Provider");
+                let selected = form
+                    .provider
+                    .as_deref()
+                    .and_then(providers::find)
+                    .map_or("none", |provider| provider.label.as_str());
+                egui::ComboBox::new(("decl-provider", item_id), "")
+                    .selected_text(selected)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut form.provider, None, "none");
+                        if let Ok(catalog) = providers::builtin() {
+                            for provider in catalog.providers() {
+                                ui.selectable_value(
+                                    &mut form.provider,
+                                    Some(provider.id.clone()),
+                                    provider.label.as_str(),
+                                );
+                            }
+                        }
+                    });
                 ui.end_row();
                 ui.label("Environment");
                 egui::ComboBox::new(("decl-env", item_id), "")
@@ -2974,6 +3108,7 @@ mod agents_view {
                     });
                 ui.end_row();
             });
+            draw_declaration_hints(ui, form);
             if accent_button(ui, "Save declaration").clicked() {
                 let form = app.owner_ui.declaration_form.clone();
                 if form.project.trim().is_empty() {
@@ -2984,7 +3119,129 @@ mod agents_view {
                     app.ask_owner(OwnerRequest::SaveDeclaration { item_id, form }, Some(&ctx));
                 }
             }
+            ui.label(RichText::new(acceptance_text(stats.as_ref())).color(INK_MUTED));
         });
+    }
+
+    /// The reason for each suggested value, and the known hosts of the provider (goal
+    /// item B4). A conflict of signals is in the ask color.
+    fn draw_declaration_hints(ui: &mut egui::Ui, form: &DeclarationForm) {
+        use crate::vault::providers::{self, Suggested};
+
+        let provider = form.provider.as_deref().and_then(providers::find);
+        let hosts = match provider {
+            Some(provider) if !provider.known_hosts.is_empty() => format!(
+                "Known hosts of {}: {}. A command that sends the secret of this item to a host outside this list and the global list waits for you.",
+                provider.label,
+                provider.known_hosts.join(", ")
+            ),
+            Some(provider) => format!(
+                "{} has no known hosts. The command analysis uses the global known hosts only.",
+                provider.label
+            ),
+            None => {
+                "No provider. The command analysis uses the global known hosts only.".to_owned()
+            }
+        };
+        let Some(suggestion) = &form.suggestion else {
+            ui.label(RichText::new(hosts).color(INK_MUTED));
+            return;
+        };
+        if let Some(id) = &suggestion.provider {
+            let label = providers::find(id).map_or(id.as_str(), |p| p.label.as_str());
+            let changed = if form.provider.as_ref() == Some(id) {
+                ""
+            } else {
+                " You changed it."
+            };
+            ui.label(
+                RichText::new(format!(
+                    "Provider: suggested {label}. {}{changed}",
+                    suggestion.provider_reason
+                ))
+                .color(INK_MUTED),
+            );
+        }
+        ui.label(RichText::new(hosts).color(INK_MUTED));
+        fn hint<T: Copy + PartialEq>(
+            ui: &mut egui::Ui,
+            name: &str,
+            suggested: Option<&Suggested<T>>,
+            current: T,
+            text: fn(T) -> &'static str,
+        ) {
+            let (line, color) = match suggested {
+                None => (
+                    format!("{name}: no signal. The default is the most sensitive value."),
+                    INK_MUTED,
+                ),
+                Some(suggested) => {
+                    let changed = if suggested.value == current {
+                        ""
+                    } else {
+                        " You changed it."
+                    };
+                    let line = format!(
+                        "{name}: suggested {}. {}{changed}",
+                        text(suggested.value),
+                        suggested.reason
+                    );
+                    (line, if suggested.conflict { ASK } else { INK_MUTED })
+                }
+            };
+            ui.label(RichText::new(line).color(color));
+        }
+        hint(
+            ui,
+            "Environment",
+            suggestion.environment.as_ref(),
+            form.environment,
+            crate::vault::Environment::as_str,
+        );
+        hint(
+            ui,
+            "Risk",
+            suggestion.risk.as_ref(),
+            form.risk,
+            crate::vault::RiskLevel::as_str,
+        );
+        hint(
+            ui,
+            "Scope",
+            suggestion.scope.as_ref(),
+            form.scope,
+            crate::vault::Scope::as_str,
+        );
+        hint(
+            ui,
+            "Reversibility",
+            suggestion.reversibility.as_ref(),
+            form.reversibility,
+            crate::vault::Reversibility::as_str,
+        );
+    }
+
+    /// The share of suggested declarations that the owner saved without a change.
+    pub(super) fn acceptance_text(stats: Option<&crate::vault::SuggestionStats>) -> String {
+        let Some(stats) = stats.filter(|stats| stats.total > 0) else {
+            return "No suggested declaration is saved yet. Apassy counts the first save of each item.".to_owned();
+        };
+        let changed: Vec<String> = stats
+            .changed
+            .iter()
+            .filter(|(_, count)| *count > 0)
+            .map(|(field, count)| format!("{} {count}", field.as_str()))
+            .collect();
+        let mut text = format!(
+            "Suggested declarations saved without a change: {} of {} ({:.0}%).",
+            stats.accepted,
+            stats.total,
+            stats.share().unwrap_or_default() * 100.0
+        );
+        if !changed.is_empty() {
+            text.push_str(&format!(" Changed fields: {}.", changed.join(", ")));
+        }
+        text
     }
 
     pub(super) fn draw_env_card(app: &mut DesktopApp, ui: &mut egui::Ui, item_id: u64) {

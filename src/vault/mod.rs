@@ -14,6 +14,8 @@
 
 mod agents;
 mod learning;
+pub mod providers;
+mod suggestions;
 mod types;
 mod waiting;
 
@@ -41,6 +43,7 @@ pub use learning::{
     MAX_DECISION_ROWS, MAX_KEPT_DENIALS, MAX_PATTERNS, PATTERN_APPROVALS_NEEDED, PATTERN_IDLE_DAYS,
     PatternKey, PatternRecord, PatternState, RequestSource,
 };
+pub use suggestions::{DeclarationField, SuggestedDeclaration, SuggestionOutcome, SuggestionStats};
 pub use types::{
     Field, FieldSummary, ItemDetails, ItemDraft, ItemSummary, MAX_PASSPHRASE_BYTES,
     MIN_PASSPHRASE_BYTES, SecretValue, VaultError, VaultErrorKind, VaultResult,
@@ -99,6 +102,7 @@ const PROCESS_SCHEMA_VERSION: i64 = 3;
 const RULE_SCHEMA_VERSION: i64 = 4;
 const DECLARATION_SCHEMA_VERSION: i64 = 5;
 const TOKEN_SCHEMA_VERSION: i64 = 6;
+const LEARNING_SCHEMA_VERSION: i64 = 7;
 
 /// Encrypted local vault. Connection state is private. Debug is redacted.
 pub struct Vault {
@@ -882,6 +886,7 @@ fn verify_user_version(conn: &Connection) -> VaultResult<i64> {
         | RULE_SCHEMA_VERSION
         | DECLARATION_SCHEMA_VERSION
         | TOKEN_SCHEMA_VERSION
+        | LEARNING_SCHEMA_VERSION
         | SCHEMA_VERSION) => Ok(version),
         _ => Err(err(VaultErrorKind::UnsupportedSchema)),
     }
@@ -964,8 +969,13 @@ fn verify_expected_columns(conn: &Connection, version: i64) -> VaultResult<()> {
     } else {
         &[]
     };
-    let v7: &[&str] = if version >= SCHEMA_VERSION {
+    let v7: &[&str] = if version >= LEARNING_SCHEMA_VERSION {
         &learning::SCHEMA_V7_COLUMNS
+    } else {
+        &[]
+    };
+    let v8: &[&str] = if version >= SCHEMA_VERSION {
+        &suggestions::SCHEMA_V8_COLUMNS
     } else {
         &[]
     };
@@ -977,6 +987,7 @@ fn verify_expected_columns(conn: &Connection, version: i64) -> VaultResult<()> {
         .chain(v5)
         .chain(v6)
         .chain(v7)
+        .chain(v8)
     {
         drop(
             conn.prepare(sql)
@@ -1021,7 +1032,11 @@ fn migrate_to_current(conn: &mut Connection, from: i64) -> VaultResult<()> {
         tx.execute_batch(agents::SCHEMA_V6_SQL)
             .map_err(|_| err(VaultErrorKind::Storage))?;
     }
-    tx.execute_batch(learning::SCHEMA_V7_SQL)
+    if from < LEARNING_SCHEMA_VERSION {
+        tx.execute_batch(learning::SCHEMA_V7_SQL)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+    }
+    tx.execute_batch(suggestions::SCHEMA_V8_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     verify_expected_columns(conn, SCHEMA_VERSION)
@@ -1056,6 +1071,8 @@ fn initialize_new_db(path: &Path, passphrase: &str) -> VaultResult<()> {
     tx.execute_batch(agents::SCHEMA_V6_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.execute_batch(learning::SCHEMA_V7_SQL)
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute_batch(suggestions::SCHEMA_V8_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     close_conn(conn)

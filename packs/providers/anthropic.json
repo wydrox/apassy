@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "provider_version": 1,
+  "id": "anthropic",
+  "kind": "provider",
+  "label": "Anthropic",
+  "description": "Anthropic API keys and admin keys.",
+  "known_hosts": ["api.anthropic.com"],
+  "signals": [
+    {
+      "id": "admin-key",
+      "when": { "value_starts": ["sk-ant-admin"] },
+      "suggest": { "risk": "high", "scope": "admin", "reversibility": "irreversible" },
+      "reason": "An admin key (sk-ant-admin) manages the members, workspaces, and keys of the organization."
+    },
+    {
+      "id": "api-key",
+      "when": { "value_starts": ["sk-ant-api"] },
+      "suggest": { "risk": "medium", "scope": "read-write", "reversibility": "partial" },
+      "reason": "An API key (sk-ant-api) calls the models and changes the files of its workspace. Each call costs money."
+    },
+    {
+      "id": "variable-name",
+      "when": { "env_name_contains": ["anthropic"] },
+      "reason": "The variable name names Anthropic."
+    },
+    {
+      "id": "name",
+      "when": { "words": ["anthropic"] },
+      "reason": "The item name or a label names Anthropic."
+    },
+    {
+      "id": "host",
+      "when": { "hosts": ["anthropic.com"] },
+      "reason": "A host of the item is an Anthropic host."
+    }
+  ]
+}

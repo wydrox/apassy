@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "provider_version": 1,
+  "id": "vercel",
+  "kind": "provider",
+  "label": "Vercel",
+  "description": "Vercel access tokens for the API and the CLI.",
+  "known_hosts": ["api.vercel.com"],
+  "signals": [
+    {
+      "id": "access-token",
+      "when": { "env_names": ["vercel_token", "vercel_api_token", "vercel_access_token"] },
+      "suggest": { "risk": "high", "scope": "admin", "reversibility": "partial" },
+      "reason": "A Vercel access token acts on every project of its account or team. A deployment can be rolled back. A deleted project cannot."
+    },
+    {
+      "id": "variable-name",
+      "when": { "env_name_contains": ["vercel"] },
+      "reason": "The variable name names Vercel."
+    },
+    {
+      "id": "name",
+      "when": { "words": ["vercel"] },
+      "reason": "The item name or a label names Vercel."
+    },
+    {
+      "id": "host",
+      "when": { "hosts": ["vercel.com"] },
+      "reason": "A host of the item is a Vercel host."
+    }
+  ]
+}

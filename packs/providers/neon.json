@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "provider_version": 1,
+  "id": "neon",
+  "kind": "provider",
+  "label": "Neon",
+  "description": "Neon serverless Postgres: API keys and database hosts.",
+  "known_hosts": ["neon.tech"],
+  "signals": [
+    {
+      "id": "host",
+      "when": { "hosts": ["neon.tech"] },
+      "reason": "A host of the item is a Neon host (neon.tech)."
+    },
+    {
+      "id": "variable-name",
+      "when": { "env_name_contains": ["neon"] },
+      "reason": "The variable name names Neon."
+    },
+    {
+      "id": "name",
+      "when": { "words": ["neon"] },
+      "reason": "The item name or a label names Neon."
+    }
+  ]
+}

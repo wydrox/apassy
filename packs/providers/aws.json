@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "provider_version": 1,
+  "id": "aws",
+  "kind": "provider",
+  "label": "Amazon Web Services",
+  "description": "AWS access keys: long-term keys (AKIA), temporary credentials (ASIA), and the standard variable names.",
+  "known_hosts": ["amazonaws.com"],
+  "signals": [
+    {
+      "id": "long-term-access-key",
+      "when": { "value_shape": { "starts": ["AKIA"], "min_len": 16, "max_len": 16, "chars": "upper_alnum" } },
+      "suggest": { "risk": "high" },
+      "reason": "A long-term access key (AKIA) works until the owner deletes it. It has the permissions of its IAM user."
+    },
+    {
+      "id": "temporary-access-key",
+      "when": { "value_shape": { "starts": ["ASIA"], "min_len": 16, "max_len": 16, "chars": "upper_alnum" } },
+      "suggest": { "risk": "medium" },
+      "reason": "Temporary credentials (ASIA) expire after some hours. They have the permissions of their role."
+    },
+    {
+      "id": "variable-name",
+      "when": { "env_names": ["aws_access_key_id", "aws_secret_access_key", "aws_session_token"] },
+      "reason": "The variable name is a standard AWS credential variable."
+    },
+    {
+      "id": "name",
+      "when": { "words": ["aws"] },
+      "reason": "The item name or a label names AWS."
+    },
+    {
+      "id": "host",
+      "when": { "hosts": ["amazonaws.com"] },
+      "reason": "A host of the item is an AWS host (amazonaws.com)."
+    }
+  ]
+}

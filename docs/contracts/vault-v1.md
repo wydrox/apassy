@@ -5,6 +5,7 @@ Status: experimental backend contract. See [local verification](../operations/va
 Schema version 2 (2026-09-25) adds agent, grant, destination, and activity tables. See section 9 of the [broker contract](broker-v0.md). The item API in this document did not change. Item delete also removes the grants and the destination of the item. Restore also revokes all agents.
 Schema version 6 (2026-09-26) adds agent token expiry and rotation (goal item P1) and the owner review after a restore (goal item V4). See section 9 of the broker contract, the agent API below, and [backup and restore](../operations/backup-restore.md).
 Schema version 7 (2026-09-26) adds the decision log, remembered patterns, and calibrations (goal items B3, B5, ADR 0009) and the wait record of a run that waits for the owner (goal item N3). See [learning](../operations/learning.md). A restore removes all remembered patterns. An unlock gives each wait record without a final entry an activity entry.
+Schema version 8 (2026-09-26) adds the provider of a declaration and the outcome of each suggested declaration (goal item B4). See [declarations](../operations/declarations.md). An item delete also removes its outcome record.
 The owner selected SQLCipher with a master passphrase after the synthetic storage probe passed.
 This contract does not permit real-secret use or claim complete P2 acceptance.
 
@@ -194,5 +195,5 @@ The new passphrase is in a temporary SQL string, as the key is at unlock. A back
 Passphrases and decrypted data exist in process memory. SQLCipher key setup also makes a temporary SQL string.
 Redacted Debug is not memory erasure or a defense against memory inspection, swap, or crash dumps.
 A completed file copy is not proof of crash-safe directory-entry persistence or a complete recovery product.
-Authenticated reveal, product isolation, and native-code review remain separate gates. Unlock migrates files from schema versions 1 to 6 in one transaction (goal item V6).
+Authenticated reveal, product isolation, and native-code review remain separate gates. Unlock migrates files from schema versions 1 to 7 in one transaction (goal item V6).
 Tests use temporary synthetic data only. No real credential or passphrase belongs in repository fixtures or logs.

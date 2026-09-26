@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "provider_version": 1,
+  "id": "twilio",
+  "kind": "provider",
+  "label": "Twilio",
+  "description": "Twilio account SIDs, auth tokens, and API keys.",
+  "known_hosts": ["twilio.com"],
+  "signals": [
+    {
+      "id": "account-sid",
+      "when": { "value_shape": { "starts": ["AC"], "min_len": 32, "max_len": 32, "chars": "lower_hex" } },
+      "reason": "An account SID (AC) names a Twilio account."
+    },
+    {
+      "id": "api-key-sid",
+      "when": { "value_shape": { "starts": ["SK"], "min_len": 32, "max_len": 32, "chars": "lower_hex" } },
+      "suggest": { "risk": "high", "scope": "read-write" },
+      "reason": "A standard API key (SK) sends messages and calls. It cannot change the account or its keys."
+    },
+    {
+      "id": "auth-token",
+      "when": { "env_names": ["twilio_auth_token"] },
+      "suggest": { "risk": "high", "scope": "admin" },
+      "reason": "The auth token acts for the whole account, with its settings and keys."
+    },
+    {
+      "id": "messages",
+      "when": { "env_name_contains": ["twilio"] },
+      "suggest": { "reversibility": "irreversible" },
+      "reason": "Twilio sends real text messages and calls. A sent message cannot be undone."
+    },
+    {
+      "id": "name",
+      "when": { "words": ["twilio"] },
+      "reason": "The item name or a label names Twilio."
+    },
+    {
+      "id": "host",
+      "when": { "hosts": ["twilio.com"] },
+      "reason": "A host of the item is a Twilio host."
+    }
+  ]
+}

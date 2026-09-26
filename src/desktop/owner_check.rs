@@ -203,9 +203,13 @@ impl OwnerRequest {
             },
             Self::SaveRule { .. } => "Save the rule of this process grant.".to_owned(),
             Self::SaveDeclaration { form, .. } => format!(
-                "Save the declaration: {}, {} risk.",
+                "Save the declaration: {}, {} risk, provider {}.",
                 form.environment.as_str(),
-                form.risk.as_str()
+                form.risk.as_str(),
+                form.provider
+                    .as_deref()
+                    .and_then(crate::vault::providers::find)
+                    .map_or("none", |provider| provider.label.as_str())
             ),
             Self::SaveVariable { env_name, .. } => {
                 format!("Bind the item to the environment variable {env_name}.")
