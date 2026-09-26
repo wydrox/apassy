@@ -659,3 +659,232 @@ fn rollback_returns_to_the_previous_model_and_needs_the_owner_check() {
     // The broker keeps the fixture fields alive until here.
     let _ = &fx.broker;
 }
+
+/// (ok, command line, purpose) of each labeled case.
+fn fixture_cases(path: &str) -> Vec<(bool, String, String)> {
+    let text = std::fs::read_to_string(path).expect("fixture");
+    text.lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .map(|line| {
+            let parts: Vec<&str> = line.split('\t').collect();
+            assert_eq!(parts.len(), 4, "bad case line: {line}");
+            (parts[0] == "ok", parts[2].to_owned(), parts[3].to_owned())
+        })
+        .collect()
+}
+
+/// The shadow measurement on this Mac (goal item B9, `docs/operations/fine-tune.md`).
+/// The active model and the candidate are real model servers. The requests are the
+/// labeled cases of `tests/fixtures/bouncer/independent.tsv`, each once. The simulated
+/// owner approves `ok` and denies `risk`. `PATH` has no programs, so no command runs.
+/// With `APASSY_SHADOW_ASK=1`, the grant is in "ask" mode: every request waits for the
+/// owner, so every request at the model step has an owner decision.
+///
+/// `APASSY_EVAL_MODEL=http://127.0.0.1:8774 APASSY_CANDIDATE_DIR=<candidate folder>
+/// APASSY_CANDIDATE_MODEL=http://127.0.0.1:8775 cargo test --locked --release
+/// --features vault --test shadow_mode shadow_session_on_synthetic_requests --
+/// --ignored --nocapture`
+#[test]
+#[ignore = "needs two model servers: APASSY_EVAL_MODEL and APASSY_CANDIDATE_MODEL"]
+fn shadow_session_on_synthetic_requests() {
+    use apassy::broker::shell_risk::command_line_to_argv;
+    use std::collections::BTreeMap;
+
+    let active_url = std::env::var("APASSY_EVAL_MODEL").expect("APASSY_EVAL_MODEL");
+    let candidate_url = std::env::var("APASSY_CANDIDATE_MODEL").expect("APASSY_CANDIDATE_MODEL");
+    let folder =
+        PathBuf::from(std::env::var("APASSY_CANDIDATE_DIR").expect("APASSY_CANDIDATE_DIR"));
+    let ask_mode = std::env::var("APASSY_SHADOW_ASK").is_ok_and(|value| value == "1");
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(folder.join("manifest.json")).expect("manifest"),
+    )
+    .expect("json");
+    let version = manifest["version"].as_str().expect("version").to_owned();
+    let sha = manifest["checkpoint"]["sha256"]
+        .as_str()
+        .expect("sha")
+        .to_owned();
+
+    let dir = TempDir::new().expect("temp dir");
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).expect("project");
+    let project = std::fs::canonicalize(project).expect("canonical");
+    let mut vault = Vault::create(&dir.path().join("vault.db"), PASS).expect("create");
+    vault.unlock(PASS).expect("unlock");
+    let item = vault
+        .add(ItemDraft {
+            title: "Supabase".to_owned(),
+            kind: CredentialKind::ApiKey,
+            notes: String::new(),
+            tags: Vec::new(),
+            fields: vec![Field {
+                name: "token".to_owned(),
+                value: SecretValue::new(SECRET.to_owned()),
+                secret: true,
+            }],
+        })
+        .expect("add");
+    vault
+        .set_env_binding(item.id, "SUPABASE_SERVICE_KEY", "token")
+        .expect("binding");
+    let declaration = Declaration {
+        project: "odealo".to_owned(),
+        ..staging()
+    };
+    vault
+        .set_declaration(item.id, &declaration)
+        .expect("declaration");
+    let (agent, token) = vault.register_agent("Shadow agent").expect("register");
+    let mode = if ask_mode {
+        ExecMode::Ask
+    } else {
+        ExecMode::Bouncer
+    };
+    vault
+        .set_exec_grant(agent.id, item.id, &project.display().to_string(), mode)
+        .expect("grant");
+    let candidate = vault
+        .register_candidate(
+            &NewCandidate {
+                version: version.clone(),
+                url: candidate_url.clone(),
+                checkpoint: folder.join("candidate.safetensors").display().to_string(),
+                checkpoint_sha256: sha,
+                report: "{}".to_owned(),
+            },
+            broker::learning::now(),
+        )
+        .expect("candidate")
+        .id;
+    let shared: SharedVault = Arc::new(Mutex::new(Some(vault)));
+    let mut options = BrokerOptions::with_tls(TlsClient::platform().expect("TLS"));
+    options.approval_timeout = Duration::from_secs(60);
+    options.run_timeout = Duration::from_secs(10);
+    options.bouncer = Some(
+        BouncerClient::new(&active_url)
+            .expect("url")
+            .with_timeout(Duration::from_secs(60)),
+    );
+    let socket = dir.path().join("run").join("broker.sock");
+    let broker = broker::start_with(Arc::clone(&shared), &socket, options).expect("broker");
+
+    let cases = fixture_cases("tests/fixtures/bouncer/independent.tsv");
+    let labels: BTreeMap<String, bool> = cases
+        .iter()
+        .map(|(ok, line, _)| (command_line_to_argv(line).join("\u{1f}"), *ok))
+        .collect();
+    let stop = Arc::new(AtomicBool::new(false));
+    let owner = {
+        let approvals = Arc::clone(broker.approvals());
+        let vault = Arc::clone(&shared);
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                for pending in approvals.pending() {
+                    let ok = labels
+                        .get(&pending.command.join("\u{1f}"))
+                        .copied()
+                        .unwrap_or(false);
+                    if ok {
+                        let proof = owner_check(&vault, OwnerAction::ApproveRun(pending));
+                        let _ = approvals.approve(proof);
+                    } else {
+                        approvals.deny(pending.id);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+    };
+    let started = Instant::now();
+    for (_, line, purpose) in &cases {
+        let response = client::send(
+            &socket,
+            token.expose(),
+            Action::Run {
+                items: vec![item.id],
+                command: command_line_to_argv(line),
+                cwd: project.display().to_string(),
+                purpose: purpose.clone(),
+                path: Some("/nonexistent-apassy-shadow".to_owned()),
+                user_request: Some(purpose.clone()),
+            },
+        )
+        .expect("answer");
+        let _ = outcome(&response);
+    }
+    let seconds = started.elapsed().as_secs_f64();
+    // The shadow threads store their rows after the broker answers.
+    let mut last = u32::MAX;
+    let summary = loop {
+        std::thread::sleep(Duration::from_secs(2));
+        let summary = {
+            let guard = shared.lock().expect("vault");
+            guard
+                .as_ref()
+                .expect("open")
+                .shadow_summary(candidate)
+                .expect("summary")
+        };
+        if summary.requests == last {
+            break summary;
+        }
+        last = summary.requests;
+    };
+    stop.store(true, Ordering::SeqCst);
+    owner.join().expect("owner");
+    let log = {
+        let guard = shared.lock().expect("vault");
+        guard.as_ref().expect("open").decision_log().expect("log")
+    };
+    // The active model at the model step: its note starts with "Model allowed" when it
+    // would run the request. Only owner decisions at the model step count, as for the
+    // candidate: model facts and no rule flag.
+    let mut base = (0u32, 0u32, 0u32);
+    let mut by: BTreeMap<String, u32> = BTreeMap::new();
+    for record in &log {
+        let entry = &record.entry;
+        let key = format!("{} {}", entry.decided_by.as_str(), entry.decision.as_str());
+        *by.entry(key).or_insert(0) += 1;
+        let model_step = !entry.model_facts.is_empty() && entry.rule_flags.is_empty();
+        if entry.decided_by == apassy::vault::DecidedBy::Owner && model_step {
+            let runs = entry.note.starts_with("Model allowed");
+            let denied = entry.owner_denied();
+            base.0 += 1;
+            base.1 += u32::from(runs != denied);
+            base.2 += u32::from(runs && denied);
+        }
+    }
+    let agreement = &summary.agreement;
+    eprintln!(
+        "SHADOW mode {} requests {} in {seconds:.1} s; decisions {by:?}",
+        if ask_mode { "ask" } else { "bouncer" },
+        cases.len()
+    );
+    eprintln!(
+        "SHADOW candidate {version}: model-step requests {}, no answer {}, owner decisions {}, agreed {} ({:.1}%), owner denials it would allow {}, same outcome as the active model {}",
+        summary.requests,
+        summary.no_answer,
+        agreement.shadow_decisions,
+        agreement.agreed,
+        agreement.agreement().unwrap_or(0.0) * 100.0,
+        agreement.allowed_owner_denials,
+        summary.same_as_active,
+    );
+    eprintln!(
+        "SHADOW active model on the same owner decisions: {} decisions, agreed {} ({:.1}%), owner denials it would allow {}",
+        base.0,
+        base.1,
+        if base.0 == 0 {
+            0.0
+        } else {
+            f64::from(base.1) * 100.0 / f64::from(base.0)
+        },
+        base.2
+    );
+    assert_eq!(
+        summary.no_answer, 0,
+        "the candidate server answered every request"
+    );
+    drop(broker);
+}

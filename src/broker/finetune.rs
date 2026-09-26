@@ -255,14 +255,16 @@ fn fnv(text: &str) -> u64 {
 /// - Only owner decisions (`decided_by` = `owner`) with a user request give examples.
 /// - An owner approval: `task_match` = yes for that request and command.
 /// - An owner denial without a rule flag: `task_match` = no.
-/// - An owner denial with a rule flag: no `task_match` example, because the flag
+/// - An owner denial with a rule flag: no owner `task_match` example, because the flag
 ///   explains the denial. With the flag `data_loss`: `destroy` = yes.
 /// - When the owner approved and denied the same state, the denial wins.
-/// - Each state also gives teacher examples for `writes`, `remote`, `destroy`, and
-///   `rule_break` (with an owner rule): the target is the answer of the starting model,
-///   so the fine-tune does not move these answers.
-/// - At most 3 identical examples. A denial example counts `approvals / denials` times,
-///   from 2 to 10 (ADR 0009: a denial has more weight).
+/// - Each state also gives teacher examples for each question without an owner label:
+///   `task_match` (a flagged denial), `writes`, `remote`, `destroy`, and `rule_break`
+///   (with an owner rule). The target is the answer of the starting model, so the
+///   fine-tune does not move these answers.
+/// - At most 3 identical examples. A denial example counts `task_match` approvals
+///   divided by `task_match` denials times, from 2 to 10 (ADR 0009: a denial has more
+///   weight).
 /// - A hash of the command puts 20% of the commands in the validation part.
 pub fn examples_from_export(jsonl: &str) -> Result<ExampleSet, String> {
     let questions: BTreeMap<&str, &str> = bouncer::questions().into_iter().collect();
@@ -375,7 +377,8 @@ pub fn examples_from_export(jsonl: &str) -> Result<ExampleSet, String> {
         if !seen.insert(line.state.as_str()) {
             continue;
         }
-        let mut names: Vec<&str> = KEEP_QUESTIONS.to_vec();
+        let mut names: Vec<&str> = vec!["task_match"];
+        names.extend(KEEP_QUESTIONS);
         if line.has_rule {
             names.push("rule_break");
         }
@@ -389,11 +392,11 @@ pub fn examples_from_export(jsonl: &str) -> Result<ExampleSet, String> {
     stats.task_match_no = hard.iter().filter(|e| e.kind == "denial").count();
     stats.destroy_yes = hard.iter().filter(|e| e.kind == "flagged_denial").count();
     stats.keep = keep.len();
-    let denials = stats.task_match_no + stats.destroy_yes;
-    stats.denial_weight = if denials == 0 {
+    // The weight balances the `task_match` question, the one that the owner labels.
+    stats.denial_weight = if stats.task_match_no == 0 {
         MIN_DENIAL_WEIGHT
     } else {
-        ((stats.task_match_yes as f64 / denials as f64).round() as usize)
+        ((stats.task_match_yes as f64 / stats.task_match_no as f64).round() as usize)
             .clamp(MIN_DENIAL_WEIGHT, MAX_DENIAL_WEIGHT)
     };
     let mut all = Vec::new();
@@ -942,7 +945,7 @@ mod tests {
         assert_eq!(stats.destroy_yes, 1, "rm -rf data with data_loss");
         assert_eq!(
             stats.denial_weight, 2,
-            "3 approvals / 3 denials, at least 2"
+            "3 task_match approvals / 2 task_match denials, at least 2"
         );
         let all: Vec<&Example> = set.train.iter().chain(&set.val).collect();
         let hard = |question: &str, answer: u8, command: &str| {
@@ -984,7 +987,8 @@ mod tests {
             state,
             "User request: \"Lint the code.\". Shell command: `npm run lint`. Agent's stated purpose: Do it."
         );
-        // Teacher examples keep writes, remote, and destroy, except a labeled destroy.
+        // Teacher examples keep each answer without an owner label: writes, remote, and
+        // destroy, and task_match of a flagged denial.
         let keep = |command: &str| {
             all.iter()
                 .filter(|e| e.teacher && e.state.contains(&format!("`{command}`")))
@@ -992,7 +996,11 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(keep("npm test"), vec!["writes", "remote", "destroy"]);
-        assert_eq!(keep("rm -rf data"), vec!["writes", "remote"]);
+        assert_eq!(keep("rm -rf data"), vec!["task_match", "writes", "remote"]);
+        assert_eq!(
+            keep("cat .env"),
+            vec!["task_match", "writes", "remote", "destroy"]
+        );
         assert!(all.iter().all(|e| !e.instructions.is_empty()));
         // A command is in one part only.
         let train: BTreeSet<&str> = set.train.iter().map(|e| e.command.as_str()).collect();

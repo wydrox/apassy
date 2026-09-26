@@ -413,25 +413,27 @@ fn a_bad_or_failed_trainer_makes_no_candidate() {
 /// The measurement on this Mac (goal item B9, `docs/operations/fine-tune.md`). The
 /// simulated owner comes from the labeled fixtures `tests/fixtures/bouncer/cases.tsv`:
 /// `ok` is an approval and `risk` is a denial. Each request waits for the owner (a
-/// grant in "ask" mode), so every request is one owner decision. The model facts come
-/// from the base model at `APASSY_EVAL_MODEL`. The real trainer then runs through
-/// `finetune::train` with the gate and the time limit.
+/// grant in "ask" mode), so every request is one owner decision. With
+/// `APASSY_EVAL_MODEL`, the log also has the model facts of that server. The label
+/// mapping does not use them. The real trainer then runs through `finetune::train`
+/// with the gate and the time limit, wrapped in `/usr/bin/time -l` for the memory.
 ///
-/// `APASSY_EVAL_MODEL=http://127.0.0.1:8774 APASSY_FINETUNE_MODELS=<dir>
+/// `APASSY_TOOLS_DIR=$PWD/tools APASSY_FINETUNE_MODELS=<dir>
 /// cargo test --locked --release --features vault --test local_finetune
 /// local_training_on_a_synthetic_log -- --ignored --nocapture`
 #[test]
-#[ignore = "needs the Laya environment, the base checkpoint, and APASSY_EVAL_MODEL"]
+#[ignore = "needs the Laya environment and the base checkpoint"]
 fn local_training_on_a_synthetic_log() {
     use apassy::broker::approvals::ApprovalOutcome;
     use apassy::broker::bouncer::{BouncerClient, BouncerRequest};
     use apassy::broker::learning::{LoggedRequest, Outcome, RunScope};
     use apassy::broker::shell_risk::{analyze, command_line_to_argv};
 
-    let url = std::env::var("APASSY_EVAL_MODEL").expect("APASSY_EVAL_MODEL");
-    let client = BouncerClient::new(&url)
-        .expect("url")
-        .with_timeout(Duration::from_secs(60));
+    let client = std::env::var("APASSY_EVAL_MODEL").ok().map(|url| {
+        BouncerClient::new(&url)
+            .expect("url")
+            .with_timeout(Duration::from_secs(60))
+    });
     let dir = TempDir::new().expect("dir");
     let mut vault = Vault::create(&dir.path().join("vault.db"), PASS).expect("create");
     vault.unlock(PASS).expect("unlock");
@@ -446,18 +448,19 @@ fn local_training_on_a_synthetic_log() {
         let (ok, line, purpose) = &cases[(n * 7) % cases.len()];
         let command = command_line_to_argv(line);
         let analysis = analyze(&command, purpose, &env_names);
-        let verdict = if analysis.flags.is_empty() {
-            facts_calls += 1;
-            client.evaluate(&BouncerRequest {
-                user_request: purpose.clone(),
-                command: command.join(" "),
-                relative_dir: ".".to_owned(),
-                purpose: purpose.clone(),
-                env_names: env_names.clone(),
-                instruction: String::new(),
-            })
-        } else {
-            apassy::broker::bouncer::BouncerVerdict::Unavailable("not asked".to_owned())
+        let verdict = match &client {
+            Some(client) if analysis.flags.is_empty() => {
+                facts_calls += 1;
+                client.evaluate(&BouncerRequest {
+                    user_request: purpose.clone(),
+                    command: command.join(" "),
+                    relative_dir: ".".to_owned(),
+                    purpose: purpose.clone(),
+                    env_names: env_names.clone(),
+                    instruction: String::new(),
+                })
+            }
+            _ => apassy::broker::bouncer::BouncerVerdict::Unavailable("not asked".to_owned()),
         };
         let scope = RunScope {
             agent_id: 1,
@@ -534,6 +537,16 @@ fn local_training_on_a_synthetic_log() {
         .expect("folder")
         .join("train.log");
     eprintln!("LOG {}", log.display());
+    // `/usr/bin/time -l` writes the peak resident memory in bytes to the log.
+    let text = std::fs::read_to_string(&log).expect("log");
+    for line in text.lines().filter(|line| {
+        line.contains("maximum resident set size")
+            || line.contains("peak memory footprint")
+            || line.contains(" real ")
+    }) {
+        eprintln!("TIME {}", line.trim());
+    }
+    assert!(report.seconds < finetune::TIME_LIMIT.as_secs_f64());
 }
 
 /// (ok, command line, purpose) of each labeled case.
