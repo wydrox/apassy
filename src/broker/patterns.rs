@@ -20,8 +20,9 @@
 //!   interpreter, `awk`, `jq`, or an SQL client) keeps every file and string literal.
 //! - A path with a hidden component (`.env`, `.git/config`), a path outside the
 //!   project, and a word with `:` or `@` stay literal.
-//! - A shell script (`sh -c TEXT`) is split into words. A script with a line break, a
-//!   backslash, a comment, a here-document, or a command substitution stays literal.
+//! - A shell script (`sh -c TEXT`) is split into words and commands. A script with a
+//!   here-document or a command substitution stays literal. A word with a backslash
+//!   stays literal. Comments are not part of the pattern.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -197,10 +198,12 @@ enum Piece {
 
 /// Split a script into words and operators. `None` for syntax that this lexer does
 /// not model. Such a script stays literal.
+///
+/// A line break ends a command, like `;`. A comment is not part of the command. A word
+/// with a backslash stays literal, and so does a word in double quotes with `$`, `!`,
+/// or a backslash. A backslash before a line break joins the lines.
 fn split_script(script: &str) -> Option<Vec<Piece>> {
-    if script.contains('\n')
-        || script.contains('\r')
-        || script.contains('\\')
+    if script.contains('\r')
         || script.contains('`')
         || script.contains("$(")
         || script.contains("<<")
@@ -222,6 +225,33 @@ fn split_script(script: &str) -> Option<Vec<Piece>> {
             ' ' | '\t' => {
                 finish(&mut word, &mut pieces);
                 after_op = false;
+            }
+            '\n' => {
+                finish(&mut word, &mut pieces);
+                // An empty line or a comment line is not a command.
+                if matches!(pieces.last(), Some(Piece::Word(_))) {
+                    pieces.push(Piece::Op("\n".to_owned()));
+                }
+                after_op = false;
+            }
+            '\\' if chars.peek() == Some(&'\n') => {
+                chars.next();
+                finish(&mut word, &mut pieces);
+                after_op = false;
+            }
+            '\\' => {
+                let escaped = chars.next()?;
+                let current = word.get_or_insert_with(|| new_word(after_op));
+                current.expands = true;
+                current.raw.push(c);
+                current.raw.push(escaped);
+                current.value.push(escaped);
+            }
+            '#' if word.is_none() => {
+                // A comment runs to the end of the line.
+                while chars.peek().is_some_and(|next| *next != '\n') {
+                    chars.next();
+                }
             }
             '|' | '&' | ';' | '<' | '>' | '(' | ')' => {
                 let adjacent = word.is_some();
@@ -246,18 +276,23 @@ fn split_script(script: &str) -> Option<Vec<Piece>> {
                 pieces.push(Piece::Op(op));
                 after_op = redirect;
             }
-            '#' if word.is_none() => return None,
             '\'' | '"' => {
                 let current = word.get_or_insert_with(|| new_word(after_op));
                 let mut part = String::new();
                 let mut closed = false;
-                for inner in chars.by_ref() {
+                while let Some(inner) = chars.next() {
                     if inner == c {
                         closed = true;
                         break;
                     }
-                    if c == '"' && matches!(inner, '$' | '!') {
+                    if c == '"' && matches!(inner, '$' | '!' | '\\') {
                         current.expands = true;
+                        if inner == '\\' {
+                            // An escaped character does not end the quotes.
+                            part.push(inner);
+                            part.push(chars.next()?);
+                            continue;
+                        }
                     }
                     part.push(inner);
                 }
@@ -492,6 +527,8 @@ fn display_tokens(tokens: &[Token], script: bool) -> String {
                     text.clone()
                 }
             }
+            // A line break shows as `;`. The template keeps the difference.
+            Token::Op(op) if op == "\n" => ";".to_owned(),
             Token::Op(op) => op.clone(),
             Token::File => "<file>".to_owned(),
             Token::Number => "<number>".to_owned(),
@@ -639,9 +676,9 @@ mod tests {
             "cat <<EOF\nx\nEOF",
             "echo $(cat .env)",
             "echo `id`",
-            "echo a\\ b",
-            "# note",
             "echo 'open",
+            "echo a\\",
+            "echo a\r",
         ] {
             let pattern = generalize(
                 &argv(&["sh", "-c", script]),
@@ -672,6 +709,30 @@ mod tests {
         assert_eq!(
             shown(&["sh", "-c", "wc -l a.rs && cd .. && wc -l a.rs"]),
             "sh -c 'wc -l <file> && cd .. && wc -l a.rs'"
+        );
+        // A line break ends a command. A comment is not part of the pattern. A line
+        // that ends with a backslash continues.
+        let multi = "# look at the file\nsed -n '1,40p' src/a.ts\nwc -l \\\n  src/b.ts";
+        assert_eq!(
+            shown(&["bash", "-lc", multi]),
+            "bash -lc 'sed -n <string> <file> ; wc -l <file>'"
+        );
+        assert_ne!(
+            template(&["bash", "-lc", multi], "/work/app"),
+            template(
+                &["bash", "-lc", "sed -n '1,40p' src/a.ts; wc -l src/b.ts"],
+                "/work/app"
+            ),
+            "a line break and `;` are different operators"
+        );
+        // A backslash keeps its word literal. In single quotes, it is plain text.
+        assert_eq!(
+            shown(&[
+                "sh",
+                "-c",
+                "rg -n 'fn\\(' src/a.rs; echo a\\ b \"x\\\"y\" 5"
+            ]),
+            "sh -c 'rg -n <string> <file> ; echo a\\ b \"x\\\"y\" <number>'"
         );
     }
 

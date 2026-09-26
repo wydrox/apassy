@@ -29,7 +29,8 @@ pub const MAX_KEPT_DENIALS: usize = 2_000;
 pub const PATTERN_APPROVALS_NEEDED: u32 = 3;
 /// A pattern that nobody approved or used in this time expires.
 pub const PATTERN_IDLE_DAYS: u64 = 30;
-/// Learning and active patterns. When the list is full, a new pattern is not stored.
+/// Learning and active patterns. When the list is full, the least recently used
+/// learning pattern goes. When all are active, a new pattern is not stored.
 pub const MAX_PATTERNS: usize = 1_000;
 /// Blocked patterns. At the limit, the oldest block goes.
 pub const MAX_BLOCKED_PATTERNS: usize = 5_000;
@@ -629,7 +630,20 @@ impl Vault {
                 if usize::try_from(stored).map_err(|_| err(VaultErrorKind::Storage))?
                     >= max_patterns
                 {
-                    return Ok(None);
+                    // The least recently used pattern that still learns makes room. An
+                    // active pattern stays. This only takes learning progress away.
+                    let freed = tx
+                        .execute(
+                            "DELETE FROM remembered_pattern WHERE id IN (
+                                 SELECT id FROM remembered_pattern
+                                 WHERE blocked = 0 AND approvals < ?1
+                                 ORDER BY last_used_at ASC, id ASC LIMIT 1)",
+                            [i64::from(PATTERN_APPROVALS_NEEDED)],
+                        )
+                        .map_err(|_| err(VaultErrorKind::Storage))?;
+                    if freed == 0 {
+                        return Ok(None);
+                    }
                 }
                 insert_pattern(&tx, key, &display, false, at)?;
             }
@@ -1312,40 +1326,33 @@ mod tests {
         assert_eq!(kept, vec![3, 4, 5, 8, 9]);
     }
 
-    /// A full list refuses a new pattern. An expired pattern leaves room. Blocks have
-    /// their own limit, and the oldest block goes first.
+    /// A full list drops the least recently used learning pattern. A list full of active
+    /// patterns refuses a new pattern. An expired pattern leaves room. Blocks have their
+    /// own limit, and the oldest block goes first.
     #[test]
     fn pattern_limits() {
         let (_dir, mut vault) = temp_vault();
         let day = DAY_SECONDS;
-        assert!(
+        let remember = |vault: &mut Vault, name: &str, at: u64| {
             vault
-                .remember_within(&key("a"), "a", 0, 2)
-                .expect("a")
-                .is_some()
-        );
-        assert!(
-            vault
-                .remember_within(&key("b"), "b", day, 2)
-                .expect("b")
-                .is_some()
-        );
-        assert!(
-            vault
-                .remember_within(&key("c"), "c", day, 2)
-                .expect("c")
-                .is_none(),
-            "the list is full"
-        );
-        // After 30 idle days, "a" expired. It goes, and "c" fits.
-        let later = (PATTERN_IDLE_DAYS + 1) * day;
-        assert!(
-            vault
-                .remember_within(&key("c"), "c", later, 2)
-                .expect("c")
-                .is_some()
-        );
+                .remember_within(&key(name), name, at, 2)
+                .expect("remember")
+        };
+        assert!(remember(&mut vault, "a", 0).is_some());
+        assert!(remember(&mut vault, "b", day).is_some());
+        // Full of learning patterns: "a" is the oldest and goes.
+        assert!(remember(&mut vault, "c", day).is_some());
         assert!(vault.pattern(&key("a")).expect("a").is_none());
+        // "b" and "c" become active. Then the list refuses a new pattern.
+        for _ in 0..2 {
+            remember(&mut vault, "b", day);
+            remember(&mut vault, "c", day);
+        }
+        assert!(remember(&mut vault, "d", day).is_none(), "the list is full");
+        // After 30 idle days, "b" and "c" expired. They go, and "d" fits.
+        let later = (PATTERN_IDLE_DAYS + 1) * day + day;
+        assert!(remember(&mut vault, "d", later).is_some());
+        assert!(vault.pattern(&key("b")).expect("b").is_none());
 
         for (index, name) in ["x", "y", "z"].into_iter().enumerate() {
             vault
