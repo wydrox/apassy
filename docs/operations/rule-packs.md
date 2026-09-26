@@ -20,13 +20,14 @@ A new stack needs a new pack, not a code change.
 | `alembic` | alembic | downgrades, upgrades and stamps (writes), read commands |
 | `algolia` | algolia | index deletion, clearing, and overwrites, record deletion, API keys, read commands |
 | `auth0` | auth0 | revealed client secrets, test tokens, deletions, user and role changes, read commands |
-| `aws` | aws, eb, cdk, sam, amplify | S3 writes and removal, deletions, resource changes, secret reads, environment values of functions and tasks, remote shells, targeted reads, identity inventory (access reads) |
-| `azure` | az | deletions, resource changes, keys and secrets, remote shells, blob listings in a named container, role and directory inventory (access reads) |
+| `aws` | aws, eb, cdk, sam, amplify | S3 writes and removal, deletions, resource changes, secret reads (also `ecr get-login-password`), environment values of functions and tasks, `--debug` with a credential, remote shells, targeted reads, identity inventory (access reads) |
+| `azure` | az | deletions, resource changes, keys and secrets, `--debug` with a credential, remote shells, blob listings in a named container, role and directory inventory (access reads) |
 | `cargo` | cargo | build and test commands, new crates, publishing, SQLx drops, migrations (writes), and offline query data |
 | `celery` | celery | queue purges, worker control, workers and task calls (project commands), worker inspection |
-| `cloud` | railway, render, serverless, sls, ansible-playbook, ansible, ansible-vault, ansible-galaxy, ansible-inventory, twilio | deployments, the printed Serverless configuration, Ansible check mode and ad-hoc commands, vault plaintext, Railway variables, shells, and reads, Twilio reads |
+| `cloud` | railway, render, serverless, sls, ansible-playbook, ansible, ansible-vault, ansible-galaxy, ansible-inventory, twilio | deployments, the printed Serverless configuration, Ansible check mode and ad-hoc commands, Ansible `-vvv` with a credential, vault plaintext, Railway variables, shells, and reads, Twilio reads |
 | `databases` | psql, pg_dump, pg_restore, dropdb, dropuser, mysql, mysqladmin, sqlite3, duckdb, mongo, mongosh, mongorestore, clickhouse-client, cockroach, cqlsh, redis-cli, mysqldump, mariadb-dump | SQL writes, SQL as a plain argument, MongoDB writes, drops, restores over data, Redis and MySQL server changes, Redis passwords, Redis reads, credential columns, SQL and Redis changes (writes), schema reads, reads of local database files |
 | `dbt` | dbt | full refreshes, project commands (`run-operation`), check and read commands |
+| `debug-output` | every program | environment settings that turn on request, credential, or internal tracing, with a bound secret: `TF_LOG`, Git trace variables, `NODE_DEBUG`, `DEBUG`, `HTTPX_LOG_LEVEL`, `GODEBUG=http2debug`, `ANSIBLE_DEBUG`, `ANSIBLE_VERBOSITY`, gcloud HTTP logs, `HELM_DEBUG` (dev round 4) |
 | `digitalocean` | doctl | deletions, resource changes, credentials, remote shells |
 | `django` | python, python3, manage.py, django-admin | flush, `migrate APP zero`, destructive `shell` code, `dbshell` writes, admin accounts, printed settings, development commands |
 | `docker` | docker, podman, docker-compose, podman-compose | removal of containers, images, and volumes; host access from a container; the printed Compose configuration; image runs (project commands); pushes (writes); read and local commands; commands in a local container |
@@ -35,7 +36,7 @@ A new stack needs a new pack, not a code change.
 | `file-tools` | ls, cat, grep, sed, awk, find, cp, rm, and 35 others | file removal, secret files, system files, read commands |
 | `firebase` | firebase | deployments, deletion of Firestore, database, function, and hosting data, remote writes, user and config exports |
 | `fly` | fly, flyctl | deployments, secret and machine changes, destruction, remote shells, tokens, read commands |
-| `gcloud` | gcloud, gsutil, bq | deletions, resource changes, storage writes, BigQuery writes and overwrites, tokens and secrets, environment values of services, remote shells, BigQuery schema reads and dry runs, IAM inventory (access reads) |
+| `gcloud` | gcloud, gsutil, bq | deletions, resource changes, storage writes, BigQuery writes and overwrites, tokens, secrets, and KMS plaintext, environment values of services and revisions, `--log-http`, `--verbosity=debug`, and `gsutil -D` with a credential, remote shells, BigQuery schema reads and dry runs, IAM inventory (access reads) |
 | `gh` | gh | releases, workflow runs, merges, secrets, repository settings, gists, API writes, write commands (writes), read commands |
 | `git` | git | history changes, pushes to release branches, pushes (writes), read commands |
 | `glab` | glab | merges, releases, pipeline runs, CI/CD variables, deletions, API writes, write commands (writes), read commands |
@@ -47,7 +48,7 @@ A new stack needs a new pack, not a code change.
 | `js-tools` | tsc, eslint, prettier, test runners, next, vite, astro, playwright, cypress, turbo | check and test commands |
 | `jvm` | gradle, gradlew, mvn, mvnw | Flyway and Liquibase tasks, history changes, migrations (writes), publishing and deployment, build, test, and read tasks |
 | `kafka` | kafka-topics, kafka-consumer-groups, kafka-configs, kafka-acls, and 8 others (with or without `.sh`), kcat | deletions, offset resets, cluster and access changes, list and describe commands |
-| `kubernetes` | kubectl, helm | deletions, cluster changes, secret reads, raw and flattened configuration, copies from a pod, read commands |
+| `kubernetes` | kubectl, helm | deletions, cluster changes, secret reads (an output format or `--template`; names and sizes are fine), `kubectl -v` 8 and higher with a credential, Helm release values (`get`, `status -o json`, `--debug`), raw and flattened configuration, copies from a pod, read commands |
 | `laravel` | php, artisan, sail, composer, phpunit, pest, phpstan, psalm, php-cs-fixer, phpcs | fresh and reset migrations, database wipes, destructive tinker code, printed config, queue flushes and retries, the app key, new packages, development commands |
 | `linters` | tflint, tfsec, checkov, kubeconform, hadolint, shellcheck, ansible-lint, sqlfluff, and 7 others | linters and scanners (known safe) |
 | `macos` | security, defaults, pbcopy, launchctl, diskutil, brew | Keychain reads, preferences, clipboard, disks |
@@ -79,7 +80,9 @@ A new stack needs a new pack, not a code change.
 | `vercel` | vercel | deployments, aliases, environment variables, read commands |
 | `wrangler` | wrangler | deployments, deletions, KV, R2, D1, and secret writes, local and read commands |
 
-The 62 packs have 258 flag rules, 117 safe rules, 21 exceptions, 5 project command entries, 17 write entries, and 3 access read entries. Each has a `note` with its reason. The test `every_built_in_rule_has_a_note` checks this. Dev round 2 added 13 packs and more knowledge in 20 packs ([dev-round2.md](../evaluation/dev-round2.md)). Dev round 3 audited every safe rule, added the `glab` and `celery` packs, and changed 33 packs ([dev-round3.md](../evaluation/dev-round3.md)).
+The 63 packs have 275 flag rules, 117 safe rules, 21 exceptions, 5 project command entries, 17 write entries, and 3 access read entries. Each has a `note` with its reason. The test `every_built_in_rule_has_a_note` checks this. Dev round 2 added 13 packs and more knowledge in 20 packs ([dev-round2.md](../evaluation/dev-round2.md)). Dev round 3 audited every safe rule, added the `glab` and `celery` packs, and changed 33 packs ([dev-round3.md](../evaluation/dev-round3.md)). Dev round 4 added the `debug-output` pack (10 rules) and 7 flag rules in 5 packs ([dev-round4.md](../evaluation/dev-round4.md)).
+
+**Reads of personal data (dev round 4).** A read of contact or payment columns of people is not known safe and not a known command, so it always needs `task_match`. See section 2.
 
 **What known safe means (dev round 3).** A known safe command has no remote write, no secret output, no data loss, and no project code. One exception is recorded: a command may run project code through a named contract of its tool whose purpose is local, namely a test, a build, a check, a format, an install from the lock file, a preview (`terraform plan`, `pulumi preview`), or a local development server (`npm run dev`, `rails server`, `mix phx.server`). A `run` verb that starts any program of the project (`cargo run`, `go run`, `dotnet run`, `deno run`, `gradle run`, `bootRun`, `spring-boot:run`) is never known safe. A command list is known safe only when every part is known safe, and the flags come from every part. The audit, pack by pack, is in [dev-round3.md](../evaluation/dev-round3.md).
 
@@ -126,6 +129,10 @@ These parts are not about one tool. They stay in `src/broker/shell_risk.rs`:
 | SQL changes, schema reads, and local file reads (dev round 3) | `sql_changes`: every statement that changes data, schema, or access, also `INSERT`, `CREATE`, `COPY ... FROM`, `CALL`, a `PRAGMA` with a value, and MongoDB inserts. `sql_schema_read`: `psql` meta commands, `EXPLAIN` of a read with read functions only, `SHOW TABLES`, `DESCRIBE`, `SELECT` without `FROM`, and MongoDB schema methods. `plain_sql_reads`: SQLite and DuckDB arguments that only read. SQL comments do not hide a statement, and every `-c` of `psql` counts. |
 | Names-only options (dev round 3) | `--only-names`, `--names-only`, `--name-only`, `--only-keys`, `--keys-only`, and `--no-values` ask for names, not values. The secret lexicon does not flag such a command, and packs use the condition `names_only`. |
 | Redirects to scratch folders (dev round 3) | A known safe command stays known safe when every output redirect goes to `/tmp/`, or to `tmp/`, `dist/`, `build/`, `out/`, `coverage/`, `target/`, or `.cache/` of the project, not to a secret file, and not through `..`. |
+| The environment of a program (dev round 4) | The `NAME=value` prefixes of a segment, the assignments after `env` (also `sudo env`), and each `export`, `declare -x`, `typeset -x`, or assignment statement anywhere in the command line. The analysis does not follow the order of the statements, so an `export` counts for every segment: this can only add a match. Packs read it with the condition `env`. |
+| Shell options (dev round 4) | The options of `sh`, `bash`, `zsh`, `dash`, `ksh`, and `fish` come before the text: `-c` also in a group (`-ec`, `-xc`, `-lc`), and `-o NAME` or `-eo NAME` take a name. Before dev round 4 only `-c` and `-lc` alone were read, so `sh -ec '...'` was a script file and its text was not checked. A `-c` after a script file is an argument of the script; the analysis still reads the word after it as a script, as before, so that no flag goes away. |
+| Shell tracing (dev round 4) | `bash -x`, `-o xtrace`, and a `-x` in a group print each command after the shell expands it. With a text or a here-document that refers to a secret, or with a script file or input that the analysis does not see and a bound secret, the command gets `secret_output`. `set -x` keeps its rule: a secret reference in the command. |
+| Reads of personal data (dev round 4) | A read of contact or payment data of people is not known safe and not a known command, so the model's `task_match` decides. SQL: a `SELECT` with a contact or payment column or `*` in its list (not inside `count(...)`) and a table of people or payments in `FROM` or `JOIN`, from the SQL argument, the plain arguments and the here-document of an SQL client. MongoDB: `find` or `findOne` with a contact projection or without a projection, `aggregate` without `$project`, `$group`, or `$count`, and `distinct` of a contact field, on a collection of people. An API read: a resource of people (an operand or a URL path of a program that does not read local text) with a field selection in the same command (`--jq`, `--query`, `--format`, `--fields`, `--select`, `--columns`, `--properties`, `--template`, or a URL `select=`, `fields=`, `properties=`, or `attributes=` parameter), or with a later part of the pipe that selects a contact field (`jq`, `yq`, `grep`, `awk`, `sed`, and similar). People words: user, customer, account, member, payment, person, people, contact, subscriber, employee, patient, client, and profile, singular and plural. Contact words: email, phone, mobile, telephone, address, street, postcode, zipcode, first, last, and full names, surname, IBAN, card, cardholder, last4, CVC, CVV, SSN, date of birth, passport, account and routing numbers, sort code, tax and national IDs, and billing and shipping details. |
 
 ## 3. Pack format
 
@@ -196,6 +203,9 @@ All conditions in one matcher must hold. A list means "one of the items". The an
 | `inline_code_leaks` | Code in the command reads the environment and prints, writes, or sends data. |
 | `sql` | `"writes"` or `"reads"`: the SQL argument (every `-c`, `--command`, `-e`, `--execute`, `--eval`, or the text after `query`). `"any_arg_writes"`: an argument that is not an option, or the value of a `--name=value` option, has a space and is SQL that writes, for clients that take SQL as an argument (`sqlite3 app.db "DELETE FROM users"`, `snowsql -q "DROP SCHEMA x"`). Dev round 3: `"changes"` and `"any_arg_changes"` (SQL that changes anything, for `writes`), `"schema_read"` (a read of the schema, a plan, or server information), and `"plain_args_read"` (SQLite and DuckDB arguments that only read). |
 | `names_only` | An option asks for names only, such as `--only-names` (dev round 3). |
+| `env` | A variable is in the environment of the program (dev round 4, section 2): `name` lists the variables, and a name that ends with `*` matches each name that starts with the text before it. `value` (optional) lists values: the value or one item of it, split at `,` or a space, must match; an item that ends with `*` covers each value that starts with the text before it (`NODE_DEBUG=http*`, `DEBUG=*`), and an item that starts with `-` does not count. Without `value`, a value that is not empty, `0`, `false`, `no`, or `off` matches. `*` alone is not allowed. |
+| `bound_secret` | The run binds a secret to the environment of the command, or a word refers to a secret (dev round 4). A tool that reads its credential from the environment then has a credential in play. |
+| `option_min` | An option in `option` has a number of at least `min`: `-v=8`, `-v 8`, `--v=8`, or `-v8` for a short option (dev round 4). |
 | `any_of` | One of the matchers in the list holds. |
 | `not` | The matcher does not hold. |
 
@@ -305,6 +315,9 @@ After the move, new tool knowledge changed the analysis on purpose. Each commit 
 | Dev round 3, schema reads | Schema, plan, and server reads; every `-c`; SQL comments; backslash in double quotes (commit `fece794`) | 10 of 2565 | 11 | 16 |
 | Dev round 3, v3 knowledge | Deno, `pnpm exec`, SQLite, MySQL, SQLx, Celery, names-only listings, command runners, redirects to scratch folders (commit `072d797`) | 10 of 2576 | 36 | 79 |
 | Dev round 3, Ansible facts | `ansible -m setup` is not known safe (commit `ef835b8`) | 0 of 2612 | 1 | 0 |
+| Dev round 4, analysis | The environment of a program, `bound_secret`, `option_min`, shell options before the text, shell tracing (commit `0932da0`) | 0 of 2613 | 123 | 54 gain a flag |
+| Dev round 4, packs | `debug-output`, trace and debug options, secret values and names (commit `f360211`) | 0 of 2613 (54 of the 123 new lines) | 0 | 0 |
+| Dev round 4, personal data | Reads of contact or payment data of people (commit `c2fdbd7`) | 3 of 2613 (16 of the 123 new lines) | 0 | 0 |
 
 On the 1517 lines of the golden file of the move, 41 lines changed:
 
@@ -355,6 +368,16 @@ v3 knowledge (`072d797`): 10 of 2576 lines change. 7 go from known to known safe
 
 The unit test `every_pack_rule_matches_a_replay_command` passes for all 421 rules, safe rules, exceptions, project commands, writes, and access reads. The replay now covers 62613 commands: 270 labeled commands, 2343 coverage commands, and 60000 generated commands.
 
+#### Dev round 4
+
+Details: [dev-round4.md](../evaluation/dev-round4.md), section "Golden replay".
+
+- Analysis (`0932da0`). 0 of the 2613 fixture and coverage lines before this round change. 123 coverage lines are new: each new rule, the probes of the report, and near misses. In the generated set, 54 of 60000 lines gain a flag and none loses one: 45 get `data_loss`, 8 `production`, and 3 `secret_output`. All come from the shell options. With `bash -c -c scripts/nuke.sh`, the old reading took the second `-c` as the text; now the text is `scripts/nuke.sh`. With `bash scripts/nuke.sh -c -s`, the old reading dropped the script file and read `-s` as the text; now the script file stays a segment. No line changes its known state.
+- Packs (`f360211`). 0 of the 2613 older lines change. 54 of the 123 new lines change: 51 get `secret_output`, and 3 lose a false `secret_output` of the old kubectl rule and become known safe (`kubectl get secrets -o name`, `kubectl get secret db -o wide`, and `kubectl get pods -n secrets -o yaml`). The generated set has the same digest.
+- Personal data (`c2fdbd7`). 19 lines change the known state and no line changes a flag: 14 from known to not known, 5 from known safe to not known. 3 of them are older coverage lines: `mongosh ... --eval "db.users.find().limit(5)"`, `mongosh ... "db.users.find().toArray()"`, and `mysql -e "SELECT email FROM users"`. The generated set has the same digest.
+
+The unit test `every_pack_rule_matches_a_replay_command` passes for all 438 rules, safe rules, exceptions, project commands, writes, and access reads. The replay now covers 62736 commands: 270 labeled commands, 2466 coverage commands, and 60000 generated commands.
+
 Review a change: write a dump before and after with `APASSY_REPLAY_DUMP=path`, and compare the flag columns line by line.
 
 The replay compares the analysis, not the final decision. The decision (`src/broker/bouncer.rs`) uses the analysis, the declarations, and the model answers. The same analysis gives the same decision.
@@ -392,15 +415,20 @@ Run the replay: `cargo test --features vault --test analysis_replay -- --nocaptu
 - The access reads cover AWS, Google Cloud, and Azure. Other clouds (`doctl`, `fly`) have no access read list.
 - A bound endpoint needs a variable name that ends with an endpoint word (`URL`, `URI`, `HOST`, `ENDPOINT`, `ADDR`, `ADDRESS`, `SERVER`, `BASE`, `DOMAIN`).
 - The global known hosts are API hosts where the host and its subdomains serve only the API of the provider. `sentry.io` is not one of them: it also serves the ingestion hosts of every Sentry organization. Such a provider needs the provider of the item (goal item B4).
+- The environment of a program (dev round 4) has the settings that the command line shows. A setting from a file (`.env`, a shell profile, `docker run --env-file`), from `docker run -e`, from a fish `set -x`, or from a variable that the shell builds is not seen. A debug setting in the configuration of a tool (`gcloud config set core/log_http true`, `git config`) is not seen either.
+- The trace rules name the tools and settings of dev round 4. A trace option of another tool (for example `pulumi -v=9`, `doctl --trace`, `bq --apilog`) is not flagged. The model decides it. `AWS_DEBUG` has no rule: the AWS CLI and botocore do not document it. `aws --debug` has one.
+- The trace rules need a bound secret. A broker run has at least one item with an environment variable, so they apply to every broker run. An analysis without secret names and without a secret reference gets no trace flag.
+- A read of personal data (dev round 4) needs a selection of contact fields, or `*`, or a MongoDB read without a projection. `stripe customers list` without a filter of fields prints full objects with emails, and it stays known safe: it shows the objects the user asked for. An ORM query (`User.pluck(:email)` in `rails runner`) and a script are not read. They are project code, so they need `task_match` anyway.
+- The people and contact words are English. A table named in another language, or a column with a short name such as `mail` or `tel`, is not found.
 
 ## 8. Checks
 
-Results on 2026-09-26, after dev round 3 ([dev-round3.md](../evaluation/dev-round3.md)):
+Results on 2026-09-27, after dev round 4 ([dev-round4.md](../evaluation/dev-round4.md)):
 
 | Command | Result |
 | --- | --- |
 | `cargo fmt --check` | PASS |
 | `cargo clippy --locked --all-targets --features desktop,vault -- -D warnings` | PASS |
-| `cargo test --locked --features desktop,vault` | PASS, 32 test binaries. `analysis_replay`: 1 test, 62613 commands, 0 differences. `rule_packs`: 7 tests, 1 ignored (`owner_local_packs_load` reads the owner's directory). `bouncer_rules`: 11, 1 ignored. `bouncer_eval`: 2, 5 ignored (they need a model, a set, or a dump). `provider_hosts`: 3. `shadow_mode`: 5, 1 ignored. Library unit tests: 157, 1 ignored. |
+| `cargo test --locked --features desktop,vault` | PASS, 32 test binaries (with the doc tests). `analysis_replay`: 1 test, 62736 commands, 0 differences. `rule_packs`: 7 tests, 1 ignored (`owner_local_packs_load` reads the owner's directory). `bouncer_rules`: 12, 1 ignored. `bouncer_eval`: 2, 5 ignored (they need a model, a set, or a dump). `provider_hosts`: 3. `shadow_mode`: 5, 1 ignored. Library unit tests: 163, 1 ignored. |
 
 The effect on the decisions is in [heldout-v1.md](../evaluation/heldout-v1.md), section "Development use after freezing".
