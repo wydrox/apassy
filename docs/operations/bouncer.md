@@ -35,18 +35,23 @@ The bouncer decides only if the rule has command prefixes. Without prefixes, eve
 
 ## 3. Decision order
 
-Date of this order: 2026-09-26 (ADR 0008, changed by ADR 0010). Policy version: `apassy-bouncer-v3`. Code: `decide` and `owner_required` in `src/broker/bouncer.rs`.
+Date of this order: 2026-09-26 (ADR 0008, changed by ADR 0010, learning from ADR 0009). Policy version: `apassy-bouncer-v4`. Code: `decide_learned`, `before_model`, and `owner_required` in `src/broker/bouncer.rs`. Version 4 adds step 4a and the calibrated level in step 6. Without a pattern and a calibration, version 4 gives the same decisions as version 3.
 
 1. Hard rule: expiry, prefixes, forbidden words, runs per hour. A failure is a denial.
 2. Production rule (ADR 0010). If an item in the run has a production declaration, the run waits for the owner. The broker does not call the model. This step comes before every model step. The model, remembered patterns, and threshold calibration come after it, so they cannot change it. A known safe command, a read-only command, and a fully certain model answer also wait.
 3. Command analysis (`src/broker/shell_risk.rs`). It parses the command like a shell: quotes, pipes, `&&`, redirects, `$( )`, `sh -c`, and `NAME=value` prefixes. Rules for each program give flags: `secret_output`, `data_loss`, `production`, `real_recipient`, `remote_code`, `remote_access`, `system_change`, `new_dependency`, `privilege`, `injection_phrase`. A flag always asks the owner. The broker does not call the model.
-4. A missing user request, a missing declaration, or an unavailable model asks the owner.
-5. The model answers the facts `task_match`, `writes`, `remote`, `leak`, `destroy`, and `rule_break` when the rule has an instruction.
-6. Needed certainty, 80% each. A command that is not known safe and not certainly read-only needs `task_match` at or above 0.8. A high-risk or irreversible declaration needs `writes` at or below 0.2, unless the command is known safe.
-7. Vetoes: `destroy` at or above 0.9 for a command that is not known safe, and `rule_break` at or above 0.8.
-8. If every needed answer is certain and no veto applies, the run starts without a prompt. A grant in "ask" mode always waits for the owner.
+4. A missing user request or a missing declaration asks the owner.
+4a. Remembered pattern (ADR 0009 step 1, ADR 0010). If an active pattern matches the request, the run starts without a prompt. The broker does not call the model. The pattern replaces only steps 5 to 7. It cannot change steps 1 to 4. See [learning](learning.md).
+5. The model answers the facts `task_match`, `writes`, `remote`, `leak`, `destroy`, and `rule_break` when the rule has an instruction. An unavailable model asks the owner.
+6. Needed certainty. A command that is not known safe and not certainly read-only needs `task_match` at or above the active level: 0.8, or a lower level that the owner applied after a calibration (ADR 0009 step 3). The level is never lower than 0.5. A high-risk or irreversible declaration needs `writes` at or below 0.2, unless the command is known safe. A calibration does not change this check.
+7. Vetoes: `destroy` at or above 0.9 for a command that is not known safe, and `rule_break` at or above 0.8. A calibration does not change the vetoes.
+8. If every needed answer is certain and no veto applies, the run starts without a prompt. A grant in "ask" mode always waits for the owner, also with an active pattern.
+
+Each decision goes to the decision log in the vault. An owner denial blocks the pattern of the request.
 
 Tests for step 2: `production_always_asks_the_owner` in `src/broker/bouncer.rs` and `production_declaration_always_waits_for_the_owner` in `tests/bouncer_rules.rs`.
+
+Tests for step 4a: `learning_replaces_only_the_model_step` and `calibration_changes_only_the_task_match_level` in `src/broker/bouncer.rs`. `an_active_pattern_never_overrides_the_earlier_steps` in `tests/learning.rs` runs the broker with an active pattern: a forbidden word, an expired rule, and the hourly limit deny (step 1); a production item, a rule flag, a missing user request, and a missing declaration wait for the owner (steps 2 to 4); the model is not called.
 
 ## 4. Measurement
 

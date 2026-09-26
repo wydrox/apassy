@@ -1,6 +1,6 @@
 //! The owner inbox (goal items N1, N3, N4).
 //!
-//! The inbox has no own storage and no schema change. It reuses two sources:
+//! The inbox has no own storage. It reuses two sources:
 //!
 //! - The approval queue for runs that wait now.
 //! - The encrypted activity log in the vault. The broker stores each refusal and each
@@ -10,28 +10,29 @@
 //!   ([`super::owner_store::OwnerSession::lock_ending_runs`]).
 //!
 //! So each event stays in the inbox after a restart, when the owner unlocks the vault.
-//! Limit: when the process ends without a quit (a crash or `kill -9`) while a run
-//! waits, that run has no entry. The run did not start. A crash-safe "waiting" entry
-//! needs a new activity decision, which is a schema change.
+//! A crash or `kill -9` while a run waits leaves the wait record of the broker in the
+//! vault (schema 7). The next unlock gives the run an entry that starts with
+//! [`ENDED_BY_RESTART`]. The run did not start.
 //!
 //! An acknowledgment only marks an event as seen. It is not an approval (N4).
 
 use crate::broker::approvals::PendingRun;
 use crate::desktop::model::ModelResult;
 use crate::desktop::owner_store::{AgentActivityRow, ENDED_BY_LOCK, ENDED_BY_QUIT, OwnerSession};
-use crate::vault::ActivityDecision;
+use crate::vault::{ActivityDecision, ENDED_BY_RESTART};
 
 /// How many activity entries the inbox reads.
 pub const INBOX_LIMIT: usize = 100;
 
 /// The broker texts for a run that waited and then ended without an approval
 /// (`src/broker/run.rs`), and the texts of the app for a lock or a quit.
-const ENDED_WITHOUT_APPROVAL: [&str; 5] = [
+const ENDED_WITHOUT_APPROVAL: [&str; 6] = [
     "The owner denied this run.",
     "The owner did not decide in",
     "The vault was locked, or Apassy stopped, before the run started.",
     ENDED_BY_LOCK,
     ENDED_BY_QUIT,
+    ENDED_BY_RESTART,
 ];
 /// The broker text when the owner locks the vault during the checks of a run.
 const RELOCKED: &str = "The vault was locked while Apassy checked this request.";
@@ -181,6 +182,7 @@ mod tests {
             "The owner did not decide in 120.0 seconds. Risk: low.",
             ENDED_BY_LOCK,
             ENDED_BY_QUIT,
+            ENDED_BY_RESTART,
         ] {
             assert_eq!(
                 classify(Deny, reason),

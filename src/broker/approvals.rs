@@ -48,11 +48,36 @@ pub struct PendingRun {
     pub request_source: String,
     /// The agent text when a hook request replaced it and the two differ. Else empty.
     pub agent_request: String,
+    /// The pattern that "Approve and remember" teaches (ADR 0010). `None` when the run
+    /// cannot teach a pattern, for example a production run or a run with a rule flag.
+    pub remember: Option<RememberOffer>,
+}
+
+/// A pattern that the owner can teach with "Approve and remember".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RememberOffer {
+    /// The generalized command, for example `git log -n <number>`.
+    pub pattern: String,
+    /// Approvals that the pattern has now.
+    pub approvals: u32,
+    /// Approvals that the pattern needs to run without a prompt.
+    pub needed: u32,
+}
+
+/// The owner answer that a waiting run gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    Approve,
+    /// Approve the run and add one approval to its pattern.
+    ApproveAndRemember,
+    Deny,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalOutcome {
     Approved,
+    /// The owner approved with "Approve and remember".
+    ApprovedAndRemembered,
     Denied,
     TimedOut,
     /// The vault was locked or replaced, or the broker stopped, before the run used a
@@ -71,6 +96,8 @@ pub enum ApprovalRefusal {
     NotWaiting,
     /// The waiting run is not the run that the owner confirmed.
     Changed,
+    /// "Approve and remember" for a run that cannot teach a pattern.
+    NothingToRemember,
 }
 
 impl ApprovalRefusal {
@@ -81,6 +108,9 @@ impl ApprovalRefusal {
             Self::NotWaiting => "The run no longer waits. Nothing was approved.",
             Self::Changed => {
                 "The request changed after you saw it. Nothing was approved. Review the request again."
+            }
+            Self::NothingToRemember => {
+                "This run cannot teach a pattern. Nothing was approved. Use \"Approve once\"."
             }
         }
     }
@@ -95,7 +125,7 @@ struct QueueState {
     /// The broker stopped. A new run does not wait.
     closed: bool,
     pending: Vec<PendingRun>,
-    decisions: BTreeMap<u64, bool>,
+    decisions: BTreeMap<u64, Answer>,
 }
 
 type Notifier = Box<dyn Fn() + Send + Sync>;
@@ -168,7 +198,9 @@ impl ApprovalQueue {
     /// [`OwnerGate::authorize`] for [`OwnerAction::ApproveRun`] or
     /// [`OwnerAction::ApproveAndRemember`], with the run exactly as it waits now. A
     /// notification or an acknowledgment cannot make a proof, so it is never an
-    /// approval (goal item N4).
+    /// approval (goal item N4). "Approve and remember" needs a run with a pattern
+    /// offer. Its run ends with [`ApprovalOutcome::ApprovedAndRemembered`], and the
+    /// broker then adds one approval to the pattern (ADR 0010).
     pub fn approve(&self, proof: OwnerProof) -> Result<(), ApprovalRefusal> {
         let Some(confirmed) = proof.action().run() else {
             return Err(ApprovalRefusal::NotAnApproval);
@@ -176,12 +208,19 @@ impl ApprovalQueue {
         if !proof.is_fresh() {
             return Err(ApprovalRefusal::Stale);
         }
+        let answer = match proof.action() {
+            OwnerAction::ApproveAndRemember(_) => Answer::ApproveAndRemember,
+            _ => Answer::Approve,
+        };
         let mut state = self.state();
         match state.pending.iter().find(|run| run.id == confirmed.id) {
             None => Err(ApprovalRefusal::NotWaiting),
             Some(waiting) if waiting != confirmed => Err(ApprovalRefusal::Changed),
+            Some(waiting) if answer == Answer::ApproveAndRemember && waiting.remember.is_none() => {
+                Err(ApprovalRefusal::NothingToRemember)
+            }
             Some(_) => {
-                Self::settle(&mut state, confirmed.id, true);
+                Self::settle(&mut state, confirmed.id, answer);
                 self.changed.notify_all();
                 Ok(())
             }
@@ -195,14 +234,14 @@ impl ApprovalQueue {
         if !state.pending.iter().any(|run| run.id == id) {
             return false;
         }
-        Self::settle(&mut state, id, false);
+        Self::settle(&mut state, id, Answer::Deny);
         self.changed.notify_all();
         true
     }
 
-    fn settle(state: &mut QueueState, id: u64, approve: bool) {
+    fn settle(state: &mut QueueState, id: u64, answer: Answer) {
         state.pending.retain(|run| run.id != id);
-        state.decisions.insert(id, approve);
+        state.decisions.insert(id, answer);
     }
 
     /// End every waiting run and every decision that a run did not use yet. The
@@ -253,11 +292,11 @@ impl ApprovalQueue {
                 state.decisions.remove(&id);
                 return ApprovalOutcome::Invalidated;
             }
-            if let Some(approved) = state.decisions.remove(&id) {
-                return if approved {
-                    ApprovalOutcome::Approved
-                } else {
-                    ApprovalOutcome::Denied
+            if let Some(answer) = state.decisions.remove(&id) {
+                return match answer {
+                    Answer::Approve => ApprovalOutcome::Approved,
+                    Answer::ApproveAndRemember => ApprovalOutcome::ApprovedAndRemembered,
+                    Answer::Deny => ApprovalOutcome::Denied,
                 };
             }
             let now = Instant::now();
@@ -304,6 +343,7 @@ mod tests {
             user_request: String::new(),
             request_source: String::new(),
             agent_request: String::new(),
+            remember: None,
         }
     }
 
@@ -366,14 +406,25 @@ mod tests {
             OwnerProof::issue_for_test(OwnerAction::ApproveRun(other), [0; 32], Instant::now());
         assert_eq!(queue.approve(proof), Err(ApprovalRefusal::NotWaiting));
 
-        // Each refusal left the run waiting. "Approve and remember" uses the same path.
-        assert_eq!(queue.pending(), vec![waiting.clone()]);
+        // "Approve and remember" uses the same path. This run has no pattern offer.
         let remember = OwnerProof::issue_for_test(
             OwnerAction::ApproveAndRemember(waiting.clone()),
             [0; 32],
             Instant::now(),
         );
-        assert_eq!(queue.approve(remember), Ok(()));
+        assert_eq!(
+            queue.approve(remember),
+            Err(ApprovalRefusal::NothingToRemember)
+        );
+
+        // Each refusal left the run waiting.
+        assert_eq!(queue.pending(), vec![waiting.clone()]);
+        let once = OwnerProof::issue_for_test(
+            OwnerAction::ApproveRun(waiting.clone()),
+            [0; 32],
+            Instant::now(),
+        );
+        assert_eq!(queue.approve(once), Ok(()));
         assert_eq!(waiter.join().expect("join"), ApprovalOutcome::Approved);
 
         // The run ended. The same approval again finds no run.
@@ -410,6 +461,38 @@ mod tests {
             ApprovalOutcome::TimedOut
         );
         assert!(queue.pending().is_empty());
+    }
+
+    /// "Approve and remember" with a proof for a run with a pattern offer ends the wait
+    /// with its own outcome, so the broker adds one approval to the pattern.
+    #[test]
+    fn approve_and_remember_with_an_offer() {
+        let queue = Arc::new(ApprovalQueue::new());
+        let offered = PendingRun {
+            remember: Some(RememberOffer {
+                pattern: "git log -n <number>".to_owned(),
+                approvals: 1,
+                needed: 3,
+            }),
+            ..run()
+        };
+        let waiter = {
+            let queue = Arc::clone(&queue);
+            std::thread::spawn(move || queue.wait_for(offered, Duration::from_secs(5), || true))
+        };
+        let id = wait_until_pending(&queue);
+        let waiting = queue.pending()[0].clone();
+        let proof = OwnerProof::issue_for_test(
+            OwnerAction::ApproveAndRemember(waiting),
+            [0; 32],
+            Instant::now(),
+        );
+        assert_eq!(queue.approve(proof), Ok(()));
+        assert!(!queue.deny(id), "the run no longer waits");
+        assert_eq!(
+            waiter.join().expect("join"),
+            ApprovalOutcome::ApprovedAndRemembered
+        );
     }
 
     #[test]

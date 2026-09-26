@@ -5,6 +5,7 @@
 
 #[cfg(feature = "vault")]
 pub mod inbox;
+mod learning_ui;
 pub mod model;
 #[cfg(feature = "vault")]
 pub mod notify;
@@ -25,7 +26,7 @@ pub use model::{
     REPORTING_AGENT_ID, REPORTING_ITEM_ID, RequestStatus, SAMPLE_RULE_TEXT,
 };
 
-/// Five owner views in the desktop shell.
+/// Owner views in the desktop shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OwnerView {
     Vault,
@@ -33,15 +34,18 @@ pub enum OwnerView {
     Rules,
     Agents,
     Activity,
+    /// Ask rate, automatic decisions, patterns, and calibration (ADR 0009, goal item B10).
+    Learning,
 }
 
 impl OwnerView {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Vault,
         Self::Item,
         Self::Rules,
         Self::Agents,
         Self::Activity,
+        Self::Learning,
     ];
 
     pub fn label(self) -> &'static str {
@@ -51,6 +55,7 @@ impl OwnerView {
             Self::Rules => "Rules",
             Self::Agents => "Agents",
             Self::Activity => "Activity",
+            Self::Learning => "Learning",
         }
     }
 }
@@ -84,6 +89,9 @@ pub struct DesktopApp {
     /// A4, N1 to N4).
     #[cfg(feature = "vault")]
     pub(crate) owner: owner_check::OwnerFlows,
+    /// Learning view state (goal item B10).
+    #[cfg(feature = "vault")]
+    pub(crate) learning: learning_ui::LearningUiState,
     styled: bool,
 }
 
@@ -125,6 +133,8 @@ impl DesktopApp {
             broker: BrokerState::NotStarted,
             #[cfg(feature = "vault")]
             owner: owner_check::OwnerFlows::default(),
+            #[cfg(feature = "vault")]
+            learning: learning_ui::LearningUiState::default(),
             styled: false,
         }
     }

@@ -11,11 +11,12 @@ use serde_json::{Map, Value, json};
 
 use super::http::{self, DestinationUrl, parse_destination};
 use super::shell_risk::Analysis;
-use crate::vault::Declaration;
+use crate::vault::{CALIBRATION_FLOOR, Declaration, PATTERN_APPROVALS_NEEDED};
 
 /// Version of the question set and the decision policy. Change it when either changes.
-/// Version 3 adds the production rule (ADR 0010).
-pub const BOUNCER_CONTRACT: &str = "apassy-bouncer-v3";
+/// Version 3 adds the production rule (ADR 0010). Version 4 adds remembered patterns and
+/// the calibrated `task_match` level at the model step (ADR 0009).
+pub const BOUNCER_CONTRACT: &str = "apassy-bouncer-v4";
 /// Default address of `laya-serve` in the operations guide.
 pub const DEFAULT_URL: &str = "http://127.0.0.1:8770";
 /// Environment variable that changes the bouncer address.
@@ -268,22 +269,103 @@ pub fn owner_required(context: &DecisionContext<'_>) -> Option<String> {
     })
 }
 
-/// Combine the command analysis, the owner declarations, and the model facts (ADR 0008).
+/// Levels that the owner can change with a calibration (ADR 0009 step 3). The production
+/// rule, the rule flags, the vetoes, and the read-only check are not here, so a
+/// calibration cannot change them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Thresholds {
+    /// A command that is not known safe and not certainly read-only needs `task_match`
+    /// at or above this level.
+    pub task_match: f64,
+}
+
+impl Default for Thresholds {
+    fn default() -> Self {
+        Self {
+            task_match: MIN_CONFIDENCE,
+        }
+    }
+}
+
+impl Thresholds {
+    /// The `task_match` level inside the calibration range. A calibration can make the
+    /// level lower than the default, never lower than the floor.
+    pub fn task_match_level(&self) -> f64 {
+        if self.task_match.is_nan() {
+            MIN_CONFIDENCE
+        } else {
+            self.task_match.clamp(CALIBRATION_FLOOR, MIN_CONFIDENCE)
+        }
+    }
+
+    /// Text for the decision log.
+    pub fn policy_label(&self) -> String {
+        format!(
+            "{BOUNCER_CONTRACT}; task_match {:.2}",
+            self.task_match_level()
+        )
+    }
+}
+
+/// What learning gives one decision (ADR 0009). Both parts act only at the model step.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Learned {
+    pub thresholds: Thresholds,
+    /// An active remembered pattern that matches the request, as the owner sees it.
+    pub pattern: Option<String>,
+}
+
+/// Combine the command analysis, the owner declarations, and the model facts (ADR 0008),
+/// without learning. See [`decide_learned`].
+pub fn decide(verdict: &BouncerVerdict, context: &DecisionContext<'_>) -> Decision {
+    decide_learned(verdict, context, &Learned::default())
+}
+
+/// Combine the command analysis, the owner declarations, the model facts, and learning.
 ///
 /// 1. A hard owner rule asks the owner: a production declaration ([`owner_required`]).
 ///    No later step can change this.
 /// 2. A rule flag asks the owner. The model is not needed.
 /// 3. A missing user request or declaration asks the owner.
-/// 4. The model decides. A command that is not known safe and not certainly read-only
-///    must match the user request with at least 80% certainty. A high-risk or
-///    irreversible credential also needs 80% certainty that the command does not
-///    change state, unless the command is known safe.
-/// 5. Model vetoes: "destroy" at 90% for an unknown command, "rule_break" at 80%.
-pub fn decide(verdict: &BouncerVerdict, context: &DecisionContext<'_>) -> Decision {
-    let ask = |confidence, note: String| Decision {
-        ask_owner: true,
-        confidence,
-        note,
+/// 4. An active remembered pattern allows the run. It replaces only the model step
+///    (steps 5 and 6), so it cannot change steps 1 to 3.
+/// 5. The model decides. A command that is not known safe and not certainly read-only
+///    must match the user request at the `task_match` level (80%, or a lower level
+///    that the owner applied). A high-risk or irreversible credential also needs 80%
+///    certainty that the command does not change state, unless the command is known safe.
+/// 6. Model vetoes: "destroy" at 90% for an unknown command, "rule_break" at 80%.
+///
+/// The hard rules of the grant (ADR 0007) run before this function. A failure there is
+/// a denial, so no step here can change it.
+pub fn decide_learned(
+    verdict: &BouncerVerdict,
+    context: &DecisionContext<'_>,
+    learned: &Learned,
+) -> Decision {
+    if let Some(decision) = before_model(context) {
+        return decision;
+    }
+    if let Some(pattern) = &learned.pattern {
+        return Decision {
+            ask_owner: false,
+            confidence: None,
+            note: format!(
+                "Remembered pattern allowed: {pattern}. The owner approved it {PATTERN_APPROVALS_NEEDED} times."
+            ),
+        };
+    }
+    model_step(verdict, context, learned.thresholds)
+}
+
+/// Steps 1 to 3 of [`decide_learned`]. `Some` when the owner decides before any model
+/// or learning step.
+pub fn before_model(context: &DecisionContext<'_>) -> Option<Decision> {
+    let ask = |note: String| {
+        Some(Decision {
+            ask_owner: true,
+            confidence: None,
+            note,
+        })
     };
     if let Some(mut note) = owner_required(context) {
         if !context.analysis.flags.is_empty() {
@@ -292,20 +374,30 @@ pub fn decide(verdict: &BouncerVerdict, context: &DecisionContext<'_>) -> Decisi
                 context.analysis.flags.join(", ")
             ));
         }
-        return ask(None, note);
+        return ask(note);
     }
     if !context.analysis.flags.is_empty() {
-        return ask(
-            None,
-            format!("Rule flags: {}", context.analysis.flags.join(", ")),
-        );
+        return ask(format!("Rule flags: {}", context.analysis.flags.join(", ")));
     }
     if !context.has_user_request {
-        return ask(None, "The agent did not send the user request.".to_owned());
+        return ask("The agent did not send the user request.".to_owned());
     }
     if context.declarations.iter().any(Option::is_none) {
-        return ask(None, "An item has no declaration.".to_owned());
+        return ask("An item has no declaration.".to_owned());
     }
+    None
+}
+
+fn model_step(
+    verdict: &BouncerVerdict,
+    context: &DecisionContext<'_>,
+    thresholds: Thresholds,
+) -> Decision {
+    let ask = |confidence, note: String| Decision {
+        ask_owner: true,
+        confidence,
+        note,
+    };
     let BouncerVerdict::Scored { .. } = verdict else {
         return ask(None, verdict.summary());
     };
@@ -324,8 +416,9 @@ pub fn decide(verdict: &BouncerVerdict, context: &DecisionContext<'_>) -> Decisi
     // - A sensitive credential needs a certain "does not change state", unless the
     //   command is known safe (local work or a read by rule).
     let mut needed: Vec<(&str, bool, f64)> = Vec::new();
+    let task_level = thresholds.task_match_level();
     if !known_safe && !certain_read {
-        needed.push(("task_match", true, MIN_CONFIDENCE));
+        needed.push(("task_match", true, task_level));
     }
     if sensitive && !known_safe {
         needed.push(("writes", false, MIN_CONFIDENCE));
@@ -364,12 +457,17 @@ pub fn decide(verdict: &BouncerVerdict, context: &DecisionContext<'_>) -> Decisi
     } else {
         "normal credential"
     };
+    let calibrated = if task_level < MIN_CONFIDENCE {
+        format!(" Calibrated task_match level: {:.0}%.", task_level * 100.0)
+    } else {
+        String::new()
+    };
     if failed.is_empty() {
         Decision {
             ask_owner: false,
             confidence: Some(confidence),
             note: format!(
-                "Model allowed at {:.0}% certainty ({scope}{}). {}",
+                "Model allowed at {:.0}% certainty ({scope}{}). {}{calibrated}",
                 confidence * 100.0,
                 if known_safe {
                     ", known safe command"
@@ -383,7 +481,7 @@ pub fn decide(verdict: &BouncerVerdict, context: &DecisionContext<'_>) -> Decisi
         ask(
             Some(confidence),
             format!(
-                "Below {:.0}% certainty: {}. {}",
+                "Below {:.0}% certainty: {}. {}{calibrated}",
                 MIN_CONFIDENCE * 100.0,
                 failed.join(", "),
                 verdict.summary()
@@ -576,6 +674,122 @@ mod tests {
         };
         assert!(owner_required(&context).is_none());
         assert!(!decide(&certain, &context).ask_owner);
+    }
+
+    /// ADR 0010: a remembered pattern and a calibrated level act only at the model step.
+    /// The production rule, a rule flag, a missing user request, and a missing
+    /// declaration still ask the owner, with the same note as without learning.
+    #[test]
+    fn learning_replaces_only_the_model_step() {
+        let learned = Learned {
+            thresholds: Thresholds {
+                task_match: CALIBRATION_FLOOR,
+            },
+            pattern: Some("npm run <string>".to_owned()),
+        };
+        let certain = verdict(&[("task_match", 1.0), ("writes", 0.0), ("destroy", 0.0)]);
+        let staging = [declaration(Environment::Staging)];
+        let production = [declaration(Environment::Production)];
+        let clean = Analysis::default();
+        let flagged = Analysis {
+            flags: vec!["secret_output".to_owned()],
+            known_safe: false,
+        };
+        let cases: [(&Analysis, &[Option<Declaration>], bool, &str); 4] = [
+            (&clean, &production, true, "Production credential"),
+            (&flagged, &staging, true, "Rule flags: secret_output"),
+            (
+                &clean,
+                &staging,
+                false,
+                "The agent did not send the user request.",
+            ),
+            (&clean, &[None], true, "An item has no declaration."),
+        ];
+        for (analysis, declarations, has_user_request, note) in cases {
+            let context = DecisionContext {
+                analysis,
+                declarations,
+                has_user_request,
+            };
+            let with = decide_learned(&certain, &context, &learned);
+            assert!(with.ask_owner, "{note}");
+            assert_eq!(with.confidence, None);
+            assert!(with.note.starts_with(note), "{}", with.note);
+            assert_eq!(with, decide(&certain, &context), "learning changed {note}");
+            assert!(before_model(&context).is_some());
+        }
+
+        // A clean request: the pattern replaces the model, also an unavailable model and
+        // a model veto. Without the pattern, both ask.
+        let context = DecisionContext {
+            analysis: &clean,
+            declarations: &staging,
+            has_user_request: true,
+        };
+        let veto = verdict(&[("task_match", 0.9), ("writes", 0.5), ("destroy", 0.99)]);
+        for model in [&veto, &BouncerVerdict::Unavailable("not asked".into())] {
+            assert!(decide(model, &context).ask_owner);
+            let allowed = decide_learned(model, &context, &learned);
+            assert!(!allowed.ask_owner, "{allowed:?}");
+            assert!(
+                allowed
+                    .note
+                    .starts_with("Remembered pattern allowed: npm run <string>")
+            );
+        }
+    }
+
+    /// ADR 0009 step 3: a calibration changes only the `task_match` level, inside
+    /// [`CALIBRATION_FLOOR`, 0.8]. The read-only check for a sensitive credential and
+    /// the vetoes stay.
+    #[test]
+    fn calibration_changes_only_the_task_match_level() {
+        let analysis = Analysis::default();
+        let staging = [declaration(Environment::Staging)];
+        let high_risk = [Some(Declaration {
+            risk: RiskLevel::High,
+            ..declaration(Environment::Staging).expect("declaration")
+        })];
+        let run = |v: &BouncerVerdict, d: &[Option<Declaration>], level: f64| {
+            decide_learned(
+                v,
+                &DecisionContext {
+                    analysis: &analysis,
+                    declarations: d,
+                    has_user_request: true,
+                },
+                &Learned {
+                    thresholds: Thresholds { task_match: level },
+                    pattern: None,
+                },
+            )
+        };
+        let general = verdict(&[("task_match", 0.65), ("writes", 0.5), ("destroy", 0.1)]);
+        assert!(run(&general, &staging, 0.8).ask_owner);
+        let calibrated = run(&general, &staging, 0.6);
+        assert!(!calibrated.ask_owner, "{calibrated:?}");
+        assert!(calibrated.note.contains("Calibrated task_match level: 60%"));
+        // A level under the floor is the floor. A level over 0.8 is 0.8.
+        let weak = verdict(&[("task_match", 0.45), ("writes", 0.5), ("destroy", 0.1)]);
+        assert!(run(&weak, &staging, 0.1).ask_owner);
+        assert!(run(&weak, &staging, f64::NAN).ask_owner);
+        assert_eq!(
+            Thresholds { task_match: 0.95 }.task_match_level(),
+            MIN_CONFIDENCE
+        );
+        // The sensitive read-only check and the vetoes do not move.
+        let writes = verdict(&[("task_match", 0.95), ("writes", 0.5), ("destroy", 0.1)]);
+        assert!(run(&writes, &high_risk, CALIBRATION_FLOOR).ask_owner);
+        let destroy = verdict(&[("task_match", 0.95), ("writes", 0.5), ("destroy", 0.95)]);
+        assert!(run(&destroy, &staging, CALIBRATION_FLOOR).ask_owner);
+        let rule = verdict(&[
+            ("task_match", 0.95),
+            ("writes", 0.5),
+            ("destroy", 0.1),
+            ("rule_break", 0.85),
+        ]);
+        assert!(run(&rule, &staging, CALIBRATION_FLOOR).ask_owner);
     }
 
     #[test]

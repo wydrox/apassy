@@ -82,6 +82,12 @@ pub enum OwnerRequest {
         item_id: u64,
     },
     ApproveRun(PendingRun),
+    /// Approve one run and add one approval to its pattern (ADR 0010).
+    ApproveAndRemember(PendingRun),
+    /// Apply a calibrated `task_match` level, in hundredths (ADR 0009 step 3).
+    ApplyCalibration {
+        level: u32,
+    },
     AllowOperation {
         agent_id: u64,
         item_id: u64,
@@ -129,6 +135,8 @@ impl OwnerRequest {
         match self {
             Self::Reveal { item_id } => OwnerAction::Reveal { item_id: *item_id },
             Self::ApproveRun(run) => OwnerAction::ApproveRun(run.clone()),
+            Self::ApproveAndRemember(run) => OwnerAction::ApproveAndRemember(run.clone()),
+            Self::ApplyCalibration { level } => OwnerAction::ChangeCalibration { level: *level },
             Self::AllowOperation {
                 agent_id, item_id, ..
             }
@@ -163,6 +171,22 @@ impl OwnerRequest {
                 "Approve one run of agent \"{}\": {}",
                 run.agent,
                 run.command.join(" ")
+            ),
+            Self::ApproveAndRemember(run) => format!(
+                "Approve one run of agent \"{}\" and remember its pattern{}: {}",
+                run.agent,
+                run.remember
+                    .as_ref()
+                    .map_or_else(String::new, |offer| format!(
+                        " {} (approval {} of {})",
+                        offer.pattern,
+                        offer.approvals + 1,
+                        offer.needed
+                    )),
+                run.command.join(" ")
+            ),
+            Self::ApplyCalibration { level } => format!(
+                "Set the task_match level of the bouncer to {level}%. Apassy replays all past decisions again first."
             ),
             Self::AllowOperation { operation, .. } => {
                 format!("Let the agent use the operation {operation}.")
@@ -390,6 +414,23 @@ impl DesktopApp {
                     )),
                     Err(message) => self.set_err(message),
                 }
+            }
+            OwnerRequest::ApproveAndRemember(run) => {
+                // The same queue path as "Approve once". The proof names this action.
+                let result = match self.approvals() {
+                    Some(approvals) => approvals.approve(proof).map_err(|r| r.message()),
+                    None => Err("The broker is not running. Nothing was approved."),
+                };
+                match result {
+                    Ok(()) => self.set_ok(format!(
+                        "The run of {} is approved. Its pattern has one more approval.",
+                        run.agent
+                    )),
+                    Err(message) => self.set_err(message),
+                }
+            }
+            OwnerRequest::ApplyCalibration { level } => {
+                super::learning_ui::apply_calibration(self, level, proof);
             }
             OwnerRequest::AllowOperation {
                 agent_id,

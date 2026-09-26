@@ -53,6 +53,9 @@ pub enum OwnerAction {
     RotateToken { agent_id: u64 },
     /// Change the token lifetime of all agents.
     ChangeTokenLifetime,
+    /// Apply a calibrated `task_match` level of the bouncer, in hundredths (ADR 0009
+    /// step 3). A return to the default level is stricter and needs no check.
+    ChangeCalibration { level: u32 },
 }
 
 impl OwnerAction {
@@ -73,6 +76,9 @@ impl OwnerAction {
             Self::ChangeItemRules { .. } => "change the agent settings of an item".to_owned(),
             Self::RotateToken { .. } => "give an agent a new token".to_owned(),
             Self::ChangeTokenLifetime => "change the agent token lifetime".to_owned(),
+            Self::ChangeCalibration { .. } => {
+                "change the task_match level of the bouncer".to_owned()
+            }
         }
     }
 

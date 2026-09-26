@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::broker::SharedVault;
-use crate::broker::approvals::{ApprovalQueue, OwnerAction, OwnerProof, PendingRun};
+use crate::broker::approvals::{ApprovalQueue, OwnerAction, OwnerProof};
 use crate::broker::http::parse_destination;
 use crate::broker::profile;
 use crate::contracts::CredentialKind;
@@ -29,8 +29,8 @@ use crate::desktop::model::{ItemDraft, ModelError, ModelResult};
 use crate::vault::{
     ActivityDecision, AgentSummary, AgentToken, Declaration, Destination, EnvBinding, Environment,
     ExecGrant, ExecMode, ExecRule, Field, ItemDraft as VaultDraft, MAX_PASSPHRASE_BYTES,
-    MAX_TOKEN_LIFETIME_DAYS, MIN_PASSPHRASE_BYTES, NewActivity, Reversibility, RiskLevel, Scope,
-    SecretValue, Vault, VaultError, VaultErrorKind, checked_env_name,
+    MAX_TOKEN_LIFETIME_DAYS, MIN_PASSPHRASE_BYTES, Reversibility, RiskLevel, Scope, SecretValue,
+    Vault, VaultError, VaultErrorKind, checked_env_name,
 };
 
 const MAX_TAG_BYTES: usize = 64;
@@ -445,9 +445,9 @@ impl OwnerSession {
     /// Lock the vault and end every run that waits in `approvals` (goal items V3, N3).
     ///
     /// Before the lock, each waiting run gets a denial in the activity log with `why`,
-    /// so the inbox keeps the event after a restart. The vault mutex is held from the
-    /// record to the invalidation, so the broker does not record the same run again:
-    /// it finds the vault locked.
+    /// from its wait record, so the inbox keeps the event after a restart. The vault
+    /// mutex is held from the record to the lock, so the broker does not record the same
+    /// run again: it finds the vault locked or its wait record gone.
     pub fn lock_ending_runs(
         &mut self,
         approvals: Option<&ApprovalQueue>,
@@ -458,12 +458,11 @@ impl OwnerSession {
         let result = match slot.as_mut() {
             None => Ok(()),
             Some(vault) => {
-                if let Some(queue) = approvals
-                    && !vault.is_locked()
-                {
-                    for run in queue.pending() {
-                        let _ = vault.record_activity(&ended_run_entry(&run, why));
-                    }
+                // The broker stores a record for each waiting run (schema 7). Each
+                // record becomes one entry, also for a run that the queue does not
+                // list yet.
+                if !vault.is_locked() {
+                    let _ = vault.end_waits(why);
                 }
                 vault.lock().map_err(map_err)
             }
@@ -1126,27 +1125,6 @@ struct RevealedValue {
 impl fmt::Debug for RevealedValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("[redacted]")
-    }
-}
-
-/// A denial for a run that ended without a decision. It has no secret value.
-fn ended_run_entry(run: &PendingRun, why: &str) -> NewActivity {
-    let mut operation = format!("run {}", run.command.join(" "));
-    if operation.len() > 64 {
-        let mut end = 61;
-        while !operation.is_char_boundary(end) {
-            end -= 1;
-        }
-        operation.truncate(end);
-        operation.push_str("...");
-    }
-    NewActivity {
-        agent_id: None,
-        agent_name: run.agent.clone(),
-        item_id: None,
-        operation,
-        decision: ActivityDecision::Deny,
-        reason: format!("{why} Purpose: {}", run.purpose),
     }
 }
 

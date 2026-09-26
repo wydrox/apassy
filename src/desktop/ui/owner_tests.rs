@@ -367,6 +367,7 @@ fn waiting_run(agent: &str) -> PendingRun {
         user_request: "Run the tests.".to_owned(),
         request_source: String::new(),
         agent_request: String::new(),
+        remember: None,
     }
 }
 
@@ -440,4 +441,141 @@ fn approval_needs_the_owner_check_and_seen_is_not_an_approval() {
     app.start_passphrase_check(&ctx);
     finish_check(&mut app, &ctx);
     assert_eq!(waiter.join().expect("waiter"), ApprovalOutcome::Approved);
+}
+
+/// Type `text` in the open owner check and wait for the result.
+fn confirm_with(app: &mut DesktopApp, ctx: &egui::Context, text: &str) {
+    app.owner
+        .check
+        .as_mut()
+        .expect("dialog")
+        .passphrase
+        .push_str(text);
+    app.start_passphrase_check(ctx);
+    finish_check(app, ctx);
+}
+
+/// A4, ADR 0010: "Approve and remember" and a calibration need the owner check, like
+/// "Approve once". A wrong passphrase does nothing.
+#[test]
+fn approve_and_remember_and_calibration_need_the_owner_check() {
+    use crate::broker::approvals::RememberOffer;
+    use crate::broker::bouncer::Thresholds;
+    use crate::vault::{
+        DecidedBy, DecisionEntry, Declaration, Environment, LoggedDecision, RequestSource,
+        Reversibility, RiskLevel, Scope,
+    };
+
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    app.start_broker(&socket_dir(&dir));
+    let BrokerState::Running(handle) = &app.broker else {
+        panic!("the broker did not start");
+    };
+    let approvals = Arc::clone(handle.approvals());
+    let offered = PendingRun {
+        remember: Some(RememberOffer {
+            pattern: "npm test".to_owned(),
+            approvals: 0,
+            needed: 3,
+        }),
+        ..waiting_run("UI agent")
+    };
+    let waiter = {
+        let approvals = Arc::clone(&approvals);
+        std::thread::spawn(move || approvals.wait_for(offered, Duration::from_secs(20), || true))
+    };
+    let run = loop {
+        if let Some(run) = approvals.pending().into_iter().next() {
+            break run;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let ctx = egui::Context::default();
+    app.view = OwnerView::Activity;
+    let text = app_frame(&ctx, &mut app);
+    assert!(text.contains("Approve and remember"), "{text}");
+    assert!(
+        text.contains("Pattern: npm test (0 of 3 approvals)"),
+        "{text}"
+    );
+
+    app.ask_owner(OwnerRequest::ApproveAndRemember(run.clone()), Some(&ctx));
+    assert!(app_frame(&ctx, &mut app).contains("and remember its pattern npm test"));
+    confirm_with(&mut app, &ctx, WRONG);
+    assert_eq!(approvals.pending(), vec![run.clone()], "nothing approved");
+    confirm_with(&mut app, &ctx, PASS);
+    assert_eq!(
+        waiter.join().expect("waiter"),
+        ApprovalOutcome::ApprovedAndRemembered
+    );
+
+    // A calibration: the log supports 70%. The level changes only after the check.
+    {
+        let shared = app.owner_ui.session.shared_vault();
+        let mut guard = shared.lock().expect("vault");
+        let vault = guard.as_mut().expect("open");
+        for at in 0..50u64 {
+            let deny = at % 10 == 0;
+            let task_match = if deny { 0.3 } else { 0.7 };
+            vault
+                .record_decision(&DecisionEntry {
+                    at: 1_790_000_000 + at,
+                    agent_id: 1,
+                    agent_name: "UI agent".to_owned(),
+                    project_dir: "/work/app".to_owned(),
+                    cwd_rel: ".".to_owned(),
+                    items: vec![1],
+                    user_request: "Continue.".to_owned(),
+                    user_request_source: RequestSource::Agent,
+                    command: vec!["./report.sh".to_owned()],
+                    purpose: "Report.".to_owned(),
+                    env_names: vec!["DEMO_KEY".to_owned()],
+                    declarations: vec![Some(Declaration {
+                        project: "demo".to_owned(),
+                        environment: Environment::Staging,
+                        risk: RiskLevel::Medium,
+                        scope: Scope::ReadWrite,
+                        reversibility: Reversibility::Reversible,
+                    })],
+                    rule_flags: Vec::new(),
+                    known_safe: false,
+                    model_facts: vec![
+                        ("task_match".to_owned(), task_match),
+                        ("writes".to_owned(), 0.5),
+                    ],
+                    pattern: String::new(),
+                    grant_asks: false,
+                    asked: true,
+                    decision: if deny {
+                        LoggedDecision::Deny
+                    } else {
+                        LoggedDecision::Allow
+                    },
+                    decided_by: DecidedBy::Owner,
+                    remembered: false,
+                    policy: Thresholds::default().policy_label(),
+                    note: String::new(),
+                    instruction: String::new(),
+                })
+                .expect("decision");
+        }
+    }
+    let shared = app.owner_ui.session.shared_vault();
+    let level = || {
+        let guard = shared.lock().expect("vault");
+        guard
+            .as_ref()
+            .expect("open")
+            .calibration()
+            .expect("calibration")
+            .map(|calibration| calibration.task_match)
+    };
+    assert_eq!(level(), None);
+    app.ask_owner(OwnerRequest::ApplyCalibration { level: 70 }, Some(&ctx));
+    assert!(app_frame(&ctx, &mut app).contains("Set the task_match level of the bouncer to 70%"));
+    confirm_with(&mut app, &ctx, WRONG);
+    assert_eq!(level(), None, "a wrong passphrase changes nothing");
+    confirm_with(&mut app, &ctx, PASS);
+    assert_eq!(level(), Some(0.7));
 }
