@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for Contents/Helpers/ApassyKeychain.app when a provisioning
+  profile is present. scripts/build-app.sh replaces __TEAM_ID__ with the team
+  ID of the profile. These entitlements are restricted: without a matching
+  embedded.provisionprofile, AMFI stops the program at launch
+  (AppleMobileFileIntegrityError -413 "No matching profile found").
+  Without a profile, the script signs the helper with Apassy.entitlements,
+  and each keychain command returns keychain_unavailable.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.application-identifier</key>
+	<string>__TEAM_ID__.__KEYCHAIN_BUNDLE_ID__</string>
+	<key>com.apple.developer.team-identifier</key>
+	<string>__TEAM_ID__</string>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>__TEAM_ID__.com.wydrox.apassy</string>
+	</array>
+</dict>
+</plist>

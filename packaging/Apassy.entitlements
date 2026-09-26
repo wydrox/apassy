@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for apassy, apassy-mcp, and apassy-helper in Contents/MacOS.
+  The hardened runtime is on. There are no runtime exceptions and no
+  restricted entitlements, so these programs need no provisioning profile.
+-->
+<plist version="1.0">
+<dict/>
+</plist>
