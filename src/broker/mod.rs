@@ -10,6 +10,7 @@ pub mod bouncer;
 pub mod decide;
 pub mod exec;
 pub mod http;
+pub mod packs;
 pub mod profile;
 mod run;
 pub mod server;

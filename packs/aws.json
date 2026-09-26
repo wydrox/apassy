@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "aws",
+  "description": "AWS CLI and AWS deploy tools (Elastic Beanstalk, CDK, SAM, Amplify).",
+  "programs": ["aws", "eb", "cdk", "sam", "amplify"],
+  "roles": {
+    "usage": ["aws"]
+  },
+  "rules": [
+    {
+      "id": "s3-write",
+      "flag": "production",
+      "dry_run": "skip",
+      "when": {
+        "program": ["aws"],
+        "any_arg_starts": ["s3://"],
+        "any_arg": ["sync", "cp", "mv", "rm"]
+      }
+    },
+    {
+      "id": "resource-change",
+      "flag": "production",
+      "dry_run": "skip",
+      "when": {
+        "program": ["aws"],
+        "any_of": [
+          { "any_arg_starts": ["delete", "put", "update", "create"] },
+          { "any_arg": ["deploy"] }
+        ]
+      }
+    },
+    {
+      "id": "deploy-tools",
+      "flag": "production",
+      "dry_run": "skip",
+      "when": { "program": ["eb", "cdk", "sam"] }
+    },
+    {
+      "id": "amplify-publish",
+      "flag": "production",
+      "dry_run": "skip",
+      "when": {
+        "program": ["amplify"],
+        "subcommand": ["deploy", "publish", "hosting:channel:deploy"]
+      }
+    }
+  ]
+}

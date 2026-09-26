@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "remote",
+  "description": "Remote shells and file copies (ssh, scp, sftp, rsync, netcat, socat, telnet, ftp).",
+  "programs": [
+    "ssh", "scp", "sftp", "rsync", "ftp", "telnet", "nc", "ncat", "netcat", "socat"
+  ],
+  "roles": {
+    "network": [
+      "ssh", "scp", "sftp", "rsync", "ftp", "telnet", "nc", "ncat", "netcat", "socat"
+    ]
+  },
+  "rules": [
+    {
+      "id": "copy-secret",
+      "flag": "secret_output",
+      "when": {
+        "program": ["scp", "sftp", "rsync"],
+        "any_of": [{ "secret_file_arg_as_written": true }, { "arg_refs_secret": true }]
+      }
+    },
+    {
+      "id": "send-secret",
+      "flag": "secret_output",
+      "when": {
+        "program": ["ssh", "telnet", "nc", "ncat", "netcat", "socat", "ftp"],
+        "arg_refs_secret": true
+      }
+    },
+    {
+      "id": "remote-access",
+      "flag": "remote_access",
+      "when": {}
+    },
+    {
+      "id": "ssh-release",
+      "flag": "production",
+      "dry_run": "skip",
+      "note": "A command on a remote host can change a deployed system.",
+      "when": { "program": ["ssh"] }
+    }
+  ]
+}

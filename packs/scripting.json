@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "scripting",
+  "description": "Ruby, Perl, and PHP: inline code, scripts, and gem publishing.",
+  "programs": ["ruby", "perl", "php", "gem"],
+  "roles": {
+    "heredoc_code": ["ruby", "perl", "php"],
+    "script_runner": ["ruby"]
+  },
+  "rules": [
+    {
+      "id": "inline-code-prints-secret",
+      "flag": "secret_output",
+      "when": {
+        "program": ["ruby", "perl", "php"],
+        "any_arg": ["-e", "-c", "--eval", "-p", "--print", "-r"],
+        "inline_code_leaks": true
+      }
+    },
+    {
+      "id": "publish",
+      "flag": "production",
+      "dry_run": "skip",
+      "when": {
+        "program": ["gem"],
+        "subcommand": ["publish", "unpublish", "deprecate", "dist-tag", "upload"]
+      }
+    }
+  ]
+}

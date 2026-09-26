@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "python",
+  "description": "Python: inline code, pip installs, test and lint tools, Django management commands, and publishing.",
+  "programs": [
+    "python", "python3", "pip", "pip3", "pytest", "ruff", "mypy", "black", "flake8", "pylint",
+    "isort", "twine", "poetry"
+  ],
+  "roles": {
+    "usage": ["python", "python3", "pip"],
+    "heredoc_code": ["python", "python3"],
+    "script_runner": ["python", "python3"]
+  },
+  "rules": [
+    {
+      "id": "inline-code-prints-secret",
+      "flag": "secret_output",
+      "when": {
+        "program": ["python", "python3"],
+        "any_arg": ["-e", "-c", "--eval", "-p", "--print", "-r"],
+        "inline_code_leaks": true
+      }
+    },
+    {
+      "id": "new-dependency",
+      "flag": "new_dependency",
+      "note": "An install from a requirements file or the project is not a new package.",
+      "when": {
+        "program": ["pip", "pip3"],
+        "subcommand": ["install"],
+        "not": { "any_arg": ["-r", "-e", "."] }
+      }
+    },
+    {
+      "id": "publish",
+      "flag": "production",
+      "dry_run": "skip",
+      "when": {
+        "program": ["twine", "poetry"],
+        "subcommand": ["publish", "unpublish", "deprecate", "dist-tag", "upload"]
+      }
+    }
+  ],
+  "safe": [
+    {
+      "id": "test-and-lint-tools",
+      "when": { "program": ["pytest", "ruff", "mypy", "black", "flake8", "pylint", "isort"] }
+    },
+    {
+      "id": "tool-module",
+      "when": {
+        "program": ["python", "python3"],
+        "subcommand": ["-m"],
+        "action": ["pytest", "unittest", "mypy", "ruff", "black"]
+      }
+    },
+    {
+      "id": "django-development",
+      "when": {
+        "program": ["python", "python3"],
+        "subcommand": ["manage.py"],
+        "action": ["test", "check", "makemigrations", "showmigrations", "runserver"]
+      }
+    }
+  ]
+}

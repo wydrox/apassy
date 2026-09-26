@@ -1,7 +1,7 @@
 # Synthetic coverage set for the analysis replay (goal B7).
 # Each line is one command line. An optional purpose follows after a tab.
 # The default purpose is "Do the work.". The text <NL> is a line break, and <TAB> is a tab.
-# The set touches each rule for a program in src/broker/shell_risk.rs, with near misses.
+# The set touches each rule for a program (now in packs/*.json), with near misses.
 # It is not labeled. The replay records the analysis output for each line.
 #
 # ---- Examples from the unit tests of shell_risk.rs ----

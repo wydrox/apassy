@@ -1,15 +1,29 @@
-//! Deterministic command analysis for the bouncer (ADR 0007 hardening).
+//! Deterministic command analysis for the bouncer (ADR 0007 hardening, ADR 0009).
 //!
 //! The analysis parses the command like a shell: quotes, pipes, `&&`, `;`,
-//! redirects, `$( )`, and `sh -c`. It then applies rules for each program.
-//! It gives two results:
+//! redirects, `$( )`, and `sh -c`. It then applies the general rules in this file
+//! and the rules of the rule packs. It gives two results:
 //!
 //! - `flags`: risks that always go to the owner. They cover the model's weak
 //!   questions (secret output, data loss, production and release, injection).
 //! - `known_safe`: every segment is a common development command with no flag.
 //!   For such a command, uncertain model answers do not ask the owner.
 //!
-//! The rules are heuristics. They reduce errors. They are not a proof.
+//! Knowledge about single tools is in the rule packs ([`super::packs`], `packs/*.json`).
+//! This file keeps what is not about one tool:
+//!
+//! - the shell parser and the wrappers `sudo`, `env`, `npx`, and `pnpm dlx`,
+//! - the secret flow: secret references, secret files, environment dumps, `set -x`,
+//!   redirects, here-documents, pipes to encoders and to the network, HTTP auth headers,
+//!   and options that ask a script to print secrets,
+//! - the general rules: a dry run does not act, a production word or a production
+//!   assignment is a production target, a script name can tell about data loss,
+//!   real recipients, mass messages, system paths, and injection phrases in the purpose.
+//!
+//! The packs give programs roles for these general rules, such as `output` or
+//! `http_client`. The rules are heuristics. They reduce errors. They are not a proof.
+
+use super::packs::{self, Check, Command, DryRun, Role, RuleSet};
 
 /// Result of the analysis.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -36,118 +50,8 @@ struct Segment {
 /// One pipeline: segments joined by `|`.
 type Pipeline = Vec<Segment>;
 
-/// Programs that print or copy data.
-const OUTPUT: &[&str] = &[
-    "echo", "printf", "print", "cat", "tee", "head", "tail", "less", "more",
-];
-/// Programs that encode data.
-const ENCODE: &[&str] = &[
-    "base64", "xxd", "od", "hexdump", "openssl", "gzip", "zip", "uuencode", "rev",
-];
-/// Programs that move data over the network.
-const NETWORK: &[&str] = &[
-    "curl", "wget", "nc", "ncat", "netcat", "socat", "ssh", "scp", "sftp", "rsync", "ftp",
-    "telnet", "http", "https", "httpie",
-];
-/// Shells that run a command string.
+/// Shells that run a command string. The parser reads `sh -c TEXT` as a script.
 const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish"];
-/// Hosts of the providers that the owner uses. A secret in an auth header to one of
-/// these hosts is normal use.
-const KNOWN_API_HOSTS: &[&str] = &[
-    "supabase.co",
-    "supabase.com",
-    "api.resend.com",
-    "api.twilio.com",
-    "api.github.com",
-    "api.stripe.com",
-    "api.openai.com",
-    "api.anthropic.com",
-    "localhost",
-    "127.0.0.1",
-];
-/// Programs that read or transform text. They do not act on remote systems.
-const TEXT_TOOLS: &[&str] = &[
-    "rg", "grep", "egrep", "ag", "sed", "awk", "cat", "head", "tail", "less", "more", "nl", "wc",
-    "sort", "uniq", "cut", "tr", "diff", "jq", "yq", "find", "ls", "echo", "printf", "test", "[",
-    "basename", "dirname", "realpath", "stat", "file", "column", "tee", "xargs", "for", "do",
-    "done", "if", "then", "else", "fi", "while", "case", "esac", "read", "cd",
-];
-
-/// Shell keywords and builtins that only control the script.
-const SHELL_CONTROL: &[&str] = &[
-    "for", "do", "done", "if", "then", "else", "elif", "fi", "while", "until", "case", "esac",
-    "in", "cd", "pushd", "popd", "local", "return", "break", "continue", "trap", "wait", "shift",
-    ":", "true", "false", "mktemp", "read",
-];
-
-/// Tools that `npx` commonly runs from the project dependencies. Another package name
-/// can download and run new code.
-const KNOWN_NPX: &[&str] = &[
-    "tsc",
-    "eslint",
-    "prettier",
-    "vitest",
-    "jest",
-    "playwright",
-    "prisma",
-    "supabase",
-    "tsx",
-    "ts-node",
-    "next",
-    "vite",
-    "vercel",
-    "wrangler",
-    "turbo",
-    "nx",
-    "cypress",
-    "storybook",
-    "drizzle-kit",
-    "knex",
-    "biome",
-    "stylelint",
-    "svelte-check",
-    "astro",
-    "remix",
-    "expo",
-    "mocha",
-    "nodemon",
-    "concurrently",
-    "rimraf",
-    "husky",
-    "lint-staged",
-    "tailwindcss",
-    "postcss",
-    "webpack",
-    "rollup",
-    "esbuild",
-    "tsup",
-    "changeset",
-    "only-allow",
-    "firebase",
-    "netlify",
-    "twilio",
-    "resend",
-    "sequelize",
-    "typeorm",
-    "graphql-codegen",
-    "openapi-typescript",
-];
-
-/// Build, cache, and dependency folders that are safe to remove.
-const REMOVABLE: &[&str] = &[
-    "node_modules",
-    ".next",
-    "dist",
-    "build",
-    "out",
-    ".turbo",
-    "coverage",
-    "tmp",
-    ".cache",
-    "target",
-    ".parcel-cache",
-    ".svelte-kit",
-];
 /// Test recipients. Other recipients are real people.
 const TEST_EMAIL_DOMAINS: &[&str] = &[
     ".test",
@@ -239,10 +143,25 @@ pub fn command_line_to_argv(line: &str) -> Vec<String> {
     }
 }
 
-/// Analyze an argument list. `purpose` is the stated purpose. `secret_names` are the
-/// environment variables that hold secrets for this run.
+/// Analyze an argument list with the active rule packs ([`packs::active`]).
+/// `purpose` is the stated purpose. `secret_names` are the environment variables that
+/// hold secrets for this run.
 pub fn analyze(argv: &[String], purpose: &str, secret_names: &[String]) -> Analysis {
+    analyze_with(&packs::active(), argv, purpose, secret_names)
+}
+
+/// Analyze an argument list with the rule packs in `rules`.
+pub fn analyze_with(
+    rules: &RuleSet,
+    argv: &[String],
+    purpose: &str,
+    secret_names: &[String],
+) -> Analysis {
     let mut flags = Vec::new();
+    // A local pack that did not load: every run waits for the owner.
+    if rules.load_error().is_some() {
+        flags.push(packs::LOAD_ERROR_FLAG.to_owned());
+    }
     let pipelines = parse_argv(argv);
     let mut all_safe = !pipelines.is_empty();
     // `set -x` prints each expanded command, so it prints secret values.
@@ -263,8 +182,12 @@ pub fn analyze(argv: &[String], purpose: &str, secret_names: &[String]) -> Analy
     }
     for pipeline in &pipelines {
         let before = flags.len();
-        check_pipeline(pipeline, secret_names, &mut flags);
-        if flags.len() > before || !pipeline.iter().all(is_known_safe) {
+        check_pipeline(rules, pipeline, secret_names, &mut flags);
+        if flags.len() > before
+            || !pipeline
+                .iter()
+                .all(|segment| is_known_safe(rules, segment, secret_names))
+        {
             all_safe = false;
         }
     }
@@ -628,6 +551,39 @@ fn effective_argv(segment: &Segment) -> Vec<String> {
     }
 }
 
+/// The command runs a package with `npx`, `bunx`, `pnpm dlx`, or `yarn dlx`. The
+/// package can come from the registry.
+pub(crate) fn is_package_runner(words: &[String]) -> bool {
+    let first = words.first().map(|arg| base_name(arg)).unwrap_or_default();
+    matches!(first.as_str(), "npx" | "bunx")
+        || (matches!(first.as_str(), "pnpm" | "yarn")
+            && words.get(1).map(String::as_str) == Some("dlx"))
+}
+
+/// A segment with a program, prepared for the rule packs.
+fn command<'a>(
+    rules: &'a RuleSet,
+    segment: &'a Segment,
+    argv: &'a [String],
+    secret_names: &'a [String],
+) -> Command<'a> {
+    let args = lower_args(&argv[1..]);
+    let joined = argv.join(" ");
+    Command {
+        words: &segment.argv,
+        argv,
+        program: base_name(&argv[0]),
+        raw_program: program(segment),
+        args_joined: args.join(" "),
+        args,
+        joined_lower: joined.to_lowercase(),
+        joined,
+        secret: segment_refs_secret(segment, secret_names),
+        secret_names,
+        known_hosts: rules.known_hosts(),
+    }
+}
+
 fn lower_args(argv: &[String]) -> Vec<String> {
     argv.iter().map(|arg| arg.to_lowercase()).collect()
 }
@@ -647,7 +603,7 @@ fn words(text: &str) -> Vec<String> {
 
 /// A reference to a secret: `$NAME`, `${NAME}`, `process.env.NAME`, `os.environ['NAME']`,
 /// or a variable whose name looks like a secret.
-fn refs_secret(text: &str, secret_names: &[String]) -> bool {
+pub(crate) fn refs_secret(text: &str, secret_names: &[String]) -> bool {
     if secret_names.iter().any(|name| {
         text.contains(&format!("${name}"))
             || text.contains(&format!("${{{name}}}"))
@@ -697,7 +653,7 @@ fn segment_refs_secret(segment: &Segment, secret_names: &[String]) -> bool {
 }
 
 /// A secret file such as `.env`, `.env.local`, or an SSH key.
-fn is_secret_file(arg: &str) -> bool {
+pub(crate) fn is_secret_file(arg: &str) -> bool {
     let name = arg.rsplit('/').next().unwrap_or(arg);
     (name.starts_with(".env") && name != ".env.example")
         || name.starts_with("id_rsa")
@@ -709,7 +665,34 @@ fn is_secret_file(arg: &str) -> bool {
         || name == ".netrc"
 }
 
-fn check_pipeline(pipeline: &Pipeline, secret_names: &[String], flags: &mut Vec<String>) {
+/// A path in a system folder.
+pub(crate) fn is_system_path(arg: &str) -> bool {
+    arg.starts_with("/etc/")
+        || arg.starts_with("/usr/")
+        || arg.starts_with("/Library/")
+        || arg.starts_with("/System/")
+        || arg.starts_with("/private/etc/")
+}
+
+/// "A dry run does not act." `--dry-run` and `--dryrun` only show the plan. For the
+/// data-loss checks `-n` also shows the plan, except for a program with the role
+/// `no_dry_run`: for such a program the data-loss checks ignore dry-run options.
+pub(crate) fn is_dry_run(rules: &RuleSet, cmd: &Command<'_>, mode: DryRun) -> bool {
+    match mode {
+        DryRun::Skip => has_arg(&cmd.args, &["--dry-run", "--dryrun"]),
+        DryRun::SkipWithN => {
+            has_arg(&cmd.args, &["--dry-run", "--dryrun", "-n"])
+                && !rules.has_role(&cmd.program, Role::NoDryRun)
+        }
+    }
+}
+
+fn check_pipeline(
+    rules: &RuleSet,
+    pipeline: &Pipeline,
+    secret_names: &[String],
+    flags: &mut Vec<String>,
+) {
     let secret_anywhere = pipeline
         .iter()
         .any(|segment| segment_refs_secret(segment, secret_names));
@@ -720,8 +703,8 @@ fn check_pipeline(pipeline: &Pipeline, secret_names: &[String], flags: &mut Vec<
         .iter()
         .map(|s| base_name(&effective_argv(s).first().cloned().unwrap_or_default()))
         .collect();
-    let has_network = programs.iter().any(|p| NETWORK.contains(&p.as_str()));
-    let has_encode = programs.iter().any(|p| ENCODE.contains(&p.as_str()));
+    let has_network = programs.iter().any(|p| rules.has_role(p, Role::Network));
+    let has_encode = programs.iter().any(|p| rules.has_role(p, Role::Encoder));
     let piped_to_shell = pipeline.len() > 1
         && pipeline
             .iter()
@@ -744,7 +727,7 @@ fn check_pipeline(pipeline: &Pipeline, secret_names: &[String], flags: &mut Vec<
         flags.push("secret_output".to_owned());
     }
     for segment in pipeline {
-        check_segment(segment, secret_names, flags);
+        check_segment(rules, segment, secret_names, flags);
     }
 }
 
@@ -762,69 +745,29 @@ fn dumps_environment(segment: &Segment) -> bool {
     }
 }
 
-fn check_segment(segment: &Segment, secret_names: &[String], flags: &mut Vec<String>) {
+fn check_segment(
+    rules: &RuleSet,
+    segment: &Segment,
+    secret_names: &[String],
+    flags: &mut Vec<String>,
+) {
     let argv = effective_argv(segment);
-    let Some(first) = argv.first() else {
+    if argv.is_empty() {
         return;
-    };
-    let prog = base_name(first);
-    let args = lower_args(&argv[1..]);
-    let joined = argv.join(" ");
-    let joined_lower = joined.to_lowercase();
-    let secret = segment_refs_secret(segment, secret_names);
+    }
+    let cmd = command(rules, segment, &argv, secret_names);
+    let prog = cmd.program.as_str();
+    let args = &cmd.args;
     // `--help` and `--version` only print usage.
-    if is_usage_request(&prog, &args) && !segment.redirect_out {
+    if is_usage_request(rules, prog, args) && !segment.redirect_out {
         return;
     }
-    let first_raw = segment
-        .argv
-        .first()
-        .map(|arg| base_name(arg))
-        .unwrap_or_default();
-    if first_raw == "sudo" || first_raw == "doas" {
-        flags.push("privilege".to_owned());
-    }
-    // A package that `npx` downloads and runs.
-    if matches!(first_raw.as_str(), "npx" | "bunx")
-        || (matches!(first_raw.as_str(), "pnpm" | "yarn")
-            && segment.argv.get(1).map(String::as_str) == Some("dlx"))
-    {
-        let package = prog.split('@').next().unwrap_or(&prog).to_owned();
-        let known = KNOWN_NPX.contains(&package.as_str()) && !first.contains("@latest");
-        if !known {
-            flags.push("new_dependency".to_owned());
-        }
-    }
+    // The rules of the rule packs.
+    rules.add_flags(&cmd, flags);
     // A secret file as an argument: upload, commit, print, or copy.
     if segment.argv.iter().skip(1).any(|arg| is_secret_file(arg))
-        && !matches!(
-            prog.as_str(),
-            "ls" | "stat" | "test" | "[" | "touch" | "rm" | "find" | "wc" | "du"
-        )
-        && !(matches!(prog.as_str(), "rg" | "grep")
-            && args
-                .iter()
-                .any(|arg| arg == "-l" || arg == "--files-with-matches" || arg == "--files"))
+        && !rules.exempt(Check::SecretFileArgument, &cmd)
     {
-        flags.push("secret_output".to_owned());
-    }
-    // Commands that print credentials: provider key listings and password or key columns.
-    let reads_credentials = (prog == "supabase" && args.join(" ").starts_with("projects api-keys"))
-        || (matches!(
-            prog.as_str(),
-            "psql" | "mysql" | "sqlite3" | "supabase" | "mongosh"
-        ) && [
-            "encrypted_password",
-            "password_hash",
-            "recovery_token",
-            "api_key",
-            "secret_key",
-            "refresh_token",
-            "access_token",
-        ]
-        .iter()
-        .any(|column| joined_lower.contains(column)));
-    if reads_credentials {
         flags.push("secret_output".to_owned());
     }
     // Environment assignments that point at production, by value (`URL=$PROD_URL`) or
@@ -844,84 +787,44 @@ fn check_segment(segment: &Segment, secret_names: &[String], flags: &mut Vec<Str
             flags.push("production".to_owned());
         }
     }
-    // Writes to system files.
-    let system_path = |arg: &String| {
-        arg.starts_with("/etc/")
-            || arg.starts_with("/usr/")
-            || arg.starts_with("/Library/")
-            || arg.starts_with("/System/")
-            || arg.starts_with("/private/etc/")
-    };
-    let writes_args = matches!(prog.as_str(), "tee" | "cp" | "mv" | "ln" | "install")
-        || (prog == "sed" && args.iter().any(|arg| arg.starts_with("-i")));
-    if segment.redirect_targets.iter().any(system_path)
-        || (writes_args && argv.iter().skip(1).any(system_path))
+    // A redirect to a system file.
+    if segment
+        .redirect_targets
+        .iter()
+        .any(|target| is_system_path(target))
     {
         flags.push("system_change".to_owned());
     }
 
     if !segment.heredoc.is_empty() {
-        if matches!(
-            prog.as_str(),
-            "python"
-                | "python3"
-                | "node"
-                | "deno"
-                | "bun"
-                | "ruby"
-                | "perl"
-                | "php"
-                | "sh"
-                | "bash"
-                | "zsh"
-        ) {
-            check_inline_code(&segment.heredoc, secret_names, flags);
+        if rules.has_role(prog, Role::HeredocCode) {
+            if inline_code_leaks(&segment.heredoc, secret_names) {
+                flags.push("secret_output".to_owned());
+            }
             if sql_writes(&segment.heredoc) && segment.heredoc.to_lowercase().contains("execute") {
                 flags.push("data_loss".to_owned());
             }
-        } else if matches!(prog.as_str(), "psql" | "mysql" | "sqlite3" | "supabase")
-            && sql_writes(&segment.heredoc)
-        {
+        } else if rules.has_role(prog, Role::HeredocSql) && sql_writes(&segment.heredoc) {
             flags.push("data_loss".to_owned());
         } else if refs_secret(&segment.heredoc, secret_names)
-            && (segment.redirect_out || prog == "tee")
+            && (segment.redirect_out || rules.has_role(prog, Role::FileWriter))
         {
             flags.push("secret_output".to_owned());
         }
     }
 
     // ---- Secret output ----
-    if secret && (OUTPUT.contains(&prog.as_str()) || ENCODE.contains(&prog.as_str())) {
+    if cmd.secret && (rules.has_role(prog, Role::Output) || rules.has_role(prog, Role::Encoder)) {
         flags.push("secret_output".to_owned());
     }
-    if secret && segment.redirect_out {
+    if cmd.secret && segment.redirect_out {
         flags.push("secret_output".to_owned());
     }
     if segment.redirect_out && dumps_environment(segment) {
         flags.push("secret_output".to_owned());
     }
-    if NETWORK.contains(&prog.as_str()) {
-        check_network(&prog, &argv, secret_names, flags);
-    }
-    if (prog == "cat" || prog == "tee" || prog == "less" || prog == "head" || prog == "tail")
-        && args.iter().any(|arg| is_secret_file(arg))
-    {
-        flags.push("secret_output".to_owned());
-    }
-    if matches!(
-        prog.as_str(),
-        "node" | "deno" | "bun" | "python" | "python3" | "ruby" | "perl" | "php"
-    ) && has_arg(&args, &["-e", "-c", "--eval", "-p", "--print", "-r"])
-    {
-        check_inline_code(&joined, secret_names, flags);
-    }
-    if secret
-        && matches!(
-            prog.as_str(),
-            "git" | "gh" | "npm" | "docker" | "security" | "defaults" | "pbcopy"
-        )
-    {
-        flags.push("secret_output".to_owned());
+    if rules.has_role(prog, Role::HttpClient) {
+        check_http(&argv, secret_names, rules.known_hosts(), flags);
     }
     // One option that asks a script to print secrets, such as `--print-secrets` or `dump-env`.
     let print_secret_option = args.iter().any(|arg| {
@@ -945,159 +848,25 @@ fn check_segment(segment: &Segment, secret_names: &[String], flags: &mut Vec<Str
     }
 
     // ---- Data loss ----
-    check_destructive(&prog, &argv, &args, &joined_lower, flags);
+    if !is_dry_run(rules, &cmd, DryRun::SkipWithN) {
+        check_destructive(rules, &cmd, flags);
+    }
 
     // ---- Production and release ----
-    check_release(&prog, &argv, &args, &joined_lower, flags);
-
-    // ---- System changes ----
-    if prog == "chmod" && args.iter().any(|arg| arg.contains("777")) {
-        flags.push("system_change".to_owned());
-    }
-    if prog == "crontab" && !(args.len() == 1 && args[0] == "-l") {
-        flags.push("system_change".to_owned());
-    }
-    if matches!(prog.as_str(), "npm" | "pnpm" | "yarn" | "bun")
-        && args.first().map(String::as_str) == Some("config")
-        && has_arg(&args, &["set", "delete", "edit"])
-    {
-        flags.push("system_change".to_owned());
-    }
-    if prog == "git"
-        && args.first().map(String::as_str) == Some("add")
-        && has_arg(&args, &["-f", "--force"])
-    {
-        flags.push("secret_output".to_owned());
-    }
-    if prog == "gh" {
-        let sub = args.first().map(String::as_str).unwrap_or_default();
-        let action = args.get(1).map(String::as_str).unwrap_or_default();
-        match sub {
-            "release" if matches!(action, "create" | "upload" | "delete" | "edit") => {
-                flags.push("production".to_owned());
-            }
-            "secret" | "variable" if matches!(action, "set" | "delete" | "remove") => {
-                flags.push("system_change".to_owned());
-            }
-            "gist" if matches!(action, "create" | "edit") => flags.push("secret_output".to_owned()),
-            "repo"
-                if matches!(
-                    action,
-                    "delete" | "edit" | "archive" | "rename" | "transfer"
-                ) =>
-            {
-                flags.push("system_change".to_owned());
-            }
-            "api"
-                if args
-                    .windows(2)
-                    .any(|w| matches!(w[0].as_str(), "-x" | "--method") && w[1] != "get") =>
-            {
-                flags.push("system_change".to_owned());
-            }
-            "workflow" if matches!(action, "run" | "enable" | "disable") => {
-                flags.push("production".to_owned());
-            }
-            _ => {}
-        }
-    }
-    if prog == "vercel" {
-        let sub = args.first().map(String::as_str).unwrap_or_default();
-        let action = args.get(1).map(String::as_str).unwrap_or_default();
-        let bare = args.iter().all(|a| a.starts_with('-'))
-            && !has_arg(&args, &["--version", "-v", "--help", "-h"]);
-        let alias_change = sub == "alias" && matches!(action, "set" | "rm" | "remove");
-        if bare
-            || alias_change
-            || matches!(
-                sub,
-                "deploy" | "promote" | "rollback" | "redeploy" | "remove" | "rm"
-            )
-        {
-            flags.push("production".to_owned());
-        }
-        if sub == "env" && matches!(action, "pull" | "add" | "rm" | "remove") {
-            flags.push("secret_output".to_owned());
-        }
-    }
-    if matches!(prog.as_str(), "curl" | "wget" | "http" | "https")
-        && segment
-            .argv
-            .iter()
-            .any(|arg| arg.to_lowercase().contains("broadcast"))
-    {
-        flags.push("production".to_owned());
-    }
-    if matches!(
-        prog.as_str(),
-        "launchctl" | "systemctl" | "shutdown" | "reboot" | "killall" | "defaults"
-    ) {
-        flags.push("system_change".to_owned());
-    }
-    if prog == "git"
-        && args.first().map(String::as_str) == Some("remote")
-        && has_arg(&args, &["set-url", "add"])
-    {
-        flags.push("system_change".to_owned());
-    }
-    if prog == "git"
-        && args.first().map(String::as_str) == Some("config")
-        && has_arg(&args, &["--global", "--system"])
-    {
-        flags.push("system_change".to_owned());
-    }
-    // A new dependency is a supply-chain change.
-    if matches!(prog.as_str(), "npm" | "pnpm" | "yarn" | "bun")
-        && matches!(
-            args.first().map(String::as_str),
-            Some("install" | "i" | "add")
-        )
-        && args.iter().skip(1).any(|arg| !arg.starts_with('-'))
-    {
-        flags.push("new_dependency".to_owned());
-    }
-    if matches!(prog.as_str(), "pip" | "pip3")
-        && args.first().map(String::as_str) == Some("install")
-        && !has_arg(&args, &["-r", "-e", "."])
-    {
-        flags.push("new_dependency".to_owned());
+    if !is_dry_run(rules, &cmd, DryRun::Skip) {
+        check_release(rules, &cmd, flags);
     }
 }
 
-fn check_network(prog: &str, argv: &[String], secret_names: &[String], flags: &mut Vec<String>) {
-    if matches!(prog, "scp" | "sftp" | "rsync") {
-        if argv
-            .iter()
-            .skip(1)
-            .any(|arg| is_secret_file(arg) || refs_secret(arg, secret_names))
-        {
-            flags.push("secret_output".to_owned());
-        }
-        flags.push("remote_access".to_owned());
-        return;
-    }
-    if matches!(
-        prog,
-        "ssh" | "telnet" | "nc" | "ncat" | "netcat" | "socat" | "ftp"
-    ) {
-        if argv
-            .iter()
-            .skip(1)
-            .any(|arg| refs_secret(arg, secret_names))
-        {
-            flags.push("secret_output".to_owned());
-        }
-        flags.push("remote_access".to_owned());
-        return;
-    }
-    // curl, wget, httpie: a secret is normal in an auth header or `-u` to a known API host.
-    let hosts: Vec<String> = argv.iter().filter_map(|arg| url_host(arg)).collect();
-    let known_host = !hosts.is_empty()
-        && hosts.iter().all(|host| {
-            KNOWN_API_HOSTS
-                .iter()
-                .any(|known| host == known || host.ends_with(&format!(".{known}")))
-        });
+/// An HTTP request: a secret is normal in an auth header or `-u` to a known API host.
+fn check_http(
+    argv: &[String],
+    secret_names: &[String],
+    known_hosts: &[String],
+    flags: &mut Vec<String>,
+) {
+    let hosts = url_hosts(argv);
+    let known_host = !hosts.is_empty() && hosts.iter().all(|host| is_known_host(host, known_hosts));
     let mut index = 1;
     while index < argv.len() {
         let arg = &argv[index];
@@ -1141,7 +910,14 @@ fn check_network(prog: &str, argv: &[String], secret_names: &[String], flags: &m
     check_recipients(argv, flags);
 }
 
-fn is_temp_path(path: &str) -> bool {
+/// The host or one of its parent domains is a known provider host from the packs.
+fn is_known_host(host: &str, known_hosts: &[String]) -> bool {
+    known_hosts
+        .iter()
+        .any(|known| host == known || host.ends_with(&format!(".{known}")))
+}
+
+pub(crate) fn is_temp_path(path: &str) -> bool {
     [
         "/tmp/",
         "/private/tmp/",
@@ -1167,7 +943,13 @@ fn url_host(arg: &str) -> Option<String> {
     (!host.is_empty()).then_some(host)
 }
 
-fn check_inline_code(code: &str, secret_names: &[String], flags: &mut Vec<String>) {
+/// Hosts of the URLs in the words.
+pub(crate) fn url_hosts(argv: &[String]) -> Vec<String> {
+    argv.iter().filter_map(|arg| url_host(arg)).collect()
+}
+
+/// Code that reads the environment and prints, writes, or sends data.
+pub(crate) fn inline_code_leaks(code: &str, secret_names: &[String]) -> bool {
     let lower = code.to_lowercase();
     let reads_env = lower.contains("process.env")
         || lower.contains("os.environ")
@@ -1192,197 +974,19 @@ fn check_inline_code(code: &str, secret_names: &[String], flags: &mut Vec<String
     ]
     .iter()
     .any(|needle| lower.contains(needle));
-    if reads_env && emits {
-        flags.push("secret_output".to_owned());
-    }
+    reads_env && emits
 }
 
-fn check_destructive(
-    prog: &str,
-    argv: &[String],
-    args: &[String],
-    joined_lower: &str,
-    flags: &mut Vec<String>,
-) {
+/// General data-loss rules. The rule packs have the rules for each tool.
+fn check_destructive(rules: &RuleSet, cmd: &Command<'_>, flags: &mut Vec<String>) {
     let push = |flags: &mut Vec<String>| flags.push("data_loss".to_owned());
-    // A dry run only shows the plan.
-    if has_arg(args, &["--dry-run", "--dryrun", "-n"]) && prog != "rm" && prog != "git" {
-        return;
-    }
-    match prog {
-        "rm" | "rmdir" | "unlink" | "shred" | "srm" => {
-            let recursive = args.iter().any(|arg| {
-                arg.starts_with('-')
-                    && !arg.starts_with("--")
-                    && (arg.contains('r') || arg.contains('R'))
-            }) || has_arg(args, &["--recursive"]);
-            let targets: Vec<&String> = args.iter().filter(|arg| !arg.starts_with('-')).collect();
-            let dangerous_target = targets.iter().any(|target| {
-                let t = target.trim_end_matches('/');
-                t.is_empty()
-                    || t == "/"
-                    || t == "~"
-                    || t.starts_with("~/") && t.len() <= 3
-                    || t == "$home"
-                    || (t.starts_with('/') && !is_temp_path(t))
-                    || t.starts_with("..")
-                    || t == "*"
-                    || t == "."
-                    || t == "supabase"
-                    || t == "migrations"
-                    || t.ends_with("/migrations")
-                    || t.starts_with("supabase/migrations")
-                    || t == ".git"
-                    || t.ends_with("/.git")
-                    || t.starts_with(".git/")
-            });
-            let all_removable = !targets.is_empty()
-                && targets.iter().all(|target| {
-                    let t = target.trim_start_matches("./").trim_end_matches('/');
-                    REMOVABLE.contains(&t)
-                        || REMOVABLE.iter().any(|r| t.starts_with(&format!("{r}/")))
-                        || is_temp_path(t)
-                });
-            if prog == "shred" || prog == "srm" || dangerous_target || (recursive && !all_removable)
-            {
-                push(flags);
-            }
-        }
-        "find" => {
-            if has_arg(args, &["-delete"])
-                || args
-                    .windows(2)
-                    .any(|w| w[0] == "-exec" && matches!(w[1].as_str(), "rm" | "shred"))
-            {
-                push(flags);
-            }
-        }
-        "git" => {
-            let sub = args.first().map(String::as_str).unwrap_or_default();
-            let destructive = match sub {
-                "reset" => has_arg(args, &["--hard", "--merge", "--keep"]),
-                "push" => args.iter().any(|arg| {
-                    arg == "-f"
-                        || arg.starts_with("--force")
-                        || arg.starts_with("+")
-                        || arg == "--delete"
-                        || arg == "-d"
-                        || arg == "--mirror"
-                }),
-                "clean" => args
-                    .iter()
-                    .any(|arg| arg.starts_with('-') && arg.contains('f')),
-                "branch" => {
-                    has_arg(args, &["-d", "-D", "--delete"])
-                        && args
-                            .iter()
-                            .any(|a| a == "-D" || a == "--delete" || a == "-d")
-                }
-                "checkout" | "restore" => {
-                    has_arg(args, &["--", ".", "--force", "-f"])
-                        && args.iter().any(|a| a == "." || a == "--force" || a == "-f")
-                }
-                "stash" => has_arg(args, &["drop", "clear"]),
-                "filter-branch" | "filter-repo" => true,
-                "rebase" => false,
-                _ => false,
-            };
-            if destructive {
-                push(flags);
-            }
-        }
-        "dropdb" | "dropuser" => push(flags),
-        "psql" | "mysql" | "sqlite3" | "mongo" | "mongosh" | "clickhouse-client" | "cockroach" => {
-            if sql_argument(argv).is_some_and(|sql| sql_writes(&sql)) {
-                push(flags);
-            }
-        }
-        "redis-cli" => {
-            if args
-                .iter()
-                .any(|arg| matches!(arg.as_str(), "flushall" | "flushdb" | "del" | "unlink"))
-            {
-                push(flags);
-            }
-        }
-        "supabase" => {
-            let a = args.join(" ");
-            if a.starts_with("db query") && sql_argument(argv).is_some_and(|sql| sql_writes(&sql)) {
-                push(flags);
-            }
-            if a.starts_with("db reset")
-                || a.contains("storage rm")
-                || a.starts_with("projects delete")
-                || a.contains("--accept-data-loss")
-                || a.starts_with("functions delete")
-            {
-                push(flags);
-            }
-        }
-        "prisma" => {
-            let a = args.join(" ");
-            if a.starts_with("migrate reset")
-                || a.contains("--accept-data-loss")
-                || a.contains("--force-reset")
-            {
-                push(flags);
-            }
-        }
-        "docker" | "podman" => {
-            let a = args.join(" ");
-            if a.contains("system prune")
-                || a.contains("volume rm")
-                || a.contains("volume prune")
-                || a.starts_with("rm ")
-                || a.starts_with("rmi")
-                || (a.contains("compose down") && (has_arg(args, &["-v", "--volumes"])))
-            {
-                push(flags);
-            }
-        }
-        "docker-compose" => {
-            if has_arg(args, &["-v", "--volumes"])
-                && args.first().map(String::as_str) == Some("down")
-            {
-                push(flags);
-            }
-        }
-        "terraform" | "tofu" | "pulumi" => {
-            if has_arg(args, &["destroy"]) {
-                push(flags);
-            }
-        }
-        "kubectl" | "helm" => {
-            if has_arg(args, &["delete", "uninstall", "drain"]) {
-                push(flags);
-            }
-        }
-        "dd" | "mkfs" | "diskutil" | "fdisk" => push(flags),
-        "truncate" => push(flags),
-        _ => {}
-    }
     // Scripts named for data loss, for example `scripts/delete-all-users.js`.
-    let script = argv
+    let script = cmd
+        .argv
         .iter()
-        .skip(
-            if matches!(
-                prog,
-                "node"
-                    | "python"
-                    | "python3"
-                    | "tsx"
-                    | "ts-node"
-                    | "bash"
-                    | "sh"
-                    | "deno"
-                    | "bun"
-                    | "ruby"
-            ) {
-                1
-            } else {
-                0
-            },
-        )
+        .skip(usize::from(
+            rules.has_role(&cmd.program, Role::ScriptRunner),
+        ))
         .take(1)
         .find(|arg| arg.contains('/') || arg.contains('.'))
         .map(|arg| arg.to_lowercase());
@@ -1406,18 +1010,17 @@ fn check_destructive(
             push(flags);
         }
     }
-    if joined_lower.contains("--accept-data-loss")
-        || joined_lower.contains("--force-reset")
-        || joined_lower.contains("dropdatabase")
+    if cmd.joined_lower.contains("--accept-data-loss")
+        || cmd.joined_lower.contains("--force-reset")
+        || cmd.joined_lower.contains("dropdatabase")
     {
         push(flags);
     }
 }
 
-/// SQL that changes or removes data or schema. Read statements pass.
 /// The SQL text of a database command: the value after `-c`, `--command`, `-e`,
 /// `--execute`, or `--eval`, or the first plain argument after `db query`.
-fn sql_argument(argv: &[String]) -> Option<String> {
+pub(crate) fn sql_argument(argv: &[String]) -> Option<String> {
     let mut iter = argv.iter().skip(1).peekable();
     let mut after_query = false;
     while let Some(arg) = iter.next() {
@@ -1463,7 +1066,7 @@ fn sql_argument(argv: &[String]) -> Option<String> {
 
 /// SQL or database shell code that changes data, schema, or access. The check looks at
 /// the first keyword of each statement, so a word inside a query or a string does not count.
-fn sql_writes(text: &str) -> bool {
+pub(crate) fn sql_writes(text: &str) -> bool {
     let lower = text.to_lowercase();
     if [
         "dropdatabase",
@@ -1511,132 +1114,36 @@ fn sql_writes(text: &str) -> bool {
     })
 }
 
-fn check_release(
-    prog: &str,
-    argv: &[String],
-    args: &[String],
-    joined_lower: &str,
-    flags: &mut Vec<String>,
-) {
+/// SQL that only reads: it starts with a read keyword and does not write.
+pub(crate) fn sql_reads(text: &str) -> bool {
+    let w = words(text);
+    matches!(
+        w.first().map(String::as_str),
+        Some("select" | "with" | "explain" | "show")
+    ) && !sql_writes(text)
+}
+
+/// The branches that `git push` updates: the operands after the subcommand, without the
+/// remote when there are two or more, and the part after `:` of a refspec.
+pub(crate) fn push_targets(args: &[String]) -> Vec<&str> {
+    let targets: Vec<&String> = args
+        .iter()
+        .skip(1)
+        .filter(|arg| !arg.starts_with('-'))
+        .collect();
+    targets
+        .iter()
+        .skip(if targets.len() > 1 { 1 } else { 0 })
+        .map(|target| target.rsplit(':').next().unwrap_or(target))
+        .collect()
+}
+
+/// General release rules. The rule packs have the rules for each tool.
+fn check_release(rules: &RuleSet, cmd: &Command<'_>, flags: &mut Vec<String>) {
     let push = |flags: &mut Vec<String>| flags.push("production".to_owned());
+    let argv = cmd.argv;
+    let args = &cmd.args;
     let sub = args.first().map(String::as_str).unwrap_or_default();
-    // A dry run only shows the plan.
-    if has_arg(args, &["--dry-run", "--dryrun"]) {
-        return;
-    }
-    match prog {
-        "npm" | "pnpm" | "yarn" | "bun" | "cargo" | "gem" | "twine" | "poetry" => {
-            if matches!(
-                sub,
-                "publish" | "unpublish" | "deprecate" | "dist-tag" | "upload"
-            ) {
-                push(flags);
-            }
-        }
-        "vercel" | "netlify"
-            if !matches!(sub, "ls" | "list" | "inspect" | "logs")
-                && !(sub == "alias" && args.get(1).is_some_and(|a| a == "ls")) =>
-        {
-            if has_arg(
-                args,
-                &["--prod", "--production", "promote", "rollback", "alias"],
-            ) || (prog == "netlify" && sub == "deploy" && has_arg(args, &["--prod"]))
-            {
-                push(flags);
-            }
-        }
-        "fly" | "flyctl" | "railway" | "render" => {
-            if matches!(sub, "deploy" | "up" | "secrets" | "scale" | "destroy") {
-                push(flags);
-            }
-        }
-        "heroku" | "eb" | "serverless" | "sls" | "cdk" | "sam" | "ansible-playbook" | "ssh" => {
-            push(flags)
-        }
-        "gcloud" | "az" => {
-            if args.iter().any(|arg| {
-                matches!(
-                    arg.as_str(),
-                    "deploy" | "delete" | "create" | "update" | "set-iam-policy"
-                )
-            }) {
-                push(flags);
-            }
-        }
-        "aws" => {
-            if args.iter().any(|arg| arg.starts_with("s3://"))
-                && has_arg(args, &["sync", "cp", "mv", "rm"])
-                || args.iter().any(|arg| {
-                    arg.starts_with("delete")
-                        || arg.starts_with("put")
-                        || arg.starts_with("update")
-                        || arg.starts_with("create")
-                        || arg == "deploy"
-                })
-            {
-                push(flags);
-            }
-        }
-        "firebase" | "wrangler" | "amplify" => {
-            if matches!(sub, "deploy" | "publish" | "hosting:channel:deploy") {
-                push(flags);
-            }
-        }
-        "terraform" | "tofu" | "pulumi" => {
-            if matches!(sub, "apply" | "up" | "import" | "state") {
-                push(flags);
-            }
-        }
-        "kubectl" | "helm" => {
-            if matches!(
-                sub,
-                "apply"
-                    | "create"
-                    | "replace"
-                    | "patch"
-                    | "scale"
-                    | "rollout"
-                    | "install"
-                    | "upgrade"
-                    | "set"
-                    | "exec"
-            ) {
-                push(flags);
-            }
-        }
-        "supabase" => {
-            let a = args.join(" ");
-            if a.starts_with("functions deploy")
-                || a.starts_with("secrets set")
-                || a.starts_with("secrets unset")
-                || a.contains("--linked") && a.starts_with("db push")
-            {
-                push(flags);
-            }
-        }
-        "git" if sub == "push" => {
-            let targets: Vec<&String> = args
-                .iter()
-                .skip(1)
-                .filter(|arg| !arg.starts_with('-'))
-                .collect();
-            let branch_names: Vec<String> = targets
-                .iter()
-                .skip(if targets.len() > 1 { 1 } else { 0 })
-                .map(|t| t.rsplit(':').next().unwrap_or(t).to_string())
-                .collect();
-            if branch_names.iter().any(|b| {
-                matches!(
-                    b.as_str(),
-                    "main" | "master" | "production" | "prod" | "release"
-                )
-            }) || has_arg(args, &["--tags"])
-            {
-                push(flags);
-            }
-        }
-        _ => {}
-    }
     // A production target: a word "prod", "production", or "live" in a host, flag value,
     // project name, or variable name. A build mode such as `build:production` is not a target.
     let target_words: Vec<String> = argv
@@ -1661,49 +1168,13 @@ fn check_release(
     let prod_word = target_words
         .iter()
         .any(|w| matches!(w.as_str(), "prod" | "production" | "prd" | "live"))
-        || joined_lower.contains("sk_live_")
-        || joined_lower.contains("pk_live_");
+        || cmd.joined_lower.contains("sk_live_")
+        || cmd.joined_lower.contains("pk_live_");
     let is_build =
         matches!(sub, "build" | "run") && args.get(1).is_some_and(|a| a.starts_with("build"));
-    // Text tools only read or print text. A production word there is a search term or a
-    // file name, not a target. `vercel env ls` lists names without values.
-    let text_tool = TEXT_TOOLS.contains(&prog);
-    // Read commands: listings, inspection, logs, and API GET requests. A dry run only
-    // shows the plan. `git` pushes are checked above; a word in a commit message or a
-    // log search is not a target.
-    let vercel_read = prog == "vercel"
-        && (matches!(
-            sub,
-            "ls" | "list" | "inspect" | "logs" | "whoami" | "domains" | "project" | "projects"
-        ) || (sub == "env" && args.get(1).is_some_and(|a| a == "ls"))
-            || (sub == "alias" && args.get(1).is_some_and(|a| a == "ls"))
-            || (sub == "api"
-                && !args
-                    .iter()
-                    .any(|a| a == "-x" || a == "--method" || a.starts_with("-x"))));
-    let dry_run = has_arg(args, &["--dry-run", "--dryrun"]);
-    // A request to this computer (for example a local browser automation service) does
-    // not target a production system, even if a label says "prod".
-    let hosts: Vec<String> = argv.iter().filter_map(|arg| url_host(arg)).collect();
-    let local_only = matches!(prog, "curl" | "wget" | "http")
-        && !hosts.is_empty()
-        && hosts.iter().all(|h| h == "127.0.0.1" || h == "localhost");
-    // Removing temporary files is not a production action.
-    let temp_cleanup = matches!(prog, "rm" | "unlink")
-        && argv
-            .iter()
-            .skip(1)
-            .filter(|a| !a.starts_with('-'))
-            .all(|a| is_temp_path(a));
-    if prod_word
-        && !is_build
-        && !text_tool
-        && !vercel_read
-        && !dry_run
-        && !local_only
-        && !temp_cleanup
-        && prog != "git"
-    {
+    // The packs make exceptions for commands that only read, such as text tools,
+    // listings, local requests, and the removal of temporary files.
+    if prod_word && !is_build && !rules.exempt(Check::ProductionWord, cmd) {
         push(flags);
     }
     // Mass messages and real recipients.
@@ -1775,7 +1246,7 @@ fn check_recipients(argv: &[String], flags: &mut Vec<String>) {
 
 // ---- Known safe commands ----
 
-fn is_known_safe(segment: &Segment) -> bool {
+fn is_known_safe(rules: &RuleSet, segment: &Segment, secret_names: &[String]) -> bool {
     if segment.redirect_out {
         return false;
     }
@@ -1787,264 +1258,23 @@ fn is_known_safe(segment: &Segment) -> bool {
         // `name=value` alone. A `$( )` inside is its own pipeline.
         return true;
     }
-    let prog = base_name(first);
-    let args = lower_args(&argv[1..]);
-    if is_usage_request(&prog, &args) {
-        return true;
-    }
-    let sub = args.first().map(String::as_str).unwrap_or_default();
-    let second = args.get(1).map(String::as_str).unwrap_or_default();
-    match prog.as_str() {
-        "npm" | "pnpm" | "yarn" | "bun" => {
-            let script = if sub == "run" || sub == "run-script" {
-                second
-            } else {
-                sub
-            };
-            matches!(
-                sub,
-                "test"
-                    | "t"
-                    | "ci"
-                    | "ls"
-                    | "outdated"
-                    | "audit"
-                    | "why"
-                    | "version"
-                    | "-v"
-                    | "--version"
-            ) || (matches!(sub, "install" | "i")
-                && args.iter().skip(1).all(|arg| arg.starts_with('-')))
-                || (sub.is_empty() && prog == "yarn")
-                || is_safe_script_name(script)
-        }
-        "tsc" | "eslint" | "prettier" | "vitest" | "jest" | "mocha" | "ava" | "biome"
-        | "stylelint" | "svelte-check" => true,
-        "next" | "vite" | "astro" => matches!(
-            sub,
-            "build" | "dev" | "lint" | "check" | "start" | "preview"
-        ),
-        "playwright" | "cypress" => matches!(sub, "test" | "run" | "open"),
-        "cargo" => matches!(
-            sub,
-            "test"
-                | "build"
-                | "check"
-                | "clippy"
-                | "fmt"
-                | "doc"
-                | "run"
-                | "bench"
-                | "tree"
-                | "metadata"
-        ),
-        "go" => matches!(sub, "test" | "build" | "vet" | "fmt" | "mod" | "run"),
-        "pytest" | "ruff" | "mypy" | "black" | "flake8" | "pylint" | "isort" => true,
-        "python" | "python3" => {
-            (sub == "-m" && matches!(second, "pytest" | "unittest" | "mypy" | "ruff" | "black"))
-                || (sub == "manage.py"
-                    && matches!(
-                        second,
-                        "test" | "check" | "makemigrations" | "showmigrations" | "runserver"
-                    ))
-        }
-        "make" => matches!(
-            sub,
-            "test" | "lint" | "build" | "check" | "fmt" | "format" | ""
-        ),
-        "git" => match sub {
-            "status" | "diff" | "log" | "show" | "fetch" | "blame" | "shortlog" | "describe"
-            | "rev-parse" | "ls-files" | "grep" | "add" | "commit" | "switch" | "pull"
-            | "rev-list" | "ls-remote" | "show-ref" | "for-each-ref" | "cat-file"
-            | "merge-base" | "name-rev" | "reflog" | "count-objects" | "check-ignore" | "var" => {
-                true
-            }
-            "worktree" => matches!(second, "list"),
-            "remote" => args.len() == 1 || matches!(second, "-v" | "show" | "get-url"),
-            "config" => has_arg(&args, &["--get", "--list", "-l", "--get-all"]),
-            "stash" => !has_arg(&args, &["drop", "clear"]),
-            "rebase" => !has_arg(&args, &["-i", "--interactive", "--exec", "-x", "--root"]),
-            "tag" => args.len() == 1,
-            "branch" => !has_arg(
-                &args,
-                &["-d", "-D", "--delete", "-m", "-M", "--force", "-f"],
-            ),
-            "checkout" => {
-                args.get(1).is_some_and(|a| a == "-b")
-                    || (args.len() == 2 && !args[1].starts_with('-') && args[1] != ".")
-            }
-            "push" => {
-                let targets: Vec<&String> = args
-                    .iter()
-                    .skip(1)
-                    .filter(|arg| !arg.starts_with('-'))
-                    .collect();
-                !args.iter().skip(1).any(|a| a.starts_with('-'))
-                    && targets.len() == 2
-                    && !matches!(
-                        targets[1].as_str(),
-                        "main" | "master" | "production" | "prod" | "release"
-                    )
-            }
-            _ => false,
-        },
-        "gh" => {
-            matches!(sub, "pr" | "issue" | "run" | "repo")
-                && matches!(
-                    second,
-                    "create" | "view" | "list" | "status" | "checks" | "diff" | "watch"
-                )
-        }
-        "ls" | "pwd" | "date" | "whoami" | "which" | "type" | "du" | "df" | "wc" | "tree"
-        | "file" | "stat" | "uname" | "true" | "false" | "sleep" | "sort" | "uniq" | "cut"
-        | "diff" | "jq" | "yq" | "nl" | "tr" | "column" | "basename" | "dirname" | "realpath"
-        | "printenv"
-            if prog != "printenv" =>
-        {
-            true
-        }
-        "sed" => !args
-            .iter()
-            .any(|arg| arg.starts_with("-i") || arg == "--in-place"),
-        "awk" => !argv.join(" ").contains("system("),
-        p if SHELL_CONTROL.contains(&p) => true,
-        "echo" | "printf" => true,
-        "cat" | "head" | "tail" | "less" | "grep" | "rg" | "ag" => {
-            !args.iter().any(|arg| is_secret_file(arg))
-        }
-        "find" => !args
-            .iter()
-            .any(|arg| matches!(arg.as_str(), "-delete" | "-exec" | "-execdir" | "-ok")),
-        "mkdir" | "touch" | "test" | "[" | "ps" | "lsof" => true,
-        "rm" => {
-            let targets: Vec<&String> = args.iter().filter(|arg| !arg.starts_with('-')).collect();
-            !targets.is_empty()
-                && targets.iter().all(|target| {
-                    let t = target.trim_start_matches("./").trim_end_matches('/');
-                    REMOVABLE.contains(&t)
-                        || REMOVABLE.iter().any(|r| t.starts_with(&format!("{r}/")))
-                })
-        }
-        "curl" | "wget" => is_authenticated_read(&argv),
-        "node" | "deno" if args.len() == 1 && matches!(sub, "-v" | "--version") => true,
-        "docker" | "podman" => {
-            matches!(
-                sub,
-                "ps" | "images" | "logs" | "inspect" | "version" | "info" | "build"
-            ) || (sub == "compose"
-                && matches!(
-                    second,
-                    "ps" | "logs" | "up" | "build" | "config" | "stop" | "restart"
-                ))
-        }
-        "supabase" => {
-            let a = args.join(" ");
-            let read_query = a.starts_with("db query")
-                && sql_argument(&argv).is_some_and(|sql| {
-                    let w = words(&sql);
-                    matches!(
-                        w.first().map(String::as_str),
-                        Some("select" | "with" | "explain" | "show")
-                    ) && !sql_writes(&sql)
-                });
-            read_query
-                || a.starts_with("db lint")
-                || a.starts_with("db advisors")
-                || a.starts_with("branches list")
-                || a.starts_with("projects list")
-                || a.starts_with("migration list")
-                || a.starts_with("inspect")
-                || a.starts_with("status")
-                || a.starts_with("start")
-                || a.starts_with("stop")
-                || a.starts_with("gen types")
-                || a.starts_with("migration new")
-                || a.starts_with("migration list")
-                || a.starts_with("db diff")
-                || a.starts_with("functions serve")
-                || a.starts_with("link")
-                || a.starts_with("--version")
-        }
-        "prisma" => {
-            let a = args.join(" ");
-            a.starts_with("generate")
-                || a.starts_with("format")
-                || a.starts_with("validate")
-                || a.starts_with("studio")
-                || (a.starts_with("migrate dev") && !a.contains("--force"))
-        }
-        "vercel" => {
-            matches!(sub, "dev" | "build" | "whoami" | "ls" | "inspect" | "logs")
-                || (sub == "env" && second == "ls")
-        }
-        _ => false,
-    }
+    let cmd = command(rules, segment, &argv, secret_names);
+    is_usage_request(rules, &cmd.program, &cmd.args) || rules.known_safe(&cmd)
 }
 
-/// Command line tools that print usage and stop for `--help` or `--version`. Other
-/// programs can treat these words as operands. For example BSD `rm -rf / --help`
-/// removes `/`, so the exception must never apply to them.
-const USAGE_CLIS: &[&str] = &[
-    "supabase",
-    "vercel",
-    "git",
-    "gh",
-    "npm",
-    "pnpm",
-    "yarn",
-    "bun",
-    "npx",
-    "node",
-    "deno",
-    "python",
-    "python3",
-    "pip",
-    "cargo",
-    "go",
-    "docker",
-    "prisma",
-    "kubectl",
-    "helm",
-    "terraform",
-    "fly",
-    "flyctl",
-    "aws",
-    "gcloud",
-    "az",
-    "firebase",
-    "wrangler",
-    "netlify",
-    "twilio",
-    "stripe",
-    "heroku",
-    "psql",
-    "pg_dump",
-    "redis-cli",
-    "curl",
-    "jq",
-    "rg",
-    "tsc",
-    "eslint",
-    "vitest",
-    "jest",
-    "playwright",
-    "next",
-    "vite",
-    "turbo",
-    "brew",
-];
-
 /// A request for usage text: `--help` or `--version` anywhere, `help` as the first
-/// word, or `-h` as the only option. Only for [`USAGE_CLIS`].
-fn is_usage_request(prog: &str, args: &[String]) -> bool {
-    USAGE_CLIS.contains(&prog)
+/// word, or `-h` as the only option. Only for programs with the role `usage`: other
+/// programs can treat these words as operands. For example BSD `rm -rf / --help`
+/// removes `/`, so the exception must never apply to `rm`.
+fn is_usage_request(rules: &RuleSet, prog: &str, args: &[String]) -> bool {
+    rules.has_role(prog, Role::Usage)
         && (args.iter().any(|arg| arg == "--help" || arg == "--version")
             || args.first().is_some_and(|arg| arg == "help")
             || (args.len() == 1 && args[0] == "-h"))
 }
 
 /// A read request to a known provider API: GET only, no body, and no upload.
-fn is_authenticated_read(argv: &[String]) -> bool {
+pub(crate) fn is_authenticated_read(argv: &[String], known_hosts: &[String]) -> bool {
     let args = lower_args(&argv[1..]);
     let writes = args.iter().enumerate().any(|(i, arg)| {
         arg.starts_with("-d")
@@ -2057,42 +1287,9 @@ fn is_authenticated_read(argv: &[String]) -> bool {
                 && args.get(i + 1).is_some_and(|m| m != "get"))
             || (arg.starts_with("-x") && arg.len() > 2 && &arg[2..] != "get")
     });
-    let hosts: Vec<String> = argv.iter().filter_map(|arg| url_host(arg)).collect();
-    let known = !hosts.is_empty()
-        && hosts.iter().all(|host| {
-            KNOWN_API_HOSTS
-                .iter()
-                .any(|k| host == k || host.ends_with(&format!(".{k}")))
-        });
+    let hosts = url_hosts(argv);
+    let known = !hosts.is_empty() && hosts.iter().all(|host| is_known_host(host, known_hosts));
     !writes && known
-}
-
-fn is_safe_script_name(name: &str) -> bool {
-    let name = name.to_lowercase();
-    let base = name.split(':').next().unwrap_or(&name);
-    matches!(
-        base,
-        "test"
-            | "tests"
-            | "lint"
-            | "build"
-            | "typecheck"
-            | "type-check"
-            | "check"
-            | "format"
-            | "fmt"
-            | "dev"
-            | "start"
-            | "preview"
-            | "storybook"
-            | "e2e"
-            | "coverage"
-            | "prettier"
-            | "tsc"
-    ) && (base == "build" || !name.contains("prod"))
-        && !name.contains("deploy")
-        && !name.contains("release")
-        && !name.contains("publish")
 }
 
 #[cfg(test)]
@@ -2326,6 +1523,74 @@ mod tests {
             &secrets(),
         );
         assert_eq!(a.flags, vec!["injection_phrase"]);
+        assert!(!a.known_safe);
+    }
+
+    /// Command lines of the replay sets: the labeled sets and the coverage set.
+    fn replay_lines() -> Vec<String> {
+        let labeled = [
+            include_str!("../../tests/fixtures/bouncer/cases.tsv"),
+            include_str!("../../tests/fixtures/bouncer/independent.tsv"),
+        ];
+        let mut lines: Vec<String> = labeled
+            .iter()
+            .flat_map(|text| text.lines())
+            .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+            .map(|line| line.split('\t').nth(2).expect("command").to_owned())
+            .collect();
+        lines.extend(
+            include_str!("../../tests/fixtures/rule_packs/coverage.tsv")
+                .lines()
+                .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+                .map(|line| {
+                    let command = line.split('\t').next().unwrap_or(line);
+                    command.replace("<NL>", "\n").replace("<TAB>", "\t")
+                }),
+        );
+        lines
+    }
+
+    /// A rule that no replay command reaches is not checked by the replay.
+    #[test]
+    fn every_pack_rule_matches_a_replay_command() {
+        let rules = RuleSet::builtin().expect("built-in packs");
+        let mut unmatched: std::collections::BTreeSet<String> =
+            rules.rule_ids().into_iter().collect();
+        assert!(unmatched.len() > 100, "{}", unmatched.len());
+        for line in replay_lines() {
+            for segment in parse_argv(&command_line_to_argv(&line)).iter().flatten() {
+                let argv = effective_argv(segment);
+                if argv.is_empty() {
+                    continue;
+                }
+                let secret_names = secrets();
+                let cmd = command(&rules, segment, &argv, &secret_names);
+                for name in rules.matching_ids(&cmd) {
+                    unmatched.remove(&name);
+                }
+            }
+        }
+        assert!(
+            unmatched.is_empty(),
+            "rules without a replay command: {unmatched:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_rule_set_asks_for_every_command() {
+        let error = packs::PackError {
+            source: "local.json".to_owned(),
+            message: "test".to_owned(),
+        };
+        let rules = RuleSet::builtin()
+            .expect("built-in packs")
+            .fail_closed(&error);
+        let a = analyze_with(&rules, &argv("npm test"), "Run the tests.", &secrets());
+        assert_eq!(a.flags, vec![packs::LOAD_ERROR_FLAG]);
+        assert!(!a.known_safe);
+        let empty = RuleSet::failed(&error);
+        let a = analyze_with(&empty, &argv("git status"), "Read.", &secrets());
+        assert_eq!(a.flags, vec![packs::LOAD_ERROR_FLAG]);
         assert!(!a.known_safe);
     }
 }

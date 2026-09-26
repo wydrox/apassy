@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "prisma",
+  "description": "Prisma CLI: database resets and schema commands.",
+  "programs": ["prisma"],
+  "roles": {
+    "usage": ["prisma"]
+  },
+  "rules": [
+    {
+      "id": "reset",
+      "flag": "data_loss",
+      "dry_run": "skip_with_n",
+      "when": {
+        "any_of": [
+          { "args_start": ["migrate reset"] },
+          { "args_contain": ["--accept-data-loss", "--force-reset"] }
+        ]
+      }
+    }
+  ],
+  "safe": [
+    {
+      "id": "schema-commands",
+      "when": { "args_start": ["generate", "format", "validate", "studio"] }
+    },
+    {
+      "id": "migrate-dev",
+      "when": { "args_start": ["migrate dev"], "not": { "args_contain": ["--force"] } }
+    }
+  ]
+}
