@@ -166,6 +166,7 @@ dependencies = [
  "eframe",
  "getrandom 0.4.3",
  "rusqlite",
+ "rustix 1.1.4",
  "rustls",
  "rustls-platform-verifier",
  "serde",
