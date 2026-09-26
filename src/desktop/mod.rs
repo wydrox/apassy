@@ -3,6 +3,7 @@
 //! This module is a demo UI. It is not a secure vault, authenticated owner
 //! channel, or verified isolation boundary.
 
+mod learning_ui;
 pub mod model;
 #[cfg(feature = "vault")]
 pub mod owner_store;
@@ -17,7 +18,7 @@ pub use model::{
     REPORTING_AGENT_ID, REPORTING_ITEM_ID, RequestStatus, SAMPLE_RULE_TEXT,
 };
 
-/// Five owner views in the desktop shell.
+/// Owner views in the desktop shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OwnerView {
     Vault,
@@ -25,15 +26,18 @@ pub enum OwnerView {
     Rules,
     Agents,
     Activity,
+    /// Ask rate, automatic decisions, patterns, and calibration (ADR 0009, goal item B10).
+    Learning,
 }
 
 impl OwnerView {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Vault,
         Self::Item,
         Self::Rules,
         Self::Agents,
         Self::Activity,
+        Self::Learning,
     ];
 
     pub fn label(self) -> &'static str {
@@ -43,6 +47,7 @@ impl OwnerView {
             Self::Rules => "Rules",
             Self::Agents => "Agents",
             Self::Activity => "Activity",
+            Self::Learning => "Learning",
         }
     }
 }
@@ -72,6 +77,9 @@ pub struct DesktopApp {
     /// The local agent broker. It runs only with a native window.
     #[cfg(feature = "vault")]
     pub(crate) broker: BrokerState,
+    /// Learning view state (goal item B10).
+    #[cfg(feature = "vault")]
+    pub(crate) learning: learning_ui::LearningUiState,
     styled: bool,
 }
 
@@ -111,6 +119,8 @@ impl DesktopApp {
             owner_ui: owner_store::OwnerUiState::default(),
             #[cfg(feature = "vault")]
             broker: BrokerState::NotStarted,
+            #[cfg(feature = "vault")]
+            learning: learning_ui::LearningUiState::default(),
             styled: false,
         }
     }

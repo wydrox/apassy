@@ -12,8 +12,8 @@ use crate::desktop::model::{
 };
 use crate::desktop::{DesktopApp, OwnerView, StatusKind};
 
-const INK: Color32 = Color32::from_rgb(28, 25, 20);
-const INK_MUTED: Color32 = Color32::from_rgb(83, 77, 68);
+pub(super) const INK: Color32 = Color32::from_rgb(28, 25, 20);
+pub(super) const INK_MUTED: Color32 = Color32::from_rgb(83, 77, 68);
 const BG: Color32 = Color32::from_rgb(243, 239, 230);
 const BG_ELEV: Color32 = Color32::from_rgb(255, 253, 248);
 const LINE: Color32 = Color32::from_rgb(215, 208, 195);
@@ -28,9 +28,9 @@ const SIDEBAR_MUTED: Color32 = Color32::from_rgb(201, 194, 180);
 const SIDEBAR_CURRENT: Color32 = Color32::from_rgb(49, 88, 108);
 const BANNER_BG: Color32 = Color32::from_rgb(239, 228, 196);
 const BANNER_INK: Color32 = Color32::from_rgb(63, 52, 20);
-const ALLOW: Color32 = Color32::from_rgb(33, 88, 69);
-const ASK: Color32 = Color32::from_rgb(122, 78, 16);
-const DENY: Color32 = Color32::from_rgb(138, 36, 48);
+pub(super) const ALLOW: Color32 = Color32::from_rgb(33, 88, 69);
+pub(super) const ASK: Color32 = Color32::from_rgb(122, 78, 16);
+pub(super) const DENY: Color32 = Color32::from_rgb(138, 36, 48);
 
 pub(crate) fn apply_style(ctx: &egui::Context) {
     ctx.options_mut(|options| {
@@ -92,7 +92,7 @@ fn content_frame() -> Frame {
     Frame::NONE.fill(BG).inner_margin(Margin::symmetric(18, 16))
 }
 
-fn card_frame() -> Frame {
+pub(super) fn card_frame() -> Frame {
     Frame::NONE
         .fill(BG_ELEV)
         .inner_margin(Margin::symmetric(14, 12))
@@ -232,6 +232,7 @@ fn draw_content(app: &mut DesktopApp, ui: &mut egui::Ui) {
             OwnerView::Rules => draw_rules(app, ui),
             OwnerView::Agents => draw_agents(app, ui),
             OwnerView::Activity => draw_activity(app, ui),
+            OwnerView::Learning => super::learning_ui::draw(app, ui),
         });
 }
 
@@ -1586,7 +1587,7 @@ fn labeled_text(ui: &mut egui::Ui, id: &str, caption: &str, value: &mut String) 
     edit.labelled_by(label.id);
 }
 
-fn heading(ui: &mut egui::Ui, text: &str) {
+pub(super) fn heading(ui: &mut egui::Ui, text: &str) {
     ui.label(
         RichText::new(text)
             .size(22.0)
@@ -1606,7 +1607,7 @@ fn quote(ui: &mut egui::Ui, text: &str) {
         });
 }
 
-fn property_grid(ui: &mut egui::Ui, id: &str, rows: &[(&str, String)]) {
+pub(super) fn property_grid(ui: &mut egui::Ui, id: &str, rows: &[(&str, String)]) {
     egui::Grid::new(id)
         .num_columns(2)
         .spacing([12.0, 6.0])
@@ -1636,7 +1637,7 @@ fn empty_as_none(value: &str) -> String {
     }
 }
 
-fn accent_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+pub(super) fn accent_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(
         egui::Button::new(RichText::new(text).color(ACCENT_INK))
             .fill(ACCENT)
@@ -1656,7 +1657,7 @@ fn secondary_sidebar_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     )
 }
 
-fn danger_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+pub(super) fn danger_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(
         egui::Button::new(RichText::new(text).color(Color32::from_rgb(255, 248, 247)))
             .fill(DENY)
@@ -1712,6 +1713,7 @@ mod tests {
             OwnerView::Rules => "Rules",
             OwnerView::Agents => "Agents",
             OwnerView::Activity => "Activity and approvals",
+            OwnerView::Learning => "Learning",
         }
     }
 
@@ -2091,6 +2093,7 @@ mod agents_view {
         ALLOW, ASK, DENY, INK, INK_MUTED, accent_button, card_frame, danger_button, heading,
         labeled_text,
     };
+    use crate::broker::approvals::{OwnerAnswer, RememberOffer};
     use crate::broker::profile::REPORTING_API_V0;
     use crate::desktop::owner_store::{FreshToken, format_utc};
     use crate::desktop::{BrokerState, DesktopApp};
@@ -2644,10 +2647,21 @@ mod agents_view {
                         )
                         .color(ASK),
                     );
+                    if let Some(offer) = &run.remember {
+                        ui.label(RichText::new(remember_text(offer)).color(INK_MUTED));
+                    }
                     ui.horizontal(|ui| {
                         if accent_button(ui, "Approve once").clicked() {
                             approvals.decide(run.id, true);
                             app.set_ok("The run is approved once.");
+                        }
+                        // "Approve and remember" is an approval: the same queue path as
+                        // "Approve once" (ADR 0010, goal item A4).
+                        if run.remember.is_some()
+                            && accent_button(ui, "Approve and remember").clicked()
+                        {
+                            approvals.answer(run.id, OwnerAnswer::ApproveAndRemember);
+                            app.set_ok("The run is approved. Its pattern has one more approval.");
                         }
                         if danger_button(ui, "Deny").clicked() {
                             approvals.decide(run.id, false);
@@ -2657,6 +2671,14 @@ mod agents_view {
                 });
             ui.add_space(8.0);
         }
+    }
+
+    /// The pattern that "Approve and remember" teaches, and its approvals.
+    fn remember_text(offer: &RememberOffer) -> String {
+        format!(
+            "Pattern: {} ({} of {} approvals). After {} approvals, this pattern runs without a prompt for this agent, project, and items.",
+            offer.pattern, offer.approvals, offer.needed, offer.needed
+        )
     }
 
     /// Arguments as one line. Arguments with spaces or quotes are in single quotes.
