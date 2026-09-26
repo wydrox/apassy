@@ -76,15 +76,45 @@ pub struct Fact {
 #[derive(Debug, Clone, PartialEq)]
 pub enum BouncerVerdict {
     /// All answers are present.
-    Scored { facts: Vec<Fact> },
+    Scored {
+        facts: Vec<Fact>,
+        /// The model version from the `model` field of the answer, for example
+        /// `apassy-base-v1+1a2b3c4d` or `laya-rl-agent`. `None` when the field is
+        /// missing or not a short version text.
+        model: Option<String>,
+    },
     /// The model did not give a valid answer. The reason has no request data.
     Unavailable(String),
+}
+
+/// Longest model version that the activity log records.
+const MODEL_VERSION_MAX: usize = 64;
+
+/// A model version is short and has only letters, digits, and `.`, `_`, `+`, `-`.
+fn model_version(value: &Value) -> Option<String> {
+    let text = value.get("model")?.as_str()?;
+    let valid = !text.is_empty()
+        && text.len() <= MODEL_VERSION_MAX
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'));
+    valid.then(|| text.to_owned())
 }
 
 impl BouncerVerdict {
     pub fn fact(&self, name: &str) -> Option<f64> {
         match self {
-            Self::Scored { facts } => facts.iter().find(|f| f.name == name).map(|f| f.probability),
+            Self::Scored { facts, .. } => {
+                facts.iter().find(|f| f.name == name).map(|f| f.probability)
+            }
+            Self::Unavailable(_) => None,
+        }
+    }
+
+    /// The version of the model that answered, if it sent one.
+    pub fn model(&self) -> Option<&str> {
+        match self {
+            Self::Scored { model, .. } => model.as_deref(),
             Self::Unavailable(_) => None,
         }
     }
@@ -93,11 +123,17 @@ impl BouncerVerdict {
     pub fn summary(&self) -> String {
         match self {
             Self::Unavailable(reason) => format!("Bouncer unavailable: {reason}"),
-            Self::Scored { facts } => facts
-                .iter()
-                .map(|f| format!("{} {:.0}%", f.name, f.probability * 100.0))
-                .collect::<Vec<_>>()
-                .join(", "),
+            Self::Scored { facts, model } => {
+                let answers = facts
+                    .iter()
+                    .map(|f| format!("{} {:.0}%", f.name, f.probability * 100.0))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                match model {
+                    Some(model) => format!("{answers}. Model: {model}."),
+                    None => answers,
+                }
+            }
         }
     }
 }
@@ -209,6 +245,7 @@ pub fn request_body(request: &BouncerRequest) -> Value {
 }
 
 /// Read `answers.<name>.noul` for every fact. A missing or bad value is unavailable.
+/// The `model` field names the model version for the activity log (goal B8).
 pub fn parse_answers(body: &[u8], asked: &[(&str, &str)]) -> BouncerVerdict {
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
         return BouncerVerdict::Unavailable("the answer is not JSON".to_owned());
@@ -229,7 +266,10 @@ pub fn parse_answers(body: &[u8], asked: &[(&str, &str)]) -> BouncerVerdict {
             None => return BouncerVerdict::Unavailable(format!("no valid answer for {name}")),
         }
     }
-    BouncerVerdict::Scored { facts }
+    BouncerVerdict::Scored {
+        facts,
+        model: model_version(&value),
+    }
 }
 
 /// The bouncer decision for one request.
@@ -417,7 +457,36 @@ mod tests {
                     probability: *p,
                 })
                 .collect(),
+            model: None,
         }
+    }
+
+    /// Goal B8: the activity log names the model version that answered.
+    #[test]
+    fn answer_names_the_model_version() {
+        let asked = [("task_match", ""), ("writes", "")];
+        let body = |model: &str| {
+            format!(
+                r#"{{"model":{model},"answers":{{"task_match":{{"noul":0.9}},"writes":{{"noul":0.1}}}}}}"#
+            )
+        };
+        let base = parse_answers(body("\"apassy-base-v1+1a2b3c4d\"").as_bytes(), &asked);
+        assert_eq!(base.model(), Some("apassy-base-v1+1a2b3c4d"));
+        assert_eq!(
+            base.summary(),
+            "task_match 90%, writes 10%. Model: apassy-base-v1+1a2b3c4d."
+        );
+        let stock = parse_answers(body("\"laya-rl-agent\"").as_bytes(), &asked);
+        assert_eq!(stock.model(), Some("laya-rl-agent"));
+        // A missing, long, or odd model text is not recorded. The answers still count.
+        let long = format!("\"{}\"", "a".repeat(MODEL_VERSION_MAX + 1));
+        for odd in ["null", "7", "\"\"", "\"a b\"", "\"x\\ny\"", long.as_str()] {
+            let verdict = parse_answers(body(odd).as_bytes(), &asked);
+            assert_eq!(verdict.model(), None, "{odd}");
+            assert_eq!(verdict.summary(), "task_match 90%, writes 10%");
+        }
+        let without = br#"{"answers":{"task_match":{"noul":0.9},"writes":{"noul":0.1}}}"#;
+        assert_eq!(parse_answers(without, &asked).model(), None);
     }
 
     fn declaration(environment: Environment) -> Option<Declaration> {
