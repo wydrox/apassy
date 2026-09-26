@@ -12,8 +12,11 @@
 //!    forbidden words, hourly limit).
 //! 6. A production declaration needs the owner (ADR 0010). The model is not asked.
 //! 7. The bouncer scores the request (ADR 0007, ADR 0008). A rule flag skips the model.
+//!    An active remembered pattern replaces the model step (ADR 0009, ADR 0010). It
+//!    cannot change steps 5 and 6, a rule flag, or a missing user request or declaration.
 //! 8. A grant in "ask" mode, a high risk, or an unavailable bouncer needs the owner.
-//!    A clean request with only "bouncer" grants runs without a prompt.
+//!    A clean request with only "bouncer" grants runs without a prompt. Each decision
+//!    goes to the decision log. An owner denial blocks the pattern of the request.
 //! 9. After a decision, the broker checks the vault, the agent, and the rules again.
 //!    The vault epoch must be the same as in step 1. A lock, an unlock, or a restore
 //!    in between makes the decision invalid (goal item V3).
@@ -27,12 +30,17 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use super::approvals::{ApprovalOutcome, PendingRun};
-use super::bouncer::{BouncerRequest, BouncerVerdict, DecisionContext, decide, owner_required};
+use super::bouncer::{
+    BouncerRequest, BouncerVerdict, DecisionContext, decide_learned, owner_required,
+};
 use super::decide::{BrokerContext, authenticate, lock, locked_response};
 use super::exec::{self, SecretEnv};
+use super::learning::{self, LoggedRequest, Outcome, RuleDenial, RunScope};
 use super::shell_risk::analyze;
 use crate::agent::wire::WireResponse;
-use crate::vault::{ActivityDecision, AgentSummary, Declaration, ExecMode, NewActivity, Vault};
+use crate::vault::{
+    ActivityDecision, AgentSummary, DecisionEntry, Declaration, ExecMode, NewActivity, Vault,
+};
 
 const MAX_ITEMS: usize = 16;
 const MAX_ARGS: usize = 64;
@@ -111,6 +119,8 @@ struct Checked {
     /// Vault epoch of the first check. Every lock and unlock changes it.
     epoch: [u8; 32],
     cwd: PathBuf,
+    /// Canonical project directory of the first item. Remembered patterns bind to it.
+    project_dir: PathBuf,
     /// Working directory relative to the project directory of the first item.
     relative_dir: String,
     env_names: Vec<String>,
@@ -144,6 +154,21 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                     ActivityDecision::Deny,
                     &reason,
                 );
+                let user_request = request.user_request.unwrap_or_default();
+                let _ = vault.record_decision(
+                    &RuleDenial {
+                        at: learning::now(),
+                        agent_id: agent.id,
+                        agent_name: &agent.name,
+                        items: request.items,
+                        user_request,
+                        user_request_source: learning::agent_source(user_request),
+                        command: request.command,
+                        purpose: request.purpose,
+                        reason: &reason,
+                    }
+                    .entry(),
+                );
                 return WireResponse::failure(code, reason);
             }
         }
@@ -162,7 +187,28 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         declarations: &checked.declarations,
         has_user_request: !user_request.is_empty(),
     };
-    let verdict = if !analysis.flags.is_empty() || owner_required(&context).is_some() {
+    // Learning (ADR 0009, ADR 0010): the calibrated level and a remembered pattern. A
+    // pattern replaces only the model step, so an active pattern also skips the model.
+    let now = learning::now();
+    let scope = RunScope {
+        agent_id: checked.agent.id,
+        project_dir: &checked.project_dir,
+        cwd: &checked.cwd,
+        cwd_rel: &checked.relative_dir,
+        items: request.items,
+        declarations: &checked.declarations,
+        instruction: &checked.instruction,
+    };
+    let pattern = learning::request_pattern(scope, request.command);
+    let learned = lock(&ctx.vault)
+        .as_ref()
+        .filter(|vault| !vault.is_locked())
+        .map(|vault| learning::lookup(vault, pattern.as_ref(), now))
+        .unwrap_or_default();
+    let verdict = if !analysis.flags.is_empty()
+        || owner_required(&context).is_some()
+        || learned.learned.pattern.is_some()
+    {
         BouncerVerdict::Unavailable("not asked".to_owned())
     } else {
         match &ctx.bouncer {
@@ -177,15 +223,40 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
             None => BouncerVerdict::Unavailable("no bouncer is set".to_owned()),
         }
     };
-    let decision = decide(&verdict, &context);
+    let decision = decide_learned(&verdict, &context, &learned.learned);
     let risk_note = decision.note.clone();
     let needs_approval = checked.any_ask || decision.ask_owner;
+    let by_pattern = !decision.ask_owner && learned.learned.pattern.is_some();
     let decided_by = if needs_approval {
         "Owner approved"
+    } else if by_pattern {
+        "Remembered pattern"
     } else {
         "Bouncer allowed"
     };
+    // The decision log entry (ADR 0009). It has no secret value.
+    let logged = LoggedRequest {
+        at: now,
+        agent_id: checked.agent.id,
+        agent_name: &checked.agent.name,
+        scope,
+        user_request,
+        user_request_source: learning::agent_source(user_request),
+        command: request.command,
+        purpose: request.purpose.trim(),
+        env_names: &checked.env_names,
+        analysis: &analysis,
+        verdict: &verdict,
+        pattern: pattern.as_ref(),
+        grant_asks: checked.any_ask,
+        thresholds: learned.learned.thresholds,
+    };
+    let mut remembered = false;
 
+    if !needs_approval {
+        let entry = logged.entry(Outcome::Automatic { by_pattern }, &risk_note);
+        record_decision_locked(ctx, &entry, pattern.as_ref());
+    }
     if needs_approval {
         // The wait ends when the vault session of the first check ends.
         let same_session = || {
@@ -203,12 +274,18 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                 purpose: request.purpose.trim().to_owned(),
                 risk: risk_note.clone(),
                 user_request: user_request.to_owned(),
+                remember: learned.offer(pattern.as_ref(), &context, checked.any_ask),
             },
             ctx.approval_timeout,
             same_session,
         );
+        // Every owner answer goes to the decision log. A denial blocks the pattern.
+        let mut entry = logged.entry(Outcome::Owner(outcome), &risk_note);
+        entry.at = learning::now();
+        record_decision_locked(ctx, &entry, pattern.as_ref());
+        remembered = outcome == ApprovalOutcome::ApprovedAndRemembered;
         let refusal = match outcome {
-            ApprovalOutcome::Approved => None,
+            ApprovalOutcome::Approved | ApprovalOutcome::ApprovedAndRemembered => None,
             ApprovalOutcome::Denied => {
                 Some(("approval_denied", "The owner denied this run.".to_owned()))
             }
@@ -277,6 +354,13 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                 &reason,
             );
             return WireResponse::failure(code, reason);
+        }
+        // The run starts in the session of the decision. Now learning can count it.
+        if remembered && let Some(pattern) = &pattern {
+            let _ = learning::remember(vault, pattern, learning::now());
+        }
+        if by_pattern && let Some(id) = learned.active_id {
+            let _ = vault.record_pattern_use(id, learning::now());
         }
         match read_secrets(vault, request.items) {
             Ok(secrets) => {
@@ -378,6 +462,7 @@ fn check(
     let mut declarations = Vec::new();
     let mut instructions: Vec<String> = Vec::new();
     let mut relative_dir = None;
+    let mut project_dir = None;
     let command_text = request.command.join(" ");
     let command_lower = command_text.to_lowercase();
     let now = std::time::SystemTime::now()
@@ -408,6 +493,7 @@ fn check(
             } else {
                 rest
             });
+            project_dir = Some(project.clone());
         }
         if !inside {
             return Err((
@@ -477,6 +563,7 @@ fn check(
     Ok(Checked {
         agent: agent.clone(),
         epoch: vault.epoch(),
+        project_dir: project_dir.unwrap_or_else(|| cwd.clone()),
         cwd,
         relative_dir: relative_dir.unwrap_or_else(|| ".".to_owned()),
         env_names,
@@ -533,6 +620,18 @@ fn record(
         decision,
         reason: format!("{reason} Purpose: {}", request.purpose.trim()),
     });
+}
+
+/// Store a decision log entry when the vault is unlocked (ADR 0009).
+fn record_decision_locked(
+    ctx: &BrokerContext,
+    entry: &DecisionEntry,
+    pattern: Option<&learning::RequestPattern>,
+) {
+    let mut guard = lock(&ctx.vault);
+    if let Some(vault) = guard.as_mut().filter(|vault| !vault.is_locked()) {
+        let _ = learning::record(vault, entry, pattern);
+    }
 }
 
 fn record_locked(

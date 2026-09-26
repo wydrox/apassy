@@ -31,11 +31,36 @@ pub struct PendingRun {
     pub risk: String,
     /// The user request that the agent sent. Empty when the agent sent none.
     pub user_request: String,
+    /// The pattern that "Approve and remember" teaches (ADR 0010). `None` when the run
+    /// cannot teach a pattern, for example a production run or a run with a rule flag.
+    pub remember: Option<RememberOffer>,
+}
+
+/// A pattern that the owner can teach with "Approve and remember".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RememberOffer {
+    /// The generalized command, for example `git log -n <number>`.
+    pub pattern: String,
+    /// Approvals that the pattern has now.
+    pub approvals: u32,
+    /// Approvals that the pattern needs to run without a prompt.
+    pub needed: u32,
+}
+
+/// The owner's answer to a waiting run. Every answer goes through [`ApprovalQueue::answer`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerAnswer {
+    Approve,
+    /// Approve this run and add one approval to its pattern.
+    ApproveAndRemember,
+    Deny,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalOutcome {
     Approved,
+    /// The owner approved with "Approve and remember".
+    ApprovedAndRemembered,
     Denied,
     TimedOut,
     /// The vault was locked or replaced, or the broker stopped, before the run used a
@@ -52,7 +77,7 @@ struct QueueState {
     /// The broker stopped. A new run does not wait.
     closed: bool,
     pending: Vec<PendingRun>,
-    decisions: BTreeMap<u64, bool>,
+    decisions: BTreeMap<u64, OwnerAnswer>,
 }
 
 type Notifier = Box<dyn Fn() + Send + Sync>;
@@ -123,12 +148,29 @@ impl ApprovalQueue {
 
     /// Record the owner decision. Returns false when the run no longer waits.
     pub fn decide(&self, id: u64, approve: bool) -> bool {
+        self.answer(
+            id,
+            if approve {
+                OwnerAnswer::Approve
+            } else {
+                OwnerAnswer::Deny
+            },
+        )
+    }
+
+    /// Record the owner answer. Every owner decision goes through this function.
+    /// Returns false when the run no longer waits, or when "Approve and remember" is
+    /// for a run without a pattern offer.
+    pub fn answer(&self, id: u64, answer: OwnerAnswer) -> bool {
         let mut state = self.state();
-        if !state.pending.iter().any(|run| run.id == id) {
+        let Some(run) = state.pending.iter().find(|run| run.id == id) else {
+            return false;
+        };
+        if answer == OwnerAnswer::ApproveAndRemember && run.remember.is_none() {
             return false;
         }
         state.pending.retain(|run| run.id != id);
-        state.decisions.insert(id, approve);
+        state.decisions.insert(id, answer);
         self.changed.notify_all();
         true
     }
@@ -181,11 +223,11 @@ impl ApprovalQueue {
                 state.decisions.remove(&id);
                 return ApprovalOutcome::Invalidated;
             }
-            if let Some(approved) = state.decisions.remove(&id) {
-                return if approved {
-                    ApprovalOutcome::Approved
-                } else {
-                    ApprovalOutcome::Denied
+            if let Some(answer) = state.decisions.remove(&id) {
+                return match answer {
+                    OwnerAnswer::Approve => ApprovalOutcome::Approved,
+                    OwnerAnswer::ApproveAndRemember => ApprovalOutcome::ApprovedAndRemembered,
+                    OwnerAnswer::Deny => ApprovalOutcome::Denied,
                 };
             }
             let now = Instant::now();
@@ -230,6 +272,7 @@ mod tests {
             purpose: "test".to_owned(),
             risk: String::new(),
             user_request: String::new(),
+            remember: None,
         }
     }
 
@@ -273,6 +316,46 @@ mod tests {
             ApprovalOutcome::TimedOut
         );
         assert!(queue.pending().is_empty());
+    }
+
+    /// "Approve and remember" uses the same queue path as "Approve once". It needs an offer.
+    #[test]
+    fn approve_and_remember_needs_an_offer() {
+        let queue = Arc::new(ApprovalQueue::new());
+        let waiter = {
+            let queue = Arc::clone(&queue);
+            std::thread::spawn(move || queue.wait_for(run(), Duration::from_secs(5), || true))
+        };
+        let id = wait_until_pending(&queue);
+        assert!(
+            !queue.answer(id, OwnerAnswer::ApproveAndRemember),
+            "no offer"
+        );
+        assert!(queue.answer(id, OwnerAnswer::Approve));
+        assert_eq!(waiter.join().expect("join"), ApprovalOutcome::Approved);
+
+        let offered = PendingRun {
+            remember: Some(RememberOffer {
+                pattern: "git log -n <number>".to_owned(),
+                approvals: 1,
+                needed: 3,
+            }),
+            ..run()
+        };
+        let waiter = {
+            let queue = Arc::clone(&queue);
+            std::thread::spawn(move || queue.wait_for(offered, Duration::from_secs(5), || true))
+        };
+        let id = wait_until_pending(&queue);
+        assert!(queue.answer(id, OwnerAnswer::ApproveAndRemember));
+        assert!(
+            !queue.answer(id, OwnerAnswer::Deny),
+            "the run no longer waits"
+        );
+        assert_eq!(
+            waiter.join().expect("join"),
+            ApprovalOutcome::ApprovedAndRemembered
+        );
     }
 
     #[test]

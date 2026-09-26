@@ -7,10 +7,14 @@
 
 pub mod approvals;
 pub mod bouncer;
+pub mod calibration;
 pub mod decide;
 pub mod exec;
 pub mod http;
+pub mod learning;
+pub mod patterns;
 pub mod profile;
+pub mod replay;
 mod run;
 pub mod server;
 pub mod shell_risk;
