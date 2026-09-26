@@ -40,6 +40,13 @@ path = "src/bin/apassy-dev-reporting.rs"
 name = "apassy-sandbox"
 path = "src/bin/apassy-sandbox.rs"
 
+# Held-out evaluation harness (goal B2). Needs the vault feature and a live Laya
+# server. It is not part of `cargo test`.
+[[bin]]
+name = "apassy-eval"
+path = "src/bin/apassy-eval.rs"
+required-features = ["vault"]
+
 [[test]]
 name = "sqlcipher_probe"
 path = "tests/sqlcipher_probe.rs"
