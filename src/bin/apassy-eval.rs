@@ -34,6 +34,7 @@ use apassy::broker::decide::{BrokerContext, handle};
 use apassy::broker::http::{
     DestinationUrl, HttpResponse, TlsClient, parse_destination, post_json_loopback,
 };
+use apassy::broker::prompts::PromptStore;
 use apassy::broker::shell_risk::command_line_to_argv;
 use apassy::contracts::CredentialKind;
 use apassy::vault::{
@@ -231,6 +232,8 @@ fn main() {
         approval_timeout: Duration::from_millis(5),
         run_timeout: Duration::from_secs(5),
         bouncer: Some(bouncer),
+        // No host hook in the evaluation: each case gives its user request directly.
+        prompts: Arc::new(PromptStore::new(Vec::new())),
     };
 
     let mut runs: Vec<RunResult> = Vec::new();
@@ -309,6 +312,7 @@ fn score_run(
         let request = WireRequest {
             v: WIRE_VERSION,
             token: token.to_owned(),
+            host_session: None,
             action: Action::Run {
                 items: item_ids.clone(),
                 command,
