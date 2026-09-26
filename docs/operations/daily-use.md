@@ -17,6 +17,7 @@ This page is the first-day checklist. The other pages have the details.
 2. Copy `target/Apassy.app` to `/Applications`. The agent profile protects `/Applications/Apassy.app` by default.
 3. Make sure that the data directory has mode `0700`: `chmod 700 "$HOME/Library/Application Support/Apassy"`. The broker does not start in a directory with a wider mode.
 4. Start the bouncer with the base model: [bouncer](bouncer.md), "Start command with the base model". Keep it on `127.0.0.1`.
+5. To start the bouncer at login, use a LaunchAgent. On 2026-09-27 this Mac got `~/Library/LaunchAgents/com.wydrox.apassy.bouncer.plist`. It runs `/Applications/Apassy.app/Contents/Resources/tools/basemodel/start.sh` with the base model on `127.0.0.1:8770`. The log is `~/Library/Logs/Apassy/bouncer.log`. To remove it: `launchctl bootout gui/$(id -u)/com.wydrox.apassy.bouncer`, then delete the file.
 
 ## 2. Set up the vault
 
