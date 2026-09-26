@@ -36,7 +36,8 @@ pub const MAX_PATTERNS: usize = 1_000;
 pub const MAX_BLOCKED_PATTERNS: usize = 5_000;
 /// Lowest `task_match` level that a calibration can apply.
 pub const CALIBRATION_FLOOR: f64 = 0.5;
-/// Highest `task_match` level that a calibration can apply. It is the default level.
+/// Highest `task_match` level that a calibration can apply. The default level is lower
+/// (`bouncer::DEFAULT_TASK_MATCH`).
 pub const CALIBRATION_CEILING: f64 = 0.8;
 const MAX_CALIBRATION_ROWS: usize = 100;
 /// Format version of one export line (`docs/operations/learning.md`).

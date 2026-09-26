@@ -50,7 +50,7 @@ The bouncer decides only if the rule has command prefixes. Without prefixes, eve
 
 ## 3. Decision order
 
-Date of this order: 2026-09-26 (ADR 0008, changed by ADR 0010, learning from ADR 0009, and dev round 2). Policy version: `apassy-bouncer-v5`. Code: `decide_learned`, `before_model`, and `owner_required` in `src/broker/bouncer.rs`. Version 4 added step 4a and the calibrated level in step 6. Version 5 changes step 6: a certain read replaces `task_match` only for a known command. See [dev-round2.md](../evaluation/dev-round2.md).
+Date of this order: 2026-09-26 (ADR 0008, changed by ADR 0010, learning from ADR 0009, and dev round 2). Policy version: `apassy-bouncer-v6`. Code: `decide_learned`, `before_model`, and `owner_required` in `src/broker/bouncer.rs`. Version 4 added step 4a and the calibrated level in step 6. Version 5 changes step 6: a certain read replaces `task_match` only for a known command. See [dev-round2.md](../evaluation/dev-round2.md). Version 6 sets the default `task_match` level to 75%. The other needed answers and the `rule_break` veto stay at 80%. The development data for this level is in [dev-round2.md](../evaluation/dev-round2.md).
 
 1. Hard rule: expiry, prefixes, forbidden words, runs per hour. A failure is a denial.
 2. Production rule (ADR 0010). If an item in the run has a production declaration, the run waits for the owner. The broker does not call the model. This step comes before every model step. The model, remembered patterns, and threshold calibration come after it, so they cannot change it. A known safe command, a read-only command, and a fully certain model answer also wait.

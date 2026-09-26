@@ -99,7 +99,7 @@ mod vault_view {
     };
     use super::{CandidateView, DesktopApp, draw_candidate};
     use crate::broker::approvals::{OwnerAction, OwnerProof};
-    use crate::broker::bouncer::{MIN_CONFIDENCE, Thresholds};
+    use crate::broker::bouncer::{DEFAULT_TASK_MATCH, Thresholds};
     use crate::broker::calibration::{self, Proposal};
     use crate::broker::learning;
     use crate::desktop::owner_check::OwnerRequest;
@@ -459,7 +459,7 @@ mod vault_view {
         active: Option<&CalibrationRecord>,
         now: u64,
     ) {
-        let level = active.map_or(MIN_CONFIDENCE, |calibration| calibration.task_match);
+        let level = active.map_or(DEFAULT_TASK_MATCH, |calibration| calibration.task_match);
         let mut compute = false;
         let mut apply = None;
         let mut reset = false;
@@ -486,7 +486,7 @@ mod vault_view {
                 if accent_button(ui, "Compute a proposal").clicked() {
                     compute = true;
                 }
-                if level < MIN_CONFIDENCE && ui.button("Back to 80%").clicked() {
+                if active.is_some() && ui.button("Back to the default (75%)").clicked() {
                     reset = true;
                 }
             });
@@ -553,7 +553,7 @@ mod vault_view {
             drop(guard);
             app.learning.proposal = None;
             match result {
-                Ok(()) => app.set_ok("The task_match level is 80% again."),
+                Ok(()) => app.set_ok("The task_match level is the default (75%) again."),
                 Err(message) => app.set_err(message),
             }
         }
@@ -721,7 +721,7 @@ mod tests {
             "Remembered patterns",
             "git log -n <number>",
             "Runs without a prompt",
-            "Active task_match level: 80% (default).",
+            "Active task_match level: 75% (default).",
             "No candidate model.",
         ] {
             assert!(text.contains(expected), "missing {expected:?} in {text}");

@@ -20,7 +20,7 @@
 use serde::Serialize;
 
 use super::bouncer::{
-    BouncerVerdict, DecisionContext, Fact, Learned, MIN_CONFIDENCE, Thresholds, before_model,
+    BouncerVerdict, DEFAULT_TASK_MATCH, DecisionContext, Fact, Learned, Thresholds, before_model,
     decide_learned,
 };
 use super::shell_risk::Analysis;
@@ -309,7 +309,7 @@ pub fn apply(vault: &mut Vault, task_match: f64, now: u64) -> Result<Proposal, S
         task_match: vault
             .calibration()
             .map_err(vault_message)?
-            .map_or(MIN_CONFIDENCE, |calibration| calibration.task_match),
+            .map_or(DEFAULT_TASK_MATCH, |calibration| calibration.task_match),
     };
     let wanted = level(hundredths(task_match));
     let report = evaluate(&records, current, wanted);

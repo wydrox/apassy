@@ -188,7 +188,7 @@ fn low_confidence_and_missing_context_wait_for_the_owner() {
         code(&run(&fx, &["sh", "-c", "node scripts/report.js"], "Test.")),
         "approval_timeout"
     );
-    assert!(last_reason(&fx).contains("Below 80% certainty: task_match 70%"));
+    assert!(last_reason(&fx).contains("Below the needed certainty: task_match 70% (needs 75%)"));
 
     // A high-risk declaration needs a certain read-only command.
     let writes = common::fake_bouncer(&[("writes", 0.9)]);
@@ -481,7 +481,7 @@ fn unknown_code_needs_the_task_match() {
         "approval_timeout"
     );
     assert!(
-        last_reason(&fx).contains("Below 80% certainty: task_match 30%"),
+        last_reason(&fx).contains("Below the needed certainty: task_match 30% (needs 75%)"),
         "{}",
         last_reason(&fx)
     );

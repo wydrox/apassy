@@ -119,7 +119,7 @@ Proposal:
 4. The held-out part gives the ask rate now and with the proposal, and the misses: owner denials that the proposal allows.
 5. The gate: a replay on all past decisions. The proposal is valid only if it allows no request that the owner denied.
 
-Apply: the owner clicks "Apply" in the Learning view. This is a rule change, so it needs the owner check (`OwnerAction::ChangeCalibration`). `calibration::apply` computes the proposal and the gate again at this time, so a denial after the proposal counts. A lower level must be at or above a valid proposal. "Back to 80%" is stricter and needs no check. The vault keeps the last 100 changes with their replay numbers.
+Apply: the owner clicks "Apply" in the Learning view. This is a rule change, so it needs the owner check (`OwnerAction::ChangeCalibration`). `calibration::apply` computes the proposal and the gate again at this time, so a denial after the proposal counts. A lower level must be at or above a valid proposal. "Back to the default (75%)" removes the calibration. It needs no check. The vault keeps the last 100 changes with their replay numbers.
 
 Test: `calibration_proposal_passes_the_replay_gate_and_the_owner_applies_it` (`tests/learning.rs`). The owner approves 45 general requests at `task_match` 0.7 and denies 5 at 0.3. The proposal is 0.7, the held-out misses are 0, and the held-out ask rate falls. Before the owner applies it, the broker asks for a request at 0.7. After, the model allows it. A production item still waits. A new owner denial at 0.72 makes the same level invalid, and `apply` refuses it.
 
@@ -130,7 +130,7 @@ The Learning view in the app (`src/desktop/learning_ui.rs`) shows:
 - The ask rate per UTC day for 14 days: requests that reached the bouncer, asked, allowed by the model, allowed by a pattern. Rule denials do not count.
 - The automatic decisions (model or pattern), newest first. "Inspect" shows each stored field of one decision.
 - The remembered patterns: pattern, agent, project, items, state (learning with its approvals, active, blocked, or expired), and runs. "Remove" removes one.
-- The calibration: the active level, "Compute a proposal", the replay numbers, "Apply", and "Back to 80%".
+- The calibration: the active level, "Compute a proposal", the replay numbers, "Apply", and "Back to the default (75%)".
 - The candidate model: "No candidate model." Shadow mode comes with goal item B9. The data shape is `vault::CandidateAgreement`: model version, start time, shadow decisions, agreements, and owner denials that the candidate would allow. `can_promote` needs 100 shadow decisions, 95% agreement, and no allowed denial (ADR 0010). The owner promotes by hand.
 
 Tests: `learning_view_shows_the_ask_rate_decisions_patterns_and_candidate_slot` and `candidate_card_says_no_candidate_until_shadow_mode` (`src/desktop/learning_ui.rs`), `candidate_promotion_needs_100_decisions_95_percent_and_no_allowed_denial` (`src/vault/learning.rs`). The view has no GUI check on a real screen.

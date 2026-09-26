@@ -18,13 +18,18 @@ use crate::vault::{CALIBRATION_FLOOR, Declaration, PATTERN_APPROVALS_NEEDED};
 /// the calibrated `task_match` level at the model step (ADR 0009). Version 5 lets a
 /// certain "does not change state" answer replace `task_match` only for a command that
 /// the built-in packs know (`Analysis::known_command`).
-pub const BOUNCER_CONTRACT: &str = "apassy-bouncer-v5";
+pub const BOUNCER_CONTRACT: &str = "apassy-bouncer-v6";
 /// Default address of `laya-serve` in the operations guide.
 pub const DEFAULT_URL: &str = "http://127.0.0.1:8770";
 /// Environment variable that changes the bouncer address.
 pub const URL_ENV: &str = "APASSY_BOUNCER_URL";
 /// The owner must decide when a needed answer is less certain than this (ADR 0008).
 pub const MIN_CONFIDENCE: f64 = 0.8;
+/// The default `task_match` level (policy v6). With the base model, this level gave no
+/// violation and no critical case without the owner on all development sets
+/// (`docs/evaluation/dev-round2.md`). A calibration can change it in
+/// [`CALIBRATION_FLOOR`, [`MIN_CONFIDENCE`]].
+pub const DEFAULT_TASK_MATCH: f64 = 0.75;
 /// A "destroy" answer at or above this vetoes an unknown command.
 const DESTROY_VETO: f64 = 0.9;
 const PATH: &str = "/v1/systemone";
@@ -324,17 +329,17 @@ pub struct Thresholds {
 impl Default for Thresholds {
     fn default() -> Self {
         Self {
-            task_match: MIN_CONFIDENCE,
+            task_match: DEFAULT_TASK_MATCH,
         }
     }
 }
 
 impl Thresholds {
-    /// The `task_match` level inside the calibration range. A calibration can make the
-    /// level lower than the default, never lower than the floor.
+    /// The `task_match` level inside the calibration range: never lower than the floor,
+    /// never higher than [`MIN_CONFIDENCE`].
     pub fn task_match_level(&self) -> f64 {
         if self.task_match.is_nan() {
-            MIN_CONFIDENCE
+            DEFAULT_TASK_MATCH
         } else {
             self.task_match.clamp(CALIBRATION_FLOOR, MIN_CONFIDENCE)
         }
@@ -485,9 +490,10 @@ fn model_step(
         confidence = confidence.min(support);
         if support < level {
             failed.push(format!(
-                "{name} {}{:.0}%",
+                "{name} {}{:.0}% (needs {:.0}%)",
                 if want_true { "" } else { "not " },
-                support * 100.0
+                support * 100.0,
+                level * 100.0
             ));
         }
     }
@@ -511,7 +517,7 @@ fn model_step(
     } else {
         "normal credential"
     };
-    let calibrated = if task_level < MIN_CONFIDENCE {
+    let calibrated = if (task_level - DEFAULT_TASK_MATCH).abs() > f64::EPSILON {
         format!(" Calibrated task_match level: {:.0}%.", task_level * 100.0)
     } else {
         String::new()
@@ -535,8 +541,7 @@ fn model_step(
         ask(
             Some(confidence),
             format!(
-                "Below {:.0}% certainty: {}. {}{calibrated}",
-                MIN_CONFIDENCE * 100.0,
+                "Below the needed certainty: {}. {}{calibrated}",
                 failed.join(", "),
                 verdict.summary()
             ),
@@ -673,7 +678,7 @@ mod tests {
         ]);
         assert!(!run(&read_unmatched, &staging, true).ask_owner);
         for bad in [
-            verdict(&[("task_match", 0.75), ("writes", 0.5), ("destroy", 0.1)]),
+            verdict(&[("task_match", 0.7), ("writes", 0.5), ("destroy", 0.1)]),
             verdict(&[("task_match", 0.9), ("writes", 0.5), ("destroy", 0.95)]),
             verdict(&[
                 ("task_match", 0.9),
