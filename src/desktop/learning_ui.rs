@@ -1,9 +1,11 @@
-//! Learning view (ADR 0009, goal item B10): the ask rate over time, the automatic
-//! decisions, the remembered patterns, the threshold calibration, and the slot for the
-//! agreement of a candidate model.
+//! Learning view (ADR 0009, goal items B9 and B10): the ask rate over time, the
+//! automatic decisions, the remembered patterns, the threshold calibration, the local
+//! fine-tune with its gate, the agreement of a candidate model in shadow mode, and the
+//! promotion and rollback of a model.
 //!
 //! The view reads the vault and calls the broker learning functions. Nothing here
-//! changes the active policy without an owner action.
+//! changes the active policy without an owner action. A training starts only when the
+//! owner clicks "Train a candidate". A promotion and a rollback need the owner check.
 
 use eframe::egui::{self, RichText};
 
@@ -32,14 +34,20 @@ pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
 }
 
 #[cfg(feature = "vault")]
-/// Text for the candidate model card. `None` until a later phase trains a candidate.
+/// Text for the candidate model card. `None` when no candidate is in shadow mode.
 pub(crate) fn candidate_lines(candidate: Option<&CandidateView>) -> Vec<String> {
     let Some(candidate) = candidate else {
         return vec![
             "No candidate model.".to_owned(),
-            "A later version trains a candidate model on this computer. It decides in shadow mode, with no effect. This card then shows its agreement with your decisions. You promote it by hand after 100 shadow decisions with 95% agreement and no allowed denial.".to_owned(),
+            "When the training gate is open, you can train a candidate model on this computer. It decides in shadow mode, with no effect. This card then shows its agreement with your decisions. You promote it by hand after 100 shadow decisions with 95% agreement and no allowed denial.".to_owned(),
         ];
     };
+    let port = candidate
+        .url
+        .rsplit(':')
+        .next()
+        .filter(|port| port.chars().all(|c| c.is_ascii_digit()))
+        .unwrap_or("8775");
     vec![
         format!(
             "Candidate {}: {} shadow decisions, agreement {}.",
@@ -52,66 +60,180 @@ pub(crate) fn candidate_lines(candidate: Option<&CandidateView>) -> Vec<String> 
         format!(
             "Denials that the candidate would allow: {}. {}",
             candidate.allowed_owner_denials,
-            if candidate.can_promote {
-                "You can promote it."
-            } else {
-                "It cannot be promoted yet."
+            match &candidate.refusal {
+                None => "You can promote it.".to_owned(),
+                Some(reason) => format!("It cannot be promoted yet. {reason}"),
             }
+        ),
+        format!(
+            "Requests in shadow mode: {}. No answer from the candidate: {}. Same outcome as the active model: {}.",
+            candidate.requests, candidate.no_answer, candidate.same_as_active
+        ),
+        format!(
+            "The candidate answers at {}. Start its server: APASSY_BASE_MODEL=\"{}\" LAYA_PORT={port} tools/basemodel/start.sh",
+            candidate.url, candidate.checkpoint
         ),
     ]
 }
 
 #[cfg(feature = "vault")]
-/// What the candidate card shows. It comes from `vault::CandidateAgreement`.
+/// What the candidate card shows. It comes from `vault::ShadowSummary`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CandidateView {
+    pub id: u64,
     pub model_version: String,
+    pub url: String,
+    pub checkpoint: String,
     pub shadow_decisions: u32,
     pub agreement: Option<f64>,
     pub allowed_owner_denials: u32,
-    pub can_promote: bool,
+    pub requests: u32,
+    pub no_answer: u32,
+    pub same_as_active: u32,
+    /// Why the shadow gate refuses a promotion. `None`: the owner can promote.
+    pub refusal: Option<String>,
 }
 
 #[cfg(feature = "vault")]
-fn draw_candidate(ui: &mut egui::Ui, candidate: Option<&CandidateView>) {
-    super::ui::card_frame().show(ui, |ui| {
-        ui.label(
-            RichText::new("Candidate model")
-                .size(16.0)
-                .strong()
-                .color(super::ui::INK),
-        );
-        for line in candidate_lines(candidate) {
-            ui.label(RichText::new(line).color(INK_MUTED));
+impl CandidateView {
+    fn new(record: &crate::vault::CandidateRecord, summary: &crate::vault::ShadowSummary) -> Self {
+        let agreement = &summary.agreement;
+        Self {
+            id: record.id,
+            model_version: record.version.clone(),
+            url: record.url.clone(),
+            checkpoint: record.checkpoint.clone(),
+            shadow_decisions: agreement.shadow_decisions,
+            agreement: agreement.agreement(),
+            allowed_owner_denials: agreement.allowed_owner_denials,
+            requests: summary.requests,
+            no_answer: summary.no_answer,
+            same_as_active: summary.same_as_active,
+            refusal: crate::broker::shadow::promotion_refusal(agreement),
         }
-    });
+    }
+
+    /// The Promote button is on only when the shadow gate passes.
+    pub(crate) fn can_promote(&self) -> bool {
+        self.refusal.is_none()
+    }
+}
+
+#[cfg(feature = "vault")]
+/// Text for the training part of the candidate card.
+pub(crate) fn training_lines(
+    gate: &crate::broker::finetune::TrainingGate,
+    running: Option<std::time::Duration>,
+) -> Vec<String> {
+    use crate::broker::finetune::{MIN_OWNER_DECISIONS, MIN_OWNER_DENIALS, TIME_LIMIT};
+    let mut lines = vec![format!(
+        "Training gate: {} of {MIN_OWNER_DECISIONS} owner decisions, {} of {MIN_OWNER_DENIALS} owner denials, power source: {}. {}",
+        gate.owner_decisions,
+        gate.owner_denials,
+        gate.power.label(),
+        if gate.is_open() {
+            "The gate is open."
+        } else {
+            "The gate is closed."
+        }
+    )];
+    if let Some(elapsed) = running {
+        lines.push(format!(
+            "Training runs: {} min {} s of {} min. Apassy stops it at the limit or on battery power.",
+            elapsed.as_secs() / 60,
+            elapsed.as_secs() % 60,
+            TIME_LIMIT.as_secs() / 60
+        ));
+    } else {
+        lines.push(format!(
+            "A training runs only when you start it, only on AC power, and for at most {} minutes. It trains the decision heads from the shipped base model on your decisions. The result is a candidate in shadow mode, with no effect.",
+            TIME_LIMIT.as_secs() / 60
+        ));
+    }
+    lines
+}
+
+#[cfg(feature = "vault")]
+/// Text for the active model: the default bouncer, or a promoted model.
+pub(crate) fn active_lines(active: Option<&crate::vault::ModelActivation>) -> Vec<String> {
+    use crate::vault::{ActivationAction, format_utc, model_label};
+    match active {
+        None => vec![
+            "Active model: the default model (APASSY_BOUNCER_URL). You did not promote a model."
+                .to_owned(),
+        ],
+        Some(activation) if activation.action == ActivationAction::Promote => vec![
+            format!(
+                "Active model: {} at {}, promoted {}.",
+                activation.version,
+                activation.url,
+                format_utc(activation.at)
+            ),
+            format!(
+                "The model before it stays available: {}. A rollback needs your confirmation.",
+                model_label(&activation.previous_version)
+            ),
+        ],
+        Some(activation) => vec![format!(
+            "Active model: {}{}, after a rollback on {}.",
+            model_label(&activation.version),
+            if activation.is_default() {
+                " (APASSY_BOUNCER_URL)".to_owned()
+            } else {
+                format!(" at {}", activation.url)
+            },
+            format_utc(activation.at)
+        )],
+    }
 }
 
 #[cfg(feature = "vault")]
 mod vault_view {
     use std::collections::BTreeMap;
-    use std::sync::PoisonError;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, PoisonError};
+    use std::time::{Duration, Instant};
 
     use eframe::egui::{self, RichText};
 
     use super::super::ui::{
         ALLOW, ASK, DENY, INK, INK_MUTED, accent_button, card_frame, danger_button, property_grid,
     };
-    use super::{CandidateView, DesktopApp, draw_candidate};
+    use super::{CandidateView, DesktopApp, active_lines, candidate_lines, training_lines};
     use crate::broker::approvals::{OwnerAction, OwnerProof};
     use crate::broker::bouncer::{DEFAULT_TASK_MATCH, Thresholds};
     use crate::broker::calibration::{self, Proposal};
-    use crate::broker::learning;
-    use crate::desktop::owner_check::OwnerRequest;
+    use crate::broker::finetune::{
+        self, Limits, Power, Trainer, TrainingError, TrainingGate, TrainingReport,
+    };
+    use crate::broker::{learning, shadow};
+    use crate::desktop::owner_check::{OwnerRequest, Task, TaskPoll};
     use crate::vault::{
-        CalibrationRecord, CandidateAgreement, DayRate, DecidedBy, DecisionRecord, PatternRecord,
-        PatternState, format_utc,
+        ActivationAction, CalibrationRecord, DayRate, DecidedBy, DecisionRecord, ModelActivation,
+        PatternRecord, PatternState, format_utc, model_label,
     };
 
     const DAY: u64 = 86_400;
     /// Days in the ask rate table.
     const DAYS_SHOWN: u64 = 14;
     const AUTOMATIC_SHOWN: usize = 25;
+    /// The view reads the power source again after this time.
+    const POWER_REFRESH: Duration = Duration::from_secs(30);
+
+    /// A local fine-tune on a worker thread (goal item B9).
+    pub(crate) struct TrainingRun {
+        task: Task<Result<TrainingReport, TrainingError>>,
+        started: Instant,
+        stop: Arc<AtomicBool>,
+    }
+
+    impl std::fmt::Debug for TrainingRun {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("TrainingRun")
+                .field("started", &self.started)
+                .finish_non_exhaustive()
+        }
+    }
 
     /// Learning view state.
     #[derive(Debug, Default)]
@@ -121,6 +243,19 @@ mod vault_view {
         /// The last computed calibration proposal. It changes nothing until the owner
         /// applies it.
         pub(crate) proposal: Option<Proposal>,
+        /// The training that runs now. Only the owner starts one.
+        pub(crate) training: Option<TrainingRun>,
+        /// The power source at the last check, and the time of the check.
+        pub(crate) power: Option<(Power, Instant)>,
+    }
+
+    impl LearningUiState {
+        /// Stop a running training. The broker stops the process group of the trainer.
+        pub(crate) fn stop_training(&self) {
+            if let Some(run) = &self.training {
+                run.stop.store(true, Ordering::SeqCst);
+            }
+        }
     }
 
     struct Loaded {
@@ -130,8 +265,12 @@ mod vault_view {
         patterns: Vec<PatternRecord>,
         calibration: Option<CalibrationRecord>,
         agents: BTreeMap<u64, String>,
-        /// Shadow mode comes in a later phase (goal item B9).
-        candidate: Option<CandidateAgreement>,
+        /// The candidate in shadow mode and its numbers (goal item B9).
+        candidate: Option<CandidateView>,
+        /// The newest promotion or rollback.
+        active: Option<ModelActivation>,
+        /// Owner decisions and owner denials, for the training gate.
+        owner_counts: (u32, u32),
     }
 
     fn load(app: &DesktopApp, now: u64) -> Option<Result<Loaded, String>> {
@@ -154,7 +293,15 @@ mod vault_view {
                     .into_iter()
                     .map(|agent| (agent.id, agent.name))
                     .collect(),
-                candidate: None,
+                candidate: match vault.shadow_candidate()? {
+                    Some(record) => Some(CandidateView::new(
+                        &record,
+                        &vault.shadow_summary(record.id)?,
+                    )),
+                    None => None,
+                },
+                active: vault.active_model()?,
+                owner_counts: vault.owner_decision_counts()?,
             })
         })();
         Some(result.map_err(|_: crate::vault::VaultError| {
@@ -164,6 +311,7 @@ mod vault_view {
 
     pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
         let now = learning::now();
+        poll_training(app);
         let loaded = match load(app, now) {
             None => {
                 ui.label(RichText::new("Unlock the vault to see learning.").color(INK_MUTED));
@@ -183,14 +331,210 @@ mod vault_view {
         ui.add_space(8.0);
         draw_calibration(app, ui, loaded.calibration.as_ref(), now);
         ui.add_space(8.0);
-        let candidate = loaded.candidate.as_ref().map(|candidate| CandidateView {
-            model_version: candidate.model_version.clone(),
-            shadow_decisions: candidate.shadow_decisions,
-            agreement: candidate.agreement(),
-            allowed_owner_denials: candidate.allowed_owner_denials,
-            can_promote: candidate.can_promote(),
+        draw_models(app, ui, &loaded);
+    }
+
+    /// The power source, read again at most every 30 seconds.
+    fn power(app: &mut DesktopApp) -> Power {
+        match app.learning.power {
+            Some((power, at)) if at.elapsed() < POWER_REFRESH => power,
+            _ => {
+                let power = finetune::power_now();
+                app.learning.power = Some((power, Instant::now()));
+                power
+            }
+        }
+    }
+
+    /// The candidate card: the training gate, the candidate in shadow mode, and the
+    /// active model with promotion and rollback (goal items B9 and B10).
+    fn draw_models(app: &mut DesktopApp, ui: &mut egui::Ui, loaded: &Loaded) {
+        let (decisions, denials) = loaded.owner_counts;
+        let gate = TrainingGate {
+            owner_decisions: decisions as usize,
+            owner_denials: denials as usize,
+            power: power(app),
+        };
+        let running = app
+            .learning
+            .training
+            .as_ref()
+            .map(|run| run.started.elapsed());
+        let mut train = false;
+        let mut stop = false;
+        let mut promote = None;
+        let mut rollback = None;
+        card_frame().show(ui, |ui| {
+            title(ui, "Candidate model");
+            for line in candidate_lines(loaded.candidate.as_ref()) {
+                ui.label(RichText::new(line).color(INK_MUTED));
+            }
+            if let Some(candidate) = &loaded.candidate {
+                let clicked = ui
+                    .add_enabled_ui(candidate.can_promote(), |ui| accent_button(ui, "Promote"))
+                    .inner
+                    .clicked();
+                if clicked {
+                    promote = Some((candidate.id, candidate.model_version.clone()));
+                }
+            }
+            ui.add_space(6.0);
+            for line in training_lines(&gate, running) {
+                ui.label(RichText::new(line).color(INK_MUTED));
+            }
+            ui.horizontal(|ui| {
+                if running.is_some() {
+                    if danger_button(ui, "Stop training").clicked() {
+                        stop = true;
+                    }
+                } else {
+                    train = ui
+                        .add_enabled_ui(gate.is_open(), |ui| accent_button(ui, "Train a candidate"))
+                        .inner
+                        .clicked();
+                }
+            });
+            ui.add_space(6.0);
+            for line in active_lines(loaded.active.as_ref()) {
+                ui.label(RichText::new(line).color(INK));
+            }
+            if let Some(active) = &loaded.active
+                && active.action == ActivationAction::Promote
+                && danger_button(
+                    ui,
+                    &format!("Roll back to {}", model_label(&active.previous_version)),
+                )
+                .clicked()
+            {
+                rollback = Some(active.clone());
+            }
         });
-        draw_candidate(ui, candidate.as_ref());
+        if running.is_some() {
+            ui.ctx().request_repaint_after(Duration::from_secs(1));
+        }
+        let ctx = ui.ctx().clone();
+        if stop {
+            app.learning.stop_training();
+        }
+        if train {
+            start_training(app, &ctx);
+        }
+        if let Some((candidate_id, version)) = promote {
+            // Goal item B9: a promotion changes the active policy. It needs the owner
+            // check. The request completes in `promote_model`.
+            app.ask_owner(
+                OwnerRequest::PromoteModel {
+                    candidate_id,
+                    version,
+                },
+                Some(&ctx),
+            );
+        }
+        if let Some(active) = rollback {
+            app.ask_owner(
+                OwnerRequest::RollbackModel {
+                    activation_id: active.id,
+                    from: model_label(&active.version),
+                    to: model_label(&active.previous_version),
+                },
+                Some(&ctx),
+            );
+        }
+    }
+
+    /// Start a training on a worker thread. The broker checks the gate again first.
+    fn start_training(app: &mut DesktopApp, ctx: &egui::Context) {
+        if app.learning.training.is_some() {
+            return;
+        }
+        let trainer = match Trainer::from_env() {
+            Ok(trainer) => trainer,
+            Err(message) => {
+                app.set_err(message);
+                return;
+            }
+        };
+        let vault = app.owner_ui.session.shared_vault();
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let url = shadow::candidate_url();
+        let task = Task::spawn(Some(ctx.clone()), move || {
+            finetune::train(
+                &vault,
+                &trainer,
+                &url,
+                Limits::default(),
+                &finetune::power_now,
+                &flag,
+            )
+        });
+        app.learning.training = Some(TrainingRun {
+            task,
+            started: Instant::now(),
+            stop,
+        });
+        app.set_ok("The training started. It stops after one hour at the latest.");
+    }
+
+    /// Take the result of a finished training.
+    fn poll_training(app: &mut DesktopApp) {
+        let Some(run) = &app.learning.training else {
+            return;
+        };
+        let result = match run.task.poll() {
+            TaskPoll::Waiting => return,
+            TaskPoll::Done(result) => result,
+            TaskPoll::Lost => Err(TrainingError::Failed(
+                "The training thread ended without a result.".to_owned(),
+            )),
+        };
+        app.learning.training = None;
+        match result {
+            Ok(report) => app.set_ok(format!(
+                "The candidate {} is in shadow mode. The training took {:.0} s. Start its server, then it answers in parallel with no effect.",
+                report.candidate.version, report.seconds
+            )),
+            Err(error) => app.set_err(error.message()),
+        }
+    }
+
+    /// Promote a candidate with a fresh owner check (goal items A4 and B9). The proof
+    /// must name this candidate and version, in this vault session. The shadow gate
+    /// runs again first.
+    pub(crate) fn promote_model(app: &mut DesktopApp, candidate_id: u64, proof: OwnerProof) {
+        let shared = app.owner_ui.session.shared_vault();
+        let mut guard = shared.lock().unwrap_or_else(PoisonError::into_inner);
+        let result = match guard.as_mut().filter(|vault| !vault.is_locked()) {
+            None => Err("The vault is locked.".to_owned()),
+            Some(vault) => shadow::promote(vault, candidate_id, proof, learning::now()),
+        };
+        drop(guard);
+        match result {
+            Ok(activation) => app.set_ok(format!(
+                "The bouncer now uses {}. {} stays available for a rollback.",
+                activation.version,
+                model_label(&activation.previous_version)
+            )),
+            Err(message) => app.set_err(message),
+        }
+    }
+
+    /// Roll back the newest promotion with a fresh owner check (goal item B9).
+    pub(crate) fn roll_back_model(app: &mut DesktopApp, activation_id: u64, proof: OwnerProof) {
+        let shared = app.owner_ui.session.shared_vault();
+        let mut guard = shared.lock().unwrap_or_else(PoisonError::into_inner);
+        let result = match guard.as_mut().filter(|vault| !vault.is_locked()) {
+            None => Err("The vault is locked.".to_owned()),
+            Some(vault) => shadow::roll_back(vault, activation_id, proof, learning::now()),
+        };
+        drop(guard);
+        match result {
+            Ok(activation) => app.set_ok(format!(
+                "The bouncer uses {} again.",
+                model_label(&activation.version)
+            )),
+            Err(message) => app.set_err(message),
+        }
     }
 
     fn title(ui: &mut egui::Ui, text: &str) {
@@ -587,28 +931,79 @@ mod vault_view {
 }
 
 #[cfg(feature = "vault")]
-pub(crate) use vault_view::{LearningUiState, apply_calibration};
+pub(crate) use vault_view::{LearningUiState, apply_calibration, promote_model, roll_back_model};
 
 #[cfg(all(test, feature = "vault"))]
 mod tests {
     use super::*;
 
+    fn view(shadow_decisions: u32, agreed: u32, allowed_owner_denials: u32) -> CandidateView {
+        let agreement = crate::vault::CandidateAgreement {
+            model_version: "laya-local-1".to_owned(),
+            started_at: 0,
+            shadow_decisions,
+            agreed,
+            allowed_owner_denials,
+        };
+        CandidateView {
+            id: 1,
+            model_version: "laya-local-1".to_owned(),
+            url: "http://127.0.0.1:8775".to_owned(),
+            checkpoint: "/models/candidate.safetensors".to_owned(),
+            shadow_decisions,
+            agreement: agreement.agreement(),
+            allowed_owner_denials,
+            requests: shadow_decisions + 10,
+            no_answer: 2,
+            same_as_active: 7,
+            refusal: crate::broker::shadow::promotion_refusal(&agreement),
+        }
+    }
+
     #[test]
     fn candidate_card_says_no_candidate_until_shadow_mode() {
         let none = candidate_lines(None);
         assert_eq!(none[0], "No candidate model.");
-        let some = candidate_lines(Some(&CandidateView {
-            model_version: "laya-local-1".to_owned(),
-            shadow_decisions: 120,
-            agreement: Some(0.96),
-            allowed_owner_denials: 0,
-            can_promote: true,
-        }));
+        let promotable = view(120, 115, 0);
+        assert!(promotable.can_promote());
+        let some = candidate_lines(Some(&promotable));
         assert_eq!(
             some[0],
             "Candidate laya-local-1: 120 shadow decisions, agreement 96%."
         );
         assert!(some[1].ends_with("You can promote it."));
+        assert!(some[2].contains("Requests in shadow mode: 130. No answer from the candidate: 2."));
+        assert!(some[3].contains(
+            "APASSY_BASE_MODEL=\"/models/candidate.safetensors\" LAYA_PORT=8775 tools/basemodel/start.sh"
+        ));
+        // The Promote button stays off below each threshold of ADR 0010.
+        for (decisions, agreed, denials) in [(99, 99, 0), (100, 94, 0), (120, 119, 1)] {
+            let blocked = view(decisions, agreed, denials);
+            assert!(!blocked.can_promote(), "{decisions} {agreed} {denials}");
+            assert!(candidate_lines(Some(&blocked))[1].contains("It cannot be promoted yet."));
+        }
+    }
+
+    #[test]
+    fn training_card_shows_the_gate_and_the_active_model() {
+        use crate::broker::finetune::{Power, TrainingGate};
+        let closed = TrainingGate {
+            owner_decisions: 299,
+            owner_denials: 30,
+            power: Power::Ac,
+        };
+        let lines = training_lines(&closed, None);
+        assert!(lines[0].starts_with(
+            "Training gate: 299 of 300 owner decisions, 30 of 30 owner denials, power source: AC power. The gate is closed."
+        ));
+        let open = TrainingGate {
+            owner_decisions: 300,
+            ..closed
+        };
+        assert!(training_lines(&open, None)[0].ends_with("The gate is open."));
+        let running = training_lines(&open, Some(std::time::Duration::from_secs(125)));
+        assert!(running[1].starts_with("Training runs: 2 min 5 s of 60 min."));
+        assert!(active_lines(None)[0].starts_with("Active model: the default model"));
     }
 
     fn text_of(shape: &egui::Shape, out: &mut String) {
@@ -729,5 +1124,123 @@ mod tests {
 
         app.owner_ui.session.lock().expect("lock");
         assert!(draw_view(&mut app).contains("Unlock the vault to see learning."));
+    }
+
+    /// Goal items B9 and B10: the view shows the shadow numbers of the candidate. The
+    /// promotion and the rollback need the owner check. A wrong passphrase changes
+    /// nothing.
+    #[test]
+    fn promotion_and_rollback_in_the_view_need_the_owner_check() {
+        use crate::broker::approvals::OwnerCheck;
+        use crate::desktop::owner_check::OwnerRequest;
+        use crate::vault::{
+            ActivationAction, NewCandidate, OwnerLabel, RealOutcome, ShadowAnswer, ShadowEntry,
+        };
+
+        let dir = tempfile::TempDir::new().expect("dir");
+        let pass = "learning-view-pass";
+        let version = "apassy-local-v1+0badc0de";
+        let mut app = DesktopApp::new();
+        app.owner_ui
+            .session
+            .create_file(&dir.path().join("promote.db"), pass)
+            .expect("create");
+        app.owner_ui.session.unlock(pass).expect("unlock");
+        let shared = app.owner_ui.session.shared_vault();
+        let candidate_id = {
+            let mut guard = shared.lock().expect("vault");
+            let vault = guard.as_mut().expect("open");
+            let candidate = vault
+                .register_candidate(
+                    &NewCandidate {
+                        version: version.to_owned(),
+                        url: "http://127.0.0.1:8775".to_owned(),
+                        checkpoint: "/models/candidate.safetensors".to_owned(),
+                        checkpoint_sha256: "0badc0de".repeat(8),
+                        report: "{}".to_owned(),
+                    },
+                    crate::broker::learning::now(),
+                )
+                .expect("candidate");
+            for n in 0..100u32 {
+                let (candidate_answer, owner) = if n < 96 {
+                    (ShadowAnswer::Run, OwnerLabel::Allow)
+                } else {
+                    (ShadowAnswer::Ask, OwnerLabel::Deny)
+                };
+                vault
+                    .record_shadow(&ShadowEntry {
+                        candidate_id: candidate.id,
+                        at: crate::broker::learning::now(),
+                        real: RealOutcome::Ask,
+                        candidate: candidate_answer,
+                        owner,
+                        facts: Vec::new(),
+                    })
+                    .expect("row");
+            }
+            candidate.id
+        };
+        let text = draw_view(&mut app);
+        for expected in [
+            "Candidate apassy-local-v1+0badc0de: 100 shadow decisions, agreement 100%.",
+            "Denials that the candidate would allow: 0. You can promote it.",
+            "Promote",
+            "Training gate: 0 of 300 owner decisions, 0 of 30 owner denials",
+            "Active model: the default model",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
+        let active = || {
+            shared
+                .lock()
+                .expect("vault")
+                .as_ref()
+                .expect("open")
+                .active_model()
+                .expect("active")
+        };
+        let promote = OwnerRequest::PromoteModel {
+            candidate_id,
+            version: version.to_owned(),
+        };
+        app.ask_owner(promote.clone(), None);
+        assert!(
+            app.confirm_owner_now(OwnerCheck::passphrase("learning-view-wrong"))
+                .is_err()
+        );
+        assert_eq!(active(), None, "a wrong passphrase promotes nothing");
+        app.ask_owner(promote, None);
+        app.confirm_owner_now(OwnerCheck::passphrase(pass))
+            .expect("owner check");
+        let promotion = active().expect("promoted");
+        assert_eq!(promotion.action, ActivationAction::Promote);
+        assert_eq!(promotion.version, version);
+        let text = draw_view(&mut app);
+        assert!(
+            text.contains("Active model: apassy-local-v1+0badc0de at http://127.0.0.1:8775"),
+            "{text}"
+        );
+        assert!(text.contains("Roll back to the default model"), "{text}");
+        assert!(text.contains("No candidate model."), "{text}");
+
+        let rollback = OwnerRequest::RollbackModel {
+            activation_id: promotion.id,
+            from: version.to_owned(),
+            to: "the default model".to_owned(),
+        };
+        app.ask_owner(rollback.clone(), None);
+        assert!(
+            app.confirm_owner_now(OwnerCheck::passphrase("learning-view-wrong"))
+                .is_err()
+        );
+        assert_eq!(active().map(|a| a.action), Some(ActivationAction::Promote));
+        app.ask_owner(rollback, None);
+        app.confirm_owner_now(OwnerCheck::passphrase(pass))
+            .expect("owner check");
+        let back = active().expect("rollback");
+        assert_eq!(back.action, ActivationAction::Rollback);
+        assert!(back.is_default());
+        assert!(draw_view(&mut app).contains("Active model: the default model"));
     }
 }

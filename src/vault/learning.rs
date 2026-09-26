@@ -390,8 +390,8 @@ pub struct CalibrationRecord {
 }
 
 /// Agreement of a candidate model with the owner in shadow mode (ADR 0010, goal items
-/// B9 and B10). A candidate decides in parallel with no effect. Apassy has no candidate
-/// model yet, so the app shows "No candidate model".
+/// B9 and B10). A candidate decides in parallel with no effect. `Vault::shadow_summary`
+/// computes it from the shadow rows (schema 9).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CandidateAgreement {
     pub model_version: String,

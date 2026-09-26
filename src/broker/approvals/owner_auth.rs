@@ -56,6 +56,12 @@ pub enum OwnerAction {
     /// Apply a calibrated `task_match` level of the bouncer, in hundredths (ADR 0009
     /// step 3). A return to the default level is stricter and needs no check.
     ChangeCalibration { level: u32 },
+    /// Make a candidate model from shadow mode the active model of the bouncer (ADR 0010,
+    /// goal item B9). The proof names the candidate and its version.
+    PromoteModel { candidate_id: u64, version: String },
+    /// Return the bouncer to the model before one promotion (goal item B9). The proof
+    /// names the promotion.
+    RollbackModel { activation_id: u64 },
 }
 
 impl OwnerAction {
@@ -79,6 +85,8 @@ impl OwnerAction {
             Self::ChangeCalibration { .. } => {
                 "change the task_match level of the bouncer".to_owned()
             }
+            Self::PromoteModel { .. } => "promote a new model for the bouncer".to_owned(),
+            Self::RollbackModel { .. } => "roll back the model of the bouncer".to_owned(),
         }
     }
 

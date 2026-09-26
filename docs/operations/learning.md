@@ -9,6 +9,8 @@ Apassy learns from the owner decisions in two ways:
 
 Both act only at the model step. They never change a hard rule, the production rule, a rule flag, a missing declaration, or a missing user request. The owner makes each change. Nothing changes the active policy without the owner (`docs/concept.md`).
 
+A third way is a local fine-tune of the model (ADR 0009 step 5c, goal item B9). The candidate model runs in shadow mode with no effect, and only the owner promotes it. See [the fine-tune](fine-tune.md), sections 6 to 12, and section 5 below.
+
 ## 1. Decision log
 
 Code: `src/vault/learning.rs` (storage), `src/broker/learning.rs` and `src/broker/run.rs` (the broker writes it).
@@ -131,9 +133,18 @@ The Learning view in the app (`src/desktop/learning_ui.rs`) shows:
 - The automatic decisions (model or pattern), newest first. "Inspect" shows each stored field of one decision.
 - The remembered patterns: pattern, agent, project, items, state (learning with its approvals, active, blocked, or expired), and runs. "Remove" removes one.
 - The calibration: the active level, "Compute a proposal", the replay numbers, "Apply", and "Back to the default (75%)".
-- The candidate model: "No candidate model." Shadow mode comes with goal item B9. The data shape is `vault::CandidateAgreement`: model version, start time, shadow decisions, agreements, and owner denials that the candidate would allow. `can_promote` needs 100 shadow decisions, 95% agreement, and no allowed denial (ADR 0010). The owner promotes by hand.
+- The candidate model card (goal items B9 and B10). [The fine-tune](fine-tune.md), sections 6 to 10, describes the pipeline.
+  - Without a candidate: "No candidate model."
+  - With a candidate in shadow mode: its version, the shadow decisions (owner decisions that the candidate also answered), the agreement with the owner, the owner denials that the candidate would allow, the requests in shadow mode, the requests without a candidate answer, the requests with the same outcome as the active model, and the command that starts the candidate server.
+  - "Promote" is on only when the shadow gate passes: 100 or more shadow decisions, 95% or more agreement, and no owner denial that the candidate would allow (`CandidateAgreement::can_promote`, ADR 0010). Otherwise the card names each threshold that fails. "Promote" needs the owner check (`OwnerAction::PromoteModel`).
+  - The training gate: the owner decisions of 300, the owner denials of 30, and the power source. "Train a candidate" is on only when the gate is open. During a training, the card shows the elapsed time against the limit of 60 minutes, and "Stop training".
+  - The active model: the default model (`APASSY_BOUNCER_URL`), or the promoted version with its address and time. After a promotion, "Roll back to ..." returns to the model before it. The rollback needs the owner check (`OwnerAction::RollbackModel`).
 
-Tests: `learning_view_shows_the_ask_rate_decisions_patterns_and_candidate_slot` and `candidate_card_says_no_candidate_until_shadow_mode` (`src/desktop/learning_ui.rs`), `candidate_promotion_needs_100_decisions_95_percent_and_no_allowed_denial` (`src/vault/learning.rs`). The view has no GUI check on a real screen.
+Measured on this Mac with a candidate from 300 synthetic owner decisions: 46 of 48 owner decisions in shadow mode agree (95.8%) on `independent.tsv` with grants in "ask" mode, and 0 owner denials would be allowed. The run has fewer than 100 shadow decisions, so the candidate cannot be promoted. See [the fine-tune](fine-tune.md), section 11.2.
+
+The data shape is `vault::CandidateAgreement`: model version, start time, shadow decisions, agreements, and owner denials that the candidate would allow. `Vault::shadow_summary` computes it from the shadow rows of schema 9. An agreement is a candidate "run" of an owner approval, or a candidate "ask" of an owner denial. A candidate "ask" of an owner approval is a disagreement. A candidate "run" of an owner denial is a disagreement and an allowed denial.
+
+Tests: `learning_view_shows_the_ask_rate_decisions_patterns_and_candidate_slot`, `candidate_card_says_no_candidate_until_shadow_mode`, `training_card_shows_the_gate_and_the_active_model`, and `promotion_and_rollback_in_the_view_need_the_owner_check` (`src/desktop/learning_ui.rs`), `candidate_promotion_needs_100_decisions_95_percent_and_no_allowed_denial` (`src/vault/learning.rs`), `shadow_summary_counts_agreement_with_the_owner` (`src/vault/candidate.rs`). The view has no GUI check on a real screen.
 
 ## 6. Export for fine-tuning
 
@@ -160,6 +171,8 @@ Tests: `learning_view_shows_the_ask_rate_decisions_patterns_and_candidate_slot` 
 | `remembered` | boolean | The owner used "Approve and remember" |
 
 The owner labels are the lines with `decided_by` = `owner`. [The fine-tune study](fine-tune.md), section 5, names some fields differently: `relative_dir` is `cwd_rel`, `owner_decision` is `decision` of an owner line, and `source` is `remembered`.
+
+The local fine-tune (goal item B9) reads this export. `broker::finetune::examples_from_export` turns it into training examples. The label mapping is in [the fine-tune](fine-tune.md), section 6.2.
 
 Example (synthetic):
 

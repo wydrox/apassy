@@ -6,6 +6,7 @@ Schema version 2 (2026-09-25) adds agent, grant, destination, and activity table
 Schema version 6 (2026-09-26) adds agent token expiry and rotation (goal item P1) and the owner review after a restore (goal item V4). See section 9 of the broker contract, the agent API below, and [backup and restore](../operations/backup-restore.md).
 Schema version 7 (2026-09-26) adds the decision log, remembered patterns, and calibrations (goal items B3, B5, ADR 0009) and the wait record of a run that waits for the owner (goal item N3). See [learning](../operations/learning.md). A restore removes all remembered patterns. An unlock gives each wait record without a final entry an activity entry.
 Schema version 8 (2026-09-26) adds the provider of a declaration and the outcome of each suggested declaration (goal item B4). See [declarations](../operations/declarations.md). An item delete also removes its outcome record.
+Schema version 9 (2026-09-26) adds candidate models, shadow answers, and the history of the active model (goal item B9, tables `model_candidate`, `shadow_decision`, `model_activation`). The migration from 8 to 9 is one transaction. See [the fine-tune](../operations/fine-tune.md) section 9.
 The owner selected SQLCipher with a master passphrase after the synthetic storage probe passed.
 This contract does not permit real-secret use or claim complete P2 acceptance.
 

@@ -1,26 +1,27 @@
 #![cfg(feature = "vault")]
 
-//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 7) to the
+//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 8) to the
 //! current version, with data at each version. Synthetic values only.
 //!
 //! The schema SQL below is a frozen copy of the statements that each earlier version ran
 //! at create: version 1 in commit a2f860a, 2 in 4ffdb5e, 3 in 22d1784, 4 in 2eb8366,
-//! 5 in 9ce2e01, 6 in 4193991, and 7 in c5a91c0. Do not change these copies when the
-//! current schema changes.
+//! 5 in 9ce2e01, 6 in 4193991, 7 in c5a91c0, and 8 in 2acde80. Do not change these
+//! copies when the current schema changes.
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use apassy::contracts::CredentialKind;
 use apassy::vault::{
-    DecidedBy, DecisionEntry, Declaration, DeclarationField, Environment, ExecMode, ExecRule,
-    LoggedDecision, PatternKey, PatternState, RequestSource, Reversibility, RiskLevel, Scope,
+    CandidateState, DecidedBy, DecisionEntry, Declaration, DeclarationField, Environment, ExecMode,
+    ExecRule, LoggedDecision, NewCandidate, OwnerLabel, PatternKey, PatternState, RealOutcome,
+    RequestSource, Reversibility, RiskLevel, Scope, ShadowAnswer, ShadowEntry,
     SuggestedDeclaration, Vault, VaultErrorKind,
 };
 use tempfile::TempDir;
 
 const PASS: &str = "synthetic-migration-passphrase";
-const CURRENT_VERSION: i64 = 8;
+const CURRENT_VERSION: i64 = 9;
 
 const V1_SQL: &str = "
 CREATE TABLE vault_meta (
@@ -208,6 +209,24 @@ UPDATE vault_meta SET schema_version = 7 WHERE id = 1;
 PRAGMA user_version = 7;
 ";
 
+const V8_SQL: &str = "
+ALTER TABLE declaration ADD COLUMN provider TEXT NOT NULL DEFAULT '';
+CREATE TABLE suggestion_outcome (
+    item_id INTEGER PRIMARY KEY,
+    at INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    environment TEXT NOT NULL,
+    risk TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    reversibility TEXT NOT NULL,
+    from_signals TEXT NOT NULL,
+    changed TEXT NOT NULL,
+    accepted INTEGER NOT NULL CHECK (accepted IN (0, 1))
+);
+UPDATE vault_meta SET schema_version = 8 WHERE id = 1;
+PRAGMA user_version = 8;
+";
+
 /// Five items, one of each kind: (title, kind, notes, tags, fields as (name, value, secret)).
 type ItemRow = (
     &'static str,
@@ -301,7 +320,9 @@ fn build_legacy(path: &Path, version: i64) {
         .expect("journal mode");
     assert_eq!(journal, "delete");
     let tx = conn.transaction().expect("transaction");
-    let steps = [V1_SQL, V2_SQL, V3_SQL, V4_SQL, V5_SQL, V6_SQL, V7_SQL];
+    let steps = [
+        V1_SQL, V2_SQL, V3_SQL, V4_SQL, V5_SQL, V6_SQL, V7_SQL, V8_SQL,
+    ];
     for sql in &steps[..usize::try_from(version).expect("version")] {
         tx.execute_batch(sql).expect("legacy schema");
     }
@@ -462,6 +483,23 @@ fn build_legacy(path: &Path, version: i64) {
         )
         .expect("calibration");
     }
+    if version >= 8 {
+        // Version 8: the declaration of item 1 names its provider, and the owner accepted
+        // the suggestion as it was.
+        tx.execute(
+            "UPDATE declaration SET provider = 'github' WHERE item_id = 1",
+            [],
+        )
+        .expect("provider");
+        tx.execute(
+            "INSERT INTO suggestion_outcome (item_id, at, provider, environment, risk, scope,
+                 reversibility, from_signals, changed, accepted)
+             VALUES (1, ?1, 'github', 'staging', 'medium', 'read-write', 'reversible',
+                 'provider', '', 1)",
+            [now - 200],
+        )
+        .expect("suggestion");
+    }
     tx.commit().expect("commit");
     conn.close().map_err(|(_, err)| err).expect("close");
 }
@@ -558,9 +596,25 @@ fn assert_version_data(vault: &mut Vault, version: i64) {
         assert!(vault.patterns().expect("patterns").is_empty());
         assert!(vault.calibration().expect("calibration").is_none());
     }
-    // Schema 8: a migrated declaration names no provider, and no suggestion is recorded.
-    assert_eq!(vault.declaration_provider(1).expect("provider"), None);
-    assert_eq!(vault.suggestion_stats().expect("stats").total, 0);
+    if version >= 8 {
+        // The provider and the suggestion outcome of version 8 stay.
+        assert_eq!(
+            vault.declaration_provider(1).expect("provider").as_deref(),
+            Some("github")
+        );
+        let stats = vault.suggestion_stats().expect("stats");
+        assert_eq!((stats.total, stats.accepted), (1, 1));
+    } else {
+        // Schema 8: a migrated declaration names no provider, and no suggestion is
+        // recorded.
+        assert_eq!(vault.declaration_provider(1).expect("provider"), None);
+        assert_eq!(vault.suggestion_stats().expect("stats").total, 0);
+    }
+    // Schema 9: no candidate model, no shadow row, and no promotion. The default model
+    // is active.
+    assert!(vault.shadow_candidate().expect("candidate").is_none());
+    assert!(vault.candidates(10).expect("candidates").is_empty());
+    assert!(vault.active_model().expect("active").is_none());
     if version < 2 {
         assert!(vault.list_agents().expect("agents").is_empty());
         return;
@@ -699,6 +753,22 @@ fn unlock_migrates_each_earlier_schema_version_to_the_current_one() {
             .expect("declaration")
             .expect("the first declaration records the outcome");
         assert_eq!(outcome.changed, vec![DeclarationField::Risk]);
+        // The candidate model and shadow mode of version 9 work on the migrated file.
+        let candidate = vault
+            .register_candidate(&migrated_candidate(), u64::try_from(now()).expect("now"))
+            .expect("candidate");
+        assert!(
+            vault
+                .record_shadow(&ShadowEntry {
+                    candidate_id: candidate.id,
+                    at: u64::try_from(now()).expect("now"),
+                    real: RealOutcome::Ask,
+                    candidate: ShadowAnswer::Run,
+                    owner: OwnerLabel::Allow,
+                    facts: vec![("task_match".to_owned(), 0.9)],
+                })
+                .expect("shadow")
+        );
         drop(vault);
         assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
 
@@ -719,7 +789,18 @@ fn unlock_migrates_each_earlier_schema_version_to_the_current_one() {
             Some("github")
         );
         let stats = again.suggestion_stats().expect("stats");
-        assert_eq!((stats.total, stats.accepted), (1, 0));
+        let expected = if version >= 8 { (2, 1) } else { (1, 0) };
+        assert_eq!((stats.total, stats.accepted), expected);
+        let candidate = again
+            .shadow_candidate()
+            .expect("read")
+            .expect("the candidate stays");
+        assert_eq!(candidate.state, CandidateState::Shadow);
+        let summary = again.shadow_summary(candidate.id).expect("summary");
+        assert_eq!(
+            (summary.requests, summary.agreement.shadow_decisions),
+            (1, 1)
+        );
         let pattern = again.pattern(&key).expect("read").expect("pattern");
         assert_eq!(
             pattern.state(u64::try_from(now()).expect("now")),
@@ -777,6 +858,55 @@ fn migrated_form() -> SuggestedDeclaration {
         reversibility: Reversibility::Irreversible,
         from_signals: vec![DeclarationField::Provider, DeclarationField::Risk],
     }
+}
+
+fn migrated_candidate() -> NewCandidate {
+    NewCandidate {
+        version: "apassy-local-v1+0badc0de".to_owned(),
+        url: "http://127.0.0.1:8775".to_owned(),
+        checkpoint: "/tmp/mig-candidate.safetensors".to_owned(),
+        checkpoint_sha256: "0badc0de".repeat(8),
+        report: "{}".to_owned(),
+    }
+}
+
+/// The step from version 8 to 9 runs in one transaction. A failure leaves version 8 and
+/// its data.
+#[test]
+fn a_failed_migration_from_version_8_keeps_the_old_version_and_data() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("blocked8.db");
+    build_legacy(&path, 8);
+    {
+        // A table with the name of a version 9 table makes the migration fail.
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        conn.execute_batch("CREATE TABLE model_activation (x INTEGER);")
+            .expect("blocking table");
+        conn.close().map_err(|(_, err)| err).expect("close");
+    }
+    let mut vault = Vault::open(&path).expect("open");
+    assert_eq!(
+        vault.unlock(PASS).unwrap_err().kind(),
+        VaultErrorKind::Storage
+    );
+    drop(vault);
+    assert_eq!(raw_versions(&path), (8, 8), "no partial migration");
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        let candidate_table = conn.prepare("SELECT id FROM model_candidate LIMIT 0");
+        assert!(candidate_table.is_err(), "no table of version 9");
+        drop(candidate_table);
+        conn.execute_batch("DROP TABLE model_activation;")
+            .expect("drop blocking table");
+        conn.close().map_err(|(_, err)| err).expect("close");
+    }
+    let mut vault = Vault::open(&path).expect("open");
+    vault.unlock(PASS).expect("unlock migrates");
+    assert_version_data(&mut vault, 8);
+    drop(vault);
+    assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
 }
 
 fn migrated_pattern(agent_id: u64) -> PatternKey {

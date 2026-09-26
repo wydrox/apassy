@@ -18,7 +18,10 @@
 //!    [`super::prompts`]). An unverified hook request or a command that names the hook
 //!    channel is a rule flag. An active remembered pattern replaces the model step
 //!    (ADR 0009, ADR 0010). It cannot change steps 5 and 6, a rule flag, or a missing
-//!    user request or declaration.
+//!    user request or declaration. The active model is the default bouncer or a model
+//!    that the owner promoted, pinned to its version. When the model step decides, a
+//!    candidate in shadow mode answers in parallel on its own thread (goal item B9,
+//!    [`super::shadow`]). Its answer goes only to the vault and has no effect.
 //! 8. A grant in "ask" mode, a high risk, or an unavailable bouncer needs the owner.
 //!    A clean request with only "bouncer" grants runs without a prompt. Each decision
 //!    goes to the decision log. An owner denial blocks the pattern of the request.
@@ -31,22 +34,29 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::json;
 
 use super::approvals::{ApprovalOutcome, PendingRun};
 use super::bouncer::{
-    BouncerRequest, BouncerVerdict, DecisionContext, decide_learned, owner_required,
+    BouncerRequest, BouncerVerdict, DecisionContext, before_model, decide_learned, owner_required,
 };
 use super::decide::{BrokerContext, authenticate, lock, locked_response};
 use super::exec::{self, SecretEnv};
 use super::learning::{self, LoggedRequest, Outcome, RuleDenial, RunScope};
+use super::shadow::{self, ShadowInput};
 use super::shell_risk::{ProviderHosts, analyze_run, injection_flag};
 use crate::agent::wire::WireResponse;
 use crate::vault::providers;
 use crate::vault::{
-    ActivityDecision, AgentSummary, DecisionEntry, Declaration, ExecMode, NewActivity, Vault,
+    ActivityDecision, AgentSummary, DecisionEntry, Declaration, ExecMode, NewActivity, OwnerLabel,
+    RealOutcome, Vault,
 };
+
+/// A shadow thread waits this long after the owner time limit for the real outcome.
+const SHADOW_MARGIN: Duration = Duration::from_secs(30);
 
 const MAX_ITEMS: usize = 16;
 const MAX_ARGS: usize = 64;
@@ -230,26 +240,57 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         instruction: &checked.instruction,
     };
     let pattern = learning::request_pattern(scope, request.command);
-    let learned = lock(&ctx.vault)
+    // Goal item B9: the active model (the default bouncer or a promoted model) and the
+    // candidate in shadow mode come from the vault.
+    let (learned, models) = lock(&ctx.vault)
         .as_ref()
         .filter(|vault| !vault.is_locked())
-        .map(|vault| learning::lookup(vault, pattern.as_ref(), now))
+        .map(|vault| {
+            (
+                learning::lookup(vault, pattern.as_ref(), now),
+                shadow::models(vault, ctx.bouncer.as_ref()),
+            )
+        })
         .unwrap_or_default();
+    let bouncer_request = BouncerRequest {
+        user_request: user_request.to_owned(),
+        command: request.command.join(" "),
+        relative_dir: checked.relative_dir.clone(),
+        purpose: request.purpose.trim().to_owned(),
+        env_names: checked.env_names.clone(),
+        instruction: checked.instruction.clone(),
+    };
+    // Shadow mode (ADR 0010): for a request that reaches the model step, the candidate
+    // answers on its own thread. Its answer goes only to the vault. The decision below
+    // uses the active model only, and the broker does not wait for the candidate.
+    let model_step = before_model(&context).is_none() && learned.learned.pattern.is_none();
+    let mut shadow_call = if model_step {
+        models.candidate.clone().and_then(|candidate| {
+            shadow::begin(
+                Arc::clone(&ctx.vault),
+                checked.epoch,
+                candidate,
+                bouncer_request.clone(),
+                ShadowInput {
+                    analysis: analysis.clone(),
+                    declarations: checked.declarations.clone(),
+                    has_user_request: context.has_user_request,
+                    thresholds: learned.learned.thresholds,
+                },
+                ctx.approval_timeout + SHADOW_MARGIN,
+            )
+        })
+    } else {
+        None
+    };
     let verdict = if !analysis.flags.is_empty()
         || owner_required(&context).is_some()
         || learned.learned.pattern.is_some()
     {
         BouncerVerdict::Unavailable("not asked".to_owned())
     } else {
-        match &ctx.bouncer {
-            Some(bouncer) => bouncer.evaluate(&BouncerRequest {
-                user_request: user_request.to_owned(),
-                command: request.command.join(" "),
-                relative_dir: checked.relative_dir.clone(),
-                purpose: request.purpose.trim().to_owned(),
-                env_names: checked.env_names.clone(),
-                instruction: checked.instruction.clone(),
-            }),
+        match &models.active {
+            Some(bouncer) => bouncer.evaluate(&bouncer_request),
             None => BouncerVerdict::Unavailable("no bouncer is set".to_owned()),
         }
     };
@@ -287,6 +328,9 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
     if !needs_approval {
         let entry = logged.entry(Outcome::Automatic { by_pattern }, &risk_note);
         record_decision_locked(ctx, &entry, pattern.as_ref());
+        if let Some(call) = shadow_call.take() {
+            call.finish(RealOutcome::Run, OwnerLabel::None);
+        }
     }
     if needs_approval {
         // Goal item N3: a durable record of the wait. A crash leaves it, and the next
@@ -347,6 +391,16 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         let mut entry = logged.entry(Outcome::Owner(outcome), &risk_note);
         entry.at = learning::now();
         record_decision_locked(ctx, &entry, pattern.as_ref());
+        if let Some(call) = shadow_call.take() {
+            let owner = match outcome {
+                ApprovalOutcome::Approved | ApprovalOutcome::ApprovedAndRemembered => {
+                    OwnerLabel::Allow
+                }
+                ApprovalOutcome::Denied => OwnerLabel::Deny,
+                ApprovalOutcome::TimedOut | ApprovalOutcome::Invalidated => OwnerLabel::None,
+            };
+            call.finish(RealOutcome::Ask, owner);
+        }
         remembered = outcome == ApprovalOutcome::ApprovedAndRemembered;
         let refusal = match outcome {
             ApprovalOutcome::Approved | ApprovalOutcome::ApprovedAndRemembered => None,

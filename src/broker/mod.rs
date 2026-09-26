@@ -10,6 +10,7 @@ pub mod bouncer;
 pub mod calibration;
 pub mod decide;
 pub mod exec;
+pub mod finetune;
 pub mod http;
 pub mod learning;
 pub mod packs;
@@ -19,6 +20,7 @@ pub mod prompts;
 pub mod replay;
 mod run;
 pub mod server;
+pub mod shadow;
 pub mod shell_risk;
 
 use std::sync::{Arc, Mutex};
