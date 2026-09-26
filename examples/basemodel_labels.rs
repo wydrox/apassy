@@ -2,6 +2,8 @@
 //!
 //! `tools/basemodel/gen_data.py` writes one JSON object per line to stdin:
 //! `{"id": "...", "line": "shell line", "purpose": "...", "secrets": ["NAME", ...]}`.
+//! An input can give `"argv": [...]` instead of `"line"`. Then the analysis uses that
+//! argument list as it is, as the broker does for an agent request.
 //! This program writes one JSON object per line to stdout:
 //! `{"id": "...", "argv": [...], "command": "argv joined", "flags": [...], "known_safe": bool}`.
 //!
@@ -19,6 +21,15 @@ use serde_json::{Value, json};
 
 use apassy::broker::shell_risk::{analyze, command_line_to_argv};
 
+fn strings(value: &Value) -> Option<Vec<String>> {
+    value.as_array().map(|items| {
+        items
+            .iter()
+            .filter_map(|item| item.as_str().map(str::to_owned))
+            .collect()
+    })
+}
+
 fn main() {
     let stdin = std::io::stdin();
     let mut out = BufWriter::new(std::io::stdout().lock());
@@ -30,16 +41,8 @@ fn main() {
         let input: Value = serde_json::from_str(&line)
             .unwrap_or_else(|error| panic!("line {}: bad JSON: {error}", number + 1));
         let text = |key: &str| input[key].as_str().unwrap_or_default().to_owned();
-        let secrets: Vec<String> = input["secrets"]
-            .as_array()
-            .map(|names| {
-                names
-                    .iter()
-                    .filter_map(|name| name.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let argv = command_line_to_argv(&text("line"));
+        let secrets = strings(&input["secrets"]).unwrap_or_default();
+        let argv = strings(&input["argv"]).unwrap_or_else(|| command_line_to_argv(&text("line")));
         let analysis = analyze(&argv, &text("purpose"), &secrets);
         let row = json!({
             "id": input["id"],
