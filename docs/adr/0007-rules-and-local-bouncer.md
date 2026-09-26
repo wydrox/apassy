@@ -1,7 +1,8 @@
 # ADR 0007 — Rules and a local bouncer with Laya
 
 Date: 2026-09-25.
-Status: owner selected rules and a bouncer on a local Jev-compatible model on 2026-09-25. Touch ID is the next stage.
+Status: CLOSED on 2026-09-27. Evidence: [bouncer](../operations/bouncer.md) (policy v7), [held-out v4](../evaluation/heldout-v4.md) (blind B2), [native app](../operations/native-app.md) (owner check). Touch ID is paused (ADR 0010, fourth round).
+Earlier status: owner selected rules and a bouncer on a local Jev-compatible model on 2026-09-25. Touch ID is the next stage.
 Update 2026-09-26: [ADR 0010](0010-closing-open-decisions.md) selects a Swift helper for Touch ID.
 
 ## Context

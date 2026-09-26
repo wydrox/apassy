@@ -1,7 +1,8 @@
 # ADR 0001 — P0 feasibility
 
 Date: 2026-09-16
-Status: PARTLY DECIDED. Remaining proposals need evidence or an owner decision.
+Status: CLOSED on 2026-09-27. §1–§7 are decided in ADR 0010. Evidence: [isolation](../operations/isolation.md) (§6), [storage review](../reviews/storage-dependencies.md) (§3), [notifications](../operations/notifications.md) (§5), and ADR 0010 for §4 (connectors move to a plugin ADR) and §7 (local models only).
+Earlier status: PARTLY DECIDED. Remaining proposals need evidence or an owner decision.
 Update 2026-09-26: [ADR 0010](0010-closing-open-decisions.md) decides the open questions. [The goal](../goal.md) tracks the evidence.
 
 This record is a feasibility input after approval of `docs/mvp-plan.md`.

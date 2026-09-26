@@ -8,20 +8,28 @@ A bouncer checks agent requests, permits normal use, pauses uncertain requests, 
 
 ## Status
 
-The owner approved the revised MVP plan and implementation with Grok subagents on 2026-09-16.
-P0 includes a synthetic owner walkthrough and filesystem checks. P1 includes Rust contracts, a native desktop demo, tests, and CI configuration.
-The owner selected macOS desktop with eframe/egui, then SQLCipher with a master passphrase for an experimental vault backend.
-The `vault` feature stores items in SQLCipher. With both `desktop` and `vault` enabled, the owner vault and item views use that file. Rules, agents, and activity stay in-memory fixtures. There is no broker.
-See the [vault contract](docs/contracts/vault-v1.md) and [passphrase decision](docs/adr/0003-passphrase-vault.md) for scope and limits.
-Real service contracts, production key handling, storage acceptance, and full agent isolation remain open. This is not a secure credential manager yet.
-The descriptions above are product goals, not implemented features or verified security guarantees.
-See [vault verification](docs/operations/vault-verification.md) and the earlier [foundation results](docs/operations/foundation-verification.md) for passing checks and remaining limits.
+Date: 2026-09-27. The goal and its definition of done are in [goal.md](docs/goal.md). The decisions are in [ADR 0010](docs/adr/0010-closing-open-decisions.md).
+
+The real-secret gate is OPEN. The owner can use Apassy with real credentials. Start with [daily use](docs/operations/daily-use.md).
+
+- Agent hosts (Claude Code and Codex) run in a Seatbelt profile. The profile denies the vault, the backups, the model, and the Apassy app bundle. See [isolation](docs/operations/isolation.md).
+- Agents get secrets only from the broker, in the environment of one process. The socket never returns a secret value. See [ADR 0006](docs/adr/0006-process-secrets.md).
+- The vault is one SQLCipher file with a master passphrase. See [vault verification](docs/operations/vault-verification.md) and the [storage review](docs/reviews/storage-dependencies.md).
+- A local bouncer (rule packs and the Apassy base model on Laya) permits normal work, asks the owner about uncertain work, and learns from the owner's decisions. A production run always waits for the owner. See [bouncer](docs/operations/bouncer.md) and [learning](docs/operations/learning.md).
+- On the blind held-out set v4, the bouncer ran no violation and no critical case without the owner. It ran 76% of normal cases without a prompt on the first day. See [held-out v4](docs/evaluation/heldout-v4.md).
+
+Open items:
+
+- N1: the owner allows notifications once, and a real banner is timed. Until then, the inbox in the app shows each event.
+- B12: after two weeks of daily use, the owner is asked on 10% or fewer of the runs.
+- A3 (Touch ID unlock) is paused by the owner. The passphrase is the only unlock.
+
+Known limits are in ADR 0006, [isolation](docs/operations/isolation.md) sections 4 and 7, and the [key-memory review](docs/reviews/key-memory.md).
 
 ## Run the desktop demo
 
 Run `cargo run --locked --features desktop,vault --bin apassy` for the owner vault file.
-The vault view creates, opens, unlocks, and backs up an encrypted file. Item details can add, edit, search, delete, and reveal values. Do not put real credentials in it.
-Rules, agents, and activity stay demo fixtures. “Reset demo” does not wipe the vault file.
+The vault view creates, opens, unlocks, and backs up an encrypted file. For real credentials, use the signed app from [daily use](docs/operations/daily-use.md).
 Run `cargo run --locked --features desktop --bin apassy` for the older in-memory demo. “Open vault” there is not owner authentication.
 Run `cargo run --locked --features desktop,vault --bin apassy -- --smoke-test` for a model check without a window.
 See [desktop development](docs/operations/desktop-development.md), [Rust contracts](docs/contracts/rust-v1.md), and [development checks](docs/operations/checks.md).

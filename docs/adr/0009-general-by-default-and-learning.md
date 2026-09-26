@@ -1,7 +1,8 @@
 # ADR 0009 — General by default, learning over time
 
 Date: 2026-09-26.
-Status: proposed by the owner on 2026-09-26. The steps below are a plan. Each step needs its own implementation and measurement.
+Status: CLOSED on 2026-09-27. Steps 1–6 are done: [learning](../operations/learning.md), [declarations](../operations/declarations.md), [host hooks](../operations/host-hooks.md), [rule packs](../operations/rule-packs.md), [base model](../operations/base-model.md), [fine-tune](../operations/fine-tune.md). The daily-use target is goal item B12.
+Earlier status: proposed by the owner on 2026-09-26. The steps below are a plan. Each step needs its own implementation and measurement.
 Update 2026-09-26: [ADR 0010](0010-closing-open-decisions.md) decides the open questions. [The goal](../goal.md) contains all six steps.
 
 ## Context

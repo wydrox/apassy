@@ -681,7 +681,7 @@ the block is the profile, not a broken tool.
 
 ## 8. Real-secret gate
 
-The real-secret gate stays BLOCKED until every gate item in
+The real-secret gate is OPEN since 2026-09-27 (ADR 0006). Every gate item in
 [goal.md](../goal.md) is done. This document is the evidence for goal items I1,
 I2 (with the Keychain part in section 6), and I4, and the partial evidence for
 I3.

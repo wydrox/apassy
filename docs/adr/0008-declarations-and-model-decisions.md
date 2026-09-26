@@ -1,7 +1,8 @@
 # ADR 0008 — Declarations, user request, and model decisions
 
 Date: 2026-09-26.
-Status: owner selected this direction on 2026-09-26. It changes the decision policy of ADR 0007.
+Status: CLOSED on 2026-09-27. Evidence: [bouncer](../operations/bouncer.md) (decision order), [declarations](../operations/declarations.md), [host hooks](../operations/host-hooks.md) (user request from the host), [held-out v4](../evaluation/heldout-v4.md).
+Earlier status: owner selected this direction on 2026-09-26. It changes the decision policy of ADR 0007.
 Update 2026-09-26: [ADR 0010](0010-closing-open-decisions.md) changes step 5 of the decision order. A production declaration always waits for the owner.
 
 ## Owner requirements

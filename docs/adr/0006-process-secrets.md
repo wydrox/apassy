@@ -1,7 +1,8 @@
 # ADR 0006 — Secrets for agent processes
 
 Date: 2026-09-25.
-Status: owner selected this mode on 2026-09-25. It changes the priority in the original concept. It does not remove mediated use from ADR 0004.
+Status: CLOSED on 2026-09-27. The real-secret gate is OPEN (see below). The owner accepted the risks, including F11, in ADR 0010.
+Earlier status: owner selected this mode on 2026-09-25. It changes the priority in the original concept. It does not remove mediated use from ADR 0004.
 Update 2026-09-26: in [ADR 0010](0010-closing-open-decisions.md), the owner accepts these risks for all environments. A production run always waits for the owner. The gate opens only after the gate items in [the goal](../goal.md).
 
 ## Context
@@ -38,7 +39,7 @@ The owner selected option 1.
 - A command in "allow" mode runs without a human check. Use "allow" only for commands that you trust.
 - The owner approval is the main control until the risk evaluator (P5) exists.
 - A process of the same user can read the environment of a running broker child through the kernel (`KERN_PROCARGS2`, as `ps -E` does). No tested Seatbelt rule blocks this and keeps tools working ([isolation](../operations/isolation.md), "Process information (F11)"). The broker limits the exposure: the environment has only the base variables, `PATH`, and the bound secrets, and the broker stops the process group when the main process ends or after 300 seconds. A descendant that starts its own process group keeps running. On 2026-09-26 the owner accepted this limit ([ADR 0010](0010-closing-open-decisions.md)). 1Password CLI (`op run`) delivers secrets in the same way, and its documentation says: "You should assume that processes on your computer can access the environment of other processes run by the same user."
-- The real-secret gate stays BLOCKED until the owner accepts these risks in a separate decision.
+- The real-secret gate is OPEN since 2026-09-27. The owner accepted these risks in [ADR 0010](0010-closing-open-decisions.md). The gate items in [goal.md](../goal.md) are done: I1–I4 ([isolation](../operations/isolation.md)), V1–V4 ([reviews](../reviews/storage-dependencies.md), [vault verification](../operations/vault-verification.md)), A1, A2, A4 ([native app](../operations/native-app.md)), and B2 ([held-out v4](../evaluation/heldout-v4.md)). A3 is deferred.
 
 ## Relation to other records
 

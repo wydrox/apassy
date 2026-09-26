@@ -48,18 +48,18 @@ Each item needs evidence: a passing test, a measurement in `docs/operations/`, o
 
 - [x] P1. A token expires after 30 days by default. The owner can change this time and rotate a token. An expired token gives a clear error to the agent. Evidence: `tokens_expire_and_rotation_replaces_them`, `mcp_adapter_explains_an_expired_token`.
 - [x] P2. A run with a production item always waits for the owner. The model, patterns, and calibration cannot change this. A test shows this. Evidence: `production_always_asks_the_owner`, `production_declaration_always_waits_for_the_owner`.
-- [ ] P3. The real-secret gate opens only after I1–I4, V1–V4, A1, A2, and A4 are done, and after B2 passes. A3 is deferred (ADR 0010, fourth round). ADR 0006 and the README then record the gate as OPEN, with links to the evidence. Status: waits for B2.
+- [x] P3. The real-secret gate opens only after I1–I4, V1–V4, A1, A2, and A4 are done, and after B2 passes. A3 is deferred (ADR 0010, fourth round). ADR 0006 and the README then record the gate as OPEN, with links to the evidence. Evidence: the gate is OPEN since 2026-09-27 in [ADR 0006](adr/0006-process-secrets.md) and the [README](../README.md).
 
 ### 6. Bouncer and learning (ADR 0007, ADR 0008, ADR 0009)
 
 - [x] B1. The bouncer uses only the local Laya model on a loopback address. Apassy has no hosted model and no rule interpreter. Evidence: [Bouncer](operations/bouncer.md); ADR 0010 Models.
-- [ ] B2. A held-out evaluation uses 200 or more cases that were not used for tuning: 100 normal, 50 explicit violations, and 50 suspicious. The cases come from a stack other than odealo. Labels are fixed before scoring. Three runs give zero explicit violations run and zero critical cases allowed without the owner. The share of normal cases that run without a prompt is recorded, but it is not a gate (owner decision, ADR 0010 third round; B12 has the target). Status: v1, v2 and v3 are development sets now. The blind test is [held-out v4](evaluation/heldout-v4.md).
+- [x] B2. A held-out evaluation uses 200 or more cases that were not used for tuning: 100 normal, 50 explicit violations, and 50 suspicious. The cases come from a stack other than odealo. Labels are fixed before scoring. Three runs give zero explicit violations run and zero critical cases allowed without the owner. The share of normal cases that run without a prompt is recorded, but it is not a gate (owner decision, ADR 0010 third round; B12 has the target). Evidence: [held-out v4](evaluation/heldout-v4.md): the base model ran 0 violations and 0 critical cases in 3 runs; 91 of 120 normal cases ran without a prompt. v1–v3 failed or were used for development ([v2](evaluation/heldout-v2.md), [v3](evaluation/heldout-v3.md)).
 - [x] B3. Step 1: the decision log and "Approve and remember" with narrow patterns (ADR 0010). A replay on real commands records the ask rate. No past denial becomes an allowance. Evidence: [Learning](operations/learning.md): replay, 0 denied requests allowed later.
 - [x] B4. Step 2: suggested declarations and known hosts. The share of suggestions that the owner accepts without a change is recorded. Evidence: [Declarations](operations/declarations.md): 52% exact on 66 synthetic credentials; per-item record in the vault.
 - [x] B5. Step 3: threshold calibration. Apassy accepts a change only if a replay on all past decisions allows no request that the owner denied. The ask rate and misses on a held-out part of the log are recorded. Evidence: [Learning](operations/learning.md) §4, `calibration_proposal_passes_the_replay_gate_and_the_owner_applies_it`.
 - [x] B6. Step 4: a Claude Code `UserPromptSubmit` hook sends the user request to Apassy. The request in the log matches the host transcript. A request from the hook replaces the text from the agent. Codex gets the same with its equivalent. If Codex has no equivalent, the gap is recorded. Evidence: [Host hooks](operations/host-hooks.md): real Claude Code and Codex runs.
 - [x] B7. Step 5a: tool knowledge moves from `src/broker/shell_risk.rs` to versioned built-in rule packs. A replay gives the same decisions as before the move. A test shows that a local pack can add a restriction and cannot remove one. Evidence: [Rule packs](operations/rule-packs.md): replay with 0 differences at the move; local packs only add restrictions.
-- [ ] B8. Step 5b: a general base model is fine-tuned on commands from many stacks, without owner data. It ships with the app. A blind test on a new independent set is recorded. Status: Trained and packaged ([base model](operations/base-model.md)). The blind test is [held-out v3](evaluation/heldout-v3.md).
+- [x] B8. Step 5b: a general base model is fine-tuned on commands from many stacks, without owner data. It ships with the app. A blind test on a new independent set is recorded. Evidence: [base model](operations/base-model.md); blind test on [held-out v4](evaluation/heldout-v4.md). The base model is the default model.
 - [x] B9. Step 5c: local fine-tune and shadow mode follow the gate in ADR 0010: 300 decisions with 30 or more denials, AC power, one hour maximum, 100 shadow decisions, 95% agreement, no allowance of a denied request, and manual promotion. Evidence: [Fine-tune](operations/fine-tune.md): gate, shadow mode, promotion; `tests/local_finetune.rs`, `tests/shadow_mode.rs`.
 - [x] B10. The app shows the ask rate over time, the automatic decisions, and the agreement of a candidate model with the owner. Evidence: Learning tab; [learning](operations/learning.md) §5.
 - [x] B11. Step 6: Touch ID for "Approve and remember" and rule changes. A4 covers this step. Evidence: Covered by A4 (`OwnerAction::ApproveAndRemember`, `ChangeCalibration`).
@@ -67,8 +67,8 @@ Each item needs evidence: a passing test, a measurement in `docs/operations/`, o
 
 ### 7. Records
 
-- [ ] R1. The status line of each ADR from 0001 to 0009 says that the ADR is closed, with links to its evidence. Status: In progress.
-- [ ] R2. The README status matches the implemented state. Status: Open.
+- [x] R1. The status line of each ADR from 0001 to 0009 says that the ADR is closed, with links to its evidence. Evidence: the status lines of ADR 0001–0009.
+- [x] R2. The README status matches the implemented state. Evidence: [README](../README.md) status of 2026-09-27; [daily use](operations/daily-use.md).
 
 ## Out of scope
 

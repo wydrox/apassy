@@ -119,7 +119,7 @@ The blind held-out sets v2 and v3 failed goal item B2. A model that asked seldom
 
 ## Limits
 
-- The real-secret gate stays BLOCKED until the goal marks its gate items done.
+- The real-secret gate opened on 2026-09-27, when the goal marked its gate items done (ADR 0006).
 - A Keychain item with biometric access control needs code signing with an Apple Developer team ID. Without one, Touch ID can confirm owner actions, but it cannot unlock the vault.
 - Apple marks `sandbox-exec` as deprecated. If a macOS release removes it, isolation needs a new ADR.
 - Seatbelt does not protect memory, the clipboard, or processes outside the profile.

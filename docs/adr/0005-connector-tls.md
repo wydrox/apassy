@@ -1,7 +1,8 @@
 # ADR 0005 — TLS for connector destinations
 
 Date: 2026-09-25.
-Status: owner approved option A on 2026-09-25. This decision closes the TLS question in [ADR 0004](0004-agent-path-first.md). It does not select a real service.
+Status: CLOSED on 2026-09-25. Evidence: the HTTPS tests in `tests/agent_path.rs`. ADR 0010 does not change this record.
+Earlier status: owner approved option A on 2026-09-25. This decision closes the TLS question in [ADR 0004](0004-agent-path-first.md). It does not select a real service.
 
 ## Context
 
