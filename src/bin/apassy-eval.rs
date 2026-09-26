@@ -16,6 +16,14 @@
 //!   `cargo run --locked --features vault --bin apassy-eval -- tests/evals/heldout-v1.jsonl`
 //!
 //! It is not part of `cargo test`. It needs a live model and is opt-in.
+//!
+//! The owner rule text is `instruction` (v1) or `owner_rule` (v2). The harness gives it
+//! to the grant as the plain-language owner instruction. It does not turn plain text
+//! into hard rules (command prefixes or forbidden words).
+//!
+//! With `APASSY_EVAL_DUMP=<path>`, the harness also writes one JSON line per run and
+//! case: the outcome, the error code, the model answers and version, and the decision
+//! log entries of the case. The dump does not change any decision.
 
 #![forbid(unsafe_code)]
 
@@ -64,6 +72,8 @@ struct CallRecord {
     latency_ms: f64,
     /// noul answers by name.
     facts: BTreeMap<String, f64>,
+    /// The `model` field of the answer.
+    model: Option<String>,
 }
 
 /// State the proxy shares with the main thread.
@@ -107,16 +117,25 @@ impl Proxy {
             }
         };
         let mut facts = BTreeMap::new();
-        if let Ok(value) = serde_json::from_slice::<Value>(&response.body)
-            && let Some(answers) = value.get("answers").and_then(Value::as_object)
-        {
-            for (name, answer) in answers {
-                if let Some(p) = answer.get("noul").and_then(Value::as_f64) {
-                    facts.insert(name.clone(), p);
+        let mut model = None;
+        if let Ok(value) = serde_json::from_slice::<Value>(&response.body) {
+            model = value
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if let Some(answers) = value.get("answers").and_then(Value::as_object) {
+                for (name, answer) in answers {
+                    if let Some(p) = answer.get("noul").and_then(Value::as_f64) {
+                        facts.insert(name.clone(), p);
+                    }
                 }
             }
         }
-        *self.last.lock().expect("last") = Some(CallRecord { latency_ms, facts });
+        *self.last.lock().expect("last") = Some(CallRecord {
+            latency_ms,
+            facts,
+            model,
+        });
         // Revoke the grant so an allowed run cannot start a process.
         let (agent_id, items) = self.current.lock().expect("current").clone();
         let mut guard = self.vault.lock().unwrap_or_else(|p| p.into_inner());
@@ -179,8 +198,15 @@ fn main() {
                     }],
                 })
                 .expect("add item");
+            // The vault accepts only upper-case names (`checked_env_name`). A name such
+            // as the .NET `ConnectionStrings__OrdersDb` is bound in upper case: .NET
+            // reads environment keys without regard to case.
+            let bound = name.to_ascii_uppercase();
+            if bound != name {
+                eprintln!("env name {name} is bound as {bound}");
+            }
             vault
-                .set_env_binding(item.id, name, "token")
+                .set_env_binding(item.id, &bound, "token")
                 .expect("env binding");
             items.insert(name.to_owned(), item.id);
         }
@@ -246,6 +272,9 @@ fn main() {
     }
 
     report(&cases, &runs);
+    if let Ok(dump) = std::env::var("APASSY_EVAL_DUMP") {
+        write_dump(&dump, &cases, &runs);
+    }
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
@@ -256,6 +285,75 @@ struct CaseResult {
     model_ms: Option<f64>,
     /// `task_match` answer when the model was called.
     task_match: Option<f64>,
+    /// Error code of the response, empty when the response was ok.
+    code: String,
+    /// All model answers and the model version, when the model was called.
+    facts: BTreeMap<String, f64>,
+    model: Option<String>,
+    /// Decision log entries that the case added.
+    decisions: Vec<Value>,
+}
+
+/// Highest decision log id, or 0 for an empty log.
+fn last_decision_id(shared: &apassy::broker::SharedVault) -> u64 {
+    let guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+    guard
+        .as_ref()
+        .and_then(|vault| vault.decision_log().ok())
+        .and_then(|log| log.iter().map(|record| record.id).max())
+        .unwrap_or(0)
+}
+
+/// Decision log entries after `after`, as short JSON objects for the dump.
+fn decisions_after(shared: &apassy::broker::SharedVault, after: u64) -> Vec<Value> {
+    let guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(log) = guard.as_ref().and_then(|vault| vault.decision_log().ok()) else {
+        return Vec::new();
+    };
+    log.into_iter()
+        .filter(|record| record.id > after)
+        .map(|record| {
+            let entry = record.entry;
+            serde_json::json!({
+                "decision": entry.decision.as_str(),
+                "decided_by": entry.decided_by.as_str(),
+                "asked": entry.asked,
+                "rule_flags": entry.rule_flags,
+                "known_safe": entry.known_safe,
+                "policy": entry.policy,
+                "note": entry.note,
+                "instruction": entry.instruction,
+            })
+        })
+        .collect()
+}
+
+/// Write one JSON line per run and case to `path`.
+fn write_dump(path: &str, cases: &[Value], runs: &[RunResult]) {
+    let mut out = String::new();
+    for (run, result) in runs.iter().enumerate() {
+        for (case, row) in cases.iter().zip(&result.rows) {
+            let line = serde_json::json!({
+                "run": run + 1,
+                "id": case["id"],
+                "stack": case["stack"],
+                "category": case["category"],
+                "expected": case["expected"],
+                "critical": case["critical"],
+                "outcome": format!("{:?}", row.outcome),
+                "code": row.code,
+                "decision_ms": row.decision_ms,
+                "model_ms": row.model_ms,
+                "model": row.model,
+                "facts": row.facts,
+                "decisions": row.decisions,
+            });
+            out.push_str(&line.to_string());
+            out.push('\n');
+        }
+    }
+    std::fs::write(path, out).expect("write the dump");
+    eprintln!("dump: {path}");
 }
 
 struct RunResult {
@@ -325,9 +423,11 @@ fn score_run(
             },
         };
 
+        let before = last_decision_id(shared);
         let started = Instant::now();
         let response = handle(ctx, &request);
         let decision_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let decisions = decisions_after(shared, before);
         let record = proxy.take_last();
         let model_hit = record.is_some();
         let model_ms = record.as_ref().map(|r| r.latency_ms);
@@ -335,11 +435,20 @@ fn score_run(
             .as_ref()
             .and_then(|r| r.facts.get("task_match").copied());
         let outcome = classify(&response, model_hit);
+        let code = response
+            .error
+            .as_ref()
+            .map_or(String::new(), |e| e.code.clone());
+        let (facts, model) = record.map_or((BTreeMap::new(), None), |r| (r.facts, r.model));
         rows.push(CaseResult {
             outcome,
             decision_ms,
             model_ms,
             task_match,
+            code,
+            facts,
+            model,
+            decisions,
         });
     }
     RunResult { rows }
@@ -408,12 +517,18 @@ fn rule_of(case: &Value) -> ExecRule {
             })
             .unwrap_or_default()
     };
+    // v1 names the owner rule `instruction`, v2 names it `owner_rule` (text or null).
+    let instruction = case["instruction"]
+        .as_str()
+        .or_else(|| case["owner_rule"].as_str())
+        .unwrap_or_default()
+        .to_owned();
     ExecRule {
         allowed_prefixes: list("allowed_prefixes"),
         forbidden_words: list("forbidden_words"),
         expires_at: None,
         max_runs_per_hour: None,
-        instruction: case["instruction"].as_str().unwrap_or_default().to_owned(),
+        instruction,
     }
 }
 
