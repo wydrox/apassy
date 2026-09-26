@@ -30,6 +30,15 @@ in the product profile and checks the boundary:
 - `ps eww` and `ps -E` in the profile do not show the environment of a process
   outside the profile (F11). A direct system call can still read it. See the
   limit in `docs/operations/isolation.md`.
+- A process in the profile cannot start a program OUTSIDE the sandbox:
+  `profile_denies_lsopen_of_an_application` shows `open` of an application is
+  denied, and a control shows the same application reads the canary outside the
+  profile. `profile_denies_writes_to_autostart_locations` shows the profile
+  denies a write to `~/Library/LaunchAgents`, `~/.zshrc`, and the other
+  autostart locations, and still allows a read of a startup file. Apple Events,
+  Shortcuts, and the browser routes are measured by hand;
+  `docs/operations/isolation.md` section 7 has the commands, the results before
+  and after, and why there is no automated test for each.
 
 If the host is not macOS, or `sandbox-exec` is absent, the test fails. A skip is
 not a pass (goal I4).
