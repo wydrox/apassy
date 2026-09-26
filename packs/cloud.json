@@ -1,33 +1,20 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "cloud",
-  "description": "Cloud and hosting command line tools (Google Cloud, Azure, Fly.io, Railway, Render, Heroku, Serverless, Ansible, Firebase, Cloudflare Wrangler) and provider CLIs (Stripe, Twilio).",
-  "programs": [
-    "gcloud", "az", "fly", "flyctl", "railway", "render", "heroku", "serverless", "sls",
-    "ansible-playbook", "firebase", "wrangler", "stripe", "twilio"
-  ],
+  "description": "Small hosting and deploy tools (Railway, Render, Serverless, Ansible playbooks and ad-hoc commands) and Twilio. Google Cloud, Azure, Fly.io, Heroku, Firebase, Wrangler, and Stripe have their own packs.",
+  "programs": ["railway", "render", "serverless", "sls", "ansible-playbook", "ansible", "twilio"],
   "roles": {
-    "usage": [
-      "gcloud", "az", "fly", "flyctl", "heroku", "firebase", "wrangler", "stripe", "twilio"
-    ]
+    "usage": ["twilio"]
   },
   "rules": [
-    {
-      "id": "resource-change",
-      "flag": "production",
-      "dry_run": "skip",
-      "when": {
-        "program": ["gcloud", "az"],
-        "any_arg": ["deploy", "delete", "create", "update", "set-iam-policy"]
-      }
-    },
     {
       "id": "platform-deploy",
       "flag": "production",
       "dry_run": "skip",
+      "note": "Deployments, scaling, secrets, and removal on a hosting platform.",
       "when": {
-        "program": ["fly", "flyctl", "railway", "render"],
+        "program": ["railway", "render"],
         "subcommand": ["deploy", "up", "secrets", "scale", "destroy"]
       }
     },
@@ -35,15 +22,33 @@
       "id": "deploy-tools",
       "flag": "production",
       "dry_run": "skip",
-      "when": { "program": ["heroku", "serverless", "sls", "ansible-playbook"] }
+      "note": "Serverless and Ansible playbooks deploy or change servers.",
+      "when": { "program": ["serverless", "sls", "ansible-playbook"] }
     },
     {
-      "id": "hosting-deploy",
+      "id": "ansible-ad-hoc",
       "flag": "production",
-      "dry_run": "skip",
+      "note": "An ad-hoc Ansible command runs a module or a shell command on remote hosts. `-m ping` and `-m setup` only check and read.",
       "when": {
-        "program": ["firebase", "wrangler"],
-        "subcommand": ["deploy", "publish", "hosting:channel:deploy"]
+        "program": ["ansible"],
+        "any_of": [
+          { "any_arg_starts": ["-a", "--args"] },
+          { "option_value": { "option": ["-m", "--module-name"], "not_value": ["ping", "setup", "debug"] } }
+        ]
+      }
+    }
+  ],
+  "safe": [
+    {
+      "id": "twilio-read",
+      "note": "Twilio `...:list` and `...:fetch` commands only read.",
+      "when": {
+        "program": ["twilio"],
+        "operands": { "at": { "index": 0, "starts": ["api:", "profiles:", "phone-numbers:"] } },
+        "not": {
+          "operands": { "any": [{ "ends": [":create", ":update", ":remove", ":delete", ":add"] }] }
+        },
+        "any_of": [{ "operands": { "any": [{ "ends": [":list", ":fetch"] }] } }]
       }
     }
   ]

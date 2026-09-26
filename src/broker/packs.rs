@@ -62,9 +62,14 @@ const MAX_LOCAL_PACK_BYTES: u64 = 1024 * 1024;
 const BUILTIN: &[(&str, &str)] = &[
     ("alembic.json", include_str!("../../packs/alembic.json")),
     ("aws.json", include_str!("../../packs/aws.json")),
+    ("azure.json", include_str!("../../packs/azure.json")),
     ("cargo.json", include_str!("../../packs/cargo.json")),
     ("cloud.json", include_str!("../../packs/cloud.json")),
     ("databases.json", include_str!("../../packs/databases.json")),
+    (
+        "digitalocean.json",
+        include_str!("../../packs/digitalocean.json"),
+    ),
     ("django.json", include_str!("../../packs/django.json")),
     ("docker.json", include_str!("../../packs/docker.json")),
     ("dotnet.json", include_str!("../../packs/dotnet.json")),
@@ -73,9 +78,13 @@ const BUILTIN: &[(&str, &str)] = &[
         "file-tools.json",
         include_str!("../../packs/file-tools.json"),
     ),
+    ("firebase.json", include_str!("../../packs/firebase.json")),
+    ("fly.json", include_str!("../../packs/fly.json")),
+    ("gcloud.json", include_str!("../../packs/gcloud.json")),
     ("gh.json", include_str!("../../packs/gh.json")),
     ("git.json", include_str!("../../packs/git.json")),
     ("go.json", include_str!("../../packs/go.json")),
+    ("heroku.json", include_str!("../../packs/heroku.json")),
     (
         "host-hooks.json",
         include_str!("../../packs/host-hooks.json"),
@@ -109,10 +118,12 @@ const BUILTIN: &[(&str, &str)] = &[
     ),
     ("scripting.json", include_str!("../../packs/scripting.json")),
     ("shell.json", include_str!("../../packs/shell.json")),
+    ("stripe.json", include_str!("../../packs/stripe.json")),
     ("supabase.json", include_str!("../../packs/supabase.json")),
     ("system.json", include_str!("../../packs/system.json")),
     ("terraform.json", include_str!("../../packs/terraform.json")),
     ("vercel.json", include_str!("../../packs/vercel.json")),
+    ("wrangler.json", include_str!("../../packs/wrangler.json")),
 ];
 
 /// File names of the built-in packs in `packs/`.

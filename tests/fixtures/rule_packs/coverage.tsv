@@ -1592,3 +1592,185 @@ npx prisma migrate status
 npx prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma
 npx prisma migrate dev -n init
 npx prisma db push --accept-data-loss -n x
+# ---- AWS (aws pack) ----
+aws s3 rm s3://acme-staging-assets --recursive
+aws s3 rb s3://acme-staging-assets --force
+aws s3 mb s3://acme-new
+aws ecr batch-delete-image --repository-name acme --image-ids imageTag=latest
+aws ec2 terminate-instances --instance-ids i-1
+aws --region us-east-1 ec2 terminate-instances --instance-ids i-1
+aws rds reboot-db-instance --db-instance-identifier acme-staging
+aws ec2 stop-instances --instance-ids i-1
+aws lambda invoke --function-name f out.json
+aws sns publish --topic-arn arn:x --message hi
+aws logs start-query --log-group-name g --query-string q
+aws secretsmanager get-secret-value --secret-id acme/staging/db
+aws ssm get-parameter --name /app/db --with-decryption
+aws ssm get-parameter --name /app/region
+aws sts assume-role --role-arn arn:x --role-session-name s
+aws kms decrypt --ciphertext-blob fileb://x
+aws configure get aws_secret_access_key
+aws configure get region
+aws s3 presign s3://b/k
+aws ssm start-session --target i-1
+aws ecs execute-command --cluster c --task t --interactive --command sh
+aws ec2 describe-instances --region us-east-1
+aws s3 ls s3://acme-staging-assets
+aws sts get-caller-identity
+aws logs tail /acme/staging/api --since 10m
+# ---- Google Cloud (gcloud pack) ----
+gcloud sql instances delete acme-staging
+gcloud compute instances stop vm-1
+gcloud run services update-traffic api --to-latest
+gcloud builds submit --tag gcr.io/x/y
+gcloud storage rm -r gs://acme-staging
+gsutil rm -r gs://acme-staging/tmp
+gsutil rb gs://acme-old
+gsutil cp dist/app.js gs://acme-staging/app.js
+gsutil ls gs://acme-staging
+bq rm -f -t dataset.table
+bq query --use_legacy_sql=false 'DELETE FROM dataset.t WHERE 1=1'
+bq query --use_legacy_sql=false 'SELECT 1'
+gcloud auth print-access-token
+gcloud secrets versions access latest --secret db
+gcloud compute ssh vm-1 --command uptime
+gcloud config list
+gcloud logging read "severity>=ERROR" --limit 10
+gcloud compute instances list
+gcloud run services list
+# ---- Azure (azure pack) ----
+az group delete --name acme-staging --yes
+az storage blob delete-batch --source c
+az keyvault secret purge --name x --vault-name v
+az webapp restart --name api --resource-group g
+az webapp deployment slot swap --slot staging --name api --resource-group g
+az webapp config appsettings set --name api --settings A=1
+az account set --subscription x
+az keyvault secret show --name db --vault-name v
+az storage account keys list --account-name s
+az account get-access-token
+az ad sp create-for-rbac --name ci
+az webapp config appsettings list --name api --resource-group g
+az vm run-command invoke --name vm --command-id RunShellScript --scripts uptime
+az ssh vm --name vm
+az account show
+az group list
+# ---- DigitalOcean (digitalocean pack) ----
+doctl compute droplet delete web-1 --force
+doctl compute droplet-action rebuild 123 --image ubuntu
+doctl databases delete db-1
+doctl compute droplet create web-2 --size s-1vcpu-1gb --image ubuntu
+doctl compute droplet-action power-off 123
+doctl databases connection db-1
+doctl databases user get db-1 doadmin
+doctl kubernetes cluster kubeconfig show c1
+doctl compute ssh web-1
+doctl account get
+doctl compute droplet list
+# ---- Heroku (heroku pack) ----
+heroku ps --app acme-staging
+heroku releases --app acme-staging
+heroku logs --tail --app acme-staging
+heroku pg:info --app acme-staging
+heroku apps:info --app acme-staging
+heroku ps:scale web=0 --app acme-staging
+heroku releases:rollback v12 --app acme-staging
+heroku config:set FEATURE_X=1 --app acme-staging
+heroku config --app acme-staging
+heroku config:get DATABASE_URL --app acme-staging
+heroku apps:destroy acme-staging --confirm acme-staging
+heroku pg:reset DATABASE --app acme-staging --confirm acme-staging
+heroku addons:destroy heroku-redis --app acme-staging
+heroku run rails console --app acme-staging
+heroku pg:psql --app acme-staging
+heroku deploy --dry-run
+# ---- Fly.io (fly pack) ----
+fly status --app acme-staging
+fly secrets list --app acme-staging
+fly secrets set X=1 --app acme-staging
+fly machine list --app acme-staging
+fly machine stop 123 --app acme-staging
+fly machine destroy 123 --app acme-staging
+fly apps destroy acme-staging --yes
+fly volumes delete vol_1
+fly scale show --app acme-staging
+fly scale count 0 --app acme-staging
+fly ssh console --app acme-staging
+fly postgres connect --app acme-db
+fly auth token
+fly tokens create deploy
+fly config validate
+fly releases --app acme-staging
+# ---- Firebase (firebase pack) ----
+firebase firestore:delete --all-collections -r -f --project acme-staging
+firebase database:remove /users --project acme-staging
+firebase database:set /config data.json --project acme-staging
+firebase functions:delete helloWorld --project acme-staging
+firebase database:update /config patch.json --project acme-staging
+firebase functions:config:set stripe.key=x
+firebase auth:import users.json --project acme-staging
+firebase auth:export users.json --project acme-staging
+firebase functions:config:get
+firebase login:ci
+firebase functions:list
+firebase functions:log --project acme-staging
+firebase firestore:indexes
+firebase emulators:start
+firebase serve
+# ---- Wrangler (wrangler pack) ----
+wrangler delete
+wrangler kv:key delete --namespace-id 1a2b feature_x
+wrangler kv key delete --namespace-id 1a2b feature_x
+wrangler r2 object delete bucket/key
+wrangler kv:key put --namespace-id 1a2b feature_x true --env staging
+wrangler r2 object put bucket/key --file x
+wrangler secret put API_TOKEN --env staging
+wrangler secret bulk secrets.json
+wrangler rollback
+wrangler versions deploy
+wrangler pages deploy dist
+wrangler d1 execute db --command "DROP TABLE users"
+wrangler d1 execute db --command "SELECT 1"
+wrangler d1 migrations list acme-staging-db
+wrangler kv:key list --namespace-id 1a2b
+wrangler tail acme-staging
+wrangler types
+wrangler deploy --dry-run --outdir dist
+wrangler deploy --env staging
+# ---- Stripe (stripe pack) ----
+stripe customers delete cus_123
+stripe subscriptions cancel sub_123
+stripe invoices void in_123
+stripe delete /v1/customers/cus_123
+stripe payouts create --amount 50000 --currency usd
+stripe refunds create --charge ch_123
+stripe payment_intents confirm pi_123
+stripe invoices pay in_123
+stripe post /v1/transfers -d amount=100
+stripe customers create --email qa@example.com
+stripe config --list
+stripe listen --forward-to localhost:4242/webhook
+stripe listen --print-secret
+stripe trigger payment_intent.succeeded
+stripe customers list --limit 5
+stripe balance retrieve
+stripe logs tail --live
+# ---- Netlify (netlify pack) ----
+netlify build --context production
+netlify build
+netlify dev
+netlify status
+netlify sites:delete abc
+netlify env:set FEATURE_X true --context production
+netlify env:get API_KEY
+netlify env:list --plain
+netlify env:list
+netlify deploy --prod
+# ---- Twilio (cloud pack) ----
+twilio api:core:messages:list --limit 10
+twilio api:core:messages:create --to +15555550100 --body hi
+twilio phone-numbers:list
+# ---- Ansible ad-hoc (cloud pack) ----
+ansible all -m ping
+ansible web -m shell -a "rm -rf /var/www"
+ansible web -a uptime

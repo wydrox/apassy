@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "wrangler",
+  "description": "Cloudflare Wrangler: deployments, deletions, writes to KV, R2, D1, and secrets, and local and read commands.",
+  "programs": ["wrangler"],
+  "roles": {
+    "usage": ["wrangler"]
+  },
+  "rules": [
+    {
+      "id": "hosting-deploy",
+      "flag": "production",
+      "dry_run": "skip",
+      "note": "A deployment of the Worker.",
+      "when": { "subcommand": ["deploy", "publish", "hosting:channel:deploy"] }
+    },
+    {
+      "id": "delete-data",
+      "flag": "data_loss",
+      "note": "`delete` removes a Worker, KV keys or namespaces, R2 objects or buckets, a D1 database, a queue, or a secret.",
+      "when": { "any_arg": ["delete"] }
+    },
+    {
+      "id": "remote-write",
+      "flag": "production",
+      "note": "A write to live resources: KV and R2 puts, secret changes, rollbacks, version and Pages deployments.",
+      "when": {
+        "any_of": [
+          { "any_arg": ["put", "rollback"] },
+          {
+            "args_start": [
+              "secret bulk", "versions deploy", "pages deploy", "pages publish",
+              "triggers deploy", "deployments rollback"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "d1-sql-write",
+      "flag": "data_loss",
+      "note": "D1 SQL that changes data or schema.",
+      "when": { "args_start": ["d1 execute"], "sql": "writes" }
+    }
+  ],
+  "safe": [
+    {
+      "id": "local-and-read-commands",
+      "note": "The local server, types, logs, identity, and listings.",
+      "when": {
+        "any_of": [
+          { "subcommand": ["dev", "types", "tail", "whoami"] },
+          {
+            "args_start": [
+              "kv:key list", "kv key list", "kv:namespace list", "kv namespace list",
+              "d1 list", "d1 info", "d1 migrations list", "r2 bucket list", "deployments list",
+              "versions list", "secret list", "pages dev", "queues list"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "deploy-dry-run",
+      "note": "`deploy --dry-run` builds the Worker and does not upload it.",
+      "when": { "subcommand": ["deploy", "publish"], "any_arg": ["--dry-run"] }
+    }
+  ]
+}
