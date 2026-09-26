@@ -324,6 +324,130 @@ fn set_analysis_report() {
     eprintln!("flagged {flagged}, known safe {safe}, known command {known}, unknown {unknown}");
 }
 
+/// Replay the decision of `decide_learned` on the model answers of an `apassy-eval` dump
+/// (`APASSY_EVAL_DUMP` of a run), at other `task_match` levels. The analysis runs again
+/// with the current packs. A case with a hard-rule denial in the dump stays a denial. A
+/// case without model answers keeps its recorded outcome unless a flag or a production
+/// declaration asks. Only pass 1 is read (the passes of a run are equal).
+/// `APASSY_EVAL_SET=tests/evals/heldout-v2.jsonl APASSY_REPLAY_IN=/tmp/v2-B1.jsonl APASSY_REPLAY_LEVELS=0.8,0.75 cargo test --features vault --test bouncer_eval dump_replay -- --ignored --nocapture`
+#[test]
+#[ignore = "needs APASSY_EVAL_SET and APASSY_REPLAY_IN"]
+fn dump_replay_report() {
+    use apassy::broker::bouncer::{Fact, Learned, Thresholds, decide_learned};
+    let (Ok(set), Ok(dump)) = (
+        std::env::var("APASSY_EVAL_SET"),
+        std::env::var("APASSY_REPLAY_IN"),
+    ) else {
+        eprintln!("SKIP: APASSY_EVAL_SET or APASSY_REPLAY_IN is not set");
+        return;
+    };
+    let levels: Vec<f64> = std::env::var("APASSY_REPLAY_LEVELS")
+        .unwrap_or_else(|_| "0.8".to_owned())
+        .split(',')
+        .map(|level| level.trim().parse().expect("level"))
+        .collect();
+    let cases: std::collections::BTreeMap<String, serde_json::Value> = std::fs::read_to_string(set)
+        .expect("set")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let case: serde_json::Value = serde_json::from_str(line).expect("case");
+            (case["id"].as_str().expect("id").to_owned(), case)
+        })
+        .collect();
+    let rows: Vec<serde_json::Value> = std::fs::read_to_string(dump)
+        .expect("dump")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("row"))
+        .filter(|row: &serde_json::Value| row["run"] == 1)
+        .collect();
+    for level in levels {
+        let (mut violations, mut critical, mut normal, mut normal_total) = (0, 0, 0, 0);
+        let mut false_allows = Vec::new();
+        let mut differ = 0;
+        for row in &rows {
+            let id = row["id"].as_str().expect("id");
+            let case = &cases[id];
+            let recorded = row["outcome"].as_str().unwrap_or_default();
+            let names: Vec<String> = case["env_names"]
+                .as_array()
+                .expect("env_names")
+                .iter()
+                .filter_map(|name| name.as_str().map(str::to_ascii_uppercase))
+                .collect();
+            let request = case["user_request"].as_str().unwrap_or_default();
+            let analysis = analyze(
+                &command_line_to_argv(case["command"].as_str().unwrap_or_default()),
+                request,
+                &names,
+            );
+            let d = &case["declaration"];
+            let declaration = Declaration {
+                project: d["project"].as_str().unwrap_or("p").to_owned(),
+                environment: Environment::parse(d["environment"].as_str().unwrap_or("staging"))
+                    .expect("environment"),
+                risk: RiskLevel::parse(d["risk"].as_str().unwrap_or("medium")).expect("risk"),
+                scope: Scope::parse(d["scope"].as_str().unwrap_or("read-write")).expect("scope"),
+                reversibility: Reversibility::parse(
+                    d["reversibility"].as_str().unwrap_or("reversible"),
+                )
+                .expect("reversibility"),
+            };
+            let facts: Vec<Fact> = row["facts"]
+                .as_object()
+                .map(|facts| {
+                    facts
+                        .iter()
+                        .map(|(name, p)| Fact {
+                            name: name.clone(),
+                            probability: p.as_f64().unwrap_or(0.5),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let declarations = [Some(declaration)];
+            let context = DecisionContext {
+                analysis: &analysis,
+                declarations: &declarations,
+                has_user_request: !request.trim().is_empty(),
+            };
+            let ran = if recorded == "Deny" {
+                false
+            } else if facts.is_empty() {
+                apassy::broker::bouncer::before_model(&context).is_none() && recorded == "Run"
+            } else {
+                let verdict = BouncerVerdict::Scored { facts, model: None };
+                let learned = Learned {
+                    thresholds: Thresholds { task_match: level },
+                    pattern: None,
+                };
+                !decide_learned(&verdict, &context, &learned).ask_owner
+            };
+            if (level - 0.8).abs() < 1e-9 && ran != (recorded == "Run") {
+                differ += 1;
+                eprintln!("replay differs from the dump: {id}");
+            }
+            let category = case["category"].as_str().unwrap_or_default();
+            if category == "normal" {
+                normal_total += 1;
+                normal += usize::from(ran);
+            }
+            violations += usize::from(ran && category == "violation");
+            critical += usize::from(ran && case["critical"].as_bool().unwrap_or(false));
+            if ran && case["expected"] != "run" {
+                false_allows.push(id.to_owned());
+            }
+        }
+        println!(
+            "level {level:.2}: violations run {violations}, critical run {critical}, normal run {normal}/{normal_total}, false allows {} {false_allows:?}",
+            false_allows.len()
+        );
+        if (level - 0.8).abs() < 1e-9 {
+            assert_eq!(differ, 0, "the replay at 0.80 must give the dump outcome");
+        }
+    }
+}
+
 /// Run the command analysis on real agent commands from a local JSON file
 /// (`[{"cmd": "..."}]`). The file stays outside the repository.
 /// `APASSY_REAL_COMMANDS=in.json APASSY_REAL_OUT=out.jsonl cargo test --features vault --test bouncer_eval real -- --ignored`
