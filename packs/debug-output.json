@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "debug-output",
+  "description": "Environment settings that turn on request, credential, or internal tracing of a tool: the trace can print a secret that the run binds. The rules apply to every program, because a task runner or a script can start the tool (dev round 4).",
+  "programs": ["*"],
+  "rules": [
+    {
+      "id": "terraform-log",
+      "flag": "secret_output",
+      "note": "`TF_LOG`, `TF_LOG_PROVIDER`, or `TF_LOG_CORE` at `TRACE`, `DEBUG`, or `JSON` (`JSON` is `TRACE` in JSON) turns on the Terraform and OpenTofu logs. Provider plugins log their HTTP requests and responses at these levels, with request bodies and, in many providers, the headers. The credentials come from the environment of the run. `INFO`, `WARN`, and `ERROR` are not here.",
+      "when": {
+        "env": { "name": ["tf_log", "tf_log_provider", "tf_log_core"], "value": ["trace", "debug", "json"] },
+        "bound_secret": true
+      }
+    },
+    {
+      "id": "git-trace",
+      "flag": "secret_output",
+      "note": "`GIT_TRACE`, `GIT_TRACE2*`, and `GIT_TRACE_PERFORMANCE` print the commands that Git runs, with remote URLs that can hold a token. `GIT_TRACE_CURL` and `GIT_CURL_VERBOSE` dump the HTTP traffic, and `GIT_TRACE_PACKET` and `GIT_TRACE_PACKFILE` the transferred data. Git hides the `Authorization` header and cookies by default, but not a token in a URL or in the data, and `GIT_TRACE_REDACT=0` turns the hiding off. A value `0`, `false`, `no`, or `off` does not trace. `GIT_TRACE_SETUP`, `GIT_TRACE_SHALLOW`, and `GIT_TRACE_PACK_ACCESS` print paths only.",
+      "when": {
+        "env": {
+          "name": [
+            "git_trace", "git_trace2*", "git_trace_performance", "git_trace_curl",
+            "git_curl_verbose", "git_trace_packet", "git_trace_packfile"
+          ]
+        },
+        "bound_secret": true
+      }
+    },
+    {
+      "id": "node-debug-http",
+      "flag": "secret_output",
+      "note": "`NODE_DEBUG` with `http`, `https`, `http2`, or `net` makes Node print the options of each new connection, with the request headers and the `auth` option; `request` does the same for the `request` package, and `fetch` and `undici` print each request URL, which can hold a key. `tls` logs the secure connections of the same requests; it is in the list as a conservative choice. `*` and `http*` cover the names.",
+      "when": {
+        "env": {
+          "name": ["node_debug"],
+          "value": ["http", "https", "http2", "net", "tls", "request", "fetch", "undici"]
+        },
+        "bound_secret": true
+      }
+    },
+    {
+      "id": "node-debug-package",
+      "flag": "secret_output",
+      "note": "`DEBUG=*` turns on the `debug` log of every Node package, HTTP clients and database drivers included. `follow-redirects`, the Node transport of axios, prints the options of each request with its headers. A name of the project only, such as `DEBUG=app:*` or `DEBUG=express:*`, is not here.",
+      "when": {
+        "env": { "name": ["debug"], "value": ["follow-redirects"] },
+        "bound_secret": true
+      }
+    },
+    {
+      "id": "httpx-trace",
+      "flag": "secret_output",
+      "note": "`HTTPX_LOG_LEVEL=trace` makes the Python `httpx` client log the request and response headers of each request (the versions that read this variable). `debug` logs only the request line, so it is not here.",
+      "when": {
+        "env": { "name": ["httpx_log_level"], "value": ["trace"] },
+        "bound_secret": true
+      }
+    },
+    {
+      "id": "go-http2-debug",
+      "flag": "secret_output",
+      "note": "`GODEBUG=http2debug=1` or `=2` makes a Go program log each HTTP/2 header that it sends and receives, `authorization` included. Terraform, kubectl, gh, and many other CLIs are Go programs.",
+      "when": {
+        "env": { "name": ["godebug"], "value": ["http2debug=1", "http2debug=2"] },
+        "bound_secret": true
+      }
+    },
+    {
+      "id": "ansible-debug",
+      "flag": "secret_output",
+      "note": "The Ansible documentation says that `ANSIBLE_DEBUG` output can include secret information despite `no_log`.",
+      "when": {
+        "env": { "name": ["ansible_debug"] },
+        "bound_secret": true
+      }
+    },
+    {
+      "id": "ansible-verbosity",
+      "flag": "secret_output",
+      "note": "`ANSIBLE_VERBOSITY` 3 or higher is `-vvv`: Ansible prints the arguments of each module call, such as a password or a token from an environment lookup, unless the task or the module hides them.",
+      "when": {
+        "env": { "name": ["ansible_verbosity"], "value": ["3", "4", "5", "6"] },
+        "bound_secret": true
+      }
+    },
+    {
+      "id": "gcloud-http-log",
+      "flag": "secret_output",
+      "note": "`CLOUDSDK_CORE_LOG_HTTP` is `--log-http`: gcloud logs each HTTP request and response with the bodies. `CLOUDSDK_CORE_VERBOSITY=debug` prints the arguments of the command. gcloud hides the access token by default (`log_http_redact_token`), but not a secret in a body or an argument.",
+      "when": {
+        "any_of": [
+          { "env": { "name": ["cloudsdk_core_log_http"] } },
+          { "env": { "name": ["cloudsdk_core_verbosity"], "value": ["debug"] } }
+        ],
+        "bound_secret": true
+      }
+    },
+    {
+      "id": "helm-debug",
+      "flag": "secret_output",
+      "note": "`HELM_DEBUG` is `helm --debug`: `install`, `upgrade`, and `status` print the user-supplied and computed values and the manifest of the release, which often hold passwords.",
+      "when": {
+        "env": { "name": ["helm_debug"] },
+        "bound_secret": true
+      }
+    }
+  ]
+}

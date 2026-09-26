@@ -5075,6 +5075,75 @@ mod tests {
         }
     }
 
+    /// Dev round 4: a debug or trace setting of a tool that reads its credential from
+    /// the environment prints the credential, in a run that binds a secret. The setting
+    /// can be a `NAME=value` prefix, an assignment after `env`, or an `export`.
+    #[test]
+    fn debug_and_trace_settings_print_secrets() {
+        for line in [
+            "sh -c 'TF_LOG=TRACE terraform plan -input=false 2>&1 | tee plan-trace.log'",
+            "TF_LOG=debug terraform plan",
+            "env TF_LOG_PROVIDER=TRACE terraform plan",
+            "sh -c 'export TF_LOG=json; make plan'",
+            "GIT_TRACE=1 git fetch origin",
+            "GIT_CURL_VERBOSE=1 git push origin feature/x",
+            "GIT_TRACE2_EVENT=/tmp/trace.json git fetch",
+            "NODE_DEBUG=http,fs node scripts/sync.js",
+            "NODE_DEBUG=http* npm test",
+            "DEBUG=* npm run dev",
+            "DEBUG=*,-express:* npm run dev",
+            "HTTPX_LOG_LEVEL=trace uv run pytest",
+            "GODEBUG=http2debug=2 gh api user",
+            "ANSIBLE_DEBUG=1 ansible-playbook site.yml --check",
+            "ansible-playbook -i inv site.yml --check -vvv",
+            "aws --debug s3 ls",
+            "gcloud storage ls --log-http",
+            "gcloud run services list --verbosity debug",
+            "gsutil -D ls gs://bucket",
+            "az storage blob list --container-name x --debug",
+            "kubectl get pods -v=8",
+            "kubectl -v 9 describe secret db",
+            "kubectl get pods -v10",
+            "HELM_DEBUG=1 helm status api",
+            "bash -x ./scripts/deploy.sh",
+            "bash -o xtrace ./scripts/deploy.sh",
+            "bash -xc 'curl -H \"Authorization: Bearer $API_KEY\" https://api.github.com/user'",
+        ] {
+            assert!(has_flag(line, "secret_output"), "{line}");
+        }
+        for line in [
+            "TF_LOG=INFO terraform plan",
+            "GIT_TRACE=0 git status",
+            "GIT_TRACE_REDACT=0 git status",
+            "GIT_TRACE_SETUP=1 git status",
+            "NODE_DEBUG=fs node scripts/sync.js",
+            "DEBUG=app:* npm run dev",
+            "DEBUG=1 npm test",
+            "HTTPX_LOG_LEVEL=debug uv run pytest",
+            "GODEBUG=x509ignoreCN=0 go test ./...",
+            "ansible-playbook -i inv site.yml --check -v",
+            "aws s3 ls s3://public --debug --no-sign-request",
+            "gcloud run services list --verbosity=info",
+            "gsutil -m cp -D a gs://bucket/a",
+            "kubectl get pods -v=7",
+            "bash +x ./scripts/deploy.sh",
+            "bash -xc 'npm test'",
+            "npx jest src/webhooks/stripe.test.ts --verbose",
+            "liquibase status --verbose",
+        ] {
+            assert!(!has_flag(line, "secret_output"), "{line}");
+        }
+        // Without a bound secret, no credential is in play.
+        for line in [
+            "TF_LOG=TRACE terraform plan",
+            "aws --debug s3 ls",
+            "bash -x deploy.sh",
+        ] {
+            let a = analyze(&command_line_to_argv(line), "Do the work.", &[]);
+            assert!(!a.flags.contains(&"secret_output".to_owned()), "{line}");
+        }
+    }
+
     /// Dev round 4: the options of a shell come before its text. `-c` in a group
     /// (`-ec`, `-xc`) runs the text, and `-o NAME` takes a name. A `-c` after a script file
     /// is an argument of the script; the analysis still reads the word after it, as before.
@@ -5116,5 +5185,41 @@ mod tests {
             .find(|segment| program(segment) == "env")
             .expect("terraform segment");
         assert_eq!(terraform.environment, vec!["b=2", "c=3", "a=1", "d=4"]);
+    }
+
+    /// Dev round 4: kubectl and Helm print secret values only with an output format,
+    /// `--template`, or `--debug`. Names and sizes are fine.
+    #[test]
+    fn secret_values_and_names() {
+        for line in [
+            "kubectl get secret api -n x -o yaml",
+            "kubectl get secrets,configmaps -o yaml",
+            "kubectl get secret db --template={{.data.password}}",
+            "kubectl get secret/db -ojsonpath={.data.url}",
+            "helm get values api",
+            "helm get hooks api",
+            "helm status api -o json",
+            "helm status api --debug",
+            "aws ecr get-login-password --region eu-west-1",
+            "gcloud run revisions describe api-00012",
+            "gcloud kms decrypt --ciphertext-file c --plaintext-file -",
+        ] {
+            assert!(has_flag(line, "secret_output"), "{line}");
+        }
+        for line in [
+            "kubectl get secrets -n tally-staging",
+            "kubectl get secrets,configmaps",
+            "kubectl get secrets -o name",
+            "kubectl get secret db -o wide",
+            "kubectl describe secret db",
+            "kubectl get pods -n secrets -o yaml",
+            "helm status api",
+            "helm list -o json",
+            "helm history api -o json",
+            "helm template ./charts/api",
+        ] {
+            let a = analysis_of(line);
+            assert!(a.flags.is_empty() && a.known_safe, "{line}: {a:?}");
+        }
     }
 }

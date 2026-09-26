@@ -85,6 +85,10 @@ const BUILTIN: &[(&str, &str)] = &[
     ("databases.json", include_str!("../../packs/databases.json")),
     ("dbt.json", include_str!("../../packs/dbt.json")),
     (
+        "debug-output.json",
+        include_str!("../../packs/debug-output.json"),
+    ),
+    (
         "digitalocean.json",
         include_str!("../../packs/digitalocean.json"),
     ),

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 5,
+  "pack_version": 6,
   "tool": "cloud",
   "description": "Small hosting and deploy tools (Railway, Render, Serverless, Ansible playbooks and ad-hoc commands) and Twilio. Google Cloud, Azure, Fly.io, Heroku, Firebase, Wrangler, and Stripe have their own packs.",
   "programs": [
@@ -81,6 +81,16 @@
           { "any_arg_starts": ["-a", "--args"] },
           { "option_value": { "option": ["-m", "--module-name"], "not_value": ["ping", "setup", "debug"] } }
         ]
+      }
+    },
+    {
+      "id": "ansible-verbose",
+      "flag": "secret_output",
+      "note": "From `-vvv` on, Ansible prints the arguments of each module call, such as a password or a token from an environment lookup, unless the task or the module hides them (`no_log`). `-vvvv` adds the connection debug output (dev round 4).",
+      "when": {
+        "program": ["ansible", "ansible-playbook"],
+        "any_arg": ["-vvv", "-vvvv", "-vvvvv", "-vvvvvv"],
+        "bound_secret": true
       }
     }
   ],

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 3,
+  "pack_version": 4,
   "tool": "azure",
   "description": "Azure CLI (az): resource changes, deletions, keys and secrets, remote shells, and read commands.",
   "programs": ["az"],
@@ -60,6 +60,12 @@
           { "args_contain": ["keys list", "credential show", "appsettings list", "keys renew", "credential reset"] }
         ]
       }
+    },
+    {
+      "id": "debug-log",
+      "flag": "secret_output",
+      "note": "`az --debug` prints the arguments of the command after the shell expands them, and each HTTP request and response with the bodies. The Azure CLI hides the `Authorization` header, but not a secret in an argument or a body (dev round 4).",
+      "when": { "any_arg": ["--debug"], "bound_secret": true }
     },
     {
       "id": "remote-shell",
