@@ -12,6 +12,8 @@
 //!    forbidden words, hourly limit).
 //! 6. A production declaration needs the owner (ADR 0010). The model is not asked.
 //! 7. The bouncer scores the request (ADR 0007, ADR 0008). A rule flag skips the model.
+//!    The command analysis gets the known hosts of the provider of each item (goal item
+//!    B4). A bound secret that goes to another host is a rule flag.
 //!    The user request comes from the host hook when there is one (goal item B6,
 //!    [`super::prompts`]). An unverified hook request or a command that names the hook
 //!    channel is a rule flag. An active remembered pattern replaces the model step
@@ -39,8 +41,9 @@ use super::bouncer::{
 use super::decide::{BrokerContext, authenticate, lock, locked_response};
 use super::exec::{self, SecretEnv};
 use super::learning::{self, LoggedRequest, Outcome, RuleDenial, RunScope};
-use super::shell_risk::analyze;
+use super::shell_risk::{ProviderHosts, analyze_run};
 use crate::agent::wire::WireResponse;
+use crate::vault::providers;
 use crate::vault::{
     ActivityDecision, AgentSummary, DecisionEntry, Declaration, ExecMode, NewActivity, Vault,
 };
@@ -135,6 +138,8 @@ struct Checked {
     instruction: String,
     /// Owner declarations, one per item. `None` when an item has none.
     declarations: Vec<Option<Declaration>>,
+    /// The known hosts of the provider of each item with a provider (goal item B4).
+    provider_hosts: Vec<ProviderHosts>,
 }
 
 pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) -> WireResponse {
@@ -181,7 +186,12 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
 
     // The bouncer runs without the vault lock. Its state has no secret value.
     // A rule flag (ADR 0008) or a hard owner rule (ADR 0010) skips the model.
-    let mut analysis = analyze(request.command, request.purpose, &checked.env_names);
+    let mut analysis = analyze_run(
+        request.command,
+        request.purpose,
+        &checked.env_names,
+        &checked.provider_hosts,
+    );
     // Goal item B6: a user request from the host hook replaces the text from the agent.
     let resolved = ctx.prompts.resolve(
         checked.agent.id,
@@ -506,6 +516,7 @@ fn check(
     let mut env_names = Vec::new();
     let mut any_ask = false;
     let mut declarations = Vec::new();
+    let mut provider_hosts = Vec::new();
     let mut instructions: Vec<String> = Vec::new();
     let mut relative_dir = None;
     let mut project_dir = None;
@@ -604,6 +615,14 @@ fn check(
         // declaration makes the decision ask the owner.
         any_ask |= grant.mode == ExecMode::Ask;
         declarations.push(vault.declaration(*item_id).ok().flatten());
+        // Goal item B4: only the stored provider name. The broker does not run the
+        // detection. An unknown provider has no hosts, as an item without a provider.
+        if let Some(provider) = vault.declaration_provider(*item_id).ok().flatten() {
+            provider_hosts.push(ProviderHosts {
+                env_name: binding.env_name.clone(),
+                hosts: providers::known_hosts(&provider).to_vec(),
+            });
+        }
         env_names.push(binding.env_name);
     }
     Ok(Checked {
@@ -616,6 +635,7 @@ fn check(
         any_ask,
         instruction: instructions.join(" "),
         declarations,
+        provider_hosts,
     })
 }
 
