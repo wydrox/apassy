@@ -87,12 +87,16 @@ pub enum HelperErrorCode {
     NotificationsUnavailable,
     /// The owner did not allow notifications. The event stays in the inbox.
     NotificationsDenied,
+    /// The helper refused the request, because its parent process is not the
+    /// signed Apassy app that contains it. A program other than Apassy.app
+    /// started the helper.
+    CallerNotAllowed,
     /// An unexpected helper error.
     Internal,
 }
 
 impl HelperErrorCode {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::InvalidRequest,
         Self::Cancelled,
         Self::Fallback,
@@ -105,6 +109,7 @@ impl HelperErrorCode {
         Self::BiometryChanged,
         Self::NotificationsUnavailable,
         Self::NotificationsDenied,
+        Self::CallerNotAllowed,
         Self::Internal,
     ];
 
@@ -123,6 +128,7 @@ impl HelperErrorCode {
             Self::BiometryChanged => "biometry_changed",
             Self::NotificationsUnavailable => "notifications_unavailable",
             Self::NotificationsDenied => "notifications_denied",
+            Self::CallerNotAllowed => "caller_not_allowed",
             Self::Internal => "internal",
         }
     }

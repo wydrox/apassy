@@ -28,6 +28,35 @@ git, cargo, npm, the network, and the host's own configuration and credentials.
 
 The profile uses `(param ...)` for each path. A test uses temporary directories.
 
+### The Apassy app bundle
+
+The app bundle holds the desktop app and the native helpers. The keychain
+helper and `apassy-helper` can show a Touch ID prompt and post a notification
+with the text of their caller. With a provisioning profile, the keychain helper
+can also return the Touch ID unlock key. So a process in the profile must not
+start them.
+
+For each app bundle, the profile:
+
+- denies the start of each program in the bundle (`process-exec*`),
+- denies each read and each write in the bundle (`file-read*`, `file-write*`).
+  So a process cannot copy, clone, or hard-link a helper, with its signature and
+  its provisioning profile, to a path that the profile does not deny. It cannot
+  change the bundle.
+- denies a rename or a delete of each parent directory of the bundle. So the
+  bundle cannot move out of the denied path.
+- re-allows the start and the read of `Contents/MacOS/apassy-mcp` and
+  `Contents/MacOS/apassy-hook`, and the metadata of `Apassy.app`,
+  `Contents`, and `Contents/MacOS`. The agent host starts these two programs.
+
+The bundle from `scripts/build-app.sh` contains `apassy-mcp`. It does not
+contain `apassy-hook` now. The host can start `apassy-hook` from
+`target/release/apassy-hook` or from a copy outside the bundle, as in
+[host-hooks.md](host-hooks.md). The rule for `Contents/MacOS/apassy-hook` is
+ready for a later bundle that contains it.
+
+The helpers also check their caller (see section 6). This is a second layer.
+
 ### Parameters
 
 Pass each parameter with `sandbox-exec -D KEY=VALUE`. Use absolute, resolved
@@ -39,6 +68,8 @@ paths.
 | `APASSY_VAULT_FILE` | the vault database |
 | `APASSY_BACKUP_FILE` | the backup database |
 | `APASSY_SOCKET` | the broker socket (re-allowed) |
+| `APASSY_APP` | the installed app bundle. Optional. Default: `/Applications/Apassy.app` |
+| `APASSY_APP_BUILD` | a second app bundle, for example `<repository>/target/Apassy.app`. Optional. |
 
 ### Directory-rename defense
 
@@ -64,11 +95,19 @@ apassy-sandbox [OPTIONS] -- <host> [host args...]
 | `--vault-file FILE` | `<data-dir>/vault.db` |
 | `--backup-file FILE` | `<vault-file>.backup` |
 | `--socket FILE` | `$APASSY_BROKER_SOCKET`, else `<data-dir>/broker.sock` |
+| `--app DIR` | `/Applications/Apassy.app` |
+| `--app-build DIR` | `<target>/Apassy.app` when the launcher is `<target>/<profile>/apassy-sandbox` and the directory is named `target`, else none |
 | `--profile FILE` | `$APASSY_SANDBOX_PROFILE`, else a file near the program |
 | `--print` | print the resolved command; do not run it |
 
 The launcher resolves symlinks in each path, because Seatbelt matches the
 resolved path. On macOS `/var` and `/tmp` are symlinks.
+
+`scripts/build-app.sh` writes the app to `<repository>/target/Apassy.app`. A
+launcher from `target/debug` or `target/release` protects this bundle without
+an option. With another target directory, or with a launcher in another place,
+give the build with `--app-build`. Keep the installed app in
+`/Applications/Apassy.app`, or give its path with `--app`.
 
 The owner keeps rotated backups in the data directory, or gives one backup
 path with `--backup-file`. The data directory is a subtree deny, so any file
@@ -107,7 +146,9 @@ approval prompts. Do not add `--dangerously-skip-permissions` for daily use.
 Claude Code runs `apassy-mcp` as an MCP server. An MCP server can run outside the
 Claude Code Bash sandbox, but it is still a child of the host, so it runs inside
 the Apassy profile. It reaches the broker socket. Set the MCP server in the
-project `.mcp.json`, as in [agent-path.md](agent-path.md) section 4.
+project `.mcp.json`, as in [agent-path.md](agent-path.md) section 4. The command
+can be `Apassy.app/Contents/MacOS/apassy-mcp` or `target/release/apassy-mcp`.
+The profile allows both. It denies the other programs in `Apassy.app`.
 
 ### Codex
 
@@ -149,7 +190,20 @@ boundary holds even when the host approves every command.
 - The profile protects files. It does not stop a command that reads a secret
   from the broker in "allow" mode and then sends it to a network host. The
   bouncer and the owner approval control that path (ADR 0006).
-- A Keychain deny check is pending. See section 6.
+- The profile denies a start of the Apassy helpers only for the bundle paths it
+  knows: `APASSY_APP` and `APASSY_APP_BUILD`. A copy of the app in another
+  place is not denied. Give each place of the app to the launcher. The caller
+  check of the helper (section 6) still refuses a caller that is not the
+  signed Apassy app.
+- A process in the profile cannot delete or move the protected bundles. So
+  `cargo clean` or `rm -rf target` in the profile fails at `target/Apassy.app`.
+  Run them outside the profile. `scripts/build-app.sh` also fails in the
+  profile. Build the signed app outside the profile.
+- A program that launchd or LaunchServices starts runs outside the profile.
+  From the profile, `open` of a helper and `launchctl submit` of a job failed
+  (section 5). A helper that launchd starts refuses the request (section 6). A
+  start of other programs through LaunchServices, for example a terminal app,
+  is not measured.
 - The profile does not fully hide the environment of other processes of the
   same user. See "Process information (F11)" in section 5.
 - `ps` and `top` are setuid programs. They cannot start inside any
@@ -210,8 +264,72 @@ socket in the denied data directory.
 | `apassy_use_credential` (`get_sales_summary`) | 318 orders, permitted fields only. No secret. |
 
 The evidence for these checks is `cargo test --locked --features desktop,vault
---test isolation_profile`. It has 10 tests. All pass. If `sandbox-exec` is
+--test isolation_profile`. It has 16 tests. All pass. If `sandbox-exec` is
 absent, or the host is not macOS, the test fails. There is no skip (goal I4).
+
+### The Apassy app bundle
+
+The tests use a synthetic `Apassy.app` with the layout of
+`scripts/build-app.sh`. Its helpers are the real Swift helper without a
+signature. `apassy-mcp` and `apassy-hook` are the programs of the build.
+
+| Command in the profile | Result |
+| --- | --- |
+| start the keychain helper, `apassy-helper`, or the main program: direct, from a shell pipe, and with `APASSY_HELPER_DEV_ANY_CALLER=1` | denied (`Operation not permitted`). No answer. |
+| the same programs outside the profile (control) | start and answer `caller_not_allowed` |
+| `keychain_read` to the keychain helper | denied. The helper does not start. |
+| `cat`, `cp`, `cp -c` (clone), `ln` (hard link) of a helper | denied |
+| `cp -R` of the keychain helper bundle or of the app | denied. No file is copied. |
+| `ls Contents` | denied |
+| overwrite a helper, add a file in `Contents/MacOS` | denied. The helper bytes do not change. |
+| rename the app, rename the parent directory of the app | denied |
+| start `Contents/MacOS/apassy-mcp` of the bundle | allowed. `initialize`, `apassy_list_access`, and `apassy_use_credential` work. No secret. |
+| start `Contents/MacOS/apassy-hook` of the bundle with a prompt | allowed. The broker accepts the prompt. With a wrong token, the hook reports "the broker refused". |
+| a copy of the keychain helper bundle that the owner made outside the bundle: `ping`, `keychain_exists`, `keychain_read`, `authenticate` | the copy starts. Each request gets `caller_not_allowed`. |
+| `sandbox-exec` with only `APASSY_APP_BUILD` (no `APASSY_APP`) | the profile loads. The keychain helper is denied. `apassy-mcp --version` works. |
+
+The test `launcher_passes_the_installed_and_the_build_app` checks the launcher
+defaults with `--print`: `APASSY_APP=/Applications/Apassy.app` and
+`APASSY_APP_BUILD=<target>/Apassy.app`.
+
+The same checks with the signed bundle ran in `scripts/build-app.sh` (section
+"Check the agent profile with the signed bundle"):
+
+```
+ok: the agent profile denies the start of Contents/Helpers/ApassyKeychain.app/Contents/MacOS/ApassyKeychain
+ok: the agent profile denies the start of Contents/MacOS/apassy-helper
+ok: the agent profile denies the start of Contents/MacOS/apassy
+ok: apassy-mcp --version in the agent profile
+ok: the agent profile denies a copy of the keychain helper
+ok: keychain helper copy in the agent profile refuses the caller, line 1
+ok: keychain helper copy in the agent profile refuses the caller, line 2
+```
+
+Mutation checks: with the two `apassy-protect-app` lines removed from the
+profile, four tests failed: `apassy_programs_cannot_start_in_profile`,
+`apassy_programs_cannot_be_read_copied_linked_or_changed_in_profile`,
+`profile_protects_the_build_app_without_the_installed_app_parameter`, and
+`keychain_item_is_not_readable_in_profile`. With the caller check removed from
+the helper, three isolation tests and two `native_helper` tests failed. The
+agent restored both files after the check.
+
+### launchd and LaunchServices
+
+Measured with the signed bundle `target/Apassy.app`, synthetic data only.
+
+| Command | Result |
+| --- | --- |
+| in the profile: `open -W -n --stdin req --stdout out <keychain helper app>` | `The file ... does not exist.`, exit 1. No answer. |
+| in the profile: the same with `-a <keychain helper app>` | exit 0, no answer. The output file does not exist. |
+| in the profile: the same with `-b com.wydrox.apassy.keychain` | `LSCopyApplicationURLsForBundleIdentifier() failed`, exit 1 |
+| in the profile: `launchctl submit` of a job that copies the vault canary | exit 1. The job does not run. |
+| outside the profile (control): the same `launchctl submit` with a harmless job | the job runs |
+| outside any sandbox (control): `open -W -n --stdin req --stdout out <keychain helper app>` | the helper starts with launchd as the parent and answers `caller_not_allowed`: "launchd started the helper. Only Apassy.app can start it." |
+
+From a sandbox with `(allow default)` only, `open --stdin --stdout` of a helper
+copy also gave no answer. The agent did not find out if LaunchServices starts
+the program without its standard input and output in this case. The caller
+check refuses such a start in each case.
 
 ### Process information (F11)
 
@@ -294,26 +412,49 @@ apassy-sandbox \
 The expected result is the same as the Claude Code run: the first two commands
 give `Operation not permitted`, and the temporary write gives `ok`.
 
-## 6. Keychain (pending)
+## 6. Keychain and the helper caller check
 
 Goal I2 also needs proof that a process in the profile cannot read the Touch ID
-Keychain item. A parallel task builds the Swift Keychain helper (goal A1, A3).
-The Keychain item does not exist yet.
+Keychain item. The item is in the data protection keychain, with the access
+group `<TEAM_ID>.com.wydrox.apassy` and `.biometryCurrentSet` access control.
+Only the keychain helper in `Apassy.app` has this access group, and only with a
+provisioning profile ([native-app.md](native-app.md)).
 
-When the helper lands, add a check to `tests/isolation/product_profile.rs`. The
-check reads the Keychain item outside the profile as a control, and shows a deny
-inside the profile. The test `keychain_check_is_pending` marks this gap now. It
-also checks that `/usr/bin/security` exists for the future check. This is not a
-skip of the isolation test.
+A Seatbelt file deny does not cover the Keychain, because the Keychain is a
+system service, not a file that the agent opens. So the protection has these
+parts:
 
-Note: a Seatbelt file deny does not cover the Keychain, because the Keychain is
-a system service, not a file the agent opens. The deny for the Keychain uses the
-biometric access control of the item and the code signing of `Apassy.app`
-(ADR 0010). The isolation test measures only that a command in the profile
-cannot reach the item.
+1. `/usr/bin/security` in the profile finds no item with the Apassy service and
+   account. The same query outside the profile (control) also finds none: the
+   tool does not search the data protection keychain, and the item needs the
+   Apassy access group.
+2. The profile denies the start of the keychain helper and of `apassy-helper`
+   (section 1). The deny does not depend on the signature or on a provisioning
+   profile. So it also holds for a provisioned build with an access group. A
+   process in the profile cannot ask the helper for a Touch ID prompt with its
+   own reason text, or for the unlock key. It also cannot run `authenticate`,
+   or `notify` with its own text.
+3. The profile denies a read of the bundle. So a process cannot copy the helper
+   bundle, with its provisioning profile, to a path that the profile does not
+   deny.
+4. The helper checks its caller. It answers only when its parent process is the
+   signed Apassy app that contains it. Any other parent gets
+   `caller_not_allowed`, also a start by launchd (LaunchServices, launchctl) and
+   a copy of the helper in another place. The rule and the APIs are in
+   [native-app.md](native-app.md), section "Caller check".
+
+The test `keychain_item_is_not_readable_in_profile` checks parts 1 and 2. The
+other tests in section 5 check parts 2 to 4. `scripts/build-app.sh` checks parts
+2 to 4 with the signed bundle.
+
+What stays open: the real `.biometryCurrentSet` item needs a provisioning
+profile, and this Mac has none. The deny of the helper start does not depend on
+it. The owner can run the checks again with a provisioned build (native-app.md,
+owner step 3.8).
 
 ## 7. Real-secret gate
 
 The real-secret gate stays BLOCKED until every gate item in
 [goal.md](../goal.md) is done. This document is the evidence for goal items I1,
-I2, and I4, and the partial evidence for I3.
+I2 (with the Keychain part in section 6), and I4, and the partial evidence for
+I3.

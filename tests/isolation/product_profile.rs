@@ -19,16 +19,20 @@
 //! host that is not macOS, or that has no `sandbox-exec`, the test fails,
 //! because Apassy is a macOS product and isolation is a release gate.
 //!
+//! Apassy app bundle: the profile denies the start, the read, and a change of
+//! the programs in `Apassy.app`, except `apassy-mcp` and `apassy-hook`. The
+//! tests use a synthetic bundle with the layout of `scripts/build-app.sh`. Its
+//! helpers are the real Swift helper, built without a signature.
+//!
 //! Keychain: goal item I2 also needs proof that the process cannot read the
 //! Touch ID Keychain item. `keychain_item_is_not_readable_in_profile` checks it
-//! with `/usr/bin/security` and with the Apassy keychain helper. Its comment
-//! says what it proves and what stays pending until the app has a
-//! provisioning profile.
+//! with `/usr/bin/security` and shows that the Apassy keychain helper cannot
+//! start in the profile.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use apassy::agent::client;
 use apassy::agent::wire::Action;
@@ -46,6 +50,9 @@ const OP_SUMMARY: &str = "get_sales_summary";
 const VAULT_TEXT: &str = "SYNTHETIC-VAULT-CANARY-NOT-A-SECRET\n";
 const BACKUP_TEXT: &str = "SYNTHETIC-BACKUP-CANARY-NOT-A-SECRET\n";
 const LAYA_TEXT: &str = "SYNTHETIC-LAYA-WEIGHTS-NOT-A-SECRET\n";
+/// The development override of the helper caller check. No test sets it for a
+/// process in the profile.
+const DEV_ANY_CALLER: &str = "APASSY_HELPER_DEV_ANY_CALLER";
 
 /// The synthetic reporting service. It answers only for the synthetic token.
 struct DevService {
@@ -143,10 +150,21 @@ fn api_item() -> ItemDraft {
 /// The started broker, the agent token, and the synthetic layout.
 struct Fixture {
     layout: Layout,
+    /// A synthetic `Apassy.app`, when the test needs one. The launcher gets it
+    /// with `--app`.
+    app: Option<PathBuf>,
     token: String,
     item_id: u64,
     _service: DevService,
     _broker: broker::BrokerHandle,
+}
+
+/// A fixture with a synthetic `Apassy.app` in its temporary directory.
+fn fixture_with_app() -> Fixture {
+    let mut fx = fixture();
+    let dir = fx.layout.data_dir.parent().expect("temp dir").to_owned();
+    fx.app = Some(make_app(&dir));
+    fx
 }
 
 fn fixture() -> Fixture {
@@ -175,9 +193,91 @@ fn fixture() -> Fixture {
         token: token.expose().to_owned(),
         item_id: item.id,
         layout,
+        app: None,
         _service: service,
         _broker: handle,
     }
+}
+
+/// The real Swift helper, built once without a signature and with
+/// `-D APASSY_HELPER_DEV`. No test sets the override for it, so it runs its
+/// caller check. It has no team signature, so it refuses every caller.
+fn dev_helper() -> &'static Path {
+    static HELPER: OnceLock<PathBuf> = OnceLock::new();
+    HELPER.get_or_init(|| {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let out_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("isolation-helper");
+        std::fs::create_dir_all(&out_dir).expect("helper dir");
+        let out = out_dir.join("apassy-helper");
+        let mut sources: Vec<PathBuf> = std::fs::read_dir(root.join("native/ApassyHelper"))
+            .expect("helper sources")
+            .map(|entry| entry.expect("entry").path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "swift"))
+            .collect();
+        sources.sort();
+        let arch = if cfg!(target_arch = "aarch64") {
+            "arm64"
+        } else {
+            "x86_64"
+        };
+        let status = Command::new("xcrun")
+            .args(["--sdk", "macosx", "swiftc", "-Onone", "-swift-version", "5"])
+            .args(["-D", "APASSY_HELPER_DEV"])
+            .args(["-target", &format!("{arch}-apple-macos15.0"), "-o"])
+            .arg(&out)
+            .args(&sources)
+            .status()
+            .expect("run xcrun: the helper checks need Xcode. This is a failure, not a skip.");
+        assert!(status.success(), "swiftc failed to build the helper");
+        out
+    })
+}
+
+/// The programs of the app bundle, relative to `Apassy.app`.
+const APP_MAIN: &str = "Contents/MacOS/apassy";
+const APP_HELPER: &str = "Contents/MacOS/apassy-helper";
+const APP_KEYCHAIN_BUNDLE: &str = "Contents/Helpers/ApassyKeychain.app";
+const APP_MCP: &str = "Contents/MacOS/apassy-mcp";
+const APP_HOOK: &str = "Contents/MacOS/apassy-hook";
+
+/// A synthetic `Apassy.app` in `dir` with the layout of `scripts/build-app.sh`.
+/// The helpers are copies of the real Swift helper. The main program is also a
+/// copy of the helper: it only stands for a program in the bundle.
+/// `apassy-mcp` and `apassy-hook` are the programs of this build.
+fn make_app(dir: &Path) -> PathBuf {
+    let app = dir.join("Apassy.app");
+    let keychain = app
+        .join("Contents")
+        .join(apassy::native::KEYCHAIN_HELPER_FROM_CONTENTS);
+    std::fs::create_dir_all(app.join("Contents/MacOS")).expect("MacOS dir");
+    std::fs::create_dir_all(keychain.parent().expect("keychain dir")).expect("keychain dir");
+    for (from, to) in [
+        (dev_helper(), app.join(APP_MAIN)),
+        (dev_helper(), app.join(APP_HELPER)),
+        (dev_helper(), keychain),
+        (
+            Path::new(env!("CARGO_BIN_EXE_apassy-mcp")),
+            app.join(APP_MCP),
+        ),
+        (
+            Path::new(env!("CARGO_BIN_EXE_apassy-hook")),
+            app.join(APP_HOOK),
+        ),
+    ] {
+        std::fs::copy(from, &to).expect("copy a program into the app");
+    }
+    std::fs::write(
+        app.join("Contents/Info.plist"),
+        "<plist version=\"1.0\"><dict/></plist>\n",
+    )
+    .expect("Info.plist");
+    app
+}
+
+/// The keychain helper program in `app`.
+fn keychain_program(app: &Path) -> PathBuf {
+    app.join("Contents")
+        .join(apassy::native::KEYCHAIN_HELPER_FROM_CONTENTS)
 }
 
 /// The path of the SBPL profile in the repository.
@@ -201,8 +301,15 @@ fn sandbox_args(fx: &Fixture) -> Vec<String> {
         l.backup_file.display().to_string(),
         "--socket".to_owned(),
         l.socket.display().to_string(),
-        "--".to_owned(),
     ]
+    .into_iter()
+    .chain(
+        fx.app
+            .iter()
+            .flat_map(|app| ["--app".to_owned(), app.display().to_string()]),
+    )
+    .chain(["--".to_owned()])
+    .collect()
 }
 
 /// Run a command inside the profile. Return (exit ok, stdout, stderr).
@@ -211,6 +318,7 @@ fn in_sandbox(fx: &Fixture, host: &[&str]) -> (bool, String, String) {
     args.extend(host.iter().map(|part| (*part).to_owned()));
     let output = Command::new(env!("CARGO_BIN_EXE_apassy-sandbox"))
         .args(&args)
+        .env_remove(DEV_ANY_CALLER)
         .output()
         .expect("run apassy-sandbox");
     (
@@ -228,8 +336,13 @@ struct McpProcess {
 
 impl McpProcess {
     fn start_in_sandbox(fx: &Fixture) -> Self {
+        Self::start_program_in_sandbox(fx, Path::new(env!("CARGO_BIN_EXE_apassy-mcp")))
+    }
+
+    /// Start the adapter at `program` inside the profile.
+    fn start_program_in_sandbox(fx: &Fixture, program: &Path) -> Self {
         let mut args = sandbox_args(fx);
-        args.push(env!("CARGO_BIN_EXE_apassy-mcp").to_owned());
+        args.push(program.display().to_string());
         let mut child = Command::new(env!("CARGO_BIN_EXE_apassy-sandbox"))
             .args(&args)
             .env("APASSY_AGENT_TOKEN", &fx.token)
@@ -297,7 +410,12 @@ fn adapter_in_profile_reaches_broker_without_secret() {
     require_sandbox();
     let fx = fixture();
     let mut mcp = McpProcess::start_in_sandbox(&fx);
+    assert_adapter_works(&fx, &mut mcp);
+}
 
+/// The adapter answers `initialize`, lists the grant, and makes a permitted,
+/// mediated credential call. No secret value leaks.
+fn assert_adapter_works(fx: &Fixture, mcp: &mut McpProcess) {
     let init = mcp.request(&json!({
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
         "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "iso", "version": "0"}}
@@ -525,86 +643,409 @@ fn own_child_processes_work_in_profile() {
     assert_eq!(out.trim(), "child-ok");
 }
 
-/// The keychain helper of the signed app, or `None` when `scripts/build-app.sh` did not
-/// run in this checkout.
-fn bundled_keychain_helper() -> Option<PathBuf> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("target/Apassy.app/Contents")
-        .join(apassy::native::KEYCHAIN_HELPER_FROM_CONTENTS);
-    path.is_file().then_some(path)
+/// One JSON request line for a helper.
+const PING: &str = "{\"cmd\":\"ping\"}";
+
+/// Start `program` outside the profile with one `ping` line, as the owner's
+/// shell does. The helper starts and answers. Its parent is this test process,
+/// not the signed Apassy app, so the answer is `caller_not_allowed`.
+fn start_outside(program: &Path) -> Value {
+    let mut child = Command::new(program)
+        .env_remove(DEV_ANY_CALLER)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("control: the helper must start outside the profile");
+    writeln!(child.stdin.take().expect("stdin"), "{PING}").expect("write ping");
+    let output = child.wait_with_output().expect("wait for the helper");
+    assert!(output.status.success(), "control exit: {:?}", output.status);
+    serde_json::from_slice(&output.stdout).expect("control answer is JSON")
 }
 
-/// The helper code without a signature, built once with the Swift compiler.
-fn unsigned_keychain_helper() -> PathBuf {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let out_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("isolation-keychain-helper");
-    std::fs::create_dir_all(&out_dir).expect("helper dir");
-    let out = out_dir.join("ApassyKeychain");
-    let mut sources: Vec<PathBuf> = std::fs::read_dir(root.join("native/ApassyHelper"))
-        .expect("helper sources")
-        .map(|entry| entry.expect("entry").path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "swift"))
-        .collect();
-    sources.sort();
-    let arch = if cfg!(target_arch = "aarch64") {
-        "arm64"
-    } else {
-        "x86_64"
-    };
-    let status = Command::new("xcrun")
-        .args(["--sdk", "macosx", "swiftc", "-Onone", "-swift-version", "5"])
-        .args(["-target", &format!("{arch}-apple-macos15.0"), "-o"])
-        .arg(&out)
-        .args(&sources)
-        .status()
-        .expect("run xcrun: the Keychain check needs Xcode. This is a failure, not a skip.");
+/// Assert that `program` does not start inside the profile: not by a direct
+/// exec, not from a shell pipe, and not with the development override set.
+fn assert_cannot_start_in_profile(fx: &Fixture, label: &str, program: &Path) {
+    let path = program.display().to_string();
+    let (ok, out, err) = in_sandbox(fx, &[&path]);
+    assert!(!ok, "{label} started in the profile: {out}");
     assert!(
-        status.success(),
-        "swiftc failed to build the keychain helper"
+        err.contains("Operation not permitted"),
+        "the {label} denial must be a sandbox denial: {err}"
     );
-    out
+    for script in [
+        format!("printf '%s\\n' '{PING}' | '{path}'"),
+        format!("printf '%s\\n' '{PING}' | {DEV_ANY_CALLER}=1 '{path}'"),
+    ] {
+        let (ok, out, err) = in_sandbox(fx, &["/bin/sh", "-c", &script]);
+        assert!(!ok, "{label} started in the profile: {out}");
+        assert!(
+            err.contains("Operation not permitted"),
+            "the {label} denial must be a sandbox denial: {err}"
+        );
+        assert!(out.is_empty(), "{label} answered in the profile: {out}");
+    }
 }
 
-/// Send JSON lines to `helper` inside the profile. Returns one JSON value per line.
-fn helper_in_sandbox(fx: &Fixture, helper: &Path, requests: &[Value]) -> Vec<Value> {
-    let lines: Vec<String> = requests
-        .iter()
-        .map(|request| format!("'{request}'"))
-        .collect();
-    let script = format!(
-        "printf '%s\\n' {} | '{}'",
-        lines.join(" "),
-        helper.display()
-    );
-    let (ok, out, err) = in_sandbox(fx, &["/bin/sh", "-c", &script]);
-    assert!(ok, "the helper did not answer in the profile: {err}");
-    out.lines()
+#[test]
+fn apassy_programs_cannot_start_in_profile() {
+    require_sandbox();
+    let fx = fixture_with_app();
+    let app = fx.app.clone().expect("app");
+    for (label, program) in [
+        ("the keychain helper", keychain_program(&app)),
+        ("apassy-helper", app.join(APP_HELPER)),
+        ("the main program", app.join(APP_MAIN)),
+    ] {
+        // Control: outside the profile the same file starts and answers.
+        let answer = start_outside(&program);
+        assert_eq!(answer["error"], "caller_not_allowed", "{label}: {answer}");
+        assert_cannot_start_in_profile(&fx, label, &program);
+    }
+}
+
+/// Every file and link below `dir`, at any depth. Directories are not listed.
+fn files_below(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).expect("read dir") {
+        let path = entry.expect("entry").path();
+        let meta = std::fs::symlink_metadata(&path).expect("metadata");
+        if meta.is_dir() {
+            found.extend(files_below(&path));
+        } else {
+            found.push(path);
+        }
+    }
+    found
+}
+
+#[test]
+fn apassy_programs_cannot_be_read_copied_linked_or_changed_in_profile() {
+    require_sandbox();
+    let fx = fixture_with_app();
+    let app = fx.app.clone().expect("app");
+    let keychain = keychain_program(&app);
+    let helper = app.join(APP_HELPER);
+    let out_dir = fx.layout.data_dir.with_file_name("copies");
+    std::fs::create_dir_all(&out_dir).expect("copies dir");
+    let keychain_s = keychain.display().to_string();
+    let helper_s = helper.display().to_string();
+    let app_s = app.display().to_string();
+    let app_parent = app.parent().expect("parent").display().to_string();
+    let out = |name: &str| out_dir.join(name).display().to_string();
+
+    let attempts: Vec<(&str, Vec<String>)> = vec![
+        ("read", vec!["/bin/cat".into(), keychain_s.clone()]),
+        (
+            "copy",
+            vec!["/bin/cp".into(), keychain_s.clone(), out("copy")],
+        ),
+        (
+            "clone",
+            vec![
+                "/bin/cp".into(),
+                "-c".into(),
+                helper_s.clone(),
+                out("clone"),
+            ],
+        ),
+        (
+            "hard link",
+            vec!["/bin/ln".into(), helper_s.clone(), out("link")],
+        ),
+        (
+            "copy of the keychain bundle",
+            vec![
+                "/bin/cp".into(),
+                "-R".into(),
+                app.join(APP_KEYCHAIN_BUNDLE).display().to_string(),
+                out("ApassyKeychain.app"),
+            ],
+        ),
+        (
+            "copy of the app",
+            vec![
+                "/bin/cp".into(),
+                "-R".into(),
+                app_s.clone(),
+                out("Apassy.app"),
+            ],
+        ),
+        (
+            "list",
+            vec!["/bin/ls".into(), app.join("Contents").display().to_string()],
+        ),
+        (
+            "overwrite",
+            vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!("echo x > '{helper_s}'"),
+            ],
+        ),
+        (
+            "new program",
+            vec![
+                "/usr/bin/touch".into(),
+                app.join("Contents/MacOS/new-program").display().to_string(),
+            ],
+        ),
+        (
+            "rename of the app",
+            vec!["/bin/mv".into(), app_s.clone(), out("Moved.app")],
+        ),
+        (
+            "rename of the app parent",
+            vec![
+                "/bin/mv".into(),
+                app_parent.clone(),
+                format!("{app_parent}-moved"),
+            ],
+        ),
+    ];
+    for (label, command) in &attempts {
+        let parts: Vec<&str> = command.iter().map(String::as_str).collect();
+        let (ok, stdout, err) = in_sandbox(&fx, &parts);
+        assert!(!ok, "the profile must deny the {label}: {stdout}");
+        assert!(
+            err.contains("Operation not permitted"),
+            "the {label} denial must be a sandbox denial: {err}"
+        );
+    }
+    // `cp -R` can make an empty target directory before the read fails. No
+    // file may exist below the target directory.
+    let left = files_below(&out_dir);
+    assert!(left.is_empty(), "a copy or a link exists: {left:?}");
+    let original = std::fs::read(dev_helper()).expect("helper bytes");
+    for program in [&keychain, &helper] {
+        assert_eq!(
+            std::fs::read(program).expect("program bytes"),
+            original,
+            "{} changed",
+            program.display()
+        );
+    }
+    assert!(!app.join("Contents/MacOS/new-program").exists());
+}
+
+#[test]
+fn a_helper_outside_the_bundle_refuses_a_caller_in_profile() {
+    // The second layer. The owner (outside the profile) puts a copy of the
+    // keychain helper bundle at a path that the profile does not protect. A
+    // process in the profile can start this copy, but the helper refuses each
+    // request: its parent is not the signed Apassy app that contains it.
+    require_sandbox();
+    let fx = fixture_with_app();
+    let app = fx.app.clone().expect("app");
+    let elsewhere = fx.layout.data_dir.with_file_name("elsewhere");
+    let copy = elsewhere.join("ApassyKeychain.app/Contents/MacOS/ApassyKeychain");
+    std::fs::create_dir_all(copy.parent().expect("dir")).expect("copy dir");
+    std::fs::copy(keychain_program(&app), &copy).expect("owner copy");
+
+    let account = apassy::native::vault_unlock_account(&fx.layout.vault_file);
+    let requests = [
+        PING.to_owned(),
+        json!({"cmd": "keychain_exists", "account": account}).to_string(),
+        json!({"cmd": "keychain_read", "account": account, "reason": "isolation check"})
+            .to_string(),
+        json!({"cmd": "authenticate", "reason": "isolation check"}).to_string(),
+    ];
+    let quoted: Vec<String> = requests.iter().map(|line| format!("'{line}'")).collect();
+    let script = format!("printf '%s\\n' {} | '{}'", quoted.join(" "), copy.display());
+    let (ok, out, err) = in_sandbox(&fx, &["/bin/sh", "-c", &script]);
+    assert!(ok, "the copy outside the bundle must start: {err}");
+    let answers: Vec<Value> = out
+        .lines()
         .map(|line| serde_json::from_str(line).expect("helper answer is JSON"))
-        .collect()
+        .collect();
+    assert_eq!(answers.len(), requests.len(), "{answers:?}");
+    for answer in &answers {
+        assert_eq!(answer["ok"], false, "{answer}");
+        assert_eq!(answer["error"], "caller_not_allowed", "{answer}");
+        assert!(answer.get("secret_b64").is_none(), "{answer}");
+    }
+}
+
+/// Run the `apassy-hook` program at `hook` inside the profile with `input` on
+/// stdin. Return (exit ok, stdout, stderr).
+fn hook_in_sandbox(fx: &Fixture, hook: &Path, token: &str, input: &str) -> (bool, String, String) {
+    let mut args = sandbox_args(fx);
+    args.push(hook.display().to_string());
+    let mut child = Command::new(env!("CARGO_BIN_EXE_apassy-sandbox"))
+        .args(&args)
+        .env("APASSY_AGENT_TOKEN", token)
+        .env("APASSY_BROKER_SOCKET", &fx.layout.socket)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the hook in the profile");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(input.as_bytes())
+        .expect("write hook input");
+    let output = child.wait_with_output().expect("wait for the hook");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn apassy_mcp_and_hook_in_the_app_bundle_work_in_profile() {
+    // The agent host starts `apassy-mcp` and `apassy-hook`. The profile denies
+    // the other programs of the bundle, but these two start and reach the
+    // broker.
+    require_sandbox();
+    let fx = fixture_with_app();
+    let app = fx.app.clone().expect("app");
+    let mut mcp = McpProcess::start_program_in_sandbox(&fx, &app.join(APP_MCP));
+    assert_adapter_works(&fx, &mut mcp);
+    drop(mcp);
+
+    let hook = app.join(APP_HOOK);
+    let input = json!({
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "isolation-session",
+        "cwd": env!("CARGO_MANIFEST_DIR"),
+        "prompt": "Run the synthetic isolation check.",
+    })
+    .to_string();
+    // The hook starts, sends the prompt, and the broker accepts it: no stderr.
+    let (ok, out, err) = hook_in_sandbox(&fx, &hook, &fx.token, &input);
+    assert!(ok, "the hook must start in the profile: {err}");
+    assert!(out.is_empty(), "the hook wrote to stdout: {out}");
+    assert!(
+        err.is_empty(),
+        "the broker did not accept the hook request: {err}"
+    );
+    // Control: with a wrong token the broker refuses, and the hook says so.
+    let (ok, _out, err) = hook_in_sandbox(&fx, &hook, "apassy_agt_synthetic-wrong-token", &input);
+    assert!(ok, "the hook always exits 0: {err}");
+    assert!(err.contains("the broker refused"), "control: {err}");
+}
+
+#[test]
+fn profile_protects_the_build_app_without_the_installed_app_parameter() {
+    // The profile uses /Applications/Apassy.app when APASSY_APP is absent, and
+    // protects APASSY_APP_BUILD as a second bundle.
+    require_sandbox();
+    let fx = fixture_with_app();
+    let app = std::fs::canonicalize(fx.app.clone().expect("app")).expect("canonical app");
+    let l = &fx.layout;
+    let resolved = |path: &Path| {
+        let parent = std::fs::canonicalize(path.parent().expect("parent")).expect("parent");
+        parent
+            .join(path.file_name().expect("name"))
+            .display()
+            .to_string()
+    };
+    let base = [
+        "-f".to_owned(),
+        profile_path().display().to_string(),
+        "-D".to_owned(),
+        format!("APASSY_DATA_DIR={}", resolved(&l.data_dir)),
+        "-D".to_owned(),
+        format!("APASSY_VAULT_FILE={}", resolved(&l.vault_file)),
+        "-D".to_owned(),
+        format!("APASSY_BACKUP_FILE={}", resolved(&l.backup_file)),
+        "-D".to_owned(),
+        format!("APASSY_SOCKET={}", resolved(&l.socket)),
+        "-D".to_owned(),
+        format!("APASSY_APP_BUILD={}", app.display()),
+    ];
+    let denied = Command::new(SANDBOX_EXEC)
+        .args(&base)
+        .arg(keychain_program(&app))
+        .output()
+        .expect("run sandbox-exec");
+    assert!(!denied.status.success(), "the keychain helper started");
+    assert!(
+        String::from_utf8_lossy(&denied.stderr).contains("Operation not permitted"),
+        "{}",
+        String::from_utf8_lossy(&denied.stderr)
+    );
+    let mcp = Command::new(SANDBOX_EXEC)
+        .args(&base)
+        .arg(app.join(APP_MCP))
+        .arg("--version")
+        .output()
+        .expect("run sandbox-exec");
+    assert!(
+        mcp.status.success(),
+        "apassy-mcp in the bundle must start: {}",
+        String::from_utf8_lossy(&mcp.stderr)
+    );
+    assert!(String::from_utf8_lossy(&mcp.stdout).starts_with("apassy-mcp "));
+}
+
+#[test]
+fn launcher_passes_the_installed_and_the_build_app() {
+    // Defaults: the installed app, and `<target>/Apassy.app` next to the launcher.
+    let launcher = Path::new(env!("CARGO_BIN_EXE_apassy-sandbox"));
+    let target = std::fs::canonicalize(launcher.parent().and_then(Path::parent).expect("target"))
+        .expect("canonical target");
+    let print = |extra: &[&str]| {
+        let output = Command::new(launcher)
+            .args(["--data-dir", "/tmp/apassy-print-check/d"])
+            .args(extra)
+            .args(["--print", "--", "/usr/bin/true"])
+            .output()
+            .expect("run apassy-sandbox --print");
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let defaults = print(&[]);
+    assert!(
+        defaults.contains(" -D APASSY_APP=/Applications/Apassy.app "),
+        "{defaults}"
+    );
+    assert!(
+        defaults.contains(&format!(
+            " -D APASSY_APP_BUILD={} ",
+            target.join("Apassy.app").display()
+        )),
+        "{defaults}"
+    );
+    let chosen = print(&[
+        "--app",
+        "/tmp/apassy-print-check/Installed.app",
+        "--app-build",
+        "/tmp/apassy-print-check/Build.app",
+    ]);
+    assert!(
+        chosen.contains(" -D APASSY_APP=/private/tmp/apassy-print-check/Installed.app "),
+        "{chosen}"
+    );
+    assert!(
+        chosen.contains(" -D APASSY_APP_BUILD=/private/tmp/apassy-print-check/Build.app "),
+        "{chosen}"
+    );
 }
 
 /// Goal I2, Keychain part. A process in the profile cannot read the Apassy Touch ID
 /// item: not with `/usr/bin/security`, and not through the Apassy keychain helper.
 ///
-/// What this proves now:
 /// - `security` runs in the profile (so a "not found" is not a broken tool), and it
 ///   finds no item with the service and the account that the helper uses, inside and
 ///   outside the profile. The item is in the data protection keychain, which the
 ///   `security` tool does not search, and it needs the Apassy access group.
-/// - The keychain helper from `target/Apassy.app` (or the helper code without a
-///   signature, when the app is not built) runs in the profile, has no keychain access
-///   group, and answers `keychain_unavailable` to `keychain_exists` and to
-///   `keychain_read`. So no process can read an unlock key from this build.
-///
-/// What stays pending (see `docs/operations/native-app.md`): the real
-/// `.biometryCurrentSet` item needs a provisioning profile. With a profile, the helper
-/// has an access group. Then a process in the profile could start the helper and ask
-/// for a Touch ID prompt, and only the owner's finger would stop it. This test then
-/// fails on purpose, until the agent profile denies the start of the Apassy helpers.
+/// - The keychain helper of the app bundle does not start in the profile. The deny
+///   does not depend on the signature or on a provisioning profile, so it also holds
+///   for a provisioned build with a keychain access group. A process in the profile
+///   cannot use the helper to show a Touch ID prompt or to read the unlock key.
+/// - `apassy_programs_cannot_be_read_copied_linked_or_changed_in_profile` shows that
+///   the process cannot copy the helper to a path that the profile does not deny.
+///   `a_helper_outside_the_bundle_refuses_a_caller_in_profile` shows the caller check
+///   of the helper for a copy that exists already. `scripts/build-app.sh` runs the
+///   same checks with the signed helpers.
 #[test]
 fn keychain_item_is_not_readable_in_profile() {
     require_sandbox();
-    let fx = fixture();
+    let fx = fixture_with_app();
     let service = apassy::native::KEYCHAIN_SERVICE;
     let account = apassy::native::vault_unlock_account(&fx.layout.vault_file);
 
@@ -648,30 +1089,18 @@ fn keychain_item_is_not_readable_in_profile() {
         "security printed a value in the profile"
     );
 
-    // The Apassy keychain helper, started from inside the profile.
-    let helper = bundled_keychain_helper().unwrap_or_else(unsigned_keychain_helper);
-    eprintln!("keychain check uses {}", helper.display());
-    let ping = helper_in_sandbox(&fx, &helper, &[json!({"cmd": "ping"})]);
-    assert_eq!(ping[0]["ok"], true, "{ping:?}");
+    // The Apassy keychain helper: it starts outside the profile (control), and it
+    // does not start inside it.
+    let keychain = keychain_program(fx.app.as_deref().expect("app"));
+    let answer = start_outside(&keychain);
+    assert_eq!(answer["error"], "caller_not_allowed", "{answer}");
+    assert_cannot_start_in_profile(&fx, "the keychain helper", &keychain);
+    let request = json!({"cmd": "keychain_read", "account": account, "reason": "isolation check"});
+    let script = format!("printf '%s\\n' '{request}' | '{}'", keychain.display());
+    let (ok, out, err) = in_sandbox(&fx, &["/bin/sh", "-c", &script]);
     assert!(
-        ping[0]["keychain_access_group"].is_null(),
-        "The keychain helper runs in the agent profile and has the keychain access group {}. \
-         A process in the profile can then ask for the Touch ID unlock key. Deny the start of \
-         the Apassy helpers in sandbox/apassy-agent-host.sb before a provisioned build is used.",
-        ping[0]["keychain_access_group"]
+        !ok && out.is_empty(),
+        "keychain_read answered in the profile: {out}"
     );
-    let answers = helper_in_sandbox(
-        &fx,
-        &helper,
-        &[
-            json!({"cmd": "keychain_exists", "account": account}),
-            json!({"cmd": "keychain_read", "account": account, "reason": "isolation check"}),
-        ],
-    );
-    assert_eq!(answers.len(), 2, "{answers:?}");
-    for answer in &answers {
-        assert_eq!(answer["ok"], false, "{answer}");
-        assert_eq!(answer["error"], "keychain_unavailable", "{answer}");
-        assert!(answer.get("secret_b64").is_none(), "{answer}");
-    }
+    assert!(err.contains("Operation not permitted"), "{err}");
 }
