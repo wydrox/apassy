@@ -4,8 +4,10 @@
 //! a real-secret product, or a complete P2 acceptance claim. Desktop remains
 //! a synthetic demo.
 //!
-//! Paths are normalized to absolute canonical form before SQL open. URI
-//! filename semantics are not enabled. The lifetime lock is an adjacent
+//! Paths are normalized to absolute canonical form before SQL open. The build
+//! turns off URI file names (`-USQLITE_USE_URI` in `.cargo/config.toml`), and the
+//! vault opens without `SQLITE_OPEN_URI`, so a `file:` name is an ordinary file
+//! name. Each open checks the build options. The lifetime lock is an adjacent
 //! `<canonical-db-path>.lock` sidecar. That lock is advisory only and does
 //! not protect against hostile parent-directory replacement or same-user
 //! arbitrary SQLite clients.
@@ -18,8 +20,10 @@ use std::io::{self, ErrorKind};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
+use rusqlite::config::DbConfig;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionBehavior};
+use zeroize::Zeroizing;
 
 use crate::contracts::CredentialKind;
 
@@ -624,9 +628,84 @@ fn close_conn(conn: Connection) -> VaultResult<()> {
         .map_err(|(_conn, _sql_err)| err(VaultErrorKind::Storage))
 }
 
+/// SQLite build options that `.cargo/config.toml` sets through `LIBSQLITE3_FLAGS`
+/// (V1 review §7 item 2, key-memory review F2).
+const REQUIRED_BUILD_OPTIONS: [&str; 2] = ["OMIT_LOAD_EXTENSION", "DEFAULT_LOOKASIDE=0,0"];
+/// SQLite build options that the vault refuses: extension loading and URI file names.
+const REFUSED_BUILD_OPTIONS: [&str; 2] = ["ENABLE_LOAD_EXTENSION", "USE_URI"];
+
+/// Refuse a SQLite build without the checked-in flags. A build outside the
+/// repository directory does not read `.cargo/config.toml`, so it fails closed here.
+fn require_build_options(conn: &Connection) -> VaultResult<()> {
+    let mut options = Vec::new();
+    conn.pragma_query(None, "compile_options", |row| {
+        options.push(row.get::<_, String>(0)?);
+        Ok(())
+    })
+    .map_err(|_| err(VaultErrorKind::Storage))?;
+    let has = |name: &str| options.iter().any(|option| option == name);
+    if REQUIRED_BUILD_OPTIONS.iter().all(|name| has(name))
+        && !REFUSED_BUILD_OPTIONS.iter().any(|name| has(name))
+    {
+        Ok(())
+    } else {
+        Err(err(VaultErrorKind::Storage))
+    }
+}
+
+/// Harden a new connection before the key reaches SQLite.
+///
+/// Defensive mode blocks SQL that can corrupt the file, for example
+/// `PRAGMA writable_schema = ON`. `cipher_memory_security` makes SQLCipher lock
+/// each SQLite allocation and overwrite it on free: the copies of the key
+/// statement, bound values, and the page cache. The setting is process-wide, and
+/// SQLCipher cannot turn it off again. It must be on before the first key.
+fn harden_connection(conn: &Connection) -> VaultResult<()> {
+    require_build_options(conn)?;
+    let defensive = conn
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    if !defensive {
+        return Err(err(VaultErrorKind::Storage));
+    }
+    conn.execute_batch("PRAGMA cipher_memory_security = ON")
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    if require_pragma_i64(conn, "cipher_memory_security")? != 1 {
+        return Err(err(VaultErrorKind::Storage));
+    }
+    Ok(())
+}
+
+/// Build `PRAGMA <pragma> = '<passphrase>'` in a buffer that is erased on drop.
+///
+/// The capacity is exact, so the buffer does not grow and leaves no partial copy
+/// in freed memory. Each `'` is doubled, as in rusqlite `pragma_update`, so the
+/// key bytes do not change. SQLite does not accept a bound parameter in a PRAGMA,
+/// and rusqlite has no key API without `unsafe`. The copies that SQLite makes are
+/// erased by `cipher_memory_security`.
+fn key_statement(pragma: &'static str, passphrase: &str) -> Zeroizing<String> {
+    const PREFIX: &str = "PRAGMA ";
+    const EQUALS: &str = " = '";
+    let quotes = passphrase.matches('\'').count();
+    let capacity = PREFIX.len() + pragma.len() + EQUALS.len() + passphrase.len() + quotes + 1;
+    let mut sql = Zeroizing::new(String::with_capacity(capacity));
+    sql.push_str(PREFIX);
+    sql.push_str(pragma);
+    sql.push_str(EQUALS);
+    for ch in passphrase.chars() {
+        if ch == '\'' {
+            sql.push('\'');
+        }
+        sql.push(ch);
+    }
+    sql.push('\'');
+    sql
+}
+
 fn apply_key(conn: &Connection, passphrase: &str) -> VaultResult<()> {
     validate_unlock_passphrase(passphrase)?;
-    conn.pragma_update(None, "key", passphrase)
+    harden_connection(conn)?;
+    conn.execute_batch(&key_statement("key", passphrase))
         .map_err(|_| err(VaultErrorKind::Storage))?;
     // Keep temporary SQL storage in memory before schema or integrity reads,
     // including read-only validation during restore.
@@ -663,7 +742,7 @@ fn rekey(conn: &Connection, path: &Path, new: &str) -> VaultResult<()> {
     conn.execute_batch("BEGIN EXCLUSIVE; ROLLBACK;")
         .map_err(|_| err(VaultErrorKind::Busy))?;
     let answer: String = conn
-        .pragma_update_and_check(None, "rekey", new, |row| row.get(0))
+        .query_row(&key_statement("rekey", new), [], |row| row.get(0))
         .map_err(|_| err(VaultErrorKind::Storage))?;
     if answer == "ok" {
         Ok(())
@@ -1211,4 +1290,114 @@ fn to_public_revision(revision: i64) -> VaultResult<u64> {
         return Err(err(VaultErrorKind::Storage));
     }
     u64::try_from(revision).map_err(|_| err(VaultErrorKind::Storage))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    const PASS: &str = "synthetic-harden-passphrase";
+
+    fn unlocked(dir: &TempDir, passphrase: &str) -> Vault {
+        let mut vault = Vault::create(&dir.path().join("harden.db"), passphrase).unwrap();
+        vault.unlock(passphrase).unwrap();
+        vault
+    }
+
+    fn compile_options(conn: &Connection) -> Vec<String> {
+        let mut options = Vec::new();
+        conn.pragma_query(None, "compile_options", |row| {
+            options.push(row.get::<_, String>(0)?);
+            Ok(())
+        })
+        .unwrap();
+        options
+    }
+
+    #[test]
+    fn build_uses_the_checked_in_sqlite_flags() {
+        let conn = Connection::open_in_memory().unwrap();
+        let options = compile_options(&conn);
+        assert!(options.iter().any(|option| option == "HAS_CODEC"));
+        for required in REQUIRED_BUILD_OPTIONS {
+            assert!(
+                options.iter().any(|option| option == required),
+                "{required}"
+            );
+        }
+        for refused in REFUSED_BUILD_OPTIONS {
+            assert!(!options.iter().any(|option| option == refused), "{refused}");
+        }
+        require_build_options(&conn).unwrap();
+        let load = conn
+            .query_row("SELECT load_extension('synthetic-missing')", [], |row| {
+                row.get::<_, Option<String>>(0)
+            })
+            .unwrap_err();
+        assert!(load.to_string().contains("no such function"), "{load}");
+    }
+
+    #[test]
+    fn unlocked_connection_has_memory_security_and_defensive_mode() {
+        let dir = TempDir::new().unwrap();
+        let vault = unlocked(&dir, PASS);
+        let conn = vault.conn_ref().unwrap();
+        assert_eq!(
+            require_pragma_i64(conn, "cipher_memory_security").unwrap(),
+            1
+        );
+        assert!(conn.db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE).unwrap());
+        // Defensive mode ignores a request for a writable schema.
+        conn.execute_batch("PRAGMA writable_schema = ON").unwrap();
+        assert_eq!(require_pragma_i64(conn, "writable_schema").unwrap(), 0);
+        assert!(
+            conn.execute("UPDATE sqlite_schema SET sql = sql", [])
+                .is_err()
+        );
+        // The cipher settings stay the SQLCipher 4 values.
+        verify_cipher_defaults(conn).unwrap();
+    }
+
+    #[test]
+    fn key_statement_doubles_quotes_with_exact_capacity() {
+        let sql = key_statement("key", "a'b''c");
+        assert_eq!(sql.as_str(), "PRAGMA key = 'a''b''''c'");
+        assert_eq!(sql.capacity(), sql.len());
+        let sql = key_statement("rekey", "plain");
+        assert_eq!(sql.as_str(), "PRAGMA rekey = 'plain'");
+        assert_eq!(sql.capacity(), sql.len());
+    }
+
+    #[test]
+    fn passphrase_with_quotes_keeps_the_same_key() {
+        let quoted = "synthetic 'quoted'' pass";
+        let dir = TempDir::new().unwrap();
+        let mut vault = unlocked(&dir, quoted);
+        vault.lock().unwrap();
+        for wrong in ["synthetic 'quoted' pass", "synthetic quoted pass"] {
+            assert_eq!(
+                vault.unlock(wrong).unwrap_err().kind(),
+                VaultErrorKind::WrongKeyOrCorrupt
+            );
+        }
+        // rusqlite `pragma_update`, the earlier key path, derives the same key.
+        let conn = Connection::open_with_flags(&vault.path, OPEN_READONLY).unwrap();
+        conn.pragma_update(None, "key", quoted).unwrap();
+        let tables: i64 = conn
+            .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
+            .unwrap();
+        assert!(tables > 0);
+        close_conn(conn).unwrap();
+        // Rekey to a new passphrase with quotes, then unlock with it.
+        let requoted = "synthetic ''new' pass'";
+        vault.unlock(quoted).unwrap();
+        vault.change_passphrase(quoted, requoted).unwrap();
+        vault.lock().unwrap();
+        assert_eq!(
+            vault.unlock(quoted).unwrap_err().kind(),
+            VaultErrorKind::WrongKeyOrCorrupt
+        );
+        vault.unlock(requoted).unwrap();
+    }
 }
