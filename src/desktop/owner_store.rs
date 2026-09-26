@@ -571,11 +571,12 @@ impl OwnerSession {
                 if !field.secret {
                     continue;
                 }
+                // Move the value into the erasing buffer without a copy (F10).
                 let value = vault.reveal(id, &field.name).map_err(map_err)?;
                 pairs.push((
                     field.name.clone(),
                     RevealedValue {
-                        value: Zeroizing::new(value.expose().to_owned()),
+                        value: value.into_zeroizing(),
                         shown_at: Instant::now(),
                     },
                 ));

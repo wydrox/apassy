@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "docker",
+  "description": "Docker, Podman, and Compose: removal of containers, images, and volumes, and read commands.",
+  "programs": ["docker", "podman", "docker-compose"],
+  "roles": {
+    "usage": ["docker"]
+  },
+  "rules": [
+    {
+      "id": "secret-argument",
+      "flag": "secret_output",
+      "when": { "program": ["docker"], "refs_secret": true }
+    },
+    {
+      "id": "remove-data",
+      "flag": "data_loss",
+      "dry_run": "skip_with_n",
+      "when": {
+        "program": ["docker", "podman"],
+        "any_of": [
+          { "args_contain": ["system prune", "volume rm", "volume prune"] },
+          { "args_start": ["rm ", "rmi"] },
+          { "args_contain": ["compose down"], "any_arg": ["-v", "--volumes"] }
+        ]
+      }
+    },
+    {
+      "id": "compose-down-volumes",
+      "flag": "data_loss",
+      "dry_run": "skip_with_n",
+      "when": {
+        "program": ["docker-compose"],
+        "subcommand": ["down"],
+        "any_arg": ["-v", "--volumes"]
+      }
+    }
+  ],
+  "safe": [
+    {
+      "id": "read-build-and-compose",
+      "when": {
+        "program": ["docker", "podman"],
+        "any_of": [
+          { "subcommand": ["ps", "images", "logs", "inspect", "version", "info", "build"] },
+          {
+            "subcommand": ["compose"],
+            "action": ["ps", "logs", "up", "build", "config", "stop", "restart"]
+          }
+        ]
+      }
+    }
+  ]
+}

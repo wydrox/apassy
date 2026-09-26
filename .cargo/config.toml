@@ -1,0 +1,18 @@
+# Build settings for every cargo command in this repository.
+#
+# LIBSQLITE3_FLAGS changes the bundled SQLCipher C build (V1 review §7 item 2,
+# key-memory review F2):
+#   -USQLITE_ENABLE_LOAD_EXTENSION -DSQLITE_OMIT_LOAD_EXTENSION
+#                               no extension loading, also not through the C API
+#   -USQLITE_USE_URI            a `file:` name is not a URI
+#   -DSQLITE_DEFAULT_LOOKASIDE=0,0
+#                               no lookaside buffer, so each small allocation goes
+#                               through the SQLCipher allocator, which erases it on
+#                               free when cipher_memory_security is on
+#
+# `force = true` makes these flags win over a LIBSQLITE3_FLAGS value in the
+# environment. The vault checks the result at each open with
+# `PRAGMA compile_options` and refuses a build without these flags
+# (src/vault/mod.rs, require_build_options).
+[env]
+LIBSQLITE3_FLAGS = { value = "-USQLITE_ENABLE_LOAD_EXTENSION -DSQLITE_OMIT_LOAD_EXTENSION -USQLITE_USE_URI -DSQLITE_DEFAULT_LOOKASIDE=0,0", force = true }

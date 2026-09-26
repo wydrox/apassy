@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "macos",
+  "description": "macOS tools: Keychain, preferences, clipboard, launch agents, disks, and Homebrew.",
+  "programs": ["security", "defaults", "pbcopy", "launchctl", "diskutil", "brew"],
+  "roles": {
+    "usage": ["brew"]
+  },
+  "rules": [
+    {
+      "id": "secret-argument",
+      "flag": "secret_output",
+      "note": "A secret in the Keychain, the preferences, or the clipboard leaves the process.",
+      "when": { "program": ["security", "defaults", "pbcopy"], "refs_secret": true }
+    },
+    {
+      "id": "system-change",
+      "flag": "system_change",
+      "when": { "program": ["launchctl", "defaults"] }
+    },
+    {
+      "id": "disk-change",
+      "flag": "data_loss",
+      "dry_run": "skip_with_n",
+      "when": { "program": ["diskutil"] }
+    }
+  ]
+}

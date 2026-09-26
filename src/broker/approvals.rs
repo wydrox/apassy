@@ -41,8 +41,13 @@ pub struct PendingRun {
     pub purpose: String,
     /// Bouncer result and heuristic flags. It has no secret value.
     pub risk: String,
-    /// The user request that the agent sent. Empty when the agent sent none.
+    /// The user request: from the host hook when there is one, else from the agent.
+    /// Empty when there is none.
     pub user_request: String,
+    /// Where the user request comes from, for example "from the agent" (goal item B6).
+    pub request_source: String,
+    /// The agent text when a hook request replaced it and the two differ. Else empty.
+    pub agent_request: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,6 +302,8 @@ mod tests {
             purpose: "test".to_owned(),
             risk: String::new(),
             user_request: String::new(),
+            request_source: String::new(),
+            agent_request: String::new(),
         }
     }
 

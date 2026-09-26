@@ -15,6 +15,8 @@ Status: experimental. This contract supports the thin agent path in [ADR 0004](.
 | HTTP client with TLS (ADR 0005) | `src/broker/http.rs` | `vault` |
 | Agent, grant, destination, and activity records | `src/vault/agents.rs` | `vault` |
 | Synthetic reporting service | `src/bin/apassy-dev-reporting.rs` | none |
+| Host hook for the user request (goal item B6) | `src/agent/hook.rs`, `src/bin/apassy-hook.rs` | none |
+| Store and transcript check of hook requests | `src/broker/prompts.rs` | `vault` |
 
 The adapter does not link the vault into its logic. It does not open the vault file.
 
@@ -49,6 +51,19 @@ Request:
 ```
 
 The `run` action is in [ADR 0006](../adr/0006-process-secrets.md). Its check order is in `src/broker/run.rs`. A run response has `exit_code`, `timed_out`, `truncated`, `stdout`, `stderr`, and `secrets_in_environment`. Each output stream keeps a maximum of 64 KiB. A response line has a maximum of 1 MiB.
+
+A request can have `host_session`: the session ID of the agent host. `apassy-mcp` sends `CLAUDE_CODE_SESSION_ID` here. `apassy-hook` sends the `session_id` of the hook input. In `submit_user_request`, the value must have 1 to 128 characters: `A-Z`, `a-z`, `0-9`, `-`, `_`, or `.`.
+
+```json
+{"v":0,"token":"apassy_agt_<64 hex>","host_session":"1dbe1639-f522-4744-a3dc-7a76626af241","action":{"kind":"submit_user_request","host":"claude-code","cwd":"/Users/me/Dev/odealo","prompt":"Run the unit tests.","transcript_path":"/Users/me/.claude/projects/-Users-me-Dev-odealo/1dbe1639-f522-4744-a3dc-7a76626af241.jsonl"}}
+```
+
+The `submit_user_request` action carries the user prompt from a host hook (goal item B6, [host hooks](../operations/host-hooks.md)):
+
+- `host` is a label: `claude-code` or `codex`. `cwd` is the absolute directory of the host session. `transcript_path` is optional. `truncated` is `true` when the hook cut a prompt longer than 32 KiB.
+- The broker checks the vault and the token, as for other actions. A field that is not valid gives `invalid_request`, and the activity log records it. The response is `{"ok":true,"result":{"stored":true}}`.
+- The broker keeps the newest prompt per agent and host session in memory: a maximum of 256 prompts for 4 hours, in the current vault session only. It does not record the prompt in the activity log at this step.
+- A later `run` uses the hook prompt in place of `user_request` and checks it in the host transcript. See [host hooks](../operations/host-hooks.md) sections 3 and 4.
 
 Response:
 
@@ -119,6 +134,9 @@ The broker sends `Authorization: Bearer <token field>`. The agent cannot set a h
 - For `token_expired`, the text also tells the user the next step: rotate the token in the Apassy app, put the new token in `APASSY_AGENT_TOKEN`, and restart the MCP server.
 - For `review_required`, the text tells the user to confirm the agent settings of the restored item in the app.
 - `apassy_list_access` shows `owner_review_needed` for each item.
+- If `CLAUDE_CODE_SESSION_ID` is set, the adapter sends it as `host_session` with each request (goal item B6).
+
+The hook program `apassy-hook` takes no arguments. It reads the host hook JSON on stdin and sends `submit_user_request` with the token in `APASSY_AGENT_TOKEN`. It waits a maximum of 2 seconds, never writes to stdout, and always exits with code 0.
 
 ## 9. Vault schema versions 2 and 3
 

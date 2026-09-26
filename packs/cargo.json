@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "cargo",
+  "description": "Rust cargo: build and test commands, and publishing.",
+  "programs": ["cargo"],
+  "roles": {
+    "usage": ["cargo"]
+  },
+  "rules": [
+    {
+      "id": "publish",
+      "flag": "production",
+      "dry_run": "skip",
+      "when": { "subcommand": ["publish", "unpublish", "deprecate", "dist-tag", "upload"] }
+    }
+  ],
+  "safe": [
+    {
+      "id": "build-and-test",
+      "when": {
+        "subcommand": [
+          "test", "build", "check", "clippy", "fmt", "doc", "run", "bench", "tree", "metadata"
+        ]
+      }
+    }
+  ]
+}

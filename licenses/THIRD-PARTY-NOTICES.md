@@ -97,7 +97,7 @@ These crates are linked on macOS (`cargo tree --target aarch64-apple-darwin`). `
 
 | Component | Version | License used | Text |
 | --- | --- | --- | --- |
-| rustls | 0.23.44 | MIT (choice from Apache-2.0 OR ISC OR MIT) | `rustls/LICENSE-MIT` |
+| rustls | 0.23.45 | MIT (choice from Apache-2.0 OR ISC OR MIT) | `rustls/LICENSE-MIT` |
 | ring | 0.17.14 | Apache-2.0 AND ISC | `ring/LICENSE`, `ring/LICENSE-other-bits` (ISC), `ring/LICENSE-BoringSSL` (Apache-2.0 and other BoringSSL notices), `ring/LICENSE-once_cell-MIT` |
 | rustls-webpki | 0.103.15 | ISC | `rustls-webpki/LICENSE` |
 | rustls-platform-verifier | 0.7.0 | MIT (choice from MIT OR Apache-2.0) | `rustls-platform-verifier/LICENSE-MIT` |

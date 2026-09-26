@@ -365,6 +365,8 @@ fn waiting_run(agent: &str) -> PendingRun {
         purpose: "Run the tests.".to_owned(),
         risk: String::new(),
         user_request: "Run the tests.".to_owned(),
+        request_source: String::new(),
+        agent_request: String::new(),
     }
 }
 

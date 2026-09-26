@@ -22,6 +22,16 @@ jobs:
       - name: Fetch Cargo dependencies
         run: cargo fetch --locked
 
+      - name: Install cargo-audit 0.22.2
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      # RustSec has no recent advisories for the bundled C code (OpenSSL in
+      # openssl-src, SQLCipher and SQLite in libsqlite3-sys). A clean result does
+      # not cover it. The update policy in docs/reviews/storage-dependencies.md §8
+      # adds the upstream advisory sources for that code.
+      - name: Check RustSec advisories
+        run: cargo audit
+
       - name: Check Rust format
         run: cargo fmt --all -- --check
 

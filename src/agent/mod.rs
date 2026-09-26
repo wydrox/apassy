@@ -4,5 +4,6 @@
 //! vault. The MCP adapter and tests use it to talk to the local broker.
 
 pub mod client;
+pub mod hook;
 pub mod mcp;
 pub mod wire;

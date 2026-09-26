@@ -1,7 +1,7 @@
 # Review: native storage dependencies (V1)
 
 Date: 2026-09-26.
-Status: review complete for goal item V1. No license blocks distribution. No known advisory is reachable in the storage path. One RustSec advisory applies to the TLS stack (rustls). The fix is a version bump.
+Status: review complete for goal item V1. No license blocks distribution. No known advisory is reachable in the storage path. One RustSec advisory applied to the TLS stack (rustls). The version bump in commit `bfb638a` fixes it. §7 records the status of each hardening item.
 Scope: SQLCipher, SQLite, OpenSSL, rusqlite, and libsqlite3-sys, at the versions in `Cargo.lock` at commit `768bbf3`. Notices: [licenses/THIRD-PARTY-NOTICES.md](../../licenses/THIRD-PARTY-NOTICES.md).
 Related: [ADR 0002](../adr/0002-encrypted-state-probe.md) §4 to §7, [ADR 0003](../adr/0003-passphrase-vault.md), [ADR 0010](../adr/0010-closing-open-decisions.md), [key-memory review](key-memory.md).
 
@@ -26,7 +26,7 @@ Host: macOS 27.0 (build 26A428), arm64, Rust 1.97.0. SIP is on.
 | openssl-sys | 0.9.117 | `b47e7e6bb2c38cd930d25a23b40fa52e068c10e85f3e03a7f5ba5aaca5713695` | MIT |
 | openssl-src | 300.6.1+3.6.3 | `46eb8fb9fb3b61ce1c0f8a026c4c1a0714d3a9e138e7fbde78753ce2babc3846` | MIT/Apache-2.0 |
 | cc (build) | 1.4.6 | `a3eb0f42d6c360dc3f8a821f6bf2fdea7f72bfd36b3076eb0e6d1e9e0752fff4` | MIT OR Apache-2.0 |
-| rustls | 0.23.44 | `6725596c3f2c3a0aef021139e145d4eafe314a6623e4680ca83852b2c67ab2ba` | Apache-2.0 OR ISC OR MIT |
+| rustls | 0.23.44 (0.23.45 since commit `bfb638a`, checksum `0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634`) | `6725596c3f2c3a0aef021139e145d4eafe314a6623e4680ca83852b2c67ab2ba` | Apache-2.0 OR ISC OR MIT |
 | ring | 0.17.14 | `a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7` | Apache-2.0 AND ISC |
 | rustls-webpki | 0.103.15 | `f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2` | ISC |
 | rustls-platform-verifier | 0.7.0 | `26d1e2536ce4f35f4846aa13bff16bd0ff40157cdb14cc056c7b14ba41233ba0` | MIT OR Apache-2.0 |
@@ -147,7 +147,7 @@ Build note: on this host, `clang` with the default Command Line Tools SDK (`MacO
 
 | Advisory | Crate | Title | Fix | Assessment |
 | --- | --- | --- | --- | --- |
-| RUSTSEC-2026-0285 (GHSA-2mjx-qc3c-rqvc), 2026-09-14 | rustls 0.23.44 | TLS 1.3 handshake messages incorrectly accepted across encryption level boundaries | rustls `>= 0.23.45` (published 2026-09-14) | Low (CVSS C:L). The handshake transcript stays authenticated. Apassy uses rustls only for connector HTTPS, and there are no real connectors in this goal. Bump the pin to `=0.23.45`. |
+| RUSTSEC-2026-0285 (GHSA-2mjx-qc3c-rqvc), 2026-09-14 | rustls 0.23.44 | TLS 1.3 handshake messages incorrectly accepted across encryption level boundaries | rustls `>= 0.23.45` (published 2026-09-14) | Low (CVSS C:L). The handshake transcript stays authenticated. Apassy uses rustls only for connector HTTPS, and there are no real connectors in this goal. Bump the pin to `=0.23.45`. Fixed in commit `bfb638a` (§7 item 1). |
 
 No advisory applies to rusqlite, libsqlite3-sys, openssl-sys, openssl-src, ring, rustls-webpki, zeroize, or eframe/egui at these versions.
 
@@ -197,6 +197,16 @@ Each item is a small change. Other workers own the files.
 4. Sign the release app with hardened runtime and library validation, without `com.apple.security.get-task-allow` and without `com.apple.security.cs.disable-library-validation` (goal item A1). This blocks injected dylibs and OpenSSL provider modules that are not signed by Apple or the same team.
 5. Consider `no-dso` for OpenSSL. A direct dependency `openssl-src = { version = "=300.6.1", features = ["no-dso"] }` under the `vault` feature enables it through Cargo feature unification. No new package is added. I did not test this. Test: `nm libcrypto.a` has no `DSO_load`, and the probe and vault tests pass.
 
+Status on 2026-09-26 (see also the [key-memory review](key-memory.md) §8):
+
+| Item | Status | Commit | Evidence |
+| --- | --- | --- | --- |
+| 1 | Done | `bfb638a` | `cargo update -p rustls --precise 0.23.45` changes only the rustls version and checksum in `Cargo.lock`. The rustls dependency list does not change. `rustls-platform-verifier =0.7.0` still resolves. The SHA-256 of the downloaded `.crate` is equal to the `Cargo.lock` checksum. The MIT license text is unchanged. `cargo audit` (0.22.2, 1271 advisories): exit 0. The `Cargo.lock` of `c8a75aa`: exit 1, RUSTSEC-2026-0285. |
+| 2 | Done | `6c7db7a` | `.cargo/config.toml` sets the four flags with `force = true`, so an environment value cannot replace them. The vault checks `PRAGMA compile_options` at each open and fails closed without them. The unit test `build_uses_the_checked_in_sqlite_flags` checks the options and that `load_extension()` is `no such function`. The check is in the vault tests, not in `tests/sqlcipher_probe.rs`. The probe passes (12 tests). The comment in `src/vault/mod.rs` is corrected. |
+| 3 | Done | `6c7db7a` | Defensive mode is set before the key on each vault connection, also the read-only restore check. The unit test checks `db_config(SQLITE_DBCONFIG_DEFENSIVE)` and that `PRAGMA writable_schema = ON` has no effect. |
+| 4 | Done | `bccd422` | `scripts/build-app.sh` fails when a program has no hardened runtime or has `get-task-allow`, `disable-library-validation`, or `allow-dyld-environment-variables`. |
+| 5 | Not done | — | Not tested. |
+
 ## 8. Update policy
 
 Owner: the Apassy owner. The owner can give the task to a worker, but the owner accepts each update.
@@ -211,7 +221,7 @@ Owner: the Apassy owner. The owner can give the task to a worker, but the owner 
 | SQLite CVEs | Each month | <https://www.sqlite.org/cves.html> |
 | New crate versions of rusqlite, libsqlite3-sys, openssl-sys, openssl-src, rustls, ring | Each month | crates.io |
 
-The CI workflow does not run `cargo audit` now. Add a step with a pinned `cargo-audit` version (a change to `.github/workflows/ci.yml`).
+The CI workflow runs `cargo audit` with `cargo-audit` 0.22.2 (commit `50b31a2`). A clean result does not cover the bundled C code (§6.1). The other rows of this table cover it.
 
 ### 8.2 Triggers and time limits
 

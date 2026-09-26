@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "js-tools",
+  "description": "JavaScript build, lint, and test tools: tsc, eslint, test runners, Next.js, Vite, Astro, Playwright, Cypress, and Turborepo.",
+  "programs": [
+    "tsc", "eslint", "prettier", "vitest", "jest", "mocha", "ava", "biome", "stylelint",
+    "svelte-check", "next", "vite", "astro", "playwright", "cypress", "turbo"
+  ],
+  "roles": {
+    "usage": ["tsc", "eslint", "vitest", "jest", "playwright", "next", "vite", "turbo"]
+  },
+  "safe": [
+    {
+      "id": "check-and-test-tools",
+      "when": {
+        "program": [
+          "tsc", "eslint", "prettier", "vitest", "jest", "mocha", "ava", "biome", "stylelint",
+          "svelte-check"
+        ]
+      }
+    },
+    {
+      "id": "framework-development",
+      "when": {
+        "program": ["next", "vite", "astro"],
+        "subcommand": ["build", "dev", "lint", "check", "start", "preview"]
+      }
+    },
+    {
+      "id": "browser-tests",
+      "when": { "program": ["playwright", "cypress"], "subcommand": ["test", "run", "open"] }
+    }
+  ]
+}

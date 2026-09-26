@@ -1,0 +1,167 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "git",
+  "description": "Git: history changes, pushes to protected branches, and read commands.",
+  "programs": ["git"],
+  "roles": {
+    "usage": ["git"],
+    "no_dry_run": ["git"]
+  },
+  "rules": [
+    {
+      "id": "secret-argument",
+      "flag": "secret_output",
+      "note": "A secret in a commit message, a config value, or a remote URL is stored or sent.",
+      "when": { "refs_secret": true }
+    },
+    {
+      "id": "add-force",
+      "flag": "secret_output",
+      "note": "`git add -f` adds ignored files, for example `.env`.",
+      "when": { "subcommand": ["add"], "any_arg": ["-f", "--force"] }
+    },
+    {
+      "id": "remote-change",
+      "flag": "system_change",
+      "when": { "subcommand": ["remote"], "any_arg": ["set-url", "add"] }
+    },
+    {
+      "id": "global-config",
+      "flag": "system_change",
+      "when": { "subcommand": ["config"], "any_arg": ["--global", "--system"] }
+    },
+    {
+      "id": "reset-hard",
+      "flag": "data_loss",
+      "dry_run": "skip_with_n",
+      "when": { "subcommand": ["reset"], "any_arg": ["--hard", "--merge", "--keep"] }
+    },
+    {
+      "id": "push-force-or-delete",
+      "flag": "data_loss",
+      "dry_run": "skip_with_n",
+      "when": {
+        "subcommand": ["push"],
+        "any_of": [
+          { "any_arg": ["-f", "--delete", "-d", "--mirror"] },
+          { "any_arg_starts": ["--force", "+"] }
+        ]
+      }
+    },
+    {
+      "id": "clean-force",
+      "flag": "data_loss",
+      "dry_run": "skip_with_n",
+      "when": { "subcommand": ["clean"], "option_letter": "f" }
+    },
+    {
+      "id": "branch-delete",
+      "flag": "data_loss",
+      "dry_run": "skip_with_n",
+      "when": { "subcommand": ["branch"], "any_arg": ["-d", "--delete"] }
+    },
+    {
+      "id": "discard-changes",
+      "flag": "data_loss",
+      "dry_run": "skip_with_n",
+      "when": { "subcommand": ["checkout", "restore"], "any_arg": [".", "--force", "-f"] }
+    },
+    {
+      "id": "stash-drop",
+      "flag": "data_loss",
+      "dry_run": "skip_with_n",
+      "when": { "subcommand": ["stash"], "any_arg": ["drop", "clear"] }
+    },
+    {
+      "id": "history-rewrite",
+      "flag": "data_loss",
+      "dry_run": "skip_with_n",
+      "when": { "subcommand": ["filter-branch", "filter-repo"] }
+    },
+    {
+      "id": "push-protected-branch",
+      "flag": "production",
+      "dry_run": "skip",
+      "note": "A push to a release branch or of tags can start a deployment.",
+      "when": {
+        "subcommand": ["push"],
+        "any_of": [
+          { "push_target": ["main", "master", "production", "prod", "release"] },
+          { "any_arg": ["--tags"] }
+        ]
+      }
+    }
+  ],
+  "exemptions": [
+    {
+      "id": "production-word",
+      "check": "production_word",
+      "note": "A production word in a commit message or a log search is not a target. The push rule above checks the branch.",
+      "when": {}
+    }
+  ],
+  "safe": [
+    {
+      "id": "read-and-local-commands",
+      "when": {
+        "subcommand": [
+          "status", "diff", "log", "show", "fetch", "blame", "shortlog", "describe",
+          "rev-parse", "ls-files", "grep", "add", "commit", "switch", "pull", "rev-list",
+          "ls-remote", "show-ref", "for-each-ref", "cat-file", "merge-base", "name-rev",
+          "reflog", "count-objects", "check-ignore", "var"
+        ]
+      }
+    },
+    { "id": "worktree-list", "when": { "subcommand": ["worktree"], "action": ["list"] } },
+    {
+      "id": "remote-read",
+      "when": {
+        "subcommand": ["remote"],
+        "any_of": [{ "arg_count": 1 }, { "action": ["-v", "show", "get-url"] }]
+      }
+    },
+    {
+      "id": "config-read",
+      "when": { "subcommand": ["config"], "any_arg": ["--get", "--list", "-l", "--get-all"] }
+    },
+    { "id": "stash", "when": { "subcommand": ["stash"], "not": { "any_arg": ["drop", "clear"] } } },
+    {
+      "id": "rebase",
+      "when": {
+        "subcommand": ["rebase"],
+        "not": { "any_arg": ["-i", "--interactive", "--exec", "-x", "--root"] }
+      }
+    },
+    { "id": "tag-list", "when": { "subcommand": ["tag"], "arg_count": 1 } },
+    {
+      "id": "branch",
+      "when": {
+        "subcommand": ["branch"],
+        "not": { "any_arg": ["-d", "--delete", "-m", "--force", "-f"] }
+      }
+    },
+    {
+      "id": "checkout-branch",
+      "when": {
+        "subcommand": ["checkout"],
+        "any_of": [
+          { "action": ["-b"] },
+          { "arg_count": 2, "operands": { "count": 2 }, "not": { "action": ["."] } }
+        ]
+      }
+    },
+    {
+      "id": "push-feature-branch",
+      "note": "Exactly a remote and a branch, no options, and not a release branch.",
+      "when": {
+        "subcommand": ["push"],
+        "not": { "any_arg_starts": ["-"] },
+        "operands": {
+          "count": 3,
+          "at": { "index": 2, "not_in": ["main", "master", "production", "prod", "release"] }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "pack_version": 1,
+  "tool": "npm",
+  "description": "Node package managers and package runners (npm, pnpm, yarn, bun, npx, bunx): scripts, new dependencies, registry settings, and publishing.",
+  "programs": ["npm", "pnpm", "yarn", "bun", "npx", "bunx"],
+  "roles": {
+    "usage": ["npm", "pnpm", "yarn", "bun", "npx"]
+  },
+  "rules": [
+    {
+      "id": "secret-argument",
+      "flag": "secret_output",
+      "when": { "program": ["npm"], "refs_secret": true }
+    },
+    {
+      "id": "unknown-package",
+      "flag": "new_dependency",
+      "note": "A package runner downloads and runs a package that is not a common project tool.",
+      "when": {
+        "raw_program": ["npx", "bunx", "pnpm", "yarn"],
+        "package_runner": true,
+        "not": {
+          "package": [
+            "tsc", "eslint", "prettier", "vitest", "jest", "playwright", "prisma", "supabase",
+            "tsx", "ts-node", "next", "vite", "vercel", "wrangler", "turbo", "nx", "cypress",
+            "storybook", "drizzle-kit", "knex", "biome", "stylelint", "svelte-check", "astro",
+            "remix", "expo", "mocha", "nodemon", "concurrently", "rimraf", "husky",
+            "lint-staged", "tailwindcss", "postcss", "webpack", "rollup", "esbuild", "tsup",
+            "changeset", "only-allow", "firebase", "netlify", "twilio", "resend", "sequelize",
+            "typeorm", "graphql-codegen", "openapi-typescript"
+          ]
+        }
+      }
+    },
+    {
+      "id": "latest-package",
+      "flag": "new_dependency",
+      "note": "`@latest` takes a new version from the registry.",
+      "when": {
+        "raw_program": ["npx", "bunx", "pnpm", "yarn"],
+        "package_runner": true,
+        "program_word_contains": ["@latest"]
+      }
+    },
+    {
+      "id": "registry-config-change",
+      "flag": "system_change",
+      "when": {
+        "program": ["npm", "pnpm", "yarn", "bun"],
+        "subcommand": ["config"],
+        "any_arg": ["set", "delete", "edit"]
+      }
+    },
+    {
+      "id": "new-dependency",
+      "flag": "new_dependency",
+      "note": "An install with a package name adds a dependency. An install without a name uses the lockfile.",
+      "when": {
+        "program": ["npm", "pnpm", "yarn", "bun"],
+        "subcommand": ["install", "i", "add"],
+        "operands": { "min": 2 }
+      }
+    },
+    {
+      "id": "publish",
+      "flag": "production",
+      "dry_run": "skip",
+      "when": {
+        "program": ["npm", "pnpm", "yarn", "bun"],
+        "subcommand": ["publish", "unpublish", "deprecate", "dist-tag", "upload"]
+      }
+    }
+  ],
+  "safe": [
+    {
+      "id": "test-and-read-commands",
+      "when": {
+        "program": ["npm", "pnpm", "yarn", "bun"],
+        "subcommand": [
+          "test", "t", "ci", "ls", "outdated", "audit", "why", "version", "-v", "--version"
+        ]
+      }
+    },
+    {
+      "id": "install-from-lockfile",
+      "when": {
+        "program": ["npm", "pnpm", "yarn", "bun"],
+        "subcommand": ["install", "i"],
+        "not": { "operands": { "min": 2 } }
+      }
+    },
+    { "id": "yarn-install", "when": { "program": ["yarn"], "subcommand": [""] } },
+    {
+      "id": "development-script",
+      "note": "A script for tests, lint, types, format, or a local server. A name with prod, deploy, release, or publish is not safe.",
+      "when": {
+        "program": ["npm", "pnpm", "yarn", "bun"],
+        "script": {
+          "base": [
+            "test", "tests", "lint", "typecheck", "type-check", "check", "format", "fmt",
+            "dev", "start", "preview", "storybook", "e2e", "coverage", "prettier", "tsc"
+          ],
+          "not_contains": ["prod", "deploy", "release", "publish"]
+        }
+      }
+    },
+    {
+      "id": "build-script",
+      "note": "A build for production is a build, not a deployment.",
+      "when": {
+        "program": ["npm", "pnpm", "yarn", "bun"],
+        "script": { "base": ["build"], "not_contains": ["deploy", "release", "publish"] }
+      }
+    }
+  ]
+}

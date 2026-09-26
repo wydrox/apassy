@@ -37,6 +37,7 @@ The owner selected option 1.
 - The process can read, print in encoded form, write to a file, or send the secret to a network host. Masking finds only the exact value.
 - A command in "allow" mode runs without a human check. Use "allow" only for commands that you trust.
 - The owner approval is the main control until the risk evaluator (P5) exists.
+- A process of the same user can read the environment of a running broker child through the kernel (`KERN_PROCARGS2`, as `ps -E` does). No tested Seatbelt rule blocks this and keeps tools working ([isolation](../operations/isolation.md), "Process information (F11)"). The broker limits the exposure: the environment has only the base variables, `PATH`, and the bound secrets, and the broker stops the process group when the main process ends or after 300 seconds. A descendant that starts its own process group keeps running.
 - The real-secret gate stays BLOCKED until the owner accepts these risks in a separate decision.
 
 ## Relation to other records
