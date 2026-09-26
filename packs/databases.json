@@ -1,14 +1,15 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "databases",
-  "description": "Database clients (psql, mysql, sqlite3, MongoDB, ClickHouse, CockroachDB, Redis): writes, drops, and credential columns.",
+  "description": "Database clients and tools (psql, mysql, sqlite3, MongoDB, ClickHouse, CockroachDB, Redis, restore tools): writes, drops, and credential columns.",
   "programs": [
-    "psql", "pg_dump", "dropdb", "dropuser", "mysql", "sqlite3", "mongo", "mongosh",
-    "clickhouse-client", "cockroach", "redis-cli"
+    "psql", "pg_dump", "pg_restore", "dropdb", "dropuser", "mysql", "mysqladmin", "sqlite3",
+    "duckdb", "mongo", "mongosh", "mongorestore", "clickhouse-client", "cockroach", "cqlsh",
+    "redis-cli"
   ],
   "roles": {
-    "usage": ["psql", "pg_dump", "redis-cli"],
+    "usage": ["psql", "pg_dump", "pg_restore", "redis-cli"],
     "heredoc_sql": ["psql", "mysql", "sqlite3"]
   },
   "rules": [
@@ -27,25 +28,86 @@
     {
       "id": "drop-database-or-user",
       "flag": "data_loss",
-      "dry_run": "skip_with_n",
+      "dry_run": "skip",
+      "note": "`dropdb` and `dropuser` remove a database or a role.",
       "when": { "program": ["dropdb", "dropuser"] }
     },
     {
       "id": "sql-write",
       "flag": "data_loss",
-      "dry_run": "skip_with_n",
+      "dry_run": "skip",
+      "note": "SQL that changes data, schema, or access. `-n` is an option of the client, not a dry run.",
       "when": {
         "program": [
-          "psql", "mysql", "sqlite3", "mongo", "mongosh", "clickhouse-client", "cockroach"
+          "psql", "mysql", "sqlite3", "mongo", "mongosh", "clickhouse-client", "cockroach",
+          "cqlsh"
         ],
         "sql": "writes"
       }
     },
     {
+      "id": "plain-sql-write",
+      "flag": "data_loss",
+      "note": "SQLite, DuckDB, and ClickHouse take SQL as a plain argument or after `--query`. SQL that changes data, schema, or access.",
+      "when": { "program": ["sqlite3", "duckdb", "clickhouse-client"], "sql": "any_arg_writes" }
+    },
+    {
       "id": "redis-delete",
       "flag": "data_loss",
-      "dry_run": "skip_with_n",
-      "when": { "program": ["redis-cli"], "any_arg": ["flushall", "flushdb", "del", "unlink"] }
+      "dry_run": "skip",
+      "note": "Key and database deletion. `-n` selects the database number, it is not a dry run.",
+      "when": {
+        "program": ["redis-cli"],
+        "any_arg": ["flushall", "flushdb", "del", "unlink", "getdel", "swapdb", "flush"]
+      }
+    },
+    {
+      "id": "redis-server-change",
+      "flag": "system_change",
+      "note": "Server settings, replication, and shutdown change the Redis server for every client.",
+      "when": {
+        "program": ["redis-cli"],
+        "any_of": [
+          { "any_arg": ["config"], "not": { "any_arg": ["get"] } },
+          { "any_arg": ["shutdown", "replicaof", "slaveof", "failover", "debug"] }
+        ]
+      }
+    },
+    {
+      "id": "mongo-write",
+      "flag": "data_loss",
+      "note": "MongoDB shell code that deletes, drops, renames, or updates many documents.",
+      "when": {
+        "program": ["mongo", "mongosh"],
+        "any_arg_contains": [
+          ".remove(", ".deletemany(", ".deleteone(", ".drop(", "dropdatabase", ".updatemany(",
+          ".replaceone(", "findoneanddelete", ".dropindex", "dropuser(", "dropallusers",
+          "renamecollection", ".bulkwrite("
+        ]
+      }
+    },
+    {
+      "id": "restore-replaces-data",
+      "flag": "data_loss",
+      "note": "`pg_restore --clean` and `mongorestore --drop` drop the objects before they restore them.",
+      "when": {
+        "any_of": [
+          { "program": ["pg_restore"], "any_arg": ["--clean", "-c"] },
+          { "program": ["mongorestore"], "any_arg": ["--drop"] }
+        ]
+      }
+    },
+    {
+      "id": "mysqladmin-drop",
+      "flag": "data_loss",
+      "note": "`mysqladmin drop` removes a database.",
+      "when": { "program": ["mysqladmin"], "any_arg": ["drop"] }
+    },
+    {
+      "id": "mysqladmin-server-change",
+      "flag": "system_change",
+      "note": "Shutdown and password changes affect the server and every client.",
+      "when": { "program": ["mysqladmin"], "any_arg": ["shutdown", "password", "kill"] }
     }
   ]
 }

@@ -117,6 +117,10 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("../../packs/ruby-tools.json"),
     ),
     ("scripting.json", include_str!("../../packs/scripting.json")),
+    (
+        "secret-managers.json",
+        include_str!("../../packs/secret-managers.json"),
+    ),
     ("shell.json", include_str!("../../packs/shell.json")),
     ("stripe.json", include_str!("../../packs/stripe.json")),
     ("supabase.json", include_str!("../../packs/supabase.json")),

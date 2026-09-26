@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "macos",
   "description": "macOS tools: Keychain, preferences, clipboard, launch agents, disks, and Homebrew.",
   "programs": ["security", "defaults", "pbcopy", "launchctl", "diskutil", "brew"],
@@ -15,14 +15,31 @@
       "when": { "program": ["security", "defaults", "pbcopy"], "refs_secret": true }
     },
     {
+      "id": "keychain-read",
+      "flag": "secret_output",
+      "note": "`find-generic-password -w` and `-g` print the password. `dump-keychain` and `export` print or write Keychain items and keys.",
+      "when": {
+        "program": ["security"],
+        "any_of": [
+          {
+            "subcommand": ["find-generic-password", "find-internet-password"],
+            "any_arg": ["-w", "-g"]
+          },
+          { "subcommand": ["dump-keychain", "export"] }
+        ]
+      }
+    },
+    {
       "id": "system-change",
       "flag": "system_change",
+      "note": "Launch agents and preferences change the system or other apps.",
       "when": { "program": ["launchctl", "defaults"] }
     },
     {
       "id": "disk-change",
       "flag": "data_loss",
       "dry_run": "skip_with_n",
+      "note": "`diskutil` erases, partitions, and unmounts disks.",
       "when": { "program": ["diskutil"] }
     }
   ]

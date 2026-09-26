@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 1,
+  "pack_version": 2,
   "tool": "file-tools",
   "description": "File and text tools (ls, cat, grep, sed, awk, find, cp, rm, and others): file removal, secret files, system files, and read commands.",
   "programs": [
@@ -34,7 +34,8 @@
     {
       "id": "secure-delete",
       "flag": "data_loss",
-      "dry_run": "skip_with_n",
+      "dry_run": "skip",
+      "note": "`shred` and `srm` overwrite and remove files. `shred -n N` sets the number of passes, it is not a dry run.",
       "when": { "program": ["shred", "srm"] }
     },
     {

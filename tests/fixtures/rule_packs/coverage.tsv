@@ -1774,3 +1774,148 @@ twilio phone-numbers:list
 ansible all -m ping
 ansible web -m shell -a "rm -rf /var/www"
 ansible web -a uptime
+# ---- Databases (databases pack) ----
+psql -n "$DATABASE_URL" -c "DROP TABLE users"
+mysql -n -e "drop database app"
+redis-cli -n 2 FLUSHALL
+redis-cli -n 2 get key
+redis-cli config set maxmemory 1gb
+redis-cli config get maxmemory
+redis-cli shutdown nosave
+redis-cli script flush
+mongosh "$MONGO_URL" --eval "db.users.remove({})"
+mongosh "$MONGO_URL" --eval "db.users.updateMany({}, {\$set: {role: 'x'}})"
+mongosh "$MONGO_URL" --eval "db.users.find().limit(5)"
+mongosh --eval "db.dropDatabase()"
+pg_restore --clean -d app dump.pgdump
+pg_restore -d app dump.pgdump
+mongorestore --drop dump/
+mongorestore dump/
+mysqladmin drop app
+mysqladmin shutdown
+mysqladmin status
+shred -n 3 -u secret.txt
+# ---- Docker (docker pack) ----
+docker run --rm -v $HOME:/host alpine ls /host
+docker run --rm -v "$PWD":/app node:20 npm test
+docker run --privileged alpine sh
+docker run -v /var/run/docker.sock:/var/run/docker.sock alpine
+docker run -v ~/.aws:/root/.aws amazon/aws-cli s3 ls
+docker run --mount type=bind,source=$HOME,target=/h alpine
+docker run -v /:/host alpine
+docker image ls
+docker volume ls
+docker compose images
+docker compose down
+docker compose down -v
+docker compose down --rmi all
+docker-compose down
+# ---- Kubernetes and Helm (kubernetes pack) ----
+kubectl delete deploy api -n staging
+kubectl delete pvc --all -n staging
+helm uninstall api -n staging
+kubectl rollout status deploy/api -n staging
+kubectl rollout history deploy/api
+kubectl rollout undo deploy/api
+kubectl rollout restart deploy/api
+helm rollback api 3 -n staging
+kubectl label node x role=db
+kubectl edit deploy api
+kubectl run tmp --image=alpine
+kubectl cp staging/api-0:/app/config.yaml ./config.yaml
+kubectl get secret db -o yaml
+kubectl get secrets/db -o jsonpath='{.data.password}'
+kubectl get secrets -n staging
+kubectl describe secret db
+kubectl config view --raw
+kubectl config view
+kubectl create token deployer
+kubectl auth can-i list pods
+kubectl config get-contexts
+helm get values api -n staging
+helm list -n staging
+helm template ./charts/api
+helm lint ./charts/api
+kubectl --kubeconfig ~/.kube/config get pods
+helm --kubeconfig=/Users/me/.kube/config list
+# ---- Terraform, OpenTofu, and Pulumi (terraform pack) ----
+terraform apply -destroy -auto-approve
+terraform plan -destroy
+terraform state list
+terraform state show aws_s3_bucket.b
+terraform state rm aws_db_instance.main
+terraform state mv a b
+terraform state pull
+terraform output
+terraform output -json
+terraform output vpc_id
+terraform show -json
+terraform show
+terraform workspace list
+terraform workspace delete old
+terraform refresh
+terraform taint aws_instance.x
+terraform init -upgrade
+terraform init -backend=false
+terraform fmt -check -recursive
+tofu plan
+tofu destroy
+pulumi preview
+pulumi stack ls
+pulumi stack output
+pulumi stack rm dev
+pulumi refresh
+pulumi up --help
+# ---- SQL as a plain argument (databases pack) ----
+sqlite3 app.db "DELETE FROM users"
+sqlite3 update.db "select 1"
+sqlite3 app.db ".tables"
+duckdb data.duckdb "DROP TABLE t"
+clickhouse-client --query "ALTER TABLE t DELETE WHERE 1"
+clickhouse-client --query "SELECT 1"
+cqlsh -e "DROP KEYSPACE app"
+# ---- macOS Keychain (macos pack) ----
+security find-generic-password -s x -w
+security find-internet-password -s x -g
+security find-generic-password -s x
+security dump-keychain
+# ---- Secret managers (secret-managers pack) ----
+vault kv get secret/app
+vault read database/creds/app
+vault kv list secret/
+vault kv put secret/app key=1
+vault kv destroy -versions=1 secret/app
+vault kv metadata delete secret/app
+vault token create
+vault status
+op read op://vault/item/password
+op item get db --fields password
+op item list
+op inject -i config.tpl -o config.yml
+op run -- npm test
+doppler secrets
+doppler secrets get API_KEY --plain
+doppler secrets set API_KEY=x
+doppler run -- npm test
+infisical secrets
+infisical export --format=dotenv
+sops -d secrets.enc.yaml
+sops --decrypt secrets.enc.yaml
+sops -e secrets.yaml
+chamber read app db
+chamber list app
+chamber list -e app
+chamber write app key value
+bw get password github
+bw list items
+pass show email/work
+pass email/work
+pass ls
+pass insert email/new
+gopass show app/db
+aws-vault exec prod -- aws s3 ls
+aws-vault export prod
+age -d -i key.txt secrets.age
+gpg --decrypt secrets.gpg
+gpg --verify release.sig
+gpg --export-secret-keys me@example.com
