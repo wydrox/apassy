@@ -11,7 +11,7 @@ use serde_json::{Map, Value, json};
 
 use super::http::{self, DestinationUrl, parse_destination};
 use super::shell_risk::Analysis;
-use crate::vault::{CALIBRATION_FLOOR, Declaration, PATTERN_APPROVALS_NEEDED};
+use crate::vault::{CALIBRATION_FLOOR, Declaration, PATTERN_APPROVALS_NEEDED, valid_model_version};
 
 /// Version of the question set and the decision policy. Change it when either changes.
 /// Version 3 adds the production rule (ADR 0010). Version 4 adds remembered patterns and
@@ -88,18 +88,11 @@ pub enum BouncerVerdict {
     Unavailable(String),
 }
 
-/// Longest model version that the activity log records.
-const MODEL_VERSION_MAX: usize = 64;
-
-/// A model version is short and has only letters, digits, and `.`, `_`, `+`, `-`.
+/// A model version is short (`vault::MAX_MODEL_VERSION`) and has only letters, digits,
+/// and `.`, `_`, `+`, `-`.
 fn model_version(value: &Value) -> Option<String> {
     let text = value.get("model")?.as_str()?;
-    let valid = !text.is_empty()
-        && text.len() <= MODEL_VERSION_MAX
-        && text
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'));
-    valid.then(|| text.to_owned())
+    valid_model_version(text).then(|| text.to_owned())
 }
 
 impl BouncerVerdict {
@@ -146,6 +139,9 @@ pub struct BouncerClient {
     url: String,
     api_key: Option<String>,
     timeout: Duration,
+    /// The model version that the answers must name (goal item B9). A promoted model is
+    /// pinned, so another model at the same address cannot change the policy silently.
+    expected_model: Option<String>,
 }
 
 impl BouncerClient {
@@ -160,7 +156,29 @@ impl BouncerClient {
             url: url.trim().trim_end_matches('/').to_owned(),
             api_key: None,
             timeout: TIMEOUT,
+            expected_model: None,
         })
+    }
+
+    /// A client for another loopback address, with the same key and time limit. It does
+    /// not pin a model version.
+    pub fn at_url(&self, url: &str) -> Result<Self, &'static str> {
+        let mut client = Self::new(url)?;
+        client.api_key.clone_from(&self.api_key);
+        client.timeout = self.timeout;
+        Ok(client)
+    }
+
+    /// Accept only answers that name `version` in their `model` field. Another version
+    /// or no version gives [`BouncerVerdict::Unavailable`], so the owner decides.
+    pub fn expect_model(mut self, version: &str) -> Self {
+        self.expected_model = Some(version.to_owned());
+        self
+    }
+
+    /// The pinned model version, if there is one.
+    pub fn expected_model(&self) -> Option<&str> {
+        self.expected_model.as_deref()
     }
 
     /// `APASSY_BOUNCER_URL`, or the default address.
@@ -205,8 +223,28 @@ impl BouncerClient {
         if !(200..300).contains(&response.status) {
             return BouncerVerdict::Unavailable(format!("status {}", response.status));
         }
-        parse_answers(&response.body, &facts_for(request))
+        let verdict = parse_answers(&response.body, &facts_for(request));
+        match (&self.expected_model, &verdict) {
+            (Some(expected), BouncerVerdict::Scored { model, .. })
+                if model.as_deref() != Some(expected.as_str()) =>
+            {
+                BouncerVerdict::Unavailable(format!(
+                    "the model at {} is {}, not the active version {expected}",
+                    self.url,
+                    model.as_deref().unwrap_or("unnamed")
+                ))
+            }
+            _ => verdict,
+        }
     }
+}
+
+/// Every question that the bouncer can ask, by name, in the order of the request. The
+/// owner-rule question is last. The local fine-tune uses the same texts (goal item B9).
+pub fn questions() -> Vec<(&'static str, &'static str)> {
+    let mut all = FACTS.to_vec();
+    all.push(RULE_FACT);
+    all
 }
 
 fn facts_for(request: &BouncerRequest) -> Vec<(&'static str, &'static str)> {
@@ -228,6 +266,12 @@ pub fn request_body(request: &BouncerRequest) -> Value {
             json!({ "type": "noul", "instructions": text }),
         );
     }
+    json!({ "state": state_text(request), "questions": questions })
+}
+
+/// The state text that the model reads. The local fine-tune builds its examples with
+/// this function, so a training state is the state that the broker sends.
+pub fn state_text(request: &BouncerRequest) -> String {
     let mut state = format!(
         "User request: \"{}\". Shell command: `{}`.",
         request.user_request.trim(),
@@ -242,7 +286,7 @@ pub fn request_body(request: &BouncerRequest) -> Value {
     if !request.instruction.trim().is_empty() {
         state.push_str(&format!(" Owner rule: {}", request.instruction.trim()));
     }
-    json!({ "state": state, "questions": questions })
+    state
 }
 
 /// Read `answers.<name>.noul` for every fact. A missing or bad value is unavailable.
@@ -577,7 +621,7 @@ mod tests {
         let stock = parse_answers(body("\"laya-rl-agent\"").as_bytes(), &asked);
         assert_eq!(stock.model(), Some("laya-rl-agent"));
         // A missing, long, or odd model text is not recorded. The answers still count.
-        let long = format!("\"{}\"", "a".repeat(MODEL_VERSION_MAX + 1));
+        let long = format!("\"{}\"", "a".repeat(crate::vault::MAX_MODEL_VERSION + 1));
         for odd in ["null", "7", "\"\"", "\"a b\"", "\"x\\ny\"", long.as_str()] {
             let verdict = parse_answers(body(odd).as_bytes(), &asked);
             assert_eq!(verdict.model(), None, "{odd}");
@@ -859,6 +903,69 @@ mod tests {
             ("rule_break", 0.85),
         ]);
         assert!(run(&rule, &staging, CALIBRATION_FLOOR).ask_owner);
+    }
+
+    /// A loopback server that gives `body` to each of `requests` requests.
+    fn answer_server(body: &'static str, requests: usize) -> String {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(requests).flatten() {
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let mut length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut request = vec![0u8; length];
+                let _ = reader.read_exact(&mut request);
+                let mut stream = stream;
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        url
+    }
+
+    /// Goal item B9: a promoted model is pinned to its version. An answer from another
+    /// version is not a verdict, so the owner decides.
+    #[test]
+    fn a_pinned_client_accepts_only_its_model_version() {
+        let body = r#"{"model":"apassy-local-v1+11111111","answers":{"task_match":{"noul":0.9},"writes":{"noul":0.1},"remote":{"noul":0.1},"leak":{"noul":0.1},"destroy":{"noul":0.1}}}"#;
+        let url = answer_server(body, 3);
+        let client = BouncerClient::new(&url).expect("loopback");
+        assert_eq!(client.expected_model(), None);
+        assert!(matches!(
+            client.evaluate(&request("")),
+            BouncerVerdict::Scored { .. }
+        ));
+        let pinned = client.clone().expect_model("apassy-local-v1+11111111");
+        assert_eq!(pinned.expected_model(), Some("apassy-local-v1+11111111"));
+        assert_eq!(
+            pinned.evaluate(&request("")).model(),
+            Some("apassy-local-v1+11111111")
+        );
+        let other = client.expect_model("apassy-local-v1+22222222");
+        match other.evaluate(&request("")) {
+            BouncerVerdict::Unavailable(reason) => assert!(
+                reason.contains("is apassy-local-v1+11111111, not the active version"),
+                "{reason}"
+            ),
+            verdict => panic!("a wrong version gave a verdict: {verdict:?}"),
+        }
+        // `at_url` keeps the key and the time limit, and drops the pin.
+        let moved = other.at_url("http://127.0.0.1:9").expect("loopback");
+        assert_eq!(moved.expected_model(), None);
+        assert!(other.at_url("https://example.com").is_err());
     }
 
     #[test]
