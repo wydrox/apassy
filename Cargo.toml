@@ -55,6 +55,13 @@ name = "apassy-eval"
 path = "src/bin/apassy-eval.rs"
 required-features = ["vault"]
 
+# Label export for the base-model data generator (goal B8, tools/basemodel/).
+# It runs the command analysis on generated commands. It is not shipped.
+[[example]]
+name = "basemodel_labels"
+path = "examples/basemodel_labels.rs"
+required-features = ["vault"]
+
 [[test]]
 name = "sqlcipher_probe"
 path = "tests/sqlcipher_probe.rs"
