@@ -85,6 +85,10 @@ const BUILTIN: &[(&str, &str)] = &[
     ("databases.json", include_str!("../../packs/databases.json")),
     ("dbt.json", include_str!("../../packs/dbt.json")),
     (
+        "debug-output.json",
+        include_str!("../../packs/debug-output.json"),
+    ),
+    (
         "digitalocean.json",
         include_str!("../../packs/digitalocean.json"),
     ),
@@ -475,6 +479,17 @@ struct Matcher {
     /// An option asks for names only, such as `--only-names` or `--keys-only`: the
     /// command prints the names of secrets or variables, not their values (dev round 3).
     names_only: Option<bool>,
+    /// A variable in the environment of the program: a `NAME=value` prefix of the
+    /// segment, an assignment after `env`, or an `export` anywhere in the command line
+    /// (dev round 4).
+    env: Option<EnvMatch>,
+    /// The run binds a secret to the environment of the command, or a word of the
+    /// command refers to a secret (dev round 4). A tool that reads its credential from
+    /// the environment then has a credential in play.
+    bound_secret: Option<bool>,
+    /// An option with a number of at least `min`: `-v=8`, `-v 8`, `--v=8`, or `-v8`
+    /// (dev round 4).
+    option_min: Option<OptionMin>,
     any_of: Option<Vec<Matcher>>,
     not: Option<Box<Matcher>>,
 }
@@ -495,6 +510,29 @@ struct OptionValue {
     option: Vec<String>,
     value: Option<Vec<String>>,
     not_value: Option<Vec<String>>,
+}
+
+/// A variable in the environment of the program (dev round 4).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnvMatch {
+    /// Variable names in lowercase. A name that ends with `*` matches each name that
+    /// starts with the text before it, for example `git_trace*`.
+    name: Vec<String>,
+    /// The value, or one item of a value list split at `,` or a space, is one of these
+    /// texts. An item that ends with `*` matches each text that starts with the text
+    /// before it (`http*`, and `*` alone), as `NODE_DEBUG` and `DEBUG` read it. An item
+    /// that starts with `-` turns a name off in `DEBUG`, so it does not match. Without
+    /// `value`, a value that is not empty, `0`, `false`, `no`, or `off` matches.
+    value: Option<Vec<String>>,
+}
+
+/// An option with a number (dev round 4).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OptionMin {
+    option: Vec<String>,
+    min: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -580,6 +618,10 @@ pub(crate) struct Command<'a> {
     pub(crate) secret: bool,
     pub(crate) secret_names: &'a [String],
     pub(crate) known_hosts: &'a [String],
+    /// The `NAME=value` settings in the environment of the program, in lowercase: the
+    /// prefixes of the segment, the assignments after `env`, and each `export` of the
+    /// command line (dev round 4).
+    pub(crate) environment: &'a [String],
 }
 
 impl Command<'_> {
@@ -759,6 +801,11 @@ impl Matcher {
             && holds(&self.names_only, |want| {
                 shell_risk::names_only(&cmd.args) == *want
             })
+            && holds(&self.env, |env| env.matches(cmd.environment))
+            && holds(&self.bound_secret, |want| {
+                (!cmd.secret_names.is_empty() || cmd.secret) == *want
+            })
+            && holds(&self.option_min, |option| option.matches(&cmd.args))
             && holds(&self.any_of, |list| {
                 list.iter().any(|matcher| matcher.matches(cmd))
             })
@@ -783,6 +830,62 @@ impl OptionValue {
             has(&self.option, &pair[0])
                 && holds(&self.value, |list| has(list, &pair[1]))
                 && holds(&self.not_value, |list| !has(list, &pair[1]))
+        })
+    }
+}
+
+/// Values that turn a setting off.
+const OFF_VALUES: &[&str] = &["", "0", "false", "no", "off"];
+
+/// One item of a list matches a pattern: equal text, or a prefix before a trailing `*`
+/// on either side.
+fn item_matches(item: &str, pattern: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        return item.starts_with(prefix);
+    }
+    if let Some(prefix) = item.strip_suffix('*') {
+        return pattern.starts_with(prefix);
+    }
+    item == pattern
+}
+
+impl EnvMatch {
+    fn matches(&self, environment: &[String]) -> bool {
+        environment.iter().any(|setting| {
+            let (name, value) = setting.split_once('=').unwrap_or((setting, ""));
+            let value = value.trim();
+            self.name.iter().any(|pattern| item_matches(name, pattern))
+                && match &self.value {
+                    None => !OFF_VALUES.contains(&value),
+                    Some(list) => std::iter::once(value)
+                        .chain(value.split([',', ' ']))
+                        .map(str::trim)
+                        .filter(|item| !item.is_empty() && !item.starts_with('-'))
+                        .any(|item| list.iter().any(|pattern| item_matches(item, pattern))),
+                }
+        })
+    }
+}
+
+impl OptionMin {
+    /// The value of an option in `option`: `-v=8`, `-v 8`, or, for a short option,
+    /// `-v8`.
+    fn matches(&self, args: &[String]) -> bool {
+        let at_least = |text: &str| text.parse::<u64>().is_ok_and(|n| n >= self.min);
+        args.iter().enumerate().any(|(index, arg)| {
+            self.option.iter().any(|option| {
+                if arg == option {
+                    return args.get(index + 1).is_some_and(|next| at_least(next));
+                }
+                let Some(rest) = arg.strip_prefix(option.as_str()) else {
+                    return false;
+                };
+                match rest.strip_prefix('=') {
+                    Some(value) => at_least(value),
+                    // `-v8`: a short option with its value attached.
+                    None => option.len() == 2 && !option.starts_with("--") && at_least(rest),
+                }
+            })
         })
     }
 }
@@ -996,6 +1099,25 @@ impl Matcher {
                         "`option_value` needs exactly one of `value` and `not_value`".to_owned(),
                     );
                 }
+            }
+        }
+        if let Some(env) = &self.env {
+            check_list(&env.name, "env.name", true, false)?;
+            if let Some(list) = &env.value {
+                check_list(list, "env.value", true, false)?;
+            }
+            // `*` alone would match every variable or every value.
+            let lists = std::iter::once(&env.name).chain(env.value.as_ref());
+            if lists.flatten().any(|item| item == "*") {
+                return Err("`env` has `*` alone; name the variables and values".to_owned());
+            }
+        }
+        if let Some(option) = &self.option_min {
+            check_list(&option.option, "option_min.option", true, false)?;
+            if let Some(word) = option.option.iter().find(|word| !word.starts_with('-')) {
+                return Err(format!(
+                    "`option_min.option` has `{word}`: list options only"
+                ));
             }
         }
         if let Some(letter) = &self.short_option_letter {
@@ -1828,6 +1950,18 @@ mod tests {
                 pack(r#""exemptions": [{"id": "a", "check": "secret_reveal"}]"#),
                 "unknown variant `secret_reveal`",
             ),
+            (rule(r#"{"env": {"name": ["TF_LOG"]}}"#), "use lowercase"),
+            (rule(r#"{"env": {"name": ["*"]}}"#), "`*` alone"),
+            (
+                rule(r#"{"env": {"name": ["debug"], "value": ["*"]}}"#),
+                "`*` alone",
+            ),
+            (rule(r#"{"env": {"name": []}}"#), "empty list"),
+            (
+                rule(r#"{"option_min": {"option": ["v"], "min": 8}}"#),
+                "list options only",
+            ),
+            (rule(r#"{"option_min": {"option": ["-v"]}}"#), "missing field `min`"),
         ];
         for (text, expected) in cases {
             let error = builtin_with(&text).expect_err(&text);
@@ -1842,5 +1976,61 @@ mod tests {
             .expect("valid pack");
         let rule = &set.rules[0].item;
         assert_eq!(rule.when.program.as_deref(), Some(&["tool".to_owned()][..]));
+    }
+
+    /// Dev round 4: `env` reads names with a trailing `*`, values that are not off, and
+    /// value lists with `*` items; `option_min` reads `-v=8`, `-v 8`, `--v=8`, and `-v8`.
+    #[test]
+    fn environment_and_number_conditions() {
+        let settings = |list: &[&str]| -> Vec<String> {
+            list.iter().map(|setting| (*setting).to_owned()).collect()
+        };
+        let env = |name: &[&str], value: Option<&[&str]>| EnvMatch {
+            name: settings(name),
+            value: value.map(settings),
+        };
+        let trace = env(&["git_trace*"], None);
+        assert!(trace.matches(&settings(&["git_trace=1"])));
+        assert!(trace.matches(&settings(&["a=b", "git_trace_curl=true"])));
+        for off in [
+            "git_trace=0",
+            "git_trace=false",
+            "git_trace=",
+            "git_trace=off",
+        ] {
+            assert!(!trace.matches(&settings(&[off])), "{off}");
+        }
+        let node = env(&["node_debug"], Some(&["http", "https", "tls"]));
+        for on in [
+            "node_debug=http",
+            "node_debug=fs,tls",
+            "node_debug=*",
+            "node_debug=ht*",
+        ] {
+            assert!(node.matches(&settings(&[on])), "{on}");
+        }
+        for off in ["node_debug=fs", "node_debug=-http", "node_debug=httpx"] {
+            assert!(!node.matches(&settings(&[off])), "{off}");
+        }
+        let go = env(&["godebug"], Some(&["http2debug=2"]));
+        assert!(go.matches(&settings(&["godebug=x509ignorecn=0,http2debug=2"])));
+        assert!(!go.matches(&settings(&["godebug=http2debug=0"])));
+
+        let verbose = OptionMin {
+            option: settings(&["-v", "--v"]),
+            min: 8,
+        };
+        for on in [
+            &["-v=8"][..],
+            &["-v", "9"],
+            &["--v=10"],
+            &["-v8"],
+            &["--v", "8"],
+        ] {
+            assert!(verbose.matches(&settings(on)), "{on:?}");
+        }
+        for off in [&["-v=7"][..], &["-vvv"], &["--verbose"], &["-v"], &["--v8"]] {
+            assert!(!verbose.matches(&settings(off)), "{off:?}");
+        }
     }
 }

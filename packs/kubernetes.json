@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 4,
+  "pack_version": 5,
   "tool": "kubernetes",
   "description": "kubectl and Helm: deletions, changes to a cluster, secret reads, shells in a container, and read commands.",
   "programs": ["kubectl", "helm"],
@@ -47,15 +47,35 @@
     {
       "id": "secret-values",
       "flag": "secret_output",
-      "note": "`get secret -o yaml` or `-o jsonpath` prints the secret data. `describe secret` shows only sizes.",
+      "note": "`get secret` with an output format (`-o yaml`, `-o json`, `-o jsonpath`, `-o go-template`) or with `--template` prints the secret data. A list of kinds (`get secrets,configmaps -o yaml`) does too. `-o name` and `-o wide` print names and sizes, and `describe secret` shows only sizes, so they are not here (dev round 4: kind lists, `--template`, names and sizes).",
       "when": {
         "program": ["kubectl"],
         "subcommand": ["get"],
-        "any_of": [
-          { "any_arg": ["secret", "secrets"] },
-          { "any_arg_starts": ["secret/", "secrets/"] }
-        ],
-        "any_arg_starts": ["-o", "--output"]
+        "operands": {
+          "skip": ["-n", "--namespace", "-l", "--selector", "--field-selector", "-o", "--output", "--context"],
+          "any": [
+            { "equals": ["secret", "secrets"] },
+            { "starts": ["secret/", "secrets/", "secret,", "secrets,", "secret.", "secrets."] },
+            { "contains": [",secret"] }
+          ]
+        },
+        "any_arg_starts": ["-o", "--output", "--template"],
+        "not": {
+          "any_of": [
+            { "option_value": { "option": ["-o", "--output"], "value": ["name", "wide"] } },
+            { "any_arg": ["-oname", "-owide", "-o=name", "-o=wide", "--output=name", "--output=wide"] }
+          ]
+        }
+      }
+    },
+    {
+      "id": "verbose-bodies",
+      "flag": "secret_output",
+      "note": "`kubectl -v=8` and higher prints the bodies of the API requests and responses, for example the data of a Secret that `describe secret` reads. Level 7 prints the request headers; kubectl masks the bearer token in them. kubectl has no `-vvv`: `-v` takes a number (dev round 4).",
+      "when": {
+        "program": ["kubectl"],
+        "option_min": { "option": ["-v", "--v"], "min": 8 },
+        "bound_secret": true
       }
     },
     {
@@ -73,21 +93,40 @@
     {
       "id": "helm-values",
       "flag": "secret_output",
-      "note": "`helm get values` and `helm get all` print the release values, which often hold passwords.",
-      "when": { "program": ["helm"], "subcommand": ["get"], "action": ["values", "all", "manifest"] }
+      "note": "`helm get values` and `helm get all` print the release values, which often hold passwords. `manifest` and `hooks` print the rendered objects, Secrets included (`hooks` in dev round 4).",
+      "when": { "program": ["helm"], "subcommand": ["get"], "action": ["values", "all", "manifest", "hooks"] }
+    },
+    {
+      "id": "helm-release-values",
+      "flag": "secret_output",
+      "note": "`helm status -o json` or `-o yaml` prints the whole release object, with the user-supplied values (`config`) and the manifest. `--debug` makes `install`, `upgrade`, and `status` print the user-supplied and computed values and the manifest. `helm list` and `helm history` print summaries only (dev round 4).",
+      "when": {
+        "program": ["helm"],
+        "any_of": [
+          {
+            "subcommand": ["status"],
+            "any_of": [
+              { "option_value": { "option": ["-o", "--output"], "value": ["json", "yaml"] } },
+              { "any_arg": ["-ojson", "-oyaml", "-o=json", "-o=yaml", "--output=json", "--output=yaml"] }
+            ]
+          },
+          { "subcommand": ["install", "upgrade", "status"], "any_arg": ["--debug"] }
+        ]
+      }
     }
   ],
   "exemptions": [
     {
       "id": "secret-reads",
       "check": "command_lexicon",
-      "note": "`kubectl get secrets` lists names and `describe secret` shows sizes. The rule `secret-values` flags the output options that print the data.",
+      "note": "`kubectl get secrets` lists names and `describe secret` shows sizes, also in a list of kinds (`get secrets,configmaps`, dev round 4). The rule `secret-values` flags the output options that print the data.",
       "when": {
         "program": ["kubectl"],
         "subcommand": ["get", "describe"],
         "any_of": [
           { "any_arg": ["secret", "secrets"] },
-          { "any_arg_starts": ["secret/", "secrets/"] }
+          { "any_arg_starts": ["secret/", "secrets/", "secret,", "secrets,", "secret.", "secrets."] },
+          { "any_arg_contains": [",secret"] }
         ]
       }
     },

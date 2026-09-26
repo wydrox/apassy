@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 3,
+  "pack_version": 4,
   "tool": "gcloud",
   "description": "Google Cloud CLIs (gcloud, gsutil, bq): resource changes, deletions, storage writes, tokens and secrets, remote shells, and read commands.",
   "programs": ["gcloud", "gsutil", "bq"],
@@ -11,12 +11,12 @@
     {
       "id": "environment-values",
       "flag": "secret_output",
-      "note": "`describe` of a Cloud Run service or a Cloud Function prints its environment variables in plain text. Such variables often hold secrets (dev round 3).",
+      "note": "`describe` of a Cloud Run service, job, or revision, or of a Cloud Function prints its environment variables in plain text. Such variables often hold secrets (dev round 3; revisions in dev round 4).",
       "when": {
         "program": ["gcloud"],
         "any_of": [
-          { "args_start": ["run services describe", "run jobs describe", "functions describe", "app versions describe"] },
-          { "args_start": ["beta run services describe", "beta functions describe"] }
+          { "args_start": ["run services describe", "run jobs describe", "run revisions describe", "functions describe", "app versions describe"] },
+          { "args_start": ["beta run services describe", "beta run revisions describe", "beta functions describe"] }
         ]
       }
     },
@@ -90,13 +90,36 @@
     {
       "id": "tokens-and-secrets",
       "flag": "secret_output",
-      "note": "The command prints an access token, an identity token, or a secret version.",
+      "note": "The command prints an access token, an identity token, a secret version, or a plaintext that `kms decrypt` decrypts (to the output or to a file; `kms decrypt` in dev round 4).",
       "when": {
         "program": ["gcloud"],
         "any_of": [
           { "any_arg": ["print-access-token", "print-identity-token", "config-helper"] },
-          { "args_contain": ["secrets versions access"] }
+          { "args_contain": ["secrets versions access", "kms decrypt"] }
         ]
+      }
+    },
+    {
+      "id": "http-log",
+      "flag": "secret_output",
+      "note": "`--log-http` logs each HTTP request and response with the bodies, and `--verbosity=debug` prints the arguments of the command. gcloud hides the access token by default (`log_http_redact_token`), but not a secret in a body or an argument, and a configuration can turn the hiding off (dev round 4).",
+      "when": {
+        "program": ["gcloud"],
+        "any_of": [
+          { "any_arg": ["--log-http", "--log-http=true", "--verbosity=debug"] },
+          { "option_value": { "option": ["--verbosity"], "value": ["debug"] } }
+        ],
+        "bound_secret": true
+      }
+    },
+    {
+      "id": "gsutil-debug",
+      "flag": "secret_output",
+      "note": "The gsutil documentation says that the output of the top-level option `-D` (and `-DD`, which adds the uploaded data) includes authentication credentials. The analysis reads arguments in lowercase, so it reads `-d` and `-dd` before the command; `-D` after `cp` is another option (dev round 4).",
+      "when": {
+        "program": ["gsutil"],
+        "args_start": ["-d", "-m -d", "-q -d"],
+        "bound_secret": true
       }
     },
     {

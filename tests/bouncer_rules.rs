@@ -496,6 +496,42 @@ fn unknown_code_needs_the_task_match() {
     assert_eq!(read_unmatched.bodies.lock().expect("bodies").len(), 2);
 }
 
+/// Dev round 4, on the broker path. A trace setting with a bound secret is a rule flag, so
+/// the model is not asked. A read of contact data of people is not a known command: the
+/// model's certain read (`writes` 0.05) does not replace the task match.
+#[test]
+fn trace_settings_and_personal_data_reads_ask() {
+    let read_unmatched = common::fake_bouncer(&[("task_match", 0.3), ("writes", 0.05)]);
+    let fx = fixture(Some(&read_unmatched.url), echo_only());
+    for command in [
+        "TF_LOG=TRACE terraform plan -input=false 2>&1 | tee plan-trace.log",
+        "GIT_TRACE=1 git fetch origin",
+        "kubectl get secret api -o yaml",
+    ] {
+        assert_eq!(
+            code(&run(&fx, &["sh", "-c", command], "Plan.")),
+            "approval_timeout"
+        );
+        assert!(last_reason(&fx).contains("secret_output"), "{command}");
+    }
+    assert!(read_unmatched.bodies.lock().expect("bodies").is_empty());
+    for command in [
+        "psql \"$DEMO_KEY\" -c 'select email, phone from users limit 50'",
+        "stripe customers list --limit 100 | jq -r '.data[].email'",
+    ] {
+        assert_eq!(
+            code(&run(&fx, &["sh", "-c", command], "Rename a helper.")),
+            "approval_timeout"
+        );
+        assert!(
+            last_reason(&fx).contains("Below the needed certainty: task_match 30% (needs 75%)"),
+            "{command}: {}",
+            last_reason(&fx)
+        );
+    }
+    assert_eq!(read_unmatched.bodies.lock().expect("bodies").len(), 2);
+}
+
 /// Policy v7 (dev round 3), on the broker path: with an owner instruction, a run needs
 /// `rule_break` at or below 0.2, also for a known safe command. A known write needs the
 /// task match, whatever the model answers for `writes`.

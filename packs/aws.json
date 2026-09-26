@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "pack_version": 3,
+  "pack_version": 4,
   "tool": "aws",
   "description": "AWS CLI and AWS deploy tools (Elastic Beanstalk, CDK, SAM, Amplify): S3 writes, deletions, resource changes, secret reads, remote shells, and read commands.",
   "programs": ["aws", "eb", "cdk", "sam", "amplify"],
@@ -109,7 +109,7 @@
     {
       "id": "secret-values",
       "flag": "secret_output",
-      "note": "The command prints a secret value, temporary credentials, a decrypted value, or a presigned URL.",
+      "note": "The command prints a secret value, temporary credentials, a decrypted value, or a presigned URL. `ecr get-login-password` prints a registry password that is valid for 12 hours; the general lexicon reads `login` as a change verb, so it needs this entry (dev round 4).",
       "when": {
         "program": ["aws"],
         "any_of": [
@@ -122,12 +122,23 @@
             "any_arg": [
               "get-session-token", "assume-role", "assume-role-with-web-identity",
               "assume-role-with-saml", "get-federation-token", "export-credentials",
-              "generate-db-auth-token", "presign"
+              "generate-db-auth-token", "presign", "get-login-password"
             ]
           },
           { "subcommand": ["kms"], "action": ["decrypt"] },
           { "args_start": ["configure get"], "any_arg_contains": ["secret", "token"] }
         ]
+      }
+    },
+    {
+      "id": "debug-log",
+      "flag": "secret_output",
+      "note": "`aws --debug` logs each signed request with its headers: the access key ID, the signature, and the session token (`X-Amz-Security-Token`). It also logs the arguments of the command after the shell expands them, and the response bodies. Without signing (`--no-sign-request`) no credential is in play (dev round 4).",
+      "when": {
+        "program": ["aws"],
+        "any_arg": ["--debug"],
+        "not": { "any_arg": ["--no-sign-request"] },
+        "bound_secret": true
       }
     },
     {

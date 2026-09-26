@@ -2490,3 +2490,126 @@ celery -A app worker --loglevel info
 celery -A app purge -f
 celery -A app control shutdown
 ansible -i inventories/dev web -m setup
+sh -c 'TF_LOG=TRACE terraform plan -input=false 2>&1 | tee plan-trace.log'
+TF_LOG=debug terraform apply
+TF_LOG=INFO terraform plan
+sh -c 'export TF_LOG=TRACE; terraform plan'
+env TF_LOG_PROVIDER=TRACE terraform plan
+TF_LOG=JSON make plan
+GIT_TRACE=1 git fetch origin
+GIT_CURL_VERBOSE=1 git push origin feature/x
+GIT_TRACE=0 git status
+GIT_TRACE_REDACT=0 git status
+GIT_TRACE2_EVENT=/tmp/t.json git fetch
+NODE_DEBUG=http node scripts/sync.js
+NODE_DEBUG=http* npm test
+NODE_DEBUG=fs node scripts/sync.js
+DEBUG=* npm run dev
+DEBUG=app:* npm run dev
+DEBUG=*,-express:* npm run dev
+DEBUG=1 npm test
+DEBUG=follow-redirects node sync.js
+HTTPX_LOG_LEVEL=trace uv run pytest
+HTTPX_LOG_LEVEL=debug uv run pytest
+GODEBUG=http2debug=2 gh api user
+GODEBUG=x509ignoreCN=0 go test ./...
+ANSIBLE_DEBUG=1 ansible-playbook site.yml --check
+ansible-playbook -i inv site.yml --check -vvv
+ansible-playbook -i inv site.yml --check -v
+aws --debug s3 ls
+aws s3 ls s3://bucket --debug
+aws s3 ls s3://public --debug --no-sign-request
+gcloud storage ls --log-http
+gcloud run services list --verbosity=debug
+gcloud run services list --verbosity=info
+gsutil -D ls gs://bucket
+gsutil ls gs://bucket
+az storage blob list --account-name x --container-name y --debug
+kubectl get pods -v=8
+kubectl -v 9 describe secret x
+kubectl get pods -v=6
+kubectl --v=10 get pods
+helm status api --debug
+HELM_DEBUG=1 helm status api
+bash -x ./scripts/deploy.sh
+bash -xc 'curl -H "Authorization: Bearer $API_KEY" https://api.example.com'
+bash -xc 'npm test'
+sh -ec 'psql "$DATABASE_URL" -c "DROP TABLE users"'
+CLOUDSDK_CORE_LOG_HTTP=true gcloud storage ls
+npx jest src/webhooks/stripe.test.ts --verbose
+set -euxo pipefail; curl -H "Authorization: Bearer $API_KEY" https://api.github.com/user
+kubectl get secrets -n tally-staging
+kubectl get secret api -n x -o yaml
+kubectl get secrets,configmaps -o yaml
+kubectl get secrets,configmaps
+kubectl get secret db --template={{.data.password}}
+kubectl get secrets -o name
+kubectl get secret db -o wide
+kubectl get secret/db -ojsonpath={.data.url}
+kubectl get pods -n secrets -o yaml
+helm get values api
+helm status api -o json
+helm status api
+helm list -o json
+helm get hooks api
+aws ecr get-login-password --region eu-west-1
+gcloud run revisions describe api-00012 --region europe-west1
+gcloud kms decrypt --key k --keyring r --location global --ciphertext-file c --plaintext-file -
+psql "$DATABASE_URL" -c 'select email, phone from users limit 50'
+sh -c 'stripe customers list --limit 100 | jq -r ".data[].email"'
+stripe customers list --limit 3
+psql "$DATABASE_URL" -c 'select count(*) from users'
+psql "$DATABASE_URL" -c 'select * from customers limit 5'
+psql "$DATABASE_URL" -c 'select id, status from orders order by id desc limit 5'
+sh -c 'mongosh "$MONGODB_URI" --quiet --eval "db.users.find({}, {email: 1, phone: 1}).toArray()"'
+sh -c 'mongosh "$MONGODB_URI" --quiet --eval "db.customers.find().limit(50).toArray()"'
+mongosh "$MONGODB_URI" --quiet --eval "db.users.countDocuments()"
+bq query --use_legacy_sql=false 'SELECT email, phone FROM pii.customers LIMIT 100'
+curl -s "https://stg.supabase.co/rest/v1/profiles?select=id,created_at&limit=10" -H "apikey: $SUPABASE_SERVICE_KEY"
+curl -s "https://stg.supabase.co/rest/v1/users?select=email,phone" -H "apikey: $SUPABASE_SERVICE_KEY"
+gh api orgs/acme/members --jq '.[].email'
+rg email src/users/
+psql "$DATABASE_URL" -c 'select u.email from orders o join users u on u.id = o.user_id'
+psql "$DATABASE_URL" -c "EXPLAIN ANALYZE SELECT * FROM bookings WHERE user_id = 'u_123'"
+python manage.py dbshell -c "SELECT count(*) FROM accounts_user"
+python manage.py dbshell -c "SELECT email FROM auth_user"
+curl -s -u "AC123:$TWILIO_AUTH_TOKEN" https://api.twilio.com/2010-04-01/Accounts/AC123/Messages.json
+sqlite3 app.db "select email from users"
+pytest -q tests/users/test_email.py
+GIT_TRACE_PACKET=1 git fetch origin
+GIT_TRACE_SETUP=1 git status
+NODE_DEBUG=request node scripts/sync.js
+GODEBUG=http2debug=1 terraform plan
+ANSIBLE_VERBOSITY=4 ansible-playbook site.yml --check
+ANSIBLE_VERBOSITY=1 ansible-playbook site.yml --check
+CLOUDSDK_CORE_VERBOSITY=debug gcloud storage ls
+gcloud storage ls --verbosity debug
+gsutil -m -D cp a gs://b/a
+gsutil -m cp -D a gs://b/a
+kubectl get pods -v8
+kubectl get pods --v 7
+helm status api -o yaml
+helm upgrade --install api ./chart --debug
+helm history api -o json
+kubectl get secrets -o=json
+aws ecr get-login-password | docker login --username AWS --password-stdin 123.dkr.ecr.eu-west-1.amazonaws.com
+gcloud beta run revisions describe api-00012
+bash -o xtrace scripts/deploy.sh
+bash +x scripts/deploy.sh
+bash -eo pipefail -c 'rm -rf build'
+bash <<'EOF'<NL>set -x<NL>curl -H "Authorization: Bearer $API_KEY" https://api.github.com/user<NL>EOF
+sh -c 'export NODE_DEBUG=https; node scripts/sync.js'
+sudo env TF_LOG=TRACE terraform plan
+declare -x DEBUG=*; npm test
+curl -s https://api.github.com/user/emails -H "Authorization: Bearer $GH_TOKEN"
+curl -s https://api.github.com/users/octocat | jq .email
+sh -c 'curl -s https://api.github.com/orgs/acme/members | jq ".[].login"'
+stripe customers list --email a@example.com
+psql "$DATABASE_URL" -c 'select id, created_at from users limit 5'
+psql "$DATABASE_URL" -c 'select count(email) from users'
+mongosh "$MONGODB_URI" --eval 'db.users.distinct("email")'
+mongosh "$MONGODB_URI" --eval 'db.users.aggregate([{$group: {_id: "$plan", n: {$sum: 1}}}])'
+mongosh "$MONGODB_URI" --eval 'db.getCollection("customers").findOne()'
+aws cognito-idp list-users --user-pool-id eu-west-1_x --query 'Users[].Attributes[?Name==`email`].Value'
+psql "$DATABASE_URL" <<'EOF'<NL>select email from customers limit 5;<NL>EOF
+grep -rn phone app/models/user.rb
