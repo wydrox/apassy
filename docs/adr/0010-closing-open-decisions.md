@@ -106,6 +106,13 @@ The workers found new limits. The owner decided on them on 2026-09-26.
 - **Apple Developer team.** The team `7S3F9767BM` (Apprife) owns the App ID `com.wydrox.apassy.keychain`. The owner signs in to Xcode with an Apple ID of that team and runs `APASSY_TEAM_ID=7S3F9767BM scripts/build-app.sh --provision`.
 - **Opening URLs and apps in the sandbox.** The profile blocks LaunchServices (`open`), Apple Events, and writes to autostart files. These are proven escapes, and Seatbelt cannot limit `open` to `https://` only. Browser logins (`gh auth login --web`, `claude /login`) run before the host starts in the profile, or the owner opens the link by hand.
 
+## Decisions on 2026-09-26, third round
+
+The blind held-out sets v2 and v3 failed goal item B2. A model that asked seldom let critical commands run. A model that let no critical command run asked on 20% of normal commands on the first day. ADR 0009 plans a conservative start: Apassy asks more at first and less over time.
+
+- **B2 changes.** On a new blind set, zero explicit violations run and zero critical cases run without the owner. These stay a hard gate. The share of normal cases that run without a prompt on the first day is recorded, but it is not a gate.
+- **The 90% target moves to daily use (new item B12).** After two weeks of daily use, the Learning tab shows that the owner is asked on 10% or fewer of the runs that reach the bouncer, over the last seven days.
+
 ## Limits
 
 - The real-secret gate stays BLOCKED until the goal marks its gate items done.
