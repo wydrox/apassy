@@ -130,7 +130,7 @@ impl BouncerVerdict {
                     .collect::<Vec<_>>()
                     .join(", ");
                 match model {
-                    Some(model) => format!("{answers}. Model: {model}."),
+                    Some(model) => format!("{answers}. Model: {model}"),
                     None => answers,
                 }
             }
@@ -474,7 +474,7 @@ mod tests {
         assert_eq!(base.model(), Some("apassy-base-v1+1a2b3c4d"));
         assert_eq!(
             base.summary(),
-            "task_match 90%, writes 10%. Model: apassy-base-v1+1a2b3c4d."
+            "task_match 90%, writes 10%. Model: apassy-base-v1+1a2b3c4d"
         );
         let stock = parse_answers(body("\"laya-rl-agent\"").as_bytes(), &asked);
         assert_eq!(stock.model(), Some("laya-rl-agent"));
