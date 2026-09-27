@@ -73,7 +73,7 @@ These changes do not prove memory erasure or removal of data from old backups. T
 
 ## Remaining limits
 
-- Agents, grants, rules, declarations, and agent activity are in the vault (schema versions 2 to 6). The Rules screen stays a demo. The owner vault and item views open an encrypted file when both `desktop` and `vault` are enabled. See [desktop vault integration](desktop-vault.md).
+- Agents, grants, rules, declarations, and agent activity are in the vault (schema versions 2 to 6). The Rules screen exists only in the demo build (`--features desktop` without `vault`). The owner vault and item views open an encrypted file when both `desktop` and `vault` are enabled. See [desktop vault integration](desktop-vault.md).
 - The APIs are trusted-process internals, not authenticated owner or agent endpoints.
 - Process memory, swap, crash dumps, and key-memory handling need further review. Redacted Debug is not memory erasure.
 - Advisory locks and path checks do not stop arbitrary same-user clients or hostile filesystem races.

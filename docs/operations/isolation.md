@@ -394,6 +394,11 @@ Result:
   short, and do not treat the environment of a running broker child as hidden
   from other processes of the same user. The owner decides if more work is
   needed before the real-secret gate opens.
+- Since 2026-09-27 a variable can use placeholder mode (ADR 0011). Then the
+  environment of the run has a placeholder, the address of the run proxy, and
+  its password, but no value. A proxied run starts in a second Seatbelt profile
+  that denies each outgoing connection except the one to the proxy port. That
+  rule works: a direct connection fails with `Operation not permitted`.
 - Host tooling: `ps` and `top` cannot start in any `sandbox-exec` profile, so a
   host feature that runs them fails. No SBPL allowance for this was verified.
   The measured Claude Code run did not break.

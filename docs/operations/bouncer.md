@@ -41,10 +41,10 @@ LAYA_HOST=127.0.0.1 LAYA_PORT=8770 tools/basemodel/start.sh
 
 ## 2. Set a rule
 
-In Agents, click "Manage grants" for an agent. In "Process access":
+In Agents, open an agent. Under "Process access", click the credential:
 
-1. Type the project directory. Click "Let the bouncer decide".
-2. Open "Rule". Type the permitted command prefixes, one per line, for example `npm test` and `npm run migrate`.
+1. Type the project folder. Under "Decision", select "Bouncer decides". Click "Save".
+2. Open the sheet again. Open "Rule". Type the permitted command prefixes, one per line, for example `npm test` and `npm run migrate`.
 3. Optional: forbidden words, an expiry in hours, a limit of runs per hour, and your instruction in plain words.
 4. Click "Save rule".
 

@@ -11,6 +11,7 @@ use apassy::desktop::model::ItemDraft;
 use apassy::desktop::owner_store::{
     DeclarationForm, OwnerDetails, OwnerSession, SecretForm, parse_lifetime_days,
 };
+use apassy::vault::EnvDelivery;
 use tempfile::TempDir;
 
 const PASS: &str = "owner-vault-pass-ok";
@@ -377,7 +378,7 @@ fn restore_lists_items_for_review_until_the_owner_confirms() {
         .expect("declaration");
     let proof = owner_ok(&session, OwnerAction::ChangeItemRules { item_id: used.id });
     session
-        .set_env_binding(used.id, "USED_KEY", "token", proof)
+        .set_env_binding(used.id, "USED_KEY", "token", &EnvDelivery::Value, proof)
         .expect("binding");
     session.register_agent("Before restore").expect("register");
     assert!(session.items_needing_review().expect("review").is_empty());
@@ -579,7 +580,7 @@ fn owner_actions_refuse_without_a_matching_check() {
     refused(session.set_connector(item.id, "reporting-api-v0", "http://127.0.0.1:8787", proof));
     assert_eq!(session.connector(item.id).expect("connector"), None);
     let proof = other(&session);
-    refused(session.set_env_binding(item.id, "GUARDED_KEY", "token", proof));
+    refused(session.set_env_binding(item.id, "GUARDED_KEY", "token", &EnvDelivery::Value, proof));
     assert_eq!(session.env_binding(item.id).expect("binding"), None);
     let form = DeclarationForm {
         project: "Project A4".to_owned(),
@@ -604,7 +605,7 @@ fn owner_actions_refuse_without_a_matching_check() {
         .expect("connector");
     let proof = item_rules(&session);
     session
-        .set_env_binding(item.id, "GUARDED_KEY", "token", proof)
+        .set_env_binding(item.id, "GUARDED_KEY", "token", &EnvDelivery::Value, proof)
         .expect("binding");
     let proof = other(&session);
     refused(session.allow_operation(agent.id, item.id, "get_sales_summary", proof));
@@ -712,4 +713,159 @@ fn revealed_values_hide_on_time_hide_and_lock() {
     unlock(&mut session);
     assert_eq!(session.revealed_value(item.id, "token"), None);
     assert!(!session.details(item.id).expect("details").any_revealed());
+}
+
+/// Custom details keep any label. A visible detail keeps its value. A hidden detail is a
+/// secret field: masked, shown only after the owner check, usable for a variable, and
+/// kept when the owner renames it without typing it again.
+#[test]
+fn custom_details_keep_labels_and_hide_hidden_values() {
+    use apassy::desktop::model::DetailDraft;
+
+    const RECOVERY: &str = "owner-secret-recovery-foxtrot";
+    let dir = TempDir::new().expect("temp dir");
+    let (mut session, _) = session_at(&dir, "details.db");
+    unlock(&mut session);
+    let mut draft = api_draft("With details", "Project D");
+    draft.details = vec![
+        DetailDraft {
+            label: "Account ID".to_owned(),
+            value: "acct_123".to_owned(),
+            ..DetailDraft::default()
+        },
+        DetailDraft {
+            label: "Kod odzyskiwania".to_owned(),
+            hidden: true,
+            ..DetailDraft::default()
+        },
+    ];
+    let mut secrets = token_form(TOKEN);
+    secrets.details[1] = RECOVERY.to_owned();
+    let item = session.add(&draft, &secrets).expect("add");
+    let details = session.details(item.id).expect("details");
+    assert_eq!(details.details.len(), 2);
+    assert_eq!(details.details[0].label, "Account ID");
+    assert_eq!(details.details[0].value.as_deref(), Some("acct_123"));
+    assert_eq!(details.details[1].label, "Kod odzyskiwania");
+    assert!(details.details[1].hidden);
+    assert_eq!(
+        details.details[1].value, None,
+        "a hidden value is not in the details"
+    );
+    assert!(!format!("{details:?}").contains(RECOVERY));
+    let hidden_name = details.details[1].name.clone();
+    assert!(
+        session
+            .secret_fields(item.id)
+            .expect("fields")
+            .contains(&hidden_name),
+        "a hidden detail can back a variable"
+    );
+    assert_eq!(session.revealed_value(item.id, &hidden_name), None);
+    reveal(&mut session, item.id);
+    assert_eq!(
+        session.revealed_value(item.id, &hidden_name),
+        Some(RECOVERY)
+    );
+
+    // A rename with a blank input keeps the stored hidden value.
+    let mut edit = details.to_draft();
+    edit.details[1].label = "Recovery code".to_owned();
+    let updated = session
+        .update(item.id, details.revision, &edit, &SecretForm::default())
+        .expect("rename");
+    let renamed = session.details(item.id).expect("details");
+    assert_eq!(renamed.details[1].label, "Recovery code");
+    reveal(&mut session, item.id);
+    assert_eq!(
+        session.revealed_value(item.id, &renamed.details[1].name),
+        Some(RECOVERY)
+    );
+    assert!(
+        session
+            .is_unchanged(item.id, &renamed.to_draft(), &SecretForm::default())
+            .expect("unchanged")
+    );
+
+    // Refused drafts: a blank label, the same label two times, a long label, and a
+    // detail without a value.
+    let mut refuse = |details: Vec<DetailDraft>, text: &str| {
+        let mut bad = renamed.to_draft();
+        bad.details = details;
+        let err = session
+            .update(item.id, updated.revision, &bad, &SecretForm::default())
+            .expect_err("refused");
+        assert!(err.message.contains(text), "{}", err.message);
+    };
+    let visible = |label: &str, value: &str| DetailDraft {
+        label: label.to_owned(),
+        value: value.to_owned(),
+        ..DetailDraft::default()
+    };
+    refuse(vec![visible(" ", "x")], "Type a name");
+    refuse(
+        vec![visible("Region", "eu"), visible("region", "us")],
+        "Two custom details",
+    );
+    refuse(vec![visible(&"L".repeat(32), "x")], "too long");
+    refuse(vec![visible("Region", "")], "Type the value of “Region”");
+
+    // Removing a detail removes its field.
+    let mut fewer = renamed.to_draft();
+    fewer.details.remove(1);
+    session
+        .update(item.id, updated.revision, &fewer, &SecretForm::default())
+        .expect("remove");
+    let after = session.details(item.id).expect("details");
+    assert_eq!(after.details.len(), 1);
+    assert!(
+        !session
+            .secret_fields(item.id)
+            .expect("fields")
+            .contains(&renamed.details[1].name)
+    );
+}
+
+/// An archive takes authority away, so it needs no owner check. The way back gives it
+/// back, so it needs a check for the agent settings of the item (goal item A4).
+#[test]
+fn archive_needs_no_check_and_the_way_back_needs_one() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut session, _) = session_at(&dir, "archive.db");
+    unlock(&mut session);
+    let item = session
+        .add(&api_draft("Old key", "Project A"), &token_form(TOKEN))
+        .expect("add");
+    reveal(&mut session, item.id);
+    session.archive(item.id).expect("archive");
+    assert!(session.is_archived(item.id).expect("state"));
+    assert_eq!(
+        session.revealed_value(item.id, "token"),
+        None,
+        "an archive hides revealed values"
+    );
+    assert!(session.details(item.id).expect("details").archived);
+    let wrong = owner_ok(&session, OwnerAction::Reveal { item_id: item.id });
+    let err = session.unarchive(item.id, wrong).expect_err("wrong proof");
+    assert_eq!(err.code, "owner_check_required");
+    assert!(session.is_archived(item.id).expect("state"));
+    let proof = owner_ok(&session, OwnerAction::ChangeItemRules { item_id: item.id });
+    session.unarchive(item.id, proof).expect("unarchive");
+    assert!(!session.is_archived(item.id).expect("state"));
+    let kinds: Vec<_> = session
+        .item_events(item.id, 10)
+        .expect("history")
+        .iter()
+        .map(|event| event.kind)
+        .collect();
+    use apassy::vault::ItemEventKind;
+    assert_eq!(
+        kinds,
+        vec![
+            ItemEventKind::Unarchived,
+            ItemEventKind::Archived,
+            ItemEventKind::Revealed,
+            ItemEventKind::Created,
+        ]
+    );
 }

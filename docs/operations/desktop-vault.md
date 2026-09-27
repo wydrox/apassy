@@ -4,6 +4,8 @@ Date: 2026-09-23.
 Status: owner vault and item views call the experimental passphrase vault when both `desktop` and `vault` are enabled.
 This is not MVP acceptance, P2b, or permission to store real credentials.
 
+The views changed on 2026-09-27. The current layout is in [desktop UI](desktop-ui.md). This page records the state of 2026-09-23.
+
 ## What is connected
 
 The Vault view can create a file, open an existing file, unlock, lock, back up, and restore.

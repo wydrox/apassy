@@ -168,7 +168,7 @@ pub fn tool_list() -> Value {
         {
             "name": TOOL_RUN_WITH_SECRETS,
             "title": "Run a command with secrets in its environment",
-            "description": "Run one command in a project directory. Apassy puts the named vault items into the process environment under the variable names that the owner set (see process_access in apassy_list_access). You never receive the values. Secret values in the output are replaced with [apassy:NAME]. The owner can need to approve the run in the Apassy app, so this call can wait up to 2 minutes. The command is an argument list, not a shell string. Use [\"sh\", \"-c\", \"...\"] only if you need a shell.",
+            "description": "Run one command in a project directory. Apassy puts the named vault items into the process environment under the variable names that the owner set (see process_access in apassy_list_access). You never receive the values. Secret values in the output are replaced with [apassy:NAME]. A variable whose env_holds is \"a placeholder\" has a placeholder: Apassy puts the real value into HTTPS requests to its hosts (Authorization header, API key header, or key parameter), so use it there as you would use the key. Do not put it into a request body or a file. The answer lists each request in network.requests. The owner can need to approve the run in the Apassy app, so this call can wait up to 2 minutes. The command is an argument list, not a shell string. Use [\"sh\", \"-c\", \"...\"] only if you need a shell.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -348,6 +348,9 @@ fn hint(code: &str) -> Option<&'static str> {
         ),
         "review_required" => Some(
             "Tell the user: the Apassy vault was restored from a backup. In the Apassy app, open the item, examine its agent settings, and click \"Confirm settings\". Do not retry before that.",
+        ),
+        "item_archived" => Some(
+            "Tell the user: this credential is archived in Apassy. Only the user can bring it back: in the Apassy app, open the credential and click \"Restore from archive\". Do not retry before that, and do not look for the secret elsewhere.",
         ),
         _ => None,
     }

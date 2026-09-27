@@ -17,6 +17,7 @@ pub mod packs;
 pub mod patterns;
 pub mod profile;
 pub mod prompts;
+pub mod proxy;
 pub mod replay;
 mod run;
 pub mod server;

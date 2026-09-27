@@ -8,10 +8,9 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Event, Key, Modifiers, Pos2, RawInput, Rect, Vec2};
 use tempfile::TempDir;
 
-use super::{
-    PASSPHRASE_CAPACITY, SECRET_VALUE_CAPACITY, draw, draw_vault_file_card, secret_field_id,
-    secret_inputs, unlock_with_passphrase,
-};
+use super::items::secret_rows;
+use super::start::{draw_unlock_card, unlock_with_passphrase};
+use super::{PASSPHRASE_CAPACITY, SECRET_VALUE_CAPACITY, draw, kit, secret_field_id};
 use crate::broker::approvals::{ApprovalOutcome, PendingRun};
 use crate::contracts::CredentialKind;
 use crate::desktop::inbox::EventKey;
@@ -34,9 +33,9 @@ fn input(time: f64, events: Vec<Event>) -> RawInput {
     }
 }
 
-/// One frame of the Vault file card only. It shows the passphrase field in each state.
+/// One frame of the unlock card only. It shows the passphrase field in each state.
 fn card_frame(ctx: &egui::Context, app: &mut DesktopApp, time: f64, events: Vec<Event>) {
-    let output = ctx.run_ui(input(time, events), |ui| draw_vault_file_card(app, ui));
+    let output = ctx.run_ui(input(time, events), |ui| draw_unlock_card(app, ui));
     output.drop_without_applying_deltas();
 }
 
@@ -193,7 +192,9 @@ fn secret_fields_keep_their_buffer_while_typing() {
     let token_id = secret_field_id("add-token");
     let form_frame = |ctx: &egui::Context, secrets: &mut SecretForm, events| {
         let output = ctx.run_ui(input(0.0, events), |ui| {
-            secret_inputs(ui, "add", CredentialKind::ApiKey, secrets);
+            kit::section(ui, None, None, |s| {
+                secret_rows(s, "add", CredentialKind::ApiKey, secrets, "Required");
+            });
         });
         output.drop_without_applying_deltas();
     };
@@ -258,7 +259,7 @@ fn unlocked_app_with_item(dir: &TempDir) -> (DesktopApp, u64) {
     (app, item.id)
 }
 
-/// A4: "Reveal values" shows the owner check. Touch ID answers `not_available`, and
+/// A4: "Show" shows the owner check. Touch ID answers `not_available`, and
 /// the dialog says so. A wrong passphrase reveals nothing. The right one reveals.
 #[test]
 fn reveal_waits_for_the_owner_check_and_falls_back_to_the_passphrase() {
@@ -271,7 +272,8 @@ fn reveal_waits_for_the_owner_check_and_falls_back_to_the_passphrase() {
     let ctx = egui::Context::default();
 
     let text = app_frame(&ctx, &mut app);
-    assert!(text.contains("Reveal values"), "{text}");
+    assert!(text.contains("Show"), "{text}");
+    assert!(text.contains(crate::desktop::MASKED_VALUE), "{text}");
     app.ask_owner(OwnerRequest::Reveal { item_id }, Some(&ctx));
     let text = app_frame(&ctx, &mut app);
     assert!(text.contains("Confirm that it is you"), "{text}");

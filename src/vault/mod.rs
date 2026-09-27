@@ -14,6 +14,7 @@
 
 mod agents;
 mod candidate;
+mod history;
 mod learning;
 pub mod providers;
 mod suggestions;
@@ -34,15 +35,17 @@ use crate::contracts::CredentialKind;
 
 pub use agents::{
     AGENT_TOKEN_PREFIX, ActivityDecision, ActivityRecord, AgentSummary, AgentToken,
-    DEFAULT_TOKEN_LIFETIME_DAYS, Declaration, Destination, EnvBinding, Environment, ExecGrant,
-    ExecMode, ExecRule, GrantSummary, MAX_ACTIVITY_ROWS, MAX_TOKEN_LIFETIME_DAYS, NewActivity,
-    Reversibility, RiskLevel, Scope, checked_env_name, format_utc,
+    DEFAULT_TOKEN_LIFETIME_DAYS, Declaration, Destination, EnvBinding, EnvDelivery, Environment,
+    ExecGrant, ExecMode, ExecRule, GrantSummary, MAX_ACTIVITY_ROWS, MAX_PLACEHOLDER_HOSTS,
+    MAX_TOKEN_LIFETIME_DAYS, NewActivity, Reversibility, RiskLevel, Scope, checked_env_name,
+    format_utc, parse_placeholder_host,
 };
 pub use candidate::{
     ActivationAction, CandidateRecord, CandidateState, MAX_ACTIVATIONS, MAX_CANDIDATES,
     MAX_MODEL_VERSION, MAX_SHADOW_ROWS, ModelActivation, NewCandidate, OwnerLabel, RealOutcome,
     ShadowAnswer, ShadowEntry, ShadowSummary, model_label, valid_model_version,
 };
+pub use history::{EditChange, ItemEvent, ItemEventKind, ItemTimes, MAX_ITEM_EVENTS};
 pub use learning::{
     CALIBRATION_CEILING, CALIBRATION_FLOOR, CalibrationRecord, CandidateAgreement, DayRate,
     DecidedBy, DecisionEntry, DecisionRecord, LoggedDecision, MAX_BLOCKED_PATTERNS,
@@ -110,6 +113,8 @@ const DECLARATION_SCHEMA_VERSION: i64 = 5;
 const TOKEN_SCHEMA_VERSION: i64 = 6;
 const LEARNING_SCHEMA_VERSION: i64 = 7;
 const SUGGESTION_SCHEMA_VERSION: i64 = 8;
+const CANDIDATE_SCHEMA_VERSION: i64 = 9;
+const HISTORY_SCHEMA_VERSION: i64 = 10;
 
 /// Encrypted local vault. Connection state is private. Debug is redacted.
 pub struct Vault {
@@ -239,6 +244,7 @@ impl Vault {
         .map_err(|_| err(VaultErrorKind::Storage))?;
         let id = tx.last_insert_rowid();
         insert_tags_and_fields(&tx, id, &draft)?;
+        history::record(&tx, id, ItemEventKind::Created, "")?;
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
         summary_from_parts(id, draft.title, draft.kind, 1)
     }
@@ -267,6 +273,7 @@ impl Vault {
         let next = expected
             .checked_add(1)
             .ok_or_else(|| err(VaultErrorKind::Storage))?;
+        let changes = edit_changes(&tx, sql_id, &draft)?;
         tx.execute(
             "UPDATE item SET title = ?1, notes = ?2, revision = ?3 WHERE id = ?4",
             (draft.title.as_str(), draft.notes.as_str(), next, sql_id),
@@ -277,6 +284,14 @@ impl Vault {
         tx.execute("DELETE FROM item_field WHERE item_id = ?1", [sql_id])
             .map_err(|_| err(VaultErrorKind::Storage))?;
         insert_tags_and_fields(&tx, sql_id, &draft)?;
+        if !changes.is_empty() {
+            history::record(
+                &tx,
+                sql_id,
+                ItemEventKind::Edited,
+                &EditChange::detail(&changes),
+            )?;
+        }
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
         let revision = u64::try_from(next).map_err(|_| err(VaultErrorKind::Storage))?;
         Ok(ItemSummary {
@@ -304,6 +319,7 @@ impl Vault {
         tx.execute("DELETE FROM item_tag WHERE item_id = ?1", [sql_id])
             .map_err(|_| err(VaultErrorKind::Storage))?;
         agents::delete_item_links(&tx, sql_id)?;
+        history::forget_item(&tx, sql_id)?;
         tx.execute("DELETE FROM item WHERE id = ?1", [sql_id])
             .map_err(|_| err(VaultErrorKind::Storage))?;
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
@@ -895,6 +911,8 @@ fn verify_user_version(conn: &Connection) -> VaultResult<i64> {
         | TOKEN_SCHEMA_VERSION
         | LEARNING_SCHEMA_VERSION
         | SUGGESTION_SCHEMA_VERSION
+        | CANDIDATE_SCHEMA_VERSION
+        | HISTORY_SCHEMA_VERSION
         | SCHEMA_VERSION) => Ok(version),
         _ => Err(err(VaultErrorKind::UnsupportedSchema)),
     }
@@ -987,8 +1005,18 @@ fn verify_expected_columns(conn: &Connection, version: i64) -> VaultResult<()> {
     } else {
         &[]
     };
-    let v9: &[&str] = if version >= SCHEMA_VERSION {
+    let v9: &[&str] = if version >= CANDIDATE_SCHEMA_VERSION {
         &candidate::SCHEMA_V9_COLUMNS
+    } else {
+        &[]
+    };
+    let v10: &[&str] = if version >= HISTORY_SCHEMA_VERSION {
+        &history::SCHEMA_V10_COLUMNS
+    } else {
+        &[]
+    };
+    let v11: &[&str] = if version >= SCHEMA_VERSION {
+        &agents::SCHEMA_V11_COLUMNS
     } else {
         &[]
     };
@@ -1002,6 +1030,8 @@ fn verify_expected_columns(conn: &Connection, version: i64) -> VaultResult<()> {
         .chain(v7)
         .chain(v8)
         .chain(v9)
+        .chain(v10)
+        .chain(v11)
     {
         drop(
             conn.prepare(sql)
@@ -1054,7 +1084,15 @@ fn migrate_to_current(conn: &mut Connection, from: i64) -> VaultResult<()> {
         tx.execute_batch(suggestions::SCHEMA_V8_SQL)
             .map_err(|_| err(VaultErrorKind::Storage))?;
     }
-    tx.execute_batch(candidate::SCHEMA_V9_SQL)
+    if from < CANDIDATE_SCHEMA_VERSION {
+        tx.execute_batch(candidate::SCHEMA_V9_SQL)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+    }
+    if from < HISTORY_SCHEMA_VERSION {
+        tx.execute_batch(history::SCHEMA_V10_SQL)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+    }
+    tx.execute_batch(agents::SCHEMA_V11_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     verify_expected_columns(conn, SCHEMA_VERSION)
@@ -1093,6 +1131,10 @@ fn initialize_new_db(path: &Path, passphrase: &str) -> VaultResult<()> {
     tx.execute_batch(suggestions::SCHEMA_V8_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.execute_batch(candidate::SCHEMA_V9_SQL)
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute_batch(history::SCHEMA_V10_SQL)
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute_batch(agents::SCHEMA_V11_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     close_conn(conn)
@@ -1303,6 +1345,69 @@ fn search_metadata(conn: &Connection, query: &str) -> VaultResult<Vec<ItemSummar
         push_search_match(&mut matches, acc, &needle_lower)?;
     }
     Ok(matches)
+}
+
+/// What an update changes, by name. The values are compared in memory and erased; the
+/// history keeps the names only.
+fn edit_changes(
+    conn: &Connection,
+    item_id: i64,
+    draft: &ItemDraft,
+) -> VaultResult<Vec<EditChange>> {
+    let (title, notes): (String, String) = conn
+        .query_row(
+            "SELECT title, notes FROM item WHERE id = ?1",
+            [item_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    let mut changes = Vec::new();
+    if title != draft.title {
+        changes.push(EditChange::Title);
+    }
+    if notes != draft.notes {
+        changes.push(EditChange::Notes);
+    }
+    if load_tags(conn, item_id)? != draft.tags {
+        changes.push(EditChange::Tags);
+    }
+    let mut stmt = conn
+        .prepare("SELECT name, value, secret FROM item_field WHERE item_id = ?1")
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    let rows = stmt
+        .query_map([item_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                Zeroizing::new(row.get::<_, String>(1)?),
+                row.get::<_, i64>(2)? == 1,
+            ))
+        })
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    let mut old = Vec::new();
+    for row in rows {
+        old.push(row.map_err(|_| err(VaultErrorKind::Storage))?);
+    }
+    let change = |name: &str, secret: bool| {
+        if secret {
+            EditChange::Secret(name.to_owned())
+        } else {
+            EditChange::Field(name.to_owned())
+        }
+    };
+    for field in &draft.fields {
+        match old.iter().find(|(name, _, _)| *name == field.name) {
+            Some((_, value, secret))
+                if value.as_str() == field.value.expose() && *secret == field.secret => {}
+            Some((_, _, secret)) => changes.push(change(&field.name, field.secret || *secret)),
+            None => changes.push(change(&field.name, field.secret)),
+        }
+    }
+    for (name, _, secret) in &old {
+        if !draft.fields.iter().any(|field| field.name == *name) {
+            changes.push(change(name, *secret));
+        }
+    }
+    Ok(changes)
 }
 
 fn load_tags(conn: &Connection, item_id: i64) -> VaultResult<Vec<String>> {

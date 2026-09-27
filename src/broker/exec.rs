@@ -6,6 +6,9 @@
 //! sends a secret. When the main process ends, the broker stops its process
 //! group, so no descendant keeps the secrets after the run. A descendant that
 //! leaves the group is not stopped.
+//!
+//! A proxied run (ADR 0011) also gets the variables of its run proxy, and on macOS
+//! it starts in a Seatbelt profile that lets it connect only to that proxy.
 
 use std::borrow::Cow;
 use std::io::{self, Read};
@@ -29,6 +32,8 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 /// Environment variables copied from the broker process.
 const BASE_ENV: [&str; 6] = ["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG"];
 const DEFAULT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+/// The system Seatbelt front end. Apple marks it deprecated but ships it.
+const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
 /// One environment variable with a secret value. Debug is redacted.
 /// The value is erased on drop.
@@ -54,6 +59,16 @@ pub struct RunOutput {
     pub timed_out: bool,
 }
 
+/// The network of a proxied run (ADR 0011).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Network<'a> {
+    /// Variables that point the process at the run proxy. They replace a secret
+    /// variable with the same name.
+    pub env: &'a [(String, String)],
+    /// A Seatbelt profile for the process and its children (macOS).
+    pub sandbox_profile: Option<&'a str>,
+}
+
 /// Run `command` in `cwd`. `command[0]` is the program. The caller validates the input.
 pub fn run(
     command: &[String],
@@ -62,10 +77,46 @@ pub fn run(
     secrets: &[SecretEnv],
     timeout: Duration,
 ) -> io::Result<RunOutput> {
+    run_with(
+        command,
+        cwd,
+        path,
+        secrets,
+        &[],
+        Network::default(),
+        timeout,
+    )
+}
+
+/// Run `command` with a network setup. `masks` are more values that the output
+/// must not show, for example the real values behind placeholders.
+pub fn run_with(
+    command: &[String],
+    cwd: &Path,
+    path: Option<&str>,
+    secrets: &[SecretEnv],
+    masks: &[SecretEnv],
+    network: Network<'_>,
+    timeout: Duration,
+) -> io::Result<RunOutput> {
     let (program, args) = command
         .split_first()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty command"))?;
-    let mut cmd = Command::new(program);
+    let mut cmd = match network.sandbox_profile {
+        Some(profile) => {
+            // sandbox-exec would read a program name that starts with `-` as an option.
+            if program.starts_with('-') {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "program name starts with -",
+                ));
+            }
+            let mut cmd = Command::new(SANDBOX_EXEC);
+            cmd.arg("-p").arg(profile).arg(program);
+            cmd
+        }
+        None => Command::new(program),
+    };
     cmd.args(args)
         .current_dir(cwd)
         .env_clear()
@@ -85,6 +136,9 @@ pub fn run(
     );
     for secret in secrets {
         cmd.env(&secret.name, secret.value.as_str());
+    }
+    for (name, value) in network.env {
+        cmd.env(name, value);
     }
     let spawned = cmd.spawn();
     // The command keeps a copy of each value. The standard library cannot erase
@@ -114,8 +168,9 @@ pub fn run(
     // keeps the secrets in its environment, and a same-user process can read that
     // environment (key-memory review K12, F11). So stop the group.
     stop_group(&mut child);
-    let masked_out = mask_output(&out, secrets);
-    let masked_err = mask_output(&err, secrets);
+    let all: Vec<&SecretEnv> = secrets.iter().chain(masks).collect();
+    let masked_out = mask_output(&out, &all);
+    let masked_err = mask_output(&err, &all);
     // The raw output can contain a secret. Only the masked text leaves.
     out.zeroize();
     err.zeroize();
@@ -181,11 +236,11 @@ fn stop_group(child: &mut Child) {
 }
 
 /// Mask raw output. A lossy UTF-8 copy can contain a secret, so it is erased.
-fn mask_output(raw: &[u8], secrets: &[SecretEnv]) -> String {
+fn mask_output(raw: &[u8], secrets: &[&SecretEnv]) -> String {
     match String::from_utf8_lossy(raw) {
-        Cow::Borrowed(text) => mask(text, secrets),
+        Cow::Borrowed(text) => mask_all(text, secrets),
         Cow::Owned(mut text) => {
-            let masked = mask(&text, secrets);
+            let masked = mask_all(&text, secrets);
             text.zeroize();
             masked
         }
@@ -195,8 +250,14 @@ fn mask_output(raw: &[u8], secrets: &[SecretEnv]) -> String {
 /// Replace each secret value with `[apassy:NAME]`. Longer values go first.
 /// Each intermediate text can still contain a later secret, so it is erased.
 pub fn mask(text: &str, secrets: &[SecretEnv]) -> String {
+    let all: Vec<&SecretEnv> = secrets.iter().collect();
+    mask_all(text, &all)
+}
+
+fn mask_all(text: &str, secrets: &[&SecretEnv]) -> String {
     let mut ordered: Vec<&SecretEnv> = secrets
         .iter()
+        .copied()
         .filter(|secret| secret.value.len() >= MIN_MASK_BYTES)
         .collect();
     ordered.sort_by_key(|secret| std::cmp::Reverse(secret.value.len()));

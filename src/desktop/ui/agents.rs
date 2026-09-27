@@ -1,0 +1,787 @@
+//! Agents: the list, one agent with its access, and the token sheets (vault build).
+//!
+//! An agent uses a credential through the Apassy broker (ADR 0004). The list shows
+//! each agent and its token state. The agent page shows its token, its process access
+//! for each credential with an environment variable, and its API operations.
+
+use eframe::egui::{self, Align, Layout};
+
+use super::kit::{self, Font, Icon, Size, Style, Tone};
+use super::{Sheet, ask_owner_from_sheet, close_sheet};
+use crate::desktop::owner_check::OwnerRequest;
+use crate::desktop::owner_store::{FreshToken, RuleForm, format_utc};
+use crate::desktop::{DesktopApp, OwnerView};
+use crate::vault::{AgentSummary, ExecMode};
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// The date part of a UTC time.
+fn date(unix: u64) -> String {
+    format_utc(unix)
+        .split(' ')
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    match app.owner_ui.selected_agent {
+        Some(agent_id) => draw_agent(app, ui, agent_id),
+        None => draw_list(app, ui),
+    }
+}
+
+fn status(agent: &AgentSummary, now: u64) -> (&'static str, Tone) {
+    if agent.revoked {
+        ("Revoked", Tone::Neutral)
+    } else if agent.token_expired_at(now) {
+        ("Token expired", Tone::Critical)
+    } else {
+        ("Active", Tone::Good)
+    }
+}
+
+fn draw_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    let agents = match app.owner_ui.session.agents() {
+        Ok(agents) => agents,
+        Err(err) => {
+            kit::tone_note(ui, err.message, Tone::Critical);
+            return;
+        }
+    };
+    let mut register = false;
+    kit::page_header(
+        ui,
+        "Agents",
+        Some("An agent uses a credential through Apassy. It never receives the secret value."),
+        |ui| {
+            register = kit::button_with(
+                ui,
+                Some(Icon::Plus),
+                "Register",
+                Style::Prominent,
+                Size::Regular,
+            )
+            .clicked();
+        },
+    );
+    let now = now();
+    let (revoked, active): (Vec<_>, Vec<_>) = agents.into_iter().partition(|agent| agent.revoked);
+    if active.is_empty() && revoked.is_empty() {
+        register |= kit::empty_state(
+            ui,
+            Icon::Person,
+            "No agents yet",
+            "Register each agent host, such as Claude Code or Codex. Apassy gives it a token for the Apassy MCP server.",
+            Some("Register agent"),
+        );
+    }
+    let mut open = None;
+    if !active.is_empty() {
+        kit::section(ui, None, None, |s| {
+            for agent in &active {
+                let (label, tone) = status(agent, now);
+                let subtitle = if agent.token_expired_at(now) {
+                    format!(
+                        "The token expired on {}. Rotate it.",
+                        date(agent.token_expires_at)
+                    )
+                } else {
+                    format!("Token until {}", date(agent.token_expires_at))
+                };
+                let detail = kit::text(label, Font::Callout).color(tone.text());
+                if s.nav(
+                    Some((Icon::Person, kit::ACCENT)),
+                    &agent.name,
+                    Some(&subtitle),
+                    Some(detail),
+                )
+                .clicked()
+                {
+                    open = Some(agent.id);
+                }
+            }
+        });
+    }
+    if !revoked.is_empty() {
+        let mut expanded = app.ui.is_expanded("revoked-agents");
+        if kit::disclosure(
+            ui,
+            &mut expanded,
+            &format!("Revoked agents ({})", revoked.len()),
+        )
+        .changed()
+        {
+            app.ui.set_expanded("revoked-agents", expanded);
+        }
+        if expanded {
+            ui.add_space(4.0);
+            kit::section(ui, None, Some("A revoked token does not work."), |s| {
+                for agent in &revoked {
+                    s.labeled(
+                        &agent.name,
+                        kit::text(
+                            format!("Registered {}", date(agent.created_at)),
+                            Font::Callout,
+                        )
+                        .color(kit::SECONDARY),
+                    );
+                }
+            });
+        }
+    }
+    if let Some(agent_id) = open {
+        app.owner_ui.selected_agent = Some(agent_id);
+    }
+    if register {
+        app.owner_ui.new_agent_name.clear();
+        app.ui.sheet = Some(Sheet::RegisterAgent);
+    }
+}
+
+fn draw_agent(app: &mut DesktopApp, ui: &mut egui::Ui, agent_id: u64) {
+    if kit::back_link(ui, "Agents") {
+        app.owner_ui.selected_agent = None;
+        return;
+    }
+    let Some(agent) = app
+        .owner_ui
+        .session
+        .agents()
+        .ok()
+        .and_then(|agents| agents.into_iter().find(|agent| agent.id == agent_id))
+    else {
+        app.owner_ui.selected_agent = None;
+        return;
+    };
+    let now = now();
+    let (label, tone) = status(&agent, now);
+    ui.horizontal(|ui| {
+        kit::icon_tile_sized(ui, Icon::Person, kit::ACCENT, 40.0);
+        ui.add_space(4.0);
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.label(kit::text(&agent.name, Font::Title).color(kit::LABEL));
+            ui.label(
+                kit::text(
+                    format!("Registered {}", date(agent.created_at)),
+                    Font::Callout,
+                )
+                .color(kit::SECONDARY),
+            );
+        });
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            kit::tag(ui, label, tone);
+        });
+    });
+    ui.add_space(20.0);
+    if agent.revoked {
+        kit::notice(
+            ui,
+            Tone::Neutral,
+            "Revoked. The token does not work.",
+            Some("Register the agent again to give it a new token."),
+            |_| {},
+        );
+        return;
+    }
+    token_section(app, ui, &agent, now);
+    process_access_section(app, ui, &agent);
+    operations_section(app, ui, agent_id);
+    let requests = app
+        .owner_ui
+        .session
+        .agent_activity(agent_id, crate::vault::MAX_ACTIVITY_ROWS)
+        .unwrap_or_default();
+    super::timeline::access_timeline(
+        app,
+        ui,
+        &requests,
+        &format!("agent-access-{agent_id}"),
+        "Recent requests",
+        "This agent did not send a request yet.",
+        true,
+    );
+    let mut revoke = false;
+    kit::section(ui, None, None, |s| {
+        revoke = s
+            .clickable_row(|ui| {
+                ui.label(kit::text("Revoke agent…", Font::Body).color(Tone::Critical.text()));
+            })
+            .clicked();
+    });
+    if revoke {
+        app.ui.sheet = Some(Sheet::RevokeAgent {
+            agent_id,
+            name: agent.name.clone(),
+        });
+    }
+}
+
+/// The token expiry and rotation (goal item P1).
+fn token_section(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary, now: u64) {
+    let lifetime = app.owner_ui.session.token_lifetime_days().ok();
+    let footer = lifetime
+        .map(|days| format!("Token lifetime: {days} days after issue. You change it in Settings."));
+    let mut rotate = false;
+    kit::section(ui, Some("Token"), footer.as_deref(), |s| {
+        let expired = agent.token_expired_at(now);
+        let (value, tone) = if expired {
+            (
+                format!(
+                    "The token expired on {}. The agent gets token_expired.",
+                    format_utc(agent.token_expires_at)
+                ),
+                Tone::Critical,
+            )
+        } else {
+            (
+                format!(
+                    "The token expires on {}.",
+                    format_utc(agent.token_expires_at)
+                ),
+                Tone::Neutral,
+            )
+        };
+        s.labeled("Expiry", kit::text(value, Font::Callout).color(tone.text()));
+        s.row(|ui| {
+            egui::Sides::new().shrink_left().wrap().show(
+                ui,
+                |ui| {
+                    kit::note(ui, "A new token replaces the old one at once.");
+                },
+                |ui| {
+                    rotate = kit::small_button(ui, "Rotate token…", Style::Bordered).clicked();
+                },
+            );
+        });
+    });
+    if rotate {
+        let ctx = ui.ctx().clone();
+        app.ask_owner(
+            OwnerRequest::RotateToken {
+                agent_id: agent.id,
+                agent_name: agent.name.clone(),
+            },
+            Some(&ctx),
+        );
+    }
+}
+
+/// Process access for one agent: one row per credential with a variable.
+fn process_access_section(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary) {
+    let items = match app.owner_ui.session.env_bound_items() {
+        Ok(items) => items,
+        Err(err) => {
+            kit::tone_note(ui, err.message, Tone::Critical);
+            return;
+        }
+    };
+    let grants = app
+        .owner_ui
+        .session
+        .exec_grants(agent.id)
+        .unwrap_or_default();
+    let mut open = None;
+    let mut go_to_credentials = false;
+    kit::section(
+        ui,
+        Some("Process access"),
+        Some(
+            "The agent can ask Apassy to run a command with the secret in its environment, in one project folder.",
+        ),
+        |s| {
+            if items.is_empty() {
+                s.row(|ui| {
+                    kit::note(
+                        ui,
+                        "No credential has an environment variable yet. Open a credential and set one under Agent access.",
+                    );
+                    go_to_credentials =
+                        kit::small_button(ui, "Go to Credentials", Style::Link).clicked();
+                });
+                return;
+            }
+            for (item_id, item_name, env_name) in &items {
+                let grant = grants.iter().find(|grant| grant.item_id == *item_id);
+                let (detail, tone) = match grant.map(|grant| grant.mode) {
+                    Some(ExecMode::Ask) => ("Asks you each time", Tone::Accent),
+                    Some(ExecMode::Bouncer) => ("Bouncer decides", Tone::Good),
+                    None => ("Off", Tone::Neutral),
+                };
+                let subtitle = match grant {
+                    Some(grant) => format!("{env_name} · {}", grant.project_dir),
+                    None => env_name.clone(),
+                };
+                let terminal = (Icon::Terminal, egui::Color32::from_rgb(88, 86, 214));
+                if s.nav(
+                    Some(terminal),
+                    item_name,
+                    Some(&subtitle),
+                    Some(kit::text(detail, Font::Callout).color(tone.text())),
+                )
+                .clicked()
+                {
+                    let mode = grant.map_or(ExecMode::Ask, |grant| grant.mode);
+                    open = Some((*item_id, mode, grant.cloned()));
+                }
+            }
+        },
+    );
+    if go_to_credentials {
+        app.view = OwnerView::Vault;
+    }
+    if let Some((item_id, mode, grant)) = open {
+        let key = (agent.id, item_id);
+        let dir = grant
+            .as_ref()
+            .map(|grant| grant.project_dir.clone())
+            .unwrap_or_default();
+        app.owner_ui.exec_dir_inputs.insert(key, dir);
+        match &grant {
+            Some(grant) => {
+                app.owner_ui
+                    .rule_inputs
+                    .insert(key, RuleForm::from_rule(&grant.rule, now()));
+            }
+            None => {
+                app.owner_ui.rule_inputs.remove(&key);
+            }
+        }
+        app.ui.sheet = Some(Sheet::ProcessAccess {
+            agent_id: agent.id,
+            item_id,
+            mode,
+        });
+    }
+}
+
+/// Connector operations as switches. A new grant needs the owner check.
+fn operations_section(app: &mut DesktopApp, ui: &mut egui::Ui, agent_id: u64) {
+    let Ok(connectors) = app.owner_ui.session.connectors() else {
+        return;
+    };
+    if connectors.is_empty() {
+        return;
+    }
+    let granted = app.owner_ui.session.grants(agent_id).unwrap_or_default();
+    let mut allow = None;
+    let mut remove = None;
+    kit::section(
+        ui,
+        Some("API operations"),
+        Some("Apassy calls the API for the agent and adds the token. The agent never receives it."),
+        |s| {
+            for row in &connectors {
+                for (operation, description) in &row.operations {
+                    let was = granted.contains(&(row.item_id, (*operation).to_owned()));
+                    let mut allowed = was;
+                    let title = format!("{} · {operation}", row.item_name);
+                    s.toggle(&title, Some(description), &mut allowed);
+                    if allowed && !was {
+                        allow = Some((row.item_id, (*operation).to_owned()));
+                    } else if !allowed && was {
+                        remove = Some((row.item_id, *operation));
+                    }
+                }
+            }
+        },
+    );
+    if let Some((item_id, operation)) = allow {
+        // A new grant needs an owner check (goal item A4).
+        let ctx = ui.ctx().clone();
+        app.ask_owner(
+            OwnerRequest::AllowOperation {
+                agent_id,
+                item_id,
+                operation,
+            },
+            Some(&ctx),
+        );
+    }
+    if let Some((item_id, operation)) = remove {
+        // A removal only takes authority away.
+        let result = app
+            .owner_ui
+            .session
+            .remove_operation(agent_id, item_id, operation);
+        let _ = app.apply(result, &format!("The agent can no longer use {operation}."));
+    }
+}
+
+// ---- Sheets. ----
+
+pub(super) fn register_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
+    let mut register = false;
+    let mut cancel = false;
+    let response = kit::sheet(ctx, "register-agent", 440.0, |ui| {
+        kit::sheet_title(
+            ui,
+            "Register an agent",
+            Some(
+                "Give each agent host its own name, for example Claude Code or Codex. Apassy then shows its token one time.",
+            ),
+        );
+        kit::section(ui, None, None, |s| {
+            let field = s.field("Name", |ui| {
+                kit::text_input(
+                    ui,
+                    &mut app.owner_ui.new_agent_name,
+                    "agent-name",
+                    "Claude Code",
+                )
+            });
+            if field.lost_focus() && field.ctx.input(|input| input.key_pressed(egui::Key::Enter)) {
+                register = true;
+            }
+        });
+        kit::sheet_buttons(
+            ui,
+            |_| {},
+            |ui| {
+                register |= kit::button(ui, "Register", Style::Prominent)
+                    .on_hover_text("⌘S")
+                    .clicked();
+                cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
+            },
+        );
+    });
+    register |= super::save_pressed(app, ctx);
+    if register {
+        let name = app.owner_ui.new_agent_name.clone();
+        match app.owner_ui.session.register_agent(&name) {
+            Ok((agent, token)) => {
+                app.owner_ui.new_agent_name.clear();
+                app.owner_ui.selected_agent = Some(agent.id);
+                app.owner_ui.fresh_token = Some(FreshToken {
+                    agent_name: agent.name.clone(),
+                    token,
+                    rotated: false,
+                });
+                app.ui.sheet = None;
+                app.view = OwnerView::Agents;
+                app.set_ok(format!("{} is registered. Save its token now.", agent.name));
+            }
+            Err(err) => app.set_err(err.message),
+        }
+    }
+    if cancel {
+        close_sheet(app, ctx);
+    }
+    response.escape
+}
+
+fn adapter_path() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("apassy-mcp")))
+        .map_or_else(
+            || "apassy-mcp".to_owned(),
+            |path| path.display().to_string(),
+        )
+}
+
+/// A new token after a registration or a rotation. Apassy shows it one time. Escape
+/// does not close this sheet: only "I saved the token" does.
+pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
+    let Some(fresh) = &app.owner_ui.fresh_token else {
+        return;
+    };
+    let (title, intro) = if fresh.rotated {
+        (
+            format!("New token for {}", fresh.agent_name),
+            "The old token does not work now. Apassy shows the new token one time. Select the text and copy it.",
+        )
+    } else {
+        (
+            format!("Token for {}", fresh.agent_name),
+            "Apassy shows this token one time. Select the text and copy it.",
+        )
+    };
+    let token = fresh.token.expose();
+    let mut dismiss = false;
+    kit::sheet(ctx, "fresh-token", 580.0, |ui| {
+        kit::sheet_title(ui, &title, Some(intro));
+        ui.label(kit::text("Token", Font::Headline).color(kit::LABEL));
+        kit::code_block(ui, token, 1);
+        ui.add_space(12.0);
+        ui.label(kit::text("MCP server configuration", Font::Headline).color(kit::LABEL));
+        let config = format!(
+            "{{\n  \"mcpServers\": {{\n    \"apassy\": {{\n      \"command\": \"{}\",\n      \"env\": {{ \"APASSY_AGENT_TOKEN\": \"{}\" }}\n    }}\n  }}\n}}",
+            adapter_path(),
+            token
+        );
+        kit::code_block(ui, &config, 7);
+        kit::note(
+            ui,
+            "Add this server to the agent host. For Claude Code, set MCP_TOOL_TIMEOUT higher than 120000.",
+        );
+        ui.add_space(8.0);
+        kit::sheet_buttons(
+            ui,
+            |_| {},
+            |ui| {
+                dismiss = kit::button(ui, "I saved the token", Style::Prominent).clicked();
+            },
+        );
+    });
+    if dismiss {
+        app.owner_ui.fresh_token = None;
+        app.set_ok("The token is hidden. Apassy cannot show it again.");
+    }
+}
+
+pub(super) fn revoke_sheet(
+    app: &mut DesktopApp,
+    ctx: &egui::Context,
+    agent_id: u64,
+    name: &str,
+) -> bool {
+    let mut revoke = false;
+    let mut cancel = false;
+    let response = kit::sheet(ctx, "revoke-agent", 400.0, |ui| {
+        kit::sheet_title(
+            ui,
+            &format!("Revoke {name}?"),
+            Some(
+                "Its token stops working at once, and its grants end. You can register the agent again later.",
+            ),
+        );
+        kit::sheet_buttons(
+            ui,
+            |_| {},
+            |ui| {
+                revoke = kit::button(ui, "Revoke", Style::DestructiveProminent).clicked();
+                cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
+            },
+        );
+    });
+    if revoke {
+        let message = format!("{name} is revoked. Its token does not work.");
+        let result = app.owner_ui.session.revoke_agent(agent_id);
+        if app.apply(result, &message).is_some() {
+            app.ui.sheet = None;
+        }
+    }
+    if cancel {
+        close_sheet(app, ctx);
+    }
+    response.escape
+}
+
+/// Process access for one agent and one credential, with its optional rule (ADR 0007).
+pub(super) fn access_sheet(
+    app: &mut DesktopApp,
+    ctx: &egui::Context,
+    agent_id: u64,
+    item_id: u64,
+    mode: ExecMode,
+) -> bool {
+    let session = &app.owner_ui.session;
+    let agent_name = session
+        .agents()
+        .ok()
+        .and_then(|agents| agents.into_iter().find(|agent| agent.id == agent_id))
+        .map(|agent| agent.name)
+        .unwrap_or_default();
+    let Some((_, item_name, env_name)) = session
+        .env_bound_items()
+        .ok()
+        .and_then(|items| items.into_iter().find(|(id, _, _)| *id == item_id))
+    else {
+        app.ui.sheet = None;
+        return false;
+    };
+    let grant = session
+        .exec_grants(agent_id)
+        .ok()
+        .and_then(|grants| grants.into_iter().find(|grant| grant.item_id == item_id));
+    let key = (agent_id, item_id);
+    let mut chosen = mode;
+    let mut save = false;
+    let mut remove = false;
+    let mut save_rule = false;
+    let mut cancel = false;
+    let response = kit::sheet(ctx, "process-access", 560.0, |ui| {
+        kit::sheet_title(
+            ui,
+            &format!("{item_name} for {agent_name}"),
+            Some(&format!(
+                "The agent can run a command with {env_name} in its environment, in this project folder only."
+            )),
+        );
+        kit::sheet_body(ui, |ui| {
+            let footer = match chosen {
+                ExecMode::Ask => {
+                    "You approve each run with your passphrase. Start here for a new project."
+                }
+                ExecMode::Bouncer => {
+                    "The bouncer decides from your declarations and rules. A risky run waits for you. A production run always waits for you."
+                }
+            };
+            kit::section(ui, None, Some(footer), |s| {
+                let dir = app.owner_ui.exec_dir_inputs.entry(key).or_default();
+                s.field("Project folder", |ui| {
+                    kit::text_input(ui, dir, "exec-dir", "/Users/you/Dev/project")
+                });
+                s.field("Decision", |ui| {
+                    kit::segmented(
+                        ui,
+                        ("exec-mode", agent_id, item_id),
+                        &mut chosen,
+                        &[
+                            (ExecMode::Ask, "Ask me each time"),
+                            (ExecMode::Bouncer, "Bouncer decides"),
+                        ],
+                    )
+                });
+            });
+            if let Some(grant) = &grant {
+                let rule_key = format!("rule-{agent_id}-{item_id}");
+                let mut open = app.ui.is_expanded(&rule_key);
+                if kit::disclosure(ui, &mut open, "Rule").changed() {
+                    app.ui.set_expanded(&rule_key, open);
+                }
+                if open {
+                    ui.add_space(6.0);
+                    let form = app
+                        .owner_ui
+                        .rule_inputs
+                        .entry(key)
+                        .or_insert_with(|| RuleForm::from_rule(&grant.rule, now()));
+                    save_rule = rule_form(ui, form);
+                }
+            }
+        });
+        kit::sheet_buttons(
+            ui,
+            |ui| {
+                if grant.is_some() {
+                    remove = kit::button(ui, "Remove access", Style::Destructive).clicked();
+                }
+            },
+            |ui| {
+                save = kit::button(ui, "Save", Style::Prominent)
+                    .on_hover_text("⌘S")
+                    .clicked();
+                cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
+            },
+        );
+    });
+    if chosen != mode {
+        app.ui.sheet = Some(Sheet::ProcessAccess {
+            agent_id,
+            item_id,
+            mode: chosen,
+        });
+    }
+    save |= super::save_pressed(app, ctx);
+    if save {
+        let project_dir = app
+            .owner_ui
+            .exec_dir_inputs
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        // A new or changed grant needs an owner check (goal item A4).
+        ask_owner_from_sheet(
+            app,
+            OwnerRequest::SetProcessAccess {
+                agent_id,
+                item_id,
+                project_dir,
+                mode: chosen,
+            },
+            ctx,
+        );
+    }
+    if save_rule && let Some(form) = app.owner_ui.rule_inputs.get(&key).cloned() {
+        match form.to_rule(now()) {
+            // A rule change needs an owner check (goal item A4).
+            Ok(rule) => ask_owner_from_sheet(
+                app,
+                OwnerRequest::SaveRule {
+                    agent_id,
+                    item_id,
+                    rule,
+                },
+                ctx,
+            ),
+            Err(message) => app.set_err(message),
+        }
+    }
+    if remove {
+        let result = app.owner_ui.session.remove_exec_grant(agent_id, item_id);
+        if app.apply(result, "Process access is removed.").is_some() {
+            app.ui.sheet = None;
+        }
+    }
+    if cancel {
+        close_sheet(app, ctx);
+    }
+    response.escape
+}
+
+/// The rule of one process grant. Returns true on "Save rule".
+fn rule_form(ui: &mut egui::Ui, form: &mut RuleForm) -> bool {
+    kit::section(
+        ui,
+        Some("Hard limits"),
+        Some(
+            "Apassy checks hard limits before the bouncer. A request that fails a hard limit is denied.",
+        ),
+        |s| {
+            s.row(|ui| {
+                ui.label(kit::text("Allowed command prefixes", Font::Body).color(kit::LABEL));
+                kit::note(ui, "One per line. Empty permits any command.");
+                kit::text_area(
+                    ui,
+                    &mut form.prefixes,
+                    "rule-prefixes",
+                    "npm run migrate\nnpm test",
+                    2,
+                );
+            });
+            s.row(|ui| {
+                ui.label(kit::text("Forbidden words", Font::Body).color(kit::LABEL));
+                kit::note(ui, "One per line.");
+                kit::text_area(
+                    ui,
+                    &mut form.forbidden,
+                    "rule-forbidden",
+                    "prod\n--force",
+                    2,
+                );
+            });
+            s.field("Expires after", |ui| {
+                let field = kit::number_input(ui, &mut form.expires_hours, "rule-expiry", "never");
+                ui.label(kit::text("hours", Font::Body).color(kit::SECONDARY));
+                field
+            });
+            s.field("Runs per hour", |ui| {
+                kit::number_input(ui, &mut form.max_runs, "rule-runs", "no limit")
+            });
+        },
+    );
+    kit::section(
+        ui,
+        Some("Your instruction"),
+        Some("In plain words. The bouncer checks each request against it."),
+        |s| {
+            s.row(|ui| {
+                kit::text_area(
+                    ui,
+                    &mut form.instruction,
+                    "rule-instruction",
+                    "Only run migrations and tests on staging. Never print or send keys.",
+                    2,
+                );
+            });
+        },
+    );
+    kit::button(ui, "Save rule", Style::Bordered).clicked()
+}

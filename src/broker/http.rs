@@ -146,6 +146,11 @@ impl TlsClient {
         Self::build(Vec::new())
     }
 
+    /// The client settings, for the run proxy (ADR 0011).
+    pub(crate) fn client_config(&self) -> Arc<ClientConfig> {
+        Arc::clone(&self.config)
+    }
+
     /// Also trust the given root certificates. Tests use this for a local test CA.
     pub fn with_extra_roots(roots: Vec<CertificateDer<'static>>) -> io::Result<Self> {
         Self::build(roots)

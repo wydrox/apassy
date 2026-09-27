@@ -5,6 +5,7 @@
 
 #[cfg(feature = "vault")]
 pub mod inbox;
+#[cfg(feature = "vault")]
 mod learning_ui;
 pub mod model;
 #[cfg(feature = "vault")]
@@ -21,47 +22,69 @@ use eframe::egui;
 
 pub use model::{
     ActiveRule, ActivityEvent, AgentRecord, Clause, CopyDemo, DEMO_BANNER, DemoAlert, DemoRequest,
-    DemoScenario, DesktopModel, DraftStatus, ExtraField, FoundationStatus, INTERPRETER_ID,
-    ItemDetails, ItemDraft, ItemSummary, MASKED_VALUE, ModelError, ModelResult, OTHER_AGENT_ID,
-    REPORTING_AGENT_ID, REPORTING_ITEM_ID, RequestStatus, SAMPLE_RULE_TEXT,
+    DemoScenario, DesktopModel, DetailDraft, DraftStatus, ExtraField, FoundationStatus,
+    INTERPRETER_ID, ItemDetails, ItemDraft, ItemSummary, MASKED_VALUE, ModelError, ModelResult,
+    OTHER_AGENT_ID, REPORTING_AGENT_ID, REPORTING_ITEM_ID, RequestStatus, SAMPLE_RULE_TEXT,
 };
 
 /// Owner views in the desktop shell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OwnerView {
+    /// The list of credentials.
     Vault,
+    /// One credential.
     Item,
+    /// The fixture rule interpreter of the demo build.
+    #[cfg(not(feature = "vault"))]
     Rules,
     Agents,
     Activity,
     /// Ask rate, automatic decisions, patterns, and calibration (ADR 0009, goal item B10).
+    #[cfg(feature = "vault")]
     Learning,
+    /// Vault file, passphrase, backup, notifications, and the broker.
+    #[cfg(feature = "vault")]
+    Settings,
 }
 
 impl OwnerView {
+    #[cfg(feature = "vault")]
     pub const ALL: [Self; 6] = [
+        Self::Vault,
+        Self::Item,
+        Self::Agents,
+        Self::Activity,
+        Self::Learning,
+        Self::Settings,
+    ];
+    #[cfg(not(feature = "vault"))]
+    pub const ALL: [Self; 5] = [
         Self::Vault,
         Self::Item,
         Self::Rules,
         Self::Agents,
         Self::Activity,
-        Self::Learning,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Vault => "Vault",
-            Self::Item => "Item details",
+            Self::Vault => "Credentials",
+            Self::Item => "Credential",
+            #[cfg(not(feature = "vault"))]
             Self::Rules => "Rules",
             Self::Agents => "Agents",
             Self::Activity => "Activity",
+            #[cfg(feature = "vault")]
             Self::Learning => "Learning",
+            #[cfg(feature = "vault")]
+            Self::Settings => "Settings",
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatusKind {
+    /// Information, for example a cancelled owner check.
     Neutral,
     Ok,
     Error,
@@ -75,10 +98,18 @@ pub struct DesktopApp {
     pub(crate) search: String,
     pub(crate) status_text: String,
     pub(crate) status_kind: StatusKind,
+    /// Grows with each status message. The toast shows each message once.
+    pub(crate) status_seq: u64,
+    /// Navigation and sheet state of the drawing code.
+    pub(crate) ui: ui::UiState,
     pub(crate) add_form: ItemDraft,
     pub(crate) edit_form: ItemDraft,
     pub(crate) pending_delete: bool,
+    /// The rule editor text of the demo build.
+    #[cfg(not(feature = "vault"))]
     pub(crate) rule_text: String,
+    /// The demo request of the demo build.
+    #[cfg(not(feature = "vault"))]
     pub(crate) scenario: DemoScenario,
     #[cfg(feature = "vault")]
     pub(crate) owner_ui: owner_store::OwnerUiState,
@@ -120,12 +151,16 @@ impl DesktopApp {
             view: OwnerView::Vault,
             selected_item_id: None,
             search: String::new(),
-            status_text: initial_status(),
+            status_text: String::new(),
             status_kind: StatusKind::Neutral,
+            status_seq: 0,
+            ui: ui::UiState::default(),
             add_form: ItemDraft::default(),
             edit_form: ItemDraft::default(),
             pending_delete: false,
+            #[cfg(not(feature = "vault"))]
             rule_text: String::new(),
+            #[cfg(not(feature = "vault"))]
             scenario: DemoScenario::Normal,
             #[cfg(feature = "vault")]
             owner_ui: owner_store::OwnerUiState::default(),
@@ -149,8 +184,23 @@ impl DesktopApp {
             // The notification center sets the notifier of the approval queue. It
             // wakes its watcher and repaints the window when a run starts to wait.
             app.start_native(&cc.egui_ctx);
+            app.open_default_vault(&cc.egui_ctx);
         }
         app
+    }
+
+    /// Open the vault file at the default location, locked, when it exists. The
+    /// window then starts on the unlock screen.
+    #[cfg(feature = "vault")]
+    fn open_default_vault(&mut self, ctx: &egui::Context) {
+        let path = ui::default_vault_path();
+        if !path.is_file() {
+            return;
+        }
+        if self.owner_ui.session.open_file(&path).is_ok() {
+            self.owner_ui.open_path = path.display().to_string();
+            self.refresh_unlock_setting(Some(ctx));
+        }
     }
 
     /// Start the agent broker on `socket`. It shares the owner vault slot.
@@ -184,13 +234,22 @@ impl DesktopApp {
     }
 
     pub(crate) fn set_ok(&mut self, message: impl Into<String>) {
-        self.status_text = message.into();
-        self.status_kind = StatusKind::Ok;
+        self.set_status(message.into(), StatusKind::Ok);
     }
 
     pub(crate) fn set_err(&mut self, message: impl Into<String>) {
-        self.status_text = message.into();
-        self.status_kind = StatusKind::Error;
+        self.set_status(message.into(), StatusKind::Error);
+    }
+
+    /// A message that is neither a result nor an error, for example a cancel.
+    pub(crate) fn set_note(&mut self, message: impl Into<String>) {
+        self.set_status(message.into(), StatusKind::Neutral);
+    }
+
+    fn set_status(&mut self, message: String, kind: StatusKind) {
+        self.status_text = message;
+        self.status_kind = kind;
+        self.status_seq += 1;
     }
 
     pub(crate) fn apply<T>(&mut self, result: ModelResult<T>, ok: &str) -> Option<T> {
@@ -210,6 +269,7 @@ impl DesktopApp {
     pub(crate) fn select_item(&mut self, id: String) {
         self.selected_item_id = Some(id.clone());
         self.pending_delete = false;
+        self.ui.sheet = None;
         if let Ok(details) = self.model.item_details(&id)
             && !details.hidden
         {
@@ -221,6 +281,7 @@ impl DesktopApp {
     #[cfg(feature = "vault")]
     pub(crate) fn select_item(&mut self, id: String) {
         self.pending_delete = false;
+        self.ui.sheet = None;
         self.view = OwnerView::Item;
         self.owner_ui.edit_secrets.clear();
         if let Ok(parsed) = id.parse::<u64>()
@@ -234,6 +295,10 @@ impl DesktopApp {
                 .as_ref()
                 .map(|binding| binding.env_name.clone())
                 .unwrap_or_default();
+            self.owner_ui.env_placeholder_input = matches!(
+                binding.as_ref().map(|binding| &binding.delivery),
+                Some(crate::vault::EnvDelivery::Placeholder(_))
+            );
             self.owner_ui.env_field_input =
                 binding.map(|binding| binding.field).unwrap_or_default();
             // The stored declaration, or the suggestion from the item (goal item B4).
@@ -254,6 +319,7 @@ impl DesktopApp {
         self.selected_item_id = Some(id);
     }
 
+    #[cfg(not(feature = "vault"))]
     pub(crate) fn reset_demo(&mut self) {
         let result = self.model.reset();
         if self
@@ -271,6 +337,7 @@ impl DesktopApp {
             self.pending_delete = false;
             self.rule_text.clear();
             self.scenario = DemoScenario::Normal;
+            self.ui.sheet = None;
         }
     }
 }
@@ -288,7 +355,7 @@ impl eframe::App for DesktopApp {
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        egui::Color32::from_rgb(243, 239, 230).to_normalized_gamma_f32()
+        ui::WINDOW_COLOR.to_normalized_gamma_f32()
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -300,12 +367,18 @@ impl eframe::App for DesktopApp {
     }
 }
 
-/// Native window options. Persistence is off.
+/// Native window options. Persistence is off. The title bar is transparent, and the
+/// sidebar runs under it, as in a SwiftUI `NavigationSplitView`.
 pub fn native_options() -> eframe::NativeOptions {
     let mut native_options = eframe::NativeOptions::default();
-    native_options.viewport.inner_size = Some(egui::Vec2::new(1280.0, 840.0));
-    native_options.viewport.min_inner_size = Some(egui::Vec2::new(960.0, 640.0));
-    native_options.viewport.title = Some("Apassy".to_owned());
+    native_options.viewport = native_options
+        .viewport
+        .with_inner_size(egui::Vec2::new(1180.0, 800.0))
+        .with_min_inner_size(egui::Vec2::new(900.0, 600.0))
+        .with_title("Apassy")
+        .with_fullsize_content_view(true)
+        .with_titlebar_shown(false)
+        .with_title_shown(false);
     native_options.persist_window = false;
     native_options.centered = true;
     native_options
@@ -480,19 +553,6 @@ pub fn smoke_test() -> Result<(), String> {
     Ok(())
 }
 
-fn initial_status() -> String {
-    #[cfg(feature = "vault")]
-    {
-        format!(
-            "{DEMO_BANNER} The vault is locked. No vault file is open. Item details are hidden."
-        )
-    }
-    #[cfg(not(feature = "vault"))]
-    {
-        format!("{DEMO_BANNER} The vault starts locked. Open vault is not authentication.")
-    }
-}
-
 #[cfg(not(feature = "vault"))]
 fn draft_from_details(details: &ItemDetails) -> ItemDraft {
     ItemDraft {
@@ -506,5 +566,6 @@ fn draft_from_details(details: &ItemDetails) -> ItemDraft {
         database_name: details.database_name.clone(),
         field_name: details.field_name.clone(),
         public_label: details.public_label.clone(),
+        details: Vec::new(),
     }
 }

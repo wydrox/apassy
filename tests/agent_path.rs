@@ -958,3 +958,64 @@ fn https_refuses_untrusted_or_mismatched_certificates_before_the_request() {
     });
     assert_eq!(activity[0].decision, ActivityDecision::Error);
 }
+
+/// Schema 10: an archived connector item is refused and hidden from the access list.
+/// Back from the archive, the call works again. The history records each step.
+#[test]
+fn an_archived_connector_is_refused_until_it_comes_back() {
+    use apassy::vault::ItemEventKind;
+
+    let fx = fixture();
+    with_vault(&fx, |vault| {
+        vault.set_archived(fx.item_id, true).expect("archive");
+        // A second archive changes nothing and records nothing.
+        vault.set_archived(fx.item_id, true).expect("archive again");
+    });
+    let refused = call(
+        &fx,
+        &fx.token,
+        OP_SUMMARY,
+        summary_params("project-a-synthetic"),
+    );
+    assert_eq!(error_code(&refused), "item_archived");
+    let list = client::send(&fx.socket, &fx.token, Action::ListAccess).expect("list");
+    assert_eq!(
+        list.result.as_ref().expect("result")["items"]
+            .as_array()
+            .map(Vec::len),
+        Some(0)
+    );
+    with_vault(&fx, |vault| {
+        vault.set_archived(fx.item_id, false).expect("unarchive");
+    });
+    let ok = call(
+        &fx,
+        &fx.token,
+        OP_SUMMARY,
+        summary_params("project-a-synthetic"),
+    );
+    assert!(ok.ok, "{ok:?}");
+    with_vault(&fx, |vault| {
+        let kinds: Vec<_> = vault
+            .item_events(fx.item_id, 10)
+            .expect("history")
+            .iter()
+            .map(|event| event.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ItemEventKind::Unarchived,
+                ItemEventKind::Archived,
+                ItemEventKind::OperationAllowed,
+                ItemEventKind::Connector,
+                ItemEventKind::Created,
+            ]
+        );
+        let log = vault.item_activity(fx.item_id, 10).expect("log");
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0].decision, ActivityDecision::Allow);
+        assert_eq!(log[1].decision, ActivityDecision::Deny);
+        assert!(log[1].reason.contains("archived"), "{}", log[1].reason);
+    });
+}

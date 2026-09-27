@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
+use super::history::{self, ItemEventKind};
 use super::types::{VaultErrorKind, VaultResult, err};
 use super::{Vault, fresh_epoch, to_public_id, to_sql_id};
 
@@ -142,6 +143,20 @@ pub(super) const SCHEMA_V6_COLUMNS: [&str; 3] = [
     "SELECT item_id, restored_at FROM restore_review LIMIT 0",
 ];
 
+/// Column added in schema version 11 (ADR 0011): the hosts of a variable in
+/// placeholder mode, one per line. NULL means the process gets the real value.
+pub(super) const SCHEMA_V11_SQL: &str = "
+ALTER TABLE env_binding ADD COLUMN placeholder_hosts TEXT;
+UPDATE vault_meta SET schema_version = 11 WHERE id = 1;
+PRAGMA user_version = 11;
+";
+
+pub(super) const SCHEMA_V11_COLUMNS: [&str; 1] =
+    ["SELECT item_id, env_name, field, placeholder_hosts FROM env_binding LIMIT 0"];
+
+/// A variable in placeholder mode names at most this many hosts.
+pub const MAX_PLACEHOLDER_HOSTS: usize = 16;
+
 /// A token works for this many days after Apassy issues it, unless the owner changes it.
 pub const DEFAULT_TOKEN_LIFETIME_DAYS: u32 = 30;
 pub const MAX_TOKEN_LIFETIME_DAYS: u32 = 365;
@@ -156,8 +171,9 @@ pub const MAX_INSTRUCTION_BYTES: usize = 1000;
 pub const MAX_ENV_NAME_BYTES: usize = 64;
 pub const MAX_PROJECT_DIR_BYTES: usize = 1024;
 
-/// Environment names that an owner cannot bind. They change how programs load or run.
-const RESERVED_ENV_NAMES: [&str; 12] = [
+/// Environment names that an owner cannot bind. They change how programs load or
+/// run, or the run proxy sets them (ADR 0011).
+const RESERVED_ENV_NAMES: [&str; 26] = [
     "PATH",
     "HOME",
     "USER",
@@ -170,6 +186,20 @@ const RESERVED_ENV_NAMES: [&str; 12] = [
     "BASH_ENV",
     "NODE_OPTIONS",
     "PYTHONPATH",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+    "NODE_USE_ENV_PROXY",
+    "NODE_EXTRA_CA_CERTS",
+    "SSL_CERT_FILE",
+    "CURL_CA_BUNDLE",
+    "REQUESTS_CA_BUNDLE",
+    "GIT_SSL_CAINFO",
 ];
 const RESERVED_ENV_PREFIXES: [&str; 4] = ["DYLD_", "LD_", "APASSY_", "__CF"];
 
@@ -242,6 +272,67 @@ pub struct EnvBinding {
     pub item_id: u64,
     pub env_name: String,
     pub field: String,
+    pub delivery: EnvDelivery,
+}
+
+/// What the variable holds in the process (ADR 0011).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum EnvDelivery {
+    /// The real value (ADR 0006).
+    #[default]
+    Value,
+    /// A placeholder. The run proxy puts the real value into requests to these hosts
+    /// only: `host` (port 443) or `host:port`. A host covers its subdomains.
+    Placeholder(Vec<String>),
+}
+
+impl EnvDelivery {
+    /// The text for the history: "placeholder for api.example.com".
+    pub fn history_text(&self) -> Option<String> {
+        match self {
+            Self::Value => None,
+            Self::Placeholder(hosts) => Some(format!("placeholder for {}", hosts.join(", "))),
+        }
+    }
+}
+
+/// `host` or `host:port` of a placeholder variable, lowercase. The host has only
+/// letters, digits, dots, and dashes. Returns the host and the port (443 by default).
+pub fn parse_placeholder_host(text: &str) -> Option<(String, u16)> {
+    let text = text.trim();
+    let (host, port) = match text.rsplit_once(':') {
+        Some((host, port)) => (host, port.parse::<u16>().ok().filter(|port| *port != 0)?),
+        None => (text, 443),
+    };
+    let valid = !host.is_empty()
+        && host.len() <= 253
+        && !host.starts_with(['.', '-'])
+        && !host.ends_with(['.', '-'])
+        && !host.contains("..")
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-');
+    valid.then(|| (host.to_owned(), port))
+}
+
+/// The stored text of the hosts: one normalized host per line.
+fn checked_placeholder_hosts(hosts: &[String]) -> VaultResult<String> {
+    if hosts.is_empty() || hosts.len() > MAX_PLACEHOLDER_HOSTS {
+        return Err(err(VaultErrorKind::InvalidInput));
+    }
+    let mut lines: Vec<String> = Vec::with_capacity(hosts.len());
+    for host in hosts {
+        let (name, port) = parse_placeholder_host(host).ok_or(err(VaultErrorKind::InvalidInput))?;
+        let line = if port == 443 {
+            name
+        } else {
+            format!("{name}:{port}")
+        };
+        if !lines.contains(&line) {
+            lines.push(line);
+        }
+    }
+    Ok(lines.join("\n"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,6 +411,21 @@ pub struct Declaration {
 }
 
 impl Declaration {
+    /// The text of a declaration event in the item history.
+    pub(super) fn history_detail(&self, provider: Option<&str>) -> String {
+        let mut text = format!(
+            "{}, {} risk, {}, {}",
+            self.environment.as_str(),
+            self.risk.as_str(),
+            self.scope.as_str(),
+            self.reversibility.as_str()
+        );
+        if let Some(provider) = provider.filter(|provider| !provider.is_empty()) {
+            text.push_str(&format!(", provider {provider}"));
+        }
+        text
+    }
+
     /// A production credential. Every run with it waits for the owner (ADR 0010).
     pub fn is_production(&self) -> bool {
         self.environment == Environment::Production
@@ -661,7 +767,7 @@ impl Vault {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| err(VaultErrorKind::Storage))?;
-        if allowed {
+        let changed = if allowed {
             require_active_agent(&tx, agent)?;
             require_item(&tx, item)?;
             tx.execute(
@@ -669,13 +775,22 @@ impl Vault {
                  VALUES (?1, ?2, ?3, ?4)",
                 (agent, item, operation, at),
             )
-            .map_err(|_| err(VaultErrorKind::Storage))?;
+            .map_err(|_| err(VaultErrorKind::Storage))?
         } else {
             tx.execute(
                 "DELETE FROM grant_rule WHERE agent_id = ?1 AND item_id = ?2 AND operation = ?3",
                 (agent, item, operation),
             )
-            .map_err(|_| err(VaultErrorKind::Storage))?;
+            .map_err(|_| err(VaultErrorKind::Storage))?
+        };
+        if changed > 0 {
+            let kind = if allowed {
+                ItemEventKind::OperationAllowed
+            } else {
+                ItemEventKind::OperationRemoved
+            };
+            let detail = format!("{} · {operation}", history::agent_name(&tx, agent)?);
+            history::record(&tx, item, kind, &detail)?;
         }
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))
     }
@@ -745,6 +860,7 @@ impl Vault {
             (item, profile, base_url),
         )
         .map_err(|_| err(VaultErrorKind::Storage))?;
+        history::record(&tx, item, ItemEventKind::Connector, base_url)?;
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))
     }
 
@@ -755,10 +871,14 @@ impl Vault {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| err(VaultErrorKind::Storage))?;
-        tx.execute("DELETE FROM destination WHERE item_id = ?1", [item])
+        let removed = tx
+            .execute("DELETE FROM destination WHERE item_id = ?1", [item])
             .map_err(|_| err(VaultErrorKind::Storage))?;
         tx.execute("DELETE FROM grant_rule WHERE item_id = ?1", [item])
             .map_err(|_| err(VaultErrorKind::Storage))?;
+        if removed > 0 {
+            history::record(&tx, item, ItemEventKind::ConnectorRemoved, "")?;
+        }
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))
     }
 
@@ -780,15 +900,31 @@ impl Vault {
         }))
     }
 
-    /// Bind an item to an environment variable. `field` must be a secret field of the item.
+    /// Bind an item to an environment variable with the real value. `field` must be
+    /// a secret field of the item.
     pub fn set_env_binding(
         &mut self,
         item_id: u64,
         env_name: &str,
         field: &str,
     ) -> VaultResult<()> {
+        self.set_env_binding_with(item_id, env_name, field, &EnvDelivery::Value)
+    }
+
+    /// Bind an item to an environment variable with a delivery mode (ADR 0011).
+    pub fn set_env_binding_with(
+        &mut self,
+        item_id: u64,
+        env_name: &str,
+        field: &str,
+        delivery: &EnvDelivery,
+    ) -> VaultResult<()> {
         let item = to_sql_id(item_id)?;
         let env_name = checked_env_name(env_name.trim())?;
+        let hosts = match delivery {
+            EnvDelivery::Value => None,
+            EnvDelivery::Placeholder(hosts) => Some(checked_placeholder_hosts(hosts)?),
+        };
         let conn = self.conn_mut()?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -817,11 +953,21 @@ impl Vault {
             return Err(err(VaultErrorKind::AlreadyExists));
         }
         tx.execute(
-            "INSERT INTO env_binding (item_id, env_name, field) VALUES (?1, ?2, ?3)
-             ON CONFLICT(item_id) DO UPDATE SET env_name = excluded.env_name, field = excluded.field",
-            (item, env_name, field),
+            "INSERT INTO env_binding (item_id, env_name, field, placeholder_hosts)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(item_id) DO UPDATE SET env_name = excluded.env_name,
+                 field = excluded.field, placeholder_hosts = excluded.placeholder_hosts",
+            (item, env_name, field, hosts.as_deref()),
         )
         .map_err(|_| err(VaultErrorKind::Storage))?;
+        let detail = match &hosts {
+            None => env_name.to_owned(),
+            Some(hosts) => format!(
+                "{env_name}, placeholder for {}",
+                hosts.split('\n').collect::<Vec<_>>().join(", ")
+            ),
+        };
+        history::record(&tx, item, ItemEventKind::Variable, &detail)?;
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))
     }
 
@@ -832,10 +978,14 @@ impl Vault {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| err(VaultErrorKind::Storage))?;
-        tx.execute("DELETE FROM env_binding WHERE item_id = ?1", [item])
+        let removed = tx
+            .execute("DELETE FROM env_binding WHERE item_id = ?1", [item])
             .map_err(|_| err(VaultErrorKind::Storage))?;
         tx.execute("DELETE FROM exec_grant WHERE item_id = ?1", [item])
             .map_err(|_| err(VaultErrorKind::Storage))?;
+        if removed > 0 {
+            history::record(&tx, item, ItemEventKind::VariableRemoved, "")?;
+        }
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))
     }
 
@@ -844,16 +994,26 @@ impl Vault {
         let conn = self.conn_ref()?;
         let row = conn
             .query_row(
-                "SELECT env_name, field FROM env_binding WHERE item_id = ?1",
+                "SELECT env_name, field, placeholder_hosts FROM env_binding WHERE item_id = ?1",
                 [item],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
             )
             .optional()
             .map_err(|_| err(VaultErrorKind::Storage))?;
-        Ok(row.map(|(env_name, field)| EnvBinding {
+        Ok(row.map(|(env_name, field, hosts)| EnvBinding {
             item_id,
             env_name,
             field,
+            delivery: match hosts {
+                None => EnvDelivery::Value,
+                Some(hosts) => EnvDelivery::Placeholder(hosts.lines().map(str::to_owned).collect()),
+            },
         }))
     }
 
@@ -897,19 +1057,36 @@ impl Vault {
             (agent, item, project_dir, mode.as_str(), at),
         )
         .map_err(|_| err(VaultErrorKind::Storage))?;
+        let decides = match mode {
+            ExecMode::Ask => "the owner approves each run",
+            ExecMode::Bouncer => "the bouncer decides",
+        };
+        let detail = format!(
+            "{} · {decides} · {project_dir}",
+            history::agent_name(&tx, agent)?
+        );
+        history::record(&tx, item, ItemEventKind::AccessGiven, &detail)?;
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))
     }
 
     pub fn remove_exec_grant(&mut self, agent_id: u64, item_id: u64) -> VaultResult<()> {
         let agent = to_sql_id(agent_id)?;
         let item = to_sql_id(item_id)?;
-        self.conn_mut()?
+        let conn = self.conn_mut()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let removed = tx
             .execute(
                 "DELETE FROM exec_grant WHERE agent_id = ?1 AND item_id = ?2",
                 (agent, item),
             )
             .map_err(|_| err(VaultErrorKind::Storage))?;
-        Ok(())
+        if removed > 0 {
+            let detail = history::agent_name(&tx, agent)?;
+            history::record(&tx, item, ItemEventKind::AccessRemoved, &detail)?;
+        }
+        tx.commit().map_err(|_| err(VaultErrorKind::Storage))
     }
 
     /// Process grants of an active agent. A revoked agent has none.
@@ -974,6 +1151,12 @@ impl Vault {
             ),
         )
         .map_err(|_| err(VaultErrorKind::Storage))?;
+        history::record(
+            &tx,
+            item,
+            ItemEventKind::Declaration,
+            &declaration.history_detail(None),
+        )?;
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))
     }
 
@@ -1020,18 +1203,22 @@ impl Vault {
         let item = to_sql_id(item_id)?;
         let rule =
             serde_json::to_string(&rule.normalized()?).map_err(|_| err(VaultErrorKind::Storage))?;
-        let changed = self
-            .conn_mut()?
+        let conn = self.conn_mut()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let changed = tx
             .execute(
                 "UPDATE exec_grant SET rule = ?1 WHERE agent_id = ?2 AND item_id = ?3",
                 (rule, agent, item),
             )
             .map_err(|_| err(VaultErrorKind::Storage))?;
         if changed == 0 {
-            Err(err(VaultErrorKind::NotFound))
-        } else {
-            Ok(())
+            return Err(err(VaultErrorKind::NotFound));
         }
+        let detail = history::agent_name(&tx, agent)?;
+        history::record(&tx, item, ItemEventKind::RuleChanged, &detail)?;
+        tx.commit().map_err(|_| err(VaultErrorKind::Storage))
     }
 
     /// Items from a restored backup whose agent settings the owner did not confirm yet
@@ -1077,8 +1264,12 @@ impl Vault {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| err(VaultErrorKind::Storage))?;
         require_item(&tx, item)?;
-        tx.execute("DELETE FROM restore_review WHERE item_id = ?1", [item])
+        let confirmed = tx
+            .execute("DELETE FROM restore_review WHERE item_id = ?1", [item])
             .map_err(|_| err(VaultErrorKind::Storage))?;
+        if confirmed > 0 {
+            history::record(&tx, item, ItemEventKind::ReviewConfirmed, "")?;
+        }
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))
     }
 
@@ -1115,6 +1306,16 @@ impl Vault {
     }
 
     pub fn record_activity(&mut self, entry: &NewActivity) -> VaultResult<()> {
+        self.record_activity_for_items(entry, &[])
+    }
+
+    /// Record an entry for a request with several items. `entry.item_id` is the first
+    /// item. `extra_items` are the others: the history of each item shows the entry.
+    pub fn record_activity_for_items(
+        &mut self,
+        entry: &NewActivity,
+        extra_items: &[u64],
+    ) -> VaultResult<()> {
         let agent_id = entry.agent_id.map(to_sql_id).transpose()?;
         let item_id = entry.item_id.map(to_sql_id).transpose()?;
         let agent_name = truncate_text(&entry.agent_name, MAX_AGENT_NAME_BYTES);
@@ -1136,57 +1337,68 @@ impl Vault {
             ),
         )
         .map_err(|_| err(VaultErrorKind::Storage))?;
+        history::link_activity(conn, conn.last_insert_rowid(), extra_items)?;
         conn.execute(
             "DELETE FROM activity WHERE id NOT IN
              (SELECT id FROM activity ORDER BY id DESC LIMIT ?1)",
             [i64::try_from(MAX_ACTIVITY_ROWS).map_err(|_| err(VaultErrorKind::Storage))?],
         )
         .map_err(|_| err(VaultErrorKind::Storage))?;
-        Ok(())
+        history::prune_activity_links(conn)
     }
 
     /// Newest entries first.
     pub fn recent_activity(&self, limit: usize) -> VaultResult<Vec<ActivityRecord>> {
         let limit = i64::try_from(limit.min(MAX_ACTIVITY_ROWS))
             .map_err(|_| err(VaultErrorKind::InvalidInput))?;
-        let conn = self.conn_ref()?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, at, agent_id, agent_name, item_id, operation, decision, reason
-                 FROM activity ORDER BY id DESC LIMIT ?1",
-            )
-            .map_err(|_| err(VaultErrorKind::Storage))?;
-        let rows = stmt
-            .query_map([limit], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<i64>>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                ))
-            })
-            .map_err(|_| err(VaultErrorKind::Storage))?;
-        let mut records = Vec::new();
-        for row in rows {
-            let (id, at, agent_id, agent_name, item_id, operation, decision, reason) =
-                row.map_err(|_| err(VaultErrorKind::Storage))?;
-            records.push(ActivityRecord {
-                id: to_public_id(id)?,
-                at: from_sql_time(at)?,
-                agent_id: agent_id.map(to_public_id).transpose()?,
-                agent_name,
-                item_id: item_id.map(to_public_id).transpose()?,
-                operation,
-                decision: ActivityDecision::from_str(&decision)?,
-                reason,
-            });
-        }
-        Ok(records)
+        query_activity(
+            self.conn_ref()?,
+            "SELECT id, at, agent_id, agent_name, item_id, operation, decision, reason
+             FROM activity ORDER BY id DESC LIMIT ?1",
+            [limit],
+        )
     }
+}
+
+/// Activity rows from `sql`, which selects the columns of [`ActivityRecord`] in order.
+pub(super) fn query_activity(
+    conn: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> VaultResult<Vec<ActivityRecord>> {
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    let rows = stmt
+        .query_map(params, |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        })
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    let mut records = Vec::new();
+    for row in rows {
+        let (id, at, agent_id, agent_name, item_id, operation, decision, reason) =
+            row.map_err(|_| err(VaultErrorKind::Storage))?;
+        records.push(ActivityRecord {
+            id: to_public_id(id)?,
+            at: from_sql_time(at)?,
+            agent_id: agent_id.map(to_public_id).transpose()?,
+            agent_name,
+            item_id: item_id.map(to_public_id).transpose()?,
+            operation,
+            decision: ActivityDecision::from_str(&decision)?,
+            reason,
+        });
+    }
+    Ok(records)
 }
 
 /// Restore calls this before the restored vault is used, in one transaction:
@@ -1220,6 +1432,7 @@ pub(super) fn prepare_restored(conn: &mut Connection) -> VaultResult<()> {
         [at],
     )
     .map_err(|_| err(VaultErrorKind::Storage))?;
+    history::record_restore(&tx)?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))
 }
 
@@ -1257,7 +1470,7 @@ fn require_active_agent(tx: &rusqlite::Transaction<'_>, agent: i64) -> VaultResu
     }
 }
 
-fn require_item(tx: &rusqlite::Transaction<'_>, item: i64) -> VaultResult<()> {
+pub(super) fn require_item(tx: &rusqlite::Transaction<'_>, item: i64) -> VaultResult<()> {
     let found: Option<i64> = tx
         .query_row("SELECT id FROM item WHERE id = ?1", [item], |row| {
             row.get(0)

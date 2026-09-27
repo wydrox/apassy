@@ -7,33 +7,22 @@
 //! changes the active policy without an owner action. A training starts only when the
 //! owner clicks "Train a candidate". A promotion and a rollback need the owner check.
 
-use eframe::egui::{self, RichText};
+use eframe::egui;
 
 use super::DesktopApp;
-use super::ui::{INK_MUTED, heading};
 
 pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    heading(ui, "Learning");
-    ui.label(
-        RichText::new(
+    super::ui::kit::page_header(
+        ui,
+        "Learning",
+        Some(
             "Apassy learns from your decisions. A remembered pattern and a calibrated level act only at the model step. They never change the hard rules, the production rule, or a rule flag.",
-        )
-        .color(INK_MUTED),
+        ),
+        |_| {},
     );
-    ui.add_space(8.0);
-    #[cfg(feature = "vault")]
     vault_view::draw(app, ui);
-    #[cfg(not(feature = "vault"))]
-    {
-        let _ = app;
-        ui.label(
-            RichText::new("Learning needs the vault build. The demo has no decision log.")
-                .color(INK_MUTED),
-        );
-    }
 }
 
-#[cfg(feature = "vault")]
 /// Text for the candidate model card. `None` when no candidate is in shadow mode.
 pub(crate) fn candidate_lines(candidate: Option<&CandidateView>) -> Vec<String> {
     let Some(candidate) = candidate else {
@@ -76,7 +65,6 @@ pub(crate) fn candidate_lines(candidate: Option<&CandidateView>) -> Vec<String> 
     ]
 }
 
-#[cfg(feature = "vault")]
 /// What the candidate card shows. It comes from `vault::ShadowSummary`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CandidateView {
@@ -94,7 +82,6 @@ pub(crate) struct CandidateView {
     pub refusal: Option<String>,
 }
 
-#[cfg(feature = "vault")]
 impl CandidateView {
     fn new(record: &crate::vault::CandidateRecord, summary: &crate::vault::ShadowSummary) -> Self {
         let agreement = &summary.agreement;
@@ -119,7 +106,6 @@ impl CandidateView {
     }
 }
 
-#[cfg(feature = "vault")]
 /// Text for the training part of the candidate card.
 pub(crate) fn training_lines(
     gate: &crate::broker::finetune::TrainingGate,
@@ -153,7 +139,6 @@ pub(crate) fn training_lines(
     lines
 }
 
-#[cfg(feature = "vault")]
 /// Text for the active model: the default bouncer, or a promoted model.
 pub(crate) fn active_lines(active: Option<&crate::vault::ModelActivation>) -> Vec<String> {
     use crate::vault::{ActivationAction, format_utc, model_label};
@@ -187,18 +172,15 @@ pub(crate) fn active_lines(active: Option<&crate::vault::ModelActivation>) -> Ve
     }
 }
 
-#[cfg(feature = "vault")]
 mod vault_view {
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, PoisonError};
     use std::time::{Duration, Instant};
 
-    use eframe::egui::{self, RichText};
+    use eframe::egui::{self, Label, Pos2, Rect, Sense, Stroke, Vec2};
 
-    use super::super::ui::{
-        ALLOW, ASK, DENY, INK, INK_MUTED, accent_button, card_frame, danger_button, property_grid,
-    };
+    use super::super::ui::kit::{self, Font, Icon, Style, Tone};
     use super::{CandidateView, DesktopApp, active_lines, candidate_lines, training_lines};
     use crate::broker::approvals::{OwnerAction, OwnerProof};
     use crate::broker::bouncer::{DEFAULT_TASK_MATCH, Thresholds};
@@ -214,6 +196,10 @@ mod vault_view {
     };
 
     const DAY: u64 = 86_400;
+    /// The disclosure key of the calibration and model sections.
+    const ADVANCED: &str = "learning-advanced";
+    /// The disclosure key of the ask rate table.
+    const TABLE: &str = "learning-ask-rate-table";
     /// Days in the ask rate table.
     const DAYS_SHOWN: u64 = 14;
     const AUTOMATIC_SHOWN: usize = 25;
@@ -314,24 +300,31 @@ mod vault_view {
         poll_training(app);
         let loaded = match load(app, now) {
             None => {
-                ui.label(RichText::new("Unlock the vault to see learning.").color(INK_MUTED));
+                kit::note(ui, "Unlock the vault to see learning.");
                 return;
             }
             Some(Err(message)) => {
-                ui.label(RichText::new(message).color(DENY));
+                kit::tone_note(ui, message, Tone::Critical);
                 return;
             }
             Some(Ok(loaded)) => loaded,
         };
-        draw_ask_rate(ui, &loaded.days);
-        ui.add_space(8.0);
+        draw_summary(ui, &loaded, now);
+        draw_ask_rate(app, ui, &loaded.days, now);
         draw_automatic(app, ui, &loaded);
-        ui.add_space(8.0);
         draw_patterns(app, ui, &loaded, now);
-        ui.add_space(8.0);
-        draw_calibration(app, ui, loaded.calibration.as_ref(), now);
-        ui.add_space(8.0);
-        draw_models(app, ui, &loaded);
+        let mut advanced = app.ui.is_expanded(ADVANCED);
+        if kit::disclosure(ui, &mut advanced, "Advanced: calibration and models").changed() {
+            app.ui.set_expanded(ADVANCED, advanced);
+        }
+        if advanced {
+            ui.add_space(10.0);
+            draw_calibration(app, ui, loaded.calibration.as_ref(), now);
+            draw_models(app, ui, &loaded);
+        }
+        if let Some(record) = &loaded.inspected {
+            draw_inspected(app, ui.ctx(), record);
+        }
     }
 
     /// The power source, read again at most every 30 seconds.
@@ -364,51 +357,62 @@ mod vault_view {
         let mut stop = false;
         let mut promote = None;
         let mut rollback = None;
-        card_frame().show(ui, |ui| {
-            title(ui, "Candidate model");
-            for line in candidate_lines(loaded.candidate.as_ref()) {
-                ui.label(RichText::new(line).color(INK_MUTED));
-            }
-            if let Some(candidate) = &loaded.candidate {
-                let clicked = ui
-                    .add_enabled_ui(candidate.can_promote(), |ui| accent_button(ui, "Promote"))
-                    .inner
-                    .clicked();
-                if clicked {
-                    promote = Some((candidate.id, candidate.model_version.clone()));
-                }
-            }
-            ui.add_space(6.0);
-            for line in training_lines(&gate, running) {
-                ui.label(RichText::new(line).color(INK_MUTED));
-            }
-            ui.horizontal(|ui| {
-                if running.is_some() {
-                    if danger_button(ui, "Stop training").clicked() {
-                        stop = true;
+        kit::section(
+            ui,
+            Some("Candidate model"),
+            Some(
+                "A candidate decides in shadow mode, with no effect. You promote it by hand. A promotion and a rollback need your passphrase.",
+            ),
+            |s| {
+                s.row(|ui| {
+                    for line in candidate_lines(loaded.candidate.as_ref()) {
+                        kit::note(ui, line);
                     }
-                } else {
-                    train = ui
-                        .add_enabled_ui(gate.is_open(), |ui| accent_button(ui, "Train a candidate"))
-                        .inner
-                        .clicked();
-                }
-            });
-            ui.add_space(6.0);
-            for line in active_lines(loaded.active.as_ref()) {
-                ui.label(RichText::new(line).color(INK));
-            }
-            if let Some(active) = &loaded.active
-                && active.action == ActivationAction::Promote
-                && danger_button(
-                    ui,
-                    &format!("Roll back to {}", model_label(&active.previous_version)),
-                )
-                .clicked()
-            {
-                rollback = Some(active.clone());
-            }
-        });
+                    if let Some(candidate) = &loaded.candidate {
+                        let clicked = ui
+                            .add_enabled_ui(candidate.can_promote(), |ui| {
+                                kit::small_button(ui, "Promote", Style::Prominent)
+                            })
+                            .inner
+                            .clicked();
+                        if clicked {
+                            promote = Some((candidate.id, candidate.model_version.clone()));
+                        }
+                    }
+                });
+                s.row(|ui| {
+                    for line in training_lines(&gate, running) {
+                        kit::note(ui, line);
+                    }
+                    if running.is_some() {
+                        stop = kit::small_button(ui, "Stop training", Style::Destructive).clicked();
+                    } else {
+                        train = ui
+                            .add_enabled_ui(gate.is_open(), |ui| {
+                                kit::small_button(ui, "Train a candidate", Style::Bordered)
+                            })
+                            .inner
+                            .clicked();
+                    }
+                });
+                s.row(|ui| {
+                    for line in active_lines(loaded.active.as_ref()) {
+                        kit::paragraph(ui, line, Font::Callout, kit::LABEL);
+                    }
+                    if let Some(active) = &loaded.active
+                        && active.action == ActivationAction::Promote
+                        && kit::small_button(
+                            ui,
+                            &format!("Roll back to {}", model_label(&active.previous_version)),
+                            Style::Destructive,
+                        )
+                        .clicked()
+                    {
+                        rollback = Some(active.clone());
+                    }
+                });
+            },
+        );
         if running.is_some() {
             ui.ctx().request_repaint_after(Duration::from_secs(1));
         }
@@ -537,47 +541,84 @@ mod vault_view {
         }
     }
 
-    fn title(ui: &mut egui::Ui, text: &str) {
-        ui.label(RichText::new(text).size(16.0).strong().color(INK));
+    /// Owner decisions and model runs of the last 7 days.
+    struct Week {
+        decisions: u32,
+        asked: u32,
+        by_model: u32,
+        by_pattern: u32,
     }
 
-    fn draw_ask_rate(ui: &mut egui::Ui, days: &[DayRate]) {
-        card_frame().show(ui, |ui| {
-            title(ui, "Ask rate over time");
-            ui.label(
-                RichText::new(
-                    "Share of requests that waited for you, per UTC day, for the last 14 days. Requests that a hard rule denied do not count.",
-                )
-                .color(INK_MUTED),
+    fn week(days: &[DayRate], now: u64) -> Week {
+        let since = (now / DAY).saturating_sub(6) * DAY;
+        days.iter().filter(|day| day.day >= since).fold(
+            Week {
+                decisions: 0,
+                asked: 0,
+                by_model: 0,
+                by_pattern: 0,
+            },
+            |week, day| Week {
+                decisions: week.decisions + day.decisions,
+                asked: week.asked + day.asked,
+                by_model: week.by_model + day.by_model,
+                by_pattern: week.by_pattern + day.by_pattern,
+            },
+        )
+    }
+
+    /// Three stat tiles: the ask rate of the week (goal item B12), the runs without the
+    /// owner, and the patterns.
+    fn draw_summary(ui: &mut egui::Ui, loaded: &Loaded, now: u64) {
+        let week = week(&loaded.days, now);
+        let (rate, rate_caption) = if week.decisions == 0 {
+            ("–".to_owned(), "No decisions in 7 days".to_owned())
+        } else {
+            (
+                format!(
+                    "{:.0}%",
+                    f64::from(week.asked) / f64::from(week.decisions) * 100.0
+                ),
+                format!(
+                    "{} of {} runs · goal 10% or less",
+                    week.asked, week.decisions
+                ),
+            )
+        };
+        let states: Vec<PatternState> = loaded
+            .patterns
+            .iter()
+            .map(|pattern| pattern.state(now))
+            .collect();
+        let active = states
+            .iter()
+            .filter(|state| matches!(state, PatternState::Active))
+            .count();
+        let learning = states
+            .iter()
+            .filter(|state| matches!(state, PatternState::Learning { .. }))
+            .count();
+        let gap = 12.0;
+        let width = (ui.available_width() - 2.0 * gap) / 3.0;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            kit::stat_tile(ui, width, "Asked you, last 7 days", &rate, &rate_caption);
+            kit::stat_tile(
+                ui,
+                width,
+                "Ran without you",
+                &(week.by_model + week.by_pattern).to_string(),
+                &format!("model {} · pattern {}", week.by_model, week.by_pattern),
             );
-            if days.is_empty() {
-                ui.label(RichText::new("No decisions yet.").color(INK_MUTED));
-                return;
-            }
-            egui::Grid::new("learning-ask-rate")
-                .striped(true)
-                .num_columns(6)
-                .show(ui, |ui| {
-                    for name in ["Day", "Requests", "Asked", "Model", "Pattern", "Ask rate"] {
-                        ui.label(RichText::new(name).strong().color(INK));
-                    }
-                    ui.end_row();
-                    for day in days {
-                        let date = format_utc(day.day);
-                        ui.label(date.split(' ').next().unwrap_or_default());
-                        ui.label(day.decisions.to_string());
-                        ui.label(day.asked.to_string());
-                        ui.label(day.by_model.to_string());
-                        ui.label(day.by_pattern.to_string());
-                        ui.add(
-                            egui::ProgressBar::new(day.ask_rate() as f32)
-                                .desired_width(160.0)
-                                .text(format!("{:.0}%", day.ask_rate() * 100.0)),
-                        );
-                        ui.end_row();
-                    }
-                });
+            kit::stat_tile(
+                ui,
+                width,
+                "Remembered patterns",
+                &active.to_string(),
+                &format!("active · {learning} still learning"),
+            );
         });
+        ui.add_space(22.0);
     }
 
     fn short(command: &[String]) -> String {
@@ -588,58 +629,245 @@ mod vault_view {
         text
     }
 
-    fn draw_automatic(app: &mut DesktopApp, ui: &mut egui::Ui, loaded: &Loaded) {
-        card_frame().show(ui, |ui| {
-            title(ui, "Automatic decisions");
-            ui.label(
-                RichText::new(
-                    "Runs that started without you: the model allowed them, or a remembered pattern did. Inspect a run to see what Apassy knew.",
-                )
-                .color(INK_MUTED),
-            );
-            if loaded.automatic.is_empty() {
-                ui.label(RichText::new("No automatic decision yet.").color(INK_MUTED));
-            } else {
-                egui::Grid::new("learning-automatic")
-                    .striped(true)
-                    .num_columns(5)
-                    .show(ui, |ui| {
-                        for name in ["Time", "Agent", "By", "Command", ""] {
-                            ui.label(RichText::new(name).strong().color(INK));
-                        }
-                        ui.end_row();
-                        for record in &loaded.automatic {
-                            let entry = &record.entry;
-                            ui.label(RichText::new(format_utc(entry.at)).color(INK_MUTED));
-                            ui.label(&entry.agent_name);
-                            let by = if entry.decided_by == DecidedBy::Pattern {
-                                "Pattern"
-                            } else {
-                                "Model"
-                            };
-                            ui.label(RichText::new(by).color(ALLOW));
-                            ui.label(RichText::new(short(&entry.command)).monospace());
-                            if ui.button("Inspect").clicked() {
-                                app.learning.inspected = Some(record.id);
-                            }
-                            ui.end_row();
-                        }
-                    });
-            }
-            if let Some(record) = &loaded.inspected {
-                ui.add_space(8.0);
-                draw_inspected(app, ui, record);
-            }
-        });
+    /// The date of a day as "MM-DD".
+    fn month_day(day: u64) -> String {
+        let date = format_utc(day);
+        date.split(' ')
+            .next()
+            .and_then(|date| date.get(5..))
+            .unwrap_or_default()
+            .to_owned()
     }
 
-    fn draw_inspected(app: &mut DesktopApp, ui: &mut egui::Ui, record: &DecisionRecord) {
-        let entry = &record.entry;
-        ui.label(
-            RichText::new(format!("Decision {}", record.id))
-                .strong()
-                .color(INK),
+    /// The goal of B12: the owner is asked on 10% or fewer of the runs.
+    const GOAL: f32 = 0.10;
+
+    /// A column chart of the daily ask rate for 14 days, with the goal line. Each column
+    /// has a tooltip. A table shows the same numbers.
+    fn draw_ask_rate(app: &mut DesktopApp, ui: &mut egui::Ui, days: &[DayRate], now: u64) {
+        kit::section(
+            ui,
+            Some("Ask rate over time"),
+            Some(
+                "Share of requests that waited for you, per UTC day, for the last 14 days. Requests that a hard rule denied do not count.",
+            ),
+            |s| {
+                s.row(|ui| {
+                    if days.is_empty() {
+                        kit::note(ui, "No decisions yet.");
+                        return;
+                    }
+                    ask_rate_chart(ui, days, now);
+                });
+            },
         );
+        if days.is_empty() {
+            return;
+        }
+        let mut table = app.ui.is_expanded(TABLE);
+        if kit::disclosure(ui, &mut table, "Show as a table").changed() {
+            app.ui.set_expanded(TABLE, table);
+        }
+        if table {
+            ui.add_space(6.0);
+            kit::section(ui, None, None, |s| {
+                s.row(|ui| {
+                    egui::Grid::new("learning-ask-rate")
+                        .num_columns(6)
+                        .spacing([18.0, 6.0])
+                        .show(ui, |ui| {
+                            for name in ["Day", "Requests", "Asked", "Model", "Pattern", "Ask rate"]
+                            {
+                                ui.label(kit::medium(name, Font::Callout).color(kit::SECONDARY));
+                            }
+                            ui.end_row();
+                            for day in days {
+                                let date = format_utc(day.day);
+                                ui.label(date.split(' ').next().unwrap_or_default());
+                                ui.label(day.decisions.to_string());
+                                ui.label(day.asked.to_string());
+                                ui.label(day.by_model.to_string());
+                                ui.label(day.by_pattern.to_string());
+                                ui.label(format!("{:.0}%", day.ask_rate() * 100.0));
+                                ui.end_row();
+                            }
+                        });
+                });
+            });
+        }
+        ui.add_space(18.0);
+    }
+
+    fn ask_rate_chart(ui: &mut egui::Ui, days: &[DayRate], now: u64) {
+        let first = (now / DAY).saturating_sub(DAYS_SHOWN - 1) * DAY;
+        let axis_width = 34.0;
+        let height = 150.0;
+        let (rect, _) = ui.allocate_exact_size(
+            Vec2::new(ui.available_width(), height + 20.0),
+            Sense::hover(),
+        );
+        let plot = Rect::from_min_max(
+            Pos2::new(rect.left() + axis_width, rect.top() + 26.0),
+            Pos2::new(rect.right() - 4.0, rect.top() + height),
+        );
+        let painter = ui.painter();
+        let grid = Stroke::new(1.0 / ui.ctx().pixels_per_point(), kit::SEPARATOR);
+        let y_of = |share: f32| plot.bottom() - share * plot.height();
+        for share in [0.0_f32, 0.5, 1.0] {
+            let y = y_of(share);
+            painter.hline(plot.x_range(), y, grid);
+            let label = kit::galley(
+                ui,
+                kit::text(format!("{:.0}%", share * 100.0), Font::Footnote),
+            );
+            painter.galley(
+                Pos2::new(plot.left() - 8.0 - label.size().x, y - label.size().y / 2.0),
+                label,
+                kit::SECONDARY,
+            );
+        }
+        // The goal line has a legend above the plot, so no label sits on a column.
+        let goal_y = y_of(GOAL);
+        let goal_stroke = Stroke::new(1.5, kit::Tone::Good.mark());
+        painter.hline(plot.x_range(), goal_y, goal_stroke);
+        let goal = kit::galley(ui, kit::text("Goal: 10% or less", Font::Footnote));
+        let legend_y = rect.top() + 6.0 + goal.size().y / 2.0;
+        let text_x = plot.right() - goal.size().x;
+        painter.galley(
+            Pos2::new(text_x, legend_y - goal.size().y / 2.0),
+            goal,
+            kit::SECONDARY,
+        );
+        painter.hline((text_x - 22.0)..=(text_x - 6.0), legend_y, goal_stroke);
+        let slot = plot.width() / DAYS_SHOWN as f32;
+        let bar = (slot * 0.56).min(22.0);
+        for index in 0..DAYS_SHOWN {
+            let day_start = first + index * DAY;
+            let center = plot.left() + slot * (index as f32 + 0.5);
+            let slot_rect = Rect::from_min_max(
+                Pos2::new(center - slot / 2.0, plot.top()),
+                Pos2::new(center + slot / 2.0, plot.bottom()),
+            );
+            let day = days.iter().find(|day| day.day == day_start);
+            if let Some(day) = day.filter(|day| day.decisions > 0) {
+                let share = day.ask_rate() as f32;
+                let top = y_of(share).min(plot.bottom() - 2.0);
+                let column = Rect::from_min_max(
+                    Pos2::new(center - bar / 2.0, top),
+                    Pos2::new(center + bar / 2.0, plot.bottom()),
+                );
+                let radius = egui::CornerRadius {
+                    nw: 4,
+                    ne: 4,
+                    sw: 0,
+                    se: 0,
+                };
+                ui.painter().rect_filled(column, radius, kit::ACCENT);
+                let tip = format!(
+                    "{}: {} of {} requests asked you ({:.0}%). Model {}, pattern {}.",
+                    format_utc(day.day).split(' ').next().unwrap_or_default(),
+                    day.asked,
+                    day.decisions,
+                    share * 100.0,
+                    day.by_model,
+                    day.by_pattern
+                );
+                ui.interact(
+                    slot_rect,
+                    ui.id().with(("ask-rate-day", index)),
+                    Sense::hover(),
+                )
+                .on_hover_text(tip);
+                if index == DAYS_SHOWN - 1 {
+                    let value = kit::galley(
+                        ui,
+                        kit::medium(format!("{:.0}%", share * 100.0), Font::Footnote),
+                    );
+                    // Above the column, and above the goal line when the column is low.
+                    let bottom = if column.top() > goal_y - 4.0 {
+                        goal_y - 3.0
+                    } else {
+                        column.top() - 2.0
+                    };
+                    ui.painter().galley(
+                        Pos2::new(center - value.size().x / 2.0, bottom - value.size().y),
+                        value,
+                        kit::LABEL,
+                    );
+                }
+            }
+            if index == 0 || index == DAYS_SHOWN / 2 || index == DAYS_SHOWN - 1 {
+                let text = if index == DAYS_SHOWN - 1 {
+                    "Today".to_owned()
+                } else {
+                    month_day(day_start)
+                };
+                let label = kit::galley(ui, kit::text(text, Font::Footnote));
+                ui.painter().galley(
+                    Pos2::new(center - label.size().x / 2.0, plot.bottom() + 5.0),
+                    label,
+                    kit::SECONDARY,
+                );
+            }
+        }
+    }
+
+    fn draw_automatic(app: &mut DesktopApp, ui: &mut egui::Ui, loaded: &Loaded) {
+        let mut inspect = None;
+        kit::section(
+            ui,
+            Some("Automatic decisions"),
+            Some(
+                "Runs that started without you: the model allowed them, or a remembered pattern did. Open a run to see what Apassy knew.",
+            ),
+            |s| {
+                if loaded.automatic.is_empty() {
+                    s.row(|ui| kit::note(ui, "No automatic decision yet."));
+                    return;
+                }
+                for record in &loaded.automatic {
+                    let entry = &record.entry;
+                    let by = if entry.decided_by == DecidedBy::Pattern {
+                        "Pattern"
+                    } else {
+                        "Model"
+                    };
+                    let response = s.clickable_row(|ui| {
+                        egui::Sides::new().shrink_left().truncate().show(
+                            ui,
+                            |ui| {
+                                ui.add(
+                                    Label::new(
+                                        kit::text(short(&entry.command), Font::Mono)
+                                            .color(kit::LABEL),
+                                    )
+                                    .truncate(),
+                                );
+                            },
+                            |ui| {
+                                kit::paint_icon_in(ui, Icon::ChevronRight, 12.0, kit::TERTIARY);
+                                kit::tag(ui, by, Tone::Good);
+                            },
+                        );
+                        kit::note(
+                            ui,
+                            format!("{} · {}", format_utc(entry.at), entry.agent_name),
+                        );
+                    });
+                    if response.clicked() {
+                        inspect = Some(record.id);
+                    }
+                }
+            },
+        );
+        if inspect.is_some() {
+            app.learning.inspected = inspect;
+        }
+    }
+
+    /// What Apassy knew for one automatic decision, in a sheet.
+    fn draw_inspected(app: &mut DesktopApp, ctx: &egui::Context, record: &DecisionRecord) {
+        let entry = &record.entry;
         let declarations: Vec<String> = entry
             .declarations
             .iter()
@@ -668,120 +896,138 @@ mod vault_view {
                 list.join(", ")
             }
         };
-        property_grid(
-            ui,
-            "learning-inspected",
-            &[
-                ("Time", format_utc(entry.at)),
-                ("Agent", entry.agent_name.clone()),
-                (
-                    "User request",
-                    format!(
-                        "{} (source: {})",
-                        if entry.user_request.is_empty() {
-                            "None"
-                        } else {
-                            &entry.user_request
-                        },
-                        entry.user_request_source.as_str()
-                    ),
+        let rows = [
+            ("Time", format_utc(entry.at)),
+            ("Agent", entry.agent_name.clone()),
+            (
+                "User request",
+                format!(
+                    "{} (source: {})",
+                    if entry.user_request.is_empty() {
+                        "None"
+                    } else {
+                        &entry.user_request
+                    },
+                    entry.user_request_source.as_str()
                 ),
-                ("Command", entry.command.join(" ")),
-                ("Directory", entry.cwd_rel.clone()),
-                ("Owner rule", entry.instruction.clone()),
-                ("Secrets", none(entry.env_names.clone())),
-                ("Declarations", none(declarations)),
-                ("Rule flags", none(entry.rule_flags.clone())),
-                ("Model facts", none(facts)),
-                ("Pattern", entry.pattern.clone()),
-                (
-                    "Decision",
-                    format!(
-                        "{} by {}",
-                        entry.decision.as_str(),
-                        entry.decided_by.as_str()
-                    ),
+            ),
+            ("Directory", entry.cwd_rel.clone()),
+            ("Owner rule", entry.instruction.clone()),
+            ("Secrets", none(entry.env_names.clone())),
+            ("Declarations", none(declarations)),
+            ("Rule flags", none(entry.rule_flags.clone())),
+            ("Model facts", none(facts)),
+            ("Pattern", entry.pattern.clone()),
+            (
+                "Decision",
+                format!(
+                    "{} by {}",
+                    entry.decision.as_str(),
+                    entry.decided_by.as_str()
                 ),
-                ("Policy", entry.policy.clone()),
-                ("Note", entry.note.clone()),
-            ],
-        );
-        if ui.button("Close").clicked() {
+            ),
+            ("Policy", entry.policy.clone()),
+            ("Note", entry.note.clone()),
+        ];
+        let mut close = false;
+        let response = kit::sheet(ctx, "learning-decision", 600.0, |ui| {
+            kit::sheet_title(ui, &format!("Decision {}", record.id), None);
+            kit::sheet_body(ui, |ui| {
+                kit::code_block(ui, &entry.command.join(" "), 1);
+                ui.add_space(10.0);
+                kit::section(ui, None, None, |s| {
+                    for (term, value) in rows.iter().filter(|(_, value)| !value.is_empty()) {
+                        s.labeled(term, kit::text(value, Font::Callout).color(kit::SECONDARY));
+                    }
+                });
+            });
+            kit::sheet_buttons(
+                ui,
+                |_| {},
+                |ui| close = kit::button(ui, "Close", Style::Bordered).clicked(),
+            );
+        });
+        if close || response.escape {
             app.learning.inspected = None;
         }
     }
 
-    fn state_text(pattern: &PatternRecord, now: u64) -> (String, egui::Color32) {
+    fn state_text(pattern: &PatternRecord, now: u64) -> (String, Tone) {
         match pattern.state(now) {
-            PatternState::Active => ("Runs without a prompt".to_owned(), ALLOW),
+            PatternState::Active => ("Runs without a prompt".to_owned(), Tone::Good),
             PatternState::Learning { approvals } => (
                 format!(
                     "Learning: {approvals} of {} approvals",
                     crate::vault::PATTERN_APPROVALS_NEEDED
                 ),
-                ASK,
+                Tone::Warning,
             ),
-            PatternState::Blocked => ("Blocked by your denial".to_owned(), DENY),
-            PatternState::Expired => ("Expired: not used for 30 days".to_owned(), INK_MUTED),
+            PatternState::Blocked => ("Blocked by your denial".to_owned(), Tone::Critical),
+            PatternState::Expired => ("Expired: not used for 30 days".to_owned(), Tone::Neutral),
         }
     }
 
     fn draw_patterns(app: &mut DesktopApp, ui: &mut egui::Ui, loaded: &Loaded, now: u64) {
         let mut remove = None;
-        card_frame().show(ui, |ui| {
-            title(ui, "Remembered patterns");
-            ui.label(
-                RichText::new(
-                    "\"Approve and remember\" teaches a pattern for one agent, one project, and one set of items. It runs without a prompt after 3 approvals. One denial blocks it. It expires after 30 days without use.",
-                )
-                .color(INK_MUTED),
-            );
-            if loaded.patterns.is_empty() {
-                ui.label(RichText::new("No pattern yet.").color(INK_MUTED));
-                return;
-            }
-            egui::Grid::new("learning-patterns")
-                .striped(true)
-                .num_columns(7)
-                .show(ui, |ui| {
-                    for name in ["Pattern", "Agent", "Project", "Items", "State", "Runs", ""] {
-                        ui.label(RichText::new(name).strong().color(INK));
-                    }
-                    ui.end_row();
-                    for pattern in &loaded.patterns {
-                        ui.label(RichText::new(&pattern.display).monospace());
-                        ui.label(
-                            loaded
-                                .agents
-                                .get(&pattern.key.agent_id)
-                                .cloned()
-                                .unwrap_or_else(|| format!("Agent {}", pattern.key.agent_id)),
+        kit::section(
+            ui,
+            Some("Remembered patterns"),
+            Some(
+                "\"Approve and remember\" teaches a pattern for one agent, one project, and one set of items. It runs without a prompt after 3 approvals. One denial blocks it. It expires after 30 days without use.",
+            ),
+            |s| {
+                if loaded.patterns.is_empty() {
+                    s.row(|ui| kit::note(ui, "No pattern yet."));
+                    return;
+                }
+                for pattern in &loaded.patterns {
+                    s.row(|ui| {
+                        let (state, tone) = state_text(pattern, now);
+                        egui::Sides::new().shrink_left().truncate().show(
+                            ui,
+                            |ui| {
+                                ui.add(
+                                    Label::new(
+                                        kit::text(&pattern.display, Font::Mono).color(kit::LABEL),
+                                    )
+                                    .truncate(),
+                                );
+                            },
+                            |ui| {
+                                if kit::small_button(ui, "Remove", Style::Destructive).clicked() {
+                                    remove = Some(pattern.id);
+                                }
+                                kit::tag(ui, &state, tone);
+                            },
                         );
+                        let agent = loaded
+                            .agents
+                            .get(&pattern.key.agent_id)
+                            .cloned()
+                            .unwrap_or_else(|| format!("Agent {}", pattern.key.agent_id));
                         let directory = if pattern.key.cwd_rel == "." {
                             pattern.key.project_dir.clone()
                         } else {
                             format!("{} ({})", pattern.key.project_dir, pattern.key.cwd_rel)
                         };
-                        ui.label(directory);
-                        ui.label(
-                            pattern
-                                .key
-                                .items
-                                .iter()
-                                .map(u64::to_string)
-                                .collect::<Vec<_>>()
-                                .join(", "),
+                        let items = pattern
+                            .key
+                            .items
+                            .iter()
+                            .map(u64::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        kit::note(
+                            ui,
+                            format!(
+                                "{agent} · {directory} · items {items} · {} runs",
+                                pattern.uses
+                            ),
                         );
-                        let (text, color) = state_text(pattern, now);
-                        ui.label(RichText::new(text).color(color));
-                        ui.label(pattern.uses.to_string());
-                        if danger_button(ui, "Remove").clicked() {
-                            remove = Some(pattern.id);
-                        }
-                        ui.end_row();
-                    }
-                });
-        });
+                    });
+                }
+            },
+        );
         if let Some(id) = remove {
             let result = app.owner_ui.session.shared_vault();
             let mut guard = result.lock().unwrap_or_else(PoisonError::into_inner);
@@ -807,64 +1053,72 @@ mod vault_view {
         let mut compute = false;
         let mut apply = None;
         let mut reset = false;
-        card_frame().show(ui, |ui| {
-            title(ui, "Threshold calibration");
-            ui.label(
-                RichText::new(
-                    "Apassy can propose a lower task_match level from your decisions. A proposal is valid only if a replay of all your past decisions allows no request that you denied. Nothing changes until you apply it. The production rule and the hard rules are never calibrated.",
-                )
-                .color(INK_MUTED),
-            );
-            let since = active.map_or_else(
-                || "default".to_owned(),
-                |calibration| format!("applied {}", format_utc(calibration.at)),
-            );
-            ui.label(
-                RichText::new(format!(
-                    "Active task_match level: {:.0}% ({since}).",
-                    level * 100.0
-                ))
-                .color(INK),
-            );
-            ui.horizontal(|ui| {
-                if accent_button(ui, "Compute a proposal").clicked() {
-                    compute = true;
+        kit::section(
+            ui,
+            Some("Threshold calibration"),
+            Some(
+                "Apassy can propose a lower task_match level from your decisions. A proposal is valid only if a replay of all your past decisions allows no request that you denied. Nothing changes until you apply it. The production rule and the hard rules are never calibrated.",
+            ),
+            |s| {
+                s.row(|ui| {
+                    let since = active.map_or_else(
+                        || "default".to_owned(),
+                        |calibration| format!("applied {}", format_utc(calibration.at)),
+                    );
+                    kit::paragraph(
+                        ui,
+                        format!("Active task_match level: {:.0}% ({since}).", level * 100.0),
+                        Font::Body,
+                        kit::LABEL,
+                    );
+                    ui.horizontal(|ui| {
+                        compute =
+                            kit::small_button(ui, "Compute a proposal", Style::Bordered).clicked();
+                        if active.is_some() {
+                            reset = kit::small_button(ui, "Back to the default (75%)", Style::Link)
+                                .clicked();
+                        }
+                    });
+                });
+                if let Some(proposal) = &app.learning.proposal {
+                    s.row(|ui| {
+                        let tone = if proposal.valid { Tone::Good } else { Tone::Warning };
+                        kit::tone_note(
+                            ui,
+                            format!(
+                                "Proposal: {:.0}% (now {:.0}%). {}",
+                                proposal.proposed * 100.0,
+                                proposal.current * 100.0,
+                                proposal.reason
+                            ),
+                            tone,
+                        );
+                        kit::note(
+                            ui,
+                            format!(
+                                "Decisions {}, your decisions {}, your denials {}. Newer part of the log: ask rate {:.0}% now, {:.0}% with the proposal, denials allowed {}.",
+                                proposal.decisions,
+                                proposal.owner_decisions,
+                                proposal.owner_denials,
+                                proposal.held_out_before.ask_rate() * 100.0,
+                                proposal.held_out_after.ask_rate() * 100.0,
+                                proposal.held_out_misses()
+                            ),
+                        );
+                        if proposal.valid
+                            && kit::small_button(
+                                ui,
+                                &format!("Apply {:.0}%", proposal.proposed * 100.0),
+                                Style::Prominent,
+                            )
+                            .clicked()
+                        {
+                            apply = Some(proposal.proposed);
+                        }
+                    });
                 }
-                if active.is_some() && ui.button("Back to the default (75%)").clicked() {
-                    reset = true;
-                }
-            });
-            if let Some(proposal) = &app.learning.proposal {
-                let color = if proposal.valid { ALLOW } else { ASK };
-                ui.label(
-                    RichText::new(format!(
-                        "Proposal: {:.0}% (now {:.0}%). {}",
-                        proposal.proposed * 100.0,
-                        proposal.current * 100.0,
-                        proposal.reason
-                    ))
-                    .color(color),
-                );
-                ui.label(
-                    RichText::new(format!(
-                        "Decisions {}, your decisions {}, your denials {}. Newer part of the log: ask rate {:.0}% now, {:.0}% with the proposal, denials allowed {}.",
-                        proposal.decisions,
-                        proposal.owner_decisions,
-                        proposal.owner_denials,
-                        proposal.held_out_before.ask_rate() * 100.0,
-                        proposal.held_out_after.ask_rate() * 100.0,
-                        proposal.held_out_misses()
-                    ))
-                    .color(INK_MUTED),
-                );
-                if proposal.valid
-                    && accent_button(ui, &format!("Apply {:.0}%", proposal.proposed * 100.0))
-                        .clicked()
-                {
-                    apply = Some(proposal.proposed);
-                }
-            }
-        });
+            },
+        );
         if let Some(task_match) = apply {
             // Goal item A4: a lower level is a rule change. It needs the owner check. The
             // request completes in `apply_calibration`.
@@ -930,10 +1184,9 @@ mod vault_view {
     }
 }
 
-#[cfg(feature = "vault")]
 pub(crate) use vault_view::{LearningUiState, apply_calibration, promote_model, roll_back_model};
 
-#[cfg(all(test, feature = "vault"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1106,6 +1359,7 @@ mod tests {
                     .expect("pattern");
             }
         }
+        app.ui.set_expanded("learning-advanced", true);
         let text = draw_view(&mut app);
         for expected in [
             "Ask rate over time",
@@ -1181,6 +1435,7 @@ mod tests {
             }
             candidate.id
         };
+        app.ui.set_expanded("learning-advanced", true);
         let text = draw_view(&mut app);
         for expected in [
             "Candidate apassy-local-v1+0badc0de: 100 shadow decisions, agreement 100%.",

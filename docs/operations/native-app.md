@@ -325,7 +325,7 @@ Findings:
 
 - `Contents/Helpers/ApassyNotify.app`: the notifier is the main program of its own bundle. Bundle ID and signing ID `com.wydrox.apassy.notify`, display name "Apassy", `LSUIElement`. No entitlements. `native/ApassyNotify/*.swift`, with the shared `Protocol.swift` and `Caller.swift`.
 - The Apassy app starts the notifier as its child, as it starts the keychain helper. Before `notify_authorize` and `notify`, the notifier does the AppKit check-in, and then it gets the notification center (R5, R9).
-- `notify` never asks for permission. Only the "Allow notifications" button asks, with a 120 s prompt. After a denial, the Inbox card shows "Open notification settings". It opens `x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=com.wydrox.apassy.notify`. Measured: System Settings opened the Notifications pane (`newSelection: 'com.apple.settings.notifications'`). The agent did not check that the pane selects the Apassy entry.
+- `notify` never asks for permission. Only the "Allow notifications" button asks, with a 120 s prompt. After a denial, Settings > Notifications shows "Open System Settings". It opens `x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=com.wydrox.apassy.notify`. Measured: System Settings opened the Notifications pane (`newSelection: 'com.apple.settings.notifications'`). The agent did not check that the pane selects the Apassy entry.
 
 ### Guard
 
@@ -344,7 +344,7 @@ At start, the window runs `ping` once. The result tells the owner check if Touch
 
 ### Unlock method (A2, A3)
 
-Code: `src/desktop/unlock.rs`, the "Unlock method" card, and "Unlock with Touch ID" in the Vault file card (`src/desktop/ui/unlock_view.rs`).
+Code: `src/desktop/unlock.rs`, "Unlock method" in Settings > Security (`src/desktop/ui/settings.rs`), and "Unlock with Touch ID" on the unlock screen (`src/desktop/ui/start.rs`).
 
 - The unlock method is an owner setting: passphrase or Touch ID. The master passphrase stays the root key.
 - Source of truth: the keychain item itself. `keychain_exists` answers without a prompt, so Apassy reads the setting before unlock, when the owner opens, creates, or restores a vault file. The encrypted vault cannot hold the setting, because Apassy needs it before the vault opens. Apassy keeps no preference file. An item means "Touch ID". No item means "passphrase".
@@ -356,7 +356,7 @@ Code: `src/desktop/unlock.rs`, the "Unlock method" card, and "Unlock with Touch 
 - A key that does not open the vault, for example after a passphrase change in another copy: Apassy deletes the item. After a passphrase change in this app, Apassy deletes the item and asks the owner to turn Touch ID unlock on again.
 - Turn off: `keychain_delete`.
 - Backup restore, passphrase change, and recovery need the typed passphrase. Touch ID never supplies it.
-- `keychain_unavailable` (no provisioning profile, the state on this Mac): the Vault file card and the Unlock method card show "Touch ID can confirm actions, but cannot unlock the vault until the app has a provisioning profile. Unlock with the passphrase." The setup controls are hidden. Passphrase unlock works as before.
+- `keychain_unavailable` (no provisioning profile, the state on this Mac): Settings > Security shows "Touch ID can confirm actions, but cannot unlock the vault until the app has a provisioning profile. Unlock with the passphrase." The setup controls are hidden. The unlock screen shows only the passphrase. Passphrase unlock works as before.
 
 ### Owner check (A4)
 
@@ -634,11 +634,11 @@ The notification steps 6 and 7 use `target/Apassy.app` itself, not the copy. The
 
 Use a vault file with synthetic values. Start the app with `open target/Apassy.app`. Record each result in this document.
 
-1. Owner check without Touch ID (A4, this Mac today). Unlock the vault with the passphrase. Open an item and select "Reveal values". Expect the dialog "Confirm that it is you" with "Touch ID is not available: the Touch ID keyboard is not connected or not paired ...". Type a wrong passphrase: expect "The passphrase is incorrect" and no value. Type the passphrase: expect the value, and that it hides after 30 s.
-2. Owner check with Touch ID (A4). With the keyboard paired, select "Reveal values". Expect the macOS prompt "Apassy is trying to show the secret values of an item". Touch the sensor: expect the value. Repeat and select Cancel: expect "Touch ID was cancelled" and no value. Repeat for "Approve once", "Rotate token", a grant checkbox, and "Save rule": each shows a prompt, and nothing changes before the check.
-3. Setup without a profile (A2, this Mac today). Open Vault > "Vault file, passphrase, unlock method, and backup". Expect "Touch ID can confirm actions, but cannot unlock the vault until the app has a provisioning profile." and no setup button. Lock: the Vault file card shows the same text, and passphrase unlock works.
-4. Setup with a profile (A2, A3). After owner step 1, type the passphrase in the Unlock method card and select "Turn on Touch ID unlock". Touch the sensor. Expect "Touch ID unlock is on". Run `security find-generic-password -s com.wydrox.apassy.vault-unlock`: expect "could not be found". Lock, then select "Unlock with Touch ID" and touch the sensor: expect the vault unlocked.
-5. Fingerprint change (A3). Add a fingerprint in System Settings. Open the vault file again. Expect "The fingerprints on this Mac changed ..." without a prompt, and passphrase unlock. Expect "Current: passphrase." after unlock.
+1. Owner check without Touch ID (A4, this Mac today). Unlock the vault with the passphrase. Open an item and select "Show" next to the secret. Expect the dialog "Confirm that it is you" with "Touch ID is not available: the Touch ID keyboard is not connected or not paired ...". Type a wrong passphrase: expect "The passphrase is incorrect" and no value. Type the passphrase: expect the value, and that it hides after 30 s.
+2. Owner check with Touch ID (A4). With the keyboard paired, select "Show" next to the secret. Expect the macOS prompt "Apassy is trying to show the secret values of an item". Touch the sensor: expect the value. Repeat and select Cancel: expect "Touch ID was cancelled" and no value. Repeat for "Approve once", "Rotate token…", an API operation switch, and "Save rule": each shows a prompt, and nothing changes before the check.
+3. Setup without a profile (A2, this Mac today). Open Settings > Security. Expect "Touch ID can confirm actions, but cannot unlock the vault until the app has a provisioning profile." and no setup button. Lock: the unlock screen shows no Touch ID button, and passphrase unlock works.
+4. Setup with a profile (A2, A3). After owner step 1, type the passphrase under "Unlock method" in Settings > Security and select "Turn on Touch ID unlock". Touch the sensor. Expect "Touch ID unlock is on". Run `security find-generic-password -s com.wydrox.apassy.vault-unlock`: expect "could not be found". Lock, then select "Unlock with Touch ID" and touch the sensor: expect the vault unlocked.
+5. Fingerprint change (A3). Add a fingerprint in System Settings. Open the vault file again. Expect "The fingerprints on this Mac changed ..." without a prompt, and passphrase unlock. Expect "Unlock method: Passphrase" in Settings > Security after unlock.
 6. Turn off (A3). Turn Touch ID unlock on again, then select "Turn off Touch ID unlock". Expect "Apassy deleted the unlock key", and after a lock, no "Unlock with Touch ID" button.
 7. Passphrase change (A3). With Touch ID unlock on, change the passphrase. Expect "Touch ID unlock is off, because the passphrase changed."
 8. Agent profile (I2). After owner step 1, run `APASSY_REQUIRE_KEYCHAIN=1 scripts/build-app.sh` and `cargo test --locked --features desktop,vault --test isolation_profile`. Expect the lines under "Check the agent profile with the signed bundle", and "keychain helper with the signed parent" with `"keychain_access_group":"<TEAM_ID>.com.wydrox.apassy"`. The provisioned keychain helper does not start in the agent profile, and a copy outside the bundle answers `caller_not_allowed`. Record the result.

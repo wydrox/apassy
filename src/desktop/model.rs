@@ -73,6 +73,20 @@ pub struct ItemDraft {
     pub database_name: String,
     pub field_name: String,
     pub public_label: String,
+    /// Custom details (vault build). The demo model does not store them.
+    pub details: Vec<DetailDraft>,
+}
+
+/// A custom detail of an item draft. The value of a hidden detail is typed in the secret
+/// form, not here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DetailDraft {
+    pub label: String,
+    /// The value of a visible detail. Empty for a stored hidden detail.
+    pub value: String,
+    pub hidden: bool,
+    /// The stored field of a hidden detail. A blank secret input keeps its value.
+    pub stored: Option<String>,
 }
 
 impl Default for ItemDraft {
@@ -88,6 +102,7 @@ impl Default for ItemDraft {
             database_name: String::new(),
             field_name: String::new(),
             public_label: String::new(),
+            details: Vec::new(),
         }
     }
 }
@@ -1772,6 +1787,7 @@ fn checked_fields(draft: ItemDraft, _require_kind: bool) -> ModelResult<ItemDraf
         database_name: draft.database_name.trim().to_owned(),
         field_name: draft.field_name.trim().to_owned(),
         public_label: draft.public_label.trim().to_owned(),
+        details: Vec::new(),
     })
 }
 

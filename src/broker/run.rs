@@ -29,6 +29,9 @@
 //!    The vault epoch must be the same as in step 1. A lock, an unlock, or a restore
 //!    in between makes the decision invalid (goal item V3).
 //! 10. The broker reads the secrets, releases the vault lock, and starts the process.
+//!     A variable in placeholder mode (ADR 0011) gets a placeholder. The broker then
+//!     starts a run proxy that puts the real value into HTTPS requests to the hosts of
+//!     the variable, and on macOS the process can connect only to that proxy.
 //!
 //! Each refusal after step 2 and each result is stored in the activity log.
 
@@ -44,15 +47,19 @@ use super::bouncer::{
     BouncerRequest, BouncerVerdict, DecisionContext, before_model, decide_learned, owner_required,
 };
 use super::decide::{BrokerContext, authenticate, lock, locked_response};
-use super::exec::{self, SecretEnv};
+use super::exec::{self, Network, SecretEnv};
 use super::learning::{self, LoggedRequest, Outcome, RuleDenial, RunScope};
+use super::proxy::{
+    HostRule, OtherHosts, ProxyEvent, ProxyOptions, ProxyOutcome, ProxySecret, RunProxy,
+    mint_placeholder,
+};
 use super::shadow::{self, ShadowInput};
 use super::shell_risk::{ProviderHosts, analyze_run, injection_flag};
 use crate::agent::wire::WireResponse;
 use crate::vault::providers;
 use crate::vault::{
-    ActivityDecision, AgentSummary, DecisionEntry, Declaration, ExecMode, NewActivity, OwnerLabel,
-    RealOutcome, Vault,
+    ActivityDecision, AgentSummary, DecisionEntry, Declaration, EnvDelivery, ExecMode, NewActivity,
+    OwnerLabel, RealOutcome, Vault,
 };
 
 /// A shadow thread waits this long after the owner time limit for the real outcome.
@@ -106,12 +113,16 @@ impl RunRequest<'_> {
             return Err(format!("The command must have 1 to {MAX_ARGS} arguments."));
         }
         if self.command[0].is_empty()
+            || self.command[0].starts_with('-')
             || self
                 .command
                 .iter()
                 .any(|arg| arg.len() > MAX_ARG_BYTES || arg.contains('\0'))
         {
-            return Err("A command argument is empty, too long, or has a NUL byte.".to_owned());
+            return Err(
+                "A command argument is empty, too long, or has a NUL byte, or the program name starts with -."
+                    .to_owned(),
+            );
         }
         let purpose = self.purpose.trim();
         if purpose.is_empty() || purpose.len() > MAX_PURPOSE_BYTES {
@@ -142,6 +153,8 @@ struct Checked {
     /// Working directory relative to the project directory of the first item.
     relative_dir: String,
     env_names: Vec<String>,
+    /// The variables in placeholder mode (ADR 0011).
+    placeholder_names: Vec<String>,
     /// At least one grant is in "ask" mode.
     any_ask: bool,
     /// Owner instructions of the grants, joined.
@@ -503,14 +516,48 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         }
     };
 
-    let result = exec::run(
+    let mut secrets = secrets;
+    let proxy = if secrets.proxied.is_empty() {
+        None
+    } else {
+        let options = ProxyOptions {
+            tls: ctx.tls.clone(),
+            other_hosts: OtherHosts::Tunnel,
+            enforce: true,
+        };
+        match RunProxy::start(std::mem::take(&mut secrets.proxied), options) {
+            Ok(proxy) => Some(proxy),
+            Err(_) => {
+                let reason = "The run proxy did not start. The command did not run.";
+                record_locked(
+                    ctx,
+                    &checked.agent,
+                    request,
+                    &label,
+                    ActivityDecision::Error,
+                    reason,
+                );
+                return WireResponse::failure("proxy_failed", reason);
+            }
+        }
+    };
+    let network = proxy.as_ref().map(RunProxy::network);
+    let result = exec::run_with(
         request.command,
         &checked.cwd,
         request.path,
-        &secrets,
+        &secrets.env,
+        &secrets.masks,
+        network.map_or_else(Network::default, |network| Network {
+            env: &network.env,
+            sandbox_profile: network.sandbox_profile.as_deref(),
+        }),
         ctx.run_timeout,
     );
+    let enforced = network.is_some_and(|network| network.sandbox_profile.is_some());
+    let requests = proxy.map(RunProxy::finish).unwrap_or_default();
     drop(secrets);
+    let proxy_note = proxy_summary(&requests);
     match result {
         Ok(output) => {
             let reason = if output.timed_out {
@@ -520,7 +567,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                 )
             } else {
                 format!(
-                    "{decided_by}. Exit code {}. Directory: {}. {log_note}.",
+                    "{decided_by}. Exit code {}. Directory: {}. {log_note}.{proxy_note}",
                     output
                         .exit_code
                         .map_or_else(|| "none".to_owned(), |code| code.to_string()),
@@ -533,7 +580,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                 ActivityDecision::Allow
             };
             record_locked(ctx, &checked.agent, request, &label, decision, &reason);
-            WireResponse::success(json!({
+            let mut answer = json!({
                 "exit_code": output.exit_code,
                 "timed_out": output.timed_out,
                 "truncated": output.truncated,
@@ -542,7 +589,17 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                 "secrets_in_environment": checked.env_names,
                 "decided_by": decided_by,
                 "note": "Secret values in the output are replaced with [apassy:NAME].",
-            }))
+            });
+            if !checked.placeholder_names.is_empty() {
+                answer["placeholders"] = json!(checked.placeholder_names);
+                answer["network"] = json!({
+                    "proxy": true,
+                    "only_proxy": enforced,
+                    "requests": requests,
+                });
+                answer["note"] = json!(PLACEHOLDER_NOTE);
+            }
+            WireResponse::success(answer)
         }
         Err(_) => {
             let reason = "The command did not start. Check the program name and PATH.";
@@ -578,6 +635,7 @@ fn check(
         )
     })?;
     let mut env_names = Vec::new();
+    let mut placeholder_names = Vec::new();
     let mut any_ask = false;
     let mut declarations = Vec::new();
     let mut provider_hosts = Vec::new();
@@ -599,6 +657,10 @@ fn check(
         // Goal item V4: settings from a restored backup wait for the owner review.
         if vault.needs_review(*item_id).unwrap_or(true) {
             return Err(("review_required", review_reason(*item_id)));
+        }
+        // An archived item stays in the vault, but agents cannot use it.
+        if vault.is_archived(*item_id).unwrap_or(true) {
+            return Err(("item_archived", archived_reason(*item_id)));
         }
         let project = canonical_dir(Path::new(&grant.project_dir));
         let inside = project
@@ -681,10 +743,28 @@ fn check(
         declarations.push(vault.declaration(*item_id).ok().flatten());
         // Goal item B4: only the stored provider name. The broker does not run the
         // detection. An unknown provider has no hosts, as an item without a provider.
-        if let Some(provider) = vault.declaration_provider(*item_id).ok().flatten() {
+        let mut hosts = vault
+            .declaration_provider(*item_id)
+            .ok()
+            .flatten()
+            .map(|provider| providers::known_hosts(&provider).to_vec())
+            .unwrap_or_default();
+        // A placeholder can go only to the hosts of the variable, so they are its
+        // known hosts too.
+        if let EnvDelivery::Placeholder(rules) = &binding.delivery {
+            for rule in rules {
+                if let Ok(rule) = HostRule::parse(rule)
+                    && !hosts.iter().any(|host| host == rule.host())
+                {
+                    hosts.push(rule.host().to_owned());
+                }
+            }
+            placeholder_names.push(binding.env_name.clone());
+        }
+        if !hosts.is_empty() {
             provider_hosts.push(ProviderHosts {
                 env_name: binding.env_name.clone(),
-                hosts: providers::known_hosts(&provider).to_vec(),
+                hosts,
             });
         }
         env_names.push(binding.env_name);
@@ -696,6 +776,7 @@ fn check(
         cwd,
         relative_dir: relative_dir.unwrap_or_else(|| ".".to_owned()),
         env_names,
+        placeholder_names,
         any_ask,
         instruction: instructions.join(" "),
         declarations,
@@ -706,7 +787,13 @@ fn check(
 /// Refusal text for an item from a restored backup that the owner did not review yet.
 pub(super) fn review_reason(item_id: u64) -> String {
     format!(
-        "The vault was restored from a backup. The owner must review the agent settings of item {item_id} in Apassy (Item details, Confirm settings) before an agent can use it."
+        "The vault was restored from a backup. The owner must review the agent settings of item {item_id} in Apassy (open the credential, Confirm settings) before an agent can use it."
+    )
+}
+
+pub(super) fn archived_reason(item_id: u64) -> String {
+    format!(
+        "The owner archived item {item_id} in Apassy. An archived credential stays in the vault, but agents cannot use it."
     )
 }
 
@@ -715,8 +802,20 @@ fn canonical_dir(path: &Path) -> Option<PathBuf> {
     canonical.is_dir().then_some(canonical)
 }
 
-fn read_secrets(vault: &Vault, items: &[u64]) -> Result<Vec<SecretEnv>, String> {
-    let mut secrets = Vec::new();
+/// The variables of a run. `env` has a real value or a placeholder for each item.
+/// `masks` has the real value behind each placeholder, so the output never shows it.
+struct RunSecrets {
+    env: Vec<SecretEnv>,
+    masks: Vec<SecretEnv>,
+    proxied: Vec<ProxySecret>,
+}
+
+fn read_secrets(vault: &Vault, items: &[u64]) -> Result<RunSecrets, String> {
+    let mut secrets = RunSecrets {
+        env: Vec::new(),
+        masks: Vec::new(),
+        proxied: Vec::new(),
+    };
     for item_id in items {
         let binding = vault
             .env_binding(*item_id)
@@ -725,13 +824,65 @@ fn read_secrets(vault: &Vault, items: &[u64]) -> Result<Vec<SecretEnv>, String> 
             .ok_or_else(|| format!("Item {item_id} has no environment variable."))?;
         let value = vault
             .reveal(*item_id, &binding.field)
-            .map_err(|_| format!("Item {item_id} has no value in field {}.", binding.field))?;
-        secrets.push(SecretEnv {
+            .map_err(|_| format!("Item {item_id} has no value in field {}.", binding.field))?
+            .into_zeroizing();
+        let EnvDelivery::Placeholder(hosts) = &binding.delivery else {
+            secrets.env.push(SecretEnv {
+                name: binding.env_name,
+                value,
+            });
+            continue;
+        };
+        let placeholder = mint_placeholder(&value).ok_or_else(|| {
+            format!(
+                "The value of item {item_id} is too short for a placeholder. The owner can use the real value mode for {}.",
+                binding.env_name
+            )
+        })?;
+        let hosts = hosts
+            .iter()
+            .map(|host| HostRule::parse(host))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| format!("Item {item_id} has a host that is not valid."))?;
+        secrets.env.push(SecretEnv {
+            name: binding.env_name.clone(),
+            value: zeroize::Zeroizing::new(placeholder.clone()),
+        });
+        secrets.masks.push(SecretEnv {
+            name: binding.env_name.clone(),
+            value: value.clone(),
+        });
+        secrets.proxied.push(ProxySecret {
             name: binding.env_name,
-            value: value.into_zeroizing(),
+            placeholder,
+            value,
+            hosts,
         });
     }
     Ok(secrets)
+}
+
+const PLACEHOLDER_NOTE: &str = "Secret values in the output are replaced with [apassy:NAME]. The variables in `placeholders` hold a placeholder, not the real value. Apassy puts the real value into HTTPS requests to the hosts of each variable, in the Authorization header, a known API key header, or a known key parameter. `network.requests` lists each request. A request that Apassy stopped has the header X-Apassy-Proxy: refused and a reason.";
+
+/// One sentence about the proxy for the activity log.
+fn proxy_summary(requests: &[ProxyEvent]) -> String {
+    if requests.is_empty() {
+        return String::new();
+    }
+    let count = |outcome| {
+        requests
+            .iter()
+            .filter(|event| event.outcome == outcome)
+            .count()
+    };
+    format!(
+        " Proxy: {} with a real value, {} without, {} tunneled, {} stopped, {} failed.",
+        count(ProxyOutcome::Swapped),
+        count(ProxyOutcome::Passed),
+        count(ProxyOutcome::Tunneled),
+        count(ProxyOutcome::Refused),
+        count(ProxyOutcome::Failed),
+    )
 }
 
 fn record(
@@ -742,14 +893,19 @@ fn record(
     decision: ActivityDecision,
     reason: &str,
 ) {
-    let _ = vault.record_activity(&NewActivity {
-        agent_id: Some(agent.id),
-        agent_name: agent.name.clone(),
-        item_id: request.items.first().copied(),
-        operation: label.to_owned(),
-        decision,
-        reason: format!("{reason} Purpose: {}", request.purpose.trim()),
-    });
+    // The history of each item of the run shows the entry (schema 10).
+    let extra_items = request.items.get(1..).unwrap_or_default();
+    let _ = vault.record_activity_for_items(
+        &NewActivity {
+            agent_id: Some(agent.id),
+            agent_name: agent.name.clone(),
+            item_id: request.items.first().copied(),
+            operation: label.to_owned(),
+            decision,
+            reason: format!("{reason} Purpose: {}", request.purpose.trim()),
+        },
+        extra_items,
+    );
 }
 
 /// Store a decision log entry when the vault is unlocked (ADR 0009).

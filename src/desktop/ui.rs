@@ -1,27 +1,39 @@
 //! Drawing code for the desktop shell. Keep state changes in [`super::DesktopApp`].
+//!
+//! The look follows SwiftUI on macOS: a sidebar, large page titles, grouped form
+//! sections, sheets for changes, and a toast for results. [`kit`] has the tokens and
+//! the controls. Each screen shows the common path first and folds the rest away.
 
 #[cfg(feature = "vault")]
-mod inbox_view;
+mod activity;
+#[cfg(feature = "vault")]
+mod agents;
+#[cfg(not(feature = "vault"))]
+mod demo;
+#[cfg(feature = "vault")]
+mod items;
+pub(crate) mod kit;
 #[cfg(feature = "vault")]
 mod owner_check_view;
 #[cfg(all(test, feature = "vault"))]
 mod owner_tests;
 #[cfg(feature = "vault")]
-mod unlock_view;
-
-use eframe::egui::{
-    self, Color32, ComboBox, CornerRadius, FontId, Frame, Margin, RichText, ScrollArea, Stroke,
-    TextEdit, Theme, ThemePreference, Vec2,
-};
-
-use crate::contracts::{CredentialKind, Decision};
-use crate::desktop::model::{
-    AMBIGUOUS_SAMPLE_TEXT, CONFLICTING_SAMPLE_TEXT, DEMO_BANNER, ExtraField, INTERPRETER_ID,
-    SAMPLE_RULE_TEXT, UNSUPPORTED_SAMPLE_TEXT,
-};
+mod settings;
+mod shell;
 #[cfg(feature = "vault")]
-use crate::desktop::owner_check::OwnerRequest;
-use crate::desktop::{DesktopApp, OwnerView, StatusKind};
+mod start;
+#[cfg(feature = "vault")]
+mod timeline;
+
+use std::collections::BTreeSet;
+
+use eframe::egui;
+#[cfg(feature = "vault")]
+use eframe::egui::TextEdit;
+
+use crate::desktop::{DesktopApp, StatusKind};
+
+pub(crate) use kit::WINDOW as WINDOW_COLOR;
 
 /// Byte capacity of a passphrase field. A field holds at most `MAX_PASSPHRASE_BYTES`
 /// characters, and a character has at most 4 bytes, so typing never moves the text
@@ -32,19 +44,29 @@ pub(crate) const PASSPHRASE_CAPACITY: usize = 4 * crate::vault::MAX_PASSPHRASE_B
 /// 65536 bytes in a field value (`MAX_FIELD_VALUE_BYTES` in `src/vault/types.rs`).
 #[cfg(feature = "vault")]
 const SECRET_VALUE_CAPACITY: usize = 4 * 65_536;
+/// The passphrase field of the start screens (create, unlock, restore).
+#[cfg(feature = "vault")]
+const VAULT_PASSPHRASE_FIELD: &str = "vault-passphrase";
+/// The second passphrase field when the owner creates a vault.
+#[cfg(feature = "vault")]
+const VAULT_REPEAT_FIELD: &str = "vault-passphrase-repeat";
 /// The passphrase field of the owner check.
 #[cfg(feature = "vault")]
 pub(crate) const OWNER_CHECK_FIELD: &str = "owner-check-passphrase";
 /// The passphrase field of the Touch ID setup.
 #[cfg(feature = "vault")]
 pub(crate) const TOUCH_ID_SETUP_FIELD: &str = "touch-id-setup-passphrase";
+/// The fields of the passphrase change sheet.
+#[cfg(feature = "vault")]
+const CHANGE_FIELDS: [&str; 3] = ["passphrase-current", "passphrase-new", "passphrase-repeat"];
 /// Every passphrase field.
 #[cfg(feature = "vault")]
-const PASSPHRASE_FIELDS: [&str; 6] = [
-    "vault-passphrase",
-    "passphrase-current",
-    "passphrase-new",
-    "passphrase-repeat",
+const PASSPHRASE_FIELDS: [&str; 7] = [
+    VAULT_PASSPHRASE_FIELD,
+    VAULT_REPEAT_FIELD,
+    CHANGE_FIELDS[0],
+    CHANGE_FIELDS[1],
+    CHANGE_FIELDS[2],
     OWNER_CHECK_FIELD,
     TOUCH_ID_SETUP_FIELD,
 ];
@@ -73,11 +95,15 @@ pub(crate) fn forget_secret_field(ctx: &egui::Context, salt: &str) {
     }
 }
 
-/// Forget the undo history of each field in an item secret form.
+/// Forget the undo history of each field in an item secret form, with the hidden
+/// custom details.
 #[cfg(feature = "vault")]
 fn forget_secret_form(ctx: &egui::Context, form: &str) {
     for field in SECRET_FORM_FIELDS {
         forget_secret_field(ctx, &format!("{form}-{field}"));
+    }
+    for index in 0..super::owner_store::MAX_DETAILS {
+        forget_secret_field(ctx, &format!("{form}-detail-{index}"));
     }
 }
 
@@ -108,1753 +134,322 @@ fn presize(value: &mut String, capacity: usize) {
     *value = sized;
 }
 
-pub(super) const INK: Color32 = Color32::from_rgb(28, 25, 20);
-pub(super) const INK_MUTED: Color32 = Color32::from_rgb(83, 77, 68);
-const BG: Color32 = Color32::from_rgb(243, 239, 230);
-const BG_ELEV: Color32 = Color32::from_rgb(255, 253, 248);
-const LINE: Color32 = Color32::from_rgb(215, 208, 195);
-const FIELD_BG: Color32 = Color32::WHITE;
-const FIELD_LINE: Color32 = Color32::from_rgb(160, 150, 132);
-const ACCENT: Color32 = Color32::from_rgb(33, 90, 120);
-const ACCENT_INK: Color32 = Color32::from_rgb(247, 251, 255);
-const ACCENT_WEAK: Color32 = Color32::from_rgb(228, 238, 243);
-const SIDEBAR: Color32 = Color32::from_rgb(36, 50, 60);
-const SIDEBAR_INK: Color32 = Color32::from_rgb(244, 239, 230);
-const SIDEBAR_MUTED: Color32 = Color32::from_rgb(201, 194, 180);
-const SIDEBAR_CURRENT: Color32 = Color32::from_rgb(49, 88, 108);
-const BANNER_BG: Color32 = Color32::from_rgb(239, 228, 196);
-const BANNER_INK: Color32 = Color32::from_rgb(63, 52, 20);
-pub(super) const ALLOW: Color32 = Color32::from_rgb(33, 88, 69);
-pub(super) const ASK: Color32 = Color32::from_rgb(122, 78, 16);
-pub(super) const DENY: Color32 = Color32::from_rgb(138, 36, 48);
-
-pub(crate) fn apply_style(ctx: &egui::Context) {
-    ctx.options_mut(|options| {
-        options.theme_preference = ThemePreference::Light;
-    });
-    let mut visuals = egui::Visuals::light();
-    visuals.panel_fill = BG;
-    visuals.window_fill = BG_ELEV;
-    visuals.warn_fg_color = ASK;
-    visuals.error_fg_color = DENY;
-    // Text fields need a visible edge on the light cards.
-    visuals.text_edit_bg_color = Some(FIELD_BG);
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, FIELD_LINE);
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT);
-    ctx.set_visuals_of(Theme::Light, visuals);
-}
-
-pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    {
-        let spacing = ui.spacing_mut();
-        spacing.item_spacing = Vec2::new(10.0, 8.0);
-        spacing.button_padding = Vec2::new(12.0, 8.0);
-        spacing.interact_size.y = 32.0;
-    }
-    #[cfg(feature = "vault")]
-    app.poll_owner_flows(ui.ctx());
-
-    egui::Panel::top("demo_banner")
-        .resizable(false)
-        .exact_size(96.0)
-        .show_separator_line(false)
-        .frame(banner_frame())
-        .show(ui, |ui| draw_banner(app, ui));
-
-    egui::Panel::left("owner_sidebar")
-        .resizable(false)
-        .exact_size(248.0)
-        .show_separator_line(false)
-        .frame(sidebar_frame())
-        .show(ui, |ui| draw_sidebar(app, ui));
-
-    egui::CentralPanel::default()
-        .frame(content_frame())
-        .show(ui, |ui| draw_content(app, ui));
-
-    #[cfg(feature = "vault")]
-    owner_check_view::draw(app, ui.ctx());
-}
-
-fn banner_frame() -> Frame {
-    Frame::NONE
-        .fill(BANNER_BG)
-        .inner_margin(Margin::symmetric(16, 12))
-        .stroke(Stroke::new(0.0, BANNER_BG))
-}
-
-fn sidebar_frame() -> Frame {
-    Frame::NONE
-        .fill(SIDEBAR)
-        .inner_margin(Margin::symmetric(16, 16))
-}
-
-fn content_frame() -> Frame {
-    Frame::NONE.fill(BG).inner_margin(Margin::symmetric(18, 16))
-}
-
-pub(super) fn card_frame() -> Frame {
-    Frame::NONE
-        .fill(BG_ELEV)
-        .inner_margin(Margin::symmetric(14, 12))
-        .corner_radius(CornerRadius::same(8))
-        .stroke(Stroke::new(1.0, LINE))
-}
-
-fn draw_banner(app: &DesktopApp, ui: &mut egui::Ui) {
-    ui.colored_label(
-        BANNER_INK,
-        RichText::new("Demo data only").size(12.0).strong(),
-    );
-    ui.colored_label(BANNER_INK, RichText::new(DEMO_BANNER).size(16.0).strong());
-    ui.colored_label(BANNER_INK, banner_status(app));
-}
-
-#[cfg(not(feature = "vault"))]
-fn banner_status(app: &DesktopApp) -> String {
-    let status = app.model.foundation_status();
-    format!(
-        "Storage is {storage}. The model is {model}. Isolation is {isolation}. Encryption is {encryption}.",
-        storage = status.storage,
-        model = status.model,
-        isolation = status.isolation,
-        encryption = status.encryption,
-    )
-}
-
-#[cfg(feature = "vault")]
-fn banner_status(app: &DesktopApp) -> String {
-    let status = app.model.foundation_status();
-    format!(
-        "{VAULT_STORAGE_SENTENCE} Agent rules are in the vault. The Rules screen is a demo. The model is {model}. Isolation is {isolation}.",
-        model = status.model,
-        isolation = status.isolation,
-    )
-}
-
-/// Storage and persistence lines for the sidebar.
-#[cfg(not(feature = "vault"))]
-fn sidebar_storage(app: &DesktopApp) -> (String, &'static str) {
-    let status = app.model.foundation_status();
-    (format!("Storage: {}", status.storage), status.persistence)
-}
-
-#[cfg(feature = "vault")]
-fn sidebar_storage(_app: &DesktopApp) -> (String, &'static str) {
-    (
-        "Storage: encrypted vault file".to_owned(),
-        "Rules and demo approvals: in memory only.",
-    )
-}
-
-#[cfg(feature = "vault")]
-const VAULT_STORAGE_SENTENCE: &str = "Items, agents, and agent activity are in an experimental encrypted file. Do not store real credentials.";
-
-fn draw_sidebar(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    ui.label(
-        RichText::new("Apassy")
-            .size(22.0)
-            .color(SIDEBAR_INK)
-            .strong(),
-    );
-    ui.label(
-        RichText::new("Owner desktop. Demo data only.")
-            .size(13.0)
-            .color(SIDEBAR_MUTED),
-    );
-    ui.add_space(8.0);
-
-    for view in OwnerView::ALL {
-        let selected = app.view == view;
-        let fill = if selected {
-            SIDEBAR_CURRENT
-        } else {
-            Color32::TRANSPARENT
-        };
-        let button = egui::Button::new(RichText::new(view.label()).color(SIDEBAR_INK))
-            .fill(fill)
-            .stroke(Stroke::new(
-                1.0,
-                Color32::from_rgba_unmultiplied(244, 239, 230, 40),
-            ))
-            .min_size(Vec2::new(ui.available_width(), 34.0));
-        if ui.add(button).clicked() {
-            app.view = view;
-        }
-    }
-
-    ui.add_space(12.0);
-    draw_lock_controls(app, ui);
-    if secondary_sidebar_button(ui, "Reset demo").clicked() {
-        app.reset_demo();
-    }
-
-    ui.add_space(16.0);
-    let status = app.model.foundation_status();
-    ui.label(
-        RichText::new("Foundation status")
-            .color(SIDEBAR_INK)
-            .strong(),
-    );
-    let (storage_line, persistence_line) = sidebar_storage(app);
-    ui.label(RichText::new(storage_line).size(13.0).color(SIDEBAR_MUTED));
-    ui.label(
-        RichText::new(format!("Model: {}", status.model))
-            .size(13.0)
-            .color(SIDEBAR_MUTED),
-    );
-    ui.label(
-        RichText::new(format!("Isolation: {}", status.isolation))
-            .size(13.0)
-            .color(SIDEBAR_MUTED),
-    );
-    ui.label(
-        RichText::new(persistence_line)
-            .size(13.0)
-            .color(SIDEBAR_MUTED),
-    );
-    ui.label(
-        RichText::new(format!("Contract version {}", status.contract_version))
-            .size(13.0)
-            .color(SIDEBAR_MUTED),
-    );
-}
-
-fn draw_content(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    draw_status(app, ui);
-    ui.add_space(8.0);
-    #[cfg(feature = "vault")]
-    agents_view::draw_approvals(app, ui);
-    ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| match app.view {
-            OwnerView::Vault => draw_vault(app, ui),
-            OwnerView::Item => draw_item(app, ui),
-            OwnerView::Rules => draw_rules(app, ui),
-            OwnerView::Agents => draw_agents(app, ui),
-            OwnerView::Activity => draw_activity(app, ui),
-            OwnerView::Learning => super::learning_ui::draw(app, ui),
-        });
-}
-
-fn draw_status(app: &DesktopApp, ui: &mut egui::Ui) {
-    let (fill, stroke) = match app.status_kind {
-        StatusKind::Neutral => (ACCENT_WEAK, Color32::from_rgb(197, 214, 223)),
-        StatusKind::Ok => (
-            Color32::from_rgb(231, 242, 234),
-            Color32::from_rgb(197, 217, 204),
-        ),
-        StatusKind::Error => (
-            Color32::from_rgb(248, 232, 234),
-            Color32::from_rgb(227, 192, 197),
-        ),
-    };
-    Frame::NONE
-        .fill(fill)
-        .stroke(Stroke::new(1.0, stroke))
-        .inner_margin(Margin::symmetric(12, 10))
-        .corner_radius(CornerRadius::same(6))
-        .show(ui, |ui| {
-            ui.label(RichText::new(&app.status_text).color(INK));
-        });
-}
-
-#[cfg(not(feature = "vault"))]
-fn draw_lock_controls(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    ui.label(
-        RichText::new(app.model.lock_state_label())
-            .size(13.0)
-            .color(SIDEBAR_MUTED),
-    );
-    ui.add_space(6.0);
-
-    let locked = app.model.is_locked();
-    ui.add_enabled_ui(!locked, |ui| {
-        if accent_button(ui, "Lock vault").clicked() {
-            let result = app.model.lock();
-            if app
-                .apply(result, "The vault is locked. Item details are hidden.")
-                .is_some()
-            {
-                app.pending_delete = false;
-            }
-        }
-    });
-    ui.add_enabled_ui(locked, |ui| {
-        if secondary_sidebar_button(ui, "Open vault").clicked() {
-            let result = app.model.unlock();
-            let _ = app.apply(
-                result,
-                "The vault is open. This control is not owner authentication.",
-            );
-        }
-    });
-}
-
-#[cfg(feature = "vault")]
-fn draw_lock_controls(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    ui.label(
-        RichText::new(app.owner_ui.session.lock_label())
-            .size(13.0)
-            .color(SIDEBAR_MUTED),
-    );
-    ui.add_space(6.0);
-    let unlocked = app.owner_ui.session.has_file() && !app.owner_ui.session.is_locked();
-    ui.add_enabled_ui(unlocked, |ui| {
-        if accent_button(ui, "Lock vault").clicked() {
-            // Waiting runs end and stay in the inbox. Typed passphrases, typed secrets,
-            // and their undo history do not stay after a lock.
-            let ctx = ui.ctx().clone();
-            app.lock_vault(Some(&ctx));
-        }
-    });
-}
-
-#[cfg(feature = "vault")]
-fn draw_vault(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    draw_owner_vault(app, ui);
-}
-
-#[cfg(not(feature = "vault"))]
-fn draw_vault(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    heading(ui, "Vault");
-    ui.label(
-        RichText::new("The vault lists five credential categories. This desktop assigns a fixed synthetic value. Real secrets are not valid input.")
-            .color(INK_MUTED),
-    );
-    ui.add_space(8.0);
-
-    ui.horizontal(|ui| {
-        let label = ui.label("Search items");
-        let edit = ui.add(
-            TextEdit::singleline(&mut app.search)
-                .desired_width(280.0)
-                .hint_text("Name, project, service, or notes"),
-        );
-        edit.labelled_by(label.id);
-        if ui.button("Search").clicked() {
-            let count = app.model.list_items(&app.search).len();
-            let noun = if count == 1 {
-                "item matches"
-            } else {
-                "items match"
-            };
-            app.set_ok(format!("The search is complete. {count} {noun}."));
-        }
-        if ui.button("Clear").clicked() {
-            app.search.clear();
-            app.set_ok("Search is cleared.");
-        }
-    });
-
-    ui.add_space(8.0);
-    let items = app.model.list_items(&app.search);
-    for kind in CredentialKind::ALL {
-        card_frame().show(ui, |ui| {
-            ui.label(RichText::new(kind.label()).size(16.0).strong().color(INK));
-            let group: Vec<_> = items
-                .iter()
-                .filter(|item| item.kind == kind)
-                .cloned()
-                .collect();
-            if group.is_empty() {
-                ui.label(RichText::new("No items in this category.").color(INK_MUTED));
-            } else {
-                for item in group {
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.label(RichText::new(&item.name).strong().color(INK));
-                            ui.label(
-                                RichText::new(meta_line(&item.project, &item.service))
-                                    .color(INK_MUTED),
-                            );
-                        });
-                        if ui.button("Open item").clicked() {
-                            app.select_item(item.id.clone());
-                        }
-                    });
-                }
-            }
-        });
-        ui.add_space(8.0);
-    }
-
-    card_frame().show(ui, |ui| {
-        ui.label(RichText::new("Add item").size(16.0).strong().color(INK));
-        ui.label(
-            RichText::new("The form stores labels only. The model creates the synthetic value.")
-                .color(INK_MUTED),
-        );
-        item_form(ui, &mut app.add_form, true);
-        ui.add_enabled_ui(!app.model.is_locked(), |ui| {
-            if accent_button(ui, "Add item").clicked() {
-                match app.model.create_item(app.add_form.clone()) {
-                    Ok(item) => {
-                        app.set_ok(format!("The desktop added {}.", item.name));
-                        app.add_form = Default::default();
-                        app.select_item(item.id);
-                    }
-                    Err(err) => app.set_err(err.message),
-                }
-            }
-        });
-        if app.model.is_locked() {
-            ui.label(
-                RichText::new("The vault is locked. Open the vault to add an item.")
-                    .color(INK_MUTED),
-            );
-        }
-    });
-}
-
-#[cfg(feature = "vault")]
-fn draw_item(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    draw_owner_item(app, ui);
-}
-
-#[cfg(not(feature = "vault"))]
-fn draw_item(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    heading(ui, "Item details");
-    ui.label(
-        RichText::new(
-            "Values stay hidden until a demo reveal. Copy does not write to the clipboard.",
-        )
-        .color(INK_MUTED),
-    );
-    ui.add_space(8.0);
-
-    let Some(id) = app.selected_item_id.clone() else {
-        ui.label(RichText::new("Select an item in the vault.").color(INK_MUTED));
-        return;
-    };
-    let details = match app.model.item_details(&id) {
-        Ok(details) => details,
-        Err(err) => {
-            ui.label(RichText::new(err.message).color(DENY));
-            return;
-        }
-    };
-
-    card_frame().show(ui, |ui| {
-        ui.label(RichText::new(&details.name).size(18.0).strong().color(INK));
-        ui.label(RichText::new(details.kind.label()).color(INK_MUTED));
-        if details.hidden {
-            ui.label(RichText::new(&details.message).color(ASK));
-            return;
-        }
-        ui.label(RichText::new(details.agent_use_label).color(INK_MUTED));
-        ui.add_space(6.0);
-        Frame::NONE
-            .fill(Color32::from_rgb(247, 244, 236))
-            .inner_margin(Margin::symmetric(10, 8))
-            .corner_radius(CornerRadius::same(6))
-            .show(ui, |ui| {
-                ui.label(RichText::new("Synthetic value").color(INK_MUTED));
-                let value = if details.revealed {
-                    RichText::new(&details.display_value).monospace().color(INK)
-                } else {
-                    RichText::new(&details.display_value)
-                        .monospace()
-                        .color(INK_MUTED)
-                };
-                ui.label(value);
-                if details.revealed {
-                    ui.label(RichText::new(details.reveal_warning).color(ASK));
-                }
-                ui.label(RichText::new(details.copy_warning).color(INK_MUTED));
-            });
-        ui.horizontal(|ui| {
-            let reveal_label = if details.revealed {
-                "Hide demo value"
-            } else {
-                "Show demo value"
-            };
-            if ui.button(reveal_label).clicked() {
-                if details.revealed {
-                    let result = app.model.hide_item(&id);
-                    let _ = app.apply(result, "The demo value is hidden.");
-                } else {
-                    match app.model.reveal_item(&id) {
-                        Ok(revealed) => app.set_ok(revealed.reveal_warning),
-                        Err(err) => app.set_err(err.message),
-                    }
-                }
-            }
-            ui.add_enabled_ui(details.revealed, |ui| {
-                if ui.button("Copy (demo)").clicked() {
-                    match app.model.demo_copy_item(&id) {
-                        Ok(copy) => app.set_ok(copy.warning),
-                        Err(err) => app.set_err(err.message),
-                    }
-                }
-            });
-        });
-        property_grid(
-            ui,
-            "item-meta",
-            &[
-                ("Project", empty_as_none(&details.project)),
-                ("Service", empty_as_none(&details.service)),
-                ("Username", empty_as_none(&details.username)),
-                ("Host", empty_as_none(&details.host)),
-                ("Database", empty_as_none(&details.database_name)),
-                ("Field name", empty_as_none(&details.field_name)),
-                ("Public label", empty_as_none(&details.public_label)),
-                ("Notes", empty_as_none(&details.notes)),
-                ("Revision", details.revision.to_string()),
-            ],
-        );
-    });
-
-    if details.hidden {
-        return;
-    }
-
-    ui.add_space(8.0);
-    card_frame().show(ui, |ui| {
-        ui.label(RichText::new("Edit item").size(16.0).strong().color(INK));
-        item_form(ui, &mut app.edit_form, false);
-        if accent_button(ui, "Save item").clicked() {
-            let result = app.model.update_item(&id, app.edit_form.clone());
-            if app.apply(result, "The item was updated.").is_some() {
-                app.pending_delete = false;
-            }
-        }
-    });
-
-    ui.add_space(8.0);
-    card_frame().show(ui, |ui| {
-        ui.label(RichText::new("Delete item").size(16.0).strong().color(INK));
-        ui.label(RichText::new("Delete removes the item from this demo memory.").color(INK_MUTED));
-        if app.pending_delete {
-            ui.horizontal(|ui| {
-                if danger_button(ui, "Confirm delete").clicked() {
-                    let result = app.model.delete_item(&id);
-                    if app.apply(result, "The item was deleted.").is_some() {
-                        app.selected_item_id = None;
-                        app.pending_delete = false;
-                        app.view = OwnerView::Vault;
-                    }
-                }
-                if ui.button("Cancel").clicked() {
-                    app.pending_delete = false;
-                    app.set_ok("Delete is canceled.");
-                }
-            });
-        } else if danger_button(ui, "Delete item").clicked() {
-            app.pending_delete = true;
-        }
-    });
-}
-
-#[cfg(feature = "vault")]
-fn draw_owner_vault(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    heading(ui, "Vault");
-    ui.label(
-        RichText::new(
-            "Create or open an encrypted vault file, then unlock it with its passphrase. Do not store real credentials. Rules and demo approvals on the other screens stay fixtures.",
-        )
-        .color(INK_MUTED),
-    );
-    ui.add_space(8.0);
-
-    if app.owner_ui.session.is_locked() {
-        draw_vault_file_card(app, ui);
-        ui.add_space(8.0);
-        draw_backup_card(app, ui);
-    } else {
-        // When the vault is unlocked, the items come first. The file controls fold below them.
-        agents_view::draw_review_list(app, ui);
-        draw_owner_items(app, ui);
-        ui.add_space(8.0);
-        egui::CollapsingHeader::new(
-            RichText::new("Vault file, passphrase, unlock method, and backup")
-                .strong()
-                .color(INK),
-        )
-        .id_salt("vault-file-and-backup")
-        .default_open(false)
-        .show(ui, |ui| {
-            draw_vault_file_card(app, ui);
-            ui.add_space(8.0);
-            draw_passphrase_card(app, ui);
-            ui.add_space(8.0);
-            unlock_view::draw_unlock_method_card(app, ui);
-            ui.add_space(8.0);
-            draw_backup_card(app, ui);
-        });
-        return;
-    }
-
-    draw_owner_items(app, ui);
-}
-
-#[cfg(feature = "vault")]
-fn draw_vault_file_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    use std::path::Path;
-
-    use super::owner_store::Ephemeral;
-
-    card_frame().show(ui, |ui| {
-        ui.label(RichText::new("Vault file").size(16.0).strong().color(INK));
-        let location = app
-            .owner_ui
-            .session
-            .location()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "No vault file is open.".to_owned());
-        ui.label(RichText::new(location).color(INK_MUTED));
-        ui.label(RichText::new(app.owner_ui.session.lock_label()).color(INK_MUTED));
-        labeled_text(ui, "vault-create-path", "New file path", &mut app.owner_ui.create_path);
-        labeled_text(ui, "vault-open-path", "Existing file path", &mut app.owner_ui.open_path);
-        password_line(
-            ui,
-            "vault-passphrase",
-            "Passphrase",
-            &mut app.owner_ui.passphrase,
-            PASSPHRASE_CAPACITY,
-        );
-        ui.label(
-            RichText::new("The passphrase field and its undo history are erased after create, unlock, or restore. It is not written into the item list.")
-                .color(INK_MUTED),
-        );
-        let ctx = ui.ctx().clone();
-        ui.horizontal_wrapped(|ui| {
-            if accent_button(ui, "Create vault file").clicked() {
-                let path = app.owner_ui.create_path.clone();
-                let passphrase = Ephemeral::take(&mut app.owner_ui.passphrase);
-                forget_secret_field(&ctx, "vault-passphrase");
-                let result = app
-                    .owner_ui
-                    .session
-                    .create_file(Path::new(&path), passphrase.expose());
-                drop(passphrase);
-                if app
-                    .apply(result, "The vault file is created and locked.")
-                    .is_some()
-                {
-                    app.selected_item_id = None;
-                    app.pending_delete = false;
-                    app.end_waiting_runs();
-                    app.refresh_unlock_setting(Some(&ctx));
-                }
-            }
-            if ui.button("Open vault file").clicked() {
-                let path = app.owner_ui.open_path.clone();
-                let result = app.owner_ui.session.open_file(Path::new(&path));
-                if app
-                    .apply(result, "The vault file is open and locked.")
-                    .is_some()
-                {
-                    app.selected_item_id = None;
-                    app.pending_delete = false;
-                    app.end_waiting_runs();
-                    app.refresh_unlock_setting(Some(&ctx));
-                }
-            }
-            let can_unlock = app.owner_ui.session.has_file() && app.owner_ui.session.is_locked();
-            ui.add_enabled_ui(can_unlock, |ui| {
-                if ui.button("Unlock vault").clicked() {
-                    unlock_with_passphrase(app, &ctx);
-                }
-            });
-        });
-        unlock_view::draw_touch_id_unlock(app, ui);
-    });
-}
-
-/// Unlock with the typed passphrase. The field and its undo history are erased first
-/// (key-memory review F1, F3).
-#[cfg(feature = "vault")]
-pub(crate) fn unlock_with_passphrase(app: &mut DesktopApp, ctx: &egui::Context) {
-    use super::owner_store::Ephemeral;
-
-    let passphrase = Ephemeral::take(&mut app.owner_ui.passphrase);
-    forget_secret_field(ctx, "vault-passphrase");
-    let result = app.owner_ui.session.unlock(passphrase.expose());
-    drop(passphrase);
-    let _ = app.apply(
-        result,
-        "The vault file is unlocked in this process. Reveal, approvals, and changes to agent access need a new Touch ID or passphrase check.",
-    );
-}
-
-/// Change the master passphrase (goal item V5). The new passphrase is typed two times.
-#[cfg(feature = "vault")]
-fn draw_passphrase_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    use super::owner_store::Ephemeral;
-
-    card_frame().show(ui, |ui| {
-        ui.label(
-            RichText::new("Change passphrase")
-                .size(16.0)
-                .strong()
-                .color(INK),
-        );
-        ui.label(
-            RichText::new(
-                "Type the current passphrase. Then type the new passphrase two times. It needs 12 or more characters. Apassy encrypts the vault file again with the new passphrase and keeps the SQLCipher key settings. Old backups still need the old passphrase. Agent runs that wait for you end.",
-            )
-            .color(INK_MUTED),
-        );
-        password_line(
-            ui,
-            "passphrase-current",
-            "Current passphrase",
-            &mut app.owner_ui.passphrase_current,
-            PASSPHRASE_CAPACITY,
-        );
-        password_line(
-            ui,
-            "passphrase-new",
-            "New passphrase",
-            &mut app.owner_ui.passphrase_new,
-            PASSPHRASE_CAPACITY,
-        );
-        password_line(
-            ui,
-            "passphrase-repeat",
-            "Repeat the new passphrase",
-            &mut app.owner_ui.passphrase_repeat,
-            PASSPHRASE_CAPACITY,
-        );
-        if accent_button(ui, "Change passphrase").clicked() {
-            let ctx = ui.ctx().clone();
-            let current = Ephemeral::take(&mut app.owner_ui.passphrase_current);
-            let new = Ephemeral::take(&mut app.owner_ui.passphrase_new);
-            let repeat = Ephemeral::take(&mut app.owner_ui.passphrase_repeat);
-            for field in ["passphrase-current", "passphrase-new", "passphrase-repeat"] {
-                forget_secret_field(&ctx, field);
-            }
-            let result = app.owner_ui.session.change_passphrase(
-                current.expose(),
-                new.expose(),
-                repeat.expose(),
-            );
-            drop((current, new, repeat));
-            if app
-                .apply(
-                    result,
-                    "The passphrase is changed. Unlock with the new passphrase from now on. Old backups still need the old passphrase.",
-                )
-                .is_some()
-            {
-                // The Touch ID unlock key holds the old passphrase (goal item A3).
-                app.after_passphrase_change(&ctx);
-            }
-            app.end_waiting_runs();
-        }
-    });
-}
-
-#[cfg(feature = "vault")]
-fn draw_backup_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    use std::path::Path;
-
-    use super::owner_store::Ephemeral;
-
-    card_frame().show(ui, |ui| {
-        ui.label(
-            RichText::new("Backup and restore")
-                .size(16.0)
-                .strong()
-                .color(INK),
-        );
-        ui.label(
-            RichText::new(
-                "Backup locks the open vault. Restore opens the restored file in the locked state. Restore needs the passphrase in the Vault file card. Touch ID unlock is off for a restored file until you turn it on.",
-            )
-            .color(INK_MUTED),
-        );
-        labeled_text(
-            ui,
-            "vault-backup-path",
-            "Backup path",
-            &mut app.owner_ui.backup_path,
-        );
-        labeled_text(
-            ui,
-            "vault-restore-source",
-            "Backup to restore",
-            &mut app.owner_ui.restore_source,
-        );
-        labeled_text(
-            ui,
-            "vault-restore-dest",
-            "Restored file path",
-            &mut app.owner_ui.restore_dest,
-        );
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("Back up vault").clicked() {
-                let path = app.owner_ui.backup_path.clone();
-                let result = app.owner_ui.session.backup(Path::new(&path));
-                if app
-                    .apply(result, "The backup is written. The vault is locked.")
-                    .is_some()
-                {
-                    app.pending_delete = false;
-                }
-                // Backup locks the vault, also when it fails.
-                app.end_waiting_runs();
-            }
-            if ui.button("Restore vault").clicked() {
-                // Restore needs the typed passphrase. Touch ID never supplies it (A2).
-                let ctx = ui.ctx().clone();
-                let source = app.owner_ui.restore_source.clone();
-                let dest = app.owner_ui.restore_dest.clone();
-                let passphrase = Ephemeral::take(&mut app.owner_ui.passphrase);
-                forget_secret_field(&ctx, "vault-passphrase");
-                let result = app.owner_ui.session.restore(
-                    Path::new(&source),
-                    Path::new(&dest),
-                    passphrase.expose(),
-                );
-                drop(passphrase);
-                if app
-                    .apply(result, "The restored vault is open and locked.")
-                    .is_some()
-                {
-                    app.selected_item_id = None;
-                    app.pending_delete = false;
-                    app.end_waiting_runs();
-                    app.refresh_unlock_setting(Some(&ctx));
-                }
-            }
-        });
-    });
-}
-
-#[cfg(feature = "vault")]
-fn draw_owner_items(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        let label = ui.label("Search items");
-        let edit = ui.add(
-            TextEdit::singleline(&mut app.search)
-                .desired_width(280.0)
-                .hint_text("Name, project, service, or notes"),
-        );
-        edit.labelled_by(label.id);
-        if ui.button("Search").clicked() {
-            match app.owner_ui.session.search(&app.search) {
-                Ok(items) => {
-                    let count = items.len();
-                    let noun = if count == 1 {
-                        "item matches"
-                    } else {
-                        "items match"
-                    };
-                    app.set_ok(format!("The search is complete. {count} {noun}."));
-                }
-                Err(err) => app.set_err(err.message),
-            }
-        }
-        if ui.button("Clear").clicked() {
-            app.search.clear();
-            app.set_ok("Search is cleared.");
-        }
-    });
-
-    ui.add_space(8.0);
-    let items = if app.owner_ui.session.is_locked() {
-        Vec::new()
-    } else {
-        app.owner_ui.session.search(&app.search).unwrap_or_default()
-    };
-    if app.owner_ui.session.is_locked() {
-        ui.label(RichText::new("Unlock the vault file to list items.").color(INK_MUTED));
-    }
-    for kind in CredentialKind::ALL {
-        card_frame().show(ui, |ui| {
-            ui.label(RichText::new(kind.label()).size(16.0).strong().color(INK));
-            let group: Vec<_> = items
-                .iter()
-                .filter(|item| item.kind == kind)
-                .cloned()
-                .collect();
-            if group.is_empty() {
-                ui.label(RichText::new("No items in this category.").color(INK_MUTED));
-            } else {
-                for item in group {
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.label(RichText::new(&item.name).strong().color(INK));
-                            ui.label(
-                                RichText::new(meta_line(&item.project, &item.service))
-                                    .color(INK_MUTED),
-                            );
-                        });
-                        if ui.button("Open item").clicked() {
-                            app.select_item(item.id.to_string());
-                        }
-                    });
-                }
-            }
-        });
-        ui.add_space(8.0);
-    }
-
-    card_frame().show(ui, |ui| {
-        ui.label(RichText::new("Add item").size(16.0).strong().color(INK));
-        ui.label(
-            RichText::new(
-                "Secret fields stay out of search, status text, and the demo activity log.",
-            )
-            .color(INK_MUTED),
-        );
-        let kind_before = app.add_form.kind;
-        item_form(ui, &mut app.add_form, true);
-        if app.add_form.kind != kind_before {
-            app.owner_ui.add_secrets.clear();
-        }
-        secret_inputs(ui, "add", app.add_form.kind, &mut app.owner_ui.add_secrets);
-        ui.add_enabled_ui(!app.owner_ui.session.is_locked(), |ui| {
-            if accent_button(ui, "Add item").clicked() {
-                let draft = app.add_form.clone();
-                // Borrow the form. A clone would be one more copy of each secret (F3).
-                match app.owner_ui.session.add(&draft, &app.owner_ui.add_secrets) {
-                    Ok(item) => {
-                        app.owner_ui.add_secrets.clear();
-                        forget_secret_form(ui.ctx(), "add");
-                        app.add_form = Default::default();
-                        app.set_ok(format!("The vault stored {}.", item.name));
-                        app.select_item(item.id.to_string());
-                    }
-                    Err(err) => app.set_err(err.message),
-                }
-            }
-        });
-        if app.owner_ui.session.is_locked() {
-            ui.label(
-                RichText::new("The vault is locked. Unlock it to add an item.").color(INK_MUTED),
-            );
-        }
-    });
-}
-
-#[cfg(feature = "vault")]
-fn draw_owner_item(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    heading(ui, "Item details");
-    ui.label(
-        RichText::new(
-            "Values stay hidden until you reveal them. This desktop does not write to the clipboard.",
-        )
-        .color(INK_MUTED),
-    );
-    ui.add_space(8.0);
-
-    if !app.owner_ui.session.has_file() {
-        ui.label(
-            RichText::new(
-                "No vault file is open. Create or open a vault file before selecting an item.",
-            )
-            .color(INK_MUTED),
-        );
-        return;
-    }
-    let Some(id_text) = app.selected_item_id.clone() else {
-        ui.label(RichText::new("Select an item in the vault.").color(INK_MUTED));
-        return;
-    };
-    let Ok(id) = id_text.parse::<u64>() else {
-        ui.label(RichText::new("Select an item in the vault.").color(INK_MUTED));
-        return;
-    };
-    let details = match app.owner_ui.session.details(id) {
-        Ok(details) => details,
-        Err(err) => {
-            ui.label(RichText::new(err.message).color(DENY));
-            return;
-        }
-    };
-
-    card_frame().show(ui, |ui| {
-        if details.hidden {
-            ui.label(RichText::new(&details.message).color(ASK));
-            return;
-        }
-        ui.label(RichText::new(&details.name).size(18.0).strong().color(INK));
-        ui.label(RichText::new(details.kind.label()).color(INK_MUTED));
-        ui.label(RichText::new(details.agent_use_label()).color(INK_MUTED));
-        ui.add_space(6.0);
-        Frame::NONE
-            .fill(Color32::from_rgb(247, 244, 236))
-            .inner_margin(Margin::symmetric(10, 8))
-            .corner_radius(CornerRadius::same(6))
-            .show(ui, |ui| {
-                ui.label(RichText::new("Stored secrets").color(INK_MUTED));
-                for line in &details.secret_lines {
-                    ui.label(RichText::new(&line.name).color(INK_MUTED));
-                    // The view borrows the revealed value from the session. egui still
-                    // copies it for the layout (key-memory review F10, §5).
-                    let value = match app.owner_ui.session.revealed_value(id, &line.name) {
-                        Some(value) => RichText::new(value).monospace().color(INK),
-                        None => RichText::new(crate::desktop::MASKED_VALUE)
-                            .monospace()
-                            .color(INK_MUTED),
-                    };
-                    ui.label(value);
-                }
-                if details.any_revealed() {
-                    ui.label(RichText::new(details.reveal_warning()).color(ASK));
-                }
-                ui.label(
-                    RichText::new(
-                        "A copy would leave Apassy control. This desktop does not write to the clipboard.",
-                    )
-                    .color(INK_MUTED),
-                );
-            });
-        ui.horizontal(|ui| {
-            let reveal_label = if details.any_revealed() {
-                "Hide values"
-            } else {
-                "Reveal values"
-            };
-            if ui.button(reveal_label).clicked() {
-                if details.any_revealed() {
-                    let result = app.owner_ui.session.hide(id);
-                    let _ = app.apply(result, "The values are hidden.");
-                } else {
-                    // Reveal needs a fresh Touch ID or passphrase check (goal item A4).
-                    let ctx = ui.ctx().clone();
-                    app.ask_owner(OwnerRequest::Reveal { item_id: id }, Some(&ctx));
-                }
-            }
-        });
-        property_grid(
-            ui,
-            "item-meta",
-            &[
-                ("Project", empty_as_none(&details.project)),
-                ("Service", empty_as_none(&details.service)),
-                ("Username", empty_as_none(&details.username)),
-                ("Host", empty_as_none(&details.host)),
-                ("Database", empty_as_none(&details.database_name)),
-                ("Field name", empty_as_none(&details.field_name)),
-                ("Public label", empty_as_none(&details.public_label)),
-                ("Notes", empty_as_none(&details.notes)),
-                ("Revision", details.revision.to_string()),
-            ],
-        );
-    });
-
-    if details.hidden {
-        return;
-    }
-
-    agents_view::draw_review_card(app, ui, id);
-    ui.add_space(8.0);
-    card_frame().show(ui, |ui| {
-        ui.label(RichText::new("Edit item").size(16.0).strong().color(INK));
-        ui.label(RichText::new("Leave a secret blank to keep the stored value.").color(INK_MUTED));
-        item_form(ui, &mut app.edit_form, false);
-        secret_inputs(
-            ui,
-            "edit",
-            app.edit_form.kind,
-            &mut app.owner_ui.edit_secrets,
-        );
-        if accent_button(ui, "Save item").clicked() {
-            let draft = app.edit_form.clone();
-            let revision = app.owner_ui.edit_revision;
-            let unchanged = app
-                .owner_ui
-                .session
-                .is_unchanged(id, &draft, &app.owner_ui.edit_secrets)
-                .unwrap_or(false);
-            if unchanged {
-                app.set_ok("There are no changes to save.");
-            } else {
-                match app
-                    .owner_ui
-                    .session
-                    .update(id, revision, &draft, &app.owner_ui.edit_secrets)
-                {
-                    Ok(summary) => {
-                        app.owner_ui.edit_secrets.clear();
-                        forget_secret_form(ui.ctx(), "edit");
-                        app.owner_ui.edit_revision = summary.revision;
-                        app.pending_delete = false;
-                        // The item changed, so the suggestion can change (goal item B4).
-                        app.owner_ui.declaration_form = app
-                            .owner_ui
-                            .session
-                            .declaration_form(id)
-                            .unwrap_or_default();
-                        app.set_ok("The item was updated.");
-                    }
-                    Err(err) => app.set_err(err.message),
-                }
-            }
-        }
-    });
-
-    ui.add_space(8.0);
-    agents_view::draw_declaration_card(app, ui, id);
-    ui.add_space(8.0);
-    agents_view::draw_env_card(app, ui, id);
-    if details.kind == CredentialKind::ApiKey {
-        ui.add_space(8.0);
-        agents_view::draw_connector_card(app, ui, id);
-    }
-
-    ui.add_space(8.0);
-    card_frame().show(ui, |ui| {
-        ui.label(RichText::new("Delete item").size(16.0).strong().color(INK));
-        ui.label(RichText::new("Delete removes the item from the vault file.").color(INK_MUTED));
-        if app.pending_delete {
-            ui.horizontal(|ui| {
-                if danger_button(ui, "Confirm delete").clicked() {
-                    let revision = app.owner_ui.edit_revision;
-                    let result = app.owner_ui.session.delete(id, revision);
-                    if app.apply(result, "The item was deleted.").is_some() {
-                        app.selected_item_id = None;
-                        app.pending_delete = false;
-                        app.view = OwnerView::Vault;
-                    }
-                }
-                if ui.button("Cancel").clicked() {
-                    app.pending_delete = false;
-                    app.set_ok("Delete is canceled.");
-                }
-            });
-        } else if danger_button(ui, "Delete item").clicked() {
-            app.pending_delete = true;
-        }
-    });
-}
-
-#[cfg(feature = "vault")]
-fn secret_inputs(
-    ui: &mut egui::Ui,
-    salt: &str,
-    kind: CredentialKind,
-    secrets: &mut super::owner_store::SecretForm,
-) {
-    let cap = SECRET_VALUE_CAPACITY;
-    match kind {
-        CredentialKind::ApiKey => {
-            password_line(
-                ui,
-                &format!("{salt}-token"),
-                "Token",
-                &mut secrets.token,
-                cap,
-            );
-        }
-        CredentialKind::Login => {
-            password_line(
-                ui,
-                &format!("{salt}-password"),
-                "Password",
-                &mut secrets.password,
-                cap,
-            );
-        }
-        CredentialKind::SshKey => {
-            password_line(
-                ui,
-                &format!("{salt}-private"),
-                "Private key",
-                &mut secrets.private_key,
-                cap,
-            );
-            password_line(
-                ui,
-                &format!("{salt}-phrase"),
-                "Key passphrase",
-                &mut secrets.key_passphrase,
-                cap,
-            );
-        }
-        CredentialKind::Database => {
-            password_line(
-                ui,
-                &format!("{salt}-password"),
-                "Password",
-                &mut secrets.password,
-                cap,
-            );
-        }
-        CredentialKind::Custom => {
-            password_line(
-                ui,
-                &format!("{salt}-custom"),
-                "Secret value",
-                &mut secrets.custom_value,
-                cap,
-            );
-        }
-    }
-}
-
 /// A masked field for a passphrase or a secret. `capacity` is the byte capacity. The
 /// field takes at most `capacity / 4` characters, so the text never grows past the
 /// buffer (key-memory review F4). The widget ID is global ([`secret_field_id`]), so
 /// the app can clear the undo history (F1).
 #[cfg(feature = "vault")]
-fn password_line(
+fn secure_input(
     ui: &mut egui::Ui,
     salt: &str,
-    caption: &str,
     value: &mut String,
     capacity: usize,
+    placeholder: &str,
 ) -> egui::Response {
     presize(value, capacity);
-    let label = ui.label(caption);
-    let edit = ui.add(
+    ui.add(
         TextEdit::singleline(value)
             .password(true)
             .id(secret_field_id(salt))
             .char_limit(capacity / 4)
-            .desired_width(320.0),
-    );
-    edit.labelled_by(label.id)
+            .hint_text(kit::text(placeholder, kit::Font::Body).color(kit::TERTIARY))
+            .margin(kit::FIELD_MARGIN)
+            .desired_width(f32::INFINITY),
+    )
 }
 
-fn draw_rules(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    heading(ui, "Rules");
-    ui.label(
-        RichText::new(
-            "The editor accepts ordinary language. This desktop uses a deterministic fixture interpreter. It does not call a language model.",
-        )
-        .color(INK_MUTED),
-    );
-    ui.label(
-        RichText::new(format!(
-            "Interpreter {INTERPRETER_ID}. This is a fixture interpreter. It is not live natural-language support."
-        ))
-        .color(ASK),
-    );
-    ui.add_space(8.0);
+/// The default vault file. The agent profile denies this directory (isolation, §1).
+#[cfg(feature = "vault")]
+pub(crate) fn default_vault_path() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+        .join("Library/Application Support/Apassy/vault.db")
+}
 
-    card_frame().show(ui, |ui| {
-        ui.label(
-            RichText::new("Supported sample")
-                .size(16.0)
-                .strong()
-                .color(INK),
-        );
-        ui.label(
-            RichText::new("The interpreter matches this exact sample. Other text is refused.")
-                .color(INK_MUTED),
-        );
-        quote(ui, SAMPLE_RULE_TEXT);
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("Fill supported sample").clicked() {
-                app.rule_text = SAMPLE_RULE_TEXT.to_owned();
-                app.set_ok("The sample text is in the editor. Review the rule next.");
-            }
-            if ui.button("Fill ambiguous sample").clicked() {
-                app.rule_text = AMBIGUOUS_SAMPLE_TEXT.to_owned();
-                app.set_ok("The sample text is in the editor. Review the rule next.");
-            }
-            if ui.button("Fill conflicting sample").clicked() {
-                app.rule_text = CONFLICTING_SAMPLE_TEXT.to_owned();
-                app.set_ok("The sample text is in the editor. Review the rule next.");
-            }
-            if ui.button("Fill unsupported sample").clicked() {
-                app.rule_text = UNSUPPORTED_SAMPLE_TEXT.to_owned();
-                app.set_ok("The sample text is in the editor. Review the rule next.");
-            }
-        });
-    });
+/// Navigation and sheet state of the drawing code. It holds no secret text: typed
+/// secrets live in [`super::owner_store::OwnerUiState`], which erases them.
+#[derive(Default)]
+pub(crate) struct UiState {
+    /// The sheet over the window, if any.
+    pub(crate) sheet: Option<Sheet>,
+    /// The sheet closes when the owner check for its action ends with success. The
+    /// value is the status sequence number at the time of the request.
+    #[cfg(feature = "vault")]
+    pub(crate) close_after_check: Option<u64>,
+    /// The status message on screen and the time it first showed.
+    toast_shown: Option<(u64, f64)>,
+    /// The status message that the owner closed.
+    toast_closed: u64,
+    /// Open disclosure groups.
+    #[cfg_attr(not(feature = "vault"), allow(dead_code))]
+    expanded: BTreeSet<String>,
+    /// The step of the start screens.
+    #[cfg(feature = "vault")]
+    pub(crate) start: start::Step,
+    /// The tab of the Activity view.
+    #[cfg(feature = "vault")]
+    pub(crate) activity_tab: activity::Tab,
+    /// The filter of the credential list.
+    #[cfg(feature = "vault")]
+    pub(crate) credential_filter: items::Filter,
+    /// The order of the credential list.
+    #[cfg(feature = "vault")]
+    pub(crate) credential_sort: items::Sort,
+    /// ⌘F: the search field takes the focus in the next frame.
+    #[cfg(feature = "vault")]
+    pub(crate) focus_search: bool,
+}
 
-    ui.add_space(8.0);
-    card_frame().show(ui, |ui| {
-        let label = ui.label("Rule text");
-        let edit = ui.add(
-            TextEdit::multiline(&mut app.rule_text)
-                .desired_width(f32::INFINITY)
-                .desired_rows(6),
-        );
-        edit.labelled_by(label.id);
-        ui.horizontal_wrapped(|ui| {
-            if accent_button(ui, "Review rule").clicked() {
-                match app.model.interpret_rule(&app.rule_text) {
-                    Ok(draft) if draft.status == crate::desktop::DraftStatus::ReadyForReview => {
-                        app.set_ok("The fixture interpreter produced a reviewable sample draft.");
-                    }
-                    Ok(_) => app.set_err(
-                        "The fixture interpreter refused this text. See questions and issues.",
-                    ),
-                    Err(err) => app.set_err(err.message),
-                }
-            }
-            let can_confirm = app.model.rule_draft().is_some_and(|draft| {
-                draft.status == crate::desktop::DraftStatus::ReadyForReview && !draft.confirmed
-            });
-            ui.add_enabled_ui(can_confirm, |ui| {
-                if ui.button("Confirm interpretation").clicked() {
-                    let result = app.model.confirm_rule();
-                    let _ = app.apply(result, "The owner demo confirmation is recorded.");
-                }
-            });
-            let can_activate = app.model.rule_draft().is_some_and(|draft| {
-                draft.status == crate::desktop::DraftStatus::ReadyForReview && draft.confirmed
-            });
-            ui.add_enabled_ui(can_activate, |ui| {
-                if accent_button(ui, "Activate rule").clicked() {
-                    let result = app.model.activate_rule();
-                    let _ = app.apply(result, "The sample rule is active in this desktop demo.");
-                }
-            });
-        });
-    });
+#[cfg_attr(not(feature = "vault"), allow(dead_code))]
+impl UiState {
+    pub(crate) fn is_expanded(&self, key: &str) -> bool {
+        self.expanded.contains(key)
+    }
 
-    ui.add_space(8.0);
-    card_frame().show(ui, |ui| {
-        ui.label(
-            RichText::new("Clause review")
-                .size(16.0)
-                .strong()
-                .color(INK),
-        );
-        match app.model.rule_draft() {
-            None => {
-                ui.label(
-                    RichText::new("A review shows clauses, questions, and examples.")
-                        .color(INK_MUTED),
-                );
-            }
-            Some(draft) => {
-                ui.label(format!(
-                    "{}. Interpreter: {}.",
-                    draft.status.label(),
-                    draft.interpreter
-                ));
-                ui.label(RichText::new("Original text").strong());
-                quote(ui, &draft.original_text);
-                ui.label(RichText::new("Clauses").strong());
-                if draft.clauses.is_empty() {
-                    ui.label(
-                        RichText::new("No clauses. The interpreter did not invent a parse.")
-                            .color(INK_MUTED),
-                    );
-                } else {
-                    for clause in &draft.clauses {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(clause.kind_label)
-                                    .small()
-                                    .strong()
-                                    .color(ACCENT),
-                            );
-                            ui.vertical(|ui| {
-                                ui.label(&clause.text);
-                                ui.label(RichText::new(&clause.meaning).color(INK_MUTED));
-                            });
-                        });
-                    }
-                }
-                ui.label(RichText::new("Questions and issues").strong());
-                if draft.questions.is_empty() && draft.issues.is_empty() {
-                    ui.label(RichText::new("No open questions.").color(INK_MUTED));
-                } else {
-                    for question in &draft.questions {
-                        ui.label(format!("• {question}"));
-                    }
-                    for issue in &draft.issues {
-                        ui.label(format!("• {}", issue.message));
-                    }
-                }
-                ui.label(RichText::new("Examples").strong());
-                if let Some(examples) = &draft.examples {
-                    property_grid(
-                        ui,
-                        "draft-examples",
-                        &[
-                            ("Permit", examples.allow.clone()),
-                            ("Wait", examples.ask.clone()),
-                            ("Deny", examples.deny.clone()),
-                        ],
-                    );
-                } else {
-                    ui.label(RichText::new("No examples for this text.").color(INK_MUTED));
-                }
+    pub(crate) fn set_expanded(&mut self, key: &str, open: bool) {
+        if open {
+            self.expanded.insert(key.to_owned());
+        } else {
+            self.expanded.remove(key);
+        }
+    }
+}
+
+/// A sheet over the window. Item sheets act on the selected item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Sheet {
+    /// Add a credential. The first step picks the kind.
+    AddItem {
+        kind_chosen: bool,
+    },
+    EditItem,
+    #[cfg(feature = "vault")]
+    Declaration,
+    #[cfg(feature = "vault")]
+    Variable,
+    #[cfg(feature = "vault")]
+    Connector,
+    #[cfg(feature = "vault")]
+    RegisterAgent,
+    /// Archive the selected item.
+    #[cfg(feature = "vault")]
+    ArchiveItem,
+    #[cfg(feature = "vault")]
+    RevokeAgent {
+        agent_id: u64,
+        name: String,
+    },
+    #[cfg(feature = "vault")]
+    ProcessAccess {
+        agent_id: u64,
+        item_id: u64,
+        mode: crate::vault::ExecMode,
+    },
+    /// Review one waiting run.
+    #[cfg(feature = "vault")]
+    Approval(u64),
+    #[cfg(feature = "vault")]
+    ChangePassphrase,
+    #[cfg(feature = "vault")]
+    Backup,
+    #[cfg(feature = "vault")]
+    Restore,
+}
+
+pub(crate) fn apply_style(ctx: &egui::Context) {
+    kit::apply_theme(ctx);
+}
+
+pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    let ctx = ui.ctx().clone();
+    #[cfg(feature = "vault")]
+    {
+        app.poll_owner_flows(&ctx);
+        close_sheet_after_check(app);
+        let session = &app.owner_ui.session;
+        if !session.has_file() || session.is_locked() {
+            // A lock also hides a token that the owner did not dismiss.
+            app.owner_ui.fresh_token = None;
+            app.ui.sheet = None;
+            start::draw(app, ui);
+        } else {
+            shell::draw(app, ui);
+        }
+    }
+    #[cfg(not(feature = "vault"))]
+    shell::draw(app, ui);
+    draw_toast(app, &ctx);
+    #[cfg(feature = "vault")]
+    owner_check_view::draw(app, &ctx);
+}
+
+/// Close the sheet. Typed secrets of its form and their undo history are erased.
+pub(crate) fn close_sheet(app: &mut DesktopApp, ctx: &egui::Context) {
+    let _ = ctx;
+    #[cfg(feature = "vault")]
+    match app.ui.sheet.take() {
+        Some(Sheet::AddItem { .. }) => {
+            app.owner_ui.add_secrets.clear();
+            forget_secret_form(ctx, "add");
+        }
+        Some(Sheet::EditItem) => {
+            app.owner_ui.edit_secrets.clear();
+            forget_secret_form(ctx, "edit");
+        }
+        Some(Sheet::ChangePassphrase) => {
+            use zeroize::Zeroize;
+            app.owner_ui.passphrase_current.zeroize();
+            app.owner_ui.passphrase_new.zeroize();
+            app.owner_ui.passphrase_repeat.zeroize();
+            for field in CHANGE_FIELDS {
+                forget_secret_field(ctx, field);
             }
         }
-    });
+        Some(Sheet::Restore) => {
+            use zeroize::Zeroize;
+            app.owner_ui.passphrase.zeroize();
+            forget_secret_field(ctx, VAULT_PASSPHRASE_FIELD);
+        }
+        _ => {}
+    }
+    #[cfg(not(feature = "vault"))]
+    {
+        app.ui.sheet = None;
+    }
+}
 
-    ui.add_space(8.0);
-    card_frame().show(ui, |ui| {
-        ui.label(RichText::new("Active rule").size(16.0).strong().color(INK));
-        match app.model.active_rule() {
-            None => ui.label(RichText::new("No active rule.").color(INK_MUTED)),
-            Some(rule) => {
-                ui.label(RichText::new(rule.status).color(decision_color_from_status(rule.status)));
-                property_grid(
-                    ui,
-                    "active-rule",
-                    &[
-                        ("Agent", rule.agent_name.clone()),
-                        ("Item", rule.item_name.clone()),
-                        ("Destination", rule.destination.to_owned()),
-                        ("Denied", rule.denied_destinations.join(", ")),
-                        ("Operation", rule.operation.to_owned()),
-                        (
-                            "Expiry",
-                            format!("{} ({})", rule.expiry_iso, rule.time_zone),
-                        ),
-                        (
-                            "Uses",
-                            format!("{} of {}", rule.use_count, rule.usage_limit),
-                        ),
-                        ("Interpreter", rule.interpreter.to_owned()),
-                        ("Version", rule.version.to_string()),
-                    ],
-                );
-                quote(ui, &rule.original_text);
-                ui.label(RichText::new(rule.interpreter).color(INK_MUTED))
-            }
-        };
-    });
+/// ⌘S in a sheet. It does nothing while the owner check is over the sheet.
+pub(crate) fn save_pressed(app: &DesktopApp, ctx: &egui::Context) -> bool {
+    #[cfg(feature = "vault")]
+    if app.owner.check.is_some() {
+        return false;
+    }
+    let _ = app;
+    kit::save_shortcut(ctx)
+}
+
+/// Ask for the owner check from a sheet. The sheet closes when the action succeeds, and
+/// stays open after a cancel or an error.
+#[cfg(feature = "vault")]
+pub(crate) fn ask_owner_from_sheet(
+    app: &mut DesktopApp,
+    request: crate::desktop::owner_check::OwnerRequest,
+    ctx: &egui::Context,
+) {
+    app.ui.close_after_check = Some(app.status_seq);
+    app.ask_owner(request, Some(ctx));
 }
 
 #[cfg(feature = "vault")]
-fn draw_agents(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    agents_view::draw(app, ui);
-}
-
-#[cfg(not(feature = "vault"))]
-fn draw_agents(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    heading(ui, "Agents");
-    ui.label(
-        RichText::new(
-            "You can connect a synthetic catalog agent. Revoke stops future sample use. This is not a verified isolation boundary.",
-        )
-        .color(INK_MUTED),
-    );
-    ui.add_space(8.0);
-    let agents = app.model.catalog_agents();
-    for agent in agents {
-        card_frame().show(ui, |ui| {
-            ui.label(RichText::new(&agent.name).size(16.0).strong().color(INK));
-            ui.label(&agent.summary);
-            ui.label(RichText::new(format!("Status: {}", agent.status_label)).color(INK_MUTED));
-            if agent.connected {
-                if danger_button(ui, "Revoke agent").clicked() {
-                    let message = format!("{} is revoked.", agent.name);
-                    let result = app.model.revoke_agent(&agent.id);
-                    let _ = app.apply(result, &message);
-                }
-            } else if accent_button(ui, "Connect agent").clicked() {
-                let message = format!("{} is connected.", agent.name);
-                let result = app.model.connect_agent(&agent.id);
-                let _ = app.apply(result, &message);
-            }
-        });
-        ui.add_space(8.0);
+fn close_sheet_after_check(app: &mut DesktopApp) {
+    let Some(seq) = app.ui.close_after_check else {
+        return;
+    };
+    if app.owner.check.is_some() {
+        return;
+    }
+    app.ui.close_after_check = None;
+    if app.status_seq > seq && app.status_kind == StatusKind::Ok {
+        app.ui.sheet = None;
     }
 }
 
-fn draw_activity(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    heading(ui, "Activity and approvals");
-    ui.label(
-        RichText::new(
-            "A demo request can be sent from this view. A normal grant is permitted. An unclear task waits. Production is denied and cannot be approved.",
-        )
-        .color(INK_MUTED),
-    );
-    ui.label(
-        RichText::new("This is a fixture risk simulation. It is not a verified bouncer.")
-            .color(ASK),
-    );
-    ui.add_space(8.0);
-    #[cfg(feature = "vault")]
-    {
-        inbox_view::draw_inbox(app, ui);
-        ui.add_space(8.0);
-        agents_view::draw_activity_card(app, ui);
-        ui.add_space(8.0);
+/// How long a result stays on screen. An error stays until the owner closes it.
+const TOAST_SECONDS: f64 = 4.5;
+const TOAST_FADE: f64 = 0.35;
+
+fn draw_toast(app: &mut DesktopApp, ctx: &egui::Context) {
+    if app.status_text.is_empty() || app.ui.toast_closed == app.status_seq {
+        return;
     }
-
-    card_frame().show(ui, |ui| {
-        ui.label(RichText::new("Demo request").size(16.0).strong().color(INK));
-        ComboBox::new("demo_scenario", "Request")
-            .selected_text(app.scenario.label())
-            .show_ui(ui, |ui| {
-                for scenario in crate::desktop::DemoScenario::ALL {
-                    ui.selectable_value(&mut app.scenario, scenario, scenario.label());
-                }
-            });
-        if accent_button(ui, "Send request").clicked() {
-            match app.model.simulate(app.scenario) {
-                Ok(request) => {
-                    if request.decision == Decision::Deny {
-                        app.set_err(request.message);
-                    } else {
-                        app.set_ok(request.message);
-                    }
-                }
-                Err(err) => app.set_err(err.message),
-            }
+    let now = ctx.input(|input| input.time);
+    let shown_at = match app.ui.toast_shown {
+        Some((seq, at)) if seq == app.status_seq => at,
+        _ => {
+            app.ui.toast_shown = Some((app.status_seq, now));
+            now
         }
-        #[cfg(feature = "vault")]
-        ui.label(
-            RichText::new(
-                "Demo requests and their alerts are in memory. They cause no native notification. The Inbox card above has the real notification channel and the agent events from the vault.",
-            )
-            .color(INK_MUTED),
-        );
-        #[cfg(not(feature = "vault"))]
-        ui.label(
-            RichText::new(
-                "Demo requests and their alerts are in memory. This build has no notification channel: native notifications need the vault build of Apassy.app.",
-            )
-            .color(INK_MUTED),
-        );
-    });
-
-    ui.add_space(8.0);
-    card_frame().show(ui, |ui| {
-        ui.label(
-            RichText::new("Inbox and alerts")
-                .size(16.0)
-                .strong()
-                .color(INK),
-        );
-        let alerts: Vec<_> = app.model.list_alerts().into_iter().cloned().collect();
-        if alerts.is_empty() {
-            ui.label(RichText::new("No alerts.").color(INK_MUTED));
-        }
-        for alert in alerts {
-            let request = app
-                .model
-                .list_requests()
-                .iter()
-                .find(|request| request.id == alert.request_id)
-                .cloned();
-            Frame::NONE
-                .stroke(Stroke::new(1.0, LINE))
-                .inner_margin(Margin::symmetric(10, 8))
-                .corner_radius(CornerRadius::same(6))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let current = request
-                            .as_ref()
-                            .map(|r| r.decision)
-                            .unwrap_or(alert.decision);
-                        decision_pill(ui, current);
-                        ui.label(RichText::new(&alert.title).strong());
-                    });
-                    if let Some(request) = &request
-                        && request.initial_decision != request.decision
-                    {
-                        ui.label(
-                            RichText::new(format!(
-                                "First decision: {}",
-                                first_decision_label(request.initial_decision)
-                            ))
-                            .color(INK_MUTED),
-                        );
-                    }
-                    ui.label(&alert.message);
-                    ui.label(
-                        RichText::new(format!(
-                            "{} · {} · {} · {} · delivery {}",
-                            alert.agent_name,
-                            alert.item_name,
-                            alert.destination,
-                            alert.operation,
-                            alert.delivery_status
-                        ))
-                        .color(INK_MUTED),
-                    );
-                    ui.horizontal_wrapped(|ui| {
-                        if let Some(request) = &request
-                            && request.status == crate::desktop::RequestStatus::Pending
-                            && request.approvable
-                        {
-                            if ui.button("Approve once").clicked() {
-                                let result = app.model.approve_once(&request.id, None);
-                                let _ = app.apply(result, "The request was approved once.");
-                            }
-                            if ui.button("Deny request").clicked() {
-                                let result = app.model.deny_request(&request.id);
-                                let _ = app.apply(result, "The request was denied.");
-                            }
-                        }
-                        let connected = app
-                            .model
-                            .list_agents()
-                            .iter()
-                            .any(|agent| agent.id == alert.agent_id && agent.connected);
-                        if connected && danger_button(ui, "Revoke agent").clicked() {
-                            let message = format!("{} is revoked.", alert.agent_name);
-                            let result = app.model.revoke_agent(&alert.agent_id);
-                            let _ = app.apply(result, &message);
-                        }
-                    });
-                });
-            ui.add_space(6.0);
-        }
-    });
-
-    ui.add_space(8.0);
-    card_frame().show(ui, |ui| {
-        ui.label(RichText::new("History").size(16.0).strong().color(INK));
-        let events: Vec<_> = app.model.list_activity().into_iter().cloned().collect();
-        if events.is_empty() {
-            ui.label(RichText::new("No history.").color(INK_MUTED));
-        }
-        for event in events {
-            ui.label(&event.message);
-            ui.label(RichText::new(format!("{} · {}", event.at_iso, event.kind)).color(INK_MUTED));
-            ui.add_space(4.0);
-        }
-    });
-}
-
-fn item_form(ui: &mut egui::Ui, form: &mut crate::desktop::ItemDraft, kind_editable: bool) {
-    labeled_text(ui, "add-name", "Name", &mut form.name);
-    if kind_editable {
-        ComboBox::new("add-kind", "Category")
-            .selected_text(form.kind.label())
-            .show_ui(ui, |ui| {
-                for kind in CredentialKind::ALL {
-                    ui.selectable_value(&mut form.kind, kind, kind.label());
-                }
-            });
+    };
+    let error = app.status_kind == StatusKind::Error;
+    let age = now - shown_at;
+    let opacity = if error || age <= TOAST_SECONDS {
+        1.0
+    } else if age <= TOAST_SECONDS + TOAST_FADE {
+        (1.0 - (age - TOAST_SECONDS) / TOAST_FADE) as f32
     } else {
-        ui.label(format!("Category: {}", form.kind.label()));
+        return;
+    };
+    if !error {
+        let wait = if age < TOAST_SECONDS {
+            TOAST_SECONDS - age
+        } else {
+            0.016
+        };
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(wait));
     }
-    labeled_text(ui, "add-service", "Service", &mut form.service);
-    labeled_text(ui, "add-project", "Project", &mut form.project);
-    for field in crate::desktop::model::DesktopModel::extra_fields(form.kind) {
-        match field {
-            ExtraField::Username => {
-                labeled_text(ui, "add-username", field.label(), &mut form.username)
-            }
-            ExtraField::Host => labeled_text(ui, "add-host", field.label(), &mut form.host),
-            ExtraField::DatabaseName => {
-                labeled_text(ui, "add-database", field.label(), &mut form.database_name)
-            }
-            ExtraField::FieldName => {
-                labeled_text(ui, "add-field", field.label(), &mut form.field_name)
-            }
-            ExtraField::PublicLabel => {
-                labeled_text(ui, "add-public", field.label(), &mut form.public_label)
-            }
-        }
+    let tone = match app.status_kind {
+        StatusKind::Ok => kit::Tone::Good,
+        StatusKind::Error => kit::Tone::Critical,
+        StatusKind::Neutral => kit::Tone::Accent,
+    };
+    if kit::toast(ctx, &app.status_text, tone, opacity, error) {
+        app.ui.toast_closed = app.status_seq;
     }
-    let label = ui.label("Notes");
-    let edit = ui.add(
-        TextEdit::multiline(&mut form.notes)
-            .desired_rows(3)
-            .desired_width(f32::INFINITY),
-    );
-    edit.labelled_by(label.id);
 }
 
-fn labeled_text(ui: &mut egui::Ui, id: &str, caption: &str, value: &mut String) {
-    let label = ui.label(caption);
-    let edit = ui.add(TextEdit::singleline(value).id_salt(id).desired_width(320.0));
-    edit.labelled_by(label.id);
-}
-
-pub(super) fn heading(ui: &mut egui::Ui, text: &str) {
-    ui.label(
-        RichText::new(text)
-            .size(22.0)
-            .strong()
-            .color(INK)
-            .font(FontId::proportional(22.0)),
-    );
-}
-
-fn quote(ui: &mut egui::Ui, text: &str) {
-    Frame::NONE
-        .fill(Color32::from_rgb(247, 244, 236))
-        .inner_margin(Margin::symmetric(10, 8))
-        .stroke(Stroke::new(3.0, ACCENT))
-        .show(ui, |ui| {
-            ui.label(RichText::new(text).color(INK));
-        });
-}
-
-pub(super) fn property_grid(ui: &mut egui::Ui, id: &str, rows: &[(&str, String)]) {
-    egui::Grid::new(id)
-        .num_columns(2)
-        .spacing([12.0, 6.0])
-        .show(ui, |ui| {
-            for (term, value) in rows {
-                ui.label(RichText::new(*term).color(INK_MUTED).strong());
-                ui.label(RichText::new(value).color(INK));
-                ui.end_row();
-            }
-        });
-}
-
-fn meta_line(project: &str, service: &str) -> String {
+/// "project · service", or nothing.
+pub(super) fn meta_line(project: &str, service: &str) -> String {
     match (project.is_empty(), service.is_empty()) {
-        (true, true) => "No project or service label".to_owned(),
+        (true, true) => String::new(),
         (false, true) => project.to_owned(),
         (true, false) => service.to_owned(),
         (false, false) => format!("{project} · {service}"),
     }
 }
 
-fn empty_as_none(value: &str) -> String {
-    if value.is_empty() {
-        "None".to_owned()
-    } else {
-        value.to_owned()
+/// The icon and the tile color of a credential kind.
+pub(super) fn kind_icon(kind: crate::contracts::CredentialKind) -> (kit::Icon, egui::Color32) {
+    use crate::contracts::CredentialKind;
+    match kind {
+        CredentialKind::ApiKey => (kit::Icon::Key, egui::Color32::from_rgb(255, 149, 0)),
+        CredentialKind::Login => (kit::Icon::Person, kit::ACCENT),
+        CredentialKind::SshKey => (kit::Icon::Terminal, egui::Color32::from_rgb(88, 86, 214)),
+        CredentialKind::Database => (kit::Icon::Database, egui::Color32::from_rgb(52, 170, 90)),
+        CredentialKind::Custom => (kit::Icon::Asterisk, egui::Color32::from_rgb(142, 142, 147)),
     }
 }
 
-pub(super) fn accent_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    ui.add(
-        egui::Button::new(RichText::new(text).color(ACCENT_INK))
-            .fill(ACCENT)
-            .min_size(Vec2::new(0.0, 32.0)),
-    )
-}
-
-fn secondary_sidebar_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    ui.add(
-        egui::Button::new(RichText::new(text).color(SIDEBAR_INK))
-            .fill(Color32::TRANSPARENT)
-            .stroke(Stroke::new(
-                1.0,
-                Color32::from_rgba_unmultiplied(244, 239, 230, 90),
-            ))
-            .min_size(Vec2::new(ui.available_width(), 32.0)),
-    )
-}
-
-pub(super) fn danger_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    ui.add(
-        egui::Button::new(RichText::new(text).color(Color32::from_rgb(255, 248, 247)))
-            .fill(DENY)
-            .min_size(Vec2::new(0.0, 32.0)),
-    )
-}
-
-fn first_decision_label(decision: Decision) -> &'static str {
-    match decision {
-        Decision::Allow => "Permit",
-        Decision::RequireApproval => "Wait",
-        Decision::Deny => "Deny",
+/// The plural section title of a credential kind.
+pub(super) fn kind_plural(kind: crate::contracts::CredentialKind) -> &'static str {
+    use crate::contracts::CredentialKind;
+    match kind {
+        CredentialKind::ApiKey => "API keys",
+        CredentialKind::Login => "Logins",
+        CredentialKind::SshKey => "SSH keys",
+        CredentialKind::Database => "Databases",
+        CredentialKind::Custom => "Custom secrets",
     }
 }
 
-fn decision_pill(ui: &mut egui::Ui, decision: Decision) {
-    let text = first_decision_label(decision);
-    let color = match decision {
-        Decision::Allow => ALLOW,
-        Decision::RequireApproval => ASK,
-        Decision::Deny => DENY,
-    };
-    ui.label(RichText::new(text).strong().color(color));
+/// One line about a credential kind, for the add sheet.
+#[cfg(feature = "vault")]
+pub(super) fn kind_blurb(kind: crate::contracts::CredentialKind) -> &'static str {
+    use crate::contracts::CredentialKind;
+    match kind {
+        CredentialKind::ApiKey => "A token for an HTTP API",
+        CredentialKind::Login => "A username and a password",
+        CredentialKind::SshKey => "A private key for SSH or Git",
+        CredentialKind::Database => "Host, database, user, password",
+        CredentialKind::Custom => "Any other secret value",
+    }
 }
 
-fn decision_color_from_status(status: &str) -> Color32 {
-    match status {
-        "active" | "completed" => ALLOW,
-        "pending" => ASK,
-        _ => DENY,
+/// The label of an extra item field in the forms.
+pub(super) fn extra_label(field: crate::desktop::ExtraField) -> &'static str {
+    match field {
+        crate::desktop::ExtraField::PublicLabel => "Public key",
+        other => other.label(),
     }
 }
 
@@ -1863,30 +458,17 @@ mod tests {
     use super::*;
     #[cfg(feature = "vault")]
     use crate::broker::approvals::{OwnerAction, OwnerCheck};
-    #[cfg(not(feature = "vault"))]
+    use crate::desktop::OwnerView;
     use crate::desktop::model::MASKED_VALUE;
-    use crate::desktop::model::{
-        DEMO_BANNER, REPORTING_AGENT_ID, REPORTING_ITEM_ID, SAMPLE_RULE_TEXT,
-    };
+    #[cfg(not(feature = "vault"))]
+    use crate::desktop::model::REPORTING_ITEM_ID;
     #[cfg(feature = "vault")]
     use crate::desktop::owner_check::OwnerRequest;
-    use crate::desktop::{DemoScenario, DesktopApp, OwnerView};
-    use eframe::egui::{self, Pos2, RawInput, Rect, Shape, Vec2};
+    use eframe::egui::{Pos2, RawInput, Rect, Shape, Vec2};
 
-    const DEFAULT_SIZE: Vec2 = Vec2::new(1280.0, 840.0);
-    const MIN_SIZE: Vec2 = Vec2::new(960.0, 640.0);
+    const DEFAULT_SIZE: Vec2 = Vec2::new(1180.0, 800.0);
+    const MIN_SIZE: Vec2 = Vec2::new(900.0, 600.0);
     const TALL_SIZE: Vec2 = Vec2::new(1280.0, 2400.0);
-
-    fn heading_for(view: OwnerView) -> &'static str {
-        match view {
-            OwnerView::Vault => "Vault",
-            OwnerView::Item => "Item details",
-            OwnerView::Rules => "Rules",
-            OwnerView::Agents => "Agents",
-            OwnerView::Activity => "Activity and approvals",
-            OwnerView::Learning => "Learning",
-        }
-    }
 
     fn collect_shape_text(shape: &Shape, out: &mut String) {
         match shape {
@@ -1903,151 +485,44 @@ mod tests {
         }
     }
 
-    fn collect_frame_text(output: &egui::FullOutput) -> String {
-        let mut out = String::new();
-        for clipped in &output.shapes {
-            collect_shape_text(&clipped.shape, &mut out);
-        }
-        out
-    }
-
-    fn draw_frames(app: &mut DesktopApp, size: Vec2, frames: u32) -> (String, usize) {
+    /// Draw `frames` frames at `time` and return the text and the shape count of the
+    /// last one. A new sheet is invisible in its first frame, while egui measures it.
+    fn draw_at(app: &mut DesktopApp, size: Vec2, frames: u32, time: f64) -> (String, usize) {
         let ctx = egui::Context::default();
         let mut text = String::new();
         let mut shape_count = 0;
         for _ in 0..frames {
             let input = RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                time: Some(time),
                 ..Default::default()
             };
             let output = ctx.run_ui(input, |ui| draw(app, ui));
             shape_count = output.shapes.len();
-            text = collect_frame_text(&output);
+            text.clear();
+            for clipped in &output.shapes {
+                collect_shape_text(&clipped.shape, &mut text);
+            }
             output.drop_without_applying_deltas();
         }
         (text, shape_count)
     }
 
-    fn unlocked_app_with_item() -> DesktopApp {
-        let mut app = DesktopApp::new();
-        app.model
-            .unlock()
-            .expect("open vault is not authentication");
-        app.select_item(REPORTING_ITEM_ID.to_owned());
-        app
+    fn draw_frames(app: &mut DesktopApp, size: Vec2, frames: u32) -> (String, usize) {
+        draw_at(app, size, frames, 0.0)
     }
 
-    fn assert_demo_shell(text: &str, shape_count: usize, heading: &str) {
-        assert!(
-            shape_count > 0,
-            "the pass must paint shapes; this is not pixel-level QA"
-        );
-        assert!(
-            text.contains(DEMO_BANNER),
-            "missing demo warning in {heading}: {text}"
-        );
-        assert!(text.contains(heading), "missing heading {heading}: {text}");
-        #[cfg(not(feature = "vault"))]
-        assert!(
-            text.contains("Storage is not connected"),
-            "storage must stay not connected: {text}"
-        );
-        #[cfg(feature = "vault")]
-        {
-            assert!(
-                text.contains(VAULT_STORAGE_SENTENCE),
-                "the vault build must name the encrypted file: {text}"
-            );
-            assert!(
-                !text.contains("Encryption is not present"),
-                "the vault build must not deny encryption: {text}"
-            );
+    /// No view shows a synthetic or a stored secret value while it is masked.
+    fn assert_masked(text: &str) {
+        for canary in ["SYNTH-", "NOT-A-SECRET", "ui-draw-token-canary"] {
+            assert!(!text.contains(canary), "a masked value is visible: {text}");
         }
-        assert!(
-            text.contains("The model is unverified"),
-            "the model must stay unverified: {text}"
-        );
-        assert!(
-            text.contains("Isolation is unverified"),
-            "isolation must stay unverified: {text}"
-        );
-        assert!(
-            !text.contains("SYNTH-"),
-            "masked demo must not show a synthetic value: {text}"
-        );
-        assert!(
-            !text.contains("NOT-A-SECRET"),
-            "masked demo must not show a synthetic value: {text}"
-        );
     }
 
-    #[test]
-    fn locked_state_draws_warning_and_hides_item_details() {
-        let mut app = DesktopApp::new();
-        assert!(app.model.is_locked());
-        let (text, shape_count) = draw_frames(&mut app, DEFAULT_SIZE, 3);
-        assert_demo_shell(&text, shape_count, "Vault");
-        assert!(
-            text.contains("The vault is locked"),
-            "locked label missing: {text}"
-        );
-        #[cfg(feature = "vault")]
-        {
-            assert!(
-                text.contains("Create vault file"),
-                "vault file controls missing: {text}"
-            );
-            assert!(
-                text.contains("No vault file is open"),
-                "missing empty vault state: {text}"
-            );
-            assert!(
-                !text.contains("Project A reporting service"),
-                "demo items must stay off the vault view: {text}"
-            );
-        }
-        assert!(
-            text.contains("Open vault is not owner authentication")
-                || text.contains("Item details are hidden"),
-            "lock copy missing: {text}"
-        );
-    }
-
-    #[test]
-    fn five_owner_views_draw_at_default_and_minimum_sizes() {
-        for size in [DEFAULT_SIZE, MIN_SIZE] {
-            for view in OwnerView::ALL {
-                let mut app = unlocked_app_with_item();
-                app.view = view;
-                let (text, shape_count) = draw_frames(&mut app, size, 3);
-                assert_demo_shell(&text, shape_count, heading_for(view));
-                if view == OwnerView::Item {
-                    #[cfg(not(feature = "vault"))]
-                    {
-                        assert!(
-                            text.contains(MASKED_VALUE),
-                            "item details must stay masked at {size:?}: {text}"
-                        );
-                        assert!(
-                            text.contains("Project A reporting service"),
-                            "selected item missing at {size:?}: {text}"
-                        );
-                    }
-                    #[cfg(feature = "vault")]
-                    {
-                        assert!(
-                            text.contains("No vault file is open"),
-                            "vault item view must wait for a file at {size:?}: {text}"
-                        );
-                        assert!(
-                            !text.contains("Project A reporting service"),
-                            "demo items must stay off the vault item view at {size:?}: {text}"
-                        );
-                    }
-                }
-            }
-        }
-    }
+    #[cfg(feature = "vault")]
+    const UI_PASS: &str = "ui-draw-pass-ok";
+    #[cfg(feature = "vault")]
+    const UI_TOKEN: &str = "ui-draw-token-canary";
 
     /// An unlocked synthetic vault file in the app. The directory must outlive the app.
     #[cfg(feature = "vault")]
@@ -2062,8 +537,29 @@ mod tests {
         app
     }
 
+    /// An unlocked vault with one API key, selected.
     #[cfg(feature = "vault")]
-    const UI_PASS: &str = "ui-draw-pass-ok";
+    fn app_with_item(dir: &tempfile::TempDir) -> (DesktopApp, u64) {
+        use crate::desktop::owner_store::SecretForm;
+
+        let mut app = app_with_vault(dir);
+        let mut secrets = SecretForm::default();
+        secrets.token = UI_TOKEN.to_owned();
+        let item = app
+            .owner_ui
+            .session
+            .add(
+                &crate::desktop::ItemDraft {
+                    name: "Drawn key".to_owned(),
+                    project: "ui".to_owned(),
+                    ..crate::desktop::ItemDraft::default()
+                },
+                &secrets,
+            )
+            .expect("add");
+        app.select_item(item.id.to_string());
+        (app, item.id)
+    }
 
     /// A proof after a passed passphrase check (goal item A4).
     #[cfg(feature = "vault")]
@@ -2076,10 +572,152 @@ mod tests {
             .expect("owner check")
     }
 
-    /// Goal item P1: the Agents view shows the token lifetime, the expiry, and rotation.
     #[cfg(feature = "vault")]
     #[test]
-    fn agents_view_shows_token_expiry_and_rotation() {
+    fn start_screen_without_a_file_offers_create_and_open() {
+        let mut app = DesktopApp::new();
+        let (text, shape_count) = draw_frames(&mut app, DEFAULT_SIZE, 3);
+        assert!(shape_count > 0);
+        for expected in [
+            "Welcome to Apassy",
+            "Create a new vault",
+            "Open an existing vault",
+            "Restore from a backup",
+        ] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+        assert!(
+            !text.contains("Learning"),
+            "no sidebar before a vault: {text}"
+        );
+
+        app.ui.start = start::Step::Create;
+        let (text, _) = draw_frames(&mut app, DEFAULT_SIZE, 3);
+        assert!(text.contains("Create your vault"), "{text}");
+        assert!(
+            text.contains("Repeat"),
+            "the passphrase is typed two times: {text}"
+        );
+        assert!(
+            text.contains("Apassy cannot recover a lost passphrase"),
+            "{text}"
+        );
+    }
+
+    /// The two create fields must match. Both fields are empty after the try.
+    #[cfg(feature = "vault")]
+    #[test]
+    fn create_needs_the_same_passphrase_two_times() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let mut app = DesktopApp::new();
+        let ctx = egui::Context::default();
+        app.owner_ui.create_path = dir
+            .path()
+            .join("new")
+            .join("vault.db")
+            .display()
+            .to_string();
+        app.owner_ui.passphrase.push_str("ui-create-pass-1");
+        app.owner_ui.passphrase_confirm.push_str("ui-create-pass-2");
+        start::create_vault(&mut app, &ctx);
+        assert!(!app.owner_ui.session.has_file(), "no file after a mismatch");
+        assert!(app.status_text.contains("different"), "{}", app.status_text);
+        assert!(app.owner_ui.passphrase.is_empty());
+        assert!(app.owner_ui.passphrase_confirm.is_empty());
+
+        app.owner_ui.passphrase.push_str("ui-create-pass-1");
+        app.owner_ui.passphrase_confirm.push_str("ui-create-pass-1");
+        start::create_vault(&mut app, &ctx);
+        assert!(app.owner_ui.session.has_file());
+        assert!(
+            !app.owner_ui.session.is_locked(),
+            "create unlocks the new vault"
+        );
+        assert!(app.owner_ui.passphrase.is_empty());
+        assert!(app.owner_ui.passphrase_confirm.is_empty());
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir.path().join("new"))
+            .expect("folder")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700, "a new data folder is private");
+    }
+
+    #[cfg(feature = "vault")]
+    #[test]
+    fn locked_file_shows_the_unlock_screen_only() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let (mut app, _) = app_with_item(&dir);
+        app.owner_ui.session.lock().expect("lock");
+        let (text, _) = draw_frames(&mut app, DEFAULT_SIZE, 3);
+        assert!(text.contains("Apassy is locked"), "{text}");
+        assert!(text.contains("Unlock"), "{text}");
+        assert!(!text.contains("Drawn key"), "items stay hidden: {text}");
+        assert_masked(&text);
+    }
+
+    #[cfg(not(feature = "vault"))]
+    #[test]
+    fn demo_starts_locked_and_says_demo() {
+        let mut app = DesktopApp::new();
+        assert!(app.model.is_locked());
+        let (text, shape_count) = draw_frames(&mut app, DEFAULT_SIZE, 3);
+        assert!(shape_count > 0);
+        assert!(text.contains(crate::desktop::DEMO_BANNER), "{text}");
+        assert!(text.contains("Demo data only"), "{text}");
+        assert!(text.contains("The demo vault is locked"), "{text}");
+        assert!(text.contains("Open vault"), "{text}");
+    }
+
+    /// The heading of each view.
+    fn heading_for(view: OwnerView) -> &'static str {
+        match view {
+            #[cfg(feature = "vault")]
+            OwnerView::Item => "Drawn key",
+            #[cfg(not(feature = "vault"))]
+            OwnerView::Item => "Project A reporting service",
+            other => other.label(),
+        }
+    }
+
+    #[test]
+    fn every_view_draws_at_default_and_minimum_sizes() {
+        for size in [DEFAULT_SIZE, MIN_SIZE] {
+            for view in OwnerView::ALL {
+                #[cfg(feature = "vault")]
+                let dir = tempfile::TempDir::new().expect("temp dir");
+                #[cfg(feature = "vault")]
+                let mut app = app_with_item(&dir).0;
+                #[cfg(not(feature = "vault"))]
+                let mut app = {
+                    let mut app = DesktopApp::new();
+                    app.model
+                        .unlock()
+                        .expect("open vault is not authentication");
+                    app.select_item(REPORTING_ITEM_ID.to_owned());
+                    app
+                };
+                app.view = view;
+                let (text, shape_count) = draw_frames(&mut app, size, 3);
+                assert!(shape_count > 0, "{view:?} paints nothing");
+                let heading = heading_for(view);
+                assert!(
+                    text.contains(heading),
+                    "missing {heading} at {size:?}: {text}"
+                );
+                assert_masked(&text);
+                if view == OwnerView::Item {
+                    assert!(text.contains(MASKED_VALUE), "masked value missing: {text}");
+                }
+            }
+        }
+    }
+
+    /// Goal item P1: the agent page shows the expiry and rotation. Settings shows the
+    /// lifetime. Rotation waits for the owner check (A4), then shows the token once.
+    #[cfg(feature = "vault")]
+    #[test]
+    fn agent_page_shows_token_expiry_and_rotation() {
         use crate::desktop::owner_store::FreshToken;
 
         let dir = tempfile::TempDir::new().expect("temp dir");
@@ -2091,12 +729,23 @@ mod tests {
             .expect("register");
         app.view = OwnerView::Agents;
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
-        assert!(text.contains("Token lifetime"), "{text}");
-        assert!(text.contains("Current lifetime: 30 days."), "{text}");
+        assert!(text.contains("UI agent"), "{text}");
+        assert!(text.contains("Active"), "{text}");
+        app.owner_ui.selected_agent = Some(agent.id);
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
         assert!(text.contains("The token expires on"), "{text}");
         assert!(text.contains("Rotate token"), "{text}");
+        assert!(
+            text.contains("Token lifetime: 30 days after issue."),
+            "{text}"
+        );
 
-        // Rotation waits for the owner check (goal item A4).
+        app.view = OwnerView::Settings;
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(text.contains("Token lifetime"), "{text}");
+        assert!(text.contains("Current lifetime: 30 days."), "{text}");
+
+        app.view = OwnerView::Agents;
         app.ask_owner(
             OwnerRequest::RotateToken {
                 agent_id: agent.id,
@@ -2121,31 +770,29 @@ mod tests {
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
         assert!(text.contains("The old token does not work now"), "{text}");
         assert!(text.contains(&shown), "the new token shows one time");
+
+        // A lock hides the token for good.
+        app.lock_vault(None);
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(app.owner_ui.fresh_token.is_none());
+        assert!(!text.contains(&shown));
     }
 
-    /// Goal item V5: the passphrase card asks for the current passphrase and for the new
-    /// passphrase two times. The fields are clear after an attempt.
+    /// Goal item V5: the passphrase sheet asks for the current passphrase and for the
+    /// new passphrase two times.
     #[cfg(feature = "vault")]
     #[test]
-    fn passphrase_card_asks_for_the_new_passphrase_two_times() {
+    fn passphrase_sheet_asks_for_the_new_passphrase_two_times() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let mut app = app_with_vault(&dir);
-        let ctx = egui::Context::default();
-        let mut text = String::new();
-        for _ in 0..2 {
-            let input = RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, DEFAULT_SIZE)),
-                ..Default::default()
-            };
-            let output = ctx.run_ui(input, |ui| super::draw_passphrase_card(&mut app, ui));
-            text = collect_frame_text(&output);
-            output.drop_without_applying_deltas();
-        }
+        app.view = OwnerView::Settings;
+        app.ui.sheet = Some(Sheet::ChangePassphrase);
+        let (text, _) = draw_frames(&mut app, DEFAULT_SIZE, 3);
         for label in [
             "Change passphrase",
             "Current passphrase",
             "New passphrase",
-            "Repeat the new passphrase",
+            "Repeat the new one",
             "Old backups still need the old passphrase",
         ] {
             assert!(text.contains(label), "missing {label}: {text}");
@@ -2164,8 +811,8 @@ mod tests {
             .expect("the old passphrase works");
     }
 
-    /// Goal item V4: after a restore, the Vault view lists the items to review, and
-    /// Item details has the review card with "Confirm settings".
+    /// Goal item V4: after a restore, the list shows the items to review, and the item
+    /// page has the review notice with "Confirm settings".
     #[cfg(feature = "vault")]
     #[test]
     fn restored_item_shows_the_review_and_confirm_action() {
@@ -2174,7 +821,7 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let mut app = app_with_vault(&dir);
         let mut secrets = SecretForm::default();
-        secrets.token = "ui-review-token-canary".to_owned();
+        secrets.token = UI_TOKEN.to_owned();
         let item = app
             .owner_ui
             .session
@@ -2207,12 +854,13 @@ mod tests {
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
         assert!(text.contains("Review after restore"), "{text}");
         assert!(text.contains("Restored key"), "{text}");
+        assert!(text.contains("Needs review"), "{text}");
 
         app.select_item(item.id.to_string());
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
         assert!(text.contains("Confirm settings"), "{text}");
         assert!(text.contains("production, high risk"), "{text}");
-        assert!(!text.contains("ui-review-token-canary"));
+        assert_masked(&text);
 
         // The confirmation waits for the owner check (goal item A4).
         app.ask_owner(OwnerRequest::ConfirmReview { item_id: item.id }, None);
@@ -2225,11 +873,12 @@ mod tests {
         assert!(!text.contains("Confirm settings"), "{text}");
     }
 
-    /// Goal item B4: a new item gets a suggested declaration with a reason for each value.
-    /// The save waits for the owner check, and the card then shows the acceptance share.
+    /// Goal item B4: a new item gets a suggested declaration. The sheet shows a hint
+    /// only for a changed value, and the reasons on request. The save waits for the
+    /// owner check, and the sheet then shows the acceptance share.
     #[cfg(feature = "vault")]
     #[test]
-    fn declaration_card_shows_the_suggestion_and_the_acceptance_share() {
+    fn declaration_sheet_shows_the_suggestion_and_the_acceptance_share() {
         use crate::desktop::owner_store::SecretForm;
         use crate::vault::{Environment, RiskLevel};
 
@@ -2259,8 +908,15 @@ mod tests {
             "the project of the item fills the form"
         );
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(text.contains("Declaration"), "{text}");
+        assert!(
+            text.contains("Not set"),
+            "the item page says it is not set: {text}"
+        );
+
+        app.ui.sheet = Some(Sheet::Declaration);
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
         assert!(text.contains("Apassy suggests the values below"), "{text}");
-        assert!(text.contains("Environment: suggested production"), "{text}");
         assert!(
             text.contains("Known hosts of Stripe: api.stripe.com"),
             "{text}"
@@ -2269,12 +925,32 @@ mod tests {
             text.contains("No suggested declaration is saved yet"),
             "{text}"
         );
+        assert!(text.contains("Why these values?"), "{text}");
+        assert!(
+            !text.contains("You changed it."),
+            "no hint for accepted values: {text}"
+        );
         assert!(!text.contains(&secret), "the value stays hidden");
+
+        let reason = app
+            .owner_ui
+            .declaration_form
+            .suggestion
+            .as_ref()
+            .map(|suggestion| suggestion.provider_reason.clone())
+            .expect("suggestion");
+        assert!(!text.contains(&reason), "the reasons start folded");
+        app.ui.set_expanded(items_why_key(), true);
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(text.contains(&reason), "{text}");
 
         // The owner lowers the risk. The save waits for the owner check (goal item A4).
         app.owner_ui.declaration_form.risk = RiskLevel::Medium;
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
-        assert!(text.contains("You changed it."), "{text}");
+        assert!(
+            text.contains("Apassy suggested high. You changed it."),
+            "{text}"
+        );
         let form = app.owner_ui.declaration_form.clone();
         app.ask_owner(
             OwnerRequest::SaveDeclaration {
@@ -2314,9 +990,276 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "vault")]
+    fn items_why_key() -> &'static str {
+        "declaration-why"
+    }
+
+    /// The add sheet asks for the kind first, then for the name and the secret.
+    #[cfg(feature = "vault")]
+    #[test]
+    fn add_sheet_picks_a_kind_then_asks_for_the_secret() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let mut app = app_with_vault(&dir);
+        let (text, _) = draw_frames(&mut app, DEFAULT_SIZE, 3);
+        assert!(text.contains("No credentials yet"), "{text}");
+        app.ui.sheet = Some(Sheet::AddItem { kind_chosen: false });
+        let (text, _) = draw_frames(&mut app, DEFAULT_SIZE, 3);
+        for kind in [
+            "Add a credential",
+            "API key",
+            "Login",
+            "SSH key",
+            "Database",
+            "Custom",
+        ] {
+            assert!(text.contains(kind), "missing {kind}: {text}");
+        }
+        assert!(!text.contains("Token"), "no fields before the kind: {text}");
+        app.add_form.kind = crate::contracts::CredentialKind::Database;
+        app.ui.sheet = Some(Sheet::AddItem { kind_chosen: true });
+        let (text, _) = draw_frames(&mut app, DEFAULT_SIZE, 3);
+        for field in [
+            "New database login",
+            "Name",
+            "Host",
+            "Database name",
+            "Password",
+            "Where it is used",
+        ] {
+            assert!(text.contains(field), "missing {field}: {text}");
+        }
+    }
+
+    /// Closing a sheet erases the secrets typed in it (key-memory review F3).
+    #[cfg(feature = "vault")]
+    #[test]
+    fn closing_a_sheet_erases_its_typed_secrets() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let (mut app, _) = app_with_item(&dir);
+        let ctx = egui::Context::default();
+        app.ui.sheet = Some(Sheet::AddItem { kind_chosen: true });
+        app.owner_ui.add_secrets.token.push_str(UI_TOKEN);
+        close_sheet(&mut app, &ctx);
+        assert!(app.ui.sheet.is_none());
+        assert!(app.owner_ui.add_secrets.is_blank());
+
+        app.ui.sheet = Some(Sheet::EditItem);
+        app.owner_ui.edit_secrets.token.push_str(UI_TOKEN);
+        close_sheet(&mut app, &ctx);
+        assert!(app.owner_ui.edit_secrets.is_blank());
+
+        app.ui.sheet = Some(Sheet::ChangePassphrase);
+        app.owner_ui.passphrase_current.push_str(UI_PASS);
+        app.owner_ui.passphrase_new.push_str(UI_PASS);
+        app.owner_ui.passphrase_repeat.push_str(UI_PASS);
+        close_sheet(&mut app, &ctx);
+        assert!(app.owner_ui.passphrase_current.is_empty());
+        assert!(app.owner_ui.passphrase_new.is_empty());
+        assert!(app.owner_ui.passphrase_repeat.is_empty());
+
+        app.ui.sheet = Some(Sheet::Restore);
+        app.owner_ui.passphrase.push_str(UI_PASS);
+        close_sheet(&mut app, &ctx);
+        assert!(app.owner_ui.passphrase.is_empty());
+    }
+
+    /// A sheet closes after its owner check succeeds, and stays after a cancel.
+    #[cfg(feature = "vault")]
+    #[test]
+    fn a_sheet_closes_only_after_a_successful_owner_check() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let (mut app, item_id) = app_with_item(&dir);
+        let ctx = egui::Context::default();
+        app.ui.sheet = Some(Sheet::Declaration);
+        let form = app.owner_ui.declaration_form.clone();
+        let request = OwnerRequest::SaveDeclaration { item_id, form };
+
+        ask_owner_from_sheet(&mut app, request.clone(), &ctx);
+        app.close_owner_check(Some(&ctx));
+        app.set_note("The owner check is cancelled. Apassy did nothing.");
+        draw_frames(&mut app, DEFAULT_SIZE, 1);
+        assert_eq!(
+            app.ui.sheet,
+            Some(Sheet::Declaration),
+            "a cancel keeps the sheet"
+        );
+
+        ask_owner_from_sheet(&mut app, request, &ctx);
+        assert!(
+            app.confirm_owner_now(OwnerCheck::passphrase("ui-draw-pass-no"))
+                .is_err()
+        );
+        draw_frames(&mut app, DEFAULT_SIZE, 1);
+        assert_eq!(
+            app.ui.sheet,
+            Some(Sheet::Declaration),
+            "a failed check keeps it"
+        );
+
+        let form = app.owner_ui.declaration_form.clone();
+        ask_owner_from_sheet(
+            &mut app,
+            OwnerRequest::SaveDeclaration { item_id, form },
+            &ctx,
+        );
+        app.confirm_owner_now(OwnerCheck::passphrase(UI_PASS))
+            .expect("owner check");
+        draw_frames(&mut app, DEFAULT_SIZE, 1);
+        assert_eq!(app.ui.sheet, None, "success closes the sheet");
+        assert!(
+            app.owner_ui
+                .session
+                .declaration(item_id)
+                .expect("read")
+                .is_some()
+        );
+    }
+
+    /// ADR 0011: the variable sheet offers a placeholder with hosts. The owner check
+    /// saves the mode, and the credential page shows it.
+    #[cfg(feature = "vault")]
+    #[test]
+    fn the_variable_sheet_saves_a_placeholder_with_its_hosts() {
+        use crate::vault::EnvDelivery;
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let (mut app, item_id) = app_with_item(&dir);
+        let ctx = egui::Context::default();
+        items::prepare_sheet(&mut app, item_id, &Sheet::Variable);
+        app.ui.sheet = Some(Sheet::Variable);
+        // The item has no provider, so a new variable starts with the real value.
+        assert!(!app.owner_ui.env_placeholder_input);
+        app.owner_ui.env_placeholder_input = true;
+        let (text, _) = draw_frames(&mut app, DEFAULT_SIZE, 2);
+        for expected in [
+            "What the program gets",
+            "Placeholder",
+            "Real value",
+            "Hosts",
+        ] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+        assert_masked(&text);
+
+        let hosts = items::host_list("API.example.com, api.other.example:8443\nAPI.example.com");
+        assert_eq!(
+            hosts,
+            vec![
+                "api.example.com".to_owned(),
+                "api.other.example:8443".to_owned(),
+                "api.example.com".to_owned()
+            ]
+        );
+        ask_owner_from_sheet(
+            &mut app,
+            OwnerRequest::SaveVariable {
+                item_id,
+                env_name: "DRAWN_KEY".to_owned(),
+                field: "token".to_owned(),
+                delivery: EnvDelivery::Placeholder(hosts),
+            },
+            &ctx,
+        );
+        app.confirm_owner_now(OwnerCheck::passphrase(UI_PASS))
+            .expect("owner check");
+        let binding = app
+            .owner_ui
+            .session
+            .env_binding(item_id)
+            .expect("read")
+            .expect("binding");
+        assert_eq!(
+            binding.delivery,
+            EnvDelivery::Placeholder(vec![
+                "api.example.com".to_owned(),
+                "api.other.example:8443".to_owned()
+            ])
+        );
+        app.ui.sheet = None;
+        app.select_item(item_id.to_string());
+        let (text, _) = draw_frames(&mut app, DEFAULT_SIZE, 2);
+        assert!(text.contains("DRAWN_KEY · placeholder"), "{text}");
+        items::prepare_sheet(&mut app, item_id, &Sheet::Variable);
+        assert!(app.owner_ui.env_placeholder_input);
+        assert_eq!(
+            app.owner_ui.env_hosts_input,
+            "api.example.com, api.other.example:8443"
+        );
+
+        // A value that is too short for a placeholder is refused.
+        let mut secrets = crate::desktop::owner_store::SecretForm::default();
+        secrets.token = "short-1".to_owned();
+        let short = app
+            .owner_ui
+            .session
+            .add(
+                &crate::desktop::ItemDraft {
+                    name: "Short key".to_owned(),
+                    ..crate::desktop::ItemDraft::default()
+                },
+                &secrets,
+            )
+            .expect("add");
+        let proof = owner_ok(
+            &app,
+            crate::broker::approvals::OwnerAction::ChangeItemRules { item_id: short.id },
+        );
+        let refused = app.owner_ui.session.set_env_binding(
+            short.id,
+            "SHORT_KEY",
+            "token",
+            &EnvDelivery::Placeholder(vec!["api.example.com".to_owned()]),
+            proof,
+        );
+        assert!(
+            refused.is_err_and(|err| err.message.contains("too short")),
+            "a short value"
+        );
+    }
+
+    /// A lock leaves the main window, closes every sheet, and hides a fresh token.
+    #[cfg(feature = "vault")]
+    #[test]
+    fn a_lock_closes_sheets_and_shows_the_unlock_screen() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let (mut app, _) = app_with_item(&dir);
+        app.ui.sheet = Some(Sheet::EditItem);
+        let ctx = egui::Context::default();
+        app.lock_vault(Some(&ctx));
+        let (text, _) = draw_frames(&mut app, DEFAULT_SIZE, 3);
+        assert!(app.ui.sheet.is_none());
+        assert!(text.contains("Apassy is locked"), "{text}");
+        assert!(!text.contains("Edit credential"), "{text}");
+    }
+
+    /// A result fades after a few seconds. An error stays until the owner closes it.
+    #[test]
+    fn a_result_fades_and_an_error_stays() {
+        let mut app = DesktopApp::new();
+        app.set_ok("Synthetic result message.");
+        let (text, _) = draw_at(&mut app, DEFAULT_SIZE, 3, 100.0);
+        assert!(text.contains("Synthetic result message."), "{text}");
+        let (text, _) = draw_at(&mut app, DEFAULT_SIZE, 3, 110.0);
+        assert!(!text.contains("Synthetic result message."), "{text}");
+
+        app.set_err("Synthetic error message.");
+        let (text, _) = draw_at(&mut app, DEFAULT_SIZE, 3, 200.0);
+        assert!(text.contains("Synthetic error message."), "{text}");
+        let (text, _) = draw_at(&mut app, DEFAULT_SIZE, 3, 400.0);
+        assert!(text.contains("Synthetic error message."), "{text}");
+    }
+
+    #[cfg(not(feature = "vault"))]
     #[test]
     fn activity_history_after_approve_once_draws_on_a_tall_frame() {
-        let mut app = unlocked_app_with_item();
+        use crate::desktop::DemoScenario;
+        use crate::desktop::model::{REPORTING_AGENT_ID, SAMPLE_RULE_TEXT};
+
+        let mut app = DesktopApp::new();
+        app.model
+            .unlock()
+            .expect("open vault is not authentication");
         app.model
             .connect_agent(REPORTING_AGENT_ID)
             .expect("connect reporting agent");
@@ -2334,1214 +1277,329 @@ mod tests {
             .expect("approve once");
         app.view = OwnerView::Activity;
 
-        let (compact, compact_shapes) = draw_frames(&mut app, MIN_SIZE, 3);
-        assert_demo_shell(&compact, compact_shapes, heading_for(OwnerView::Activity));
+        let (compact, _) = draw_frames(&mut app, MIN_SIZE, 3);
         assert!(
             compact.contains("This is a fixture risk simulation"),
             "fixture risk label missing: {compact}"
         );
-
-        let (tall, tall_shapes) = draw_frames(&mut app, TALL_SIZE, 3);
-        assert_demo_shell(&tall, tall_shapes, heading_for(OwnerView::Activity));
-        assert!(
-            tall.contains("Permitted request"),
-            "current completion title missing on the tall frame: {tall}"
-        );
-        assert!(
-            tall.contains("The owner approved this exact request once"),
-            "current approval message missing on the tall frame: {tall}"
-        );
-        assert!(
-            tall.contains("First decision: Wait"),
-            "first wait label missing on the tall frame: {tall}"
-        );
+        let (tall, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        for expected in [
+            "Permitted request",
+            "The owner approved this exact request once",
+            "First decision: Wait",
+            "History",
+            "The request waits for an owner decision",
+        ] {
+            assert!(tall.contains(expected), "missing {expected}: {tall}");
+        }
         assert!(
             !tall.contains("Approve once"),
             "completed use must not show Approve once: {tall}"
         );
-        assert!(
-            tall.contains("History"),
-            "history heading missing on the tall frame: {tall}"
-        );
-        assert!(
-            tall.contains("The request waits for an owner decision"),
-            "original wait must stay in history: {tall}"
-        );
-    }
-}
-
-/// Agent access views for the vault build (ADR 0004).
-#[cfg(feature = "vault")]
-mod agents_view {
-    use eframe::egui::{self, Frame, Margin, RichText, TextEdit};
-
-    use super::{
-        ALLOW, ASK, DENY, INK, INK_MUTED, accent_button, card_frame, danger_button, heading,
-        labeled_text,
-    };
-    use crate::broker::approvals::RememberOffer;
-    use crate::broker::profile::REPORTING_API_V0;
-    use crate::desktop::owner_check::OwnerRequest;
-    use crate::desktop::owner_store::{DeclarationForm, FreshToken, format_utc};
-    use crate::desktop::{BrokerState, DesktopApp};
-    use crate::vault::ActivityDecision;
-    use crate::vault::{DEFAULT_TOKEN_LIFETIME_DAYS, ExecMode};
-
-    pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
-        heading(ui, "Agents");
-        ui.label(
-            RichText::new(
-                "An agent uses a credential through the Apassy broker. The agent never receives the secret value. The grants on this screen are temporary manual permissions. Confirmed rules replace them later.",
-            )
-            .color(INK_MUTED),
-        );
-        ui.add_space(8.0);
-        draw_broker_card(app, ui);
-        ui.add_space(8.0);
-        if app.owner_ui.session.is_locked() {
-            // A lock also hides a token that the owner did not dismiss.
-            app.owner_ui.fresh_token = None;
-            ui.label(RichText::new("Unlock the vault to manage agents.").color(INK_MUTED));
-            return;
-        }
-        draw_review_list(app, ui);
-        draw_fresh_token(app, ui);
-        draw_register_card(app, ui);
-        ui.add_space(8.0);
-        draw_token_lifetime_card(app, ui);
-        ui.add_space(8.0);
-        draw_agent_list(app, ui);
     }
 
-    fn adapter_path() -> String {
-        std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(|dir| dir.join("apassy-mcp")))
-            .map_or_else(
-                || "apassy-mcp".to_owned(),
-                |path| path.display().to_string(),
-            )
-    }
-
-    fn draw_broker_card(app: &DesktopApp, ui: &mut egui::Ui) {
-        card_frame().show(ui, |ui| {
-            ui.label(RichText::new("Broker").size(16.0).strong().color(INK));
-            match &app.broker {
-                BrokerState::Running(handle) => {
-                    ui.label(RichText::new("The broker accepts agent requests.").color(ALLOW));
-                    let bouncer = handle.bouncer_url().map_or_else(
-                        || "Bouncer: not set. Every run waits for you.".to_owned(),
-                        |url| format!("Bouncer: {url} (Jev-compatible, for example Laya). If it does not answer, every run waits for you."),
-                    );
-                    ui.label(RichText::new(bouncer).color(INK_MUTED));
-                    ui.label(
-                        RichText::new(format!("Socket: {}", handle.socket_path().display()))
-                            .color(INK_MUTED),
-                    );
-                }
-                BrokerState::Failed(message) => {
-                    ui.label(RichText::new(message).color(DENY));
-                }
-                BrokerState::NotStarted => {
-                    ui.label(
-                        RichText::new("The broker starts with the desktop window.")
-                            .color(INK_MUTED),
-                    );
-                }
-            }
-            ui.label(
-                RichText::new(
-                    "A locked vault refuses all agent requests. Destinations use https://, or http:// on this computer only. The broker does not follow redirects.",
-                )
-                .color(INK_MUTED),
-            );
-        });
-    }
-
-    fn draw_register_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
-        card_frame().show(ui, |ui| {
-            ui.label(
-                RichText::new("Register an agent")
-                    .size(16.0)
-                    .strong()
-                    .color(INK),
-            );
-            labeled_text(
-                ui,
-                "agent-name",
-                "Agent name",
-                &mut app.owner_ui.new_agent_name,
-            );
-            if accent_button(ui, "Register agent").clicked() {
-                let name = app.owner_ui.new_agent_name.clone();
-                match app.owner_ui.session.register_agent(&name) {
-                    Ok((agent, token)) => {
-                        app.owner_ui.new_agent_name.clear();
-                        app.owner_ui.selected_agent = Some(agent.id);
-                        app.owner_ui.fresh_token = Some(FreshToken {
-                            agent_name: agent.name.clone(),
-                            token,
-                            rotated: false,
-                        });
-                        app.set_ok(format!("{} is registered. Copy its token now.", agent.name));
-                    }
-                    Err(err) => app.set_err(err.message),
-                }
-            }
-        });
-    }
-
-    fn review_frame() -> Frame {
-        Frame::NONE
-            .fill(egui::Color32::from_rgb(252, 238, 214))
-            .stroke(egui::Stroke::new(1.5, ASK))
-            .corner_radius(egui::CornerRadius::same(8))
-            .inner_margin(Margin::symmetric(14, 12))
-    }
-
-    /// Items from a restored backup that wait for the owner review (goal item V4).
-    pub(super) fn draw_review_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
-        let items = app
-            .owner_ui
-            .session
-            .items_needing_review()
-            .unwrap_or_default();
-        if items.is_empty() {
-            return;
-        }
-        let mut open = None;
-        review_frame().show(ui, |ui| {
-            ui.label(
-                RichText::new("Review after restore")
-                    .size(16.0)
-                    .strong()
-                    .color(INK),
-            );
-            ui.label(
-                RichText::new(
-                    "This vault came from a backup. Agents cannot use these items until you confirm their agent settings: the declaration, the environment variable, and the connector. The restore also revoked every agent. Register the agents again.",
-                )
-                .color(INK),
-            );
-            for (item_id, name) in &items {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(name).strong().color(INK));
-                    if ui.button("Open item").clicked() {
-                        open = Some(*item_id);
-                    }
-                });
-            }
-        });
-        ui.add_space(8.0);
-        if let Some(item_id) = open {
-            app.select_item(item_id.to_string());
-        }
-    }
-
-    /// Review and confirm the agent settings of one restored item (goal item V4).
-    pub(super) fn draw_review_card(app: &mut DesktopApp, ui: &mut egui::Ui, item_id: u64) {
-        let session = &app.owner_ui.session;
-        if !session.needs_review(item_id).unwrap_or(false) {
-            return;
-        }
-        // The provider gives known hosts to the command analysis, so the owner reviews it.
-        let provider = session
-            .declaration_form(item_id)
-            .ok()
-            .and_then(|form| form.provider)
-            .and_then(|id| crate::vault::providers::find(&id))
-            .map_or_else(String::new, |p| format!(", provider {}", p.label));
-        let declaration = session.declaration(item_id).ok().flatten().map_or_else(
-            || "None. Every run with this item waits for you.".to_owned(),
-            |d| {
-                format!(
-                    "{}, {} risk, {}, {}, project {}{provider}",
-                    d.environment.as_str(),
-                    d.risk.as_str(),
-                    d.scope.as_str(),
-                    d.reversibility.as_str(),
-                    d.project
-                )
-            },
-        );
-        let variable = session.env_binding(item_id).ok().flatten().map_or_else(
-            || "None".to_owned(),
-            |binding| format!("{} = field {}", binding.env_name, binding.field),
-        );
-        let connector = session
-            .connector(item_id)
-            .ok()
-            .flatten()
-            .map_or_else(|| "None".to_owned(), |destination| destination.base_url);
-        let mut confirm = false;
-        ui.add_space(8.0);
-        review_frame().show(ui, |ui| {
-            ui.label(
-                RichText::new("Review after restore")
-                    .size(16.0)
-                    .strong()
-                    .color(INK),
-            );
-            ui.label(
-                RichText::new(
-                    "This item came from a restored backup. An old or changed backup can have wrong agent settings, for example a connector to another host or a production credential with a lower declaration. Examine the settings. Correct them in the cards below. Then confirm. Agents cannot use this item before you confirm.",
-                )
-                .color(INK),
-            );
-            egui::Grid::new(("review", item_id))
-                .num_columns(2)
-                .spacing([12.0, 6.0])
-                .show(ui, |ui| {
-                    for (term, value) in [
-                        ("Declaration", &declaration),
-                        ("Environment variable", &variable),
-                        ("Connector", &connector),
-                    ] {
-                        ui.label(RichText::new(term).strong().color(INK_MUTED));
-                        ui.label(RichText::new(value).color(INK));
-                        ui.end_row();
-                    }
-                });
-            if accent_button(ui, "Confirm settings").clicked() {
-                confirm = true;
-            }
-        });
-        if confirm {
-            // Agents can use the item again after this, so it needs an owner check (A4).
-            let ctx = ui.ctx().clone();
-            app.ask_owner(OwnerRequest::ConfirmReview { item_id }, Some(&ctx));
-        }
-    }
-
-    /// A new token after a registration or a rotation. Apassy shows it one time.
-    fn draw_fresh_token(app: &mut DesktopApp, ui: &mut egui::Ui) {
-        let mut dismiss = false;
-        if let Some(fresh) = &app.owner_ui.fresh_token {
-            Frame::NONE
-                .fill(egui::Color32::from_rgb(252, 244, 222))
-                .inner_margin(Margin::symmetric(10, 8))
-                .show(ui, |ui| {
-                    let heading = if fresh.rotated {
-                        format!(
-                            "New token for {}. The old token does not work now. Apassy shows the new token one time. Select the text and copy it.",
-                            fresh.agent_name
-                        )
-                    } else {
-                        format!(
-                            "Token for {}. Apassy shows it one time. Select the text and copy it.",
-                            fresh.agent_name
-                        )
-                    };
-                    ui.label(RichText::new(heading).color(ASK));
-                    let mut shown = fresh.token.expose().to_owned();
-                    ui.add(
-                        TextEdit::singleline(&mut shown)
-                            .font(egui::TextStyle::Monospace)
-                            .desired_width(f32::INFINITY),
-                    );
-                    ui.label(
-                        RichText::new("MCP server configuration for the agent host:")
-                            .color(INK_MUTED),
-                    );
-                    let mut config = format!(
-                        "{{\n  \"mcpServers\": {{\n    \"apassy\": {{\n      \"command\": \"{}\",\n      \"env\": {{ \"APASSY_AGENT_TOKEN\": \"{}\" }}\n    }}\n  }}\n}}",
-                        adapter_path(),
-                        fresh.token.expose()
-                    );
-                    ui.add(
-                        TextEdit::multiline(&mut config)
-                            .font(egui::TextStyle::Monospace)
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(7),
-                    );
-                    config.clear();
-                    shown.clear();
-                    if ui.button("I saved the token").clicked() {
-                        dismiss = true;
-                    }
-                });
-            ui.add_space(8.0);
-        }
-        if dismiss {
-            app.owner_ui.fresh_token = None;
-            app.set_ok("The token is hidden. Apassy cannot show it again.");
-        }
-    }
-
-    /// Token lifetime for every agent (goal item P1).
-    fn draw_token_lifetime_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
-        let current = app.owner_ui.session.token_lifetime_days().ok();
-        card_frame().show(ui, |ui| {
-            ui.label(RichText::new("Token lifetime").size(16.0).strong().color(INK));
-            ui.label(
-                RichText::new(format!(
-                    "A token works for this number of days after Apassy issues it. Then the agent gets token_expired, and you rotate the token. The default is {DEFAULT_TOKEN_LIFETIME_DAYS} days. A change applies to every active token from its issue time."
-                ))
-                .color(INK_MUTED),
-            );
-            if let Some(days) = current {
-                ui.label(RichText::new(format!("Current lifetime: {days} days.")).color(INK));
-            }
-            ui.horizontal_wrapped(|ui| {
-                let label = ui.label("Days (1 to 365)");
-                let edit = ui.add(
-                    TextEdit::singleline(&mut app.owner_ui.token_lifetime_input)
-                        .hint_text(current.map_or_else(String::new, |days| days.to_string()))
-                        .desired_width(80.0),
-                );
-                edit.labelled_by(label.id);
-                if ui.button("Save lifetime").clicked() {
-                    let days = app.owner_ui.token_lifetime_input.clone();
-                    match crate::desktop::owner_store::parse_lifetime_days(&days) {
-                        Ok(_) => {
-                            let ctx = ui.ctx().clone();
-                            app.ask_owner(OwnerRequest::SetTokenLifetime { days }, Some(&ctx));
-                        }
-                        Err(err) => app.set_err(err.message),
-                    }
-                }
-            });
-        });
-    }
-
-    fn draw_agent_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
-        let agents = match app.owner_ui.session.agents() {
-            Ok(agents) => agents,
-            Err(err) => {
-                ui.label(RichText::new(err.message).color(DENY));
-                return;
-            }
-        };
-        if agents.is_empty() {
-            ui.label(RichText::new("No agent is registered.").color(INK_MUTED));
-            return;
-        }
-        for agent in agents {
-            card_frame().show(ui, |ui| {
-                ui.label(RichText::new(&agent.name).size(16.0).strong().color(INK));
-                ui.label(
-                    RichText::new(format!("Registered {}", format_utc(agent.created_at)))
-                        .color(INK_MUTED),
-                );
-                if agent.revoked {
-                    ui.label(RichText::new("Revoked. The token does not work.").color(DENY));
-                    return;
-                }
-                if agent.token_expired_at(now()) {
-                    ui.label(
-                        RichText::new(format!(
-                            "The token expired on {}. The agent gets token_expired. Rotate the token.",
-                            format_utc(agent.token_expires_at)
-                        ))
-                        .color(DENY),
-                    );
-                } else {
-                    ui.label(RichText::new("Active").color(ALLOW));
-                    ui.label(
-                        RichText::new(format!(
-                            "The token expires on {}.",
-                            format_utc(agent.token_expires_at)
-                        ))
-                        .color(INK_MUTED),
-                    );
-                }
-                ui.horizontal_wrapped(|ui| {
-                    let selected = app.owner_ui.selected_agent == Some(agent.id);
-                    let label = if selected {
-                        "Hide grants"
-                    } else {
-                        "Manage grants"
-                    };
-                    if ui.button(label).clicked() {
-                        app.owner_ui.selected_agent = if selected { None } else { Some(agent.id) };
-                    }
-                    if ui.button("Rotate token").clicked() {
-                        let ctx = ui.ctx().clone();
-                        app.ask_owner(
-                            OwnerRequest::RotateToken {
-                                agent_id: agent.id,
-                                agent_name: agent.name.clone(),
-                            },
-                            Some(&ctx),
-                        );
-                    }
-                    if danger_button(ui, "Revoke agent").clicked() {
-                        let message =
-                            format!("{} is revoked. Its token does not work.", agent.name);
-                        let result = app.owner_ui.session.revoke_agent(agent.id);
-                        let _ = app.apply(result, &message);
-                    }
-                });
-                if app.owner_ui.selected_agent == Some(agent.id) {
-                    draw_process_access(app, ui, agent.id);
-                    ui.add_space(6.0);
-                    draw_grants(app, ui, agent.id);
-                }
-            });
-            ui.add_space(8.0);
-        }
-    }
-
-    fn draw_grants(app: &mut DesktopApp, ui: &mut egui::Ui, agent_id: u64) {
-        let connectors = match app.owner_ui.session.connectors() {
-            Ok(rows) => rows,
-            Err(err) => {
-                ui.label(RichText::new(err.message).color(DENY));
-                return;
-            }
-        };
-        if connectors.is_empty() {
-            ui.label(
-                RichText::new(
-                    "No item has a connector. Open an API key item and add a connector in Item details.",
-                )
-                .color(INK_MUTED),
-            );
-            return;
-        }
-        let granted = app.owner_ui.session.grants(agent_id).unwrap_or_default();
-        for row in connectors {
-            ui.add_space(4.0);
-            ui.label(RichText::new(&row.item_name).strong().color(INK));
-            ui.label(
-                RichText::new(format!("{} at {}", row.profile_label, row.base_url))
-                    .color(INK_MUTED),
-            );
-            for (operation, description) in row.operations {
-                let was = granted.contains(&(row.item_id, operation.to_owned()));
-                let mut allowed = was;
-                ui.checkbox(&mut allowed, format!("{operation}: {description}"));
-                if allowed && !was {
-                    // A new grant needs an owner check (goal item A4).
-                    let ctx = ui.ctx().clone();
-                    app.ask_owner(
-                        OwnerRequest::AllowOperation {
-                            agent_id,
-                            item_id: row.item_id,
-                            operation: operation.to_owned(),
-                        },
-                        Some(&ctx),
-                    );
-                } else if !allowed && was {
-                    // A removal only takes authority away.
-                    let result =
-                        app.owner_ui
-                            .session
-                            .remove_operation(agent_id, row.item_id, operation);
-                    let _ = app.apply(result, &format!("The agent can no longer use {operation}."));
-                }
-            }
-        }
-    }
-
-    pub(super) fn draw_connector_card(app: &mut DesktopApp, ui: &mut egui::Ui, item_id: u64) {
-        card_frame().show(ui, |ui| {
-            ui.label(RichText::new("Agent connector").size(16.0).strong().color(INK));
-            ui.label(
-                RichText::new(
-                    "The broker adds this token to requests for permitted agents. The agent never receives the token. Use https://, or http:// on this computer only.",
-                )
-                .color(INK_MUTED),
-            );
-            let current = app.owner_ui.session.connector(item_id).ok().flatten();
-            let status = current.as_ref().map_or_else(
-                || "No connector.".to_owned(),
-                |destination| format!("Connector: {} at {}", REPORTING_API_V0.label, destination.base_url),
-            );
-            ui.label(RichText::new(status).color(INK));
-            ui.label(RichText::new(format!("Profile: {}", REPORTING_API_V0.label)).color(INK_MUTED));
-            ui.add(
-                TextEdit::singleline(&mut app.owner_ui.connector_url)
-                    .hint_text("http://127.0.0.1:8787")
-                    .desired_width(320.0),
-            );
-            ui.horizontal_wrapped(|ui| {
-                if accent_button(ui, "Save connector").clicked() {
-                    let base_url = app.owner_ui.connector_url.trim().to_owned();
-                    match crate::broker::http::parse_destination(&base_url) {
-                        Ok(_) => {
-                            // The connector decides where the token goes (goal item A4).
-                            let ctx = ui.ctx().clone();
-                            app.ask_owner(
-                                OwnerRequest::SaveConnector { item_id, base_url },
-                                Some(&ctx),
-                            );
-                        }
-                        Err(message) => app.set_err(message),
-                    }
-                }
-                if current.is_some() && ui.button("Remove connector").clicked() {
-                    let result = app.owner_ui.session.clear_connector(item_id);
-                    if app
-                        .apply(result, "The connector and its grants are removed.")
-                        .is_some()
-                    {
-                        app.owner_ui.connector_url.clear();
-                    }
-                }
-            });
-        });
-    }
-
-    /// Runs that wait for the owner. This card is on every view.
-    pub(super) fn draw_approvals(app: &mut DesktopApp, ui: &mut egui::Ui) {
-        let BrokerState::Running(handle) = &app.broker else {
-            return;
-        };
-        let approvals = std::sync::Arc::clone(handle.approvals());
-        // A broker thread can add a run at any time. Check again soon.
-        ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(500));
-        let pending = approvals.pending();
-        let new_run = pending
-            .iter()
-            .any(|run| !app.owner_ui.signaled_runs.contains(&run.id));
-        if new_run {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
-                    egui::UserAttentionType::Critical,
-                ));
-        }
-        app.owner_ui.signaled_runs = pending.iter().map(|run| run.id).collect();
-        for run in pending {
-            Frame::NONE
-                .fill(egui::Color32::from_rgb(252, 238, 214))
-                .stroke(egui::Stroke::new(1.5, ASK))
-                .corner_radius(egui::CornerRadius::same(8))
-                .inner_margin(Margin::symmetric(14, 12))
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new(format!("{} asks to run a command with secrets", run.agent))
-                            .size(16.0)
-                            .strong()
-                            .color(INK),
-                    );
-                    let user_request = if run.user_request.is_empty() {
-                        "The agent did not send the user request.".to_owned()
-                    } else {
-                        let source = if run.request_source.is_empty() {
-                            "from the agent"
-                        } else {
-                            run.request_source.as_str()
-                        };
-                        format!("User request ({source}): \"{}\"", run.user_request)
-                    };
-                    ui.label(RichText::new(user_request).color(INK));
-                    // Goal item B6: the hook request replaced a different text from the agent.
-                    if !run.agent_request.is_empty() {
-                        ui.label(
-                            RichText::new(format!(
-                                "The agent sent a different user request: \"{}\"",
-                                run.agent_request
-                            ))
-                            .color(ASK),
-                        );
-                    }
-                    ui.label(RichText::new(format!("Purpose: {}", run.purpose)).color(INK));
-                    ui.label(RichText::new("Command:").color(INK_MUTED));
-                    let mut command = shell_words(&run.command);
-                    ui.add(
-                        TextEdit::multiline(&mut command)
-                            .font(egui::TextStyle::Monospace)
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(2)
-                            .interactive(false),
-                    );
-                    ui.label(RichText::new(format!("Directory: {}", run.cwd)).color(INK_MUTED));
-                    ui.label(
-                        RichText::new(format!("Secrets in the environment: {}", run.env_names.join(", ")))
-                            .color(INK_MUTED),
-                    );
-                    if !run.risk.is_empty() {
-                        ui.label(RichText::new(&run.risk).color(ASK));
-                    }
-                    ui.label(
-                        RichText::new(
-                            "The process can read these secrets. Approve only a command that you trust. An approval needs Touch ID or the passphrase now. A notification is not an approval.",
-                        )
-                        .color(ASK),
-                    );
-                    if let Some(offer) = &run.remember {
-                        ui.label(RichText::new(remember_text(offer)).color(INK_MUTED));
-                    }
-                    ui.horizontal(|ui| {
-                        if accent_button(ui, "Approve once").clicked() {
-                            // The proof names this run exactly as shown (goal items A4, N4).
-                            let ctx = ui.ctx().clone();
-                            app.ask_owner(OwnerRequest::ApproveRun(run.clone()), Some(&ctx));
-                        }
-                        // "Approve and remember" is an approval: the owner check and the
-                        // queue path of "Approve once" (ADR 0010, goal item A4).
-                        if run.remember.is_some()
-                            && accent_button(ui, "Approve and remember").clicked()
-                        {
-                            let ctx = ui.ctx().clone();
-                            app.ask_owner(OwnerRequest::ApproveAndRemember(run.clone()), Some(&ctx));
-                        }
-                        if danger_button(ui, "Deny").clicked() {
-                            if approvals.deny(run.id) {
-                                app.set_ok("The run is denied.");
-                            } else {
-                                app.set_err("The run no longer waits.");
-                            }
-                        }
-                    });
-                });
-            ui.add_space(8.0);
-        }
-    }
-
-    /// The pattern that "Approve and remember" teaches, and its approvals.
-    fn remember_text(offer: &RememberOffer) -> String {
-        format!(
-            "Pattern: {} ({} of {} approvals). After {} approvals, this pattern runs without a prompt for this agent, project, and items.",
-            offer.pattern, offer.approvals, offer.needed, offer.needed
-        )
-    }
-
-    /// Arguments as one line. Arguments with spaces or quotes are in single quotes.
-    fn shell_words(command: &[String]) -> String {
-        command
-            .iter()
-            .map(|arg| {
-                let plain = !arg.is_empty()
-                    && arg
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || "-_./=:@%+,".contains(c));
-                if plain {
-                    arg.clone()
-                } else {
-                    format!("'{}'", arg.replace('\'', "'\\''"))
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-
-    /// Owner declaration for the bouncer (ADR 0008). The form shows the suggestion from
-    /// the item, the reason for each value, and the known hosts of the provider (goal
-    /// item B4).
-    pub(super) fn draw_declaration_card(app: &mut DesktopApp, ui: &mut egui::Ui, item_id: u64) {
-        use crate::vault::providers;
-        use crate::vault::{Environment, Reversibility, RiskLevel, Scope};
-
-        let stats = app.owner_ui.session.suggestion_stats().ok();
-        card_frame().show(ui, |ui| {
-            ui.label(RichText::new("Declaration").size(16.0).strong().color(INK));
-            ui.label(
-                RichText::new(
-                    "The bouncer uses these values for each agent request. Production, high risk, or irreversible means that a command that changes state waits for you.",
-                )
-                .color(INK_MUTED),
-            );
-            let form = &mut app.owner_ui.declaration_form;
-            if !form.stored {
-                ui.label(RichText::new("No declaration. Every agent run with this item waits for you.").color(ASK));
-                ui.label(
-                    RichText::new(if form.suggestion.is_some() {
-                        "Apassy suggests the values below from the item. Confirm or change each value, then save."
-                    } else {
-                        "Apassy found no signal in the item. The form starts with the most sensitive values."
-                    })
-                    .color(INK_MUTED),
-                );
-            }
-            egui::Grid::new(("declaration", item_id)).num_columns(2).show(ui, |ui| {
-                ui.label("Project");
-                ui.add(TextEdit::singleline(&mut form.project).hint_text("odealo").desired_width(220.0));
-                ui.end_row();
-                ui.label("Provider");
-                let selected = form
-                    .provider
-                    .as_deref()
-                    .and_then(providers::find)
-                    .map_or("none", |provider| provider.label.as_str());
-                egui::ComboBox::new(("decl-provider", item_id), "")
-                    .selected_text(selected)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut form.provider, None, "none");
-                        if let Ok(catalog) = providers::builtin() {
-                            for provider in catalog.providers() {
-                                ui.selectable_value(
-                                    &mut form.provider,
-                                    Some(provider.id.clone()),
-                                    provider.label.as_str(),
-                                );
-                            }
-                        }
-                    });
-                ui.end_row();
-                ui.label("Environment");
-                egui::ComboBox::new(("decl-env", item_id), "")
-                    .selected_text(form.environment.as_str())
-                    .show_ui(ui, |ui| {
-                        for value in Environment::ALL {
-                            ui.selectable_value(&mut form.environment, *value, value.as_str());
-                        }
-                    });
-                ui.end_row();
-                ui.label("Risk");
-                egui::ComboBox::new(("decl-risk", item_id), "")
-                    .selected_text(form.risk.as_str())
-                    .show_ui(ui, |ui| {
-                        for value in RiskLevel::ALL {
-                            ui.selectable_value(&mut form.risk, *value, value.as_str());
-                        }
-                    });
-                ui.end_row();
-                ui.label("Scope");
-                egui::ComboBox::new(("decl-scope", item_id), "")
-                    .selected_text(form.scope.as_str())
-                    .show_ui(ui, |ui| {
-                        for value in Scope::ALL {
-                            ui.selectable_value(&mut form.scope, *value, value.as_str());
-                        }
-                    });
-                ui.end_row();
-                ui.label("Reversibility");
-                egui::ComboBox::new(("decl-rev", item_id), "")
-                    .selected_text(form.reversibility.as_str())
-                    .show_ui(ui, |ui| {
-                        for value in Reversibility::ALL {
-                            ui.selectable_value(&mut form.reversibility, *value, value.as_str());
-                        }
-                    });
-                ui.end_row();
-            });
-            draw_declaration_hints(ui, form);
-            if accent_button(ui, "Save declaration").clicked() {
-                let form = app.owner_ui.declaration_form.clone();
-                if form.project.trim().is_empty() {
-                    app.set_err("Type the project name.");
-                } else {
-                    // The declaration is a rule input for the bouncer (goal item A4).
-                    let ctx = ui.ctx().clone();
-                    app.ask_owner(OwnerRequest::SaveDeclaration { item_id, form }, Some(&ctx));
-                }
-            }
-            ui.label(RichText::new(acceptance_text(stats.as_ref())).color(INK_MUTED));
-        });
-    }
-
-    /// The reason for each suggested value, and the known hosts of the provider (goal
-    /// item B4). A conflict of signals is in the ask color.
-    fn draw_declaration_hints(ui: &mut egui::Ui, form: &DeclarationForm) {
-        use crate::vault::providers::{self, Suggested};
-
-        let provider = form.provider.as_deref().and_then(providers::find);
-        let hosts = match provider {
-            Some(provider) if !provider.known_hosts.is_empty() => format!(
-                "Known hosts of {}: {}. A command that sends the secret of this item to a host outside this list and the global list waits for you.",
-                provider.label,
-                provider.known_hosts.join(", ")
-            ),
-            Some(provider) => format!(
-                "{} has no known hosts. The command analysis uses the global known hosts only.",
-                provider.label
-            ),
-            None => {
-                "No provider. The command analysis uses the global known hosts only.".to_owned()
-            }
-        };
-        let Some(suggestion) = &form.suggestion else {
-            ui.label(RichText::new(hosts).color(INK_MUTED));
-            return;
-        };
-        if let Some(id) = &suggestion.provider {
-            let label = providers::find(id).map_or(id.as_str(), |p| p.label.as_str());
-            let changed = if form.provider.as_ref() == Some(id) {
-                ""
-            } else {
-                " You changed it."
+    /// Draw one frame with `events`, then two frames without, so a new sheet shows.
+    #[cfg(feature = "vault")]
+    fn draw_events(app: &mut DesktopApp, events: Vec<egui::Event>) -> String {
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        for events in [events, Vec::new(), Vec::new()] {
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, TALL_SIZE)),
+                events,
+                ..Default::default()
             };
-            ui.label(
-                RichText::new(format!(
-                    "Provider: suggested {label}. {}{changed}",
-                    suggestion.provider_reason
-                ))
-                .color(INK_MUTED),
-            );
-        }
-        ui.label(RichText::new(hosts).color(INK_MUTED));
-        fn hint<T: Copy + PartialEq>(
-            ui: &mut egui::Ui,
-            name: &str,
-            suggested: Option<&Suggested<T>>,
-            current: T,
-            text: fn(T) -> &'static str,
-        ) {
-            let (line, color) = match suggested {
-                None => (
-                    format!("{name}: no signal. The default is the most sensitive value."),
-                    INK_MUTED,
-                ),
-                Some(suggested) => {
-                    let changed = if suggested.value == current {
-                        ""
-                    } else {
-                        " You changed it."
-                    };
-                    let line = format!(
-                        "{name}: suggested {}. {}{changed}",
-                        text(suggested.value),
-                        suggested.reason
-                    );
-                    (line, if suggested.conflict { ASK } else { INK_MUTED })
-                }
-            };
-            ui.label(RichText::new(line).color(color));
-        }
-        hint(
-            ui,
-            "Environment",
-            suggestion.environment.as_ref(),
-            form.environment,
-            crate::vault::Environment::as_str,
-        );
-        hint(
-            ui,
-            "Risk",
-            suggestion.risk.as_ref(),
-            form.risk,
-            crate::vault::RiskLevel::as_str,
-        );
-        hint(
-            ui,
-            "Scope",
-            suggestion.scope.as_ref(),
-            form.scope,
-            crate::vault::Scope::as_str,
-        );
-        hint(
-            ui,
-            "Reversibility",
-            suggestion.reversibility.as_ref(),
-            form.reversibility,
-            crate::vault::Reversibility::as_str,
-        );
-    }
-
-    /// The share of suggested declarations that the owner saved without a change.
-    pub(super) fn acceptance_text(stats: Option<&crate::vault::SuggestionStats>) -> String {
-        let Some(stats) = stats.filter(|stats| stats.total > 0) else {
-            return "No suggested declaration is saved yet. Apassy counts the first save of each item.".to_owned();
-        };
-        let changed: Vec<String> = stats
-            .changed
-            .iter()
-            .filter(|(_, count)| *count > 0)
-            .map(|(field, count)| format!("{} {count}", field.as_str()))
-            .collect();
-        let mut text = format!(
-            "Suggested declarations saved without a change: {} of {} ({:.0}%).",
-            stats.accepted,
-            stats.total,
-            stats.share().unwrap_or_default() * 100.0
-        );
-        if !changed.is_empty() {
-            text.push_str(&format!(" Changed fields: {}.", changed.join(", ")));
+            let output = ctx.run_ui(input, |ui| draw(app, ui));
+            text.clear();
+            for clipped in &output.shapes {
+                collect_shape_text(&clipped.shape, &mut text);
+            }
+            output.drop_without_applying_deltas();
         }
         text
     }
 
-    pub(super) fn draw_env_card(app: &mut DesktopApp, ui: &mut egui::Ui, item_id: u64) {
-        let fields = app
-            .owner_ui
-            .session
-            .secret_fields(item_id)
-            .unwrap_or_default();
-        if fields.is_empty() {
-            return;
+    #[cfg(feature = "vault")]
+    fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
         }
-        if !fields.contains(&app.owner_ui.env_field_input) {
-            app.owner_ui.env_field_input = fields[0].clone();
-        }
-        card_frame().show(ui, |ui| {
-            ui.label(
-                RichText::new("Environment variable for agent processes")
-                    .size(16.0)
-                    .strong()
-                    .color(INK),
-            );
-            ui.label(
-                RichText::new(
-                    "An agent can ask Apassy to run a command with this secret in the environment. The agent never receives the value. You give process access in Agents.",
-                )
-                .color(INK_MUTED),
-            );
-            let current = app.owner_ui.session.env_binding(item_id).ok().flatten();
-            let status = current.as_ref().map_or_else(
-                || "No variable.".to_owned(),
-                |binding| format!("Variable: {} = field {}", binding.env_name, binding.field),
-            );
-            ui.label(RichText::new(status).color(INK));
-            ui.horizontal_wrapped(|ui| {
-                ui.add(
-                    TextEdit::singleline(&mut app.owner_ui.env_name_input)
-                        .hint_text("SUPABASE_SERVICE_KEY")
-                        .desired_width(260.0),
-                );
-                egui::ComboBox::new(("env-field", item_id), "Field")
-                    .selected_text(app.owner_ui.env_field_input.clone())
-                    .show_ui(ui, |ui| {
-                        for field in &fields {
-                            ui.selectable_value(&mut app.owner_ui.env_field_input, field.clone(), field);
-                        }
-                    });
-            });
-            ui.horizontal_wrapped(|ui| {
-                if accent_button(ui, "Save variable").clicked() {
-                    let env_name = app.owner_ui.env_name_input.trim().to_owned();
-                    let field = app.owner_ui.env_field_input.clone();
-                    if crate::vault::checked_env_name(&env_name).is_err() {
-                        app.set_err("Use A-Z, 0-9, and _ and start with a letter or _. System names such as PATH or DYLD_* are not permitted.");
-                    } else {
-                        // The variable decides which secret a process gets (goal item A4).
-                        let ctx = ui.ctx().clone();
-                        app.ask_owner(
-                            OwnerRequest::SaveVariable { item_id, env_name, field },
-                            Some(&ctx),
-                        );
-                    }
-                }
-                if current.is_some() && ui.button("Remove variable").clicked() {
-                    let result = app.owner_ui.session.clear_env_binding(item_id);
-                    if app
-                        .apply(result, "The variable and its process grants are removed.")
-                        .is_some()
-                    {
-                        app.owner_ui.env_name_input.clear();
-                    }
-                }
-            });
-        });
     }
 
-    /// Process access for one agent: one row per item with a variable.
-    fn draw_process_access(app: &mut DesktopApp, ui: &mut egui::Ui, agent_id: u64) {
-        ui.label(RichText::new("Process access").strong().color(INK));
-        let items = match app.owner_ui.session.env_bound_items() {
-            Ok(items) => items,
-            Err(err) => {
-                ui.label(RichText::new(err.message).color(DENY));
-                return;
-            }
+    #[cfg(feature = "vault")]
+    fn add_named(app: &mut DesktopApp, name: &str, kind: crate::contracts::CredentialKind) -> u64 {
+        use crate::desktop::owner_store::SecretForm;
+
+        let mut secrets = SecretForm::default();
+        secrets.token = UI_TOKEN.to_owned();
+        secrets.password = UI_TOKEN.to_owned();
+        app.owner_ui
+            .session
+            .add(
+                &crate::desktop::ItemDraft {
+                    name: name.to_owned(),
+                    kind,
+                    username: "ui-user".to_owned(),
+                    ..crate::desktop::ItemDraft::default()
+                },
+                &secrets,
+            )
+            .expect("add")
+            .id
+    }
+
+    /// The list hides an archived credential until a search or the "Archived" filter.
+    /// A filter by kind and the recency orders work.
+    #[cfg(feature = "vault")]
+    #[test]
+    fn the_list_sorts_filters_and_hides_archived_credentials() {
+        use crate::contracts::CredentialKind;
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let mut app = app_with_vault(&dir);
+        let alpha = add_named(&mut app, "Alpha key", CredentialKind::ApiKey);
+        add_named(&mut app, "Beta login", CredentialKind::Login);
+        let gamma = add_named(&mut app, "Gamma key", CredentialKind::ApiKey);
+        app.owner_ui.session.archive(gamma).expect("archive");
+        app.view = OwnerView::Vault;
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(
+            text.contains("Alpha key") && text.contains("Beta login"),
+            "{text}"
+        );
+        assert!(!text.contains("Gamma key"), "{text}");
+        assert!(text.contains("1 archived credential is hidden."), "{text}");
+
+        app.search = "gamma".to_owned();
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(
+            text.contains("Gamma key") && text.contains("Archived"),
+            "{text}"
+        );
+        assert!(!text.contains("Alpha key"), "{text}");
+
+        app.search.clear();
+        app.ui.credential_filter = items::Filter::Archived;
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(
+            text.contains("Gamma key") && !text.contains("Alpha key"),
+            "{text}"
+        );
+
+        app.ui.credential_filter = items::Filter::Kind(CredentialKind::Login);
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(
+            text.contains("Beta login") && !text.contains("Alpha key"),
+            "{text}"
+        );
+
+        // The newest change goes first.
+        app.ui.credential_filter = items::Filter::All;
+        app.ui.credential_sort = items::Sort::Changed;
+        let details = app.owner_ui.session.details(alpha).expect("details");
+        let mut draft = details.to_draft();
+        draft.notes = "changed".to_owned();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        app.owner_ui
+            .session
+            .update(alpha, details.revision, &draft, &Default::default())
+            .expect("update");
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        let first = text.find("Alpha key").expect("alpha");
+        let second = text.find("Beta login").expect("beta");
+        assert!(first < second, "{text}");
+        assert!(text.contains("Recently changed"), "{text}");
+        assert!(text.contains("Changed just now"), "{text}");
+    }
+
+    /// The page of a credential shows custom details (hidden ones masked), the history,
+    /// and the agent requests.
+    #[cfg(feature = "vault")]
+    #[test]
+    fn the_credential_page_shows_details_history_and_requests() {
+        use crate::desktop::model::DetailDraft;
+        use crate::desktop::owner_store::SecretForm;
+
+        const HIDDEN: &str = "ui-hidden-detail-canary";
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let mut app = app_with_vault(&dir);
+        let mut secrets = SecretForm::default();
+        secrets.token = UI_TOKEN.to_owned();
+        secrets.details[1] = HIDDEN.to_owned();
+        let item = app
+            .owner_ui
+            .session
+            .add(
+                &crate::desktop::ItemDraft {
+                    name: "Detailed key".to_owned(),
+                    details: vec![
+                        DetailDraft {
+                            label: "Account ID".to_owned(),
+                            value: "acct_ui".to_owned(),
+                            ..DetailDraft::default()
+                        },
+                        DetailDraft {
+                            label: "Recovery code".to_owned(),
+                            hidden: true,
+                            ..DetailDraft::default()
+                        },
+                    ],
+                    ..crate::desktop::ItemDraft::default()
+                },
+                &secrets,
+            )
+            .expect("add");
+        app.select_item(item.id.to_string());
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        for expected in [
+            "Account ID",
+            "acct_ui",
+            "Recovery code",
+            "Add custom detail",
+            "History",
+            "Added",
+            "Agent requests",
+            "No agent asked for this credential yet.",
+            "Archive credential…",
+        ] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+        assert!(!text.contains(HIDDEN), "a hidden detail is masked");
+        assert_masked(&text);
+
+        let proof = owner_ok(&app, OwnerAction::Reveal { item_id: item.id });
+        app.owner_ui.session.reveal(item.id, proof).expect("reveal");
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(text.contains(HIDDEN), "{text}");
+        assert!(text.contains("You showed the secret"), "{text}");
+
+        // "Add custom detail" opens the edit sheet with a new row.
+        app.ui.sheet = None;
+        app.owner_ui.session.hide(item.id).expect("hide");
+        let details = app.owner_ui.session.details(item.id).expect("details");
+        app.edit_form = details.to_draft();
+        app.edit_form.details.push(DetailDraft::default());
+        app.ui.sheet = Some(Sheet::EditItem);
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(text.contains("Custom details"), "{text}");
+        assert!(
+            text.contains("Unchanged"),
+            "a stored hidden value stays: {text}"
+        );
+        assert!(!text.contains(HIDDEN), "{text}");
+    }
+
+    /// The archive sheet archives at once. The page then offers the way back, which
+    /// needs the owner check.
+    #[cfg(feature = "vault")]
+    #[test]
+    fn archive_from_the_page_and_back_with_the_owner_check() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let (mut app, item_id) = app_with_item(&dir);
+        app.ui.sheet = Some(Sheet::ArchiveItem);
+        let text = draw_events(&mut app, Vec::new());
+        assert!(text.contains("Archive “Drawn key”?"), "{text}");
+        // ⌘S takes the default action of the sheet.
+        draw_events(&mut app, vec![key(egui::Key::S, egui::Modifiers::COMMAND)]);
+        assert!(app.owner_ui.session.is_archived(item_id).expect("state"));
+        assert!(app.ui.sheet.is_none());
+        let text = draw_events(&mut app, Vec::new());
+        assert!(text.contains("Restore from archive"), "{text}");
+        app.ask_owner(
+            OwnerRequest::Unarchive {
+                item_id,
+                name: "Drawn key".to_owned(),
+            },
+            None,
+        );
+        let text = draw_events(&mut app, Vec::new());
+        assert!(
+            text.contains("Bring \"Drawn key\" back from the archive"),
+            "{text}"
+        );
+        app.confirm_owner_now(OwnerCheck::passphrase(UI_PASS))
+            .expect("owner check");
+        assert!(!app.owner_ui.session.is_archived(item_id).expect("state"));
+    }
+
+    /// ⌘N opens the add sheet, ⌘F goes to the search, ⌘⇧H asks to show the values, and
+    /// ⌘S saves the edit sheet.
+    #[cfg(feature = "vault")]
+    #[test]
+    fn keyboard_shortcuts_open_save_and_show() {
+        use egui::{Key, Modifiers};
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let (mut app, item_id) = app_with_item(&dir);
+        draw_events(
+            &mut app,
+            vec![key(Key::H, Modifiers::COMMAND | Modifiers::SHIFT)],
+        );
+        let check = app.owner.check.as_ref().expect("the owner check opens");
+        assert!(matches!(check.request, OwnerRequest::Reveal { item_id: id } if id == item_id));
+        app.close_owner_check(None);
+
+        draw_events(&mut app, vec![key(Key::F, Modifiers::COMMAND)]);
+        assert_eq!(app.view, OwnerView::Vault);
+        draw_events(&mut app, vec![key(Key::N, Modifiers::COMMAND)]);
+        assert_eq!(app.ui.sheet, Some(Sheet::AddItem { kind_chosen: false }));
+        app.ui.sheet = None;
+
+        app.select_item(item_id.to_string());
+        let details = app.owner_ui.session.details(item_id).expect("details");
+        app.edit_form = details.to_draft();
+        app.edit_form.name = "Renamed by shortcut".to_owned();
+        app.owner_ui.edit_revision = details.revision;
+        app.ui.sheet = Some(Sheet::EditItem);
+        draw_events(&mut app, Vec::new());
+        draw_events(&mut app, vec![key(Key::S, Modifiers::COMMAND)]);
+        assert!(app.ui.sheet.is_none(), "the sheet closes after the save");
+        assert_eq!(
+            app.owner_ui.session.details(item_id).expect("details").name,
+            "Renamed by shortcut"
+        );
+        let history = app
+            .owner_ui
+            .session
+            .item_events(item_id, 5)
+            .expect("history");
+        assert_eq!(history[0].kind, crate::vault::ItemEventKind::Edited);
+    }
+
+    /// A segmented picker is one Tab stop. Space selects the next option, and the arrow
+    /// keys move left and right.
+    #[cfg(feature = "vault")]
+    #[test]
+    fn tab_focuses_a_picker_and_space_cycles_its_options() {
+        use egui::{Key, Modifiers};
+
+        let ctx = egui::Context::default();
+        let mut value = 0u8;
+        let frame = |value: &mut u8, events: Vec<egui::Event>| {
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, DEFAULT_SIZE)),
+                events,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                kit::segmented(ui, "picker", value, &[(0, "One"), (1, "Two"), (2, "Three")]);
+            });
+            output.drop_without_applying_deltas();
         };
-        if items.is_empty() {
-            ui.label(
-                RichText::new(
-                    "No item has an environment variable. Open an item and set one in Item details.",
-                )
-                .color(INK_MUTED),
-            );
-            return;
-        }
-        let grants = app
-            .owner_ui
-            .session
-            .exec_grants(agent_id)
-            .unwrap_or_default();
-        for (item_id, item_name, env_name) in items {
-            let grant = grants
-                .iter()
-                .find(|grant| grant.item_id == item_id)
-                .cloned();
-            ui.add_space(4.0);
-            ui.label(RichText::new(format!("{item_name} as {env_name}")).color(INK));
-            let key = (agent_id, item_id);
-            let input = app.owner_ui.exec_dir_inputs.entry(key).or_insert_with(|| {
-                grant
-                    .as_ref()
-                    .map(|g| g.project_dir.clone())
-                    .unwrap_or_default()
-            });
-            ui.add(
-                TextEdit::singleline(input)
-                    .hint_text("/Users/you/Dev/project")
-                    .desired_width(360.0),
-            );
-            let status = match &grant {
-                Some(grant) if grant.mode == ExecMode::Ask => {
-                    format!("Access in {}. You approve each run.", grant.project_dir)
-                }
-                Some(grant) => format!(
-                    "Access in {}. The bouncer decides. A risky run waits for you.",
-                    grant.project_dir
-                ),
-                None => "No access.".to_owned(),
-            };
-            ui.label(RichText::new(status).color(INK_MUTED));
-            ui.horizontal_wrapped(|ui| {
-                let dir = app
-                    .owner_ui
-                    .exec_dir_inputs
-                    .get(&key)
-                    .cloned()
-                    .unwrap_or_default();
-                // A new or changed grant needs an owner check (goal item A4).
-                let ask = accent_button(ui, "Allow, ask each time").clicked();
-                let bouncer = ui.button("Let the bouncer decide").clicked();
-                let mode = if ask {
-                    Some(ExecMode::Ask)
-                } else if bouncer {
-                    Some(ExecMode::Bouncer)
-                } else {
-                    None
-                };
-                if let Some(mode) = mode {
-                    let ctx = ui.ctx().clone();
-                    app.ask_owner(
-                        OwnerRequest::SetProcessAccess {
-                            agent_id,
-                            item_id,
-                            project_dir: dir,
-                            mode,
-                        },
-                        Some(&ctx),
-                    );
-                }
-                if grant.is_some() && danger_button(ui, "Remove access").clicked() {
-                    let result = app.owner_ui.session.remove_exec_grant(agent_id, item_id);
-                    let _ = app.apply(result, "Process access is removed.");
-                }
-            });
-            if let Some(grant) = grant {
-                draw_rule_editor(app, ui, agent_id, item_id, &grant.rule);
-            }
-        }
-    }
-
-    fn now() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_secs())
-    }
-
-    /// Rule for one process grant (ADR 0007).
-    fn draw_rule_editor(
-        app: &mut DesktopApp,
-        ui: &mut egui::Ui,
-        agent_id: u64,
-        item_id: u64,
-        rule: &crate::vault::ExecRule,
-    ) {
-        use crate::desktop::owner_store::RuleForm;
-
-        let key = (agent_id, item_id);
-        let form = app
-            .owner_ui
-            .rule_inputs
-            .entry(key)
-            .or_insert_with(|| RuleForm::from_rule(rule, now()));
-        let mut to_save = None;
-        egui::CollapsingHeader::new(RichText::new("Rule").strong().color(INK))
-            .id_salt(("rule", agent_id, item_id))
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.label(
-                    RichText::new(
-                        "Hard limits are checked before the bouncer. A request that fails a hard limit is denied.",
-                    )
-                    .color(INK_MUTED),
-                );
-                ui.label(RichText::new("Permitted command prefixes, one per line. Empty permits any command.").color(INK));
-                ui.add(
-                    TextEdit::multiline(&mut form.prefixes)
-                        .hint_text("npm run migrate\nnpm test")
-                        .desired_rows(2)
-                        .desired_width(420.0),
-                );
-                ui.label(RichText::new("Forbidden words, one per line.").color(INK));
-                ui.add(
-                    TextEdit::multiline(&mut form.forbidden)
-                        .hint_text("prod\n--force")
-                        .desired_rows(2)
-                        .desired_width(420.0),
-                );
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Expires after (hours)");
-                    ui.add(TextEdit::singleline(&mut form.expires_hours).hint_text("never").desired_width(80.0));
-                    ui.label("Runs per hour");
-                    ui.add(TextEdit::singleline(&mut form.max_runs).hint_text("no limit").desired_width(80.0));
-                });
-                ui.label(
-                    RichText::new("Your instruction in plain words. The bouncer checks each request against it.")
-                        .color(INK),
-                );
-                ui.add(
-                    TextEdit::multiline(&mut form.instruction)
-                        .hint_text("Only run migrations and tests on staging. Never print or send keys.")
-                        .desired_rows(2)
-                        .desired_width(420.0),
-                );
-                if ui.button("Save rule").clicked() {
-                    to_save = Some(form.clone());
-                }
-            });
-        if let Some(form) = to_save {
-            match form.to_rule(now()) {
-                Ok(rule) => {
-                    // A rule change needs an owner check (goal item A4).
-                    let ctx = ui.ctx().clone();
-                    app.ask_owner(
-                        OwnerRequest::SaveRule {
-                            agent_id,
-                            item_id,
-                            rule,
-                        },
-                        Some(&ctx),
-                    );
-                }
-                Err(message) => app.set_err(message),
-            }
-        }
-    }
-
-    pub(super) fn draw_activity_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
-        card_frame().show(ui, |ui| {
-            ui.label(
-                RichText::new("Agent activity (vault)")
-                    .size(16.0)
-                    .strong()
-                    .color(INK),
-            );
-            if app.owner_ui.session.is_locked() {
-                ui.label(RichText::new("Unlock the vault to see agent activity.").color(INK_MUTED));
-                return;
-            }
-            let rows = match app.owner_ui.session.activity(50) {
-                Ok(rows) => rows,
-                Err(err) => {
-                    ui.label(RichText::new(err.message).color(DENY));
-                    return;
-                }
-            };
-            if rows.is_empty() {
-                ui.label(RichText::new("No agent request yet.").color(INK_MUTED));
-                return;
-            }
-            egui::Grid::new("agent-activity")
-                .striped(true)
-                .num_columns(5)
-                .show(ui, |ui| {
-                    for title in ["Time", "Agent", "Item", "Operation", "Result"] {
-                        ui.label(RichText::new(title).strong().color(INK));
-                    }
-                    ui.end_row();
-                    for row in rows {
-                        ui.label(RichText::new(&row.when).color(INK_MUTED));
-                        ui.label(&row.agent);
-                        ui.label(&row.item);
-                        ui.label(&row.operation);
-                        let (text, color) = match row.decision {
-                            ActivityDecision::Allow => ("Allowed", ALLOW),
-                            ActivityDecision::Deny => ("Denied", DENY),
-                            ActivityDecision::Error => ("Failed", ASK),
-                        };
-                        ui.label(RichText::new(format!("{text}. {}", row.reason)).color(color));
-                        ui.end_row();
-                    }
-                });
-        });
+        frame(&mut value, Vec::new());
+        frame(&mut value, vec![key(Key::Tab, Modifiers::NONE)]);
+        frame(&mut value, Vec::new());
+        frame(&mut value, vec![key(Key::Space, Modifiers::NONE)]);
+        assert_eq!(value, 1, "Space selects the next option");
+        frame(&mut value, vec![key(Key::ArrowRight, Modifiers::NONE)]);
+        assert_eq!(value, 2);
+        frame(&mut value, vec![key(Key::Space, Modifiers::NONE)]);
+        assert_eq!(value, 0, "Space wraps around");
+        frame(&mut value, vec![key(Key::ArrowLeft, Modifiers::NONE)]);
+        assert_eq!(value, 0, "the first option stays at the left end");
     }
 }

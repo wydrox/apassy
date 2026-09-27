@@ -50,7 +50,9 @@ Request:
 {"v":0,"token":"apassy_agt_<64 hex>","action":{"kind":"run","items":[1],"command":["npm","run","migrate"],"cwd":"/Users/me/Dev/odealo","purpose":"Apply the new migration.","path":"/usr/bin:/bin"}}
 ```
 
-The `run` action is in [ADR 0006](../adr/0006-process-secrets.md). Its check order is in `src/broker/run.rs`. A run response has `exit_code`, `timed_out`, `truncated`, `stdout`, `stderr`, and `secrets_in_environment`. Each output stream keeps a maximum of 64 KiB. A response line has a maximum of 1 MiB.
+The `run` action is in [ADR 0006](../adr/0006-process-secrets.md). Its check order is in `src/broker/run.rs`. A run response has `exit_code`, `timed_out`, `truncated`, `stdout`, `stderr`, and `secrets_in_environment`. Each output stream keeps a maximum of 64 KiB. A response line has a maximum of 1 MiB. The program name (`command[0]`) cannot start with `-`.
+
+A run with a variable in placeholder mode ([ADR 0011](../adr/0011-run-proxy-placeholders.md)) also has `placeholders` (the variable names) and `network`: `proxy` (true), `only_proxy` (true when the macOS network rule was on), and `requests`. Each request has `host`, `port`, `method`, `path` (without the query), `status`, `outcome` (`swapped`, `passed`, `tunneled`, `refused`, or `failed`), `secrets` (the variables whose value went in), and `reason`. When the run proxy cannot start, the code is `proxy_failed` and the command does not run. In `list_access`, each `process_access` entry has `env_holds` ("the real value" or "a placeholder") and `real_value_only_for_hosts`.
 
 A request can have `host_session`: the session ID of the agent host. `apassy-mcp` sends `CLAUDE_CODE_SESSION_ID` here. `apassy-hook` sends the `session_id` of the hook input. In `submit_user_request`, the value must have 1 to 128 characters: `A-Z`, `a-z`, `0-9`, `-`, `_`, or `.`.
 
@@ -80,6 +82,7 @@ The broker does the checks in this order:
 2. The token belongs to an active agent. If not, the code is `unauthenticated`. If the token is older than the token lifetime, the code is `token_expired`. The activity log names the agent.
 3. The agent has a grant for the item and the operation. If not, the code is `not_granted`.
 3a. If the item came from a restored backup, the owner confirmed its agent settings. If not, the code is `review_required` (goal item V4, [backup and restore](../operations/backup-restore.md)).
+3b. The item is not archived. If it is, the code is `item_archived` (schema version 10). A process run makes the same check for each item.
 4. The item has a destination. The destination profile is known and has the operation.
 5. The parameters match the operation.
 6. The destination is `https://HOST[:PORT]`, or `http://` on a loopback address. See [ADR 0005](../adr/0005-connector-tls.md).
@@ -109,7 +112,7 @@ A locked vault cannot record. The broker does not record requests with an unknow
 
 ## 6. Error codes
 
-`rule_expired`, `rule_command_not_permitted`, `rule_forbidden_word`, `rule_rate_limit`, `invalid_request`, `outside_project`, `no_env_binding`, `approval_denied`, `approval_timeout`, `approval_invalidated`, `start_failed`, `bad_request`, `unsupported_version`, `busy`, `vault_locked`, `unauthenticated`, `not_granted`, `no_destination`, `unknown_profile`, `unknown_operation`, `invalid_params`, `destination_not_permitted`, `wrong_credential_kind`, `missing_secret`, `destination_unreachable`, `tls_failed`, `destination_refused`, `destination_not_found`, `destination_error`, `bad_output`, `output_blocked`, `broker_error`, `token_expired`, `review_required`.
+`rule_expired`, `rule_command_not_permitted`, `rule_forbidden_word`, `rule_rate_limit`, `invalid_request`, `outside_project`, `no_env_binding`, `approval_denied`, `approval_timeout`, `approval_invalidated`, `start_failed`, `bad_request`, `unsupported_version`, `busy`, `vault_locked`, `unauthenticated`, `not_granted`, `no_destination`, `unknown_profile`, `unknown_operation`, `invalid_params`, `destination_not_permitted`, `wrong_credential_kind`, `missing_secret`, `destination_unreachable`, `tls_failed`, `destination_refused`, `destination_not_found`, `destination_error`, `bad_output`, `output_blocked`, `broker_error`, `token_expired`, `review_required`, `item_archived`, `proxy_failed`.
 
 ## 7. Connector profile `reporting-api-v0`
 
@@ -133,7 +136,8 @@ The broker sends `Authorization: Bearer <token field>`. The agent cannot set a h
 - A broker refusal is a tool result with `isError: true`. The text starts with the error code.
 - For `token_expired`, the text also tells the user the next step: rotate the token in the Apassy app, put the new token in `APASSY_AGENT_TOKEN`, and restart the MCP server.
 - For `review_required`, the text tells the user to confirm the agent settings of the restored item in the app.
-- `apassy_list_access` shows `owner_review_needed` for each item.
+- For `item_archived`, the text tells the user that only the user can bring the credential back from the archive in the app.
+- `apassy_list_access` shows `owner_review_needed` for each item. It does not list an archived item.
 - If `CLAUDE_CODE_SESSION_ID` is set, the adapter sends it as `host_session` with each request (goal item B6).
 
 The hook program `apassy-hook` takes no arguments. It reads the host hook JSON on stdin and sends `submit_user_request` with the token in `APASSY_AGENT_TOKEN`. It waits a maximum of 2 seconds, never writes to stdout, and always exits with code 0.

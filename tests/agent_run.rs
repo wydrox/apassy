@@ -20,7 +20,7 @@ use apassy::broker::http::TlsClient;
 use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault};
 use apassy::contracts::CredentialKind;
 use apassy::vault::{
-    ActivityDecision, Declaration, Environment, ExecMode, ExecRule, Field, ItemDraft,
+    ActivityDecision, Declaration, EnvDelivery, Environment, ExecMode, ExecRule, Field, ItemDraft,
     Reversibility, RiskLevel, Scope, SecretValue, Vault, VaultErrorKind,
 };
 use serde_json::{Value, json};
@@ -195,6 +195,80 @@ fn approved_run_gets_the_secret_and_masks_output() {
             .contains("Purpose: Test the process mode.")
     );
     no_secret(&activity);
+}
+
+#[test]
+fn a_placeholder_variable_gets_a_placeholder_and_the_run_proxy() {
+    let fx = fixture(ExecMode::Bouncer, Duration::from_secs(5));
+    with_vault(&fx, |vault| {
+        vault
+            .set_env_binding_with(
+                fx.item_id,
+                ENV_NAME,
+                "token",
+                &EnvDelivery::Placeholder(vec!["api.example.invalid".to_owned()]),
+            )
+            .expect("placeholder binding");
+    });
+    decide_later(&fx, true, || {});
+    let response = run(
+        &fx,
+        &fx.project,
+        "printf '%s' \"$DEMO_API_KEY\" | rev; echo; echo \"len=${#DEMO_API_KEY} proxy=${HTTPS_PROXY:+set}\"",
+    );
+    assert!(response.ok, "{response:?}");
+    let result = response.result.clone().expect("result");
+    let stdout = result["stdout"].as_str().unwrap_or_default();
+    let reversed: String = SECRET.chars().rev().collect();
+    assert!(
+        !stdout.contains(&reversed),
+        "the process has the value: {stdout}"
+    );
+    // The placeholder has the length of the value.
+    assert!(
+        stdout.contains(&format!("len={} proxy=set", SECRET.len())),
+        "{stdout}"
+    );
+    assert_eq!(result["placeholders"], json!([ENV_NAME]));
+    assert_eq!(result["network"]["proxy"], true);
+    assert_eq!(result["network"]["only_proxy"], cfg!(target_os = "macos"));
+    assert_eq!(result["network"]["requests"], json!([]));
+    no_secret(&response);
+    let history = with_vault(&fx, |vault| {
+        vault.item_events(fx.item_id, 5).expect("history")
+    });
+    assert_eq!(
+        history[0].detail,
+        "DEMO_API_KEY, placeholder for api.example.invalid"
+    );
+
+    // A host that is not valid, and a variable name that the proxy uses, are refused.
+    with_vault(&fx, |vault| {
+        for hosts in [
+            vec![],
+            vec!["https://api.example.com".to_owned()],
+            vec!["API.example.com".to_owned()],
+        ] {
+            assert_eq!(
+                vault
+                    .set_env_binding_with(
+                        fx.item_id,
+                        ENV_NAME,
+                        "token",
+                        &EnvDelivery::Placeholder(hosts.clone()),
+                    )
+                    .unwrap_err()
+                    .kind(),
+                VaultErrorKind::InvalidInput,
+                "{hosts:?}"
+            );
+        }
+        assert!(
+            vault
+                .set_env_binding(fx.item_id, "HTTPS_PROXY", "token")
+                .is_err()
+        );
+    });
 }
 
 #[test]
@@ -717,4 +791,105 @@ fn mcp_adapter_runs_with_masked_output() {
         "key=[apassy:DEMO_API_KEY]\n"
     );
     assert!(!line.contains(SECRET));
+}
+
+/// Schema 10: an archived credential stays in the vault, but no run gets it, and the
+/// access list hides it. A run with two credentials shows in the log of each one.
+#[test]
+fn archived_items_do_not_run_and_a_run_shows_for_each_item() {
+    const SECOND: &str = "FAKE-second-run-secret-canary";
+    let fx = fixture(ExecMode::Ask, Duration::from_secs(10));
+    let second = with_vault(&fx, |v| {
+        let item = v
+            .add(ItemDraft {
+                title: "Second key".to_owned(),
+                kind: CredentialKind::ApiKey,
+                notes: String::new(),
+                tags: Vec::new(),
+                fields: vec![Field {
+                    name: "token".to_owned(),
+                    value: SecretValue::new(SECOND.to_owned()),
+                    secret: true,
+                }],
+            })
+            .expect("add");
+        v.set_env_binding(item.id, "SECOND_KEY", "token")
+            .expect("binding");
+        v.set_exec_grant(
+            fx.agent_id,
+            item.id,
+            &fx.project.display().to_string(),
+            ExecMode::Ask,
+        )
+        .expect("grant");
+        item.id
+    });
+    let run_both = || {
+        client::send(
+            &fx.socket,
+            &fx.token,
+            Action::Run {
+                items: vec![fx.item_id, second],
+                command: vec!["true".into()],
+                cwd: fx.project.display().to_string(),
+                purpose: "Use both keys.".into(),
+                path: Some("/usr/bin:/bin".into()),
+                user_request: Some("Use both keys.".into()),
+            },
+        )
+        .expect("answer")
+    };
+
+    // The owner approves one run with both items.
+    let approvals = Arc::clone(fx.broker.approvals());
+    let vault = Arc::clone(&fx.vault);
+    let approver = std::thread::spawn(move || {
+        let pending = loop {
+            if let Some(run) = approvals.pending().into_iter().next() {
+                break run;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let proof = owner_check(&vault, pending);
+        approvals.approve(proof).expect("approve");
+    });
+    let ok = run_both();
+    approver.join().expect("approver");
+    assert!(ok.ok, "{ok:?}");
+    with_vault(&fx, |v| {
+        let first_log = v.item_activity(fx.item_id, 10).expect("first");
+        let second_log = v.item_activity(second, 10).expect("second");
+        assert_eq!(
+            first_log[0].id, second_log[0].id,
+            "one entry for both items"
+        );
+        assert_eq!(second_log[0].decision, ActivityDecision::Allow);
+        let agent_log = v.agent_activity(fx.agent_id, 10).expect("agent");
+        assert_eq!(agent_log[0].id, first_log[0].id);
+        let times = v.item_times().expect("times");
+        assert!(times[&second].used.is_some(), "the second item was used");
+        v.set_archived(second, true).expect("archive");
+    });
+
+    // The archived item is refused before the owner is asked, and the list hides it.
+    let refused = run_both();
+    assert_eq!(code(&refused), "item_archived");
+    let message = &refused.error.as_ref().expect("error").message;
+    assert!(message.contains("archived"), "{message}");
+    assert!(fx.broker.approvals().pending().is_empty());
+    let list = client::send(&fx.socket, &fx.token, Action::ListAccess).expect("list");
+    let access = list.result.as_ref().expect("result")["process_access"]
+        .as_array()
+        .expect("process access")
+        .clone();
+    assert_eq!(access.len(), 1, "{access:?}");
+    assert_eq!(access[0]["item_id"], json!(fx.item_id));
+    no_secret(&list);
+    let history = with_vault(&fx, |v| v.item_events(second, 10).expect("history"));
+    assert_eq!(
+        history[0].kind,
+        apassy::vault::ItemEventKind::Archived,
+        "{history:?}"
+    );
+    assert!(!format!("{history:?}").contains(SECOND));
 }

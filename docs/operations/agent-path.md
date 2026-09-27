@@ -28,15 +28,15 @@ It adds one extra field to each response. The broker must drop that field.
 
 1. Start `./target/release/apassy`.
 2. Create and unlock a vault.
-3. Add an API key item. Put `FAKE-ALPHA-TOKEN-7731` in the Token field.
-4. In Item details, find "Agent connector". Type `http://127.0.0.1:8787` and click "Save connector". A real service uses `https://HOST`.
-5. In Agents, type a name and click "Register agent".
-6. Copy the token. Apassy shows it one time. Click "I saved the token". The token works for 30 days. "Token lifetime" in Agents changes this time for all tokens (1 to 365 days). "Rotate token" gives a new token and stops the old token at once. Put the new token in the MCP configuration.
-7. Click "Manage grants". Select `get_sales_summary`.
+3. In Credentials, click "Add" and select "API key". Put `FAKE-ALPHA-TOKEN-7731` in the Token field.
+4. Open the credential. Under "Agent access", click "Connector". Type `http://127.0.0.1:8787` and click "Save". A real service uses `https://HOST`.
+5. In Agents, click "Register". Type a name and click "Register".
+6. Copy the token. Apassy shows it one time. Click "I saved the token". The token works for 30 days. "Token lifetime" in Settings changes this time for all tokens (1 to 365 days). "Rotate token…" on the page of the agent gives a new token and stops the old token at once. Put the new token in the MCP configuration.
+7. On the page of the agent, under "API operations", turn on `get_sales_summary`.
 
 ## 4. Connect an agent host
 
-The Agents view shows an MCP configuration with the full adapter path. Example:
+The token sheet after "Register" shows an MCP configuration with the full adapter path. Example:
 
 ```json
 {
@@ -118,13 +118,13 @@ An agent can run a command with vault items in the process environment. The agen
 
 Setup in the desktop app:
 
-1. In Item details, find "Environment variable for agent processes". Type a name, for example `SUPABASE_SERVICE_KEY`. Select the secret field. Click "Save variable".
-2. In Agents, click "Manage grants" for the agent. In "Process access", type the project directory.
-3. Click "Allow, ask each time" or "Allow without asking".
+1. Open the credential. Under "Agent access", click "Environment variable". Type a name, for example `SUPABASE_SERVICE_KEY`. Select the secret field if the item has more than one. Click "Save".
+2. In Agents, open the agent. Under "Process access", click the credential. Type the project folder.
+3. Under "Decision", select "Ask me each time" or "Bouncer decides". Click "Save".
 
-The agent must send `user_request`: the user's own words that led to the command. Each item needs a declaration in Item details (ADR 0008).
+The agent must send `user_request`: the user's own words that led to the command. Each item needs a declaration: open the credential, and under "Agent access" click "Declaration" (ADR 0008).
 
-When an agent calls `apassy_run_with_secrets` in "ask" mode, a card shows on every view. The card shows the agent, the purpose, the command, the directory, and the variable names. Click "Approve once" or "Deny". The request waits a maximum of 120 seconds. A lock, a backup, a restore, or a stop of the app ends every waiting run with `approval_invalidated`. An approval that the broker did not use before a lock is not valid after the unlock. The agent must send the request again.
+When an agent calls `apassy_run_with_secrets` in "ask" mode, a banner shows on every view, and the Activity view shows the approval card. "Review" in the banner opens the same card. The card shows the agent, the purpose, the command, the directory, and the variable names. Click "Approve once" or "Deny". The request waits a maximum of 120 seconds. A lock, a backup, a restore, or a stop of the app ends every waiting run with `approval_invalidated`. An approval that the broker did not use before a lock is not valid after the unlock. The agent must send the request again.
 
 For Claude Code, set `MCP_TOOL_TIMEOUT` to a value higher than 120000, because a run can wait for your approval.
 
@@ -140,6 +140,20 @@ A headless Claude Code 2.1.282 session used `apassy_list_access` and `apassy_run
 A manual request with `sh -c 'echo key=$DEMO_SERVICE_KEY | base64'` showed the risk of this mode: masking does not find an encoded value. The owner denied the request in the approval card. The Activity view shows both runs.
 
 The first GUI run found a defect: the approval card showed only after a click in the window. The broker now asks the window to repaint when a run starts to wait.
+
+## 8b. Placeholder mode (ADR 0011)
+
+A variable can hold a placeholder in place of the real value ([ADR 0011](../adr/0011-run-proxy-placeholders.md)). The run then goes through a proxy of Apassy. The proxy puts the real value into HTTPS requests to the hosts of the variable, and on macOS the process can connect only to that proxy.
+
+Setup: open the credential, click "Environment variable", and under "What the program gets" select "Placeholder". "Hosts" starts with the known API hosts of the provider. Type more hosts, separated by commas: `api.example.com`, or `api.example.com:8443` for another port. A host covers its subdomains. Click "Save" and confirm that it is you.
+
+The agent uses the variable as it would use the key: in the `Authorization` header, an API key header, or a key parameter. The answer of `apassy_run_with_secrets` lists each request in `network.requests`. The proxy stops a request that has the placeholder in another place, for example in a body or a file upload, and answers `403` with the header `X-Apassy-Proxy: refused` and a reason.
+
+Select "Real value" for:
+
+- Go programs on macOS and Windows (`gh`, the Stripe CLI, `terraform`), Apple's `/usr/bin/python3`, and Java programs. They do not trust the certificate of the run, so they fail.
+- A value that the program uses itself: a JWT signing secret, a webhook secret, a database password.
+- A command that copies the secret to another service, for example `vercel env add`.
 
 ## 9. Limits
 

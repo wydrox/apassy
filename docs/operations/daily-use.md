@@ -21,28 +21,30 @@ This page is the first-day checklist. The other pages have the details.
 
 ## 2. Set up the vault
 
-1. Open `Apassy.app`. Create the vault. Use a strong passphrase that you can remember. A lost passphrase can make the data unrecoverable (ADR 0003).
-2. Make an encrypted backup and keep it in a safe place: [backup and restore](backup-restore.md).
-3. Add each credential. Apassy suggests a declaration from the item. Confirm or change each field: [declarations](declarations.md). An item without a declaration makes every run wait for you.
-4. For each credential that a command needs, set the environment variable name and the secret field: [agent path](agent-path.md), section 8.
+1. Open `Apassy.app`. Click "Create a new vault". Type a strong passphrase that you can remember, two times. A lost passphrase can make the data unrecoverable (ADR 0003). The vault file is `~/Library/Application Support/Apassy/vault.db`. At the next start, Apassy opens this file and shows the unlock screen.
+2. Make an encrypted backup and keep it in a safe place: Settings > "Back up now", and [backup and restore](backup-restore.md).
+3. In Credentials, click "Add" for each credential. Then open it, and under "Agent access" click "Declaration". Apassy suggests the values from the item. Confirm or change each field: [declarations](declarations.md). An item without a declaration makes every run wait for you.
+4. For each credential that a command needs, click "Environment variable" under "Agent access" and set the variable name: [agent path](agent-path.md), section 8.
+
+The app layout is in [desktop UI](desktop-ui.md).
 
 ## 3. Connect Claude Code and Codex
 
-1. In Agents, register one agent for each host. The app shows the token one time. The token expires after 30 days. Rotate it in the app.
+1. In Agents, click "Register" for each host. The app shows the token one time. The token expires after 30 days. Rotate it on the page of the agent.
 2. Add the MCP server to the host with the path `/Applications/Apassy.app/Contents/MacOS/apassy-mcp`: [agent path](agent-path.md), section 4. For Claude Code, set `MCP_TOOL_TIMEOUT` higher than `120000`.
 3. Install the prompt hook for each host: [host hooks](host-hooks.md), section 6.
-4. Give process access for each project directory: [agent path](agent-path.md), section 8. Start with "ask" mode for a new project. Use "bouncer" mode when the declarations are correct.
+4. Give process access for each project directory: open the agent, and under "Process access" click the credential ([agent path](agent-path.md), section 8). Start with "Ask me each time" for a new project. Use "Bouncer decides" when the declarations are correct.
 5. Log in to each host (`claude /login`, `codex login`, `gh auth login`) before you start it in the profile. The profile blocks browser logins.
 6. Start each host in the profile, with its own sandbox off: [isolation](isolation.md), section 3.
 7. In a project that agents edit, open your own terminal in the profile too: `apassy-sandbox -- zsh` (ADR 0010, second round).
 
 ## 4. Every day
 
-- A card shows each run that waits for you. Click "Approve once", "Approve and remember", or "Deny". Each approval needs your passphrase.
+- A banner on every view shows a run that waits for you. Click "Review", then "Approve once", "Approve and remember", or "Deny". The Activity view shows the same cards. Each approval needs your passphrase.
 - A production run always waits for you.
 - "Approve and remember" makes a pattern. A pattern runs without a prompt after 3 approvals. One denial blocks it.
 - The Learning tab shows how often Apassy asks you. Goal item B12: after two weeks, you are asked on 10% or fewer of the runs, over the last seven days.
-- Until goal item N1 is done, check the inbox in the app. A native notification is not available yet.
+- Until goal item N1 is done, check Activity > Inbox in the app. A native notification is not available yet. Settings > Notifications has the "Allow notifications" button.
 
 ## 5. What Apassy does not protect
 

@@ -1,11 +1,10 @@
-//! The owner check dialog (goal item A4). It shows the action, runs Touch ID, and
-//! takes the passphrase when Touch ID is not available.
+//! The owner check sheet (goal item A4). It shows the action, runs Touch ID, and takes
+//! the passphrase when Touch ID is not available.
 
-use eframe::egui::{self, Modal, RichText};
+use eframe::egui::{self, Key};
 
-use super::{
-    ASK, DENY, INK, INK_MUTED, OWNER_CHECK_FIELD, PASSPHRASE_CAPACITY, accent_button, password_line,
-};
+use super::kit::{self, Font, Icon, Size, Style, Tone};
+use super::{OWNER_CHECK_FIELD, PASSPHRASE_CAPACITY, secure_input};
 use crate::broker::approvals::{CheckMethod, OwnerCheck};
 use crate::desktop::DesktopApp;
 
@@ -22,69 +21,87 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
     let mut passphrase = false;
     let mut cancel = false;
 
-    Modal::new(egui::Id::new("apassy-owner-check")).show(ctx, |ui| {
-        ui.set_max_width(480.0);
-        ui.label(
-            RichText::new("Confirm that it is you")
-                .size(18.0)
-                .strong()
-                .color(INK),
+    let response = kit::sheet(ctx, "owner-check", 440.0, |ui| {
+        ui.horizontal(|ui| {
+            kit::icon_tile_sized(ui, Icon::Lock, kit::ACCENT, 32.0);
+            ui.add_space(2.0);
+            ui.label(kit::text("Confirm that it is you", Font::Title3).color(kit::LABEL));
+        });
+        ui.add_space(8.0);
+        kit::paragraph(ui, action, Font::Body, kit::LABEL);
+        ui.add_space(4.0);
+        kit::note(
+            ui,
+            "Apassy asks for Touch ID or the passphrase for each reveal, approval, access change, rule change, and token rotation. A notification or \"Mark as seen\" is never an approval.",
         );
-        ui.label(RichText::new(action).color(INK));
-        ui.label(
-            RichText::new(
-                "Apassy asks for Touch ID or the passphrase for each reveal, approval, access change, rule change, and token rotation. A notification or \"Mark as seen\" is never an approval.",
-            )
-            .color(INK_MUTED),
-        );
+        ui.add_space(10.0);
         match running {
-            Some(CheckMethod::TouchId) => {
-                ui.label(
-                    RichText::new("Waiting for Touch ID. Touch the sensor, or cancel the macOS prompt.")
-                        .color(ASK),
-                );
-            }
+            Some(CheckMethod::TouchId) => kit::tone_note(
+                ui,
+                "Waiting for Touch ID. Touch the sensor, or cancel the macOS prompt.",
+                Tone::Warning,
+            ),
             Some(CheckMethod::Passphrase) => {
-                ui.label(RichText::new("Apassy is checking the passphrase.").color(ASK));
+                kit::tone_note(ui, "Apassy is checking the passphrase.", Tone::Accent);
             }
             None => {}
         }
-        if let Some(note) = &note {
-            ui.label(RichText::new(note).color(ASK));
-        }
         if let Some(message) = &message {
-            ui.label(RichText::new(message).color(DENY));
+            kit::tone_note(ui, message, Tone::Critical);
         }
         ui.add_enabled_ui(running.is_none(), |ui| {
-            ui.add_enabled_ui(has_helper, |ui| {
-                if ui.button("Use Touch ID").clicked() {
-                    touch_id = true;
+            kit::section(ui, None, note.as_deref(), |s| {
+                if let Some(dialog) = app.owner.check.as_mut() {
+                    let field = s.field("Passphrase", |ui| {
+                        secure_input(
+                            ui,
+                            OWNER_CHECK_FIELD,
+                            &mut dialog.passphrase,
+                            PASSPHRASE_CAPACITY,
+                            "Required",
+                        )
+                    });
+                    if running.is_none() && !field.has_focus() && !field.lost_focus() {
+                        let focused = field.ctx.memory(|memory| memory.focused());
+                        if focused.is_none() {
+                            field.request_focus();
+                        }
+                    }
+                    if field.lost_focus() && field.ctx.input(|input| input.key_pressed(Key::Enter))
+                    {
+                        passphrase = true;
+                    }
                 }
             });
-            if let Some(dialog) = app.owner.check.as_mut() {
-                let field = password_line(
-                    ui,
-                    OWNER_CHECK_FIELD,
-                    "Passphrase",
-                    &mut dialog.passphrase,
-                    PASSPHRASE_CAPACITY,
-                );
-                if field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
-                    passphrase = true;
-                }
-            }
-            if accent_button(ui, "Confirm with passphrase").clicked() {
-                passphrase = true;
-            }
         });
-        if ui.button("Cancel").clicked() {
-            cancel = true;
-        }
+        let idle = running.is_none();
+        kit::sheet_buttons(
+            ui,
+            |ui| {
+                if has_helper
+                    && ui
+                        .add_enabled_ui(idle, |ui| {
+                            kit::button_with(ui, None, "Use Touch ID", Style::Link, Size::Regular)
+                        })
+                        .inner
+                        .clicked()
+                {
+                    touch_id = true;
+                }
+            },
+            |ui| {
+                passphrase |= ui
+                    .add_enabled_ui(idle, |ui| kit::button(ui, "Confirm", Style::Prominent))
+                    .inner
+                    .clicked();
+                cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
+            },
+        );
     });
 
-    if cancel {
+    if cancel || (response.escape && running.is_none()) {
         app.close_owner_check(Some(ctx));
-        app.set_ok("The owner check is cancelled. Apassy did nothing.");
+        app.set_note("The owner check is cancelled. Apassy did nothing.");
     } else if touch_id {
         app.start_owner_check(OwnerCheck::TouchId, Some(ctx.clone()));
     } else if passphrase {

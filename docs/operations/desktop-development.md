@@ -33,6 +33,8 @@ The desktop crate also draws the owner views in memory with `egui::Context::run_
 
 ## What the desktop does
 
+The views changed on 2026-09-27. The current layout of both builds is in [desktop UI](desktop-ui.md). The rest of this page records the demo of 2026-09-16.
+
 The window starts in a locked demo view. Open vault is not authentication.
 
 The shell has five owner views:

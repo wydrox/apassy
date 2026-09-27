@@ -11,7 +11,7 @@ This document does not open the real-secret gate.
 - A request that the broker blocks causes a macOS notification "Request blocked".
 - The preview has the agent name and the event type only. It never has the command, the user request, the purpose, or a value (N2).
 - The owner decides in the app. A notification is not an approval. "Mark as seen" in the inbox is not an approval (N4).
-- The Activity view has the Inbox card. It shows the notification channel, the delivery result of each event, and the events.
+- Activity > Inbox shows the events and the delivery result of each event. Settings > Notifications shows the channel state and its buttons. When macOS cannot show a banner, Activity shows a short notice with a link to Settings.
 
 ## Design
 
@@ -22,7 +22,7 @@ This document does not open the real-secret gate.
 | Notifier | `native/ApassyNotify`, in `Apassy.app/Contents/Helpers/ApassyNotify.app` | The app starts it as its child for each call. Bundle ID and signing ID `com.wydrox.apassy.notify`, display name "Apassy". It checks its parent (the signed Apassy app), builds the text from fixed templates, and posts with `UNUserNotificationCenter`. See [native-app.md](native-app.md#notification-research-n1). |
 | Preview | `src/native/mod.rs` | `Notification::new(event_id, agent_name, event)` is the only constructor. It takes no free text. The request has the id, the event type, and the agent name only. |
 | Inbox | `src/desktop/inbox.rs` | Waiting runs from the queue, and events from the activity log in the vault. |
-| Inbox card | `src/desktop/ui/inbox_view.rs` | Channel state, delivery results, events, "Mark as seen". |
+| Inbox and channel views | `src/desktop/ui/activity.rs`, `src/desktop/ui/settings.rs` | Events, delivery results, and "Mark as seen" in Activity. Channel state and permission buttons in Settings. |
 
 The notification center starts with the window, after the broker. It replaces the notifier of the approval queue: the notifier wakes the watcher and repaints the window.
 The helper calls run on worker threads only. The UI thread never calls the helper.
@@ -69,10 +69,10 @@ A delivery fails when the notifier answers `notifications_denied`, `notification
 Then:
 
 - the event in the inbox shows "Notification failed: ... The event stays in this inbox.",
-- the Inbox card shows the number of failed notifications and the channel state,
+- Settings > Notifications shows the number of failed notifications and the channel state,
 - nothing changes in the approval queue. The run still waits until the owner decides or the approval time ends.
 
-The channel state comes from `notify_status` at start, from each `notify` answer, and from the "Check notification settings" button. After a `notifications_denied` answer, the sender reads `notify_status` again, so the card shows the real permission state.
+The channel state comes from `notify_status` at start, from each `notify` answer, and from the "Check again" button in Settings > Notifications. After a `notifications_denied` answer, the sender reads `notify_status` again, so Settings shows the real permission state.
 
 Permission (measured on macOS 27, [native-app.md](native-app.md#notification-research-n1)):
 
@@ -155,7 +155,7 @@ End-to-end time for N1: the time from the event to the notifier request (table a
 Use a vault with synthetic values. Record the results here.
 
 1. Build: `scripts/build-app.sh`. Run `scripts/n1-check.sh` (see [N1 with the real notifier](#n1-with-the-real-notifier)). Start: `open target/Apassy.app`. Activity > Inbox: expect "Notifications are allowed. Banners are on." If the card shows "Allow notifications", select it and click "Allow" in the macOS prompt within 120 s. If it shows "Open notification settings", select it and turn on "Allow notifications" for Apassy.
-2. N1, N2 waiting: register an agent, give it process access with "Allow, ask each time", and send a run from the agent. Expect a banner "Approval waiting" within 5 seconds, with the agent name and no command. Measure with a stopwatch from the agent request to the banner.
+2. N1, N2 waiting: register an agent, give it process access with "Ask me each time", and send a run from the agent. Expect a banner "Approval waiting" within 5 seconds, with the agent name and no command. Measure with a stopwatch from the agent request to the banner.
 3. N1, N2 blocked: send a run from a directory outside the grant. Expect a banner "Request blocked" within 5 seconds.
 4. N4: click the banner. Expect that Apassy opens and the run still waits. Select "Mark as seen". Expect that the run still waits. Approve it only through "Approve once" and Touch ID or the passphrase.
 5. N3 failure: turn off notifications for Apassy in System Settings > Notifications. Send a run in "ask" mode. Expect "Notification failed" at the event, and the run still waits.

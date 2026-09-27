@@ -32,7 +32,7 @@ use crate::broker::approvals::{
 };
 use crate::broker::profile::REPORTING_API_V0;
 use crate::native::{Biometry, NativeHelper};
-use crate::vault::{ExecMode, ExecRule};
+use crate::vault::{EnvDelivery, ExecMode, ExecRule};
 
 /// The result of a poll of a [`Task`].
 pub(crate) enum TaskPoll<T> {
@@ -123,6 +123,7 @@ pub enum OwnerRequest {
         item_id: u64,
         env_name: String,
         field: String,
+        delivery: EnvDelivery,
     },
     SaveConnector {
         item_id: u64,
@@ -130,6 +131,11 @@ pub enum OwnerRequest {
     },
     ConfirmReview {
         item_id: u64,
+    },
+    /// Bring an archived item back. Agents with a grant can use it again.
+    Unarchive {
+        item_id: u64,
+        name: String,
     },
     RotateToken {
         agent_id: u64,
@@ -176,7 +182,8 @@ impl OwnerRequest {
             Self::SaveDeclaration { item_id, .. }
             | Self::SaveVariable { item_id, .. }
             | Self::SaveConnector { item_id, .. }
-            | Self::ConfirmReview { item_id } => OwnerAction::ChangeItemRules { item_id: *item_id },
+            | Self::ConfirmReview { item_id }
+            | Self::Unarchive { item_id, .. } => OwnerAction::ChangeItemRules { item_id: *item_id },
             Self::RotateToken { agent_id, .. } => OwnerAction::RotateToken {
                 agent_id: *agent_id,
             },
@@ -238,15 +245,26 @@ impl OwnerRequest {
                     .and_then(crate::vault::providers::find)
                     .map_or("none", |provider| provider.label.as_str())
             ),
-            Self::SaveVariable { env_name, .. } => {
-                format!("Bind the item to the environment variable {env_name}.")
-            }
+            Self::SaveVariable {
+                env_name, delivery, ..
+            } => match delivery {
+                EnvDelivery::Value => format!(
+                    "Bind the item to the environment variable {env_name}. Programs get the real value."
+                ),
+                EnvDelivery::Placeholder(hosts) => format!(
+                    "Bind the item to the environment variable {env_name}. Programs get a placeholder, and Apassy sends the real value only to {}.",
+                    hosts.join(", ")
+                ),
+            },
             Self::SaveConnector { base_url, .. } => {
                 format!("Send the token of this item to {base_url}.")
             }
             Self::ConfirmReview { .. } => {
                 "Confirm the agent settings of this restored item.".to_owned()
             }
+            Self::Unarchive { name, .. } => format!(
+                "Bring \"{name}\" back from the archive. Agents with a grant can use it again."
+            ),
             Self::RotateToken { agent_name, .. } => {
                 format!("Give {agent_name} a new token. The old token stops working.")
             }
@@ -510,13 +528,23 @@ impl DesktopApp {
                 item_id,
                 env_name,
                 field,
+                delivery,
             } => {
-                let result = session.set_env_binding(item_id, &env_name, &field, proof);
+                let result = session.set_env_binding(item_id, &env_name, &field, &delivery, proof);
                 let _ = self.apply(result, &format!("The item is bound to {env_name}."));
             }
             OwnerRequest::SaveConnector { item_id, base_url } => {
                 let result = session.set_connector(item_id, REPORTING_API_V0.id, &base_url, proof);
                 let _ = self.apply(result, "The connector is saved.");
+            }
+            OwnerRequest::Unarchive { item_id, name } => {
+                let result = session.unarchive(item_id, proof);
+                let _ = self.apply(
+                    result,
+                    &format!(
+                        "{name} is back from the archive. Agents with a grant can use it again."
+                    ),
+                );
             }
             OwnerRequest::ConfirmReview { item_id } => {
                 let result = session.confirm_review(item_id, proof);
@@ -810,6 +838,7 @@ impl DesktopApp {
         let ui_state = &mut self.owner_ui;
         for field in [
             &mut ui_state.passphrase,
+            &mut ui_state.passphrase_confirm,
             &mut ui_state.passphrase_current,
             &mut ui_state.passphrase_new,
             &mut ui_state.passphrase_repeat,

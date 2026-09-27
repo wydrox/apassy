@@ -267,6 +267,12 @@ impl Vault {
             ),
         )
         .map_err(|_| err(VaultErrorKind::Storage))?;
+        super::history::record(
+            &tx,
+            item,
+            super::history::ItemEventKind::Declaration,
+            &declaration.history_detail(provider),
+        )?;
         let outcome = match suggested {
             Some(suggested) if first => {
                 let outcome = SuggestionOutcome {

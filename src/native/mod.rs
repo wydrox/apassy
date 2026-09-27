@@ -27,7 +27,7 @@
 //! use. This is best effort. It does not erase copies in the helper, in the
 //! allocator, in swap, or in crash dumps.
 
-mod base64;
+pub(crate) mod base64;
 pub mod check;
 
 use std::fmt;

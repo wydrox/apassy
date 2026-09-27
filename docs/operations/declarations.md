@@ -87,13 +87,13 @@ What the detection reads from an item:
 
 1. The owner adds an item, or saves a change of an item. The app computes the declaration form with `OwnerSession::declaration_form` (`Vault::suggest_declaration`). This runs only in the owner flow, with the vault unlocked. The broker never runs the detection.
 2. The detection reads the field values in the owner process. The values stay in erasing buffers (`Zeroizing`). The suggestion has the provider name, the field values, and the reasons from the data files. It has no secret value.
-3. The Declaration card in Item details shows:
-   - the provider, with a choice of "none" or a built-in provider,
-   - each field, with "suggested VALUE" and the reason, or "no signal" and the most sensitive default,
-   - "You changed it." when the owner changed a suggested value,
-   - the known hosts of the provider,
+3. The Declaration sheet (open a credential, then "Agent access" > "Declaration") shows:
+   - the provider, with a choice of "None" or a built-in provider, and the known hosts of the chosen provider,
+   - each field as a segmented control, filled with the suggested value, or with the most sensitive default when no signal matched,
+   - "Apassy suggested VALUE. You changed it." under a field when the owner changed a suggested value, and the reason when signals disagree,
+   - "Why these values?", which opens the reasons of the suggestion,
    - the acceptance share (section 5).
-4. "Save declaration" opens the owner check (`OwnerAction::ChangeItemRules`). The vault stores the declaration and the provider in one transaction.
+4. "Save" opens the owner check (`OwnerAction::ChangeItemRules`). The vault stores the declaration and the provider in one transaction. The sheet closes when the check passes.
 5. An item with a stored declaration shows the stored values. The suggestion stays as a hint.
 
 The review card after a restore (goal item V4) shows the provider, because the provider gives known hosts to the analysis.
@@ -162,7 +162,7 @@ The record has no secret value and no reason text. A later change of a stored de
 
 ### How to read the share
 
-Item details, Declaration card, last line:
+Declaration sheet, last line:
 
 > Suggested declarations saved without a change: 7 of 9 (78%). Changed fields: risk 2, scope 1.
 

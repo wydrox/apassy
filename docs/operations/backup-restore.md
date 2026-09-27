@@ -49,11 +49,13 @@ Apassy then does these steps:
 The restored vault does not trust the agent authority in the backup. An old or changed backup can have wrong settings. For example, a connector can send the token to another host, or a production item can have a staging declaration.
 
 1. Unlock the restored vault.
-2. Find the card "Review after restore" in Vault or Agents. It lists each item that waits for your review.
-3. Click "Open item". Examine the declaration, the environment variable, and the connector in the card "Review after restore". Correct them in the cards below if necessary.
+2. Find the banner "Review after restore" in Credentials. It lists each item that waits for your review. The list marks each such item "Needs review".
+3. Click the name of an item. Examine the declaration, the environment variable, and the connector in the banner "Review after restore". Correct them under "Agent access" if necessary.
 4. Click "Confirm settings". Do this for each item in the list.
 5. In Agents, register each agent again. Put the new token in `APASSY_AGENT_TOKEN` of the MCP configuration of the agent host. The old tokens do not work.
 6. Give process access, grants, and rules again.
+
+The restore adds "Restored from a backup" to the history of each credential. An archived credential stays archived.
 
 Until you confirm an item, the broker refuses each run and each connector call with that item. The code is `review_required`. `apassy-mcp` tells the agent to ask you for the review. `apassy_list_access` shows `"owner_review_needed": true` for the item.
 
@@ -77,7 +79,7 @@ cargo test --locked --features desktop,vault --lib restored_item_shows_the_revie
 | `restore_lists_items_for_review_until_the_owner_confirms` (`tests/owner_vault.rs`) | The procedure in the owner session: backup locks the vault, restore opens the new file locked, agents are revoked, the item with settings waits for review, and "Confirm settings" ends the review. |
 | `restore_needs_owner_review_before_runs` (`tests/agent_run.rs`) | After the restore, grants and rules are gone and agents are revoked. A run with the restored item gets `review_required`. After the review, the run starts. |
 | `restored_connector_waits_for_the_owner_review` (`tests/agent_path.rs`) | A connector call with a restored item gets `review_required` until the review. A second restore marks the item again. A delete removes the mark. |
-| `restored_item_shows_the_review_and_confirm_action` (`src/desktop/ui.rs`) | The Vault view lists the item. Item details shows the settings and "Confirm settings". |
+| `restored_item_shows_the_review_and_confirm_action` (`src/desktop/ui.rs`) | Credentials lists the item. The page of the item shows the settings and "Confirm settings". |
 | `delete_item_removes_links_and_restore_revokes_agents` (`tests/agent_path.rs`) | A restore revokes every agent and removes the grants. |
 | `backup_restore_passphrase_overwrite_and_source_bytes` (`tests/vault_lifecycle.rs`) | Backup and restore keep all item data, refuse existing targets, and do not change the backup file. |
 

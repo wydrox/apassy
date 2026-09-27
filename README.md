@@ -14,6 +14,7 @@ The real-secret gate is OPEN. The owner can use Apassy with real credentials. St
 
 - Agent hosts (Claude Code and Codex) run in a Seatbelt profile. The profile denies the vault, the backups, the model, and the Apassy app bundle. See [isolation](docs/operations/isolation.md).
 - Agents get secrets only from the broker, in the environment of one process. The socket never returns a secret value. See [ADR 0006](docs/adr/0006-process-secrets.md).
+- A variable can hold a placeholder in place of the value. The run then goes through a proxy of Apassy, which puts the real value into HTTPS requests to the hosts of the variable only. On macOS the process can connect only to that proxy. See [ADR 0011](docs/adr/0011-run-proxy-placeholders.md).
 - The vault is one SQLCipher file with a master passphrase. See [vault verification](docs/operations/vault-verification.md) and the [storage review](docs/reviews/storage-dependencies.md).
 - A local bouncer (rule packs and the Apassy base model on Laya) permits normal work, asks the owner about uncertain work, and learns from the owner's decisions. A production run always waits for the owner. See [bouncer](docs/operations/bouncer.md) and [learning](docs/operations/learning.md).
 - On the blind held-out set v4, the bouncer ran no violation and no critical case without the owner. It ran 76% of normal cases without a prompt on the first day. See [held-out v4](docs/evaluation/heldout-v4.md).
@@ -29,7 +30,7 @@ Known limits are in ADR 0006, [isolation](docs/operations/isolation.md) sections
 ## Run the desktop demo
 
 Run `cargo run --locked --features desktop,vault --bin apassy` for the owner vault file.
-The vault view creates, opens, unlocks, and backs up an encrypted file. For real credentials, use the signed app from [daily use](docs/operations/daily-use.md).
+The start screen creates, opens, or restores an encrypted vault file. See [desktop UI](docs/operations/desktop-ui.md). For real credentials, use the signed app from [daily use](docs/operations/daily-use.md).
 Run `cargo run --locked --features desktop --bin apassy` for the older in-memory demo. “Open vault” there is not owner authentication.
 Run `cargo run --locked --features desktop,vault --bin apassy -- --smoke-test` for a model check without a window.
 See [desktop development](docs/operations/desktop-development.md), [Rust contracts](docs/contracts/rust-v1.md), and [development checks](docs/operations/checks.md).

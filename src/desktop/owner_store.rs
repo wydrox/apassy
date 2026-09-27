@@ -25,16 +25,65 @@ use crate::broker::approvals::{ApprovalQueue, OwnerAction, OwnerProof};
 use crate::broker::http::parse_destination;
 use crate::broker::profile;
 use crate::contracts::CredentialKind;
-use crate::desktop::model::{ItemDraft, ModelError, ModelResult};
+use crate::desktop::model::{DetailDraft, ItemDraft, ModelError, ModelResult};
 use crate::vault::providers::{self, Suggestion};
 use crate::vault::{
-    ActivityDecision, AgentSummary, AgentToken, Declaration, Destination, EnvBinding, Environment,
-    ExecGrant, ExecMode, ExecRule, Field, ItemDraft as VaultDraft, MAX_PASSPHRASE_BYTES,
+    ActivityDecision, ActivityRecord, AgentSummary, AgentToken, Declaration, Destination,
+    EnvBinding, EnvDelivery, Environment, ExecGrant, ExecMode, ExecRule, Field,
+    ItemDraft as VaultDraft, ItemEvent, ItemTimes, MAX_PASSPHRASE_BYTES, MAX_PLACEHOLDER_HOSTS,
     MAX_TOKEN_LIFETIME_DAYS, MIN_PASSPHRASE_BYTES, Reversibility, RiskLevel, Scope, SecretValue,
-    SuggestionStats, Vault, VaultError, VaultErrorKind, checked_env_name,
+    SuggestionStats, Vault, VaultError, VaultErrorKind, checked_env_name, parse_placeholder_host,
 };
 
 const MAX_TAG_BYTES: usize = 64;
+
+/// A custom detail is an item field with this prefix. The rest of the name is the label
+/// in hexadecimal, because a field name takes only ASCII letters, digits, and `_`, and a
+/// label can have any text.
+pub const DETAIL_PREFIX: &str = "x_";
+/// The longest label of a custom detail, in bytes. The field name takes 2 + 2 × 31 bytes.
+pub const MAX_DETAIL_LABEL_BYTES: usize = 31;
+/// The most custom details on one item.
+pub const MAX_DETAILS: usize = 10;
+
+/// The field name of a custom detail with `label`.
+pub fn detail_field_name(label: &str) -> String {
+    let mut name = String::from(DETAIL_PREFIX);
+    for byte in label.as_bytes() {
+        name.push_str(&format!("{byte:02x}"));
+    }
+    name
+}
+
+/// The label of a custom detail field. `None` for another field.
+pub fn detail_label(name: &str) -> Option<String> {
+    let hex = name.strip_prefix(DETAIL_PREFIX)?;
+    if hex.is_empty() || hex.len() % 2 != 0 {
+        return None;
+    }
+    let bytes: Option<Vec<u8>> = (0..hex.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(hex.get(index..index + 2)?, 16).ok())
+        .collect();
+    String::from_utf8(bytes?).ok()
+}
+
+/// The owner-facing name of a field: a built-in name, or the label of a custom detail.
+pub fn field_label(name: &str) -> String {
+    match name {
+        "token" => "Token".to_owned(),
+        "password" => "Password".to_owned(),
+        "private_key" => "Private key".to_owned(),
+        "passphrase" => "Key passphrase".to_owned(),
+        "username" => "Username".to_owned(),
+        "host" => "Host".to_owned(),
+        "database" => "Database".to_owned(),
+        "public_key" => "Public key".to_owned(),
+        "service" => "Service".to_owned(),
+        "project" => "Project".to_owned(),
+        other => detail_label(other).unwrap_or_else(|| other.to_owned()),
+    }
+}
 
 /// A revealed value hides itself after this time (key-memory review F10).
 pub const REVEAL_TIME: Duration = Duration::from_secs(30);
@@ -58,6 +107,8 @@ pub struct SecretForm {
     pub private_key: String,
     pub key_passphrase: String,
     pub custom_value: String,
+    /// The values of hidden custom details, by the position of the detail.
+    pub details: [String; MAX_DETAILS],
 }
 
 impl SecretForm {
@@ -67,6 +118,7 @@ impl SecretForm {
             && self.private_key.is_empty()
             && self.key_passphrase.is_empty()
             && self.custom_value.is_empty()
+            && self.details.iter().all(String::is_empty)
     }
 
     /// Erase every field. The buffers keep their capacity (key-memory review F4).
@@ -76,6 +128,19 @@ impl SecretForm {
         self.private_key.zeroize();
         self.key_passphrase.zeroize();
         self.custom_value.zeroize();
+        for detail in &mut self.details {
+            detail.zeroize();
+        }
+    }
+
+    /// Remove the hidden value at `index` when the owner removes that detail. The later
+    /// values move down one place. The buffers move; their text is not copied.
+    pub fn remove_detail(&mut self, index: usize) {
+        if index >= MAX_DETAILS {
+            return;
+        }
+        self.details[index].zeroize();
+        self.details[index..].rotate_left(1);
     }
 
     /// The fields and their widget names in the item forms.
@@ -310,6 +375,9 @@ pub struct OwnerUiState {
     pub create_path: String,
     pub open_path: String,
     pub passphrase: String,
+    /// The passphrase typed a second time when the owner creates a vault. The app
+    /// erases it after each try.
+    pub passphrase_confirm: String,
     /// Passphrase change fields (goal item V5). The app clears them after each attempt.
     pub passphrase_current: String,
     pub passphrase_new: String,
@@ -329,6 +397,10 @@ pub struct OwnerUiState {
     pub selected_agent: Option<u64>,
     pub env_name_input: String,
     pub env_field_input: String,
+    /// The variable holds a placeholder, and the run proxy adds the value (ADR 0011).
+    pub env_placeholder_input: bool,
+    /// The hosts of a placeholder variable, as the owner typed them.
+    pub env_hosts_input: String,
     /// Declaration form of the selected item (ADR 0008).
     pub declaration_form: DeclarationForm,
     /// Project directory text for each (agent, item) pair in the Agents view.
@@ -607,7 +679,9 @@ impl OwnerSession {
     /// check for [`OwnerAction::Reveal`] of this item (goal item A4).
     pub fn reveal(&mut self, id: u64, proof: OwnerProof) -> ModelResult<OwnerDetails> {
         let pairs = {
-            let vault = self.unlocked_for(proof, &OwnerAction::Reveal { item_id: id })?;
+            let mut vault = self.unlocked_for(proof, &OwnerAction::Reveal { item_id: id })?;
+            // The history says when the owner saw the values (schema 10).
+            vault.record_reveal(id).map_err(map_err)?;
             let meta = vault.details(id).map_err(map_err)?;
             let mut pairs = Vec::new();
             for field in &meta.fields {
@@ -863,12 +937,14 @@ impl OwnerSession {
     }
 
     /// Bind a secret field of the item to an environment variable for agent processes.
-    /// Needs a fresh owner check (goal item A4).
+    /// Needs a fresh owner check (goal item A4). A placeholder variable (ADR 0011)
+    /// needs valid hosts and a value that is long enough for a placeholder.
     pub fn set_env_binding(
         &mut self,
         item_id: u64,
         env_name: &str,
         field: &str,
+        delivery: &EnvDelivery,
         proof: OwnerProof,
     ) -> ModelResult<()> {
         checked_env_name(env_name.trim()).map_err(|_| {
@@ -877,14 +953,45 @@ impl OwnerSession {
                 "Use A-Z, 0-9, and _ and start with a letter or _. System names such as PATH or DYLD_* are not permitted.",
             )
         })?;
+        if let EnvDelivery::Placeholder(hosts) = delivery
+            && (hosts.is_empty()
+                || hosts.len() > MAX_PLACEHOLDER_HOSTS
+                || hosts
+                    .iter()
+                    .any(|host| parse_placeholder_host(host).is_none()))
+        {
+            return Err(fail(
+                "invalid_input",
+                "Name 1 to 16 hosts, such as api.stripe.com or api.example.com:8443.",
+            ));
+        }
         let mut vault = self.unlocked_for(proof, &OwnerAction::ChangeItemRules { item_id })?;
-        match vault.set_env_binding(item_id, env_name, field) {
+        if matches!(delivery, EnvDelivery::Placeholder(_)) {
+            let value = vault.reveal(item_id, field).map_err(map_err)?;
+            if crate::broker::proxy::mint_placeholder(value.expose()).is_none() {
+                return Err(fail(
+                    "invalid_input",
+                    "This value is too short to hide behind a placeholder. Use the real value, or a key with at least 16 random characters.",
+                ));
+            }
+        }
+        match vault.set_env_binding_with(item_id, env_name, field, delivery) {
             Err(err) if err.kind() == VaultErrorKind::AlreadyExists => Err(fail(
                 "already_exists",
                 "Another item already uses this variable name.",
             )),
             other => other.map_err(map_err),
         }
+    }
+
+    /// The known API hosts of the provider of the item: the stored one, or the
+    /// suggestion. A placeholder variable starts with them.
+    pub fn suggested_placeholder_hosts(&self, item_id: u64) -> Vec<String> {
+        self.declaration_form(item_id)
+            .ok()
+            .and_then(|form| form.provider)
+            .map(|provider| providers::known_hosts(&provider).to_vec())
+            .unwrap_or_default()
     }
 
     /// Remove the variable and every process grant for the item.
@@ -1054,26 +1161,60 @@ impl OwnerSession {
     pub fn activity(&self, limit: usize) -> ModelResult<Vec<AgentActivityRow>> {
         let vault = self.unlocked()?;
         let records = vault.recent_activity(limit).map_err(map_err)?;
-        Ok(records
-            .into_iter()
-            .map(|record| {
-                let item = match record.item_id {
-                    Some(id) => vault
-                        .details(id)
-                        .map_or_else(|_| format!("Item {id} (deleted)"), |d| d.summary.title),
-                    None => "No item".to_owned(),
-                };
-                AgentActivityRow {
-                    id: record.id,
-                    when: format_utc(record.at),
-                    agent: record.agent_name,
-                    item,
-                    operation: record.operation,
-                    decision: record.decision,
-                    reason: record.reason,
-                }
-            })
-            .collect())
+        Ok(activity_rows(&vault, records))
+    }
+
+    /// Archive an item. Agents cannot use it, and the list hides it. This only takes
+    /// authority away, so it needs no owner check. Revealed values hide.
+    pub fn archive(&mut self, id: u64) -> ModelResult<()> {
+        self.unlocked()?.set_archived(id, true).map_err(map_err)?;
+        self.revealed.retain(|key, _| key.0 != id);
+        Ok(())
+    }
+
+    /// Bring an item back from the archive. Agents with a grant can use it again, so
+    /// this needs a fresh owner check for the agent settings of the item (goal item A4).
+    pub fn unarchive(&mut self, id: u64, proof: OwnerProof) -> ModelResult<()> {
+        self.unlocked_for(proof, &OwnerAction::ChangeItemRules { item_id: id })?
+            .set_archived(id, false)
+            .map_err(map_err)
+    }
+
+    pub fn is_archived(&self, id: u64) -> ModelResult<bool> {
+        self.unlocked()?.is_archived(id).map_err(map_err)
+    }
+
+    /// Archived items and the time of the archive.
+    pub fn archived(&self) -> ModelResult<BTreeMap<u64, u64>> {
+        self.unlocked()?.archived_items().map_err(map_err)
+    }
+
+    /// When each item was added, changed, and used, for sorting.
+    pub fn item_times(&self) -> ModelResult<BTreeMap<u64, ItemTimes>> {
+        self.unlocked()?.item_times().map_err(map_err)
+    }
+
+    /// The change history of an item, newest first. It has no secret value.
+    pub fn item_events(&self, id: u64, limit: usize) -> ModelResult<Vec<ItemEvent>> {
+        self.unlocked()?.item_events(id, limit).map_err(map_err)
+    }
+
+    /// Agent requests with an item, newest first.
+    pub fn item_activity(&self, id: u64, limit: usize) -> ModelResult<Vec<AgentActivityRow>> {
+        let vault = self.unlocked()?;
+        let records = vault.item_activity(id, limit).map_err(map_err)?;
+        Ok(activity_rows(&vault, records))
+    }
+
+    /// Requests of one agent, newest first.
+    pub fn agent_activity(
+        &self,
+        agent_id: u64,
+        limit: usize,
+    ) -> ModelResult<Vec<AgentActivityRow>> {
+        let vault = self.unlocked()?;
+        let records = vault.agent_activity(agent_id, limit).map_err(map_err)?;
+        Ok(activity_rows(&vault, records))
     }
 
     fn install(&mut self, vault: Vault, path: PathBuf) {
@@ -1151,9 +1292,34 @@ impl OwnerSession {
         let field_name = meta
             .fields
             .iter()
-            .find(|field| field.secret && meta.summary.kind == CredentialKind::Custom)
+            .find(|field| {
+                field.secret
+                    && meta.summary.kind == CredentialKind::Custom
+                    && !field.name.starts_with(DETAIL_PREFIX)
+            })
             .map(|field| field.name.clone())
             .unwrap_or_default();
+        let (details, archived) = {
+            let vault = self.unlocked()?;
+            let mut details = Vec::new();
+            for field in &meta.fields {
+                let Some(label) = detail_label(&field.name) else {
+                    continue;
+                };
+                let value = if field.secret {
+                    None
+                } else {
+                    Some(plain_value(&vault, id, &field.name)?)
+                };
+                details.push(DetailLine {
+                    name: field.name.clone(),
+                    label,
+                    value,
+                    hidden: field.secret,
+                });
+            }
+            (details, vault.is_archived(id).map_err(map_err)?)
+        };
         // The lines say only which values are revealed. The view borrows a revealed value
         // from the session (key-memory review F10).
         let secret_lines = meta
@@ -1180,9 +1346,36 @@ impl OwnerSession {
             revision: meta.summary.revision,
             hidden: false,
             secret_lines,
+            details,
+            archived,
             message: String::new(),
         })
     }
+}
+
+/// Activity rows with item names. A deleted item keeps its number.
+fn activity_rows(vault: &Vault, records: Vec<ActivityRecord>) -> Vec<AgentActivityRow> {
+    records
+        .into_iter()
+        .map(|record| {
+            let item = match record.item_id {
+                Some(id) => vault
+                    .details(id)
+                    .map_or_else(|_| format!("Item {id} (deleted)"), |d| d.summary.title),
+                None => "No item".to_owned(),
+            };
+            AgentActivityRow {
+                id: record.id,
+                at: record.at,
+                when: format_utc(record.at),
+                agent: record.agent_name,
+                item,
+                operation: record.operation,
+                decision: record.decision,
+                reason: record.reason,
+            }
+        })
+        .collect()
 }
 
 impl Default for OwnerSession {
@@ -1224,6 +1417,8 @@ pub struct ConnectorRow {
 pub struct AgentActivityRow {
     /// The ID of the activity entry. It grows with each entry.
     pub id: u64,
+    /// Unix time of the entry.
+    pub at: u64,
     pub when: String,
     pub agent: String,
     pub item: String,
@@ -1261,8 +1456,25 @@ pub struct OwnerDetails {
     pub public_label: String,
     pub revision: u64,
     pub hidden: bool,
+    /// Every secret field, with the hidden custom details. The view borrows a revealed
+    /// value from the session.
     pub secret_lines: Vec<SecretLine>,
+    /// Custom details in order. A hidden one has no value here.
+    pub details: Vec<DetailLine>,
+    /// Agents cannot use an archived item.
+    pub archived: bool,
     pub message: String,
+}
+
+/// One custom detail on the item page. It has no hidden value.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DetailLine {
+    /// The field name.
+    pub name: String,
+    pub label: String,
+    /// The value of a visible detail. `None` for a hidden detail.
+    pub value: Option<String>,
+    pub hidden: bool,
 }
 
 impl OwnerDetails {
@@ -1282,6 +1494,8 @@ impl OwnerDetails {
             revision: 0,
             hidden: true,
             secret_lines: Vec::new(),
+            details: Vec::new(),
+            archived: false,
             message: message.to_owned(),
         }
     }
@@ -1298,6 +1512,16 @@ impl OwnerDetails {
             database_name: self.database_name.clone(),
             field_name: self.field_name.clone(),
             public_label: self.public_label.clone(),
+            details: self
+                .details
+                .iter()
+                .map(|detail| DetailDraft {
+                    label: detail.label.clone(),
+                    value: detail.value.clone().unwrap_or_default(),
+                    hidden: detail.hidden,
+                    stored: detail.hidden.then(|| detail.name.clone()),
+                })
+                .collect(),
         }
     }
 
@@ -1565,6 +1789,7 @@ fn build_vault_draft(
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
                 || is_reserved_field(name)
+                || name.starts_with(DETAIL_PREFIX)
             {
                 return Err(fail(
                     "invalid_input",
@@ -1582,6 +1807,8 @@ fn build_vault_draft(
             )?;
         }
     }
+
+    push_details(&mut fields, vault, existing, draft, secrets)?;
 
     let mut tags = Vec::new();
     push_tag(&mut tags, &draft.service)?;
@@ -1654,6 +1881,67 @@ fn push_secret(
         value: SecretValue::new(value),
         secret: true,
     });
+    Ok(())
+}
+
+/// Add the custom details. A hidden detail takes its typed value, or keeps its stored
+/// value when the input is blank. A label must be unique on the item.
+fn push_details(
+    fields: &mut Vec<Field>,
+    vault: &Vault,
+    existing: Option<u64>,
+    draft: &ItemDraft,
+    secrets: &SecretForm,
+) -> ModelResult<()> {
+    if draft.details.len() > MAX_DETAILS {
+        return Err(fail(
+            "invalid_input",
+            format!("An item can have at most {MAX_DETAILS} custom details."),
+        ));
+    }
+    let mut labels = BTreeSet::new();
+    for (index, detail) in draft.details.iter().enumerate() {
+        let label = detail.label.trim();
+        if label.is_empty() {
+            return Err(fail("invalid_input", "Type a name for each custom detail."));
+        }
+        if label.len() > MAX_DETAIL_LABEL_BYTES {
+            return Err(fail(
+                "invalid_input",
+                format!(
+                    "The name “{label}” is too long. Use {MAX_DETAIL_LABEL_BYTES} bytes or fewer."
+                ),
+            ));
+        }
+        if !labels.insert(label.to_lowercase()) {
+            return Err(fail(
+                "invalid_input",
+                format!("Two custom details have the name “{label}”."),
+            ));
+        }
+        let name = detail_field_name(label);
+        let missing = format!("Type the value of “{label}”.");
+        if !detail.hidden {
+            push_required_plain(fields, &name, &detail.value, &missing)?;
+            continue;
+        }
+        let typed = &secrets.details[index];
+        let value = if !typed.is_empty() {
+            SecretValue::new(typed.clone())
+        } else if let (Some(id), Some(stored)) = (existing, &detail.stored) {
+            vault.reveal(id, stored).map_err(map_err)?
+        } else if !detail.value.trim().is_empty() {
+            // A visible detail that the owner made hidden keeps its value.
+            SecretValue::new(detail.value.trim().to_owned())
+        } else {
+            return Err(fail("invalid_input", missing));
+        };
+        fields.push(Field {
+            name,
+            value,
+            secret: true,
+        });
+    }
     Ok(())
 }
 

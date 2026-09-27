@@ -193,6 +193,10 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
     }
     let mut items = Vec::new();
     for (item_id, operations) in by_item {
+        // An archived item is not for agents. The broker refuses each request with it.
+        if vault.is_archived(item_id).unwrap_or(true) {
+            continue;
+        }
         let Ok(details) = vault.details(item_id) else {
             continue;
         };
@@ -217,6 +221,9 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
     }
     let mut process_access = Vec::new();
     for grant in vault.exec_grants_for_agent(agent.id).unwrap_or_default() {
+        if vault.is_archived(grant.item_id).unwrap_or(true) {
+            continue;
+        }
         let Ok(details) = vault.details(grant.item_id) else {
             continue;
         };
@@ -228,10 +235,16 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
             .ok()
             .flatten()
             .is_some_and(|declaration| declaration.is_production());
+        let (holds, hosts) = match &binding.delivery {
+            crate::vault::EnvDelivery::Value => ("the real value", Vec::new()),
+            crate::vault::EnvDelivery::Placeholder(hosts) => ("a placeholder", hosts.clone()),
+        };
         process_access.push(json!({
             "item_id": grant.item_id,
             "item_name": details.summary.title,
             "env_name": binding.env_name,
+            "env_holds": holds,
+            "real_value_only_for_hosts": hosts,
             "project_dir": grant.project_dir,
             "permitted_command_prefixes": grant.rule.allowed_prefixes,
             "owner_instruction": grant.rule.instruction,
@@ -352,6 +365,10 @@ fn prepare(
     if vault.needs_review(item_id).unwrap_or(true) {
         let reason = super::run::review_reason(item_id);
         return Err(deny(vault, "review_required", &reason));
+    }
+    if vault.is_archived(item_id).unwrap_or(true) {
+        let reason = super::run::archived_reason(item_id);
+        return Err(deny(vault, "item_archived", &reason));
     }
     let Ok(Some(destination)) = vault.destination(item_id) else {
         return Err(deny(

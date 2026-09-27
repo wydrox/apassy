@@ -1,27 +1,28 @@
 #![cfg(feature = "vault")]
 
-//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 8) to the
-//! current version, with data at each version. Synthetic values only.
+//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 10) to
+//! the current version, with data at each version. Synthetic values only.
 //!
 //! The schema SQL below is a frozen copy of the statements that each earlier version ran
 //! at create: version 1 in commit a2f860a, 2 in 4ffdb5e, 3 in 22d1784, 4 in 2eb8366,
-//! 5 in 9ce2e01, 6 in 4193991, 7 in c5a91c0, and 8 in 2acde80. Do not change these
-//! copies when the current schema changes.
+//! 5 in 9ce2e01, 6 in 4193991, 7 in c5a91c0, 8 in 2acde80, 9 in cff4303, and 10 in the
+//! change that added the item history. Do not change these copies when the current
+//! schema changes.
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use apassy::contracts::CredentialKind;
 use apassy::vault::{
-    CandidateState, DecidedBy, DecisionEntry, Declaration, DeclarationField, Environment, ExecMode,
-    ExecRule, LoggedDecision, NewCandidate, OwnerLabel, PatternKey, PatternState, RealOutcome,
-    RequestSource, Reversibility, RiskLevel, Scope, ShadowAnswer, ShadowEntry,
-    SuggestedDeclaration, Vault, VaultErrorKind,
+    CandidateState, DecidedBy, DecisionEntry, Declaration, DeclarationField, EnvDelivery,
+    Environment, ExecMode, ExecRule, ItemEventKind, LoggedDecision, NewCandidate, OwnerLabel,
+    PatternKey, PatternState, RealOutcome, RequestSource, Reversibility, RiskLevel, Scope,
+    ShadowAnswer, ShadowEntry, SuggestedDeclaration, Vault, VaultErrorKind,
 };
 use tempfile::TempDir;
 
 const PASS: &str = "synthetic-migration-passphrase";
-const CURRENT_VERSION: i64 = 9;
+const CURRENT_VERSION: i64 = 11;
 
 const V1_SQL: &str = "
 CREATE TABLE vault_meta (
@@ -227,6 +228,67 @@ UPDATE vault_meta SET schema_version = 8 WHERE id = 1;
 PRAGMA user_version = 8;
 ";
 
+const V9_SQL: &str = "
+CREATE TABLE model_candidate (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    version TEXT NOT NULL,
+    url TEXT NOT NULL,
+    checkpoint TEXT NOT NULL,
+    checkpoint_sha256 TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('shadow', 'promoted', 'replaced', 'rolled_back')),
+    ended_at INTEGER,
+    report TEXT NOT NULL
+);
+CREATE TABLE shadow_decision (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    candidate_id INTEGER NOT NULL,
+    at INTEGER NOT NULL,
+    real_outcome TEXT NOT NULL CHECK (real_outcome IN ('run', 'ask')),
+    candidate_outcome TEXT NOT NULL CHECK (candidate_outcome IN ('run', 'ask', 'no_answer')),
+    owner_decision TEXT NOT NULL CHECK (owner_decision IN ('allow', 'deny', 'none')),
+    facts TEXT NOT NULL
+);
+CREATE INDEX shadow_decision_candidate ON shadow_decision(candidate_id);
+CREATE TABLE model_activation (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at INTEGER NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('promote', 'rollback')),
+    version TEXT NOT NULL,
+    url TEXT NOT NULL,
+    candidate_id INTEGER,
+    previous_version TEXT NOT NULL,
+    previous_url TEXT NOT NULL,
+    report TEXT NOT NULL
+);
+UPDATE vault_meta SET schema_version = 9 WHERE id = 1;
+PRAGMA user_version = 9;
+";
+
+const V10_SQL: &str = "
+CREATE TABLE item_event (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id INTEGER NOT NULL,
+    at INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    detail TEXT NOT NULL
+);
+CREATE INDEX item_event_item ON item_event(item_id, id);
+CREATE TABLE item_archive (
+    item_id INTEGER PRIMARY KEY,
+    archived_at INTEGER NOT NULL
+);
+CREATE TABLE activity_item (
+    activity_id INTEGER NOT NULL,
+    item_id INTEGER NOT NULL
+);
+CREATE INDEX activity_item_item ON activity_item(item_id);
+INSERT INTO item_event (item_id, at, kind, detail)
+    SELECT id, CAST(strftime('%s', 'now') AS INTEGER), 'tracked', '' FROM item;
+UPDATE vault_meta SET schema_version = 10 WHERE id = 1;
+PRAGMA user_version = 10;
+";
+
 /// Five items, one of each kind: (title, kind, notes, tags, fields as (name, value, secret)).
 type ItemRow = (
     &'static str,
@@ -321,7 +383,7 @@ fn build_legacy(path: &Path, version: i64) {
     assert_eq!(journal, "delete");
     let tx = conn.transaction().expect("transaction");
     let steps = [
-        V1_SQL, V2_SQL, V3_SQL, V4_SQL, V5_SQL, V6_SQL, V7_SQL, V8_SQL,
+        V1_SQL, V2_SQL, V3_SQL, V4_SQL, V5_SQL, V6_SQL, V7_SQL, V8_SQL, V9_SQL, V10_SQL,
     ];
     for sql in &steps[..usize::try_from(version).expect("version")] {
         tx.execute_batch(sql).expect("legacy schema");
@@ -500,6 +562,14 @@ fn build_legacy(path: &Path, version: i64) {
         )
         .expect("suggestion");
     }
+    if version >= 10 {
+        // Version 10: each item has an "added" event.
+        tx.execute(
+            "INSERT INTO item_event (item_id, at, kind, detail) SELECT id, ?1, 'created', '' FROM item",
+            [now - 100],
+        )
+        .expect("history");
+    }
     tx.commit().expect("commit");
     conn.close().map_err(|(_, err)| err).expect("close");
 }
@@ -671,14 +741,10 @@ fn assert_version_data(vault: &mut Vault, version: i64) {
         assert!(vault.exec_grants_for_agent(1).expect("grants").is_empty());
         return;
     }
-    assert_eq!(
-        vault
-            .env_binding(1)
-            .expect("binding")
-            .expect("some")
-            .env_name,
-        "MIG_API_KEY"
-    );
+    let binding = vault.env_binding(1).expect("binding").expect("some");
+    assert_eq!(binding.env_name, "MIG_API_KEY");
+    // Version 11: an old binding keeps the real value mode.
+    assert_eq!(binding.delivery, EnvDelivery::Value);
     let grants = vault.exec_grants_for_agent(1).expect("grants");
     assert_eq!(grants.len(), 2);
     // Version 3 stored "allow". ADR 0007 puts those grants under the bouncer.
@@ -769,6 +835,32 @@ fn unlock_migrates_each_earlier_schema_version_to_the_current_one() {
                 })
                 .expect("shadow")
         );
+        // Version 10: the history of each old item starts with the migration (or with
+        // its "added" event in a version 10 file), and the archive and the request log
+        // work on the migrated file.
+        let first_kind = if version >= 10 {
+            ItemEventKind::Created
+        } else {
+            ItemEventKind::Tracked
+        };
+        for item in 1..=5u64 {
+            let history = vault.item_events(item, 10).expect("history");
+            let oldest = history.last().expect("an event");
+            assert_eq!(oldest.kind, first_kind, "item {item}: {history:?}");
+        }
+        // Item 3 got its declaration above, after the migration.
+        assert_eq!(
+            vault.item_events(3, 10).expect("history")[0].kind,
+            ItemEventKind::Declaration
+        );
+        vault.set_archived(4, true).expect("archive");
+        assert!(vault.is_archived(4).expect("archived"));
+        assert!(vault.item_activity(1, 10).is_ok());
+        // Version 11: a variable in placeholder mode works on the migrated file.
+        let placeholder = EnvDelivery::Placeholder(vec!["api.mig.invalid".to_owned()]);
+        vault
+            .set_env_binding_with(5, "MIG_CUSTOM", "blob", &placeholder)
+            .expect("placeholder binding");
         drop(vault);
         assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
 
@@ -801,6 +893,16 @@ fn unlock_migrates_each_earlier_schema_version_to_the_current_one() {
             (summary.requests, summary.agreement.shadow_decisions),
             (1, 1)
         );
+        assert!(again.is_archived(4).expect("archived"), "the archive stays");
+        assert_eq!(
+            again
+                .env_binding(5)
+                .expect("binding")
+                .expect("some")
+                .delivery,
+            EnvDelivery::Placeholder(vec!["api.mig.invalid".to_owned()])
+        );
+        assert_eq!(again.item_events(1, 10).expect("history").len(), 1);
         let pattern = again.pattern(&key).expect("read").expect("pattern");
         assert_eq!(
             pattern.state(u64::try_from(now()).expect("now")),
@@ -872,6 +974,77 @@ fn migrated_candidate() -> NewCandidate {
 
 /// The step from version 8 to 9 runs in one transaction. A failure leaves version 8 and
 /// its data.
+#[test]
+fn a_failed_migration_from_version_10_keeps_the_old_version_and_data() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("blocked10.db");
+    build_legacy(&path, 10);
+    {
+        // A column with the name of the version 11 column makes the migration fail.
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        conn.execute_batch("ALTER TABLE env_binding ADD COLUMN placeholder_hosts INTEGER;")
+            .expect("blocking column");
+        conn.close().map_err(|(_, err)| err).expect("close");
+    }
+    let mut vault = Vault::open(&path).expect("open");
+    assert_eq!(
+        vault.unlock(PASS).unwrap_err().kind(),
+        VaultErrorKind::Storage
+    );
+    drop(vault);
+    assert_eq!(raw_versions(&path), (10, 10), "no partial migration");
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        conn.execute_batch("ALTER TABLE env_binding DROP COLUMN placeholder_hosts;")
+            .expect("drop blocking column");
+        conn.close().map_err(|(_, err)| err).expect("close");
+    }
+    let mut vault = Vault::open(&path).expect("open");
+    vault.unlock(PASS).expect("unlock migrates");
+    assert_version_data(&mut vault, 10);
+    drop(vault);
+    assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
+}
+
+#[test]
+fn a_failed_migration_from_version_9_keeps_the_old_version_and_data() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("blocked9.db");
+    build_legacy(&path, 9);
+    {
+        // A table with the name of a version 10 table makes the migration fail.
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        conn.execute_batch("CREATE TABLE item_archive (x INTEGER);")
+            .expect("blocking table");
+        conn.close().map_err(|(_, err)| err).expect("close");
+    }
+    let mut vault = Vault::open(&path).expect("open");
+    assert_eq!(
+        vault.unlock(PASS).unwrap_err().kind(),
+        VaultErrorKind::Storage
+    );
+    drop(vault);
+    assert_eq!(raw_versions(&path), (9, 9), "no partial migration");
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        let history_table = conn.prepare("SELECT id FROM item_event LIMIT 0");
+        assert!(history_table.is_err(), "no table of version 10");
+        drop(history_table);
+        conn.execute_batch("DROP TABLE item_archive;")
+            .expect("drop blocking table");
+        conn.close().map_err(|(_, err)| err).expect("close");
+    }
+    let mut vault = Vault::open(&path).expect("open");
+    vault.unlock(PASS).expect("unlock migrates");
+    assert_version_data(&mut vault, 9);
+    drop(vault);
+    assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
+}
+
 #[test]
 fn a_failed_migration_from_version_8_keeps_the_old_version_and_data() {
     let dir = TempDir::new().expect("temp dir");
