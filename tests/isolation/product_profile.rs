@@ -765,15 +765,20 @@ fn make_canary_app(dir: &Path, vault_file: &Path, marker: &Path) -> PathBuf {
     )
     .expect("Info.plist");
     let exe = macos.join("iso-canary");
+    // The script writes a temporary file and renames it. The marker shows up only
+    // with its whole content, so a test that sees it can read it at once. A slow
+    // host (a CI runner) read an empty marker before this.
     std::fs::write(
         &exe,
         format!(
             "#!/bin/sh\n\
-             if /bin/cat '{vault}' > '{marker}' 2>/dev/null; then\n\
-             \techo ESCAPED-READ >> '{marker}'\n\
+             tmp='{marker}.tmp'\n\
+             if /bin/cat '{vault}' > \"$tmp\" 2>/dev/null; then\n\
+             \techo ESCAPED-READ >> \"$tmp\"\n\
              else\n\
-             \techo READ-DENIED >> '{marker}'\n\
-             fi\n",
+             \techo READ-DENIED >> \"$tmp\"\n\
+             fi\n\
+             /bin/mv \"$tmp\" '{marker}'\n",
             vault = vault_file.display(),
             marker = marker.display(),
         ),
