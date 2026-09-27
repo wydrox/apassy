@@ -95,6 +95,14 @@ fn event_text(event: &ItemEvent) -> (String, Option<String>, Tone) {
         ItemEventKind::AccessRemoved => {
             ("Process access removed".to_owned(), detail(), Tone::Neutral)
         }
+        ItemEventKind::AccessRequested => (
+            "An agent asked for access".to_owned(),
+            detail(),
+            Tone::Warning,
+        ),
+        ItemEventKind::AccessDenied => {
+            ("Access request denied".to_owned(), detail(), Tone::Neutral)
+        }
         ItemEventKind::RuleChanged => ("Rule changed".to_owned(), detail(), Tone::Accent),
         ItemEventKind::OperationAllowed => {
             ("API operation allowed".to_owned(), detail(), Tone::Accent)

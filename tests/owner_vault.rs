@@ -11,7 +11,7 @@ use apassy::desktop::model::ItemDraft;
 use apassy::desktop::owner_store::{
     DeclarationForm, OwnerDetails, OwnerSession, SecretForm, parse_lifetime_days,
 };
-use apassy::vault::EnvDelivery;
+use apassy::vault::{EnvDelivery, GrantPlace};
 use tempfile::TempDir;
 
 const PASS: &str = "owner-vault-pass-ok";
@@ -611,7 +611,13 @@ fn owner_actions_refuse_without_a_matching_check() {
     refused(session.allow_operation(agent.id, item.id, "get_sales_summary", proof));
     assert!(session.grants(agent.id).expect("grants").is_empty());
     let proof = other(&session);
-    refused(session.set_exec_grant(agent.id, item.id, &project, ExecMode::Bouncer, proof));
+    refused(session.set_exec_grant(
+        agent.id,
+        item.id,
+        &GrantPlace::Folder(project.clone()),
+        ExecMode::Bouncer,
+        proof,
+    ));
     assert!(session.exec_grants(agent.id).expect("grants").is_empty());
     // A proof for another item is also refused.
     let other_item = owner_ok(
@@ -639,7 +645,13 @@ fn owner_actions_refuse_without_a_matching_check() {
         .expect("grant with a proof");
     let proof = grant(&session);
     session
-        .set_exec_grant(agent.id, item.id, &project, ExecMode::Ask, proof)
+        .set_exec_grant(
+            agent.id,
+            item.id,
+            &GrantPlace::Folder(project.clone()),
+            ExecMode::Ask,
+            proof,
+        )
         .expect("process access with a proof");
     let rule = ExecRule {
         allowed_prefixes: vec!["npm test".to_owned()],

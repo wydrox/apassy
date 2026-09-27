@@ -178,7 +178,8 @@ impl ApprovalQueue {
         *self.notifier.lock().unwrap_or_else(PoisonError::into_inner) = Some(Box::new(notifier));
     }
 
-    fn notify_owner(&self) {
+    /// Ask the desktop app to repaint: a run waits, or an agent asked for access.
+    pub(crate) fn notify_owner(&self) {
         if let Some(notifier) = self
             .notifier
             .lock()

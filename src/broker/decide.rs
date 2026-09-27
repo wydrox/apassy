@@ -81,6 +81,11 @@ pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
                 host_session: request.host_session.as_deref(),
             },
         ),
+        Action::RequestAccess {
+            item_id,
+            reason,
+            cwd,
+        } => request_access(ctx, &request.token, *item_id, reason, cwd.as_deref()),
         Action::SubmitUserRequest {
             host,
             cwd,
@@ -245,7 +250,8 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
             "env_name": binding.env_name,
             "env_holds": holds,
             "real_value_only_for_hosts": hosts,
-            "project_dir": grant.project_dir,
+            "project_dir": grant.place.folder(),
+            "any_folder": grant.place == crate::vault::GrantPlace::AnyFolder,
             "permitted_command_prefixes": grant.rule.allowed_prefixes,
             "owner_instruction": grant.rule.instruction,
             "approval": match grant.mode {
@@ -258,12 +264,153 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
             "owner_review_needed": vault.needs_review(grant.item_id).unwrap_or(true),
         }));
     }
-    WireResponse::success(json!({
+    let sees_all = vault.agent_sees_all(agent.id).unwrap_or(false);
+    let mut answer = json!({
         "agent": agent.name,
         "items": items,
         "process_access": process_access,
+        "sees_all_credentials": sees_all,
         "note": "Secret values are never returned. Use apassy_use_credential for a connector operation. Use apassy_run_with_secrets to run a command with process_access items in its environment.",
-    }))
+    });
+    if sees_all {
+        answer["catalog"] = catalog(vault, agent.id);
+        answer["note"] = json!(
+            "Secret values are never returned. `catalog` lists every credential of the owner without secret values. For a credential with access \"can_request\", call apassy_request_access with the reason in the user's own words. The owner decides in the Apassy app; the call does not wait. When the owner gives access, the credential shows in process_access."
+        );
+    }
+    let requests: Vec<Value> = vault
+        .agent_access_requests(agent.id, 20)
+        .unwrap_or_default()
+        .iter()
+        .map(|request| {
+            json!({
+                "request_id": request.id,
+                "item_id": request.item_id,
+                "state": request.state.as_str(),
+            })
+        })
+        .collect();
+    if !requests.is_empty() {
+        answer["access_requests"] = json!(requests);
+    }
+    WireResponse::success(answer)
+}
+
+/// Every credential that is not archived, without values (ADR 0012), with what the
+/// agent can do with it.
+fn catalog(vault: &Vault, agent_id: u64) -> Value {
+    let granted: Vec<u64> = vault
+        .exec_grants_for_agent(agent_id)
+        .unwrap_or_default()
+        .iter()
+        .map(|grant| grant.item_id)
+        .collect();
+    let open: Vec<u64> = vault
+        .agent_access_requests(agent_id, crate::vault::MAX_OPEN_REQUESTS)
+        .unwrap_or_default()
+        .iter()
+        .filter(|request| request.state == crate::vault::RequestState::Open)
+        .map(|request| request.item_id)
+        .collect();
+    let entries: Vec<Value> = vault
+        .catalog()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| {
+            let access = if granted.contains(&entry.item_id) {
+                "can_use"
+            } else if open.contains(&entry.item_id) {
+                "requested"
+            } else if entry.has_variable {
+                "can_request"
+            } else {
+                "no_variable"
+            };
+            let details: serde_json::Map<String, Value> = entry
+                .details
+                .into_iter()
+                .map(|(name, value)| (name, Value::String(value)))
+                .collect();
+            json!({
+                "item_id": entry.item_id,
+                "item_name": entry.name,
+                "kind": entry.kind,
+                "details": details,
+                "access": access,
+            })
+        })
+        .collect();
+    json!(entries)
+}
+
+/// An agent asks for process access to one item (ADR 0012). The answer comes at once.
+fn request_access(
+    ctx: &BrokerContext,
+    token: &str,
+    item_id: u64,
+    reason: &str,
+    cwd: Option<&str>,
+) -> WireResponse {
+    let label = format!("request access to item {item_id}");
+    let mut guard = lock(&ctx.vault);
+    let Some(vault) = guard.as_mut().filter(|vault| !vault.is_locked()) else {
+        return locked_response();
+    };
+    let agent = match authenticate(vault, token, &label) {
+        Ok(agent) => agent,
+        Err(response) => return response,
+    };
+    let result = vault.request_access(agent.id, item_id, reason, cwd.unwrap_or_default());
+    let (decision, answer) = match result {
+        Ok((request_id, created)) => (
+            ActivityDecision::Allow,
+            WireResponse::success(json!({
+                "request_id": request_id,
+                "state": "open",
+                "new": created,
+                "note": "The owner decides in the Apassy app. This call does not wait. Tell the user that the request waits in Apassy (Activity). When the owner gives access, the credential shows in process_access of apassy_list_access.",
+            })),
+        ),
+        Err(err) => {
+            let (code, message) = match err.kind() {
+                VaultErrorKind::NotFound => (
+                    "not_visible",
+                    "The owner did not let this agent see this credential, or it is archived or gone.",
+                ),
+                VaultErrorKind::InvalidInput => (
+                    "invalid_request",
+                    "State the reason in 1 to 500 characters, use an absolute cwd, and ask only for a credential whose access is \"can_request\". A credential without an environment variable needs the owner first.",
+                ),
+                VaultErrorKind::AlreadyExists => (
+                    "already_granted",
+                    "The agent already has process access to this credential. See process_access.",
+                ),
+                VaultErrorKind::Busy => (
+                    "too_many_requests",
+                    "This agent has 20 open access requests. Wait for the owner.",
+                ),
+                _ => ("broker_error", "The broker cannot record the request."),
+            };
+            (ActivityDecision::Deny, WireResponse::failure(code, message))
+        }
+    };
+    let reason_text = match &answer.error {
+        Some(error) => error.message.clone(),
+        None => "The agent asked for process access. It waits for the owner.".to_owned(),
+    };
+    let _ = vault.record_activity(&NewActivity {
+        agent_id: Some(agent.id),
+        agent_name: agent.name.clone(),
+        item_id: Some(item_id),
+        operation: "request access".to_owned(),
+        decision,
+        reason: reason_text,
+    });
+    drop(guard);
+    if answer.ok {
+        ctx.approvals.notify_owner();
+    }
+    answer
 }
 
 /// Everything the network step needs. The vault lock is released before the call.

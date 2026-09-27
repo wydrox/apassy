@@ -1,17 +1,20 @@
-//! Activity: runs that wait for the owner, the inbox, and every agent request (goal
-//! items N1 to N4). A notification or "Mark as seen" is never an approval.
+//! Activity: runs that wait for the owner, access requests of agents (ADR 0012), the
+//! inbox, and every agent request (goal items N1 to N4). A notification or "Mark as
+//! seen" is never an approval.
 
 use std::sync::Arc;
 
 use eframe::egui::{self, CornerRadius, Frame, Label, Margin, Stroke};
 
+use super::agents::{GrantForm, place_section};
 use super::kit::{self, Font, Icon, Style, Tone};
+use super::{Sheet, ask_owner_from_sheet, close_sheet};
 use crate::broker::approvals::{ApprovalQueue, PendingRun, RememberOffer};
 use crate::desktop::inbox::{self, InboxKind};
 use crate::desktop::notify::Delivery;
 use crate::desktop::owner_check::OwnerRequest;
 use crate::desktop::{BrokerState, DesktopApp, OwnerView};
-use crate::vault::ActivityDecision;
+use crate::vault::{AccessRequest, ActivityDecision, EnvDelivery, ExecMode, GrantPlace};
 
 /// How many inbox events the view shows.
 const SHOWN_EVENTS: usize = 40;
@@ -39,6 +42,7 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[PendingRu
         |_| {},
     );
     notifications_notice(app, ui);
+    access_requests(app, ui);
     if !pending.is_empty() {
         ui.label(kit::text("Waiting for you", Font::Headline).color(kit::LABEL));
         ui.add_space(4.0);
@@ -86,6 +90,210 @@ fn notifications_notice(app: &mut DesktopApp, ui: &mut egui::Ui) {
 }
 
 /// One run that waits for the owner, with its decision buttons.
+/// Open access requests of agents (ADR 0012). "Give access…" opens a sheet with the
+/// place and the decision; the owner check follows. "Deny" gives nothing.
+fn access_requests(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    let requests = app
+        .owner_ui
+        .session
+        .access_requests(true)
+        .unwrap_or_default();
+    if requests.is_empty() {
+        return;
+    }
+    let mut open = None;
+    let mut deny = None;
+    kit::section(
+        ui,
+        Some("Access requests"),
+        Some(
+            "The reason is the text of the agent. Give access only when it matches what you asked the agent to do.",
+        ),
+        |s| {
+            for request in &requests {
+                s.row(|ui| {
+                    egui::Sides::new().shrink_left().wrap().show(
+                        ui,
+                        |ui| {
+                            kit::dot(ui, Tone::Warning);
+                            ui.label(
+                                kit::medium(
+                                    format!(
+                                        "{} asks for {}",
+                                        request.agent_name, request.item_name
+                                    ),
+                                    Font::Body,
+                                )
+                                .color(kit::LABEL),
+                            );
+                        },
+                        |ui| {
+                            if kit::small_button(ui, "Give access…", Style::Prominent).clicked() {
+                                open = Some(request.clone());
+                            }
+                            if kit::small_button(ui, "Deny", Style::Bordered).clicked() {
+                                deny = Some(request.id);
+                            }
+                        },
+                    );
+                    ui.horizontal(|ui| {
+                        ui.add_space(18.0);
+                        ui.add(
+                            Label::new(
+                                kit::text(
+                                    format!("\u{201c}{}\u{201d}", request.reason),
+                                    Font::Callout,
+                                )
+                                .color(kit::SECONDARY),
+                            )
+                            .wrap(),
+                        );
+                    });
+                    if !request.cwd.is_empty() {
+                        ui.horizontal(|ui| {
+                            ui.add_space(18.0);
+                            ui.label(
+                                kit::text(&request.cwd, Font::MonoSmall).color(kit::SECONDARY),
+                            );
+                        });
+                    }
+                });
+            }
+        },
+    );
+    ui.add_space(6.0);
+    if let Some(request) = open {
+        app.ui.grant = GrantForm {
+            dir: request.cwd.clone(),
+            any_folder: request.cwd.is_empty(),
+            ..GrantForm::default()
+        };
+        app.ui.sheet = Some(Sheet::AccessRequest {
+            request_id: request.id,
+        });
+    }
+    if let Some(id) = deny {
+        let result = app.owner_ui.session.deny_access_request(id);
+        let _ = app.apply(result, "The request is denied. The agent can see that.");
+    }
+}
+
+/// Decide one access request: where the agent can use the credential, and who decides.
+pub(super) fn access_request_sheet(
+    app: &mut DesktopApp,
+    ctx: &egui::Context,
+    request_id: u64,
+) -> bool {
+    let Some(request) = app
+        .owner_ui
+        .session
+        .access_requests(true)
+        .ok()
+        .and_then(|requests| {
+            requests
+                .into_iter()
+                .find(|request| request.id == request_id)
+        })
+    else {
+        app.ui.sheet = None;
+        return false;
+    };
+    let real_value = app
+        .owner_ui
+        .session
+        .env_binding(request.item_id)
+        .ok()
+        .flatten()
+        .is_some_and(|binding| binding.delivery == EnvDelivery::Value);
+    let mut mode = match app.ui.grant.mode {
+        super::agents::Decision::Ask => ExecMode::Ask,
+        super::agents::Decision::Bouncer => ExecMode::Bouncer,
+    };
+    let mut save = false;
+    let mut deny = false;
+    let mut cancel = false;
+    let response = kit::sheet(ctx, "access-request", 540.0, |ui| {
+        kit::sheet_title(
+            ui,
+            &format!("{} asks for {}", request.agent_name, request.item_name),
+            Some(&format!("\u{201c}{}\u{201d}", request.reason)),
+        );
+        kit::sheet_body(ui, |ui| {
+            let form = &mut app.ui.grant;
+            place_section(
+                ui,
+                ("request", request_id),
+                &mut form.dir,
+                &mut form.any_folder,
+                &mut mode,
+                usize::from(real_value),
+            );
+        });
+        kit::sheet_buttons(
+            ui,
+            |ui| {
+                deny = kit::button(ui, "Deny", Style::Destructive).clicked();
+            },
+            |ui| {
+                save = kit::button(ui, "Give access", Style::Prominent)
+                    .on_hover_text("⌘S")
+                    .clicked();
+                cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
+            },
+        );
+    });
+    app.ui.grant.mode = match mode {
+        ExecMode::Ask => super::agents::Decision::Ask,
+        ExecMode::Bouncer => super::agents::Decision::Bouncer,
+    };
+    save |= super::save_pressed(app, ctx);
+    if save {
+        let place = app.ui.grant.place();
+        let mode = if place == GrantPlace::AnyFolder && real_value {
+            ExecMode::Ask
+        } else {
+            mode
+        };
+        grant_request(app, ctx, &request, place, mode);
+    }
+    if deny {
+        let result = app.owner_ui.session.deny_access_request(request_id);
+        if app
+            .apply(result, "The request is denied. The agent can see that.")
+            .is_some()
+        {
+            app.ui.sheet = None;
+        }
+    }
+    if cancel {
+        close_sheet(app, ctx);
+    }
+    response.escape
+}
+
+fn grant_request(
+    app: &mut DesktopApp,
+    ctx: &egui::Context,
+    request: &AccessRequest,
+    place: GrantPlace,
+    mode: ExecMode,
+) {
+    // A grant needs an owner check (goal item A4).
+    ask_owner_from_sheet(
+        app,
+        OwnerRequest::GrantRequest {
+            request_id: request.id,
+            agent_id: request.agent_id,
+            item_id: request.item_id,
+            agent_name: request.agent_name.clone(),
+            item_name: request.item_name.clone(),
+            place,
+            mode,
+        },
+        ctx,
+    );
+}
+
 pub(super) fn approval_card(app: &mut DesktopApp, ui: &mut egui::Ui, run: &PendingRun) {
     Frame::NONE
         .fill(kit::SURFACE)

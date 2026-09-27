@@ -199,6 +199,9 @@ pub(crate) struct UiState {
     /// ⌘F: the search field takes the focus in the next frame.
     #[cfg(feature = "vault")]
     pub(crate) focus_search: bool,
+    /// The form of a grant for several credentials or of an access request.
+    #[cfg(feature = "vault")]
+    pub(crate) grant: agents::GrantForm,
 }
 
 #[cfg_attr(not(feature = "vault"), allow(dead_code))]
@@ -245,6 +248,17 @@ pub(crate) enum Sheet {
         agent_id: u64,
         item_id: u64,
         mode: crate::vault::ExecMode,
+        any_folder: bool,
+    },
+    /// Give one agent access to several credentials (ADR 0012).
+    #[cfg(feature = "vault")]
+    GrantMany {
+        agent_id: u64,
+    },
+    /// Decide an access request of an agent (ADR 0012).
+    #[cfg(feature = "vault")]
+    AccessRequest {
+        request_id: u64,
     },
     /// Review one waiting run.
     #[cfg(feature = "vault")]
@@ -1216,6 +1230,169 @@ mod tests {
             refused.is_err_and(|err| err.message.contains("too short")),
             "a short value"
         );
+    }
+
+    /// ADR 0012: "see all" waits for the owner check, several credentials get access with
+    /// one check, and an access request shows in Activity until a grant answers it.
+    #[cfg(feature = "vault")]
+    #[test]
+    fn access_model_screens_wait_for_the_owner_check() {
+        use crate::broker::approvals::OwnerAction;
+        use crate::desktop::owner_store::SecretForm;
+        use crate::vault::{EnvDelivery, ExecMode, GrantPlace, RequestState};
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let (mut app, first) = app_with_item(&dir);
+        let ctx = egui::Context::default();
+        let mut secrets = SecretForm::default();
+        secrets.token = "ui-second-token-canary".to_owned();
+        let second = app
+            .owner_ui
+            .session
+            .add(
+                &crate::desktop::ItemDraft {
+                    name: "Second key".to_owned(),
+                    ..crate::desktop::ItemDraft::default()
+                },
+                &secrets,
+            )
+            .expect("add")
+            .id;
+        for (item_id, name) in [(first, "FIRST_KEY"), (second, "SECOND_KEY")] {
+            let proof = owner_ok(&app, OwnerAction::ChangeItemRules { item_id });
+            app.owner_ui
+                .session
+                .set_env_binding(item_id, name, "token", &EnvDelivery::Value, proof)
+                .expect("variable");
+        }
+        let (agent, _token) = app
+            .owner_ui
+            .session
+            .register_agent("Finder")
+            .expect("register");
+        app.view = OwnerView::Agents;
+        app.owner_ui.selected_agent = Some(agent.id);
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        for expected in [
+            "What it can see",
+            "All credentials, without values",
+            "Give access to several credentials",
+        ] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+
+        app.ask_owner(
+            OwnerRequest::ShowAllCredentials {
+                agent_id: agent.id,
+                agent_name: agent.name.clone(),
+            },
+            None,
+        );
+        assert!(!app.owner_ui.session.agent_sees_all(agent.id).expect("read"));
+        app.confirm_owner_now(OwnerCheck::passphrase(UI_PASS))
+            .expect("owner check");
+        assert!(app.owner_ui.session.agent_sees_all(agent.id).expect("read"));
+
+        // Two credentials in any folder with one check. They hold the real value, so
+        // the sheet says that each run waits.
+        app.ui.grant = agents::GrantForm {
+            selection: [first, second].into_iter().collect(),
+            any_folder: true,
+            ..agents::GrantForm::default()
+        };
+        app.ui.sheet = Some(Sheet::GrantMany { agent_id: agent.id });
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 2);
+        for expected in [
+            "Give Finder access",
+            "Give access to 2 credentials",
+            "Any folder",
+            "you approve each run with it",
+        ] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+        ask_owner_from_sheet(
+            &mut app,
+            OwnerRequest::GrantMany {
+                agent_id: agent.id,
+                item_ids: vec![first, second],
+                place: GrantPlace::AnyFolder,
+                mode: ExecMode::Ask,
+            },
+            &ctx,
+        );
+        app.confirm_owner_now(OwnerCheck::passphrase(UI_PASS))
+            .expect("owner check");
+        draw_frames(&mut app, TALL_SIZE, 1);
+        assert_eq!(app.ui.sheet, None, "the sheet closes after the check");
+        let grants = app.owner_ui.session.exec_grants(agent.id).expect("grants");
+        assert_eq!(grants.len(), 2);
+        assert!(
+            grants
+                .iter()
+                .all(|grant| grant.place == GrantPlace::AnyFolder)
+        );
+
+        // An access request of the agent shows in Activity.
+        app.owner_ui
+            .session
+            .remove_exec_grant(agent.id, second)
+            .expect("remove");
+        let request_id = {
+            let shared = app.owner_ui.session.shared_vault();
+            let mut guard = shared.lock().expect("vault");
+            guard
+                .as_mut()
+                .expect("open")
+                .request_access(agent.id, second, "Run the second job.", "")
+                .expect("request")
+                .0
+        };
+        app.view = OwnerView::Activity;
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(text.contains("Access requests"), "{text}");
+        assert!(text.contains("Finder asks for Second key"), "{text}");
+        assert!(text.contains("Run the second job."), "{text}");
+        assert!(!text.contains("ui-second-token-canary"));
+
+        app.ui.grant = agents::GrantForm {
+            any_folder: true,
+            ..agents::GrantForm::default()
+        };
+        app.ui.sheet = Some(Sheet::AccessRequest { request_id });
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 2);
+        assert!(text.contains("Give access"), "{text}");
+        ask_owner_from_sheet(
+            &mut app,
+            OwnerRequest::GrantRequest {
+                request_id,
+                agent_id: agent.id,
+                item_id: second,
+                agent_name: agent.name.clone(),
+                item_name: "Second key".to_owned(),
+                place: GrantPlace::AnyFolder,
+                mode: ExecMode::Ask,
+            },
+            &ctx,
+        );
+        app.confirm_owner_now(OwnerCheck::passphrase(UI_PASS))
+            .expect("owner check");
+        let requests = app.owner_ui.session.access_requests(false).expect("read");
+        assert_eq!(requests[0].state, RequestState::Granted);
+        assert_eq!(
+            app.owner_ui
+                .session
+                .exec_grants(agent.id)
+                .expect("grants")
+                .len(),
+            2
+        );
+
+        // Turning "see all" off needs no check.
+        app.owner_ui
+            .session
+            .set_agent_sees_all(agent.id, false, None)
+            .expect("off");
+        assert!(!app.owner_ui.session.agent_sees_all(agent.id).expect("read"));
     }
 
     /// A lock leaves the main window, closes every sheet, and hides a fresh token.

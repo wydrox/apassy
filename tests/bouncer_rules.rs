@@ -17,8 +17,8 @@ use apassy::broker::http::TlsClient;
 use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault};
 use apassy::contracts::CredentialKind;
 use apassy::vault::{
-    Declaration, Environment, ExecMode, ExecRule, Field, ItemDraft, Reversibility, RiskLevel,
-    Scope, SecretValue, Vault,
+    Declaration, EnvDelivery, Environment, ExecMode, ExecRule, Field, GrantPlace, ItemDraft,
+    Reversibility, RiskLevel, Scope, SecretValue, Vault,
 };
 use tempfile::TempDir;
 
@@ -143,6 +143,70 @@ fn last_reason(fx: &Fixture) -> String {
     vault.recent_activity(1).expect("activity")[0]
         .reason
         .clone()
+}
+
+fn run_in(fx: &Fixture, cwd: &std::path::Path, command: &[&str]) -> WireResponse {
+    client::send(
+        &fx.socket,
+        &fx.token,
+        Action::Run {
+            items: vec![fx.item_id],
+            command: command.iter().map(|arg| (*arg).to_owned()).collect(),
+            cwd: cwd.display().to_string(),
+            purpose: "Print done.".to_owned(),
+            path: Some("/usr/bin:/bin".to_owned()),
+            user_request: Some("Run the project checks.".to_owned()),
+        },
+    )
+    .expect("answer")
+}
+
+/// ADR 0012: a grant for any folder works outside a project. With the real value, each
+/// run waits for the owner. With a placeholder, the bouncer decides.
+#[test]
+fn any_folder_runs_outside_a_project_and_asks_for_a_real_value() {
+    let bouncer = common::fake_bouncer(&[]);
+    let fx = fixture(Some(&bouncer.url), echo_only());
+    let outside = fx.project.parent().expect("parent").to_path_buf();
+    let command = ["sh", "-c", "echo done; node -e 0"];
+    assert_eq!(code(&run_in(&fx, &outside, &command)), "outside_project");
+
+    {
+        let mut guard = fx.vault.lock().expect("vault");
+        let vault = guard.as_mut().expect("open");
+        vault
+            .set_exec_grants(
+                fx.agent_id,
+                &[fx.item_id],
+                &GrantPlace::AnyFolder,
+                ExecMode::Bouncer,
+            )
+            .expect("any folder");
+        let grants = vault.exec_grants_for_agent(fx.agent_id).expect("grants");
+        assert_eq!(grants[0].rule, echo_only(), "the rule stays");
+    }
+    // The real value in any folder: the run waits for the owner, here until the timeout.
+    assert_eq!(code(&run_in(&fx, &outside, &command)), "approval_timeout");
+
+    {
+        let mut guard = fx.vault.lock().expect("vault");
+        guard
+            .as_mut()
+            .expect("open")
+            .set_env_binding_with(
+                fx.item_id,
+                "DEMO_KEY",
+                "token",
+                &EnvDelivery::Placeholder(vec!["api.example.invalid".to_owned()]),
+            )
+            .expect("placeholder");
+    }
+    let clean = run_in(&fx, &outside, &command);
+    assert!(clean.ok, "{clean:?}");
+    let result = clean.result.expect("result");
+    assert_eq!(result["decided_by"], "Bouncer allowed");
+    assert_eq!(result["stdout"], "done\n");
+    assert!(fx.broker.approvals().pending().is_empty());
 }
 
 #[test]

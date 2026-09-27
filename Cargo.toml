@@ -91,6 +91,11 @@ path = "tests/agent_path.rs"
 required-features = ["vault"]
 
 [[test]]
+name = "access_model"
+path = "tests/access_model.rs"
+required-features = ["vault"]
+
+[[test]]
 name = "run_proxy"
 path = "tests/run_proxy.rs"
 required-features = ["vault"]

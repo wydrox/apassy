@@ -155,6 +155,13 @@ Select "Real value" for:
 - A value that the program uses itself: a JWT signing secret, a webhook secret, a database password.
 - A command that copies the secret to another service, for example `vercel env add`.
 
+## 8c. What an agent sees, any folder, and access requests (ADR 0012)
+
+- **Several credentials at once:** in Agents, open the agent. Under "Process access", click "Give access to several credentials…". Switch on each credential, choose "This folder" (and type it) or "Any folder", choose the decision, and click "Give access to N credentials". You confirm once.
+- **Any folder:** in the same sheet, or in the sheet of one credential, choose "Any folder". The agent can then run a command from any working directory. A credential whose variable holds the real value asks you at each run. With a placeholder, the bouncer can decide.
+- **See all credentials:** under "What it can see", switch on "All credentials, without values" and confirm. `apassy_list_access` then has a catalog without values. The agent can call `apassy_request_access` for a credential with access `can_request`.
+- **Access requests:** a request shows in Activity under "Access requests" with the reason of the agent. "Give access…" asks for the folder and the decision, then the owner check. "Deny" closes it. The agent sees the state in `apassy_list_access`.
+
 ## 9. Limits
 
 See section 10 of the [broker contract](../contracts/broker-v0.md). The real-secret gate stays BLOCKED.

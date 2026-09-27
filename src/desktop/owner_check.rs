@@ -32,7 +32,7 @@ use crate::broker::approvals::{
 };
 use crate::broker::profile::REPORTING_API_V0;
 use crate::native::{Biometry, NativeHelper};
-use crate::vault::{EnvDelivery, ExecMode, ExecRule};
+use crate::vault::{EnvDelivery, ExecMode, ExecRule, GrantPlace};
 
 /// The result of a poll of a [`Task`].
 pub(crate) enum TaskPoll<T> {
@@ -74,6 +74,14 @@ impl<T: Send + 'static> Task<T> {
     }
 }
 
+/// The decision of a process grant, for the owner check dialog.
+fn decides(mode: ExecMode) -> &'static str {
+    match mode {
+        ExecMode::Ask => "You approve each run.",
+        ExecMode::Bouncer => "The bouncer decides.",
+    }
+}
+
 /// An owner action that waits for the owner check. It has the parameters of the
 /// action, so the app does exactly what the owner confirmed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,7 +115,29 @@ pub enum OwnerRequest {
     SetProcessAccess {
         agent_id: u64,
         item_id: u64,
-        project_dir: String,
+        place: GrantPlace,
+        mode: ExecMode,
+    },
+    /// Give process access to several credentials at once (ADR 0012).
+    GrantMany {
+        agent_id: u64,
+        item_ids: Vec<u64>,
+        place: GrantPlace,
+        mode: ExecMode,
+    },
+    /// Let an agent see all credentials without values (ADR 0012).
+    ShowAllCredentials {
+        agent_id: u64,
+        agent_name: String,
+    },
+    /// Give the access that an agent asked for (ADR 0012).
+    GrantRequest {
+        request_id: u64,
+        agent_id: u64,
+        item_id: u64,
+        agent_name: String,
+        item_name: String,
+        place: GrantPlace,
         mode: ExecMode,
     },
     SaveRule {
@@ -169,9 +199,21 @@ impl OwnerRequest {
             }
             | Self::SetProcessAccess {
                 agent_id, item_id, ..
+            }
+            | Self::GrantRequest {
+                agent_id, item_id, ..
             } => OwnerAction::ChangeGrant {
                 agent_id: *agent_id,
                 item_id: *item_id,
+            },
+            Self::GrantMany {
+                agent_id, item_ids, ..
+            } => OwnerAction::ChangeGrants {
+                agent_id: *agent_id,
+                item_ids: item_ids.clone(),
+            },
+            Self::ShowAllCredentials { agent_id, .. } => OwnerAction::ShowAllCredentials {
+                agent_id: *agent_id,
             },
             Self::SaveRule {
                 agent_id, item_id, ..
@@ -225,16 +267,36 @@ impl OwnerRequest {
             Self::AllowOperation { operation, .. } => {
                 format!("Let the agent use the operation {operation}.")
             }
-            Self::SetProcessAccess {
-                project_dir, mode, ..
-            } => match mode {
-                ExecMode::Ask => {
-                    format!("Give the agent process access in {project_dir}. You approve each run.")
-                }
-                ExecMode::Bouncer => {
-                    format!("Give the agent process access in {project_dir}. The bouncer decides.")
-                }
-            },
+            Self::SetProcessAccess { place, mode, .. } => format!(
+                "Give the agent process access in {}. {}",
+                place.describe(),
+                decides(*mode)
+            ),
+            Self::GrantMany {
+                item_ids,
+                place,
+                mode,
+                ..
+            } => format!(
+                "Give the agent process access to {} credentials in {}. {}",
+                item_ids.len(),
+                place.describe(),
+                decides(*mode)
+            ),
+            Self::ShowAllCredentials { agent_name, .. } => format!(
+                "Let {agent_name} see all your credentials without values: names, usernames, hosts, and visible details. It can ask for access to each."
+            ),
+            Self::GrantRequest {
+                agent_name,
+                item_name,
+                place,
+                mode,
+                ..
+            } => format!(
+                "Give {agent_name} process access to {item_name} in {}. {}",
+                place.describe(),
+                decides(*mode)
+            ),
             Self::SaveRule { .. } => "Save the rule of this process grant.".to_owned(),
             Self::SaveDeclaration { form, .. } => format!(
                 "Save the declaration: {}, {} risk, provider {}.",
@@ -498,10 +560,10 @@ impl DesktopApp {
             OwnerRequest::SetProcessAccess {
                 agent_id,
                 item_id,
-                project_dir,
+                place,
                 mode,
             } => {
-                let result = session.set_exec_grant(agent_id, item_id, &project_dir, mode, proof);
+                let result = session.set_exec_grant(agent_id, item_id, &place, mode, proof);
                 let message = match mode {
                     ExecMode::Ask => "Process access is saved. You approve each run.",
                     ExecMode::Bouncer => {
@@ -509,6 +571,36 @@ impl DesktopApp {
                     }
                 };
                 let _ = self.apply(result, message);
+            }
+            OwnerRequest::GrantMany {
+                agent_id,
+                item_ids,
+                place,
+                mode,
+            } => {
+                let count = item_ids.len();
+                let result = session.set_exec_grants(agent_id, &item_ids, &place, mode, proof);
+                let _ = self.apply(
+                    result,
+                    &format!("Process access to {count} credentials is saved."),
+                );
+            }
+            OwnerRequest::ShowAllCredentials { agent_id, .. } => {
+                let result = session.set_agent_sees_all(agent_id, true, Some(proof));
+                let _ = self.apply(
+                    result,
+                    "The agent sees all credentials without values. It can ask for access.",
+                );
+            }
+            OwnerRequest::GrantRequest {
+                request_id,
+                item_name,
+                place,
+                mode,
+                ..
+            } => {
+                let result = session.grant_access_request(request_id, &place, mode, proof);
+                let _ = self.apply(result, &format!("Access to {item_name} is given."));
             }
             OwnerRequest::SaveRule {
                 agent_id,

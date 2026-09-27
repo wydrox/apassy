@@ -16,6 +16,7 @@ use super::wire::{Action, MAX_LINE_BYTES, WireResponse};
 pub const TOOL_LIST_ACCESS: &str = "apassy_list_access";
 pub const TOOL_USE_CREDENTIAL: &str = "apassy_use_credential";
 pub const TOOL_RUN_WITH_SECRETS: &str = "apassy_run_with_secrets";
+pub const TOOL_REQUEST_ACCESS: &str = "apassy_request_access";
 const SUPPORTED_PROTOCOLS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// Claude Code sets this variable for its stdio MCP servers to the session ID. The
@@ -130,7 +131,7 @@ fn initialize_result(params: &Value) -> Value {
         "protocolVersion": version,
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": { "name": "apassy", "version": env!("CARGO_PKG_VERSION") },
-        "instructions": "Apassy lets you use credentials that the owner permits. You never receive secret values. Call apassy_list_access first. To run a command that needs secrets, use apassy_run_with_secrets: Apassy starts the command with the secrets in its environment and returns masked output. Do not ask for secret values, and do not try to print them.",
+        "instructions": "Apassy lets you use credentials that the owner permits. You never receive secret values. Call apassy_list_access first. To run a command that needs secrets, use apassy_run_with_secrets: Apassy starts the command with the secrets in its environment and returns masked output. When apassy_list_access has a catalog, you can ask the owner for a credential there with apassy_request_access. Do not ask for secret values, and do not try to print them.",
     })
 }
 
@@ -139,7 +140,7 @@ pub fn tool_list() -> Value {
         {
             "name": TOOL_LIST_ACCESS,
             "title": "List permitted credentials",
-            "description": "List the credentials and named operations that the owner permits for this agent. The result has item IDs, item names, operations, and parameter formats. It never has secret values.",
+            "description": "List the credentials and named operations that the owner permits for this agent. The result has item IDs, item names, operations, parameter formats, and where each process grant works (a project folder or any folder). When the owner lets this agent see all credentials, it also has a catalog: each credential without secret values, and whether you can use it or ask for it. It never has secret values.",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -181,6 +182,21 @@ pub fn tool_list() -> Value {
                 "required": ["items", "command", "cwd", "purpose", "user_request"],
                 "additionalProperties": false
             }
+        },
+        {
+            "name": TOOL_REQUEST_ACCESS,
+            "title": "Ask the owner for a credential",
+            "description": "Ask the owner for process access to one credential from the catalog of apassy_list_access (access \"can_request\"). Apassy records the request and answers at once; it does not wait. The owner decides in the Apassy app and chooses the folder. Tell the user that the request waits in Apassy. When the owner gives access, the credential shows in process_access.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "item_id": { "type": "integer", "minimum": 1, "description": "Item ID from the catalog." },
+                    "reason": { "type": "string", "description": "Why you need this credential, with the user's own words when you have them. The owner reads it. At most 500 characters." },
+                    "cwd": { "type": "string", "description": "The absolute working directory where you want to use it. Optional." }
+                },
+                "required": ["item_id", "reason"],
+                "additionalProperties": false
+            }
         }
     ])
 }
@@ -198,6 +214,7 @@ fn call_tool(config: &AdapterConfig, params: &Value) -> Value {
         TOOL_LIST_ACCESS => Ok(Action::ListAccess),
         TOOL_USE_CREDENTIAL => call_action(&arguments),
         TOOL_RUN_WITH_SECRETS => run_action(&arguments),
+        TOOL_REQUEST_ACCESS => request_action(&arguments),
         _ => Err("The tool name is not known.".to_owned()),
     };
     let action = match action {
@@ -317,6 +334,42 @@ fn run_action(arguments: &Value) -> Result<Action, String> {
     })
 }
 
+fn request_action(arguments: &Value) -> Result<Action, String> {
+    let object = arguments
+        .as_object()
+        .ok_or_else(|| "The arguments must be an object.".to_owned())?;
+    if let Some(extra) = object
+        .keys()
+        .find(|key| !matches!(key.as_str(), "item_id" | "reason" | "cwd"))
+    {
+        return Err(format!("The argument \"{extra}\" is not permitted."));
+    }
+    let item_id = object
+        .get("item_id")
+        .and_then(Value::as_u64)
+        .filter(|id| *id > 0)
+        .ok_or_else(|| "The item_id argument must be a positive integer.".to_owned())?;
+    let reason = object
+        .get("reason")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "The reason argument must be a string.".to_owned())?
+        .to_owned();
+    let cwd = match object.get("cwd") {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .ok_or_else(|| "The cwd argument must be a string.".to_owned())?
+                .to_owned(),
+        ),
+    };
+    Ok(Action::RequestAccess {
+        item_id,
+        reason,
+        cwd,
+    })
+}
+
 fn tool_result(response: WireResponse) -> Value {
     if response.ok {
         let result = response.result.unwrap_or(Value::Null);
@@ -348,6 +401,9 @@ fn hint(code: &str) -> Option<&'static str> {
         ),
         "review_required" => Some(
             "Tell the user: the Apassy vault was restored from a backup. In the Apassy app, open the item, examine its agent settings, and click \"Confirm settings\". Do not retry before that.",
+        ),
+        "not_visible" => Some(
+            "Tell the user: the owner did not let this agent see this credential. Only the user can change that: in the Apassy app, open Agents, open this agent, and turn on \"All credentials, without values\". Do not retry before that.",
         ),
         "item_archived" => Some(
             "Tell the user: this credential is archived in Apassy. Only the user can bring it back: in the Apassy app, open the credential and click \"Restore from archive\". Do not retry before that, and do not look for the secret elsewhere.",
@@ -392,7 +448,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
         )
         .expect("reply");
-        assert_eq!(reply["result"]["tools"].as_array().map(Vec::len), Some(3));
+        assert_eq!(reply["result"]["tools"].as_array().map(Vec::len), Some(4));
         assert!(
             handle_message(
                 &config(),
@@ -447,5 +503,34 @@ mod tests {
         assert!(text.contains("APASSY_AGENT_TOKEN"), "{text}");
         let other = tool_result(WireResponse::failure("not_granted", "No."));
         assert_eq!(other["content"][0]["text"], "not_granted: No.");
+    }
+
+    #[test]
+    fn request_access_arguments_are_checked() {
+        let action = request_action(&serde_json::json!({
+            "item_id": 7,
+            "reason": "The user asked to deploy.",
+            "cwd": "/Users/me/Dev/app"
+        }))
+        .expect("action");
+        assert_eq!(
+            action,
+            Action::RequestAccess {
+                item_id: 7,
+                reason: "The user asked to deploy.".to_owned(),
+                cwd: Some("/Users/me/Dev/app".to_owned()),
+            }
+        );
+        for bad in [
+            serde_json::json!({ "item_id": 0, "reason": "x" }),
+            serde_json::json!({ "item_id": 7 }),
+            serde_json::json!({ "item_id": 7, "reason": "x", "folder": "/" }),
+            serde_json::json!({ "item_id": 7, "reason": "x", "cwd": 5 }),
+        ] {
+            assert!(request_action(&bad).is_err(), "{bad}");
+        }
+        let hint = tool_result(WireResponse::failure("not_visible", "No."));
+        let text = hint["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(text.contains("All credentials, without values"), "{text}");
     }
 }

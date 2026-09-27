@@ -157,6 +157,35 @@ pub(super) const SCHEMA_V11_COLUMNS: [&str; 1] =
 /// A variable in placeholder mode names at most this many hosts.
 pub const MAX_PLACEHOLDER_HOSTS: usize = 16;
 
+/// Columns and the table added in schema version 12 (ADR 0012): what an agent can see,
+/// grants for any folder, and access requests from agents.
+pub(super) const SCHEMA_V12_SQL: &str = "
+ALTER TABLE agent ADD COLUMN see_all INTEGER NOT NULL DEFAULT 0 CHECK (see_all IN (0, 1));
+ALTER TABLE exec_grant ADD COLUMN any_folder INTEGER NOT NULL DEFAULT 0 CHECK (any_folder IN (0, 1));
+CREATE TABLE access_request (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id INTEGER NOT NULL,
+    item_id INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('open', 'granted', 'denied')),
+    decided_at INTEGER
+);
+CREATE INDEX access_request_state ON access_request(state, id);
+UPDATE vault_meta SET schema_version = 12 WHERE id = 1;
+PRAGMA user_version = 12;
+";
+
+pub(super) const SCHEMA_V12_COLUMNS: [&str; 3] = [
+    "SELECT see_all FROM agent LIMIT 0",
+    "SELECT any_folder FROM exec_grant LIMIT 0",
+    "SELECT id, agent_id, item_id, reason, cwd, created_at, state, decided_at FROM access_request LIMIT 0",
+];
+
+/// One process grant covers at most this many items in one change.
+pub const MAX_GRANT_ITEMS: usize = 64;
+
 /// A token works for this many days after Apassy issues it, unless the owner changes it.
 pub const DEFAULT_TOKEN_LIFETIME_DAYS: u32 = 30;
 pub const MAX_TOKEN_LIFETIME_DAYS: u32 = 365;
@@ -487,14 +516,43 @@ impl ExecRule {
     }
 }
 
-/// Process access for one agent and one item, limited to one project directory.
+/// Process access for one agent and one item, in one project directory or in any
+/// folder (ADR 0012).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecGrant {
     pub agent_id: u64,
     pub item_id: u64,
-    pub project_dir: String,
+    pub place: GrantPlace,
     pub mode: ExecMode,
     pub rule: ExecRule,
+}
+
+/// Where a process grant works.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GrantPlace {
+    /// In this absolute directory and below it.
+    Folder(String),
+    /// In any working directory (ADR 0012). With a variable that holds the real
+    /// value, each run waits for the owner.
+    AnyFolder,
+}
+
+impl GrantPlace {
+    /// The directory, or `None` for any folder.
+    pub fn folder(&self) -> Option<&str> {
+        match self {
+            Self::Folder(dir) => Some(dir),
+            Self::AnyFolder => None,
+        }
+    }
+
+    /// "any folder" or the directory.
+    pub fn describe(&self) -> &str {
+        match self {
+            Self::Folder(dir) => dir,
+            Self::AnyFolder => "any folder",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -691,6 +749,10 @@ impl Vault {
         tx.execute("DELETE FROM grant_rule WHERE agent_id = ?1", [sql_id])
             .map_err(|_| err(VaultErrorKind::Storage))?;
         tx.execute("DELETE FROM exec_grant WHERE agent_id = ?1", [sql_id])
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        tx.execute("UPDATE agent SET see_all = 0 WHERE id = ?1", [sql_id])
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        tx.execute("DELETE FROM access_request WHERE agent_id = ?1", [sql_id])
             .map_err(|_| err(VaultErrorKind::Storage))?;
         super::learning::forget_agent(&tx, sql_id)?;
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))
@@ -1025,47 +1087,89 @@ impl Vault {
         project_dir: &str,
         mode: ExecMode,
     ) -> VaultResult<()> {
-        let agent = to_sql_id(agent_id)?;
-        let item = to_sql_id(item_id)?;
-        let project_dir = checked_text(project_dir.trim(), MAX_PROJECT_DIR_BYTES)?;
-        if !project_dir.starts_with('/') {
+        self.set_exec_grants(
+            agent_id,
+            &[item_id],
+            &GrantPlace::Folder(project_dir.to_owned()),
+            mode,
+        )
+    }
+
+    /// Give or change process access to several items in one transaction (ADR 0012).
+    /// Each item needs an environment variable. When one item fails, no grant changes.
+    /// An open access request of the agent for an item is granted with it.
+    pub fn set_exec_grants(
+        &mut self,
+        agent_id: u64,
+        item_ids: &[u64],
+        place: &GrantPlace,
+        mode: ExecMode,
+    ) -> VaultResult<()> {
+        let unique: std::collections::BTreeSet<u64> = item_ids.iter().copied().collect();
+        if item_ids.is_empty() || item_ids.len() > MAX_GRANT_ITEMS || unique.len() != item_ids.len()
+        {
             return Err(err(VaultErrorKind::InvalidInput));
         }
+        let agent = to_sql_id(agent_id)?;
+        let items = item_ids
+            .iter()
+            .map(|id| to_sql_id(*id))
+            .collect::<VaultResult<Vec<i64>>>()?;
+        let (project_dir, any_folder) = match place {
+            GrantPlace::Folder(dir) => {
+                let dir = checked_text(dir.trim(), MAX_PROJECT_DIR_BYTES)?;
+                if !dir.starts_with('/') {
+                    return Err(err(VaultErrorKind::InvalidInput));
+                }
+                (dir.to_owned(), 0i64)
+            }
+            GrantPlace::AnyFolder => (String::new(), 1i64),
+        };
         let at = to_sql_time(now_unix())?;
         let conn = self.conn_mut()?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| err(VaultErrorKind::Storage))?;
         require_active_agent(&tx, agent)?;
-        require_item(&tx, item)?;
-        let bound: Option<i64> = tx
-            .query_row(
-                "SELECT item_id FROM env_binding WHERE item_id = ?1",
-                [item],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|_| err(VaultErrorKind::Storage))?;
-        if bound.is_none() {
-            return Err(err(VaultErrorKind::InvalidInput));
-        }
-        tx.execute(
-            "INSERT INTO exec_grant (agent_id, item_id, project_dir, mode, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(agent_id, item_id) DO UPDATE SET
-                 project_dir = excluded.project_dir, mode = excluded.mode",
-            (agent, item, project_dir, mode.as_str(), at),
-        )
-        .map_err(|_| err(VaultErrorKind::Storage))?;
         let decides = match mode {
             ExecMode::Ask => "the owner approves each run",
             ExecMode::Bouncer => "the bouncer decides",
         };
         let detail = format!(
-            "{} · {decides} · {project_dir}",
-            history::agent_name(&tx, agent)?
+            "{} · {decides} · {}",
+            history::agent_name(&tx, agent)?,
+            place.describe().trim()
         );
-        history::record(&tx, item, ItemEventKind::AccessGiven, &detail)?;
+        for item in items {
+            require_item(&tx, item)?;
+            let bound: Option<i64> = tx
+                .query_row(
+                    "SELECT item_id FROM env_binding WHERE item_id = ?1",
+                    [item],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|_| err(VaultErrorKind::Storage))?;
+            if bound.is_none() {
+                return Err(err(VaultErrorKind::InvalidInput));
+            }
+            tx.execute(
+                "INSERT INTO exec_grant (agent_id, item_id, project_dir, mode, created_at, any_folder)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(agent_id, item_id) DO UPDATE SET
+                     project_dir = excluded.project_dir, mode = excluded.mode,
+                     any_folder = excluded.any_folder",
+                (agent, item, project_dir.as_str(), mode.as_str(), at, any_folder),
+            )
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+            tx.execute(
+                "UPDATE access_request SET state = 'granted', decided_at = ?1
+                 WHERE agent_id = ?2 AND item_id = ?3 AND state = 'open'",
+                (at, agent, item),
+            )
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+            history::record(&tx, item, ItemEventKind::AccessGiven, &detail)?;
+        }
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))
     }
 
@@ -1095,7 +1199,8 @@ impl Vault {
         let conn = self.conn_ref()?;
         let mut stmt = conn
             .prepare(
-                "SELECT exec_grant.item_id, exec_grant.project_dir, exec_grant.mode, exec_grant.rule
+                "SELECT exec_grant.item_id, exec_grant.project_dir, exec_grant.mode, exec_grant.rule,
+                     exec_grant.any_folder
                  FROM exec_grant JOIN agent ON agent.id = exec_grant.agent_id
                  WHERE exec_grant.agent_id = ?1 AND agent.revoked_at IS NULL
                  ORDER BY exec_grant.item_id ASC",
@@ -1108,17 +1213,22 @@ impl Vault {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
                 ))
             })
             .map_err(|_| err(VaultErrorKind::Storage))?;
         let mut grants = Vec::new();
         for row in rows {
-            let (item_id, project_dir, mode, rule) =
+            let (item_id, project_dir, mode, rule, any_folder) =
                 row.map_err(|_| err(VaultErrorKind::Storage))?;
             grants.push(ExecGrant {
                 agent_id,
                 item_id: to_public_id(item_id)?,
-                project_dir,
+                place: if any_folder == 1 {
+                    GrantPlace::AnyFolder
+                } else {
+                    GrantPlace::Folder(project_dir)
+                },
                 mode: ExecMode::from_str(&mode)?,
                 rule: serde_json::from_str(&rule).map_err(|_| err(VaultErrorKind::Storage))?,
             });
@@ -1422,6 +1532,10 @@ pub(super) fn prepare_restored(conn: &mut Connection) -> VaultResult<()> {
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.execute("DELETE FROM exec_grant", [])
         .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute("UPDATE agent SET see_all = 0", [])
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute("DELETE FROM access_request", [])
+        .map_err(|_| err(VaultErrorKind::Storage))?;
     super::learning::forget_all_patterns(&tx)?;
     tx.execute(
         "INSERT OR REPLACE INTO restore_review (item_id, restored_at)
@@ -1450,11 +1564,13 @@ pub(super) fn delete_item_links(tx: &rusqlite::Transaction<'_>, item_id: i64) ->
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.execute("DELETE FROM restore_review WHERE item_id = ?1", [item_id])
         .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute("DELETE FROM access_request WHERE item_id = ?1", [item_id])
+        .map_err(|_| err(VaultErrorKind::Storage))?;
     super::suggestions::forget_item(tx, item_id)?;
     super::learning::forget_item(tx, item_id)
 }
 
-fn require_active_agent(tx: &rusqlite::Transaction<'_>, agent: i64) -> VaultResult<()> {
+pub(super) fn require_active_agent(tx: &rusqlite::Transaction<'_>, agent: i64) -> VaultResult<()> {
     let row: Option<Option<i64>> = tx
         .query_row(
             "SELECT revoked_at FROM agent WHERE id = ?1",
@@ -1578,7 +1694,7 @@ fn constant_time_eq(stored: &[u8], presented: &[u8; TOKEN_BYTES]) -> bool {
     diff == 0
 }
 
-fn now_unix() -> u64 {
+pub(super) fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs())
@@ -1605,11 +1721,11 @@ pub fn format_utc(unix: u64) -> String {
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} UTC")
 }
 
-fn to_sql_time(at: u64) -> VaultResult<i64> {
+pub(super) fn to_sql_time(at: u64) -> VaultResult<i64> {
     i64::try_from(at).map_err(|_| err(VaultErrorKind::Storage))
 }
 
-fn from_sql_time(at: i64) -> VaultResult<u64> {
+pub(super) fn from_sql_time(at: i64) -> VaultResult<u64> {
     u64::try_from(at).map_err(|_| err(VaultErrorKind::Storage))
 }
 

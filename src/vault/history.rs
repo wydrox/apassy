@@ -78,6 +78,10 @@ pub enum ItemEventKind {
     AccessGiven,
     /// The detail names the agent.
     AccessRemoved,
+    /// An agent asked for process access (ADR 0012). The detail names the agent.
+    AccessRequested,
+    /// The owner denied an access request. The detail names the agent.
+    AccessDenied,
     /// The detail names the agent.
     RuleChanged,
     /// The detail names the agent and the operation.
@@ -105,6 +109,8 @@ impl ItemEventKind {
             Self::ConnectorRemoved => "connector_removed",
             Self::AccessGiven => "access_given",
             Self::AccessRemoved => "access_removed",
+            Self::AccessRequested => "access_requested",
+            Self::AccessDenied => "access_denied",
             Self::RuleChanged => "rule_changed",
             Self::OperationAllowed => "operation_allowed",
             Self::OperationRemoved => "operation_removed",
@@ -128,6 +134,8 @@ impl ItemEventKind {
             "connector_removed" => Self::ConnectorRemoved,
             "access_given" => Self::AccessGiven,
             "access_removed" => Self::AccessRemoved,
+            "access_requested" => Self::AccessRequested,
+            "access_denied" => Self::AccessDenied,
             "rule_changed" => Self::RuleChanged,
             "operation_allowed" => Self::OperationAllowed,
             "operation_removed" => Self::OperationRemoved,

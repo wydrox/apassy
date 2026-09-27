@@ -79,6 +79,16 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         user_request: Option<String>,
     },
+    /// Ask the owner for process access to one item that the agent sees (ADR 0012).
+    /// The broker records the request and answers at once. The owner decides in the app.
+    RequestAccess {
+        item_id: u64,
+        /// Why the agent needs the item. The owner reads it.
+        reason: String,
+        /// The working directory where the agent wants to use the item.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
     /// The user prompt from a host hook, for example Claude Code `UserPromptSubmit`
     /// (goal item B6). `apassy-hook` sends it. The broker keeps it in memory and uses
     /// it as the user request of later runs in the same host session.
@@ -103,6 +113,7 @@ impl Action {
             Self::ListAccess => "list_access",
             Self::Call { .. } => "call",
             Self::Run { .. } => "run",
+            Self::RequestAccess { .. } => "request_access",
             Self::SubmitUserRequest { .. } => "submit_user_request",
         }
     }

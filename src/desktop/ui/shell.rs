@@ -158,7 +158,15 @@ fn badge(app: &DesktopApp, view: OwnerView, pending: &Pending) -> Option<(usize,
                 .ok()
                 .map(|items| (items.len().saturating_sub(archived), Tone::Neutral))
         }
-        OwnerView::Activity => Some((pending.len(), Tone::Warning)),
+        OwnerView::Activity => {
+            // Runs that wait, and access requests of agents (ADR 0012).
+            let requests = app
+                .owner_ui
+                .session
+                .access_requests(true)
+                .map_or(0, |requests| requests.len());
+            Some((pending.len() + requests, Tone::Warning))
+        }
         _ => None,
     }
 }
@@ -367,7 +375,14 @@ fn sheets(app: &mut DesktopApp, ctx: &egui::Context) {
             agent_id,
             item_id,
             mode,
-        } => super::agents::access_sheet(app, ctx, agent_id, item_id, mode),
+            any_folder,
+        } => super::agents::access_sheet(app, ctx, agent_id, item_id, mode, any_folder),
+        #[cfg(feature = "vault")]
+        Sheet::GrantMany { agent_id } => super::agents::grant_many_sheet(app, ctx, agent_id),
+        #[cfg(feature = "vault")]
+        Sheet::AccessRequest { request_id } => {
+            super::activity::access_request_sheet(app, ctx, request_id)
+        }
         #[cfg(feature = "vault")]
         Sheet::Approval(run_id) => super::activity::approval_sheet(app, ctx, run_id),
         #[cfg(feature = "vault")]

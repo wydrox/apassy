@@ -28,11 +28,12 @@ use crate::contracts::CredentialKind;
 use crate::desktop::model::{DetailDraft, ItemDraft, ModelError, ModelResult};
 use crate::vault::providers::{self, Suggestion};
 use crate::vault::{
-    ActivityDecision, ActivityRecord, AgentSummary, AgentToken, Declaration, Destination,
-    EnvBinding, EnvDelivery, Environment, ExecGrant, ExecMode, ExecRule, Field,
-    ItemDraft as VaultDraft, ItemEvent, ItemTimes, MAX_PASSPHRASE_BYTES, MAX_PLACEHOLDER_HOSTS,
-    MAX_TOKEN_LIFETIME_DAYS, MIN_PASSPHRASE_BYTES, Reversibility, RiskLevel, Scope, SecretValue,
-    SuggestionStats, Vault, VaultError, VaultErrorKind, checked_env_name, parse_placeholder_host,
+    AccessRequest, ActivityDecision, ActivityRecord, AgentSummary, AgentToken, Declaration,
+    Destination, EnvBinding, EnvDelivery, Environment, ExecGrant, ExecMode, ExecRule, Field,
+    GrantPlace, ItemDraft as VaultDraft, ItemEvent, ItemTimes, MAX_PASSPHRASE_BYTES,
+    MAX_PLACEHOLDER_HOSTS, MAX_TOKEN_LIFETIME_DAYS, MIN_PASSPHRASE_BYTES, Reversibility, RiskLevel,
+    Scope, SecretValue, SuggestionStats, Vault, VaultError, VaultErrorKind, checked_env_name,
+    parse_placeholder_host,
 };
 
 const MAX_TAG_BYTES: usize = 64;
@@ -57,15 +58,7 @@ pub fn detail_field_name(label: &str) -> String {
 
 /// The label of a custom detail field. `None` for another field.
 pub fn detail_label(name: &str) -> Option<String> {
-    let hex = name.strip_prefix(DETAIL_PREFIX)?;
-    if hex.is_empty() || hex.len() % 2 != 0 {
-        return None;
-    }
-    let bytes: Option<Vec<u8>> = (0..hex.len())
-        .step_by(2)
-        .map(|index| u8::from_str_radix(hex.get(index..index + 2)?, 16).ok())
-        .collect();
-    String::from_utf8(bytes?).ok()
+    crate::vault::custom_detail_label(name)
 }
 
 /// The owner-facing name of a field: a built-in name, or the label of a custom detail.
@@ -1017,34 +1010,105 @@ impl OwnerSession {
             .map_err(map_err)
     }
 
-    /// Give an agent process access to an item, or change the mode. Needs a fresh owner
-    /// check (goal item A4).
+    /// Give an agent process access to an item, or change the mode or the place. Needs a
+    /// fresh owner check (goal item A4).
     pub fn set_exec_grant(
         &mut self,
         agent_id: u64,
         item_id: u64,
-        project_dir: &str,
+        place: &GrantPlace,
         mode: ExecMode,
         proof: OwnerProof,
     ) -> ModelResult<()> {
-        let dir = project_dir.trim();
-        let canonical = std::fs::canonicalize(dir)
-            .ok()
-            .filter(|path| path.is_dir())
-            .ok_or_else(|| {
-                fail(
+        let place = checked_place(place)?;
+        self.unlocked_for(proof, &OwnerAction::ChangeGrant { agent_id, item_id })?
+            .set_exec_grants(agent_id, &[item_id], &place, mode)
+            .map_err(map_err)
+    }
+
+    /// Give an agent process access to several items with one owner check (ADR 0012).
+    /// When one item fails, no grant changes.
+    pub fn set_exec_grants(
+        &mut self,
+        agent_id: u64,
+        item_ids: &[u64],
+        place: &GrantPlace,
+        mode: ExecMode,
+        proof: OwnerProof,
+    ) -> ModelResult<()> {
+        let place = checked_place(place)?;
+        let action = OwnerAction::ChangeGrants {
+            agent_id,
+            item_ids: item_ids.to_vec(),
+        };
+        self.unlocked_for(proof, &action)?
+            .set_exec_grants(agent_id, item_ids, &place, mode)
+            .map_err(|err| match err.kind() {
+                VaultErrorKind::InvalidInput => fail(
                     "invalid_input",
-                    "Type the absolute path of an existing project directory.",
+                    "Select 1 to 64 credentials. Each needs an environment variable.",
+                ),
+                _ => map_err(err),
+            })
+    }
+
+    /// The agent sees all credentials without values (ADR 0012).
+    pub fn agent_sees_all(&self, agent_id: u64) -> ModelResult<bool> {
+        self.unlocked()?.agent_sees_all(agent_id).map_err(map_err)
+    }
+
+    /// Turn "see all credentials" on (needs the owner check) or off (takes authority
+    /// away, so it needs none). Off also denies the open requests of the agent.
+    pub fn set_agent_sees_all(
+        &mut self,
+        agent_id: u64,
+        on: bool,
+        proof: Option<OwnerProof>,
+    ) -> ModelResult<()> {
+        let mut vault = if on {
+            let proof = proof.ok_or_else(|| {
+                fail(
+                    "owner_check_required",
+                    "Confirm that it is you to let an agent see all credentials.",
                 )
             })?;
-        if canonical == Path::new("/") {
-            return Err(fail(
-                "invalid_input",
-                "The project directory cannot be the root directory.",
-            ));
-        }
+            self.unlocked_for(proof, &OwnerAction::ShowAllCredentials { agent_id })?
+        } else {
+            self.unlocked()?
+        };
+        vault.set_agent_sees_all(agent_id, on).map_err(map_err)
+    }
+
+    /// Access requests of agents, newest first.
+    pub fn access_requests(&self, open_only: bool) -> ModelResult<Vec<AccessRequest>> {
+        self.unlocked()?
+            .access_requests(open_only, 100)
+            .map_err(map_err)
+    }
+
+    /// Deny an open request. It gives nothing, so it needs no owner check.
+    pub fn deny_access_request(&mut self, request_id: u64) -> ModelResult<()> {
+        self.unlocked()?
+            .deny_access_request(request_id)
+            .map_err(map_err)
+    }
+
+    /// Give the access that an agent asked for. Needs a fresh owner check for the
+    /// agent and the item of the request.
+    pub fn grant_access_request(
+        &mut self,
+        request_id: u64,
+        place: &GrantPlace,
+        mode: ExecMode,
+        proof: OwnerProof,
+    ) -> ModelResult<()> {
+        let place = checked_place(place)?;
+        let (agent_id, item_id) = self
+            .unlocked()?
+            .open_request_target(request_id)
+            .map_err(|_| fail("not_found", "The request is not open any more."))?;
         self.unlocked_for(proof, &OwnerAction::ChangeGrant { agent_id, item_id })?
-            .set_exec_grant(agent_id, item_id, &canonical.display().to_string(), mode)
+            .set_exec_grants(agent_id, &[item_id], &place, mode)
             .map_err(map_err)
     }
 
@@ -1675,6 +1739,30 @@ fn require_path(path: &Path) -> ModelResult<()> {
     } else {
         Ok(())
     }
+}
+
+/// A folder must be an existing directory that is not the root. It is stored in its
+/// canonical form.
+fn checked_place(place: &GrantPlace) -> ModelResult<GrantPlace> {
+    let GrantPlace::Folder(dir) = place else {
+        return Ok(GrantPlace::AnyFolder);
+    };
+    let canonical = std::fs::canonicalize(dir.trim())
+        .ok()
+        .filter(|path| path.is_dir())
+        .ok_or_else(|| {
+            fail(
+                "invalid_input",
+                "Type the absolute path of an existing project directory, or choose Any folder.",
+            )
+        })?;
+    if canonical == Path::new("/") {
+        return Err(fail(
+            "invalid_input",
+            "The project directory cannot be the root directory. Choose Any folder instead.",
+        ));
+    }
+    Ok(GrantPlace::Folder(canonical.display().to_string()))
 }
 
 fn plain_value(vault: &Vault, id: u64, name: &str) -> ModelResult<String> {

@@ -7,9 +7,10 @@
 //! 3. The request has a valid form: items, command, working directory, purpose, and `PATH`.
 //! 4. The working directory exists.
 //! 5. For each item: the agent has process access, the owner reviewed the item after a
-//!    restore, the working directory is in the granted project directory, the item has
-//!    an environment binding, and the hard rule passes (expiry, command prefixes,
-//!    forbidden words, hourly limit).
+//!    restore, the working directory is in the granted project directory (a grant for
+//!    any folder skips this, ADR 0012), the item has an environment binding, and the
+//!    hard rule passes (expiry, command prefixes, forbidden words, hourly limit). A grant
+//!    for any folder with a variable that holds the real value asks the owner.
 //! 6. A production declaration needs the owner (ADR 0010). The model is not asked.
 //! 7. The bouncer scores the request (ADR 0007, ADR 0008). A rule flag skips the model.
 //!    The command analysis gets the known hosts of the provider of each item (goal item
@@ -58,8 +59,8 @@ use super::shell_risk::{ProviderHosts, analyze_run, injection_flag};
 use crate::agent::wire::WireResponse;
 use crate::vault::providers;
 use crate::vault::{
-    ActivityDecision, AgentSummary, DecisionEntry, Declaration, EnvDelivery, ExecMode, NewActivity,
-    OwnerLabel, RealOutcome, Vault,
+    ActivityDecision, AgentSummary, DecisionEntry, Declaration, EnvDelivery, ExecMode, GrantPlace,
+    NewActivity, OwnerLabel, RealOutcome, Vault,
 };
 
 /// A shadow thread waits this long after the owner time limit for the real outcome.
@@ -662,7 +663,11 @@ fn check(
         if vault.is_archived(*item_id).unwrap_or(true) {
             return Err(("item_archived", archived_reason(*item_id)));
         }
-        let project = canonical_dir(Path::new(&grant.project_dir));
+        // ADR 0012: a grant for any folder takes the working directory as its project.
+        let project = match &grant.place {
+            GrantPlace::Folder(dir) => canonical_dir(Path::new(dir)),
+            GrantPlace::AnyFolder => Some(cwd.clone()),
+        };
         let inside = project
             .as_ref()
             .is_some_and(|project| cwd.starts_with(project));
@@ -740,6 +745,8 @@ fn check(
         // ADR 0008: the bouncer decides with the owner declaration. An item without a
         // declaration makes the decision ask the owner.
         any_ask |= grant.mode == ExecMode::Ask;
+        // ADR 0012: in any folder, a process with the real value waits for the owner.
+        any_ask |= grant.place == GrantPlace::AnyFolder && binding.delivery == EnvDelivery::Value;
         declarations.push(vault.declaration(*item_id).ok().flatten());
         // Goal item B4: only the stored provider name. The broker does not run the
         // detection. An unknown provider has no hosts, as an item without a provider.

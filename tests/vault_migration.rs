@@ -1,13 +1,12 @@
 #![cfg(feature = "vault")]
 
-//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 10) to
+//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 11) to
 //! the current version, with data at each version. Synthetic values only.
 //!
 //! The schema SQL below is a frozen copy of the statements that each earlier version ran
 //! at create: version 1 in commit a2f860a, 2 in 4ffdb5e, 3 in 22d1784, 4 in 2eb8366,
-//! 5 in 9ce2e01, 6 in 4193991, 7 in c5a91c0, 8 in 2acde80, 9 in cff4303, and 10 in the
-//! change that added the item history. Do not change these copies when the current
-//! schema changes.
+//! 5 in 9ce2e01, 6 in 4193991, 7 in c5a91c0, 8 in 2acde80, 9 in cff4303, 10 and 11 in
+//! ab935b8. Do not change these copies when the current schema changes.
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,14 +14,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use apassy::contracts::CredentialKind;
 use apassy::vault::{
     CandidateState, DecidedBy, DecisionEntry, Declaration, DeclarationField, EnvDelivery,
-    Environment, ExecMode, ExecRule, ItemEventKind, LoggedDecision, NewCandidate, OwnerLabel,
-    PatternKey, PatternState, RealOutcome, RequestSource, Reversibility, RiskLevel, Scope,
-    ShadowAnswer, ShadowEntry, SuggestedDeclaration, Vault, VaultErrorKind,
+    Environment, ExecMode, ExecRule, GrantPlace, ItemEventKind, LoggedDecision, NewCandidate,
+    OwnerLabel, PatternKey, PatternState, RealOutcome, RequestSource, RequestState, Reversibility,
+    RiskLevel, Scope, ShadowAnswer, ShadowEntry, SuggestedDeclaration, Vault, VaultErrorKind,
 };
 use tempfile::TempDir;
 
 const PASS: &str = "synthetic-migration-passphrase";
-const CURRENT_VERSION: i64 = 11;
+const CURRENT_VERSION: i64 = 12;
 
 const V1_SQL: &str = "
 CREATE TABLE vault_meta (
@@ -289,6 +288,12 @@ UPDATE vault_meta SET schema_version = 10 WHERE id = 1;
 PRAGMA user_version = 10;
 ";
 
+const V11_SQL: &str = "
+ALTER TABLE env_binding ADD COLUMN placeholder_hosts TEXT;
+UPDATE vault_meta SET schema_version = 11 WHERE id = 1;
+PRAGMA user_version = 11;
+";
+
 /// Five items, one of each kind: (title, kind, notes, tags, fields as (name, value, secret)).
 type ItemRow = (
     &'static str,
@@ -383,7 +388,7 @@ fn build_legacy(path: &Path, version: i64) {
     assert_eq!(journal, "delete");
     let tx = conn.transaction().expect("transaction");
     let steps = [
-        V1_SQL, V2_SQL, V3_SQL, V4_SQL, V5_SQL, V6_SQL, V7_SQL, V8_SQL, V9_SQL, V10_SQL,
+        V1_SQL, V2_SQL, V3_SQL, V4_SQL, V5_SQL, V6_SQL, V7_SQL, V8_SQL, V9_SQL, V10_SQL, V11_SQL,
     ];
     for sql in &steps[..usize::try_from(version).expect("version")] {
         tx.execute_batch(sql).expect("legacy schema");
@@ -861,6 +866,23 @@ fn unlock_migrates_each_earlier_schema_version_to_the_current_one() {
         vault
             .set_env_binding_with(5, "MIG_CUSTOM", "blob", &placeholder)
             .expect("placeholder binding");
+        // Version 12: "see all", a grant for any folder, and an access request work on
+        // the migrated file. Old grants keep their folder.
+        for grant in vault.exec_grants_for_agent(1).expect("grants") {
+            assert!(matches!(grant.place, GrantPlace::Folder(_)), "{grant:?}");
+        }
+        vault.set_agent_sees_all(agent.id, true).expect("see all");
+        let (request, created) = vault
+            .request_access(agent.id, 5, "Run the custom job.", "")
+            .expect("request");
+        assert!(created);
+        vault
+            .set_exec_grants(agent.id, &[5], &GrantPlace::AnyFolder, ExecMode::Bouncer)
+            .expect("grant");
+        assert_eq!(
+            vault.access_requests(false, 10).expect("requests")[0].id,
+            request
+        );
         drop(vault);
         assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
 
@@ -901,6 +923,22 @@ fn unlock_migrates_each_earlier_schema_version_to_the_current_one() {
                 .expect("some")
                 .delivery,
             EnvDelivery::Placeholder(vec!["api.mig.invalid".to_owned()])
+        );
+        let agent_id = again
+            .list_agents()
+            .expect("agents")
+            .iter()
+            .find(|agent| agent.name == "MIG new agent")
+            .expect("agent")
+            .id;
+        assert!(again.agent_sees_all(agent_id).expect("see all"));
+        assert_eq!(
+            again.access_requests(false, 10).expect("requests")[0].state,
+            RequestState::Granted
+        );
+        assert_eq!(
+            again.exec_grants_for_agent(agent_id).expect("grants")[0].place,
+            GrantPlace::AnyFolder
         );
         assert_eq!(again.item_events(1, 10).expect("history").len(), 1);
         let pattern = again.pattern(&key).expect("read").expect("pattern");
@@ -974,6 +1012,43 @@ fn migrated_candidate() -> NewCandidate {
 
 /// The step from version 8 to 9 runs in one transaction. A failure leaves version 8 and
 /// its data.
+#[test]
+fn a_failed_migration_from_version_11_keeps_the_old_version_and_data() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("blocked11.db");
+    build_legacy(&path, 11);
+    {
+        // A table with the name of the version 12 table makes the migration fail.
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        conn.execute_batch("CREATE TABLE access_request (x INTEGER);")
+            .expect("blocking table");
+        conn.close().map_err(|(_, err)| err).expect("close");
+    }
+    let mut vault = Vault::open(&path).expect("open");
+    assert_eq!(
+        vault.unlock(PASS).unwrap_err().kind(),
+        VaultErrorKind::Storage
+    );
+    drop(vault);
+    assert_eq!(raw_versions(&path), (11, 11), "no partial migration");
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        let column = conn.prepare("SELECT see_all FROM agent LIMIT 0");
+        assert!(column.is_err(), "no column of version 12");
+        drop(column);
+        conn.execute_batch("DROP TABLE access_request;")
+            .expect("drop blocking table");
+        conn.close().map_err(|(_, err)| err).expect("close");
+    }
+    let mut vault = Vault::open(&path).expect("open");
+    vault.unlock(PASS).expect("unlock migrates");
+    assert_version_data(&mut vault, 11);
+    drop(vault);
+    assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
+}
+
 #[test]
 fn a_failed_migration_from_version_10_keeps_the_old_version_and_data() {
     let dir = TempDir::new().expect("temp dir");

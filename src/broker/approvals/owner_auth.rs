@@ -44,6 +44,11 @@ pub enum OwnerAction {
     /// Give an agent access to an item or change that access: a connector operation
     /// or process access.
     ChangeGrant { agent_id: u64, item_id: u64 },
+    /// Give an agent process access to several items in one change (ADR 0012).
+    ChangeGrants { agent_id: u64, item_ids: Vec<u64> },
+    /// Let an agent see all items without values (ADR 0012). Turning it off takes
+    /// authority away and needs no check.
+    ShowAllCredentials { agent_id: u64 },
     /// Change the hard rule of a process grant (ADR 0007).
     ChangeRule { agent_id: u64, item_id: u64 },
     /// Change the agent settings of an item: the declaration, the environment
@@ -78,6 +83,12 @@ impl OwnerAction {
                 )
             }
             Self::ChangeGrant { .. } => "change the access of an agent".to_owned(),
+            Self::ChangeGrants { item_ids, .. } => {
+                format!("give an agent access to {} credentials", item_ids.len())
+            }
+            Self::ShowAllCredentials { .. } => {
+                "let an agent see all credentials without values".to_owned()
+            }
             Self::ChangeRule { .. } => "change an agent rule".to_owned(),
             Self::ChangeItemRules { .. } => "change the agent settings of an item".to_owned(),
             Self::RotateToken { .. } => "give an agent a new token".to_owned(),

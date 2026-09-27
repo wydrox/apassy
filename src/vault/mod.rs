@@ -12,6 +12,7 @@
 //! not protect against hostile parent-directory replacement or same-user
 //! arbitrary SQLite clients.
 
+mod access;
 mod agents;
 mod candidate;
 mod history;
@@ -33,12 +34,16 @@ use zeroize::Zeroizing;
 
 use crate::contracts::CredentialKind;
 
+pub use access::{
+    AccessRequest, CatalogEntry, MAX_CATALOG_ITEMS, MAX_OPEN_REQUESTS, MAX_REQUEST_REASON_BYTES,
+    RequestState, custom_detail_label,
+};
 pub use agents::{
     AGENT_TOKEN_PREFIX, ActivityDecision, ActivityRecord, AgentSummary, AgentToken,
     DEFAULT_TOKEN_LIFETIME_DAYS, Declaration, Destination, EnvBinding, EnvDelivery, Environment,
-    ExecGrant, ExecMode, ExecRule, GrantSummary, MAX_ACTIVITY_ROWS, MAX_PLACEHOLDER_HOSTS,
-    MAX_TOKEN_LIFETIME_DAYS, NewActivity, Reversibility, RiskLevel, Scope, checked_env_name,
-    format_utc, parse_placeholder_host,
+    ExecGrant, ExecMode, ExecRule, GrantPlace, GrantSummary, MAX_ACTIVITY_ROWS, MAX_GRANT_ITEMS,
+    MAX_PLACEHOLDER_HOSTS, MAX_TOKEN_LIFETIME_DAYS, NewActivity, Reversibility, RiskLevel, Scope,
+    checked_env_name, format_utc, parse_placeholder_host,
 };
 pub use candidate::{
     ActivationAction, CandidateRecord, CandidateState, MAX_ACTIVATIONS, MAX_CANDIDATES,
@@ -115,6 +120,7 @@ const LEARNING_SCHEMA_VERSION: i64 = 7;
 const SUGGESTION_SCHEMA_VERSION: i64 = 8;
 const CANDIDATE_SCHEMA_VERSION: i64 = 9;
 const HISTORY_SCHEMA_VERSION: i64 = 10;
+const PLACEHOLDER_SCHEMA_VERSION: i64 = 11;
 
 /// Encrypted local vault. Connection state is private. Debug is redacted.
 pub struct Vault {
@@ -913,6 +919,7 @@ fn verify_user_version(conn: &Connection) -> VaultResult<i64> {
         | SUGGESTION_SCHEMA_VERSION
         | CANDIDATE_SCHEMA_VERSION
         | HISTORY_SCHEMA_VERSION
+        | PLACEHOLDER_SCHEMA_VERSION
         | SCHEMA_VERSION) => Ok(version),
         _ => Err(err(VaultErrorKind::UnsupportedSchema)),
     }
@@ -1015,8 +1022,13 @@ fn verify_expected_columns(conn: &Connection, version: i64) -> VaultResult<()> {
     } else {
         &[]
     };
-    let v11: &[&str] = if version >= SCHEMA_VERSION {
+    let v11: &[&str] = if version >= PLACEHOLDER_SCHEMA_VERSION {
         &agents::SCHEMA_V11_COLUMNS
+    } else {
+        &[]
+    };
+    let v12: &[&str] = if version >= SCHEMA_VERSION {
+        &agents::SCHEMA_V12_COLUMNS
     } else {
         &[]
     };
@@ -1032,6 +1044,7 @@ fn verify_expected_columns(conn: &Connection, version: i64) -> VaultResult<()> {
         .chain(v9)
         .chain(v10)
         .chain(v11)
+        .chain(v12)
     {
         drop(
             conn.prepare(sql)
@@ -1092,7 +1105,11 @@ fn migrate_to_current(conn: &mut Connection, from: i64) -> VaultResult<()> {
         tx.execute_batch(history::SCHEMA_V10_SQL)
             .map_err(|_| err(VaultErrorKind::Storage))?;
     }
-    tx.execute_batch(agents::SCHEMA_V11_SQL)
+    if from < PLACEHOLDER_SCHEMA_VERSION {
+        tx.execute_batch(agents::SCHEMA_V11_SQL)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+    }
+    tx.execute_batch(agents::SCHEMA_V12_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     verify_expected_columns(conn, SCHEMA_VERSION)
@@ -1135,6 +1152,8 @@ fn initialize_new_db(path: &Path, passphrase: &str) -> VaultResult<()> {
     tx.execute_batch(history::SCHEMA_V10_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.execute_batch(agents::SCHEMA_V11_SQL)
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute_batch(agents::SCHEMA_V12_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     close_conn(conn)

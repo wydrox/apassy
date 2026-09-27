@@ -54,6 +54,12 @@ The `run` action is in [ADR 0006](../adr/0006-process-secrets.md). Its check ord
 
 A run with a variable in placeholder mode ([ADR 0011](../adr/0011-run-proxy-placeholders.md)) also has `placeholders` (the variable names) and `network`: `proxy` (true), `only_proxy` (true when the macOS network rule was on), and `requests`. Each request has `host`, `port`, `method`, `path` (without the query), `status`, `outcome` (`swapped`, `passed`, `tunneled`, `refused`, or `failed`), `secrets` (the variables whose value went in), and `reason`. When the run proxy cannot start, the code is `proxy_failed` and the command does not run. In `list_access`, each `process_access` entry has `env_holds` ("the real value" or "a placeholder") and `real_value_only_for_hosts`.
 
+[ADR 0012](../adr/0012-agent-visibility-and-access-requests.md) adds to `list_access`: `sees_all_credentials`; for each `process_access` entry `any_folder`, with `project_dir` null for any folder; `catalog` when the owner lets the agent see all credentials (`item_id`, `item_name`, `kind`, `details`, `access`: `can_use`, `can_request`, `requested`, or `no_variable`); and `access_requests` (`request_id`, `item_id`, `state`: `open`, `granted`, or `denied`). The action `request_access` has `item_id`, `reason`, and an optional `cwd`. It answers at once with `request_id`, `state`, and `new`. Its codes are `not_visible`, `invalid_request`, `already_granted`, and `too_many_requests`.
+
+```json
+{"v":0,"token":"apassy_agt_<64 hex>","action":{"kind":"request_access","item_id":7,"reason":"The user asked me to deploy the staging app.","cwd":"/Users/me/Dev/shop"}}
+```
+
 A request can have `host_session`: the session ID of the agent host. `apassy-mcp` sends `CLAUDE_CODE_SESSION_ID` here. `apassy-hook` sends the `session_id` of the hook input. In `submit_user_request`, the value must have 1 to 128 characters: `A-Z`, `a-z`, `0-9`, `-`, `_`, or `.`.
 
 ```json
@@ -112,7 +118,7 @@ A locked vault cannot record. The broker does not record requests with an unknow
 
 ## 6. Error codes
 
-`rule_expired`, `rule_command_not_permitted`, `rule_forbidden_word`, `rule_rate_limit`, `invalid_request`, `outside_project`, `no_env_binding`, `approval_denied`, `approval_timeout`, `approval_invalidated`, `start_failed`, `bad_request`, `unsupported_version`, `busy`, `vault_locked`, `unauthenticated`, `not_granted`, `no_destination`, `unknown_profile`, `unknown_operation`, `invalid_params`, `destination_not_permitted`, `wrong_credential_kind`, `missing_secret`, `destination_unreachable`, `tls_failed`, `destination_refused`, `destination_not_found`, `destination_error`, `bad_output`, `output_blocked`, `broker_error`, `token_expired`, `review_required`, `item_archived`, `proxy_failed`.
+`rule_expired`, `rule_command_not_permitted`, `rule_forbidden_word`, `rule_rate_limit`, `invalid_request`, `outside_project`, `no_env_binding`, `approval_denied`, `approval_timeout`, `approval_invalidated`, `start_failed`, `bad_request`, `unsupported_version`, `busy`, `vault_locked`, `unauthenticated`, `not_granted`, `no_destination`, `unknown_profile`, `unknown_operation`, `invalid_params`, `destination_not_permitted`, `wrong_credential_kind`, `missing_secret`, `destination_unreachable`, `tls_failed`, `destination_refused`, `destination_not_found`, `destination_error`, `bad_output`, `output_blocked`, `broker_error`, `token_expired`, `review_required`, `item_archived`, `proxy_failed`, `not_visible`, `already_granted`, `too_many_requests`.
 
 ## 7. Connector profile `reporting-api-v0`
 
