@@ -1,6 +1,6 @@
 [package]
 name = "apassy"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.97"
 publish = false
@@ -64,6 +64,12 @@ required-features = ["vault"]
 name = "basemodel_labels"
 path = "examples/basemodel_labels.rs"
 required-features = ["vault"]
+
+# Screenshots for the README and the site (scripts/screenshots.sh). Synthetic data.
+[[example]]
+name = "screenshots"
+path = "examples/screenshots.rs"
+required-features = ["desktop", "vault"]
 
 [[test]]
 name = "sqlcipher_probe"
