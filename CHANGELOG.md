@@ -2,6 +2,31 @@
 
 All notable changes to Apassy. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org/). The site shows this file at <https://apassy.wyderka.cc/changelog>.
 
+## [0.3.0] - 2026-09-28
+
+Several vaults, iCloud sync, import from 1Password, and automatic updates.
+
+### Added
+
+- **Several vaults.** Each vault is its own encrypted file with its own passphrase, credentials, agents, rules, and learning data. One vault is open at a time, and agents reach only the open vault. The name of the open vault at the top of the sidebar switches to another vault. A switch locks the open vault and ends each run that waits for you. Settings > Vaults renames a vault or removes it from the list; the file stays ([several vaults](docs/operations/multiple-vaults.md), [ADR 0013](docs/adr/0013-multiple-vaults.md)).
+- **iCloud sync.** A vault can keep an encrypted copy in iCloud Drive, and your other Macs open it with "Open a vault from iCloud…". The vault that Apassy works on stays a local file: SQLite never writes in iCloud Drive. Apassy uploads your changes before a lock and every few minutes, and loads a newer copy when you unlock. When two Macs changed the vault, you choose one version, and Apassy keeps the other as a conflict copy. An older copy, or a copy made of pages from different versions, is refused ([iCloud](docs/operations/icloud.md), [ADR 0014](docs/adr/0014-icloud-sync.md)).
+- **Import from 1Password.** Settings > Import reads a 1PUX or CSV export and shows each item before anything is added. API credentials, SSH keys, databases, and servers are selected first; logins, passwords, and notes are not. A secret never goes into a title, notes, or tags. No agent gets access to an imported credential. After the import, Apassy offers to delete the export file ([import from 1Password](docs/operations/import-1password.md)).
+- **Automatic updates.** The app checks for a new version shortly after the start and every 6 hours, downloads it, and installs it at "Restart now" or at the next quit. It installs only an app with the size and SHA-256 of `latest.json`, signed with a Developer ID of the same team, and notarized by Apple. Settings > Updates turns the check and the automatic install off ([updates](docs/operations/updates.md), [ADR 0015](docs/adr/0015-automatic-updates.md)).
+
+### Changed
+
+- The vault schema is version 13: a vault ID and a sync generation for iCloud. A vault of an earlier version migrates at unlock.
+- `apassy-sandbox` denies agents each vault in the vault list, the iCloud Drive folder of Apassy, and the list itself. It refuses to start when the vault list is damaged, because a damaged list can hide a vault outside the data folder.
+- An agent with a token of another vault gets a message that says the owner may have another vault open. The message names no vault.
+- The result of a run, a connector call, and a local training goes only to the vault where it started, also when you switch vaults during it.
+- An edit of a credential keeps its tags.
+- Release builds record their commit and build time in the program and in `Info.plist`.
+
+### Security
+
+- The updater checks the new app again just before it replaces the installed app, and puts the old app back when the replacement fails.
+- An iCloud copy is checked with your passphrase on a local copy before it replaces the vault file.
+
 ## [0.2.1] - 2026-09-28
 
 Apassy builds and passes its tests on Linux. The app for Linux is not published yet: the isolation of agents uses macOS Seatbelt, and Linux needs its own version first.
@@ -59,6 +84,7 @@ The alpha. It was not published.
 - Secrets for agent processes with owner approval: the socket never returns a secret value ([ADR 0006](docs/adr/0006-process-secrets.md)).
 - Plain-language rules and a local bouncer on Laya ([ADR 0007](docs/adr/0007-rules-and-local-bouncer.md)).
 
+[0.3.0]: https://github.com/wydrox/apassy/releases/tag/v0.3.0
 [0.2.1]: https://github.com/wydrox/apassy/releases/tag/v0.2.1
 [0.2.0]: https://github.com/wydrox/apassy/releases/tag/v0.2.0
 [0.1.0]: https://github.com/wydrox/apassy/commits/a2f860a

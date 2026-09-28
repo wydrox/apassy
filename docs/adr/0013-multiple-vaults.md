@@ -1,7 +1,7 @@
 # ADR 0013 — Several vaults, one open at a time
 
 Date: 2026-09-28.
-Status: ACCEPTED by the owner for 0.3.0. In the code.
+Status: PROPOSED for 0.3.0. In the code.
 
 ## Context
 
