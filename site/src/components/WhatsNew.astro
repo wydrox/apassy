@@ -1,0 +1,309 @@
+---
+// What 0.3.0 adds: several vaults, sync between Macs, import from 1Password, and
+// automatic updates. The facts: CHANGELOG.md, docs/operations/multiple-vaults.md,
+// import-1password.md, and updates.md. The small views are drawings of the app,
+// not screenshots; the text of each card says the same.
+const vaults = [
+  { name: "Personal", color: "var(--blue)", open: true },
+  { name: "Client A", color: "var(--orange)", open: false },
+  { name: "Client B", color: "var(--green)", open: false },
+];
+const providers = ["iCloud Drive", "Dropbox", "Google Drive", "OneDrive", "Syncthing"];
+const items = [
+  { title: "Stripe live key", kind: "API key", on: true },
+  { title: "Deploy key", kind: "SSH key", on: true },
+  { title: "Orders database", kind: "Database", on: true },
+  { title: "github.com", kind: "Login", on: false },
+];
+---
+<section class="section" id="new">
+  <div class="container">
+    <header class="center">
+      <p class="eyebrow" data-reveal>New in 0.3.0</p>
+      <h2 class="h2" data-reveal style="--i:1">Keep clients apart. Keep your Macs in step.</h2>
+      <p class="lead" data-reveal style="--i:2">
+        Give each client its own vault, sync a vault between your Macs, bring your keys over from 1Password,
+        and let the app update itself.
+      </p>
+    </header>
+
+    <div class="grid">
+      <article class="feature card" data-spotlight data-reveal style="--i:3">
+        <div class="stage" aria-hidden="true">
+          <div class="switcher">
+            <div class="current">
+              <span class="dot" style="--c:var(--blue)"></span>
+              <span>Personal</span>
+              <svg class="chev" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5" /></svg>
+            </div>
+            <div class="menu">
+              {vaults.map((v) => (
+                <div class:list={["item", { on: v.open }]}>
+                  <span class="dot" style={`--c:${v.color}`}></span>
+                  <span class="name">{v.name}</span>
+                  {v.open ? (
+                    <span class="state">Open</span>
+                  ) : (
+                    <svg class="lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2" /><path d="M8 11V8a4 4 0 0 1 8 0v3" /></svg>
+                  )}
+                </div>
+              ))}
+              <div class="sep"></div>
+              <div class="item action">New vault…</div>
+            </div>
+          </div>
+        </div>
+        <div class="body">
+          <h3>
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 3.5 8l8.5 4.5L20.5 8zM3.5 12l8.5 4.5 8.5-4.5M3.5 16l8.5 4.5 8.5-4.5" /></svg>
+            Several vaults
+          </h3>
+          <p>
+            Keep personal and client credentials apart, for example in Personal and Client&nbsp;A. Each vault is its own
+            encrypted file with its own passphrase, credentials, agents, and rules.
+          </p>
+          <ul class="checks">
+            <li>One vault is open at a time</li>
+            <li>Agents reach only the open vault</li>
+            <li>Switch from the top of the sidebar</li>
+          </ul>
+        </div>
+      </article>
+
+      <article class="feature card" data-spotlight data-reveal style="--i:4">
+        <div class="stage" aria-hidden="true">
+          <div class="sync">
+            <div class="flow">
+              <div class="node">
+                <svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="11" rx="1.5" /><path d="M2 19h20" /></svg>
+                <p>MacBook Pro</p>
+                <p class="sub">its own agents</p>
+              </div>
+              <div class="wire"><i class="packet"></i></div>
+              <div class="node folder">
+                <svg viewBox="0 0 24 24"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2h9A1.5 1.5 0 0 1 21 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z" /><rect x="9.5" y="12.5" width="5" height="4" rx="0.8" /><path d="M10.5 12.5v-1a1.5 1.5 0 0 1 3 0v1" /></svg>
+                <p>Sync folder</p>
+                <p class="sub">encrypted</p>
+              </div>
+              <div class="wire back"><i class="packet"></i></div>
+              <div class="node">
+                <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="1.5" /><path d="M9 20h6M12 16v4" /></svg>
+                <p>Mac mini</p>
+                <p class="sub">its own agents</p>
+              </div>
+            </div>
+            <ul class="providers">
+              {providers.map((p) => <li>{p}</li>)}
+            </ul>
+          </div>
+        </div>
+        <div class="body">
+          <h3>
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 10.5A7.5 7.5 0 0 0 6 6.8M4.5 13.5A7.5 7.5 0 0 0 18 17.2M5.5 3.5v3.8h3.8M18.5 20.5v-3.8h-3.8" /></svg>
+            Sync between your Macs
+          </h3>
+          <p>
+            As with an Obsidian vault, a vault syncs through iCloud Drive, or through any folder that Dropbox,
+            Google Drive, OneDrive, or Syncthing keeps in step. Sync is off until you turn it on.
+          </p>
+          <ul class="checks">
+            <li>Changes from several Macs merge, one credential at a time</li>
+            <li>When a credential changed on two Macs, the other version stays as an archived conflict copy</li>
+            <li>The synced file is encrypted with the vault passphrase</li>
+            <li>Agents, their access, and the activity stay on each Mac. Each Mac registers its own agents.</li>
+          </ul>
+        </div>
+      </article>
+
+      <article class="feature card" data-spotlight data-reveal style="--i:5">
+        <div class="stage" aria-hidden="true">
+          <div class="panel">
+            <div class="panel-head">
+              <span class="file">1PasswordExport-….1pux</span>
+              <span class="count">{items.length} items</span>
+            </div>
+            <ul class="items">
+              {items.map((item) => (
+                <li class:list={{ off: !item.on }}>
+                  <span class:list={["box", { on: item.on }]}>
+                    {item.on && <svg viewBox="0 0 16 16"><path d="m3.5 8.5 3 3 6-7" /></svg>}
+                  </span>
+                  <span class="title">{item.title}</span>
+                  <span class="kind">{item.kind}</span>
+                </li>
+              ))}
+            </ul>
+            <div class="panel-foot">
+              <span class="mini-btn">Import {items.filter((item) => item.on).length} credentials</span>
+            </div>
+          </div>
+        </div>
+        <div class="body">
+          <h3>
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5v11M7.5 10l4.5 4.5 4.5-4.5M4 15.5v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" /></svg>
+            Import from 1Password
+          </h3>
+          <p>Read a 1PUX or CSV export, see every item first, and pick what to add.</p>
+          <ul class="checks">
+            <li>API credentials, SSH keys, databases, and servers are selected first</li>
+            <li>Website logins stay in 1Password unless you pick them</li>
+            <li>Secrets never go into titles, notes, or tags</li>
+            <li>Afterwards, Apassy offers to delete the export file</li>
+          </ul>
+        </div>
+      </article>
+
+      <article class="feature card" data-spotlight data-reveal style="--i:6">
+        <div class="stage" aria-hidden="true">
+          <div class="panel">
+            <div class="banner">
+              <span class="ready">A new version is ready.</span>
+              <span class="mini-btn">Restart now</span>
+            </div>
+            <div class="panel-head"><span>Settings › Updates</span></div>
+            <div class="setting">
+              <span>Check for updates automatically</span>
+              <span class="toggle"></span>
+            </div>
+            <div class="setting">
+              <span>Download and install automatically</span>
+              <span class="toggle"></span>
+            </div>
+          </div>
+        </div>
+        <div class="body">
+          <h3>
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" /><path d="M12 16V8.5M8.5 11.5 12 8l3.5 3.5" /></svg>
+            Automatic updates
+          </h3>
+          <p>Apassy checks for a new version and installs it when you restart. Settings&nbsp;&gt;&nbsp;Updates turns it off.</p>
+          <ul class="checks">
+            <li>Only a build signed by the same Developer ID team</li>
+            <li>Only a build notarized by Apple</li>
+            <li>Only when the version number goes up</li>
+          </ul>
+          <p class="note">
+            Apps before 0.3.0 do not update themselves: <a href="#download">download Apassy from this page once</a>.
+          </p>
+        </div>
+      </article>
+    </div>
+  </div>
+</section>
+
+<style>
+  .center { text-align: center; max-width: 760px; margin: 0 auto; }
+  .center .h2 { margin-top: 14px; }
+  .center .lead { margin-top: 20px; }
+
+  .grid { margin-top: 56px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+  .feature { display: flex; flex-direction: column; }
+
+  /* ---- The drawing at the top of each card ---- */
+  .stage {
+    height: 236px; padding: 20px; display: grid; place-items: center; border-bottom: 1px solid var(--edge);
+    background:
+      linear-gradient(var(--grid) 1px, transparent 1px) 0 0 / 24px 24px,
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0 / 24px 24px,
+      var(--surface-2);
+  }
+  .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
+
+  /* Several vaults: the switcher at the top of the sidebar. */
+  .switcher { width: 100%; max-width: 260px; font-size: 13px; }
+  .current {
+    display: flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid var(--edge); border-radius: 10px;
+    background: var(--surface); font-weight: 600;
+  }
+  .chev { margin-left: auto; width: 14px; height: 14px; fill: none; stroke: var(--faint); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .menu {
+    margin-top: 6px; padding: 5px; border: 1px solid var(--edge); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow);
+  }
+  .item { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-radius: 8px; color: var(--ink-2); }
+  .item.on { background: var(--blue-soft); color: var(--ink); font-weight: 500; }
+  .state { margin-left: auto; font-size: 11px; color: var(--blue); font-weight: 600; }
+  .lock { margin-left: auto; width: 13px; height: 13px; fill: none; stroke: var(--faint); stroke-width: 1.8; stroke-linecap: round; }
+  .sep { height: 1px; margin: 4px 6px; background: var(--edge); }
+  .action { color: var(--muted); }
+
+  /* Sync: two Macs and the folder between them. */
+  .sync { width: 100%; display: grid; gap: 20px; justify-items: center; }
+  .flow { width: 100%; max-width: 420px; display: grid; grid-template-columns: auto minmax(14px, 1fr) auto minmax(14px, 1fr) auto; align-items: center; }
+  .node {
+    display: grid; justify-items: center; gap: 2px; padding: 12px 10px 10px; min-width: 84px; border: 1px solid var(--edge); border-radius: 12px;
+    background: var(--surface); box-shadow: var(--shadow); text-align: center; font-size: 12px; font-weight: 600; white-space: nowrap;
+  }
+  .node svg { width: 24px; height: 24px; margin-bottom: 4px; fill: none; stroke: var(--ink-2); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+  .node .sub { font-size: 11px; font-weight: 400; color: var(--faint); }
+  .folder { box-shadow: 0 0 0 5px var(--blue-soft), var(--shadow); }
+  .folder svg { stroke: var(--blue); }
+  .wire { position: relative; height: 2px; background: repeating-linear-gradient(90deg, var(--edge) 0 5px, transparent 5px 9px); }
+  .packet { position: absolute; top: -3px; left: 0; width: 8px; height: 8px; border-radius: 50%; background: var(--blue); box-shadow: 0 0 10px var(--blue); opacity: 0; }
+  .is-visible .packet { animation: travel 2.6s ease-in-out infinite; }
+  .is-visible .back .packet { animation-name: travel-back; animation-delay: 1.3s; }
+  @keyframes travel { 0% { left: 0; opacity: 0; } 15%, 85% { opacity: 1; } 100% { left: calc(100% - 8px); opacity: 0; } }
+  @keyframes travel-back { 0% { left: calc(100% - 8px); opacity: 0; } 15%, 85% { opacity: 1; } 100% { left: 0; opacity: 0; } }
+  .providers { list-style: none; padding: 0; display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; }
+  .providers li {
+    padding: 3px 9px; border: 1px solid var(--edge); border-radius: 999px; background: var(--surface);
+    font-family: var(--mono); font-size: 11px; color: var(--muted);
+  }
+
+  /* Import and updates: a small window of the app. */
+  .panel {
+    width: 100%; max-width: 340px; border: 1px solid var(--edge); border-radius: 12px; background: var(--surface);
+    box-shadow: var(--shadow); font-size: 13px; overflow: hidden;
+  }
+  .panel-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 12px;
+    border-bottom: 1px solid var(--edge); font-size: 12px; font-weight: 600; color: var(--muted);
+  }
+  .file { font-family: var(--mono); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .count { flex: none; font-weight: 400; color: var(--faint); }
+  .items { list-style: none; padding: 4px 0; }
+  .items li { display: flex; align-items: center; gap: 9px; padding: 5px 12px; }
+  .items li.off { color: var(--faint); }
+  .box {
+    flex: none; display: grid; place-items: center; width: 15px; height: 15px; border-radius: 4px; border: 1.5px solid var(--faint);
+  }
+  .box.on { border-color: var(--blue); background: var(--blue); }
+  .box svg { width: 11px; height: 11px; fill: none; stroke: #fff; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+  .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .kind { margin-left: auto; flex: none; font-size: 11px; color: var(--faint); }
+  .panel-foot { display: flex; justify-content: flex-end; padding: 8px 12px 10px; border-top: 1px solid var(--edge); }
+  .mini-btn {
+    flex: none; padding: 4px 10px; border-radius: 7px; background: var(--btn-bg); color: var(--btn-ink); font-size: 12px; font-weight: 600;
+  }
+  .banner {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px;
+    background: var(--green-soft); border-bottom: 1px solid var(--edge);
+  }
+  .ready { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+  .ready::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+  .setting { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 12px; color: var(--ink-2); }
+  .setting + .setting { border-top: 1px solid var(--edge); }
+  .toggle { position: relative; flex: none; width: 30px; height: 18px; border-radius: 999px; background: var(--green); }
+  .toggle::after { content: ""; position: absolute; top: 2px; right: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25); }
+
+  /* ---- The text of each card ---- */
+  .body { padding: 26px 28px 30px; }
+  h3 { display: flex; align-items: center; gap: 12px; font-size: 21px; font-weight: 600; letter-spacing: -0.02em; }
+  .icon {
+    flex: none; width: 34px; height: 34px; padding: 7px; border-radius: 10px; background: var(--blue-soft); color: var(--blue);
+    fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+  }
+  .body > p { margin-top: 14px; color: var(--muted); text-wrap: pretty; }
+  .body .checks { margin-top: 18px; gap: 10px; font-size: 15px; }
+  .note { padding-top: 16px; border-top: 1px dashed var(--edge); font-size: 14px; }
+  .body .checks + .note { margin-top: 20px; }
+  .note a { color: var(--blue); font-weight: 500; }
+
+  @media (max-width: 860px) {
+    .grid { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 480px) {
+    .stage { height: auto; min-height: 220px; padding: 20px 14px; }
+    .body { padding: 22px 20px 26px; }
+    .node { min-width: 0; padding: 10px 8px 8px; }
+  }
+</style>
