@@ -52,7 +52,7 @@ flowchart LR
 - **The bouncer runs on your Mac.** 64 rule packs and the `apassy-base-v1` model check every command. A production credential always waits for you ([bouncer](docs/operations/bouncer.md)).
 - **It learns.** "Approve and remember" turns a routine command into a pattern, and the Learning view shows how often you are asked ([learning](docs/operations/learning.md)).
 - **Agents run in a sandbox.** `apassy-sandbox` starts Claude Code and Codex in a Seatbelt profile that denies the vaults, the backups, the model, and the app ([isolation](docs/operations/isolation.md)).
-- **Several vaults, and iCloud if you want it.** Keep personal and client credentials apart: each vault has its own passphrase, agents, and rules, and one is open at a time. A vault can keep an encrypted copy in iCloud Drive for your other Macs ([several vaults](docs/operations/multiple-vaults.md), [iCloud](docs/operations/icloud.md)).
+- **Several vaults, synced if you want it.** Keep personal and client credentials apart: each vault has its own passphrase, agents, and rules, and one is open at a time. A vault can sync between your Macs through iCloud Drive, Dropbox, Google Drive, OneDrive, or Syncthing, and changes merge one credential at a time ([several vaults](docs/operations/multiple-vaults.md), [sync](docs/operations/sync.md)).
 - **Import from 1Password.** Read a 1PUX or CSV export, pick the API keys, SSH keys, and databases that agents need, and add them in one step ([import](docs/operations/import-1password.md)).
 
 ## A look inside
@@ -141,7 +141,7 @@ Open items:
 | Topic | Documents |
 | --- | --- |
 | Start here | [Daily use](docs/operations/daily-use.md) · [Agent path](docs/operations/agent-path.md) · [Host hooks](docs/operations/host-hooks.md) · [Import from 1Password](docs/operations/import-1password.md) |
-| Vaults | [Several vaults](docs/operations/multiple-vaults.md) · [iCloud sync](docs/operations/icloud.md) · [Backup and restore](docs/operations/backup-restore.md) |
+| Vaults | [Several vaults](docs/operations/multiple-vaults.md) · [Sync](docs/operations/sync.md) · [Backup and restore](docs/operations/backup-restore.md) |
 | Security | [Isolation](docs/operations/isolation.md) · [Key-memory review](docs/reviews/key-memory.md) · [Storage review](docs/reviews/storage-dependencies.md) · [Vault verification](docs/operations/vault-verification.md) |
 | The bouncer | [Bouncer](docs/operations/bouncer.md) · [Rule packs](docs/operations/rule-packs.md) · [Declarations](docs/operations/declarations.md) · [Base model](docs/operations/base-model.md) · [Learning](docs/operations/learning.md) |
 | Decisions | [ADRs 0001–0016](docs/adr) · [Goal](docs/goal.md) · [Evaluations](docs/evaluation) |
