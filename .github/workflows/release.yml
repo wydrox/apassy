@@ -109,6 +109,15 @@ jobs:
         working-directory: site
         run: npm ci
 
+      # The build identity of the app (docs/operations/updates.md). This build
+      # and scripts/build-app.sh get the same values, so the script does not
+      # build again.
+      - name: Set the build identity
+        if: steps.head.outputs.publish == 'true'
+        run: |
+          echo "APASSY_BUILD_COMMIT=$(git rev-parse HEAD)" >>"$GITHUB_ENV"
+          echo "APASSY_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$GITHUB_ENV"
+
       # The same command as scripts/build-app.sh, so the script does not build
       # again. The build scripts of the dependencies run before the signing
       # key is in a keychain.

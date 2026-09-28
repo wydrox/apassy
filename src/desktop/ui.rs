@@ -26,6 +26,8 @@ mod shell;
 mod start;
 #[cfg(feature = "vault")]
 mod timeline;
+#[cfg(feature = "vault")]
+mod updates;
 #[cfg(all(test, feature = "vault"))]
 mod vault_tests;
 /// Several vaults, one open at a time (ADR 0013).
