@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<!-- The Apassy app icon: the dark icon of design/promo/launch/logo on the macOS icon grid
+     (824 body at 100, radius 185.4). scripts/make-icon.sh renders AppIcon.icns from it. -->
+<defs><filter id="s" x="-10%" y="-10%" width="120%" height="125%"><feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#000" flood-opacity=".28"/></filter></defs>
+<rect x="100" y="100" width="824" height="824" rx="185.4" fill="#0e1820" filter="url(#s)"/>
+<rect x="100.75" y="100.75" width="822.5" height="822.5" rx="184.65" fill="none" stroke="#fff" stroke-opacity=".08" stroke-width="1.5"/>
+<g transform="translate(248.32,266.33) scale(2.302882)"><path d="M0,114.5A114.5,114.5 0 0 1 229,114.5L229,204.2A2,2 0 0 1 227,206.2L190.5,206.2A21,21 0 0 1 169.5,185.2L169.5,114.5A55,55 0 0 0 59.5,114.5L59.5,204.2A2,2 0 0 1 57.5,206.2L2,206.2A2,2 0 0 1 0,204.2Z" fill="#fff"/><path d="M75,97.76A2.5,2.5 0 0 1 78.47,95.45L105.54,106.78A26,26 0 0 1 121.5,130.76L121.5,178.76A3,3 0 0 1 119.95,181.39L76.48,205.38A1,1 0 0 1 75,204.51Z" fill="#0a77fe"/></g>
+</svg>

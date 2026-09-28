@@ -24,6 +24,8 @@ The protocol is one JSON line in and one JSON line out.
 | `Helpers/ApassyKeychain.app` | the same Swift helper, in its own bundle: keychain commands | `com.wydrox.apassy.keychain` | keychain entitlements, only with a profile |
 | `Helpers/ApassyNotify.app` | Swift notifier (`native/ApassyNotify`), in its own bundle, display name "Apassy": notification commands | `com.wydrox.apassy.notify` (signing ID = bundle ID) | none |
 
+Each bundle has `Contents/Resources/AppIcon.icns` from `packaging/AppIcon.svg` (`scripts/make-icon.sh`). macOS shows it in the Dock, on each notification, and on the Touch ID prompt of the keychain helper.
+
 Each program uses the hardened runtime. The bundle ID `com.wydrox.apassy` matches the GitHub owner `wydrox`.
 The keychain access group is `<TEAM_ID>.com.wydrox.apassy`.
 

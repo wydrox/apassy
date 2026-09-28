@@ -368,11 +368,14 @@ impl eframe::App for DesktopApp {
 }
 
 /// Native window options. Persistence is off. The title bar is transparent, and the
-/// sidebar runs under it, as in a SwiftUI `NavigationSplitView`.
+/// sidebar runs under it, as in a SwiftUI `NavigationSplitView`. The empty icon keeps
+/// the icon of the bundle (`packaging/AppIcon.icns`) in the Dock: without it, eframe
+/// replaces the Dock icon with the egui logo at start.
 pub fn native_options() -> eframe::NativeOptions {
     let mut native_options = eframe::NativeOptions::default();
     native_options.viewport = native_options
         .viewport
+        .with_icon(egui::IconData::default())
         .with_inner_size(egui::Vec2::new(1180.0, 800.0))
         .with_min_inner_size(egui::Vec2::new(900.0, 600.0))
         .with_title("Apassy")

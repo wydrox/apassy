@@ -15,6 +15,8 @@
 	<string>Apassy</string>
 	<key>CFBundleExecutable</key>
 	<string>ApassyNotify</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.wydrox.apassy.notify</string>
 	<key>CFBundleInfoDictionaryVersion</key>
