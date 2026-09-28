@@ -367,6 +367,16 @@ impl CloudSync {
         self.state()?.ok_or(CloudError::NotEnabled)
     }
 
+    /// Write the state with the path of the local vault file.
+    fn write_state(&self, state: &SyncState) -> Result<(), CloudError> {
+        let mut state = state.clone();
+        state.vault_path = Some(
+            fs::canonicalize(&self.config.vault_path)
+                .unwrap_or_else(|_| self.config.vault_path.clone()),
+        );
+        state::write(&self.config.state_path, &state)
+    }
+
     /// Compare the local file and the cloud file with the last sync. No passphrase, no
     /// change to any file.
     pub fn status(&self) -> Result<SyncReport, CloudError> {
@@ -458,7 +468,7 @@ impl CloudSync {
                         };
                         let mut state = SyncState::new(&name, &local.vault_id, last, generation);
                         state.last_sync_at = Some(unix_now());
-                        state::write(&self.config.state_path, &state)?;
+                        self.write_state(&state)?;
                         return Ok(EnableReport {
                             cloud_file_name: name,
                             pushed: false,
@@ -619,7 +629,7 @@ impl CloudSync {
                     Err(CloudError::Io)
                 }
             })
-            .and_then(|()| state::write(&self.config.state_path, &state));
+            .and_then(|()| self.write_state(&state));
         if let Err(install_err) = installed {
             let new_file = vault.path().to_owned();
             drop(vault);
@@ -697,7 +707,7 @@ impl CloudSync {
         next.last_sha256 = Some(hash);
         next.last_generation = identity.generation;
         next.last_sync_at = Some(unix_now());
-        state::write(&self.config.state_path, &next)?;
+        self.write_state(&next)?;
         Ok(SyncOutcome {
             copied: true,
             cloud_file_name: name,
@@ -730,7 +740,7 @@ impl CloudSync {
         next.last_sha256 = Some(to_hex(&copy.sha256));
         next.last_generation = copy.identity.generation;
         next.last_sync_at = Some(unix_now());
-        state::write(&self.config.state_path, &next)?;
+        self.write_state(&next)?;
         Ok(SyncOutcome {
             copied: true,
             cloud_file_name: name,
@@ -751,7 +761,7 @@ impl CloudSync {
         let mut next = state;
         next.last_sha256 = Some(hash);
         next.last_sync_at = Some(unix_now());
-        state::write(&self.config.state_path, &next)?;
+        self.write_state(&next)?;
         Ok(unchanged(&next))
     }
 
@@ -848,6 +858,16 @@ impl CloudSync {
         }
         Ok(())
     }
+}
+
+/// Read the sync state file at `path`. `None` when it does not exist.
+pub fn read_state(path: &Path) -> Result<Option<SyncState>, CloudError> {
+    state::read(path)
+}
+
+/// Lowercase hexadecimal SHA-256 of the file at `path`, as in the sync state.
+pub fn file_sha256(path: &Path) -> Result<String, CloudError> {
+    hash_path(path)
 }
 
 /// The status from three hashes: the local file, the cloud file, and the last sync.

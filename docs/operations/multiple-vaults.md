@@ -10,6 +10,7 @@ Use only synthetic values for tests. The real-secret gate stays BLOCKED.
 - One vault is open at a time. Agents reach only the open vault.
 - Each vault has a name of 1 to 40 characters. Two vaults cannot have the same name, without regard to case.
 - Apassy keeps the list of vaults in `~/Library/Application Support/Apassy/vaults.json` (Linux: `$XDG_DATA_HOME/apassy/vaults.json`). The list has the names and the paths, no key and no item. The file has mode `0600`.
+- On macOS a vault can keep a copy in iCloud Drive and sync with your other Macs. Each vault has its own setting: [iCloud sync](icloud.md).
 
 ## 2. Create a vault
 
@@ -52,7 +53,7 @@ A file that is in the list already opens as it is. A restore from a backup also 
 In Settings > Vaults:
 
 - "Rename…" changes the name. The file does not move.
-- "Remove from list…" takes the vault out of the list. Apassy does not delete the file. You can open it again with "Open vault file…". The open vault stays in the list; open another vault first.
+- "Remove from list…" takes the vault out of the list. Apassy does not delete the file. You can open it again with "Open vault file…". The open vault stays in the list; open another vault first. iCloud sync of the vault stops; its copy in iCloud Drive stays ([iCloud sync](icloud.md), section 10).
 
 A vault whose file is missing shows "File missing". A switch to it changes nothing and offers "Remove from list".
 
@@ -81,6 +82,7 @@ A host reads the list only when it starts. After you add a vault in another fold
 
 - At the first start of 0.3, Apassy finds `vault.db` and adds it to the list as "Personal". The file stays where it is.
 - A damaged list, or a list from a newer Apassy, does not stop the start. Apassy moves it to `vaults.json.bad-<unix time>` and makes a new list from `vault.db` and the files in `vaults/`. A note says so. Open each vault in another folder again with "Open vault file…".
+- The new list links iCloud sync again where the sync state proves the vault; the note names the others, which need "Turn on iCloud sync…" again ([iCloud sync](icloud.md), section 11).
 
 ## 9. Tests
 

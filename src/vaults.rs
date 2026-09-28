@@ -113,6 +113,41 @@ pub fn slug(name: &str) -> String {
     }
 }
 
+/// iCloud sync of one vault (ADR 0014). The sync state is a file in the data
+/// directory: `icloud/<state>.json`. It names the file in iCloud Drive.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudLink {
+    /// The name of the sync state file, without `.json`. An empty or invalid name
+    /// means that sync is off.
+    #[serde(default)]
+    pub state: String,
+    /// Fields of a later Apassy. They stay when this version writes the list.
+    #[serde(flatten)]
+    extra: Map<String, Value>,
+}
+
+impl CloudLink {
+    /// A link to the sync state file `icloud/<state>.json`.
+    pub fn new(state: &str) -> Self {
+        Self {
+            state: state.to_owned(),
+            extra: Map::new(),
+        }
+    }
+
+    /// The state name when it can be a file name: 1 to 64 ASCII letters, digits, `-`,
+    /// or `_`.
+    pub fn state_name(&self) -> Option<&str> {
+        let name = self.state.as_str();
+        let valid = !name.is_empty()
+            && name.len() <= MAX_ID_BYTES
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        valid.then_some(name)
+    }
+}
+
 /// One vault in the list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VaultEntry {
@@ -127,9 +162,19 @@ pub struct VaultEntry {
     /// Unix time of the last open. `None` before the first open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_opened_at: Option<u64>,
+    /// iCloud sync of the vault (ADR 0014). `None` when sync is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<CloudLink>,
     /// Fields of a later Apassy. They stay when this version writes the list.
     #[serde(flatten)]
     extra: Map<String, Value>,
+}
+
+impl VaultEntry {
+    /// The sync state name of the vault, when iCloud sync is on.
+    pub fn cloud_state(&self) -> Option<&str> {
+        self.cloud.as_ref().and_then(CloudLink::state_name)
+    }
 }
 
 /// The list of vaults.
@@ -499,6 +544,7 @@ impl Registry {
             path: path.to_path_buf(),
             added_at: now,
             last_opened_at: None,
+            cloud: None,
             extra: Map::new(),
         });
         Ok(id)
@@ -908,6 +954,27 @@ mod tests {
             .count();
         assert_eq!(count, 2);
         fs::remove_dir_all(dir).expect("clean");
+    }
+
+    #[test]
+    fn a_cloud_link_round_trips_and_needs_a_file_name() {
+        let mut registry = Registry::new();
+        let id = registry
+            .add("Personal", Path::new("/tmp/apassy-cloud.db"), 1)
+            .expect("add");
+        assert_eq!(registry.get(&id).expect("entry").cloud_state(), None);
+        registry.entry_mut(&id).expect("entry").cloud = Some(CloudLink::new(&id));
+        let read = Registry::parse(&registry.to_json()).expect("parse");
+        assert_eq!(
+            read.get(&id).expect("entry").cloud_state(),
+            Some(id.as_str())
+        );
+        for bad in ["", "../x", "a b", &"x".repeat(65)] {
+            assert_eq!(CloudLink::new(bad).state_name(), None, "{bad}");
+        }
+        // Sync off writes no field.
+        registry.entry_mut(&id).expect("entry").cloud = None;
+        assert!(!registry.to_json().contains("\"cloud\""));
     }
 
     #[test]

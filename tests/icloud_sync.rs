@@ -839,6 +839,9 @@ fn locks_paths_and_state_are_checked() {
         vault_b.sync_identity().expect("record").vault_id,
         state.vault_id
     );
+    // The state names its vault file, so the app can link it again after a rebuilt
+    // vault list.
+    assert_eq!(state.vault_path.as_deref(), Some(vault_b.path()));
     assert_eq!(
         names_in(state_path.parent().expect("dir")),
         vec!["vault.json".to_owned()]

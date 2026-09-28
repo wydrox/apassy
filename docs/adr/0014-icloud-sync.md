@@ -1,7 +1,7 @@
 # ADR 0014 — iCloud sync of a vault
 
 Date: 2026-09-28.
-Status: PROPOSED for 0.3.0. Phase 1 is in the code: the sync engine (`apassy::cloud`), schema version 13, the Seatbelt rule, and the tests. Phase 2 adds the desktop UI and the setting of each vault in the vault registry.
+Status: PROPOSED for 0.3.0. In the code: the sync engine (`apassy::cloud`), schema version 13, the Seatbelt rule, the setting of each vault in the vault list (ADR 0013), the desktop app (section 11), and the tests.
 Operations: [icloud.md](../operations/icloud.md).
 
 ## Context
@@ -94,7 +94,18 @@ The Seatbelt profile has an optional parameter `APASSY_CLOUD_DIR`. It denies rea
 
 ### 10. Linux
 
-Linux has no iCloud Drive. The code builds there, and `default_cloud_dir()` is `None`. The tests use a temporary folder as iCloud Drive, so they run on Linux and on macOS.
+Linux has no iCloud Drive. The code builds there, and `default_cloud_dir()` is `None`, so the app shows no iCloud control. The tests use a temporary folder as iCloud Drive, so they run on Linux and on macOS.
+
+### 11. The app
+
+- **Setting.** Each entry of the vault list has an optional field `cloud` with the name of its sync state file. The name is the list ID of the vault, so the state is `<data folder>/icloud/<list ID>.json`. The engine gets its paths from the entry; it does not read the list.
+- **Push before each lock.** The owner session has one step that runs with the unlocked vault after the runs that wait end and before the lock (`OwnerSession::set_before_lock`). Every lock path goes through it: "Lock now", a switch, a backup, a restore or an open that replaces an unlocked vault, a quit, and "Restart now" for an update. The step pushes when the vault has changes and the iCloud copy did not change. A failure never stops the lock; it shows once as a note. The step knows only the sync of the open vault, and the engine refuses a vault at another path or with another vault ID, so a push never reaches the iCloud file of another vault.
+- **Push while unlocked.** Every 30 seconds the app reads the status. When the open vault has changes, it pushes at most every 3 minutes, and not while an agent run waits for the owner.
+- **Pull before an unlock.** When the status is "pull available", the unlock pulls first with the typed passphrase, or with the passphrase from Touch ID. A refused pull (an older copy, another vault, a wrong passphrase) does not stop the unlock of the file on this Mac; a note says why.
+- **Conflict.** A banner and Settings open a sheet with "Keep this Mac's version" and "Use the iCloud version", with the passphrase. The unlock screen has the same two buttons with the typed passphrase. For "Use the iCloud version" from an unlocked vault, the app checks the passphrase against the file of this Mac first, locks without a push, pulls, and unlocks again.
+- **A new Mac.** "Open a vault from iCloud…" lists the iCloud files that no vault of the list syncs with, and adopts one into `<data folder>/vaults/<name>.db` with sync on.
+- **A rebuilt list.** A damaged list loses the field `cloud`. The state file names its vault file (`vault_path`). The app links a state to a vault of the rebuilt list only when the paths match and the file has the SHA-256 of the last sync. Else the note asks the owner to turn sync on again, which links to the same iCloud file by the vault ID.
+- **The status does not name the Mac of a newer copy.** The device name is inside the encrypted copy, and the status runs without the passphrase. The app shows the time of the file; the result of the pull names the Mac.
 
 ## Alternatives
 

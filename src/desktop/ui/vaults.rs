@@ -66,6 +66,8 @@ pub(crate) enum VaultSheet {
     Missing {
         id: String,
     },
+    /// Turn iCloud sync on or off, or choose a version in a conflict (ADR 0014).
+    Icloud(super::icloud::IcloudSheet),
 }
 
 /// Text for a listed vault whose file is missing.
@@ -81,7 +83,24 @@ impl DesktopApp {
     /// Read the vault list of `data_dir`. A damaged list moves aside and a new one
     /// takes its place; the note says so. It never blocks the start.
     pub(crate) fn load_vault_list(&mut self, data_dir: PathBuf, persist: bool) {
-        let loaded = Registry::load(&data_dir);
+        let mut loaded = Registry::load(&data_dir);
+        // A rebuilt list lost the iCloud setting of each vault. Link it again where the
+        // state file proves the vault (ADR 0014).
+        if let Some(note) = loaded.note.take() {
+            let line = super::icloud::relink_states(&data_dir, &mut loaded.registry);
+            if line.is_some() && persist {
+                let _ = loaded.registry.save(&data_dir);
+            }
+            loaded.note = Some(match line {
+                Some(line) => format!("{note} {line}"),
+                None => note,
+            });
+        }
+        // The window uses the iCloud Drive folder of the owner. A unit test never does:
+        // it sets a temporary folder.
+        if persist && !cfg!(test) {
+            self.icloud.cloud_dir = crate::cloud::default_cloud_dir();
+        }
         self.vault_list = VaultListState {
             data_dir,
             persist,
@@ -236,6 +255,8 @@ impl DesktopApp {
         // A parsed 1Password export belongs to the import into the vault that was open.
         self.import.forget();
         self.vault_list.name_input.clear();
+        // No push into the iCloud file of the vault that was open.
+        self.icloud_forget_open_vault(ctx);
     }
 
     /// The open file is the vault `id`. It becomes the last used vault, and the Touch
@@ -252,6 +273,7 @@ impl DesktopApp {
         }
         self.save_vault_list();
         self.refresh_unlock_setting(ctx);
+        self.icloud_track_open_vault();
     }
 
     /// Add the open vault file to the list as `name`, or find it there, and make it the
@@ -395,6 +417,8 @@ impl DesktopApp {
             );
             return false;
         }
+        // iCloud sync of the vault stops; its iCloud file stays (ADR 0014).
+        let icloud = self.icloud_on_remove(id).unwrap_or_default();
         match self.vault_list.registry.remove(id) {
             Ok(entry) => {
                 if self.vault_list.missing.as_deref() == Some(id) {
@@ -402,7 +426,7 @@ impl DesktopApp {
                 }
                 if self.save_vault_list() {
                     self.set_ok(format!(
-                        "“{}” is not in the list now. The file stays at {}.",
+                        "“{}” is not in the list now. The file stays at {}.{icloud}",
                         entry.name,
                         entry.path.display()
                     ));
@@ -691,12 +715,15 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         }
         app.ui.sheet = Some(Sheet::Vault(sheet));
     }
+    super::icloud::settings_section(app, ui);
 }
 
 /// A sheet of the vault list. Returns true when the owner pressed Escape.
 pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context, sheet: &VaultSheet) -> bool {
-    let (VaultSheet::Rename { id } | VaultSheet::Remove { id } | VaultSheet::Missing { id }) =
-        sheet;
+    let id = match sheet {
+        VaultSheet::Rename { id } | VaultSheet::Remove { id } | VaultSheet::Missing { id } => id,
+        VaultSheet::Icloud(sheet) => return super::icloud::sheet(app, ctx, sheet),
+    };
     let Some(entry) = app.vault_list.registry.get(id).cloned() else {
         close_sheet(app, ctx);
         return false;
@@ -705,6 +732,7 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context, sheet: &VaultShee
         VaultSheet::Rename { .. } => rename_sheet(app, ctx, &entry),
         VaultSheet::Remove { .. } => remove_sheet(app, ctx, &entry, false),
         VaultSheet::Missing { .. } => remove_sheet(app, ctx, &entry, true),
+        VaultSheet::Icloud(_) => false,
     }
 }
 
@@ -769,8 +797,13 @@ fn remove_sheet(
         (
             format!("Remove “{}” from the list?", entry.name),
             format!(
-                "The file stays at {}. Apassy does not delete it. You can open it again with “Open vault file…”. A vault file outside the Apassy data folder is then not closed to agents that start later: move it into a safe place, or delete it yourself.",
-                entry.path.display()
+                "The file stays at {}. Apassy does not delete it. You can open it again with “Open vault file…”. A vault file outside the Apassy data folder is then not closed to agents that start later: move it into a safe place, or delete it yourself.{}",
+                entry.path.display(),
+                if entry.cloud_state().is_some() {
+                    " iCloud sync of this vault stops. Its copy in iCloud Drive stays."
+                } else {
+                    ""
+                }
             ),
         )
     };

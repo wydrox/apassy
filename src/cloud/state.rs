@@ -8,7 +8,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +38,10 @@ pub struct SyncState {
     pub last_generation: u64,
     /// The time of the last push or pull, in Unix seconds.
     pub last_sync_at: Option<u64>,
+    /// The local vault file of this state. The app uses it to link the state to its
+    /// vault again after the vault list was rebuilt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_path: Option<PathBuf>,
 }
 
 impl SyncState {
@@ -54,6 +58,7 @@ impl SyncState {
             last_sha256,
             last_generation,
             last_sync_at: None,
+            vault_path: None,
         }
     }
 

@@ -409,12 +409,43 @@ pub struct OwnerUiState {
     pub signaled_runs: BTreeSet<u64>,
 }
 
+/// A step with the unlocked vault just before the session locks it: a lock, a switch,
+/// a quit, a restart for an update, a backup, or an open or a restore that replaces it.
+/// Runs that waited have ended by then. iCloud sync pushes here (ADR 0014). The step
+/// must not fail the lock, so it returns nothing.
+pub type BeforeLock = Box<dyn FnMut(&mut Vault) + Send>;
+
+/// The [`BeforeLock`] step of a session, if any.
+#[derive(Default)]
+struct LockHook(Option<BeforeLock>);
+
+impl LockHook {
+    fn run(&mut self, vault: &mut Vault) {
+        if let Some(step) = self.0.as_mut()
+            && !vault.is_locked()
+        {
+            step(vault);
+        }
+    }
+}
+
+impl fmt::Debug for LockHook {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "LockHook(set)"
+        } else {
+            "LockHook(none)"
+        })
+    }
+}
+
 /// One vault file open inside this process. The broker shares the same slot.
 #[derive(Debug)]
 pub struct OwnerSession {
     vault: SharedVault,
     path: Option<PathBuf>,
     revealed: BTreeMap<(u64, String), RevealedValue>,
+    before_lock: LockHook,
 }
 
 /// Mutex guard over an unlocked vault. Hold it only for one short operation.
@@ -440,7 +471,19 @@ impl OwnerSession {
             vault: Arc::new(Mutex::new(None)),
             path: None,
             revealed: BTreeMap::new(),
+            before_lock: LockHook::default(),
         }
+    }
+
+    /// Set the step that runs before each lock ([`BeforeLock`]). `None` removes it.
+    pub fn set_before_lock(&mut self, step: Option<BeforeLock>) {
+        self.before_lock = LockHook(step);
+    }
+
+    /// Run `f` with the open vault, locked or unlocked. The vault mutex is held for the
+    /// call, so the broker waits: keep it short. `None` when no file is open.
+    pub fn with_vault<T>(&self, f: impl FnOnce(&mut Vault) -> T) -> Option<T> {
+        self.slot().as_mut().map(f)
     }
 
     /// The vault slot for the broker. The broker sees each open, lock, and restore.
@@ -488,7 +531,7 @@ impl OwnerSession {
         match Vault::open(path) {
             Ok(vault) => {
                 self.install(vault, path.to_path_buf());
-                previous.retire();
+                previous.retire(&mut self.before_lock);
                 Ok(())
             }
             Err(err) => {
@@ -569,7 +612,7 @@ impl OwnerSession {
         why: &str,
     ) -> ModelResult<()> {
         self.revealed.clear();
-        let mut slot = self.slot();
+        let mut slot = self.vault.lock().unwrap_or_else(PoisonError::into_inner);
         let result = match slot.as_mut() {
             None => Ok(()),
             Some(vault) => {
@@ -579,6 +622,7 @@ impl OwnerSession {
                 if !vault.is_locked() {
                     let _ = vault.end_waits(why);
                 }
+                self.before_lock.run(vault);
                 vault.lock().map_err(map_err)
             }
         };
@@ -748,7 +792,16 @@ impl OwnerSession {
 
     pub fn backup(&mut self, destination: &Path) -> ModelResult<()> {
         require_path(destination)?;
-        let result = self.unlocked()?.backup(destination);
+        let result = {
+            let mut slot = self.vault.lock().unwrap_or_else(PoisonError::into_inner);
+            let vault = match slot.as_mut() {
+                Some(vault) if !vault.is_locked() => vault,
+                Some(_) => return Err(fail("vault_locked", "The vault is locked.")),
+                None => return Err(fail("vault_locked", "No vault file is open.")),
+            };
+            self.before_lock.run(vault);
+            vault.backup(destination)
+        };
         if self.is_locked() {
             self.revealed.clear();
         }
@@ -768,7 +821,7 @@ impl OwnerSession {
         match Vault::restore(backup, destination, passphrase) {
             Ok(vault) => {
                 self.install(vault, destination.to_path_buf());
-                previous.retire();
+                previous.retire(&mut self.before_lock);
                 Ok(())
             }
             Err(err) => {
@@ -1302,7 +1355,7 @@ impl OwnerSession {
             vault: replaced,
             path: None,
         }
-        .retire();
+        .retire(&mut self.before_lock);
         self.path = Some(path);
     }
 
@@ -1474,12 +1527,14 @@ struct HeldVault {
 
 impl HeldVault {
     /// Close a vault that another file replaced (ADR 0013). When it is still
-    /// unlocked, each run that waits in it gets its denial first, as at a lock.
-    fn retire(self) {
+    /// unlocked, each run that waits in it gets its denial first, as at a lock, and the
+    /// step before a lock runs.
+    fn retire(self, before_lock: &mut LockHook) {
         if let Some(mut vault) = self.vault
             && !vault.is_locked()
         {
             let _ = vault.end_waits(ENDED_BY_SWITCH);
+            before_lock.run(&mut vault);
             let _ = vault.lock();
         }
     }
