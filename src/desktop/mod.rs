@@ -126,6 +126,10 @@ pub struct DesktopApp {
     /// The list of vaults (ADR 0013).
     #[cfg(feature = "vault")]
     pub(crate) vault_list: ui::vaults::VaultListState,
+    /// Import from 1Password. It holds the parsed export until the import, a cancel, or
+    /// a lock.
+    #[cfg(feature = "vault")]
+    pub(crate) import: ui::import::ImportState,
     styled: bool,
 }
 
@@ -175,6 +179,8 @@ impl DesktopApp {
             learning: learning_ui::LearningUiState::default(),
             #[cfg(feature = "vault")]
             vault_list: ui::vaults::VaultListState::default(),
+            #[cfg(feature = "vault")]
+            import: ui::import::ImportState::default(),
             styled: false,
         }
     }

@@ -23,6 +23,7 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     super::vaults::settings_section(app, ui);
     security_section(app, ui);
     backup_section(app, ui);
+    super::import::section(app, ui);
     agents_section(app, ui);
     notifications_section(app, ui);
     broker_section(app, ui);

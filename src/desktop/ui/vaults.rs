@@ -184,8 +184,8 @@ impl DesktopApp {
 
     /// Forget each piece of state of the vault that was open: typed secrets and their
     /// undo history, forms, the selection, the navigation, the owner check, a Touch ID
-    /// unlock or change that still runs, inbox marks, and the learning view. A
-    /// training stops: it reads and writes the vault that was open.
+    /// unlock or change that still runs, inbox marks, the learning view, and a parsed
+    /// 1Password export. A training stops: it reads and writes the vault that was open.
     pub(crate) fn reset_vault_state(&mut self, ctx: Option<&egui::Context>) {
         self.erase_typed_secrets(ctx);
         self.view = OwnerView::Vault;
@@ -233,6 +233,8 @@ impl DesktopApp {
         }
         self.learning.stop_training();
         self.learning = Default::default();
+        // A parsed 1Password export belongs to the import into the vault that was open.
+        self.import.forget();
         self.vault_list.name_input.clear();
     }
 

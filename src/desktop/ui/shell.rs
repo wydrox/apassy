@@ -395,6 +395,8 @@ fn sheets(app: &mut DesktopApp, ctx: &egui::Context) {
         Sheet::Restore => super::settings::restore_sheet(app, ctx),
         #[cfg(feature = "vault")]
         Sheet::Vault(sheet) => super::vaults::sheet(app, ctx, &sheet),
+        #[cfg(feature = "vault")]
+        Sheet::Import => super::import::sheet(app, ctx),
         #[cfg(not(feature = "vault"))]
         Sheet::AddItem { kind_chosen } => super::demo::add_sheet(app, ctx, kind_chosen),
         #[cfg(not(feature = "vault"))]
