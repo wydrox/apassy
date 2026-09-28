@@ -144,7 +144,7 @@ Open items:
 | Vaults | [Several vaults](docs/operations/multiple-vaults.md) · [iCloud sync](docs/operations/icloud.md) · [Backup and restore](docs/operations/backup-restore.md) |
 | Security | [Isolation](docs/operations/isolation.md) · [Key-memory review](docs/reviews/key-memory.md) · [Storage review](docs/reviews/storage-dependencies.md) · [Vault verification](docs/operations/vault-verification.md) |
 | The bouncer | [Bouncer](docs/operations/bouncer.md) · [Rule packs](docs/operations/rule-packs.md) · [Declarations](docs/operations/declarations.md) · [Base model](docs/operations/base-model.md) · [Learning](docs/operations/learning.md) |
-| Decisions | [ADRs 0001–0015](docs/adr) · [Goal](docs/goal.md) · [Evaluations](docs/evaluation) |
+| Decisions | [ADRs 0001–0016](docs/adr) · [Goal](docs/goal.md) · [Evaluations](docs/evaluation) |
 | Product | [Product vision](docs/product-vision-v1.md) · [Concept](docs/concept.md) · [Infrastructure](docs/product-infra-v1.md) · [MVP plan](docs/mvp-plan.md) |
 | Shipping | [Native app](docs/operations/native-app.md) · [Release and site](docs/operations/release.md) · [Updates](docs/operations/updates.md) |
 
@@ -170,3 +170,11 @@ See also [desktop development](docs/operations/desktop-development.md), [Rust co
 | `tools/` | Training and serving of the base model |
 | `site/` | The website, an Astro page on a Cloudflare Worker |
 | `docs/` | Decisions, operations, reviews, and evaluations |
+
+## Contributing and security
+
+Rule packs and provider files are data, and the easiest contribution: one JSON file, a schema, and a validator. See [CONTRIBUTING.md](CONTRIBUTING.md). Report a vulnerability through [SECURITY.md](SECURITY.md), not in a public issue.
+
+## License
+
+The code and the documents are [Apache-2.0](LICENSE). The rule packs, the provider files, and their schemas in `packs/` are public domain under [CC0-1.0](packs/LICENSE), so any tool can use that knowledge, not only Apassy. A future team server will be its own crate under its own license; this repository stays as it is. The notices of the bundled dependencies are in [licenses/THIRD-PARTY-NOTICES.md](licenses/THIRD-PARTY-NOTICES.md).

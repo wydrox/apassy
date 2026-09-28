@@ -4,6 +4,8 @@ version = "0.3.0"
 edition = "2024"
 rust-version = "1.97"
 publish = false
+license = "Apache-2.0"
+repository = "https://github.com/wydrox/apassy"
 description = "A personal credential manager with controlled agent access"
 
 [features]
@@ -61,6 +63,11 @@ path = "src/bin/apassy-sandbox.rs"
 [[bin]]
 name = "apassy-eval"
 path = "src/bin/apassy-eval.rs"
+required-features = ["vault"]
+
+[[bin]]
+name = "apassy-packs"
+path = "src/bin/apassy-packs.rs"
 required-features = ["vault"]
 
 # Label export for the base-model data generator (goal B8, tools/basemodel/).

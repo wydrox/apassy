@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/wydrox/apassy/main/packs/schema/provider.schema.json",
+  "title": "Apassy provider file, schema version 1",
+  "description": "One API provider (Stripe, GitHub, ...) for the declaration suggestions and the known hosts of the bouncer, or the general signals file. The files are in packs/providers/. The file name is <id>.json. This schema checks the structure. The loader in src/vault/providers.rs is the authority: `apassy-packs validate <file>` runs it. See docs/operations/declarations.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "provider_version", "id", "kind", "label", "description", "signals"],
+  "properties": {
+    "schema_version": {
+      "description": "The file format. This version of Apassy reads version 1 only.",
+      "const": 1
+    },
+    "provider_version": {
+      "description": "The version of the file content. It starts at 1. Increase it at each change.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "id": {
+      "description": "A unique id. The file name is <id>.json.",
+      "type": "string",
+      "pattern": "^[a-z0-9_-]+$"
+    },
+    "kind": {
+      "description": "`provider`: one provider with known hosts (or `generic: true`). `general`: signals for every credential, such as production words. There is one general file.",
+      "enum": ["provider", "general"]
+    },
+    "label": {
+      "description": "The name that the app shows.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "generic": {
+      "description": "A generic provider, such as a PostgreSQL URL of any host. A specific provider wins over it. Not for a general file.",
+      "type": "boolean"
+    },
+    "known_hosts": {
+      "description": "Provider API hosts in lowercase. A host also covers its subdomains. Not for a general file. A generic provider may have an empty list.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/host" }
+    },
+    "signals": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/signal" }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "general" } } },
+      "then": {
+        "not": { "anyOf": [{ "required": ["known_hosts"] }, { "properties": { "generic": { "const": true } }, "required": ["generic"] }] }
+      }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "provider" } } },
+      "then": {
+        "anyOf": [{ "required": ["known_hosts"] }, { "properties": { "generic": { "const": true } }, "required": ["generic"] }]
+      }
+    }
+  ],
+  "$defs": {
+    "host": {
+      "description": "A lowercase host name, such as api.stripe.com or localhost.",
+      "type": "string",
+      "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$"
+    },
+    "writtenList": {
+      "description": "Texts compared as written. Case matters.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1, "pattern": "\\S" }
+    },
+    "lowercaseList": {
+      "description": "The detection compares lowercase text, so list items are lowercase.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1, "pattern": "^[^A-Z]*\\S[^A-Z]*$" }
+    },
+    "claims": {
+      "description": "A map from a claim or field name to the texts that its value may be.",
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "minLength": 1 },
+      "additionalProperties": { "$ref": "#/$defs/writtenList" }
+    },
+    "conditions": {
+      "description": "All conditions of a signal must hold. A list means one of the items. A value condition is the strongest signal for the provider, then a host, then a variable name, then a word.",
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "value_starts": { "$ref": "#/$defs/writtenList" },
+        "value_contains": { "$ref": "#/$defs/writtenList" },
+        "value_shape": {
+          "description": "A field value is a prefix and a rest of a fixed form.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["starts", "min_len", "max_len", "chars"],
+          "properties": {
+            "starts": { "$ref": "#/$defs/writtenList" },
+            "min_len": { "type": "integer", "minimum": 0 },
+            "max_len": { "type": "integer", "minimum": 1 },
+            "chars": {
+              "description": "The characters of the rest after the prefix. `token`: letters, digits, `-`, `_`, and `.`.",
+              "enum": ["lower_hex", "upper_alnum", "alnum", "token"]
+            }
+          }
+        },
+        "jwt_claims": { "$ref": "#/$defs/claims" },
+        "json_fields": { "$ref": "#/$defs/claims" },
+        "env_names": { "$ref": "#/$defs/lowercaseList" },
+        "env_name_contains": { "$ref": "#/$defs/lowercaseList" },
+        "hosts": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/host" }
+        },
+        "words": { "$ref": "#/$defs/lowercaseList" }
+      }
+    },
+    "suggest": {
+      "description": "Declaration fields that the signal suggests. A general signal must suggest at least one field.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "environment": { "enum": ["local", "development", "staging", "production"] },
+        "risk": { "enum": ["low", "medium", "high"] },
+        "scope": { "enum": ["read-only", "read-write", "admin"] },
+        "reversibility": { "enum": ["reversible", "partial", "irreversible"] }
+      }
+    },
+    "signal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "when", "reason"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9_-]+$" },
+        "when": { "$ref": "#/$defs/conditions" },
+        "suggest": { "$ref": "#/$defs/suggest" },
+        "reason": {
+          "description": "Why the signal says what it says. The app shows it to the owner.",
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        }
+      }
+    }
+  }
+}
