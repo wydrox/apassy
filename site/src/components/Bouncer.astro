@@ -1,0 +1,122 @@
+---
+// A live feed of the bouncer (scripts/site.ts plays it). The decisions follow the
+// bouncer scene of the launch video and the rules of the product.
+const requests = [
+  { agent: "Codex", env: "STRIPE_SECRET_KEY", cmd: "stripe balance retrieve", verdict: "run", why: "read-only" },
+  { agent: "Claude Code", env: "PGPASSWORD", cmd: "npm run migrate", verdict: "run", why: "a remembered pattern" },
+  { agent: "Claude Code", env: "PROD_PGPASSWORD", cmd: 'psql -c "select count(*) from orders"', verdict: "ask", why: "production" },
+  { agent: "Claude Code", env: "STRIPE_SECRET_KEY", cmd: "printenv STRIPE_SECRET_KEY", verdict: "ask", why: "could print a secret" },
+  { agent: "Claude Code", env: "PGPASSWORD", cmd: "npm run db:reset --force", verdict: "deny", why: "your rule: never --force" },
+];
+const label = { run: "Runs", ask: "Asks you", deny: "Blocked" } as const;
+---
+<section class="section" id="bouncer">
+  <div class="container cols">
+    <div class="visual" data-reveal>
+      <div class="feed card" data-feed>
+        <div class="head">
+          <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span>Agent requests</span>
+          <span class="live"><i></i>Live</span>
+        </div>
+        <ul>
+          {requests.map((r) => (
+            <li class="row" data-feed-row>
+              <div class="top">
+                <span class="agent">{r.agent}</span>
+                <span class="env">{r.env}</span>
+                <span class="status">
+                  <span class="checking" aria-hidden="true"><i></i><i></i><i></i></span>
+                  <span class={`verdict ${r.verdict}`}>{label[r.verdict as keyof typeof label]}</span>
+                </span>
+              </div>
+              <code class="cmd">{r.cmd}</code>
+              <p class="why">{r.why}</p>
+            </li>
+          ))}
+        </ul>
+      </div>
+      <div class="link" aria-hidden="true"></div>
+      <div class="approve">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7" /></svg>
+        Approve and remember
+      </div>
+    </div>
+
+    <div class="copy">
+      <h2 class="h2" data-reveal>A bouncer checks every request.</h2>
+      <p class="lead" data-reveal style="--i:1">
+        Write rules in plain language. Before a command gets a secret, a local model and 64 rule packs read it:
+        normal work runs, anything uncertain waits for you, and what you forbid never runs.
+      </p>
+      <ul class="checks" data-reveal style="--i:2">
+        <li>Plain-language rules for each credential</li>
+        <li>A production credential always waits for you</li>
+        <li>The model runs on your Mac</li>
+        <li>“Approve and remember” teaches it your routine</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<style>
+  .cols { display: grid; grid-template-columns: 1.05fr 1fr; gap: 72px; align-items: center; }
+  .copy .lead { margin-top: 22px; }
+  .checks { margin-top: 30px; }
+  .visual { display: flex; flex-direction: column; align-items: center; }
+
+  .feed { width: 100%; box-shadow: var(--shadow); }
+  .head { display: flex; align-items: center; gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--edge); font-size: 13px; font-weight: 500; color: var(--muted); }
+  .dots { display: flex; gap: 6px; }
+  .dots i { width: 10px; height: 10px; border-radius: 50%; background: var(--edge); }
+  .live { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-family: var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--green); }
+  .live i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: pulse 1.8s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; box-shadow: 0 0 0 0 color-mix(in srgb, var(--green) 50%, transparent); } 50% { opacity: 0.6; box-shadow: 0 0 0 5px transparent; } }
+  ul { list-style: none; padding: 6px 0; }
+  .row { padding: 12px 18px; transition: opacity 0.4s var(--ease-out), transform 0.4s var(--ease-out), background-color 0.2s; }
+  .row + .row { border-top: 1px solid var(--edge); }
+  .row:hover { background: var(--surface-2); }
+  .top { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+  .agent { font-weight: 600; }
+  .env { font-family: var(--mono); font-size: 11px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .status { margin-left: auto; display: grid; justify-items: end; }
+  .status > * { grid-area: 1 / 1; }
+  .cmd { display: block; margin-top: 6px; font-size: 13px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .why { margin-top: 2px; font-size: 12px; color: var(--faint); }
+  .verdict { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .verdict::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .run { color: var(--green); background: var(--green-soft); }
+  .ask { color: var(--orange); background: var(--orange-soft); }
+  .deny { color: var(--red); background: var(--red-soft); }
+  .checking { display: inline-flex; gap: 3px; padding: 6px 4px; opacity: 0; }
+  .checking i { width: 5px; height: 5px; border-radius: 50%; background: var(--faint); animation: blink 1s ease-in-out infinite; }
+  .checking i:nth-child(2) { animation-delay: 0.15s; }
+  .checking i:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes blink { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
+
+  /* The animated feed: a row arrives, shows "checking", then its verdict. */
+  /* Queued rows show as faint ghosts, so the card keeps its shape. */
+  .feed:global(.animated) .row { opacity: 0.16; transform: translateY(6px); }
+  .feed:global(.animated) .row:global(.in) { opacity: 1; transform: none; }
+  .feed:global(.animated) .row .verdict { opacity: 0; transform: scale(0.8); transition: opacity 0.25s, transform 0.35s cubic-bezier(0.3, 1.6, 0.5, 1); }
+  .feed:global(.animated) .row:global(.in) .checking { opacity: 1; }
+  .feed:global(.animated) .row:global(.done) .checking { opacity: 0; }
+  .feed:global(.animated) .row:global(.done) .verdict { opacity: 1; transform: none; }
+  .feed:global(.fading) .row { opacity: 0.16 !important; transition-duration: 0.4s; }
+
+  .link { width: 1px; height: 40px; background: linear-gradient(var(--edge), var(--faint)); position: relative; }
+  .link::before, .link::after { content: ""; position: absolute; left: -3px; width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+  .link::before { top: -3px; }
+  .link::after { bottom: -3px; }
+  .approve {
+    display: inline-flex; align-items: center; gap: 8px; padding: 12px 18px; border-radius: 12px; font-size: 14px; font-weight: 600;
+    background: var(--btn-bg); color: var(--btn-ink); box-shadow: var(--shadow-lg); animation: float 5s ease-in-out infinite;
+  }
+  .approve svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+
+  @media (max-width: 960px) {
+    .cols { grid-template-columns: 1fr; gap: 56px; }
+    .copy { order: -1; }
+  }
+</style>

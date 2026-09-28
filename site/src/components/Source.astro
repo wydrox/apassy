@@ -1,0 +1,104 @@
+---
+import GitHubIcon from "./GitHubIcon.astro";
+import { REPO, VERSION } from "../lib/site";
+
+const clone = `git clone ${REPO} && cd apassy`;
+// The lines of scripts/build-app.sh that a build prints.
+const lines = [
+  { cmd: true, text: clone },
+  { cmd: false, text: "Cloned into 'apassy'", tone: "ok" },
+  { cmd: true, text: "scripts/build-app.sh" },
+  { cmd: false, text: "Hardened runtime on all 5 programs", tone: "ok" },
+  { cmd: false, text: "40 checks passed, agent profile included", tone: "ok" },
+  { cmd: false, text: "App: target/Apassy.app", tone: "info" },
+];
+---
+<section class="section" id="source">
+  <div class="container">
+    <header class="center">
+      <p class="eyebrow" data-reveal>Source on GitHub</p>
+      <h2 class="h2" data-reveal style="--i:1">Don't trust us. Read the code.</h2>
+    </header>
+    <div class="cols">
+      <div class="term" data-terminal data-reveal style="--i:2">
+        <div class="term-bar">
+          <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="term-title">~/code</span>
+          <button class="copy" type="button" data-copy={`${clone} && scripts/build-app.sh`} aria-label="Copy the commands">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5" y="5" width="8.5" height="8.5" rx="2" /><path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5" /></svg>
+            <span data-copy-label>Copy</span>
+          </button>
+        </div>
+        <div class="term-body">
+          {lines.map((line) =>
+            line.cmd ? (
+              <p data-line data-cmd><span class="prompt">$</span> <span data-text>{line.text}</span></p>
+            ) : (
+              <p data-line class={line.tone}><span class="mark">{line.tone === "ok" ? "✓" : "→"}</span> <span data-text>{line.text}</span></p>
+            ),
+          )}
+          <p class="caret-line"><span class="prompt">$</span> <span class="caret"></span></p>
+        </div>
+      </div>
+
+      <div class="side card" data-spotlight data-reveal style="--i:3">
+        <ul class="points">
+          <li><b>Local first.</b> One encrypted file on your Mac. No account and no cloud.</li>
+          <li><b>Build it yourself.</b> One script builds, signs, and checks every program and the sandbox.</li>
+          <li><b>Every decision on paper.</b> Twelve decision records, security reviews, and blind evaluations.</li>
+        </ul>
+        <p class="facts">Rust and Swift · v{VERSION}</p>
+        <div class="buttons">
+          <a class="btn btn-primary small" href={REPO}><GitHubIcon /> View on GitHub</a>
+          <a class="docs" href={`${REPO}/tree/main/docs`}>Read the docs <span aria-hidden="true">↗</span></a>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+  .center { text-align: center; }
+  .center .h2 { margin-top: 14px; }
+  .cols { margin-top: 56px; display: grid; grid-template-columns: 1.2fr 1fr; gap: 20px; }
+
+  .term { border-radius: 16px; background: var(--term-bg); color: var(--term-ink); border: 1px solid rgba(255, 255, 255, 0.08); box-shadow: var(--shadow-lg); overflow: hidden; }
+  .term-bar { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-bottom: 1px solid rgba(255, 255, 255, 0.07); background: rgba(255, 255, 255, 0.03); }
+  .dots { display: flex; gap: 6px; }
+  .dots i { width: 11px; height: 11px; border-radius: 50%; background: #ff5f57; }
+  .dots i:nth-child(2) { background: #febc2e; }
+  .dots i:nth-child(3) { background: #28c840; }
+  .term-title { flex: 1; text-align: center; font-family: var(--mono); font-size: 12px; color: #8b8f96; }
+  .copy {
+    display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 7px; border: 1px solid rgba(255, 255, 255, 0.12);
+    background: transparent; color: #b8bbc1; font-size: 12px; transition: background-color 0.2s, color 0.2s, border-color 0.2s;
+  }
+  .copy:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
+  .copy:global(.copied) { color: #4cd964; border-color: rgba(76, 217, 100, 0.5); }
+  .copy svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.4; }
+  .term-body { padding: 20px 22px 26px; font-family: var(--mono); font-size: 13.5px; line-height: 1.85; min-height: 260px; }
+  .term-body p { white-space: pre-wrap; word-break: break-all; }
+  .prompt { color: #3b93ff; }
+  .ok { color: #9da1a8; }
+  .ok .mark { color: #4cd964; }
+  .info { color: #9da1a8; }
+  .info .mark { color: #3b93ff; }
+  .caret { display: inline-block; width: 8px; height: 16px; vertical-align: -3px; background: #e8e8ea; animation: caret 1s steps(1) infinite; }
+  @keyframes caret { 50% { opacity: 0; } }
+
+  .side { padding: 30px; display: flex; flex-direction: column; background: radial-gradient(90% 70% at 100% 0%, var(--blue-soft), transparent 60%), var(--surface); }
+  .points { list-style: none; padding: 0; display: grid; gap: 18px; }
+  .points li { position: relative; padding-left: 34px; color: var(--muted); }
+  .points li::before {
+    content: "✓"; position: absolute; left: 0; top: 0; width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center;
+    font-size: 12px; color: var(--blue); background: var(--blue-soft); border: 1px solid color-mix(in srgb, var(--blue) 35%, transparent);
+  }
+  .points b { color: var(--ink); font-weight: 600; }
+  .facts { margin-top: auto; padding-top: 28px; font-family: var(--mono); font-size: 12px; color: var(--faint); }
+  .buttons { margin-top: 16px; display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+  .small { height: 44px; padding: 0 18px; font-size: 15px; }
+  .small :global(svg) { width: 16px; height: 16px; }
+  .docs { color: var(--muted); font-size: 15px; transition: color 0.15s; }
+  .docs:hover { color: var(--ink); }
+  @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
+</style>

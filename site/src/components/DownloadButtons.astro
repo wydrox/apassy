@@ -1,0 +1,50 @@
+---
+import AppleIcon from "./AppleIcon.astro";
+import LinuxIcon from "./LinuxIcon.astro";
+import { DOWNLOAD, REPO } from "../lib/site";
+
+interface Props {
+  /** A unique id for the Linux note on the page. */
+  id: string;
+}
+const { id } = Astro.props;
+---
+<div class="downloads">
+  <a class="btn btn-primary" href={DOWNLOAD} data-download>
+    <AppleIcon />
+    <span data-soon="Coming soon for macOS">Download for macOS</span>
+  </a>
+  <button class="btn btn-secondary" type="button" popovertarget={id} aria-haspopup="dialog">
+    <LinuxIcon />
+    <span>Linux</span>
+    <span class="badge">Soon</span>
+  </button>
+  <div id={id} popover class="linux-note" role="dialog" aria-labelledby={`${id}-title`}>
+    <p class="note-title" id={`${id}-title`}><LinuxIcon /> Apassy for Linux is on the way</p>
+    <p>
+      Apassy runs on macOS today: agents work in a macOS Seatbelt sandbox, and native macOS helpers handle Touch ID and notifications.
+      Linux needs its own versions of these protections before Apassy holds your secrets there.
+    </p>
+    <a class="note-link" href={`${REPO}/releases`}>Follow the releases on GitHub <span aria-hidden="true">→</span></a>
+  </div>
+</div>
+
+<style>
+  .downloads { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  .linux-note {
+    inset: auto; margin: 0; position: fixed; padding: 18px 18px 16px; border-radius: 16px;
+    border: 1px solid var(--edge); background: var(--surface); color: var(--ink); box-shadow: var(--shadow-lg);
+    font-size: 14px; line-height: 1.5; text-align: left;
+    opacity: 0; transform: translateY(-6px) scale(0.98); transform-origin: top center;
+    transition: opacity 0.2s var(--ease-out), transform 0.2s var(--ease-out), overlay 0.2s allow-discrete, display 0.2s allow-discrete;
+  }
+  .linux-note:popover-open { opacity: 1; transform: none; }
+  @starting-style { .linux-note:popover-open { opacity: 0; transform: translateY(-6px) scale(0.98); } }
+  .linux-note p + p, .linux-note p + a { margin-top: 10px; }
+  .linux-note p:not(.note-title) { color: var(--muted); }
+  .note-title { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 15px; }
+  .note-title :global(svg) { width: 16px; height: 16px; }
+  .note-link { display: inline-block; color: var(--blue); font-weight: 500; }
+  .note-link span { display: inline-block; transition: transform 0.2s var(--ease-out); }
+  .note-link:hover span { transform: translateX(3px); }
+</style>

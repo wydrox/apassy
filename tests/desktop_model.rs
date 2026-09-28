@@ -8,7 +8,7 @@ use apassy::desktop::model::{
     SAMPLE_EXPIRY_ISO, SAMPLE_OPERATION, SAMPLE_RULE_TEXT, SAMPLE_USAGE_LIMIT,
     UNSUPPORTED_SAMPLE_TEXT,
 };
-use apassy::desktop::{DesktopApp, OwnerView, smoke_test};
+use apassy::desktop::{DesktopApp, OwnerView, native_options, smoke_test};
 
 fn ready_model() -> DesktopModel {
     let mut model = DesktopModel::new();
@@ -618,4 +618,14 @@ fn expired_approval_updates_alert_and_never_executes() {
     assert_eq!(alert.status, current.status);
     assert_eq!(alert.decision, current.decision);
     assert_eq!(alert.message, current.message);
+}
+
+#[test]
+fn window_keeps_the_bundle_icon() {
+    // eframe sets the Dock icon to the egui logo unless the icon is empty.
+    let options = native_options();
+    assert_eq!(
+        options.viewport.icon.as_deref(),
+        Some(&eframe::egui::IconData::default())
+    );
 }

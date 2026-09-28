@@ -1,0 +1,48 @@
+---
+import { REPO } from "../lib/site";
+// docs/evaluation/heldout-v4.md: 226 unseen cases, 3 runs, base model and policy v7.
+const stats = [
+  { value: 0, suffix: "", of: "of 56", label: "commands that break a rule ran" },
+  { value: 0, suffix: "", of: "of 75", label: "critical commands ran without you" },
+  { value: 76, suffix: "%", of: "91 of 120", label: "of normal work ran without a prompt" },
+];
+---
+<section class="section proof" id="proof">
+  <div class="container">
+    <header class="center">
+      <p class="eyebrow" data-reveal>Evidence</p>
+      <h2 class="h2" data-reveal style="--i:1">Tested blind before it held a real secret.</h2>
+      <p class="lead" data-reveal style="--i:2">
+        The bouncer was scored on 226 agent commands it had never seen, three times over. Apassy took real
+        credentials only after it passed.
+      </p>
+    </header>
+    <div class="stats">
+      {stats.map((s, i) => (
+        <div class="stat card" data-spotlight data-reveal style={`--i:${i + 3}`}>
+          <p class="num"><span data-count={s.value} data-suffix={s.suffix}>{s.value}{s.suffix}</span><span class="of">{s.of}</span></p>
+          <p class="label">{s.label}</p>
+        </div>
+      ))}
+    </div>
+    <p class="more" data-reveal style="--i:6">
+      <a href={`${REPO}/blob/main/docs/evaluation/heldout-v4.md`}>Read the evaluation <span aria-hidden="true">→</span></a>
+    </p>
+  </div>
+</section>
+
+<style>
+  .center { text-align: center; max-width: 760px; margin: 0 auto; }
+  .center .h2 { margin-top: 14px; }
+  .center .lead { margin-top: 20px; }
+  .stats { margin-top: 56px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .stat { padding: 30px 28px; }
+  .num { display: flex; align-items: baseline; gap: 10px; font-size: clamp(56px, 7vw, 84px); font-weight: 500; letter-spacing: -0.05em; line-height: 1; font-variant-numeric: tabular-nums; }
+  .of { font-size: 15px; letter-spacing: 0; color: var(--faint); font-weight: 400; }
+  .label { margin-top: 14px; color: var(--muted); }
+  .more { margin-top: 28px; text-align: center; }
+  .more a { color: var(--blue); font-weight: 500; }
+  .more span { display: inline-block; transition: transform 0.2s var(--ease-out); }
+  .more a:hover span { transform: translateX(3px); }
+  @media (max-width: 800px) { .stats { grid-template-columns: 1fr; } }
+</style>

@@ -1,0 +1,235 @@
+name: Release
+
+# After each green CI run of a push to main: build the app with the Developer ID
+# certificate, notarize it, package Apassy.dmg, and upload the image and
+# latest.json to the R2 bucket of apassy.wyderka.cc. The site serves them at
+# /download/Apassy.dmg and /latest.json. See docs/operations/release.md.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One release at a time. A newer run waits for the current one, so the last
+# commit of main is the last upload.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    # workflow_run also fires for pull requests from a fork branch named main.
+    # Only a push to this repository publishes.
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      COMMIT: ${{ github.event.workflow_run.head_sha || github.sha }}
+      BUCKET: apassy-downloads
+    steps:
+      # Before the owner adds the Apple secrets (docs/operations/release.md), the run
+      # publishes nothing and says so. A part of the secrets is a mistake: it fails.
+      - name: Check the secrets
+        id: secrets
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          apple=0
+          for name in MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD APPLE_API_KEY_P8 APPLE_API_KEY_ID APPLE_API_ISSUER_ID; do
+            [ -z "${!name}" ] || apple=$((apple + 1))
+          done
+          if [ "$apple" = "0" ]; then
+            echo "::warning::The Apple signing secrets are not set, so this run publishes no build. See docs/operations/release.md."
+            echo "configured=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          missing=""
+          for name in MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD APPLE_API_KEY_P8 APPLE_API_KEY_ID \
+                      APPLE_API_ISSUER_ID CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secrets:$missing. See docs/operations/release.md."
+            exit 1
+          fi
+          echo "configured=true" >>"$GITHUB_OUTPUT"
+
+      - name: Check out the commit that passed CI
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+
+      # CI runs finish in any order. An older commit must not replace the image
+      # of a newer one.
+      - name: Check that the commit is the head of main
+        id: head
+        env:
+          CONFIGURED: ${{ steps.secrets.outputs.configured }}
+        run: |
+          head="$(git ls-remote "https://github.com/${{ github.repository }}" refs/heads/main | cut -f1)"
+          if [ "$CONFIGURED" != "true" ]; then
+            echo "publish=false" >>"$GITHUB_OUTPUT"
+          elif [ "$head" = "$COMMIT" ]; then
+            echo "publish=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >>"$GITHUB_OUTPUT"
+            echo "::notice::$COMMIT is not the head of main ($head). The run for the head publishes."
+          fi
+
+      - name: Install Rust 1.97.0
+        if: steps.head.outputs.publish == 'true'
+        run: rustup toolchain install 1.97.0 --profile minimal
+
+      - name: Install Node.js 22
+        if: steps.head.outputs.publish == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install Wrangler
+        if: steps.head.outputs.publish == 'true'
+        working-directory: site
+        run: npm ci
+
+      # The same command as scripts/build-app.sh, so the script does not build
+      # again. The build scripts of the dependencies run before the signing
+      # key is in a keychain.
+      - name: Build the Rust binaries
+        if: steps.head.outputs.publish == 'true'
+        run: cargo build --release --locked --features desktop,vault --bin apassy --bin apassy-mcp --bin apassy-sandbox
+
+      # The checkpoint is not in the repository (docs/operations/base-model.md).
+      # The owner uploads it once to models/ in the bucket. The Worker does not
+      # serve that key. build-app.sh checks it against the manifest.
+      - name: Get the base model
+        if: steps.head.outputs.publish == 'true'
+        working-directory: site
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          model="$RUNNER_TEMP/apassy-base-v1.safetensors"
+          if npx wrangler r2 object get "$BUCKET/models/apassy-base-v1.safetensors" --file "$model" --remote; then
+            echo "APASSY_BASE_MODEL=$model" >>"$GITHUB_ENV"
+          else
+            rm -f "$model"
+            echo "::warning::No models/apassy-base-v1.safetensors in the bucket. The app ships without the base model."
+          fi
+
+      - name: Import the Developer ID certificate
+        if: steps.head.outputs.publish == 'true'
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password="$(openssl rand -base64 32)"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 7200 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          umask 077
+          printf '%s' "$MACOS_CERTIFICATE_P12" | base64 --decode >"$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -f pkcs12 \
+            -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          # The intermediate of Developer ID certificates, in case the runner lacks it.
+          curl -fsSL https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer -o "$RUNNER_TEMP/DeveloperIDG2CA.cer"
+          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$keychain" || true
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
+          keychains=("$keychain")
+          while IFS= read -r line; do
+            keychains+=("$(sed -E 's/^[[:space:]]*"(.*)"$/\1/' <<<"$line")")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "${keychains[@]}"
+          identity="$(security find-identity -v -p codesigning "$keychain" | awk '/"Developer ID Application: / {print $2; exit}')"
+          if [ -z "$identity" ]; then
+            echo "::error::MACOS_CERTIFICATE_P12 has no Developer ID Application identity."
+            exit 1
+          fi
+          echo "APASSY_SIGN_IDENTITY=$identity" >>"$GITHUB_ENV"
+          echo "KEYCHAIN=$keychain" >>"$GITHUB_ENV"
+
+      # Touch ID unlock (goal item A3) needs a Developer ID provisioning profile
+      # for the keychain helper (docs/operations/release.md). With the optional
+      # secret, the build embeds it, and stops when the profile does not fit.
+      - name: Get the keychain profile
+        if: steps.head.outputs.publish == 'true'
+        env:
+          MACOS_KEYCHAIN_PROFILE: ${{ secrets.MACOS_KEYCHAIN_PROFILE }}
+        run: |
+          if [ -z "$MACOS_KEYCHAIN_PROFILE" ]; then
+            echo "::notice::No MACOS_KEYCHAIN_PROFILE secret. Touch ID confirms actions but does not unlock the vault."
+            exit 0
+          fi
+          profile="$RUNNER_TEMP/ApassyKeychain.provisionprofile"
+          printf '%s' "$MACOS_KEYCHAIN_PROFILE" | base64 --decode >"$profile"
+          {
+            echo "APASSY_KEYCHAIN_PROFILE=$profile"
+            echo "APASSY_REQUIRE_KEYCHAIN=1"
+          } >>"$GITHUB_ENV"
+
+      - name: Build and sign Apassy.app
+        if: steps.head.outputs.publish == 'true'
+        run: scripts/build-app.sh
+
+      - name: Notarize and package Apassy.dmg
+        if: steps.head.outputs.publish == 'true'
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APASSY_NOTARY_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APASSY_NOTARY_ISSUER: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          umask 077
+          export APASSY_NOTARY_KEY="$RUNNER_TEMP/AuthKey.p8"
+          printf '%s\n' "$APPLE_API_KEY_P8" >"$APASSY_NOTARY_KEY"
+          scripts/build-dmg.sh --notarize
+
+      # The image first, then latest.json, so latest.json never names a build
+      # that is not there yet.
+      - name: Upload to R2
+        if: steps.head.outputs.publish == 'true'
+        working-directory: site
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          npx wrangler r2 object put "$BUCKET/Apassy.dmg" --file ../target/dist/Apassy.dmg --remote \
+            --content-type application/x-apple-diskimage \
+            --content-disposition 'attachment; filename="Apassy.dmg"' \
+            --cache-control no-cache
+          npx wrangler r2 object put "$BUCKET/latest.json" --file ../target/dist/latest.json --remote \
+            --content-type application/json \
+            --cache-control no-cache
+          {
+            echo "### Apassy.dmg"
+            echo
+            echo "Published to https://apassy.wyderka.cc/download/Apassy.dmg"
+            echo
+            echo '```json'
+            cat ../target/dist/latest.json
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Remove the keychain and the notary key
+        if: always()
+        run: |
+          [ -z "${KEYCHAIN:-}" ] || security delete-keychain "$KEYCHAIN" || true
+          rm -f "$RUNNER_TEMP/AuthKey.p8" "$RUNNER_TEMP/certificate.p12" "$RUNNER_TEMP/ApassyKeychain.provisionprofile"

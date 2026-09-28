@@ -1,0 +1,46 @@
+---
+import { markdownToHtml } from "satteri";
+import Page from "../layouts/Page.astro";
+import changelog from "../../../CHANGELOG.md?raw";
+import { REPO } from "../lib/site";
+
+// CHANGELOG.md links to files of the repository (docs/...). Here they go to GitHub.
+const source = changelog.replace(/\]\(((?:docs|scripts|packs|src|site|packaging)\/[^)]+)\)/g, `](${REPO}/blob/main/$1)`);
+const { html } = markdownToHtml(source);
+---
+<Page title="Changelog · apassy" description="What is new in each version of Apassy.">
+  <main class="container">
+    <header class="head">
+      <p class="eyebrow">Changelog</p>
+      <h1>What's new in apassy</h1>
+      <p class="lead">Each version of the app. The same file is <a href={`${REPO}/blob/main/CHANGELOG.md`}>CHANGELOG.md</a> on GitHub.</p>
+    </header>
+    <article class="prose" set:html={html} />
+  </main>
+</Page>
+
+<style>
+  main { max-width: 820px; padding-top: 72px; padding-bottom: 120px; }
+  .head { padding-bottom: 36px; border-bottom: 1px solid var(--line); }
+  h1 { margin-top: 12px; font-size: clamp(40px, 6vw, 64px); font-weight: 500; letter-spacing: -0.05em; line-height: 1.02; }
+  .lead { margin-top: 16px; }
+  .lead a { color: var(--blue); }
+
+  /* CHANGELOG.md: its title and intro are the header above. */
+  .prose :global(h1:first-child), .prose :global(h1:first-child + p) { display: none; }
+  .prose :global(h2) {
+    margin-top: 56px; padding-top: 8px; font-size: 30px; font-weight: 500; letter-spacing: -0.03em;
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  }
+  .prose :global(h2 a) { color: var(--ink); }
+  .prose :global(h3) {
+    margin-top: 30px; font-family: var(--mono); font-size: 12px; font-weight: 500; letter-spacing: 0.16em; text-transform: uppercase; color: var(--faint);
+  }
+  .prose :global(p) { margin-top: 14px; color: var(--muted); }
+  .prose :global(ul) { margin-top: 14px; padding-left: 0; list-style: none; display: grid; gap: 12px; }
+  .prose :global(li) { position: relative; padding-left: 22px; color: var(--muted); }
+  .prose :global(li::before) { content: ""; position: absolute; left: 4px; top: 0.7em; width: 6px; height: 6px; border-radius: 50%; background: var(--blue); }
+  .prose :global(li strong) { color: var(--ink); font-weight: 600; }
+  .prose :global(a) { color: var(--blue); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--blue) 35%, transparent); text-underline-offset: 3px; }
+  .prose :global(code) { font-size: 0.88em; padding: 1px 5px; border-radius: 5px; background: var(--surface-2); border: 1px solid var(--edge); color: var(--ink-2); }
+</style>

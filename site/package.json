@@ -1,0 +1,21 @@
+{
+  "name": "apassy-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "check": "wrangler types worker/worker-configuration.d.ts && tsc -p worker",
+    "preview": "astro build && wrangler dev",
+    "deploy": "astro build && wrangler deploy"
+  },
+  "dependencies": {
+    "@fontsource-variable/dm-sans": "5.3.0",
+    "astro": "7.3.5",
+    "satteri": "0.10.5"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "wrangler": "4.142.0"
+  }
+}

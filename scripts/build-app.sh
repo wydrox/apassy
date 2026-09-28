@@ -30,7 +30,10 @@
 #
 # Environment:
 #   APASSY_SIGN_IDENTITY     codesign identity (SHA-1 or name). Default: the
-#                            only valid "Apple Development" identity.
+#                            only valid "Apple Development" identity. A
+#                            "Developer ID Application" identity signs with a
+#                            secure timestamp, as notarization needs
+#                            (scripts/build-dmg.sh).
 #   APASSY_KEYCHAIN_PROFILE  path to a macOS development profile for
 #                            com.wydrox.apassy.keychain. Default: search the
 #                            Xcode profile folders.
@@ -67,7 +70,7 @@ PROVISION=0
 for arg in "$@"; do
   case "$arg" in
     --provision) PROVISION=1 ;;
-    -h|--help) sed -n '2,48p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,51p' "$0"; exit 0 ;;
     *) echo "build-app: unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -121,6 +124,12 @@ awk -v want="$SIGN_SHA1" '
 CERT_TEAM="$(openssl x509 -in "$TMP/sign-cert.pem" -noout -subject \
   | grep -oE 'OU ?= ?[A-Z0-9]{10}' | grep -oE '[A-Z0-9]{10}$' | head -n 1 || true)"
 echo "Identity: $SIGN_NAME ($SIGN_SHA1), team ${CERT_TEAM:-unknown}"
+# Notarization refuses code without a secure timestamp. A development build
+# does not go to Apple, so it skips the call to the timestamp server.
+case "$SIGN_NAME" in
+  "Developer ID Application: "*) SIGN_TIMESTAMP="--timestamp" ;;
+  *) SIGN_TIMESTAMP="--timestamp=none" ;;
+esac
 
 # ---------------------------------------------------------------- profile
 MAC_UDID="$(system_profiler SPHardwareDataType | awk -F': ' '/Provisioning UDID/ {print $2}')"
@@ -277,6 +286,13 @@ cp target/release/apassy target/release/apassy-mcp "$APP/Contents/MacOS/"
 cp "$NATIVE_OUT/apassy-helper" "$APP/Contents/MacOS/apassy-helper"
 cp "$NATIVE_OUT/apassy-helper" "$KC_APP/Contents/MacOS/$KEYCHAIN_EXE"
 cp "$NATIVE_OUT/$NOTIFY_EXE" "$NT_APP/Contents/MacOS/$NOTIFY_EXE"
+# The app icon (scripts/make-icon.sh). macOS shows the icon of the notifier on
+# each notification, and the icon of the keychain helper on its Touch ID prompt.
+[ -f packaging/AppIcon.icns ] || fail "missing packaging/AppIcon.icns. Run scripts/make-icon.sh."
+for bundle in "$APP" "$KC_APP" "$NT_APP"; do
+  mkdir -p "$bundle/Contents/Resources"
+  cp packaging/AppIcon.icns "$bundle/Contents/Resources/AppIcon.icns"
+done
 
 # Goal B8: the base-model checkpoint goes into the bundle before the signature,
 # so the signature seals it. The copy must match tools/basemodel/manifest.json.
@@ -334,7 +350,7 @@ fi
 
 # ---------------------------------------------------------------- sign
 step "Sign from the inside out (hardened runtime)"
-sign() { codesign --force --sign "$SIGN_SHA1" --options runtime --timestamp=none "$@"; }
+sign() { codesign --force --sign "$SIGN_SHA1" --options runtime "$SIGN_TIMESTAMP" "$@"; }
 sign --entitlements "$KC_ENTITLEMENTS" "$KC_APP"
 # A bundle signature takes the identifier from CFBundleIdentifier.
 sign --entitlements packaging/Apassy.entitlements "$NT_APP"

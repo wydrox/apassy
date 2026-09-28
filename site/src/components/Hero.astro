@@ -1,0 +1,173 @@
+---
+import { Image } from "astro:assets";
+import DownloadButtons from "./DownloadButtons.astro";
+import GitHubIcon from "./GitHubIcon.astro";
+import Mark from "./Mark.astro";
+import { REPO, VERSION } from "../lib/site";
+import vault from "../../../docs/images/app-vault.png";
+
+// The tiles use the icons and colors of the credential kinds in the app. Each one
+// flies in from (fx, fy), then drifts by (dx, dy). depth is the pull of the pointer.
+const tiles = [
+  { icon: "key", color: "#ff9500", size: 96, x: "6%", y: 150, rot: -9, fx: -140, fy: 60, dx: 6, dy: -12, dur: 8.5, depth: 22 },
+  { icon: "person", color: "#0a84ff", size: 66, x: "25%", y: 40, rot: 7, fx: -60, fy: -80, dx: -5, dy: 9, dur: 9.8, depth: -12 },
+  { icon: "mark", color: "#0a77fe", size: 70, x: "71%", y: 34, rot: -7, fx: 60, fy: -90, dx: 7, dy: 8, dur: 10.5, depth: 14 },
+  { icon: "shield", color: "#34c759", size: 96, x: "88%", y: 160, rot: 8, fx: 150, fy: 40, dx: -6, dy: -10, dur: 9.2, depth: -20 },
+  { icon: "terminal", color: "#5e5ce6", size: 80, x: "15%", y: 470, rot: 8, fx: -120, fy: 90, dx: 8, dy: 7, dur: 11.5, depth: 16 },
+  { icon: "database", color: "#30d158", size: 80, x: "80%", y: 480, rot: -6, fx: 120, fy: 90, dx: -7, dy: -8, dur: 7.8, depth: -16 },
+];
+---
+<section class="hero" data-parallax>
+  <div class="tiles" aria-hidden="true">
+    {tiles.map((t, i) => (
+      <span class="tile-wrap" style={`left:${t.x};top:${t.y}px;--depth:${t.depth}`}>
+        <span
+          class="tile"
+          style={`--size:${t.size}px;--c:${t.color};--rot:${t.rot}deg;--fx:${t.fx}px;--fy:${t.fy}px;--dx:${t.dx}px;--dy:${t.dy}px;--dur:${t.dur}s;--delay:${0.15 + i * 0.09}s`}
+        >
+          {t.icon === "mark" ? (
+            <Mark class="glyph mark" />
+          ) : (
+            <svg class="glyph" viewBox="0 0 24 24">
+              {t.icon === "key" && <><circle cx="7.5" cy="15.5" r="4.5" /><path d="M10.7 12.3 20 3M16 7l3 3M13.8 9.2l2 2" /></>}
+              {t.icon === "person" && <><circle cx="12" cy="8" r="4" /><path d="M4.5 20.5c.8-3.8 3.9-6 7.5-6s6.7 2.2 7.5 6" /></>}
+              {t.icon === "shield" && <><path d="M12 3 4.5 6v5.5c0 4.6 3.1 8.1 7.5 9.5 4.4-1.4 7.5-4.9 7.5-9.5V6z" /><path d="m8.8 12 2.2 2.2 4.2-4.4" /></>}
+              {t.icon === "terminal" && <><rect x="2.5" y="4" width="19" height="16" rx="3.5" /><path d="m7 9.5 2.8 2.5L7 14.5M12.5 15h4.5" /></>}
+              {t.icon === "database" && <><ellipse cx="12" cy="5.5" rx="7.5" ry="3" /><path d="M4.5 5.5v13c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-13M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3" /></>}
+            </svg>
+          )}
+        </span>
+      </span>
+    ))}
+  </div>
+
+  <div class="container hero-inner">
+    <a class="announce rise" href="/changelog" style="--d:0">
+      <span class="badge">New</span>
+      <span>v{VERSION} — the first public release</span>
+      <span class="arrow" aria-hidden="true">→</span>
+    </a>
+    <h1>
+      <span class="line rise" style="--d:1">Agents get access.</span>
+      <span class="line rise" style="--d:2">Never your <span class="hl">secrets.</span></span>
+    </h1>
+    <p class="sub rise" style="--d:3">
+      A credential manager for you and your agents. They run commands with your keys but never see the values.
+      A local bouncer permits normal work, asks you when unsure, and blocks the rest.
+    </p>
+    <div class="actions rise" style="--d:4"><DownloadButtons id="linux-hero" /></div>
+    <a class="source rise" href={REPO} style="--d:5">
+      <GitHubIcon />
+      Read every line of the code
+      <svg class="out" viewBox="0 0 12 12" aria-hidden="true"><path d="M3.5 8.5l5-5M4.5 3.5h4v4" /></svg>
+    </a>
+    <p class="meta rise" style="--d:6">macOS 15 or later · Apple silicon · <span data-build>v{VERSION}</span></p>
+  </div>
+
+  <div class="container shot-area">
+    <div class="shot-glow" aria-hidden="true"></div>
+    <div class="shot-tilt">
+      <Image
+        class="shot"
+        src={vault}
+        alt="The Apassy window: credentials grouped by kind, each with the environment variable that agents use."
+        widths={[800, 1200, 1600, 2360]}
+        sizes="(min-width: 1224px) 1176px, calc(100vw - 48px)"
+        loading="eager"
+        fetchpriority="high"
+      />
+    </div>
+  </div>
+</section>
+
+<style>
+  .hero { position: relative; padding-top: 72px; }
+  .hero-inner { position: relative; z-index: 2; display: flex; flex-direction: column; align-items: center; text-align: center; }
+
+  /* ---- Tiles ---- */
+  .tiles { position: absolute; inset: 0 0 auto; height: 640px; max-width: 1360px; margin: 0 auto; pointer-events: none; }
+  .tile-wrap {
+    position: absolute; translate: -50% 0;
+    transform: translate3d(calc(var(--px, 0) * var(--depth) * 1px), calc(var(--py, 0) * var(--depth) * 1px), 0);
+    transition: transform 0.8s var(--ease-out);
+  }
+  .tile {
+    display: grid; place-items: center; width: var(--size); height: var(--size); border-radius: calc(var(--size) * 0.27);
+    background:
+      radial-gradient(120% 90% at 30% 15%, color-mix(in srgb, var(--c) 16%, transparent), transparent 60%),
+      linear-gradient(180deg, var(--surface-2), var(--surface));
+    border: 1px solid var(--edge); color: var(--c);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), var(--shadow);
+    transform: rotate(var(--rot));
+    animation: mark-in 1s var(--ease-out) var(--delay) both, mark-drift var(--dur) ease-in-out calc(var(--delay) + 1s) infinite;
+  }
+  .glyph { width: 44%; height: 44%; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  .tile :global(.mark) { width: 50%; height: auto; color: var(--ink); }
+  @keyframes mark-in {
+    from { opacity: 0; transform: translate(var(--fx), var(--fy)) rotate(calc(var(--rot) + 24deg)) scale(0.6); }
+    to { opacity: 1; transform: translate(0, 0) rotate(var(--rot)) scale(1); }
+  }
+  @keyframes mark-drift {
+    0%, 100% { transform: translate(0, 0) rotate(var(--rot)); }
+    50% { transform: translate(var(--dx), var(--dy)) rotate(calc(var(--rot) + 3deg)); }
+  }
+  @media (max-width: 1080px) { .tiles { display: none; } }
+
+  /* ---- Copy ---- */
+  .rise { animation: rise 0.8s var(--ease-out) calc(0.1s + var(--d) * 0.08s) both; }
+  @keyframes rise { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: none; } }
+
+  .announce {
+    display: inline-flex; align-items: center; gap: 10px; padding: 5px 14px 5px 6px; border-radius: 999px;
+    border: 1px solid var(--edge); background: color-mix(in srgb, var(--surface) 80%, transparent);
+    font-size: 13px; color: var(--muted); transition: border-color 0.2s, color 0.2s;
+  }
+  .announce:hover { border-color: var(--faint); color: var(--ink); }
+  .announce .arrow { transition: transform 0.2s var(--ease-out); }
+  .announce:hover .arrow { transform: translateX(3px); }
+
+  h1 {
+    margin-top: 30px; font-size: clamp(50px, 8.6vw, 108px); font-weight: 500; line-height: 0.98; letter-spacing: -0.058em;
+  }
+  h1 .line { display: block; }
+  .hl {
+    background: linear-gradient(100deg, #0a77fe 10%, #4aa3ff 50%, #0a77fe 90%); background-size: 200% 100%;
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    animation: shine 6s ease-in-out 1.5s infinite;
+  }
+  @keyframes shine { 0%, 100% { background-position: 100% 0; } 50% { background-position: 0 0; } }
+  .sub { margin-top: 26px; max-width: 660px; font-size: clamp(17px, 1.7vw, 20px); line-height: 1.5; color: var(--muted); text-wrap: balance; }
+  .actions { margin-top: 36px; }
+  .source { margin-top: 22px; display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 15px; transition: color 0.15s; }
+  .source:hover { color: var(--ink); }
+  .source :global(svg) { width: 16px; height: 16px; }
+  .source .out { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; transition: transform 0.2s var(--ease-out); }
+  .source:hover .out { transform: translate(2px, -2px); }
+  .meta { margin-top: 14px; font-size: 13px; color: var(--faint); }
+
+  /* ---- The screenshot: it settles from a tilt as the page scrolls ---- */
+  .shot-area { position: relative; margin-top: 72px; perspective: 1600px; }
+  .shot-glow {
+    position: absolute; inset: 8% 10% 20%; border-radius: 50%; filter: blur(80px); opacity: 0.55; pointer-events: none;
+    background: radial-gradient(closest-side, rgba(10, 119, 254, 0.5), transparent), radial-gradient(closest-side at 70% 60%, rgba(52, 199, 89, 0.25), transparent);
+  }
+  .shot-tilt {
+    position: relative; animation: rise 1s var(--ease-out) 0.7s both;
+    mask-image: linear-gradient(to bottom, #000 62%, transparent 100%);
+  }
+  .shot-tilt :global(.shot) {
+    width: 100%; border-radius: 16px; box-shadow: 0 0 0 1px var(--edge), var(--shadow-lg);
+    transform-origin: 50% 0;
+  }
+  @supports (animation-timeline: view()) {
+    .shot-tilt :global(.shot) { animation: settle linear both; animation-timeline: view(); animation-range: entry 10% cover 40%; }
+    @keyframes settle {
+      from { transform: rotateX(16deg) scale(0.93); }
+      to { transform: none; }
+    }
+  }
+  @media (max-width: 700px) {
+    .hero { padding-top: 40px; }
+    .shot-area { margin-top: 48px; }
+  }
+</style>

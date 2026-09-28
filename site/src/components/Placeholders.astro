@@ -1,0 +1,121 @@
+---
+import Mark from "./Mark.astro";
+// ADR 0011: the run gets a placeholder with the prefix and the length of the value.
+// The proxy puts the real value only into requests to the hosts of the variable and
+// refuses a placeholder on its way to any other host. The shown values are cut short.
+---
+<section class="section" id="placeholders">
+  <div class="container">
+    <header class="center">
+      <p class="eyebrow" data-reveal>Placeholders</p>
+      <h2 class="h2" data-reveal style="--i:1">Your agent never sees the real key.</h2>
+      <p class="lead" data-reveal style="--i:2">
+        The run gets a placeholder that looks like your key. Apassy's proxy swaps in the real value only on the way
+        to the hosts you allow. Anywhere else, the request stops, and each run gets new placeholders.
+      </p>
+    </header>
+
+    <div class="diagram card" data-reveal style="--i:3">
+      <div class="node run">
+        <p class="label">Agent run</p>
+        <code class="cmd">stripe balance retrieve</code>
+        <code class="env">STRIPE_SECRET_KEY=<mark>sk_live_Qm7r…</mark></code>
+        <p class="note">placeholder, new for each run</p>
+      </div>
+
+      <div class="wire straight" aria-hidden="true"><i class="packet ph"></i></div>
+
+      <div class="node proxy">
+        <span class="proxy-icon"><Mark class="mark" /></span>
+        <p class="label">apassy proxy</p>
+        <p class="note">checks the host of each request</p>
+      </div>
+
+      <div class="fork" aria-hidden="true">
+        <svg viewBox="0 0 100 100" preserveAspectRatio="none">
+          <path class="track" d="M0 50 C 45 50, 55 18, 100 18" />
+          <path class="track" d="M0 50 C 45 50, 55 82, 100 82" />
+          <path class="flow ok" d="M0 50 C 45 50, 55 18, 100 18" pathLength="100" />
+          <path class="flow bad" d="M0 50 C 45 50, 30 64, 42 70" pathLength="100" />
+        </svg>
+      </div>
+
+      <div class="ends">
+        <div class="node end ok">
+          <p class="host">api.stripe.com</p>
+          <p class="result"><span class="dot"></span>200 · the real key went in</p>
+        </div>
+        <div class="node end bad">
+          <p class="host">paste.sh</p>
+          <p class="result"><span class="dot"></span>403 · refused</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+  .center { text-align: center; max-width: 760px; margin: 0 auto; }
+  .center .h2 { margin-top: 14px; }
+  .center .lead { margin-top: 20px; }
+
+  .diagram {
+    margin-top: 64px; padding: 40px; display: grid; align-items: center;
+    grid-template-columns: minmax(0, 1.3fr) minmax(40px, 0.6fr) auto minmax(60px, 0.8fr) minmax(0, 1fr);
+    background:
+      linear-gradient(var(--grid) 1px, transparent 1px) 0 0 / 28px 28px,
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0 / 28px 28px,
+      var(--surface);
+  }
+  .node { border: 1px solid var(--edge); border-radius: 14px; background: var(--surface); padding: 16px 18px; box-shadow: var(--shadow); }
+  .label { font-weight: 600; font-size: 14px; }
+  .note { margin-top: 6px; font-size: 12px; color: var(--faint); }
+  .cmd, .env { display: block; margin-top: 8px; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .env { color: var(--muted); }
+  mark { background: var(--orange-soft); color: var(--orange); border-radius: 4px; padding: 0 3px; }
+
+  .proxy { text-align: center; padding: 20px 22px; }
+  .proxy-icon {
+    display: grid; place-items: center; width: 64px; height: 64px; margin: 0 auto 12px; border-radius: 18px; background: #0e1820;
+    box-shadow: 0 0 0 6px var(--blue-soft), var(--shadow); animation: ring 3s ease-in-out infinite;
+  }
+  .proxy-icon :global(.mark) { width: 36px; height: auto; color: #fff; }
+  @keyframes ring { 0%, 100% { box-shadow: 0 0 0 6px var(--blue-soft), var(--shadow); } 50% { box-shadow: 0 0 0 12px transparent, var(--shadow); } }
+
+  .wire { position: relative; height: 2px; background: repeating-linear-gradient(90deg, var(--edge) 0 6px, transparent 6px 11px); }
+  .packet { position: absolute; top: -4px; left: 0; width: 10px; height: 10px; border-radius: 50%; }
+  .packet.ph { background: var(--orange); box-shadow: 0 0 12px var(--orange); }
+  .is-visible .packet { animation: travel 2.4s ease-in-out infinite; }
+  @keyframes travel { 0% { left: 0; opacity: 0; } 12% { opacity: 1; } 88% { opacity: 1; } 100% { left: calc(100% - 10px); opacity: 0; } }
+
+  .fork { align-self: stretch; }
+  .fork svg { width: 100%; height: 100%; overflow: visible; }
+  .fork path { fill: none; vector-effect: non-scaling-stroke; stroke-linecap: round; }
+  .track { stroke: var(--edge); stroke-width: 2; stroke-dasharray: 6 5; }
+  .flow { stroke-width: 3; stroke-dasharray: 14 200; stroke-dashoffset: 14; }
+  .flow.ok { stroke: var(--green); }
+  .flow.bad { stroke: var(--red); }
+  .is-visible .flow.ok { animation: flow 2.4s ease-in-out 1.2s infinite; }
+  .is-visible .flow.bad { animation: flow-stop 2.4s ease-in-out 1.2s infinite; }
+  @keyframes flow { from { stroke-dashoffset: 14; } to { stroke-dashoffset: -100; } }
+  @keyframes flow-stop { 0% { stroke-dashoffset: 14; opacity: 1; } 70% { stroke-dashoffset: -60; opacity: 1; } 100% { stroke-dashoffset: -60; opacity: 0; } }
+
+  .ends { display: grid; gap: 28px; }
+  .host { font-family: var(--mono); font-size: 13px; font-weight: 600; }
+  .result { margin-top: 6px; display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 500; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .end.ok .result { color: var(--green); }
+  .end.bad .result { color: var(--red); }
+  .end.bad { border-style: dashed; }
+
+  @media (max-width: 900px) {
+    .diagram { grid-template-columns: 1fr; gap: 0; padding: 24px; justify-items: stretch; }
+    .wire { width: 2px; height: 44px; justify-self: center; background: repeating-linear-gradient(180deg, var(--edge) 0 6px, transparent 6px 11px); }
+    .packet { left: -4px !important; }
+    .is-visible .packet { animation-name: travel-down; }
+    @keyframes travel-down { 0% { top: 0; opacity: 0; } 12% { opacity: 1; } 88% { opacity: 1; } 100% { top: calc(100% - 10px); opacity: 0; } }
+    .fork { display: none; }
+    .ends { margin-top: 44px; grid-template-columns: 1fr 1fr; gap: 12px; position: relative; }
+    .ends::before { content: ""; position: absolute; top: -44px; left: 50%; width: 2px; height: 44px; background: repeating-linear-gradient(180deg, var(--edge) 0 6px, transparent 6px 11px); }
+  }
+</style>
