@@ -9,9 +9,9 @@ pub mod contracts;
 #[cfg(feature = "vault")]
 pub mod broker;
 
-/// iCloud sync of a vault (ADR 0014). It needs the vault.
+/// Sync of a vault through a folder (ADR 0014). It needs the vault.
 #[cfg(feature = "vault")]
-pub mod cloud;
+pub mod sync;
 
 #[cfg(feature = "desktop")]
 pub mod desktop;

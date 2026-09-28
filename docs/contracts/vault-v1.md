@@ -10,7 +10,8 @@ Schema version 9 (2026-09-26) adds candidate models, shadow answers, and the his
 Schema version 10 (2026-09-27) adds the change history of each item (`item_event`), the archive (`item_archive`), and the other items of a request with several items (`activity_item`). The history names what changed and never keeps a value: an edit names the fields, a variable its name, a connector its address, and a grant its agent. An item that exists at the migration gets one `tracked` event. An item delete removes its history. A restore adds a `restored` event to each item. The broker refuses a request with an archived item with `item_archived`. The migration from 9 to 10 is one transaction. Custom details of the desktop app are item fields named `x_` and the label in hexadecimal; a hidden detail is a secret field.
 Schema version 11 (2026-09-27) adds `env_binding.placeholder_hosts` ([ADR 0011](../adr/0011-run-proxy-placeholders.md)). NULL means the process gets the real value. Text means placeholder mode: one host per line, `host` or `host:port`, 1 to 16 hosts. `set_env_binding` stores the real value mode; `set_env_binding_with` stores either mode. The history detail of a placeholder variable names its hosts. The proxy variable names (`HTTPS_PROXY`, `SSL_CERT_FILE`, and the others in the ADR) cannot be bound. The migration from 10 to 11 is one transaction, and an old variable keeps the real value mode.
 Schema version 12 (2026-09-27) adds `agent.see_all`, `exec_grant.any_folder`, and the table `access_request` ([ADR 0012](../adr/0012-agent-visibility-and-access-requests.md)). `catalog` lists each item that is not archived with its plain fields, never a secret field or the notes. `set_exec_grants` changes the grants of several items in one transaction, in a folder or in any folder (`GrantPlace`). `request_access`, `access_requests`, `deny_access_request`, and `open_request_target` handle requests; a grant answers the open request for its agent and item. A revoke removes the requests of the agent, an item delete removes the requests for the item, and a restore removes all requests and turns "see all" off. The migration from 11 to 12 is one transaction, and an old grant keeps its folder.
-Schema version 13 (2026-09-28) adds the table `sync_meta` for iCloud sync ([ADR 0014](../adr/0014-icloud-sync.md)): one row with a random vault id (UUID version 4, made at create or at the migration), the sync generation, the device and the time of the last push, and the content digest of the last push. `sync_identity` reads it. `write_sync_copy` raises the generation and copies the file while the vault stays unlocked. `inspect_sync_copy` checks a copy with the passphrase, including the content digest. `replace_file_with` puts a checked copy in the place of a locked vault. `adopt_sync_copy` makes a new vault from a checked copy. Unlike a restore, these keep agents, grants, and rules. The migration from 12 to 13 is one transaction. A backup and a restore keep the row.
+Schema version 13 (2026-09-28) adds the table `sync_meta` for iCloud sync ([ADR 0014](../adr/0014-icloud-sync.md)): one row with a random vault id (UUID version 4, made at create or at the migration), the sync generation, the device and the time of the last push, and the content digest of the last push. `sync_identity` reads it. `write_sync_copy` raises the generation and copies the file while the vault stays unlocked. `inspect_sync_copy` checks a copy with the passphrase, including the content digest. `adopt_sync_copy` makes a new vault from a checked copy. The migration from 12 to 13 is one transaction. A backup and a restore keep the row.
+Schema version 14 (2026-09-28) adds record-level sync ([ADR 0014](../adr/0014-icloud-sync.md), [sync](../operations/sync.md)): `item.uuid`, `item.updated_at` (Unix milliseconds), `item.updated_by` (a device ID), `item.clock` (a version vector), `item_event.uuid`, the tables `sync_tombstone` and `sync_peer` (synced), and `sync_stamp` and `sync_device` (local). SQL triggers keep the time and the device on each change of an item or of its tags, fields, archive state, declaration, variable, or connector, and write a tombstone at a delete. The migration from 13 derives the UUIDs of existing rows from the vault ID, the table, and the row ID, so copies of one vault agree. A pushed copy (`write_sync_copy`) has no row of `LOCAL_TABLES`, no local history event, and the default token lifetime. `merge_from` merges a local copy with the key of the open vault; `take_passphrase_of_copy` rekeys the vault to the passphrase of a copy of the same vault. A restore gives the file a new device ID.
 The owner selected SQLCipher with a master passphrase after the synthetic storage probe passed.
 This contract does not permit real-secret use or claim complete P2 acceptance.
 
@@ -101,23 +102,33 @@ impl Vault {
 // AgentSummary has token_issued_at and token_expires_at (Unix seconds).
 ```
 
-## iCloud sync API (schema 13)
+## Sync API (schema 13 and 14)
 
 ```rust
 pub struct SyncIdentity { pub vault_id: String, pub generation: u64, pub pushed_by: String, pub pushed_at: Option<u64> }
-pub struct SyncCopy { pub identity: SyncIdentity, pub sha256: [u8; 32] }
-pub const INCOMING_SUFFIX: &str = ".sync-incoming";
+pub struct SyncCopy { pub identity: SyncIdentity, pub sha256: [u8; 32], pub content: [u8; 32] }
+pub struct AdoptedCopy { pub identity: SyncIdentity, pub content: [u8; 32] }
+pub struct SyncScope;             // SyncScope::vault(): every credential, the key of the vault
+pub struct MergeReport { pub inserted: usize, pub updated: usize, pub deleted: usize,
+    pub conflicts: Vec<ConflictCopy>, pub skipped_variables: Vec<String>,
+    pub remote: SyncIdentity, pub remote_content: [u8; 32] }
+pub struct ConflictCopy { pub title: String, pub copy_title: String, pub device: String }
+pub const LOCAL_TABLES: [&str; 18];      // never in a pushed copy
+pub const SYNCED_TABLES: [&str; 13];
 impl Vault {
-    pub fn sync_identity(&self) -> VaultResult<SyncIdentity>;                   // unlocked
-    pub fn write_sync_copy(&mut self, destination: &Path, device: &str, above: u64) -> VaultResult<SyncCopy>;
+    pub fn sync_identity(&self) -> VaultResult<SyncIdentity>;                                  // unlocked
+    pub fn sync_content(&self, scope: &SyncScope) -> VaultResult<[u8; 32]>;                   // unlocked
+    pub fn sync_device_id(&self) -> VaultResult<String>;                                       // unlocked
+    pub fn write_sync_copy(&mut self, destination: &Path, device: &str) -> VaultResult<SyncCopy>;
+    pub fn check_sync_copy(&self, path: &Path, scope: &SyncScope) -> VaultResult<SyncIdentity>;
+    pub fn merge_from(&mut self, path: &Path, scope: &SyncScope) -> VaultResult<MergeReport>;
+    pub fn take_passphrase_of_copy(&mut self, copy: &Path, passphrase: &str) -> VaultResult<()>;
     pub fn inspect_sync_copy(path: &Path, passphrase: &str) -> VaultResult<SyncIdentity>;
-    pub fn replace_file_with(&mut self, incoming: &Path) -> VaultResult<()>;   // locked
-    pub fn incoming_path(&self) -> PathBuf;                                    // <vault>.sync-incoming
-    pub fn adopt_sync_copy(source: &Path, destination: &Path, passphrase: &str) -> VaultResult<(Self, SyncIdentity)>;
+    pub fn adopt_sync_copy(source: &Path, destination: &Path, passphrase: &str) -> VaultResult<(Self, AdoptedCopy)>;
 }
 ```
 
-The policy (status, rollback refusal, conflicts) is in `apassy::cloud`. See [icloud.md](../operations/icloud.md).
+A copy that does not open with the key of the vault is `WrongKeyOrCorrupt`; one that opens but fails a check is `Damaged`; one of another vault is `OtherVault`. The policy (folders, status, when to sync) is in `apassy::sync`. See [sync](../operations/sync.md).
 
 ```rust
 impl Vault {

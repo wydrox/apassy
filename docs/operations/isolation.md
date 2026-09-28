@@ -19,13 +19,17 @@ The profile denies read and write to:
   ([several vaults](multiple-vaults.md), ADR 0013).
 - the backup file. The owner can place it outside the data directory.
 - the SQLite companion files of the vault and the backup (`-wal`, `-shm`,
-  `-journal`, `.lock`), and the `.sync-incoming` copy that an iCloud pull
-  checks next to the vault ([icloud.md](icloud.md)).
+  `-journal`, `.lock`).
 - the Apassy folder in iCloud Drive
   (`~/Library/Mobile Documents/com~apple~CloudDocs/Apassy`). It holds a closed,
-  encrypted copy of each synced vault ([ADR 0014](../adr/0014-icloud-sync.md)).
-  A process with a copy can guess passphrases offline, and a changed copy can
-  reach the other Macs. The rest of iCloud Drive stays usable.
+  encrypted copy of each vault that syncs there ([sync](sync.md), [ADR
+  0014](../adr/0014-icloud-sync.md)). A process with a copy can guess
+  passphrases offline, and a changed copy can reach the other Macs. The rest of
+  iCloud Drive stays usable.
+- the synced file of each vault that syncs through another folder (Dropbox,
+  Google Drive, a share): the file, its push temporary file
+  `<file>.push.nosync`, and its SQLite companions. Only these files, not the
+  folder: an agent's projects can live in the same Dropbox folder.
 
 The profile permits a connection to the broker socket. The socket lives inside
 the denied data directory. A later rule in the profile re-opens only the socket
@@ -90,6 +94,7 @@ paths.
 | `APASSY_APP` | the installed app bundle. Optional. Default: `/Applications/Apassy.app` |
 | `APASSY_APP_BUILD` | a second app bundle, for example `<repository>/target/Apassy.app`. Optional. |
 | `APASSY_CLOUD_DIR` | the Apassy folder in iCloud Drive (subtree deny). Optional. The launcher passes it by default. |
+| `APASSY_SYNC_FILE_1` to `APASSY_SYNC_FILE_16` | the synced vault files from the vault list outside the data directory and the iCloud Apassy folder: the file, `<file>.push.nosync`, and the SQLite companions. Optional. |
 
 ### Directory-rename defense
 
@@ -98,8 +103,10 @@ block a rename of a directory above it. Without more rules, a process can
 rename a parent directory and then read the protected file at its new path. A
 measurement showed this bypass (section 5). So the profile also denies a rename
 or a delete of each parent directory of the data directory, the vault file, each
-listed vault file outside the data directory, the backup file, and the Apassy
-folder in iCloud Drive.
+listed vault file outside the data directory, the backup file, the Apassy
+folder in iCloud Drive, and each synced file in another folder. For a synced
+file in Dropbox this stops only a rename or a delete of the Dropbox folder and
+its parents; the files and folders inside stay usable.
 
 ## 2. The launcher
 
@@ -136,6 +143,10 @@ vault file:
 - A vault outside the data directory gets its own parameter,
   `APASSY_VAULT_FILE_2` to `APASSY_VAULT_FILE_16`, in the order of the list.
   `--print` shows them.
+- The synced file of a vault that syncs through a folder other than the iCloud
+  Apassy folder gets its own parameter, `APASSY_SYNC_FILE_1` to
+  `APASSY_SYNC_FILE_16` (ADR 0014). A synced file in the data directory or in
+  the iCloud Apassy folder needs none: their subtree denies cover it.
 
 The launcher fails closed. It stops with an error, and the host does not
 start, in these cases:
@@ -147,6 +158,9 @@ start, in these cases:
   Apassy once: it moves the damaged list aside and makes a new one.
 - More than 15 listed vaults are outside the data directory. Move vaults into
   the data directory, or remove vaults from the list in Settings > Vaults.
+- A synced vault has no valid synced file in the list, or more than 16 synced
+  files are outside the data directory and the iCloud Apassy folder. Turn the
+  sync of a vault off and on again, or sync some vaults through iCloud Drive.
 
 Without a list, the launcher denies the data directory and `--vault-file`, as
 before.
@@ -311,6 +325,9 @@ a vault canary, a fake Laya file, a backup canary, and a live broker socket.
 | read, list, or write in the Apassy folder in iCloud Drive | denied |
 | rename the iCloud Drive folder, then read the vault copy | denied |
 | read a file in another iCloud Drive folder | allowed |
+| read or write a synced file in a Dropbox folder, its push temporary file, or its journal | denied |
+| rename the Dropbox folder of a synced file | denied |
+| read another file in that Dropbox folder, or work on a project next to it | allowed |
 | connect to the broker socket | allowed |
 | read a project file | allowed |
 | write a file in a temporary directory | allowed |

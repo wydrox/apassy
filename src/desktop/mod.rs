@@ -137,9 +137,9 @@ pub struct DesktopApp {
     /// starts it.
     #[cfg(feature = "vault")]
     pub(crate) updates: update::Updater,
-    /// iCloud sync of the vaults (ADR 0014).
+    /// Sync of the vaults through a folder (ADR 0014).
     #[cfg(feature = "vault")]
-    pub(crate) icloud: ui::icloud::IcloudState,
+    pub(crate) sync: ui::sync::SyncUiState,
     styled: bool,
 }
 
@@ -194,7 +194,7 @@ impl DesktopApp {
             #[cfg(feature = "vault")]
             updates: update::Updater::idle(),
             #[cfg(feature = "vault")]
-            icloud: ui::icloud::IcloudState::default(),
+            sync: ui::sync::SyncUiState::default(),
             styled: false,
         }
     }

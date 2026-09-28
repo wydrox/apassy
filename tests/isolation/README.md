@@ -33,6 +33,11 @@ in the product profile and checks the boundary:
   synthetic iCloud Drive, or move the iCloud Drive folder
   (`profile_denies_the_icloud_folder`). Another iCloud Drive folder stays
   readable. The launcher passes `APASSY_CLOUD_DIR` by default.
+- A synced vault file in another folder (a synthetic Dropbox folder), its push
+  temporary file, and its journal are denied, and the folder cannot be renamed;
+  another file in that folder and a project next to it stay usable
+  (`profile_denies_a_synced_file_and_keeps_its_folder_usable`). The launcher
+  passes it as `APASSY_SYNC_FILE_1` (ADR 0014).
 - Ordinary work still runs: it reads the project directory and writes a
   temporary file. Child processes of the sandboxed process work.
 - `ps eww` and `ps -E` in the profile do not show the environment of a process

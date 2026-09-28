@@ -1,124 +1,101 @@
-# ADR 0014 — iCloud sync of a vault
+# ADR 0014 — Sync of a vault through a folder, merged by credential
 
 Date: 2026-09-28.
-Status: PROPOSED for 0.3.0. In the code: the sync engine (`apassy::cloud`), schema version 13, the Seatbelt rule, the setting of each vault in the vault list (ADR 0013), the desktop app (section 11), and the tests.
-Operations: [icloud.md](../operations/icloud.md).
+Status: ACCEPTED for 0.3.0: on 2026-09-28 the owner asked for sync that works "like other apps", with a folder of choice, automatic merges, and no version choice. In the code. It replaces the first design of this ADR (a whole-file copy in iCloud Drive, with "Keep this Mac" or "Use iCloud" in a conflict), which did not ship.
+Operations: [sync.md](../operations/sync.md).
 
 ## Context
 
-The owner wants the same vault on more than one Mac. iCloud Drive is on each Mac of the owner and needs no Apassy server.
+The owner wants the same vault on more than one Mac, and a small team wants to share a vault. They expect it to work like other apps that sync through a folder (Obsidian, for example): the owner picks where the vault syncs, it just syncs, and changes from two Macs merge. A choice of a whole version is not acceptable in normal use.
 
-A live SQLite database in iCloud Drive is not safe:
-
-- iCloud can replace the file while a connection has it open.
-- iCloud syncs a rollback journal (`-journal`) or a WAL apart from its database. A Mac can then get a database without its journal, or a journal of another state.
-- iCloud can evict a file (keep only the name on the Mac) and download it again later.
-- Two Macs can change the file at the same time. iCloud then keeps one version, or makes a duplicate like `Personal 2.apassy`.
+A live SQLite database in a synced folder is not safe: a sync service can replace the file under an open connection, sync a rollback journal apart from its database, evict the file, or keep one of two concurrent versions.
 
 ## Decision
 
-### 1. The live vault stays local
+### 1. Where a vault syncs
 
-The live vault is a local file, as before. The Seatbelt profile protects it. iCloud Drive holds a closed, encrypted copy of the vault in `~/Library/Mobile Documents/com~apple~CloudDocs/Apassy/<name>.apassy`. The copy has the format of a backup: the SQLCipher file with the passphrase of its time. SQLite never opens a file in iCloud Drive; each check opens a local copy.
+The sync setting of a vault holds a folder. iCloud Drive (`…/com~apple~CloudDocs/Apassy`) is the default when it is on. The app also offers the folders in `~/Library/CloudStorage` (Dropbox, Google Drive, OneDrive, other File Provider services), `~/Dropbox`, and "Choose folder…" for any path (Syncthing, a network share). The file is `<folder>/<name>.apassy`: a closed, encrypted copy. The live database stays local; SQLite never opens a file in the folder. The vault list (ADR 0013) keeps the folder, the file name, and the name of the sync state of each vault.
 
-### 2. Schema version 13: the sync record
+### 2. What syncs
 
-The table `sync_meta` has one row:
+The credentials and their settings sync: items, fields, tags, the archive state, declarations, environment variables with placeholder hosts, connectors, and the history events of a credential (added, edited, archived, declaration, variable, connector).
 
-| Column | Meaning |
+Everything else stays on each Mac (`vault::LOCAL_TABLES`): agents and tokens, grants, rules, the token lifetime, activity, the decision log, patterns, calibrations, candidates and shadow answers, access requests, waits, review marks, the history events about agents and reveals, and the sync bookkeeping. A push removes these rows from the copy (`ATTACH` of the copy, `DELETE`, `VACUUM`) before the copy goes to the folder. So the agents and the activity of one Mac never reach another Mac or a teammate. Each Mac registers its own agents; their tokens live in the MCP configuration of each Mac, and their folders are on each Mac.
+
+A test lists every table of the schema and fails when a new table is neither synced nor local.
+
+### 3. Records, versions, and tombstones (schema version 14)
+
+Each credential has a stable `uuid`, `updated_at` (Unix milliseconds), `updated_by` (the random device ID of the vault file; `sync_device`), and a version vector `clock` (for each device ID, the count of its changes). SQL triggers keep the time and the device on each change of the item or of one of its child rows, and write a tombstone at a delete. So the many write paths of the app need no edit. Before each merge and each push, the app counts each change since the last stamp in the clock of its device (`sync_stamp`, local).
+
+A tombstone has the clock of the record with the delete counted. It stays 180 days.
+
+The migration from 13 gives existing records UUIDs derived from the vault ID, the table, and the row ID (SHA-256), so two copies of the same vault agree on them, and it counts them as stamped with an empty clock. A readable device name for the conflict copies is in `sync_peer`, which syncs.
+
+The unit of merge is the credential with all its settings. A change of the variable on one Mac and of the declaration on another is a conflict of that credential.
+
+### 4. Merge
+
+The other copy is always a local copy in the data folder, never the file in the synced folder. The app attaches it to the open connection without a key argument: SQLCipher then uses the key of the vault (a test shows this, and that a copy made after a passphrase change on another Mac does not open). The copy must pass the page checks of SQLCipher, the integrity check, the schema check, and the content digest of its last push (a file that mixes pages of different copies fails: each page passes its HMAC, the digest does not). It must have the vault ID of the vault.
+
+Then, per credential, in one transaction:
+
+| Clocks | Result |
 | --- | --- |
-| `vault_id` | a random UUID (version 4), made at create or at the migration. Every copy of the vault has it. |
-| `generation` | 0 before the first push. Each push makes it larger. |
-| `pushed_by`, `pushed_at` | the device name (`scutil --get ComputerName`, else the host name) and the time of the last push |
-| `content_digest` | SHA-256 of the schema and of every row of every other table at the last push |
+| equal, or the local one contains the other | keep the local version (an old copy changes nothing) |
+| the other contains the local one | take the other version |
+| each has a change that the other lacks, same content | keep it, join the clocks |
+| each has a change that the other lacks, other content | the later change (time, then device ID) wins; the other version stays as an archived credential "<title> (conflict copy, <device>)" without its variable and connector |
 
-The row is inside the encrypted database. Only an unlocked vault, or a copy opened with the passphrase, shows it.
+A record only on the other side is added, unless a local tombstone saw its version. A tombstone of the other side that saw the local version deletes the local credential with its agent links; a local change that the delete did not see keeps it. Integer IDs are local: each reference between synced tables goes through the UUIDs. A variable name that another local credential has already is left out and reported.
 
-### 3. Push
+The conflict copy has a UUID, a version, and a clock from the losing version, so each Mac that sees the conflict makes the same copy, and it is there once.
 
-The vault is unlocked. One transaction raises the generation above the current one and above the last known one, and writes the device, the time, and the content digest. Then Apassy copies the vault file to `.<name>.push.nosync` in the Apassy folder (iCloud does not sync a name that ends in `.nosync`), syncs the copy, renames it to `<name>.apassy`, and syncs the folder. The vault stays unlocked.
+After a merge, when the vault has content that the file lacks, the app pushes. "Content to push" is a digest of the synced content only: agent activity does not start a push.
 
-The copy while the connection is open is safe: the vault uses DELETE journal mode, each vault method ends its transaction before it returns, and `&mut Vault` means that no statement runs. An idle connection in rollback-journal mode holds no lock and no unwritten page, so the file is a complete database. The `.lock` sidecar keeps other Apassy processes out. A `-journal`, `-wal`, or `-shm` file next to the vault refuses the push.
+### 5. No passphrase in normal use
 
-### 4. Status without the passphrase
+A merge and a push use the key of the unlocked vault. When the synced file does not open with it (another Mac changed the passphrase), the app asks once: "The passphrase of <vault> changed on another Mac. Type the new passphrase." The new passphrase must open the file and the file must hold this vault; then the local vault is rekeyed to it (`PRAGMA rekey` on the open connection; the old passphrase is not needed) and the merge runs. Opening a synced vault on a new Mac or by a teammate takes the passphrase.
 
-A small JSON file in the data folder keeps, for each vault: the cloud file name, the vault id, the SHA-256 of the file at the last push or pull, and the generation at that time. The status compares the SHA-256 of the local file and of the cloud file with the last one:
+### 6. When it runs
 
-| Local file | Cloud file | Status |
-| --- | --- | --- |
-| as at the last sync | as at the last sync | in sync |
-| changed | as at the last sync | push needed |
-| as at the last sync | changed | pull available |
-| changed | changed | conflict (in sync when the two are equal) |
+At each unlock, before the list shows; while unlocked, every 30 seconds for the file (by its hash) and 5 to 8 seconds after a change of a credential; before each lock of the session, including a switch, a backup, a quit, and the restart for an update (the step before a lock of `OwnerSession`, after waiting runs end); and at "Sync now". Never while an agent run waits for the owner. A failure never stops a lock or a quit. An evicted iCloud file is requested with `brctl download`; a missing or unreachable folder shows "Folder not available" and syncs when it is back.
 
-Other states: the cloud file is missing, the cloud file is not downloaded (a `.<name>.icloud` placeholder, or a dataless file on macOS 14 and later), and iCloud Drive is not available. The status also lists iCloud duplicates of the cloud file.
+### 7. A sync scope
 
-### 5. Pull
+One sync covers a scope (`vault::SyncScope`): which records, which file, which key. Now the only scope is the whole vault with the key of the vault. A shared collection (a group of credentials with its own file and its own random key) will be another scope: the merge takes the scope and does not change. Version vectors belong to the record, not to the file, so a record can later sync through two files.
 
-The vault is locked, and the owner types the passphrase. Apassy copies the cloud file next to the vault (`<vault>.sync-incoming`), and checks it with the passphrase: the cipher settings, the schema, the integrity, and the content digest. It refuses:
+### 8. What was kept from the first design, and what went
 
-- local changes that are not in iCloud,
-- a copy with another vault id,
-- a copy with a lower generation than the last sync, or with the same generation and other content (a rollback).
-
-Then Apassy renames the copy over the vault file. The vault keeps its `.lock` sidecar and has no connection while locked, so the next unlock opens the new file. A copy from an older schema migrates at that unlock, as always.
-
-### 6. A pull keeps agents and grants
-
-A restore removes agent authority, because an old or changed backup can have wrong settings (ADR 0003, goal item V4). A pull keeps agents, grants, and rules:
-
-- The passphrase authenticates the copy. SQLCipher checks the HMAC of each page with a key from the passphrase. Without the passphrase, nobody can make a copy that passes.
-- The generation check refuses an old copy, for example one with an agent that the owner revoked since.
-- SQLCipher authenticates each page, not the file. All copies of a vault share the key, so a page of an older copy still passes its HMAC in a newer copy. The content digest in the sync record covers every row, so a copy that mixes pages of different copies fails the check. A test shows that SQLCipher accepts such a mixed file and the pull refuses it.
-
-The limit: a person with the passphrase and access to the iCloud account can make a valid copy with any content and a high generation. The other Macs then accept it. The passphrase is the root key of the vault (ADR 0003), so this is the same trust as for an unlock.
-
-### 7. Conflicts
-
-The owner chooses. Apassy never merges.
-
-- "Keep this Mac": Apassy reads the generation of the iCloud copy with the passphrase, saves the iCloud copy to `<data folder>/conflicts/<name>-icloud-<time>.apassy`, and pushes with a higher generation.
-- "Use iCloud": Apassy saves the local file to `<data folder>/conflicts/<name>-this-mac-<time>.apassy`, then pulls. Here a copy with the generation of the last sync and other content is accepted (two Macs pushed from the same copy). A lower generation is still refused.
-
-A conflict copy is an ordinary vault file. The owner can open it later with the passphrase of its time.
-
-### 8. Enable, disable, adopt
-
-- Enable (vault unlocked, passphrase): the first push. The cloud file name comes from the vault name. When a file with that name holds another vault (another vault id, or it does not open with the passphrase), Apassy tries `<name>-2`, `<name>-3`, and so on. When the file holds the same vault, Apassy links to it without a push: equal files are in sync, other files are a conflict.
-- Disable: Apassy removes the state file. The cloud file stays.
-- Adopt (a new Mac): Apassy lists the `*.apassy` files in the Apassy folder. The owner picks one and types its passphrase. Apassy checks the copy and makes a new local vault file. There is no earlier generation, so any generation is accepted.
+- Kept: the live vault stays local; the closed copy; the `.nosync` temporary file and the rename; the content digest against mixed pages; the stable vault ID; the sync state per vault in the data folder; the detection of evicted iCloud files and of iCloud duplicates; the Seatbelt denial of the iCloud Apassy folder.
+- Dropped: the refusal of an older generation. With version vectors and tombstones an old copy cannot undo a newer change and makes no conflict copy, so the refusal adds nothing; the generation stays in the sync record as a push counter for display. Dropped: "Keep this Mac" and "Use iCloud". The only whole-file choice left is the last resort for a damaged synced file ("Replace with this Mac's vault"), because a damaged file cannot be merged.
 
 ### 9. Isolation
 
-The Seatbelt profile has an optional parameter `APASSY_CLOUD_DIR`. It denies read and write under the Apassy folder in iCloud Drive, and a rename or a delete of its parent folders. `apassy-sandbox` passes `$HOME/Library/Mobile Documents/com~apple~CloudDocs/Apassy` by default. The profile also denies `<vault>.sync-incoming` like the vault file. The state file and the conflict copies are in the data folder, which the profile denies.
+`APASSY_CLOUD_DIR` denies the iCloud Apassy folder as a whole. For a synced file in another folder, the profile denies only its files, because an agent's projects can live in Dropbox too: the file, `<file>.push.nosync`, and its SQLite companions (`APASSY_SYNC_FILE_1` to `APASSY_SYNC_FILE_16`, read from the vault list; a damaged list, a synced vault without a valid file, or more than 16 such files stop the launcher). The folders above the file cannot be renamed or deleted, as for the other rules. Sealing a Dropbox folder this way stops only a rename or a delete of that folder and its parents; files and folders inside stay usable (a test shows a project in the same Dropbox folder).
 
-### 10. Linux
+## Sharing a vault with a small team
 
-Linux has no iCloud Drive. The code builds there, and `default_cloud_dir()` is `None`, so the app shows no iCloud control. The tests use a temporary folder as iCloud Drive, so they run on Linux and on macOS.
-
-### 11. The app
-
-- **Setting.** Each entry of the vault list has an optional field `cloud` with the name of its sync state file. The name is the list ID of the vault, so the state is `<data folder>/icloud/<list ID>.json`. The engine gets its paths from the entry; it does not read the list.
-- **Push before each lock.** The owner session has one step that runs with the unlocked vault after the runs that wait end and before the lock (`OwnerSession::set_before_lock`). Every lock path goes through it: "Lock now", a switch, a backup, a restore or an open that replaces an unlocked vault, a quit, and "Restart now" for an update. The step pushes when the vault has changes and the iCloud copy did not change. A failure never stops the lock; it shows once as a note. The step knows only the sync of the open vault, and the engine refuses a vault at another path or with another vault ID, so a push never reaches the iCloud file of another vault.
-- **Push while unlocked.** Every 30 seconds the app reads the status. When the open vault has changes, it pushes at most every 3 minutes, and not while an agent run waits for the owner.
-- **Pull before an unlock.** When the status is "pull available", the unlock pulls first with the typed passphrase, or with the passphrase from Touch ID. A refused pull (an older copy, another vault, a wrong passphrase) does not stop the unlock of the file on this Mac; a note says why.
-- **Conflict.** A banner and Settings open a sheet with "Keep this Mac's version" and "Use the iCloud version", with the passphrase. The unlock screen has the same two buttons with the typed passphrase. For "Use the iCloud version" from an unlocked vault, the app checks the passphrase against the file of this Mac first, locks without a push, pulls, and unlocks again.
-- **A new Mac.** "Open a vault from iCloud…" lists the iCloud files that no vault of the list syncs with, and adopts one into `<data folder>/vaults/<name>.db` with sync on.
-- **A rebuilt list.** A damaged list loses the field `cloud`. The state file names its vault file (`vault_path`). The app links a state to a vault of the rebuilt list only when the paths match and the file has the SHA-256 of the last sync. Else the note asks the owner to turn sync on again, which links to the same iCloud file by the vault ID.
-- **The status does not name the Mac of a newer copy.** The device name is inside the encrypted copy, and the status runs without the passphrase. The app shows the time of the file; the result of the pull names the Mac.
+The same `.apassy` file in a folder that several people share is a shared vault: each person opens it with the passphrase. Limits: everyone with the passphrase can read and change every value; removing a person means changing the passphrase and rotating the credentials; there is no per-person audit.
 
 ## Alternatives
 
-- The live database in iCloud Drive. Refused: see Context.
-- A sidecar file in iCloud with the generation or a MAC. Refused: iCloud syncs it apart from the vault copy, so the two can disagree.
-- A merge of two copies by rows. Refused for now: agents, grants, and the history of items make a merge hard to prove correct. The owner chooses a copy and keeps the other as a file.
-- The time as the generation. Refused: the clocks of two Macs can differ. The counter with "Keep this Mac" above the iCloud generation needs no clock.
+- The live database in the synced folder. Refused: see Context.
+- A whole-file copy with a version choice (the first design of this ADR). Refused by the owner.
+- Last writer wins by time alone. Refused: a push over a file that another Mac's push did not reach yet would drop that Mac's change silently, and a base-version scheme either drops such changes or makes a false conflict copy in ordinary back-and-forth editing. A test covers the case. Version vectors tell a concurrent change from an old one.
+- Merging each child table as its own record. Refused for now: the credential is what the owner sees and edits; a finer merge can come later without a format change of the file.
+- A sidecar file with metadata next to the vault file. Refused: a sync service syncs it apart from the vault file.
 
 ## What this does not protect
 
-- A person with the passphrase and the iCloud account (section 6).
-- The iCloud copy holds the passphrase of the last push. After a passphrase change on one Mac, the other Macs type the new passphrase at the pull. An old iCloud copy, a conflict copy, and iCloud's own file versions keep the old passphrase.
-- iCloud can deliver a push late. A push on another Mac in that time is a conflict or an iCloud duplicate. Apassy shows both; the owner chooses.
-- Between the read of the iCloud copy and the rename, iCloud can deliver a newer version. The rename then replaces it in iCloud. The Mac that pushed that version still has it; its next pull stops with the equal-generation message, and the owner chooses there.
-- The activity log is part of the vault. Each agent use changes the local file, so the status often says "push needed".
-- Apassy does not delete conflict copies or iCloud duplicates.
+- A person with the passphrase and the synced folder can write a valid file with any content, and the other Macs merge it. The passphrase is the root key of the vault (ADR 0003).
+- A conflict picks the later change by the clock of each Mac; a wrong clock can pick the wrong winner, but the other version is kept.
+- A Mac away longer than 180 days can bring a deleted credential back.
+- The synced file has the passphrase of the Mac that pushed last. Old copies in the folder's version history keep old passphrases.
+- Apassy does not delete conflict copies, duplicates, or old synced files.
+
+## Relation to other records
+
+- ADR 0003: the passphrase stays the root key; a rekey from a synced copy needs the new passphrase.
+- ADR 0013: the sync setting is an optional field of a vault list entry; the launcher reads it.
+- ADR 0015: "Restart now" locks through the same step, so it syncs.

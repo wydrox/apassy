@@ -113,26 +113,45 @@ pub fn slug(name: &str) -> String {
     }
 }
 
-/// iCloud sync of one vault (ADR 0014). The sync state is a file in the data
-/// directory: `icloud/<state>.json`. It names the file in iCloud Drive.
+/// Sync of one vault through a folder (ADR 0014). The sync state is a file in the data
+/// directory: `sync/<state>.json`. The synced file is `<folder>/<file>`; the sandbox
+/// launcher reads it here and denies it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CloudLink {
+pub struct SyncLink {
     /// The name of the sync state file, without `.json`. An empty or invalid name
     /// means that sync is off.
     #[serde(default)]
     pub state: String,
+    /// The synced folder, for example the Apassy folder in iCloud Drive.
+    #[serde(default)]
+    pub folder: PathBuf,
+    /// The name of the synced file in the folder, for example `Personal.apassy`.
+    #[serde(default)]
+    pub file: String,
     /// Fields of a later Apassy. They stay when this version writes the list.
     #[serde(flatten)]
     extra: Map<String, Value>,
 }
 
-impl CloudLink {
-    /// A link to the sync state file `icloud/<state>.json`.
-    pub fn new(state: &str) -> Self {
+impl SyncLink {
+    /// A link to the sync state file `sync/<state>.json` and the synced file
+    /// `<folder>/<file>`.
+    pub fn new(state: &str, folder: &Path, file: &str) -> Self {
         Self {
             state: state.to_owned(),
+            folder: folder.to_owned(),
+            file: file.to_owned(),
             extra: Map::new(),
         }
+    }
+
+    /// The synced file, when the folder is absolute and the name is a plain file name.
+    pub fn file_path(&self) -> Option<PathBuf> {
+        let plain = !self.file.is_empty()
+            && !self.file.contains(['/', '\0'])
+            && self.file != "."
+            && self.file != "..";
+        (plain && self.folder.is_absolute()).then(|| self.folder.join(&self.file))
     }
 
     /// The state name when it can be a file name: 1 to 64 ASCII letters, digits, `-`,
@@ -162,18 +181,24 @@ pub struct VaultEntry {
     /// Unix time of the last open. `None` before the first open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_opened_at: Option<u64>,
-    /// iCloud sync of the vault (ADR 0014). `None` when sync is off.
+    /// Sync of the vault through a folder (ADR 0014). `None` when sync is off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cloud: Option<CloudLink>,
+    pub sync: Option<SyncLink>,
     /// Fields of a later Apassy. They stay when this version writes the list.
     #[serde(flatten)]
     extra: Map<String, Value>,
 }
 
 impl VaultEntry {
-    /// The sync state name of the vault, when iCloud sync is on.
-    pub fn cloud_state(&self) -> Option<&str> {
-        self.cloud.as_ref().and_then(CloudLink::state_name)
+    /// The sync state name of the vault, when sync is on.
+    pub fn sync_state(&self) -> Option<&str> {
+        self.sync.as_ref().and_then(SyncLink::state_name)
+    }
+
+    /// The synced file of the vault, when sync is on.
+    pub fn sync_file(&self) -> Option<PathBuf> {
+        self.sync_state()?;
+        self.sync.as_ref().and_then(SyncLink::file_path)
     }
 }
 
@@ -544,7 +569,7 @@ impl Registry {
             path: path.to_path_buf(),
             added_at: now,
             last_opened_at: None,
-            cloud: None,
+            sync: None,
             extra: Map::new(),
         });
         Ok(id)
@@ -957,24 +982,36 @@ mod tests {
     }
 
     #[test]
-    fn a_cloud_link_round_trips_and_needs_a_file_name() {
+    fn a_sync_link_round_trips_and_needs_a_file_name() {
         let mut registry = Registry::new();
         let id = registry
-            .add("Personal", Path::new("/tmp/apassy-cloud.db"), 1)
+            .add("Personal", Path::new("/tmp/apassy-sync.db"), 1)
             .expect("add");
-        assert_eq!(registry.get(&id).expect("entry").cloud_state(), None);
-        registry.entry_mut(&id).expect("entry").cloud = Some(CloudLink::new(&id));
+        assert_eq!(registry.get(&id).expect("entry").sync_state(), None);
+        let folder = Path::new("/Users/me/Dropbox/Apassy");
+        registry.entry_mut(&id).expect("entry").sync =
+            Some(SyncLink::new(&id, folder, "Personal.apassy"));
         let read = Registry::parse(&registry.to_json()).expect("parse");
-        assert_eq!(
-            read.get(&id).expect("entry").cloud_state(),
-            Some(id.as_str())
-        );
+        let entry = read.get(&id).expect("entry");
+        assert_eq!(entry.sync_state(), Some(id.as_str()));
+        assert_eq!(entry.sync_file(), Some(folder.join("Personal.apassy")));
         for bad in ["", "../x", "a b", &"x".repeat(65)] {
-            assert_eq!(CloudLink::new(bad).state_name(), None, "{bad}");
+            assert_eq!(
+                SyncLink::new(bad, folder, "x.apassy").state_name(),
+                None,
+                "{bad}"
+            );
         }
+        for bad in ["", "a/b.apassy", "..", "."] {
+            assert_eq!(SyncLink::new("s", folder, bad).file_path(), None, "{bad}");
+        }
+        assert_eq!(
+            SyncLink::new("s", Path::new("relative"), "x.apassy").file_path(),
+            None
+        );
         // Sync off writes no field.
-        registry.entry_mut(&id).expect("entry").cloud = None;
-        assert!(!registry.to_json().contains("\"cloud\""));
+        registry.entry_mut(&id).expect("entry").sync = None;
+        assert!(!registry.to_json().contains("\"sync\""));
     }
 
     #[test]

@@ -1,12 +1,13 @@
 #![cfg(feature = "vault")]
 
-//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 12) to
+//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 13) to
 //! the current version, with data at each version. Synthetic values only.
 //!
 //! The schema SQL below is a frozen copy of the statements that each earlier version ran
 //! at create: version 1 in commit a2f860a, 2 in 4ffdb5e, 3 in 22d1784, 4 in 2eb8366,
 //! 5 in 9ce2e01, 6 in 4193991, 7 in c5a91c0, 8 in 2acde80, 9 in cff4303, 10 and 11 in
-//! ab935b8, 12 in 8f1a8e0. Do not change these copies when the current schema changes.
+//! ab935b8, 12 in 8f1a8e0, 13 in 611fa6e (its sync row had a random vault ID; the copy
+//! uses a fixed one). Do not change these copies when the current schema changes.
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -21,7 +22,9 @@ use apassy::vault::{
 use tempfile::TempDir;
 
 const PASS: &str = "synthetic-migration-passphrase";
-const CURRENT_VERSION: i64 = 13;
+const CURRENT_VERSION: i64 = 14;
+/// The vault ID of the frozen version 13 file.
+const V13_VAULT_ID: &str = "6f1c2d3e-4a5b-4c6d-8e7f-0123456789ab";
 
 const V1_SQL: &str = "
 CREATE TABLE vault_meta (
@@ -294,6 +297,21 @@ UPDATE vault_meta SET schema_version = 11 WHERE id = 1;
 PRAGMA user_version = 11;
 ";
 
+const V13_SQL: &str = "
+CREATE TABLE sync_meta (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    vault_id TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK (generation >= 0),
+    pushed_by TEXT NOT NULL,
+    pushed_at INTEGER,
+    content_digest BLOB
+);
+INSERT INTO sync_meta (id, vault_id, generation, pushed_by)
+    VALUES (1, '6f1c2d3e-4a5b-4c6d-8e7f-0123456789ab', 0, '');
+UPDATE vault_meta SET schema_version = 13 WHERE id = 1;
+PRAGMA user_version = 13;
+";
+
 const V12_SQL: &str = "
 ALTER TABLE agent ADD COLUMN see_all INTEGER NOT NULL DEFAULT 0 CHECK (see_all IN (0, 1));
 ALTER TABLE exec_grant ADD COLUMN any_folder INTEGER NOT NULL DEFAULT 0 CHECK (any_folder IN (0, 1));
@@ -407,7 +425,7 @@ fn build_legacy(path: &Path, version: i64) {
     let tx = conn.transaction().expect("transaction");
     let steps = [
         V1_SQL, V2_SQL, V3_SQL, V4_SQL, V5_SQL, V6_SQL, V7_SQL, V8_SQL, V9_SQL, V10_SQL, V11_SQL,
-        V12_SQL,
+        V12_SQL, V13_SQL,
     ];
     for sql in &steps[..usize::try_from(version).expect("version")] {
         tx.execute_batch(sql).expect("legacy schema");
@@ -824,9 +842,23 @@ fn unlock_migrates_each_earlier_schema_version_to_the_current_one() {
         assert!(vault.is_locked());
         vault.unlock(PASS).expect("unlock migrates");
         assert_version_data(&mut vault, version);
-        // Version 13: the migration gives the vault a new sync record, never pushed.
+        // Version 13: the migration gives the vault a new sync record, never pushed. A
+        // version 13 file keeps its own.
         let identity = vault.sync_identity().expect("sync record");
         assert_eq!(identity.vault_id.len(), 36, "{identity:?}");
+        if version == 13 {
+            assert_eq!(identity.vault_id, V13_VAULT_ID);
+        }
+        // Version 14: each credential and each history event has a UUID, and the
+        // migrated rows have no sync version yet.
+        let (uuids, versions) = sync_columns(&path);
+        assert_eq!(uuids.len(), 5, "{uuids:?}");
+        assert!(uuids.iter().all(|uuid| uuid.len() == 32));
+        assert!(
+            versions
+                .iter()
+                .all(|(at, by, clock)| *at == 0 && by.is_empty() && clock.is_empty())
+        );
         assert_eq!(identity.generation, 0);
         assert!(identity.pushed_by.is_empty());
         assert_eq!(identity.pushed_at, None);
@@ -1059,7 +1091,100 @@ fn migrated_candidate() -> NewCandidate {
     }
 }
 
-/// The step from version 12 to 13 runs in one transaction. A failure leaves version 12
+/// The sync columns of the items of a migrated file: the UUIDs, and (updated_at,
+/// updated_by, clock) for each.
+fn sync_columns(path: &Path) -> (Vec<String>, Vec<(i64, String, String)>) {
+    let conn = rusqlite::Connection::open(path).expect("open");
+    conn.pragma_update(None, "key", PASS).expect("key");
+    let mut stmt = conn
+        .prepare("SELECT uuid, updated_at, updated_by, clock FROM item ORDER BY id")
+        .expect("prepare");
+    let rows: Vec<(String, i64, String, String)> = stmt
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("rows");
+    let null_events: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM item_event WHERE uuid IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .expect("events");
+    assert_eq!(null_events, 0, "every history event has a UUID");
+    drop(stmt);
+    conn.close().map_err(|(_, err)| err).expect("close");
+    (
+        rows.iter().map(|row| row.0.clone()).collect(),
+        rows.into_iter().map(|row| (row.1, row.2, row.3)).collect(),
+    )
+}
+
+/// Two copies of the same version 13 file agree on the UUID of each credential after
+/// each migrates on its own Mac, so they merge record by record.
+#[test]
+fn two_copies_of_one_vault_get_the_same_record_uuids() {
+    let dir = TempDir::new().expect("temp dir");
+    let first = dir.path().join("first.db");
+    build_legacy(&first, 13);
+    let second = dir.path().join("second.db");
+    std::fs::copy(&first, &second).expect("copy");
+    let mut contents = Vec::new();
+    for path in [&first, &second] {
+        let mut vault = Vault::open(path).expect("open");
+        vault.unlock(PASS).expect("unlock migrates");
+        contents.push(
+            vault
+                .sync_content(&apassy::vault::SyncScope::vault())
+                .expect("content"),
+        );
+    }
+    assert_eq!(sync_columns(&first).0, sync_columns(&second).0);
+    assert_eq!(contents[0], contents[1], "the same synced content");
+}
+
+/// The step from version 13 to 14 runs in one transaction. A failure leaves version 13
+/// and its data.
+#[test]
+fn a_failed_migration_from_version_13_keeps_the_old_version_and_data() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("blocked13.db");
+    build_legacy(&path, 13);
+    {
+        // A table with the name of a version 14 table makes the migration fail.
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        conn.execute_batch("CREATE TABLE sync_tombstone (x INTEGER);")
+            .expect("blocking table");
+        conn.close().map_err(|(_, err)| err).expect("close");
+    }
+    let mut vault = Vault::open(&path).expect("open");
+    assert_eq!(
+        vault.unlock(PASS).unwrap_err().kind(),
+        VaultErrorKind::Storage
+    );
+    drop(vault);
+    assert_eq!(raw_versions(&path), (13, 13), "no partial migration");
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        let column = conn.prepare("SELECT uuid FROM item LIMIT 0");
+        assert!(column.is_err(), "no column of version 14");
+        drop(column);
+        conn.execute_batch("DROP TABLE sync_tombstone;")
+            .expect("drop blocking table");
+        conn.close().map_err(|(_, err)| err).expect("close");
+    }
+    let mut vault = Vault::open(&path).expect("open");
+    vault.unlock(PASS).expect("unlock migrates");
+    assert_version_data(&mut vault, 13);
+    drop(vault);
+    assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
+}
+
+/// The step from version 12 to 14 runs in one transaction. A failure leaves version 12
 /// and its data.
 #[test]
 fn a_failed_migration_from_version_12_keeps_the_old_version_and_data() {
@@ -1096,7 +1221,7 @@ fn a_failed_migration_from_version_12_keeps_the_old_version_and_data() {
     assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
 }
 
-/// The step from version 11 to 13 runs in one transaction. A failure leaves version 11
+/// The step from version 11 to 14 runs in one transaction. A failure leaves version 11
 /// and its data.
 #[test]
 fn a_failed_migration_from_version_11_keeps_the_old_version_and_data() {

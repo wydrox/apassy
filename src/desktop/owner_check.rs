@@ -888,11 +888,14 @@ impl DesktopApp {
                 return;
             }
         };
-        // A newer iCloud copy loads first (ADR 0014). The key is the passphrase.
-        let pre = self.icloud_before_unlock(&key);
         let result = self.owner_ui.session.unlock(&key);
         drop(key);
-        let loaded = self.icloud_after_unlock(pre, result.is_ok());
+        // Sync before the owner sees the list (ADR 0014).
+        let loaded = if result.is_ok() {
+            self.sync_after_unlock()
+        } else {
+            None
+        };
         match result {
             Ok(()) => self.set_ok(match loaded {
                 Some(line) => format!("The vault is unlocked with Touch ID. {line}"),
@@ -948,7 +951,7 @@ impl DesktopApp {
         ui_state.edit_secrets.clear();
         // The parsed 1Password export holds secrets.
         self.import.forget();
-        self.icloud_forget_secrets(ctx);
+        self.sync_forget_secrets(ctx);
         self.close_owner_check(ctx);
         if let Some(ctx) = ctx {
             super::ui::forget_all_secret_fields(ctx);

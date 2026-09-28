@@ -1,9 +1,10 @@
-//! The sync record and the file copies for iCloud sync (schema v13, ADR 0014).
+//! The sync record and the file copies for sync through a folder (schema v13, ADR 0014).
 //!
-//! The live vault stays a local file. iCloud Drive holds a closed copy with the same
-//! format as a backup. This module writes that copy from an unlocked vault, checks a
-//! copy with the passphrase, and puts a checked copy in the place of the local file.
-//! The policy (status, rollback refusal, conflicts) is in `crate::cloud`.
+//! The live vault stays a local file. The synced folder holds a closed copy with the
+//! format of a backup, without the data that stays on each Mac. This module writes that
+//! copy from an unlocked vault, checks a copy with the passphrase, and makes a new vault
+//! from a copy. The record-level merge is in `merge.rs`; the policy (when, where) is in
+//! `crate::sync`.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, Write};
@@ -14,11 +15,12 @@ use ring::digest;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
+use super::merge::{self, PUSH, SyncScope};
 use super::types::{SCHEMA_VERSION, VaultErrorKind, VaultResult, err, validate_unlock_passphrase};
 use super::{
     OPEN_READONLY, Vault, apply_key, canonical_new_target, close_conn, copy_into_new_file,
-    exclusive_create, fresh_epoch, map_open_err, refuse_sqlite_companions,
-    require_unaliased_regular, verify_cipher_defaults, verify_readable_schema,
+    exclusive_create, fresh_epoch, map_open_err, open_working_conn, refuse_sqlite_companions,
+    rekey, require_unaliased_regular, verify_cipher_defaults, verify_readable_schema,
 };
 
 /// The table added in schema version 13 (ADR 0014). One row. `vault_id` is random and
@@ -44,10 +46,6 @@ pub(super) const SCHEMA_V13_COLUMNS: [&str; 1] = [
 /// A device name in the sync record has at most this many bytes.
 pub const MAX_DEVICE_NAME_BYTES: usize = 64;
 
-/// Name suffix of the file that a pull copies next to the vault before it replaces the
-/// vault. The Seatbelt profile denies it like the vault file.
-pub const INCOMING_SUFFIX: &str = ".sync-incoming";
-
 /// The sync record of a vault. It has no secret. Only an unlocked vault, or a copy
 /// opened with the passphrase, shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +67,17 @@ pub struct SyncCopy {
     pub identity: SyncIdentity,
     /// SHA-256 of the bytes of the copy.
     pub sha256: [u8; 32],
+    /// The synced-content digest of the copy (see [`Vault::sync_content`]).
+    pub content: [u8; 32],
+}
+
+/// A new vault that `Vault::adopt_sync_copy` made from a copy.
+#[derive(Debug)]
+pub struct AdoptedCopy {
+    /// The sync record of the copy.
+    pub identity: SyncIdentity,
+    /// The synced-content digest of the new vault. It is the one of the copy.
+    pub content: [u8; 32],
 }
 
 /// Add schema version 13 and the one sync row with a new vault id. Create and each
@@ -138,12 +147,17 @@ fn unix_now() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
-/// The sync row and the stored content digest.
-fn read_sync_row(conn: &Connection) -> VaultResult<(SyncIdentity, Option<Vec<u8>>)> {
+/// The sync row and the stored content digest in `schema` (`main`, or an attached copy).
+pub(super) fn read_sync_row(
+    conn: &Connection,
+    schema: &str,
+) -> VaultResult<(SyncIdentity, Option<Vec<u8>>)> {
     let row = conn
         .query_row(
-            "SELECT vault_id, generation, pushed_by, pushed_at, content_digest
-             FROM sync_meta WHERE id = 1",
+            &format!(
+                "SELECT vault_id, generation, pushed_by, pushed_at, content_digest
+                 FROM {schema}.sync_meta WHERE id = 1"
+            ),
             [],
             |row| {
                 Ok((
@@ -178,21 +192,23 @@ fn read_sync_row(conn: &Connection) -> VaultResult<(SyncIdentity, Option<Vec<u8>
     ))
 }
 
-/// SHA-256 of the logical content: the schema without page numbers, and every row of
-/// every table except `sync_meta`, in rowid order.
+/// SHA-256 of the logical content of `schema`: the schema without page numbers, and
+/// every row of every table except `sync_meta`, in rowid order.
 ///
 /// SQLCipher authenticates each page with an HMAC, but not the file as a whole. All
 /// copies of a vault share the key, so someone with an older copy can put an old page
 /// into a newer copy, and the HMAC of that page still matches. The digest in the sync
-/// row covers the rows of all pages, so such a mixed file fails the check at a pull.
-fn content_digest(conn: &Connection) -> VaultResult<[u8; 32]> {
+/// row covers the rows of all pages, so such a mixed file fails the check at a merge.
+pub(super) fn content_digest(conn: &Connection, schema: &str) -> VaultResult<[u8; 32]> {
     let storage = |_| err(VaultErrorKind::Storage);
     let mut ctx = digest::Context::new(&digest::SHA256);
     ctx.update(b"apassy-sync-content-v1\0");
     let mut tables = Vec::new();
     {
         let mut stmt = conn
-            .prepare("SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name")
+            .prepare(&format!(
+                "SELECT type, name, tbl_name, sql FROM {schema}.sqlite_schema ORDER BY type, name"
+            ))
             .map_err(storage)?;
         let mut rows = stmt.query([]).map_err(storage)?;
         while let Some(row) = rows.next().map_err(storage)? {
@@ -211,7 +227,7 @@ fn content_digest(conn: &Connection) -> VaultResult<[u8; 32]> {
         ctx.update(b"T");
         hash_value(&mut ctx, ValueRef::Text(table.as_bytes()));
         let sql = format!(
-            "SELECT * FROM \"{}\" ORDER BY rowid",
+            "SELECT * FROM {schema}.\"{}\" ORDER BY rowid",
             table.replace('"', "\"\"")
         );
         let mut stmt = conn.prepare(&sql).map_err(storage)?;
@@ -298,18 +314,19 @@ pub(crate) fn sync_dir(dir: &Path) -> io::Result<()> {
 impl Vault {
     /// The sync record of this vault. The vault must be unlocked.
     pub fn sync_identity(&self) -> VaultResult<SyncIdentity> {
-        read_sync_row(self.conn_ref()?).map(|(identity, _)| identity)
+        read_sync_row(self.conn_ref()?, "main").map(|(identity, _)| identity)
     }
 
-    /// Write a closed copy of the vault file to `destination` for iCloud sync. The vault
-    /// stays unlocked.
+    /// Write the copy that the other Macs get to `destination` (a new local file, not a
+    /// file in a synced folder). The vault stays unlocked.
     ///
-    /// `destination` must not exist. The copy gets mode `0600` and is synced. Before the
-    /// copy, one transaction sets the next generation (above the current one and above
-    /// `above`), the device name, the time, and the content digest. The copy has them.
-    /// The method refuses a vault file with a `-journal`, `-wal`, or `-shm` file next to
-    /// it (`InvalidInput`). After a failure the generation can be one higher than before;
-    /// that is harmless, because only the order of generations counts.
+    /// First each local change is counted in the clock of this device. Then one
+    /// transaction raises the generation and records `device` as the writer, in the sync
+    /// record and in the device list. Then the vault file is copied, the copy is
+    /// attached with the key of the vault, and the data that stays on each Mac is removed
+    /// from it (`merge::LOCAL_TABLES`, the local history events, the token lifetime). The
+    /// copy is shrunk (`VACUUM`), and the digest of its content is stored in it. The copy
+    /// gets mode `0600` and is synced.
     ///
     /// Why a copy while the connection is open is safe: the vault uses DELETE journal
     /// mode (set at each unlock), so every committed page is in the main file and no
@@ -319,57 +336,84 @@ impl Vault {
     /// file on disk is a complete, consistent database, as after `lock()`. The `.lock`
     /// sidecar keeps other Apassy processes out of the file. A write by an external
     /// SQLite client during the copy is not supported, as for `backup()`.
-    pub fn write_sync_copy(
-        &mut self,
-        destination: &Path,
-        device: &str,
-        above: u64,
-    ) -> VaultResult<SyncCopy> {
+    pub fn write_sync_copy(&mut self, destination: &Path, device: &str) -> VaultResult<SyncCopy> {
         self.require_unlocked()?;
         refuse_sqlite_companions(&self.path, VaultErrorKind::InvalidInput)?;
         let mut dest_file = exclusive_create(destination)?;
-        let result = self.bump_and_copy(&mut dest_file, device, above);
+        let result = self.copy_and_strip(&mut dest_file, destination, device);
         if result.is_err() {
             drop(dest_file);
             let _ = fs::remove_file(destination);
+            let _ = fs::remove_file(companion(destination, "-journal"));
         }
         result
     }
 
-    fn bump_and_copy(
+    fn copy_and_strip(
         &mut self,
         dest_file: &mut File,
+        destination: &Path,
         device: &str,
-        above: u64,
     ) -> VaultResult<SyncCopy> {
         let device = clean_device_name(device);
         let now = i64::try_from(unix_now()).map_err(|_| err(VaultErrorKind::Storage))?;
         let conn = self.conn_mut()?;
+        // Count the local changes in the clocks first: the copy carries them.
+        merge::stamp_conn(conn)?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| err(VaultErrorKind::Storage))?;
-        let (current, _) = read_sync_row(&tx)?;
+        let (current, _) = read_sync_row(&tx, "main")?;
         let next = current
             .generation
-            .max(above)
             .checked_add(1)
             .and_then(|next| i64::try_from(next).ok())
             .ok_or_else(|| err(VaultErrorKind::Storage))?;
-        let digest = content_digest(&tx)?;
         tx.execute(
-            "UPDATE sync_meta SET generation = ?1, pushed_by = ?2, pushed_at = ?3,
-                 content_digest = ?4 WHERE id = 1",
-            (next, device.as_str(), now, digest.as_slice()),
+            "UPDATE sync_meta SET generation = ?1, pushed_by = ?2, pushed_at = ?3 WHERE id = 1",
+            (next, device.as_str(), now),
+        )
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+        tx.execute(
+            "UPDATE sync_device SET device_name = ?1 WHERE id = 1",
+            [device.as_str()],
+        )
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+        tx.execute(
+            "INSERT INTO sync_peer (device_id, name, seen_at)
+             SELECT device_id, ?1, ?2 FROM sync_device WHERE id = 1
+             ON CONFLICT(device_id) DO UPDATE SET name = excluded.name,
+                 seen_at = excluded.seen_at",
+            (device.as_str(), now),
         )
         .map_err(|_| err(VaultErrorKind::Storage))?;
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
-        let (identity, _) = read_sync_row(self.conn_ref()?)?;
         // The commit deleted the rollback journal. A companion now means that another
         // program uses the file, so the file on disk is not the whole database.
         refuse_sqlite_companions(&self.path, VaultErrorKind::InvalidInput)?;
         let mut source = File::open(&self.path).map_err(|_| err(VaultErrorKind::Io))?;
-        let sha256 = copy_hashing(&mut source, dest_file).map_err(|_| err(VaultErrorKind::Io))?;
-        Ok(SyncCopy { identity, sha256 })
+        copy_hashing(&mut source, dest_file).map_err(|_| err(VaultErrorKind::Io))?;
+        let path = destination
+            .to_str()
+            .ok_or_else(|| err(VaultErrorKind::InvalidInput))?;
+        let conn = self.conn_mut()?;
+        conn.execute(&format!("ATTACH DATABASE ?1 AS {PUSH}"), [path])
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let stripped = merge::strip_attached(conn, PUSH).and_then(|()| {
+            let (identity, _) = read_sync_row(conn, PUSH)?;
+            let content = merge::sync_content_digest(conn, PUSH, &SyncScope::vault())?;
+            Ok((identity, content))
+        });
+        let _ = conn.execute_batch(&format!("DETACH DATABASE {PUSH}"));
+        let (identity, content) = stripped?;
+        dest_file.sync_all().map_err(|_| err(VaultErrorKind::Io))?;
+        let mut written = File::open(destination).map_err(|_| err(VaultErrorKind::Io))?;
+        let sha256 = hash_open_file(&mut written).map_err(|_| err(VaultErrorKind::Io))?;
+        Ok(SyncCopy {
+            identity,
+            sha256,
+            content,
+        })
     }
 
     /// Check a sync copy at `path` with `passphrase` and return its sync record. The
@@ -378,9 +422,9 @@ impl Vault {
     /// The check is the check of a restore (cipher settings, schema, columns, integrity)
     /// plus the content digest of the last push. A wrong passphrase, a damaged file, or
     /// a file that mixes pages of different copies returns `WrongKeyOrCorrupt`. A copy
-    /// from before schema 13, or from a newer Apassy, returns `UnsupportedSchema`. A
-    /// schema 13 vault file that was never pushed (generation 0) has no digest; it
-    /// passes, so an owner can adopt a vault file that they put in iCloud Drive by hand.
+    /// from another schema version returns `UnsupportedSchema`. A schema 14 vault file
+    /// that was never pushed (generation 0) has no digest; it passes, so an owner can
+    /// adopt a vault file that they put in a synced folder by hand.
     pub fn inspect_sync_copy(path: &Path, passphrase: &str) -> VaultResult<SyncIdentity> {
         validate_unlock_passphrase(passphrase)?;
         let meta = match fs::symlink_metadata(path) {
@@ -400,59 +444,35 @@ impl Vault {
         }
     }
 
-    /// Put the file `incoming` in the place of the vault file. The vault must be locked.
-    ///
-    /// `incoming` must be a regular file in the directory of the vault file, so the
-    /// rename is atomic. The method refuses a vault file with a `-journal`, `-wal`, or
-    /// `-shm` file next to it: SQLite would apply such a file to the new database at the
-    /// next unlock. The vault keeps its `.lock` sidecar. It has no connection while
-    /// locked, so the next unlock opens the new file. The caller checks `incoming`
-    /// first (`inspect_sync_copy`).
-    pub fn replace_file_with(&mut self, incoming: &Path) -> VaultResult<()> {
-        if !self.is_locked() {
-            return Err(err(VaultErrorKind::InvalidInput));
-        }
-        refuse_sqlite_companions(&self.path, VaultErrorKind::InvalidInput)?;
-        let meta = fs::symlink_metadata(incoming).map_err(|_| err(VaultErrorKind::Io))?;
-        require_unaliased_regular(&meta)?;
-        let dir = self
-            .path
-            .parent()
-            .ok_or_else(|| err(VaultErrorKind::InvalidInput))?;
-        let incoming_dir = incoming
-            .parent()
-            .and_then(|parent| fs::canonicalize(parent).ok())
-            .ok_or_else(|| err(VaultErrorKind::InvalidInput))?;
-        if incoming_dir != dir {
-            return Err(err(VaultErrorKind::InvalidInput));
-        }
-        fs::rename(incoming, &self.path).map_err(|_| err(VaultErrorKind::Io))?;
-        sync_dir(dir).map_err(|_| err(VaultErrorKind::Io))
-    }
-
-    /// The path next to the vault file where a pull puts the new copy before it
-    /// replaces the vault file.
-    pub fn incoming_path(&self) -> std::path::PathBuf {
-        let mut name = self.path.as_os_str().to_os_string();
-        name.push(INCOMING_SUFFIX);
-        std::path::PathBuf::from(name)
-    }
-
     /// Make a new vault file at `destination` from the sync copy at `source`, and open
-    /// it locked. Used to adopt a vault from iCloud Drive on a new Mac.
+    /// it locked. Used to adopt a synced vault on a new Mac.
     ///
-    /// The checks are those of `inspect_sync_copy`. Unlike a restore, the agents, grants,
-    /// and rules stay: the passphrase authenticates the copy, and the caller refuses an
-    /// old copy by its generation (ADR 0014).
+    /// The checks are those of `inspect_sync_copy`. The copy has no agents, grants, or
+    /// rules: each Mac registers its own. The new vault gets its own device ID, and its
+    /// credentials count as stamped: they are the copy, not changes of this device.
     pub fn adopt_sync_copy(
         source: &Path,
         destination: &Path,
         passphrase: &str,
-    ) -> VaultResult<(Self, SyncIdentity)> {
+    ) -> VaultResult<(Self, AdoptedCopy)> {
         let dest = canonical_new_target(destination)?;
         let dest_lock = super::acquire_sidecar_lock(&dest)?;
         let identity = Self::inspect_sync_copy(source, passphrase)?;
         copy_into_new_file(source, &dest)?;
+        let prepared = open_working_conn(&dest, passphrase).and_then(|mut conn| {
+            let result = merge::new_device(&conn)
+                .and_then(|()| merge::mark_seen(&mut conn))
+                .and_then(|()| merge::sync_content_digest(&conn, "main", &SyncScope::vault()));
+            let closed = close_conn(conn);
+            result.and_then(|content| closed.map(|()| content))
+        });
+        let content = match prepared {
+            Ok(content) => content,
+            Err(prepare_err) => {
+                let _ = fs::remove_file(&dest);
+                return Err(prepare_err);
+            }
+        };
         let epoch = match fresh_epoch() {
             Ok(epoch) => epoch,
             Err(epoch_err) => {
@@ -467,21 +487,59 @@ impl Vault {
                 conn: None,
                 epoch,
             },
-            identity,
+            AdoptedCopy { identity, content },
         ))
     }
+
+    /// Take the passphrase that another Mac gave the vault. `copy` is a local copy of the
+    /// synced file; `passphrase` must open it, and it must have the vault ID of this
+    /// vault (`OtherVault`). Then the vault file is rekeyed to `passphrase`, and the vault
+    /// is unlocked with it. The vault must be unlocked.
+    ///
+    /// The owner proves the new passphrase with the copy, so the old one is not needed:
+    /// the open connection has the key. The change ends the vault epoch, like a lock and
+    /// an unlock. After a failure the vault can be locked; the old passphrase then still
+    /// opens it.
+    pub fn take_passphrase_of_copy(&mut self, copy: &Path, passphrase: &str) -> VaultResult<()> {
+        self.require_unlocked()?;
+        let theirs = Self::inspect_sync_copy(copy, passphrase)?;
+        if theirs.vault_id != self.sync_identity()?.vault_id {
+            return Err(err(VaultErrorKind::OtherVault));
+        }
+        let conn = self
+            .conn
+            .take()
+            .ok_or_else(|| err(VaultErrorKind::Locked))?;
+        if let Ok(epoch) = fresh_epoch() {
+            self.epoch = epoch;
+        }
+        let rekeyed = rekey(&conn, &self.path, passphrase);
+        let _ = close_conn(conn);
+        rekeyed?;
+        self.conn = Some(open_working_conn(&self.path, passphrase)?);
+        Ok(())
+    }
+}
+
+/// The path of a SQLite companion of `path`, for example `-journal`.
+fn companion(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    std::path::PathBuf::from(name)
 }
 
 fn inspect_open_copy(conn: &Connection, passphrase: &str) -> VaultResult<SyncIdentity> {
     apply_key(conn, passphrase)?;
     verify_cipher_defaults(conn)?;
     let version = verify_readable_schema(conn)?;
-    if version < SCHEMA_VERSION {
+    if version != SCHEMA_VERSION {
         return Err(err(VaultErrorKind::UnsupportedSchema));
     }
-    let (identity, stored) = read_sync_row(conn)?;
+    let (identity, stored) = read_sync_row(conn, "main")?;
     match stored {
-        Some(stored) if stored.as_slice() == content_digest(conn)?.as_slice() => Ok(identity),
+        Some(stored) if stored.as_slice() == content_digest(conn, "main")?.as_slice() => {
+            Ok(identity)
+        }
         None if identity.generation == 0 => Ok(identity),
         _ => Err(err(VaultErrorKind::WrongKeyOrCorrupt)),
     }
