@@ -78,7 +78,7 @@ Apassy took real credentials only after this test passed.
 
 Download the signed and notarized `Apassy.dmg` from **[apassy.wyderka.cc](https://apassy.wyderka.cc)**, open it, and drag Apassy to Applications. Each push to `main` that passes CI publishes a new build ([release](docs/operations/release.md)).
 
-Requirements: macOS 15 or later on Apple silicon. Linux is not supported yet: the isolation of agents uses macOS Seatbelt, and Linux needs its own version first.
+Requirements: macOS 15 or later on Apple silicon. Linux is not supported yet: the isolation of agents uses macOS Seatbelt, and Linux needs its own version first. Apassy already builds and passes its tests on Linux, and CI checks it there.
 
 ### Build from source
 
@@ -126,7 +126,7 @@ More limits are in [isolation](docs/operations/isolation.md) sections 4 and 7, a
 
 ## Status
 
-Version 0.2.0, the first public release ([changelog](CHANGELOG.md)). The goal and its definition of done are in [goal.md](docs/goal.md); the decisions are in [ADR 0010](docs/adr/0010-closing-open-decisions.md). The real-secret gate is **open**: the owner uses Apassy with real credentials.
+Version 0.2.1 ([changelog](CHANGELOG.md)). The goal and its definition of done are in [goal.md](docs/goal.md); the decisions are in [ADR 0010](docs/adr/0010-closing-open-decisions.md). The real-secret gate is **open**: the owner uses Apassy with real credentials.
 
 Open items:
 
