@@ -1780,16 +1780,12 @@ pub fn activate_local_dir(dir: &Path) -> Result<Vec<PackInfo>, PackError> {
     }
 }
 
-/// `APASSY_PACKS_DIR`, or `~/Library/Application Support/Apassy/packs`.
+/// `APASSY_PACKS_DIR`, or `packs` in the data directory ([`crate::paths::data_dir`]).
 pub fn default_local_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os(PACKS_DIR_ENV).filter(|value| !value.is_empty()) {
         return PathBuf::from(dir);
     }
-    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from);
-    home.join("Library")
-        .join("Application Support")
-        .join("Apassy")
-        .join("packs")
+    crate::paths::data_dir().join("packs")
 }
 
 #[cfg(test)]

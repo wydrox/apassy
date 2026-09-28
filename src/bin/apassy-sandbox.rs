@@ -37,6 +37,9 @@
 //! This program uses only `std` and no `unsafe`. `CommandExt::exec` replaces the
 //! process image; it is a safe call that returns an error if the exec fails.
 
+// The launcher is for macOS. On Linux it only prints that, so its parts are unused.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code, unused_imports))]
+
 use std::env;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -55,6 +58,13 @@ const DEFAULT_APP: &str = "/Applications/Apassy.app";
 /// The app bundle that `scripts/build-app.sh` writes into the target directory.
 const BUILD_APP_NAME: &str = "Apassy.app";
 
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    eprintln!("apassy-sandbox: the Seatbelt launcher runs only on macOS.");
+    std::process::exit(2);
+}
+
+#[cfg(target_os = "macos")]
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     match run(&args) {

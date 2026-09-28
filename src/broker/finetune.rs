@@ -464,8 +464,7 @@ fn bundled_tools() -> Option<PathBuf> {
 fn laya_dir() -> PathBuf {
     match std::env::var_os("APASSY_LAYA_DIR").filter(|dir| !dir.is_empty()) {
         Some(dir) => PathBuf::from(dir),
-        None => PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-            .join("Library/Application Support/Apassy/laya"),
+        None => crate::paths::data_dir().join("laya"),
     }
 }
 

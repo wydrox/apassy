@@ -1,4 +1,4 @@
-#![cfg(feature = "vault")]
+#![cfg(all(feature = "vault", target_os = "macos"))]
 
 //! Product isolation profile test (goal items I1, I2, I4).
 //!
