@@ -10,11 +10,6 @@ mod activity;
 mod agents;
 #[cfg(not(feature = "vault"))]
 mod demo;
-/// iCloud sync of the vaults (ADR 0014).
-#[cfg(feature = "vault")]
-pub(crate) mod icloud;
-#[cfg(all(test, feature = "vault"))]
-mod icloud_tests;
 #[cfg(feature = "vault")]
 pub(crate) mod import;
 #[cfg(feature = "vault")]
@@ -29,6 +24,11 @@ mod settings;
 mod shell;
 #[cfg(feature = "vault")]
 mod start;
+/// Sync of the vaults through a folder (ADR 0014).
+#[cfg(feature = "vault")]
+pub(crate) mod sync;
+#[cfg(all(test, feature = "vault"))]
+mod sync_tests;
 #[cfg(feature = "vault")]
 mod timeline;
 #[cfg(feature = "vault")]
@@ -298,7 +298,7 @@ pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     #[cfg(feature = "vault")]
     {
         app.poll_owner_flows(&ctx);
-        app.poll_icloud(&ctx);
+        app.poll_sync(&ctx);
         close_sheet_after_check(app);
         let session = &app.owner_ui.session;
         if !session.has_file() || session.is_locked() {

@@ -31,6 +31,9 @@
 //!                       `<target>/<profile>/`, else none.
 //!   --cloud-dir DIR     The Apassy folder in iCloud Drive. Default:
 //!                       `$HOME/Library/Mobile Documents/com~apple~CloudDocs/Apassy`.
+//!                       The synced file of each vault in another folder (ADR
+//!                       0014) gets its own profile parameter,
+//!                       `APASSY_SYNC_FILE_1` to `APASSY_SYNC_FILE_16`.
 //!   --profile FILE      The SBPL profile. Default: `$APASSY_SANDBOX_PROFILE`,
 //!                       else a file found next to this program or in `sandbox/`.
 //!   --print             Print the resolved sandbox-exec command. Do not run it.
@@ -71,6 +74,9 @@ const BUILD_APP_NAME: &str = "Apassy.app";
 /// The profile has the parameters `APASSY_VAULT_FILE_2` to `APASSY_VAULT_FILE_16`
 /// for vault files outside the data directory.
 const MAX_EXTRA_VAULTS: usize = 15;
+/// The profile has the parameters `APASSY_SYNC_FILE_1` to `APASSY_SYNC_FILE_16` for
+/// synced vault files outside the data directory and the iCloud Apassy folder.
+const MAX_SYNC_FILES: usize = 16;
 /// The Apassy folder in iCloud Drive, under the home directory (ADR 0014).
 const CLOUD_DIR_IN_HOME: [&str; 4] = [
     "Library",
@@ -144,6 +150,8 @@ fn run(args: &[String]) -> Result<(), String> {
     // Every vault of the list (ADR 0013). A list that cannot be read stops the
     // launcher: the profile cannot deny a vault file that it does not know.
     let listed = listed_vaults(&data_dir)?;
+    // The synced file of each vault (ADR 0014), with the same rule.
+    let listed_sync = listed_sync_files(&data_dir)?;
 
     let app = parsed
         .app
@@ -191,6 +199,12 @@ fn run(args: &[String]) -> Result<(), String> {
         .enumerate()
         .map(|(index, path)| (format!("APASSY_VAULT_FILE_{}", index + 2), path))
         .collect();
+    let sync_params: Vec<(String, PathBuf)> =
+        sync_file_params(&data_dir, cloud_dir.as_deref(), &listed_sync)?
+            .into_iter()
+            .enumerate()
+            .map(|(index, path)| (format!("APASSY_SYNC_FILE_{}", index + 1), path))
+            .collect();
 
     let mut command = Command::new(SANDBOX_EXEC);
     command.arg("-f").arg(&profile);
@@ -213,6 +227,9 @@ fn run(args: &[String]) -> Result<(), String> {
     if let Some(cloud_dir) = &cloud_dir {
         command.arg("-D").arg(param("APASSY_CLOUD_DIR", cloud_dir)?);
     }
+    for (key, path) in &sync_params {
+        command.arg("-D").arg(param(key, path)?);
+    }
     command.arg(&parsed.host[0]);
     command.args(&parsed.host[1..]);
 
@@ -234,6 +251,11 @@ fn run(args: &[String]) -> Result<(), String> {
             ("APASSY_APP_BUILD", app_build.as_ref()),
             ("APASSY_CLOUD_DIR", cloud_dir.as_ref()),
         ]);
+        params.extend(
+            sync_params
+                .iter()
+                .map(|(key, path)| (key.as_str(), Some(path))),
+        );
         print_command(&profile, &params, &parsed.host);
         return Ok(());
     }
@@ -333,6 +355,65 @@ fn listed_vaults(data_dir: &Path) -> Result<Vec<PathBuf>, String> {
             apassy::vaults::registry_path(data_dir).display()
         )),
     }
+}
+
+/// The synced vault files of the vault list (ADR 0014). A list that cannot be read, or
+/// a synced vault without a valid file, stops the launcher: the profile cannot deny a
+/// file that it does not know.
+fn listed_sync_files(data_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let registry = match apassy::vaults::Registry::read(data_dir) {
+        Ok(None) => return Ok(Vec::new()),
+        Ok(Some(registry)) => registry,
+        Err(err) => {
+            return Err(format!(
+                "cannot use the vault list {}: {err}. The profile cannot deny a synced vault file that the launcher does not know, so the host does not start. Open Apassy once: it moves a damaged list aside and makes a new one. Then start the launcher again.",
+                apassy::vaults::registry_path(data_dir).display()
+            ));
+        }
+    };
+    let mut files = Vec::new();
+    for entry in registry.entries() {
+        if entry.sync_state().is_none() {
+            continue;
+        }
+        match entry.sync_file() {
+            Some(file) => files.push(file),
+            None => {
+                return Err(format!(
+                    "the vault “{}” syncs, but the vault list has no valid synced file for it, so the host does not start. In Apassy, turn its sync off and on again (Settings > Vaults).",
+                    entry.name
+                ));
+            }
+        }
+    }
+    Ok(files)
+}
+
+/// The synced files that need their own profile parameter: each one outside `data_dir`
+/// and outside `cloud_dir` (their subtree denies cover the others), once, resolved.
+/// More than [`MAX_SYNC_FILES`] is an error.
+fn sync_file_params(
+    data_dir: &Path,
+    cloud_dir: Option<&Path>,
+    listed: &[PathBuf],
+) -> Result<Vec<PathBuf>, String> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    for path in listed {
+        let path = resolve(path);
+        let covered =
+            path.starts_with(data_dir) || cloud_dir.is_some_and(|dir| path.starts_with(dir));
+        if covered || files.contains(&path) {
+            continue;
+        }
+        files.push(path);
+    }
+    if files.len() > MAX_SYNC_FILES {
+        return Err(format!(
+            "the vault list has {} synced vault files outside iCloud Drive. The profile can deny at most {MAX_SYNC_FILES}, so the host does not start. Sync some vaults through iCloud Drive, or turn their sync off in Apassy (Settings > Vaults).",
+            files.len()
+        ));
+    }
+    Ok(files)
 }
 
 /// The listed vault files that need their own profile parameter: each one outside
@@ -568,5 +649,65 @@ mod tests {
             assert!(profile.contains(&rule), "missing: {rule}");
         }
         assert!(!profile.contains(&format!("APASSY_VAULT_FILE_{}", MAX_EXTRA_VAULTS + 2)));
+        for number in 1..=MAX_SYNC_FILES {
+            let rule = format!(
+                "(if (param \"APASSY_SYNC_FILE_{number}\") (apassy-protect-sync-file (param \"APASSY_SYNC_FILE_{number}\")))"
+            );
+            assert!(profile.contains(&rule), "missing: {rule}");
+        }
+        assert!(!profile.contains(&format!("APASSY_SYNC_FILE_{}", MAX_SYNC_FILES + 1)));
+    }
+
+    /// ADR 0014: a synced file outside the data directory and outside the iCloud Apassy
+    /// folder gets a parameter; a synced vault without a valid file stops the launcher.
+    #[test]
+    fn synced_files_outside_the_denied_folders_get_a_parameter() {
+        let root = temp_dir("sync");
+        let data = root.join("d");
+        let icloud = root.join("icloud").join("Apassy");
+        let dropbox = root.join("Dropbox").join("Apassy");
+        let mut registry = apassy::vaults::Registry::new();
+        for (name, folder) in [("A", &dropbox), ("B", &icloud), ("C", &data)] {
+            let id = registry
+                .add(name, &root.join(format!("{name}.db")), 1)
+                .expect("add");
+            registry.entry_mut(&id).expect("entry").sync = Some(apassy::vaults::SyncLink::new(
+                &id,
+                folder,
+                &format!("{name}.apassy"),
+            ));
+        }
+        registry
+            .add("Plain", &root.join("plain.db"), 1)
+            .expect("add");
+        registry.save(&data).expect("save");
+        let listed = listed_sync_files(&data).expect("list");
+        assert_eq!(listed.len(), 3);
+        assert_eq!(
+            sync_file_params(&data, Some(&icloud), &listed).expect("params"),
+            vec![dropbox.join("A.apassy")]
+        );
+        let many: Vec<PathBuf> = (0..=MAX_SYNC_FILES)
+            .map(|index| dropbox.join(format!("v{index}.apassy")))
+            .collect();
+        let err = sync_file_params(&data, None, &many).expect_err("17 do not fit");
+        assert!(err.contains("17 synced vault files"), "{err}");
+        assert_eq!(
+            sync_file_params(&data, None, &many[..MAX_SYNC_FILES])
+                .expect("16 fit")
+                .len(),
+            MAX_SYNC_FILES
+        );
+        // A synced vault whose file the list does not name fails closed.
+        let id = registry.entries()[0].id.clone();
+        registry.entry_mut(&id).expect("entry").sync = Some(apassy::vaults::SyncLink::new(
+            &id,
+            Path::new("relative"),
+            "A.apassy",
+        ));
+        registry.save(&data).expect("save");
+        let err = listed_sync_files(&data).expect_err("no valid file");
+        assert!(err.contains("does not start"), "{err}");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

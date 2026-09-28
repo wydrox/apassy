@@ -1739,6 +1739,8 @@ fn map_err(err: VaultError) -> ModelError {
         VaultErrorKind::Io => "io",
         VaultErrorKind::Storage => "storage",
         VaultErrorKind::Expired => "token_expired",
+        VaultErrorKind::Damaged => "sync_damaged",
+        VaultErrorKind::OtherVault => "sync_other_vault",
     };
     ModelError {
         code,
@@ -1770,6 +1772,8 @@ fn owner_message(kind: VaultErrorKind) -> &'static str {
         }
         VaultErrorKind::Storage => "The vault storage operation failed.",
         VaultErrorKind::Expired => "The agent token expired. Rotate the token in Agents.",
+        VaultErrorKind::Damaged => "The synced copy of the vault is damaged.",
+        VaultErrorKind::OtherVault => "The synced file holds another vault.",
     }
 }
 

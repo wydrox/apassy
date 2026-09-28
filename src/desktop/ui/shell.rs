@@ -280,7 +280,7 @@ fn content(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
                 #[cfg(feature = "vault")]
                 super::updates::banner(app, ui);
                 #[cfg(feature = "vault")]
-                super::icloud::banner(app, ui);
+                super::sync::banner(app, ui);
                 page(app, ui, pending);
             });
         });

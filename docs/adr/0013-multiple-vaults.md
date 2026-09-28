@@ -26,7 +26,7 @@ Apassy keeps the list in `<data dir>/vaults.json` (`src/vaults.rs`):
 - Format version 1. Each entry has a random ID, a name, the absolute path of the file, the time it came into the list, and the time of the last open. The list also names the last used vault.
 - A name has 1 to 40 characters. Two vaults cannot have the same name, without regard to case.
 - The file has mode `0600`. A write goes to a temporary file, then a sync, then a rename over the list.
-- A field that this version does not know stays in the file when this version writes it. A later version adds an optional field, for example the iCloud setting of a vault.
+- A field that this version does not know stays in the file when this version writes it. A later version adds an optional field, for example the sync setting of a vault.
 - The list is not secret. It has names and paths, no key and no item.
 
 At start, Apassy opens the last used vault, locked.
@@ -70,4 +70,4 @@ The launcher fails closed:
 - ADR 0003: each vault keeps the passphrase rules. A lost passphrase loses only that vault.
 - ADR 0004: the broker and the desktop app still share one slot.
 - ADR 0010: a switch ends waiting runs as a lock does (goal items V3, N3).
-- ADR 0014 and ADR 0015 (iCloud sync and updates) build on this list. A per-vault sync setting is an optional field of a list entry.
+- ADR 0014 and ADR 0015 (sync through a folder, and updates) build on this list. The sync setting of a vault is an optional field of a list entry (`sync`: the folder, the file, and the sync state); the launcher reads it.
