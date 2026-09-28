@@ -275,6 +275,8 @@ fn content(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
                 if app.view != OwnerView::Activity {
                     approval_banner(app, ui, pending);
                 }
+                #[cfg(feature = "vault")]
+                super::updates::banner(app, ui);
                 page(app, ui, pending);
             });
         });

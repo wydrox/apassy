@@ -24,6 +24,8 @@ mod shell;
 mod start;
 #[cfg(feature = "vault")]
 mod timeline;
+#[cfg(feature = "vault")]
+mod updates;
 
 use std::collections::BTreeSet;
 

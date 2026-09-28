@@ -33,9 +33,9 @@ With an unlocked vault, the sidebar has these views:
 | Agents | The list with the token state. "Register" opens a sheet, then the token sheet shows the token and the MCP configuration one time. The agent page has the token expiry, "Rotate token…", "What it can see" (switch "All credentials, without values"), "Process access" for each credential with a variable and "Give access to several credentials…", "API operations" as switches, "Recent requests" (the access log of the agent), and "Revoke agent…". A process grant works in "This folder" or "Any folder" ([ADR 0012](../adr/0012-agent-visibility-and-access-requests.md)). |
 | Activity | "Access requests" of agents with "Give access…" and "Deny", then "Waiting for you" with an approval card for each waiting run, then "Inbox" and "All requests". The sidebar count has the waiting runs and the open requests. |
 | Learning | Three figures for the last 7 days, the ask rate chart for 14 days with the 10% goal line, the automatic decisions, and the remembered patterns. "Advanced" has the calibration and the candidate model. |
-| Settings | Vault file and "Lock now", "Change passphrase", the unlock method, backup and restore, the token lifetime, notifications, and the broker and bouncer state. |
+| Settings | Vault file and "Lock now", "Change passphrase", the unlock method, backup and restore, the token lifetime, notifications, the broker and bouncer state, and Updates ([updates](updates.md)). |
 
-A run that waits for you shows a banner on each view but Activity. "Review" opens its approval card in a sheet. Each approval, reveal, and change of agent authority opens the owner check sheet "Confirm that it is you". A sheet with a change closes only when the check passes.
+A run that waits for you shows a banner on each view but Activity. A new version that is ready shows the banner "Apassy X is ready." with "Restart now" and "Later" on each view but Settings. "Review" opens its approval card in a sheet. Each approval, reveal, and change of agent authority opens the owner check sheet "Confirm that it is you". A sheet with a change closes only when the check passes.
 
 A lock returns the window to the unlock screen. It closes each sheet, erases each typed secret, and hides a token that you did not dismiss.
 

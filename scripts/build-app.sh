@@ -47,6 +47,13 @@
 #                            checks it against tools/basemodel/manifest.json
 #                            and copies it with the manifest to
 #                            Contents/Resources/models/. Default: no model.
+#   APASSY_BUILD_DATE        build time for the build identity,
+#                            YYYY-MM-DDTHH:MM:SSZ (UTC). Default: now. The
+#                            release workflow sets it once for its two builds.
+#
+# The build identity: the release build gets APASSY_BUILD_COMMIT (git HEAD) and
+# APASSY_BUILD_DATE. The app compares them with latest.json for updates
+# (docs/operations/updates.md).
 #
 # See docs/operations/native-app.md and docs/operations/base-model.md.
 set -euo pipefail
@@ -70,7 +77,7 @@ PROVISION=0
 for arg in "$@"; do
   case "$arg" in
     --provision) PROVISION=1 ;;
-    -h|--help) sed -n '2,51p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,58p' "$0"; exit 0 ;;
     *) echo "build-app: unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -225,9 +232,27 @@ fi
 
 # ---------------------------------------------------------------- build
 step "Build the Rust binaries (release)"
+# The build identity (docs/operations/updates.md). The app reads both values
+# with option_env!. Cargo builds again when a value changes, so the release
+# workflow sets the same values for its own first build.
+BUILD_COMMIT="$(git rev-parse HEAD 2>/dev/null || true)"
+BUILD_DATE="${APASSY_BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+[[ "$BUILD_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+  || fail "APASSY_BUILD_DATE must have the form YYYY-MM-DDTHH:MM:SSZ"
+if [[ "$BUILD_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "Build:    $BUILD_COMMIT, $BUILD_DATE"
+  if [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+    warn "the working tree has changes. The app names commit $BUILD_COMMIT all the same."
+  fi
+else
+  BUILD_COMMIT=""
+  BUILD_DATE=""
+  warn "git cannot name the commit. The app has no build identity and updates only to a higher version."
+fi
 # apassy-sandbox does not go into the bundle. The agent profile check at the
 # end uses it.
-cargo build --release --locked --features desktop,vault --bin apassy --bin apassy-mcp --bin apassy-sandbox
+APASSY_BUILD_COMMIT="$BUILD_COMMIT" APASSY_BUILD_DATE="$BUILD_DATE" \
+  cargo build --release --locked --features desktop,vault --bin apassy --bin apassy-mcp --bin apassy-sandbox
 
 step "Build the Swift helper"
 mkdir -p "$NATIVE_OUT"
@@ -273,6 +298,13 @@ fill_plist() { # template, output
   if grep -q '\$(' "$2"; then fail "unfilled variable in $2"; fi
 }
 fill_plist packaging/Info.plist "$APP/Contents/Info.plist"
+# The build identity in the signed Info.plist. An update of the same version
+# must be a later build (docs/operations/updates.md).
+if [ -n "$BUILD_COMMIT" ]; then
+  /usr/libexec/PlistBuddy -c "Add :ApassyBuildCommit string $BUILD_COMMIT" \
+    -c "Add :ApassyBuildDate string $BUILD_DATE" "$APP/Contents/Info.plist" >/dev/null
+  plutil -lint "$APP/Contents/Info.plist" >/dev/null
+fi
 fill_plist packaging/ApassyKeychain-Info.plist "$KC_APP/Contents/Info.plist"
 fill_plist packaging/ApassyNotify-Info.plist "$NT_APP/Contents/Info.plist"
 [ "$(plutil -extract CFBundleIdentifier raw -o - "$NT_APP/Contents/Info.plist")" = "$NOTIFY_APP_ID" ] \
@@ -429,6 +461,11 @@ check_output() { # label, output, pattern
 }
 "$APP/Contents/MacOS/apassy" --smoke-test >"$TMP/smoke.txt" 2>&1 || { cat "$TMP/smoke.txt" >&2; fail "apassy --smoke-test failed"; }
 echo "ok: apassy --smoke-test"
+if [ -n "$BUILD_COMMIT" ]; then
+  LC_ALL=C grep -aqF "$BUILD_COMMIT" "$APP/Contents/MacOS/apassy" \
+    || fail "the app does not contain its build identity ($BUILD_COMMIT)"
+  echo "ok: the app names build $BUILD_COMMIT"
+fi
 check_output "apassy-mcp --version" "$("$APP/Contents/MacOS/apassy-mcp" --version)" "^apassy-mcp $VERSION$"
 
 H_EXE="$APP/Contents/MacOS/apassy-helper"
@@ -570,6 +607,7 @@ rm -rf "$STAGE"
 step "Done"
 echo "App:      $OUT"
 echo "Version:  $VERSION"
+echo "Build:    ${BUILD_COMMIT:-none (no build identity)}${BUILD_DATE:+, $BUILD_DATE}"
 echo "Signed:   $SIGN_NAME"
 if [ "$MODEL_MODE" = "none" ]; then
   echo "Model:    none (set APASSY_BASE_MODEL to ship the base model)"
