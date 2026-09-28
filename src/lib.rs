@@ -13,6 +13,7 @@ pub mod broker;
 pub mod desktop;
 
 pub mod native;
+pub mod paths;
 
 /// Experimental trusted-process vault APIs.
 ///

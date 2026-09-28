@@ -220,6 +220,37 @@ fn node_dir() -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The `PATH` of a run: the system folders and the folder of `node`.
+fn run_path() -> String {
+    match node_dir() {
+        Some(dir) => format!("/usr/bin:/bin:{dir}"),
+        None => "/usr/bin:/bin".to_owned(),
+    }
+}
+
+/// Whether the `node` of a run reads `HTTPS_PROXY`. Node before 22.21 ignores it
+/// and connects directly (Debian 13 has Node 20). The probe names a closed port as
+/// the proxy: a node that reads the variable is refused there, and one that ignores
+/// it looks up the name instead.
+fn node_reads_proxy_variables() -> bool {
+    let Ok(port) = TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .map(|addr| addr.port())
+    else {
+        return false;
+    };
+    std::process::Command::new("node")
+        .args([
+            "-e",
+            "fetch('https://apassy.invalid/').catch(e=>console.log((e.cause||e).code))",
+        ])
+        .env("PATH", run_path())
+        .env("NODE_USE_ENV_PROXY", "1")
+        .env("HTTPS_PROXY", format!("http://127.0.0.1:{port}"))
+        .output()
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains("ECONNREFUSED"))
+}
+
 fn run(run: &Run, script: &str) -> RunOutput {
     let network = run.proxy.network();
     let env = [
@@ -236,14 +267,10 @@ fn run(run: &Run, script: &str) -> RunOutput {
         name: NAME.to_owned(),
         value: Zeroizing::new(REAL.to_owned()),
     }];
-    let path = match node_dir() {
-        Some(dir) => format!("/usr/bin:/bin:{dir}"),
-        None => "/usr/bin:/bin".to_owned(),
-    };
     exec::run_with(
         &["/bin/sh".to_owned(), "-c".to_owned(), script.to_owned()],
         Path::new("/tmp"),
-        Some(&path),
+        Some(&run_path()),
         &env,
         &masks,
         Network {
@@ -333,7 +360,7 @@ fn python_and_node_use_the_proxy_too() {
     } else {
         eprintln!("SKIP python: no python3 with OpenSSL on PATH");
     }
-    if node_dir().is_some() {
+    if node_reads_proxy_variables() {
         let node = run(
             &proxied,
             &format!(
@@ -343,7 +370,7 @@ fn python_and_node_use_the_proxy_too() {
         assert!(node.stdout.contains("{\"ok\":true}"), "node: {node:?}");
         swapped += 1;
     } else {
-        eprintln!("SKIP node: not on PATH");
+        eprintln!("SKIP node: no node on PATH that reads HTTPS_PROXY");
     }
     let log = events(proxied);
     assert_eq!(log.len(), swapped, "{log:?}");

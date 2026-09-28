@@ -22,6 +22,10 @@
 //! it contacts macOS, so these tests never show a permission prompt and never
 //! post a notification.
 
+// The real helper and notifier are Swift programs for macOS. Off macOS only the
+// tests with a fake helper run, so the parts for the real ones are unused.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code, unused_imports))]
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -527,11 +531,13 @@ fn swift_sources(dir: &str) -> Vec<PathBuf> {
     sources
 }
 
+#[cfg(target_os = "macos")]
 /// Build the real helper without a signature. `dev` adds `-D APASSY_HELPER_DEV`.
 fn build_helper(name: &str, dev: bool) -> PathBuf {
     build_swift(name, "apassy-helper", dev, &swift_sources("ApassyHelper"))
 }
 
+#[cfg(target_os = "macos")]
 /// Build the real notifier as `scripts/build-app.sh` does: its own files and the
 /// protocol and caller check of the helper.
 fn build_notifier(name: &str, dev: bool) -> PathBuf {
@@ -542,6 +548,7 @@ fn build_notifier(name: &str, dev: bool) -> PathBuf {
     build_swift(name, "ApassyNotify", dev, &sources)
 }
 
+#[cfg(target_os = "macos")]
 /// Compile `sources` into `<tmp>/<name>/<program>` without a signature.
 fn build_swift(name: &str, program: &str, dev: bool, sources: &[PathBuf]) -> PathBuf {
     let out_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
@@ -570,30 +577,35 @@ fn build_swift(name: &str, program: &str, dev: bool, sources: &[PathBuf]) -> Pat
     out
 }
 
+#[cfg(target_os = "macos")]
 /// The real helper, built once with the development override.
 fn real_helper() -> &'static Path {
     static HELPER: OnceLock<PathBuf> = OnceLock::new();
     HELPER.get_or_init(|| build_helper("native-real", true))
 }
 
+#[cfg(target_os = "macos")]
 /// The real helper, built once without the development flag, as a release.
 fn real_release_helper() -> &'static Path {
     static HELPER: OnceLock<PathBuf> = OnceLock::new();
     HELPER.get_or_init(|| build_helper("native-release", false))
 }
 
+#[cfg(target_os = "macos")]
 /// The real notifier, built once with the development override.
 fn real_notifier() -> &'static Path {
     static NOTIFIER: OnceLock<PathBuf> = OnceLock::new();
     NOTIFIER.get_or_init(|| build_notifier("notifier-real", true))
 }
 
+#[cfg(target_os = "macos")]
 /// The real notifier, built once without the development flag, as a release.
 fn real_release_notifier() -> &'static Path {
     static NOTIFIER: OnceLock<PathBuf> = OnceLock::new();
     NOTIFIER.get_or_init(|| build_notifier("notifier-release", false))
 }
 
+#[cfg(target_os = "macos")]
 /// A client for the development helper with the caller override on. The
 /// client starts the helper without extra environment, so a small script sets
 /// the variable and then replaces itself with the helper. The parent of the
@@ -610,6 +622,7 @@ fn dev_client() -> NativeHelper {
     NativeHelper::with_paths(helper, helper).with_notifier(notifier)
 }
 
+#[cfg(target_os = "macos")]
 /// A script in `<tmp>/<name>` that sets the development override and then
 /// replaces itself with `program`.
 fn dev_wrapper(name: &str, program: &Path) -> PathBuf {
@@ -659,6 +672,7 @@ fn raw_exchange_with(helper: &Path, input: &str, any_caller: Option<&str>) -> Ve
         .collect()
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn real_helper_answers_each_line_with_one_line() {
     let helper = real_helper();
@@ -686,6 +700,7 @@ fn real_helper_answers_each_line_with_one_line() {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn the_helper_sends_no_notifications() {
     // Notifications run only in the notifier. The helper answers each
@@ -713,6 +728,7 @@ fn the_helper_sends_no_notifications() {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn real_unsigned_helper_reports_missing_keychain_and_bundle() {
     let client = dev_client();
@@ -782,6 +798,7 @@ fn assert_all_refused(responses: &[Value]) {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn real_helper_refuses_a_parent_that_is_not_apassy() {
     // The parent is this test process, not the signed Apassy app. The helper
@@ -814,6 +831,7 @@ fn real_helper_refuses_a_parent_that_is_not_apassy() {
     assert_eq!(responses[0]["ok"], true, "{responses:?}");
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn a_helper_built_without_the_dev_flag_ignores_the_override() {
     // `scripts/build-app.sh` builds the helper without `-D APASSY_HELPER_DEV`.
@@ -866,6 +884,7 @@ fn assert_notifier_refused(responses: &[Value]) {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn real_notifier_refuses_a_parent_that_is_not_apassy() {
     // The guard of the notifier: the parent is this test process, not the
@@ -898,6 +917,7 @@ fn real_notifier_refuses_a_parent_that_is_not_apassy() {
     assert_eq!(responses[0]["bundle_id"], Value::Null, "{responses:?}");
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn a_notifier_built_without_the_dev_flag_ignores_the_override() {
     for any_caller in [None, Some("1")] {
@@ -916,6 +936,7 @@ fn a_notifier_built_without_the_dev_flag_ignores_the_override() {
     );
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn swift_and_rust_previews_match() {
     // The notifier builds the text from its own templates (goal item N2). The
@@ -939,6 +960,7 @@ fn swift_and_rust_previews_match() {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn the_notifier_takes_no_free_text() {
     // Goal item N2: a request has the id, the event type, and the agent name

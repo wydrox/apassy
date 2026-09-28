@@ -161,10 +161,7 @@ fn secure_input(
 /// The default vault file. The agent profile denies this directory (isolation, §1).
 #[cfg(feature = "vault")]
 pub(crate) fn default_vault_path() -> std::path::PathBuf {
-    std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_default()
-        .join("Library/Application Support/Apassy/vault.db")
+    crate::paths::data_dir().join("vault.db")
 }
 
 /// Navigation and sheet state of the drawing code. It holds no secret text: typed

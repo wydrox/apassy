@@ -17,16 +17,13 @@ const IO_TIMEOUT: Duration = Duration::from_secs(30);
 /// A run can wait for the owner and then for the process.
 const RUN_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// The socket path: `APASSY_BROKER_SOCKET`, or the default in Application Support.
+/// The socket path: `APASSY_BROKER_SOCKET`, or `broker.sock` in the data directory
+/// ([`crate::paths::data_dir`]).
 pub fn default_socket_path() -> PathBuf {
     if let Some(path) = std::env::var_os(SOCKET_ENV).filter(|value| !value.is_empty()) {
         return PathBuf::from(path);
     }
-    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from);
-    home.join("Library")
-        .join("Application Support")
-        .join("Apassy")
-        .join("broker.sock")
+    crate::paths::data_dir().join("broker.sock")
 }
 
 /// Settings of one request besides the token and the action.
