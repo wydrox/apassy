@@ -1,0 +1,16 @@
+---
+import Page from "../layouts/Page.astro";
+---
+<Page title="Not found · apassy" description="This page does not exist.">
+  <main>
+    <h1>Not found.</h1>
+    <p>This page does not exist. <a href="/">Go to the home page</a>.</p>
+  </main>
+</Page>
+
+<style>
+  main { max-width: 1080px; margin: 0 auto; padding: 120px 24px; text-align: center; }
+  h1 { font-size: clamp(40px, 7vw, 72px); font-weight: 600; letter-spacing: -0.04em; }
+  p { margin-top: 20px; font-size: 18px; color: var(--muted); }
+  a { color: var(--blue); }
+</style>

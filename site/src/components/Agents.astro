@@ -1,0 +1,76 @@
+---
+// "Bring your own agent": the hosts that use Apassy, and how they connect.
+const agents = [
+  { name: "Claude Code", how: "apassy-mcp · hook", icon: "prompt" },
+  { name: "Codex", how: "apassy-mcp · hook", icon: "code" },
+  { name: "Any MCP client", how: "apassy-mcp", icon: "plug" },
+  { name: "Agent sandbox", how: "apassy-sandbox", icon: "shield" },
+];
+---
+<section class="section" id="agents">
+  <div class="container">
+    <h2 class="h2" data-reveal>Bring your own agent</h2>
+    <p class="lead intro" data-reveal style="--i:1">
+      Apassy doesn't replace your tools. Claude Code, Codex, or any MCP client asks Apassy to run a command
+      with a credential. The command gets the secret in its environment. The agent never receives the value.
+    </p>
+    <div class="grid" data-reveal style="--i:2">
+      {agents.map((agent) => (
+        <div class="cell" data-spotlight>
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            {agent.icon === "prompt" && <path d="m5 8 4 4-4 4M11.5 16H19" />}
+            {agent.icon === "code" && <path d="m8.5 7-5 5 5 5M15.5 7l5 5-5 5M13.5 4.5l-3 15" />}
+            {agent.icon === "plug" && <path d="M9 3v5M15 3v5M6.5 8h11v3.5a5.5 5.5 0 0 1-11 0zM12 17v4" />}
+            {agent.icon === "shield" && <><path d="M12 3 4.5 6v5.5c0 4.6 3.1 8.1 7.5 9.5 4.4-1.4 7.5-4.9 7.5-9.5V6z" /><path d="m8.8 12 2.2 2.2 4.2-4.4" /></>}
+          </svg>
+          <div>
+            <p class="name">{agent.name}</p>
+            <code class="how">{agent.how}</code>
+          </div>
+        </div>
+      ))}
+    </div>
+    <ul class="inline" data-reveal style="--i:3">
+      <li>The agent never receives the value.</li>
+      <li>Every request is in the log.</li>
+      <li>Production always waits for you.</li>
+    </ul>
+  </div>
+</section>
+
+<style>
+  .intro { margin-top: 20px; max-width: 640px; }
+  .grid {
+    margin-top: 56px; display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--edge);
+    border-radius: 16px; background: var(--surface); overflow: hidden;
+  }
+  .cell { position: relative; display: flex; align-items: center; gap: 14px; padding: 24px 22px; transition: background-color 0.2s; }
+  .cell + .cell { border-left: 1px solid var(--edge); }
+  .cell:hover { background: var(--surface-2); }
+  .icon {
+    flex: none; width: 36px; height: 36px; padding: 8px; border-radius: 10px; background: var(--blue-soft); color: var(--blue);
+    fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+    transition: transform 0.3s var(--ease-out);
+  }
+  .cell:hover .icon { transform: rotate(-6deg) scale(1.08); }
+  .name { font-weight: 500; }
+  .how { font-size: 12px; color: var(--faint); }
+  .inline {
+    list-style: none; padding: 26px 0 0; margin-top: 30px; border-top: 1px dashed var(--edge);
+    display: flex; flex-wrap: wrap; gap: 12px 28px; font-size: 15px; color: var(--muted);
+  }
+  .inline li { display: flex; align-items: baseline; gap: 9px; }
+  .inline li::before {
+    content: ""; width: 11px; height: 7px; border-left: 1.6px solid var(--green); border-bottom: 1.6px solid var(--green);
+    transform: translateY(-3px) rotate(-45deg);
+  }
+  @media (max-width: 900px) {
+    .grid { grid-template-columns: repeat(2, 1fr); }
+    .cell:nth-child(3) { border-left: 0; }
+    .cell:nth-child(n + 3) { border-top: 1px solid var(--edge); }
+  }
+  @media (max-width: 480px) {
+    .grid { grid-template-columns: 1fr; }
+    .cell + .cell { border-left: 0; border-top: 1px solid var(--edge); }
+  }
+</style>

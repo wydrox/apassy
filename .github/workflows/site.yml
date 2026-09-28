@@ -1,0 +1,64 @@
+name: Site
+
+# Build apassy.wyderka.cc (site/) on each change. On main, deploy the Worker
+# and its assets to Cloudflare. The disk image comes from release.yml.
+# See docs/operations/release.md.
+
+on:
+  push:
+    paths: ["site/**", ".github/workflows/site.yml"]
+  pull_request:
+    paths: ["site/**", ".github/workflows/site.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: site-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  site:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: site
+    env:
+      HAS_CLOUDFLARE_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Node.js 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check the Worker types
+        run: npm run check
+
+      - name: Build the site
+        run: npm run build
+
+      - name: Say why the deploy is skipped
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && env.HAS_CLOUDFLARE_TOKEN != 'true'
+        run: echo "::warning::CLOUDFLARE_API_TOKEN is not set, so the site is not deployed. See docs/operations/release.md."
+
+      - name: Deploy to Cloudflare
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && env.HAS_CLOUDFLARE_TOKEN == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          # The Worker binds the bucket. Make it on the first deploy.
+          npx wrangler r2 bucket info apassy-downloads >/dev/null 2>&1 \
+            || npx wrangler r2 bucket create apassy-downloads
+          npx wrangler deploy

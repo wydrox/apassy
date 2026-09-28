@@ -1,0 +1,26 @@
+---
+import DownloadButtons from "./DownloadButtons.astro";
+---
+<section class="section closing" id="download">
+  <div class="glow" aria-hidden="true"></div>
+  <div class="container center">
+    <h2 class="title" data-reveal>Your secrets deserve better than a <code>.env</code> file.</h2>
+    <p class="lead" data-reveal style="--i:1">
+      Apassy is free. Install it, add your credentials, and let your agents work without ever holding your keys.
+    </p>
+    <div class="actions" data-reveal style="--i:2"><DownloadButtons id="linux-closing" /></div>
+  </div>
+</section>
+
+<style>
+  .closing { overflow: hidden; padding: 136px 0 144px; }
+  .glow {
+    position: absolute; left: 50%; bottom: -260px; width: 900px; height: 460px; translate: -50% 0; border-radius: 50%;
+    background: radial-gradient(closest-side, rgba(10, 119, 254, 0.28), transparent); filter: blur(30px); pointer-events: none;
+  }
+  .center { position: relative; text-align: center; display: flex; flex-direction: column; align-items: center; }
+  .title { max-width: 980px; font-size: clamp(44px, 7vw, 84px); font-weight: 500; line-height: 1; letter-spacing: -0.055em; text-wrap: balance; }
+  .title code { font-family: inherit; color: var(--blue); }
+  .lead { margin-top: 24px; max-width: 560px; }
+  .actions { margin-top: 36px; }
+</style>

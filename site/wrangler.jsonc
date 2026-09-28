@@ -1,0 +1,20 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "apassy-site",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-09-28",
+  // Assets first: the Worker runs only for paths with no file in dist/, that
+  // is /download, /download/Apassy.dmg, /latest.json, and pages that do not exist.
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "404-page"
+  },
+  // The release workflow (.github/workflows/release.yml) puts Apassy.dmg and
+  // latest.json here after each green CI run on main.
+  "r2_buckets": [{ "binding": "DOWNLOADS", "bucket_name": "apassy-downloads" }],
+  "routes": [{ "pattern": "apassy.wyderka.cc", "custom_domain": true }],
+  "workers_dev": false,
+  "preview_urls": false,
+  "observability": { "enabled": true }
+}

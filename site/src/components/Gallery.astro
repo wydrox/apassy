@@ -1,0 +1,102 @@
+---
+import { Image } from "astro:assets";
+import vault from "../../../docs/images/app-vault.png";
+import credential from "../../../docs/images/app-credential.png";
+import agent from "../../../docs/images/app-agent.png";
+import requests from "../../../docs/images/app-requests.png";
+import activity from "../../../docs/images/app-activity.png";
+import learning from "../../../docs/images/app-learning.png";
+
+// Screenshots of the real app with synthetic data (scripts/screenshots.sh).
+const views = [
+  { id: "credentials", tab: "Credentials", text: "API keys, logins, SSH keys, and databases in one encrypted file on your Mac.", image: vault, alt: "The list of credentials, grouped by kind, with the environment variable of each." },
+  { id: "credential", tab: "A credential", text: "Each credential says what it is for: its project, its environment, and its risk.", image: credential, alt: "A production database credential with a masked password, its details, and its declaration." },
+  { id: "access", tab: "Agent access", text: "Give each agent the credentials it needs, in one folder, and choose who decides.", image: agent, alt: "The Claude Code agent with process access per credential: the bouncer decides, or you are asked each time." },
+  { id: "requests", tab: "Requests", text: "Every request of the agent, with the command and the reason for the decision.", image: requests, alt: "Recent requests of an agent: allowed and denied runs with their reasons." },
+  { id: "activity", tab: "Activity", text: "Access requests and blocked runs wait in your inbox.", image: activity, alt: "The Activity view with an access request from Codex and two blocked requests." },
+  { id: "learning", tab: "Learning", text: "Apassy learns from your decisions and asks you less each week.", image: learning, alt: "The Learning view: the share of runs that asked you over 14 days, falling toward the goal of 10%." },
+];
+---
+<section class="section" id="tour">
+  <div class="container">
+    <header class="center">
+      <p class="eyebrow" data-reveal>A look inside</p>
+      <h2 class="h2" data-reveal style="--i:1">A native Mac app for your keys.</h2>
+    </header>
+
+    <div class="gallery" data-gallery data-reveal style="--i:2">
+      <div class="tabs" role="tablist" aria-label="Views of the app">
+        {views.map((view, i) => (
+          <button
+            class="tab"
+            role="tab"
+            id={`tab-${view.id}`}
+            aria-controls={`panel-${view.id}`}
+            aria-selected={i === 0 ? "true" : "false"}
+            tabindex={i === 0 ? 0 : -1}
+            type="button"
+          >
+            {view.tab}
+            <span class="progress" aria-hidden="true"></span>
+          </button>
+        ))}
+      </div>
+      <div class="stage">
+        {views.map((view, i) => (
+          <figure
+            class="panel"
+            role="tabpanel"
+            id={`panel-${view.id}`}
+            aria-labelledby={`tab-${view.id}`}
+            aria-hidden={i === 0 ? "false" : "true"}
+            data-active={i === 0 ? "" : undefined}
+          >
+            <figcaption>{view.text}</figcaption>
+            <Image
+              class="screen"
+              src={view.image}
+              alt={view.alt}
+              widths={[800, 1200, 1600, 2360]}
+              sizes="(min-width: 1224px) 1080px, calc(100vw - 48px)"
+              loading="lazy"
+            />
+          </figure>
+        ))}
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+  .center { text-align: center; }
+  .center .h2 { margin-top: 14px; }
+  .gallery { margin-top: 48px; }
+  .tabs {
+    display: flex; gap: 4px; justify-content: center; flex-wrap: wrap; width: fit-content; max-width: 100%; margin: 0 auto;
+    padding: 4px; border: 1px solid var(--edge); border-radius: 14px; background: var(--surface);
+  }
+  @media (max-width: 700px) {
+    .tabs { flex-wrap: nowrap; overflow-x: auto; justify-content: flex-start; width: 100%; scrollbar-width: none; scroll-snap-type: x proximity; }
+    .tabs::-webkit-scrollbar { display: none; }
+    .tab { flex: none; scroll-snap-align: center; }
+  }
+  .tab {
+    position: relative; overflow: hidden; border: 0; background: transparent; padding: 9px 16px; border-radius: 10px;
+    font-size: 14px; font-weight: 500; color: var(--muted); transition: color 0.2s, background-color 0.2s;
+  }
+  .tab:hover { color: var(--ink); }
+  .tab[aria-selected="true"] { color: var(--ink); background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--edge); }
+  .progress { position: absolute; left: 10px; right: 10px; bottom: 3px; height: 2px; border-radius: 2px; background: var(--blue); transform: scaleX(0); transform-origin: left; opacity: 0; }
+  .tab:global(.playing) .progress { opacity: 1; animation: progress 6.5s linear forwards; }
+  .gallery:global([data-paused]) .progress { animation-play-state: paused; }
+  @keyframes progress { to { transform: scaleX(1); } }
+
+  .stage { display: grid; margin: 28px auto 0; max-width: 1080px; }
+  .panel {
+    grid-area: 1 / 1; opacity: 0; visibility: hidden; transform: translateY(10px) scale(0.99);
+    transition: opacity 0.5s var(--ease-out), transform 0.6s var(--ease-out), visibility 0s 0.5s;
+  }
+  .panel[data-active] { opacity: 1; visibility: visible; transform: none; transition-delay: 0s; }
+  figcaption { text-align: center; color: var(--muted); font-size: 15px; min-height: 1.5em; margin-bottom: 22px; }
+  .panel :global(.screen) { width: 100%; border-radius: 14px; box-shadow: 0 0 0 1px var(--edge), var(--shadow-lg); }
+</style>
