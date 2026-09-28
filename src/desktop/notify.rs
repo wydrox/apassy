@@ -16,6 +16,7 @@
 //! this module cannot make an owner proof.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
@@ -293,6 +294,15 @@ impl NotificationCenter {
         self.view().deliveries.get(&key).cloned()
     }
 
+    /// Forget the deliveries of activity entries. Another vault has other entries with
+    /// the same IDs (ADR 0013). Waiting runs keep theirs.
+    pub fn forget_activity(&self) {
+        self.shared.update(|view| {
+            view.deliveries
+                .retain(|key, _| !matches!(key, EventKey::Activity(_)));
+        });
+    }
+
     /// Read the notification settings again. It never shows a prompt.
     pub fn refresh_status(&self) {
         self.send(Job::Status);
@@ -360,9 +370,10 @@ fn preview_name(agent: &str) -> String {
 
 fn watch_loop(shared: &Shared, approvals: &ApprovalQueue, vault: &SharedVault, jobs: &Sender<Job>) {
     let mut notified_runs = BTreeSet::new();
-    // `None` until the watcher sees an unlocked vault. Then the newest entry ID: older
-    // entries are history and cause no notification.
-    let mut last_entry: Option<u64> = None;
+    // `None` until the watcher sees an unlocked vault. Then that vault file and its
+    // newest entry ID: older entries are history and cause no notification. Each vault
+    // file has its own entry IDs, so another file starts again (ADR 0013).
+    let mut last_entry: Option<(PathBuf, u64)> = None;
     loop {
         let pending = approvals.pending();
         for run in &pending {
@@ -381,15 +392,22 @@ fn watch_loop(shared: &Shared, approvals: &ApprovalQueue, vault: &SharedVault, j
         let rows = {
             let guard = vault.lock().unwrap_or_else(PoisonError::into_inner);
             match guard.as_ref() {
-                Some(open) if !open.is_locked() => open.recent_activity(ACTIVITY_WINDOW).ok(),
+                Some(open) if !open.is_locked() => open
+                    .recent_activity(ACTIVITY_WINDOW)
+                    .ok()
+                    .map(|rows| (open.path().to_path_buf(), rows)),
                 _ => None,
             }
         };
         match rows {
             None => last_entry = None,
-            Some(rows) => {
+            Some((path, rows)) => {
                 let newest = rows.first().map_or(0, |row| row.id);
-                if let Some(last) = last_entry {
+                let last = last_entry
+                    .take()
+                    .filter(|(last_path, _)| *last_path == path)
+                    .map(|(_, last)| last);
+                if let Some(last) = last {
                     for row in rows.iter().rev().filter(|row| row.id > last) {
                         if needs_notification(row.decision, &row.reason) {
                             queue_notification(
@@ -402,7 +420,7 @@ fn watch_loop(shared: &Shared, approvals: &ApprovalQueue, vault: &SharedVault, j
                         }
                     }
                 }
-                last_entry = Some(last_entry.map_or(newest, |last| last.max(newest)));
+                last_entry = Some((path, last.map_or(newest, |last| last.max(newest))));
             }
         }
         if !shared.sleep(POLL_INTERVAL) {

@@ -411,7 +411,7 @@ impl OwnerFlows {
 }
 
 impl DesktopApp {
-    fn approvals(&self) -> Option<Arc<ApprovalQueue>> {
+    pub(crate) fn approvals(&self) -> Option<Arc<ApprovalQueue>> {
         match &self.broker {
             BrokerState::Running(handle) => Some(Arc::clone(handle.approvals())),
             _ => None,
@@ -890,8 +890,17 @@ impl DesktopApp {
         };
         let result = self.owner_ui.session.unlock(&key);
         drop(key);
+        // Sync before the owner sees the list (ADR 0014).
+        let loaded = if result.is_ok() {
+            self.sync_after_unlock()
+        } else {
+            None
+        };
         match result {
-            Ok(()) => self.set_ok("The vault is unlocked with Touch ID."),
+            Ok(()) => self.set_ok(match loaded {
+                Some(line) => format!("The vault is unlocked with Touch ID. {line}"),
+                None => "The vault is unlocked with Touch ID.".to_owned(),
+            }),
             Err(err) if err.code == "wrong_key" => {
                 if let (Some(helper), Some(path)) = (
                     self.owner.helper.clone(),
@@ -940,6 +949,9 @@ impl DesktopApp {
         }
         ui_state.add_secrets.clear();
         ui_state.edit_secrets.clear();
+        // The parsed 1Password export holds secrets.
+        self.import.forget();
+        self.sync_forget_secrets(ctx);
         self.close_owner_check(ctx);
         if let Some(ctx) = ctx {
             super::ui::forget_all_secret_fields(ctx);

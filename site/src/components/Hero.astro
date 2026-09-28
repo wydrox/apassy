@@ -42,9 +42,10 @@ const tiles = [
   </div>
 
   <div class="container hero-inner">
-    <a class="announce rise" href="/changelog" style="--d:0">
+    <a class="announce rise" href="#new" style="--d:0">
       <span class="badge">New</span>
-      <span>v{VERSION} — the first public release</span>
+      <span class="long">v{VERSION}: several vaults, sync, and 1Password import</span>
+      <span class="short">v{VERSION}: several vaults and sync</span>
       <span class="arrow" aria-hidden="true">→</span>
     </a>
     <h1>
@@ -125,6 +126,12 @@ const tiles = [
   .announce:hover { border-color: var(--faint); color: var(--ink); }
   .announce .arrow { transition: transform 0.2s var(--ease-out); }
   .announce:hover .arrow { transform: translateX(3px); }
+  /* On a phone the long text would wrap the pill to two lines. */
+  .announce .short { display: none; }
+  @media (max-width: 520px) {
+    .announce .long { display: none; }
+    .announce .short { display: inline; }
+  }
 
   h1 {
     margin-top: 30px; font-size: clamp(50px, 8.6vw, 108px); font-weight: 500; line-height: 0.98; letter-spacing: -0.058em;

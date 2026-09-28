@@ -19,7 +19,7 @@ pub const MAX_FIELD_NAME_BYTES: usize = 64;
 pub const MAX_FIELD_VALUE_BYTES: usize = 65_536;
 pub const MAX_PAYLOAD_BYTES: usize = 1_048_576;
 pub const MAX_SEARCH_RESULTS: usize = 1000;
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 14;
 
 /// Owned secret text. Debug is redacted. There is no public `Serialize` impl.
 /// Drop erases the text with `zeroize`. A clone is a second copy with its own erase.
@@ -146,6 +146,11 @@ pub enum VaultErrorKind {
     Storage,
     /// The agent token is older than the token lifetime (goal item P1).
     Expired,
+    /// A synced copy opens with the key but fails a check: it is damaged, or it mixes
+    /// pages of different copies (ADR 0014).
+    Damaged,
+    /// A synced copy holds another vault (another vault ID).
+    OtherVault,
 }
 
 impl VaultErrorKind {
@@ -162,6 +167,8 @@ impl VaultErrorKind {
             Self::Io => "the vault I/O operation failed",
             Self::Storage => "the vault storage operation failed",
             Self::Expired => "the agent token expired",
+            Self::Damaged => "the synced copy is damaged",
+            Self::OtherVault => "the synced copy holds another vault",
         }
     }
 }

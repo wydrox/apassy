@@ -96,3 +96,15 @@ jobs:
 
       - name: Run Python fixture boundary tests
         run: python3 tests/isolation/test_fixture_boundary.py
+
+      # The JSON Schemas in packs/schema/ describe the structure of a pack for editors
+      # and contributors. This step keeps them in step with the real files.
+      - name: Check the rule packs and provider files with the JSON Schemas
+        run: |
+          pipx run --spec check-jsonschema==0.38.2 check-jsonschema --check-metaschema packs/schema/*.json
+          pipx run --spec check-jsonschema==0.38.2 check-jsonschema --schemafile packs/schema/rule-pack.schema.json packs/*.json
+          pipx run --spec check-jsonschema==0.38.2 check-jsonschema --schemafile packs/schema/provider.schema.json packs/providers/*.json
+
+      # The loaders are the authority. The same check that CONTRIBUTING.md asks for.
+      - name: Check the rule packs and provider files with the loaders
+        run: cargo run --offline --locked --features vault --bin apassy-packs -- validate packs/*.json packs/providers/*.json

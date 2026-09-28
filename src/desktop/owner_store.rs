@@ -37,6 +37,8 @@ use crate::vault::{
 };
 
 const MAX_TAG_BYTES: usize = 64;
+/// The most tags on one item (`MAX_TAG_COUNT` in `src/vault/types.rs`).
+const MAX_TAG_COUNT: usize = 32;
 
 /// A custom detail is an item field with this prefix. The rest of the name is the label
 /// in hexadecimal, because a field name takes only ASCII letters, digits, and `_`, and a
@@ -90,6 +92,9 @@ pub const ENDED_BY_LOCK: &str =
     "The owner locked the vault before a decision. The run did not start.";
 /// Activity text when Apassy quits while runs wait (goal item N3).
 pub const ENDED_BY_QUIT: &str = "Apassy stopped before the owner decided. The run did not start.";
+/// Activity text when the owner switches to another vault while runs wait (ADR 0013).
+pub const ENDED_BY_SWITCH: &str =
+    "The owner switched to another vault before a decision. The run did not start.";
 
 /// Secret inputs for one item form. Debug output is redacted. There is no `Clone`,
 /// so the form is the only copy that the app keeps.
@@ -404,12 +409,43 @@ pub struct OwnerUiState {
     pub signaled_runs: BTreeSet<u64>,
 }
 
+/// A step with the unlocked vault just before the session locks it: a lock, a switch,
+/// a quit, a restart for an update, a backup, or an open or a restore that replaces it.
+/// Runs that waited have ended by then. iCloud sync pushes here (ADR 0014). The step
+/// must not fail the lock, so it returns nothing.
+pub type BeforeLock = Box<dyn FnMut(&mut Vault) + Send>;
+
+/// The [`BeforeLock`] step of a session, if any.
+#[derive(Default)]
+struct LockHook(Option<BeforeLock>);
+
+impl LockHook {
+    fn run(&mut self, vault: &mut Vault) {
+        if let Some(step) = self.0.as_mut()
+            && !vault.is_locked()
+        {
+            step(vault);
+        }
+    }
+}
+
+impl fmt::Debug for LockHook {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "LockHook(set)"
+        } else {
+            "LockHook(none)"
+        })
+    }
+}
+
 /// One vault file open inside this process. The broker shares the same slot.
 #[derive(Debug)]
 pub struct OwnerSession {
     vault: SharedVault,
     path: Option<PathBuf>,
     revealed: BTreeMap<(u64, String), RevealedValue>,
+    before_lock: LockHook,
 }
 
 /// Mutex guard over an unlocked vault. Hold it only for one short operation.
@@ -435,7 +471,19 @@ impl OwnerSession {
             vault: Arc::new(Mutex::new(None)),
             path: None,
             revealed: BTreeMap::new(),
+            before_lock: LockHook::default(),
         }
+    }
+
+    /// Set the step that runs before each lock ([`BeforeLock`]). `None` removes it.
+    pub fn set_before_lock(&mut self, step: Option<BeforeLock>) {
+        self.before_lock = LockHook(step);
+    }
+
+    /// Run `f` with the open vault, locked or unlocked. The vault mutex is held for the
+    /// call, so the broker waits: keep it short. `None` when no file is open.
+    pub fn with_vault<T>(&self, f: impl FnOnce(&mut Vault) -> T) -> Option<T> {
+        self.slot().as_mut().map(f)
     }
 
     /// The vault slot for the broker. The broker sees each open, lock, and restore.
@@ -483,6 +531,7 @@ impl OwnerSession {
         match Vault::open(path) {
             Ok(vault) => {
                 self.install(vault, path.to_path_buf());
+                previous.retire(&mut self.before_lock);
                 Ok(())
             }
             Err(err) => {
@@ -563,7 +612,7 @@ impl OwnerSession {
         why: &str,
     ) -> ModelResult<()> {
         self.revealed.clear();
-        let mut slot = self.slot();
+        let mut slot = self.vault.lock().unwrap_or_else(PoisonError::into_inner);
         let result = match slot.as_mut() {
             None => Ok(()),
             Some(vault) => {
@@ -573,6 +622,7 @@ impl OwnerSession {
                 if !vault.is_locked() {
                     let _ = vault.end_waits(why);
                 }
+                self.before_lock.run(vault);
                 vault.lock().map_err(map_err)
             }
         };
@@ -624,6 +674,13 @@ impl OwnerSession {
             build_vault_draft(&vault, None, draft, secrets)?
         };
         let summary = self.unlocked()?.add(vault_draft).map_err(map_err)?;
+        self.row_from(summary)
+    }
+
+    /// Add an item from an import (`crate::import`). The draft already has the layout of
+    /// the item forms: built-in fields and custom details. No agent gets access.
+    pub fn add_imported(&mut self, draft: VaultDraft) -> ModelResult<OwnerSummary> {
+        let summary = self.unlocked()?.add(draft).map_err(map_err)?;
         self.row_from(summary)
     }
 
@@ -735,7 +792,16 @@ impl OwnerSession {
 
     pub fn backup(&mut self, destination: &Path) -> ModelResult<()> {
         require_path(destination)?;
-        let result = self.unlocked()?.backup(destination);
+        let result = {
+            let mut slot = self.vault.lock().unwrap_or_else(PoisonError::into_inner);
+            let vault = match slot.as_mut() {
+                Some(vault) if !vault.is_locked() => vault,
+                Some(_) => return Err(fail("vault_locked", "The vault is locked.")),
+                None => return Err(fail("vault_locked", "No vault file is open.")),
+            };
+            self.before_lock.run(vault);
+            vault.backup(destination)
+        };
         if self.is_locked() {
             self.revealed.clear();
         }
@@ -755,6 +821,7 @@ impl OwnerSession {
         match Vault::restore(backup, destination, passphrase) {
             Ok(vault) => {
                 self.install(vault, destination.to_path_buf());
+                previous.retire(&mut self.before_lock);
                 Ok(())
             }
             Err(err) => {
@@ -1283,7 +1350,12 @@ impl OwnerSession {
 
     fn install(&mut self, vault: Vault, path: PathBuf) {
         self.revealed.clear();
-        *self.slot() = Some(vault);
+        let replaced = self.slot().replace(vault);
+        HeldVault {
+            vault: replaced,
+            path: None,
+        }
+        .retire(&mut self.before_lock);
         self.path = Some(path);
     }
 
@@ -1451,6 +1523,21 @@ impl Default for OwnerSession {
 struct HeldVault {
     vault: Option<Vault>,
     path: Option<PathBuf>,
+}
+
+impl HeldVault {
+    /// Close a vault that another file replaced (ADR 0013). When it is still
+    /// unlocked, each run that waits in it gets its denial first, as at a lock, and the
+    /// step before a lock runs.
+    fn retire(self, before_lock: &mut LockHook) {
+        if let Some(mut vault) = self.vault
+            && !vault.is_locked()
+        {
+            let _ = vault.end_waits(ENDED_BY_SWITCH);
+            before_lock.run(&mut vault);
+            let _ = vault.lock();
+        }
+    }
 }
 
 /// One revealed value. `Zeroizing` erases it when it is hidden, expires, or the vault
@@ -1652,6 +1739,8 @@ fn map_err(err: VaultError) -> ModelError {
         VaultErrorKind::Io => "io",
         VaultErrorKind::Storage => "storage",
         VaultErrorKind::Expired => "token_expired",
+        VaultErrorKind::Damaged => "sync_damaged",
+        VaultErrorKind::OtherVault => "sync_other_vault",
     };
     ModelError {
         code,
@@ -1683,6 +1772,8 @@ fn owner_message(kind: VaultErrorKind) -> &'static str {
         }
         VaultErrorKind::Storage => "The vault storage operation failed.",
         VaultErrorKind::Expired => "The agent token expired. Rotate the token in Agents.",
+        VaultErrorKind::Damaged => "The synced copy of the vault is damaged.",
+        VaultErrorKind::OtherVault => "The synced file holds another vault.",
     }
 }
 
@@ -1783,14 +1874,17 @@ fn build_vault_draft(
     if title.is_empty() {
         return Err(fail("invalid_input", "The item name is required."));
     }
-    if let Some(id) = existing {
-        let current = vault.details(id).map_err(map_err)?;
-        if current.summary.kind != draft.kind {
-            return Err(fail(
-                "category_locked",
-                "The item category cannot change. Delete the item and add a new one.",
-            ));
-        }
+    let current = match existing {
+        Some(id) => Some(vault.details(id).map_err(map_err)?),
+        None => None,
+    };
+    if let Some(current) = &current
+        && current.summary.kind != draft.kind
+    {
+        return Err(fail(
+            "category_locked",
+            "The item category cannot change. Delete the item and add a new one.",
+        ));
     }
 
     let mut fields = Vec::new();
@@ -1901,6 +1995,21 @@ fn build_vault_draft(
     let mut tags = Vec::new();
     push_tag(&mut tags, &draft.service)?;
     push_tag(&mut tags, &draft.project)?;
+    if let Some(current) = current {
+        // The form has no tag field. An edit keeps the other tags of the item, for
+        // example the tags of a 1Password import, and replaces the old service and
+        // project labels.
+        let id = current.summary.id;
+        let old = [
+            plain_value(vault, id, "service")?,
+            plain_value(vault, id, "project")?,
+        ];
+        for tag in current.tags {
+            if tags.len() < MAX_TAG_COUNT && !old.contains(&tag) && !tags.contains(&tag) {
+                tags.push(tag);
+            }
+        }
+    }
     Ok(VaultDraft {
         title: title.to_owned(),
         kind: draft.kind,

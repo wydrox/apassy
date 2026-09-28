@@ -51,7 +51,9 @@ flowchart LR
 - **Placeholders.** A variable can hold a placeholder that looks like the key. Apassy's proxy puts the real value only into HTTPS requests to the hosts of that credential, and refuses the placeholder anywhere else ([ADR 0011](docs/adr/0011-run-proxy-placeholders.md)).
 - **The bouncer runs on your Mac.** 64 rule packs and the `apassy-base-v1` model check every command. A production credential always waits for you ([bouncer](docs/operations/bouncer.md)).
 - **It learns.** "Approve and remember" turns a routine command into a pattern, and the Learning view shows how often you are asked ([learning](docs/operations/learning.md)).
-- **Agents run in a sandbox.** `apassy-sandbox` starts Claude Code and Codex in a Seatbelt profile that denies the vault, the backups, the model, and the app ([isolation](docs/operations/isolation.md)).
+- **Agents run in a sandbox.** `apassy-sandbox` starts Claude Code and Codex in a Seatbelt profile that denies the vaults, the backups, the model, and the app ([isolation](docs/operations/isolation.md)).
+- **Several vaults, synced if you want it.** Keep personal and client credentials apart: each vault has its own passphrase, agents, and rules, and one is open at a time. A vault can sync between your Macs through iCloud Drive, Dropbox, Google Drive, OneDrive, or Syncthing, and changes merge one credential at a time ([several vaults](docs/operations/multiple-vaults.md), [sync](docs/operations/sync.md)).
+- **Import from 1Password.** Read a 1PUX or CSV export, pick the API keys, SSH keys, and databases that agents need, and add them in one step ([import](docs/operations/import-1password.md)).
 
 ## A look inside
 
@@ -76,7 +78,7 @@ Apassy took real credentials only after this test passed.
 
 ## Install
 
-Download the signed and notarized `Apassy.dmg` from **[apassy.wyderka.cc](https://apassy.wyderka.cc)**, open it, and drag Apassy to Applications. Each push to `main` that passes CI publishes a new build ([release](docs/operations/release.md)).
+Download the signed and notarized `Apassy.dmg` from **[apassy.wyderka.cc](https://apassy.wyderka.cc)**, open it, and drag Apassy to Applications. Each push to `main` that passes CI publishes a new build ([release](docs/operations/release.md)). From 0.3.0, Apassy updates itself when the version number goes up: it installs only a build that is signed by the same developer and notarized by Apple, and asks you to restart ([updates](docs/operations/updates.md)).
 
 Requirements: macOS 15 or later on Apple silicon. Linux is not supported yet: the isolation of agents uses macOS Seatbelt, and Linux needs its own version first. Apassy already builds and passes its tests on Linux, and CI checks it there.
 
@@ -126,7 +128,7 @@ More limits are in [isolation](docs/operations/isolation.md) sections 4 and 7, a
 
 ## Status
 
-Version 0.2.1 ([changelog](CHANGELOG.md)). The goal and its definition of done are in [goal.md](docs/goal.md); the decisions are in [ADR 0010](docs/adr/0010-closing-open-decisions.md). The real-secret gate is **open**: the owner uses Apassy with real credentials.
+Version 0.3.0 ([changelog](CHANGELOG.md)). The goal and its definition of done are in [goal.md](docs/goal.md); the decisions are in [ADR 0010](docs/adr/0010-closing-open-decisions.md). The real-secret gate is **open**: the owner uses Apassy with real credentials.
 
 Open items:
 
@@ -138,18 +140,19 @@ Open items:
 
 | Topic | Documents |
 | --- | --- |
-| Start here | [Daily use](docs/operations/daily-use.md) · [Agent path](docs/operations/agent-path.md) · [Host hooks](docs/operations/host-hooks.md) |
+| Start here | [Daily use](docs/operations/daily-use.md) · [Agent path](docs/operations/agent-path.md) · [Host hooks](docs/operations/host-hooks.md) · [Import from 1Password](docs/operations/import-1password.md) |
+| Vaults | [Several vaults](docs/operations/multiple-vaults.md) · [Sync](docs/operations/sync.md) · [Backup and restore](docs/operations/backup-restore.md) |
 | Security | [Isolation](docs/operations/isolation.md) · [Key-memory review](docs/reviews/key-memory.md) · [Storage review](docs/reviews/storage-dependencies.md) · [Vault verification](docs/operations/vault-verification.md) |
 | The bouncer | [Bouncer](docs/operations/bouncer.md) · [Rule packs](docs/operations/rule-packs.md) · [Declarations](docs/operations/declarations.md) · [Base model](docs/operations/base-model.md) · [Learning](docs/operations/learning.md) |
-| Decisions | [ADRs 0001–0012](docs/adr) · [Goal](docs/goal.md) · [Evaluations](docs/evaluation) |
+| Decisions | [ADRs 0001–0016](docs/adr) · [Goal](docs/goal.md) · [Evaluations](docs/evaluation) |
 | Product | [Product vision](docs/product-vision-v1.md) · [Concept](docs/concept.md) · [Infrastructure](docs/product-infra-v1.md) · [MVP plan](docs/mvp-plan.md) |
-| Shipping | [Native app](docs/operations/native-app.md) · [Release and site](docs/operations/release.md) · [Backup and restore](docs/operations/backup-restore.md) |
+| Shipping | [Native app](docs/operations/native-app.md) · [Release and site](docs/operations/release.md) · [Updates](docs/operations/updates.md) |
 
 ## Development
 
 | Command | What it does |
 | --- | --- |
-| `cargo run --locked --features desktop,vault --bin apassy` | The desktop app with the owner vault file. It creates, opens, or restores an encrypted vault ([desktop UI](docs/operations/desktop-ui.md)). |
+| `cargo run --locked --features desktop,vault --bin apassy` | The desktop app with the owner vaults. It creates, opens, switches, or restores an encrypted vault ([desktop UI](docs/operations/desktop-ui.md)). |
 | `cargo run --locked --features desktop --bin apassy` | The older in-memory demo. "Open vault" there is not owner authentication. |
 | `cargo run --locked --features desktop,vault --bin apassy -- --smoke-test` | A model check without a window. |
 | `scripts/build-app.sh` · `scripts/build-dmg.sh` | The signed app, and the disk image ([release](docs/operations/release.md)). |
@@ -167,3 +170,11 @@ See also [desktop development](docs/operations/desktop-development.md), [Rust co
 | `tools/` | Training and serving of the base model |
 | `site/` | The website, an Astro page on a Cloudflare Worker |
 | `docs/` | Decisions, operations, reviews, and evaluations |
+
+## Contributing and security
+
+Rule packs and provider files are data, and the easiest contribution: one JSON file, a schema, and a validator. See [CONTRIBUTING.md](CONTRIBUTING.md). Report a vulnerability through [SECURITY.md](SECURITY.md), not in a public issue.
+
+## License
+
+The code and the documents are [Apache-2.0](LICENSE). The rule packs, the provider files, and their schemas in `packs/` are public domain under [CC0-1.0](packs/LICENSE), so any tool can use that knowledge, not only Apassy. A future team server will be its own crate under its own license; this repository stays as it is. The notices of the bundled dependencies are in [licenses/THIRD-PARTY-NOTICES.md](licenses/THIRD-PARTY-NOTICES.md).

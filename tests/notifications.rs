@@ -381,6 +381,71 @@ fn an_undecided_permission_keeps_the_allow_button() {
     assert_eq!(code(&response.join().expect("waiter")), "approval_denied");
 }
 
+/// ADR 0013: another vault file has its own activity entry IDs. When the slot holds
+/// another unlocked vault, its old entries are history: no notification, also when the
+/// watcher never saw a locked vault in between. Deliveries of activity entries go when
+/// the app switches vaults; a waiting run keeps its delivery.
+#[test]
+fn another_vault_starts_a_new_notification_baseline() {
+    use apassy::vault::{ActivityDecision, NewActivity, Vault};
+
+    let fx = fixture(Duration::from_secs(10));
+    let fake = FakeNative::new("switch");
+    fake.respond(
+        "notify",
+        &format!(r#"{{"ok":true,"delivered":true,{ALLOWED_STATUS}}}"#),
+    );
+    fake.respond(
+        "notify_status",
+        &format!(r#"{{"ok":true,{ALLOWED_STATUS}}}"#),
+    );
+    let center = start_center(&fx, &fake);
+
+    // A blocked request in the first vault gets its notification.
+    let outside = fx.dir.path().to_path_buf();
+    assert!(!send_run(&fx, outside).join().expect("request").ok);
+    let entry = {
+        let guard = fx.vault.lock().expect("vault");
+        guard
+            .as_ref()
+            .expect("open")
+            .recent_activity(1)
+            .expect("activity")[0]
+            .clone()
+    };
+    let key = EventKey::Activity(entry.id);
+    notify_request(&fake, &key.notification_id(), Instant::now());
+    assert_eq!(wait_for_delivery(&center, key), Delivery::Delivered);
+
+    // A second vault with older blocked requests, with higher entry IDs.
+    let mut other = Vault::create(&fx.dir.path().join("other.db"), PASS).expect("create");
+    other.unlock(PASS).expect("unlock");
+    for _ in 0..5 {
+        other
+            .record_activity(&NewActivity {
+                agent_id: None,
+                agent_name: "Other agent".to_owned(),
+                item_id: None,
+                operation: "run make".to_owned(),
+                decision: ActivityDecision::Deny,
+                reason: "The command is not in the permitted prefixes.".to_owned(),
+            })
+            .expect("entry");
+    }
+    let before = fake.requests_for("notify").len();
+    // The swap happens within one poll of the watcher.
+    *fx.vault.lock().expect("vault") = Some(other);
+    std::thread::sleep(Duration::from_millis(2500));
+    assert_eq!(
+        fake.requests_for("notify").len(),
+        before,
+        "history of another vault is not new"
+    );
+
+    center.forget_activity();
+    assert_eq!(center.delivery(key), None);
+}
+
 /// N3: each event stays in the inbox after a restart. The app records a waiting run
 /// when it quits, so the broker does not need to.
 #[test]

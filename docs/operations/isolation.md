@@ -12,12 +12,24 @@ that the host starts run inside the profile.
 The profile denies read and write to:
 
 - the Apassy data directory (`~/Library/Application Support/Apassy`). This
-  directory holds the vault, the broker socket, and the Laya model at
-  `.../Apassy/laya`.
+  directory holds the vaults, the vault list `vaults.json`, the broker socket,
+  and the Laya model at `.../Apassy/laya`.
 - the vault file. The owner can place it outside the data directory.
+- each other vault file in the vault list that is outside the data directory
+  ([several vaults](multiple-vaults.md), ADR 0013).
 - the backup file. The owner can place it outside the data directory.
 - the SQLite companion files of the vault and the backup (`-wal`, `-shm`,
   `-journal`, `.lock`).
+- the Apassy folder in iCloud Drive
+  (`~/Library/Mobile Documents/com~apple~CloudDocs/Apassy`). It holds a closed,
+  encrypted copy of each vault that syncs there ([sync](sync.md), [ADR
+  0014](../adr/0014-icloud-sync.md)). A process with a copy can guess
+  passphrases offline, and a changed copy can reach the other Macs. The rest of
+  iCloud Drive stays usable.
+- the synced file of each vault that syncs through another folder (Dropbox,
+  Google Drive, a share): the file, its push temporary file
+  `<file>.push.nosync`, and its SQLite companions. Only these files, not the
+  folder: an agent's projects can live in the same Dropbox folder.
 
 The profile permits a connection to the broker socket. The socket lives inside
 the denied data directory. A later rule in the profile re-opens only the socket
@@ -75,11 +87,14 @@ paths.
 | --- | --- |
 | `APASSY_DATA_DIR` | the Apassy data directory (subtree deny) |
 | `APASSY_VAULT_FILE` | the vault database |
+| `APASSY_VAULT_FILE_2` to `APASSY_VAULT_FILE_16` | more vault files from the vault list, outside the data directory. Optional. Each one gets the same rules as `APASSY_VAULT_FILE`. |
 | `APASSY_BACKUP_FILE` | the backup database |
 | `APASSY_SOCKET` | the broker socket (re-allowed) |
 | `APASSY_HOME` | the owner home directory. The profile denies a write to the autostart locations under it (section 7). |
 | `APASSY_APP` | the installed app bundle. Optional. Default: `/Applications/Apassy.app` |
 | `APASSY_APP_BUILD` | a second app bundle, for example `<repository>/target/Apassy.app`. Optional. |
+| `APASSY_CLOUD_DIR` | the Apassy folder in iCloud Drive (subtree deny). Optional. The launcher passes it by default. |
+| `APASSY_SYNC_FILE_1` to `APASSY_SYNC_FILE_16` | the synced vault files from the vault list outside the data directory and the iCloud Apassy folder: the file, `<file>.push.nosync`, and the SQLite companions. Optional. |
 
 ### Directory-rename defense
 
@@ -87,8 +102,11 @@ A subtree deny blocks a rename of the denied directory itself. It does not
 block a rename of a directory above it. Without more rules, a process can
 rename a parent directory and then read the protected file at its new path. A
 measurement showed this bypass (section 5). So the profile also denies a rename
-or a delete of each parent directory of the data directory, the vault file, and
-the backup file.
+or a delete of each parent directory of the data directory, the vault file, each
+listed vault file outside the data directory, the backup file, the Apassy
+folder in iCloud Drive, and each synced file in another folder. For a synced
+file in Dropbox this stops only a rename or a delete of the Dropbox folder and
+its parents; the files and folders inside stay usable.
 
 ## 2. The launcher
 
@@ -102,17 +120,50 @@ apassy-sandbox [OPTIONS] -- <host> [host args...]
 | Option | Default |
 | --- | --- |
 | `--data-dir DIR` | `$HOME/Library/Application Support/Apassy` |
-| `--vault-file FILE` | `<data-dir>/vault.db` |
+| `--vault-file FILE` | `<data-dir>/vault.db`. Each vault of `<data-dir>/vaults.json` is denied too (below). |
 | `--backup-file FILE` | `<vault-file>.backup` |
 | `--socket FILE` | `$APASSY_BROKER_SOCKET`, else `<data-dir>/broker.sock` |
 | `--home DIR` | `$HOME`. The profile denies a write to the autostart locations under it (section 7). |
 | `--app DIR` | `/Applications/Apassy.app` |
 | `--app-build DIR` | `<target>/Apassy.app` when the launcher is `<target>/<profile>/apassy-sandbox` and the directory is named `target`, else none |
+| `--cloud-dir DIR` | `$HOME/Library/Mobile Documents/com~apple~CloudDocs/Apassy`. The folder may not exist yet; the profile denies it anyway. |
 | `--profile FILE` | `$APASSY_SANDBOX_PROFILE`, else a file near the program |
 | `--print` | print the resolved command; do not run it |
 
 The launcher resolves symlinks in each path, because Seatbelt matches the
 resolved path. On macOS `/var` and `/tmp` are symlinks.
+
+### The vault list
+
+The launcher reads `<data-dir>/vaults.json` (ADR 0013) and denies each listed
+vault file:
+
+- A vault inside the data directory is in the subtree deny, with its SQLite
+  companions and its `.lock` file.
+- A vault outside the data directory gets its own parameter,
+  `APASSY_VAULT_FILE_2` to `APASSY_VAULT_FILE_16`, in the order of the list.
+  `--print` shows them.
+- The synced file of a vault that syncs through a folder other than the iCloud
+  Apassy folder gets its own parameter, `APASSY_SYNC_FILE_1` to
+  `APASSY_SYNC_FILE_16` (ADR 0014). A synced file in the data directory or in
+  the iCloud Apassy folder needs none: their subtree denies cover it.
+
+The launcher fails closed. It stops with an error, and the host does not
+start, in these cases:
+
+- The list cannot be read, is not valid, or has a format from a newer Apassy.
+  The launcher cannot name each vault file of a damaged list, so it cannot prove
+  that the profile denies each vault. A fallback that denies only the data
+  directory would leave a vault in another folder open without a warning. Open
+  Apassy once: it moves the damaged list aside and makes a new one.
+- More than 15 listed vaults are outside the data directory. Move vaults into
+  the data directory, or remove vaults from the list in Settings > Vaults.
+- A synced vault has no valid synced file in the list, or more than 16 synced
+  files are outside the data directory and the iCloud Apassy folder. Turn the
+  sync of a vault off and on again, or sync some vaults through iCloud Drive.
+
+Without a list, the launcher denies the data directory and `--vault-file`, as
+before.
 
 `scripts/build-app.sh` writes the app to `<repository>/target/Apassy.app`. A
 launcher from `target/debug` or `target/release` protects this bundle without
@@ -225,6 +276,13 @@ boundary holds even when the host approves every command.
   measurement.
 - The profile does not fully hide the environment of other processes of the
   same user. See "Process information (F11)" in section 5.
+- The launcher reads the vault list when it starts. A host that started earlier
+  does not get a vault that the owner adds later outside the data directory.
+  Start the host again after such a change. A vault in the data directory needs
+  no restart.
+- "Remove from list" keeps the file. A removed vault outside the data
+  directory, or a vault that a damaged list lost, is not denied to hosts that
+  start later.
 - `ps` and `top` are setuid programs. They cannot start inside any
   `sandbox-exec` profile on this macOS, also with `(allow default)` only. A host
   feature that runs `ps` fails in the profile. The measured Claude Code run did
@@ -264,6 +322,12 @@ a vault canary, a fake Laya file, a backup canary, and a live broker socket.
 | replace the vault file by a rename | denied |
 | rename the data directory, then read the vault | denied |
 | rename the backup parent directory, then read the backup | denied |
+| read, list, or write in the Apassy folder in iCloud Drive | denied |
+| rename the iCloud Drive folder, then read the vault copy | denied |
+| read a file in another iCloud Drive folder | allowed |
+| read or write a synced file in a Dropbox folder, its push temporary file, or its journal | denied |
+| rename the Dropbox folder of a synced file | denied |
+| read another file in that Dropbox folder, or work on a project next to it | allowed |
 | connect to the broker socket | allowed |
 | read a project file | allowed |
 | write a file in a temporary directory | allowed |

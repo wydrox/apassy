@@ -25,6 +25,19 @@ in the product profile and checks the boundary:
   result. No secret leaks.
 - A process in the profile cannot read, copy, overwrite, or replace the vault,
   a backup, or a file under a fake Laya directory.
+- A vault in the vault list outside the data directory is denied too
+  (`profile_denies_a_listed_vault_outside_the_data_directory`). The launcher
+  passes it as `APASSY_VAULT_FILE_2` and stops on a damaged list or on more
+  than 15 such vaults (`launcher_*` tests, ADR 0013).
+- A process in the profile cannot read, list, or write the Apassy folder in a
+  synthetic iCloud Drive, or move the iCloud Drive folder
+  (`profile_denies_the_icloud_folder`). Another iCloud Drive folder stays
+  readable. The launcher passes `APASSY_CLOUD_DIR` by default.
+- A synced vault file in another folder (a synthetic Dropbox folder), its push
+  temporary file, and its journal are denied, and the folder cannot be renamed;
+  another file in that folder and a project next to it stay usable
+  (`profile_denies_a_synced_file_and_keeps_its_folder_usable`). The launcher
+  passes it as `APASSY_SYNC_FILE_1` (ADR 0014).
 - Ordinary work still runs: it reads the project directory and writes a
   temporary file. Child processes of the sandboxed process work.
 - `ps eww` and `ps -E` in the profile do not show the environment of a process

@@ -7,9 +7,15 @@
 ;; own configuration and credentials.
 ;;
 ;; The profile denies read and write to:
-;;   - the Apassy data directory (vault, broker socket, Laya model),
+;;   - the Apassy data directory (vaults, vault list, broker socket, Laya model),
 ;;   - the vault file and its SQLite companions,
-;;   - the backup file and its SQLite companions.
+;;   - each other vault file in the vault list outside the data directory, and
+;;     its SQLite companions,
+;;   - the backup file and its SQLite companions,
+;;   - the Apassy folder in iCloud Drive (the synced vault copies), when given,
+;;   - each synced vault file in another folder (Dropbox, a share), its push
+;;     temporary file, and its SQLite companions. The rest of that folder stays
+;;     usable.
 ;; It re-allows a connection to the broker socket, which lives inside the
 ;; denied data directory.
 ;;
@@ -31,6 +37,11 @@
 ;;   APASSY_DATA_DIR    the Apassy data directory, for example
 ;;                      "$HOME/Library/Application Support/Apassy"
 ;;   APASSY_VAULT_FILE  the vault database file
+;;   APASSY_VAULT_FILE_2 to APASSY_VAULT_FILE_16
+;;                      more vault files from the vault list
+;;                      (<data dir>/vaults.json) that are outside the data
+;;                      directory. Optional. The launcher passes one for each
+;;                      such vault and stops when the list has more than 15.
 ;;   APASSY_BACKUP_FILE the backup database file
 ;;   APASSY_SOCKET      the broker Unix socket
 ;;   APASSY_HOME        the owner home directory. The profile denies a write to
@@ -39,6 +50,15 @@
 ;;                      "/Applications/Apassy.app"
 ;;   APASSY_APP_BUILD   a second app bundle, for example the build output
 ;;                      "<repository>/target/Apassy.app". Optional.
+;;   APASSY_CLOUD_DIR   the Apassy folder in iCloud Drive, for example
+;;                      "$HOME/Library/Mobile Documents/com~apple~CloudDocs/Apassy".
+;;                      Optional. The profile denies read and write under it.
+;;   APASSY_SYNC_FILE_1 to APASSY_SYNC_FILE_16
+;;                      the synced vault files of the vault list that are outside
+;;                      the data directory and the iCloud Apassy folder, for
+;;                      example "$HOME/Dropbox/Apassy/Work.apassy". Optional. The
+;;                      launcher passes one for each and stops when there are more
+;;                      than 16.
 ;;
 ;; Limits: Seatbelt does not protect memory, the clipboard, or processes that
 ;; run outside this profile. A program that the owner runs later, for example
@@ -81,6 +101,12 @@
   (deny file-read* file-write* (literal (string-append path "-journal")))
   (deny file-read* file-write* (literal (string-append path ".lock"))))
 
+;; Deny read and write under the directory DIR, and a rename or a delete of its
+;; parent directories.
+(define (apassy-deny-tree dir)
+  (deny file-read* file-write* (subpath dir))
+  (apassy-seal-ancestors dir))
+
 ;; --- Denials -------------------------------------------------------------
 
 ;; The Apassy data directory holds the vault, the broker socket, and the Laya
@@ -92,9 +118,64 @@
 (apassy-deny-db (param "APASSY_VAULT_FILE"))
 (apassy-seal-ancestors (param "APASSY_VAULT_FILE"))
 
+;; The other vaults of the vault list (ADR 0013). A vault in the data directory
+;; is already in the subtree deny. The launcher passes each vault outside it as
+;; one of these parameters. An absent parameter adds no rule.
+(define (apassy-protect-vault path)
+  (apassy-deny-db path)
+  (apassy-seal-ancestors path))
+(if (param "APASSY_VAULT_FILE_2") (apassy-protect-vault (param "APASSY_VAULT_FILE_2")))
+(if (param "APASSY_VAULT_FILE_3") (apassy-protect-vault (param "APASSY_VAULT_FILE_3")))
+(if (param "APASSY_VAULT_FILE_4") (apassy-protect-vault (param "APASSY_VAULT_FILE_4")))
+(if (param "APASSY_VAULT_FILE_5") (apassy-protect-vault (param "APASSY_VAULT_FILE_5")))
+(if (param "APASSY_VAULT_FILE_6") (apassy-protect-vault (param "APASSY_VAULT_FILE_6")))
+(if (param "APASSY_VAULT_FILE_7") (apassy-protect-vault (param "APASSY_VAULT_FILE_7")))
+(if (param "APASSY_VAULT_FILE_8") (apassy-protect-vault (param "APASSY_VAULT_FILE_8")))
+(if (param "APASSY_VAULT_FILE_9") (apassy-protect-vault (param "APASSY_VAULT_FILE_9")))
+(if (param "APASSY_VAULT_FILE_10") (apassy-protect-vault (param "APASSY_VAULT_FILE_10")))
+(if (param "APASSY_VAULT_FILE_11") (apassy-protect-vault (param "APASSY_VAULT_FILE_11")))
+(if (param "APASSY_VAULT_FILE_12") (apassy-protect-vault (param "APASSY_VAULT_FILE_12")))
+(if (param "APASSY_VAULT_FILE_13") (apassy-protect-vault (param "APASSY_VAULT_FILE_13")))
+(if (param "APASSY_VAULT_FILE_14") (apassy-protect-vault (param "APASSY_VAULT_FILE_14")))
+(if (param "APASSY_VAULT_FILE_15") (apassy-protect-vault (param "APASSY_VAULT_FILE_15")))
+(if (param "APASSY_VAULT_FILE_16") (apassy-protect-vault (param "APASSY_VAULT_FILE_16")))
+
 ;; The backup file. The owner can place it outside the data directory.
 (apassy-deny-db (param "APASSY_BACKUP_FILE"))
 (apassy-seal-ancestors (param "APASSY_BACKUP_FILE"))
+
+;; The Apassy folder in iCloud Drive. It holds a closed, encrypted copy of each
+;; synced vault. A process with such a copy can try passphrases offline, and a
+;; changed copy can reach the other Macs. Optional, so a profile call without it
+;; still works; the launcher passes it by default.
+(if (param "APASSY_CLOUD_DIR")
+  (apassy-deny-tree (param "APASSY_CLOUD_DIR")))
+
+;; The synced vault files in other folders (ADR 0014, docs/operations/sync.md).
+;; Only the file is closed, not the folder: an agent's projects can live in
+;; Dropbox too. A process with the file can guess passphrases offline, and a
+;; changed file can reach the other Macs. The push writes
+;; `<file>.push.nosync` first, then renames it.
+(define (apassy-protect-sync-file path)
+  (apassy-deny-db path)
+  (deny file-read* file-write* (literal (string-append path ".push.nosync")))
+  (apassy-seal-ancestors path))
+(if (param "APASSY_SYNC_FILE_1") (apassy-protect-sync-file (param "APASSY_SYNC_FILE_1")))
+(if (param "APASSY_SYNC_FILE_2") (apassy-protect-sync-file (param "APASSY_SYNC_FILE_2")))
+(if (param "APASSY_SYNC_FILE_3") (apassy-protect-sync-file (param "APASSY_SYNC_FILE_3")))
+(if (param "APASSY_SYNC_FILE_4") (apassy-protect-sync-file (param "APASSY_SYNC_FILE_4")))
+(if (param "APASSY_SYNC_FILE_5") (apassy-protect-sync-file (param "APASSY_SYNC_FILE_5")))
+(if (param "APASSY_SYNC_FILE_6") (apassy-protect-sync-file (param "APASSY_SYNC_FILE_6")))
+(if (param "APASSY_SYNC_FILE_7") (apassy-protect-sync-file (param "APASSY_SYNC_FILE_7")))
+(if (param "APASSY_SYNC_FILE_8") (apassy-protect-sync-file (param "APASSY_SYNC_FILE_8")))
+(if (param "APASSY_SYNC_FILE_9") (apassy-protect-sync-file (param "APASSY_SYNC_FILE_9")))
+(if (param "APASSY_SYNC_FILE_10") (apassy-protect-sync-file (param "APASSY_SYNC_FILE_10")))
+(if (param "APASSY_SYNC_FILE_11") (apassy-protect-sync-file (param "APASSY_SYNC_FILE_11")))
+(if (param "APASSY_SYNC_FILE_12") (apassy-protect-sync-file (param "APASSY_SYNC_FILE_12")))
+(if (param "APASSY_SYNC_FILE_13") (apassy-protect-sync-file (param "APASSY_SYNC_FILE_13")))
+(if (param "APASSY_SYNC_FILE_14") (apassy-protect-sync-file (param "APASSY_SYNC_FILE_14")))
+(if (param "APASSY_SYNC_FILE_15") (apassy-protect-sync-file (param "APASSY_SYNC_FILE_15")))
+(if (param "APASSY_SYNC_FILE_16") (apassy-protect-sync-file (param "APASSY_SYNC_FILE_16")))
 
 ;; --- The Apassy app bundle ------------------------------------------------
 

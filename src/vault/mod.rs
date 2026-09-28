@@ -17,8 +17,10 @@ mod agents;
 mod candidate;
 mod history;
 mod learning;
+mod merge;
 pub mod providers;
 mod suggestions;
+mod sync;
 mod types;
 mod waiting;
 
@@ -57,7 +59,13 @@ pub use learning::{
     MAX_DECISION_ROWS, MAX_KEPT_DENIALS, MAX_PATTERNS, PATTERN_APPROVALS_NEEDED, PATTERN_IDLE_DAYS,
     PatternKey, PatternRecord, PatternState, RequestSource,
 };
+pub use merge::{
+    ConflictCopy, LOCAL_TABLES, MergeReport, SYNCED_EVENT_KINDS, SYNCED_TABLES, SyncScope,
+    TOMBSTONE_DAYS,
+};
 pub use suggestions::{DeclarationField, SuggestedDeclaration, SuggestionOutcome, SuggestionStats};
+pub use sync::{AdoptedCopy, MAX_DEVICE_NAME_BYTES, SyncCopy, SyncIdentity};
+pub(crate) use sync::{copy_hashing, hash_open_file, sync_dir, to_hex};
 pub use types::{
     Field, FieldSummary, ItemDetails, ItemDraft, ItemSummary, MAX_PASSPHRASE_BYTES,
     MIN_PASSPHRASE_BYTES, SecretValue, VaultError, VaultErrorKind, VaultResult,
@@ -121,6 +129,8 @@ const SUGGESTION_SCHEMA_VERSION: i64 = 8;
 const CANDIDATE_SCHEMA_VERSION: i64 = 9;
 const HISTORY_SCHEMA_VERSION: i64 = 10;
 const PLACEHOLDER_SCHEMA_VERSION: i64 = 11;
+const ACCESS_SCHEMA_VERSION: i64 = 12;
+const SYNC_META_SCHEMA_VERSION: i64 = 13;
 
 /// Encrypted local vault. Connection state is private. Debug is redacted.
 pub struct Vault {
@@ -920,6 +930,8 @@ fn verify_user_version(conn: &Connection) -> VaultResult<i64> {
         | CANDIDATE_SCHEMA_VERSION
         | HISTORY_SCHEMA_VERSION
         | PLACEHOLDER_SCHEMA_VERSION
+        | ACCESS_SCHEMA_VERSION
+        | SYNC_META_SCHEMA_VERSION
         | SCHEMA_VERSION) => Ok(version),
         _ => Err(err(VaultErrorKind::UnsupportedSchema)),
     }
@@ -963,8 +975,13 @@ fn verify_sqlite_integrity(conn: &Connection) -> VaultResult<()> {
 }
 
 fn verify_expected_columns(conn: &Connection, version: i64) -> VaultResult<()> {
+    verify_expected_columns_in(conn, "main", version)
+}
+
+/// Check the tables and columns of `version` in `schema` (`main`, or an attached copy).
+fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> VaultResult<()> {
     match conn.query_row(
-        "SELECT id, schema_version FROM vault_meta WHERE id = 1",
+        &format!("SELECT id, schema_version FROM {schema}.vault_meta WHERE id = 1"),
         [],
         |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
     ) {
@@ -1027,8 +1044,18 @@ fn verify_expected_columns(conn: &Connection, version: i64) -> VaultResult<()> {
     } else {
         &[]
     };
-    let v12: &[&str] = if version >= SCHEMA_VERSION {
+    let v12: &[&str] = if version >= ACCESS_SCHEMA_VERSION {
         &agents::SCHEMA_V12_COLUMNS
+    } else {
+        &[]
+    };
+    let v13: &[&str] = if version >= SYNC_META_SCHEMA_VERSION {
+        &sync::SCHEMA_V13_COLUMNS
+    } else {
+        &[]
+    };
+    let v14: &[&str] = if version >= SCHEMA_VERSION {
+        &merge::SCHEMA_V14_COLUMNS
     } else {
         &[]
     };
@@ -1045,9 +1072,12 @@ fn verify_expected_columns(conn: &Connection, version: i64) -> VaultResult<()> {
         .chain(v10)
         .chain(v11)
         .chain(v12)
+        .chain(v13)
+        .chain(v14)
     {
+        let sql = sql.replacen(" FROM ", &format!(" FROM {schema}."), 1);
         drop(
-            conn.prepare(sql)
+            conn.prepare(&sql)
                 .map_err(|_| err(VaultErrorKind::UnsupportedSchema))?,
         );
     }
@@ -1109,8 +1139,14 @@ fn migrate_to_current(conn: &mut Connection, from: i64) -> VaultResult<()> {
         tx.execute_batch(agents::SCHEMA_V11_SQL)
             .map_err(|_| err(VaultErrorKind::Storage))?;
     }
-    tx.execute_batch(agents::SCHEMA_V12_SQL)
-        .map_err(|_| err(VaultErrorKind::Storage))?;
+    if from < ACCESS_SCHEMA_VERSION {
+        tx.execute_batch(agents::SCHEMA_V12_SQL)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+    }
+    if from < SYNC_META_SCHEMA_VERSION {
+        sync::add_schema_v13(&tx)?;
+    }
+    merge::add_schema_v14(&tx)?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     verify_expected_columns(conn, SCHEMA_VERSION)
 }
@@ -1118,7 +1154,8 @@ fn migrate_to_current(conn: &mut Connection, from: i64) -> VaultResult<()> {
 /// Open the restored copy, migrate it to the current schema, and remove its agent authority.
 fn prepare_restored(path: &Path, passphrase: &str) -> VaultResult<()> {
     let mut conn = open_working_conn(path, passphrase)?;
-    let result = agents::prepare_restored(&mut conn);
+    // A restored file is a new copy: it writes its changes under a new device ID.
+    let result = agents::prepare_restored(&mut conn).and_then(|()| merge::new_device(&conn));
     let close_result = close_conn(conn);
     result.and(close_result)
 }
@@ -1155,6 +1192,8 @@ fn initialize_new_db(path: &Path, passphrase: &str) -> VaultResult<()> {
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.execute_batch(agents::SCHEMA_V12_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
+    sync::add_schema_v13(&tx)?;
+    merge::add_schema_v14(&tx)?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     close_conn(conn)
 }
@@ -1185,6 +1224,11 @@ fn open_working_conn(path: &Path, passphrase: &str) -> VaultResult<Connection> {
     {
         drop(conn);
         return Err(migrate_err);
+    }
+    // A vault made from a synced copy has no device row: the copy leaves it out.
+    if let Err(device_err) = merge::ensure_device(&conn) {
+        drop(conn);
+        return Err(device_err);
     }
     Ok(conn)
 }

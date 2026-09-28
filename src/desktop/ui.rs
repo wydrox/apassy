@@ -11,6 +11,8 @@ mod agents;
 #[cfg(not(feature = "vault"))]
 mod demo;
 #[cfg(feature = "vault")]
+pub(crate) mod import;
+#[cfg(feature = "vault")]
 mod items;
 pub(crate) mod kit;
 #[cfg(feature = "vault")]
@@ -22,8 +24,20 @@ mod settings;
 mod shell;
 #[cfg(feature = "vault")]
 mod start;
+/// Sync of the vaults through a folder (ADR 0014).
+#[cfg(feature = "vault")]
+pub(crate) mod sync;
+#[cfg(all(test, feature = "vault"))]
+mod sync_tests;
 #[cfg(feature = "vault")]
 mod timeline;
+#[cfg(feature = "vault")]
+mod updates;
+#[cfg(all(test, feature = "vault"))]
+mod vault_tests;
+/// Several vaults, one open at a time (ADR 0013).
+#[cfg(feature = "vault")]
+pub(crate) mod vaults;
 
 use std::collections::BTreeSet;
 
@@ -158,10 +172,11 @@ fn secure_input(
     )
 }
 
-/// The default vault file. The agent profile denies this directory (isolation, §1).
+/// The vault file of Apassy 0.2. The agent profile denies this directory (isolation,
+/// §1). New vaults go to `vaults/` in the same directory (ADR 0013).
 #[cfg(feature = "vault")]
 pub(crate) fn default_vault_path() -> std::path::PathBuf {
-    crate::paths::data_dir().join("vault.db")
+    crate::vaults::legacy_vault_path(&crate::paths::data_dir())
 }
 
 /// Navigation and sheet state of the drawing code. It holds no secret text: typed
@@ -266,6 +281,12 @@ pub(crate) enum Sheet {
     Backup,
     #[cfg(feature = "vault")]
     Restore,
+    /// Rename a vault, remove it from the list, or a missing vault file (ADR 0013).
+    #[cfg(feature = "vault")]
+    Vault(vaults::VaultSheet),
+    /// Import from 1Password.
+    #[cfg(feature = "vault")]
+    Import,
 }
 
 pub(crate) fn apply_style(ctx: &egui::Context) {
@@ -277,12 +298,14 @@ pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     #[cfg(feature = "vault")]
     {
         app.poll_owner_flows(&ctx);
+        app.poll_sync(&ctx);
         close_sheet_after_check(app);
         let session = &app.owner_ui.session;
         if !session.has_file() || session.is_locked() {
             // A lock also hides a token that the owner did not dismiss.
             app.owner_ui.fresh_token = None;
             app.ui.sheet = None;
+            app.import.forget();
             start::draw(app, ui);
         } else {
             shell::draw(app, ui);
@@ -322,6 +345,7 @@ pub(crate) fn close_sheet(app: &mut DesktopApp, ctx: &egui::Context) {
             app.owner_ui.passphrase.zeroize();
             forget_secret_field(ctx, VAULT_PASSPHRASE_FIELD);
         }
+        Some(Sheet::Import) => app.import.forget(),
         _ => {}
     }
     #[cfg(not(feature = "vault"))]

@@ -25,13 +25,13 @@ The release workflow runs on `macos-15`:
 2. It builds the Rust binaries. Then it imports the Developer ID certificate into a temporary keychain, so the build scripts of the dependencies never run while the signing key is in a keychain.
 3. If the bucket has `models/apassy-base-v1.safetensors`, it downloads the checkpoint. `scripts/build-app.sh` checks it against `tools/basemodel/manifest.json`. Without it, the app ships without the base model, and the run shows a warning.
 4. If the secret `MACOS_KEYCHAIN_PROFILE` is set, it embeds the keychain profile for Touch ID unlock. See [Touch ID unlock](#touch-id-unlock).
-5. `scripts/build-app.sh` builds and signs the app with the hardened runtime and a secure timestamp, and runs all of its checks.
+5. `scripts/build-app.sh` builds and signs the app with the hardened runtime and a secure timestamp, and runs all of its checks. The app gets its build identity: the commit and the build time, in the program and in the signed `Info.plist` ([updates](updates.md)).
 6. `scripts/build-dmg.sh --notarize` notarizes the app, staples it, makes the disk image, signs it, notarizes it, and staples it. `spctl` must accept both.
 7. It uploads `Apassy.dmg`, then `latest.json`, to the bucket. The run summary shows `latest.json`.
 
-The bucket keeps only the latest build. The Worker serves only `Apassy.dmg` and `latest.json`. Other keys, such as `models/`, stay private.
+The bucket keeps only the latest build. The Worker serves only `Apassy.dmg` and `latest.json`. Other keys, such as `models/`, stay private. The upload sets `Cache-Control: no-cache` on both, and the Worker passes it on, so the app and the site get a new `latest.json` at once.
 
-`latest.json`:
+`latest.json`. The site reads `version` and `build`. The app checks every field before an update ([updates](updates.md)) and ignores fields it does not know:
 
 ```json
 {
@@ -144,4 +144,5 @@ For `npm run preview`, put test files in the local bucket with `npx wrangler r2 
 
 - Without `MACOS_KEYCHAIN_PROFILE`, the published app cannot unlock with Touch ID. See [Touch ID unlock](#touch-id-unlock).
 - The app runs on Apple silicon with macOS 15 or later only. The site shows a Linux button with a note: the isolation of agents uses macOS Seatbelt, and Linux needs its own version first.
-- The app does not update itself. The site always has the latest build.
+- From 0.3.0, the app reads `latest.json`, downloads a newer build, and installs it at "Restart now" or at the next quit ([updates](updates.md), [ADR 0015](../adr/0015-automatic-updates.md)). An app before 0.3.0 does not update itself: install 0.3.0 from the site once. A copy with no team in its signature (an ad hoc build), or one outside an app bundle, only shows the new version and the download page.
+- The updater trusts the Developer ID team and Apple notarization, not the site. Each green CI run on `main` publishes a new image on the site, but installed apps install only a higher version: raise the version in `Cargo.toml` (and the CHANGELOG) to release. Each installed app with automatic install on then gets it within about 6 hours.

@@ -1,5 +1,6 @@
 //! The start screens: welcome, create, open, restore, and unlock. They fill the window
-//! while no vault file is open or the vault is locked.
+//! while no vault file is open or the vault is locked. Create, Open, and Restore add
+//! the vault to the vault list with a name (ADR 0013).
 
 use std::path::{Path, PathBuf};
 
@@ -8,7 +9,7 @@ use eframe::egui::{self, Align, Frame, Id, Key, Label, Rect, Vec2};
 use super::kit::{self, Font, Icon, Style, Tone};
 use super::{
     PASSPHRASE_CAPACITY, VAULT_PASSPHRASE_FIELD, VAULT_REPEAT_FIELD, default_vault_path,
-    forget_secret_field, secure_input,
+    forget_secret_field, secure_input, vaults,
 };
 use crate::desktop::owner_store::Ephemeral;
 use crate::desktop::unlock::UnlockMethod;
@@ -26,6 +27,8 @@ pub(crate) enum Step {
     Create,
     Open,
     Restore,
+    /// Open a synced vault (ADR 0014).
+    OpenSynced,
 }
 
 pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
@@ -75,6 +78,7 @@ fn screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
         Step::Create => create(app, ui),
         Step::Open => open(app, ui),
         Step::Restore => restore(app, ui),
+        Step::OpenSynced => super::sync::open_screen(app, ui),
     }
 }
 
@@ -118,21 +122,30 @@ fn welcome(app: &mut DesktopApp, ui: &mut egui::Ui) {
     title(
         ui,
         "Welcome to Apassy",
-        "Credentials for you and your agents. Your secrets stay in one encrypted file on this Mac. Agents use them through Apassy and never see the values.",
+        "Credentials for you and your agents. Each vault is one encrypted file on this Mac. Agents use the secrets through Apassy and never see the values.",
     );
+    vaults::start_notices(app, ui);
+    vaults::welcome_list(app, ui);
     if kit::wide_button(ui, "Create a new vault", Style::Prominent).clicked() {
-        app.ui.start = Step::Create;
+        go(app, Step::Create);
     }
     ui.add_space(8.0);
     if kit::wide_button(ui, "Open an existing vault", Style::Bordered).clicked() {
-        app.ui.start = Step::Open;
+        go(app, Step::Open);
     }
     ui.add_space(10.0);
     ui.vertical_centered(|ui| {
         if kit::small_button(ui, "Restore from a backup…", Style::Link).clicked() {
-            app.ui.start = Step::Restore;
+            go(app, Step::Restore);
         }
     });
+    super::sync::start_link(app, ui);
+}
+
+/// Go to a start step with an empty name field.
+fn go(app: &mut DesktopApp, step: Step) {
+    app.vault_list.name_input.clear();
+    app.ui.start = step;
 }
 
 /// Fill an empty path field with the default location.
@@ -144,22 +157,29 @@ fn prefill(path: &mut String, default: &Path) {
 
 fn create(app: &mut DesktopApp, ui: &mut egui::Ui) {
     back(app, ui);
-    ui.label(kit::text("Create your vault", Font::Title).color(kit::LABEL));
+    let first = app.vault_list.registry.is_empty();
+    let heading = if first {
+        "Create your vault"
+    } else {
+        "Create a new vault"
+    };
+    ui.label(kit::text(heading, Font::Title).color(kit::LABEL));
     kit::paragraph(
         ui,
-        "Choose a passphrase that you can remember. Apassy cannot recover a lost passphrase, and the data is then gone.",
+        "Each vault has its own passphrase, agents, and rules. Choose a passphrase that you can remember. Apassy cannot recover a lost passphrase, and the data is then gone.",
         Font::Callout,
         kit::SECONDARY,
     );
     ui.add_space(14.0);
-    prefill(&mut app.owner_ui.create_path, &default_vault_path());
     let ctx = ui.ctx().clone();
     let mut submit = false;
+    let name_hint = app.create_fallback_name().unwrap_or("For example Work");
     kit::section(
         ui,
         None,
         Some("12 or more characters. A sentence of several words is strong and easy to remember."),
         |s| {
+            vaults::name_field(app, s, "vault-create-name", name_hint);
             s.field("Passphrase", |ui| {
                 secure_input(
                     ui,
@@ -181,19 +201,37 @@ fn create(app: &mut DesktopApp, ui: &mut egui::Ui) {
             submit = enter_pressed(&repeat);
         },
     );
+    super::sync::create_option(app, ui);
     let mut open = app.ui.is_expanded("start-location");
     if kit::disclosure(ui, &mut open, "Location").changed() {
         app.ui.set_expanded("start-location", open);
     }
     if open {
         ui.add_space(4.0);
+        let name = match app.vault_list.name_input.trim() {
+            "" => app.create_fallback_name().unwrap_or("vault").to_owned(),
+            typed => typed.to_owned(),
+        };
+        let default = app
+            .vault_list
+            .registry
+            .new_vault_path(&app.vault_list.data_dir, &name)
+            .display()
+            .to_string();
         kit::section(
             ui,
             None,
-            Some("The default folder is closed to agents by the Apassy sandbox profile."),
+            Some(
+                "Leave the field empty for the default folder. The Apassy sandbox profile closes it to agents. A vault in another folder is closed to agents that start after you create it.",
+            ),
             |s| {
                 s.field("File", |ui| {
-                    kit::text_input(ui, &mut app.owner_ui.create_path, "vault-create-path", "")
+                    kit::text_input(
+                        ui,
+                        &mut app.owner_ui.create_path,
+                        "vault-create-path",
+                        &default,
+                    )
                 });
             },
         );
@@ -205,10 +243,18 @@ fn create(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
 }
 
-/// Create the vault file and unlock it with the same passphrase. The passphrase fields
-/// and their undo history are erased first (key-memory review F1, F3).
+/// Create the vault file, add it to the vault list, and unlock it with the same
+/// passphrase. A wrong name or file keeps the typed passphrases. Then the passphrase
+/// fields and their undo history are erased (key-memory review F1, F3).
 pub(super) fn create_vault(app: &mut DesktopApp, ctx: &egui::Context) {
-    let path = PathBuf::from(app.owner_ui.create_path.trim());
+    let fallback = app.create_fallback_name();
+    let (name, path) = match app.new_vault_target(&app.owner_ui.create_path, fallback) {
+        Ok(target) => target,
+        Err(message) => {
+            app.set_err(message);
+            return;
+        }
+    };
     let passphrase = Ephemeral::take(&mut app.owner_ui.passphrase);
     let repeat = Ephemeral::take(&mut app.owner_ui.passphrase_confirm);
     forget_secret_field(ctx, VAULT_PASSPHRASE_FIELD);
@@ -227,22 +273,35 @@ pub(super) fn create_vault(app: &mut DesktopApp, ctx: &egui::Context) {
         return;
     }
     let unlocked = app.owner_ui.session.unlock(passphrase.expose());
-    drop(passphrase);
-    app.selected_item_id = None;
-    app.pending_delete = false;
+    app.reset_vault_state(Some(ctx));
     app.end_waiting_runs();
-    app.refresh_unlock_setting(Some(ctx));
+    app.list_open_vault(&name, Some(ctx));
     app.ui.start = Step::Home;
     app.view = OwnerView::Vault;
-    let _ = app.apply(
-        unlocked,
-        "Your vault is ready. Add your first credential, then make a backup in Settings.",
+    drop(passphrase);
+    // The Sync choice of the Create screen.
+    let synced = if unlocked.is_ok() {
+        super::sync::after_create(app)
+    } else {
+        Ok(None)
+    };
+    let ready = format!(
+        "Your vault is ready. Add your first credential, then make a backup in Settings.{}",
+        synced
+            .as_ref()
+            .ok()
+            .and_then(|line| line.as_deref())
+            .unwrap_or("")
     );
+    let _ = app.apply(unlocked, &ready);
+    if let Err(message) = synced {
+        app.set_err(message);
+    }
 }
 
 /// Create a missing parent folder with mode 0700. The broker does not start in a data
 /// folder with a wider mode.
-fn ensure_private_folder(path: &Path) -> Result<(), String> {
+pub(super) fn ensure_private_folder(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::DirBuilderExt;
 
     let Some(parent) = path
@@ -271,33 +330,41 @@ fn open(app: &mut DesktopApp, ui: &mut egui::Ui) {
     ui.label(kit::text("Open a vault", Font::Title).color(kit::LABEL));
     kit::paragraph(
         ui,
-        "Type the location of an Apassy vault file. You unlock it on the next screen.",
+        "Type the location of an Apassy vault file. Apassy adds it to your vaults. You unlock it on the next screen.",
         Font::Callout,
         kit::SECONDARY,
     );
     ui.add_space(14.0);
-    prefill(&mut app.owner_ui.open_path, &default_vault_path());
+    if app.vault_list.registry.is_empty() {
+        prefill(&mut app.owner_ui.open_path, &default_vault_path());
+    }
+    let name_hint = match app.owner_ui.open_path.trim() {
+        "" => "From the file name".to_owned(),
+        path => crate::vaults::name_from_path(Path::new(path)),
+    };
     let mut submit = false;
-    kit::section(ui, None, None, |s| {
-        let field = s.field("File", |ui| {
-            kit::text_input(ui, &mut app.owner_ui.open_path, "vault-open-path", "")
-        });
-        submit = enter_pressed(&field);
-    });
+    kit::section(
+        ui,
+        None,
+        Some("A file in your vaults opens as it is. A new file gets the name."),
+        |s| {
+            let field = s.field("File", |ui| {
+                kit::text_input(
+                    ui,
+                    &mut app.owner_ui.open_path,
+                    "vault-open-path",
+                    "/Volumes/Work/work.db",
+                )
+            });
+            submit = enter_pressed(&field);
+            let name = vaults::name_field(app, s, "vault-open-name", &name_hint);
+            submit |= enter_pressed(&name);
+        },
+    );
     if kit::wide_button(ui, "Open", Style::Prominent).clicked() || submit {
         let ctx = ui.ctx().clone();
-        let path = PathBuf::from(app.owner_ui.open_path.trim());
-        let result = app.owner_ui.session.open_file(&path);
-        if app
-            .apply(result, "The vault file is open. Unlock it.")
-            .is_some()
-        {
-            app.selected_item_id = None;
-            app.pending_delete = false;
-            app.end_waiting_runs();
-            app.refresh_unlock_setting(Some(&ctx));
-            app.ui.start = Step::Home;
-        }
+        let typed = app.owner_ui.open_path.clone();
+        app.open_vault_file(&typed, Some(&ctx));
     }
 }
 
@@ -322,19 +389,19 @@ fn restore(app: &mut DesktopApp, ui: &mut egui::Ui) {
 
 /// The restore fields. Returns true when the owner presses Enter in the passphrase.
 pub(super) fn restore_form(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool {
-    let default = default_vault_path();
-    let dest = if default.exists() {
-        default.with_file_name("vault-restored.db")
-    } else {
-        default
+    let (name_hint, dest_hint) = match app.new_vault_target(
+        &app.owner_ui.restore_dest,
+        Some(&restore_fallback_name(app)),
+    ) {
+        Ok((name, path)) => (name, path.display().to_string()),
+        Err(_) => (restore_fallback_name(app), String::new()),
     };
-    prefill(&mut app.owner_ui.restore_dest, &dest);
     let mut submit = false;
     kit::section(
         ui,
         None,
         Some(
-            "The passphrase is the one of the backup. Touch ID unlock stays off for the restored file.",
+            "The passphrase is the one of the backup. The restored vault is a new vault in your list. Leave the file empty for the default folder. Touch ID unlock stays off for the restored file.",
         ),
         |s| {
             s.field("Backup file", |ui| {
@@ -345,8 +412,14 @@ pub(super) fn restore_form(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool {
                     "/Volumes/Backup/apassy.backup",
                 )
             });
+            vaults::name_field(app, s, "vault-restore-name", &name_hint);
             s.field("New vault file", |ui| {
-                kit::text_input(ui, &mut app.owner_ui.restore_dest, "vault-restore-dest", "")
+                kit::text_input(
+                    ui,
+                    &mut app.owner_ui.restore_dest,
+                    "vault-restore-dest",
+                    &dest_hint,
+                )
             });
             let field = s.field("Passphrase", |ui| {
                 secure_input(
@@ -363,10 +436,28 @@ pub(super) fn restore_form(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool {
     submit
 }
 
-/// Restore needs the typed passphrase. Touch ID never supplies it (A2).
+/// The name of a restored vault when the owner types none: from the typed file name,
+/// else "Restored".
+fn restore_fallback_name(app: &DesktopApp) -> String {
+    match app.owner_ui.restore_dest.trim() {
+        "" => "Restored".to_owned(),
+        dest => crate::vaults::name_from_path(Path::new(dest)),
+    }
+}
+
+/// Restore needs the typed passphrase. Touch ID never supplies it (A2). The restored
+/// file is a new vault in the list (ADR 0013). A vault that was open and unlocked ends
+/// its waiting runs, as at a switch.
 pub(super) fn restore_now(app: &mut DesktopApp, ctx: &egui::Context) {
     let source = PathBuf::from(app.owner_ui.restore_source.trim());
-    let dest = PathBuf::from(app.owner_ui.restore_dest.trim());
+    let fallback = restore_fallback_name(app);
+    let (name, dest) = match app.new_vault_target(&app.owner_ui.restore_dest, Some(&fallback)) {
+        Ok(target) => target,
+        Err(message) => {
+            app.set_err(message);
+            return;
+        }
+    };
     if let Err(message) = ensure_private_folder(&dest) {
         app.set_err(message);
         return;
@@ -385,10 +476,9 @@ pub(super) fn restore_now(app: &mut DesktopApp, ctx: &egui::Context) {
         )
         .is_some()
     {
-        app.selected_item_id = None;
-        app.pending_delete = false;
+        app.reset_vault_state(Some(ctx));
         app.end_waiting_runs();
-        app.refresh_unlock_setting(Some(ctx));
+        app.list_open_vault(&name, Some(ctx));
         app.ui.start = Step::Home;
         app.view = OwnerView::Vault;
     }
@@ -402,11 +492,14 @@ fn unlock(app: &mut DesktopApp, ui: &mut egui::Ui) {
         .location()
         .map(|path| path.display().to_string())
         .unwrap_or_default();
-    title(
-        ui,
-        "Apassy is locked",
-        "Type your passphrase to unlock the vault.",
-    );
+    let subtitle = match app.current_vault_name() {
+        Some(name) => format!("Type the passphrase of “{name}” to unlock it."),
+        None => "Type your passphrase to unlock the vault.".to_owned(),
+    };
+    title(ui, "Apassy is locked", &subtitle);
+    vaults::start_notices(app, ui);
+    super::sync::unlock_notices(app, ui);
+    vaults::unlock_picker(app, ui);
     draw_unlock_card(app, ui);
     ui.add_space(14.0);
     ui.vertical_centered(|ui| {
@@ -416,17 +509,21 @@ fn unlock(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 .halign(Align::Center),
         );
         ui.horizontal(|ui| {
-            // Center the two links.
-            let width = 260.0;
+            // Center the three links.
+            let width = 300.0;
             ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
-            if kit::small_button(ui, "Open another vault…", Style::Link).clicked() {
-                app.ui.start = Step::Open;
+            if kit::small_button(ui, "New vault…", Style::Link).clicked() {
+                go(app, Step::Create);
+            }
+            if kit::small_button(ui, "Open vault file…", Style::Link).clicked() {
+                go(app, Step::Open);
             }
             if kit::small_button(ui, "Restore…", Style::Link).clicked() {
-                app.ui.start = Step::Restore;
+                go(app, Step::Restore);
             }
         });
     });
+    super::sync::start_link(app, ui);
 }
 
 /// The passphrase field, Unlock, and Touch ID when it is set up. The field takes the
@@ -462,10 +559,19 @@ pub(crate) fn unlock_with_passphrase(app: &mut DesktopApp, ctx: &egui::Context) 
     forget_secret_field(ctx, VAULT_PASSPHRASE_FIELD);
     let result = app.owner_ui.session.unlock(passphrase.expose());
     drop(passphrase);
-    if result.is_ok() {
+    // Sync before the owner sees the list (ADR 0014). A sync problem does not stop the
+    // unlock.
+    let loaded = if result.is_ok() {
         app.view = OwnerView::Vault;
-    }
-    let _ = app.apply(result, "The vault is unlocked.");
+        app.sync_after_unlock()
+    } else {
+        None
+    };
+    let ok = match loaded {
+        Some(line) => format!("The vault is unlocked. {line}"),
+        None => "The vault is unlocked.".to_owned(),
+    };
+    let _ = app.apply(result, &ok);
 }
 
 /// Touch ID unlock (goal items A2, A3). It shows only when it is set up for this file.

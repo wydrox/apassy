@@ -1,5 +1,5 @@
-//! Settings: the vault file, security, backup, agents, notifications, and the broker.
-//! Each change that is rare or risky opens a sheet.
+//! Settings: the vault file, security, backup, agents, notifications, the broker, and
+//! updates (`updates.rs`). Each change that is rare or risky opens a sheet.
 
 use std::path::PathBuf;
 
@@ -20,12 +20,15 @@ use crate::vault::DEFAULT_TOKEN_LIFETIME_DAYS;
 pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     kit::page_header(ui, "Settings", None, |_| {});
     vault_section(app, ui);
+    super::vaults::settings_section(app, ui);
     security_section(app, ui);
     backup_section(app, ui);
+    super::import::section(app, ui);
     agents_section(app, ui);
     notifications_section(app, ui);
     broker_section(app, ui);
     shortcuts_section(ui);
+    super::updates::section(app, ui);
     kit::section(ui, Some("About"), None, |s| {
         s.labeled(
             "Version",

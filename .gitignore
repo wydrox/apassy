@@ -5,3 +5,8 @@
 *.pem
 *.key
 /target/
+# Local Wrangler state of a run at the repository root.
+/.wrangler/
+# The promo renders and their tools: the sources are in git, the output is not.
+design/promo/**/node_modules/
+design/promo/**/out/

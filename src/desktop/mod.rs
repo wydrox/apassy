@@ -17,6 +17,9 @@ pub mod owner_store;
 mod ui;
 #[cfg(feature = "vault")]
 pub mod unlock;
+/// Automatic updates of the macOS app (ADR 0015).
+#[cfg(feature = "vault")]
+pub(crate) mod update;
 
 use eframe::egui;
 
@@ -123,6 +126,20 @@ pub struct DesktopApp {
     /// Learning view state (goal item B10).
     #[cfg(feature = "vault")]
     pub(crate) learning: learning_ui::LearningUiState,
+    /// The list of vaults (ADR 0013).
+    #[cfg(feature = "vault")]
+    pub(crate) vault_list: ui::vaults::VaultListState,
+    /// Import from 1Password. It holds the parsed export until the import, a cancel, or
+    /// a lock.
+    #[cfg(feature = "vault")]
+    pub(crate) import: ui::import::ImportState,
+    /// Update checks, downloads, and the installer (ADR 0015). Idle until the window
+    /// starts it.
+    #[cfg(feature = "vault")]
+    pub(crate) updates: update::Updater,
+    /// Sync of the vaults through a folder (ADR 0014).
+    #[cfg(feature = "vault")]
+    pub(crate) sync: ui::sync::SyncUiState,
     styled: bool,
 }
 
@@ -170,6 +187,14 @@ impl DesktopApp {
             owner: owner_check::OwnerFlows::default(),
             #[cfg(feature = "vault")]
             learning: learning_ui::LearningUiState::default(),
+            #[cfg(feature = "vault")]
+            vault_list: ui::vaults::VaultListState::default(),
+            #[cfg(feature = "vault")]
+            import: ui::import::ImportState::default(),
+            #[cfg(feature = "vault")]
+            updates: update::Updater::idle(),
+            #[cfg(feature = "vault")]
+            sync: ui::sync::SyncUiState::default(),
             styled: false,
         }
     }
@@ -184,23 +209,13 @@ impl DesktopApp {
             // The notification center sets the notifier of the approval queue. It
             // wakes its watcher and repaints the window when a run starts to wait.
             app.start_native(&cc.egui_ctx);
-            app.open_default_vault(&cc.egui_ctx);
+            // The last used vault opens locked, so the window starts on the unlock
+            // screen (ADR 0013).
+            app.load_vault_list(crate::paths::data_dir(), true);
+            app.open_last_vault(Some(&cc.egui_ctx));
+            app.start_updates(&cc.egui_ctx);
         }
         app
-    }
-
-    /// Open the vault file at the default location, locked, when it exists. The
-    /// window then starts on the unlock screen.
-    #[cfg(feature = "vault")]
-    fn open_default_vault(&mut self, ctx: &egui::Context) {
-        let path = ui::default_vault_path();
-        if !path.is_file() {
-            return;
-        }
-        if self.owner_ui.session.open_file(&path).is_ok() {
-            self.owner_ui.open_path = path.display().to_string();
-            self.refresh_unlock_setting(Some(ctx));
-        }
     }
 
     /// Start the agent broker on `socket`. It shares the owner vault slot.
@@ -348,10 +363,14 @@ impl eframe::App for DesktopApp {
     }
 
     /// Waiting runs end and stay in the inbox. The vault locks. Typed secrets are
-    /// erased (goal items V3, N3; key-memory review F3).
+    /// erased (goal items V3, N3; key-memory review F3). Then a ready update installs
+    /// when automatic install is on (ADR 0015).
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         #[cfg(feature = "vault")]
-        self.shut_down();
+        {
+            self.shut_down();
+            self.finish_updates();
+        }
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {

@@ -9,11 +9,22 @@ pub mod contracts;
 #[cfg(feature = "vault")]
 pub mod broker;
 
+/// Sync of a vault through a folder (ADR 0014). It needs the vault.
+#[cfg(feature = "vault")]
+pub mod sync;
+
 #[cfg(feature = "desktop")]
 pub mod desktop;
 
+/// Import from 1Password (1PUX and CSV exports). It needs the vault types.
+#[cfg(feature = "vault")]
+pub mod import;
+
 pub mod native;
 pub mod paths;
+/// The list of vaults on this computer (ADR 0013). It needs no feature, so the
+/// sandbox launcher reads it.
+pub mod vaults;
 
 /// Experimental trusted-process vault APIs.
 ///

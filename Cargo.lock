@@ -161,11 +161,13 @@ checksum = "fc7eb209b1518d6bb87b283c20095f5228ecda460da70b44f0802523dea6da04"
 
 [[package]]
 name = "apassy"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "eframe",
+ "flate2",
  "getrandom 0.4.3",
  "rcgen",
+ "ring",
  "rusqlite",
  "rustix 1.1.4",
  "rustls",

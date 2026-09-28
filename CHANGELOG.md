@@ -2,6 +2,37 @@
 
 All notable changes to Apassy. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org/). The site shows this file at <https://apassy.wyderka.cc/changelog>.
 
+## [0.3.0] - 2026-09-28
+
+Several vaults, sync between your Macs, import from 1Password, and automatic updates.
+
+### Added
+
+- **Several vaults.** Each vault is its own encrypted file with its own passphrase, credentials, agents, rules, and learning data. One vault is open at a time, and agents reach only the open vault. The name of the open vault at the top of the sidebar switches to another vault. A switch locks the open vault and ends each run that waits for you. Settings > Vaults renames a vault or removes it from the list; the file stays ([several vaults](docs/operations/multiple-vaults.md), [ADR 0013](docs/adr/0013-multiple-vaults.md)).
+- **Sync through a folder.** As with an Obsidian vault, a vault can sync through iCloud Drive or through any folder that Dropbox, Google Drive, OneDrive, or Syncthing keeps in step. Settings > Vaults > Sync, or the Create screen, turns it on; it is off by default. Your other Macs add the vault with "Open a synced vault…".
+  - Changes merge one credential at a time, after each unlock, every 30 seconds, a few seconds after a change, and before each lock and quit. You type no passphrase for it.
+  - When the same credential changed on two Macs, the newer version wins, and the other stays as an archived conflict copy. An old copy changes nothing.
+  - The credentials and their settings sync. Agents, tokens, grants, rules, activity, and learning data stay on each Mac and are never in the synced file: each Mac registers its own agents.
+  - The vault that Apassy works on stays a local file, and SQLite never writes in the synced folder. The synced file is encrypted with the vault passphrase ([sync](docs/operations/sync.md), [ADR 0014](docs/adr/0014-icloud-sync.md)).
+- **Import from 1Password.** Settings > Import reads a 1PUX or CSV export and shows each item before anything is added. API credentials, SSH keys, databases, and servers are selected first; logins, passwords, and notes are not. A secret never goes into a title, notes, or tags. No agent gets access to an imported credential. After the import, Apassy offers to delete the export file ([import from 1Password](docs/operations/import-1password.md)).
+- **Rule pack validator.** `apassy-packs validate` loads a rule pack or a provider file as the broker does, and names the reason when it does not load. JSON Schemas in `packs/schema/` describe both formats, and CI checks each file with both ([rule packs](docs/operations/rule-packs.md), [CONTRIBUTING.md](CONTRIBUTING.md)).
+- **Licenses and policies.** The code and the documents are Apache-2.0. The rule packs, the provider files, and their schemas are CC0-1.0. [SECURITY.md](SECURITY.md) says how to report a vulnerability.
+- **Automatic updates.** The app checks for a new version shortly after the start and every 6 hours, downloads it, and installs it at "Restart now" or at the next quit. Only a higher version number updates the app: another build of the same version does not. It installs only an app with the size and SHA-256 of `latest.json`, signed with a Developer ID of the same team, and notarized by Apple. Settings > Updates turns the check and the automatic install off ([updates](docs/operations/updates.md), [ADR 0015](docs/adr/0015-automatic-updates.md)).
+
+### Changed
+
+- The vault schema is version 14: a vault ID, and an ID, a change count, and deletion marks for each synced record. A vault of an earlier version migrates at unlock.
+- `apassy-sandbox` denies agents each vault in the vault list, the iCloud Drive folder of Apassy, the synced file of each vault in another folder, and the list itself. It refuses to start when the vault list is damaged, because a damaged list can hide a vault outside the data folder.
+- An agent with a token of another vault gets a message that says the owner may have another vault open. The message names no vault.
+- The result of a run, a connector call, and a local training goes only to the vault where it started, also when you switch vaults during it.
+- An edit of a credential keeps its tags.
+- Release builds record their commit and build time in the program and in `Info.plist`.
+
+### Security
+
+- The updater checks the new app again just before it replaces the installed app, and puts the old app back when the replacement fails.
+- A synced copy is read only as a local copy, and it must pass the checks of a restore and a content digest before it merges. So a copy made of pages from different versions is refused.
+
 ## [0.2.1] - 2026-09-28
 
 Apassy builds and passes its tests on Linux. The app for Linux is not published yet: the isolation of agents uses macOS Seatbelt, and Linux needs its own version first.
@@ -59,6 +90,7 @@ The alpha. It was not published.
 - Secrets for agent processes with owner approval: the socket never returns a secret value ([ADR 0006](docs/adr/0006-process-secrets.md)).
 - Plain-language rules and a local bouncer on Laya ([ADR 0007](docs/adr/0007-rules-and-local-bouncer.md)).
 
+[0.3.0]: https://github.com/wydrox/apassy/releases/tag/v0.3.0
 [0.2.1]: https://github.com/wydrox/apassy/releases/tag/v0.2.1
 [0.2.0]: https://github.com/wydrox/apassy/releases/tag/v0.2.0
 [0.1.0]: https://github.com/wydrox/apassy/commits/a2f860a

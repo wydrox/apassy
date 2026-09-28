@@ -1788,6 +1788,131 @@ pub fn default_local_dir() -> PathBuf {
     crate::paths::data_dir().join("packs")
 }
 
+// ---- Validation of one file, for `apassy-packs validate` ----
+
+/// What one pack file has, after the loader accepted it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackSummary {
+    pub tool: String,
+    pub pack_version: u64,
+    /// The programs of the pack, or `["*"]` for every program.
+    pub programs: Vec<String>,
+    pub rules: usize,
+    pub safe: usize,
+    pub exemptions: usize,
+    pub project_commands: usize,
+    pub writes: usize,
+    pub access_reads: usize,
+    /// Entries without a `note`, as `<kind> <id>`. Each entry of a built-in pack needs a
+    /// note with its reason (test `every_built_in_rule_has_a_note`).
+    pub without_note: Vec<String>,
+    /// The tool name is one of the embedded packs. The file replaces that pack at the next
+    /// build. A local pack cannot have such a name.
+    pub replaces_builtin: bool,
+}
+
+fn parse_builtin(source: &str, text: &str) -> Result<BuiltinPack, PackError> {
+    let value = parse(source, text)?;
+    serde_json::from_value(value).map_err(|error| PackError::new(source, error.to_string()))
+}
+
+fn without_notes<'a, T: 'a>(
+    kind: &str,
+    entries: impl Iterator<Item = (&'a str, &'a Option<T>)>,
+    into: &mut Vec<String>,
+) {
+    for (id, note) in entries {
+        if note.is_none() {
+            into.push(format!("{kind} `{id}`"));
+        }
+    }
+}
+
+/// Check one file as a built-in pack, alone, with the checks of the build-time loader.
+/// The tool name may be the name of an embedded pack: the file then replaces that pack
+/// at the next build (`replaces_builtin`). A file that fails changes nothing.
+pub fn validate_builtin(source: &str, text: &str) -> Result<PackSummary, PackError> {
+    let mut set = RuleSet::default();
+    set.add_builtin(source, text)?;
+    let pack = parse_builtin(source, text)?;
+    let mut without_note = Vec::new();
+    without_notes(
+        "rule",
+        pack.rules.iter().map(|r| (r.id.as_str(), &r.note)),
+        &mut without_note,
+    );
+    without_notes(
+        "safe rule",
+        pack.safe.iter().map(|s| (s.id.as_str(), &s.note)),
+        &mut without_note,
+    );
+    without_notes(
+        "exemption",
+        pack.exemptions.iter().map(|e| (e.id.as_str(), &e.note)),
+        &mut without_note,
+    );
+    without_notes(
+        "project command",
+        pack.project_commands
+            .iter()
+            .map(|p| (p.id.as_str(), &p.note)),
+        &mut without_note,
+    );
+    without_notes(
+        "write",
+        pack.writes.iter().map(|w| (w.id.as_str(), &w.note)),
+        &mut without_note,
+    );
+    without_notes(
+        "access read",
+        pack.access_reads.iter().map(|a| (a.id.as_str(), &a.note)),
+        &mut without_note,
+    );
+    let file = format!("{}.json", pack.tool);
+    Ok(PackSummary {
+        replaces_builtin: builtin_pack_files().contains(&file.as_str()),
+        tool: pack.tool,
+        pack_version: pack.pack_version,
+        programs: pack.programs,
+        rules: pack.rules.len(),
+        safe: pack.safe.len(),
+        exemptions: pack.exemptions.len(),
+        project_commands: pack.project_commands.len(),
+        writes: pack.writes.len(),
+        access_reads: pack.access_reads.len(),
+        without_note,
+    })
+}
+
+/// Check one file as a local pack, with the built-in packs loaded, as the broker does
+/// at start. A local pack can only add flags. A file that fails changes nothing.
+pub fn validate_local(source: &str, text: &str) -> Result<PackSummary, PackError> {
+    let mut set = RuleSet::builtin()?;
+    set.add_local(source, text)?;
+    let value = parse(source, text)?;
+    let pack: LocalPack =
+        serde_json::from_value(value).map_err(|error| PackError::new(source, error.to_string()))?;
+    let mut without_note = Vec::new();
+    without_notes(
+        "rule",
+        pack.rules.iter().map(|r| (r.id.as_str(), &r.note)),
+        &mut without_note,
+    );
+    Ok(PackSummary {
+        tool: pack.tool,
+        pack_version: pack.pack_version,
+        programs: pack.programs,
+        rules: pack.rules.len(),
+        safe: 0,
+        exemptions: 0,
+        project_commands: 0,
+        writes: 0,
+        access_reads: 0,
+        without_note,
+        replaces_builtin: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

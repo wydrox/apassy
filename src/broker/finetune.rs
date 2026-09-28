@@ -669,7 +669,9 @@ pub fn train(
     power: &dyn Fn() -> Power,
     stop: &AtomicBool,
 ) -> Result<TrainingReport, TrainingError> {
-    let export = {
+    // The candidate goes to the vault file of the decisions, never to another vault
+    // that the owner opens during the training (ADR 0013).
+    let (export, vault_file) = {
         let guard = lock(vault);
         let vault = guard
             .as_ref()
@@ -682,9 +684,10 @@ pub fn train(
         if !gate.is_open() {
             return Err(TrainingError::GateClosed(gate));
         }
-        vault
+        let export = vault
             .export_decisions_jsonl()
-            .map_err(|_| TrainingError::Data("The vault did not export the log.".to_owned()))?
+            .map_err(|_| TrainingError::Data("The vault did not export the log.".to_owned()))?;
+        (export, vault.path().to_path_buf())
     };
     let set = examples_from_export(&export).map_err(TrainingError::Data)?;
     drop(export);
@@ -793,7 +796,7 @@ pub fn train(
         let mut guard = lock(vault);
         let vault = guard
             .as_mut()
-            .filter(|vault| !vault.is_locked())
+            .filter(|vault| !vault.is_locked() && vault.path() == vault_file)
             .ok_or(TrainingError::Locked)?;
         vault
             .register_candidate(

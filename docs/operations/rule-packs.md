@@ -136,7 +136,7 @@ These parts are not about one tool. They stay in `src/broker/shell_risk.rs`:
 
 ## 3. Pack format
 
-A pack is one JSON object. The loader rejects unknown fields at every level.
+A pack is one JSON object. The loader rejects unknown fields at every level. The JSON Schema [`packs/schema/rule-pack.schema.json`](../../packs/schema/rule-pack.schema.json) describes the structure for an editor or a CI step. The loader is the authority: `cargo run --locked --features vault --bin apassy-packs -- validate <file>` runs it on a file (`--local` for an owner pack) and names the reason when the file does not load.
 
 | Field | Built-in | Local | Meaning |
 | --- | --- | --- | --- |
@@ -260,7 +260,7 @@ Write a local pack:
 1. Select a tool name that no built-in pack has, for example `git-local` or `owner-rules`.
 2. List the programs, or use `["*"]`.
 3. Write one rule for each restriction. Use lowercase text in the lists.
-4. Check the directory: `cargo test --features vault --test rule_packs owner_local_packs -- --ignored --nocapture`. The test names each loaded pack. It fails with the reason if a pack does not load.
+4. Check the file: `cargo run --locked --features vault --bin apassy-packs -- validate --local <file>`. It names the reason if the pack does not load. To check the whole directory as the broker reads it: `cargo test --features vault --test rule_packs owner_local_packs -- --ignored --nocapture`.
 5. Restart the broker.
 
 ### Guarantees

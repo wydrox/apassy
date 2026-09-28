@@ -1,16 +1,18 @@
 [package]
 name = "apassy"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.97"
 publish = false
+license = "Apache-2.0"
+repository = "https://github.com/wydrox/apassy"
 description = "A personal credential manager with controlled agent access"
 
 [features]
 default = []
 desktop = ["dep:eframe", "dep:rustix"]
 storage-probe = ["dep:rusqlite", "dep:tempfile"]
-vault = ["dep:rusqlite", "dep:tempfile", "dep:getrandom", "dep:rustls", "dep:rustls-platform-verifier", "dep:rcgen", "dep:time"]
+vault = ["dep:rusqlite", "dep:tempfile", "dep:getrandom", "dep:rustls", "dep:rustls-platform-verifier", "dep:rcgen", "dep:time", "dep:ring", "dep:flate2"]
 
 [dependencies]
 serde = { version = "=1.0.229", features = ["derive"] }
@@ -26,6 +28,11 @@ rustls-platform-verifier = { version = "=0.7.0", optional = true }
 # ADR 0011: the certificate authority of each proxied run and its host certificates.
 rcgen = { version = "=0.14.10", optional = true, default-features = false, features = ["crypto", "pem", "ring"] }
 time = { version = "=0.3.47", optional = true, default-features = false, features = ["std"] }
+# 0.3.0: SHA-256 of an update image and of an iCloud copy of a vault. The version
+# that rustls already uses.
+ring = { version = "=0.17.14", optional = true, default-features = false }
+# 0.3.0: the zip archive of a 1Password export (.1pux). The version that png already uses.
+flate2 = { version = "=1.1.10", optional = true, default-features = false, features = ["rust_backend"] }
 # Key-memory review F6: safe setrlimit for the core-dump limit of the desktop
 # process. The same version is already in Cargo.lock through tempfile.
 rustix = { version = "=1.1.4", optional = true, default-features = false, features = ["std", "process"] }
@@ -56,6 +63,11 @@ path = "src/bin/apassy-sandbox.rs"
 [[bin]]
 name = "apassy-eval"
 path = "src/bin/apassy-eval.rs"
+required-features = ["vault"]
+
+[[bin]]
+name = "apassy-packs"
+path = "src/bin/apassy-packs.rs"
 required-features = ["vault"]
 
 # Label export for the base-model data generator (goal B8, tools/basemodel/).
@@ -117,8 +129,18 @@ path = "tests/host_hook.rs"
 required-features = ["vault"]
 
 [[test]]
+name = "onepassword_import"
+path = "tests/onepassword_import.rs"
+required-features = ["vault"]
+
+[[test]]
 name = "isolation_profile"
 path = "tests/isolation/product_profile.rs"
+required-features = ["vault"]
+
+[[test]]
+name = "folder_sync"
+path = "tests/folder_sync.rs"
 required-features = ["vault"]
 
 [lints.rust]

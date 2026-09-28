@@ -92,6 +92,13 @@ fn seed(home: &Path) {
     );
     std::fs::create_dir_all(&data).expect("data dir");
     set_owner_only(&data);
+    // The tour must not ask the update server: the updater reads this file at start
+    // (ADR 0015).
+    std::fs::write(
+        data.join("update.json"),
+        r#"{"auto_check": false, "auto_install": false}"#,
+    )
+    .expect("update settings");
     // Project folders as the owner would see them. The vault checks only that
     // they are absolute.
     let api = "/Users/you/code/acme-api".to_owned();

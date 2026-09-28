@@ -53,6 +53,7 @@ const OP_SUMMARY: &str = "get_sales_summary";
 const VAULT_TEXT: &str = "SYNTHETIC-VAULT-CANARY-NOT-A-SECRET\n";
 const BACKUP_TEXT: &str = "SYNTHETIC-BACKUP-CANARY-NOT-A-SECRET\n";
 const LAYA_TEXT: &str = "SYNTHETIC-LAYA-WEIGHTS-NOT-A-SECRET\n";
+const CLOUD_TEXT: &str = "SYNTHETIC-ICLOUD-COPY-CANARY-NOT-A-SECRET\n";
 /// The development override of the helper caller check. No test sets it for a
 /// process in the profile.
 const DEV_ANY_CALLER: &str = "APASSY_HELPER_DEV_ANY_CALLER";
@@ -106,6 +107,10 @@ struct Layout {
     /// A synthetic owner home directory. The profile denies a write to the
     /// autostart locations under it. A test never touches the real `$HOME`.
     home: PathBuf,
+    /// A synthetic Apassy folder in a synthetic iCloud Drive, with a canary vault
+    /// copy (ADR 0014). A test never touches the real iCloud Drive.
+    cloud_dir: PathBuf,
+    cloud_file: PathBuf,
 }
 
 fn make_layout() -> Layout {
@@ -144,6 +149,17 @@ fn make_layout() -> Layout {
     // An existing shell startup file, to show that a read (a source) still
     // works while a write is denied.
     std::fs::write(home.join(".zshrc"), "# synthetic startup file\n").expect("zshrc");
+    // A synthetic iCloud Drive with the Apassy folder and one more folder.
+    let icloud = dir
+        .path()
+        .join("Mobile Documents")
+        .join("com~apple~CloudDocs");
+    let cloud_dir = icloud.join("Apassy");
+    std::fs::create_dir_all(&cloud_dir).expect("cloud dir");
+    std::fs::create_dir_all(icloud.join("Notes")).expect("notes dir");
+    std::fs::write(icloud.join("Notes").join("notes.txt"), "notes-ok\n").expect("notes");
+    let cloud_file = cloud_dir.join("Personal.apassy");
+    std::fs::write(&cloud_file, CLOUD_TEXT).expect("cloud canary");
     Layout {
         data_dir,
         vault_file,
@@ -152,6 +168,8 @@ fn make_layout() -> Layout {
         socket,
         scratch: dir.path().join("scratch.txt"),
         home,
+        cloud_dir,
+        cloud_file,
         _dir: dir,
     }
 }
@@ -373,6 +391,8 @@ fn sandbox_args(fx: &Fixture) -> Vec<String> {
         l.socket.display().to_string(),
         "--home".to_owned(),
         l.home.display().to_string(),
+        "--cloud-dir".to_owned(),
+        l.cloud_dir.display().to_string(),
     ]
     .into_iter()
     .chain(
@@ -474,6 +494,10 @@ fn control_process_can_read_the_canaries() {
     assert_eq!(
         std::fs::read_to_string(&fx.layout.laya_file).unwrap(),
         LAYA_TEXT
+    );
+    assert_eq!(
+        std::fs::read_to_string(&fx.layout.cloud_file).unwrap(),
+        CLOUD_TEXT
     );
 }
 
@@ -640,6 +664,69 @@ fn ordinary_work_still_runs_in_profile() {
         std::fs::read_to_string(&fx.layout.scratch).unwrap(),
         "work-ok\n"
     );
+}
+
+#[test]
+fn profile_denies_the_icloud_folder() {
+    // ADR 0014: iCloud Drive holds a closed, encrypted copy of each synced vault.
+    // A process in the profile cannot read it (an offline passphrase guess), change
+    // it (the other Macs would get it), or move the folder away. The rest of iCloud
+    // Drive stays usable.
+    require_sandbox();
+    let fx = fixture();
+    let l = &fx.layout;
+    let cloud_file = l.cloud_file.display().to_string();
+
+    let (ok, out, err) = in_sandbox(&fx, &["/bin/cat", &cloud_file]);
+    assert!(
+        !ok,
+        "the profile must deny a read of the iCloud copy: {out}"
+    );
+    assert!(err.contains("Operation not permitted"), "{err}");
+    assert!(!out.contains("CANARY"), "the iCloud copy leaked: {out}");
+
+    let (ok, _out, err) = in_sandbox(&fx, &["/bin/ls", &l.cloud_dir.display().to_string()]);
+    assert!(!ok, "the profile must deny a list of the Apassy folder");
+    assert!(err.contains("Operation not permitted"), "{err}");
+
+    assert!(write_is_denied(&fx, &l.cloud_file), "overwrite");
+    assert!(
+        write_is_denied(&fx, &l.cloud_dir.join("Planted.apassy")),
+        "a new file"
+    );
+    assert!(!l.cloud_dir.join("Planted.apassy").exists());
+
+    // Escape by a rename of the iCloud Drive folder, then read at the new path.
+    let icloud = l.cloud_dir.parent().expect("icloud");
+    let moved = icloud.with_file_name("moved");
+    let (ok, out, _err) = in_sandbox(
+        &fx,
+        &[
+            "/bin/sh",
+            "-c",
+            &format!(
+                "mv '{}' '{}' && cat '{}/Apassy/Personal.apassy'",
+                icloud.display(),
+                moved.display(),
+                moved.display()
+            ),
+        ],
+    );
+    assert!(
+        !ok,
+        "the profile must deny a rename of the iCloud Drive folder"
+    );
+    assert!(
+        !out.contains("CANARY"),
+        "the copy leaked after a rename: {out}"
+    );
+    assert_eq!(std::fs::read_to_string(&l.cloud_file).unwrap(), CLOUD_TEXT);
+
+    // Control: another folder in iCloud Drive stays readable in the profile.
+    let notes = icloud.join("Notes").join("notes.txt");
+    let (ok, out, err) = in_sandbox(&fx, &["/bin/cat", &notes.display().to_string()]);
+    assert!(ok, "the rest of iCloud Drive must stay readable: {err}");
+    assert_eq!(out, "notes-ok\n");
 }
 
 // --- Launching outside the sandbox ---------------------------------------
@@ -1419,6 +1506,269 @@ fn launcher_passes_the_installed_and_the_build_app() {
         chosen.contains(" -D APASSY_APP_BUILD=/private/tmp/apassy-print-check/Build.app "),
         "{chosen}"
     );
+
+    // ADR 0014: the launcher passes the Apassy folder in iCloud Drive of the home
+    // directory by default, and the folder of `--cloud-dir` when given.
+    let with_home = Command::new(launcher)
+        .env("HOME", "/tmp/apassy-print-check/home")
+        .args(["--data-dir", "/tmp/apassy-print-check/d"])
+        .args(["--print", "--", "/usr/bin/true"])
+        .output()
+        .expect("run apassy-sandbox --print");
+    assert!(with_home.status.success());
+    let with_home = String::from_utf8_lossy(&with_home.stdout).into_owned();
+    assert!(
+        with_home.contains(
+            " -D APASSY_CLOUD_DIR=/private/tmp/apassy-print-check/home/Library/Mobile Documents/com~apple~CloudDocs/Apassy "
+        ),
+        "{with_home}"
+    );
+    let cloud = print(&["--cloud-dir", "/tmp/apassy-print-check/Cloud"]);
+    assert!(
+        cloud.contains(" -D APASSY_CLOUD_DIR=/private/tmp/apassy-print-check/Cloud "),
+        "{cloud}"
+    );
+}
+
+/// Write a vault list in `data_dir` with one vault for each path (ADR 0013).
+fn write_vault_list(data_dir: &Path, paths: &[PathBuf]) {
+    let mut registry = apassy::vaults::Registry::new();
+    for (index, path) in paths.iter().enumerate() {
+        registry
+            .add(&format!("Vault {index}"), path, 1)
+            .expect("list a vault");
+    }
+    registry.save(data_dir).expect("save the list");
+}
+
+/// `apassy-sandbox --print` with `--data-dir DIR`. Returns (exit ok, stdout, stderr).
+fn print_with_data_dir(data_dir: &Path) -> (bool, String, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_apassy-sandbox"))
+        .arg("--data-dir")
+        .arg(data_dir)
+        .args(["--print", "--", "/usr/bin/true"])
+        .output()
+        .expect("run apassy-sandbox --print");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// ADR 0013: the launcher passes each listed vault outside the data directory as its
+/// own parameter. A vault in the data directory needs none.
+#[test]
+fn launcher_passes_each_listed_vault_outside_the_data_directory() {
+    let dir = TempDir::new().expect("temp dir");
+    let root = std::fs::canonicalize(dir.path()).expect("canonical");
+    let data = root.join("d");
+    let outside = root.join("work").join("client.db");
+    write_vault_list(
+        &data,
+        &[
+            data.join("vault.db"),
+            data.join("vaults").join("home.db"),
+            outside.clone(),
+        ],
+    );
+    let (ok, out, err) = print_with_data_dir(&data);
+    assert!(ok, "{err}");
+    assert!(
+        out.contains(&format!(" -D APASSY_VAULT_FILE_2={} ", outside.display())),
+        "{out}"
+    );
+    assert!(!out.contains("APASSY_VAULT_FILE_3"), "{out}");
+    assert!(
+        !out.contains("home.db"),
+        "a vault in the data directory: {out}"
+    );
+
+    // Without a list, the launcher passes no extra vault.
+    let (ok, out, _) = print_with_data_dir(&root.join("empty"));
+    assert!(ok);
+    assert!(!out.contains("APASSY_VAULT_FILE_2"), "{out}");
+}
+
+/// ADR 0013: the launcher fails closed. A damaged list, a list from a newer Apassy,
+/// and more vaults outside the data directory than the profile supports stop it.
+#[test]
+fn launcher_fails_closed_on_a_bad_vault_list() {
+    let dir = TempDir::new().expect("temp dir");
+    let root = std::fs::canonicalize(dir.path()).expect("canonical");
+    let data = root.join("d");
+    std::fs::create_dir_all(&data).expect("data dir");
+    for bad in ["{ not json", r#"{"version":9,"vaults":[]}"#] {
+        std::fs::write(data.join("vaults.json"), bad).expect("bad list");
+        let (ok, out, err) = print_with_data_dir(&data);
+        assert!(!ok, "a bad list must stop the launcher: {out}");
+        assert!(out.is_empty(), "{out}");
+        assert!(err.contains("cannot use the vault list"), "{err}");
+    }
+    let many: Vec<PathBuf> = (0..16)
+        .map(|index| root.join("elsewhere").join(format!("v{index}.db")))
+        .collect();
+    write_vault_list(&data, &many);
+    let (ok, out, err) = print_with_data_dir(&data);
+    assert!(!ok, "16 outside vaults must stop the launcher: {out}");
+    assert!(err.contains("16 vault files outside"), "{err}");
+    write_vault_list(&data, &many[..15]);
+    let (ok, out, err) = print_with_data_dir(&data);
+    assert!(ok, "{err}");
+    assert!(out.contains(" -D APASSY_VAULT_FILE_16="), "{out}");
+}
+
+/// ADR 0013: a listed vault outside the data directory is closed in the profile: its
+/// file, its SQLite companions, and a rename of its folder. A file next to it that is
+/// not a vault stays readable (the control).
+#[test]
+fn profile_denies_a_listed_vault_outside_the_data_directory() {
+    require_sandbox();
+    let fx = fixture();
+    let folder = fx.layout.data_dir.with_file_name("client-vaults");
+    std::fs::create_dir_all(&folder).expect("folder");
+    let client = folder.join("client.db");
+    std::fs::write(&client, VAULT_TEXT).expect("client vault canary");
+    std::fs::write(folder.join("client.db-wal"), VAULT_TEXT).expect("wal canary");
+    std::fs::write(folder.join("notes.txt"), "SYNTHETIC-NOTES\n").expect("control file");
+    write_vault_list(
+        &fx.layout.data_dir,
+        &[fx.layout.data_dir.join("live.db"), client.clone()],
+    );
+    for path in [client.clone(), folder.join("client.db-wal")] {
+        let (ok, out, err) = in_sandbox(&fx, &["/bin/cat", &path.display().to_string()]);
+        assert!(!ok, "the profile must deny {}: {out}", path.display());
+        assert!(err.contains("Operation not permitted"), "{err}");
+        assert!(!out.contains("CANARY"), "{out}");
+    }
+    let (ok, out, err) = in_sandbox(
+        &fx,
+        &["/bin/cat", &folder.join("notes.txt").display().to_string()],
+    );
+    assert!(ok, "a file that is not a vault stays readable: {err}");
+    assert!(out.contains("SYNTHETIC-NOTES"));
+    let moved = folder.with_file_name("moved");
+    let (ok, _out, _err) = in_sandbox(
+        &fx,
+        &[
+            "/bin/mv",
+            &folder.display().to_string(),
+            &moved.display().to_string(),
+        ],
+    );
+    assert!(!ok, "the profile must deny a rename of the vault folder");
+    assert_eq!(
+        std::fs::read_to_string(&client).expect("canary"),
+        VAULT_TEXT
+    );
+}
+
+/// Write a vault list in `data_dir` with one vault that syncs `<folder>/<file>`.
+fn write_synced_list(data_dir: &Path, vault: &Path, folder: &Path, file: &str) {
+    let mut registry = apassy::vaults::Registry::new();
+    let id = registry.add("Synced", vault, 1).expect("list a vault");
+    registry.entry_mut(&id).expect("entry").sync =
+        Some(apassy::vaults::SyncLink::new(&id, folder, file));
+    registry.save(data_dir).expect("save the list");
+}
+
+/// ADR 0014: the launcher passes the synced file of a vault in another folder, and
+/// not one in the iCloud Apassy folder (its subtree deny covers it).
+#[test]
+fn launcher_passes_each_synced_file_outside_icloud() {
+    let dir = TempDir::new().expect("temp dir");
+    let root = std::fs::canonicalize(dir.path()).expect("canonical");
+    let data = root.join("d");
+    let dropbox = root.join("Dropbox").join("Apassy");
+    write_synced_list(&data, &data.join("vault.db"), &dropbox, "Work.apassy");
+    let (ok, out, err) = print_with_data_dir(&data);
+    assert!(ok, "{err}");
+    assert!(
+        out.contains(&format!(
+            " -D APASSY_SYNC_FILE_1={} ",
+            dropbox.join("Work.apassy").display()
+        )),
+        "{out}"
+    );
+    let icloud = root.join("icloud").join("Apassy");
+    write_synced_list(&data, &data.join("vault.db"), &icloud, "Work.apassy");
+    let output = Command::new(env!("CARGO_BIN_EXE_apassy-sandbox"))
+        .arg("--data-dir")
+        .arg(&data)
+        .arg("--cloud-dir")
+        .arg(&icloud)
+        .args(["--print", "--", "/usr/bin/true"])
+        .output()
+        .expect("run apassy-sandbox --print");
+    let out = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(!out.contains("APASSY_SYNC_FILE_1"), "{out}");
+}
+
+/// ADR 0014: a synced file in a folder that is not iCloud Drive (a Dropbox folder) is
+/// closed in the profile: the file, its push temporary file, its SQLite companions, and
+/// a rename of its folders. Other files in the same folder stay usable, so an agent can
+/// work on a project in Dropbox.
+#[test]
+fn profile_denies_a_synced_file_and_keeps_its_folder_usable() {
+    require_sandbox();
+    let fx = fixture();
+    let dropbox = fx.layout.data_dir.with_file_name("Dropbox");
+    let folder = dropbox.join("Apassy");
+    let project = dropbox.join("project");
+    std::fs::create_dir_all(&folder).expect("folder");
+    std::fs::create_dir_all(&project).expect("project");
+    let file = folder.join("Work.apassy");
+    let closed = [
+        file.clone(),
+        folder.join("Work.apassy.push.nosync"),
+        folder.join("Work.apassy-journal"),
+    ];
+    for path in &closed {
+        std::fs::write(path, CLOUD_TEXT).expect("canary");
+    }
+    std::fs::write(folder.join("notes.txt"), "SYNTHETIC-NOTES\n").expect("control");
+    std::fs::write(project.join("readme.md"), "SYNTHETIC-PROJECT\n").expect("project");
+    write_synced_list(
+        &fx.layout.data_dir,
+        &fx.layout.data_dir.join("live.db"),
+        &folder,
+        "Work.apassy",
+    );
+    for path in &closed {
+        let (ok, out, err) = in_sandbox(&fx, &["/bin/cat", &path.display().to_string()]);
+        assert!(!ok, "the profile must deny {}: {out}", path.display());
+        assert!(err.contains("Operation not permitted"), "{err}");
+        assert!(!out.contains("CANARY"), "{out}");
+    }
+    assert!(write_is_denied(&fx, &file), "overwrite of the synced file");
+    // Control: the rest of the synced folder stays usable.
+    let (ok, out, err) = in_sandbox(
+        &fx,
+        &["/bin/cat", &folder.join("notes.txt").display().to_string()],
+    );
+    assert!(ok, "another file in the folder stays readable: {err}");
+    assert!(out.contains("SYNTHETIC-NOTES"));
+    let script = format!(
+        "echo work > '{}' && cat '{}'",
+        project.join("scratch.txt").display(),
+        project.join("readme.md").display()
+    );
+    let (ok, out, err) = in_sandbox(&fx, &["/bin/sh", "-c", &script]);
+    assert!(ok, "a project in the synced folder stays usable: {err}");
+    assert!(out.contains("SYNTHETIC-PROJECT"));
+    // The folders above the file cannot move, so the file cannot leave the rule.
+    let moved = dropbox.with_file_name("moved");
+    let (ok, _out, _err) = in_sandbox(
+        &fx,
+        &[
+            "/bin/mv",
+            &dropbox.display().to_string(),
+            &moved.display().to_string(),
+        ],
+    );
+    assert!(!ok, "the profile must deny a rename of the Dropbox folder");
+    assert_eq!(std::fs::read_to_string(&file).expect("canary"), CLOUD_TEXT);
 }
 
 /// Goal I2, Keychain part. A process in the profile cannot read the Apassy Touch ID
