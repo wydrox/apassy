@@ -17,6 +17,9 @@ pub mod owner_store;
 mod ui;
 #[cfg(feature = "vault")]
 pub mod unlock;
+/// Automatic updates of the macOS app (ADR 0015).
+#[cfg(feature = "vault")]
+pub(crate) mod update;
 
 use eframe::egui;
 
@@ -130,6 +133,10 @@ pub struct DesktopApp {
     /// a lock.
     #[cfg(feature = "vault")]
     pub(crate) import: ui::import::ImportState,
+    /// Update checks, downloads, and the installer (ADR 0015). Idle until the window
+    /// starts it.
+    #[cfg(feature = "vault")]
+    pub(crate) updates: update::Updater,
     styled: bool,
 }
 
@@ -181,6 +188,8 @@ impl DesktopApp {
             vault_list: ui::vaults::VaultListState::default(),
             #[cfg(feature = "vault")]
             import: ui::import::ImportState::default(),
+            #[cfg(feature = "vault")]
+            updates: update::Updater::idle(),
             styled: false,
         }
     }
@@ -199,6 +208,7 @@ impl DesktopApp {
             // screen (ADR 0013).
             app.load_vault_list(crate::paths::data_dir(), true);
             app.open_last_vault(Some(&cc.egui_ctx));
+            app.start_updates(&cc.egui_ctx);
         }
         app
     }
@@ -348,10 +358,14 @@ impl eframe::App for DesktopApp {
     }
 
     /// Waiting runs end and stay in the inbox. The vault locks. Typed secrets are
-    /// erased (goal items V3, N3; key-memory review F3).
+    /// erased (goal items V3, N3; key-memory review F3). Then a ready update installs
+    /// when automatic install is on (ADR 0015).
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         #[cfg(feature = "vault")]
-        self.shut_down();
+        {
+            self.shut_down();
+            self.finish_updates();
+        }
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
