@@ -21,7 +21,8 @@ This page is the first-day checklist. The other pages have the details.
 
 ## 2. Set up the vault
 
-1. Open `Apassy.app`. Click "Create a new vault". Type a strong passphrase that you can remember, two times. A lost passphrase can make the data unrecoverable (ADR 0003). The vault file is `~/Library/Application Support/Apassy/vault.db`. At the next start, Apassy opens this file and shows the unlock screen.
+1. Open `Apassy.app`. Click "Create a new vault". Type a name, or leave "Personal". Type a strong passphrase that you can remember, two times. A lost passphrase can make the data unrecoverable (ADR 0003). The vault file is `~/Library/Application Support/Apassy/vaults/personal.db`. A vault from Apassy 0.2 stays at `~/Library/Application Support/Apassy/vault.db` with the name "Personal". At the next start, Apassy opens the last used vault and shows the unlock screen.
+   To keep credentials apart, for example for one client, make another vault with its own passphrase: [several vaults](multiple-vaults.md). One vault is open at a time. An agent works only with the vault where you registered it.
 2. Make an encrypted backup and keep it in a safe place: Settings > "Back up now", and [backup and restore](backup-restore.md).
 3. In Credentials, click "Add" for each credential. Then open it, and under "Agent access" click "Declaration". Apassy suggests the values from the item. Confirm or change each field: [declarations](declarations.md). An item without a declaration makes every run wait for you.
 4. For each credential that a command needs, click "Environment variable" under "Agent access" and set the variable name: [agent path](agent-path.md), section 8.
@@ -35,7 +36,7 @@ The app layout is in [desktop UI](desktop-ui.md).
 3. Install the prompt hook for each host: [host hooks](host-hooks.md), section 6.
 4. Give process access for each project directory: open the agent, and under "Process access" click the credential ([agent path](agent-path.md), section 8). Start with "Ask me each time" for a new project. Use "Bouncer decides" when the declarations are correct.
 5. Log in to each host (`claude /login`, `codex login`, `gh auth login`) before you start it in the profile. The profile blocks browser logins.
-6. Start each host in the profile, with its own sandbox off: [isolation](isolation.md), section 3.
+6. Start each host in the profile, with its own sandbox off: [isolation](isolation.md), section 3. The profile denies each vault in the vault list. After you add a vault outside `~/Library/Application Support/Apassy`, start the host again.
 7. In a project that agents edit, open your own terminal in the profile too: `apassy-sandbox -- zsh` (ADR 0010, second round).
 
 ## 4. Every day
