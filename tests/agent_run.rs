@@ -271,6 +271,48 @@ fn a_placeholder_variable_gets_a_placeholder_and_the_run_proxy() {
     });
 }
 
+/// ADR 0013: the result of a run goes only to the vault that decided it. When another
+/// vault takes the shared slot during the run, it gets no entry of that run.
+#[test]
+fn a_run_result_stays_in_the_vault_of_the_run() {
+    let fx = fixture(ExecMode::Bouncer, Duration::from_secs(5));
+    decide_later(&fx, true, || {});
+    let mut other = Vault::create(&fx.dir.path().join("other.db"), PASS).expect("create");
+    other.unlock(PASS).expect("unlock");
+    let started = fx.project.join("started");
+    let swapper = {
+        let vault = Arc::clone(&fx.vault);
+        let started = started.clone();
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while !started.exists() {
+                assert!(Instant::now() < deadline, "the command did not start");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            vault.lock().expect("vault").replace(other)
+        })
+    };
+    let response = run(
+        &fx,
+        &fx.project,
+        &format!("touch '{}'; sleep 1; echo done", started.display()),
+    );
+    assert!(response.ok, "{response:?}");
+    let first = swapper.join().expect("swap").expect("the first vault");
+    assert!(
+        with_vault(&fx, |v| v.recent_activity(10).expect("activity")).is_empty(),
+        "the other vault has no entry of the run"
+    );
+    assert!(
+        first
+            .recent_activity(10)
+            .expect("activity")
+            .iter()
+            .all(|entry| !entry.reason.contains("Exit code")),
+        "the result of a run in a vault that left the slot is not recorded"
+    );
+}
+
 #[test]
 fn working_directory_must_stay_in_the_project() {
     let fx = fixture(ExecMode::Bouncer, Duration::from_secs(2));

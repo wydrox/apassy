@@ -7,8 +7,10 @@
 ;; own configuration and credentials.
 ;;
 ;; The profile denies read and write to:
-;;   - the Apassy data directory (vault, broker socket, Laya model),
+;;   - the Apassy data directory (vaults, vault list, broker socket, Laya model),
 ;;   - the vault file and its SQLite companions,
+;;   - each other vault file in the vault list outside the data directory, and
+;;     its SQLite companions,
 ;;   - the backup file and its SQLite companions,
 ;;   - the Apassy folder in iCloud Drive (the synced vault copies), when given.
 ;; It re-allows a connection to the broker socket, which lives inside the
@@ -32,6 +34,11 @@
 ;;   APASSY_DATA_DIR    the Apassy data directory, for example
 ;;                      "$HOME/Library/Application Support/Apassy"
 ;;   APASSY_VAULT_FILE  the vault database file
+;;   APASSY_VAULT_FILE_2 to APASSY_VAULT_FILE_16
+;;                      more vault files from the vault list
+;;                      (<data dir>/vaults.json) that are outside the data
+;;                      directory. Optional. The launcher passes one for each
+;;                      such vault and stops when the list has more than 15.
 ;;   APASSY_BACKUP_FILE the backup database file
 ;;   APASSY_SOCKET      the broker Unix socket
 ;;   APASSY_HOME        the owner home directory. The profile denies a write to
@@ -103,6 +110,28 @@
 ;; The vault file. The owner can place it outside the data directory.
 (apassy-deny-db (param "APASSY_VAULT_FILE"))
 (apassy-seal-ancestors (param "APASSY_VAULT_FILE"))
+
+;; The other vaults of the vault list (ADR 0013). A vault in the data directory
+;; is already in the subtree deny. The launcher passes each vault outside it as
+;; one of these parameters. An absent parameter adds no rule.
+(define (apassy-protect-vault path)
+  (apassy-deny-db path)
+  (apassy-seal-ancestors path))
+(if (param "APASSY_VAULT_FILE_2") (apassy-protect-vault (param "APASSY_VAULT_FILE_2")))
+(if (param "APASSY_VAULT_FILE_3") (apassy-protect-vault (param "APASSY_VAULT_FILE_3")))
+(if (param "APASSY_VAULT_FILE_4") (apassy-protect-vault (param "APASSY_VAULT_FILE_4")))
+(if (param "APASSY_VAULT_FILE_5") (apassy-protect-vault (param "APASSY_VAULT_FILE_5")))
+(if (param "APASSY_VAULT_FILE_6") (apassy-protect-vault (param "APASSY_VAULT_FILE_6")))
+(if (param "APASSY_VAULT_FILE_7") (apassy-protect-vault (param "APASSY_VAULT_FILE_7")))
+(if (param "APASSY_VAULT_FILE_8") (apassy-protect-vault (param "APASSY_VAULT_FILE_8")))
+(if (param "APASSY_VAULT_FILE_9") (apassy-protect-vault (param "APASSY_VAULT_FILE_9")))
+(if (param "APASSY_VAULT_FILE_10") (apassy-protect-vault (param "APASSY_VAULT_FILE_10")))
+(if (param "APASSY_VAULT_FILE_11") (apassy-protect-vault (param "APASSY_VAULT_FILE_11")))
+(if (param "APASSY_VAULT_FILE_12") (apassy-protect-vault (param "APASSY_VAULT_FILE_12")))
+(if (param "APASSY_VAULT_FILE_13") (apassy-protect-vault (param "APASSY_VAULT_FILE_13")))
+(if (param "APASSY_VAULT_FILE_14") (apassy-protect-vault (param "APASSY_VAULT_FILE_14")))
+(if (param "APASSY_VAULT_FILE_15") (apassy-protect-vault (param "APASSY_VAULT_FILE_15")))
+(if (param "APASSY_VAULT_FILE_16") (apassy-protect-vault (param "APASSY_VAULT_FILE_16")))
 
 ;; The backup file. The owner can place it outside the data directory.
 (apassy-deny-db (param "APASSY_BACKUP_FILE"))

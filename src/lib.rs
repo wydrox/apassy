@@ -16,8 +16,15 @@ pub mod cloud;
 #[cfg(feature = "desktop")]
 pub mod desktop;
 
+/// Import from 1Password (1PUX and CSV exports). It needs the vault types.
+#[cfg(feature = "vault")]
+pub mod import;
+
 pub mod native;
 pub mod paths;
+/// The list of vaults on this computer (ADR 0013). It needs no feature, so the
+/// sandbox launcher reads it.
+pub mod vaults;
 
 /// Experimental trusted-process vault APIs.
 ///

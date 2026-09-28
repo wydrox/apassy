@@ -25,6 +25,10 @@ in the product profile and checks the boundary:
   result. No secret leaks.
 - A process in the profile cannot read, copy, overwrite, or replace the vault,
   a backup, or a file under a fake Laya directory.
+- A vault in the vault list outside the data directory is denied too
+  (`profile_denies_a_listed_vault_outside_the_data_directory`). The launcher
+  passes it as `APASSY_VAULT_FILE_2` and stops on a damaged list or on more
+  than 15 such vaults (`launcher_*` tests, ADR 0013).
 - A process in the profile cannot read, list, or write the Apassy folder in a
   synthetic iCloud Drive, or move the iCloud Drive folder
   (`profile_denies_the_icloud_folder`). Another iCloud Drive folder stays

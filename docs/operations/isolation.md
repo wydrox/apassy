@@ -12,9 +12,11 @@ that the host starts run inside the profile.
 The profile denies read and write to:
 
 - the Apassy data directory (`~/Library/Application Support/Apassy`). This
-  directory holds the vault, the broker socket, and the Laya model at
-  `.../Apassy/laya`.
+  directory holds the vaults, the vault list `vaults.json`, the broker socket,
+  and the Laya model at `.../Apassy/laya`.
 - the vault file. The owner can place it outside the data directory.
+- each other vault file in the vault list that is outside the data directory
+  ([several vaults](multiple-vaults.md), ADR 0013).
 - the backup file. The owner can place it outside the data directory.
 - the SQLite companion files of the vault and the backup (`-wal`, `-shm`,
   `-journal`, `.lock`), and the `.sync-incoming` copy that an iCloud pull
@@ -81,6 +83,7 @@ paths.
 | --- | --- |
 | `APASSY_DATA_DIR` | the Apassy data directory (subtree deny) |
 | `APASSY_VAULT_FILE` | the vault database |
+| `APASSY_VAULT_FILE_2` to `APASSY_VAULT_FILE_16` | more vault files from the vault list, outside the data directory. Optional. Each one gets the same rules as `APASSY_VAULT_FILE`. |
 | `APASSY_BACKUP_FILE` | the backup database |
 | `APASSY_SOCKET` | the broker socket (re-allowed) |
 | `APASSY_HOME` | the owner home directory. The profile denies a write to the autostart locations under it (section 7). |
@@ -94,8 +97,9 @@ A subtree deny blocks a rename of the denied directory itself. It does not
 block a rename of a directory above it. Without more rules, a process can
 rename a parent directory and then read the protected file at its new path. A
 measurement showed this bypass (section 5). So the profile also denies a rename
-or a delete of each parent directory of the data directory, the vault file, the
-backup file, and the Apassy folder in iCloud Drive.
+or a delete of each parent directory of the data directory, the vault file, each
+listed vault file outside the data directory, the backup file, and the Apassy
+folder in iCloud Drive.
 
 ## 2. The launcher
 
@@ -109,7 +113,7 @@ apassy-sandbox [OPTIONS] -- <host> [host args...]
 | Option | Default |
 | --- | --- |
 | `--data-dir DIR` | `$HOME/Library/Application Support/Apassy` |
-| `--vault-file FILE` | `<data-dir>/vault.db` |
+| `--vault-file FILE` | `<data-dir>/vault.db`. Each vault of `<data-dir>/vaults.json` is denied too (below). |
 | `--backup-file FILE` | `<vault-file>.backup` |
 | `--socket FILE` | `$APASSY_BROKER_SOCKET`, else `<data-dir>/broker.sock` |
 | `--home DIR` | `$HOME`. The profile denies a write to the autostart locations under it (section 7). |
@@ -121,6 +125,31 @@ apassy-sandbox [OPTIONS] -- <host> [host args...]
 
 The launcher resolves symlinks in each path, because Seatbelt matches the
 resolved path. On macOS `/var` and `/tmp` are symlinks.
+
+### The vault list
+
+The launcher reads `<data-dir>/vaults.json` (ADR 0013) and denies each listed
+vault file:
+
+- A vault inside the data directory is in the subtree deny, with its SQLite
+  companions and its `.lock` file.
+- A vault outside the data directory gets its own parameter,
+  `APASSY_VAULT_FILE_2` to `APASSY_VAULT_FILE_16`, in the order of the list.
+  `--print` shows them.
+
+The launcher fails closed. It stops with an error, and the host does not
+start, in these cases:
+
+- The list cannot be read, is not valid, or has a format from a newer Apassy.
+  The launcher cannot name each vault file of a damaged list, so it cannot prove
+  that the profile denies each vault. A fallback that denies only the data
+  directory would leave a vault in another folder open without a warning. Open
+  Apassy once: it moves the damaged list aside and makes a new one.
+- More than 15 listed vaults are outside the data directory. Move vaults into
+  the data directory, or remove vaults from the list in Settings > Vaults.
+
+Without a list, the launcher denies the data directory and `--vault-file`, as
+before.
 
 `scripts/build-app.sh` writes the app to `<repository>/target/Apassy.app`. A
 launcher from `target/debug` or `target/release` protects this bundle without
@@ -233,6 +262,13 @@ boundary holds even when the host approves every command.
   measurement.
 - The profile does not fully hide the environment of other processes of the
   same user. See "Process information (F11)" in section 5.
+- The launcher reads the vault list when it starts. A host that started earlier
+  does not get a vault that the owner adds later outside the data directory.
+  Start the host again after such a change. A vault in the data directory needs
+  no restart.
+- "Remove from list" keeps the file. A removed vault outside the data
+  directory, or a vault that a damaged list lost, is not denied to hosts that
+  start later.
 - `ps` and `top` are setuid programs. They cannot start inside any
   `sandbox-exec` profile on this macOS, also with `(allow default)` only. A host
   feature that runs `ps` fails in the profile. The measured Claude Code run did

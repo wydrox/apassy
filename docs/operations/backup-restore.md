@@ -42,7 +42,7 @@ Apassy then does these steps:
 4. It copies the backup to the new path.
 5. It migrates a backup from an earlier schema version to the current version.
 6. In one transaction, it revokes every agent, removes every grant and every rule, and marks each item with agent settings for review. Agent settings are a declaration, an environment variable, or a connector.
-7. It opens the restored file in the locked state.
+7. It opens the restored file in the locked state. The restored file is a new vault in the vault list, with the name that you typed, or the name of its file ([several vaults](multiple-vaults.md)). An empty file path puts it in `~/Library/Application Support/Apassy/vaults/`. A vault that was open and unlocked closes after the restore, and its waiting runs end, as at a switch.
 
 ## 4. After a restore
 

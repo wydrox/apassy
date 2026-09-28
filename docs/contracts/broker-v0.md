@@ -85,7 +85,7 @@ Response:
 The broker does the checks in this order:
 
 1. The vault is open and unlocked. If not, the code is `vault_locked`.
-2. The token belongs to an active agent. If not, the code is `unauthenticated`. If the token is older than the token lifetime, the code is `token_expired`. The activity log names the agent.
+2. The token belongs to an active agent of the open vault. If not, the code is `unauthenticated`; the text says that the token is not valid for the vault that is open now, and names no other vault ([ADR 0013](../adr/0013-multiple-vaults.md)). If the token is older than the token lifetime, the code is `token_expired`. The activity log names the agent.
 3. The agent has a grant for the item and the operation. If not, the code is `not_granted`.
 3a. If the item came from a restored backup, the owner confirmed its agent settings. If not, the code is `review_required` (goal item V4, [backup and restore](../operations/backup-restore.md)).
 3b. The item is not archived. If it is, the code is `item_archived` (schema version 10). A process run makes the same check for each item.

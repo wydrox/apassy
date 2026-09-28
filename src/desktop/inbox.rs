@@ -18,20 +18,23 @@
 
 use crate::broker::approvals::PendingRun;
 use crate::desktop::model::ModelResult;
-use crate::desktop::owner_store::{AgentActivityRow, ENDED_BY_LOCK, ENDED_BY_QUIT, OwnerSession};
+use crate::desktop::owner_store::{
+    AgentActivityRow, ENDED_BY_LOCK, ENDED_BY_QUIT, ENDED_BY_SWITCH, OwnerSession,
+};
 use crate::vault::{ActivityDecision, ENDED_BY_RESTART};
 
 /// How many activity entries the inbox reads.
 pub const INBOX_LIMIT: usize = 100;
 
 /// The broker texts for a run that waited and then ended without an approval
-/// (`src/broker/run.rs`), and the texts of the app for a lock or a quit.
-const ENDED_WITHOUT_APPROVAL: [&str; 6] = [
+/// (`src/broker/run.rs`), and the texts of the app for a lock, a quit, or a switch.
+const ENDED_WITHOUT_APPROVAL: [&str; 7] = [
     "The owner denied this run.",
     "The owner did not decide in",
     "The vault was locked, or Apassy stopped, before the run started.",
     ENDED_BY_LOCK,
     ENDED_BY_QUIT,
+    ENDED_BY_SWITCH,
     ENDED_BY_RESTART,
 ];
 /// The broker text when the owner locks the vault during the checks of a run.
@@ -182,6 +185,7 @@ mod tests {
             "The owner did not decide in 120.0 seconds. Risk: low.",
             ENDED_BY_LOCK,
             ENDED_BY_QUIT,
+            ENDED_BY_SWITCH,
             ENDED_BY_RESTART,
         ] {
             assert_eq!(

@@ -134,6 +134,8 @@ fn sidebar(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
         ),
     );
     ui.add_space(kit::TITLE_BAR + 10.0);
+    #[cfg(feature = "vault")]
+    super::vaults::sidebar_switcher(app, ui);
     ui.spacing_mut().item_spacing.y = 2.0;
     for (view, icon) in primary_views() {
         let selected =
@@ -391,6 +393,10 @@ fn sheets(app: &mut DesktopApp, ctx: &egui::Context) {
         Sheet::Backup => super::settings::backup_sheet(app, ctx),
         #[cfg(feature = "vault")]
         Sheet::Restore => super::settings::restore_sheet(app, ctx),
+        #[cfg(feature = "vault")]
+        Sheet::Vault(sheet) => super::vaults::sheet(app, ctx, &sheet),
+        #[cfg(feature = "vault")]
+        Sheet::Import => super::import::sheet(app, ctx),
         #[cfg(not(feature = "vault"))]
         Sheet::AddItem { kind_chosen } => super::demo::add_sheet(app, ctx, kind_chosen),
         #[cfg(not(feature = "vault"))]

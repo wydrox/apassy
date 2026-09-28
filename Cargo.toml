@@ -122,6 +122,11 @@ path = "tests/host_hook.rs"
 required-features = ["vault"]
 
 [[test]]
+name = "onepassword_import"
+path = "tests/onepassword_import.rs"
+required-features = ["vault"]
+
+[[test]]
 name = "isolation_profile"
 path = "tests/isolation/product_profile.rs"
 required-features = ["vault"]

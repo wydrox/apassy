@@ -1542,6 +1542,139 @@ fn launcher_passes_the_installed_and_the_build_app() {
     );
 }
 
+/// Write a vault list in `data_dir` with one vault for each path (ADR 0013).
+fn write_vault_list(data_dir: &Path, paths: &[PathBuf]) {
+    let mut registry = apassy::vaults::Registry::new();
+    for (index, path) in paths.iter().enumerate() {
+        registry
+            .add(&format!("Vault {index}"), path, 1)
+            .expect("list a vault");
+    }
+    registry.save(data_dir).expect("save the list");
+}
+
+/// `apassy-sandbox --print` with `--data-dir DIR`. Returns (exit ok, stdout, stderr).
+fn print_with_data_dir(data_dir: &Path) -> (bool, String, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_apassy-sandbox"))
+        .arg("--data-dir")
+        .arg(data_dir)
+        .args(["--print", "--", "/usr/bin/true"])
+        .output()
+        .expect("run apassy-sandbox --print");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// ADR 0013: the launcher passes each listed vault outside the data directory as its
+/// own parameter. A vault in the data directory needs none.
+#[test]
+fn launcher_passes_each_listed_vault_outside_the_data_directory() {
+    let dir = TempDir::new().expect("temp dir");
+    let root = std::fs::canonicalize(dir.path()).expect("canonical");
+    let data = root.join("d");
+    let outside = root.join("work").join("client.db");
+    write_vault_list(
+        &data,
+        &[
+            data.join("vault.db"),
+            data.join("vaults").join("home.db"),
+            outside.clone(),
+        ],
+    );
+    let (ok, out, err) = print_with_data_dir(&data);
+    assert!(ok, "{err}");
+    assert!(
+        out.contains(&format!(" -D APASSY_VAULT_FILE_2={} ", outside.display())),
+        "{out}"
+    );
+    assert!(!out.contains("APASSY_VAULT_FILE_3"), "{out}");
+    assert!(
+        !out.contains("home.db"),
+        "a vault in the data directory: {out}"
+    );
+
+    // Without a list, the launcher passes no extra vault.
+    let (ok, out, _) = print_with_data_dir(&root.join("empty"));
+    assert!(ok);
+    assert!(!out.contains("APASSY_VAULT_FILE_2"), "{out}");
+}
+
+/// ADR 0013: the launcher fails closed. A damaged list, a list from a newer Apassy,
+/// and more vaults outside the data directory than the profile supports stop it.
+#[test]
+fn launcher_fails_closed_on_a_bad_vault_list() {
+    let dir = TempDir::new().expect("temp dir");
+    let root = std::fs::canonicalize(dir.path()).expect("canonical");
+    let data = root.join("d");
+    std::fs::create_dir_all(&data).expect("data dir");
+    for bad in ["{ not json", r#"{"version":9,"vaults":[]}"#] {
+        std::fs::write(data.join("vaults.json"), bad).expect("bad list");
+        let (ok, out, err) = print_with_data_dir(&data);
+        assert!(!ok, "a bad list must stop the launcher: {out}");
+        assert!(out.is_empty(), "{out}");
+        assert!(err.contains("cannot use the vault list"), "{err}");
+    }
+    let many: Vec<PathBuf> = (0..16)
+        .map(|index| root.join("elsewhere").join(format!("v{index}.db")))
+        .collect();
+    write_vault_list(&data, &many);
+    let (ok, out, err) = print_with_data_dir(&data);
+    assert!(!ok, "16 outside vaults must stop the launcher: {out}");
+    assert!(err.contains("16 vault files outside"), "{err}");
+    write_vault_list(&data, &many[..15]);
+    let (ok, out, err) = print_with_data_dir(&data);
+    assert!(ok, "{err}");
+    assert!(out.contains(" -D APASSY_VAULT_FILE_16="), "{out}");
+}
+
+/// ADR 0013: a listed vault outside the data directory is closed in the profile: its
+/// file, its SQLite companions, and a rename of its folder. A file next to it that is
+/// not a vault stays readable (the control).
+#[test]
+fn profile_denies_a_listed_vault_outside_the_data_directory() {
+    require_sandbox();
+    let fx = fixture();
+    let folder = fx.layout.data_dir.with_file_name("client-vaults");
+    std::fs::create_dir_all(&folder).expect("folder");
+    let client = folder.join("client.db");
+    std::fs::write(&client, VAULT_TEXT).expect("client vault canary");
+    std::fs::write(folder.join("client.db-wal"), VAULT_TEXT).expect("wal canary");
+    std::fs::write(folder.join("notes.txt"), "SYNTHETIC-NOTES\n").expect("control file");
+    write_vault_list(
+        &fx.layout.data_dir,
+        &[fx.layout.data_dir.join("live.db"), client.clone()],
+    );
+    for path in [client.clone(), folder.join("client.db-wal")] {
+        let (ok, out, err) = in_sandbox(&fx, &["/bin/cat", &path.display().to_string()]);
+        assert!(!ok, "the profile must deny {}: {out}", path.display());
+        assert!(err.contains("Operation not permitted"), "{err}");
+        assert!(!out.contains("CANARY"), "{out}");
+    }
+    let (ok, out, err) = in_sandbox(
+        &fx,
+        &["/bin/cat", &folder.join("notes.txt").display().to_string()],
+    );
+    assert!(ok, "a file that is not a vault stays readable: {err}");
+    assert!(out.contains("SYNTHETIC-NOTES"));
+    let moved = folder.with_file_name("moved");
+    let (ok, _out, _err) = in_sandbox(
+        &fx,
+        &[
+            "/bin/mv",
+            &folder.display().to_string(),
+            &moved.display().to_string(),
+        ],
+    );
+    assert!(!ok, "the profile must deny a rename of the vault folder");
+    assert_eq!(
+        std::fs::read_to_string(&client).expect("canary"),
+        VAULT_TEXT
+    );
+}
+
 /// Goal I2, Keychain part. A process in the profile cannot read the Apassy Touch ID
 /// item: not with `/usr/bin/security`, and not through the Apassy keychain helper.
 ///

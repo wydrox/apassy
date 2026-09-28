@@ -37,6 +37,8 @@ use crate::vault::{
 };
 
 const MAX_TAG_BYTES: usize = 64;
+/// The most tags on one item (`MAX_TAG_COUNT` in `src/vault/types.rs`).
+const MAX_TAG_COUNT: usize = 32;
 
 /// A custom detail is an item field with this prefix. The rest of the name is the label
 /// in hexadecimal, because a field name takes only ASCII letters, digits, and `_`, and a
@@ -90,6 +92,9 @@ pub const ENDED_BY_LOCK: &str =
     "The owner locked the vault before a decision. The run did not start.";
 /// Activity text when Apassy quits while runs wait (goal item N3).
 pub const ENDED_BY_QUIT: &str = "Apassy stopped before the owner decided. The run did not start.";
+/// Activity text when the owner switches to another vault while runs wait (ADR 0013).
+pub const ENDED_BY_SWITCH: &str =
+    "The owner switched to another vault before a decision. The run did not start.";
 
 /// Secret inputs for one item form. Debug output is redacted. There is no `Clone`,
 /// so the form is the only copy that the app keeps.
@@ -483,6 +488,7 @@ impl OwnerSession {
         match Vault::open(path) {
             Ok(vault) => {
                 self.install(vault, path.to_path_buf());
+                previous.retire();
                 Ok(())
             }
             Err(err) => {
@@ -627,6 +633,13 @@ impl OwnerSession {
         self.row_from(summary)
     }
 
+    /// Add an item from an import (`crate::import`). The draft already has the layout of
+    /// the item forms: built-in fields and custom details. No agent gets access.
+    pub fn add_imported(&mut self, draft: VaultDraft) -> ModelResult<OwnerSummary> {
+        let summary = self.unlocked()?.add(draft).map_err(map_err)?;
+        self.row_from(summary)
+    }
+
     pub fn update(
         &mut self,
         id: u64,
@@ -755,6 +768,7 @@ impl OwnerSession {
         match Vault::restore(backup, destination, passphrase) {
             Ok(vault) => {
                 self.install(vault, destination.to_path_buf());
+                previous.retire();
                 Ok(())
             }
             Err(err) => {
@@ -1283,7 +1297,12 @@ impl OwnerSession {
 
     fn install(&mut self, vault: Vault, path: PathBuf) {
         self.revealed.clear();
-        *self.slot() = Some(vault);
+        let replaced = self.slot().replace(vault);
+        HeldVault {
+            vault: replaced,
+            path: None,
+        }
+        .retire();
         self.path = Some(path);
     }
 
@@ -1451,6 +1470,19 @@ impl Default for OwnerSession {
 struct HeldVault {
     vault: Option<Vault>,
     path: Option<PathBuf>,
+}
+
+impl HeldVault {
+    /// Close a vault that another file replaced (ADR 0013). When it is still
+    /// unlocked, each run that waits in it gets its denial first, as at a lock.
+    fn retire(self) {
+        if let Some(mut vault) = self.vault
+            && !vault.is_locked()
+        {
+            let _ = vault.end_waits(ENDED_BY_SWITCH);
+            let _ = vault.lock();
+        }
+    }
 }
 
 /// One revealed value. `Zeroizing` erases it when it is hidden, expires, or the vault
@@ -1783,14 +1815,17 @@ fn build_vault_draft(
     if title.is_empty() {
         return Err(fail("invalid_input", "The item name is required."));
     }
-    if let Some(id) = existing {
-        let current = vault.details(id).map_err(map_err)?;
-        if current.summary.kind != draft.kind {
-            return Err(fail(
-                "category_locked",
-                "The item category cannot change. Delete the item and add a new one.",
-            ));
-        }
+    let current = match existing {
+        Some(id) => Some(vault.details(id).map_err(map_err)?),
+        None => None,
+    };
+    if let Some(current) = &current
+        && current.summary.kind != draft.kind
+    {
+        return Err(fail(
+            "category_locked",
+            "The item category cannot change. Delete the item and add a new one.",
+        ));
     }
 
     let mut fields = Vec::new();
@@ -1901,6 +1936,21 @@ fn build_vault_draft(
     let mut tags = Vec::new();
     push_tag(&mut tags, &draft.service)?;
     push_tag(&mut tags, &draft.project)?;
+    if let Some(current) = current {
+        // The form has no tag field. An edit keeps the other tags of the item, for
+        // example the tags of a 1Password import, and replaces the old service and
+        // project labels.
+        let id = current.summary.id;
+        let old = [
+            plain_value(vault, id, "service")?,
+            plain_value(vault, id, "project")?,
+        ];
+        for tag in current.tags {
+            if tags.len() < MAX_TAG_COUNT && !old.contains(&tag) && !tags.contains(&tag) {
+                tags.push(tag);
+            }
+        }
+    }
     Ok(VaultDraft {
         title: title.to_owned(),
         kind: draft.kind,

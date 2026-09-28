@@ -123,6 +123,13 @@ pub struct DesktopApp {
     /// Learning view state (goal item B10).
     #[cfg(feature = "vault")]
     pub(crate) learning: learning_ui::LearningUiState,
+    /// The list of vaults (ADR 0013).
+    #[cfg(feature = "vault")]
+    pub(crate) vault_list: ui::vaults::VaultListState,
+    /// Import from 1Password. It holds the parsed export until the import, a cancel, or
+    /// a lock.
+    #[cfg(feature = "vault")]
+    pub(crate) import: ui::import::ImportState,
     styled: bool,
 }
 
@@ -170,6 +177,10 @@ impl DesktopApp {
             owner: owner_check::OwnerFlows::default(),
             #[cfg(feature = "vault")]
             learning: learning_ui::LearningUiState::default(),
+            #[cfg(feature = "vault")]
+            vault_list: ui::vaults::VaultListState::default(),
+            #[cfg(feature = "vault")]
+            import: ui::import::ImportState::default(),
             styled: false,
         }
     }
@@ -184,23 +195,12 @@ impl DesktopApp {
             // The notification center sets the notifier of the approval queue. It
             // wakes its watcher and repaints the window when a run starts to wait.
             app.start_native(&cc.egui_ctx);
-            app.open_default_vault(&cc.egui_ctx);
+            // The last used vault opens locked, so the window starts on the unlock
+            // screen (ADR 0013).
+            app.load_vault_list(crate::paths::data_dir(), true);
+            app.open_last_vault(Some(&cc.egui_ctx));
         }
         app
-    }
-
-    /// Open the vault file at the default location, locked, when it exists. The
-    /// window then starts on the unlock screen.
-    #[cfg(feature = "vault")]
-    fn open_default_vault(&mut self, ctx: &egui::Context) {
-        let path = ui::default_vault_path();
-        if !path.is_file() {
-            return;
-        }
-        if self.owner_ui.session.open_file(&path).is_ok() {
-            self.owner_ui.open_path = path.display().to_string();
-            self.refresh_unlock_setting(Some(ctx));
-        }
     }
 
     /// Start the agent broker on `socket`. It shares the owner vault slot.
