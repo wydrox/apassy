@@ -15,6 +15,7 @@ Apassy builds and passes its tests on Linux. The app for Linux is not published 
 
 - On Linux, `apassy-sandbox` says that it runs only on macOS. The Seatbelt tests and the tests of the Swift helpers run only on macOS.
 - The run proxy test uses Node only when it reads `HTTPS_PROXY`. Node before 22.21 ignores it and connects directly.
+- CI runs once for each update of a pull request and once for each push to `main`, not for each push to another branch or a tag. A newer push to a pull request cancels its older run. A change only in `site/` or `design/` runs no CI.
 
 ## [0.2.0] - 2026-09-28
 

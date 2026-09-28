@@ -1,11 +1,27 @@
 name: CI
 
+# One run for each update of a pull request, and one for each push to main. A push
+# to another branch or a tag runs nothing: its pull request or main runs the same
+# code. The site has its own workflow, and design/ is not part of the app.
 on:
   push:
+    branches: [main]
+    paths-ignore:
+      - "site/**"
+      - "design/**"
   pull_request:
+    paths-ignore:
+      - "site/**"
+      - "design/**"
 
 permissions:
   contents: read
+
+# A newer push to a pull request cancels its older run. Each run of main has its
+# own group and finishes: the release workflow publishes after a green run.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
 
 jobs:
   macos:
