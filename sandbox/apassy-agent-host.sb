@@ -11,7 +11,8 @@
 ;;   - the vault file and its SQLite companions,
 ;;   - each other vault file in the vault list outside the data directory, and
 ;;     its SQLite companions,
-;;   - the backup file and its SQLite companions.
+;;   - the backup file and its SQLite companions,
+;;   - the Apassy folder in iCloud Drive (the synced vault copies), when given.
 ;; It re-allows a connection to the broker socket, which lives inside the
 ;; denied data directory.
 ;;
@@ -46,6 +47,9 @@
 ;;                      "/Applications/Apassy.app"
 ;;   APASSY_APP_BUILD   a second app bundle, for example the build output
 ;;                      "<repository>/target/Apassy.app". Optional.
+;;   APASSY_CLOUD_DIR   the Apassy folder in iCloud Drive, for example
+;;                      "$HOME/Library/Mobile Documents/com~apple~CloudDocs/Apassy".
+;;                      Optional. The profile denies read and write under it.
 ;;
 ;; Limits: Seatbelt does not protect memory, the clipboard, or processes that
 ;; run outside this profile. A program that the owner runs later, for example
@@ -80,13 +84,21 @@
     (apassy-ancestors path)))
 
 ;; Deny read and write to PATH and to the SQLite sidecar files that a vault or
-;; a backup can have next to it.
+;; a backup can have next to it. `.sync-incoming` is the iCloud copy that a pull
+;; checks next to the vault before it replaces the vault (docs/operations/icloud.md).
 (define (apassy-deny-db path)
   (deny file-read* file-write* (literal path))
   (deny file-read* file-write* (literal (string-append path "-wal")))
   (deny file-read* file-write* (literal (string-append path "-shm")))
   (deny file-read* file-write* (literal (string-append path "-journal")))
-  (deny file-read* file-write* (literal (string-append path ".lock"))))
+  (deny file-read* file-write* (literal (string-append path ".lock")))
+  (deny file-read* file-write* (literal (string-append path ".sync-incoming"))))
+
+;; Deny read and write under the directory DIR, and a rename or a delete of its
+;; parent directories.
+(define (apassy-deny-tree dir)
+  (deny file-read* file-write* (subpath dir))
+  (apassy-seal-ancestors dir))
 
 ;; --- Denials -------------------------------------------------------------
 
@@ -124,6 +136,13 @@
 ;; The backup file. The owner can place it outside the data directory.
 (apassy-deny-db (param "APASSY_BACKUP_FILE"))
 (apassy-seal-ancestors (param "APASSY_BACKUP_FILE"))
+
+;; The Apassy folder in iCloud Drive. It holds a closed, encrypted copy of each
+;; synced vault. A process with such a copy can try passphrases offline, and a
+;; changed copy can reach the other Macs. Optional, so a profile call without it
+;; still works; the launcher passes it by default.
+(if (param "APASSY_CLOUD_DIR")
+  (apassy-deny-tree (param "APASSY_CLOUD_DIR")))
 
 ;; --- The Apassy app bundle ------------------------------------------------
 

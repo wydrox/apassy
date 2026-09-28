@@ -131,6 +131,11 @@ name = "isolation_profile"
 path = "tests/isolation/product_profile.rs"
 required-features = ["vault"]
 
+[[test]]
+name = "icloud_sync"
+path = "tests/icloud_sync.rs"
+required-features = ["vault"]
+
 [lints.rust]
 unsafe_code = "forbid"
 

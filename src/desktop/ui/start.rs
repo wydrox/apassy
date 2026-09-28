@@ -27,6 +27,8 @@ pub(crate) enum Step {
     Create,
     Open,
     Restore,
+    /// Open a vault from iCloud Drive (ADR 0014).
+    Icloud,
 }
 
 pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
@@ -76,6 +78,7 @@ fn screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
         Step::Create => create(app, ui),
         Step::Open => open(app, ui),
         Step::Restore => restore(app, ui),
+        Step::Icloud => super::icloud::adopt_screen(app, ui),
     }
 }
 
@@ -136,6 +139,7 @@ fn welcome(app: &mut DesktopApp, ui: &mut egui::Ui) {
             go(app, Step::Restore);
         }
     });
+    super::icloud::start_link(app, ui);
 }
 
 /// Go to a start step with an empty name field.
@@ -197,6 +201,7 @@ fn create(app: &mut DesktopApp, ui: &mut egui::Ui) {
             submit = enter_pressed(&repeat);
         },
     );
+    super::icloud::create_option(app, ui);
     let mut open = app.ui.is_expanded("start-location");
     if kit::disclosure(ui, &mut open, "Location").changed() {
         app.ui.set_expanded("start-location", open);
@@ -268,21 +273,35 @@ pub(super) fn create_vault(app: &mut DesktopApp, ctx: &egui::Context) {
         return;
     }
     let unlocked = app.owner_ui.session.unlock(passphrase.expose());
-    drop(passphrase);
     app.reset_vault_state(Some(ctx));
     app.end_waiting_runs();
     app.list_open_vault(&name, Some(ctx));
     app.ui.start = Step::Home;
     app.view = OwnerView::Vault;
-    let _ = app.apply(
-        unlocked,
-        "Your vault is ready. Add your first credential, then make a backup in Settings.",
+    // "Keep a copy in iCloud Drive": sync starts with the passphrase just typed.
+    let icloud = if unlocked.is_ok() {
+        super::icloud::after_create(app, passphrase.expose())
+    } else {
+        Ok(None)
+    };
+    drop(passphrase);
+    let ready = format!(
+        "Your vault is ready. Add your first credential, then make a backup in Settings.{}",
+        icloud
+            .as_ref()
+            .ok()
+            .and_then(|line| line.as_deref())
+            .unwrap_or("")
     );
+    let _ = app.apply(unlocked, &ready);
+    if let Err(message) = icloud {
+        app.set_err(message);
+    }
 }
 
 /// Create a missing parent folder with mode 0700. The broker does not start in a data
 /// folder with a wider mode.
-fn ensure_private_folder(path: &Path) -> Result<(), String> {
+pub(super) fn ensure_private_folder(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::DirBuilderExt;
 
     let Some(parent) = path
@@ -479,6 +498,7 @@ fn unlock(app: &mut DesktopApp, ui: &mut egui::Ui) {
     };
     title(ui, "Apassy is locked", &subtitle);
     vaults::start_notices(app, ui);
+    super::icloud::unlock_notices(app, ui);
     vaults::unlock_picker(app, ui);
     draw_unlock_card(app, ui);
     ui.add_space(14.0);
@@ -503,6 +523,7 @@ fn unlock(app: &mut DesktopApp, ui: &mut egui::Ui) {
             }
         });
     });
+    super::icloud::start_link(app, ui);
 }
 
 /// The passphrase field, Unlock, and Touch ID when it is set up. The field takes the
@@ -536,12 +557,20 @@ pub(super) fn draw_unlock_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
 pub(crate) fn unlock_with_passphrase(app: &mut DesktopApp, ctx: &egui::Context) {
     let passphrase = Ephemeral::take(&mut app.owner_ui.passphrase);
     forget_secret_field(ctx, VAULT_PASSPHRASE_FIELD);
+    // A newer iCloud copy loads first. A refused copy does not stop the unlock of the
+    // file on this Mac (ADR 0014).
+    let pre = app.icloud_before_unlock(passphrase.expose());
     let result = app.owner_ui.session.unlock(passphrase.expose());
     drop(passphrase);
+    let loaded = app.icloud_after_unlock(pre, result.is_ok());
     if result.is_ok() {
         app.view = OwnerView::Vault;
     }
-    let _ = app.apply(result, "The vault is unlocked.");
+    let ok = match loaded {
+        Some(line) => format!("The vault is unlocked. {line}"),
+        None => "The vault is unlocked.".to_owned(),
+    };
+    let _ = app.apply(result, &ok);
 }
 
 /// Touch ID unlock (goal items A2, A3). It shows only when it is set up for this file.

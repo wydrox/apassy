@@ -1,12 +1,12 @@
 #![cfg(feature = "vault")]
 
-//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 11) to
+//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 12) to
 //! the current version, with data at each version. Synthetic values only.
 //!
 //! The schema SQL below is a frozen copy of the statements that each earlier version ran
 //! at create: version 1 in commit a2f860a, 2 in 4ffdb5e, 3 in 22d1784, 4 in 2eb8366,
 //! 5 in 9ce2e01, 6 in 4193991, 7 in c5a91c0, 8 in 2acde80, 9 in cff4303, 10 and 11 in
-//! ab935b8. Do not change these copies when the current schema changes.
+//! ab935b8, 12 in 8f1a8e0. Do not change these copies when the current schema changes.
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -21,7 +21,7 @@ use apassy::vault::{
 use tempfile::TempDir;
 
 const PASS: &str = "synthetic-migration-passphrase";
-const CURRENT_VERSION: i64 = 12;
+const CURRENT_VERSION: i64 = 13;
 
 const V1_SQL: &str = "
 CREATE TABLE vault_meta (
@@ -294,6 +294,24 @@ UPDATE vault_meta SET schema_version = 11 WHERE id = 1;
 PRAGMA user_version = 11;
 ";
 
+const V12_SQL: &str = "
+ALTER TABLE agent ADD COLUMN see_all INTEGER NOT NULL DEFAULT 0 CHECK (see_all IN (0, 1));
+ALTER TABLE exec_grant ADD COLUMN any_folder INTEGER NOT NULL DEFAULT 0 CHECK (any_folder IN (0, 1));
+CREATE TABLE access_request (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id INTEGER NOT NULL,
+    item_id INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('open', 'granted', 'denied')),
+    decided_at INTEGER
+);
+CREATE INDEX access_request_state ON access_request(state, id);
+UPDATE vault_meta SET schema_version = 12 WHERE id = 1;
+PRAGMA user_version = 12;
+";
+
 /// Five items, one of each kind: (title, kind, notes, tags, fields as (name, value, secret)).
 type ItemRow = (
     &'static str,
@@ -389,6 +407,7 @@ fn build_legacy(path: &Path, version: i64) {
     let tx = conn.transaction().expect("transaction");
     let steps = [
         V1_SQL, V2_SQL, V3_SQL, V4_SQL, V5_SQL, V6_SQL, V7_SQL, V8_SQL, V9_SQL, V10_SQL, V11_SQL,
+        V12_SQL,
     ];
     for sql in &steps[..usize::try_from(version).expect("version")] {
         tx.execute_batch(sql).expect("legacy schema");
@@ -575,6 +594,14 @@ fn build_legacy(path: &Path, version: i64) {
         )
         .expect("history");
     }
+    if version >= 12 {
+        // Version 12: the active agent sees all credentials.
+        tx.execute(
+            "UPDATE agent SET see_all = 1 WHERE name = 'MIG active agent'",
+            [],
+        )
+        .expect("see all");
+    }
     tx.commit().expect("commit");
     conn.close().map_err(|(_, err)| err).expect("close");
 }
@@ -713,6 +740,11 @@ fn assert_version_data(vault: &mut Vault, version: i64) {
         .authenticate_agent(&token_text(&ACTIVE_TOKEN))
         .expect("the active token works after the migration");
     assert_eq!(active.id, agents[0].id);
+    assert_eq!(
+        vault.agent_sees_all(active.id).expect("see all"),
+        version >= 12,
+        "the setting of version 12 stays"
+    );
     if version >= 6 {
         // The owner rotated the old token under version 6. It works.
         vault
@@ -781,6 +813,7 @@ fn assert_version_data(vault: &mut Vault, version: i64) {
 
 #[test]
 fn unlock_migrates_each_earlier_schema_version_to_the_current_one() {
+    let mut sync_ids: Vec<String> = Vec::new();
     for version in 1..CURRENT_VERSION {
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join(format!("v{version}.db"));
@@ -791,6 +824,17 @@ fn unlock_migrates_each_earlier_schema_version_to_the_current_one() {
         assert!(vault.is_locked());
         vault.unlock(PASS).expect("unlock migrates");
         assert_version_data(&mut vault, version);
+        // Version 13: the migration gives the vault a new sync record, never pushed.
+        let identity = vault.sync_identity().expect("sync record");
+        assert_eq!(identity.vault_id.len(), 36, "{identity:?}");
+        assert_eq!(identity.generation, 0);
+        assert!(identity.pushed_by.is_empty());
+        assert_eq!(identity.pushed_at, None);
+        assert!(
+            !sync_ids.contains(&identity.vault_id),
+            "each migrated vault gets its own id"
+        );
+        sync_ids.push(identity.vault_id.clone());
 
         // The current features work on the migrated file.
         vault.set_token_lifetime_days(60).expect("lifetime");
@@ -890,6 +934,11 @@ fn unlock_migrates_each_earlier_schema_version_to_the_current_one() {
         let mut again = Vault::open(&path).expect("open");
         again.unlock(PASS).expect("unlock");
         assert_items(&again);
+        assert_eq!(
+            again.sync_identity().expect("sync record"),
+            identity,
+            "a second unlock keeps the sync record"
+        );
         assert_eq!(again.token_lifetime_days().expect("lifetime"), 60);
         let log = again.decision_log().expect("log");
         assert_eq!(log.len(), if version >= 7 { 2 } else { 1 });
@@ -1010,8 +1059,45 @@ fn migrated_candidate() -> NewCandidate {
     }
 }
 
-/// The step from version 8 to 9 runs in one transaction. A failure leaves version 8 and
-/// its data.
+/// The step from version 12 to 13 runs in one transaction. A failure leaves version 12
+/// and its data.
+#[test]
+fn a_failed_migration_from_version_12_keeps_the_old_version_and_data() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("blocked12.db");
+    build_legacy(&path, 12);
+    {
+        // A table with the name of the version 13 table makes the migration fail.
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        conn.execute_batch("CREATE TABLE sync_meta (x INTEGER);")
+            .expect("blocking table");
+        conn.close().map_err(|(_, err)| err).expect("close");
+    }
+    let mut vault = Vault::open(&path).expect("open");
+    assert_eq!(
+        vault.unlock(PASS).unwrap_err().kind(),
+        VaultErrorKind::Storage
+    );
+    drop(vault);
+    assert_eq!(raw_versions(&path), (12, 12), "no partial migration");
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        conn.execute_batch("DROP TABLE sync_meta;")
+            .expect("drop blocking table");
+        conn.close().map_err(|(_, err)| err).expect("close");
+    }
+    let mut vault = Vault::open(&path).expect("open");
+    vault.unlock(PASS).expect("unlock migrates");
+    assert_version_data(&mut vault, 12);
+    assert_eq!(vault.sync_identity().expect("sync record").generation, 0);
+    drop(vault);
+    assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
+}
+
+/// The step from version 11 to 13 runs in one transaction. A failure leaves version 11
+/// and its data.
 #[test]
 fn a_failed_migration_from_version_11_keeps_the_old_version_and_data() {
     let dir = TempDir::new().expect("temp dir");

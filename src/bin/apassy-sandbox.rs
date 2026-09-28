@@ -3,10 +3,10 @@
 //! It resolves the protected paths, finds the SBPL profile, and replaces
 //! itself with `/usr/bin/sandbox-exec`. The host (Claude Code, Codex) and every
 //! command that the host starts then run inside the profile. They cannot read,
-//! copy, or replace a vault, the backup, or the Laya model. They cannot
-//! start, read, or change the programs in the Apassy app bundle, except
-//! `apassy-mcp` and `apassy-hook`. They can still connect to the broker
-//! socket, so `apassy-mcp` keeps working.
+//! copy, or replace a vault, the backup, the Laya model, or the iCloud copies of
+//! the vaults. They cannot start, read, or change the programs in the Apassy app
+//! bundle, except `apassy-mcp` and `apassy-hook`. They can still connect to the
+//! broker socket, so `apassy-mcp` keeps working.
 //!
 //! Usage:
 //!   apassy-sandbox [OPTIONS] -- <host> [host args...]
@@ -29,6 +29,8 @@
 //!   --app-build DIR     A second Apassy app bundle, for example a build. Default:
 //!                       `<target>/Apassy.app` when this program runs from
 //!                       `<target>/<profile>/`, else none.
+//!   --cloud-dir DIR     The Apassy folder in iCloud Drive. Default:
+//!                       `$HOME/Library/Mobile Documents/com~apple~CloudDocs/Apassy`.
 //!   --profile FILE      The SBPL profile. Default: `$APASSY_SANDBOX_PROFILE`,
 //!                       else a file found next to this program or in `sandbox/`.
 //!   --print             Print the resolved sandbox-exec command. Do not run it.
@@ -69,6 +71,13 @@ const BUILD_APP_NAME: &str = "Apassy.app";
 /// The profile has the parameters `APASSY_VAULT_FILE_2` to `APASSY_VAULT_FILE_16`
 /// for vault files outside the data directory.
 const MAX_EXTRA_VAULTS: usize = 15;
+/// The Apassy folder in iCloud Drive, under the home directory (ADR 0014).
+const CLOUD_DIR_IN_HOME: [&str; 4] = [
+    "Library",
+    "Mobile Documents",
+    "com~apple~CloudDocs",
+    "Apassy",
+];
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -144,6 +153,16 @@ fn run(args: &[String]) -> Result<(), String> {
         .map(PathBuf::from)
         .or_else(default_build_app);
 
+    // The iCloud copies of the vaults. The profile denies the folder also when it
+    // does not exist yet, so a later sync cannot create a readable copy.
+    let cloud_dir = parsed.cloud_dir.map(PathBuf::from).or_else(|| {
+        home.as_ref().map(|home| {
+            CLOUD_DIR_IN_HOME
+                .iter()
+                .fold(home.clone(), |dir, part| dir.join(part))
+        })
+    });
+
     // The home directory, for the autostart denials in the profile.
     let home_dir = match parsed.home {
         Some(path) => PathBuf::from(path),
@@ -165,6 +184,7 @@ fn run(args: &[String]) -> Result<(), String> {
     let home_dir = resolve(&home_dir);
     let app = resolve(&app);
     let app_build = app_build.as_deref().map(resolve);
+    let cloud_dir = cloud_dir.as_deref().map(resolve);
     let extra_vaults = extra_vault_files(&data_dir, &vault_file, &listed)?;
     let extra_params: Vec<(String, PathBuf)> = extra_vaults
         .into_iter()
@@ -190,6 +210,9 @@ fn run(args: &[String]) -> Result<(), String> {
     if let Some(app_build) = &app_build {
         command.arg("-D").arg(param("APASSY_APP_BUILD", app_build)?);
     }
+    if let Some(cloud_dir) = &cloud_dir {
+        command.arg("-D").arg(param("APASSY_CLOUD_DIR", cloud_dir)?);
+    }
     command.arg(&parsed.host[0]);
     command.args(&parsed.host[1..]);
 
@@ -209,6 +232,7 @@ fn run(args: &[String]) -> Result<(), String> {
             ("APASSY_HOME", Some(&home_dir)),
             ("APASSY_APP", Some(&app)),
             ("APASSY_APP_BUILD", app_build.as_ref()),
+            ("APASSY_CLOUD_DIR", cloud_dir.as_ref()),
         ]);
         print_command(&profile, &params, &parsed.host);
         return Ok(());
@@ -228,6 +252,7 @@ struct Parsed {
     home: Option<String>,
     app: Option<String>,
     app_build: Option<String>,
+    cloud_dir: Option<String>,
     profile: Option<String>,
     print: bool,
     help: bool,
@@ -243,6 +268,7 @@ fn parse(args: &[String]) -> Result<Parsed, String> {
         home: None,
         app: None,
         app_build: None,
+        cloud_dir: None,
         profile: None,
         print: false,
         help: false,
@@ -264,6 +290,7 @@ fn parse(args: &[String]) -> Result<Parsed, String> {
             "--home" => parsed.home = Some(value(&mut iter, arg)?),
             "--app" => parsed.app = Some(value(&mut iter, arg)?),
             "--app-build" => parsed.app_build = Some(value(&mut iter, arg)?),
+            "--cloud-dir" => parsed.cloud_dir = Some(value(&mut iter, arg)?),
             "--profile" => parsed.profile = Some(value(&mut iter, arg)?),
             other => {
                 return Err(format!(
@@ -432,6 +459,8 @@ Options:
   --app DIR           installed app bundle (default: /Applications/Apassy.app)
   --app-build DIR     second app bundle (default: <target>/Apassy.app when this
                       program runs from <target>/<profile>/)
+  --cloud-dir DIR     Apassy folder in iCloud Drive (default: $HOME/Library/Mobile
+                      Documents/com~apple~CloudDocs/Apassy)
   --profile FILE      SBPL profile (default: found near the program)
   --print             print the resolved sandbox-exec command; do not run it
   -h, --help          print this help
