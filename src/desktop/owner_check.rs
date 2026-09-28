@@ -940,6 +940,8 @@ impl DesktopApp {
         }
         ui_state.add_secrets.clear();
         ui_state.edit_secrets.clear();
+        // The parsed 1Password export holds secrets.
+        self.import.forget();
         self.close_owner_check(ctx);
         if let Some(ctx) = ctx {
             super::ui::forget_all_secret_fields(ctx);

@@ -12,6 +12,10 @@ pub mod broker;
 #[cfg(feature = "desktop")]
 pub mod desktop;
 
+/// Import from 1Password (1PUX and CSV exports). It needs the vault types.
+#[cfg(feature = "vault")]
+pub mod import;
+
 pub mod native;
 pub mod paths;
 

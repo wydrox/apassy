@@ -23,7 +23,7 @@ This page is the first-day checklist. The other pages have the details.
 
 1. Open `Apassy.app`. Click "Create a new vault". Type a strong passphrase that you can remember, two times. A lost passphrase can make the data unrecoverable (ADR 0003). The vault file is `~/Library/Application Support/Apassy/vault.db`. At the next start, Apassy opens this file and shows the unlock screen.
 2. Make an encrypted backup and keep it in a safe place: Settings > "Back up now", and [backup and restore](backup-restore.md).
-3. In Credentials, click "Add" for each credential. Then open it, and under "Agent access" click "Declaration". Apassy suggests the values from the item. Confirm or change each field: [declarations](declarations.md). An item without a declaration makes every run wait for you.
+3. In Credentials, click "Add" for each credential, or import them from 1Password with Settings > Import: [import from 1Password](import-1password.md). Then open each credential, and under "Agent access" click "Declaration". Apassy suggests the values from the item. Confirm or change each field: [declarations](declarations.md). An item without a declaration makes every run wait for you.
 4. For each credential that a command needs, click "Environment variable" under "Agent access" and set the variable name: [agent path](agent-path.md), section 8.
 
 The app layout is in [desktop UI](desktop-ui.md).

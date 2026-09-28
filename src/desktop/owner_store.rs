@@ -37,6 +37,8 @@ use crate::vault::{
 };
 
 const MAX_TAG_BYTES: usize = 64;
+/// The most tags on one item (`MAX_TAG_COUNT` in `src/vault/types.rs`).
+const MAX_TAG_COUNT: usize = 32;
 
 /// A custom detail is an item field with this prefix. The rest of the name is the label
 /// in hexadecimal, because a field name takes only ASCII letters, digits, and `_`, and a
@@ -624,6 +626,13 @@ impl OwnerSession {
             build_vault_draft(&vault, None, draft, secrets)?
         };
         let summary = self.unlocked()?.add(vault_draft).map_err(map_err)?;
+        self.row_from(summary)
+    }
+
+    /// Add an item from an import (`crate::import`). The draft already has the layout of
+    /// the item forms: built-in fields and custom details. No agent gets access.
+    pub fn add_imported(&mut self, draft: VaultDraft) -> ModelResult<OwnerSummary> {
+        let summary = self.unlocked()?.add(draft).map_err(map_err)?;
         self.row_from(summary)
     }
 
@@ -1783,14 +1792,17 @@ fn build_vault_draft(
     if title.is_empty() {
         return Err(fail("invalid_input", "The item name is required."));
     }
-    if let Some(id) = existing {
-        let current = vault.details(id).map_err(map_err)?;
-        if current.summary.kind != draft.kind {
-            return Err(fail(
-                "category_locked",
-                "The item category cannot change. Delete the item and add a new one.",
-            ));
-        }
+    let current = match existing {
+        Some(id) => Some(vault.details(id).map_err(map_err)?),
+        None => None,
+    };
+    if let Some(current) = &current
+        && current.summary.kind != draft.kind
+    {
+        return Err(fail(
+            "category_locked",
+            "The item category cannot change. Delete the item and add a new one.",
+        ));
     }
 
     let mut fields = Vec::new();
@@ -1901,6 +1913,21 @@ fn build_vault_draft(
     let mut tags = Vec::new();
     push_tag(&mut tags, &draft.service)?;
     push_tag(&mut tags, &draft.project)?;
+    if let Some(current) = current {
+        // The form has no tag field. An edit keeps the other tags of the item, for
+        // example the tags of a 1Password import, and replaces the old service and
+        // project labels.
+        let id = current.summary.id;
+        let old = [
+            plain_value(vault, id, "service")?,
+            plain_value(vault, id, "project")?,
+        ];
+        for tag in current.tags {
+            if tags.len() < MAX_TAG_COUNT && !old.contains(&tag) && !tags.contains(&tag) {
+                tags.push(tag);
+            }
+        }
+    }
     Ok(VaultDraft {
         title: title.to_owned(),
         kind: draft.kind,

@@ -11,6 +11,8 @@ mod agents;
 #[cfg(not(feature = "vault"))]
 mod demo;
 #[cfg(feature = "vault")]
+pub(crate) mod import;
+#[cfg(feature = "vault")]
 mod items;
 pub(crate) mod kit;
 #[cfg(feature = "vault")]
@@ -266,6 +268,9 @@ pub(crate) enum Sheet {
     Backup,
     #[cfg(feature = "vault")]
     Restore,
+    /// Import from 1Password.
+    #[cfg(feature = "vault")]
+    Import,
 }
 
 pub(crate) fn apply_style(ctx: &egui::Context) {
@@ -283,6 +288,7 @@ pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
             // A lock also hides a token that the owner did not dismiss.
             app.owner_ui.fresh_token = None;
             app.ui.sheet = None;
+            app.import.forget();
             start::draw(app, ui);
         } else {
             shell::draw(app, ui);
@@ -322,6 +328,7 @@ pub(crate) fn close_sheet(app: &mut DesktopApp, ctx: &egui::Context) {
             app.owner_ui.passphrase.zeroize();
             forget_secret_field(ctx, VAULT_PASSPHRASE_FIELD);
         }
+        Some(Sheet::Import) => app.import.forget(),
         _ => {}
     }
     #[cfg(not(feature = "vault"))]

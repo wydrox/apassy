@@ -123,6 +123,10 @@ pub struct DesktopApp {
     /// Learning view state (goal item B10).
     #[cfg(feature = "vault")]
     pub(crate) learning: learning_ui::LearningUiState,
+    /// Import from 1Password. It holds the parsed export until the import, a cancel, or
+    /// a lock.
+    #[cfg(feature = "vault")]
+    pub(crate) import: ui::import::ImportState,
     styled: bool,
 }
 
@@ -170,6 +174,8 @@ impl DesktopApp {
             owner: owner_check::OwnerFlows::default(),
             #[cfg(feature = "vault")]
             learning: learning_ui::LearningUiState::default(),
+            #[cfg(feature = "vault")]
+            import: ui::import::ImportState::default(),
             styled: false,
         }
     }
