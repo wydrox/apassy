@@ -16,7 +16,7 @@ The app holds the vault key while it is unlocked. An updater that installs code 
 - A background thread reads `https://apassy.wyderka.cc/latest.json` about 15 seconds after the start, then every 6 hours. The owner can turn this off and check by hand.
 - `/usr/bin/curl` with `--proto =https`, TLS 1.2 or later, the macOS trust store, a time limit, and a size limit. The rustls client of the broker reads at most 64 KiB and does not stream, so it does not fit an image of about 110 MB.
 - The app checks each field of `latest.json`: the version form, 40-digit commit, UTC date, `file` = `Apassy.dmg`, size at most 1 GiB, 64-digit SHA-256, `notarized` = true, `arch` = `arm64`, and `minimum_macos` not later than the running macOS.
-- Newer means a higher version (Semantic Versioning order), or the same version from another commit with a later date. The second rule needs the build identity: `scripts/build-app.sh` embeds the commit and the build time (`APASSY_BUILD_COMMIT`, `APASSY_BUILD_DATE`) in the program and in the signed `Info.plist`.
+- Newer means a higher version (Semantic Versioning order). Another build of the same version is never newer (owner decision of 2026-09-28): a merge to `main` publishes a new image on the site, but it reaches installed apps only with a higher version number. `scripts/build-app.sh` embeds the commit and the build time (`APASSY_BUILD_COMMIT`, `APASSY_BUILD_DATE`) in the program and in the signed `Info.plist`; Settings shows them, and the check below uses the commit.
 - A debug build can use another HTTPS server for development (`APASSY_UPDATE_BASE`). A release build does not contain this code.
 
 ### 2. Download and verify
@@ -25,7 +25,7 @@ The image goes to `<data dir>/update/`, which the agent profile denies. The app 
 
 1. The size and the SHA-256 match `latest.json`.
 2. The app in the image has the bundle ID `com.wydrox.apassy` and the version of `latest.json`.
-3. The commit in its signed `Info.plist` is the commit of `latest.json`. For the same version, its build date is later than the date of the running build.
+3. The commit in its signed `Info.plist` is the commit of `latest.json`.
 4. It is signed with a Developer ID Application certificate of the same team as the running app: `codesign --verify --deep --strict -R '=identifier "com.wydrox.apassy" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "<team>"'`.
 5. Gatekeeper accepts it (`spctl --assess --type exec`), so Apple notarized it.
 
@@ -43,7 +43,7 @@ The app reads its own team from the signature of the running process (`codesign 
 | Attacker | Result |
 | --- | --- |
 | Changes `latest.json` or the image on the site or in R2 | The app installs only an app with the Apassy bundle ID, a Developer ID signature of the same team as the running app, and an Apple notarization. The attacker cannot make such an app without the signing key of the owner and a notarization in the owner's Apple account. A changed image with the old `latest.json` fails the SHA-256. |
-| Offers an older release | A lower version is never newer. An older notarized image of a lower version fails the version check against `latest.json`. For the same version, the signed `Info.plist` must name a later build than the running one, so a false date in `latest.json` does not help. |
+| Offers an older release | Only a higher version is newer. An older notarized image of a lower or the same version fails the version check against `latest.json`, because the version in its signed `Info.plist` must be the version of `latest.json`. |
 | On the network path | TLS with the macOS trust store. Even without TLS, the checks of the image decide. |
 | An agent on this Mac | The agent profile denies `<data dir>`, so an agent cannot change the staged app, the log, or `update.json`. It also denies `/Applications/Apassy.app`. The installer checks the staged app again right before the move. |
 | A process of the owner's user outside the agent profile | Not covered. Such a process can change the app bundle or `update/` without the updater. |

@@ -153,7 +153,8 @@ pub(crate) fn open(target: &std::ffi::OsStr) -> Result<(), String> {
     Ok(())
 }
 
-/// True when `staged` is newer than the running build, so it is worth installing.
+/// True when `staged` has a higher version than the running build, so it is worth
+/// installing. Another build of the same version is not (ADR 0015).
 fn staged_is_newer(staged: &Staged, build: &BuildIdentity) -> bool {
     use std::cmp::Ordering;
     let (Ok(offered), Ok(running)) = (
@@ -162,14 +163,7 @@ fn staged_is_newer(staged: &Staged, build: &BuildIdentity) -> bool {
     ) else {
         return false;
     };
-    match offered.cmp(&running) {
-        Ordering::Greater => true,
-        Ordering::Less => false,
-        Ordering::Equal => build
-            .build
-            .as_ref()
-            .is_some_and(|(commit, _)| *commit != staged.commit),
-    }
+    offered.cmp(&running) == Ordering::Greater
 }
 
 impl Updater {
@@ -910,7 +904,8 @@ mod tests {
         let build = BuildIdentity::from_parts("0.3.0", Some(COMMIT), Some("2026-10-01T00:00:00Z"));
         let other = super::manifest::tests::OTHER_COMMIT;
         assert!(staged_is_newer(&staged("0.3.1", COMMIT), &build));
-        assert!(staged_is_newer(&staged("0.3.0", other), &build));
+        // Another build of the same version is not worth an install.
+        assert!(!staged_is_newer(&staged("0.3.0", other), &build));
         assert!(!staged_is_newer(&staged("0.3.0", COMMIT), &build));
         assert!(!staged_is_newer(&staged("0.2.9", other), &build));
         let dev = BuildIdentity::from_parts("0.3.0", None, None);

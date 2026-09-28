@@ -265,13 +265,11 @@ impl BuildIdentity {
     }
 }
 
-/// True when `manifest` names a build that is newer than `current`:
-///
-/// - a higher version, or
-/// - the same version from another commit with a later date. Only a build with an
-///   embedded identity can tell this.
-///
-/// A lower version is never newer, so the app refuses a downgrade.
+/// True when `manifest` names a higher version than `current` (Semantic Versioning
+/// order). Only a higher version updates the app: another build of the same
+/// version does not, so a merge to `main` without a version change reaches no
+/// installed app (ADR 0015). A lower version is never newer, so the app refuses a
+/// downgrade.
 pub(crate) fn is_newer(manifest: &Manifest, current: &BuildIdentity) -> bool {
     let (Ok(offered), Ok(running)) = (
         Version::parse(&manifest.version),
@@ -279,14 +277,7 @@ pub(crate) fn is_newer(manifest: &Manifest, current: &BuildIdentity) -> bool {
     ) else {
         return false;
     };
-    match offered.cmp(&running) {
-        Ordering::Greater => true,
-        Ordering::Less => false,
-        Ordering::Equal => match &current.build {
-            Some((commit, date)) => manifest.commit != *commit && manifest.date_unix > *date,
-            None => false,
-        },
-    }
+    offered.cmp(&running) == Ordering::Greater
 }
 
 #[cfg(test)]
@@ -531,35 +522,25 @@ pub(crate) mod tests {
         }
     }
 
+    /// Another build of the same version never updates the app: only a higher
+    /// version number does.
     #[test]
-    fn the_same_version_is_newer_only_from_another_commit_with_a_later_date() {
+    fn the_same_version_is_never_newer() {
         let running =
             BuildIdentity::from_parts("0.3.0", Some(COMMIT), Some("2026-10-01T00:00:00Z"));
-        // Another commit, published later.
-        assert!(is_newer(
-            &manifest("0.3.0", OTHER_COMMIT, "2026-10-01T00:00:01Z"),
-            &running
-        ));
-        // The same commit: this build.
-        assert!(!is_newer(
-            &manifest("0.3.0", COMMIT, "2026-10-05T00:00:00Z"),
-            &running
-        ));
-        // Another commit, published before this build.
-        assert!(!is_newer(
-            &manifest("0.3.0", OTHER_COMMIT, "2026-09-30T23:59:59Z"),
-            &running
-        ));
-        assert!(!is_newer(
-            &manifest("0.3.0", OTHER_COMMIT, "2026-10-01T00:00:00Z"),
-            &running
-        ));
-        // Without an embedded identity the app cannot tell, so it does not update.
         let dev = BuildIdentity::from_parts("0.3.0", None, None);
-        assert!(!is_newer(
-            &manifest("0.3.0", OTHER_COMMIT, "2027-01-01T00:00:00Z"),
-            &dev
-        ));
+        for current in [&running, &dev] {
+            // Another commit, published later.
+            assert!(!is_newer(
+                &manifest("0.3.0", OTHER_COMMIT, "2026-10-05T00:00:00Z"),
+                current
+            ));
+            // The same commit: this build.
+            assert!(!is_newer(
+                &manifest("0.3.0", COMMIT, "2026-10-05T00:00:00Z"),
+                current
+            ));
+        }
         // Build metadata does not make a version newer.
         assert!(!is_newer(
             &manifest("0.3.0+2", OTHER_COMMIT, "2026-09-01T00:00:00Z"),

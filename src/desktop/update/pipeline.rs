@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use super::manifest::{BuildIdentity, Manifest, is_newer, parse_utc};
+use super::manifest::{BuildIdentity, Manifest, is_newer};
 use super::store::{Staged, StagedKind, private_dir};
 use super::system::{BUNDLE_ID, Location, UpdateSystem};
 
@@ -324,14 +324,9 @@ fn verify_image(
 }
 
 /// The build identity in the signed `Info.plist` of the new app must be the build
-/// of `latest.json`. For the same version, it must also be a later build than the
-/// running one: `latest.json` alone cannot prove that, so a changed `latest.json`
-/// cannot offer an older build of the same version.
-fn check_build(
-    running: &BuildIdentity,
-    manifest: &Manifest,
-    info: &super::system::BundleInfo,
-) -> Result<(), String> {
+/// of `latest.json`. The version is checked apart: only a higher version gets this
+/// far (ADR 0015).
+fn check_build(manifest: &Manifest, info: &super::system::BundleInfo) -> Result<(), String> {
     if let Some(commit) = &info.build_commit
         && *commit != manifest.commit
     {
@@ -341,17 +336,7 @@ fn check_build(
             manifest.build
         ));
     }
-    if manifest.version != running.version {
-        return Ok(());
-    }
-    let built = info.build_date.as_deref().and_then(parse_utc);
-    match (&info.build_commit, built, &running.build) {
-        (Some(_), Some(built), Some((_, running_date))) if built > *running_date => Ok(()),
-        _ => Err(format!(
-            "The app in the disk image is not a later build of Apassy {}. Apassy does not install it.",
-            running.version
-        )),
-    }
+    Ok(())
 }
 
 fn check_app(
@@ -379,7 +364,7 @@ fn check_app(
             info.version, manifest.version
         ));
     }
-    check_build(check.build, manifest, &info)?;
+    check_build(manifest, &info)?;
     match sys.signing_team(app)? {
         Some(signed) if signed == team => {}
         Some(signed) => {
@@ -431,7 +416,6 @@ pub(crate) mod tests {
         pub(crate) app_id: String,
         pub(crate) app_version: String,
         pub(crate) app_commit: Option<String>,
-        pub(crate) app_date: Option<String>,
         pub(crate) app_team: Option<String>,
         pub(crate) signature_ok: bool,
         pub(crate) gatekeeper_ok: bool,
@@ -463,7 +447,6 @@ pub(crate) mod tests {
                 app_id: BUNDLE_ID.to_owned(),
                 app_version: "0.3.1".to_owned(),
                 app_commit: Some(COMMIT.to_owned()),
-                app_date: Some("2026-10-02T09:00:00Z".to_owned()),
                 app_team: Some(TEAM.to_owned()),
                 signature_ok: true,
                 gatekeeper_ok: true,
@@ -544,7 +527,6 @@ pub(crate) mod tests {
                 identifier: self.app_id.clone(),
                 version: self.app_version.clone(),
                 build_commit: self.app_commit.clone(),
-                build_date: self.app_date.clone(),
             })
         }
 
@@ -815,51 +797,28 @@ pub(crate) mod tests {
         }
     }
 
-    /// The same version installs only as a later build, and the signed Info.plist
-    /// of the app decides that, not the date in `latest.json`.
+    /// Another build of the same version is up to date: nothing downloads. A higher
+    /// version installs also from an app without the build identity keys.
     #[test]
-    fn the_same_version_needs_a_later_build_in_the_app() {
-        let same_version = |fake: &mut Fake| {
-            fake.manifest = manifest_json(&[
-                ("version", serde_json::json!("0.3.0")),
-                ("size", serde_json::json!(fake.image.len())),
-                ("sha256", serde_json::json!(digest_of(&fake.image))),
-            ]);
-            fake.app_version = "0.3.0".to_owned();
-        };
-        // A later build of the same version.
+    fn only_a_higher_version_downloads() {
         let temp = tempfile::TempDir::new().expect("temp dir");
         let dir = temp.path().join("update");
         let mut fake = Fake::new(temp.path());
-        same_version(&mut fake);
+        fake.manifest = manifest_json(&[
+            ("version", serde_json::json!("0.3.0")),
+            ("size", serde_json::json!(fake.image.len())),
+            ("sha256", serde_json::json!(digest_of(&fake.image))),
+        ]);
+        fake.app_version = "0.3.0".to_owned();
         let (result, _) = check_with(&fake, &dir, true, None);
-        assert!(matches!(result, Ok(Outcome::Ready(_))), "{result:?}");
+        assert!(matches!(result, Ok(Outcome::UpToDate)), "{result:?}");
+        assert!(!fake.calls().contains(&"download".to_owned()));
+        assert!(files(&dir).is_empty());
 
-        // An older build that latest.json calls newer.
-        type Change = fn(&mut Fake);
-        let cases: [Change; 3] = [
-            |fake| fake.app_date = Some("2026-09-30T00:00:00Z".to_owned()),
-            |fake| fake.app_date = None,
-            |fake| fake.app_commit = None,
-        ];
-        for change in cases {
-            let temp = tempfile::TempDir::new().expect("temp dir");
-            let dir = temp.path().join("update");
-            let mut fake = Fake::new(temp.path());
-            same_version(&mut fake);
-            change(&mut fake);
-            let (result, _) = check_with(&fake, &dir, true, None);
-            let err = result.expect_err("older build");
-            assert!(err.contains("not a later build of Apassy 0.3.0"), "{err}");
-            assert!(files(&dir).is_empty());
-        }
-
-        // A higher version from before the build identity: no keys, no refusal.
         let temp = tempfile::TempDir::new().expect("temp dir");
         let dir = temp.path().join("update");
         let mut fake = Fake::new(temp.path());
         fake.app_commit = None;
-        fake.app_date = None;
         let (result, _) = check_with(&fake, &dir, true, None);
         assert!(matches!(result, Ok(Outcome::Ready(_))), "{result:?}");
     }

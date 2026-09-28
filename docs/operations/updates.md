@@ -33,7 +33,7 @@ On Linux, Settings says that updates are available only for the macOS app. The a
 ## 3. Which build is newer
 
 - A higher version is newer. The app compares versions as Semantic Versioning does: `0.3.0-rc.1` < `0.3.0` < `0.3.1`.
-- The same version is newer only when the build has another commit and a later date than this build. The release build has its commit and build time (`scripts/build-app.sh`). A local build has neither, so it updates only to a higher version.
+- Another build of the same version is not newer. Each green CI run on `main` publishes a new image on the site, but an installed app updates only when the version number in `Cargo.toml` goes up. So a merge without a version change reaches no installed app.
 - A lower version is never newer.
 
 ## 4. The checks
@@ -51,7 +51,7 @@ The disk image:
 1. The size and the SHA-256 match `latest.json`. Otherwise the app deletes the file.
 2. `hdiutil attach -nobrowse -readonly -noautoopen` at a private folder in `update/`.
 3. `Apassy.app` in the image has the bundle ID `com.wydrox.apassy` and the version of `latest.json`.
-4. The build in its signed `Info.plist` (`ApassyBuildCommit`, `ApassyBuildDate`) is the commit of `latest.json`. For the same version, the build date is later than the date of this build.
+4. The build in its signed `Info.plist` (`ApassyBuildCommit`) is the commit of `latest.json`.
 5. It has a Developer ID signature of the same team as the running app, and `codesign --verify --deep --strict` passes against `identifier "com.wydrox.apassy" and anchor apple generic` with the Developer ID certificate fields and that team.
 6. Gatekeeper accepts it: `spctl --assess --type exec`. This needs notarization.
 7. `ditto` copies it to `update/Apassy.app`, and the signature check runs on the copy. Then the app detaches and deletes the image.
@@ -107,7 +107,7 @@ APASSY_UPDATE_PROBE_APP=/Applications/<an app>.app \
 | --- | --- |
 | `update/version.rs` | Version order with pre-releases, and invalid versions. |
 | `update/manifest.rs` | Each field of `latest.json` that is not valid refuses it. The newer-build rule. |
-| `update/pipeline.rs` | Check, download, and staging. A SHA-256 or size mismatch, and each failed check of the app, delete the image. The same version needs a later build in the signed `Info.plist`. A copy without a team only reports the version. A folder that Apassy cannot write keeps the image. |
+| `update/pipeline.rs` | Check, download, and staging. A SHA-256 or size mismatch, and each failed check of the app, delete the image. Only a higher version downloads. A copy without a team only reports the version. A folder that Apassy cannot write keeps the image. |
 | `update/store.rs` | `update.json` defaults, atomic write, mode `0600`. |
 | `update/install.rs` | The installer body with test doubles: it waits for the process, replaces the bundle, refuses a bad staged app or bad arguments, and treats paths as data. |
 | `update/mod.rs` | The state: idle, checking, downloading, verifying, then ready or error. The install result at the next start. |

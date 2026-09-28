@@ -50,10 +50,9 @@ pub(crate) fn is_team_id(text: &str) -> bool {
             .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
 }
 
-/// The keys of the build identity in `Contents/Info.plist`. `scripts/build-app.sh`
-/// adds them before the signature, so the signature covers them.
+/// The key of the build commit in `Contents/Info.plist`. `scripts/build-app.sh` adds
+/// it, and `ApassyBuildDate`, before the signature, so the signature covers them.
 pub(crate) const PLIST_BUILD_COMMIT: &str = "ApassyBuildCommit";
-pub(crate) const PLIST_BUILD_DATE: &str = "ApassyBuildDate";
 
 /// The fields of `Contents/Info.plist` that the check reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,8 +61,6 @@ pub(crate) struct BundleInfo {
     pub(crate) version: String,
     /// [`PLIST_BUILD_COMMIT`], when the app has it.
     pub(crate) build_commit: Option<String>,
-    /// [`PLIST_BUILD_DATE`], when the app has it.
-    pub(crate) build_date: Option<String>,
 }
 
 /// Where the running app is.
@@ -459,7 +456,6 @@ impl UpdateSystem for Commands {
             identifier: plist_value(app, "CFBundleIdentifier")?,
             version: plist_value(app, "CFBundleShortVersionString")?,
             build_commit: plist_value(app, PLIST_BUILD_COMMIT).ok(),
-            build_date: plist_value(app, PLIST_BUILD_DATE).ok(),
         })
     }
 
