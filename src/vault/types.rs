@@ -19,7 +19,7 @@ pub const MAX_FIELD_NAME_BYTES: usize = 64;
 pub const MAX_FIELD_VALUE_BYTES: usize = 65_536;
 pub const MAX_PAYLOAD_BYTES: usize = 1_048_576;
 pub const MAX_SEARCH_RESULTS: usize = 1000;
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 /// Owned secret text. Debug is redacted. There is no public `Serialize` impl.
 /// Drop erases the text with `zeroize`. A clone is a second copy with its own erase.

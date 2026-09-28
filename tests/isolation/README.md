@@ -25,6 +25,10 @@ in the product profile and checks the boundary:
   result. No secret leaks.
 - A process in the profile cannot read, copy, overwrite, or replace the vault,
   a backup, or a file under a fake Laya directory.
+- A process in the profile cannot read, list, or write the Apassy folder in a
+  synthetic iCloud Drive, or move the iCloud Drive folder
+  (`profile_denies_the_icloud_folder`). Another iCloud Drive folder stays
+  readable. The launcher passes `APASSY_CLOUD_DIR` by default.
 - Ordinary work still runs: it reads the project directory and writes a
   temporary file. Child processes of the sandboxed process work.
 - `ps eww` and `ps -E` in the profile do not show the environment of a process

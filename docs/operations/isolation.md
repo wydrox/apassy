@@ -17,7 +17,13 @@ The profile denies read and write to:
 - the vault file. The owner can place it outside the data directory.
 - the backup file. The owner can place it outside the data directory.
 - the SQLite companion files of the vault and the backup (`-wal`, `-shm`,
-  `-journal`, `.lock`).
+  `-journal`, `.lock`), and the `.sync-incoming` copy that an iCloud pull
+  checks next to the vault ([icloud.md](icloud.md)).
+- the Apassy folder in iCloud Drive
+  (`~/Library/Mobile Documents/com~apple~CloudDocs/Apassy`). It holds a closed,
+  encrypted copy of each synced vault ([ADR 0014](../adr/0014-icloud-sync.md)).
+  A process with a copy can guess passphrases offline, and a changed copy can
+  reach the other Macs. The rest of iCloud Drive stays usable.
 
 The profile permits a connection to the broker socket. The socket lives inside
 the denied data directory. A later rule in the profile re-opens only the socket
@@ -80,6 +86,7 @@ paths.
 | `APASSY_HOME` | the owner home directory. The profile denies a write to the autostart locations under it (section 7). |
 | `APASSY_APP` | the installed app bundle. Optional. Default: `/Applications/Apassy.app` |
 | `APASSY_APP_BUILD` | a second app bundle, for example `<repository>/target/Apassy.app`. Optional. |
+| `APASSY_CLOUD_DIR` | the Apassy folder in iCloud Drive (subtree deny). Optional. The launcher passes it by default. |
 
 ### Directory-rename defense
 
@@ -87,8 +94,8 @@ A subtree deny blocks a rename of the denied directory itself. It does not
 block a rename of a directory above it. Without more rules, a process can
 rename a parent directory and then read the protected file at its new path. A
 measurement showed this bypass (section 5). So the profile also denies a rename
-or a delete of each parent directory of the data directory, the vault file, and
-the backup file.
+or a delete of each parent directory of the data directory, the vault file, the
+backup file, and the Apassy folder in iCloud Drive.
 
 ## 2. The launcher
 
@@ -108,6 +115,7 @@ apassy-sandbox [OPTIONS] -- <host> [host args...]
 | `--home DIR` | `$HOME`. The profile denies a write to the autostart locations under it (section 7). |
 | `--app DIR` | `/Applications/Apassy.app` |
 | `--app-build DIR` | `<target>/Apassy.app` when the launcher is `<target>/<profile>/apassy-sandbox` and the directory is named `target`, else none |
+| `--cloud-dir DIR` | `$HOME/Library/Mobile Documents/com~apple~CloudDocs/Apassy`. The folder may not exist yet; the profile denies it anyway. |
 | `--profile FILE` | `$APASSY_SANDBOX_PROFILE`, else a file near the program |
 | `--print` | print the resolved command; do not run it |
 
@@ -264,6 +272,9 @@ a vault canary, a fake Laya file, a backup canary, and a live broker socket.
 | replace the vault file by a rename | denied |
 | rename the data directory, then read the vault | denied |
 | rename the backup parent directory, then read the backup | denied |
+| read, list, or write in the Apassy folder in iCloud Drive | denied |
+| rename the iCloud Drive folder, then read the vault copy | denied |
+| read a file in another iCloud Drive folder | allowed |
 | connect to the broker socket | allowed |
 | read a project file | allowed |
 | write a file in a temporary directory | allowed |
