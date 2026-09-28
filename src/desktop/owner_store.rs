@@ -90,6 +90,9 @@ pub const ENDED_BY_LOCK: &str =
     "The owner locked the vault before a decision. The run did not start.";
 /// Activity text when Apassy quits while runs wait (goal item N3).
 pub const ENDED_BY_QUIT: &str = "Apassy stopped before the owner decided. The run did not start.";
+/// Activity text when the owner switches to another vault while runs wait (ADR 0013).
+pub const ENDED_BY_SWITCH: &str =
+    "The owner switched to another vault before a decision. The run did not start.";
 
 /// Secret inputs for one item form. Debug output is redacted. There is no `Clone`,
 /// so the form is the only copy that the app keeps.
@@ -483,6 +486,7 @@ impl OwnerSession {
         match Vault::open(path) {
             Ok(vault) => {
                 self.install(vault, path.to_path_buf());
+                previous.retire();
                 Ok(())
             }
             Err(err) => {
@@ -755,6 +759,7 @@ impl OwnerSession {
         match Vault::restore(backup, destination, passphrase) {
             Ok(vault) => {
                 self.install(vault, destination.to_path_buf());
+                previous.retire();
                 Ok(())
             }
             Err(err) => {
@@ -1283,7 +1288,12 @@ impl OwnerSession {
 
     fn install(&mut self, vault: Vault, path: PathBuf) {
         self.revealed.clear();
-        *self.slot() = Some(vault);
+        let replaced = self.slot().replace(vault);
+        HeldVault {
+            vault: replaced,
+            path: None,
+        }
+        .retire();
         self.path = Some(path);
     }
 
@@ -1451,6 +1461,19 @@ impl Default for OwnerSession {
 struct HeldVault {
     vault: Option<Vault>,
     path: Option<PathBuf>,
+}
+
+impl HeldVault {
+    /// Close a vault that another file replaced (ADR 0013). When it is still
+    /// unlocked, each run that waits in it gets its denial first, as at a lock.
+    fn retire(self) {
+        if let Some(mut vault) = self.vault
+            && !vault.is_locked()
+        {
+            let _ = vault.end_waits(ENDED_BY_SWITCH);
+            let _ = vault.lock();
+        }
+    }
 }
 
 /// One revealed value. `Zeroizing` erases it when it is hidden, expires, or the vault

@@ -114,10 +114,12 @@ pub(super) fn locked_response() -> WireResponse {
     )
 }
 
+/// The owner can keep several vaults, and only one is open (ADR 0013). The text says
+/// that, but it names no other vault and no count.
 fn unauthenticated_response() -> WireResponse {
     WireResponse::failure(
         "unauthenticated",
-        "The agent token is not valid, or the owner revoked it.",
+        "The agent token is not valid for the Apassy vault that is open now. The owner may have another vault open, or the owner revoked the token.",
     )
 }
 
@@ -431,13 +433,13 @@ fn call(
     params: &BTreeMap<String, String>,
 ) -> WireResponse {
     let vault = &ctx.vault;
-    let prepared = {
+    let (prepared, vault_file) = {
         let mut guard = lock(vault);
         let Some(vault) = guard.as_mut().filter(|vault| !vault.is_locked()) else {
             return locked_response();
         };
         match prepare(vault, token, item_id, operation, params) {
-            Ok(prepared) => prepared,
+            Ok(prepared) => (prepared, vault.path().to_path_buf()),
             Err(response) => return response,
         }
     };
@@ -454,8 +456,13 @@ fn call(
         ),
     };
     {
+        // The entry goes only to the vault of the call. The owner can open another
+        // vault during the call (ADR 0013).
         let mut guard = lock(vault);
-        if let Some(vault) = guard.as_mut().filter(|vault| !vault.is_locked()) {
+        if let Some(vault) = guard
+            .as_mut()
+            .filter(|vault| !vault.is_locked() && vault.path() == vault_file)
+        {
             let _ = vault.record_activity(&NewActivity {
                 agent_id: Some(prepared.agent.id),
                 agent_name: prepared.agent.name.clone(),

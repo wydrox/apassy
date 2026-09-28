@@ -3,7 +3,7 @@
 //! It resolves the protected paths, finds the SBPL profile, and replaces
 //! itself with `/usr/bin/sandbox-exec`. The host (Claude Code, Codex) and every
 //! command that the host starts then run inside the profile. They cannot read,
-//! copy, or replace the vault, the backup, or the Laya model. They cannot
+//! copy, or replace a vault, the backup, or the Laya model. They cannot
 //! start, read, or change the programs in the Apassy app bundle, except
 //! `apassy-mcp` and `apassy-hook`. They can still connect to the broker
 //! socket, so `apassy-mcp` keeps working.
@@ -15,6 +15,10 @@
 //!   --data-dir DIR      The Apassy data directory. Default:
 //!                       `$HOME/Library/Application Support/Apassy`.
 //!   --vault-file FILE   The vault database. Default: `<data-dir>/vault.db`.
+//!                       Each vault in `<data-dir>/vaults.json` is denied too
+//!                       (ADR 0013): the data directory covers a vault in it,
+//!                       and a vault outside it gets its own profile parameter,
+//!                       `APASSY_VAULT_FILE_2` to `APASSY_VAULT_FILE_16`.
 //!   --backup-file FILE  The backup database. Default: `<vault-file>.backup`.
 //!   --socket FILE       The broker socket. Default: `$APASSY_BROKER_SOCKET`,
 //!                       else `<data-dir>/broker.sock`.
@@ -33,6 +37,11 @@
 //! The host name and its arguments follow `--`. Set the host environment (for
 //! example `APASSY_AGENT_TOKEN`) before you start this launcher; the launcher
 //! passes the environment through to the host.
+//!
+//! The launcher fails closed. It stops with an error when the vault list cannot
+//! be read or is not valid, because then it cannot name each vault file, and
+//! when the list has more vault files outside the data directory than the
+//! profile has parameters for.
 //!
 //! This program uses only `std` and no `unsafe`. `CommandExt::exec` replaces the
 //! process image; it is a safe call that returns an error if the exec fails.
@@ -57,6 +66,9 @@ const SOCKET_ENV: &str = "APASSY_BROKER_SOCKET";
 const DEFAULT_APP: &str = "/Applications/Apassy.app";
 /// The app bundle that `scripts/build-app.sh` writes into the target directory.
 const BUILD_APP_NAME: &str = "Apassy.app";
+/// The profile has the parameters `APASSY_VAULT_FILE_2` to `APASSY_VAULT_FILE_16`
+/// for vault files outside the data directory.
+const MAX_EXTRA_VAULTS: usize = 15;
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -120,6 +132,9 @@ fn run(args: &[String]) -> Result<(), String> {
         .or_else(|| env::var_os(SOCKET_ENV).map(PathBuf::from))
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| data_dir.join("broker.sock"));
+    // Every vault of the list (ADR 0013). A list that cannot be read stops the
+    // launcher: the profile cannot deny a vault file that it does not know.
+    let listed = listed_vaults(&data_dir)?;
 
     let app = parsed
         .app
@@ -150,6 +165,12 @@ fn run(args: &[String]) -> Result<(), String> {
     let home_dir = resolve(&home_dir);
     let app = resolve(&app);
     let app_build = app_build.as_deref().map(resolve);
+    let extra_vaults = extra_vault_files(&data_dir, &vault_file, &listed)?;
+    let extra_params: Vec<(String, PathBuf)> = extra_vaults
+        .into_iter()
+        .enumerate()
+        .map(|(index, path)| (format!("APASSY_VAULT_FILE_{}", index + 2), path))
+        .collect();
 
     let mut command = Command::new(SANDBOX_EXEC);
     command.arg("-f").arg(&profile);
@@ -157,6 +178,9 @@ fn run(args: &[String]) -> Result<(), String> {
     command
         .arg("-D")
         .arg(param("APASSY_VAULT_FILE", &vault_file)?);
+    for (key, path) in &extra_params {
+        command.arg("-D").arg(param(key, path)?);
+    }
     command
         .arg("-D")
         .arg(param("APASSY_BACKUP_FILE", &backup_file)?);
@@ -170,19 +194,23 @@ fn run(args: &[String]) -> Result<(), String> {
     command.args(&parsed.host[1..]);
 
     if parsed.print {
-        print_command(
-            &profile,
-            &[
-                ("APASSY_DATA_DIR", Some(&data_dir)),
-                ("APASSY_VAULT_FILE", Some(&vault_file)),
-                ("APASSY_BACKUP_FILE", Some(&backup_file)),
-                ("APASSY_SOCKET", Some(&socket)),
-                ("APASSY_HOME", Some(&home_dir)),
-                ("APASSY_APP", Some(&app)),
-                ("APASSY_APP_BUILD", app_build.as_ref()),
-            ],
-            &parsed.host,
+        let mut params: Vec<(&str, Option<&PathBuf>)> = vec![
+            ("APASSY_DATA_DIR", Some(&data_dir)),
+            ("APASSY_VAULT_FILE", Some(&vault_file)),
+        ];
+        params.extend(
+            extra_params
+                .iter()
+                .map(|(key, path)| (key.as_str(), Some(path))),
         );
+        params.extend([
+            ("APASSY_BACKUP_FILE", Some(&backup_file)),
+            ("APASSY_SOCKET", Some(&socket)),
+            ("APASSY_HOME", Some(&home_dir)),
+            ("APASSY_APP", Some(&app)),
+            ("APASSY_APP_BUILD", app_build.as_ref()),
+        ]);
+        print_command(&profile, &params, &parsed.host);
         return Ok(());
     }
 
@@ -261,6 +289,49 @@ fn param(key: &str, path: &Path) -> Result<String, String> {
         .to_str()
         .ok_or_else(|| format!("the path for {key} is not valid UTF-8: {}", path.display()))?;
     Ok(format!("{key}={text}"))
+}
+
+/// The vault files of the list in `data_dir` (ADR 0013). No list gives none. A
+/// list that cannot be read, or that is not valid, is an error.
+fn listed_vaults(data_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    match apassy::vaults::Registry::read(data_dir) {
+        Ok(None) => Ok(Vec::new()),
+        Ok(Some(registry)) => Ok(registry
+            .entries()
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect()),
+        Err(err) => Err(format!(
+            "cannot use the vault list {}: {err}. The profile cannot deny a vault file that the launcher does not know, so the host does not start. Open Apassy once: it moves a damaged list aside and makes a new one. Then start the launcher again.",
+            apassy::vaults::registry_path(data_dir).display()
+        )),
+    }
+}
+
+/// The listed vault files that need their own profile parameter: each one outside
+/// `data_dir` (the subtree deny covers the others) and other than `vault_file`,
+/// once, resolved. More than [`MAX_EXTRA_VAULTS`] is an error.
+fn extra_vault_files(
+    data_dir: &Path,
+    vault_file: &Path,
+    listed: &[PathBuf],
+) -> Result<Vec<PathBuf>, String> {
+    let mut extra: Vec<PathBuf> = Vec::new();
+    for path in listed {
+        let path = resolve(path);
+        if path.starts_with(data_dir) || path == vault_file || extra.contains(&path) {
+            continue;
+        }
+        extra.push(path);
+    }
+    if extra.len() > MAX_EXTRA_VAULTS {
+        return Err(format!(
+            "the vault list has {} vault files outside {}. The profile can deny at most {MAX_EXTRA_VAULTS}, so the host does not start. Move vaults into the data directory, or remove vaults from the list in Apassy (Settings > Vaults).",
+            extra.len(),
+            data_dir.display()
+        ));
+    }
+    Ok(extra)
 }
 
 /// Resolve symlinks. Canonicalize the path, or, if it does not exist yet, the
@@ -350,7 +421,11 @@ Usage:
 
 Options:
   --data-dir DIR      Apassy data directory (default: the Application Support path)
-  --vault-file FILE   vault database (default: <data-dir>/vault.db)
+  --vault-file FILE   vault database (default: <data-dir>/vault.db). Each vault
+                      in <data-dir>/vaults.json is denied too; a vault outside
+                      the data directory gets APASSY_VAULT_FILE_2 to _16. The
+                      launcher stops when the list cannot be read or has more
+                      than 15 such vaults.
   --backup-file FILE  backup database (default: <vault-file>.backup)
   --socket FILE       broker socket (default: <data-dir>/broker.sock)
   --home DIR          owner home directory for the autostart denials (default: $HOME)
@@ -365,3 +440,104 @@ Examples (turn off only the host's inner sandbox; keep its approval prompts):
   apassy-sandbox -- claude --settings '{\"sandbox\":{\"enabled\":false}}'
   apassy-sandbox -- codex -c sandbox_mode=danger-full-access
 ";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!(
+            "apassy-sandbox-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        resolve(&dir)
+    }
+
+    #[test]
+    fn only_vaults_outside_the_data_directory_get_a_parameter() {
+        let root = temp_dir("extra");
+        let data = root.join("d");
+        let vault = data.join("vault.db");
+        let listed = vec![
+            vault.clone(),
+            data.join("vaults").join("work.db"),
+            root.join("elsewhere").join("client.db"),
+            root.join("elsewhere").join("client.db"),
+            root.join("other.db"),
+        ];
+        let extra = extra_vault_files(&data, &vault, &listed).expect("extra");
+        assert_eq!(
+            extra,
+            vec![
+                root.join("elsewhere").join("client.db"),
+                root.join("other.db")
+            ]
+        );
+        // A vault outside the data directory can be the --vault-file one.
+        let chosen = root.join("other.db");
+        let extra = extra_vault_files(&data, &chosen, &listed).expect("extra");
+        assert_eq!(extra, vec![root.join("elsewhere").join("client.db")]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn more_vaults_than_the_profile_supports_fail_closed() {
+        let root = temp_dir("many");
+        let data = root.join("d");
+        let listed: Vec<PathBuf> = (0..MAX_EXTRA_VAULTS)
+            .map(|index| root.join(format!("v{index}.db")))
+            .collect();
+        let extra = extra_vault_files(&data, &data.join("vault.db"), &listed).expect("15 fit");
+        assert_eq!(extra.len(), MAX_EXTRA_VAULTS);
+        let mut too_many = listed;
+        too_many.push(root.join("v-last.db"));
+        let err =
+            extra_vault_files(&data, &data.join("vault.db"), &too_many).expect_err("16 do not fit");
+        assert!(err.contains("16 vault files outside"), "{err}");
+        assert!(err.contains("does not start"), "{err}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_damaged_vault_list_fails_closed_and_no_list_is_fine() {
+        let data = temp_dir("list");
+        assert_eq!(
+            listed_vaults(&data).expect("no list"),
+            Vec::<PathBuf>::new()
+        );
+        std::fs::write(data.join("vaults.json"), "{ not json").expect("bad list");
+        let err = listed_vaults(&data).expect_err("a damaged list");
+        assert!(err.contains("cannot use the vault list"), "{err}");
+        assert!(err.contains("does not start"), "{err}");
+        std::fs::write(data.join("vaults.json"), r#"{"version":7,"vaults":[]}"#)
+            .expect("newer list");
+        assert!(listed_vaults(&data).is_err(), "a newer list fails closed");
+        let mut registry = apassy::vaults::Registry::new();
+        registry
+            .add("Work", Path::new("/Volumes/Work/work.db"), 1)
+            .expect("add");
+        registry.save(&data).expect("save");
+        assert_eq!(
+            listed_vaults(&data).expect("list"),
+            vec![PathBuf::from("/Volumes/Work/work.db")]
+        );
+        let _ = std::fs::remove_dir_all(data);
+    }
+
+    /// The profile has one rule for each parameter that the launcher can pass.
+    #[test]
+    fn the_profile_has_a_rule_for_each_vault_parameter() {
+        let profile = include_str!("../../sandbox/apassy-agent-host.sb");
+        for number in 2..=MAX_EXTRA_VAULTS + 1 {
+            let rule = format!(
+                "(if (param \"APASSY_VAULT_FILE_{number}\") (apassy-protect-vault (param \"APASSY_VAULT_FILE_{number}\")))"
+            );
+            assert!(profile.contains(&rule), "missing: {rule}");
+        }
+        assert!(!profile.contains(&format!("APASSY_VAULT_FILE_{}", MAX_EXTRA_VAULTS + 2)));
+    }
+}

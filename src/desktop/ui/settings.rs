@@ -20,6 +20,7 @@ use crate::vault::DEFAULT_TOKEN_LIFETIME_DAYS;
 pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     kit::page_header(ui, "Settings", None, |_| {});
     vault_section(app, ui);
+    super::vaults::settings_section(app, ui);
     security_section(app, ui);
     backup_section(app, ui);
     agents_section(app, ui);
