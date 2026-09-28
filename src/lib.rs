@@ -14,6 +14,9 @@ pub mod desktop;
 
 pub mod native;
 pub mod paths;
+/// The list of vaults on this computer (ADR 0013). It needs no feature, so the
+/// sandbox launcher reads it.
+pub mod vaults;
 
 /// Experimental trusted-process vault APIs.
 ///

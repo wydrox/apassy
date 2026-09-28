@@ -411,7 +411,7 @@ impl OwnerFlows {
 }
 
 impl DesktopApp {
-    fn approvals(&self) -> Option<Arc<ApprovalQueue>> {
+    pub(crate) fn approvals(&self) -> Option<Arc<ApprovalQueue>> {
         match &self.broker {
             BrokerState::Running(handle) => Some(Arc::clone(handle.approvals())),
             _ => None,

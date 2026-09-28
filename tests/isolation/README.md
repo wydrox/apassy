@@ -25,6 +25,10 @@ in the product profile and checks the boundary:
   result. No secret leaks.
 - A process in the profile cannot read, copy, overwrite, or replace the vault,
   a backup, or a file under a fake Laya directory.
+- A vault in the vault list outside the data directory is denied too
+  (`profile_denies_a_listed_vault_outside_the_data_directory`). The launcher
+  passes it as `APASSY_VAULT_FILE_2` and stops on a damaged list or on more
+  than 15 such vaults (`launcher_*` tests, ADR 0013).
 - Ordinary work still runs: it reads the project directory and writes a
   temporary file. Child processes of the sandboxed process work.
 - `ps eww` and `ps -E` in the profile do not show the environment of a process

@@ -148,6 +148,9 @@ struct Checked {
     agent: AgentSummary,
     /// Vault epoch of the first check. Every lock and unlock changes it.
     epoch: [u8; 32],
+    /// The vault file of the first check. Each entry of the run goes only to it, also
+    /// when the owner opens another vault during the run (ADR 0013).
+    vault_file: PathBuf,
     cwd: PathBuf,
     /// Canonical project directory of the first item. Remembered patterns bind to it.
     project_dir: PathBuf,
@@ -341,7 +344,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
 
     if !needs_approval {
         let entry = logged.entry(Outcome::Automatic { by_pattern }, &risk_note);
-        record_decision_locked(ctx, &entry, pattern.as_ref());
+        record_decision_locked(ctx, &checked, &entry, pattern.as_ref());
         if let Some(call) = shadow_call.take() {
             call.finish(RealOutcome::Run, OwnerLabel::None);
         }
@@ -394,7 +397,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
             let mut guard = lock(&ctx.vault);
             guard
                 .as_mut()
-                .filter(|vault| !vault.is_locked())
+                .filter(|vault| !vault.is_locked() && vault.path() == checked.vault_file)
                 .is_some_and(|vault| {
                     wait.as_ref()
                         .is_none_or(|ticket| vault.end_wait(ticket).unwrap_or(true))
@@ -404,7 +407,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         // Every owner answer goes to the decision log. A denial blocks the pattern.
         let mut entry = logged.entry(Outcome::Owner(outcome), &risk_note);
         entry.at = learning::now();
-        record_decision_locked(ctx, &entry, pattern.as_ref());
+        record_decision_locked(ctx, &checked, &entry, pattern.as_ref());
         if let Some(call) = shadow_call.take() {
             let owner = match outcome {
                 ApprovalOutcome::Approved | ApprovalOutcome::ApprovedAndRemembered => {
@@ -435,7 +438,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
             if own_entry {
                 record_locked(
                     ctx,
-                    &checked.agent,
+                    &checked,
                     request,
                     &label,
                     ActivityDecision::Deny,
@@ -532,7 +535,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                 let reason = "The run proxy did not start. The command did not run.";
                 record_locked(
                     ctx,
-                    &checked.agent,
+                    &checked,
                     request,
                     &label,
                     ActivityDecision::Error,
@@ -580,7 +583,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
             } else {
                 ActivityDecision::Allow
             };
-            record_locked(ctx, &checked.agent, request, &label, decision, &reason);
+            record_locked(ctx, &checked, request, &label, decision, &reason);
             let mut answer = json!({
                 "exit_code": output.exit_code,
                 "timed_out": output.timed_out,
@@ -606,7 +609,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
             let reason = "The command did not start. Check the program name and PATH.";
             record_locked(
                 ctx,
-                &checked.agent,
+                &checked,
                 request,
                 &label,
                 ActivityDecision::Error,
@@ -779,6 +782,7 @@ fn check(
     Ok(Checked {
         agent: agent.clone(),
         epoch: vault.epoch(),
+        vault_file: vault.path().to_path_buf(),
         project_dir: project_dir.unwrap_or_else(|| cwd.clone()),
         cwd,
         relative_dir: relative_dir.unwrap_or_else(|| ".".to_owned()),
@@ -918,25 +922,32 @@ fn record(
 /// Store a decision log entry when the vault is unlocked (ADR 0009).
 fn record_decision_locked(
     ctx: &BrokerContext,
+    checked: &Checked,
     entry: &DecisionEntry,
     pattern: Option<&learning::RequestPattern>,
 ) {
     let mut guard = lock(&ctx.vault);
-    if let Some(vault) = guard.as_mut().filter(|vault| !vault.is_locked()) {
+    if let Some(vault) = guard
+        .as_mut()
+        .filter(|vault| !vault.is_locked() && vault.path() == checked.vault_file)
+    {
         let _ = learning::record(vault, entry, pattern);
     }
 }
 
 fn record_locked(
     ctx: &BrokerContext,
-    agent: &AgentSummary,
+    checked: &Checked,
     request: &RunRequest<'_>,
     label: &str,
     decision: ActivityDecision,
     reason: &str,
 ) {
     let mut guard = lock(&ctx.vault);
-    if let Some(vault) = guard.as_mut().filter(|vault| !vault.is_locked()) {
-        record(vault, agent, request, label, decision, reason);
+    if let Some(vault) = guard
+        .as_mut()
+        .filter(|vault| !vault.is_locked() && vault.path() == checked.vault_file)
+    {
+        record(vault, &checked.agent, request, label, decision, reason);
     }
 }

@@ -399,6 +399,11 @@ fn hint(code: &str) -> Option<&'static str> {
         "token_expired" => Some(
             "Tell the user: the Apassy agent token of this MCP server expired. In the Apassy app, open Agents and click \"Rotate token\". Put the new token in APASSY_AGENT_TOKEN of the MCP server configuration, then restart the MCP server. Do not retry before that.",
         ),
+        // ADR 0013: the owner can keep several vaults, one open at a time. The text
+        // names no vault and no count.
+        "unauthenticated" => Some(
+            "Tell the user: Apassy did not accept the agent token of this MCP server. The token is not valid for the vault that is open in Apassy now. If the user keeps several vaults, the user opens and unlocks the vault where this agent is registered. If the user revoked the agent or rotated its token, the user puts a new token from Agents in APASSY_AGENT_TOKEN of the MCP server configuration and restarts the MCP server. Do not retry before that.",
+        ),
         "review_required" => Some(
             "Tell the user: the Apassy vault was restored from a backup. In the Apassy app, open the item, examine its agent settings, and click \"Confirm settings\". Do not retry before that.",
         ),
@@ -503,6 +508,29 @@ mod tests {
         assert!(text.contains("APASSY_AGENT_TOKEN"), "{text}");
         let other = tool_result(WireResponse::failure("not_granted", "No."));
         assert_eq!(other["content"][0]["text"], "not_granted: No.");
+    }
+
+    /// ADR 0013: a token of a vault that is not open gets a clear next step. The text
+    /// names no other vault.
+    #[test]
+    fn a_token_for_another_vault_gives_the_user_a_next_step() {
+        let reply = tool_result(WireResponse::failure(
+            "unauthenticated",
+            "The agent token is not valid for the Apassy vault that is open now. The owner may have another vault open, or the owner revoked the token.",
+        ));
+        assert_eq!(reply["isError"], true);
+        let text = reply["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(
+            text.starts_with("unauthenticated: The agent token is not valid for the Apassy vault that is open now."),
+            "{text}"
+        );
+        assert!(
+            text.contains("opens and unlocks the vault where this agent is registered"),
+            "{text}"
+        );
+        assert!(text.contains("APASSY_AGENT_TOKEN"), "{text}");
+        assert!(text.contains("Do not retry"), "{text}");
+        assert!(!text.contains("vaults.json"), "{text}");
     }
 
     #[test]
