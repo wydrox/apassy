@@ -232,6 +232,11 @@ pub struct NewItem {
     /// `reversible`, `partial`, `irreversible`. Default `irreversible`.
     #[serde(default)]
     pub reversibility: Option<String>,
+    /// A host rule covers the host and every subdomain. A host that is a public
+    /// suffix or a whole registrable domain (`example.com`) is refused unless this is
+    /// true. A known host of the provider is not broad.
+    #[serde(default)]
+    pub allow_broad_host: bool,
 }
 
 /// Write side of `NewItem`.
@@ -251,6 +256,8 @@ pub struct NewItemRef<'a> {
     pub scope: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reversibility: Option<&'a str>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub allow_broad_host: bool,
 }
 
 /// An item without its value. Members see the items of their granted collections.
@@ -312,6 +319,15 @@ pub struct AgentView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Created {
     pub id: u64,
+}
+
+/// The result of `POST /v1/items`: the id and the hosts the value may go to. Each
+/// host covers its subdomains too.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemCreated {
+    pub id: u64,
+    #[serde(default)]
+    pub hosts: Vec<String>,
 }
 
 /// `POST /v1/runs` (agent token), and the MCP tool `apassy_request_run`.
@@ -505,11 +521,21 @@ mod tests {
             risk: None,
             scope: None,
             reversibility: None,
+            allow_broad_host: false,
         };
         let text = serde_json::to_string(&sent).unwrap();
+        assert!(!text.contains("allow_broad_host"), "{text}");
         let read: NewItem = serde_json::from_str(&text).unwrap();
         assert_eq!(read.value.expose(), "sk_test_synthetic_canary_0123456789");
+        assert!(!read.allow_broad_host);
         assert!(!format!("{read:?}").contains("canary"));
+        let text = serde_json::to_string(&NewItemRef {
+            allow_broad_host: true,
+            ..sent
+        })
+        .unwrap();
+        let read: NewItem = serde_json::from_str(&text).unwrap();
+        assert!(read.allow_broad_host);
     }
 
     #[test]

@@ -174,7 +174,7 @@ apassy-team item add --collection 1 --name "Stripe test" --env STRIPE_API_KEY \
 apassy-team invite --role member --hours 72 > invite-code-file
 ```
 
-An item needs at least one host. A provider that the core knows, such as `stripe`, brings its hosts. For another API, give `--host api.example.com`. Add `--environment production` for a production credential: every run with it waits for an approver.
+An item needs at least one host. A provider that the core knows, such as `stripe`, brings its hosts. For another API, give `--host api.example.com`. A host covers every subdomain too, so give the exact API host. The relay refuses a public suffix (`herokuapp.com`, `github.io`, `supabase.co`) and a whole domain (`example.com`): someone else may own a subdomain of it. Add `--allow-broad-host` only when you own every subdomain; the audit records it. Add `--environment production` for a production credential: every run with it waits for an approver.
 
 The member joins with the code. The code works once:
 

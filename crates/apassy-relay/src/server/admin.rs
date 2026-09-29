@@ -12,8 +12,8 @@ use serde_json::{Value, json};
 
 use crate::api::{
     AccessItem, AccessView, AgentCreate, AgentView, CollectionCreate, CollectionView, Created,
-    GrantCreate, GrantView, InviteRequest, InviteView, IssuedRef, ItemView, JoinRequest, MeView,
-    MemberView, NewItem, Policy, PolicyMode, PrincipalKind, Role,
+    GrantCreate, GrantView, InviteRequest, InviteView, IssuedRef, ItemCreated, ItemView,
+    JoinRequest, MeView, MemberView, NewItem, Policy, PolicyMode, PrincipalKind, Role,
 };
 use crate::error::{RelayError, RelayResult, codes};
 use crate::ids::{AgentId, CollectionId, GrantId, InviteId, ItemId, MemberId};
@@ -488,12 +488,17 @@ pub fn item_create(core: &Core, by: &MemberAuth, request: NewItem, now: u64) -> 
         ));
     }
     let value = &request.value;
+    // Printable ASCII only, and no quote or backslash: JSON writes such a value as
+    // it is, so a JSON echo of it in a response is found and hidden.
     if value.is_empty()
         || value.len() > MAX_VALUE_BYTES
-        || value.expose().contains(['\0', '\n', '\r'])
+        || !value
+            .expose()
+            .bytes()
+            .all(|b| (b' '..=b'~').contains(&b) && b != b'"' && b != b'\\')
     {
         return Err(RelayError::invalid(
-            "The value is 1 to 4096 bytes with no NUL and no newline.",
+            "The value is 1 to 4096 bytes of printable ASCII, with no quote (\") and no backslash.",
         ));
     }
     let provider = match request.provider.as_deref() {
@@ -515,12 +520,26 @@ pub fn item_create(core: &Core, by: &MemberAuth, request: NewItem, now: u64) -> 
         return Err(RelayError::invalid("A relay item needs at least one host."));
     }
     let mut hosts: Vec<String> = Vec::new();
+    let mut broad_hosts: Vec<String> = Vec::new();
+    let provider_hosts = provider.as_deref().map_or(&[][..], providers::known_hosts);
     for text in &host_texts {
         let rule = HostRule::parse(text).map_err(RelayError::invalid)?;
         let shown = rule.to_string();
-        if !hosts.contains(&shown) {
-            hosts.push(shown);
+        if hosts.contains(&shown) {
+            continue;
         }
+        if let Some(why) = broad_host(rule.host(), provider_hosts) {
+            if !request.allow_broad_host {
+                return Err(RelayError::new(
+                    codes::BROAD_HOST,
+                    format!(
+                        "The host {shown} is {why}. A host covers every subdomain too, and other people may own some of them. Give the exact API host, such as api.example.com, or allow a broad host on purpose (apassy-team item add --allow-broad-host)."
+                    ),
+                ));
+            }
+            broad_hosts.push(shown.clone());
+        }
+        hosts.push(shown);
     }
     if hosts.len() > MAX_ITEM_HOSTS {
         return Err(RelayError::invalid("An item has at most 16 hosts."));
@@ -599,12 +618,35 @@ pub fn item_create(core: &Core, by: &MemberAuth, request: NewItem, now: u64) -> 
             &json!({
                 "item_id": id, "collection_id": request.collection_id, "name": name,
                 "env_name": env_name, "provider": provider, "hosts": hosts,
-                "environment": environment
+                "environment": environment, "broad_hosts": broad_hosts
             }),
         )?;
         Ok(id)
     })?;
-    created(id)
+    to_json(&ItemCreated { id, hosts })
+}
+
+/// Why a host is broad, or `None`. A host rule covers the host and every subdomain.
+/// - A public suffix (`com`, `herokuapp.com`, `github.io`, `s3.amazonaws.com`) has
+///   subdomains of many owners. It is always broad.
+/// - A whole domain under a public (ICANN) suffix (`example.com`, `example.co.uk`)
+///   has subdomains that other teams or customers may own. A known host of the
+///   provider of the item is not broad in this way: the provider owns it. A domain
+///   under a private suffix (`myapp.herokuapp.com`) belongs to one customer.
+///
+/// The public suffix list is compiled in (`psl`).
+pub fn broad_host(host: &str, provider_hosts: &[String]) -> Option<&'static str> {
+    let bytes = host.as_bytes();
+    if psl::suffix(bytes).is_some_and(|suffix| suffix.as_bytes() == bytes) {
+        return Some("a public suffix");
+    }
+    let whole = psl::domain(bytes).is_some_and(|domain| {
+        domain.as_bytes() == bytes && domain.suffix().typ() != Some(psl::Type::Private)
+    });
+    if whole && !provider_hosts.iter().any(|known| known == host) {
+        return Some("a whole domain");
+    }
+    None
 }
 
 pub fn item_list(
@@ -940,4 +982,90 @@ pub fn access(core: &Core, agent: &AgentAuth) -> RelayResult<Value> {
             note: note.to_string(),
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn broad_hosts_are_public_suffixes_and_whole_domains() {
+        for host in [
+            "com",
+            "herokuapp.com",
+            "azurewebsites.net",
+            "github.io",
+            "workers.dev",
+            "s3.amazonaws.com",
+            "co.uk",
+            "localhost",
+        ] {
+            assert_eq!(broad_host(host, &[]), Some("a public suffix"), "{host}");
+        }
+        for host in [
+            "example.com",
+            "amazonaws.com",
+            "example.co.uk",
+            "stripe.com",
+        ] {
+            assert_eq!(broad_host(host, &[]), Some("a whole domain"), "{host}");
+        }
+        for host in [
+            "api.example.com",
+            "api.stripe.com",
+            "myapp.herokuapp.com",
+            "mybucket.s3.amazonaws.com",
+            "api.example.co.uk",
+            "other.example.test",
+        ] {
+            assert_eq!(broad_host(host, &[]), None, "{host}");
+        }
+        // A known host of the provider of the item is not broad as a whole domain.
+        let aws = providers::known_hosts("aws");
+        assert!(aws.iter().any(|h| h == "amazonaws.com"));
+        assert_eq!(broad_host("amazonaws.com", aws), None);
+        assert_eq!(
+            broad_host("amazonaws.com", providers::known_hosts("stripe")),
+            Some("a whole domain")
+        );
+        // A public suffix stays broad even when a provider lists it.
+        let listed = ["github.io".to_owned()];
+        assert_eq!(broad_host("github.io", &listed), Some("a public suffix"));
+    }
+
+    #[test]
+    fn provider_default_hosts_that_are_broad() {
+        let catalog = [
+            "anthropic",
+            "aws",
+            "cloudflare",
+            "datadog",
+            "gcp",
+            "github",
+            "neon",
+            "netlify",
+            "openai",
+            "planetscale",
+            "resend",
+            "sendgrid",
+            "sentry",
+            "stripe",
+            "supabase",
+            "twilio",
+            "vercel",
+        ];
+        let mut suffixes = Vec::new();
+        for id in catalog {
+            let known = providers::known_hosts(id);
+            for host in known {
+                if broad_host(host, known).is_some() {
+                    suffixes.push(host.clone());
+                }
+            }
+        }
+        // Each project of Supabase is a subdomain of supabase.co, and googleapis.com
+        // hosts customer content: both are on the public suffix list. Such an item
+        // needs the exact host (`<project>.supabase.co`) or `allow_broad_host`.
+        assert_eq!(suffixes, vec!["googleapis.com", "supabase.co"]);
+    }
 }

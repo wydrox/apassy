@@ -142,6 +142,14 @@ fn wait_until_decided(
                     }
                 }
             }
+            // A busy relay is like a lost connection: wait and ask again.
+            Err(CallError::Api(e)) if e.is_busy() => {
+                failures += 1;
+                if failures >= POLL_RETRIES {
+                    return Err(CallError::Api(e).into_cli());
+                }
+                std::thread::sleep(Duration::from_secs(2));
+            }
             Err(CallError::Transport(message)) => {
                 failures += 1;
                 if failures >= POLL_RETRIES {

@@ -294,6 +294,7 @@ mod tests {
             session_ttl_secs: 60,
             approval_timeout_secs: 30,
             upstream: Default::default(),
+            limits: Default::default(),
         };
         let store = Store::create(&config).unwrap();
         store

@@ -316,15 +316,21 @@ impl Proxy {
             )));
         }
 
-        // The response: values back to placeholders in the headers and the body.
+        // The response: values back to placeholders in the headers and the body. The
+        // encoded forms that this request sent (Basic, query) go first, so an echo of
+        // the request shows the placeholder and not an encoded value.
         let pairs = || -> Vec<Pair> {
-            session
-                .secrets
+            swapped
+                .echoes
                 .iter()
-                .map(|s| Pair {
+                .map(|echo| Pair {
+                    from: Zeroizing::new(echo.sent.as_bytes().to_vec()),
+                    to: echo.shown.as_bytes().to_vec(),
+                })
+                .chain(session.secrets.iter().map(|s| Pair {
                     from: Zeroizing::new(s.value.expose().as_bytes().to_vec()),
                     to: s.placeholder.expose().as_bytes().to_vec(),
-                })
+                }))
                 .collect()
         };
         let header_replacer = Replacer::new(pairs());
@@ -422,6 +428,13 @@ fn refusal_error(refusal: &Refusal, session: &LiveSession) -> RelayError {
             codes::WRONG_HOST,
             format!(
                 "The placeholder of {} is not for this host.",
+                session.secrets[*index].env_name
+            ),
+        ),
+        Refusal::NoEcho { index } => RelayError::new(
+            codes::NOT_SUPPORTED,
+            format!(
+                "The relay cannot hide the encoded value of {} in the response.",
                 session.secrets[*index].env_name
             ),
         ),

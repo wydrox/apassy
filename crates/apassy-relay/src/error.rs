@@ -24,6 +24,7 @@ pub mod codes {
     pub const NOT_GRANTED: &str = "not_granted";
     pub const ITEM_ARCHIVED: &str = "item_archived";
     pub const PLACEHOLDER_IMPOSSIBLE: &str = "placeholder_impossible";
+    pub const BROAD_HOST: &str = "broad_host";
     // Hard rules (the same codes as the core broker).
     pub const RULE_EXPIRED: &str = "rule_expired";
     pub const RULE_COMMAND_NOT_PERMITTED: &str = "rule_command_not_permitted";
@@ -43,6 +44,8 @@ pub mod codes {
     pub const NOT_SUPPORTED: &str = "not_supported";
     pub const UPSTREAM_FAILED: &str = "upstream_failed";
     pub const ENCODED_RESPONSE: &str = "encoded_response";
+    // Load.
+    pub const BUSY: &str = "busy";
     // Anything else.
     pub const RELAY_ERROR: &str = "relay_error";
 }
@@ -51,7 +54,7 @@ pub mod codes {
 pub fn status_of(code: &str) -> u16 {
     use codes::*;
     match code {
-        INVALID_REQUEST | PLACEHOLDER_IMPOSSIBLE => 400,
+        INVALID_REQUEST | PLACEHOLDER_IMPOSSIBLE | BROAD_HOST => 400,
         UNAUTHENTICATED | TOKEN_EXPIRED => 401,
         EDGE_REFUSED
         | FORBIDDEN
@@ -73,6 +76,7 @@ pub fn status_of(code: &str) -> u16 {
         PAYLOAD_TOO_LARGE => 413,
         NOT_SUPPORTED => 501,
         UPSTREAM_FAILED | ENCODED_RESPONSE => 502,
+        BUSY => 503,
         _ => 500,
     }
 }
@@ -148,6 +152,7 @@ mod tests {
             403
         );
         assert_eq!(RelayError::new(codes::UPSTREAM_FAILED, "x").status(), 502);
+        assert_eq!(RelayError::new(codes::BUSY, "x").status(), 503);
         assert_eq!(RelayError::internal("x").status(), 500);
         assert_eq!(status_of("something_new"), 500);
     }

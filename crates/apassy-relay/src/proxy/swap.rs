@@ -54,6 +54,17 @@ pub(super) enum Refusal {
     Misplaced { index: usize, place: &'static str },
     /// The placeholder of secret `index` goes to a host that it is not for.
     WrongHost { index: usize },
+    /// The encoded value of secret `index` has no encoded placeholder of the same
+    /// length, so the relay could not hide it in the response.
+    NoEcho { index: usize },
+}
+
+/// An encoded form of a value that the relay sent upstream, and the same form of
+/// the placeholder. Both have the same length. The response gets `shown` in place
+/// of `sent`, so an upstream host that echoes the request gives back no value.
+pub(super) struct Echo {
+    pub sent: Zeroizing<String>,
+    pub shown: String,
 }
 
 /// The request for the service after the swap, and the secrets that went into it.
@@ -61,6 +72,9 @@ pub(super) struct Swapped {
     pub target: Zeroizing<String>,
     pub headers: Vec<(String, Zeroizing<String>)>,
     pub used: Vec<usize>,
+    /// The encoded forms of values in this request (Basic, query). The raw values
+    /// are searched anyway.
+    pub echoes: Vec<Echo>,
 }
 
 /// Headers that the relay never forwards: the hop-by-hop ones, the ones it sets
@@ -117,7 +131,8 @@ pub(super) fn swap_request(
         Ok(())
     };
 
-    let target = swap_target(target, secrets, &mut take)?;
+    let mut echoes = Vec::new();
+    let target = swap_target(target, secrets, &mut take, &mut echoes)?;
     let mut out_headers: Vec<(String, Zeroizing<String>)> = Vec::with_capacity(headers.len());
     for (name, value) in headers {
         if dropped_header(name) {
@@ -125,9 +140,9 @@ pub(super) fn swap_request(
         }
         let lower = name.to_ascii_lowercase();
         let swapped = if lower == "authorization" {
-            swap_authorization(value, secrets, &mut take)?
+            swap_authorization(value, secrets, &mut take, &mut echoes)?
         } else if KEY_HEADERS.contains(&lower.as_str()) {
-            swap_key_header(value, secrets, &mut take)?
+            swap_key_header(value, secrets, &mut take, &mut echoes)?
         } else {
             None
         };
@@ -149,6 +164,7 @@ pub(super) fn swap_request(
         target,
         headers: out_headers,
         used,
+        echoes,
     })
 }
 
@@ -168,6 +184,7 @@ fn swap_authorization(
     value: &str,
     secrets: &[SwapSecret<'_>],
     take: &mut impl FnMut(usize) -> Result<(), Refusal>,
+    echoes: &mut Vec<Echo>,
 ) -> Result<Option<Zeroizing<String>>, Refusal> {
     if let Some(index) = exact_placeholder(value, secrets) {
         take(index)?;
@@ -178,7 +195,7 @@ fn swap_authorization(
     };
     let credentials = credentials.trim();
     if scheme.eq_ignore_ascii_case("basic") {
-        return swap_basic(scheme, credentials, secrets, take);
+        return swap_basic(scheme, credentials, secrets, take, echoes);
     }
     if let Some(index) = exact_placeholder(credentials, secrets) {
         take(index)?;
@@ -198,6 +215,7 @@ fn swap_basic(
     credentials: &str,
     secrets: &[SwapSecret<'_>],
     take: &mut impl FnMut(usize) -> Result<(), Refusal>,
+    echoes: &mut Vec<Echo>,
 ) -> Result<Option<Zeroizing<String>>, Refusal> {
     let Ok(decoded) = BASE64_STANDARD
         .decode(credentials)
@@ -233,6 +251,9 @@ fn swap_basic(
             });
         }
     }
+    // The credentials as the agent knows them, with the placeholders: an echo of
+    // the sent credentials is shown as this text.
+    let shown = BASE64_STANDARD.encode(text.as_bytes());
     let user = match user_index {
         Some(index) => {
             take(index)?;
@@ -252,6 +273,15 @@ fn swap_basic(
     plain.push(':');
     plain.push_str(password);
     let encoded = Zeroizing::new(BASE64_STANDARD.encode(plain.as_bytes()));
+    if encoded.len() != shown.len() {
+        // A value and its placeholder always have the same length, so this is a bug.
+        let index = user_index.or(password_index).unwrap_or(0);
+        return Err(Refusal::NoEcho { index });
+    }
+    echoes.push(Echo {
+        sent: encoded.clone(),
+        shown,
+    });
     let mut out = Zeroizing::new(String::with_capacity(scheme.len() + 1 + encoded.len()));
     out.push_str(scheme);
     out.push(' ');
@@ -264,12 +294,13 @@ fn swap_key_header(
     value: &str,
     secrets: &[SwapSecret<'_>],
     take: &mut impl FnMut(usize) -> Result<(), Refusal>,
+    echoes: &mut Vec<Echo>,
 ) -> Result<Option<Zeroizing<String>>, Refusal> {
     if let Some(index) = exact_placeholder(value, secrets) {
         take(index)?;
         return Ok(Some(Zeroizing::new(secrets[index].value.to_owned())));
     }
-    swap_authorization(value, secrets, take)
+    swap_authorization(value, secrets, take, echoes)
 }
 
 /// Swaps a placeholder in a known key parameter of the query. A placeholder in the
@@ -278,6 +309,7 @@ fn swap_target(
     target: &str,
     secrets: &[SwapSecret<'_>],
     take: &mut impl FnMut(usize) -> Result<(), Refusal>,
+    echoes: &mut Vec<Echo>,
 ) -> Result<Zeroizing<String>, Refusal> {
     let (path, query) = match target.split_once('?') {
         Some((path, query)) => (path, Some(query)),
@@ -308,9 +340,13 @@ fn swap_target(
             && KEY_PARAMS.contains(&name_lower.as_str())
         {
             take(index)?;
+            let secret = &secrets[index];
+            let echo =
+                query_echoes(secret.value, secret.placeholder).ok_or(Refusal::NoEcho { index })?;
             out.push_str(name);
             out.push('=');
-            percent_encode_into(secrets[index].value, &mut out);
+            out.push_str(&echo[0].sent);
+            echoes.extend(echo);
             continue;
         }
         if let Some(index) =
@@ -357,17 +393,60 @@ fn hex(byte: u8) -> Option<u8> {
     }
 }
 
-fn percent_encode_into(value: &str, out: &mut String) {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+/// True for a byte that stays as it is in a query value.
+fn unreserved(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"-._~".contains(&byte)
+}
+
+/// Writes `text` percent-encoded. A byte is escaped when it is not unreserved or
+/// when `escape_at` is true for its position. `upper` picks the case of the hex digits.
+fn percent_encode_into(
+    text: &str,
+    escape_at: impl Fn(usize) -> bool,
+    upper: bool,
+    out: &mut String,
+) {
+    let hex: &[u8; 16] = if upper {
+        b"0123456789ABCDEF"
+    } else {
+        b"0123456789abcdef"
+    };
+    for (position, byte) in text.bytes().enumerate() {
+        if unreserved(byte) && !escape_at(position) {
             out.push(char::from(byte));
         } else {
             out.push('%');
-            out.push(char::from(HEX[usize::from(byte >> 4)]));
-            out.push(char::from(HEX[usize::from(byte & 15)]));
+            out.push(char::from(hex[usize::from(byte >> 4)]));
+            out.push(char::from(hex[usize::from(byte & 15)]));
         }
     }
+}
+
+/// The percent-encoded forms of a value in a query parameter, with the same forms of
+/// its placeholder: first the form the relay sends (upper-case hex), then the
+/// lower-case one when it differs. The placeholder is escaped at each position where
+/// the value is, so each pair has the same length. `None` when the placeholder needs
+/// an escape where the value does not (a placeholder from `mint` never does).
+fn query_echoes(value: &str, placeholder: &str) -> Option<Vec<Echo>> {
+    if value.len() != placeholder.len() {
+        return None;
+    }
+    let escaped = |position: usize| !unreserved(value.as_bytes()[position]);
+    let mut echoes = Vec::with_capacity(2);
+    for upper in [true, false] {
+        let mut sent = Zeroizing::new(String::with_capacity(value.len() * 3));
+        percent_encode_into(value, |_| false, upper, &mut sent);
+        let mut shown = String::with_capacity(sent.len());
+        percent_encode_into(placeholder, escaped, upper, &mut shown);
+        if sent.len() != shown.len() {
+            return None;
+        }
+        if !upper && echoes.iter().any(|echo: &Echo| *echo.sent == *sent) {
+            continue;
+        }
+        echoes.push(Echo { sent, shown });
+    }
+    Some(echoes)
 }
 
 #[cfg(test)]
@@ -381,7 +460,7 @@ mod tests {
     fn secrets<'a>(hosts: &'a [HostRule]) -> Vec<SwapSecret<'a>> {
         vec![
             SwapSecret {
-                placeholder: "ph_AAAAAAAAAAAAAAAAAAAA",
+                placeholder: "ph_AAAAAAAAAAAAAAAAAAAAAA",
                 value: "REAL-ONE-value/with+chars",
                 hosts,
             },
@@ -413,13 +492,13 @@ mod tests {
         let secrets = secrets(&hosts);
         let request = headers(&[
             ("Host", "api.example.com"),
-            ("Authorization", "Bearer ph_AAAAAAAAAAAAAAAAAAAA"),
-            ("X-Api-Key", "ph_AAAAAAAAAAAAAAAAAAAA"),
+            ("Authorization", "Bearer ph_AAAAAAAAAAAAAAAAAAAAAA"),
+            ("X-Api-Key", "ph_AAAAAAAAAAAAAAAAAAAAAA"),
             ("Accept-Encoding", "gzip"),
             ("Proxy-Authorization", "Basic eDp5"),
         ]);
         let swapped = swap_request(
-            "/v1/x?key=ph_AAAAAAAAAAAAAAAAAAAA&q=1",
+            "/v1/x?key=ph_AAAAAAAAAAAAAAAAAAAAAA&q=1",
             &request,
             "api.example.com",
             443,
@@ -443,7 +522,7 @@ mod tests {
         assert!(header(&swapped, "Host").is_none());
         assert_eq!(swapped.used, vec![0]);
 
-        let basic = BASE64_STANDARD.encode(b"x-access-token:ph_AAAAAAAAAAAAAAAAAAAA");
+        let basic = BASE64_STANDARD.encode(b"x-access-token:ph_AAAAAAAAAAAAAAAAAAAAAA");
         let request = headers(&[("Authorization", &format!("Basic {basic}"))]);
         let swapped =
             swap_request("/", &request, "sub.api.example.com", 443, &secrets).expect("basic");
@@ -458,7 +537,7 @@ mod tests {
     fn basic_swaps_the_user_and_the_password() {
         let hosts = [rule("api.example.com")];
         let secrets = secrets(&hosts);
-        let both = BASE64_STANDARD.encode(b"ph_AAAAAAAAAAAAAAAAAAAA:ph_AAAAAAAAAAAAAAAAAAAA");
+        let both = BASE64_STANDARD.encode(b"ph_AAAAAAAAAAAAAAAAAAAAAA:ph_AAAAAAAAAAAAAAAAAAAAAA");
         let request = headers(&[("Authorization", &format!("Basic {both}"))]);
         let swapped = swap_request("/", &request, "api.example.com", 443, &secrets).expect("swap");
         let expected =
@@ -482,7 +561,7 @@ mod tests {
         let hosts = [rule("api.example.com")];
         let secrets = secrets(&hosts);
         for name in KEY_HEADERS {
-            let request = headers(&[(name, "Bearer ph_AAAAAAAAAAAAAAAAAAAA")]);
+            let request = headers(&[(name, "Bearer ph_AAAAAAAAAAAAAAAAAAAAAA")]);
             let swapped =
                 swap_request("/", &request, "api.example.com", 443, &secrets).expect(name);
             assert_eq!(
@@ -492,7 +571,7 @@ mod tests {
             );
         }
         for name in KEY_PARAMS {
-            let target = format!("/?{}=ph_AAAAAAAAAAAAAAAAAAAA", name.to_ascii_uppercase());
+            let target = format!("/?{}=ph_AAAAAAAAAAAAAAAAAAAAAA", name.to_ascii_uppercase());
             let swapped = swap_request(&target, &[], "api.example.com", 443, &secrets).expect(name);
             assert!(swapped.target.contains("REAL-ONE-value%2Fwith%2Bchars"));
         }
@@ -503,7 +582,7 @@ mod tests {
         let hosts = [rule("api.example.com")];
         let secrets = secrets(&hosts);
         let swapped = swap_request(
-            "/?ap%69_key=ph_AAAAAAAAAAAAAAAAAAA%41",
+            "/?ap%69_key=ph_AAAAAAAAAAAAAAAAAAAAA%41",
             &[],
             "api.example.com",
             443,
@@ -525,7 +604,7 @@ mod tests {
                 .err()
                 .expect("refusal")
         };
-        let bearer_a = [("Authorization", "Bearer ph_AAAAAAAAAAAAAAAAAAAA")];
+        let bearer_a = [("Authorization", "Bearer ph_AAAAAAAAAAAAAAAAAAAAAA")];
         let bearer_b = [("Authorization", "Bearer ph_BBBBBBBBBBBBBBBBBBBB")];
         assert_eq!(
             refused("/", &bearer_a, "evil.example.net"),
@@ -538,33 +617,33 @@ mod tests {
         assert!(matches!(
             refused(
                 "/",
-                &[("User-Agent", "x ph_AAAAAAAAAAAAAAAAAAAA")],
+                &[("User-Agent", "x ph_AAAAAAAAAAAAAAAAAAAAAA")],
                 "api.example.com"
             ),
             Refusal::Misplaced { index: 0, .. }
         ));
         assert!(matches!(
-            refused("/store/ph_AAAAAAAAAAAAAAAAAAAA", &[], "api.example.com"),
+            refused("/store/ph_AAAAAAAAAAAAAAAAAAAAAA", &[], "api.example.com"),
             Refusal::Misplaced { index: 0, .. }
         ));
         assert!(matches!(
-            refused("/store/ph_AAAAAAAAAAAAAAAAAAA%41", &[], "api.example.com"),
+            refused("/store/ph_AAAAAAAAAAAAAAAAAAAAA%41", &[], "api.example.com"),
             Refusal::Misplaced { index: 0, .. }
         ));
         assert!(matches!(
-            refused("/?note=ph_AAAAAAAAAAAAAAAAAAAA", &[], "api.example.com"),
+            refused("/?note=ph_AAAAAAAAAAAAAAAAAAAAAA", &[], "api.example.com"),
             Refusal::Misplaced { index: 0, .. }
         ));
         assert!(matches!(
             refused(
-                "/?note=x&key=a%20ph_AAAAAAAAAAAAAAAAAAAA",
+                "/?note=x&key=a%20ph_AAAAAAAAAAAAAAAAAAAAAA",
                 &[],
                 "api.example.com"
             ),
             Refusal::Misplaced { index: 0, .. }
         ));
         // A Basic part with more text.
-        let text = BASE64_STANDARD.encode(b"user:pw-ph_AAAAAAAAAAAAAAAAAAAA");
+        let text = BASE64_STANDARD.encode(b"user:pw-ph_AAAAAAAAAAAAAAAAAAAAAA");
         assert!(matches!(
             refused(
                 "/",
@@ -573,7 +652,8 @@ mod tests {
             ),
             Refusal::Misplaced { index: 0, .. }
         ));
-        let mixed = BASE64_STANDARD.encode(b"ph_AAAAAAAAAAAAAAAAAAAA:pw-ph_AAAAAAAAAAAAAAAAAAAA");
+        let mixed =
+            BASE64_STANDARD.encode(b"ph_AAAAAAAAAAAAAAAAAAAAAA:pw-ph_AAAAAAAAAAAAAAAAAAAAAA");
         assert!(matches!(
             refused(
                 "/",
@@ -590,7 +670,7 @@ mod tests {
         // A placeholder in a header that is dropped does not stop the request.
         let swapped = swap_request(
             "/",
-            &headers(&[("X-Forwarded-For", "ph_AAAAAAAAAAAAAAAAAAAA")]),
+            &headers(&[("X-Forwarded-For", "ph_AAAAAAAAAAAAAAAAAAAAAA")]),
             "api.example.com",
             443,
             &secrets,
@@ -644,10 +724,63 @@ mod tests {
     }
 
     #[test]
+    fn encoded_values_have_encoded_placeholders_of_the_same_length() {
+        let hosts = [rule("api.example.com")];
+        let secrets = secrets(&hosts);
+        let swapped = swap_request(
+            "/?key=ph_AAAAAAAAAAAAAAAAAAAAAA",
+            &[],
+            "api.example.com",
+            443,
+            &secrets,
+        )
+        .expect("swap");
+        let pairs: Vec<(&str, &str)> = swapped
+            .echoes
+            .iter()
+            .map(|echo| (echo.sent.as_str(), echo.shown.as_str()))
+            .collect();
+        // `/` and `+` of the value are escaped, so the placeholder is escaped at the
+        // same places. The lower-case form of the escapes is there too.
+        assert_eq!(
+            pairs,
+            vec![
+                (
+                    "REAL-ONE-value%2Fwith%2Bchars",
+                    "ph_AAAAAAAAAAA%41AAAA%41AAAAA"
+                ),
+                (
+                    "REAL-ONE-value%2fwith%2bchars",
+                    "ph_AAAAAAAAAAA%41AAAA%41AAAAA"
+                ),
+            ]
+        );
+        assert_eq!(percent_decode(pairs[0].1), "ph_AAAAAAAAAAAAAAAAAAAAAA");
+
+        let basic = BASE64_STANDARD.encode(b"robot:ph_AAAAAAAAAAAAAAAAAAAAAA");
+        let request = headers(&[("Authorization", &format!("Basic {basic}"))]);
+        let swapped = swap_request("/", &request, "api.example.com", 443, &secrets).expect("swap");
+        let sent = BASE64_STANDARD.encode(b"robot:REAL-ONE-value/with+chars");
+        assert_eq!(swapped.echoes.len(), 1);
+        assert_eq!(swapped.echoes[0].sent.as_str(), sent);
+        assert_eq!(swapped.echoes[0].shown, basic);
+
+        // A placeholder that needs an escape where its value does not has no echo.
+        assert!(query_echoes("abc/def", "abcdef/").is_none());
+        assert!(query_echoes("abc", "abcd").is_none());
+        let plain = query_echoes("abcdef", "uvwxyz").expect("no escapes");
+        assert_eq!(plain.len(), 1);
+        assert_eq!(plain[0].shown, "uvwxyz");
+    }
+
+    #[test]
     fn percent_coding_round_trips() {
         assert_eq!(percent_decode("a%2Fb+c%zz%4"), "a/b c%zz%4");
         let mut out = String::new();
-        percent_encode_into("a/b c~-._", &mut out);
+        percent_encode_into("a/b c~-._", |_| false, true, &mut out);
         assert_eq!(out, "a%2Fb%20c~-._");
+        let mut out = String::new();
+        percent_encode_into("a/b", |position| position == 0, false, &mut out);
+        assert_eq!(out, "%61%2fb");
     }
 }

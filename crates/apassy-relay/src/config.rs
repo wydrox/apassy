@@ -50,6 +50,29 @@ impl Default for UpstreamOptions {
     }
 }
 
+/// The limits of the HTTP layer. Not read from the environment. Tests set small ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// The most requests handled at once. More get 503 `busy`.
+    pub max_active: usize,
+    /// Slots that agent requests (the proxy, `/mcp`, `/v1/runs`, `/v1/access`) never
+    /// take, so members, approvers, and `/healthz` always get an answer.
+    pub member_reserve: usize,
+    /// The most long polls of one agent at once. A poll over this is answered at
+    /// once, as with `wait=0`.
+    pub long_polls_per_agent: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_active: 256,
+            member_reserve: 32,
+            long_polls_per_agent: 4,
+        }
+    }
+}
+
 /// Everything the relay server needs to start.
 #[derive(Debug, Clone)]
 pub struct RelayConfig {
@@ -62,6 +85,7 @@ pub struct RelayConfig {
     pub session_ttl_secs: u64,
     pub approval_timeout_secs: u64,
     pub upstream: UpstreamOptions,
+    pub limits: Limits,
 }
 
 impl RelayConfig {
@@ -121,6 +145,7 @@ impl RelayConfig {
             session_ttl_secs,
             approval_timeout_secs,
             upstream: UpstreamOptions::default(),
+            limits: Limits::default(),
         })
     }
 }

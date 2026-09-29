@@ -100,6 +100,7 @@ Binaries:
 | `sha2` | `=0.11.0` | token hashes |
 | `base64` | `=0.23.1` | Basic auth in the swap |
 | `httparse` | `=1.10.1` | upstream response heads |
+| `psl` | `=2.1.238` | the public suffix list, compiled in: broad item hosts |
 | `tiny_http` | `=0.12.0`, no features | inbound HTTP/1.1 server (plain HTTP) |
 | `ureq` | `=3.4.2`, feature `rustls` (ring, webpki roots) | HTTPS client of the CLI, and HTTP calls in tests |
 | dev: `rcgen`, `tempfile` | `=0.14.10`, `=3.27.0` | test CA for the mock upstream, temp dirs |
@@ -194,8 +195,9 @@ Item rules at `POST /v1/items`:
 - `name`: 1 to 64 bytes, no control characters. `env_name`: `apassy::vault::checked_env_name`. It must not be `PATH`, `HOME`, or one of the base URL names in section 11, and must not start with `APASSY_`.
 - `provider`: if set, `apassy::vault::providers::find` must know it. Hosts default to `providers::known_hosts(id)`.
 - `hosts`: 1 to 16 after defaults; each `HostRule::parse` (lowercase name, optional port). No host: 400 `invalid_request` ("A relay item needs at least one host.").
+- A host covers itself and every subdomain. A broad host is refused with 400 `broad_host`, unless `allow_broad_host` is true. A broad host is a public suffix (`com`, `herokuapp.com`, `github.io`, `supabase.co`), or a whole domain under a public (ICANN) suffix (`example.com`, `example.co.uk`). A known host of the item's provider is not broad as a whole domain (`amazonaws.com` for `aws`). A domain under a private suffix (`myapp.herokuapp.com`) belongs to one customer, so it is not broad. The public suffix list is compiled in with the `psl` crate. The audit row `item_added` names the allowed broad hosts in `broad_hosts`.
 - `environment`, `risk`, `scope`, `reversibility`: `Environment::parse` and the others of the core. Defaults: risk `high`, scope `admin`, reversibility `irreversible` (the core defaults).
-- `value`: 1 to 4096 bytes, no NUL, no newline. `proxy::mint(value)` must return a placeholder, else 400 `placeholder_impossible`.
+- `value`: 1 to 4096 bytes of printable ASCII (space to `~`), with no quote (`"`) and no backslash. JSON writes such a value as it is, so a JSON echo of it in a response is found. `proxy::mint(value)` must return a placeholder, else 400 `placeholder_impossible`.
 - The value is never returned by any endpoint.
 
 ## 9. HTTP API
@@ -203,6 +205,7 @@ Item rules at `POST /v1/items`:
 - Plain HTTP/1.1 on one port. JSON bodies at most 64 KiB (`api::MAX_JSON_BODY`), else 413 `payload_too_large`. Unknown fields are refused where the type says `deny_unknown_fields`.
 - Every JSON response is the core envelope (`api::Envelope`): `{"ok":true,"result":...}` or `{"ok":false,"error":{"code":"...","message":"..."}}`. The HTTP status comes from `error::status_of(code)`.
 - `Content-Type: application/json` on every JSON response. `Cache-Control: no-store` on every `/v1` and `/mcp` response.
+- Load (`config::Limits`, not read from the environment). At most 256 requests run at once. Agent paths (`/p/`, `/mcp`, `/v1/runs`, `/v1/access`) can be slow, so they take at most 256 - 32 of them. The other 32 are kept for members, approvers, and `/healthz`. A request over a limit gets 503 `busy` as an envelope, with `Retry-After: 2`. `apassy-team run` asks again after a `busy` answer while it waits.
 - Auth column: `edge` = edge header only; `member` = edge + member bearer; `approver` = member bearer with role owner or manager; `owner` = owner bearer; `agent` = edge + agent bearer; `any` = member or agent bearer.
 
 | Method and path | Auth | Body | Result |
@@ -217,7 +220,7 @@ Item rules at `POST /v1/items`:
 | `POST /v1/collections` | approver | `CollectionCreate {name, policy?}` | `Created {id}` |
 | `GET /v1/collections` | member | | `[CollectionView]`: all for approvers, granted ones for members |
 | `PUT /v1/collections/{id}/policy` | approver | `Policy` | `CollectionView` |
-| `POST /v1/items` | approver | `NewItem` | `Created {id}` |
+| `POST /v1/items` | approver | `NewItem` | `ItemCreated {id, hosts}` |
 | `GET /v1/items?collection={id}` | member | | `[ItemView]`: live items; members see granted collections only |
 | `DELETE /v1/items/{id}` | approver | | `Created {id}`; archives the item and ends sessions that hold it |
 | `POST /v1/grants` | approver | `GrantCreate` | `Created {id}` (409 `conflict` if a live grant exists) |
@@ -232,14 +235,14 @@ Item rules at `POST /v1/items`:
 | `GET /v1/audit?after={id}&limit={n}` | approver | | `[AuditEntry]`, id ascending, limit 1 to 500, default 100 |
 | `GET /v1/access` | agent | | `AccessView` |
 | `POST /v1/runs` | agent | `RunRequest` | `RunView` (`pending` or `ready`) |
-| `GET /v1/runs/{id}?wait={s}` | agent | | `RunView`. Only the agent that made the run; else 404. `wait` 0 to 25: while `pending`, hold the response up to that many seconds. |
+| `GET /v1/runs/{id}?wait={s}` | agent | | `RunView`. Only the agent that made the run; else 404. `wait` 0 to 25: while `pending`, hold the response up to that many seconds. An agent has at most 4 long polls open (`Limits::long_polls_per_agent`); a poll over that is answered at once, as with `wait=0`. |
 | `POST /mcp` | agent | JSON-RPC | section 14 |
 | `GET /mcp`, `DELETE /mcp` | agent | | 405 |
 | `ANY /p/{session key}/{host}/{path}` | edge | any | the upstream response, section 12 |
 
 Other paths: 404 `not_found`. A known path with another method: 405 `method_not_allowed`.
 
-Error codes are in `src/error.rs` (`codes`). The main ones: `invalid_request` 400, `placeholder_impossible` 400, `unauthenticated` 401, `token_expired` 401, `edge_refused` 403, `forbidden` 403, `invite_invalid` 403, `not_granted` 403, `item_archived` 403, `rule_expired` / `rule_command_not_permitted` / `rule_forbidden_word` / `rule_rate_limit` 403, `not_found` 404, `method_not_allowed` 405, `conflict` 409, `run_not_pending` 409, `payload_too_large` 413, `relay_error` 500. Proxy codes are in section 12. `approval_denied`, `approval_timeout`, `approval_invalidated` appear in `RunView.code`, not as HTTP errors.
+Error codes are in `src/error.rs` (`codes`). The main ones: `invalid_request` 400, `placeholder_impossible` 400, `broad_host` 400, `unauthenticated` 401, `token_expired` 401, `edge_refused` 403, `forbidden` 403, `invite_invalid` 403, `not_granted` 403, `item_archived` 403, `rule_expired` / `rule_command_not_permitted` / `rule_forbidden_word` / `rule_rate_limit` 403, `not_found` 404, `method_not_allowed` 405, `conflict` 409, `run_not_pending` 409, `payload_too_large` 413, `relay_error` 500, `busy` 503. Proxy codes are in section 12. `approval_denied`, `approval_timeout`, `approval_invalidated` appear in `RunView.code`, not as HTTP errors.
 
 `POST /v1/join`: the code must be a live invite (not used, not expired), else 403 `invite_invalid` (one message for every case). The name: 1 to 64 bytes of `[A-Za-z0-9._-]`, unique, else 409 `conflict`. The invite is marked used in the same transaction.
 
@@ -346,6 +349,7 @@ States of a run: `pending` → `ready` → `ended`, or `pending` → `denied` / 
 - `Content-Encoding` other than `identity`: 502 `encoded_response` (the body cannot be searched).
 - Drop hop-by-hop headers (`connection`, `keep-alive`, `transfer-encoding`, `trailer`, `upgrade`, `content-length`); tiny_http sets the framing again.
 - Replace every value of the session with its placeholder in every header value and in the body. Values and placeholders have the same length, so `Content-Length` does not change.
+- The encoded forms that this request sent are replaced first, so a host that echoes the request gives back no value: for Basic, `base64(user:value)` becomes the Base64 text that the agent sent; for a key query parameter, `percent_encode(value)` (upper-case and lower-case hex) becomes the placeholder, percent-encoded at the same places, so it has the same length. If no such form of the same length exists: 501 `not_supported`, and nothing goes upstream (a placeholder from `mint` always has one).
 - The body is streamed through a `Replacer` (a copy of the core one) that keeps a carry of `max value length - 1` bytes across reads, so a value split across two reads is still replaced. There is no size limit on responses. Framing: `Content-Length` (pass the length to tiny_http), `chunked` (decode, and give tiny_http a reader with no length), or read to close. `HEAD`, 204, and 304 have no body.
 - The response the client gets is the upstream status and headers. The relay adds nothing to a forwarded response.
 
@@ -420,7 +424,7 @@ Commands. A secret (member token, invite code, item value) is read from stdin, n
 | `invite [--role member\|manager] [--hours N]` | prints the code once on stdout |
 | `members`, `member revoke ID` | list, revoke |
 | `collection create NAME [policy flags]`, `collection list`, `collection policy ID [policy flags]` | policy flags: `--mode ask\|bouncer`, `--allow-prefix P` (repeat), `--forbid WORD` (repeat), `--max-runs-per-hour N`, `--instruction TEXT`, `--rule-expires-at UNIX` |
-| `item add --collection ID --name NAME --env ENV_NAME --environment ENV [--provider P] [--host H]... [--risk R] [--scope S] [--reversibility R]` | the value from stdin, one trailing newline removed; prints the id |
+| `item add --collection ID --name NAME --env ENV_NAME --environment ENV [--provider P] [--host H]... [--risk R] [--scope S] [--reversibility R] [--allow-broad-host]` | the value from stdin, one trailing newline removed; prints the id on stdout, and on stderr what each host covers ("api.example.com and every subdomain of it") |
 | `item list [--collection ID]`, `item archive ID` | |
 | `grant --collection ID --member ID`, `grants`, `revoke --grant ID` | |
 | `agent create NAME [--days N]`, `agent list`, `agent revoke ID` | `create` prints the token once |

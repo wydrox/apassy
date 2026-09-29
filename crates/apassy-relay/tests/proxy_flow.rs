@@ -25,6 +25,24 @@ const VALUE_B: &str = "ghp_SyntheticCanaryValueForGithub0123456789abcdefgh";
 const VALUE_Q: &str = "sk_test_51Synthetic/Canary+Value=0123456789abcdefABCDEF";
 const RELAY_HEADER: &str = "X-Apassy-Relay";
 
+/// `%XX` escapes decoded, for the tests.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap();
+            out.push(u8::from_str_radix(hex, 16).unwrap());
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap()
+}
+
 // ---------------------------------------------------------------------------
 // A test session source: a map of sessions and a list of recorded events.
 
@@ -400,8 +418,20 @@ fn basic_user_and_password_are_swapped() {
         h.upstream.requests()[0].header("authorization"),
         Some(format!("Basic {expected}").as_str())
     );
-    // The value is not in the answer in clear. (Its Base64 form is not searched.)
+    // The value is not in the answer in clear, and not in the Base64 form that the
+    // relay sent: the echo shows the credentials that the agent sent.
     assert!(!reply.text().contains(VALUE_A));
+    assert!(!reply.text().contains(&expected), "{}", reply.text());
+    assert_eq!(
+        reply.header("X-Echo-Authorization"),
+        Some(format!("Basic {password}").as_str())
+    );
+    assert_eq!(reply.json()["authorization"], format!("Basic {password}"));
+    let echoed = reply.json()["authorization"].as_str().unwrap().to_owned();
+    let decoded = BASE64_STANDARD
+        .decode(echoed.strip_prefix("Basic ").unwrap())
+        .unwrap();
+    assert_eq!(decoded, format!("robot:{}", h.placeholder_a).as_bytes());
 
     let user = BASE64_STANDARD.encode(format!("{}:", h.placeholder_a));
     let reply = h.get(
@@ -414,6 +444,8 @@ fn basic_user_and_password_are_swapped() {
         h.upstream.requests()[1].header("authorization"),
         Some(format!("Basic {expected}").as_str())
     );
+    assert!(!reply.text().contains(&expected), "{}", reply.text());
+    assert_eq!(reply.json()["authorization"], format!("Basic {user}"));
 }
 
 #[test]
@@ -445,9 +477,21 @@ fn a_key_query_parameter_is_swapped_with_percent_encoding() {
         target,
         "/v1/x?a=1&api_key=sk_test_51Synthetic%2FCanary%2BValue%3D0123456789abcdefABCDEF&b=2"
     );
-    // The raw value is not in the answer. (Its encoded form is the value of a
-    // different string, which the relay does not search.)
+    // The raw value is not in the answer, and not the encoded form that the relay
+    // sent: the echoed target decodes to the placeholder.
     assert!(!reply.text().contains(VALUE_Q));
+    let sent = "sk_test_51Synthetic%2FCanary%2BValue%3D0123456789abcdefABCDEF";
+    assert!(!reply.text().contains(sent), "{}", reply.text());
+    let echoed = reply.json()["target"].as_str().unwrap().to_owned();
+    let param = echoed
+        .split_once("api_key=")
+        .and_then(|(_, rest)| rest.split('&').next())
+        .unwrap()
+        .to_owned();
+    assert_eq!(param.len(), sent.len());
+    assert_eq!(percent_decode(&param), h.placeholder_q);
+    assert!(echoed.starts_with("/v1/x?a=1&api_key=sk_test_"), "{echoed}");
+    assert!(echoed.ends_with("&b=2"), "{echoed}");
     assert_eq!(h.last_event().swapped, vec!["QUERY_KEY".to_owned()]);
     // A percent-encoded name and value of a placeholder is swapped too.
     let encoded = h.placeholder_q.replacen("sk_", "%73k%5F", 1);

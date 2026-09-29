@@ -1,6 +1,7 @@
 //! The HTTP layer (docs/SPEC.md, "HTTP API").
 //!
-//! One accept loop, one thread per request. Order for each request: `GET /healthz`;
+//! One accept loop, one thread per request, with limits (`config::Limits`): agent
+//! paths leave a reserve of threads to members. Order for each request: `GET /healthz`;
 //! the edge secret; the proxy path `/p/`; the route (404, 405); the body (413); the
 //! token and its role; the endpoint. Every JSON answer is an envelope.
 
@@ -23,8 +24,8 @@ use crate::proxy::Proxy;
 use crate::server::auth::{self, Need, Principal};
 use crate::server::{Core, admin, approvals, decide, mcp};
 
-/// The most requests handled at once. More get 503.
-const MAX_ACTIVE: usize = 256;
+/// Seconds a client waits after 503 `busy` (`Retry-After`).
+pub const BUSY_RETRY_AFTER: &str = "2";
 /// Seconds between two sweeps of timed out runs and expired sessions.
 const MAINTENANCE_SECS: u64 = 5;
 
@@ -149,7 +150,36 @@ pub struct Serving {
     pub stop: Arc<AtomicBool>,
 }
 
-/// Accepts requests until `stop` is set.
+/// True for a path that agents use: the proxy, MCP, runs, and access. These
+/// requests can be slow (a long poll, a slow upstream host), so they never take the
+/// slots kept for members and approvers.
+pub fn is_agent_path(url: &str) -> bool {
+    let path = url.split_once('?').map_or(url, |(path, _)| path);
+    path.starts_with(paths::PROXY_PREFIX)
+        || path == "/mcp"
+        || path == "/v1/access"
+        || path == "/v1/runs"
+        || path.starts_with("/v1/runs/")
+}
+
+/// The request threads in use: all of them, and those of agent paths.
+struct Slots {
+    all: AtomicUsize,
+    agent: AtomicUsize,
+}
+
+impl Slots {
+    fn release(&self, agent: bool) {
+        self.all.fetch_sub(1, Ordering::Relaxed);
+        if agent {
+            self.agent.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Accepts requests until `stop` is set. At most `max_active` requests run at
+/// once, and agent paths leave `member_reserve` of them free. A request over a
+/// limit gets 503 `busy` with `Retry-After`.
 pub fn serve(serving: Serving) {
     let Serving {
         core,
@@ -157,28 +187,37 @@ pub fn serve(serving: Serving) {
         server,
         stop,
     } = serving;
-    let active = Arc::new(AtomicUsize::new(0));
+    let limits = core.config.limits;
+    let agent_max = limits.max_active.saturating_sub(limits.member_reserve);
+    let slots = Arc::new(Slots {
+        all: AtomicUsize::new(0),
+        agent: AtomicUsize::new(0),
+    });
     let mut last_maintenance = Instant::now();
     while !stop.load(Ordering::Relaxed) {
         match server.recv_timeout(Duration::from_millis(200)) {
             Ok(Some(request)) => {
-                if active.load(Ordering::Relaxed) >= MAX_ACTIVE {
-                    let _ = request.respond(Response::from_string("busy\n").with_status_code(503));
-                    continue;
-                }
-                active.fetch_add(1, Ordering::Relaxed);
-                let (core, proxy, active) = (core.clone(), proxy.clone(), active.clone());
-                let spawned = std::thread::Builder::new()
-                    .name("relay-request".to_string())
-                    .spawn({
-                        let active = active.clone();
-                        move || {
+                // Only the accept loop takes a slot, so a load and an add do not race.
+                let agent = is_agent_path(request.url());
+                let full = slots.all.load(Ordering::Relaxed) >= limits.max_active
+                    || (agent && slots.agent.load(Ordering::Relaxed) >= agent_max);
+                if full {
+                    respond_busy(request);
+                } else {
+                    slots.all.fetch_add(1, Ordering::Relaxed);
+                    if agent {
+                        slots.agent.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let (core, proxy, held) = (core.clone(), proxy.clone(), slots.clone());
+                    let spawned = std::thread::Builder::new()
+                        .name("relay-request".to_string())
+                        .spawn(move || {
                             handle(&core, &proxy, request);
-                            active.fetch_sub(1, Ordering::Relaxed);
-                        }
-                    });
-                if spawned.is_err() {
-                    active.fetch_sub(1, Ordering::Relaxed);
+                            held.release(agent);
+                        });
+                    if spawned.is_err() {
+                        slots.release(agent);
+                    }
                 }
             }
             Ok(None) => {}
@@ -216,6 +255,20 @@ fn respond_json(request: Request, status: u16, envelope: &Envelope, close: bool)
         .with_header(json_header())
         .with_header(no_store_header());
     if close && let Ok(header) = Header::from_bytes(&b"Connection"[..], &b"close"[..]) {
+        response.add_header(header);
+    }
+    let _ = request.respond(response);
+}
+
+/// 503 `busy` as an envelope, with `Retry-After`.
+fn respond_busy(request: Request) {
+    let error = RelayError::new(codes::BUSY, "The relay is busy. Try again in a moment.");
+    let body = serde_json::to_vec(&error.to_envelope()).unwrap_or_default();
+    let mut response = Response::from_data(body)
+        .with_status_code(error.status())
+        .with_header(json_header())
+        .with_header(no_store_header());
+    if let Ok(header) = Header::from_bytes(&b"Retry-After"[..], BUSY_RETRY_AFTER.as_bytes()) {
         response.add_header(header);
     }
     let _ = request.respond(response);
@@ -569,6 +622,30 @@ mod tests {
             codes::NOT_FOUND
         );
         assert_eq!(route("GET", "/v1/me/").unwrap_err().code, codes::NOT_FOUND);
+    }
+
+    #[test]
+    fn agent_paths_are_the_slow_ones() {
+        for url in [
+            "/p/apassy_ses_x/api.example.com/v1",
+            "/mcp",
+            "/v1/access",
+            "/v1/runs",
+            "/v1/runs/7?wait=25",
+        ] {
+            assert!(is_agent_path(url), "{url}");
+        }
+        for url in [
+            "/healthz",
+            "/v1/approvals/7/approve",
+            "/v1/approvals",
+            "/v1/me",
+            "/v1/runsx",
+            "/mcp/x",
+            "/v1/items?x=/p/",
+        ] {
+            assert!(!is_agent_path(url), "{url}");
+        }
     }
 
     #[test]

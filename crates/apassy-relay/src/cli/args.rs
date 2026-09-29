@@ -44,6 +44,8 @@ pub struct ItemAddArgs {
     pub risk: Option<String>,
     pub scope: Option<String>,
     pub reversibility: Option<String>,
+    /// Allow a host that is a public suffix or a whole domain.
+    pub allow_broad_host: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,7 +230,11 @@ impl Scan {
     }
 
     fn json(&self) -> bool {
-        self.switches.iter().any(|s| s == "json")
+        self.switch("json")
+    }
+
+    fn switch(&self, name: &str) -> bool {
+        self.switches.iter().any(|s| s == name)
     }
 
     /// Exactly `count` positional words.
@@ -300,7 +306,8 @@ Team (owner or manager)
                     --max-runs-per-hour N  --instruction TEXT  --rule-expires-at UNIX
   item add --collection ID --name NAME --env ENV_NAME --environment ENV
            [--provider P] [--host H]... [--risk R] [--scope S] [--reversibility R]
-           (the value comes from stdin)
+           [--allow-broad-host]
+           (the value comes from stdin; a host covers its subdomains too)
   item list [--collection ID] | item archive ID
   grant --collection ID --member ID | grants | revoke --grant ID
   pending | approve RUN_ID [--reason TEXT] | deny RUN_ID [--reason TEXT]
@@ -475,7 +482,7 @@ fn item(rest: &[String]) -> Result<Command, CliError> {
                     "scope",
                     "reversibility",
                 ],
-                &[],
+                &["allow-broad-host"],
             )?;
             s.positional(
                 0,
@@ -491,6 +498,7 @@ fn item(rest: &[String]) -> Result<Command, CliError> {
                 risk: s.one("risk")?,
                 scope: s.one("scope")?,
                 reversibility: s.one("reversibility")?,
+                allow_broad_host: s.switch("allow-broad-host"),
             }))
         }
         Some("list") => {
@@ -703,6 +711,15 @@ mod tests {
         assert_eq!((a.collection, a.env_name.as_str()), (1, "STRIPE_API_KEY"));
         assert_eq!(a.hosts, vec!["a.example", "b.example"]);
         assert_eq!(a.risk.as_deref(), Some("low"));
+        assert!(!a.allow_broad_host);
+        let c =
+            p("item add --collection 1 --name N --env K --environment staging --allow-broad-host")
+                .unwrap();
+        let Command::ItemAdd(a) = c else {
+            panic!("wrong command")
+        };
+        assert!(a.allow_broad_host);
+        assert!(p("item add --collection 1 --name N --env K --environment staging --allow-broad-host=yes").is_err());
         assert_eq!(
             p("item list --collection 2").unwrap(),
             Command::ItemList {

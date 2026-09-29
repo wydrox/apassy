@@ -5,6 +5,7 @@
 //! `timed_out`. A timeout is checked lazily, at each read of a run and each list of
 //! approvals. Nothing here allows a run on an error.
 
+use std::collections::HashMap;
 use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -54,6 +55,55 @@ impl Notifier {
             .changed
             .wait_timeout(guard, timeout)
             .unwrap_or_else(PoisonError::into_inner);
+    }
+}
+
+/// The open long polls of each agent. One agent cannot hold many request threads by
+/// long polls: a poll over the limit is answered at once.
+pub struct LongPolls {
+    max: usize,
+    open: Mutex<HashMap<AgentId, usize>>,
+}
+
+/// One open long poll. Dropping it closes it.
+pub struct LongPoll<'a> {
+    polls: &'a LongPolls,
+    agent: AgentId,
+}
+
+impl LongPolls {
+    pub fn new(max: usize) -> Self {
+        Self {
+            max,
+            open: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Opens a long poll for `agent`, or `None` when it has `max` open.
+    pub fn enter(&self, agent: AgentId) -> Option<LongPoll<'_>> {
+        let mut open = self.open.lock().unwrap_or_else(PoisonError::into_inner);
+        let count = open.entry(agent).or_insert(0);
+        if *count >= self.max {
+            return None;
+        }
+        *count += 1;
+        Some(LongPoll { polls: self, agent })
+    }
+}
+
+impl Drop for LongPoll<'_> {
+    fn drop(&mut self) {
+        let mut open = self
+            .polls
+            .open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(count) = open.get_mut(&self.agent) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                open.remove(&self.agent);
+            }
+        }
     }
 }
 
@@ -524,13 +574,20 @@ pub fn deny(
 }
 
 /// `GET /v1/runs/{id}?wait=s`: the run of this agent. While it is pending, holds the
-/// response up to `wait` seconds.
+/// response up to `wait` seconds. An agent that has `long_polls_per_agent` long polls
+/// open gets the answer at once, as with `wait=0`.
 pub fn get_run(
     core: &Core,
     agent: &AgentAuth,
     run_id: RunId,
     wait_secs: u64,
 ) -> RelayResult<RunView> {
+    let poll = if wait_secs > 0 {
+        core.polls.enter(agent.id)
+    } else {
+        None
+    };
+    let wait_secs = if poll.is_some() { wait_secs } else { 0 };
     let deadline = Instant::now() + Duration::from_secs(wait_secs.min(MAX_WAIT_SECS));
     loop {
         let seen = core.notify.current();

@@ -72,6 +72,11 @@ impl ApiError {
             || self.code == crate::error::codes::NOT_GRANTED
             || self.code == crate::error::codes::ITEM_ARCHIVED
     }
+
+    /// 503 `busy`: the relay has no free request slot. A retry later can work.
+    pub fn is_busy(&self) -> bool {
+        self.code == crate::error::codes::BUSY
+    }
 }
 
 pub enum CallError {
@@ -213,6 +218,10 @@ pub fn parse_reply<T: DeserializeOwned>(status: u16, body: &str) -> Result<T, Ca
             code: error.code,
             message: error.message,
         })),
+        _ if status == 503 => Err(CallError::Transport(
+            "The relay or its edge is not available (HTTP 503 without an envelope). Try again later."
+                .to_owned(),
+        )),
         _ => Err(CallError::Transport(format!(
             "The relay answered with HTTP {status} and a body that is not an envelope. Is this the relay URL?"
         ))),
@@ -237,5 +246,22 @@ mod tests {
         }
         let junk: Result<u64, CallError> = parse_reply(502, "<html>bad gateway</html>");
         assert!(matches!(junk, Err(CallError::Transport(_))));
+        let busy: Result<u64, CallError> = parse_reply(
+            503,
+            r#"{"ok":false,"error":{"code":"busy","message":"The relay is busy."}}"#,
+        );
+        match busy {
+            Err(CallError::Api(e)) => {
+                assert!(e.is_busy());
+                let cli = CallError::Api(e).into_cli();
+                assert_eq!(cli.code, 4);
+                assert!(cli.message.contains("busy"), "{}", cli.message);
+            }
+            _ => panic!("expected an api error"),
+        }
+        match parse_reply::<u64>(503, "relay not configured") {
+            Err(CallError::Transport(message)) => assert!(message.contains("503"), "{message}"),
+            _ => panic!("expected a transport error"),
+        }
     }
 }

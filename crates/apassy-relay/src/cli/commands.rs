@@ -13,7 +13,7 @@ use zeroize::Zeroizing;
 use crate::api::{
     self, AccessView, AgentCreate, AgentView, ApprovalView, AuditEntry, CollectionCreate,
     CollectionView, Created, DecisionRequest, GrantCreate, GrantView, InviteRequest, InviteView,
-    Issued, ItemView, JoinRequestRef, MeView, MemberView, NewItemRef, Policy, RunView,
+    Issued, ItemCreated, ItemView, JoinRequestRef, MeView, MemberView, NewItemRef, Policy, RunView,
 };
 use crate::cli::CliError;
 use crate::cli::args::{Command, ItemAddArgs, USAGE};
@@ -543,10 +543,25 @@ fn item_add(settings: &Settings, args: &ItemAddArgs) -> Result<(), CliError> {
         risk: args.risk.as_deref(),
         scope: args.scope.as_deref(),
         reversibility: args.reversibility.as_deref(),
+        allow_broad_host: args.allow_broad_host,
     })?;
-    let done: Created = client.ok(Method::Post, api::paths::ITEMS, Some(&payload))?;
+    let done: ItemCreated = client.ok(Method::Post, api::paths::ITEMS, Some(&payload))?;
     println!("{}", done.id);
+    // The id goes to stdout for scripts. Where the value may go goes to stderr.
+    for host in &done.hosts {
+        eprintln!("The value may go to {}.", coverage(host));
+    }
     Ok(())
+}
+
+/// What a host rule covers, in words: `api.example.com and every subdomain of it`, and
+/// the port when it is not 443.
+pub fn coverage(host: &str) -> String {
+    let host = clean(host);
+    match host.rsplit_once(':') {
+        Some((name, port)) => format!("{name} and every subdomain of it, on port {port}"),
+        None => format!("{host} and every subdomain of it"),
+    }
 }
 
 fn decide(

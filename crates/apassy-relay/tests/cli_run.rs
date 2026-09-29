@@ -315,6 +315,23 @@ fn a_poll_error_from_the_relay_ends_the_run_with_exit_4() {
 }
 
 #[test]
+fn a_busy_relay_during_the_wait_is_asked_again() {
+    let mock = relay(
+        ok(run_view(5, "pending", None)),
+        vec![
+            err(503, "busy", "The relay is busy. Try again in a moment."),
+            ok(run_view(5, "ready", Some(session_env()))),
+        ],
+    );
+    let output = Cli::new().agent(&mock.url).run(
+        &["run", "--items", "1", "--purpose", "T", "--", "true"],
+        None,
+    );
+    assert_eq!(code(&output), 0, "{}", text(&output.stderr));
+    assert_eq!(mock.requests().len(), 3);
+}
+
+#[test]
 fn waiting_stops_after_the_wait_option() {
     let pending = || slow(ok(run_view(5, "pending", None)), 200);
     let mock = relay(

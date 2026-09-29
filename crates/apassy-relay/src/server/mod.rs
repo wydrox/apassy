@@ -32,7 +32,7 @@ use crate::config::RelayConfig;
 use crate::error::{RelayError, RelayResult};
 use crate::proxy::Proxy;
 use crate::secret::{SecretString, TokenKind, new_token, token_hash};
-use crate::server::approvals::Notifier;
+use crate::server::approvals::{LongPolls, Notifier};
 use crate::server::audit::{Audit, RELAY_ACTOR};
 use crate::server::sessions::SessionTable;
 use crate::server::store::{Store, db, load_all_items, to_i, to_u};
@@ -47,6 +47,8 @@ pub struct Core {
     /// The built-in rule packs of the core, loaded once at start.
     pub rules: RuleSet,
     pub notify: Notifier,
+    /// The open long polls of each agent.
+    pub polls: LongPolls,
     /// The host of the public URL. A command that names it is not a foreign host.
     pub public_host: String,
     stop: Arc<AtomicBool>,
@@ -202,6 +204,7 @@ impl Relay {
         let stop = Arc::new(AtomicBool::new(false));
         let core = Arc::new(Core {
             public_host: decide::public_host(&config.public_url),
+            polls: LongPolls::new(config.limits.long_polls_per_agent),
             config,
             store,
             audit,

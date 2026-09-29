@@ -377,6 +377,42 @@ fn item_add_sends_the_value_from_stdin_and_never_prints_it() {
     assert!(!text(&output.stderr).contains(CANARY));
     // The value is not in the arguments of the CLI either: it only came through stdin.
     assert!(!args.iter().any(|a| a.contains(CANARY)));
+    assert!(seen[0].json().get("allow_broad_host").is_none());
+}
+
+#[test]
+fn item_add_shows_what_each_host_covers_and_sends_allow_broad_host() {
+    let mock = Mock::always(
+        200,
+        json!({"id": 5, "hosts": ["example.com", "api.example.com:8443"]}),
+    );
+    let cli = Cli::new().member(&mock.url);
+    let args = [
+        "item",
+        "add",
+        "--collection",
+        "2",
+        "--name",
+        "Wide",
+        "--env",
+        "WIDE_KEY",
+        "--environment",
+        "staging",
+        "--host",
+        "example.com",
+        "--host",
+        "api.example.com:8443",
+        "--allow-broad-host",
+    ];
+    let output = cli.run(&args, Some(&format!("{CANARY}\n")));
+    assert_eq!(code(&output), 0, "{}", text(&output.stderr));
+    assert_eq!(mock.requests()[0].json()["allow_broad_host"], true);
+    assert_eq!(text(&output.stdout), "5\n");
+    assert_eq!(
+        text(&output.stderr),
+        "The value may go to example.com and every subdomain of it.\n\
+         The value may go to api.example.com and every subdomain of it, on port 8443.\n"
+    );
 }
 
 #[test]
@@ -531,6 +567,15 @@ fn missing_settings_and_a_dead_relay_have_clear_exit_codes() {
     let output = Cli::new().member(&mock.url).run(&["members"], None);
     assert_eq!(code(&output), 4);
     assert!(text(&output.stderr).contains("HTTP 502"));
+    // A busy relay: the code of the envelope is printed.
+    let mock = Mock::start(|_, _| err(503, "busy", "The relay is busy. Try again in a moment."));
+    let output = Cli::new().member(&mock.url).run(&["approve", "7"], None);
+    assert_eq!(code(&output), 4);
+    assert!(
+        text(&output.stderr).contains("relay: busy: The relay is busy."),
+        "{}",
+        text(&output.stderr)
+    );
 }
 
 #[test]

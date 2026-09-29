@@ -120,6 +120,73 @@ fn hosts_and_providers() {
 }
 
 #[test]
+fn a_broad_host_needs_allow_broad_host_and_is_audited() {
+    let relay = start(UpstreamOptions::default());
+    let c = relay.add_collection("c", json!({}));
+    // A host covers every subdomain. A public suffix or a whole domain would let the
+    // value go to a subdomain that someone else owns: refused.
+    for host in [
+        "herokuapp.com",
+        "azurewebsites.net",
+        "github.io",
+        "workers.dev",
+        "s3.amazonaws.com",
+        "amazonaws.com",
+        "example.com",
+        "example.co.uk",
+        "com",
+    ] {
+        let mut body = item_body(c, "BROAD_KEY_X", CANARY);
+        body["hosts"] = json!(["api.example.com", host]);
+        let (status, result) = add(&relay, &body);
+        assert_eq!(status, 400, "{host}: {result}");
+        assert_eq!(result["error"]["code"], "broad_host", "{host}");
+        let message = result["error"]["message"].as_str().unwrap();
+        assert!(message.contains(host), "{message}");
+        assert!(message.contains("--allow-broad-host"), "{message}");
+    }
+    // A provider default that is a public suffix is broad too.
+    let mut body = item_body(c, "SUPABASE_KEY_X", CANARY);
+    body["hosts"] = json!([]);
+    body["provider"] = json!("supabase");
+    assert_eq!(add(&relay, &body).1["error"]["code"], "broad_host");
+    // A known whole-domain host of the provider of the item is not broad.
+    let mut body = item_body(c, "AWS_KEY_X", CANARY);
+    body["hosts"] = json!([]);
+    body["provider"] = json!("aws");
+    let (status, result) = add(&relay, &body);
+    assert_eq!(status, 200, "{result}");
+    assert_eq!(result["result"]["hosts"], json!(["amazonaws.com"]));
+    // An exact host, and the host of one customer under a private suffix, pass. The
+    // answer shows the hosts.
+    let mut body = item_body(c, "APP_KEY_X", CANARY);
+    body["hosts"] = json!(["api.example.com", "myapp.herokuapp.com:8443"]);
+    let (status, result) = add(&relay, &body);
+    assert_eq!(status, 200, "{result}");
+    assert_eq!(
+        result["result"]["hosts"],
+        json!(["api.example.com", "myapp.herokuapp.com:8443"])
+    );
+    // On purpose: allowed, and the audit names the broad host.
+    let mut body = item_body(c, "BROAD_KEY_X", CANARY);
+    body["hosts"] = json!(["api.example.com", "example.com"]);
+    body["allow_broad_host"] = json!(true);
+    let (status, result) = add(&relay, &body);
+    assert_eq!(status, 200, "{result}");
+    let rows = relay.ok("GET", "/v1/audit?limit=500", &relay.owner_token, None);
+    let added: Vec<&serde_json::Value> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["action"] == "item_added")
+        .collect();
+    let last = added.last().unwrap();
+    assert_eq!(last["detail"]["env_name"], "BROAD_KEY_X");
+    assert_eq!(last["detail"]["broad_hosts"], json!(["example.com"]));
+    assert_eq!(added[0]["detail"]["broad_hosts"], json!([]));
+}
+
+#[test]
 fn declarations_and_defaults() {
     let relay = start(UpstreamOptions::default());
     let c = relay.add_collection("c", json!({}));
@@ -153,18 +220,29 @@ fn value_rules_and_placeholder_impossible() {
     let (status, body) = add(&relay, &item_body(c, "SHORT_KEY_X", "short"));
     assert_eq!(status, 400);
     assert_eq!(body["error"]["code"], "placeholder_impossible");
-    // Empty, NUL, newline, too long.
+    // Empty, NUL, newline, too long. A quote, a backslash, a control character, or a
+    // byte that is not ASCII: JSON would escape it, so a JSON echo of the value
+    // would not be found in a response.
     for bad in [
         String::new(),
         format!("{CANARY}\0x"),
         format!("{CANARY}\nx"),
         format!("{CANARY}\r"),
         "a".repeat(4097),
+        "sk_test_51Synth\"etic\\Canary0123456789abcdef".to_owned(),
+        format!("{CANARY}\"x"),
+        format!("{CANARY}\\x"),
+        format!("{CANARY}\tx"),
+        format!("{CANARY}\u{7f}"),
+        format!("{CANARY}\u{e9}"),
     ] {
         let (status, body) = add(&relay, &item_body(c, "BAD_VALUE_X", &bad));
         assert_eq!(status, 400, "{body}");
         assert_eq!(body["error"]["code"], "invalid_request");
     }
+    // Printable ASCII with a space and signs is fine.
+    let signs = "sk_test_51Synthetic/Canary+Value= with ~!@#$%^&*()";
+    assert_eq!(add(&relay, &item_body(c, "SIGNS_VALUE_X", signs)).0, 200);
     // A value of 4096 bytes with room for random characters is fine.
     let long = format!("sk_test_{}", "Ab1".repeat(1362));
     assert!(long.len() <= 4096);

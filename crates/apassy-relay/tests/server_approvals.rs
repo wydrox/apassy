@@ -5,7 +5,7 @@ mod relay;
 
 use std::time::{Duration, Instant};
 
-use apassy_relay::config::UpstreamOptions;
+use apassy_relay::config::{Limits, UpstreamOptions};
 use relay::{CANARY, Team, TestRelay, start, start_with};
 use serde_json::{Value, json};
 
@@ -531,4 +531,196 @@ fn the_approval_list_is_oldest_first() {
     );
     let list = relay.ok("GET", "/v1/approvals", &relay.owner_token, None);
     assert_eq!(list.as_array().unwrap().len(), 2);
+}
+
+/// A raw HTTP/1.1 request, for the status line and the headers of an answer.
+fn raw_get(relay: &TestRelay, path: &str, token: &str) -> (u16, String, String) {
+    use std::io::{Read, Write};
+    let addr = relay.url.trim_start_matches("http://");
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: relay\r\nX-Apassy-Edge: {}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n",
+        relay.edge_secret
+    )
+    .unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    let (head, body) = answer.split_once("\r\n\r\n").unwrap();
+    let status = head.split(' ').nth(1).unwrap().parse().unwrap();
+    (status, head.to_ascii_lowercase(), body.to_owned())
+}
+
+/// Many long polls of one agent: each over the limit is answered at once, and an
+/// approver still gets through.
+#[test]
+fn many_long_polls_of_one_agent_do_not_block_the_approver() {
+    let relay = std::sync::Arc::new(start_with(
+        |config| config.approval_timeout_secs = 120,
+        UpstreamOptions::default(),
+    ));
+    let team = relay.setup("production");
+    let run = pending_run(&relay, &team);
+    let started = Instant::now();
+    let pollers: Vec<_> = (0..300)
+        .map(|_| {
+            let relay = relay.clone();
+            let token = team.agent_token.clone();
+            // A short gap, so the listen queue of the test machine does not overflow.
+            std::thread::sleep(Duration::from_millis(3));
+            std::thread::spawn(move || {
+                let asked = Instant::now();
+                let (status, body) = relay.call(
+                    "GET",
+                    &format!("/v1/runs/{run}?wait=25"),
+                    Some(&token),
+                    None,
+                );
+                (status, body, asked.elapsed())
+            })
+        })
+        .collect();
+    std::thread::sleep(Duration::from_millis(1000));
+    let (status, body) = approve(&relay, run, None);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["result"]["status"], "ready");
+    let mut quick_pending = 0;
+    for poller in pollers {
+        let (status, body, took) = poller.join().unwrap();
+        match status {
+            200 => {
+                let run_status = body["result"]["status"].as_str().unwrap().to_owned();
+                if run_status == "pending" {
+                    // Over the limit of long polls: answered at once.
+                    assert!(took < Duration::from_secs(5), "{took:?}");
+                    quick_pending += 1;
+                } else {
+                    assert_eq!(run_status, "ready");
+                }
+            }
+            503 => assert_eq!(body["error"]["code"], "busy", "{body}"),
+            other => panic!("unexpected status {other}: {body}"),
+        }
+    }
+    assert!(quick_pending > 0);
+    assert!(started.elapsed() < Duration::from_secs(20));
+}
+
+/// Agent requests leave a reserve of slots to members and approvers. A request over
+/// a limit gets 503 `busy` as an envelope with `Retry-After`.
+#[test]
+fn agent_requests_leave_slots_for_approvers_and_busy_is_an_envelope() {
+    let relay = std::sync::Arc::new(start_with(
+        |config| {
+            config.approval_timeout_secs = 120;
+            config.limits = Limits {
+                max_active: 6,
+                member_reserve: 2,
+                long_polls_per_agent: 2,
+            };
+        },
+        UpstreamOptions::default(),
+    ));
+    let team = relay.setup("production");
+    let second = relay.ok(
+        "POST",
+        "/v1/agents",
+        &team.member_token,
+        Some(&json!({"name": "alice-agent-2"})),
+    );
+    let second = Team {
+        agent_id: second["id"].as_u64().unwrap(),
+        agent_token: second["secret"].as_str().unwrap().to_owned(),
+        member_token: team.member_token.clone(),
+        ..team
+    };
+    let run_a = pending_run(&relay, &team);
+    let run_b = pending_run(&relay, &second);
+    let poll = |token: &str, run: u64| {
+        let relay = relay.clone();
+        let token = token.to_owned();
+        std::thread::spawn(move || {
+            relay.call(
+                "GET",
+                &format!("/v1/runs/{run}?wait=20"),
+                Some(&token),
+                None,
+            )
+        })
+    };
+    let mut held = vec![
+        poll(&team.agent_token, run_a),
+        poll(&team.agent_token, run_a),
+    ];
+    // A third long poll of the same agent is answered at once. (A probe that starts
+    // before a held poll takes its place; that poll is then asked again.)
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        std::thread::sleep(Duration::from_millis(200));
+        let asked = Instant::now();
+        let view = relay.ok(
+            "GET",
+            &format!("/v1/runs/{run_a}?wait=2"),
+            &team.agent_token,
+            None,
+        );
+        assert_eq!(view["status"], "pending");
+        if asked.elapsed() < Duration::from_secs(1) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the long polls did not start");
+        for slot in &mut held {
+            if slot.is_finished() {
+                let old = std::mem::replace(slot, poll(&team.agent_token, run_a));
+                let (status, body) = old.join().unwrap();
+                assert_eq!(
+                    (status, &body["result"]["status"]),
+                    (200, &json!("pending"))
+                );
+            }
+        }
+    }
+    held.push(poll(&second.agent_token, run_b));
+    held.push(poll(&second.agent_token, run_b));
+    // Now 4 agent requests run: the agent slots (6 - 2) are full.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (status, head, body) = loop {
+        let answer = raw_get(&relay, "/v1/access", &second.agent_token);
+        if answer.0 == 503 {
+            break answer;
+        }
+        assert!(Instant::now() < deadline, "the agent slots never filled");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(status, 503);
+    assert!(head.contains("\r\nretry-after: 2"), "{head}");
+    assert!(
+        head.contains("\r\ncontent-type: application/json"),
+        "{head}"
+    );
+    let envelope: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["error"]["code"], "busy");
+    // The proxy and MCP are agent requests too.
+    assert_eq!(raw_get(&relay, "/mcp", &second.agent_token).0, 503);
+    assert_eq!(raw_get(&relay, "/p/x/api.example.com/", "x").0, 503);
+    // Members, approvers, and the health check still get through.
+    assert_eq!(raw_get(&relay, "/healthz", "x").0, 200);
+    relay.ok("GET", "/v1/approvals", &relay.owner_token, None);
+    let (status, body) = approve(&relay, run_a, None);
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = relay.call(
+        "POST",
+        &format!("/v1/approvals/{run_b}/deny"),
+        Some(&relay.owner_token),
+        None,
+    );
+    assert_eq!(status, 200, "{body}");
+    for poller in held {
+        let (status, body) = poller.join().unwrap();
+        assert_eq!(status, 200, "{body}");
+        assert_ne!(body["result"]["status"], "pending", "{body}");
+    }
+    // The slots are free again.
+    relay.ok("GET", "/v1/access", &second.agent_token, None);
 }
