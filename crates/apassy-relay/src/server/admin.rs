@@ -311,11 +311,13 @@ pub fn member_revoke(
 
 // ---- Collections ----
 
-fn checked_policy(policy: Policy) -> RelayResult<Policy> {
-    let rule = policy
+fn checked_policy(core: &Core, policy: Policy) -> RelayResult<Policy> {
+    let mut rule = policy
         .rule
         .normalized()
         .map_err(|_| RelayError::invalid("The rule of the policy is not valid."))?;
+    // The instruction is free text that agents can read back: no value or token in it.
+    rule.instruction = core.audit.mask_text(&rule.instruction);
     Ok(Policy {
         mode: policy.mode,
         rule,
@@ -332,8 +334,10 @@ pub fn collection_create(
     request: CollectionCreate,
     now: u64,
 ) -> RelayResult<Value> {
-    let name = checked_label(&request.name, "collection")?;
-    let policy = checked_policy(request.policy)?;
+    let name = core
+        .audit
+        .mask_text(&checked_label(&request.name, "collection")?);
+    let policy = checked_policy(core, request.policy)?;
     let text = policy_json(&policy)?;
     let id = core.store.tx(|tx| {
         match tx.execute(
@@ -417,7 +421,7 @@ pub fn policy_put(
     policy: Policy,
     now: u64,
 ) -> RelayResult<Value> {
-    let policy = checked_policy(policy)?;
+    let policy = checked_policy(core, policy)?;
     let text = policy_json(&policy)?;
     let view = core.store.tx(|tx| {
         let changed = tx
@@ -544,6 +548,9 @@ pub fn item_create(core: &Core, by: &MemberAuth, request: NewItem, now: u64) -> 
     let hosts_text = serde_json::to_string(&hosts)
         .map_err(|_| RelayError::internal("The hosts cannot be written."))?;
     let id = core.store.tx(|tx| {
+        // The value is masked from here on, in the name of the item too.
+        core.audit.add_value(&env_name, value);
+        let name = core.audit.mask_text(&name);
         let exists: i64 = tx
             .query_row(
                 "SELECT count(*) FROM collection WHERE id = ?1",
@@ -583,8 +590,6 @@ pub fn item_create(core: &Core, by: &MemberAuth, request: NewItem, now: u64) -> 
             Err(error) => return Err(db(error)),
         }
         let id = to_u(tx.last_insert_rowid());
-        // The value is masked from the first audit row on.
-        core.audit.add_value(&env_name, value);
         core.audit.write_on(
             tx,
             now,
@@ -776,7 +781,9 @@ pub fn agent_create(
     request: &AgentCreate,
     now: u64,
 ) -> RelayResult<Value> {
-    let name = checked_label(&request.name, "agent")?;
+    let name = core
+        .audit
+        .mask_text(&checked_label(&request.name, "agent")?);
     let days = request.days.unwrap_or(DEFAULT_AGENT_DAYS);
     if !(1..=MAX_AGENT_DAYS).contains(&days) {
         return Err(RelayError::invalid("An agent token lives 1 to 365 days."));
