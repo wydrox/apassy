@@ -20,6 +20,8 @@ use crate::ids::{ItemId, RunId};
 pub const DEFAULT_WAIT_SECS: u64 = 900;
 /// The long poll of `GET /v1/runs/{id}`, in seconds.
 const POLL_SECS: u64 = 25;
+/// The least time between two polls.
+const MIN_POLL_GAP: Duration = Duration::from_secs(1);
 /// Consecutive network failures that `run` rides out while it waits.
 const POLL_RETRIES: u32 = 3;
 
@@ -106,7 +108,9 @@ fn wait_until_decided(
     let deadline = Instant::now() + Duration::from_secs(wait_secs);
     let mut failures = 0;
     while view.status == RunStatus::Pending {
-        let left = deadline.saturating_duration_since(Instant::now()).as_secs();
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        // Round up, so a wait of 1 second still polls once.
+        let left = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
         if left == 0 {
             return Err(CliError::denied(format!(
                 "Gave up waiting for an approver (run {}). The run may still be approved later.",
@@ -119,15 +123,24 @@ fn wait_until_decided(
             view.run_id,
             left.min(POLL_SECS)
         );
-        match client.call::<RunView>(
+        let asked = Instant::now();
+        let answer = client.call::<RunView>(
             Method::Get,
             &path,
             None,
             Duration::from_secs(POLL_SECS) + LONG_POLL_MARGIN,
-        ) {
+        );
+        match answer {
             Ok(next) => {
                 failures = 0;
                 view = next;
+                // A relay that answers a long poll at once must not be hammered.
+                if view.status == RunStatus::Pending {
+                    let spent = asked.elapsed();
+                    if spent < MIN_POLL_GAP {
+                        std::thread::sleep(MIN_POLL_GAP - spent);
+                    }
+                }
             }
             Err(CallError::Transport(message)) => {
                 failures += 1;

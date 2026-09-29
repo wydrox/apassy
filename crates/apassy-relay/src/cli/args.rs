@@ -375,8 +375,8 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
             }
             _ => Err(CliError::usage("Usage: apassy-team member revoke ID")),
         },
-        "collection" => collection(&rest),
-        "item" => item(&rest),
+        "collection" => collection(rest),
+        "item" => item(rest),
         "grant" => {
             let s = scan(rest, &["collection", "member"], &[])?;
             s.positional(0, "grant --collection ID --member ID")?;
@@ -393,7 +393,7 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
                 id: parse_id("--grant", &s.required("grant")?)?,
             })
         }
-        "agent" => agent(&rest),
+        "agent" => agent(rest),
         "pending" => no_args(rest).map(|json| Command::Pending { json }),
         "approve" | "deny" => {
             let s = scan(rest, &["reason"], &[])?;
