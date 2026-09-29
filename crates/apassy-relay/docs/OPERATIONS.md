@@ -38,6 +38,7 @@ chmod 600 ~/.apassy-relay/vault_key ~/.apassy-relay/edge_secret
 - Never put a secret in a shell history, a repo, or an image.
 - The vault key opens the vault. If you lose it, the vault is lost. Back it up somewhere apart from the vault backup.
 - The edge secret must be the same text in the relay and in the Worker.
+- Keep the folder under your home folder. Colima shares only the home folder with its VM. A folder in `/tmp` shows up empty in the container, and the relay then says it cannot read the file.
 - Every secret the CLI needs (a member token, an invite code, an item value) is read from stdin. The CLI refuses to read it from a terminal.
 
 ## 3. Build the image

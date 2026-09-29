@@ -5,3 +5,5 @@ docs
 tests
 .wrangler
 node_modules
+examples
+scripts
