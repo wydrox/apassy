@@ -94,6 +94,8 @@ The full setup, with the Cloudflare Worker and the tunnel, is in [docs/OPERATION
 | `src/proxy/` | the reverse proxy that swaps placeholders |
 | `src/cli/` | the `apassy-team` CLI and the stdio MCP adapter |
 | `deploy/worker/` | the Cloudflare Worker at the edge |
+| `scripts/e2e.sh` | the end-to-end check with the real binaries |
+| `examples/e2e_relay.rs` | the relay with a mock upstream, for `scripts/e2e.sh` only |
 | `Dockerfile` | the image: one binary, one port, one volume |
 | `docs/SPEC.md` | the specification of the alpha |
 | `docs/OPERATIONS.md` | how to run it |
@@ -104,7 +106,14 @@ The full setup, with the Cloudflare Worker and the tunnel, is in [docs/OPERATION
 cargo test
 cargo clippy --all-targets -- -D warnings
 node --test 'deploy/worker/test/*.test.ts'    # Node 22.18 or later, no npm install
+scripts/e2e.sh                                # the binaries end to end, on 127.0.0.1
 ```
+
+`tests/e2e.rs` runs the whole flow in process. `scripts/e2e.sh` runs it with the real
+binaries: `apassy-relay init` and `serve`, then the same server code with a mock
+upstream (`examples/e2e_relay.rs`), and `apassy-team` for every step. The release
+binary cannot trust a test root on purpose, so the script needs the example for the
+upstream. All values are synthetic.
 
 ## What it does not protect
 
