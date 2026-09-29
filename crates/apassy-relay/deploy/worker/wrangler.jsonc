@@ -1,0 +1,9 @@
+{
+  "name": "apassy-relay-edge",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "workers_dev": false,
+  "routes": [{ "pattern": "apassy-relay.wyderka.cc", "custom_domain": true }],
+  "vars": { "RELAY_ORIGIN": "https://replace-me.trycloudflare.com" },
+  "observability": { "enabled": false }
+}

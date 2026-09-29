@@ -1,0 +1,18 @@
+{
+  "name": "apassy-relay-edge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The edge Worker of apassy-relay: forwards to the relay and adds the edge secret.",
+  "license": "FSL-1.1-ALv2",
+  "scripts": {
+    "test": "node --test test/",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260929.1",
+    "@types/node": "22.20.4",
+    "typescript": "7.0.2",
+    "wrangler": "4.144.0"
+  }
+}
