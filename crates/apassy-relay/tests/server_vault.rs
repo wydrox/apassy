@@ -53,9 +53,8 @@ fn file_bytes_hold_no_value_and_no_plain_header() {
 #[test]
 fn init_twice_is_refused_and_keeps_the_first_team() {
     let relay = start(UpstreamOptions::default());
-    let error = Relay::init(&relay.config, "Other Team", "mallory")
-        .err()
-        .expect("second init must fail");
+    let error =
+        Relay::init(&relay.config, "Other Team", "mallory").expect_err("second init must fail");
     assert_eq!(error.code, codes::CONFLICT);
     let me = relay.ok("GET", "/v1/me", &relay.owner_token, None);
     assert_eq!(me["team"], "Test Team");

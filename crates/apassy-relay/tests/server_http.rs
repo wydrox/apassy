@@ -740,3 +740,62 @@ fn invite_options_are_checked() {
             >= 167 * 3600 - 5
     );
 }
+
+#[test]
+fn many_requests_at_once_are_all_answered() {
+    let relay = std::sync::Arc::new(start(UpstreamOptions::default()));
+    let team = relay.setup("staging");
+    let mut handles = Vec::new();
+    for worker in 0..8 {
+        let relay = relay.clone();
+        let token = team.agent_token.clone();
+        let item = team.item;
+        handles.push(std::thread::spawn(move || {
+            for i in 0..10 {
+                let (status, body) = relay.call("GET", "/v1/access", Some(&token), None);
+                assert_eq!(status, 200, "{body}");
+                let request = json!({
+                    "items": [item], "command": ["git", "status"],
+                    "purpose": format!("worker {worker} run {i}"), "user_request": "check"
+                });
+                let (status, body) = relay.call("POST", "/v1/runs", Some(&token), Some(&request));
+                assert_eq!(status, 200, "{body}");
+                assert_eq!(body["result"]["status"], "ready");
+            }
+        }));
+    }
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    let audit = relay.ok("GET", "/v1/audit?limit=500", &relay.owner_token, None);
+    let started = audit
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["action"] == "session_started")
+        .count();
+    assert!(started >= 80, "{started}");
+}
+
+#[test]
+fn the_proxy_path_goes_to_the_proxy_after_the_edge_check() {
+    let relay = start(UpstreamOptions::default());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let key = format!("apassy_ses_{}", "0".repeat(64));
+    let url = format!("{}/p/{key}/api.stripe.com/v1/balance", relay.url);
+    // No edge header: the relay refuses it itself, with no proxy header.
+    let refused = agent.get(&url).call().unwrap();
+    assert_eq!(refused.status().as_u16(), 403);
+    assert!(refused.headers().get("x-apassy-relay").is_none());
+    // With the edge header the proxy answers, and marks its refusal.
+    let answered = agent
+        .get(&url)
+        .header("X-Apassy-Edge", &relay.edge_secret)
+        .call()
+        .unwrap();
+    assert!(answered.status().as_u16() >= 400);
+    assert_eq!(answered.headers().get("x-apassy-relay").unwrap(), "refused");
+}
