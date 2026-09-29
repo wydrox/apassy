@@ -258,7 +258,7 @@ fn timed_out_and_ended_runs_exit_3() {
 }
 
 #[test]
-fn a_hard_rule_failure_is_a_denial_and_other_errors_are_relay_errors() {
+fn hard_rule_and_access_refusals_are_denials_and_other_errors_are_relay_errors() {
     let mock = relay(
         err(
             403,
@@ -274,13 +274,23 @@ fn a_hard_rule_failure_is_a_denial_and_other_errors_are_relay_errors() {
     assert_eq!(code(&output), 3);
     assert!(text(&output.stderr).contains("rule_forbidden_word"));
 
-    let mock = relay(err(403, "not_granted", "No access to that item."), vec![]);
+    for denial in ["not_granted", "item_archived"] {
+        let mock = relay(err(403, denial, "No access to that item."), vec![]);
+        let output = Cli::new().agent(&mock.url).run(
+            &["run", "--items", "1", "--purpose", "T", "--", "true"],
+            None,
+        );
+        assert_eq!(code(&output), 3, "{denial}");
+        assert!(text(&output.stderr).contains(denial));
+    }
+
+    let mock = relay(err(500, "relay_error", "The relay failed."), vec![]);
     let output = Cli::new().agent(&mock.url).run(
         &["run", "--items", "1", "--purpose", "T", "--", "true"],
         None,
     );
     assert_eq!(code(&output), 4);
-    assert!(text(&output.stderr).contains("not_granted"));
+    assert!(text(&output.stderr).contains("relay_error"));
 
     let output = Cli::new().agent(&dead_url()).run(
         &["run", "--items", "1", "--purpose", "T", "--", "true"],

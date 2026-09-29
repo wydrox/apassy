@@ -227,7 +227,7 @@ apassy-team run --items 1 --purpose "Check the balance" \
   --request "Show me the Stripe balance" -- stripe balance retrieve
 ```
 
-`run` exits with the code of the command (128 plus the signal number when it dies from a signal). It exits 3 if the run is denied or times out, 4 on a relay or network error, and 2 on a usage error. The command does not inherit `APASSY_TOKEN`, `APASSY_TEAM_TOKEN`, or `APASSY_EDGE_SECRET`. Use `--wait SECONDS` to limit how long it waits for an approver (the default is 900).
+`run` exits with the code of the command (128 plus the signal number when it dies from a signal). It exits 3 if the run is denied (by a hard rule, by an approver, or for lack of access) or times out, 4 on a relay or network error, and 2 on a usage error. The command does not inherit `APASSY_TOKEN`, `APASSY_TEAM_TOKEN`, or `APASSY_EDGE_SECRET`. Use `--wait SECONDS` to limit how long it waits for an approver (the default is 900).
 
 **Remote MCP, for Claude Code.** Put this in `.mcp.json` in a repo:
 

@@ -54,7 +54,7 @@ pub fn run(settings: &Settings, args: RunArgs) -> Result<i32, CliError> {
     let view: RunView =
         match client.call(Method::Post, api::paths::RUNS, Some(&payload), CALL_TIMEOUT) {
             Ok(view) => view,
-            Err(CallError::Api(e)) if e.is_rule_denial() => {
+            Err(CallError::Api(e)) if e.is_run_denial() => {
                 return Err(CliError::denied(format!(
                     "Run denied: {}: {}",
                     e.code,

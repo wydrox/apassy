@@ -65,9 +65,12 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    /// A hard rule that failed at `POST /v1/runs`: the run is denied, not broken.
-    pub fn is_rule_denial(&self) -> bool {
+    /// A refusal at `POST /v1/runs` by a hard rule or by access (no grant, an
+    /// archived item): the run is denied, not broken, and a retry does not help.
+    pub fn is_run_denial(&self) -> bool {
         self.code.starts_with("rule_")
+            || self.code == crate::error::codes::NOT_GRANTED
+            || self.code == crate::error::codes::ITEM_ARCHIVED
     }
 }
 
