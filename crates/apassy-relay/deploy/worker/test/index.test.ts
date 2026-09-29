@@ -50,7 +50,7 @@ before(async () => {
         res.end();
       } else {
         res.writeHead(201, { "content-type": "text/plain", "x-from-relay": "yes" });
-        res.end("echo:" + Buffer.concat(chunks).toString("utf8"));
+        res.end("echo:" + Buffer.concat(chunks).toString());
       }
     });
   });
@@ -130,13 +130,13 @@ describe("pass through", () => {
     assert.equal(request.method, "POST");
     assert.equal(request.url, "/v1/runs?wait=25&x=%20");
     assert.deepEqual(values(request, "authorization"), ["Bearer synthetic-token"]);
-    assert.equal(request.body.toString("utf8"), '{"items":[1]}');
+    assert.equal(request.body.toString(), '{"items":[1]}');
   });
 
   it("passes PUT and DELETE", async () => {
     await call("/v1/collections/2/policy", { method: "PUT", body: "{}" });
     assert.equal(seen[0]!.method, "PUT");
-    assert.equal(seen[0]!.body.toString("utf8"), "{}");
+    assert.equal(seen[0]!.body.toString(), "{}");
     await call("/v1/members/3", { method: "DELETE" });
     assert.equal(seen[0]!.method, "DELETE");
     assert.equal(seen[0]!.body.length, 0);

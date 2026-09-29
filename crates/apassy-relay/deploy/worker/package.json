@@ -6,7 +6,7 @@
   "description": "The edge Worker of apassy-relay: forwards to the relay and adds the edge secret.",
   "license": "FSL-1.1-ALv2",
   "scripts": {
-    "test": "node --test test/",
+    "test": "node --test 'test/*.test.ts'",
     "typecheck": "tsc -p tsconfig.json"
   },
   "devDependencies": {
