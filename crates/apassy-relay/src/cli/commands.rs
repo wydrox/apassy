@@ -1,1 +1,751 @@
-//! Track client: the argument parser and every admin and member command.
+//! Every admin and member command of the CLI: each one builds a request, calls the relay, and prints a short answer.
+//!
+//! Secrets (a member token, an invite code, an item value) come from stdin only.
+//! The only places that print a secret are `invite` and `agent create`, once, on stdout.
+//! Text that an agent wrote (commands, purposes) is printed with control characters
+//! escaped, so it cannot move the cursor or set the title of an approver's terminal.
+
+use std::io::{IsTerminal, Read, Write};
+
+use serde::Serialize;
+use zeroize::Zeroizing;
+
+use crate::api::{
+    self, AccessView, AgentCreate, AgentView, ApprovalView, AuditEntry, CollectionCreate,
+    CollectionView, Created, DecisionRequest, GrantCreate, GrantView, InviteRequest, InviteView,
+    Issued, ItemView, JoinRequestRef, MeView, MemberView, NewItemRef, Policy, RunView,
+};
+use crate::cli::CliError;
+use crate::cli::args::{Command, ItemAddArgs, USAGE};
+use crate::cli::client::{Client, Method};
+use crate::cli::settings::{self, Settings};
+use crate::secret::SecretString;
+
+/// Runs one parsed command and returns the exit code.
+pub fn execute(command: Command) -> Result<i32, CliError> {
+    match command {
+        Command::Help => {
+            print!("{USAGE}");
+            Ok(0)
+        }
+        Command::Version => {
+            println!("apassy-team {}", env!("CARGO_PKG_VERSION"));
+            Ok(0)
+        }
+        Command::Init { relay } => init(&relay),
+        Command::Join { relay, name } => join(&relay, &name),
+        Command::Mcp => crate::cli::mcp_stdio::run(&settings::load()?),
+        Command::Run(args) => crate::cli::exec::run(&settings::load()?, args),
+        other => {
+            let settings = settings::load()?;
+            member_command(&settings, other)?;
+            Ok(0)
+        }
+    }
+}
+
+fn member_client(settings: &Settings) -> Result<Client, CliError> {
+    Ok(Client::new(
+        settings.relay()?,
+        Some(settings.member()?),
+        settings.edge_secret.as_ref(),
+    ))
+}
+
+fn agent_client(settings: &Settings) -> Result<Client, CliError> {
+    Ok(Client::new(
+        settings.relay()?,
+        Some(settings.agent()?),
+        settings.edge_secret.as_ref(),
+    ))
+}
+
+/// Reads one secret from stdin. It refuses a terminal, so the secret is never typed
+/// where it would echo or land in a history. One trailing newline is removed.
+pub fn read_secret(what: &str, example: &str) -> Result<SecretString, CliError> {
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return Err(CliError::usage(format!(
+            "Refusing to read {what} from a terminal. Pipe it on stdin, for example: {example}"
+        )));
+    }
+    let mut bytes = Zeroizing::new(Vec::new());
+    const LIMIT: u64 = 16 * 1024;
+    stdin
+        .lock()
+        .take(LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| CliError::usage(format!("Cannot read {what} from stdin: {}.", e.kind())))?;
+    if bytes.len() as u64 > LIMIT {
+        return Err(CliError::usage(format!("The {what} on stdin is too long.")));
+    }
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| CliError::usage(format!("The {what} on stdin is not UTF-8 text.")))?;
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    let text = text.strip_suffix('\r').unwrap_or(text);
+    if text.is_empty() {
+        return Err(CliError::usage(format!("The {what} on stdin is empty.")));
+    }
+    Ok(SecretString::new(text.to_owned()))
+}
+
+/// A request body that holds a secret lives in a zeroizing string.
+fn body<T: Serialize>(value: &T) -> Result<Zeroizing<String>, CliError> {
+    serde_json::to_string(value)
+        .map(Zeroizing::new)
+        .map_err(|_| CliError::usage("Cannot encode the request."))
+}
+
+fn init(relay: &str) -> Result<i32, CliError> {
+    let relay = settings::normalize_url(relay)?;
+    let token = read_secret(
+        "the member token",
+        "apassy-team init --relay URL < owner-token-file",
+    )?;
+    let edge = settings::env_secret(settings::ENV_EDGE_SECRET);
+    let client = Client::new(&relay, Some(&token), edge.as_ref());
+    let me: MeView = client.ok(Method::Get, api::paths::ME, None)?;
+    if me.kind != api::PrincipalKind::Member {
+        return Err(CliError::usage(
+            "That is an agent token. `init` needs a member token.",
+        ));
+    }
+    let path = settings::save(&relay, &token)?;
+    println!(
+        "Saved settings for {} ({}) of team {} in {}.",
+        clean(&me.member_name),
+        role_word(me.role),
+        clean(&me.team),
+        path.display()
+    );
+    Ok(0)
+}
+
+fn join(relay: &str, name: &str) -> Result<i32, CliError> {
+    let relay = settings::normalize_url(relay)?;
+    let code = read_secret(
+        "the invite code",
+        "apassy-team join --relay URL --name NAME < invite-code-file",
+    )?;
+    let edge = settings::env_secret(settings::ENV_EDGE_SECRET);
+    let client = Client::new(&relay, None, edge.as_ref());
+    let payload = body(&JoinRequestRef {
+        code: code.expose(),
+        name,
+    })?;
+    let issued: Issued = client.ok(Method::Post, api::paths::JOIN, Some(&payload))?;
+    let path = settings::save(&relay, &issued.secret)?;
+    println!(
+        "Joined as {} (member {}). Settings saved in {}.",
+        clean(name),
+        issued.id,
+        path.display()
+    );
+    Ok(0)
+}
+
+fn member_command(settings: &Settings, command: Command) -> Result<(), CliError> {
+    use api::paths;
+    match command {
+        Command::Me { json } => {
+            // Either kind of token works for `me`.
+            let token = settings
+                .member_token
+                .as_ref()
+                .or(settings.agent_token.as_ref());
+            let token = token.ok_or_else(|| {
+                CliError::usage(
+                    "No token. Set APASSY_TEAM_TOKEN or APASSY_TOKEN, or run `apassy-team init`.",
+                )
+            })?;
+            let client = Client::new(
+                settings.relay()?,
+                Some(token),
+                settings.edge_secret.as_ref(),
+            );
+            let me: MeView = client.ok(Method::Get, paths::ME, None)?;
+            if json {
+                return print_json(&me);
+            }
+            match (&me.agent_name, &me.agent_id) {
+                (Some(agent), Some(id)) => println!(
+                    "team {}: agent {} (id {}) of member {} ({})",
+                    clean(&me.team),
+                    clean(agent),
+                    id,
+                    clean(&me.member_name),
+                    role_word(me.role)
+                ),
+                _ => println!(
+                    "team {}: member {} (id {}, {})",
+                    clean(&me.team),
+                    clean(&me.member_name),
+                    me.member_id,
+                    role_word(me.role)
+                ),
+            }
+            Ok(())
+        }
+        Command::Invite { role, hours } => {
+            let client = member_client(settings)?;
+            let payload = body(&InviteRequest {
+                role,
+                expires_hours: hours,
+            })?;
+            let issued: Issued = client.ok(Method::Post, paths::INVITES, Some(&payload))?;
+            // The one-time output: the code alone on stdout, the rest on stderr.
+            println!("{}", issued.secret.expose());
+            eprintln!(
+                "Invite {} for role {}, expires {}. The code works once. Send it over a private channel.",
+                issued.id,
+                role_word(role),
+                issued
+                    .expires_at
+                    .map(fmt_time)
+                    .unwrap_or_else(|| "?".into())
+            );
+            Ok(())
+        }
+        Command::Invites { json } => {
+            let items: Vec<InviteView> =
+                member_client(settings)?.ok(Method::Get, paths::INVITES, None)?;
+            if json {
+                return print_json(&items);
+            }
+            let rows = items
+                .iter()
+                .map(|i| {
+                    vec![
+                        i.id.to_string(),
+                        role_word(i.role).to_owned(),
+                        fmt_time(i.expires_at),
+                        i.used_by
+                            .map_or("unused".to_owned(), |m| format!("used by member {m}")),
+                    ]
+                })
+                .collect();
+            table(&["ID", "ROLE", "EXPIRES", "STATE"], rows);
+            Ok(())
+        }
+        Command::Members { json } => {
+            let items: Vec<MemberView> =
+                member_client(settings)?.ok(Method::Get, paths::MEMBERS, None)?;
+            if json {
+                return print_json(&items);
+            }
+            let rows = items
+                .iter()
+                .map(|m| {
+                    vec![
+                        m.id.to_string(),
+                        clean(&m.name),
+                        role_word(m.role).to_owned(),
+                        if m.revoked { "revoked" } else { "active" }.to_owned(),
+                    ]
+                })
+                .collect();
+            table(&["ID", "NAME", "ROLE", "STATE"], rows);
+            Ok(())
+        }
+        Command::MemberRevoke { id } => {
+            let done: Created = member_client(settings)?.ok(
+                Method::Delete,
+                &format!("{}/{id}", paths::MEMBERS),
+                None,
+            )?;
+            println!("Revoked member {}.", done.id);
+            Ok(())
+        }
+        Command::CollectionCreate { name, policy } => {
+            let payload = body(&CollectionCreate {
+                name,
+                policy: policy.into_policy(),
+            })?;
+            let done: Created =
+                member_client(settings)?.ok(Method::Post, paths::COLLECTIONS, Some(&payload))?;
+            println!("{}", done.id);
+            Ok(())
+        }
+        Command::CollectionList { json } => {
+            let items: Vec<CollectionView> =
+                member_client(settings)?.ok(Method::Get, paths::COLLECTIONS, None)?;
+            if json {
+                return print_json(&items);
+            }
+            let rows = items
+                .iter()
+                .map(|c| {
+                    vec![
+                        c.id.to_string(),
+                        clean(&c.name),
+                        c.item_count.to_string(),
+                        policy_words(&c.policy),
+                    ]
+                })
+                .collect();
+            table(&["ID", "NAME", "ITEMS", "POLICY"], rows);
+            Ok(())
+        }
+        Command::CollectionPolicy { id, policy } => {
+            let payload = body(&policy.into_policy())?;
+            let view: CollectionView = member_client(settings)?.ok(
+                Method::Put,
+                &format!("{}/{id}/policy", paths::COLLECTIONS),
+                Some(&payload),
+            )?;
+            println!(
+                "Collection {} ({}): {}",
+                view.id,
+                clean(&view.name),
+                policy_words(&view.policy)
+            );
+            Ok(())
+        }
+        Command::ItemAdd(args) => item_add(settings, &args),
+        Command::ItemList { collection, json } => {
+            let path = match collection {
+                Some(id) => format!("{}?collection={id}", paths::ITEMS),
+                None => paths::ITEMS.to_owned(),
+            };
+            let items: Vec<ItemView> = member_client(settings)?.ok(Method::Get, &path, None)?;
+            if json {
+                return print_json(&items);
+            }
+            let rows = items
+                .iter()
+                .map(|i| {
+                    vec![
+                        i.id.to_string(),
+                        clean(&i.collection),
+                        clean(&i.name),
+                        clean(&i.env_name),
+                        clean(&i.environment),
+                        clean(&i.hosts.join(",")),
+                    ]
+                })
+                .collect();
+            table(
+                &["ID", "COLLECTION", "NAME", "ENV", "ENVIRONMENT", "HOSTS"],
+                rows,
+            );
+            Ok(())
+        }
+        Command::ItemArchive { id } => {
+            let done: Created = member_client(settings)?.ok(
+                Method::Delete,
+                &format!("{}/{id}", paths::ITEMS),
+                None,
+            )?;
+            println!("Archived item {}.", done.id);
+            Ok(())
+        }
+        Command::Grant { collection, member } => {
+            let payload = body(&GrantCreate {
+                collection_id: crate::ids::CollectionId(collection),
+                member_id: crate::ids::MemberId(member),
+            })?;
+            let done: Created =
+                member_client(settings)?.ok(Method::Post, paths::GRANTS, Some(&payload))?;
+            println!("{}", done.id);
+            Ok(())
+        }
+        Command::Grants { json } => {
+            let items: Vec<GrantView> =
+                member_client(settings)?.ok(Method::Get, paths::GRANTS, None)?;
+            if json {
+                return print_json(&items);
+            }
+            let rows = items
+                .iter()
+                .map(|g| {
+                    vec![
+                        g.id.to_string(),
+                        format!("{} ({})", g.collection_id, clean(&g.collection)),
+                        format!("{} ({})", g.member_id, clean(&g.member)),
+                        fmt_time(g.created_at),
+                    ]
+                })
+                .collect();
+            table(&["ID", "COLLECTION", "MEMBER", "SINCE"], rows);
+            Ok(())
+        }
+        Command::GrantRevoke { id } => {
+            let done: Created = member_client(settings)?.ok(
+                Method::Delete,
+                &format!("{}/{id}", paths::GRANTS),
+                None,
+            )?;
+            println!("Revoked grant {}.", done.id);
+            Ok(())
+        }
+        Command::AgentCreate { name, days } => {
+            let payload = body(&AgentCreate {
+                name: name.clone(),
+                days,
+            })?;
+            let issued: Issued =
+                member_client(settings)?.ok(Method::Post, paths::AGENTS, Some(&payload))?;
+            // The one-time output: the token alone on stdout, the rest on stderr.
+            println!("{}", issued.secret.expose());
+            eprintln!(
+                "Agent {} (id {}), expires {}. The token is shown once. Set it as APASSY_TOKEN.",
+                clean(&name),
+                issued.id,
+                issued
+                    .expires_at
+                    .map(fmt_time)
+                    .unwrap_or_else(|| "?".into())
+            );
+            Ok(())
+        }
+        Command::AgentList { json } => {
+            let items: Vec<AgentView> =
+                member_client(settings)?.ok(Method::Get, paths::AGENTS, None)?;
+            if json {
+                return print_json(&items);
+            }
+            let rows = items
+                .iter()
+                .map(|a| {
+                    vec![
+                        a.id.to_string(),
+                        clean(&a.name),
+                        a.member_id.to_string(),
+                        fmt_time(a.expires_at),
+                        if a.revoked { "revoked" } else { "active" }.to_owned(),
+                    ]
+                })
+                .collect();
+            table(&["ID", "NAME", "MEMBER", "EXPIRES", "STATE"], rows);
+            Ok(())
+        }
+        Command::AgentRevoke { id } => {
+            let done: Created = member_client(settings)?.ok(
+                Method::Delete,
+                &format!("{}/{id}", paths::AGENTS),
+                None,
+            )?;
+            println!("Revoked agent {}.", done.id);
+            Ok(())
+        }
+        Command::Pending { json } => {
+            let items: Vec<ApprovalView> =
+                member_client(settings)?.ok(Method::Get, paths::APPROVALS, None)?;
+            if json {
+                return print_json(&items);
+            }
+            if items.is_empty() {
+                println!("No runs are waiting.");
+            }
+            for run in &items {
+                print_pending(run);
+            }
+            Ok(())
+        }
+        Command::Approve { run, reason } => decide(settings, run, reason, "approve"),
+        Command::Deny { run, reason } => decide(settings, run, reason, "deny"),
+        Command::Audit { after, limit, json } => {
+            let mut query = Vec::new();
+            if let Some(after) = after {
+                query.push(format!("after={after}"));
+            }
+            if let Some(limit) = limit {
+                query.push(format!("limit={limit}"));
+            }
+            let path = if query.is_empty() {
+                paths::AUDIT.to_owned()
+            } else {
+                format!("{}?{}", paths::AUDIT, query.join("&"))
+            };
+            let entries: Vec<AuditEntry> = member_client(settings)?.ok(Method::Get, &path, None)?;
+            if json {
+                return print_json(&entries);
+            }
+            for e in &entries {
+                let run = e.run_id.map_or(String::new(), |r| format!(" run {r}"));
+                println!(
+                    "{} {} {} {}{run} {}",
+                    e.id,
+                    fmt_time(e.at),
+                    clean(&e.actor),
+                    clean(&e.action),
+                    clean(&e.detail.to_string())
+                );
+            }
+            Ok(())
+        }
+        Command::Access { json } => {
+            let view: AccessView = agent_client(settings)?.ok(Method::Get, paths::ACCESS, None)?;
+            if json {
+                return print_json(&view);
+            }
+            println!(
+                "agent {} of member {}",
+                clean(&view.agent),
+                clean(&view.member)
+            );
+            let rows = view
+                .items
+                .iter()
+                .map(|i| {
+                    vec![
+                        i.item_id.to_string(),
+                        clean(&i.collection),
+                        clean(&i.item_name),
+                        clean(&i.env_name),
+                        clean(&i.environment),
+                        clean(&i.hosts.join(",")),
+                        clean(&i.approval),
+                    ]
+                })
+                .collect();
+            table(
+                &[
+                    "ID",
+                    "COLLECTION",
+                    "NAME",
+                    "ENV",
+                    "ENVIRONMENT",
+                    "HOSTS",
+                    "APPROVAL",
+                ],
+                rows,
+            );
+            if !view.note.is_empty() {
+                println!("{}", clean(&view.note));
+            }
+            Ok(())
+        }
+        // Handled by `execute`.
+        Command::Help
+        | Command::Version
+        | Command::Init { .. }
+        | Command::Join { .. }
+        | Command::Run(_)
+        | Command::Mcp => Ok(()),
+    }
+}
+
+fn item_add(settings: &Settings, args: &ItemAddArgs) -> Result<(), CliError> {
+    let client = member_client(settings)?;
+    let value = read_secret(
+        "the item value",
+        "apassy-team item add --collection 1 --name NAME --env ENV_NAME --environment staging < value-file",
+    )?;
+    let payload = body(&NewItemRef {
+        collection_id: crate::ids::CollectionId(args.collection),
+        name: &args.name,
+        env_name: &args.env_name,
+        value: value.expose(),
+        provider: args.provider.as_deref(),
+        hosts: args.hosts.clone(),
+        environment: &args.environment,
+        risk: args.risk.as_deref(),
+        scope: args.scope.as_deref(),
+        reversibility: args.reversibility.as_deref(),
+    })?;
+    let done: Created = client.ok(Method::Post, api::paths::ITEMS, Some(&payload))?;
+    println!("{}", done.id);
+    Ok(())
+}
+
+fn decide(
+    settings: &Settings,
+    run: u64,
+    reason: Option<String>,
+    verb: &str,
+) -> Result<(), CliError> {
+    let payload = body(&DecisionRequest { reason })?;
+    let view: RunView = member_client(settings)?.ok(
+        Method::Post,
+        &format!("{}/{run}/{verb}", api::paths::APPROVALS),
+        Some(&payload),
+    )?;
+    println!(
+        "Run {}: {}. {}",
+        view.run_id,
+        status_word(view.status),
+        clean(&view.note)
+    );
+    Ok(())
+}
+
+fn print_pending(run: &ApprovalView) {
+    println!(
+        "run {}  agent {} of {}  asked {}  times out {}",
+        run.run_id,
+        clean(&run.agent),
+        clean(&run.member),
+        fmt_time(run.created_at),
+        fmt_time(run.expires_at)
+    );
+    println!("  command:  {}", clean(&shell_words(&run.command)));
+    println!("  purpose:  {}", clean(&run.purpose));
+    match &run.user_request {
+        Some(text) => println!("  request:  {}", clean(text)),
+        None => println!("  request:  (none)"),
+    }
+    if let Some(cwd) = &run.cwd {
+        println!("  cwd:      {}", clean(cwd));
+    }
+    for item in &run.items {
+        println!(
+            "  item {}:  {} ({}, {})",
+            item.id,
+            clean(&item.name),
+            clean(&item.collection),
+            clean(&item.environment)
+        );
+    }
+    if !run.flags.is_empty() {
+        println!("  flags:    {}", clean(&run.flags.join(", ")));
+    }
+    println!("  note:     {}", clean(&run.note));
+}
+
+fn print_json<T: Serialize>(value: &T) -> Result<(), CliError> {
+    let text = serde_json::to_string_pretty(value)
+        .map_err(|_| CliError::relay("Cannot encode the answer."))?;
+    println!("{text}");
+    Ok(())
+}
+
+/// Prints rows in aligned columns. An empty list prints only the header.
+fn table(header: &[&str], rows: Vec<Vec<String>>) {
+    let mut widths: Vec<usize> = header.iter().map(|h| h.chars().count()).collect();
+    for row in &rows {
+        for (i, cell) in row.iter().enumerate() {
+            widths[i] = widths[i].max(cell.chars().count());
+        }
+    }
+    let mut out = std::io::stdout().lock();
+    let mut line = |cells: Vec<&str>| {
+        let text: Vec<String> = cells
+            .iter()
+            .enumerate()
+            .map(|(i, c)| format!("{c:<width$}", width = widths[i]))
+            .collect();
+        let _ = writeln!(out, "{}", text.join("  ").trim_end());
+    };
+    line(header.to_vec());
+    for row in &rows {
+        line(row.iter().map(String::as_str).collect());
+    }
+}
+
+/// Escapes control characters, so that text from an agent cannot drive a terminal.
+pub fn clean(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The argv as one line, with quotes around words that need them.
+pub fn shell_words(argv: &[String]) -> String {
+    argv.iter()
+        .map(|word| {
+            let plain = !word.is_empty()
+                && word
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_./:=@%+,".contains(c));
+            if plain {
+                word.clone()
+            } else {
+                format!("'{}'", word.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn role_word(role: api::Role) -> &'static str {
+    match role {
+        api::Role::Owner => "owner",
+        api::Role::Manager => "manager",
+        api::Role::Member => "member",
+    }
+}
+
+fn status_word(status: api::RunStatus) -> &'static str {
+    match status {
+        api::RunStatus::Pending => "pending",
+        api::RunStatus::Ready => "ready",
+        api::RunStatus::Denied => "denied",
+        api::RunStatus::TimedOut => "timed out",
+        api::RunStatus::Ended => "ended",
+    }
+}
+
+fn policy_words(policy: &Policy) -> String {
+    let mut parts = vec![match policy.mode {
+        api::PolicyMode::Bouncer => "mode bouncer".to_owned(),
+        api::PolicyMode::Ask => "mode ask".to_owned(),
+    }];
+    let rule = &policy.rule;
+    if !rule.allowed_prefixes.is_empty() {
+        parts.push(format!("allow {}", rule.allowed_prefixes.join("|")));
+    }
+    if !rule.forbidden_words.is_empty() {
+        parts.push(format!("forbid {}", rule.forbidden_words.join("|")));
+    }
+    if let Some(n) = rule.max_runs_per_hour {
+        parts.push(format!("max {n}/hour"));
+    }
+    if let Some(t) = rule.expires_at {
+        parts.push(format!("until {}", fmt_time(t)));
+    }
+    clean(&parts.join(", "))
+}
+
+/// Unix seconds as `YYYY-MM-DD HH:MM:SSZ` (UTC).
+pub fn fmt_time(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    // Civil date from a day count (H. Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { year + 1 } else { year };
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn time_is_utc_calendar() {
+        assert_eq!(fmt_time(0), "1970-01-01 00:00:00Z");
+        assert_eq!(fmt_time(951_782_400), "2000-02-29 00:00:00Z");
+        assert_eq!(fmt_time(1_790_726_400 + 3_661), "2026-09-30 01:01:01Z");
+    }
+
+    #[test]
+    fn control_characters_are_escaped() {
+        assert_eq!(clean("a\u{1b}[31mb\nc"), "a\\u{1b}[31mb\\nc");
+        assert_eq!(clean("plain text é"), "plain text é");
+    }
+
+    #[test]
+    fn argv_is_quoted_for_display() {
+        let argv = ["sh", "-c", "echo 'hi there'", ""].map(String::from);
+        assert_eq!(shell_words(&argv), "sh -c 'echo '\\''hi there'\\''' ''");
+    }
+}
