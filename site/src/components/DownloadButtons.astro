@@ -1,25 +1,62 @@
 ---
 import AppleIcon from "./AppleIcon.astro";
 import LinuxIcon from "./LinuxIcon.astro";
-import { DOWNLOAD, REPO } from "../lib/site";
+import { DOWNLOAD, INSTALL_COMMAND, REPO } from "../lib/site";
 
 interface Props {
-  /** A unique id for the Linux note on the page. */
+  /** A unique prefix for the notes of this pair of buttons on the page. */
   id: string;
 }
 const { id } = Astro.props;
+const installNote = `${id}-install`;
 ---
 <div class="downloads">
-  <a class="btn btn-primary" href={DOWNLOAD} data-download>
+  <!-- Without a signed build (/latest.json is 404), scripts/site.ts turns this link
+       into a button that opens the install note. -->
+  <a class="btn btn-primary" href={DOWNLOAD} data-download data-soon-note={installNote}>
     <AppleIcon />
     <span data-soon="Coming soon for macOS">Download for macOS</span>
+    <svg class="more" viewBox="0 0 12 12" aria-hidden="true"><path d="m3 4.5 3 3 3-3" /></svg>
   </a>
   <button class="btn btn-secondary" type="button" popovertarget={id} aria-haspopup="dialog">
     <LinuxIcon />
     <span>Linux</span>
     <span class="badge">Soon</span>
   </button>
-  <div id={id} popover class="linux-note" role="dialog" aria-labelledby={`${id}-title`}>
+
+  <div id={installNote} popover class="note install-note" role="dialog" aria-labelledby={`${installNote}-title`} data-width="480">
+    <p class="note-title" id={`${installNote}-title`}>
+      <svg class="term" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2.5" /><path d="m4.5 6 2 2-2 2M8.5 10h3" /></svg>
+      Install from source, with one command
+    </p>
+    <p>
+      The signed download is on its way. Until then, this command builds the newest release of Apassy on your Mac,
+      checks it, and installs it in Applications. It takes a few minutes.
+    </p>
+    <div class="command">
+      <div class="command-bar">
+        <span>Terminal</span>
+        <button class="copy" type="button" data-copy={INSTALL_COMMAND} aria-label="Copy the command">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5" y="5" width="8.5" height="8.5" rx="2" /><path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5" /></svg>
+          <span data-copy-label>Copy</span>
+        </button>
+        <span class="sr-only" aria-live="polite" data-copy-status></span>
+      </div>
+      <code>{INSTALL_COMMAND}</code>
+    </div>
+    <p class="needs">
+      Needs macOS 15 on Apple silicon, Xcode or its Command Line Tools, Rust, and a free Apple Development
+      certificate. The script checks each one first, asks before it replaces an app, and never uses sudo.
+      You sign the build yourself, and it does not update itself: run the command again for a new release.
+    </p>
+    <p class="links">
+      <a href="/install.sh">Read the script</a>
+      <span aria-hidden="true">·</span>
+      <a href={`${REPO}#build-from-source`}>Build by hand</a>
+    </p>
+  </div>
+
+  <div id={id} popover class="note" role="dialog" aria-labelledby={`${id}-title`}>
     <p class="note-title" id={`${id}-title`}><LinuxIcon /> Apassy for Linux is on the way</p>
     <p>
       Apassy runs on macOS today: agents work in a macOS Seatbelt sandbox, and native macOS helpers handle Touch ID and notifications.
@@ -31,20 +68,51 @@ const { id } = Astro.props;
 
 <style>
   .downloads { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
-  .linux-note {
+
+  /* The chevron shows only on the button that opens the install note. */
+  .more { display: none; width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; transition: transform 0.2s var(--ease-out); }
+  :global(button.btn-primary.soon) .more { display: block; }
+  :global(button.btn-primary.soon[aria-expanded="true"]) .more { transform: rotate(180deg); }
+
+  .note {
     inset: auto; margin: 0; position: fixed; padding: 18px 18px 16px; border-radius: 16px;
-    border: 1px solid var(--edge); background: var(--surface); color: var(--ink); box-shadow: var(--shadow-lg);
+    max-height: calc(100dvh - 16px); overflow: auto;
+    border: 1px solid var(--edge); background: var(--surface); color: var(--ink);
+    /* A light shadow, away from the button, so it does not darken the button. */
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12), 0 14px 36px rgba(0, 0, 0, 0.22);
     font-size: 14px; line-height: 1.5; text-align: left;
     opacity: 0; transform: translateY(-6px) scale(0.98); transform-origin: top center;
     transition: opacity 0.2s var(--ease-out), transform 0.2s var(--ease-out), overlay 0.2s allow-discrete, display 0.2s allow-discrete;
   }
-  .linux-note:popover-open { opacity: 1; transform: none; }
-  @starting-style { .linux-note:popover-open { opacity: 0; transform: translateY(-6px) scale(0.98); } }
-  .linux-note p + p, .linux-note p + a { margin-top: 10px; }
-  .linux-note p:not(.note-title) { color: var(--muted); }
-  .note-title { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 15px; }
-  .note-title :global(svg) { width: 16px; height: 16px; }
+  .note:global([data-above]) { transform-origin: bottom center; box-shadow: 0 -1px 2px rgba(0, 0, 0, 0.12), 0 -14px 36px rgba(0, 0, 0, 0.22); }
+  .note:popover-open { opacity: 1; transform: none; }
+  @starting-style { .note:popover-open { opacity: 0; transform: translateY(-6px) scale(0.98); } }
+  .note > * + * { margin-top: 10px; }
+  .note p:not(.note-title) { color: var(--muted); }
+  .note-title { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 15px; color: var(--ink); }
+  .note-title :global(svg), .note-title .term { width: 16px; height: 16px; flex: none; }
+  .term { fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
   .note-link { display: inline-block; color: var(--blue); font-weight: 500; }
   .note-link span { display: inline-block; transition: transform 0.2s var(--ease-out); }
   .note-link:hover span { transform: translateX(3px); }
+
+  .command { border-radius: 10px; background: var(--term-bg); color: var(--term-ink); border: 1px solid rgba(255, 255, 255, 0.08); overflow: hidden; }
+  .command-bar {
+    display: flex; align-items: center; justify-content: space-between; padding: 6px 8px 6px 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07); font-family: var(--mono); font-size: 11px; color: #8b8f96;
+  }
+  /* Lines break at spaces: the URL stays whole on its own line. */
+  .command code { display: block; padding: 12px 14px 13px; font-size: 12.5px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; }
+  .copy {
+    flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 7px;
+    border: 1px solid rgba(255, 255, 255, 0.14); background: transparent; color: #c4c7cc; font-size: 12px;
+    transition: background-color 0.2s, color 0.2s, border-color 0.2s;
+  }
+  .copy:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
+  .copy:global(.copied) { color: #4cd964; border-color: rgba(76, 217, 100, 0.5); }
+  .copy svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.4; }
+  .needs { font-size: 13px; }
+  .links { display: flex; gap: 8px; font-size: 13px; }
+  .links a { color: var(--blue); font-weight: 500; }
+  .links a:hover { text-decoration: underline; text-underline-offset: 3px; }
 </style>

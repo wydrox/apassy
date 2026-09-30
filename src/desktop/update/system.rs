@@ -89,8 +89,9 @@ pub(crate) trait UpdateSystem: Send + Sync {
     /// The macOS version, for example `15.4.1`.
     fn macos_version(&self) -> Result<String, String>;
     /// The team of the signature of the running app. `None` when the running
-    /// program is not the signed Apassy app, or when its signature has no team
-    /// (ad hoc).
+    /// program is not the signed Apassy app, or when its signature is not a
+    /// Developer ID Application signature (ad hoc, or Apple Development for a
+    /// build from source).
     fn running_team(&self) -> Result<Option<String>, String>;
     fn location(&self) -> Location;
     /// Attach `image` read-only at `mountpoint`, with no Finder window.
@@ -233,6 +234,23 @@ pub(crate) fn team_from_codesign(output: &str) -> Option<String> {
         .find_map(|line| line.strip_prefix("TeamIdentifier="))?
         .trim();
     is_team_id(team).then(|| team.to_owned())
+}
+
+/// The team of `codesign -d --verbose=2` output when the leaf certificate (the first
+/// `Authority=` line) is a Developer ID Application certificate. A build from
+/// source, signed with an "Apple Development" certificate, has a team but no
+/// Developer ID. Such a copy does not download updates: a release of another team
+/// can never pass [`requirement`] for it, and its owner updates it with the
+/// installer (docs/operations/updates.md).
+pub(crate) fn developer_id_team_from_codesign(output: &str) -> Option<String> {
+    let leaf = output
+        .lines()
+        .find_map(|line| line.strip_prefix("Authority="))?;
+    if leaf.trim().starts_with("Developer ID Application: ") {
+        team_from_codesign(output)
+    } else {
+        None
+    }
 }
 
 /// The `Identifier=` line of `codesign -d --verbose=2`.
@@ -398,7 +416,7 @@ impl UpdateSystem for Commands {
         if identifier_from_codesign(&output.stderr) != Some(BUNDLE_ID) {
             return Ok(None);
         }
-        Ok(team_from_codesign(&output.stderr))
+        Ok(developer_id_team_from_codesign(&output.stderr))
     }
 
     fn location(&self) -> Location {
@@ -548,6 +566,42 @@ mod tests {
             None
         );
         assert_eq!(team_from_codesign("Identifier=x\n"), None);
+    }
+
+    /// Only a Developer ID signature gives the team for updates. A build from
+    /// source (Apple Development) and an ad hoc build do not.
+    #[test]
+    fn only_a_developer_id_signature_gives_the_update_team() {
+        let signed = |authority: &str, team: &str| {
+            format!(
+                "Executable=/Applications/Apassy.app/Contents/MacOS/apassy\nIdentifier=com.wydrox.apassy\n{authority}Authority=Apple Root CA\nTeamIdentifier={team}\n"
+            )
+        };
+        let developer_id = signed(
+            "Authority=Developer ID Application: Example Inc. (ABCDE12345)\nAuthority=Developer ID Certification Authority\n",
+            "ABCDE12345",
+        );
+        assert_eq!(
+            developer_id_team_from_codesign(&developer_id).as_deref(),
+            Some("ABCDE12345")
+        );
+        let from_source = signed(
+            "Authority=Apple Development: Jane Doe (XYZ9876543)\nAuthority=Apple Worldwide Developer Relations Certification Authority\n",
+            "ABCDE12345",
+        );
+        assert_eq!(
+            team_from_codesign(&from_source).as_deref(),
+            Some("ABCDE12345")
+        );
+        assert_eq!(developer_id_team_from_codesign(&from_source), None);
+        let ad_hoc = "Identifier=com.wydrox.apassy\nSignature=adhoc\nTeamIdentifier=not set\n";
+        assert_eq!(developer_id_team_from_codesign(ad_hoc), None);
+        // The leaf is the first Authority line; a later one does not count.
+        let wrong_leaf = signed(
+            "Authority=Apple Development: Jane Doe (XYZ9876543)\nAuthority=Developer ID Application: Example Inc. (ABCDE12345)\n",
+            "ABCDE12345",
+        );
+        assert_eq!(developer_id_team_from_codesign(&wrong_leaf), None);
     }
 
     #[test]

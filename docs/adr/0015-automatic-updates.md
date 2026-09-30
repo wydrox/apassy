@@ -29,7 +29,7 @@ The image goes to `<data dir>/update/`, which the agent profile denies. The app 
 4. It is signed with a Developer ID Application certificate of the same team as the running app: `codesign --verify --deep --strict -R '=identifier "com.wydrox.apassy" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "<team>"'`.
 5. Gatekeeper accepts it (`spctl --assess --type exec`), so Apple notarized it.
 
-The app reads its own team from the signature of the running process (`codesign -d <pid>`). A running app with no team, for example an ad hoc build, or a program outside an app bundle, does not download. It offers the download page.
+The app reads its own team from the signature of the running process (`codesign -d <pid>`). A running app without a Developer ID signature, for example an ad hoc build or a build from source signed with Apple Development, or a program outside an app bundle, does not download. It offers the download page. (Changed after 0.3.0: at first only a signature without a team stopped the download.)
 
 ### 3. Install
 

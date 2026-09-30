@@ -78,9 +78,19 @@ Apassy took real credentials only after this test passed.
 
 ## Install
 
-Download the signed and notarized `Apassy.dmg` from **[apassy.wyderka.cc](https://apassy.wyderka.cc)**, open it, and drag Apassy to Applications. Each push to `main` that passes CI publishes a new build ([release](docs/operations/release.md)). From 0.3.0, Apassy updates itself when the version number goes up: it installs only a build that is signed by the same developer and notarized by Apple, and asks you to restart ([updates](docs/operations/updates.md)).
+When it is published, download the signed and notarized `Apassy.dmg` from **[apassy.wyderka.cc](https://apassy.wyderka.cc)**, open it, and drag Apassy to Applications; until then, use [the command below](#install-from-source-with-one-command). Each push to `main` that passes CI publishes a new build ([release](docs/operations/release.md)). From 0.3.0, Apassy updates itself when the version number goes up: it installs only a build that is signed by the same developer and notarized by Apple, and asks you to restart ([updates](docs/operations/updates.md)).
 
 Requirements: macOS 15 or later on Apple silicon. Linux is not supported yet: the isolation of agents uses macOS Seatbelt, and Linux needs its own version first. Apassy already builds and passes its tests on Linux, and CI checks it there.
+
+### Install from source with one command
+
+Until the signed download is published, this command builds the newest release on your Mac, checks it, and installs it as `/Applications/Apassy.app`. It takes a few minutes:
+
+```sh
+/bin/bash -c "$(curl -fsSL https://apassy.wyderka.cc/install.sh)"
+```
+
+It needs macOS 15 on Apple silicon, Xcode or its Command Line Tools, [rustup](https://rustup.rs), and an Apple Development certificate (a free Apple Account in Xcode gives one). The script ([`scripts/install.sh`](scripts/install.sh)) checks each one first, asks before it replaces an app, and never uses sudo. Add `install.sh --check` after the command to check your Mac only. You sign the build yourself, so it does not update itself: run the command again for a new release.
 
 ### Build from source
 
