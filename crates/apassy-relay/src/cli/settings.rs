@@ -180,19 +180,27 @@ pub fn normalize_url(text: &str) -> Result<String, CliError> {
     Ok(format!("{scheme}://{rest}"))
 }
 
-/// Writes the settings file: directory 0700, file 0600, replaced atomically.
-pub fn save(relay_url: &str, member_token: &SecretString) -> Result<PathBuf, CliError> {
-    let dir = settings_dir()?;
+/// Makes the directory (and its parents) with mode 0700, and sets 0700 on it.
+pub fn ensure_private_dir(dir: &std::path::Path) -> Result<(), CliError> {
     let fail = |what: &str, err: std::io::Error| {
         CliError::relay(format!("Cannot {what}: {}.", err.kind()))
     };
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
-        .create(&dir)
+        .create(dir)
         .map_err(|e| fail("create the settings directory", e))?;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
-        .map_err(|e| fail("protect the settings directory", e))?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| fail("protect the settings directory", e))
+}
+
+/// Writes the settings file: directory 0700, file 0600, replaced atomically.
+pub fn save(relay_url: &str, member_token: &SecretString) -> Result<PathBuf, CliError> {
+    let dir = settings_dir()?;
+    let fail = |what: &str, err: std::io::Error| {
+        CliError::relay(format!("Cannot {what}: {}.", err.kind()))
+    };
+    ensure_private_dir(&dir)?;
     let body = zeroize::Zeroizing::new(
         serde_json::to_string_pretty(&FileSettingsRef {
             relay_url,

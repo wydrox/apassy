@@ -1,8 +1,8 @@
 //! The `/v1` endpoints for people and agents (docs/SPEC.md, "HTTP API").
 //!
 //! Each function does one endpoint: it takes the checked principal and the parsed
-//! request, and returns the `result` of the envelope. The value of an item never
-//! leaves this module: no view has a field for it.
+//! request, and returns the `result` of the envelope. The relay has no readable value
+//! of an item: it stores a uid and a sealed text, and no view has a field for either.
 
 use apassy::broker::proxy::HostRule;
 use apassy::vault::{Environment, Reversibility, RiskLevel, Scope, checked_env_name, providers};
@@ -16,9 +16,11 @@ use crate::api::{
     JoinRequest, MeView, MemberView, NewItem, Policy, PolicyMode, PrincipalKind, Role,
 };
 use crate::error::{RelayError, RelayResult, codes};
+use crate::hostkeys;
 use crate::ids::{AgentId, CollectionId, GrantId, InviteId, ItemId, MemberId};
 use crate::secret::{TokenKind, new_token, token_hash};
 use crate::server::Core;
+use crate::server::approvals::invalidate_pending;
 use crate::server::audit::{self, member_actor};
 use crate::server::auth::{AgentAuth, MemberAuth, parse_role, role_text};
 use crate::server::env::{RESERVED_NAMES, base_var, provider_vars};
@@ -30,7 +32,6 @@ const DEFAULT_INVITE_HOURS: u32 = 72;
 const MAX_INVITE_HOURS: u32 = 168;
 const DEFAULT_AGENT_DAYS: u32 = 30;
 const MAX_AGENT_DAYS: u32 = 365;
-const MAX_VALUE_BYTES: usize = 4096;
 const MAX_ITEM_HOSTS: usize = 16;
 
 fn to_json<T: Serialize>(value: &T) -> RelayResult<Value> {
@@ -287,12 +288,15 @@ pub fn member_revoke(
             params![to_i(id.0), to_i(now)],
         )
         .map_err(db)?;
-        tx.execute(
-            "UPDATE run SET status = 'denied', code = ?3, decided_by = 'revocation', decided_at = ?2, \
-             note = 'The member was revoked.' WHERE member_id = ?1 AND status = 'pending'",
-            params![to_i(id.0), to_i(now), codes::APPROVAL_INVALIDATED],
-        )
-        .map_err(db)?;
+        // The pending runs of this member are denied, and their keys are dropped.
+        invalidate_pending(
+            core,
+            tx,
+            now,
+            &member_actor(owner.id.0),
+            "member_revoked",
+            |run| run.member_id == id,
+        )?;
         core.sessions
             .end_matching(tx, now, "member_revoked", |s| s.member_id == id)?;
         core.audit.write_on(
@@ -487,20 +491,19 @@ pub fn item_create(core: &Core, by: &MemberAuth, request: NewItem, now: u64) -> 
             "The variable name is one that the relay sets itself.",
         ));
     }
-    let value = &request.value;
-    // Printable ASCII only, and no quote or backslash: JSON writes such a value as
-    // it is, so a JSON echo of it in a response is found and hidden.
-    if value.is_empty()
-        || value.len() > MAX_VALUE_BYTES
-        || !value
-            .expose()
-            .bytes()
-            .all(|b| (b' '..=b'~').contains(&b) && b != b'"' && b != b'\\')
-    {
+    // The relay cannot read the value: the CLI checked it and sealed it. The relay
+    // checks the shape of what it stores.
+    if !hostkeys::is_uid(&request.uid) {
         return Err(RelayError::invalid(
-            "The value is 1 to 4096 bytes of printable ASCII, with no quote (\") and no backslash.",
+            "The uid is 32 lowercase hex characters.",
         ));
     }
+    let sealed = hostkeys::decode_b64(&request.sealed, hostkeys::MAX_SEALED_BYTES)
+        .ok()
+        .filter(|bytes| bytes.len() >= hostkeys::MIN_SEALED_BYTES)
+        .ok_or_else(|| {
+            RelayError::invalid("The sealed value is base64url text of 12 + 16 + 1 to 4096 bytes.")
+        })?;
     let provider = match request.provider.as_deref() {
         None | Some("") => None,
         Some(id) => {
@@ -558,17 +561,9 @@ pub fn item_create(core: &Core, by: &MemberAuth, request: NewItem, now: u64) -> 
         Reversibility::parse,
         "reversibility",
     )?;
-    if crate::proxy::mint(value).is_none() {
-        return Err(RelayError::new(
-            codes::PLACEHOLDER_IMPOSSIBLE,
-            "This value cannot get a placeholder: it is too short or has too little variety. The relay stores only items that can.",
-        ));
-    }
     let hosts_text = serde_json::to_string(&hosts)
         .map_err(|_| RelayError::internal("The hosts cannot be written."))?;
     let id = core.store.tx(|tx| {
-        // The value is masked from here on, in the name of the item too.
-        core.audit.add_value(&env_name, value);
         let name = core.audit.mask_text(&name);
         let exists: i64 = tx
             .query_row(
@@ -580,15 +575,29 @@ pub fn item_create(core: &Core, by: &MemberAuth, request: NewItem, now: u64) -> 
         if exists == 0 {
             return Err(RelayError::not_found("collection"));
         }
+        let uid_used: i64 = tx
+            .query_row(
+                "SELECT count(*) FROM item WHERE uid = ?1",
+                params![request.uid],
+                |row| row.get(0),
+            )
+            .map_err(db)?;
+        if uid_used > 0 {
+            return Err(RelayError::new(
+                codes::CONFLICT,
+                "An item with this uid exists.",
+            ));
+        }
         match tx.execute(
-            "INSERT INTO item (collection_id, name, env_name, value, provider, hosts, environment, \
-             risk, scope, reversibility, created_by, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO item (collection_id, name, env_name, uid, sealed, provider, hosts, \
+             environment, risk, scope, reversibility, created_by, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 to_i(request.collection_id.0),
                 name,
                 env_name,
-                value.expose(),
+                request.uid,
+                sealed,
                 provider,
                 hosts_text,
                 environment,
@@ -677,6 +686,14 @@ pub fn item_archive(core: &Core, by: &MemberAuth, id: ItemId, now: u64) -> Relay
         if changed == 0 {
             return Err(RelayError::not_found("item"));
         }
+        invalidate_pending(
+            core,
+            tx,
+            now,
+            &member_actor(by.id.0),
+            "item_archived",
+            |run| run.items.contains(&id),
+        )?;
         core.sessions.end_matching(tx, now, "item_archived", |s| {
             s.secrets.iter().any(|secret| secret.item_id == id)
         })?;
@@ -690,6 +707,7 @@ pub fn item_archive(core: &Core, by: &MemberAuth, id: ItemId, now: u64) -> Relay
         )?;
         Ok(())
     })?;
+    core.notify.notify();
     created(id.0)
 }
 
@@ -799,6 +817,14 @@ pub fn grant_revoke(core: &Core, by: &MemberAuth, id: GrantId, now: u64) -> Rela
                 .collect::<Result<_, _>>()
                 .map_err(db)?
         };
+        invalidate_pending(
+            core,
+            tx,
+            now,
+            &member_actor(by.id.0),
+            "grant_revoked",
+            |run| run.member_id == member && run.items.iter().any(|item| items.contains(item)),
+        )?;
         core.sessions.end_matching(tx, now, "grant_revoked", |s| {
             s.member_id == member && s.secrets.iter().any(|secret| items.contains(&secret.item_id))
         })?;
@@ -812,6 +838,7 @@ pub fn grant_revoke(core: &Core, by: &MemberAuth, id: GrantId, now: u64) -> Rela
         )?;
         Ok(())
     })?;
+    core.notify.notify();
     created(id.0)
 }
 
@@ -910,6 +937,14 @@ pub fn agent_revoke(core: &Core, by: &MemberAuth, id: AgentId, now: u64) -> Rela
             params![to_i(id.0), to_i(now)],
         )
         .map_err(db)?;
+        invalidate_pending(
+            core,
+            tx,
+            now,
+            &member_actor(by.id.0),
+            "agent_revoked",
+            |run| run.agent_id == id,
+        )?;
         core.sessions
             .end_matching(tx, now, "agent_revoked", |s| s.agent_id == id)?;
         core.audit.write_on(
@@ -922,6 +957,7 @@ pub fn agent_revoke(core: &Core, by: &MemberAuth, id: AgentId, now: u64) -> Rela
         )?;
         Ok(())
     })?;
+    core.notify.notify();
     created(id.0)
 }
 
@@ -934,11 +970,13 @@ pub fn audit_list(core: &Core, after: u64, limit: u32) -> RelayResult<Value> {
 
 fn approval_text(item: &ItemRow) -> String {
     if item.environment == "production" {
-        "Every run with this production credential waits for an approver.".to_string()
+        "Every run with this production credential waits for the owner's host, which asks the owner."
+            .to_string()
     } else if item.policy.mode == PolicyMode::Ask {
-        "Every run waits for an approver (the policy of the collection).".to_string()
+        "Every run waits for the owner's host, which asks the owner (the policy of the collection)."
+            .to_string()
     } else {
-        "A known safe command runs at once when the run has the user's request. Any other command waits for an approver."
+        "A known safe command is released by the owner's host when the run has the user's request. Any other command waits for the owner at the host."
             .to_string()
     }
 }

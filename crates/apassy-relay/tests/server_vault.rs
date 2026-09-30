@@ -130,13 +130,18 @@ fn a_file_that_is_not_a_vault_is_refused() {
 fn data_survives_a_restart_and_sessions_do_not() {
     let relay = start(UpstreamOptions::default());
     let team = relay.setup("staging");
-    let (status, run) = relay.run(
+    let run = relay.run_released(
         &team.agent_token,
         &team.request(&["git", "status"], Some("check the repo")),
     );
-    assert_eq!(status, 200, "{run}");
-    assert_eq!(run["result"]["status"], "ready");
-    let run_id = run["result"]["run_id"].as_u64().unwrap();
+    assert_eq!(run["status"], "ready");
+    let run_id = run["run_id"].as_u64().unwrap();
+    // A second run waits when the relay stops.
+    let (_, waiting) = relay.run(
+        &team.agent_token,
+        &team.request(&["git", "status"], Some("wait")),
+    );
+    let waiting_id = waiting["result"]["run_id"].as_u64().unwrap();
     let relay = relay.restart();
     // The owner token, the items, and the grant are still there.
     let items = relay.ok("GET", "/v1/items", &relay.owner_token, None);
@@ -152,13 +157,22 @@ fn data_survives_a_restart_and_sessions_do_not() {
     );
     assert_eq!(run["status"], "ended");
     assert!(run.get("session").is_none());
-    // A new run works.
-    let (_, run) = relay.run(
+    // The run that waited is still pending, but its key is gone: the host never sees it.
+    let waiting = relay.ok(
+        "GET",
+        &format!("/v1/runs/{waiting_id}"),
+        &team.agent_token,
+        None,
+    );
+    assert_eq!(waiting["status"], "pending");
+    assert!(relay.host_requests().is_empty());
+    // A new run works, and its key is new.
+    let run = relay.run_released(
         &team.agent_token,
         &team.request(&["git", "status"], Some("again")),
     );
-    assert_eq!(run["result"]["status"], "ready");
-    // The value is still masked in the audit after the restart.
+    assert_eq!(run["status"], "ready");
+    // The session holds the value again, so the value is masked in the audit.
     let request = json!({
         "items": [team.item], "command": ["git", "status"],
         "purpose": format!("value {CANARY}"), "user_request": "x"
@@ -167,6 +181,58 @@ fn data_survives_a_restart_and_sessions_do_not() {
     let audit = relay.ok("GET", "/v1/audit?limit=500", &relay.owner_token, None);
     assert!(!audit.to_string().contains(CANARY));
     assert!(audit.to_string().contains("session_ended"));
+}
+
+/// The first alpha kept the item values in the vault (user_version 1). This relay
+/// refuses such a vault at start, and does not touch it.
+#[test]
+fn a_vault_from_the_first_alpha_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = relay::test_config(dir.path(), UpstreamOptions::default());
+    std::fs::create_dir_all(&config.data_dir).unwrap();
+    let conn = rusqlite::Connection::open(config.vault_path()).unwrap();
+    conn.execute_batch(&format!("PRAGMA key = '{}';", relay::VAULT_KEY))
+        .unwrap();
+    conn.execute_batch(
+        "CREATE TABLE team (id INTEGER PRIMARY KEY CHECK (id = 1), name TEXT NOT NULL, created_at INTEGER NOT NULL);
+         CREATE TABLE item (id INTEGER PRIMARY KEY, name TEXT NOT NULL, env_name TEXT NOT NULL, value TEXT NOT NULL);
+         INSERT INTO team VALUES (1, 'Old Team', 0);
+         PRAGMA user_version = 1;",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO item (name, env_name, value) VALUES ('old', 'OLD_KEY', ?1)",
+        [CANARY],
+    )
+    .unwrap();
+    drop(conn);
+    let before = std::fs::read(config.vault_path()).unwrap();
+    let error = Relay::start(config.clone())
+        .err()
+        .expect("a version 1 vault must be refused");
+    assert!(error.message.contains("first alpha"), "{error}");
+    assert!(error.message.contains("plaintext"), "{error}");
+    assert!(error.message.contains("new data volume"), "{error}");
+    assert!(!error.to_string().contains(CANARY), "{error}");
+    assert_eq!(std::fs::read(config.vault_path()).unwrap(), before);
+    // A vault of a version that is not known is refused with another message.
+    let conn = rusqlite::Connection::open(config.vault_path()).unwrap();
+    conn.execute_batch(&format!(
+        "PRAGMA key = '{}'; PRAGMA user_version = 9;",
+        relay::VAULT_KEY
+    ))
+    .unwrap();
+    drop(conn);
+    let error = Relay::start(config).err().expect("version 9 is unknown");
+    assert!(error.message.contains("unknown schema version"), "{error}");
+}
+
+#[test]
+fn a_new_vault_is_version_2_with_no_value_column() {
+    let relay = start(UpstreamOptions::default());
+    let version = relay.vault_rows("SELECT user_version, '' FROM pragma_user_version");
+    assert_eq!(version[0].0, b"2");
+    assert_eq!(store::SCHEMA_VERSION, 2);
 }
 
 #[test]

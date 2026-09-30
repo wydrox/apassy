@@ -138,43 +138,6 @@ fn cases() -> Vec<Case> {
                 collection_view.clone(),
             )
         },
-        Case {
-            stdin: Some("placeholder-value\n"),
-            body: Some(json!({
-                "collection_id": 2, "name": "Stripe", "env_name": "STRIPE_API_KEY",
-                "value": "placeholder-value", "provider": "stripe",
-                "hosts": ["api.stripe.com", "files.stripe.com"], "environment": "staging",
-                "risk": "low", "scope": "read-only", "reversibility": "reversible"})),
-            ..case(
-                &[
-                    "item",
-                    "add",
-                    "--collection",
-                    "2",
-                    "--name",
-                    "Stripe",
-                    "--env",
-                    "STRIPE_API_KEY",
-                    "--environment",
-                    "staging",
-                    "--provider",
-                    "stripe",
-                    "--host",
-                    "api.stripe.com",
-                    "--host",
-                    "files.stripe.com",
-                    "--risk",
-                    "low",
-                    "--scope",
-                    "read-only",
-                    "--reversibility",
-                    "reversible",
-                ],
-                "POST",
-                "/v1/items",
-                json!({"id": 4}),
-            )
-        },
         case(
             &["item", "list"],
             "GET",
@@ -347,126 +310,417 @@ fn me_works_with_an_agent_token_and_json_prints_the_result() {
     );
 }
 
-#[test]
-fn item_add_sends_the_value_from_stdin_and_never_prints_it() {
-    let mock = Mock::always(200, json!({"id": 4}));
-    let cli = Cli::new().member(&mock.url);
-    let args = [
+const ME: &str = r#"{"ok":true,"result":{"team":"Test Team","kind":"member","member_id":1,"member_name":"olga","role":"owner"}}"#;
+
+/// A relay that answers `GET /v1/me` and takes every item.
+fn item_mock(item_answer: fn() -> Answer) -> Mock {
+    Mock::start(move |request, _| {
+        if request.url == "/v1/me" {
+            raw(200, ME)
+        } else {
+            item_answer()
+        }
+    })
+}
+
+fn item_created() -> Answer {
+    ok(json!({"id": 4, "hosts": ["api.stripe.com", "files.stripe.com"]}))
+}
+
+fn item_args<'a>(extra: &[&'a str]) -> Vec<&'a str> {
+    let mut args = vec![
         "item",
         "add",
         "--collection",
         "2",
         "--name",
-        "Stripe",
+        "Stripe test key",
         "--env",
         "STRIPE_API_KEY",
         "--environment",
         "staging",
     ];
-    let stdin = format!("{CANARY}\n");
-    let output = cli.run(&args, Some(&stdin));
+    args.extend_from_slice(extra);
+    args
+}
+
+fn keys_file(cli: &Cli) -> std::path::PathBuf {
+    cli.config_dir().join("apassy-team").join("keys.json")
+}
+
+fn key_entries(cli: &Cli) -> Vec<Value> {
+    let text = std::fs::read_to_string(keys_file(cli)).unwrap_or_default();
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let file: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(file["version"], 1);
+    file["entries"].as_array().unwrap().clone()
+}
+
+#[test]
+fn item_add_seals_the_value_and_keeps_its_key_on_this_machine() {
+    use apassy_relay::hostkeys;
+    use std::os::unix::fs::PermissionsExt;
+    let mock = item_mock(item_created);
+    let cli = Cli::new().member(&mock.url);
+    let args = item_args(&["--provider", "stripe"]);
+    let output = cli.run(&args, Some(&format!("{CANARY}\n")));
     assert_eq!(code(&output), 0, "{}", text(&output.stderr));
+    // The relay got the token check and the sealed item, and nothing else.
     let seen = mock.requests();
+    assert_eq!(seen.len(), 2, "{seen:?}");
     assert_eq!(
-        seen[0].json()["value"],
-        CANARY,
-        "one trailing newline is removed"
+        (seen[0].method.as_str(), seen[0].url.as_str()),
+        ("GET", "/v1/me")
     );
+    assert_eq!(
+        (seen[1].method.as_str(), seen[1].url.as_str()),
+        ("POST", "/v1/items")
+    );
+    let body = seen[1].json();
+    assert!(body.get("value").is_none(), "{body}");
+    assert!(body.get("allow_broad_host").is_none());
+    assert_eq!(body["collection_id"], 2);
+    assert_eq!(body["provider"], "stripe");
+    let uid = body["uid"].as_str().unwrap();
+    assert!(hostkeys::is_uid(uid), "{uid}");
+    let sealed = hostkeys::decode_b64(body["sealed"].as_str().unwrap(), 5000).unwrap();
+    assert_eq!(sealed.len(), 12 + CANARY.len() + 16);
+    // The key is in keys.json, with the metadata that the host trusts.
+    let entries = key_entries(&cli);
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    assert_eq!(entry["relay_url"], mock.url.as_str());
+    assert_eq!(entry["team"], "Test Team");
+    assert_eq!(entry["uid"], uid);
+    assert_eq!(entry["item_id"], 4);
+    assert_eq!(entry["name"], "Stripe test key");
+    assert_eq!(entry["env_name"], "STRIPE_API_KEY");
+    assert_eq!(entry["environment"], "staging");
+    // The hosts are what the relay said it stored.
+    assert_eq!(
+        entry["hosts"],
+        json!(["api.stripe.com", "files.stripe.com"])
+    );
+    assert!(entry["created_at"].as_u64().unwrap() > 1_700_000_000);
+    let key = hostkeys::decode_key(entry["key"].as_str().unwrap()).unwrap();
+    let opened = hostkeys::open_item(&key, uid, &sealed).unwrap();
+    assert_eq!(opened.as_slice(), CANARY.as_bytes());
+    // The value and the key are nowhere on the wire, on stdout, or on stderr.
+    let key_text = entry["key"].as_str().unwrap();
+    let wire: String = seen
+        .iter()
+        .map(|r| format!("{} {}", r.url, r.body))
+        .collect();
+    for hidden in [CANARY, key_text] {
+        assert!(!wire.contains(hidden), "the relay got a secret");
+        assert!(!text(&output.stdout).contains(hidden));
+        assert!(!text(&output.stderr).contains(hidden));
+    }
     assert_eq!(text(&output.stdout), "4\n");
-    assert!(!text(&output.stdout).contains(CANARY));
-    assert!(!text(&output.stderr).contains(CANARY));
+    assert!(
+        text(&output.stderr).contains("keys.json"),
+        "{}",
+        text(&output.stderr)
+    );
+    // Modes.
+    let dir_mode = std::fs::metadata(cli.config_dir().join("apassy-team"))
+        .unwrap()
+        .permissions()
+        .mode();
+    let file_mode = std::fs::metadata(keys_file(&cli))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!((dir_mode & 0o777, file_mode & 0o777), (0o700, 0o600));
     // The value is not in the arguments of the CLI either: it only came through stdin.
     assert!(!args.iter().any(|a| a.contains(CANARY)));
-    assert!(seen[0].json().get("allow_broad_host").is_none());
+    // A second item gets its own uid and key, and the first stays.
+    let output = cli.run(&item_args(&[]), Some(&format!("{CANARY}\n")));
+    assert_eq!(code(&output), 0, "{}", text(&output.stderr));
+    let entries = key_entries(&cli);
+    assert_eq!(entries.len(), 2);
+    assert_ne!(entries[0]["uid"], entries[1]["uid"]);
+    assert_ne!(entries[0]["key"], entries[1]["key"]);
 }
 
 #[test]
 fn item_add_shows_what_each_host_covers_and_sends_allow_broad_host() {
-    let mock = Mock::always(
-        200,
-        json!({"id": 5, "hosts": ["example.com", "api.example.com:8443"]}),
-    );
+    let mock = Mock::start(|request, _| {
+        if request.url == "/v1/me" {
+            raw(200, ME)
+        } else {
+            ok(json!({"id": 5, "hosts": ["example.com", "api.example.com:8443"]}))
+        }
+    });
     let cli = Cli::new().member(&mock.url);
-    let args = [
-        "item",
-        "add",
-        "--collection",
-        "2",
-        "--name",
-        "Wide",
-        "--env",
-        "WIDE_KEY",
-        "--environment",
-        "staging",
+    let args = item_args(&[
         "--host",
         "example.com",
         "--host",
         "api.example.com:8443",
         "--allow-broad-host",
-    ];
+    ]);
     let output = cli.run(&args, Some(&format!("{CANARY}\n")));
     assert_eq!(code(&output), 0, "{}", text(&output.stderr));
-    assert_eq!(mock.requests()[0].json()["allow_broad_host"], true);
-    assert_eq!(text(&output.stdout), "5\n");
+    assert_eq!(mock.requests()[1].json()["allow_broad_host"], true);
     assert_eq!(
-        text(&output.stderr),
-        "The value may go to example.com and every subdomain of it.\n\
-         The value may go to api.example.com and every subdomain of it, on port 8443.\n"
+        mock.requests()[1].json()["hosts"],
+        json!(["example.com", "api.example.com:8443"])
+    );
+    assert_eq!(text(&output.stdout), "5\n");
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.starts_with(
+            "The value may go to example.com and every subdomain of it.\n\
+             The value may go to api.example.com and every subdomain of it, on port 8443.\n"
+        ),
+        "{stderr}"
     );
 }
 
 #[test]
-fn item_add_removes_one_newline_and_refuses_an_empty_value() {
-    let mock = Mock::always(200, json!({"id": 4}));
+fn item_add_sends_the_declarations_and_the_local_entry_has_them_too() {
+    let mock = item_mock(item_created);
     let cli = Cli::new().member(&mock.url);
-    let args = [
-        "item",
-        "add",
-        "--collection",
-        "2",
-        "--name",
-        "S",
-        "--env",
-        "K",
-        "--environment",
-        "staging",
-    ];
+    let args = item_args(&[
+        "--provider",
+        "stripe",
+        "--risk",
+        "low",
+        "--scope",
+        "read-only",
+        "--reversibility",
+        "reversible",
+    ]);
+    let output = cli.run(&args, Some(&format!("{CANARY}\n")));
+    assert_eq!(code(&output), 0, "{}", text(&output.stderr));
+    let body = mock.requests()[1].json();
+    assert_eq!(body["risk"], "low");
+    assert_eq!(body["scope"], "read-only");
+    assert_eq!(body["reversibility"], "reversible");
+    let entry = &key_entries(&cli)[0];
+    assert_eq!(entry["risk"], "low");
+    assert_eq!(entry["scope"], "read-only");
+    assert_eq!(entry["reversibility"], "reversible");
+}
+
+#[test]
+fn item_add_removes_one_newline_and_refuses_an_empty_value() {
+    use apassy_relay::hostkeys;
+    let mock = item_mock(item_created);
+    let cli = Cli::new().member(&mock.url);
+    let args = item_args(&[]);
     let empty = cli.run(&args, Some("\n"));
     assert_eq!(code(&empty), 2);
     let none = cli.run(&args, None);
     assert_eq!(code(&none), 2);
     assert!(mock.requests().is_empty(), "no request without a value");
-    // Only one newline is removed.
-    let two = cli.run(&args, Some("abc\n\n"));
-    assert_eq!(code(&two), 0);
-    assert_eq!(mock.requests()[0].json()["value"], "abc\n");
+    assert!(key_entries(&cli).is_empty());
+    // Only one newline is removed: what is left is not printable ASCII.
+    let two = cli.run(&args, Some(&format!("{CANARY}\n\n")));
+    assert_eq!(code(&two), 2);
+    assert!(mock.requests().is_empty());
+    assert!(key_entries(&cli).is_empty());
+    // One newline, or a carriage return and a newline, is removed.
+    for stdin in [
+        format!("{CANARY}\n"),
+        format!("{CANARY}\r\n"),
+        CANARY.to_string(),
+    ] {
+        let output = cli.run(&args, Some(&stdin));
+        assert_eq!(code(&output), 0, "{}", text(&output.stderr));
+    }
+    for entry in key_entries(&cli) {
+        let uid = entry["uid"].as_str().unwrap().to_string();
+        let key = hostkeys::decode_key(entry["key"].as_str().unwrap()).unwrap();
+        let sealed = mock
+            .requests()
+            .iter()
+            .map(|r| r.json())
+            .find(|b| b["uid"] == uid.as_str())
+            .unwrap();
+        let sealed = hostkeys::decode_b64(sealed["sealed"].as_str().unwrap(), 5000).unwrap();
+        assert_eq!(
+            hostkeys::open_item(&key, &uid, &sealed).unwrap().as_slice(),
+            CANARY.as_bytes()
+        );
+    }
 }
 
+/// The relay cannot check a value, so the CLI does: nothing is sent, and no key is
+/// written, for a value that the relay would have refused.
 #[test]
-fn a_relay_error_shows_code_and_message_and_exits_4_without_the_value() {
-    let mock = Mock::start(|_, _| err(400, "placeholder_impossible", "The value is too short."));
+fn item_add_checks_the_value_before_anything_else() {
+    let mock = item_mock(item_created);
     let cli = Cli::new().member(&mock.url);
-    let args = [
-        "item",
-        "add",
-        "--collection",
-        "2",
-        "--name",
-        "S",
-        "--env",
-        "K",
-        "--environment",
-        "staging",
-    ];
-    let output = cli.run(&args, Some(&format!("{CANARY}\n")));
+    let args = item_args(&[]);
+    for (why, value) in [
+        ("a NUL", format!("{CANARY}\0x")),
+        ("a tab", format!("{CANARY}\tx")),
+        ("a quote", format!("{CANARY}\"x")),
+        ("a backslash", format!("{CANARY}\\x")),
+        ("DEL", format!("{CANARY}\u{7f}")),
+        ("a letter that is not ASCII", format!("{CANARY}\u{e9}")),
+        ("4097 bytes", "a".repeat(4097)),
+    ] {
+        let output = cli.run(&args, Some(&value));
+        assert_eq!(code(&output), 2, "{why}");
+        let stderr = text(&output.stderr);
+        assert!(stderr.contains("printable ASCII"), "{why}: {stderr}");
+        assert!(!stderr.contains(CANARY), "{why}");
+    }
+    // Too short for a placeholder.
+    let output = cli.run(&args, Some("short\n"));
+    assert_eq!(code(&output), 2);
+    assert!(text(&output.stderr).contains("cannot get a placeholder"));
+    assert!(mock.requests().is_empty(), "nothing went to the relay");
+    assert!(!keys_file(&cli).exists(), "no key was written");
+    // Signs and spaces are fine, and so is 4096 bytes.
+    let signs = "sk_test_51Synthetic/Canary+Value= with ~!@#$%^&*()";
+    let long = format!("sk_test_{}", "Ab1".repeat(1362));
+    for value in [signs.to_string(), long] {
+        let output = cli.run(&args, Some(&value));
+        assert_eq!(code(&output), 0, "{}", text(&output.stderr));
+    }
+    // A value in the name is refused: the relay stores the name in clear.
+    let mut named = item_args(&[]);
+    named[5] = CANARY;
+    let output = cli.run(&named, Some(&format!("{CANARY}\n")));
+    assert_eq!(code(&output), 2);
+    assert!(!text(&output.stderr).contains(CANARY));
+}
+
+/// When the relay refuses the item, there is no item and so no key to keep.
+#[test]
+fn item_add_removes_the_key_when_the_relay_refuses_the_item() {
+    let mock = Mock::start(|request, _| {
+        if request.url == "/v1/me" {
+            raw(200, ME)
+        } else {
+            err(
+                409,
+                "conflict",
+                "This collection has an item with this variable name.",
+            )
+        }
+    });
+    let cli = Cli::new().member(&mock.url);
+    let output = cli.run(&item_args(&[]), Some(&format!("{CANARY}\n")));
     assert_eq!(code(&output), 4);
     let stderr = text(&output.stderr);
     assert!(
-        stderr.contains("placeholder_impossible: The value is too short."),
+        stderr.contains("conflict: This collection has an item"),
         "{stderr}"
     );
     assert!(!stderr.contains(CANARY));
     assert!(!text(&output.stdout).contains(CANARY));
+    // The entry was written before the upload and is gone again.
+    assert_eq!(mock.requests().len(), 2);
+    assert!(key_entries(&cli).is_empty());
+    let mode = std::os::unix::fs::PermissionsExt::mode(
+        &std::fs::metadata(keys_file(&cli)).unwrap().permissions(),
+    );
+    assert_eq!(mode & 0o777, 0o600);
+}
+
+#[test]
+fn a_relay_error_shows_code_and_message_and_exits_4_without_the_value() {
+    let mock = Mock::start(|request, _| {
+        if request.url == "/v1/me" {
+            raw(200, ME)
+        } else {
+            err(400, "broad_host", "The host example.com is a whole domain.")
+        }
+    });
+    let cli = Cli::new().member(&mock.url);
+    let output = cli.run(&item_args(&[]), Some(&format!("{CANARY}\n")));
+    assert_eq!(code(&output), 4);
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.contains("broad_host: The host example.com is a whole domain."),
+        "{stderr}"
+    );
+    assert!(!stderr.contains(CANARY));
+    assert!(!text(&output.stdout).contains(CANARY));
+    assert!(key_entries(&cli).is_empty());
+}
+
+/// A relay that takes the request and then drops the connection: the CLI cannot know
+/// whether the item exists, so the key stays (an item without its key is lost).
+#[test]
+fn item_add_keeps_the_key_when_it_cannot_know_whether_the_item_was_stored() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut head = [0u8; 4096];
+            let n = stream.read(&mut head).unwrap_or(0);
+            let head = String::from_utf8_lossy(&head[..n]).into_owned();
+            if head.starts_with("GET /v1/me") {
+                let body = ME;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+            // The item request is read and dropped: no answer.
+        }
+    });
+    let cli = Cli::new().member(&url);
+    let output = cli.run(&item_args(&[]), Some(&format!("{CANARY}\n")));
+    server.join().unwrap();
+    assert_eq!(code(&output), 4);
+    let stderr = text(&output.stderr);
+    assert!(stderr.contains("may have taken the item"), "{stderr}");
+    assert!(stderr.contains("keys.json"), "{stderr}");
+    assert!(!stderr.contains(CANARY));
+    let entries = key_entries(&cli);
+    assert_eq!(entries.len(), 1, "the key stays");
+    assert!(entries[0]["item_id"].is_null());
+}
+
+/// A relay that is not there: nothing was sent, and nothing is left behind.
+#[test]
+fn item_add_to_a_relay_that_is_down_writes_no_key() {
+    let cli = Cli::new().member(&dead_url());
+    let output = cli.run(&item_args(&[]), Some(&format!("{CANARY}\n")));
+    assert_eq!(code(&output), 4);
+    assert!(!keys_file(&cli).exists());
+}
+
+#[test]
+fn approve_says_that_the_keys_are_on_the_owners_host() {
+    let message = "The keys are on the owner's host. Approve there with apassy-team host.";
+    let mock = Mock::start(move |_, _| err(403, "approve_on_host", message));
+    let cli = Cli::new().member(&mock.url);
+    let output = cli.run(&["approve", "9"], None);
+    assert_eq!(code(&output), 2);
+    assert_eq!(text(&output.stderr), format!("apassy-team: {message}\n"));
+    assert_eq!(text(&output.stdout), "");
+    assert_eq!(mock.requests().len(), 1);
+    assert_eq!(mock.requests()[0].url, "/v1/approvals/9/approve");
+    // Deny still works.
+    let ok_mock = Mock::always(200, run_view(9, "denied", None));
+    let output = Cli::new().member(&ok_mock.url).run(&["deny", "9"], None);
+    assert_eq!(code(&output), 0);
+}
+
+#[test]
+fn help_names_the_host_command_and_the_approve_refusal() {
+    let output = Cli::new().run(&["help"], None);
+    assert_eq!(code(&output), 0);
+    let help = text(&output.stdout);
+    assert!(help.contains("host [--ask-all] [--auto-limit N]"), "{help}");
+    assert!(help.contains("keys.json"), "{help}");
+    assert!(help.contains("`host`"), "{help}");
+    assert!(help.contains("sealed here"), "{help}");
 }
 
 #[test]

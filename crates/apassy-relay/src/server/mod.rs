@@ -1,8 +1,9 @@
 //! Track server: the relay server (docs/SPEC.md).
 //!
-//! The team vault, the auth of the edge and of tokens, the admin API, the decision
-//! per run, the live sessions, the approvals, the audit, and the remote MCP
-//! endpoint. The proxy path `/p/` goes to `crate::proxy::Proxy::handle`.
+//! The team vault (sealed item values only), the auth of the edge and of tokens, the
+//! admin API, the decision per run, the one-time keys of pending runs, the endpoints
+//! of the owner's host, the live sessions, the audit, and the remote MCP endpoint.
+//! The proxy path `/p/` goes to `crate::proxy::Proxy::handle`.
 //!
 //! The public interface below is fixed by the skeleton: the `apassy-relay`
 //! binary and the tests use `Relay::init` and `Relay::start`.
@@ -13,8 +14,10 @@ pub mod audit;
 pub mod auth;
 pub mod decide;
 pub mod env;
+pub mod host;
 pub mod http;
 pub mod mcp;
+pub mod runkeys;
 pub mod sessions;
 pub mod store;
 
@@ -34,8 +37,9 @@ use crate::proxy::Proxy;
 use crate::secret::{SecretString, TokenKind, new_token, token_hash};
 use crate::server::approvals::{LongPolls, Notifier};
 use crate::server::audit::{Audit, RELAY_ACTOR};
+use crate::server::runkeys::RunKeys;
 use crate::server::sessions::SessionTable;
-use crate::server::store::{Store, db, load_all_items, to_i, to_u};
+use crate::server::store::{Store, db, to_i, to_u};
 use crate::session::SessionSource;
 
 /// The state that every request handler shares.
@@ -49,6 +53,10 @@ pub struct Core {
     pub notify: Notifier,
     /// The open long polls of each agent.
     pub polls: LongPolls,
+    /// The open long polls of the owner's host.
+    pub host_polls: LongPolls,
+    /// The one-time keys of pending runs. In memory only.
+    pub run_keys: RunKeys,
     /// The host of the public URL. A command that names it is not a foreign host.
     pub public_host: String,
     stop: Arc<AtomicBool>,
@@ -99,6 +107,7 @@ impl RunningRelay {
             let _ = handle.join();
         }
         self.core.sessions.clear();
+        self.core.run_keys.clear();
     }
 }
 
@@ -158,10 +167,8 @@ impl Relay {
         let audit = Audit::new();
         let now = crate::now_unix();
         store.tx(|tx| {
-            for item in load_all_items(tx)? {
-                audit.add_value(&item.env_name, &item.value);
-            }
-            // A restart ends every session.
+            // A restart ends every session. It also drops every run key: a pending run
+            // from before is never shown to the host, and times out.
             let ended: Vec<u64> = {
                 let mut statement = tx
                     .prepare("SELECT id FROM run WHERE status = 'ready'")
@@ -203,8 +210,10 @@ impl Relay {
             .ok_or_else(|| RelayError::internal("The listener has no IP address."))?;
         let stop = Arc::new(AtomicBool::new(false));
         let core = Arc::new(Core {
-            public_host: decide::public_host(&config.public_url),
+            public_host: crate::decision::public_host(&config.public_url),
             polls: LongPolls::new(config.limits.long_polls_per_agent),
+            host_polls: LongPolls::new(config.limits.host_long_polls),
+            run_keys: RunKeys::default(),
             config,
             store,
             audit,

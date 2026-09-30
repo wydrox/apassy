@@ -143,7 +143,7 @@ pub fn handle(client: &Client, text: &str) -> Option<String> {
         CALL_TIMEOUT,
     ) {
         Ok(reply) => reply,
-        Err(message) => return fail("unreachable", &message),
+        Err(error) => return fail("unreachable", &error.message),
     };
     if reply.status == 202 || reply.body.trim().is_empty() && reply.status < 300 {
         return None;

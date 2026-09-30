@@ -5,14 +5,17 @@
 //! the real value only into an auth position, and it puts the placeholder back
 //! in the response. The design is in `docs/SPEC.md`.
 //!
-//! Shared modules (frozen after the skeleton; a track does not edit them):
-//! `api`, `config`, `error`, `ids`, `secret`, `session`.
+//! Shared modules: `api`, `config`, `error`, `ids`, `secret`, `session`, and
+//! `hostkeys` (the crypto of host-held item keys), `decision` (the pure part of the
+//! decision per run, used by the relay and by the owner's host).
 //! Track modules: `server` (track server), `proxy` (track proxy), `cli` (track client).
 #![forbid(unsafe_code)]
 
 pub mod api;
 pub mod config;
+pub mod decision;
 pub mod error;
+pub mod hostkeys;
 pub mod ids;
 pub mod secret;
 pub mod session;

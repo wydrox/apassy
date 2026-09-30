@@ -1,7 +1,8 @@
 //! The `apassy-team` command (docs/SPEC.md, "CLI").
 //!
 //! Admin commands for owners and managers, `join` and `agent create` for members,
-//! `run -- <cmd>` for agents, and `mcp`, the stdio MCP adapter that forwards each
+//! `run -- <cmd>` for agents, `host` for the owner's machine (it holds the item keys
+//! and releases them run by run), and `mcp`, the stdio MCP adapter that forwards each
 //! JSON-RPC message to the relay's `/mcp`.
 //!
 //! The public interface below is fixed by the skeleton: `src/bin/apassy-team.rs`
@@ -14,6 +15,8 @@ pub mod args;
 pub mod client;
 pub mod commands;
 pub mod exec;
+pub mod host;
+pub mod keystore;
 pub mod mcp_stdio;
 pub mod settings;
 

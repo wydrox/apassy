@@ -8,7 +8,7 @@
 //! | `APASSY_RELAY_EDGE_SECRET` or `APASSY_RELAY_EDGE_SECRET_FILE` | The secret the Worker adds as `X-Apassy-Edge`; at least 32 bytes | required |
 //! | `APASSY_RELAY_KEY` or `APASSY_RELAY_KEY_FILE` | The passphrase of the team vault; at least 16 bytes | required |
 //! | `APASSY_RELAY_SESSION_TTL` | Seconds a proxy session lives; 60 to 3600 | `900` |
-//! | `APASSY_RELAY_APPROVAL_TIMEOUT` | Seconds a run waits for an approver; 30 to 86400 | `600` |
+//! | `APASSY_RELAY_APPROVAL_TIMEOUT` | Seconds a run waits for the owner's host; 30 to 86400 | `600` |
 //!
 //! A `_FILE` variable names a file whose content (trailing newline removed) is the
 //! value. It wins over the plain variable.
@@ -61,6 +61,9 @@ pub struct Limits {
     /// The most long polls of one agent at once. A poll over this is answered at
     /// once, as with `wait=0`.
     pub long_polls_per_agent: usize,
+    /// The most long polls of the owner's host at once (`GET /v1/host/requests`). A
+    /// poll over this is answered at once, as with `wait=0`.
+    pub host_long_polls: usize,
 }
 
 impl Default for Limits {
@@ -69,6 +72,7 @@ impl Default for Limits {
             max_active: 256,
             member_reserve: 32,
             long_polls_per_agent: 4,
+            host_long_polls: 2,
         }
     }
 }

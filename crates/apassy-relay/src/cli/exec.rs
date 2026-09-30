@@ -150,7 +150,7 @@ fn wait_until_decided(
                 }
                 std::thread::sleep(Duration::from_secs(2));
             }
-            Err(CallError::Transport(message)) => {
+            Err(CallError::Transport(message) | CallError::Unsent(message)) => {
                 failures += 1;
                 if failures >= POLL_RETRIES {
                     return Err(CliError::relay(message));

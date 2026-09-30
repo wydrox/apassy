@@ -2,7 +2,9 @@
 //!
 //! The table is keyed by the hash of the session key. The proxy reads it through
 //! `SessionSource`. A restart ends every session. Nothing of a session is written to
-//! disk except its id, run id, and expiry.
+//! disk except its id, run id, and expiry. The values of a session are the only
+//! readable item values that the relay ever holds: each removal of a session erases
+//! them and drops them from the audit masks.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -68,6 +70,8 @@ impl SessionTable {
             })?;
             // Masked before it exists anywhere else.
             self.audit.add_placeholder(&item.env_name, &placeholder);
+            self.audit
+                .add_session_value(run_id, &item.env_name, &item.value);
             secrets.push(SessionSecret {
                 item_id: item.item_id,
                 env_name: item.env_name.clone(),
@@ -106,7 +110,10 @@ impl SessionTable {
 
     /// Removes one session by its handle, without an audit row.
     pub fn remove_hash(&self, hash: &TokenHash) {
-        self.lock().remove(hash);
+        let removed = self.lock().remove(hash);
+        if let Some(entry) = removed {
+            self.audit.forget_run(entry.session.run_id);
+        }
     }
 
     /// The environment of the live session of a run, for the agent that asked for it.
@@ -125,11 +132,16 @@ impl SessionTable {
             .filter(|(_, entry)| matches(&entry.session))
             .map(|(hash, _)| *hash)
             .collect();
-        hashes
+        let removed: Vec<Arc<LiveSession>> = hashes
             .into_iter()
             .filter_map(|hash| table.remove(&hash))
             .map(|entry| entry.session)
-            .collect()
+            .collect();
+        drop(table);
+        for session in &removed {
+            self.audit.forget_run(session.run_id);
+        }
+        removed
     }
 
     /// Ends the sessions that `matches` selects: removes them, sets their runs to
@@ -171,7 +183,10 @@ impl SessionTable {
 
     /// Drops every session (at stop).
     pub fn clear(&self) {
-        self.lock().clear();
+        let removed: Vec<Entry> = self.lock().drain().map(|(_, entry)| entry).collect();
+        for entry in &removed {
+            self.audit.forget_run(entry.session.run_id);
+        }
     }
 
     pub fn len(&self) -> usize {

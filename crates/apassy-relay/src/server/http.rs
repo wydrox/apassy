@@ -3,7 +3,8 @@
 //! One accept loop, one thread per request, with limits (`config::Limits`): agent
 //! paths leave a reserve of threads to members. Order for each request: `GET /healthz`;
 //! the edge secret; the proxy path `/p/`; the route (404, 405); the body (413); the
-//! token and its role; the endpoint. Every JSON answer is an envelope.
+//! token and its role; the endpoint. Every JSON answer is an envelope. The endpoints of
+//! the owner's host (`/v1/host/...`) are not agent paths: they use the member lane.
 
 use std::io::Read;
 use std::sync::Arc;
@@ -15,14 +16,16 @@ use serde_json::{Value, json};
 use tiny_http::{Header, Request, Response};
 
 use crate::api::{
-    self, DecisionRequest, EDGE_HEADER, Envelope, JoinRequest, NewItem, Policy, RunRequest, paths,
+    self, DecisionRequest, EDGE_HEADER, Envelope, JoinRequest, NewItem, Policy, ReleaseRequest,
+    RunRequest, paths,
 };
 use crate::error::{RelayError, RelayResult, codes};
 use crate::ids::{AgentId, CollectionId, GrantId, ItemId, MemberId, RunId};
 use crate::now_unix;
 use crate::proxy::Proxy;
+use crate::server::approvals::Denier;
 use crate::server::auth::{self, Need, Principal};
-use crate::server::{Core, admin, approvals, decide, mcp};
+use crate::server::{Core, admin, approvals, decide, host, mcp};
 
 /// Seconds a client waits after 503 `busy` (`Retry-After`).
 pub const BUSY_RETRY_AFTER: &str = "2";
@@ -57,6 +60,9 @@ pub enum Endpoint {
     Access,
     RunCreate,
     RunGet(u64),
+    HostRequests,
+    HostRelease(u64),
+    HostDeny(u64),
     Mcp,
 }
 
@@ -138,6 +144,13 @@ pub fn route(method: &str, path: &str) -> RelayResult<Routed> {
         ["v1", "access"] => pick(method, &[("GET", Need::Agent, Access)]),
         ["v1", "runs"] => pick(method, &[("POST", Need::Agent, RunCreate)]),
         ["v1", "runs", n] => pick(method, &[("GET", Need::Agent, RunGet(id(n)?))]),
+        ["v1", "host", "requests"] => pick(method, &[("GET", Need::Owner, HostRequests)]),
+        ["v1", "host", "requests", n, "release"] => {
+            pick(method, &[("POST", Need::Owner, HostRelease(id(n)?))])
+        }
+        ["v1", "host", "requests", n, "deny"] => {
+            pick(method, &[("POST", Need::Owner, HostDeny(id(n)?))])
+        }
         _ => Err(not_found()),
     }
 }
@@ -534,16 +547,11 @@ fn dispatch(
         AgentList => admin::agent_list(core, member_of(principal)?),
         AgentRevoke(id) => admin::agent_revoke(core, member_of(principal)?, AgentId(id), now),
         ApprovalList => to_value(&approvals::list(core, now)?),
-        Approve(id) => to_value(&approvals::approve(
-            core,
-            member_of(principal)?,
-            RunId(id),
-            &parse_optional::<DecisionRequest>(body)?,
-            now,
-        )?),
+        // The keys are on the owner's host: nobody approves here, whatever the body is.
+        Approve(_) => Err(approvals::approve_on_host()),
         Deny(id) => to_value(&approvals::deny(
             core,
-            member_of(principal)?,
+            Denier::Approver(member_of(principal)?),
             RunId(id),
             &parse_optional::<DecisionRequest>(body)?,
             now,
@@ -578,6 +586,27 @@ fn dispatch(
                 wait,
             )?)
         }
+        HostRequests => {
+            let wait = number(query, "wait")?.unwrap_or(0);
+            if wait > approvals::MAX_WAIT_SECS {
+                return Err(RelayError::invalid("The wait is from 0 to 25 seconds."));
+            }
+            to_value(&host::list(core, member_of(principal)?, wait)?)
+        }
+        HostRelease(id) => to_value(&host::release(
+            core,
+            member_of(principal)?,
+            RunId(id),
+            &parse_body::<ReleaseRequest>(body)?,
+            now,
+        )?),
+        HostDeny(id) => to_value(&approvals::deny(
+            core,
+            Denier::Host(member_of(principal)?),
+            RunId(id),
+            &parse_optional::<DecisionRequest>(body)?,
+            now,
+        )?),
         Mcp => Err(RelayError::internal("MCP is served elsewhere.")),
     }
 }
@@ -600,6 +629,30 @@ mod tests {
         assert_eq!(
             route("DELETE", "/v1/members/3").unwrap(),
             (Need::Owner, Endpoint::MemberRevoke(3))
+        );
+        assert_eq!(
+            route("GET", "/v1/host/requests").unwrap(),
+            (Need::Owner, Endpoint::HostRequests)
+        );
+        assert_eq!(
+            route("POST", "/v1/host/requests/7/release").unwrap(),
+            (Need::Owner, Endpoint::HostRelease(7))
+        );
+        assert_eq!(
+            route("POST", "/v1/host/requests/7/deny").unwrap(),
+            (Need::Owner, Endpoint::HostDeny(7))
+        );
+        assert_eq!(
+            route("GET", "/v1/host/requests/7/release")
+                .unwrap_err()
+                .code,
+            codes::METHOD_NOT_ALLOWED
+        );
+        assert_eq!(
+            route("GET", "/v1/host/requests/x/release")
+                .unwrap_err()
+                .code,
+            codes::NOT_FOUND
         );
         assert_eq!(
             route("GET", "/v1/join").unwrap_err().code,
@@ -639,6 +692,8 @@ mod tests {
             "/healthz",
             "/v1/approvals/7/approve",
             "/v1/approvals",
+            "/v1/host/requests?wait=25",
+            "/v1/host/requests/7/release",
             "/v1/me",
             "/v1/runsx",
             "/mcp/x",

@@ -15,25 +15,27 @@ use serde_json::{Value, json};
 
 const USER: &str = "Please check the repository state.";
 
-/// A ready run with the Stripe item. Returns the run id and the session key.
-fn ready_run(relay: &TestRelay, team: &Team) -> (u64, String, Value) {
-    let (status, body) = relay.run(
-        &team.agent_token,
-        &team.request(&["git", "status"], Some(USER)),
-    );
-    assert_eq!(status, 200, "{body}");
-    let view = body["result"].clone();
-    assert_eq!(view["status"], "ready");
+/// The session key in the base URLs of a run view.
+fn key_of(view: &Value) -> String {
     let base = view["session"]["env"]["STRIPE_API_BASE"].as_str().unwrap();
-    let key = base
-        .split("/p/")
+    base.split("/p/")
         .nth(1)
         .unwrap()
         .split('/')
         .next()
         .unwrap()
-        .to_string();
-    (view["run_id"].as_u64().unwrap(), key, view)
+        .to_string()
+}
+
+/// A ready run with the Stripe item: the agent asks, the host releases. Returns the
+/// run id, the session key, and the view the agent gets.
+fn ready_run(relay: &TestRelay, team: &Team) -> (u64, String, Value) {
+    let view = relay.run_released(
+        &team.agent_token,
+        &team.request(&["git", "status"], Some(USER)),
+    );
+    assert_eq!(view["status"], "ready");
+    (view["run_id"].as_u64().unwrap(), key_of(&view), view)
 }
 
 fn status_of(relay: &TestRelay, team: &Team, run: u64) -> String {
@@ -113,13 +115,13 @@ fn find_is_none_after_the_expiry() {
 #[test]
 fn a_run_shows_ended_after_the_session_expires() {
     let relay = start_with(
-        |config| config.session_ttl_secs = 1,
+        |config| config.session_ttl_secs = 3,
         UpstreamOptions::default(),
     );
     let team = relay.setup("staging");
     let (run, key, _) = ready_run(&relay, &team);
     assert_eq!(status_of(&relay, &team, run), "ready");
-    std::thread::sleep(Duration::from_millis(2200));
+    std::thread::sleep(Duration::from_millis(4200));
     assert!(relay.sessions().find(&key, now_unix()).is_none());
     let view = relay.ok("GET", &format!("/v1/runs/{run}"), &team.agent_token, None);
     assert_eq!(view["status"], "ended");
@@ -146,22 +148,11 @@ fn revoking_the_agent_ends_its_sessions() {
         &team.member_token,
         Some(&json!({"name": "second"})),
     );
-    let (_, other_body) = relay.run(
+    let other_view = relay.run_released(
         second["secret"].as_str().unwrap(),
         &team.request(&["git", "status"], Some(USER)),
     );
-    let other_base = other_body["result"]["session"]["env"]["STRIPE_API_BASE"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let other_key = other_base
-        .split("/p/")
-        .nth(1)
-        .unwrap()
-        .split('/')
-        .next()
-        .unwrap()
-        .to_string();
+    let other_key = key_of(&other_view);
     let source = relay.sessions();
     assert!(source.find(&key, now_unix()).is_some());
     relay.ok(
@@ -203,19 +194,8 @@ fn revoking_the_grant_ends_the_sessions_of_that_member_only() {
     let bobs_agent = relay.ok("POST", "/v1/agents", &bob, Some(&json!({"name": "b"})));
     let bobs_token = bobs_agent["secret"].as_str().unwrap();
     let (_, alice_key, _) = ready_run(&relay, &team);
-    let (_, bob_body) = relay.run(bobs_token, &team.request(&["git", "status"], Some(USER)));
-    let bob_base = bob_body["result"]["session"]["env"]["STRIPE_API_BASE"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let bob_key = bob_base
-        .split("/p/")
-        .nth(1)
-        .unwrap()
-        .split('/')
-        .next()
-        .unwrap()
-        .to_string();
+    let bob_view = relay.run_released(bobs_token, &team.request(&["git", "status"], Some(USER)));
+    let bob_key = key_of(&bob_view);
     let source = relay.sessions();
     relay.ok(
         "DELETE",

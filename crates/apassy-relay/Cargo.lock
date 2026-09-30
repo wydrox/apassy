@@ -29,6 +29,7 @@ dependencies = [
  "httparse",
  "psl",
  "rcgen",
+ "ring",
  "rusqlite",
  "rustls",
  "rustls-platform-verifier",

@@ -23,6 +23,7 @@ upstream API hosts (api.stripe.com, api.openai.com, ...)
 - The relay refuses every request without the right `X-Apassy-Edge`, except `GET /healthz`. The tunnel URL alone gives no access.
 - The Worker forwards everything and streams bodies. It checks nothing else.
 - The image is portable: one binary, one port, one volume, config from variables. It can move to Cloudflare Containers later. That needs an amd64 image and persistent storage.
+- The relay holds no readable item value. The keys of the items are on the owner's Mac, in `keys.json`. `apassy-team host` runs there and talks to the relay through the same Worker and tunnel. See section 11.
 
 ## 2. Secrets
 
@@ -40,6 +41,7 @@ chmod 600 ~/.apassy-relay/vault_key ~/.apassy-relay/edge_secret
 - The edge secret must be the same text in the relay and in the Worker.
 - Keep the folder under your home folder. Colima shares only the home folder with its VM. A folder in `/tmp` shows up empty in the container, and the relay then says it cannot read the file.
 - Every secret the CLI needs (a member token, an invite code, an item value) is read from stdin. The CLI refuses to read it from a terminal.
+- The vault holds only sealed item values, so the vault key protects less than before: a stolen vault or backup gives only ciphertext. The item keys are in `keys.json` on the owner's Mac (section 9). Back that file up apart from the vault.
 
 ## 3. Build the image
 
@@ -91,9 +93,11 @@ Optional variables:
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | `APASSY_RELAY_SESSION_TTL` | session lifetime, 60 to 3600 s | 900 |
-| `APASSY_RELAY_APPROVAL_TIMEOUT` | wait for an approver, 30 to 86400 s | 600 |
+| `APASSY_RELAY_APPROVAL_TIMEOUT` | wait for the owner's host to decide a run, 30 to 86400 s | 600 |
 
-A restart ends every session. Runs that are still pending stay in the vault.
+A restart ends every session. Runs that are still pending stay in the vault, but they lose their one-time keys: the host never sees them, and they time out.
+
+A vault from the first alpha (it held plaintext values) is refused at start. There is no migration: start with a new data volume and add the items again.
 
 ## 6. Tunnel
 
@@ -174,7 +178,11 @@ apassy-team item add --collection 1 --name "Stripe test" --env STRIPE_API_KEY \
 apassy-team invite --role member --hours 72 > invite-code-file
 ```
 
-An item needs at least one host. A provider that the core knows, such as `stripe`, brings its hosts. For another API, give `--host api.example.com`. A host covers every subdomain too, so give the exact API host. The relay refuses a public suffix (`herokuapp.com`, `github.io`, `supabase.co`) and a whole domain (`example.com`): someone else may own a subdomain of it. Add `--allow-broad-host` only when you own every subdomain; the audit records it. Add `--environment production` for a production credential: every run with it waits for an approver.
+`item add` reads the value from stdin and checks it on this machine (1 to 4096 bytes of printable ASCII, no `"` and no `\`, long and varied enough for a placeholder). It makes a uid and a key, seals the value, writes the key to `keys.json` next to `settings.json` (directory 0700, file 0600), and sends only the uid and the sealed text to the relay. Run `item add` as the owner, on the machine where `apassy-team host` runs: only that machine holds the keys. A manager can add an item too, but its key is on the manager's machine, so every run with it is denied at the owner's host ("Unknown item on this host.").
+
+**Back up `keys.json`.** It is plain text in the alpha. Without it the items on the relay cannot be used, and you add them again. With it, and a copy of the vault, anyone can read the items: keep the two apart.
+
+An item needs at least one host. A provider that the core knows, such as `stripe`, brings its hosts. For another API, give `--host api.example.com`. A host covers every subdomain too, so give the exact API host. The relay refuses a public suffix (`herokuapp.com`, `github.io`, `supabase.co`) and a whole domain (`example.com`): someone else may own a subdomain of it. Add `--allow-broad-host` only when you own every subdomain; the audit records it. Add `--environment production` for a production credential: the host asks you for every run with it.
 
 The member joins with the code. The code works once:
 
@@ -206,11 +214,11 @@ Policy flags for `collection create` and `collection policy ID`:
 
 | Flag | Meaning |
 | --- | --- |
-| `--mode ask\|bouncer` | `ask`: every run waits. `bouncer`: a known-safe command runs, the rest waits. |
+| `--mode ask\|bouncer` | `ask`: the relay suggests asking for every run. `bouncer`: the relay suggests a release for a known-safe command, and asking for the rest. (The host runs its own check either way.) |
 | `--allow-prefix P` | the command must start with one of these (repeat) |
 | `--forbid WORD` | a command with this word is denied (repeat) |
 | `--max-runs-per-hour N` | at most N runs per hour |
-| `--instruction TEXT` | a note for the approver |
+| `--instruction TEXT` | a note for the owner |
 | `--rule-expires-at UNIX` | the rule stops working at this time |
 
 `collection policy` replaces the whole policy. Flags you leave out go back to their defaults.
@@ -219,7 +227,7 @@ Policy flags for `collection create` and `collection policy ID`:
 
 There are three ways.
 
-**The CLI.** It asks for a run, waits for an approver if needed, then runs the command with the session environment. The variables never reach the transcript of the agent.
+**The CLI.** It asks for a run, waits for the owner's host, then runs the command with the session environment. The variables never reach the transcript of the agent.
 
 ```sh
 export APASSY_RELAY_URL=https://apassy-relay.wyderka.cc
@@ -228,7 +236,7 @@ apassy-team run --items 1 --purpose "Check the balance" \
   --request "Show me the Stripe balance" -- stripe balance retrieve
 ```
 
-`run` exits with the code of the command (128 plus the signal number when it dies from a signal). It exits 3 if the run is denied (by a hard rule, by an approver, or for lack of access) or times out, 4 on a relay or network error, and 2 on a usage error. The command does not inherit `APASSY_TOKEN`, `APASSY_TEAM_TOKEN`, or `APASSY_EDGE_SECRET`. Use `--wait SECONDS` to limit how long it waits for an approver (the default is 900).
+`run` exits with the code of the command (128 plus the signal number when it dies from a signal). It exits 3 if the run is denied (by a hard rule, by the host, or for lack of access) or times out, 4 on a relay or network error, and 2 on a usage error. The command does not inherit `APASSY_TOKEN`, `APASSY_TEAM_TOKEN`, or `APASSY_EDGE_SECRET`. Use `--wait SECONDS` to limit how long it waits for the host (the default is 900).
 
 **Remote MCP, for Claude Code.** Put this in `.mcp.json` in a repo:
 
@@ -251,26 +259,42 @@ With MCP, the agent must run the command itself with `session.env` set. Then the
 
 What the session gives the command: for each item, a variable with the item's name that holds a placeholder, and `APASSY_BASE_<NAME>`, a base URL on the relay. Some providers also get a standard variable: `STRIPE_API_BASE`, `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `GITHUB_API_URL`. The command must send its requests to that base URL. The relay puts the real value only in an auth position: the `Authorization` header, a known API key header, or a known key query parameter. A placeholder anywhere else is refused.
 
-## 11. Approvals
+## 11. Runs and the host
 
-The owner or a manager sees the waiting runs:
+Every run that passes the hard rules waits for the owner's host. Nothing starts without a release, and the relay cannot approve a run on its own: it does not hold the keys.
+
+On the owner's Mac, where `keys.json` is, run:
+
+```sh
+apassy-team host
+```
+
+Use the owner token (`apassy-team init` with it). Keep it running, in `tmux` or a launchd job that has a terminal for questions. The host must be online for every run. A run with no host times out after `APASSY_RELAY_APPROVAL_TIMEOUT` seconds (600 by default), and the agent sees `timed_out`.
+
+The host handles the runs one at a time, oldest first. For each run it checks, on its own, with the metadata in `keys.json` and its own run of the core analysis (not with what the relay says):
+
+- Every item must be in `keys.json` for this relay, else the run is denied ("Unknown item on this host.").
+- It releases the keys by itself only if all of these are true: you did not start it with `--ask-all`; the relay suggests a release and flags nothing; no item is `production` in `keys.json`; the host's own analysis says known safe with no flag; and the item was not released automatically 30 times in the last hour (`--auto-limit N` changes the number). `git status`, `ls -la`, `cargo test`, and `stripe balance retrieve` with a staging item are known safe.
+- Otherwise it shows you the run: the agent, the member, the command, the purpose, the user's request, the working directory, the items with their environment from `keys.json`, the flags, the relay's note, and why it asks. Then it asks `Release the keys for run 7? [y/N]` on the terminal. Only `y` or `yes` releases. Anything else denies. With no terminal it denies ("No one at the host."). If the run expires while it waits, it moves on.
+
+Every request is one line in `host.log` next to `keys.json`: the time, the run id, the agent, the member, the item uids and names, and the decision (`auto`, `approved`, `denied`, `unknown_item`, `expired`, `error`). It holds no key.
+
+There is no flag or variable that makes the host say yes by itself. `--ask-all` only asks more.
+
+To see and deny waiting runs from anywhere, the owner or a manager can use the CLI. This is for looking, and for saying no:
 
 ```sh
 apassy-team pending
-```
-
-It shows the command, the purpose, the user's request, the items, the flags, and the note. Read it before you decide:
-
-```sh
-apassy-team approve 7 --reason "Fine, I asked for it"
 apassy-team deny 7 --reason "Not this key"
 ```
 
-- A run that no one decides times out after `APASSY_RELAY_APPROVAL_TIMEOUT` seconds (600 by default). The agent sees `timed_out`.
-- An approval fails with `run_not_pending` if the run is not pending any more.
-- If the agent, the grant, or the item was revoked while the run waited, the approval fails and the run is denied with `approval_invalidated`.
-- Approvals happen only in the CLI. There is no web page or app in the alpha.
-- An owner may approve a run of their own agent.
+`apassy-team approve` does not approve: the relay answers `approve_on_host`, and the CLI says "The keys are on the owner's host. Approve there with apassy-team host."
+
+- A run that no one decides times out. The agent sees `timed_out`.
+- If the agent, the grant, the member, or the item is revoked while a run waits, the run is denied at once with `approval_invalidated`, and its key is dropped.
+- A release that does not check (a wrong run, a changed text, a wrong set of items) denies the run with `release_invalid`. Each run key works once.
+- There is no web page or app in the alpha. The owner decides at the terminal of the host.
+- The owner's host may release a run of the owner's own agent.
 
 ## 12. Audit
 
@@ -292,7 +316,9 @@ docker run --rm -v apassy-relay-data:/data:ro -v "$PWD":/backup debian:trixie-sl
 docker start apassy-relay
 ```
 
-The file is encrypted with the vault key. Keep the key apart from the backup. To restore, copy the file into a fresh volume with the same key.
+The file is encrypted with the vault key, and it holds no readable value: each item is sealed, and its key is not on the relay. Keep the vault key apart from the backup. To restore, copy the file into a fresh volume with the same key.
+
+Also back up `keys.json` on the owner's Mac (`~/.config/apassy-team/keys.json`, or under `$XDG_CONFIG_HOME`). It is plain text in the alpha, so keep the copy private and apart from the vault backup. Losing it means adding the items again. With the vault backup alone nobody can read a value, and with `keys.json` alone nobody can open anything.
 
 ## 14. Revocation
 
@@ -303,9 +329,9 @@ apassy-team member revoke 3     # a member (owner only)
 apassy-team item archive 4      # an item
 ```
 
-A revocation works at the next request. The relay looks up each token every time. Revoking an agent, a grant, a member, or an item ends the live sessions that depend on it at once. A run that is still pending fails when someone tries to approve it.
+A revocation works at the next request. The relay looks up each token every time. Revoking an agent, a grant, a member, or an item ends the live sessions that depend on it at once, and denies the runs that are pending on it (`approval_invalidated`) and drops their keys.
 
-To rotate a credential, archive the item and add a new one. There is no edit in the alpha.
+To rotate a credential, archive the item and add a new one (`item add` makes a new key). There is no edit in the alpha.
 
 To rotate the edge secret, change the file, restart the container, and run `wrangler secret put EDGE_SECRET` with the new text. The vault key cannot be rotated in the alpha.
 
@@ -313,18 +339,21 @@ To rotate the edge secret, change the file, restart the container, and run `wran
 
 What this does not protect:
 
-- The relay holds the vault key and every value in memory while it runs. Root on the Mac or the VM can read them.
+- The relay does not store a readable value, but it sees a value in memory while its session lives. Root on the Mac or the VM, or a taken-over relay while it runs, can read the values of the sessions of that time. A stolen vault or backup gives only ciphertext.
+- A relay that is taken over can make up a run. The host releases a known-safe command with a non-production item by itself, and one release is enough to learn a value, so such a relay can get the values of those items. Read `host.log`. Start the host with `--ask-all` (or `--auto-limit 0`) if you want to be asked every time. Production items always ask.
+- `keys.json` on the owner's Mac is plain text in the alpha. Whoever reads it holds the item keys. Back it up, and protect it like the vault key.
+- The host must be online for every run. Only the owner's host holds keys: a manager can deny a run but cannot release one, and there is no sharing of keys to another machine yet.
 - A session key and a placeholder together work as a credential for the hosts of that item, in auth positions only, until the session ends. They can end up in an agent transcript if the agent runs the command itself.
-- The relay approves a stated command. It cannot check what the agent really runs with the session. It controls which hosts get the value, where the value goes in a request, and for how long.
-- Cloudflare sees all traffic in clear, including session keys in paths and placeholders in headers.
+- The relay and the host approve a stated command. They cannot check what the agent really runs with the session. The relay controls which hosts get the value, where the value goes in a request, and for how long.
+- Cloudflare sees all traffic in clear, including session keys in paths and placeholders in headers. It no longer sees a value when an item is added: the CLI seals it first.
 - The quick tunnel has no SLA and a changing URL.
 
 What the alpha does not do:
 
-- Way A (the member's Mac app gets a value for one run), and the model sidecar. With no model, only known-safe commands run at once. Every other command waits for an approver.
+- Way A (the member's Mac app gets a value for one run), and the model sidecar. With no model, only known-safe commands are released by the host by itself. Every other command asks the owner at the host.
 - `CONNECT` and a run certificate. Workers cannot do `CONNECT`, so the relay rewrites base URLs.
 - Team rule packs, grants to one agent, item edit, access requests from agents.
-- Approvals in an app, on the web, or in Slack.
+- Approvals in an app, on the web, or in Slack. The owner decides at the terminal of the host.
 - Keep-alive to upstream hosts, HTTP/2, WebSocket, `Upgrade`, server-sent events through the tunnel.
 - Rewriting of redirects. A `Location` header passes through. A client that follows it goes to the real host with a placeholder and fails.
 - Compressed upstream responses (a 502), request bodies over 8 MiB (a 413), AWS SigV4 and other signed requests.
@@ -333,4 +362,4 @@ What the alpha does not do:
 - Sessions that survive a restart.
 - TLS in the relay, several teams per relay, a key typed at start.
 
-The full list is in section 2 of [SPEC.md](SPEC.md). The threat notes are in section 20.
+The full list is in section 2 of [SPEC.md](SPEC.md). The threat notes are in sections 20 and 21.

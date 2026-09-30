@@ -4,12 +4,18 @@
 //! 127.0.0.1, and gives back a handle. `call` sends a request with the edge header.
 //! The extra methods below the spec API (`ok`, `setup`, `Team`) are shortcuts for
 //! the server tests.
+//!
+//! The relay holds only sealed item values, so `add_item` seals the value here and
+//! keeps the item key in the handle: the handle plays the part of the owner's host.
+//! `release` answers a pending run like the host does, with the keys of its items.
 #![allow(dead_code)]
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use apassy_relay::config::{RelayConfig, UpstreamOptions};
+use apassy_relay::hostkeys::{self, Key32};
 use apassy_relay::secret::SecretString;
 use apassy_relay::server::{Relay, RunningRelay};
 use apassy_relay::session::SessionSource;
@@ -29,6 +35,67 @@ pub struct TestRelay {
     pub dir: tempfile::TempDir,
     pub config: RelayConfig,
     running: Option<RunningRelay>,
+    /// The item keys, by uid: what the owner's host keeps.
+    book: Mutex<HashMap<String, Key32>>,
+}
+
+/// An item as the CLI makes it: a uid, a sealed text, and the key that stays on the host.
+pub struct SealedItem {
+    pub uid: String,
+    pub sealed: String,
+    pub key: Key32,
+}
+
+/// Seals a value like `apassy-team item add` does.
+pub fn seal(value: &str) -> SealedItem {
+    let uid = hostkeys::new_uid().expect("uid");
+    let key = hostkeys::new_key().expect("key");
+    let sealed = hostkeys::seal_item(&key, &uid, value.as_bytes()).expect("seal");
+    SealedItem {
+        uid,
+        sealed: hostkeys::encode_b64(&sealed),
+        key,
+    }
+}
+
+/// The body of `POST /v1/items` for a sealed value. `extra` adds or replaces fields.
+pub fn item_request(collection: u64, env_name: &str, sealed: &SealedItem, extra: Value) -> Value {
+    let mut body = json!({
+        "collection_id": collection,
+        "name": format!("Item {env_name}"),
+        "env_name": env_name,
+        "uid": sealed.uid,
+        "sealed": sealed.sealed,
+    });
+    for (key, v) in extra.as_object().expect("object") {
+        body[key] = v.clone();
+    }
+    body
+}
+
+/// The release body that the host sends for `run_key`: the keys of `keys`, sealed to it.
+pub fn release_body(
+    run_key: &str,
+    run_id: u64,
+    keys: &[(String, &Key32)],
+    reason: Option<&str>,
+) -> Value {
+    let key_texts: Vec<_> = keys
+        .iter()
+        .map(|(uid, key)| json!({"uid": uid, "key": hostkeys::encode_key(key).as_str()}))
+        .collect();
+    let plain = json!({"run_id": run_id, "keys": key_texts}).to_string();
+    let run_key: [u8; 32] = hostkeys::decode_array(run_key).expect("run key");
+    let release = hostkeys::seal_release(&run_key, run_id, plain.as_bytes()).expect("seal");
+    let mut body = json!({
+        "host_key": hostkeys::encode_b64(&release.host_key),
+        "nonce": hostkeys::encode_b64(&release.nonce),
+        "sealed_keys": hostkeys::encode_b64(&release.sealed_keys),
+    });
+    if let Some(reason) = reason {
+        body["reason"] = json!(reason);
+    }
+    body
 }
 
 /// A free port on 127.0.0.1: bind to port 0 and drop the listener.
@@ -70,6 +137,7 @@ pub fn start_with(config: impl FnOnce(&mut RelayConfig), upstream: UpstreamOptio
         dir,
         config: cfg,
         running: Some(running),
+        book: Mutex::new(HashMap::new()),
     }
 }
 
@@ -242,6 +310,75 @@ impl TestRelay {
         self.running = Some(Relay::start(self.config.clone()).expect("restart"));
     }
 
+    /// Runs SQL on the vault file while the relay runs (to set a time in the past on
+    /// a pending run, which a test cannot wait for). The relay keeps its state, in
+    /// particular the run keys.
+    pub fn edit_vault_live(&self, sql: &str) {
+        let conn = rusqlite::Connection::open(self.config.vault_path()).expect("open vault");
+        conn.execute_batch(&format!("PRAGMA key = '{VAULT_KEY}';"))
+            .expect("key");
+        conn.busy_timeout(Duration::from_secs(10)).expect("busy");
+        conn.execute_batch(sql).expect("edit");
+    }
+
+    /// Every cell of every table of the vault, as bytes (text and blobs). Reads the
+    /// file with the key while the relay runs.
+    pub fn vault_cells(&self) -> Vec<Vec<u8>> {
+        use rusqlite::types::ValueRef;
+        let conn = rusqlite::Connection::open(self.config.vault_path()).expect("open vault");
+        conn.execute_batch(&format!("PRAGMA key = '{VAULT_KEY}';"))
+            .expect("key");
+        conn.busy_timeout(Duration::from_secs(10)).expect("busy");
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .expect("tables")
+            .query_map([], |row| row.get(0))
+            .expect("rows")
+            .collect::<Result<_, _>>()
+            .expect("names");
+        let mut cells = Vec::new();
+        for table in tables {
+            let mut statement = conn
+                .prepare(&format!("SELECT * FROM \"{table}\""))
+                .expect("select");
+            let columns = statement.column_count();
+            let mut rows = statement.query([]).expect("query");
+            while let Some(row) = rows.next().expect("row") {
+                for i in 0..columns {
+                    match row.get_ref(i).expect("cell") {
+                        ValueRef::Text(bytes) | ValueRef::Blob(bytes) => cells.push(bytes.to_vec()),
+                        ValueRef::Integer(n) => cells.push(n.to_string().into_bytes()),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        cells
+    }
+
+    /// Two columns of a query on the vault, as bytes. Reads the file with the key.
+    pub fn vault_rows(&self, sql: &str) -> Vec<(Vec<u8>, Vec<u8>)> {
+        use rusqlite::types::ValueRef;
+        let conn = rusqlite::Connection::open(self.config.vault_path()).expect("open vault");
+        conn.execute_batch(&format!("PRAGMA key = '{VAULT_KEY}';"))
+            .expect("key");
+        conn.busy_timeout(Duration::from_secs(10)).expect("busy");
+        let mut statement = conn.prepare(sql).expect("prepare");
+        let rows = statement
+            .query_map([], |row| {
+                let cell = |i: usize| -> Vec<u8> {
+                    match row.get_ref(i).expect("cell") {
+                        ValueRef::Text(b) | ValueRef::Blob(b) => b.to_vec(),
+                        ValueRef::Integer(n) => n.to_string().into_bytes(),
+                        _ => Vec::new(),
+                    }
+                };
+                Ok((cell(0), cell(1)))
+            })
+            .expect("rows");
+        rows.collect::<Result<_, _>>().expect("collect")
+    }
+
     /// Adds an invite for `role`, joins as `name`, and returns the member id and token.
     pub fn join_member(&self, role: &str, name: &str) -> (u64, String) {
         let invite = self.ok(
@@ -274,19 +411,105 @@ impl TestRelay {
         created["id"].as_u64().expect("id")
     }
 
-    /// An item of the owner. Returns its id.
+    /// An item of the owner, sealed here. Returns its id. The key stays in the handle.
     pub fn add_item(&self, collection: u64, env_name: &str, value: &str, extra: Value) -> u64 {
-        let mut body = json!({
-            "collection_id": collection,
-            "name": format!("Item {env_name}"),
-            "env_name": env_name,
-            "value": value,
-        });
-        for (key, v) in extra.as_object().expect("object") {
-            body[key] = v.clone();
-        }
+        let sealed = seal(value);
+        let body = item_request(collection, env_name, &sealed, extra);
         let created = self.ok("POST", "/v1/items", &self.owner_token, Some(&body));
+        self.keep_key(sealed);
         created["id"].as_u64().expect("id")
+    }
+
+    /// Keeps the key of a sealed item, as the owner's host would.
+    pub fn keep_key(&self, sealed: SealedItem) {
+        self.book
+            .lock()
+            .expect("book")
+            .insert(sealed.uid, sealed.key);
+    }
+
+    /// The item keys in the handle, as text (base64url).
+    pub fn item_key_texts(&self) -> Vec<String> {
+        self.book
+            .lock()
+            .expect("book")
+            .values()
+            .map(|key| hostkeys::encode_key(key).to_string())
+            .collect()
+    }
+
+    /// The key of one item in the handle, as text (base64url).
+    pub fn item_key_text(&self, uid: &str) -> String {
+        let book = self.book.lock().expect("book");
+        hostkeys::encode_key(book.get(uid).expect("a key for this uid")).to_string()
+    }
+
+    /// The pending runs that wait for the host (`GET /v1/host/requests`, no wait).
+    pub fn host_requests(&self) -> Vec<Value> {
+        let result = self.ok("GET", "/v1/host/requests", &self.owner_token, None);
+        result.as_array().expect("list").clone()
+    }
+
+    /// The host request of one run. Panics when the host does not see it.
+    pub fn host_request(&self, run_id: u64) -> Value {
+        self.host_requests()
+            .into_iter()
+            .find(|r| r["run_id"] == run_id)
+            .unwrap_or_else(|| panic!("run {run_id} is not listed for the host"))
+    }
+
+    /// The release body for a run, from the keys in the handle.
+    pub fn release_for(&self, request: &Value, reason: Option<&str>) -> Value {
+        let book = self.book.lock().expect("book");
+        let keys: Vec<(String, &Key32)> = request["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|item| {
+                let uid = item["uid"].as_str().expect("uid").to_string();
+                let key = book.get(&uid).expect("a key for this item");
+                (uid, key)
+            })
+            .collect();
+        release_body(
+            request["run_key"].as_str().expect("run key"),
+            request["run_id"].as_u64().expect("run id"),
+            &keys,
+            reason,
+        )
+    }
+
+    /// Plays the host: releases a pending run with the keys of its items. Returns the
+    /// raw status and body.
+    pub fn release(&self, run_id: u64) -> (u16, Value) {
+        let body = self.release_for(&self.host_request(run_id), None);
+        self.call(
+            "POST",
+            &format!("/v1/host/requests/{run_id}/release"),
+            Some(&self.owner_token),
+            Some(&body),
+        )
+    }
+
+    /// Releases a pending run, and expects `ready`.
+    pub fn release_ok(&self, run_id: u64) -> Value {
+        let (status, value) = self.release(run_id);
+        assert_eq!(status, 200, "release {run_id}: {value}");
+        assert_eq!(
+            value["result"]["status"], "ready",
+            "release {run_id}: {value}"
+        );
+        value["result"].clone()
+    }
+
+    /// An agent asks for a run, and the host releases it. Returns the `RunView` the
+    /// agent gets when it asks again: `ready`, with the session.
+    pub fn run_released(&self, agent_token: &str, body: &Value) -> Value {
+        let (status, view) = self.run(agent_token, body);
+        assert_eq!(status, 200, "{view}");
+        let run_id = view["result"]["run_id"].as_u64().expect("run id");
+        self.release_ok(run_id);
+        self.ok("GET", &format!("/v1/runs/{run_id}"), agent_token, None)
     }
 
     /// One collection "payments" with a Stripe item of `environment`, one member

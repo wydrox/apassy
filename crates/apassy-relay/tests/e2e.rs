@@ -1,16 +1,30 @@
 //! End to end (docs/SPEC.md section 19): one relay in process with the real proxy,
 //! a mock HTTPS upstream for api.stripe.com and api.github.com, the HTTP API, the
 //! remote MCP endpoint, and the `apassy-team` binary. Synthetic values only.
+//!
+//! The owner adds the items with `apassy-team item add` (the value is sealed there and
+//! its key goes to a key store in a temp XDG dir). The owner's host runs as the real
+//! host loop on a thread, with the same key store; the person at its terminal is a
+//! script that gives the answers of the test. No run starts without a release.
 
 #[path = "common/relay.rs"]
 mod relay;
 #[path = "common/upstream.rs"]
 mod upstream;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use apassy::broker::packs::RuleSet;
+use apassy_relay::api::HostRequestView;
+use apassy_relay::cli::client::Client;
+use apassy_relay::cli::host::{Answer, HostContext, HostOptions, serve};
+use apassy_relay::cli::keystore::{KeyEntry, KeyStore};
+use apassy_relay::secret::SecretString;
 use relay::TestRelay;
 use serde_json::{Value, json};
 use upstream::{MockUpstream, Recorded};
@@ -70,9 +84,57 @@ struct Team {
     agent_token: String,
 }
 
-/// Steps 1 and 2: the owner makes the collection and both items, invites a member,
-/// the member joins, the owner grants the collection, the member makes an agent.
-fn make_team(relay: &TestRelay) -> Team {
+/// `apassy-team` as the owner, with a key store in `config` (an XDG dir).
+fn owner_cli(relay: &TestRelay, config: &Path, args: &[&str], stdin: &str) -> std::process::Output {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_apassy-team"))
+        .args(args)
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", config)
+        .env("XDG_CONFIG_HOME", config)
+        .env("APASSY_RELAY_URL", &relay.url)
+        .env("APASSY_TEAM_TOKEN", &relay.owner_token)
+        .env("APASSY_EDGE_SECRET", &relay.edge_secret)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("apassy-team");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(stdin.as_bytes())
+        .expect("write the value");
+    child.wait_with_output().expect("apassy-team output")
+}
+
+/// `apassy-team item add` as the owner. Returns the item id.
+fn cli_item_add(
+    relay: &TestRelay,
+    config: &Path,
+    collection: u64,
+    args: &[&str],
+    value: &str,
+) -> u64 {
+    let collection = collection.to_string();
+    let mut all = vec!["item", "add", "--collection", collection.as_str()];
+    all.extend_from_slice(args);
+    let output = owner_cli(relay, config, &all, &format!("{value}\n"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert!(stderr.contains("keys.json"), "{stderr}");
+    assert!(!stderr.contains(value));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains(value));
+    stdout.trim().parse().expect("the item id on stdout")
+}
+
+/// Steps 1 and 2: the owner makes the collection and both items (with the CLI, so
+/// the keys land in the key store), invites a member, the member joins, the owner
+/// grants the collection, the member makes an agent.
+fn make_team(relay: &TestRelay, config: &Path) -> Team {
     let owner = relay.owner_token.as_str();
     let collection = relay.ok(
         "POST",
@@ -82,36 +144,38 @@ fn make_team(relay: &TestRelay) -> Team {
     )["id"]
         .as_u64()
         .expect("collection id");
-    let stripe_item = relay.ok(
-        "POST",
-        "/v1/items",
-        owner,
-        Some(&json!({
-            "collection_id": collection,
-            "name": "Stripe test key",
-            "env_name": "STRIPE_API_KEY",
-            "value": STRIPE_CANARY,
-            "provider": "stripe",
-            "environment": "staging",
-        })),
-    )["id"]
-        .as_u64()
-        .expect("item id");
-    let github_item = relay.ok(
-        "POST",
-        "/v1/items",
-        owner,
-        Some(&json!({
-            "collection_id": collection,
-            "name": "GitHub deploy token",
-            "env_name": "GITHUB_TOKEN",
-            "value": GITHUB_CANARY,
-            "hosts": ["api.github.com"],
-            "environment": "production",
-        })),
-    )["id"]
-        .as_u64()
-        .expect("item id");
+    let stripe_item = cli_item_add(
+        relay,
+        config,
+        collection,
+        &[
+            "--name",
+            "Stripe test key",
+            "--env",
+            "STRIPE_API_KEY",
+            "--environment",
+            "staging",
+            "--provider",
+            "stripe",
+        ],
+        STRIPE_CANARY,
+    );
+    let github_item = cli_item_add(
+        relay,
+        config,
+        collection,
+        &[
+            "--name",
+            "GitHub deploy token",
+            "--env",
+            "GITHUB_TOKEN",
+            "--environment",
+            "production",
+            "--host",
+            "api.github.com",
+        ],
+        GITHUB_CANARY,
+    );
 
     let invite = relay.ok(
         "POST",
@@ -151,6 +215,81 @@ fn make_team(relay: &TestRelay) -> Team {
         invite_code,
         grant,
         agent_token: agent["secret"].as_str().expect("token").to_string(),
+    }
+}
+
+/// A run that the person was shown, and the LOCAL environments of its items.
+type Shown = Vec<(u64, Vec<String>)>;
+
+/// The owner's host on a thread: the real loop, a scripted person.
+struct Host {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    /// What the person was shown: the run id and the LOCAL environments of its items.
+    shown: Arc<Mutex<Shown>>,
+}
+
+impl Host {
+    fn start(relay: &TestRelay, config: &Path, answers: Vec<Answer>) -> Host {
+        let stop = Arc::new(AtomicBool::new(false));
+        let shown: Arc<Mutex<Shown>> = Arc::default();
+        let (stop2, shown2) = (stop.clone(), shown.clone());
+        let (url, edge, owner) = (
+            relay.url.clone(),
+            relay.edge_secret.clone(),
+            relay.owner_token.clone(),
+        );
+        let store = KeyStore::at(config.join("apassy-team"));
+        let mut answers: VecDeque<Answer> = answers.into();
+        let thread = std::thread::spawn(move || {
+            let client = Client::new(
+                &url,
+                Some(&SecretString::new(owner)),
+                Some(&SecretString::new(edge)),
+            );
+            let rules = RuleSet::builtin().expect("rules");
+            let ctx = HostContext {
+                client: &client,
+                store: &store,
+                options: HostOptions::default(),
+                rules: &rules,
+                poll_secs: 1,
+            };
+            let mut person = |request: &HostRequestView, local: &[&KeyEntry], _why: &str| {
+                shown2.lock().unwrap().push((
+                    request.run_id.0,
+                    local.iter().map(|e| e.environment.clone()).collect(),
+                ));
+                // With no answer left, the person says no: never yes by default.
+                answers.pop_front().unwrap_or(Answer::No)
+            };
+            serve(&ctx, &mut person, &stop2).expect("the host loop");
+        });
+        Host {
+            stop,
+            thread: Some(thread),
+            shown,
+        }
+    }
+
+    fn finish(mut self) -> Shown {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            thread.join().expect("the host thread");
+        }
+        self.shown.lock().unwrap().clone()
+    }
+}
+
+/// Waits until the run is decided (not pending), as the agent does, and gives the view.
+fn decided(relay: &TestRelay, agent: &str, run_id: u64) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let view = relay.ok("GET", &format!("/v1/runs/{run_id}?wait=5"), agent, None);
+        if view["status"] != "pending" {
+            return view;
+        }
+        assert!(Instant::now() < deadline, "run {run_id} is still pending");
     }
 }
 
@@ -275,22 +414,16 @@ fn whole_audit(relay: &TestRelay) -> String {
     serde_json::to_string(&rows).expect("json")
 }
 
-/// Waits until the run of this command is pending, and returns its id.
-fn pending_run_of(relay: &TestRelay, first_arg: &str) -> u64 {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        let list = relay.ok("GET", "/v1/approvals", &relay.owner_token, None);
-        if let Some(run) = list
-            .as_array()
-            .expect("list")
-            .iter()
-            .find(|a| a["command"][0] == first_arg)
-        {
-            return run["run_id"].as_u64().expect("run id");
-        }
-        assert!(Instant::now() < deadline, "no pending run of {first_arg}");
-        std::thread::sleep(Duration::from_millis(100));
-    }
+/// Asks for a run as the agent. The run waits for the host: always `pending`.
+fn ask(relay: &TestRelay, agent: &str, body: &Value) -> u64 {
+    let (status, run) = relay.run(agent, body);
+    assert_eq!(status, 200, "{run}");
+    assert_eq!(run["result"]["status"], "pending", "{run}");
+    assert!(
+        run["result"]["session"].is_null(),
+        "no session before a release"
+    );
+    run["result"]["run_id"].as_u64().expect("run id")
 }
 
 #[test]
@@ -298,20 +431,44 @@ fn the_whole_flow_through_api_mcp_and_cli() {
     let upstream = upstream::start(&["api.stripe.com", "api.github.com"]);
     let relay = relay::start(upstream.options());
     let owner = relay.owner_token.clone();
+    let config = tempfile::tempdir().expect("owner config");
 
-    // 1 and 2.
-    let team = make_team(&relay);
+    // 1 and 2. The owner adds the items with the CLI: the keys stay on this machine.
+    let team = make_team(&relay, config.path());
     let agent = team.agent_token.clone();
     let access = relay.ok("GET", "/v1/access", &agent, None);
     let access_text = access.to_string();
     assert!(access_text.contains("STRIPE_API_KEY") && access_text.contains("GITHUB_TOKEN"));
     assert!(!access_text.contains(STRIPE_CANARY) && !access_text.contains(GITHUB_CANARY));
+    let store = KeyStore::at(config.path().join("apassy-team"));
+    let entries = store.load().expect("key store");
+    assert_eq!(entries.len(), 2);
+    let item_keys: Vec<String> = entries.iter().map(|e| e.key.expose().to_string()).collect();
+    // The relay holds no readable value at all, before any run.
+    for cell in relay.vault_cells() {
+        for value in [STRIPE_CANARY, GITHUB_CANARY] {
+            assert!(!cell.windows(value.len()).any(|w| w == value.as_bytes()));
+        }
+        for key in &item_keys {
+            assert!(!cell.windows(key.len()).any(|w| w == key.as_bytes()));
+        }
+    }
+
+    // The owner's host: the first run is a production item that the person denies, the
+    // second the person allows, the third (the CLI run with secret output) too.
+    let host = Host::start(
+        &relay,
+        config.path(),
+        vec![Answer::No, Answer::Yes, Answer::Yes],
+    );
 
     let mut placeholders = Vec::new();
     let mut keys = Vec::new();
 
-    // 3. A known-safe command with a staging item runs at once.
-    let (status, run) = relay.run(
+    // 3. A known-safe command with a staging item: pending, and then released by the
+    // host without a question.
+    let run_id = ask(
+        &relay,
         &agent,
         &run_body(
             &[team.stripe_item],
@@ -319,10 +476,10 @@ fn the_whole_flow_through_api_mcp_and_cli() {
             USER_REQUEST,
         ),
     );
-    assert_eq!(status, 200, "{run}");
-    let run = &run["result"];
+    let run = decided(&relay, &agent, run_id);
     assert_eq!(run["status"], "ready", "{run}");
-    assert_eq!(run["decided_by"], "known_safe");
+    assert_eq!(run["decided_by"], "host");
+    assert_eq!(run["note"], "Released automatically: known safe command.");
     let stripe_env = run["session"]["env"].clone();
     placeholders.push(check_stripe_swap(
         &relay,
@@ -332,56 +489,28 @@ fn the_whole_flow_through_api_mcp_and_cli() {
     ));
     keys.extend(session_keys(&stripe_env));
 
-    // 4. A production item waits. Deny, then ask again and approve.
+    // 4. A production item waits for the person. They say no, then yes.
     let both = [team.github_item, team.stripe_item];
-    let (status, run) = relay.run(&agent, &run_body(&both, &["git", "status"], USER_REQUEST));
-    assert_eq!(status, 200, "{run}");
-    assert_eq!(run["result"]["status"], "pending", "{run}");
-    assert!(run["result"]["session"].is_null());
-    assert!(
-        run["result"]["note"]
-            .as_str()
-            .unwrap()
-            .contains("Production credential"),
-        "{run}"
+    let denied_id = ask(
+        &relay,
+        &agent,
+        &run_body(&both, &["git", "status"], USER_REQUEST),
     );
-    let denied_id = run["result"]["run_id"].as_u64().unwrap();
-    relay.ok(
-        "POST",
-        &format!("/v1/approvals/{denied_id}/deny"),
-        &owner,
-        Some(&json!({"reason": "not now"})),
-    );
-    let denied = relay.ok("GET", &format!("/v1/runs/{denied_id}"), &agent, None);
-    assert_eq!(denied["status"], "denied");
+    let denied = decided(&relay, &agent, denied_id);
+    assert_eq!(denied["status"], "denied", "{denied}");
     assert_eq!(denied["code"], "approval_denied");
+    assert_eq!(denied["note"], "Denied on the host.");
     assert!(denied["session"].is_null());
 
-    let (_, run) = relay.run(&agent, &run_body(&both, &["git", "status"], USER_REQUEST));
-    assert_eq!(run["result"]["status"], "pending", "{run}");
-    let approved_id = run["result"]["run_id"].as_u64().unwrap();
-    let pending = relay.ok("GET", "/v1/approvals", &owner, None);
-    assert!(
-        pending
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|a| a["run_id"] == approved_id)
-    );
-    relay.ok(
-        "POST",
-        &format!("/v1/approvals/{approved_id}/approve"),
-        &owner,
-        Some(&json!({})),
-    );
-    let ready = relay.ok(
-        "GET",
-        &format!("/v1/runs/{approved_id}?wait=1"),
+    let approved_id = ask(
+        &relay,
         &agent,
-        None,
+        &run_body(&both, &["git", "status"], USER_REQUEST),
     );
+    let ready = decided(&relay, &agent, approved_id);
     assert_eq!(ready["status"], "ready", "{ready}");
-    assert_eq!(ready["decided_by"], "approver");
+    assert_eq!(ready["decided_by"], "host");
+    assert_eq!(ready["note"], "Approved on the host.");
     let both_env = ready["session"]["env"].clone();
     keys.extend(session_keys(&both_env));
     let github_placeholder = both_env["GITHUB_TOKEN"].as_str().unwrap().to_string();
@@ -403,6 +532,16 @@ fn the_whole_flow_through_api_mcp_and_cli() {
     let both_stripe = check_stripe_swap(&relay, &upstream, &both_env, "/v1/customers");
     placeholders.push(both_stripe.clone());
 
+    // An approver cannot approve on the relay: the keys are on the host.
+    relay.fails(
+        "POST",
+        &format!("/v1/approvals/{approved_id}/approve"),
+        Some(&owner),
+        None,
+        403,
+        "approve_on_host",
+    );
+
     // 5. Refusals: a placeholder in the path, and a Stripe placeholder sent to GitHub.
     let stripe_base = both_env["STRIPE_API_BASE"].as_str().unwrap();
     let before = upstream.requests().len();
@@ -420,7 +559,7 @@ fn the_whole_flow_through_api_mcp_and_cli() {
         "a refusal reached the upstream"
     );
 
-    // 7a. The same flow through the remote MCP endpoint.
+    // 7a. The same flow through the remote MCP endpoint: pending, then released.
     let mcp_call = json!({
         "jsonrpc": "2.0", "id": 7, "method": "tools/call",
         "params": {"name": "apassy_request_run", "arguments": {
@@ -435,8 +574,16 @@ fn the_whole_flow_through_api_mcp_and_cli() {
     assert_eq!(answer["id"], 7);
     assert_eq!(answer["result"]["isError"], false, "{answer}");
     let mcp_run = &answer["result"]["structuredContent"];
-    assert_eq!(mcp_run["status"], "ready", "{answer}");
-    let mcp_env = mcp_run["session"]["env"].clone();
+    assert_eq!(mcp_run["status"], "pending", "{answer}");
+    let status_call = json!({
+        "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+        "params": {"name": "apassy_run_status",
+                   "arguments": {"run_id": mcp_run["run_id"], "wait_secs": 20}},
+    });
+    let (_, answer) = relay.call("POST", "/mcp", Some(&agent), Some(&status_call));
+    let mcp_ready = &answer["result"]["structuredContent"];
+    assert_eq!(mcp_ready["status"], "ready", "{answer}");
+    let mcp_env = mcp_ready["session"]["env"].clone();
     keys.extend(session_keys(&mcp_env));
     placeholders.push(check_stripe_swap(
         &relay,
@@ -444,19 +591,12 @@ fn the_whole_flow_through_api_mcp_and_cli() {
         &mcp_env,
         "/v1/charges",
     ));
-    let status_call = json!({
-        "jsonrpc": "2.0", "id": 8, "method": "tools/call",
-        "params": {"name": "apassy_run_status",
-                   "arguments": {"run_id": mcp_run["run_id"], "wait_secs": 0}},
-    });
-    let (_, answer) = relay.call("POST", "/mcp", Some(&agent), Some(&status_call));
-    assert_eq!(answer["result"]["structuredContent"]["status"], "ready");
 
     // 7b. The same flow through `apassy-team run`. The child prints the variable to
-    // stdout, so the command asks (secret_output); the owner approves it.
+    // stdout, so the command asks (secret_output); the person says yes.
     let home = tempfile::tempdir().expect("home");
     let out = home.path().join("session.env");
-    let child = Command::new(env!("CARGO_BIN_EXE_apassy-team"))
+    let output = Command::new(env!("CARGO_BIN_EXE_apassy-team"))
         .args([
             "run",
             "--items",
@@ -483,28 +623,11 @@ fn the_whole_flow_through_api_mcp_and_cli() {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .output()
         .expect("apassy-team");
-    let cli_run = pending_run_of(&relay, "sh");
-    let flags = relay.ok("GET", "/v1/approvals", &owner, None);
-    let flags = flags
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| a["run_id"] == cli_run)
-        .expect("pending")["flags"]
-        .to_string();
-    assert!(flags.contains("secret_output"), "{flags}");
-    relay.ok(
-        "POST",
-        &format!("/v1/approvals/{cli_run}/approve"),
-        &owner,
-        Some(&json!({"reason": "ok for the test"})),
-    );
-    let output = child.wait_with_output().expect("apassy-team output");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
-    assert!(stderr.contains(&format!("Waiting for an approver (run {cli_run}).")));
+    assert!(stderr.contains("Waiting for an approver (run "), "{stderr}");
     assert_eq!(String::from_utf8_lossy(&output.stdout), "edge:none\n");
     let written = std::fs::read_to_string(&out).expect("child output");
     let mut lines = written.lines();
@@ -573,19 +696,59 @@ fn the_whole_flow_through_api_mcp_and_cli() {
     assert_eq!(revoked_cli.status.code(), Some(3));
     assert!(String::from_utf8_lossy(&revoked_cli.stderr).contains("not_granted"));
 
-    // 8. The whole audit holds no value, placeholder, token, or session key.
+    // What the person saw: only the runs that the host could not release by itself, and
+    // always with the local environments.
+    let shown = host.finish();
+    let shown_ids: Vec<u64> = shown.iter().map(|(id, _)| *id).collect();
+    assert_eq!(shown_ids.len(), 3, "{shown:?}");
+    assert_eq!(
+        shown[0],
+        (
+            denied_id,
+            vec!["production".to_string(), "staging".to_string()]
+        )
+    );
+    assert_eq!(shown[1].0, approved_id);
+    assert_eq!(shown[2].1, vec!["staging".to_string()]);
+    // The log of the host: one line per run, no key, no value.
+    let log = std::fs::read_to_string(store.log_path()).expect("host.log");
+    let decisions: Vec<String> = log
+        .lines()
+        .map(|l| {
+            serde_json::from_str::<Value>(l).expect("json line")["decision"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        decisions,
+        vec!["auto", "denied", "approved", "auto", "approved"],
+        "{log}"
+    );
+    for hidden in item_keys
+        .iter()
+        .map(String::as_str)
+        .chain([STRIPE_CANARY, GITHUB_CANARY])
+    {
+        assert!(!log.contains(hidden), "host.log holds a secret");
+    }
+
+    // 8. The whole audit holds no value, placeholder, token, session key, or item key.
     let audit = whole_audit(&relay);
     for action in [
-        "run_allowed",
         "run_pending",
         "run_denied",
-        "run_approved",
+        "run_released",
         "session_started",
         "session_ended",
         "grant_revoked",
         "proxy_request",
     ] {
         assert!(audit.contains(action), "no {action} in the audit");
+    }
+    for action in ["run_approved", "run_allowed"] {
+        assert!(!audit.contains(action), "{action} is not written any more");
     }
     assert!(!keys.is_empty());
     let mut needles: Vec<&str> = vec![
@@ -599,6 +762,7 @@ fn the_whole_flow_through_api_mcp_and_cli() {
     ];
     needles.extend(placeholders.iter().map(String::as_str));
     needles.extend(keys.iter().map(String::as_str));
+    needles.extend(item_keys.iter().map(String::as_str));
     for needle in needles {
         assert!(!audit.contains(needle), "the audit holds a secret");
     }
@@ -606,6 +770,15 @@ fn the_whole_flow_through_api_mcp_and_cli() {
         !audit.contains("apassy_ses_"),
         "the audit holds a session key"
     );
+    // And after all those sessions, no cell of the vault holds a value or an item key.
+    for cell in relay.vault_cells() {
+        for value in [STRIPE_CANARY, GITHUB_CANARY] {
+            assert!(!cell.windows(value.len()).any(|w| w == value.as_bytes()));
+        }
+        for key in &item_keys {
+            assert!(!cell.windows(key.len()).any(|w| w == key.as_bytes()));
+        }
+    }
 
     // The team is still sound for the owner: the member and the items are there.
     let members = relay.ok("GET", "/v1/members", &owner, None);

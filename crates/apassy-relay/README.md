@@ -2,7 +2,7 @@
 
 The team relay of Apassy. It is a credential manager with a bouncer for AI agents, for a small team.
 
-A team keeps shared credentials in one encrypted vault on the relay. An agent asks for a run. The relay decides. If the run may go, the agent gets placeholders and base URLs that point at the relay. The relay proxies the agent's requests to the real API host. It puts the real value only in an auth position, only for the hosts of that item. The agent never holds a real value.
+A team keeps shared credentials on the relay, but the relay never stores a readable value. Each value is sealed on the owner's machine, and its key stays there. An agent asks for a run. The owner's machine (`apassy-team host`) decides, and for a run that it agrees to, it sends the relay the keys of that run's items, sealed to a one-time key of that run. The relay opens the values in memory for that session only. The agent gets placeholders and base URLs that point at the relay. The relay proxies the agent's requests to the real API host. It puts the real value only in an auth position, only for the hosts of that item. The agent never holds a real value.
 
 This is an alpha. The design is in [docs/SPEC.md](docs/SPEC.md). It follows ADR 0013 of the [core](https://github.com/wydrox/apassy), way B.
 
@@ -11,9 +11,9 @@ This is an alpha. The design is in [docs/SPEC.md](docs/SPEC.md). It follows ADR 
 - Owner, managers, and members. Members join with one-time invite codes.
 - Collections of items. Each collection has a policy. A grant gives one member the use of one collection.
 - Each member makes agent tokens.
-- A known-safe command runs at once. Every other command waits for an approver. A production credential always waits. A hard-rule failure is denied.
-- Approvals are done with the CLI.
-- An audit log with no values, no placeholders, no tokens.
+- Host-held item keys. A stolen vault or backup gives only ciphertext. A relay that is taken over gets only the values of the runs that the host released while it ran.
+- The owner's host releases a known-safe command with a non-production item at once, and asks the owner on the terminal for every other run. A production credential always asks. A hard-rule failure is denied by the relay. Nobody approves on the relay.
+- An audit log with no values, no placeholders, no tokens, no keys.
 - Agents use a remote MCP endpoint, a stdio MCP adapter, or `apassy-team run`.
 
 ## License
@@ -69,7 +69,7 @@ apassy-team init --relay http://127.0.0.1:8080 < owner-token-file
 apassy-team me
 ```
 
-Add a credential and let an agent use it:
+Add a credential and let an agent use it. `item add` seals the value on this machine and keeps its key in `~/.config/apassy-team/keys.json`. Back that file up: without it the item cannot be used, and you add it again.
 
 ```sh
 apassy-team collection create payments
@@ -79,10 +79,14 @@ apassy-team invite                       # send the code to the member
 apassy-team grant --collection 1 --member 2
 apassy-team agent create ci              # the member runs this; it prints the token once
 
+apassy-team host                         # on the owner's Mac; keep it running
+
 export APASSY_TOKEN=...                  # in the agent's environment
 apassy-team run --items 1 --purpose "Check the balance" \
   --request "Show me the Stripe balance" -- stripe balance retrieve
 ```
+
+Every run waits for `apassy-team host`. It releases a known-safe command with a staging item by itself (the `stripe balance retrieve` above), and asks you at the terminal about any other run: `Release the keys for run N? [y/N]`. The host must be online for any run to start.
 
 The full setup, with the Cloudflare Worker and the tunnel, is in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
@@ -90,9 +94,11 @@ The full setup, with the Cloudflare Worker and the tunnel, is in [docs/OPERATION
 
 | Path | What |
 | --- | --- |
-| `src/server/` | the relay server: vault, decisions, sessions, audit, MCP |
+| `src/server/` | the relay server: vault (sealed values), decisions, run keys, host endpoints, sessions, audit, MCP |
 | `src/proxy/` | the reverse proxy that swaps placeholders |
-| `src/cli/` | the `apassy-team` CLI and the stdio MCP adapter |
+| `src/cli/` | the `apassy-team` CLI, the owner's host (`host.rs`), the key store (`keystore.rs`), and the stdio MCP adapter |
+| `src/hostkeys.rs` | the crypto of host-held item keys: seal, open, release |
+| `src/decision.rs` | the pure part of the decision per run, used by the relay and by the host |
 | `deploy/worker/` | the Cloudflare Worker at the edge |
 | `scripts/e2e.sh` | the end-to-end check with the real binaries |
 | `examples/e2e_relay.rs` | the relay with a mock upstream, for `scripts/e2e.sh` only |
@@ -109,12 +115,12 @@ node --test 'deploy/worker/test/*.test.ts'    # Node 22.18 or later, no npm inst
 scripts/e2e.sh                                # the binaries end to end, on 127.0.0.1
 ```
 
-`tests/e2e.rs` runs the whole flow in process. `scripts/e2e.sh` runs it with the real
+`tests/e2e.rs` runs the whole flow in process: `apassy-team item add` with a key store in a temp dir, the real host loop with a scripted person, an agent, and the mock upstream. `scripts/e2e.sh` runs it with the real
 binaries: `apassy-relay init` and `serve`, then the same server code with a mock
-upstream (`examples/e2e_relay.rs`), and `apassy-team` for every step. The release
+upstream (`examples/e2e_relay.rs`), `apassy-team host` cut off from any terminal, and `apassy-team` for every step. The release
 binary cannot trust a test root on purpose, so the script needs the example for the
 upstream. All values are synthetic.
 
 ## What it does not protect
 
-Read section 20 of [docs/SPEC.md](docs/SPEC.md). In short: the relay holds every value in memory while it runs, and Cloudflare sees all traffic in clear.
+Read sections 20 and 21 of [docs/SPEC.md](docs/SPEC.md). In short: the relay still sees a value while a session lives, `keys.json` is plain text on the owner's disk in this alpha (back it up), the host must be online for every run, only the owner's host holds keys, and Cloudflare sees all traffic in clear (but no longer a value when an item is added).

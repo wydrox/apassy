@@ -19,7 +19,7 @@ use crate::server::{admin, decide};
 pub const VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const FALLBACK_VERSION: &str = "2025-06-18";
 
-const INSTRUCTIONS: &str = "Apassy relay. Call apassy_list_access to see the credentials you can use. Call apassy_request_run with the exact command, the purpose, and the user's request. If the status is pending, an approver decides: call apassy_run_status until it is ready, denied, or timed_out. When it is ready, run the command yourself with every variable of session.env set. The variables hold placeholders and base URLs, not real values; the relay swaps them. Do not print or store the variables. If apassy-team is installed, prefer `apassy-team run`, which does all of this and keeps the variables out of the transcript.";
+const INSTRUCTIONS: &str = "Apassy relay. Call apassy_list_access to see the credentials you can use. Call apassy_request_run with the exact command, the purpose, and the user's request. The status is pending until the owner's host releases the keys of the items: it does so by itself for a known safe command, and it asks the owner for any other. Call apassy_run_status until it is ready, denied, or timed_out. When it is ready, run the command yourself with every variable of session.env set. The variables hold placeholders and base URLs, not real values; the relay swaps them. Do not print or store the variables. If apassy-team is installed, prefer `apassy-team run`, which does all of this and keeps the variables out of the transcript.";
 
 /// The reply to one HTTP request on `/mcp`.
 pub enum Reply {
@@ -42,12 +42,12 @@ pub fn tools() -> Value {
     json!([
         {
             "name": api::TOOL_LIST_ACCESS,
-            "description": "List the credentials this agent may use: items, hosts, the variables a run gets, and when a run waits for an approver.",
+            "description": "List the credentials this agent may use: items, hosts, the variables a run gets, and when the owner's host asks the owner about a run.",
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
         },
         {
             "name": api::TOOL_REQUEST_RUN,
-            "description": "Ask for a run: the items, the exact command, the purpose, and the user's request. A known safe command is allowed at once. Any other command waits for an approver.",
+            "description": "Ask for a run: the items, the exact command, the purpose, and the user's request. The run waits for the owner's host, which releases the keys by itself for a known safe command and asks the owner about any other.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -64,7 +64,7 @@ pub fn tools() -> Value {
         },
         {
             "name": api::TOOL_RUN_STATUS,
-            "description": "The status of a run. While it is pending, waits up to wait_secs for an approver.",
+            "description": "The status of a run. While it is pending, waits up to wait_secs for the owner's host.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -21,8 +21,9 @@ use crate::error::{RelayError, RelayResult, codes};
 use crate::ids::{CollectionId, ItemId, MemberId};
 use crate::secret::SecretString;
 
-/// The schema version in `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i64 = 1;
+/// The schema version in `PRAGMA user_version`. Version 1 was the first alpha: it kept
+/// the item values in the vault. Version 2 keeps only sealed values (`uid`, `sealed`).
+pub const SCHEMA_VERSION: i64 = 2;
 
 const KDF_ITER: i64 = 256_000;
 const PAGE_SIZE: i64 = 4096;
@@ -45,7 +46,7 @@ CREATE TABLE collection (
   created_at INTEGER NOT NULL);
 CREATE TABLE item (
   id INTEGER PRIMARY KEY, collection_id INTEGER NOT NULL REFERENCES collection(id),
-  name TEXT NOT NULL, env_name TEXT NOT NULL, value TEXT NOT NULL,
+  name TEXT NOT NULL, env_name TEXT NOT NULL, uid TEXT NOT NULL UNIQUE, sealed BLOB NOT NULL,
   provider TEXT, hosts TEXT NOT NULL,
   environment TEXT NOT NULL, risk TEXT NOT NULL, scope TEXT NOT NULL, reversibility TEXT NOT NULL,
   created_by INTEGER NOT NULL REFERENCES member(id), created_at INTEGER NOT NULL, archived_at INTEGER);
@@ -68,7 +69,7 @@ CREATE TABLE run (
 CREATE TABLE audit (
   id INTEGER PRIMARY KEY, at INTEGER NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL,
   run_id INTEGER, detail TEXT NOT NULL);
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 ";
 
 /// The one storage error. No SQL text, no value.
@@ -161,6 +162,11 @@ impl Store {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(db)?;
+        if version == 1 {
+            return Err(RelayError::internal(
+                "This team vault is from the first alpha and holds plaintext item values. Start with a new data volume: there is no migration.",
+            ));
+        }
         if version != SCHEMA_VERSION {
             return Err(RelayError::internal(
                 "The team vault has an unknown schema version.",
@@ -315,7 +321,8 @@ pub fn build_options_ok(options: &[String]) -> bool {
         && !has("USE_URI")
 }
 
-/// One item with its collection. It holds the real value: never put it in a view.
+/// One item with its collection. It holds the sealed value, not a readable one: the
+/// key is on the owner's host.
 pub struct ItemRow {
     pub id: ItemId,
     pub collection_id: CollectionId,
@@ -323,7 +330,10 @@ pub struct ItemRow {
     pub policy: Policy,
     pub name: String,
     pub env_name: String,
-    pub value: SecretString,
+    /// 32 lowercase hex characters. The host finds its item key by it.
+    pub uid: String,
+    /// `nonce || ciphertext || tag`. Ciphertext only.
+    pub sealed: Vec<u8>,
     pub provider: Option<String>,
     pub hosts: Vec<String>,
     pub environment: String,
@@ -334,12 +344,12 @@ pub struct ItemRow {
     pub archived: bool,
 }
 
-const ITEM_COLUMNS: &str = "i.id, i.collection_id, c.name, c.policy, i.name, i.env_name, i.value, \
+const ITEM_COLUMNS: &str = "i.id, i.collection_id, c.name, c.policy, i.name, i.env_name, i.uid, i.sealed, \
      i.provider, i.hosts, i.environment, i.risk, i.scope, i.reversibility, i.created_at, i.archived_at";
 
 fn item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemRow> {
     let policy_text: String = row.get(3)?;
-    let hosts_text: String = row.get(8)?;
+    let hosts_text: String = row.get(9)?;
     Ok(ItemRow {
         id: ItemId(to_u(row.get(0)?)),
         collection_id: CollectionId(to_u(row.get(1)?)),
@@ -347,15 +357,16 @@ fn item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemRow> {
         policy: serde_json::from_str(&policy_text).unwrap_or_default(),
         name: row.get(4)?,
         env_name: row.get(5)?,
-        value: SecretString::new(row.get(6)?),
-        provider: row.get(7)?,
+        uid: row.get(6)?,
+        sealed: row.get(7)?,
+        provider: row.get(8)?,
         hosts: serde_json::from_str(&hosts_text).unwrap_or_default(),
-        environment: row.get(9)?,
-        risk: row.get(10)?,
-        scope: row.get(11)?,
-        reversibility: row.get(12)?,
-        created_at: to_u(row.get(13)?),
-        archived: row.get::<_, Option<i64>>(14)?.is_some(),
+        environment: row.get(10)?,
+        risk: row.get(11)?,
+        scope: row.get(12)?,
+        reversibility: row.get(13)?,
+        created_at: to_u(row.get(14)?),
+        archived: row.get::<_, Option<i64>>(15)?.is_some(),
     })
 }
 
@@ -370,17 +381,6 @@ pub fn load_item(conn: &Connection, id: ItemId) -> RelayResult<Option<ItemRow>> 
     )
     .optional()
     .map_err(db)
-}
-
-/// Every item, live or archived, in id order.
-pub fn load_all_items(conn: &Connection) -> RelayResult<Vec<ItemRow>> {
-    let mut statement = conn
-        .prepare(&format!(
-            "SELECT {ITEM_COLUMNS} FROM item i JOIN collection c ON c.id = i.collection_id ORDER BY i.id"
-        ))
-        .map_err(db)?;
-    let rows = statement.query_map([], item_from_row).map_err(db)?;
-    rows.map(|row| row.map_err(db)).collect()
 }
 
 /// The live items of one collection, or of all collections, in id order.

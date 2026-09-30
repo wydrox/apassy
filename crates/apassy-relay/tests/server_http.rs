@@ -147,7 +147,7 @@ fn a_bad_body_is_400_and_never_echoes_a_value() {
     let relay = start(UpstreamOptions::default());
     let collection = relay.add_collection("c", json!({}));
     // The value has the wrong type: the error must not print it.
-    let bad = json!({"collection_id": collection, "name": "n", "env_name": "K_KEY", "value": 5, "environment": "staging", "note": CANARY});
+    let bad = json!({"collection_id": collection, "name": "n", "env_name": "K_KEY", "sealed": 5, "value": CANARY, "environment": "staging", "note": CANARY});
     let (status, body) = relay.call("POST", "/v1/items", Some(&relay.owner_token), Some(&bad));
     assert_eq!(status, 400);
     assert_eq!(body["error"]["code"], "invalid_request");
@@ -200,6 +200,9 @@ fn endpoints_refuse_missing_wrong_kind_and_unknown_tokens() {
         ("POST", "/v1/approvals/1/approve"),
         ("POST", "/v1/approvals/1/deny"),
         ("GET", "/v1/audit"),
+        ("GET", "/v1/host/requests"),
+        ("POST", "/v1/host/requests/1/release"),
+        ("POST", "/v1/host/requests/1/deny"),
     ];
     let agent_endpoints = [
         ("GET", "/v1/access"),
@@ -316,6 +319,9 @@ fn a_plain_member_cannot_do_what_approvers_do() {
         ("POST", "/v1/approvals/1/deny"),
         ("GET", "/v1/audit"),
         ("DELETE", "/v1/members/1"),
+        ("GET", "/v1/host/requests"),
+        ("POST", "/v1/host/requests/1/release"),
+        ("POST", "/v1/host/requests/1/deny"),
     ] {
         relay.fails(method, path, token, None, 403, "forbidden");
     }
@@ -342,11 +348,17 @@ fn a_manager_works_but_cannot_invite_a_manager_or_revoke() {
         Some(&json!({"name": "ops"})),
     );
     let collection = created["id"].as_u64().unwrap();
+    let sealed = relay::seal(CANARY);
     relay.ok(
         "POST",
         "/v1/items",
         &manager,
-        Some(&json!({"collection_id": collection, "name": "n", "env_name": "OPS_TOKEN", "value": CANARY, "hosts": ["api.example.com"], "environment": "staging"})),
+        Some(&relay::item_request(
+            collection,
+            "OPS_TOKEN",
+            &sealed,
+            json!({"hosts": ["api.example.com"], "environment": "staging"}),
+        )),
     );
     relay.ok("GET", "/v1/audit", &manager, None);
     relay.ok("GET", "/v1/members", &manager, None);
@@ -759,6 +771,10 @@ fn many_requests_at_once_are_all_answered() {
                     "purpose": format!("worker {worker} run {i}"), "user_request": "check"
                 });
                 let (status, body) = relay.call("POST", "/v1/runs", Some(&token), Some(&request));
+                assert_eq!(status, 200, "{body}");
+                assert_eq!(body["result"]["status"], "pending");
+                let run = body["result"]["run_id"].as_u64().unwrap();
+                let (status, body) = relay.release(run);
                 assert_eq!(status, 200, "{body}");
                 assert_eq!(body["result"]["status"], "ready");
             }

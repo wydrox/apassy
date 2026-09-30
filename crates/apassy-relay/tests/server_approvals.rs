@@ -1,4 +1,6 @@
-//! Approvals, denials, timeouts, invalidation, and the long poll.
+//! Denials, the refused approve endpoint, timeouts, invalidation, and the long poll.
+//! A run is released by the owner's host (`TestRelay::release` plays the host); the
+//! host endpoints themselves are in `server_host.rs`.
 
 #[path = "common/relay.rs"]
 mod relay;
@@ -31,12 +33,32 @@ fn approve(relay: &TestRelay, run: u64, body: Option<Value>) -> (u16, Value) {
     )
 }
 
+/// The host releases a pending run with the keys of its items.
+fn release(relay: &TestRelay, run: u64) -> (u16, Value) {
+    relay.release(run)
+}
+
+/// The release body for a run, made while the run is pending. It stays valid for one
+/// try only: the relay takes the run key out at the first release.
+fn release_body(relay: &TestRelay, run: u64, reason: Option<&str>) -> Value {
+    relay.release_for(&relay.host_request(run), reason)
+}
+
+fn release_with(relay: &TestRelay, run: u64, body: &Value) -> (u16, Value) {
+    relay.call(
+        "POST",
+        &format!("/v1/host/requests/{run}/release"),
+        Some(&relay.owner_token),
+        Some(body),
+    )
+}
+
 fn get_run(relay: &TestRelay, team: &Team, run: u64) -> Value {
     relay.ok("GET", &format!("/v1/runs/{run}"), &team.agent_token, None)
 }
 
 #[test]
-fn approve_gives_a_session_with_placeholders_and_base_urls() {
+fn release_gives_a_session_with_placeholders_and_base_urls() {
     let relay = start(UpstreamOptions::default());
     let team = relay.setup("staging");
     let run = pending_run(&relay, &team);
@@ -47,16 +69,16 @@ fn approve_gives_a_session_with_placeholders_and_base_urls() {
     assert_eq!(list[0]["command"], json!(["python3", "script.py"]));
     assert_eq!(list[0]["user_request"], USER);
     assert_eq!(list[0]["cwd"], "/work");
-    let (status, body) = approve(&relay, run, None);
+    let (status, body) = release(&relay, run);
     assert_eq!(status, 200, "{body}");
     let view = &body["result"];
     assert_eq!(view["status"], "ready");
-    assert_eq!(view["decided_by"], "approver");
-    assert_eq!(view["approver"], "owner");
-    assert_eq!(view["note"], "Approved by owner.");
+    assert_eq!(view["decided_by"], "host");
+    assert!(view.get("approver").is_none());
+    assert_eq!(view["note"], "Released by the owner's host.");
     assert!(
         view.get("session").is_none(),
-        "the approver does not get the session"
+        "the host does not get the session"
     );
     assert_eq!(
         relay
@@ -97,12 +119,70 @@ fn approve_gives_a_session_with_placeholders_and_base_urls() {
 }
 
 #[test]
-fn approve_and_deny_take_a_reason() {
+fn nobody_approves_on_the_relay() {
     let relay = start(UpstreamOptions::default());
     let team = relay.setup("staging");
     let run = pending_run(&relay, &team);
-    let (_, body) = approve(&relay, run, Some(json!({"reason": "Looks fine to me."})));
-    assert_eq!(body["result"]["note"], "Looks fine to me.");
+    // The owner, with or without a body, and for a run that does not exist.
+    for body in [
+        None,
+        Some(json!({})),
+        Some(json!({"reason": "fine"})),
+        Some(json!({"anything": 1})),
+    ] {
+        let (status, answer) = approve(&relay, run, body);
+        assert_eq!(status, 403, "{answer}");
+        assert_eq!(answer["error"]["code"], "approve_on_host");
+        assert_eq!(
+            answer["error"]["message"],
+            "The keys are on the owner's host. Approve there with apassy-team host."
+        );
+    }
+    assert_eq!(
+        approve(&relay, 9999, None).1["error"]["code"],
+        "approve_on_host"
+    );
+    // A manager too. A plain member is refused earlier, as forbidden.
+    let (_, manager) = relay.join_member("manager", "maria");
+    let (_, member) = relay.join_member("member", "bob");
+    relay.fails(
+        "POST",
+        &format!("/v1/approvals/{run}/approve"),
+        Some(&manager),
+        None,
+        403,
+        "approve_on_host",
+    );
+    relay.fails(
+        "POST",
+        &format!("/v1/approvals/{run}/approve"),
+        Some(&member),
+        None,
+        403,
+        "forbidden",
+    );
+    // The run still waits, and the host can release it.
+    assert_eq!(get_run(&relay, &team, run)["status"], "pending");
+    assert_eq!(release(&relay, run).0, 200);
+    let audit = relay.ok("GET", "/v1/audit?limit=500", &relay.owner_token, None);
+    assert!(
+        !audit
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["action"] == "run_approved")
+    );
+}
+
+#[test]
+fn release_and_deny_take_a_reason() {
+    let relay = start(UpstreamOptions::default());
+    let team = relay.setup("staging");
+    let run = pending_run(&relay, &team);
+    let body = release_body(&relay, run, Some("  Looks fine to me.  "));
+    let (status, answer) = release_with(&relay, run, &body);
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["result"]["note"], "Looks fine to me.");
     let run = pending_run(&relay, &team);
     let (status, body) = relay.call(
         "POST",
@@ -112,18 +192,29 @@ fn approve_and_deny_take_a_reason() {
     );
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["result"]["note"], "Not today.");
-    // A long reason, a NUL, and an unknown field are refused.
+    // A long reason, a NUL, and an unknown field are refused before the key is used.
     let run = pending_run(&relay, &team);
-    for bad in [
-        json!({"reason": "r".repeat(501)}),
-        json!({"reason": "a\u{0}b"}),
-        json!({"other": 1}),
-    ] {
-        let (status, body) = approve(&relay, run, Some(bad));
+    for reason in [Some("r".repeat(501)), Some("a\u{0}b".to_string())] {
+        let body = release_body(&relay, run, reason.as_deref());
+        let (status, body) = release_with(&relay, run, &body);
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(body["error"]["code"], "invalid_request");
+    }
+    let mut body = release_body(&relay, run, None);
+    body["other"] = json!(1);
+    assert_eq!(release_with(&relay, run, &body).0, 400);
+    for bad in [json!({"reason": "r".repeat(501)}), json!({"other": 1})] {
+        let (status, body) = relay.call(
+            "POST",
+            &format!("/v1/host/requests/{run}/deny"),
+            Some(&relay.owner_token),
+            Some(&bad),
+        );
         assert_eq!(status, 400, "{body}");
     }
-    // The run still waits.
+    // The run still waits, and its key is still there.
     assert_eq!(get_run(&relay, &team, run)["status"], "pending");
+    assert_eq!(release(&relay, run).0, 200);
 }
 
 #[test]
@@ -131,6 +222,7 @@ fn deny_ends_the_run_with_approval_denied() {
     let relay = start(UpstreamOptions::default());
     let team = relay.setup("staging");
     let run = pending_run(&relay, &team);
+    let old_request = relay.host_request(run);
     let (status, body) = relay.call(
         "POST",
         &format!("/v1/approvals/{run}/deny"),
@@ -156,18 +248,23 @@ fn deny_ends_the_run_with_approval_denied() {
         409,
         "run_not_pending",
     );
-    let (status, body) = approve(&relay, run, None);
+    // The run is gone from the host, and a release for it is refused.
+    assert!(relay.host_requests().is_empty());
+    let body = relay.release_for(&old_request, None);
+    let (status, body) = release_with(&relay, run, &body);
     assert_eq!(status, 409, "{body}");
     assert_eq!(body["error"]["code"], "run_not_pending");
 }
 
 #[test]
-fn approving_twice_is_run_not_pending() {
+fn releasing_twice_is_run_not_pending() {
     let relay = start(UpstreamOptions::default());
     let team = relay.setup("staging");
     let run = pending_run(&relay, &team);
-    assert_eq!(approve(&relay, run, None).0, 200);
-    let (status, body) = approve(&relay, run, None);
+    let request = relay.host_request(run);
+    let again = relay.release_for(&request, None);
+    assert_eq!(release(&relay, run).0, 200);
+    let (status, body) = release_with(&relay, run, &again);
     assert_eq!(status, 409);
     assert_eq!(body["error"]["code"], "run_not_pending");
     relay.fails(
@@ -178,36 +275,57 @@ fn approving_twice_is_run_not_pending() {
         409,
         "run_not_pending",
     );
-    // A run that was ready at once can not be approved either.
-    let (_, ready) = relay.run(
-        &team.agent_token,
-        &team.request(&["git", "status"], Some(USER)),
+    relay.fails(
+        "POST",
+        &format!("/v1/host/requests/{run}/deny"),
+        Some(&relay.owner_token),
+        None,
+        409,
+        "run_not_pending",
     );
-    let id = ready["result"]["run_id"].as_u64().unwrap();
-    assert_eq!(approve(&relay, id, None).0, 409);
+    // The second release did not end the session of the first.
+    assert_eq!(get_run(&relay, &team, run)["status"], "ready");
     // An unknown run is 404.
-    assert_eq!(approve(&relay, 9999, None).0, 404);
+    let (status, _) = release_with(&relay, 9999, &again);
+    assert_eq!(status, 404);
 }
 
 #[test]
-fn a_manager_can_approve() {
+fn a_manager_can_deny_but_not_release() {
     let relay = start(UpstreamOptions::default());
     let team = relay.setup("staging");
     let (_, manager) = relay.join_member("manager", "maria");
     let run = pending_run(&relay, &team);
+    let body = release_body(&relay, run, None);
+    let (status, answer) = relay.call(
+        "POST",
+        &format!("/v1/host/requests/{run}/release"),
+        Some(&manager),
+        Some(&body),
+    );
+    assert_eq!(status, 403, "{answer}");
+    assert_eq!(answer["error"]["code"], "forbidden");
+    relay.fails(
+        "GET",
+        "/v1/host/requests",
+        Some(&manager),
+        None,
+        403,
+        "forbidden",
+    );
     let (status, body) = relay.call(
         "POST",
-        &format!("/v1/approvals/{run}/approve"),
+        &format!("/v1/approvals/{run}/deny"),
         Some(&manager),
         None,
     );
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["result"]["approver"], "maria");
-    assert_eq!(body["result"]["note"], "Approved by maria.");
+    assert_eq!(body["result"]["note"], "Denied by maria.");
 }
 
 #[test]
-fn a_run_times_out_and_can_no_longer_be_approved() {
+fn a_run_times_out_and_can_no_longer_be_released() {
     let relay = start_with(
         |config| config.approval_timeout_secs = 2,
         UpstreamOptions::default(),
@@ -215,6 +333,7 @@ fn a_run_times_out_and_can_no_longer_be_approved() {
     let team = relay.setup("staging");
     let run = pending_run(&relay, &team);
     let second = pending_run(&relay, &team);
+    let body = release_body(&relay, second, None);
     assert_eq!(
         relay
             .ok("GET", "/v1/approvals", &relay.owner_token, None)
@@ -223,13 +342,14 @@ fn a_run_times_out_and_can_no_longer_be_approved() {
             .len(),
         2
     );
+    assert_eq!(relay.host_requests().len(), 2);
     std::thread::sleep(Duration::from_millis(2500));
     // A read of the run shows the timeout.
     let view = get_run(&relay, &team, run);
     assert_eq!(view["status"], "timed_out");
     assert_eq!(view["code"], "approval_timeout");
     assert_eq!(view["decided_by"], "timeout");
-    // The list of approvals sweeps the other one.
+    // The list of approvals sweeps the other one, and the host does not see either.
     assert_eq!(
         relay
             .ok("GET", "/v1/approvals", &relay.owner_token, None)
@@ -238,9 +358,10 @@ fn a_run_times_out_and_can_no_longer_be_approved() {
             .len(),
         0
     );
-    let (status, body) = approve(&relay, second, None);
-    assert_eq!(status, 409, "{body}");
-    assert_eq!(body["error"]["code"], "run_not_pending");
+    assert!(relay.host_requests().is_empty());
+    let (status, answer) = release_with(&relay, second, &body);
+    assert_eq!(status, 409, "{answer}");
+    assert_eq!(answer["error"]["code"], "run_not_pending");
     assert_eq!(get_run(&relay, &team, second)["status"], "timed_out");
     let audit = relay.ok("GET", "/v1/audit?limit=500", &relay.owner_token, None);
     let timed_out = audit
@@ -253,41 +374,69 @@ fn a_run_times_out_and_can_no_longer_be_approved() {
 }
 
 #[test]
-fn a_late_approval_is_refused_even_before_any_read() {
+fn a_late_release_is_refused_even_before_any_read() {
     let relay = start_with(
-        |config| config.approval_timeout_secs = 1,
+        |config| config.approval_timeout_secs = 2,
         UpstreamOptions::default(),
     );
     let team = relay.setup("staging");
     let run = pending_run(&relay, &team);
-    std::thread::sleep(Duration::from_millis(1600));
-    let (status, body) = approve(&relay, run, None);
-    assert_eq!(status, 409, "{body}");
+    let body = release_body(&relay, run, None);
+    std::thread::sleep(Duration::from_millis(2600));
+    let (status, answer) = release_with(&relay, run, &body);
+    assert_eq!(status, 409, "{answer}");
     assert_eq!(get_run(&relay, &team, run)["status"], "timed_out");
 }
 
 #[test]
-fn a_grant_revoked_while_pending_invalidates_the_approval() {
+fn a_run_with_no_host_times_out() {
+    let relay = start_with(
+        |config| config.approval_timeout_secs = 2,
+        UpstreamOptions::default(),
+    );
+    let team = relay.setup("staging");
+    // A known safe command: the relay suggests allow, but nobody releases the keys.
+    let (status, body) = relay.run(
+        &team.agent_token,
+        &team.request(&["git", "status"], Some(USER)),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["result"]["status"], "pending");
+    let run = body["result"]["run_id"].as_u64().unwrap();
+    let view = relay.ok(
+        "GET",
+        &format!("/v1/runs/{run}?wait=10"),
+        &team.agent_token,
+        None,
+    );
+    assert_eq!(view["status"], "timed_out");
+    assert_eq!(view["code"], "approval_timeout");
+    assert!(view.get("session").is_none());
+}
+
+#[test]
+fn a_grant_revoked_while_pending_invalidates_the_run() {
     let relay = start(UpstreamOptions::default());
     let team = relay.setup("staging");
     let run = pending_run(&relay, &team);
+    let old = relay.host_request(run);
     relay.ok(
         "DELETE",
         &format!("/v1/grants/{}", team.grant),
         &relay.owner_token,
         None,
     );
-    // The run waits until an approver looks at it; the re-check fails then.
-    assert_eq!(get_run(&relay, &team, run)["status"], "pending");
-    let (status, body) = approve(&relay, run, None);
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(body["result"]["status"], "denied");
-    assert_eq!(body["result"]["code"], "approval_invalidated");
+    // The run is denied at once, and its key is dropped: the host does not see it.
     let view = get_run(&relay, &team, run);
     assert_eq!(view["status"], "denied");
     assert_eq!(view["code"], "approval_invalidated");
     assert_eq!(view["decided_by"], "revocation");
     assert!(view.get("session").is_none());
+    assert!(relay.host_requests().is_empty());
+    let body = relay.release_for(&old, None);
+    let (status, answer) = release_with(&relay, run, &body);
+    assert_eq!(status, 409, "{answer}");
+    assert_eq!(answer["error"]["code"], "run_not_pending");
     let audit = relay.ok("GET", "/v1/audit?limit=500", &relay.owner_token, None);
     assert!(
         audit
@@ -299,7 +448,7 @@ fn a_grant_revoked_while_pending_invalidates_the_approval() {
 }
 
 #[test]
-fn an_archived_item_or_a_revoked_agent_invalidates_the_approval() {
+fn an_archived_item_or_a_revoked_agent_invalidates_the_run() {
     let relay = start(UpstreamOptions::default());
     let team = relay.setup("staging");
     let run = pending_run(&relay, &team);
@@ -309,20 +458,23 @@ fn an_archived_item_or_a_revoked_agent_invalidates_the_approval() {
         &relay.owner_token,
         None,
     );
-    let (_, body) = approve(&relay, run, None);
-    assert_eq!(body["result"]["code"], "approval_invalidated");
+    let view = get_run(&relay, &team, run);
+    assert_eq!(view["code"], "approval_invalidated");
+    assert!(relay.host_requests().is_empty());
 
     let relay = start(UpstreamOptions::default());
     let team = relay.setup("staging");
     let run = pending_run(&relay, &team);
+    let old = relay.host_request(run);
     relay.ok(
         "DELETE",
         &format!("/v1/agents/{}", team.agent_id),
         &relay.owner_token,
         None,
     );
-    let (_, body) = approve(&relay, run, None);
-    assert_eq!(body["result"]["code"], "approval_invalidated");
+    assert!(relay.host_requests().is_empty());
+    let body = relay.release_for(&old, None);
+    assert_eq!(release_with(&relay, run, &body).0, 409);
     relay.fails(
         "GET",
         &format!("/v1/runs/{run}"),
@@ -334,10 +486,43 @@ fn an_archived_item_or_a_revoked_agent_invalidates_the_approval() {
 }
 
 #[test]
+fn the_recheck_at_release_denies_a_run_whose_agent_expired() {
+    // Step 1 of the decision is checked again at release. An agent token can run
+    // out while a run waits, without any revocation that drops the key.
+    let relay = start(UpstreamOptions::default());
+    let team = relay.setup("staging");
+    let run = pending_run(&relay, &team);
+    relay.edit_vault_live("UPDATE agent SET expires_at = 1");
+    let (status, body) = release(&relay, run);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["result"]["status"], "denied");
+    assert_eq!(body["result"]["code"], "approval_invalidated");
+    assert_eq!(body["result"]["decided_by"], "revocation");
+    let audit = relay.ok("GET", "/v1/audit?limit=500", &relay.owner_token, None);
+    assert!(
+        audit
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["action"] == "run_invalidated")
+    );
+    // No session was made, and the key is used up.
+    assert!(
+        !audit
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["action"] == "session_started")
+    );
+    assert!(relay.host_requests().is_empty());
+}
+
+#[test]
 fn a_revoked_member_loses_the_pending_runs_at_once() {
     let relay = start(UpstreamOptions::default());
     let team = relay.setup("staging");
     let run = pending_run(&relay, &team);
+    let old = relay.host_request(run);
     relay.ok(
         "DELETE",
         &format!("/v1/members/{}", team.member_id),
@@ -352,7 +537,9 @@ fn a_revoked_member_loses_the_pending_runs_at_once() {
             .len(),
         0
     );
-    let (status, body) = approve(&relay, run, None);
+    assert!(relay.host_requests().is_empty());
+    let body = relay.release_for(&old, None);
+    let (status, body) = release_with(&relay, run, &body);
     assert_eq!(status, 409, "{body}");
 }
 
@@ -408,7 +595,7 @@ fn only_the_agent_that_made_the_run_reads_it() {
 }
 
 #[test]
-fn wait_holds_the_response_until_the_approval() {
+fn wait_holds_the_response_until_the_release() {
     let relay = std::sync::Arc::new(start(UpstreamOptions::default()));
     let team = relay.setup("staging");
     let run = pending_run(&relay, &team);
@@ -422,7 +609,7 @@ fn wait_holds_the_response_until_the_approval() {
         })
     };
     std::thread::sleep(Duration::from_millis(800));
-    assert_eq!(approve(&relay, run, None).0, 200);
+    assert_eq!(release(&relay, run).0, 200);
     let (view, waited) = poller.join().unwrap();
     assert_eq!(view["status"], "ready");
     assert!(view["session"]["env"]["STRIPE_API_KEY"].is_string());
@@ -453,11 +640,11 @@ fn wait_returns_pending_when_the_time_is_up_and_ready_at_once() {
     relay.ok("GET", &format!("/v1/runs/{run}"), &team.agent_token, None);
     assert!(started.elapsed() < Duration::from_millis(500));
     // A ready run does not wait.
-    let (_, ready) = relay.run(
+    let ready = relay.run_released(
         &team.agent_token,
         &team.request(&["git", "status"], Some(USER)),
     );
-    let id = ready["result"]["run_id"].as_u64().unwrap();
+    let id = ready["run_id"].as_u64().unwrap();
     let started = Instant::now();
     let view = relay.ok(
         "GET",
@@ -581,7 +768,7 @@ fn many_long_polls_of_one_agent_do_not_block_the_approver() {
         })
         .collect();
     std::thread::sleep(Duration::from_millis(1000));
-    let (status, body) = approve(&relay, run, None);
+    let (status, body) = release(&relay, run);
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["result"]["status"], "ready");
     let mut quick_pending = 0;
@@ -606,6 +793,9 @@ fn many_long_polls_of_one_agent_do_not_block_the_approver() {
     assert!(started.elapsed() < Duration::from_secs(20));
 }
 
+/// A long poll that is held: who asks for which run, and the thread that waits.
+type Held = Vec<(String, u64, std::thread::JoinHandle<(u16, Value)>)>;
+
 /// Agent requests leave a reserve of slots to members and approvers. A request over
 /// a limit gets 503 `busy` as an envelope with `Retry-After`.
 #[test]
@@ -617,6 +807,7 @@ fn agent_requests_leave_slots_for_approvers_and_busy_is_an_envelope() {
                 max_active: 6,
                 member_reserve: 2,
                 long_polls_per_agent: 2,
+                host_long_polls: 2,
             };
         },
         UpstreamOptions::default(),
@@ -640,18 +831,49 @@ fn agent_requests_leave_slots_for_approvers_and_busy_is_an_envelope() {
         let relay = relay.clone();
         let token = token.to_owned();
         std::thread::spawn(move || {
-            relay.call(
-                "GET",
-                &format!("/v1/runs/{run}?wait=20"),
-                Some(&token),
-                None,
-            )
+            // As `apassy-team run` does, ask again after 503 `busy`: a slot is freed
+            // a moment after the answer that used it is sent.
+            loop {
+                let answer = relay.call(
+                    "GET",
+                    &format!("/v1/runs/{run}?wait=20"),
+                    Some(&token),
+                    None,
+                );
+                if answer.0 != 503 {
+                    return answer;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
         })
     };
-    let mut held = vec![
-        poll(&team.agent_token, run_a),
-        poll(&team.agent_token, run_a),
+    // The long polls that are held: who asks for which run, and the thread.
+    let mut held: Held = vec![
+        (
+            team.agent_token.clone(),
+            run_a,
+            poll(&team.agent_token, run_a),
+        ),
+        (
+            team.agent_token.clone(),
+            run_a,
+            poll(&team.agent_token, run_a),
+        ),
     ];
+    // A long poll that was answered at once (over the limit of its agent, or a probe that
+    // took its place) is asked again.
+    let renew = |held: &mut Held| {
+        for (token, run, handle) in held.iter_mut() {
+            if handle.is_finished() {
+                let old = std::mem::replace(handle, poll(token, *run));
+                let (status, body) = old.join().unwrap();
+                assert_eq!(
+                    (status, &body["result"]["status"]),
+                    (200, &json!("pending"))
+                );
+            }
+        }
+    };
     // A third long poll of the same agent is answered at once. (A probe that starts
     // before a held poll takes its place; that poll is then asked again.)
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -669,19 +891,15 @@ fn agent_requests_leave_slots_for_approvers_and_busy_is_an_envelope() {
             break;
         }
         assert!(Instant::now() < deadline, "the long polls did not start");
-        for slot in &mut held {
-            if slot.is_finished() {
-                let old = std::mem::replace(slot, poll(&team.agent_token, run_a));
-                let (status, body) = old.join().unwrap();
-                assert_eq!(
-                    (status, &body["result"]["status"]),
-                    (200, &json!("pending"))
-                );
-            }
-        }
+        renew(&mut held);
     }
-    held.push(poll(&second.agent_token, run_b));
-    held.push(poll(&second.agent_token, run_b));
+    for _ in 0..2 {
+        held.push((
+            second.agent_token.clone(),
+            run_b,
+            poll(&second.agent_token, run_b),
+        ));
+    }
     // Now 4 agent requests run: the agent slots (6 - 2) are full.
     let deadline = Instant::now() + Duration::from_secs(10);
     let (status, head, body) = loop {
@@ -690,6 +908,7 @@ fn agent_requests_leave_slots_for_approvers_and_busy_is_an_envelope() {
             break answer;
         }
         assert!(Instant::now() < deadline, "the agent slots never filled");
+        renew(&mut held);
         std::thread::sleep(Duration::from_millis(50));
     };
     assert_eq!(status, 503);
@@ -707,16 +926,18 @@ fn agent_requests_leave_slots_for_approvers_and_busy_is_an_envelope() {
     // Members, approvers, and the health check still get through.
     assert_eq!(raw_get(&relay, "/healthz", "x").0, 200);
     relay.ok("GET", "/v1/approvals", &relay.owner_token, None);
-    let (status, body) = approve(&relay, run_a, None);
+    // The host endpoints are in the member lane: they work while the agent slots are full.
+    assert_eq!(relay.host_requests().len(), 2);
+    let (status, body) = release(&relay, run_a);
     assert_eq!(status, 200, "{body}");
     let (status, body) = relay.call(
         "POST",
-        &format!("/v1/approvals/{run_b}/deny"),
+        &format!("/v1/host/requests/{run_b}/deny"),
         Some(&relay.owner_token),
         None,
     );
     assert_eq!(status, 200, "{body}");
-    for poller in held {
+    for (_, _, poller) in held {
         let (status, body) = poller.join().unwrap();
         assert_eq!(status, 200, "{body}");
         assert_ne!(body["result"]["status"], "pending", "{body}");

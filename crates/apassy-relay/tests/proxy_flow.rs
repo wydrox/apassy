@@ -188,8 +188,20 @@ impl Harness {
         self.sessions.events.lock().unwrap().clone()
     }
 
+    /// The last event. The proxy records an event after it has answered, so a test
+    /// that reads it at once waits a moment for the first one.
     fn last_event(&self) -> ProxyEvent {
-        self.events().pop().expect("an event")
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(event) = self.events().pop() {
+                return event;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no event was recorded"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     /// Every real value, placeholder, and key of the harness.

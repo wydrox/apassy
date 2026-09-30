@@ -1,11 +1,13 @@
-//! Runs, approvals, denials, timeouts, and the long poll (docs/SPEC.md, "Session
-//! lifecycle and environment").
+//! Runs, denials, timeouts, revocations of pending runs, and the long poll
+//! (docs/SPEC.md, "Session lifecycle and environment").
 //!
 //! States of a run: `pending` to `ready` to `ended`, or `pending` to `denied` or
 //! `timed_out`. A timeout is checked lazily, at each read of a run and each list of
-//! approvals. Nothing here allows a run on an error.
+//! approvals. A run becomes `ready` only by a release from the owner's host
+//! (`server::host`): nobody approves on the relay. Nothing here allows a run on an
+//! error.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -18,13 +20,12 @@ use crate::ids::{AgentId, ItemId, MemberId, RunId};
 use crate::now_unix;
 use crate::server::Core;
 use crate::server::audit::{RELAY_ACTOR, member_actor};
-use crate::server::auth::{self, AgentAuth, MemberAuth};
-use crate::server::decide;
+use crate::server::auth::{AgentAuth, MemberAuth};
 use crate::server::store::{db, load_item, member_name, to_i, to_u};
 
 /// The longest long poll, in seconds.
 pub const MAX_WAIT_SECS: u64 = 25;
-/// The longest reason of an approver, in bytes.
+/// The longest reason of an approver or of the host, in bytes.
 pub const MAX_REASON_BYTES: usize = 500;
 
 /// Wakes the long polls when a run changes.
@@ -41,12 +42,12 @@ impl Notifier {
         self.changed.notify_all();
     }
 
-    fn current(&self) -> u64 {
+    pub fn current(&self) -> u64 {
         *self.version.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Waits until the version differs from `seen`, or `timeout` passes.
-    fn wait_from(&self, seen: u64, timeout: Duration) {
+    pub fn wait_from(&self, seen: u64, timeout: Duration) {
         let guard = self.version.lock().unwrap_or_else(PoisonError::into_inner);
         if *guard != seen {
             return;
@@ -58,17 +59,18 @@ impl Notifier {
     }
 }
 
-/// The open long polls of each agent. One agent cannot hold many request threads by
-/// long polls: a poll over the limit is answered at once.
+/// The open long polls of each caller (an agent id, or the owner's id for the host).
+/// One caller cannot hold many request threads by long polls: a poll over the limit
+/// is answered at once.
 pub struct LongPolls {
     max: usize,
-    open: Mutex<HashMap<AgentId, usize>>,
+    open: Mutex<HashMap<u64, usize>>,
 }
 
 /// One open long poll. Dropping it closes it.
 pub struct LongPoll<'a> {
     polls: &'a LongPolls,
-    agent: AgentId,
+    caller: u64,
 }
 
 impl LongPolls {
@@ -79,15 +81,18 @@ impl LongPolls {
         }
     }
 
-    /// Opens a long poll for `agent`, or `None` when it has `max` open.
-    pub fn enter(&self, agent: AgentId) -> Option<LongPoll<'_>> {
+    /// Opens a long poll for `caller`, or `None` when it has `max` open.
+    pub fn enter(&self, caller: u64) -> Option<LongPoll<'_>> {
         let mut open = self.open.lock().unwrap_or_else(PoisonError::into_inner);
-        let count = open.entry(agent).or_insert(0);
+        let count = open.entry(caller).or_insert(0);
         if *count >= self.max {
             return None;
         }
         *count += 1;
-        Some(LongPoll { polls: self, agent })
+        Some(LongPoll {
+            polls: self,
+            caller,
+        })
     }
 }
 
@@ -98,10 +103,10 @@ impl Drop for LongPoll<'_> {
             .open
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if let Some(count) = open.get_mut(&self.agent) {
+        if let Some(count) = open.get_mut(&self.caller) {
             *count = count.saturating_sub(1);
             if *count == 0 {
-                open.remove(&self.agent);
+                open.remove(&self.caller);
             }
         }
     }
@@ -153,19 +158,19 @@ fn parse_status(text: &str) -> RunStatus {
 
 pub fn decided_text(by: DecidedBy) -> &'static str {
     match by {
-        DecidedBy::KnownSafe => "known_safe",
         DecidedBy::Approver => "approver",
         DecidedBy::Revocation => "revocation",
         DecidedBy::Timeout => "timeout",
+        DecidedBy::Host => "host",
     }
 }
 
 fn parse_decided(text: &str) -> Option<DecidedBy> {
     match text {
-        "known_safe" => Some(DecidedBy::KnownSafe),
         "approver" => Some(DecidedBy::Approver),
         "revocation" => Some(DecidedBy::Revocation),
         "timeout" => Some(DecidedBy::Timeout),
+        "host" => Some(DecidedBy::Host),
         _ => None,
     }
 }
@@ -245,9 +250,15 @@ pub fn insert_run(conn: &Connection, run: &RunRow) -> RelayResult<RunId> {
     Ok(RunId(to_u(conn.last_insert_rowid())))
 }
 
-/// Makes the lazy changes to a run: a pending run past its expiry times out, and a
-/// ready run without a live session ends. Returns the current row.
-fn settle(core: &Core, conn: &Connection, mut run: RunRow, now: u64) -> RelayResult<RunRow> {
+/// Makes the lazy changes to a run: a pending run past its expiry times out (and its
+/// key is dropped), and a ready run without a live session ends. Returns the current
+/// row.
+pub(super) fn settle(
+    core: &Core,
+    conn: &Connection,
+    mut run: RunRow,
+    now: u64,
+) -> RelayResult<RunRow> {
     match run.status {
         RunStatus::Pending if run.expires_at.is_some_and(|at| now >= at) => {
             conn.execute(
@@ -268,6 +279,7 @@ fn settle(core: &Core, conn: &Connection, mut run: RunRow, now: u64) -> RelayRes
             run.code = Some(codes::APPROVAL_TIMEOUT.to_string());
             run.decided_by = Some(DecidedBy::Timeout);
             run.decided_at = Some(now);
+            core.run_keys.remove(run.id);
             core.notify.notify();
         }
         RunStatus::Ready => {
@@ -296,7 +308,8 @@ fn settle(core: &Core, conn: &Connection, mut run: RunRow, now: u64) -> RelayRes
     Ok(run)
 }
 
-/// Times out every pending run past its expiry, and ends expired sessions.
+/// Times out every pending run past its expiry, ends expired sessions, and drops the
+/// key of every run that is not pending any more.
 pub fn maintenance(core: &Core, now: u64) -> RelayResult<()> {
     core.store.tx(|tx| {
         let ids: Vec<u64> = {
@@ -316,6 +329,17 @@ pub fn maintenance(core: &Core, now: u64) -> RelayResult<()> {
                 settle(core, tx, run, now)?;
             }
         }
+        // Inside the transaction, so a run that commits now cannot lose its key.
+        let pending: HashSet<u64> = {
+            let mut statement = tx
+                .prepare("SELECT id FROM run WHERE status = 'pending'")
+                .map_err(db)?;
+            let rows = statement
+                .query_map([], |row| Ok(to_u(row.get(0)?)))
+                .map_err(db)?;
+            rows.collect::<Result<_, _>>().map_err(db)?
+        };
+        core.run_keys.retain(|run| pending.contains(&run.0));
         Ok(())
     })
 }
@@ -355,6 +379,31 @@ pub fn run_view(
     })
 }
 
+/// The pending runs that have not passed their expiry, oldest first.
+pub fn pending_runs(conn: &Connection, now: u64) -> RelayResult<Vec<RunRow>> {
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT {RUN_COLUMNS} FROM run WHERE status = 'pending' \
+             AND (expires_at IS NULL OR expires_at > ?1) ORDER BY id"
+        ))
+        .map_err(db)?;
+    statement
+        .query_map(params![to_i(now)], run_from_row)
+        .map_err(db)?
+        .collect::<Result<_, _>>()
+        .map_err(db)
+}
+
+/// The name of an agent.
+pub fn agent_name(conn: &Connection, id: AgentId) -> RelayResult<String> {
+    conn.query_row(
+        "SELECT name FROM agent WHERE id = ?1",
+        params![to_i(id.0)],
+        |row| row.get(0),
+    )
+    .map_err(db)
+}
+
 /// `GET /v1/approvals`: the pending runs, oldest first.
 pub fn list(core: &Core, now: u64) -> RelayResult<Vec<ApprovalView>> {
     maintenance(core, now)?;
@@ -371,13 +420,7 @@ pub fn list(core: &Core, now: u64) -> RelayResult<Vec<ApprovalView>> {
             .map_err(db)?;
         let mut views = Vec::with_capacity(runs.len());
         for run in runs {
-            let agent: String = conn
-                .query_row(
-                    "SELECT name FROM agent WHERE id = ?1",
-                    params![to_i(run.agent_id.0)],
-                    |row| row.get(0),
-                )
-                .map_err(db)?;
+            let agent = agent_name(conn, run.agent_id)?;
             let member = member_name(conn, run.member_id)?.unwrap_or_default();
             let mut items = Vec::new();
             for id in &run.items {
@@ -410,8 +453,9 @@ pub fn list(core: &Core, now: u64) -> RelayResult<Vec<ApprovalView>> {
     })
 }
 
-fn checked_reason(request: &DecisionRequest) -> RelayResult<Option<String>> {
-    match request.reason.as_deref().map(str::trim) {
+/// The reason of a decision: trimmed, at most 500 bytes, no NUL. `None` when empty.
+pub fn checked_reason(reason: Option<&str>) -> RelayResult<Option<String>> {
+    match reason.map(str::trim) {
         None | Some("") => Ok(None),
         Some(reason) if reason.len() > MAX_REASON_BYTES || reason.contains('\0') => Err(
             RelayError::invalid("The reason is at most 500 bytes and has no NUL."),
@@ -420,151 +464,73 @@ fn checked_reason(request: &DecisionRequest) -> RelayResult<Option<String>> {
     }
 }
 
-/// `POST /v1/approvals/{id}/approve`.
-pub fn approve(
-    core: &Core,
-    approver: &MemberAuth,
-    run_id: RunId,
-    request: &DecisionRequest,
-    now: u64,
-) -> RelayResult<RunView> {
-    let reason = checked_reason(request)?.map(|r| core.audit.mask_text(&r));
-    let mut created = None;
-    let result = core.store.tx(|tx| {
-        let run = load_run(tx, run_id)?.ok_or_else(|| RelayError::not_found("run"))?;
-        let run = settle(core, tx, run, now)?;
-        if run.status != RunStatus::Pending {
-            // A run that timed out just now is stored; the caller still gets 409.
-            return Ok(Err(RelayError::new(
-                codes::RUN_NOT_PENDING,
-                "The run is not waiting for an approver.",
-            )));
-        }
-        // Step 1 and step 3 of the decision, again.
-        let still_valid = auth::agent_by_id(tx, run.agent_id, now).is_ok()
-            && decide::check_access(tx, run.member_id, &run.items).is_ok();
-        let items = if still_valid {
-            decide::check_access(tx, run.member_id, &run.items).ok()
-        } else {
-            None
-        };
-        let Some(items) = items else {
-            let note = "The agent or its access changed while the run waited.".to_string();
-            tx.execute(
-                "UPDATE run SET status = 'denied', code = ?2, decided_by = 'revocation', \
-                 decided_at = ?3, note = ?4 WHERE id = ?1",
-                params![to_i(run.id.0), codes::APPROVAL_INVALIDATED, to_i(now), note],
-            )
-            .map_err(db)?;
-            core.audit.write_on(
-                tx,
-                now,
-                &member_actor(approver.id.0),
-                "run_invalidated",
-                Some(run.id),
-                &json!({"reason": "revocation"}),
-            )?;
-            let row = load_run(tx, run.id)?.ok_or_else(|| RelayError::not_found("run"))?;
-            return Ok(Ok(run_view(core, tx, &row, false, now)?));
-        };
-        let expires_at = now + run.ttl_secs;
-        let env_items = decide::env_items(&items)?;
-        let (_, hash) = core.sessions.create(
-            &core.config.public_url,
-            run.id,
-            run.agent_id,
-            run.member_id,
-            expires_at,
-            &env_items,
-        )?;
-        created = Some(hash);
-        let note = reason
-            .clone()
-            .unwrap_or_else(|| format!("Approved by {}.", approver.name));
-        tx.execute(
-            "UPDATE run SET status = 'ready', decided_by = 'approver', approver_id = ?2, \
-             decided_at = ?3, session_expires_at = ?4, note = ?5, code = NULL WHERE id = ?1",
-            params![
-                to_i(run.id.0),
-                to_i(approver.id.0),
-                to_i(now),
-                to_i(expires_at),
-                note
-            ],
-        )
-        .map_err(db)?;
-        let actor = member_actor(approver.id.0);
-        core.audit.write_on(
-            tx,
-            now,
-            &actor,
-            "run_approved",
-            Some(run.id),
-            &json!({"reason": note}),
-        )?;
-        core.audit.write_on(
-            tx,
-            now,
-            RELAY_ACTOR,
-            "session_started",
-            Some(run.id),
-            &json!({"expires_at": expires_at, "items": run.items}),
-        )?;
-        let row = load_run(tx, run.id)?.ok_or_else(|| RelayError::not_found("run"))?;
-        Ok(Ok(run_view(core, tx, &row, false, now)?))
-    });
-    match result {
-        Ok(outcome) => {
-            core.notify.notify();
-            outcome
-        }
-        Err(error) => {
-            if let Some(hash) = created {
-                core.sessions.remove_hash(&hash);
-            }
-            Err(error)
-        }
-    }
+/// `POST /v1/approvals/{id}/approve`: always refused. The keys of the items are on the
+/// owner's host, so the relay cannot start a session on its own say.
+pub fn approve_on_host() -> RelayError {
+    RelayError::new(
+        codes::APPROVE_ON_HOST,
+        "The keys are on the owner's host. Approve there with apassy-team host.",
+    )
 }
 
-/// `POST /v1/approvals/{id}/deny`.
+/// Who denies a run.
+#[derive(Clone, Copy)]
+pub enum Denier<'a> {
+    /// An owner or manager, on `POST /v1/approvals/{id}/deny`.
+    Approver(&'a MemberAuth),
+    /// The owner's host, on `POST /v1/host/requests/{id}/deny`.
+    Host(&'a MemberAuth),
+}
+
+/// Denies a pending run and drops its key. `POST /v1/approvals/{id}/deny` and
+/// `POST /v1/host/requests/{id}/deny`.
 pub fn deny(
     core: &Core,
-    approver: &MemberAuth,
+    who: Denier<'_>,
     run_id: RunId,
     request: &DecisionRequest,
     now: u64,
 ) -> RelayResult<RunView> {
-    let reason = checked_reason(request)?.map(|r| core.audit.mask_text(&r));
+    let reason = checked_reason(request.reason.as_deref())?.map(|r| core.audit.mask_text(&r));
+    let (by, name) = match who {
+        Denier::Approver(member) => (member, format!("Denied by {}.", member.name)),
+        Denier::Host(member) => (member, "Denied by the owner's host.".to_string()),
+    };
+    let (decided_by, approver_id) = match who {
+        Denier::Approver(member) => (DecidedBy::Approver, Some(to_i(member.id.0))),
+        Denier::Host(_) => (DecidedBy::Host, None),
+    };
     let result = core.store.tx(|tx| {
         let run = load_run(tx, run_id)?.ok_or_else(|| RelayError::not_found("run"))?;
         let run = settle(core, tx, run, now)?;
         if run.status != RunStatus::Pending {
             return Ok(Err(RelayError::new(
                 codes::RUN_NOT_PENDING,
-                "The run is not waiting for an approver.",
+                "The run is not waiting for a decision.",
             )));
         }
-        let note = reason.clone().unwrap_or_else(|| format!("Denied by {}.", approver.name));
+        let note = reason.clone().unwrap_or_else(|| name.clone());
         tx.execute(
-            "UPDATE run SET status = 'denied', code = ?2, decided_by = 'approver', approver_id = ?3, \
-             decided_at = ?4, note = ?5 WHERE id = ?1",
+            "UPDATE run SET status = 'denied', code = ?2, decided_by = ?3, approver_id = ?4, \
+             decided_at = ?5, note = ?6 WHERE id = ?1",
             params![
                 to_i(run.id.0),
                 codes::APPROVAL_DENIED,
-                to_i(approver.id.0),
+                decided_text(decided_by),
+                approver_id,
                 to_i(now),
                 note
             ],
         )
         .map_err(db)?;
+        core.run_keys.remove(run.id);
         core.audit.write_on(
             tx,
             now,
-            &member_actor(approver.id.0),
+            &member_actor(by.id.0),
             "run_denied",
             Some(run.id),
-            &json!({"code": codes::APPROVAL_DENIED, "reason": note}),
+            &json!({"code": codes::APPROVAL_DENIED, "reason": note, "by": decided_text(decided_by)}),
         )?;
         let row = load_run(tx, run.id)?.ok_or_else(|| RelayError::not_found("run"))?;
         Ok(Ok(run_view(core, tx, &row, false, now)?))
@@ -572,6 +538,59 @@ pub fn deny(
     core.notify.notify();
     result
 }
+
+/// Denies the pending runs that `depends` selects, with `approval_invalidated`, and
+/// drops their keys. Call it in the transaction of the revocation of an agent, a
+/// member, a grant, or an item. Returns how many runs it denied.
+pub fn invalidate_pending(
+    core: &Core,
+    conn: &Connection,
+    now: u64,
+    actor: &str,
+    reason: &str,
+    depends: impl Fn(&RunRow) -> bool,
+) -> RelayResult<usize> {
+    let runs: Vec<RunRow> = {
+        let mut statement = conn
+            .prepare(&format!(
+                "SELECT {RUN_COLUMNS} FROM run WHERE status = 'pending' ORDER BY id"
+            ))
+            .map_err(db)?;
+        statement
+            .query_map([], run_from_row)
+            .map_err(db)?
+            .collect::<Result<_, _>>()
+            .map_err(db)?
+    };
+    let mut count = 0;
+    for run in runs.iter().filter(|run| depends(run)) {
+        core.run_keys.remove(run.id);
+        conn.execute(
+            "UPDATE run SET status = 'denied', code = ?2, decided_by = 'revocation', \
+             decided_at = ?3, note = ?4 WHERE id = ?1 AND status = 'pending'",
+            params![
+                to_i(run.id.0),
+                codes::APPROVAL_INVALIDATED,
+                to_i(now),
+                INVALIDATED_NOTE
+            ],
+        )
+        .map_err(db)?;
+        core.audit.write_on(
+            conn,
+            now,
+            actor,
+            "run_invalidated",
+            Some(run.id),
+            &json!({"reason": reason}),
+        )?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// The note of a run that a revocation or a failed re-check denied.
+pub const INVALIDATED_NOTE: &str = "The agent or its access changed while the run waited.";
 
 /// `GET /v1/runs/{id}?wait=s`: the run of this agent. While it is pending, holds the
 /// response up to `wait` seconds. An agent that has `long_polls_per_agent` long polls
@@ -583,7 +602,7 @@ pub fn get_run(
     wait_secs: u64,
 ) -> RelayResult<RunView> {
     let poll = if wait_secs > 0 {
-        core.polls.enter(agent.id)
+        core.polls.enter(agent.id.0)
     } else {
         None
     };

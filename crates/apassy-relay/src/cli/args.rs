@@ -147,6 +147,11 @@ pub enum Command {
     },
     Run(RunArgs),
     Mcp,
+    /// The owner's host: holds the item keys, releases them run by run.
+    Host {
+        ask_all: bool,
+        auto_limit: Option<u32>,
+    },
 }
 
 /// The options found in one command line.
@@ -307,11 +312,20 @@ Team (owner or manager)
   item add --collection ID --name NAME --env ENV_NAME --environment ENV
            [--provider P] [--host H]... [--risk R] [--scope S] [--reversibility R]
            [--allow-broad-host]
-           (the value comes from stdin; a host covers its subdomains too)
+           (the value comes from stdin and is sealed here; its key goes to keys.json on
+            this machine and never to the relay; a host covers its subdomains too)
   item list [--collection ID] | item archive ID
   grant --collection ID --member ID | grants | revoke --grant ID
-  pending | approve RUN_ID [--reason TEXT] | deny RUN_ID [--reason TEXT]
+  pending | deny RUN_ID [--reason TEXT]
+  approve RUN_ID [--reason TEXT]   (refused: the keys are on the owner's host; use `host`)
   audit [--after ID] [--limit N] [--json]
+
+Owner's machine (the owner token; keys.json lives here, back it up)
+  host [--ask-all] [--auto-limit N]
+      keep the item keys, and decide every run: a known safe run of a non-production
+      item is released at once (at most N per item per hour, default 30); every other
+      run asks on the terminal; --ask-all asks for every run. The host must be online
+      for any run to start.
 
 Members
   agent create NAME [--days N]  print an agent token once
@@ -427,6 +441,14 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
         "mcp" => {
             scan(rest, &[], &[])?.positional(0, "mcp")?;
             Ok(Command::Mcp)
+        }
+        "host" => {
+            let s = scan(rest, &["auto-limit"], &["ask-all"])?;
+            s.positional(0, "host [--ask-all] [--auto-limit N]")?;
+            Ok(Command::Host {
+                ask_all: s.switch("ask-all"),
+                auto_limit: s.num("auto-limit")?,
+            })
         }
         other => Err(CliError::usage(format!("Unknown command `{other}`."))),
     }
@@ -675,6 +697,20 @@ mod tests {
             }
         );
         assert_eq!(p("mcp").unwrap(), Command::Mcp);
+        assert_eq!(
+            p("host").unwrap(),
+            Command::Host {
+                ask_all: false,
+                auto_limit: None
+            }
+        );
+        assert_eq!(
+            p("host --ask-all --auto-limit 5").unwrap(),
+            Command::Host {
+                ask_all: true,
+                auto_limit: Some(5)
+            }
+        );
         assert_eq!(p("--help").unwrap(), Command::Help);
     }
 
@@ -782,6 +818,11 @@ mod tests {
             "run --purpose x -- ls",
             "run --items 1 --purpose  -- ls",
             "audit --json=1",
+            "host extra",
+            "host --ask-all=yes",
+            "host --auto-limit",
+            "host --auto-limit many",
+            "host --auto-limit -1",
             "item add --collection 1",
             "agent",
             "-x",

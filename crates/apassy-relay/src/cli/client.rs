@@ -42,6 +42,17 @@ pub struct RawReply {
     pub body: Zeroizing<String>,
 }
 
+/// A failure before an answer: words for a person, and whether the request can have
+/// reached the relay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawError {
+    pub message: String,
+    /// False when the request certainly did not reach the relay (no route, refused
+    /// connection, failed TLS handshake). True when it may have (a timeout or a
+    /// broken connection after the connect).
+    pub maybe_sent: bool,
+}
+
 /// The envelope with a typed `result`, so a secret in it lands in a `SecretString`.
 #[derive(Deserialize)]
 struct Reply<T> {
@@ -81,14 +92,17 @@ impl ApiError {
 
 pub enum CallError {
     Api(ApiError),
+    /// The call failed and the relay may have got the request.
     Transport(String),
+    /// The call failed and the relay certainly did not get the request.
+    Unsent(String),
 }
 
 impl CallError {
     pub fn into_cli(self) -> CliError {
         match self {
             Self::Api(e) => CliError::relay(format!("relay: {}: {}", e.code, e.message)),
-            Self::Transport(m) => CliError::relay(m),
+            Self::Transport(m) | Self::Unsent(m) => CliError::relay(m),
         }
     }
 }
@@ -131,7 +145,7 @@ impl Client {
         body: Option<&str>,
         accept: Option<&str>,
         timeout: Duration,
-    ) -> Result<RawReply, String> {
+    ) -> Result<RawReply, RawError> {
         let url = format!("{}{}", self.base, path);
         let mut builder = ureq::http::Request::builder()
             .method(method.as_str())
@@ -148,15 +162,19 @@ impl Client {
         }
         let request = builder
             .body(body.unwrap_or("").to_owned())
-            .map_err(|_| "The request is not valid (check the tokens and the URL).".to_owned())?;
-        let mut response = Self::agent(timeout)
-            .run(request)
-            .map_err(|e| format!("Cannot reach the relay: {}", transport_words(&e)))?;
+            .map_err(|_| RawError {
+                message: "The request is not valid (check the tokens and the URL).".to_owned(),
+                maybe_sent: false,
+            })?;
+        let mut response = Self::agent(timeout).run(request).map_err(|e| RawError {
+            message: format!("Cannot reach the relay: {}", transport_words(&e)),
+            maybe_sent: !failed_before_send(&e),
+        })?;
         let status = response.status().as_u16();
-        let text = response
-            .body_mut()
-            .read_to_string()
-            .map_err(|e| format!("Cannot read the relay answer: {}", transport_words(&e)))?;
+        let text = response.body_mut().read_to_string().map_err(|e| RawError {
+            message: format!("Cannot read the relay answer: {}", transport_words(&e)),
+            maybe_sent: true,
+        })?;
         Ok(RawReply {
             status,
             body: Zeroizing::new(text),
@@ -171,9 +189,13 @@ impl Client {
         body: Option<&str>,
         timeout: Duration,
     ) -> Result<T, CallError> {
-        let reply = self
-            .raw(method, path, body, None, timeout)
-            .map_err(CallError::Transport)?;
+        let reply = self.raw(method, path, body, None, timeout).map_err(|e| {
+            if e.maybe_sent {
+                CallError::Transport(e.message)
+            } else {
+                CallError::Unsent(e.message)
+            }
+        })?;
         parse_reply(reply.status, &reply.body)
     }
 
@@ -186,6 +208,29 @@ impl Client {
     ) -> Result<T, CliError> {
         self.call(method, path, body, CALL_TIMEOUT)
             .map_err(CallError::into_cli)
+    }
+}
+
+/// True when the failure came before the request could leave: no address, a refused
+/// connection, a failed handshake. Then the relay did not get the request.
+fn failed_before_send(err: &ureq::Error) -> bool {
+    match err {
+        ureq::Error::HostNotFound
+        | ureq::Error::ConnectionFailed
+        | ureq::Error::BadUri(_)
+        | ureq::Error::Http(_)
+        | ureq::Error::Tls(_)
+        | ureq::Error::Rustls(_) => true,
+        ureq::Error::Timeout(timeout) => {
+            matches!(timeout, ureq::Timeout::Resolve | ureq::Timeout::Connect)
+        }
+        ureq::Error::Io(e) => matches!(
+            e.kind(),
+            std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::NetworkUnreachable
+                | std::io::ErrorKind::HostUnreachable
+        ),
+        _ => false,
     }
 }
 
@@ -231,6 +276,31 @@ pub fn parse_reply<T: DeserializeOwned>(status: u16, body: &str) -> Result<T, Ca
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failure_before_the_send_is_told_from_one_that_may_have_sent() {
+        use std::io::{Error, ErrorKind};
+        for before in [
+            ureq::Error::HostNotFound,
+            ureq::Error::ConnectionFailed,
+            ureq::Error::Tls("handshake"),
+            ureq::Error::Timeout(ureq::Timeout::Connect),
+            ureq::Error::Timeout(ureq::Timeout::Resolve),
+            ureq::Error::Io(Error::from(ErrorKind::ConnectionRefused)),
+        ] {
+            assert!(failed_before_send(&before), "{before:?}");
+        }
+        for maybe in [
+            ureq::Error::Timeout(ureq::Timeout::Global),
+            ureq::Error::Timeout(ureq::Timeout::RecvResponse),
+            ureq::Error::Timeout(ureq::Timeout::SendBody),
+            ureq::Error::Io(Error::from(ErrorKind::ConnectionReset)),
+            ureq::Error::Io(Error::from(ErrorKind::UnexpectedEof)),
+            ureq::Error::Io(Error::from(ErrorKind::BrokenPipe)),
+        ] {
+            assert!(!failed_before_send(&maybe), "{maybe:?}");
+        }
+    }
 
     #[test]
     fn envelope_result_and_error() {

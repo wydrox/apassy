@@ -2,6 +2,8 @@
 //!
 //! Secrets (a member token, an invite code, an item value) come from stdin only.
 //! The only places that print a secret are `invite` and `agent create`, once, on stdout.
+//! An item value never goes to the relay: `item add` seals it here, and its key goes
+//! to the key store of this machine (`cli::keystore`).
 //! Text that an agent wrote (commands, purposes) is printed with control characters
 //! escaped, so it cannot move the cursor or set the title of an approver's terminal.
 
@@ -17,8 +19,10 @@ use crate::api::{
 };
 use crate::cli::CliError;
 use crate::cli::args::{Command, ItemAddArgs, USAGE};
-use crate::cli::client::{Client, Method};
+use crate::cli::client::{CallError, Client, Method};
+use crate::cli::keystore::{KeyEntry, KeyStore};
 use crate::cli::settings::{self, Settings};
+use crate::hostkeys;
 use crate::secret::SecretString;
 
 /// Runs one parsed command and returns the exit code.
@@ -36,6 +40,16 @@ pub fn execute(command: Command) -> Result<i32, CliError> {
         Command::Join { relay, name } => join(&relay, &name),
         Command::Mcp => crate::cli::mcp_stdio::run(&settings::load()?),
         Command::Run(args) => crate::cli::exec::run(&settings::load()?, args),
+        Command::Host {
+            ask_all,
+            auto_limit,
+        } => crate::cli::host::run(
+            &settings::load()?,
+            crate::cli::host::HostOptions {
+                ask_all,
+                auto_limit: auto_limit.unwrap_or(crate::cli::host::DEFAULT_AUTO_LIMIT),
+            },
+        ),
         other => {
             let settings = settings::load()?;
             member_command(&settings, other)?;
@@ -522,21 +536,74 @@ fn member_command(settings: &Settings, command: Command) -> Result<(), CliError>
         | Command::Init { .. }
         | Command::Join { .. }
         | Command::Run(_)
+        | Command::Host { .. }
         | Command::Mcp => Ok(()),
     }
 }
 
+/// `item add`: checks the value, seals it with a new item key, keeps the key in
+/// `keys.json`, and sends only the sealed text to the relay.
+///
+/// The key is written to disk before the upload, so an item that exists on the relay
+/// never loses its key. After the relay took the item, the entry gets the item id.
+/// When the relay refuses the item, or the request certainly did not reach it, the
+/// entry is removed again. When the outcome is unknown (a timeout), the entry stays.
 fn item_add(settings: &Settings, args: &ItemAddArgs) -> Result<(), CliError> {
     let client = member_client(settings)?;
     let value = read_secret(
         "the item value",
         "apassy-team item add --collection 1 --name NAME --env ENV_NAME --environment staging < value-file",
     )?;
+    // The relay cannot read the value, so this is the one place that checks it.
+    hostkeys::check_value(value.expose()).map_err(|p| CliError::usage(p.message()))?;
+    // The relay stores the name and the hosts in clear and cannot mask the value in
+    // them: a value in a name would be a leak.
+    if std::iter::once(&args.name)
+        .chain(&args.hosts)
+        .chain(args.provider.iter())
+        .any(|text| text.contains(value.expose()))
+    {
+        return Err(CliError::usage(
+            "The name, the provider, and the hosts of an item must not contain its value.",
+        ));
+    }
+    let me: MeView = client.ok(Method::Get, api::paths::ME, None)?;
+    let store = KeyStore::open()?;
+
+    let crypto = |_| CliError::relay("Cannot seal the value: the system has no random source.");
+    let uid = hostkeys::new_uid().map_err(crypto)?;
+    let key = hostkeys::new_key().map_err(crypto)?;
+    let sealed = hostkeys::seal_item(&key, &uid, value.expose().as_bytes()).map_err(crypto)?;
+    let sealed_text = hostkeys::encode_b64(&sealed);
+    drop(value);
+
+    let entry = KeyEntry {
+        relay_url: client.base().to_owned(),
+        team: me.team.clone(),
+        uid: uid.clone(),
+        item_id: None,
+        name: args.name.trim().to_owned(),
+        env_name: args.env_name.clone(),
+        environment: args.environment.clone(),
+        hosts: local_hosts(args),
+        risk: args.risk.clone().unwrap_or_else(|| "high".to_owned()),
+        scope: args.scope.clone().unwrap_or_else(|| "admin".to_owned()),
+        reversibility: args
+            .reversibility
+            .clone()
+            .unwrap_or_else(|| "irreversible".to_owned()),
+        key: SecretString::new(hostkeys::encode_key(&key).to_string()),
+        created_at: crate::now_unix(),
+    };
+    drop(key);
+    store.add(entry)?;
+
     let payload = body(&NewItemRef {
         collection_id: crate::ids::CollectionId(args.collection),
         name: &args.name,
         env_name: &args.env_name,
-        value: value.expose(),
+        uid: &uid,
+        sealed: &sealed_text,
         provider: args.provider.as_deref(),
         hosts: args.hosts.clone(),
         environment: &args.environment,
@@ -545,13 +612,74 @@ fn item_add(settings: &Settings, args: &ItemAddArgs) -> Result<(), CliError> {
         reversibility: args.reversibility.as_deref(),
         allow_broad_host: args.allow_broad_host,
     })?;
-    let done: ItemCreated = client.ok(Method::Post, api::paths::ITEMS, Some(&payload))?;
+    let uploaded = client.call::<ItemCreated>(
+        Method::Post,
+        api::paths::ITEMS,
+        Some(&payload),
+        crate::cli::client::CALL_TIMEOUT,
+    );
+    let done = match uploaded {
+        Ok(done) => done,
+        Err(error @ (CallError::Api(_) | CallError::Unsent(_))) => {
+            // The relay did not take the item: no item, so no key to keep.
+            if store.remove(&uid).is_err() {
+                eprintln!(
+                    "apassy-team: warning: the key of the refused item is still in {}.",
+                    store.path().display()
+                );
+            }
+            return Err(error.into_cli());
+        }
+        Err(error) => {
+            let cli = error.into_cli();
+            return Err(CliError::relay(format!(
+                "{} The relay may have taken the item, so its key stays in {}.",
+                cli.message,
+                store.path().display()
+            )));
+        }
+    };
+    if let Err(error) = store.finish(&uid, done.id, &done.hosts) {
+        eprintln!(
+            "apassy-team: warning: the item is on the relay, but its entry in {} was not updated: {}",
+            store.path().display(),
+            error.message
+        );
+    }
     println!("{}", done.id);
-    // The id goes to stdout for scripts. Where the value may go goes to stderr.
+    // The id goes to stdout for scripts. The rest goes to stderr.
     for host in &done.hosts {
         eprintln!("The value may go to {}.", coverage(host));
     }
+    eprintln!(
+        "The key of this item is in {}. Back that file up: without it the item cannot be used, and you add it again.",
+        store.path().display()
+    );
     Ok(())
+}
+
+/// The hosts that the relay will store for the item: the `--host` values, or the known
+/// hosts of the provider, in the form that `HostRule` shows. The relay answers with
+/// the final list, and the entry takes that when the item is stored.
+fn local_hosts(args: &ItemAddArgs) -> Vec<String> {
+    let texts: Vec<String> = if args.hosts.is_empty() {
+        args.provider
+            .as_deref()
+            .map(|id| apassy::vault::providers::known_hosts(id).to_vec())
+            .unwrap_or_default()
+    } else {
+        args.hosts.clone()
+    };
+    let mut hosts: Vec<String> = Vec::new();
+    for text in texts {
+        let shown = apassy::broker::proxy::HostRule::parse(&text)
+            .map(|rule| rule.to_string())
+            .unwrap_or(text);
+        if !hosts.contains(&shown) {
+            hosts.push(shown);
+        }
+    }
+    hosts
 }
 
 /// What a host rule covers, in words: `api.example.com and every subdomain of it`, and
@@ -571,11 +699,20 @@ fn decide(
     verb: &str,
 ) -> Result<(), CliError> {
     let payload = body(&DecisionRequest { reason })?;
-    let view: RunView = member_client(settings)?.ok(
+    let answer: Result<RunView, CallError> = member_client(settings)?.call(
         Method::Post,
         &format!("{}/{run}/{verb}", api::paths::APPROVALS),
         Some(&payload),
-    )?;
+        crate::cli::client::CALL_TIMEOUT,
+    );
+    let view = match answer {
+        Ok(view) => view,
+        // Nobody approves on the relay: the keys are on the owner's host.
+        Err(CallError::Api(e)) if e.code == crate::error::codes::APPROVE_ON_HOST => {
+            return Err(CliError::usage(clean(&e.message)));
+        }
+        Err(error) => return Err(error.into_cli()),
+    };
     println!(
         "Run {}: {}. {}",
         view.run_id,

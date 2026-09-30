@@ -6,6 +6,9 @@
 //! A body that carries a secret has two types: an owning one with `SecretString`
 //! that only implements `Deserialize`, and a borrowed `...Ref<'a>` that only
 //! implements `Serialize`. The server reads the first; the CLI sends the second.
+//! An item value is no such body any more: the CLI seals it, and the relay never
+//! gets it. Binary fields (`sealed`, `host_key`, `nonce`, `sealed_keys`, `run_key`)
+//! are base64url without padding.
 
 use std::collections::BTreeMap;
 
@@ -55,6 +58,8 @@ pub mod paths {
     pub const AUDIT: &str = "/v1/audit";
     pub const ACCESS: &str = "/v1/access";
     pub const RUNS: &str = "/v1/runs";
+    /// `GET /v1/host/requests`, `POST /v1/host/requests/{id}/release` and `/deny`.
+    pub const HOST_REQUESTS: &str = "/v1/host/requests";
     pub const MCP: &str = "/mcp";
     /// `/p/<session key>/<host[:port]>/<path>`.
     pub const PROXY_PREFIX: &str = "/p/";
@@ -65,7 +70,8 @@ pub mod paths {
 pub enum Role {
     /// Created by `apassy-relay init`. Everything, and the only one who invites managers.
     Owner,
-    /// Adds items, collections, grants; approves runs; reads the audit.
+    /// Adds items, collections, grants; denies runs; reads the audit. Cannot approve a
+    /// run: the keys are on the owner's host.
     Manager,
     /// Uses the collections granted to them through their agents.
     Member,
@@ -169,10 +175,10 @@ pub struct InviteView {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PolicyMode {
-    /// Known-safe commands run; every other command waits for an approver.
+    /// The relay suggests a release for a known-safe command, and asks for the rest.
     #[default]
     Bouncer,
-    /// Every run waits for an approver.
+    /// The relay suggests asking a person for every run.
     Ask,
 }
 
@@ -205,15 +211,21 @@ pub struct CollectionView {
     pub created_at: u64,
 }
 
-/// `POST /v1/items` (owner or manager). Read side.
-#[derive(Debug, Deserialize)]
+/// `POST /v1/items` (owner or manager). The value is sealed in the CLI with an item
+/// key that stays on the owner's host (docs/SPEC.md, "Host-held item keys"). A body
+/// with a `value` is refused.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NewItem {
     pub collection_id: CollectionId,
     pub name: String,
     /// `[A-Z_][A-Z0-9_]*`, checked with the core `checked_env_name`.
     pub env_name: String,
-    pub value: SecretString,
+    /// 16 random bytes as 32 lowercase hex characters. It names the item on the host.
+    pub uid: String,
+    /// `nonce(12) || AES-256-GCM(item key, nonce, value, aad)`, base64url. The relay
+    /// checks only its length: 12 + 16 + 1 to 4096 bytes after decoding.
+    pub sealed: String,
     /// A core provider id, for example `stripe`. Its known hosts are the default hosts.
     #[serde(default)]
     pub provider: Option<String>,
@@ -245,7 +257,8 @@ pub struct NewItemRef<'a> {
     pub collection_id: CollectionId,
     pub name: &'a str,
     pub env_name: &'a str,
-    pub value: &'a str,
+    pub uid: &'a str,
+    pub sealed: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<&'a str>,
     pub hosts: Vec<String>,
@@ -260,7 +273,7 @@ pub struct NewItemRef<'a> {
     pub allow_broad_host: bool,
 }
 
-/// An item without its value. Members see the items of their granted collections.
+/// An item without its sealed value. Members see the items of their granted collections.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemView {
     pub id: ItemId,
@@ -354,13 +367,14 @@ pub struct RunRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunStatus {
-    /// Waits for an approver.
+    /// Waits for the owner's host to release the keys of the items.
     Pending,
-    /// Allowed or approved; the session is live and `session` is set.
+    /// Released by the owner's host; the session is live and `session` is set.
     Ready,
-    /// Denied by an approver, or invalidated by a revocation. `code` says which.
+    /// Denied by the host or an approver, refused as `release_invalid`, or invalidated
+    /// by a revocation. `code` says which.
     Denied,
-    /// No approver decided in time. `code` is `approval_timeout`.
+    /// No one decided in time (no host, or no answer). `code` is `approval_timeout`.
     TimedOut,
     /// The session expired or was ended by a revocation.
     Ended,
@@ -369,14 +383,15 @@ pub enum RunStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DecidedBy {
-    /// The analysis found a known-safe command and no rule asked.
-    KnownSafe,
-    /// An owner or manager approved or denied.
+    /// An owner or manager denied the run (nobody approves on the relay any more).
     Approver,
     /// A revocation invalidated the pending run.
     Revocation,
     /// No decision in time.
     Timeout,
+    /// The owner's host released the keys, or refused, or sent a release that did
+    /// not check (`release_invalid`).
+    Host,
 }
 
 /// The environment of a live session. Only the agent that asked for the run gets it.
@@ -401,13 +416,14 @@ pub struct RunView {
     pub status: RunStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decided_by: Option<DecidedBy>,
-    /// The approver's name when `decided_by` is `approver`.
+    /// The name of the approver that denied the run, when `decided_by` is `approver`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approver: Option<String>,
     /// An error code for `denied` and `timed_out`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
-    /// Why: the core decision note, or the approver's reason.
+    /// Why: the relay's verdict while the run waits, then the reason of the host or
+    /// the approver.
     pub note: String,
     /// The flags of the analysis.
     pub flags: Vec<String>,
@@ -446,10 +462,69 @@ pub struct ApprovalView {
     pub expires_at: u64,
 }
 
-/// `POST /v1/approvals/{run_id}/approve` and `/deny`.
+/// `POST /v1/approvals/{run_id}/deny` and `POST /v1/host/requests/{run_id}/deny`. The
+/// approve endpoint answers `approve_on_host` whatever the body is.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DecisionRequest {
+    /// At most 500 bytes. Shown to the agent in `RunView.note`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// What the relay itself would do with a run: the verdict of its own analysis. The
+/// owner's host decides anyway, and runs its own check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Suggestion {
+    /// A known safe command, no rule asked.
+    Allow,
+    /// A person should decide.
+    Ask,
+}
+
+/// An item in a host request. The host looks the `uid` up in its own key store and
+/// trusts its own metadata for the item, not the relay's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostItem {
+    pub uid: String,
+    pub id: ItemId,
+    pub name: String,
+    pub env_name: String,
+}
+
+/// `GET /v1/host/requests` (owner token): a pending run that waits for the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostRequestView {
+    pub run_id: RunId,
+    pub agent: String,
+    pub member: String,
+    pub items: Vec<HostItem>,
+    pub command: Vec<String>,
+    pub purpose: String,
+    pub user_request: Option<String>,
+    pub cwd: Option<String>,
+    pub ttl_secs: u64,
+    pub flags: Vec<String>,
+    pub suggestion: Suggestion,
+    /// The note of the relay's own verdict.
+    pub note: String,
+    /// The one-time X25519 public key of this run, base64url. The host seals the
+    /// keys of the items of this run to it.
+    pub run_key: String,
+    pub expires_at: u64,
+}
+
+/// `POST /v1/host/requests/{run_id}/release`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseRequest {
+    /// The one-time X25519 public key of the host, 32 bytes.
+    pub host_key: String,
+    /// 12 bytes.
+    pub nonce: String,
+    /// AES-256-GCM of `{"run_id":N,"keys":[{"uid","key"}]}`.
+    pub sealed_keys: String,
     /// At most 500 bytes. Shown to the agent in `RunView.note`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -462,7 +537,7 @@ pub struct AuditEntry {
     pub at: u64,
     /// `member:<id>`, `agent:<id>`, `relay`, or `edge` (an unauthenticated request).
     pub actor: String,
-    /// For example `run_requested`, `run_approved`, `proxy_request`, `grant_revoked`.
+    /// For example `run_requested`, `run_released`, `proxy_request`, `grant_revoked`.
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<RunId>,
@@ -481,7 +556,7 @@ pub struct AccessItem {
     pub environment: String,
     /// The base URL variables a run gets for this item.
     pub base_url_vars: Vec<String>,
-    /// In words: when a run with this item waits for an approver.
+    /// In words: when the owner's host asks the owner about a run with this item.
     pub approval: String,
     pub rule: ExecRule,
 }
@@ -510,11 +585,13 @@ mod tests {
 
     #[test]
     fn new_item_round_trip_through_the_two_sides() {
+        let uid = "0123456789abcdef0123456789abcdef";
         let sent = NewItemRef {
             collection_id: CollectionId(1),
             name: "Stripe test",
             env_name: "STRIPE_API_KEY",
-            value: "sk_test_synthetic_canary_0123456789",
+            uid,
+            sealed: "c2VhbGVkLWJ5dGVz",
             provider: Some("stripe"),
             hosts: vec![],
             environment: "staging",
@@ -526,9 +603,11 @@ mod tests {
         let text = serde_json::to_string(&sent).unwrap();
         assert!(!text.contains("allow_broad_host"), "{text}");
         let read: NewItem = serde_json::from_str(&text).unwrap();
-        assert_eq!(read.value.expose(), "sk_test_synthetic_canary_0123456789");
+        assert_eq!(
+            (read.uid.as_str(), read.sealed.as_str()),
+            (uid, "c2VhbGVkLWJ5dGVz")
+        );
         assert!(!read.allow_broad_host);
-        assert!(!format!("{read:?}").contains("canary"));
         let text = serde_json::to_string(&NewItemRef {
             allow_broad_host: true,
             ..sent
@@ -536,6 +615,14 @@ mod tests {
         .unwrap();
         let read: NewItem = serde_json::from_str(&text).unwrap();
         assert!(read.allow_broad_host);
+    }
+
+    #[test]
+    fn new_item_with_a_value_is_refused() {
+        let old_client = r#"{"collection_id":1,"name":"n","env_name":"K_KEY","value":"sk_test_x","uid":"0123456789abcdef0123456789abcdef","sealed":"AAAA","environment":"staging"}"#;
+        assert!(serde_json::from_str::<NewItem>(old_client).is_err());
+        let no_uid = r#"{"collection_id":1,"name":"n","env_name":"K_KEY","value":"sk_test_x","environment":"staging"}"#;
+        assert!(serde_json::from_str::<NewItem>(no_uid).is_err());
     }
 
     #[test]

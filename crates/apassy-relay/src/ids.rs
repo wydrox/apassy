@@ -49,7 +49,7 @@ row_id!(
     RunId
 );
 row_id!(
-    /// One live proxy session of an approved or allowed run.
+    /// One live proxy session of a released run.
     SessionId
 );
 row_id!(

@@ -35,6 +35,11 @@ pub mod codes {
     pub const APPROVAL_TIMEOUT: &str = "approval_timeout";
     pub const APPROVAL_INVALIDATED: &str = "approval_invalidated";
     pub const RUN_NOT_PENDING: &str = "run_not_pending";
+    /// `POST /v1/approvals/{id}/approve`: the keys are on the owner's host.
+    pub const APPROVE_ON_HOST: &str = "approve_on_host";
+    /// A release from the host did not open or did not match the run. The run is
+    /// denied. Also the `RunView.code` of that run.
+    pub const RELEASE_INVALID: &str = "release_invalid";
     // Proxy.
     pub const SESSION_INVALID: &str = "session_invalid";
     pub const HOST_NOT_IN_SESSION: &str = "host_not_in_session";
@@ -69,7 +74,9 @@ pub fn status_of(code: &str) -> u16 {
         | HOST_NOT_IN_SESSION
         | MISPLACED_PLACEHOLDER
         | WRONG_HOST
-        | PLACEHOLDER_IN_BODY => 403,
+        | PLACEHOLDER_IN_BODY
+        | APPROVE_ON_HOST
+        | RELEASE_INVALID => 403,
         NOT_FOUND => 404,
         METHOD_NOT_ALLOWED => 405,
         CONFLICT | RUN_NOT_PENDING => 409,
@@ -153,6 +160,8 @@ mod tests {
         );
         assert_eq!(RelayError::new(codes::UPSTREAM_FAILED, "x").status(), 502);
         assert_eq!(RelayError::new(codes::BUSY, "x").status(), 503);
+        assert_eq!(RelayError::new(codes::APPROVE_ON_HOST, "x").status(), 403);
+        assert_eq!(RelayError::new(codes::RELEASE_INVALID, "x").status(), 403);
         assert_eq!(RelayError::internal("x").status(), 500);
         assert_eq!(status_of("something_new"), 500);
     }

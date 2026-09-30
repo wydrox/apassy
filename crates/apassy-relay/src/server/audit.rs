@@ -1,8 +1,10 @@
 //! The audit log (docs/SPEC.md, "Audit"). Append only.
 //!
-//! Before a row is written, every string of its detail is masked: item values and
-//! live placeholders become `[apassy:<ENV_NAME>]`, and every token form becomes
-//! `[apassy:token]`. No endpoint changes or deletes a row.
+//! Before a row is written, every string of its detail is masked: the item values
+//! that live sessions hold and every placeholder become `[apassy:<ENV_NAME>]`, and
+//! every token form becomes `[apassy:token]`. The relay holds an item value only
+//! while a session lives, so it masks the value only for that time. No endpoint
+//! changes or deletes a row.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
@@ -35,25 +37,42 @@ pub const EDGE_ACTOR: &str = "edge";
 struct Needle {
     text: SecretString,
     tag: String,
+    /// `Some` for an item value: it is forgotten when the session of this run ends.
+    run: Option<RunId>,
 }
 
 #[derive(Default)]
 struct Masker {
-    /// Item values and placeholders, longest first.
+    /// Placeholders and the values of live sessions, longest first.
     needles: Vec<Needle>,
 }
 
 impl Masker {
-    fn add(&mut self, env_name: &str, text: &SecretString) {
-        if text.is_empty() || self.needles.iter().any(|n| n.text == *text) {
+    fn add(&mut self, env_name: &str, text: &SecretString, run: Option<RunId>) {
+        if text.is_empty() {
+            return;
+        }
+        // A placeholder is kept once. A value is kept once for each run that holds it,
+        // so the end of one session does not unmask the value of another.
+        if run.is_none()
+            && self
+                .needles
+                .iter()
+                .any(|n| n.run.is_none() && n.text == *text)
+        {
             return;
         }
         self.needles.push(Needle {
             text: text.clone(),
             tag: format!("[apassy:{env_name}]"),
+            run,
         });
         self.needles
             .sort_by_key(|n| std::cmp::Reverse(n.text.len()));
+    }
+
+    fn forget(&mut self, run: RunId) {
+        self.needles.retain(|n| n.run != Some(run));
     }
 
     fn mask(&self, text: &str) -> String {
@@ -114,17 +133,29 @@ impl Audit {
         })
     }
 
-    /// Adds an item value to the masks.
-    pub fn add_value(&self, env_name: &str, value: &SecretString) {
+    /// Adds an item value to the masks while the session of `run` holds it. Call
+    /// `forget_run` when the session ends.
+    pub fn add_session_value(&self, run: RunId, env_name: &str, value: &SecretString) {
         self.masker
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .add(env_name, value);
+            .add(env_name, value, Some(run));
+    }
+
+    /// Drops the values of the session of `run` from the masks and from memory.
+    pub fn forget_run(&self, run: RunId) {
+        self.masker
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .forget(run);
     }
 
     /// Adds a placeholder to the masks. It stays masked after its session ends.
     pub fn add_placeholder(&self, env_name: &str, placeholder: &SecretString) {
-        self.add_value(env_name, placeholder);
+        self.masker
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .add(env_name, placeholder, None);
     }
 
     /// Masks a text.
@@ -264,7 +295,7 @@ mod tests {
     fn values_and_placeholders_are_masked_in_every_string() {
         let audit = Audit::new();
         let value = SecretString::new("sk_test_Synthetic_Canary_Value_0123456789".into());
-        audit.add_value("STRIPE_API_KEY", &value);
+        audit.add_session_value(RunId(1), "STRIPE_API_KEY", &value);
         let detail = serde_json::json!({
             "purpose": format!("use {} now", value.expose()),
             "list": [value.expose()],
@@ -275,6 +306,34 @@ mod tests {
         assert!(!text.contains("Canary"), "{text}");
         assert!(text.contains("[apassy:STRIPE_API_KEY]"));
         assert_eq!(masked["n"], 3);
+    }
+
+    #[test]
+    fn a_value_is_masked_only_while_a_session_holds_it() {
+        let audit = Audit::new();
+        let value = SecretString::new("sk_test_Synthetic_Canary_Value_0123456789".into());
+        let placeholder = SecretString::new("sk_test_Placeholder_xxxxxxx_YYYYYYYYYYYYYY".into());
+        audit.add_placeholder("STRIPE_API_KEY", &placeholder);
+        // Two sessions hold the same value.
+        audit.add_session_value(RunId(1), "STRIPE_API_KEY", &value);
+        audit.add_session_value(RunId(2), "STRIPE_API_KEY", &value);
+        let text = format!("{} {}", value.expose(), placeholder.expose());
+        assert_eq!(
+            audit.mask_text(&text),
+            "[apassy:STRIPE_API_KEY] [apassy:STRIPE_API_KEY]"
+        );
+        audit.forget_run(RunId(1));
+        assert!(!audit.mask_text(&text).contains("Canary"));
+        audit.forget_run(RunId(2));
+        let after = audit.mask_text(&text);
+        assert!(
+            after.contains("Canary"),
+            "the relay no longer knows the value: {after}"
+        );
+        assert!(
+            !after.contains("Placeholder"),
+            "a placeholder stays masked: {after}"
+        );
     }
 
     #[test]

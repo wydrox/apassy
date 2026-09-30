@@ -314,10 +314,10 @@ fn list_access_works_without_initialize() {
 }
 
 #[test]
-fn request_run_allows_a_known_safe_command_and_asks_for_the_rest() {
+fn request_run_waits_for_the_host_even_for_a_known_safe_command() {
     let relay = start(UpstreamOptions::default());
     let team = relay.setup("staging");
-    let ready = call(
+    let asked = call(
         &relay,
         &team,
         "apassy_request_run",
@@ -325,10 +325,23 @@ fn request_run_allows_a_known_safe_command_and_asks_for_the_rest() {
             "items": [team.item], "command": ["git", "status"], "purpose": "look", "user_request": USER, "cwd": "/work"
         }),
     );
-    assert_eq!(ready["isError"], false);
-    let view = &ready["structuredContent"];
+    assert_eq!(asked["isError"], false);
+    let view = &asked["structuredContent"];
+    assert_eq!(view["status"], "pending");
+    assert!(view.get("session").is_none());
+    let run_id = view["run_id"].as_u64().unwrap();
+    assert_eq!(relay.host_request(run_id)["suggestion"], "allow");
+    // The host releases it, and the status tool shows the session.
+    relay.release_ok(run_id);
+    let status = call(
+        &relay,
+        &team,
+        "apassy_run_status",
+        json!({"run_id": run_id, "wait_secs": 0}),
+    );
+    let view = &status["structuredContent"];
     assert_eq!(view["status"], "ready");
-    assert_eq!(view["decided_by"], "known_safe");
+    assert_eq!(view["decided_by"], "host");
     assert!(view["session"]["env"]["STRIPE_API_KEY"].is_string());
     assert!(
         view["session"]["env"]["STRIPE_API_BASE"]
@@ -418,20 +431,21 @@ fn run_status_reads_a_run_and_waits() {
     );
     assert_eq!(status["structuredContent"]["status"], "pending");
     assert!(started.elapsed() < std::time::Duration::from_secs(1));
-    // With a wait, an approval in the meantime ends it.
+    // With a wait, a release in the meantime ends it.
     let approver = {
         let url = relay.url.clone();
         let edge = relay.edge_secret.clone();
         let owner = relay.owner_token.clone();
+        let body = relay.release_for(&relay.host_request(run_id), None);
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(700));
             relay::call_url(
                 &url,
                 Some(&edge),
                 "POST",
-                &format!("/v1/approvals/{run_id}/approve"),
+                &format!("/v1/host/requests/{run_id}/release"),
                 Some(&owner),
-                None,
+                Some(&body),
             )
         })
     };

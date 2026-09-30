@@ -1,20 +1,22 @@
 //! The decision per run (docs/SPEC.md, "Decision per run").
 //!
 //! Order: validation, access, hard rules, analysis, user request, context, decision,
-//! then the run row and the audit. An error never allows a run.
+//! then the run row and the audit. An error never allows a run. The relay's verdict
+//! (`allow` or `ask`) is a suggestion to the owner's host: every run that passes the
+//! hard rules becomes `pending` and waits for a release.
 
 use std::collections::HashSet;
 
-use apassy::broker::bouncer::{DecisionContext, before_model};
 use apassy::broker::proxy::HostRule;
-use apassy::broker::shell_risk::{self, ProviderHosts};
-use apassy::vault::{Declaration, Environment, Reversibility, RiskLevel, Scope};
 use rusqlite::{Connection, params};
 use serde_json::json;
 
-use crate::api::{self, DecidedBy, PolicyMode, RunRequest, RunStatus, RunView};
+use crate::api::{self, PolicyMode, RunRequest, RunStatus, RunView, Suggestion};
+use crate::decision::{self, ItemFacts};
 use crate::error::{RelayError, RelayResult, codes};
+use crate::hostkeys::RunKey;
 use crate::ids::{CollectionId, ItemId, MemberId, RunId};
+use crate::secret::SecretString;
 use crate::server::Core;
 use crate::server::approvals::{RunRow, insert_run, run_view};
 use crate::server::audit::{RELAY_ACTOR, agent_actor};
@@ -103,11 +105,18 @@ pub fn check_access(
     Ok(items)
 }
 
-/// The items of a run as the input of a session.
-pub fn env_items(items: &[ItemRow]) -> RelayResult<Vec<EnvItem>> {
+/// The items of a run as the input of a session. `values[i]` is the decrypted value
+/// of `items[i]`.
+pub fn env_items(items: &[ItemRow], values: Vec<SecretString>) -> RelayResult<Vec<EnvItem>> {
+    if items.len() != values.len() {
+        return Err(RelayError::internal(
+            "The values of a run do not match its items.",
+        ));
+    }
     items
         .iter()
-        .map(|item| {
+        .zip(values)
+        .map(|(item, value)| {
             let hosts = item
                 .hosts
                 .iter()
@@ -117,7 +126,7 @@ pub fn env_items(items: &[ItemRow]) -> RelayResult<Vec<EnvItem>> {
             Ok(EnvItem {
                 item_id: item.id,
                 env_name: item.env_name.clone(),
-                value: item.value.clone(),
+                value,
                 hosts,
             })
         })
@@ -219,15 +228,6 @@ fn runs_in_last_hour(
         .count() as u64)
 }
 
-/// The host of the public URL, for the analysis.
-pub fn public_host(public_url: &str) -> String {
-    let rest = public_url
-        .strip_prefix("https://")
-        .or_else(|| public_url.strip_prefix("http://"))
-        .unwrap_or(public_url);
-    rest.split(':').next().unwrap_or(rest).to_lowercase()
-}
-
 /// The outcome of the decision.
 struct Verdict {
     ask: bool,
@@ -236,62 +236,33 @@ struct Verdict {
 }
 
 fn decide(core: &Core, items: &[ItemRow], request: &RunRequest) -> RelayResult<Verdict> {
-    let env_names: Vec<String> = items.iter().map(|i| i.env_name.clone()).collect();
-    let mut providers = Vec::with_capacity(items.len());
-    for item in items {
-        let mut hosts: Vec<String> = item
-            .hosts
-            .iter()
-            .filter_map(|h| HostRule::parse(h).ok())
-            .map(|rule| rule.host().to_string())
-            .collect();
-        hosts.push(core.public_host.clone());
-        providers.push(ProviderHosts {
-            env_name: item.env_name.clone(),
+    let hosts: Vec<&[String]> = items.iter().map(|i| i.hosts.as_slice()).collect();
+    let facts: Vec<ItemFacts<'_>> = items
+        .iter()
+        .zip(&hosts)
+        .map(|(item, hosts)| ItemFacts {
+            env_name: &item.env_name,
             hosts,
-        });
-    }
-    let mut analysis = shell_risk::analyze_with_providers(
+            project: &item.collection,
+            environment: &item.environment,
+            risk: &item.risk,
+            scope: &item.scope,
+            reversibility: &item.reversibility,
+        })
+        .collect();
+    let assessment = decision::assess(
         &core.rules,
         &request.command,
         request.purpose.trim(),
-        &env_names,
-        &providers,
-    );
-    if let Some(text) = &request.user_request
-        && let Some(flag) = shell_risk::injection_flag(text)
-    {
-        analysis.flags.push(flag.to_string());
-        analysis.known_safe = false;
-        analysis.known_command = false;
-    }
-    analysis.flags.sort();
-    analysis.flags.dedup();
-    let mut declarations = Vec::with_capacity(items.len());
-    for item in items {
-        let unreadable = |_| RelayError::internal("An item has a declaration that cannot be read.");
-        declarations.push(Some(Declaration {
-            project: item.collection.clone(),
-            environment: Environment::parse(&item.environment).map_err(unreadable)?,
-            risk: RiskLevel::parse(&item.risk).map_err(unreadable)?,
-            scope: Scope::parse(&item.scope).map_err(unreadable)?,
-            reversibility: Reversibility::parse(&item.reversibility).map_err(unreadable)?,
-        }));
-    }
-    let has_user_request = request
-        .user_request
-        .as_deref()
-        .is_some_and(|text| !text.trim().is_empty());
-    let context = DecisionContext {
-        analysis: &analysis,
-        declarations: &declarations,
-        has_user_request,
-    };
-    let flags = analysis.flags.clone();
-    if let Some(decision) = before_model(&context) {
+        request.user_request.as_deref(),
+        &facts,
+        &core.public_host,
+    )?;
+    let flags = assessment.flags.clone();
+    if let Some(note) = assessment.ask_note {
         return Ok(Verdict {
             ask: true,
-            note: decision.note,
+            note,
             flags,
         });
     }
@@ -305,7 +276,7 @@ fn decide(core: &Core, items: &[ItemRow], request: &RunRequest) -> RelayResult<V
             flags,
         });
     }
-    if analysis.known_safe {
+    if assessment.known_safe {
         return Ok(Verdict {
             ask: false,
             note: "Known safe command. No rule asked.".to_string(),
@@ -314,13 +285,16 @@ fn decide(core: &Core, items: &[ItemRow], request: &RunRequest) -> RelayResult<V
     }
     Ok(Verdict {
         ask: true,
-        note: "Not a known safe command. The relay has no model, so an approver decides."
-            .to_string(),
+        note: "Not a known safe command. The relay has no model, so a person decides.".to_string(),
         flags,
     })
 }
 
 /// `POST /v1/runs`. A hard-rule failure or an access failure is an `Err` (HTTP 403).
+///
+/// A run that passes becomes `pending`, whatever the relay's own verdict is. The
+/// verdict is kept as the suggestion to the owner's host, next to the one-time key of
+/// the run. The key is made here and kept in memory only.
 pub fn request_run(
     core: &Core,
     agent: &AgentAuth,
@@ -328,7 +302,7 @@ pub fn request_run(
     now: u64,
 ) -> RelayResult<RunView> {
     validate(request, core.config.session_ttl_secs)?;
-    let mut created = None;
+    let mut pending_key: Option<(RunId, RunKey, Suggestion)> = None;
     let result = core.store.tx(|tx| {
         let actor = agent_actor(agent.id.0);
         let items = match check_access(tx, agent.member.id, &request.items) {
@@ -394,76 +368,51 @@ pub fn request_run(
             return Ok(Err(error));
         }
         let verdict = decide(core, &items, request)?;
+        let suggestion = if verdict.ask {
+            Suggestion::Ask
+        } else {
+            Suggestion::Allow
+        };
+        // A key that cannot be made is an error, and an error never allows a run.
+        let key = RunKey::generate()
+            .map_err(|_| RelayError::internal("The system has no random source."))?;
         row.flags = verdict.flags.clone();
         row.note = mask(&verdict.note);
-        if verdict.ask {
-            row.status = RunStatus::Pending;
-            row.expires_at = Some(now + core.config.approval_timeout_secs);
-        } else {
-            row.status = RunStatus::Ready;
-            row.decided_by = Some(DecidedBy::KnownSafe);
-            row.decided_at = Some(now);
-            row.session_expires_at = Some(now + ttl);
-        }
+        row.status = RunStatus::Pending;
+        row.expires_at = Some(now + core.config.approval_timeout_secs);
         let id = insert_run(tx, &row)?;
         row.id = id;
-        if !verdict.ask {
-            let env_items = env_items(&items)?;
-            let (_, hash) = core.sessions.create(
-                &core.config.public_url,
-                id,
-                agent.id,
-                agent.member.id,
-                now + ttl,
-                &env_items,
-            )?;
-            created = Some(hash);
-        }
+        pending_key = Some((id, key, suggestion));
         let mut detail = requested;
         detail["flags"] = json!(verdict.flags);
         detail["note"] = json!(verdict.note);
         core.audit
             .write_on(tx, now, &actor, "run_requested", Some(id), &detail)?;
-        if verdict.ask {
-            core.audit.write_on(
-                tx,
-                now,
-                RELAY_ACTOR,
-                "run_pending",
-                Some(id),
-                &json!({"note": verdict.note, "expires_at": row.expires_at}),
-            )?;
-        } else {
-            core.audit.write_on(
-                tx,
-                now,
-                RELAY_ACTOR,
-                "run_allowed",
-                Some(id),
-                &json!({"decided_by": "known_safe", "note": verdict.note}),
-            )?;
-            core.audit.write_on(
-                tx,
-                now,
-                RELAY_ACTOR,
-                "session_started",
-                Some(id),
-                &json!({"expires_at": now + ttl, "items": request.items}),
-            )?;
-        }
+        core.audit.write_on(
+            tx,
+            now,
+            RELAY_ACTOR,
+            "run_pending",
+            Some(id),
+            &json!({
+                "note": verdict.note,
+                "suggestion": if verdict.ask { "ask" } else { "allow" },
+                "expires_at": row.expires_at,
+            }),
+        )?;
         Ok(Ok(run_view(core, tx, &row, true, now)?))
     });
     match result {
         Ok(outcome) => {
+            // The key goes into the table only after the run is stored, and before the
+            // host is woken.
+            if let Some((id, key, suggestion)) = pending_key {
+                core.run_keys.insert(id, key, suggestion);
+            }
             core.notify.notify();
             outcome
         }
-        Err(error) => {
-            if let Some(hash) = created {
-                core.sessions.remove_hash(&hash);
-            }
-            Err(error)
-        }
+        Err(error) => Err(error),
     }
 }
 
@@ -510,14 +459,5 @@ mod tests {
         assert!(validate(&r, 900).is_err());
         r.ttl_secs = Some(120);
         assert!(validate(&r, 900).is_ok());
-    }
-
-    #[test]
-    fn public_host_is_the_bare_name() {
-        assert_eq!(
-            public_host("https://Apassy-Relay.wyderka.cc"),
-            "apassy-relay.wyderka.cc"
-        );
-        assert_eq!(public_host("http://127.0.0.1:8080"), "127.0.0.1");
     }
 }

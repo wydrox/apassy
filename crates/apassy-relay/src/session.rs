@@ -1,6 +1,6 @@
 //! The interface between the server track and the proxy track.
 //!
-//! The server creates a `LiveSession` when a run is allowed or approved, and keeps
+//! The server creates a `LiveSession` when the owner's host releases a run, and keeps
 //! it in memory until it expires or a revocation ends it. The proxy finds the
 //! session by the session key in the path `/p/<session key>/<host>/<path>`, swaps
 //! placeholders for the values of its secrets, and reports each request back with
@@ -41,7 +41,7 @@ impl std::fmt::Debug for SessionSecret {
     }
 }
 
-/// One live proxy session: the approved run of one agent.
+/// One live proxy session: the released run of one agent.
 #[derive(Debug, Clone)]
 pub struct LiveSession {
     pub id: SessionId,
