@@ -82,6 +82,16 @@ Download the signed and notarized `Apassy.dmg` from **[apassy.wyderka.cc](https:
 
 Requirements: macOS 15 or later on Apple silicon. Linux is not supported yet: the isolation of agents uses macOS Seatbelt, and Linux needs its own version first. Apassy already builds and passes its tests on Linux, and CI checks it there.
 
+### Install from source with one command
+
+Until the signed download is published, this command builds the newest release on your Mac, checks it, and installs it as `/Applications/Apassy.app`. It takes a few minutes:
+
+```sh
+/bin/bash -c "$(curl -fsSL https://apassy.wyderka.cc/install.sh)"
+```
+
+It needs macOS 15 on Apple silicon, Xcode or its Command Line Tools, [rustup](https://rustup.rs), and an Apple Development certificate (a free Apple Account in Xcode gives one). The script ([`scripts/install.sh`](scripts/install.sh)) checks each one first, asks before it replaces an app, and never uses sudo. Add `install.sh --check` after the command to check your Mac only. You sign the build yourself, so it does not update itself: run the command again for a new release.
+
 ### Build from source
 
 You need Xcode, Rust 1.97 (`rust-toolchain.toml` selects it), and an Apple Development signing identity.

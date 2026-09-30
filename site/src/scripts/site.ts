@@ -5,7 +5,8 @@ const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 // ---- The latest signed build (worker/index.ts) ----
 // Before the first release there is none: header links hide, and the main buttons
-// say "Coming soon".
+// say "Coming soon". A main button with an install note opens it (the command of
+// scripts/install.sh), so there is still a way to install.
 fetch("/latest.json")
   .then(async (res) => {
     if (res.status === 404) {
@@ -15,10 +16,15 @@ fetch("/latest.json")
           link.hidden = true;
           continue;
         }
+        label.textContent = label.dataset.soon ?? "";
+        const note = link.dataset.soonNote && document.getElementById(link.dataset.soonNote);
+        if (note) {
+          link.replaceWith(soonButton(link, note.id));
+          continue;
+        }
         link.removeAttribute("href");
         link.setAttribute("aria-disabled", "true");
         link.classList.add("soon");
-        label.textContent = label.dataset.soon ?? "";
       }
     }
     const latest = res.ok ? await res.json() : null;
@@ -29,6 +35,22 @@ fetch("/latest.json")
     }
   })
   .catch(() => {});
+
+// A button with the classes, the attributes (also the scoped-style ones), and the
+// content of `link`, which opens the popover `noteId`.
+function soonButton(link: HTMLAnchorElement, noteId: string): HTMLButtonElement {
+  const button = document.createElement("button");
+  for (const { name, value } of [...link.attributes]) {
+    if (name !== "href" && !name.startsWith("data-download") && name !== "data-soon-note") button.setAttribute(name, value);
+  }
+  button.type = "button";
+  button.classList.add("soon");
+  button.setAttribute("popovertarget", noteId);
+  button.setAttribute("aria-haspopup", "dialog");
+  button.setAttribute("aria-expanded", "false");
+  button.append(...link.childNodes);
+  return button;
+}
 
 // ---- The header gets a background once the page scrolls ----
 const header = document.querySelector<HTMLElement>("[data-header]");
@@ -143,25 +165,41 @@ if (hero && !reduced && window.matchMedia("(pointer: fine)").matches) {
   });
 }
 
-// ---- Popovers open next to their button (the Linux note) ----
+// ---- Popovers open next to their button (the install and Linux notes) ----
+// Below the button, or above it when the space below is too small. data-width sets
+// the width (default 360). An open note follows its button when the page scrolls.
+const triggerOf = (pop: HTMLElement) => document.querySelector<HTMLElement>(`[popovertarget="${pop.id}"]`);
+function place(pop: HTMLElement) {
+  const button = triggerOf(pop);
+  if (!button) return;
+  const box = button.getBoundingClientRect();
+  const width = Math.min(Number(pop.dataset.width) || 360, window.innerWidth - 32);
+  const left = Math.max(16, Math.min(box.left + box.width / 2 - width / 2, window.innerWidth - width - 16));
+  pop.style.width = `${width}px`;
+  pop.style.left = `${left}px`;
+  const height = pop.offsetHeight;
+  const above = box.bottom + 10 + height > window.innerHeight - 8 && box.top - 10 - height >= 8;
+  pop.toggleAttribute("data-above", above);
+  pop.style.top = `${above ? box.top - 10 - height : box.bottom + 10}px`;
+}
 for (const pop of document.querySelectorAll<HTMLElement>("[popover]")) {
   pop.addEventListener("beforetoggle", (event) => {
-    if ((event as ToggleEvent).newState !== "open") return;
-    const button = document.querySelector<HTMLElement>(`[popovertarget="${pop.id}"]`);
-    if (!button) return;
-    const box = button.getBoundingClientRect();
-    const width = Math.min(360, window.innerWidth - 32);
-    const left = Math.max(16, Math.min(box.left + box.width / 2 - width / 2, window.innerWidth - width - 16));
-    pop.style.width = `${width}px`;
-    pop.style.left = `${left}px`;
-    pop.style.top = `${box.bottom + 10}px`;
+    if ((event as ToggleEvent).newState === "open") place(pop);
+  });
+  pop.addEventListener("toggle", (event) => {
+    const open = (event as ToggleEvent).newState === "open";
+    // The height is known only once the note is open.
+    if (open) place(pop);
+    triggerOf(pop)?.setAttribute("aria-expanded", String(open));
   });
 }
-window.addEventListener(
-  "scroll",
-  () => document.querySelectorAll<HTMLElement>("[popover]:popover-open").forEach((pop) => pop.hidePopover()),
-  { passive: true },
-);
+let placing = 0;
+const placeOpen = () => {
+  cancelAnimationFrame(placing);
+  placing = requestAnimationFrame(() => document.querySelectorAll<HTMLElement>("[popover]:popover-open").forEach(place));
+};
+window.addEventListener("scroll", placeOpen, { passive: true });
+window.addEventListener("resize", placeOpen);
 
 // ---- Gallery tabs: click, arrow keys, and autoplay with a progress bar ----
 for (const gallery of document.querySelectorAll<HTMLElement>("[data-gallery]")) {

@@ -1,0 +1,6 @@
+# Workers static assets apply these headers (wrangler.jsonc serves dist/).
+# The installer opens as text in a browser, and curl gets the current file.
+/install.sh
+  Content-Type: text/plain; charset=utf-8
+  Cache-Control: no-cache
+  X-Content-Type-Options: nosniff

@@ -204,7 +204,9 @@ const { title, description } = Astro.props;
   .btn svg { width: 17px; height: 17px; flex: none; }
   .btn-primary { background: var(--btn-bg); color: var(--btn-ink); box-shadow: var(--shadow); }
   .btn-primary:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg); }
-  .btn-primary.soon { opacity: 0.55; pointer-events: none; box-shadow: none; }
+  /* No signed build yet (scripts/site.ts): a link without an install note is inert;
+     a button opens the install note. */
+  a.btn-primary.soon { opacity: 0.55; pointer-events: none; box-shadow: none; }
   .btn-secondary { background: var(--surface); border-color: var(--edge); color: var(--ink); }
   .btn-secondary:hover { border-color: var(--faint); transform: translateY(-2px); }
   .badge {
