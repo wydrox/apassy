@@ -28,6 +28,7 @@ const lines = [
             <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5" y="5" width="8.5" height="8.5" rx="2" /><path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5" /></svg>
             <span data-copy-label>Copy</span>
           </button>
+          <span class="sr-only" aria-live="polite" data-copy-status></span>
         </div>
         <div class="term-body">
           {lines.map((line) =>

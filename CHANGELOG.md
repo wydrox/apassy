@@ -10,7 +10,7 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ### Fixed
 
-- A copy without a Developer ID signature, such as a build from source, no longer downloads new versions that it could never install. Settings shows the version and the download page instead ([updates](docs/operations/updates.md)).
+- A copy without a Developer ID signature, such as a build from source, no longer downloads new versions every 6 hours only to refuse them. It shows the version and the download page, and the installer updates it ([updates](docs/operations/updates.md)).
 
 ## [0.3.0] - 2026-09-28
 
@@ -100,6 +100,7 @@ The alpha. It was not published.
 - Secrets for agent processes with owner approval: the socket never returns a secret value ([ADR 0006](docs/adr/0006-process-secrets.md)).
 - Plain-language rules and a local bouncer on Laya ([ADR 0007](docs/adr/0007-rules-and-local-bouncer.md)).
 
+[Unreleased]: https://github.com/wydrox/apassy/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/wydrox/apassy/releases/tag/v0.3.0
 [0.2.1]: https://github.com/wydrox/apassy/releases/tag/v0.2.1
 [0.2.0]: https://github.com/wydrox/apassy/releases/tag/v0.2.0

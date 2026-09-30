@@ -121,19 +121,25 @@ for (const term of document.querySelectorAll<HTMLElement>("[data-terminal]")) {
 }
 
 // ---- Copy buttons: <button data-copy="text"> ----
+// A live region next to the button (data-copy-status) says the result to screen
+// readers, because the aria-label of the button hides its changing label.
 for (const button of document.querySelectorAll<HTMLButtonElement>("[data-copy]")) {
   const label = button.querySelector<HTMLElement>("[data-copy-label]");
+  const status = button.parentElement?.querySelector<HTMLElement>("[data-copy-status]");
   button.addEventListener("click", async () => {
     try {
       await navigator.clipboard.writeText(button.dataset.copy ?? "");
       if (label) label.textContent = "Copied";
+      if (status) status.textContent = "Copied to the clipboard.";
       button.classList.add("copied");
       setTimeout(() => {
         if (label) label.textContent = "Copy";
+        if (status) status.textContent = "";
         button.classList.remove("copied");
       }, 1600);
     } catch {
       if (label) label.textContent = "Select and copy";
+      if (status) status.textContent = "Copy failed. Select the command and copy it.";
     }
   });
 }
@@ -178,9 +184,12 @@ function place(pop: HTMLElement) {
   pop.style.width = `${width}px`;
   pop.style.left = `${left}px`;
   const height = pop.offsetHeight;
-  const above = box.bottom + 10 + height > window.innerHeight - 8 && box.top - 10 - height >= 8;
+  const fitsBelow = box.bottom + 10 + height <= window.innerHeight - 8;
+  const above = !fitsBelow && box.top - 10 - height >= 8;
   pop.toggleAttribute("data-above", above);
-  pop.style.top = `${above ? box.top - 10 - height : box.bottom + 10}px`;
+  // When it fits neither below nor above, keep it on screen (it scrolls inside).
+  const top = fitsBelow ? box.bottom + 10 : above ? box.top - 10 - height : Math.max(8, window.innerHeight - height - 8);
+  pop.style.top = `${top}px`;
 }
 for (const pop of document.querySelectorAll<HTMLElement>("[popover]")) {
   pop.addEventListener("beforetoggle", (event) => {

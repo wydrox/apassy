@@ -89,8 +89,9 @@ pub(crate) trait UpdateSystem: Send + Sync {
     /// The macOS version, for example `15.4.1`.
     fn macos_version(&self) -> Result<String, String>;
     /// The team of the signature of the running app. `None` when the running
-    /// program is not the signed Apassy app, or when its signature has no team
-    /// (ad hoc).
+    /// program is not the signed Apassy app, or when its signature is not a
+    /// Developer ID Application signature (ad hoc, or Apple Development for a
+    /// build from source).
     fn running_team(&self) -> Result<Option<String>, String>;
     fn location(&self) -> Location;
     /// Attach `image` read-only at `mountpoint`, with no Finder window.
@@ -238,8 +239,9 @@ pub(crate) fn team_from_codesign(output: &str) -> Option<String> {
 /// The team of `codesign -d --verbose=2` output when the leaf certificate (the first
 /// `Authority=` line) is a Developer ID Application certificate. A build from
 /// source, signed with an "Apple Development" certificate, has a team but no
-/// Developer ID: no new version can pass [`requirement`] for it, so the app does
-/// not download one (docs/operations/updates.md).
+/// Developer ID. Such a copy does not download updates: a release of another team
+/// can never pass [`requirement`] for it, and its owner updates it with the
+/// installer (docs/operations/updates.md).
 pub(crate) fn developer_id_team_from_codesign(output: &str) -> Option<String> {
     let leaf = output
         .lines()

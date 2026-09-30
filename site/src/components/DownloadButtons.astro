@@ -40,6 +40,7 @@ const installNote = `${id}-install`;
           <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5" y="5" width="8.5" height="8.5" rx="2" /><path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5" /></svg>
           <span data-copy-label>Copy</span>
         </button>
+        <span class="sr-only" aria-live="polite" data-copy-status></span>
       </div>
       <code>{INSTALL_COMMAND}</code>
     </div>
@@ -75,6 +76,7 @@ const installNote = `${id}-install`;
 
   .note {
     inset: auto; margin: 0; position: fixed; padding: 18px 18px 16px; border-radius: 16px;
+    max-height: calc(100dvh - 16px); overflow: auto;
     border: 1px solid var(--edge); background: var(--surface); color: var(--ink);
     /* A light shadow, away from the button, so it does not darken the button. */
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12), 0 14px 36px rgba(0, 0, 0, 0.22);

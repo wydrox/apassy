@@ -56,7 +56,7 @@ The disk image:
 6. Gatekeeper accepts it: `spctl --assess --type exec`. This needs notarization.
 7. `ditto` copies it to `update/Apassy.app`, and the signature check runs on the copy. Then the app detaches and deletes the image.
 
-When the running app has no Developer ID signature (an ad hoc build, or a build from source that `scripts/build-app.sh` or `install.sh` signed with an "Apple Development" certificate), or does not run from an app bundle, the app does not download: no new version could pass the check of step 5 for it. Settings shows the version and "Open the download page". A build from source updates when you run the installer again.
+When the running app has no Developer ID signature (an ad hoc build, or a build from source that `scripts/build-app.sh` or `scripts/install.sh` signed with an "Apple Development" certificate), or does not run from an app bundle, the app does not download. A build from source updates when you run the installer again: a release of another team could never pass step 5 for it, and one download every 6 hours for nothing is a waste. Settings shows the version and "Open the download page".
 
 ## 5. The install
 

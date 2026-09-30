@@ -1,14 +1,16 @@
 name: Site
 
-# Build apassy.wyderka.cc (site/) on each change. On main, deploy the Worker
-# and its assets to Cloudflare. The disk image comes from release.yml.
+# Build apassy.wyderka.cc (site/) on each change of the site or of a file that it
+# builds from (the installer, the version, the changelog, the screenshots). On
+# main, deploy the Worker and its assets to Cloudflare. The disk image comes from
+# release.yml.
 # See docs/operations/release.md.
 
 on:
   push:
-    paths: ["site/**", ".github/workflows/site.yml"]
+    paths: ["site/**", "scripts/install.sh", "Cargo.toml", "CHANGELOG.md", "docs/images/**", ".github/workflows/site.yml"]
   pull_request:
-    paths: ["site/**", ".github/workflows/site.yml"]
+    paths: ["site/**", "scripts/install.sh", "Cargo.toml", "CHANGELOG.md", "docs/images/**", ".github/workflows/site.yml"]
   workflow_dispatch:
 
 permissions:

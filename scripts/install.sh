@@ -110,14 +110,19 @@ check_mac() {
     xcrun --sdk macosx --show-sdk-path >/dev/null 2>&1 && xcrun --find git >/dev/null 2>&1; then
     ok "Swift and git ($(xcode-select -p))"
   else
-    problem "no Swift compiler or git." "Install Xcode from the App Store, or run: xcode-select --install"
+    problem "no Swift compiler or git." "Install Xcode from the App Store, or run: xcode-select --install" \
+      "With Xcode installed, open it once to accept its license, then run the command again."
   fi
 
   # rustup reads rust-toolchain.toml of the release and installs its Rust.
   # shellcheck source=/dev/null
   [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
   if command -v rustup >/dev/null 2>&1 && command -v cargo >/dev/null 2>&1; then
-    ok "rustup $(rustup --version 2>/dev/null | awk '{print $2; exit}')"
+    if rustup show 2>/dev/null | grep -qi '^default host: aarch64-apple-darwin'; then
+      ok "rustup $(rustup --version 2>/dev/null | awk '{print $2; exit}')"
+    else
+      problem "rustup builds for Intel (x86_64), not Apple silicon." "Run: rustup set default-host aarch64-apple-darwin"
+    fi
   else
     problem "no rustup." "Install it from https://rustup.rs:" \
       "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh" \
@@ -163,7 +168,8 @@ check_identity() {
   fi
   if [ "$count" != "1" ]; then
     printf '  %s!%s %s signing identities:\n' "$YELLOW" "$RESET" "$count"
-    printf '%s\n' "$matches" | sed -E 's/^ *([0-9]+)\) ([0-9A-F]{40}) "(.*)"$/      \1) \3/'
+    # Numbered by position in this list, the number that the question reads.
+    printf '%s\n' "$matches" | awk -F'"' '{ split($1, f, " "); printf "      %d) %s  %s\n", NR, $2, f[2] }'
     if [ "$CHECK_ONLY" = "1" ] || ! has_tty || [ "$ASSUME_YES" = "1" ]; then
       problem "more than one identity." "Choose one: APASSY_SIGN_IDENTITY=<SHA-1> before the command."
       return
@@ -205,6 +211,9 @@ check_existing() {
   if [ -e "$INSTALL_DIR" ] && [ ! -w "$INSTALL_DIR" ]; then
     problem "you cannot write $INSTALL_DIR." "Use an administrator account, or set APASSY_INSTALL_DIR."
   fi
+  if running_app; then
+    note "Apassy is running. Quit it before the install step at the end."
+  fi
   case "$(app_kind)" in
     none) ok "no Apassy in $INSTALL_DIR yet" ;;
     notarized) note "$APP is the notarized Apassy $(app_version). The script asks before it replaces it." ;;
@@ -232,7 +241,7 @@ SRC="${APASSY_SRC:-$HOME/Library/Caches/apassy/src}"
 TAG=""
 
 newest_release() {
-  git ls-remote --tags --refs --sort=-v:refname "$REPO_URL" 'v*' 2>/dev/null |
+  git ls-remote --tags --refs --sort=-v:refname "$REPO_URL" 'v*' |
     awk -F/ '{print $NF}' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1
 }
 
@@ -241,12 +250,13 @@ fetch_source() {
   TAG="${APASSY_VERSION:-}"
   if [ -z "$TAG" ]; then
     TAG="$(newest_release)" || true
-    [ -n "$TAG" ] || fail "cannot read the releases of $REPO_URL. Check the network and run the command again."
+    [ -n "$TAG" ] || fail "cannot read the releases of $REPO_URL (git says why above). Check the network and run the command again."
   fi
   [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "APASSY_VERSION must be a release tag such as v0.3.0, not \"$TAG\"."
 
   if [ -d "$SRC/.git" ]; then
-    [ "$(git -C "$SRC" remote get-url origin 2>/dev/null)" = "$REPO_URL" ] ||
+    # The stored URL: a url.<base>.insteadOf rewrite changes only what get-url shows.
+    [ "$(git -C "$SRC" config --get remote.origin.url 2>/dev/null)" = "$REPO_URL" ] ||
       fail "$SRC is not a clone of $REPO_URL. Remove it, or set APASSY_SRC."
     git -C "$SRC" fetch --quiet --depth 1 origin "+refs/tags/$TAG:refs/tags/$TAG" ||
       fail "cannot fetch $TAG from $REPO_URL."
@@ -269,7 +279,16 @@ build_app() {
   [ -n "$channel" ] || fail "rust-toolchain.toml of $TAG names no channel."
   rustup toolchain install "$channel" --profile minimal --component clippy --component rustfmt ||
     fail "rustup cannot install Rust $channel. Check the network and run the command again."
-  ok "Rust $channel"
+  # rustup's cargo and rustc first on PATH: another cargo (Homebrew) would ignore
+  # rust-toolchain.toml.
+  PATH="$(dirname "$(command -v rustup)"):$PATH"
+  export PATH
+  local rustc_version
+  rustc_version="$(cd "$SRC" && rustc --version 2>/dev/null)" || rustc_version=""
+  case "$rustc_version" in
+    "rustc $channel "*) ok "Rust $channel" ;;
+    *) fail "the build would use \"${rustc_version:-no rustc}\" from $(command -v rustc || echo "nowhere"), not Rust $channel of rustup." ;;
+  esac
 
   step "Build, sign, and check Apassy $TAG (this takes a few minutes)"
   (cd "$SRC" && APASSY_SIGN_IDENTITY="$IDENTITY" scripts/build-app.sh) ||
@@ -290,8 +309,10 @@ cleanup() {
   fi
 }
 
+# The main program of the app, of this user. apassy-mcp, which agent hosts start
+# from the same folder, keeps running and is not the app.
 running_app() {
-  pgrep -f "^$APP/Contents/MacOS/" >/dev/null 2>&1
+  pgrep -U "$(id -u)" -f "^$APP/Contents/MacOS/apassy( |\$)" >/dev/null 2>&1
 }
 
 install_app() {
@@ -310,13 +331,13 @@ install_app() {
   codesign --verify --deep --strict "$new" 2>/dev/null ||
     fail "the copy in $INSTALL_DIR does not pass codesign --verify. Nothing was replaced."
   if [ -e "$APP" ]; then
-    mv "$APP" "$old" || fail "cannot move the old app aside. Nothing was replaced."
     SWAP_OLD="$old"
+    mv "$APP" "$old" || fail "cannot move the old app aside. Nothing was replaced."
   fi
   mv "$new" "$APP" || fail "cannot put the new app in place."
   SWAP_NEW=""
   SWAP_OLD=""
-  rm -rf "$old"
+  rm -rf "$old" 2>/dev/null || note "cannot remove $old. Move it to the Trash in Finder."
   ok "Apassy $(app_version) in $APP"
 }
 
