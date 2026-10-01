@@ -248,6 +248,7 @@ fn init(relay: &str) -> Result<i32, CliError> {
             member_token: Some(token),
             safety_verified: None,
         },
+        false,
     )?;
     println!(
         "Saved settings for {} ({}) of team {} in {}.",

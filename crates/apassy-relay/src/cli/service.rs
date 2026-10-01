@@ -9,6 +9,7 @@ use std::process::{Command, Output};
 use super::CliError;
 use super::host::{self, HostOptions};
 use super::settings::{self, Settings};
+use crate::ids::TeamId;
 
 pub const LABEL: &str = "com.wydrox.apassy.team-host";
 pub const UNIT: &str = "apassy-team-host.service";
@@ -42,8 +43,13 @@ fn xml(text: &str) -> Result<String, CliError> {
     Ok(escaped)
 }
 
-fn host_args(options: HostOptions) -> Vec<String> {
-    let mut args = vec!["host".to_string(), "--dialog".to_string()];
+fn host_args(team: &TeamId, options: HostOptions) -> Vec<String> {
+    let mut args = vec![
+        "--team".to_string(),
+        team.to_string(),
+        "host".to_string(),
+        "--dialog".to_string(),
+    ];
     if options.ask_all {
         args.push("--ask-all".to_string());
     }
@@ -54,6 +60,7 @@ fn host_args(options: HostOptions) -> Vec<String> {
 /// Generate a plist without file writes, environment reads, or service commands.
 pub fn generate_plist(
     exe: &Path,
+    team: &TeamId,
     options: HostOptions,
     log: &Path,
     xdg: Option<&str>,
@@ -61,7 +68,7 @@ pub fn generate_plist(
     let exe = xml(path_text(exe)?)?;
     let log = xml(path_text(log)?)?;
     let mut arguments = format!("        <string>{exe}</string>\n");
-    for argument in host_args(options) {
+    for argument in host_args(team, options) {
         arguments.push_str(&format!("        <string>{}</string>\n", xml(&argument)?));
     }
     let environment = match xdg {
@@ -95,6 +102,7 @@ fn unit_path(path: &Path) -> Result<&str, CliError> {
 /// Generate a user unit without file writes, environment reads, or service commands.
 pub fn generate_unit(
     exe: &Path,
+    team: &TeamId,
     options: HostOptions,
     xdg: Option<&str>,
 ) -> Result<String, CliError> {
@@ -114,7 +122,7 @@ pub fn generate_unit(
     };
     Ok(format!(
         "[Unit]\nDescription=Apassy team host\nAfter=graphical-session.target\n\n[Service]\nType=simple\nExecStart={exe} {}\nRestart=on-failure\nRestartSec=30\n{environment}StandardOutput=append:{log}\nStandardError=append:{log}\n\n[Install]\nWantedBy=default.target\n",
-        host_args(options).join(" ")
+        host_args(team, options).join(" ")
     ))
 }
 
@@ -290,18 +298,12 @@ fn check_saved_settings(settings: &Settings, path: &Path) -> Result<(), CliError
         CliError::usage("The saved service settings are invalid. Check settings.json.")
     })?;
     let entry = if saved.version == Some(2) {
-        let current = saved.current.as_ref().ok_or_else(|| {
-            CliError::usage("The service needs a current team. Use `team use ID`.")
+        let selected = settings.team_id.as_ref().ok_or_else(|| {
+            CliError::usage("The service needs a selected team. Use `--team ID` or `team use ID`.")
         })?;
-        if settings.team_id.as_ref() != Some(current) {
-            return Err(CliError::usage(
-                "The service uses the saved current team. Use `team use ID` before `host install`.",
-            ));
-        }
-        saved
-            .teams
-            .get(current)
-            .ok_or_else(|| CliError::usage("The saved current team is missing."))?
+        saved.teams.get(selected).ok_or_else(|| {
+            CliError::usage("The selected team is missing from the saved settings.")
+        })?
     } else if saved.version.is_none() || saved.version == Some(1) {
         &saved.legacy
     } else {
@@ -320,7 +322,7 @@ fn check_saved_settings(settings: &Settings, path: &Path) -> Result<(), CliError
         || entry.member_token.is_none() && entry.device_id.is_none()
     {
         return Err(CliError::usage(
-            "The shell settings differ from the saved settings. Use the saved current team's relay and credentials before `host install`.",
+            "The shell settings differ from the saved settings. Use the selected team's saved relay and credentials before `host install`.",
         ));
     }
     if settings.edge_secret.is_some() {
@@ -334,7 +336,6 @@ fn check_saved_settings(settings: &Settings, path: &Path) -> Result<(), CliError
 #[derive(serde::Deserialize)]
 struct SavedServiceSettings {
     version: Option<u32>,
-    current: Option<crate::ids::TeamId>,
     #[serde(default)]
     teams: std::collections::BTreeMap<crate::ids::TeamId, SavedServiceEntry>,
     #[serde(flatten)]
@@ -356,13 +357,27 @@ pub fn install(settings: &Settings, options: HostOptions) -> Result<i32, CliErro
         .map_err(|error| io_error("get the executable path", error))?;
     let xdg = xdg_config()?;
     let log = service_log()?;
-    let text = if cfg!(target_os = "macos") {
-        generate_plist(&exe, options, &log, xdg.as_deref())?
+    let settings_path = settings::settings_path()?;
+    check_saved_settings(settings, &settings_path)?;
+    // A legacy entry needs its saved team ID before the service can select it.
+    let migrated;
+    let settings = if settings.team_id.is_none() {
+        settings::migrate_legacy()?;
+        migrated = settings::load_for(None)?;
+        &migrated
     } else {
-        generate_unit(&exe, options, xdg.as_deref())?
+        settings
     };
-    check_saved_settings(settings, &settings::settings_path()?)?;
+    check_saved_settings(settings, &settings_path)?;
+    let team = settings.team_id.as_ref().ok_or_else(|| {
+        CliError::usage("The service needs a saved team. Run `apassy-team init` first.")
+    })?;
     host::check_owner(settings)?;
+    let text = if cfg!(target_os = "macos") {
+        generate_plist(&exe, team, options, &log, xdg.as_deref())?
+    } else {
+        generate_unit(&exe, team, options, xdg.as_deref())?
+    };
     if cfg!(target_os = "linux") {
         settings::ensure_private_dir(&settings::settings_dir()?)?;
     }
@@ -532,6 +547,96 @@ pub fn status() -> Result<i32, CliError> {
 mod tests {
     use super::*;
 
+    fn test_team() -> TeamId {
+        TeamId::parse("t_abcdefgh23").unwrap()
+    }
+
+    #[test]
+    fn service_accepts_the_selected_saved_team_when_another_team_is_current() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let selected = crate::ids::TeamId::parse("t_abcdefgh23").unwrap();
+        let current = crate::ids::TeamId::parse("t_abcdefgh24").unwrap();
+        let settings = Settings {
+            relay_url: Some("https://selected.example.test".into()),
+            team_id: Some(selected.clone()),
+            device_id: Some(crate::ids::DeviceId(3)),
+            ..Settings::default()
+        };
+        for current in [Some(current), None] {
+            fs::write(
+                &path,
+                serde_json::json!({"version":2,"current":current,"teams":{
+                    selected.as_str():{"relay_url":"https://selected.example.test","device_id":3},
+                    "t_abcdefgh24":{"relay_url":"https://current.example.test","device_id":4}
+                }})
+                .to_string(),
+            )
+            .unwrap();
+            check_saved_settings(&settings, &path).unwrap();
+        }
+    }
+
+    #[test]
+    fn generated_service_arguments_parse_as_the_selected_host() {
+        use crate::cli::args::{self, Command};
+        let expected_team = "t_abcdefgh23";
+        let options = HostOptions {
+            ask_all: true,
+            auto_limit: 7,
+        };
+        let plist = generate_plist(
+            Path::new("/exe"),
+            &test_team(),
+            options,
+            Path::new("/log"),
+            None,
+        )
+        .unwrap();
+        let unit = generate_unit(Path::new("/exe"), &test_team(), options, None).unwrap();
+        let plist_args: Vec<String> = plist
+            .split("<key>ProgramArguments</key>")
+            .nth(1)
+            .unwrap()
+            .split("</array>")
+            .next()
+            .unwrap()
+            .lines()
+            .filter_map(|line| {
+                line.trim()
+                    .strip_prefix("<string>")
+                    .and_then(|line| line.strip_suffix("</string>"))
+            })
+            .skip(1)
+            .map(str::to_owned)
+            .collect();
+        let unit_args: Vec<String> = unit
+            .lines()
+            .find_map(|line| line.strip_prefix("ExecStart="))
+            .unwrap()
+            .split_whitespace()
+            .skip(1)
+            .map(str::to_owned)
+            .collect();
+        for arguments in [plist_args, unit_args] {
+            assert_eq!(
+                arguments.get(..3).unwrap(),
+                ["--team", expected_team, "host"]
+            );
+            assert_eq!(
+                args::parse(&arguments).unwrap(),
+                Command::Selected {
+                    team: expected_team.into(),
+                    command: Box::new(Command::Host {
+                        ask_all: true,
+                        auto_limit: Some(7),
+                        dialog: true
+                    }),
+                }
+            );
+        }
+    }
+
     #[test]
     fn service_requires_the_same_saved_credentials_and_no_edge_variable() {
         use crate::secret::SecretString;
@@ -568,7 +673,7 @@ mod tests {
     }
 
     #[test]
-    fn saved_device_settings_use_the_current_team_without_a_member_token() {
+    fn saved_device_settings_use_the_selected_team_without_a_member_token() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         let team = crate::ids::TeamId::parse("t_abcdefgh23").unwrap();
@@ -585,19 +690,20 @@ mod tests {
         settings.team_id = crate::ids::TeamId::parse("t_abcdefgh24");
         let error = check_saved_settings(&settings, &path).unwrap_err();
         assert_eq!(error.code, 2);
-        assert!(error.message.contains("saved current team"));
+        assert!(error.message.contains("selected team is missing"));
     }
 
     #[test]
     fn plist_arguments_and_session_settings() {
         let text = generate_plist(
             Path::new("/Applications/apassy-team"),
+            &test_team(),
             HostOptions::default(),
             Path::new("/Users/a/Library/Logs/host.log"),
             None,
         )
         .unwrap();
-        assert!(text.contains("<string>/Applications/apassy-team</string>\n        <string>host</string>\n        <string>--dialog</string>"));
+        assert!(text.contains("<string>/Applications/apassy-team</string>\n        <string>--team</string>\n        <string>t_abcdefgh23</string>\n        <string>host</string>\n        <string>--dialog</string>"));
         assert!(text.contains("<string>--auto-limit</string>\n        <string>30</string>"));
         assert!(!text.contains("--ask-all"));
         assert!(!text.contains("EnvironmentVariables"));
@@ -629,6 +735,7 @@ mod tests {
     fn plist_escapes_all_xml_characters_and_keeps_options() {
         let text = generate_plist(
             Path::new("/a &<>'\"/apassy-team"),
+            &test_team(),
             HostOptions {
                 ask_all: true,
                 auto_limit: 7,
@@ -655,6 +762,7 @@ mod tests {
             assert!(
                 generate_plist(
                     Path::new(exe),
+                    &test_team(),
                     HostOptions::default(),
                     Path::new("/log"),
                     None
@@ -665,6 +773,7 @@ mod tests {
         assert!(
             generate_plist(
                 Path::new("/exe"),
+                &test_team(),
                 HostOptions::default(),
                 Path::new("log"),
                 None
@@ -674,6 +783,7 @@ mod tests {
         assert!(
             generate_plist(
                 Path::new("/exe"),
+                &test_team(),
                 HostOptions::default(),
                 Path::new("/log"),
                 Some("config")
@@ -686,12 +796,13 @@ mod tests {
     fn unit_default_arguments_and_log_paths() {
         let text = generate_unit(
             Path::new("/usr/local/bin/apassy-team"),
+            &test_team(),
             HostOptions::default(),
             None,
         )
         .unwrap();
         assert!(
-            text.contains("ExecStart=/usr/local/bin/apassy-team host --dialog --auto-limit 30\n")
+            text.contains("ExecStart=/usr/local/bin/apassy-team --team t_abcdefgh23 host --dialog --auto-limit 30\n")
         );
         assert!(!text.contains("--ask-all"));
         assert!(!text.contains("Environment="));
@@ -708,6 +819,7 @@ mod tests {
     fn unit_custom_options_and_xdg() {
         let text = generate_unit(
             Path::new("/opt/apassy-team"),
+            &test_team(),
             HostOptions {
                 ask_all: true,
                 auto_limit: 9,
@@ -716,7 +828,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            text.contains("ExecStart=/opt/apassy-team host --dialog --ask-all --auto-limit 9\n")
+            text.contains("ExecStart=/opt/apassy-team --team t_abcdefgh23 host --dialog --ask-all --auto-limit 9\n")
         );
         assert!(text.contains("Environment=XDG_CONFIG_HOME=/custom/config\n"));
         assert_eq!(
@@ -733,11 +845,17 @@ mod tests {
             "relative", "/a b", "/a%b", "/a$b", "/a\"b", "/a'b", "/a\\b", "/a\nb", "/a;b",
         ] {
             assert!(
-                generate_unit(Path::new(path), HostOptions::default(), None).is_err(),
+                generate_unit(Path::new(path), &test_team(), HostOptions::default(), None).is_err(),
                 "{path:?}"
             );
             assert!(
-                generate_unit(Path::new("/exe"), HostOptions::default(), Some(path)).is_err(),
+                generate_unit(
+                    Path::new("/exe"),
+                    &test_team(),
+                    HostOptions::default(),
+                    Some(path)
+                )
+                .is_err(),
                 "{path:?}"
             );
         }

@@ -95,6 +95,7 @@ pub fn create(relay: &str, team: &str, name: &str, device: Option<&str>) -> Resu
                 member_token: None,
                 safety_verified: None,
             },
+            true,
         )?;
         Ok((made, id))
     };
@@ -161,6 +162,7 @@ fn save_granted(relay: &str, granted: AccessGranted) -> Result<i32, CliError> {
             member_token: None,
             safety_verified: None,
         },
+        true,
     )?;
     remove_recovery(&granted.team_id)?;
     println!(
@@ -175,7 +177,7 @@ fn save_granted(relay: &str, granted: AccessGranted) -> Result<i32, CliError> {
 fn wait(client: &Client, id: &TeamId, key: &DeviceKey, no_wait: bool) -> Result<i32, CliError> {
     if no_wait {
         eprintln!(
-            "The request waits for confirmation. Use `apassy-team join --resume` to wait again."
+            "The request waits for confirmation. Use `apassy-team --team {id} join --resume` to wait again."
         );
         return Ok(0);
     }
@@ -184,16 +186,16 @@ fn wait(client: &Client, id: &TeamId, key: &DeviceKey, no_wait: bool) -> Result<
         let started = Instant::now();
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(CliError::denied(
-                "The confirmation did not arrive within 10 minutes. Use `apassy-team join --resume` to wait again.",
-            ));
+            return Err(CliError::denied(format!(
+                "The confirmation did not arrive within 10 minutes. Use `apassy-team --team {id} join --resume` to wait again."
+            )));
         }
         match signin::sign_in_timeout(client, id, key, remaining.min(CALL_TIMEOUT)) {
             Ok(granted) => {
                 if Instant::now() >= deadline {
-                    return Err(CliError::denied(
-                        "The confirmation did not arrive within 10 minutes. Use `apassy-team join --resume` to wait again.",
-                    ));
+                    return Err(CliError::denied(format!(
+                        "The confirmation did not arrive within 10 minutes. Use `apassy-team --team {id} join --resume` to wait again."
+                    )));
                 }
                 if &granted.team_id != id {
                     return Err(CliError::relay("The relay returned another team id."));
@@ -209,9 +211,9 @@ fn wait(client: &Client, id: &TeamId, key: &DeviceKey, no_wait: bool) -> Result<
             Err(error) => return Err(error.into_cli()),
         }
         if Instant::now() >= deadline {
-            return Err(CliError::denied(
-                "The confirmation did not arrive within 10 minutes. Use `apassy-team join --resume` to wait again.",
-            ));
+            return Err(CliError::denied(format!(
+                "The confirmation did not arrive within 10 minutes. Use `apassy-team --team {id} join --resume` to wait again."
+            )));
         }
         std::thread::sleep(
             Duration::from_secs(5)
@@ -332,6 +334,7 @@ fn submit(
             member_token: None,
             safety_verified: Some(true),
         },
+        false,
     )?;
     println!(
         "Team {} ({}), from {}. Safety words: {}",
@@ -413,6 +416,7 @@ pub fn join(
             member_token: None,
             safety_verified: Some(false),
         },
+        false,
     )?;
     let edge = settings::env_secret(settings::ENV_EDGE_SECRET);
     let client = Client::new(&relay, None, edge.as_ref());
