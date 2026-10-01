@@ -16,6 +16,7 @@ use crate::api::{
     self, AccessView, AgentCreate, AgentView, ApprovalView, AuditEntry, CollectionCreate,
     CollectionView, Created, DecisionRequest, GrantCreate, GrantView, InviteRequest, InviteView,
     Issued, ItemCreated, ItemView, JoinRequestRef, MeView, MemberView, NewItemRef, Policy, RunView,
+    TeamCreateRef, TeamCreated,
 };
 use crate::cli::CliError;
 use crate::cli::args::{Command, ItemAddArgs, USAGE};
@@ -37,6 +38,7 @@ pub fn execute(command: Command) -> Result<i32, CliError> {
             Ok(0)
         }
         Command::Init { relay } => init(&relay),
+        Command::Create { relay, team, name } => create(&relay, &team, &name),
         Command::Join { relay, name } => join(&relay, &name),
         Command::Mcp => crate::cli::mcp_stdio::run(&settings::load()?),
         Command::Run(args) => crate::cli::exec::run(&settings::load()?, args),
@@ -135,6 +137,32 @@ fn init(relay: &str) -> Result<i32, CliError> {
     Ok(0)
 }
 
+fn create(relay: &str, team: &str, name: &str) -> Result<i32, CliError> {
+    let relay = settings::normalize_url(relay)?;
+    let code = read_secret(
+        "the team code",
+        "apassy-team create --relay URL --team NAME --name NAME < team-code-file",
+    )?;
+    let edge = settings::env_secret(settings::ENV_EDGE_SECRET);
+    let client = Client::new(&relay, None, edge.as_ref());
+    let payload = body(&TeamCreateRef {
+        code: code.expose(),
+        team,
+        owner: name,
+    })?;
+    let made: TeamCreated = client.ok(Method::Post, api::paths::TEAMS, Some(&payload))?;
+    let path = settings::save(&relay, &made.secret)?;
+    println!(
+        "Created team {} ({}). You are its owner {} (member {}). Settings saved in {}.",
+        clean(team),
+        made.team_id,
+        clean(name),
+        made.member_id,
+        path.display()
+    );
+    Ok(0)
+}
+
 fn join(relay: &str, name: &str) -> Result<i32, CliError> {
     let relay = settings::normalize_url(relay)?;
     let code = read_secret(
@@ -183,16 +211,18 @@ fn member_command(settings: &Settings, command: Command) -> Result<(), CliError>
             }
             match (&me.agent_name, &me.agent_id) {
                 (Some(agent), Some(id)) => println!(
-                    "team {}: agent {} (id {}) of member {} ({})",
+                    "team {}{}: agent {} (id {}) of member {} ({})",
                     clean(&me.team),
+                    team_id_note(&me),
                     clean(agent),
                     id,
                     clean(&me.member_name),
                     role_word(me.role)
                 ),
                 _ => println!(
-                    "team {}: member {} (id {}, {})",
+                    "team {}{}: member {} (id {}, {})",
                     clean(&me.team),
+                    team_id_note(&me),
                     clean(&me.member_name),
                     me.member_id,
                     role_word(me.role)
@@ -534,11 +564,19 @@ fn member_command(settings: &Settings, command: Command) -> Result<(), CliError>
         Command::Help
         | Command::Version
         | Command::Init { .. }
+        | Command::Create { .. }
         | Command::Join { .. }
         | Command::Run(_)
         | Command::Host { .. }
         | Command::Mcp => Ok(()),
     }
+}
+
+/// ` (t_...)` after the team name, when the relay has teams.
+fn team_id_note(me: &MeView) -> String {
+    me.team_id
+        .as_ref()
+        .map_or_else(String::new, |id| format!(" ({id})"))
 }
 
 /// `item add`: checks the value, seals it with a new item key, keeps the key in

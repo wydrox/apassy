@@ -16,7 +16,8 @@ use std::time::Duration;
 
 use apassy_relay::config::{RelayConfig, UpstreamOptions};
 use apassy_relay::hostkeys::{self, Key32};
-use apassy_relay::secret::SecretString;
+use apassy_relay::ids::TeamId;
+use apassy_relay::secret::{SecretString, parse_token};
 use apassy_relay::server::{Relay, RunningRelay};
 use apassy_relay::session::SessionSource;
 use serde_json::{Value, json};
@@ -32,6 +33,8 @@ pub struct TestRelay {
     pub url: String,
     pub edge_secret: String,
     pub owner_token: String,
+    /// The team of `owner_token`.
+    pub team_id: TeamId,
     pub dir: tempfile::TempDir,
     pub config: RelayConfig,
     running: Option<RunningRelay>,
@@ -98,6 +101,23 @@ pub fn release_body(
     body
 }
 
+/// The team id in a token.
+pub fn team_of(token: &str) -> TeamId {
+    parse_token(token)
+        .and_then(|parsed| parsed.team)
+        .expect("a token with a team")
+}
+
+/// Opens the file of a team with its key, read from the directory.
+pub fn open_team_file(config: &RelayConfig, team: &TeamId) -> rusqlite::Connection {
+    let (path, key) = Relay::team_vault(config, team).expect("team vault");
+    let conn = rusqlite::Connection::open(path).expect("open vault");
+    conn.execute_batch(&format!("PRAGMA key = '{}';", key.expose()))
+        .expect("key");
+    conn.busy_timeout(Duration::from_secs(10)).expect("busy");
+    conn
+}
+
 /// A free port on 127.0.0.1: bind to port 0 and drop the listener.
 fn free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -112,7 +132,7 @@ pub fn test_config(dir: &std::path::Path, upstream: UpstreamOptions) -> RelayCon
         listen: format!("127.0.0.1:{port}").parse().expect("addr"),
         public_url: format!("http://127.0.0.1:{port}"),
         edge_secret: SecretString::new(EDGE_SECRET.to_string()),
-        vault_key: SecretString::new(VAULT_KEY.to_string()),
+        master_key: SecretString::new(VAULT_KEY.to_string()),
         session_ttl_secs: 60,
         approval_timeout_secs: 5,
         upstream,
@@ -133,6 +153,7 @@ pub fn start_with(config: impl FnOnce(&mut RelayConfig), upstream: UpstreamOptio
     TestRelay {
         url: running.url(),
         edge_secret: cfg.edge_secret.expose().to_string(),
+        team_id: team_of(owner.expose()),
         owner_token: owner.expose().to_string(),
         dir,
         config: cfg,
@@ -302,9 +323,7 @@ impl TestRelay {
         if let Some(running) = self.running.take() {
             running.stop();
         }
-        let conn = rusqlite::Connection::open(self.config.vault_path()).expect("open vault");
-        conn.execute_batch(&format!("PRAGMA key = '{VAULT_KEY}';"))
-            .expect("key");
+        let conn = open_team_file(&self.config, &self.team_id);
         conn.execute_batch(sql).expect("edit");
         drop(conn);
         self.running = Some(Relay::start(self.config.clone()).expect("restart"));
@@ -314,10 +333,7 @@ impl TestRelay {
     /// a pending run, which a test cannot wait for). The relay keeps its state, in
     /// particular the run keys.
     pub fn edit_vault_live(&self, sql: &str) {
-        let conn = rusqlite::Connection::open(self.config.vault_path()).expect("open vault");
-        conn.execute_batch(&format!("PRAGMA key = '{VAULT_KEY}';"))
-            .expect("key");
-        conn.busy_timeout(Duration::from_secs(10)).expect("busy");
+        let conn = open_team_file(&self.config, &self.team_id);
         conn.execute_batch(sql).expect("edit");
     }
 
@@ -325,10 +341,7 @@ impl TestRelay {
     /// file with the key while the relay runs.
     pub fn vault_cells(&self) -> Vec<Vec<u8>> {
         use rusqlite::types::ValueRef;
-        let conn = rusqlite::Connection::open(self.config.vault_path()).expect("open vault");
-        conn.execute_batch(&format!("PRAGMA key = '{VAULT_KEY}';"))
-            .expect("key");
-        conn.busy_timeout(Duration::from_secs(10)).expect("busy");
+        let conn = open_team_file(&self.config, &self.team_id);
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
             .expect("tables")
@@ -359,10 +372,7 @@ impl TestRelay {
     /// Two columns of a query on the vault, as bytes. Reads the file with the key.
     pub fn vault_rows(&self, sql: &str) -> Vec<(Vec<u8>, Vec<u8>)> {
         use rusqlite::types::ValueRef;
-        let conn = rusqlite::Connection::open(self.config.vault_path()).expect("open vault");
-        conn.execute_batch(&format!("PRAGMA key = '{VAULT_KEY}';"))
-            .expect("key");
-        conn.busy_timeout(Duration::from_secs(10)).expect("busy");
+        let conn = open_team_file(&self.config, &self.team_id);
         let mut statement = conn.prepare(sql).expect("prepare");
         let rows = statement
             .query_map([], |row| {
@@ -549,6 +559,51 @@ impl TestRelay {
     /// A run request of an agent. Returns the raw status and body.
     pub fn run(&self, agent_token: &str, body: &Value) -> (u16, Value) {
         self.call("POST", "/v1/runs", Some(agent_token), Some(body))
+    }
+
+    /// Points the handle at another team of the same relay: the owner token and the
+    /// team id that the shortcuts use. Returns the previous owner token.
+    pub fn switch_team(&mut self, owner_token: &str) -> String {
+        self.team_id = team_of(owner_token);
+        std::mem::replace(&mut self.owner_token, owner_token.to_string())
+    }
+
+    /// The audit of the relay (`relay.db`): actor, action, and detail of each row.
+    pub fn relay_audit(&self) -> Vec<(String, String, String)> {
+        let conn = rusqlite::Connection::open(self.config.directory_path()).expect("open relay.db");
+        conn.execute_batch(&format!("PRAGMA key = '{VAULT_KEY}';"))
+            .expect("key");
+        conn.busy_timeout(Duration::from_secs(10)).expect("busy");
+        let mut statement = conn
+            .prepare("SELECT actor, action, detail FROM audit ORDER BY id")
+            .expect("prepare");
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("rows")
+            .collect::<Result<_, _>>()
+            .expect("collect")
+    }
+
+    /// Sends a command to the operator socket of the running relay.
+    pub fn operator(
+        &self,
+        command: apassy_relay::server::operator::Command,
+    ) -> Result<Value, apassy_relay::error::RelayError> {
+        apassy_relay::server::operator::send(&self.config.admin_socket_path(), &command)
+    }
+
+    /// A new team through a team code of the operator. Returns its owner token.
+    pub fn new_team(&self, name: &str, owner: &str) -> String {
+        let code = self
+            .operator(apassy_relay::server::operator::Command::TeamCode { hours: 1 })
+            .expect("team code");
+        let made = self.ok(
+            "POST",
+            "/v1/teams",
+            "",
+            Some(&json!({"code": code["code"], "team": name, "owner": owner})),
+        );
+        made["secret"].as_str().expect("owner token").to_string()
     }
 }
 

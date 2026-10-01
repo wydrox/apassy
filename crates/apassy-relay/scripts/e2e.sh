@@ -42,7 +42,7 @@ fail() {
 
 step "Build"
 cargo build --quiet --bin apassy-relay --bin apassy-team --example e2e_relay
-BIN="$ROOT/target/debug"
+BIN="${CARGO_TARGET_DIR:-$ROOT/target}/debug"
 RELAY_BIN="$BIN/apassy-relay"
 TEAM_BIN="$BIN/apassy-team"
 E2E_BIN="$BIN/examples/e2e_relay"
@@ -89,7 +89,7 @@ stop_relay() {
 
 step "apassy-relay init and serve"
 "$RELAY_BIN" init --team e2e --owner owner >"$TMP/owner_token" 2>"$TMP/init.err"
-grep -Eq '^apassy_mbr_[0-9a-f]{64}$' "$TMP/owner_token" || fail "init did not print one owner token"
+grep -Eq '^apassy_mbr_t_[a-z2-7]{10}_[0-9a-f]{64}$' "$TMP/owner_token" || fail "init did not print one owner token"
 ok "init printed the owner token once"
 "$RELAY_BIN" serve 2>"$TMP/serve.err" &
 RELAY_PID=$!
@@ -158,7 +158,7 @@ fi
 ok "alice joined as member $MEMBER_ID; the invite code does not work twice"
 GRANT=$(owner grant --collection "$COLLECTION" --member "$MEMBER_ID")
 AGENT_TOKEN=$(member agent create alice-agent 2>/dev/null)
-case "$AGENT_TOKEN" in apassy_agt_*) ;; *) fail "agent create did not print a token" ;; esac
+case "$AGENT_TOKEN" in apassy_tagt_t_*) ;; *) fail "agent create did not print a token" ;; esac
 ok "grant $GRANT; alice made an agent token"
 agent access >"$TMP/access.out"
 grep -q STRIPE_API_KEY "$TMP/access.out" || fail "the agent does not see its items"
@@ -284,6 +284,24 @@ owner approve 1 >/dev/null 2>"$TMP/approve.err" || status=$?
 [ "$status" = 2 ] && grep -q "apassy-team host" "$TMP/approve.err" || fail "apassy-team approve: exit $status"
 ok "approve: 403 approve_on_host, and the CLI points to apassy-team host"
 
+step "A second team on the same relay"
+"$RELAY_BIN" admin team-code --hours 1 >"$TMP/team_code" 2>/dev/null
+grep -Eq '^apassy_tcd_[0-9a-f]{64}$' "$TMP/team_code" || fail "admin team-code did not print one code"
+SECOND_CFG="$TMP/second-config"
+mkdir -p "$SECOND_CFG"
+second() { XDG_CONFIG_HOME="$SECOND_CFG" APASSY_EDGE_SECRET="$EDGE" "$TEAM_BIN" "$@"; }
+second create --relay "$URL" --team second --name olga <"$TMP/team_code" >"$TMP/create.out"
+if second create --relay "$URL" --team third --name eve <"$TMP/team_code" >/dev/null 2>&1; then
+	fail "a team code worked twice"
+fi
+second me | grep -q '^team second (t_' || fail "the second owner is not in the second team"
+if second item list | grep -q STRIPE_API_KEY; then fail "the second team sees an item of the first"; fi
+owner me | grep -q '^team e2e (t_' || fail "the first owner left the first team"
+"$RELAY_BIN" admin teams >"$TMP/teams.json"
+[ "$(grep -c '"id"' "$TMP/teams.json")" = 2 ] || fail "admin teams does not list two teams"
+if grep -q -e payments -e alice -e STRIPE "$TMP/teams.json"; then fail "admin teams shows team content"; fi
+ok "admin team-code, apassy-team create, two separate teams, the operator sees no content"
+
 step "The audit and host.log hold no secret"
 owner audit --json --limit 500 >"$TMP/audit.json"
 for action in run_pending run_denied run_released session_started session_ended grant_revoked proxy_request; do
@@ -293,7 +311,8 @@ for action in run_approved run_allowed; do
 	if grep -q "\"$action\"" "$TMP/audit.json"; then fail "the audit has $action"; fi
 done
 for needle in "$STRIPE_CANARY" "$GITHUB_CANARY" "$PLACEHOLDER" "$AGENT_TOKEN" \
-	"$(cat "$TMP/owner_token")" "$(cat "$TMP/invite_code")" "$EDGE" apassy_ses_ $ITEM_KEYS; do
+	"$(cat "$TMP/owner_token")" "$(cat "$TMP/invite_code")" "$(cat "$TMP/team_code")" "$EDGE" \
+	apassy_ses_ $ITEM_KEYS; do
 	if grep -qF "$needle" "$TMP/audit.json" "$HOST_LOG"; then fail "the audit or host.log holds a secret"; fi
 done
 ok "$(grep -c '"action"' "$TMP/audit.json") audit rows and $(wc -l <"$HOST_LOG" | tr -d ' ') host.log lines, no value, placeholder, token, session key, or item key"

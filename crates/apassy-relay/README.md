@@ -8,7 +8,8 @@ This is an alpha. The design is in [docs/SPEC.md](docs/SPEC.md). It follows ADR 
 
 ## What it does
 
-- Owner, managers, and members. Members join with one-time invite codes.
+- Several teams on one relay, each in its own encrypted file with its own state. The operator gives a one-time team code; its holder creates a team (`apassy-team create`). See section 22 of the spec.
+- Owner, managers, and members in each team. Members join with one-time invite codes.
 - Collections of items. Each collection has a policy. A grant gives one member the use of one collection.
 - Each member makes agent tokens.
 - Host-held item keys. A stolen vault or backup gives only ciphertext. A relay that is taken over gets only the values of the runs that the host released while it ran.
@@ -31,20 +32,20 @@ cargo build --release --bin apassy-team
 docker build -t apassy-relay:alpha .
 ```
 
-Make a vault key and an edge secret. Keep them in files, never in a shell history:
+Make a master key and an edge secret. Keep them in files, never in a shell history:
 
 ```sh
 mkdir -p ~/.apassy-relay && chmod 700 ~/.apassy-relay
-openssl rand -hex 32 > ~/.apassy-relay/vault_key
+openssl rand -hex 32 > ~/.apassy-relay/master_key
 openssl rand -hex 32 > ~/.apassy-relay/edge_secret
 chmod 600 ~/.apassy-relay/*
 ```
 
-Create the team. This prints the owner token once:
+Create the relay and its first team. This prints the owner token once:
 
 ```sh
 docker run --rm -v apassy-relay-data:/data -v ~/.apassy-relay:/run/secrets:ro \
-  -e APASSY_RELAY_KEY_FILE=/run/secrets/vault_key \
+  -e APASSY_RELAY_KEY_FILE=/run/secrets/master_key \
   -e APASSY_RELAY_EDGE_SECRET_FILE=/run/secrets/edge_secret \
   -e APASSY_RELAY_PUBLIC_URL=http://127.0.0.1:8080 \
   apassy-relay:alpha init --team myteam --owner olga
@@ -55,7 +56,7 @@ Start it on the loopback address:
 ```sh
 docker run -d --name apassy-relay --restart unless-stopped -p 127.0.0.1:8080:8080 \
   -v apassy-relay-data:/data -v ~/.apassy-relay:/run/secrets:ro \
-  -e APASSY_RELAY_KEY_FILE=/run/secrets/vault_key \
+  -e APASSY_RELAY_KEY_FILE=/run/secrets/master_key \
   -e APASSY_RELAY_EDGE_SECRET_FILE=/run/secrets/edge_secret \
   -e APASSY_RELAY_PUBLIC_URL=http://127.0.0.1:8080 \
   apassy-relay:alpha serve

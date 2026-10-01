@@ -6,7 +6,7 @@ Design source: ADR 0013 of the core (way B only). Core crate: `wydrox/apassy` at
 ## 1. What the alpha does
 
 - A team keeps shared credentials on the relay as sealed values, in one encrypted vault. The relay never stores a readable value: the key of each item stays on the owner's host (`apassy-team host`, section 21).
-- The owner creates the team. Members join with one-time invite codes.
+- One relay holds several teams, each in its own encrypted file with its own state (section 22). The operator gives a one-time team code; its holder creates a team and is its owner. Members join with one-time invite codes.
 - Items live in collections. A collection has a policy. A grant gives one member the use of one collection.
 - A member creates agent tokens. An agent asks for a run: items, command, purpose, and the user's request.
 - The relay checks the core hard rules and runs the core command analysis. A hard-rule failure is denied at once. Every other run waits for the owner's host, with the relay's verdict (allow or ask) as a suggestion.
@@ -37,11 +37,14 @@ Design source: ADR 0013 of the core (way B only). Core crate: `wydrox/apassy` at
 - Items that are not HTTP API keys (for example a Postgres URL). An item whose value cannot get a placeholder is refused.
 - The `gh` CLI. `GH_HOST` cannot carry a path, so only `GITHUB_API_URL` is set.
 - Sessions that survive a relay restart. A restart ends every session.
-- TLS in the relay (Cloudflare ends TLS), Let's Encrypt, Docker Compose, a multi-tenant relay, several teams per relay.
+- TLS in the relay (Cloudflare ends TLS), Let's Encrypt.
+- Device keys, invite links with grants, confirmed joins, limits per team, and the owner's delete of a team (ADR 0019, stages 2 to 4). In this stage a member still signs in with a member token.
 - A key typed at start (D7 of the ADR). The key comes from a variable or a file.
 - Self-approval checks. The owner's host may release a run of the owner's own agent.
 
 ## 3. Deployment today
+
+Since 2026-10-01 the relay runs on a Linux VPS behind a named tunnel and a Workers VPC binding (OPERATIONS.md, section 16). The quick tunnel below is the first setup.
 
 ```
 agent (cloud session, CI, laptop)
@@ -119,15 +122,17 @@ From `src/config.rs` (`RelayConfig::from_env`):
 
 | Variable | Meaning | Default |
 | --- | --- | --- |
-| `APASSY_RELAY_DATA` | data dir; the vault is `<dir>/team.db` | `/data` |
+| `APASSY_RELAY_DATA` | data dir: `relay.db`, `teams/<team id>.db`, `admin.sock` (section 22) | `/data` |
 | `APASSY_RELAY_LISTEN` | listener address | `0.0.0.0:8080` |
 | `APASSY_RELAY_PUBLIC_URL` | public origin, for base URLs and the MCP `Origin` check | required |
 | `APASSY_RELAY_EDGE_SECRET` / `_FILE` | edge secret, at least 32 bytes | required |
-| `APASSY_RELAY_KEY` / `_FILE` | vault passphrase, at least 16 bytes | required |
+| `APASSY_RELAY_KEY` / `_FILE` | the master key: it opens `relay.db`, which holds the random key of each team file; at least 16 bytes | required |
 | `APASSY_RELAY_SESSION_TTL` | session lifetime, 60 to 3600 s | 900 |
 | `APASSY_RELAY_APPROVAL_TIMEOUT` | wait for the owner's host to decide a run, 30 to 86400 s | 600 |
 
 `UpstreamOptions` (extra roots, fixed addresses) is not read from the environment. Tests set it in code.
+
+`apassy-relay migrate` also reads `APASSY_RELAY_OLD_KEY` / `_FILE`: the passphrase of a `team.db` from before teams. `apassy-relay admin` reads only `APASSY_RELAY_DATA`.
 
 ## 7. Auth model
 
@@ -136,10 +141,14 @@ From `src/config.rs` (`RelayConfig::from_env`):
 
 | Kind | Prefix | Made by | Sent as | Lifetime |
 | --- | --- | --- | --- | --- |
-| Member token (owner, manager, member) | `apassy_mbr_` | `apassy-relay init` (owner), `POST /v1/join` | `Authorization: Bearer <token>` | until the member is revoked |
-| Agent token | `apassy_agt_` | `POST /v1/agents` by a member | `Authorization: Bearer <token>` | 1 to 365 days, default 30 |
+| Member token (owner, manager, member) | `apassy_mbr_` | `apassy-relay init` or `POST /v1/teams` (owner), `POST /v1/join` | `Authorization: Bearer <token>` | until the member is revoked |
+| Agent token | `apassy_tagt_` | `POST /v1/agents` by a member | `Authorization: Bearer <token>` | 1 to 365 days, default 30 |
 | Invite code | `apassy_inv_` | `POST /v1/invites` | in the body of `POST /v1/join` | one use, 1 to 168 hours, default 72 |
 | Session key | `apassy_ses_` | the relay, when the host releases a run | in the path `/p/<key>/...` | the session TTL |
+| Team code | `apassy_tcd_` | the operator, `apassy-relay admin team-code` | in the body of `POST /v1/teams` | one use, 1 to 720 hours, default 72 |
+
+- Every token of a team names its team: `<prefix><team id>_<64 hex>`, for example `apassy_mbr_t_7k2m9q4x8c_<64 hex>`. A team code names no team: `apassy_tcd_<64 hex>`. The relay reads the team id first and looks the hash up in that team's file only (section 22).
+- A member token `apassy_mbr_<64 hex>` or an agent token `apassy_agt_<64 hex>` of a relay from before teams has no team id. Only the migrated team accepts them.
 
 - A bearer with the wrong kind for an endpoint gets 401 `unauthenticated`. An expired agent token gets 401 `token_expired`.
 - Revocation works at the next request: the token hash is looked up each time, and revocation ends live sessions at once.
@@ -220,8 +229,9 @@ Item rules at `POST /v1/items`:
 | Method and path | Auth | Body | Result |
 | --- | --- | --- | --- |
 | `GET /healthz` | none | | `200 ok` (text), no envelope |
-| `GET /v1/me` | any | | `MeView` |
-| `POST /v1/join` | edge | `JoinRequest {code, name}` | `Issued {id: member id, secret: member token}` |
+| `GET /v1/me` | any | | `MeView`, with `team_id` |
+| `POST /v1/teams` | edge | `TeamCreate {code, team, owner}` | `TeamCreated {team_id, member_id, secret: owner token}`; a wrong, used, or expired code is 403 `invite_invalid`; the names are checked before the code, so a bad name does not use it |
+| `POST /v1/join` | edge | `JoinRequest {code, name}` | `Issued {id: member id, secret: member token}`; the team comes from the code |
 | `POST /v1/invites` | approver | `InviteRequest {role, expires_hours?}` | `Issued {id: invite id, secret: code, expires_at}` |
 | `GET /v1/invites` | approver | | `[InviteView]` |
 | `GET /v1/members` | approver | | `[MemberView]` |
@@ -376,11 +386,12 @@ States of a run: `pending` → `ready` → `ended`, or `pending` → `denied` / 
 `src/server/audit.rs`. Append only. No endpoint changes or deletes rows.
 
 - Actions: `team_created`, `invite_created`, `member_joined`, `member_revoked`, `collection_created`, `policy_changed`, `item_added`, `item_archived`, `grant_created`, `grant_revoked`, `agent_created`, `agent_revoked`, `run_requested`, `run_pending`, `run_released`, `run_denied`, `run_timed_out`, `run_invalidated`, `session_started`, `session_ended`, `proxy_request`, `auth_failed`. (`run_allowed` and `run_approved` of the first alpha are not written any more: no run starts without a release.)
-- Actor: `member:<id>`, `agent:<id>`, `relay`, or `edge`.
+- Actor: `member:<id>`, `agent:<id>`, `relay`, `edge`, or `operator` (section 22).
+- Each team has its own audit in its own file. A request that names no known team (no edge header, a token or session key of no live team) is written to the audit of the relay in `relay.db`, at most one row per 10 seconds for each kind, and never to a team. Operator actions are written there too, and also to the audit of the team they touch.
 - **Masking.** Before a row is written, its detail JSON text (and the run's command, purpose, user request, cwd) is masked:
   - every item value that a live session holds becomes `[apassy:<ENV_NAME>]`. The relay holds a value only while a session lives (it never stores one), so it can mask a value only for that time. The value is added to the masks when the session is made and dropped when the session ends. The CLI refuses an item whose name, provider, or host contains its value;
   - every live placeholder becomes `[apassy:<ENV_NAME>]`;
-  - every text that matches a token form (`apassy_(mbr|agt|inv|ses)_` plus 64 hex) becomes `[apassy:token]`.
+  - every text that has the shape of a token (`apassy_(mbr|tagt|agt|inv|ses|tcd)_`, then a team id and `_` or nothing, then 64 hex) becomes `[apassy:token]`.
 - A row never holds key material: no item key, no sealed text, no `run_key`, `host_key`, `nonce`, or `sealed_keys`. `run_released` names the run and the item ids.
 - A test puts canary values, placeholders, and tokens into every free-text field (purpose, user request, command, reasons) while a session holds the values, and checks that no audit row and no API response except the one that issues the secret holds them, and that no row holds key material.
 
@@ -435,8 +446,9 @@ Commands. A secret (member token, invite code, item value) is read from stdin, n
 | Command | Does |
 | --- | --- |
 | `init --relay URL` | reads a member token (the owner token from `apassy-relay init`) from stdin, checks `GET /v1/me`, writes the settings file |
+| `create --relay URL --team NAME --name NAME` | reads a team code of the operator from stdin, `POST /v1/teams`, writes the settings file with the owner token of the new team |
 | `join --relay URL --name NAME` | reads the invite code from stdin, `POST /v1/join`, writes the settings file with the new token |
-| `me` | `GET /v1/me` |
+| `me` | `GET /v1/me`; prints the team id after the team name |
 | `invite [--role member\|manager] [--hours N]` | prints the code once on stdout |
 | `members`, `member revoke ID` | list, revoke |
 | `collection create NAME [policy flags]`, `collection list`, `collection policy ID [policy flags]` | policy flags: `--mode ask\|bouncer`, `--allow-prefix P` (repeat), `--forbid WORD` (repeat), `--max-runs-per-hour N`, `--instruction TEXT`, `--rule-expires-at UNIX` |
@@ -520,7 +532,7 @@ Plain short sentences. Sections:
 1. What runs where (the diagram of section 3).
 2. Secrets: make the vault key and the edge secret with `openssl rand -hex 32` into files in `~/.apassy-relay/` (mode 0600). Never in a shell history or a repo.
 3. Build the image: `docker build -t apassy-relay:alpha .`.
-4. Create the team: `docker run --rm -v apassy-relay-data:/data -v ~/.apassy-relay:/run/secrets:ro -e APASSY_RELAY_KEY_FILE=/run/secrets/vault_key -e APASSY_RELAY_EDGE_SECRET_FILE=/run/secrets/edge_secret -e APASSY_RELAY_PUBLIC_URL=https://apassy-relay.wyderka.cc apassy-relay:alpha init --team <name> --owner <name>`. It prints the owner token once.
+4. Create the relay and its first team: `docker run --rm -v apassy-relay-data:/data -v ~/.apassy-relay:/run/secrets:ro -e APASSY_RELAY_KEY_FILE=/run/secrets/master_key -e APASSY_RELAY_EDGE_SECRET_FILE=/run/secrets/edge_secret -e APASSY_RELAY_PUBLIC_URL=https://apassy-relay.wyderka.cc apassy-relay:alpha init --team <name> --owner <name>`. It prints the owner token once.
 5. Start: the same with `-d --name apassy-relay --restart unless-stopped -p 127.0.0.1:8080:8080` and `serve`.
 6. Tunnel: `cloudflared tunnel --url http://127.0.0.1:8080`. Copy the `trycloudflare.com` URL into the Worker var `RELAY_ORIGIN`. The URL changes at each cloudflared restart; then the Worker needs the new URL and a deploy. Errors 1016 and 530 mean the tunnel is down or the URL is old.
 7. Worker: the var, the secret `EDGE_SECRET` (the same text as the edge secret file), the custom domain. Who deploys.
@@ -644,3 +656,54 @@ Every request is one JSON line in `host.log` next to `keys.json` (mode 0600): ti
 - A relay that is taken over can make up a run (it needs no agent). The host cannot tell a made-up run from a real one. It asks the owner for everything except a known-safe command with a non-production item, which it releases by itself. One release is enough to learn a value, so a taken-over relay can get the value of any non-production item on the host; `--auto-limit` only caps how often it happens without a person, and the owner sees every release in `host.log`. Production items always ask. `--ask-all`, or `--auto-limit 0`, makes the host ask every time.
 - The host cannot check the hosts that the relay stores for an item: a relay that holds the keys of a run can send the values where it likes.
 - A manager can add an item on the relay. It has no key on the owner's host, so every run with it is denied there ("Unknown item on this host.").
+
+## 22. Teams
+
+ADR 0019 of the core, stage 1. One relay holds several teams. Separation is by file and by state, not by a column.
+
+**Files.** The data directory has:
+
+| File | What | Key |
+| --- | --- | --- |
+| `relay.db` | the directory: each team's id, name, state (`active` or `suspended`), the random key of its file, and a `legacy` flag; the team codes (hash, expiry, use); the audit of the relay. No people, no items, no runs. `user_version` 1001 | the master key (`APASSY_RELAY_KEY`) |
+| `teams/<team id>.db` | one team: the schema of section 8, unchanged (`user_version` 2) | its own random 256-bit key, kept in `relay.db` |
+| `admin.sock` | the operator socket, mode 0600 | none; file mode only |
+
+- A team id is `t_` and 10 characters of lowercase base32 (`a-z`, `2-7`), random, and public. Ids inside a team file (member 1, item 1, run 1) are local to that team and repeat between teams.
+- `apassy-relay init --team T --owner O` makes `relay.db` and one team. `apassy-relay init` alone makes `relay.db` with no team. Both refuse when the data directory has a relay or a `team.db`.
+
+**State.** Each active team has its own `Core` in memory: its file, its audit writer and masks, its session table, its run keys, its notifier, its long polls, and its limiter of refused requests. No map spans teams. The hub (`src/server/hub.rs`) keeps the active teams by id.
+
+**Routing.** For each request, after the edge check:
+
+1. `/p/<session key>/...`: the team id in the session key picks the team; that team's session table looks the key up. A key with another team's id finds nothing (`session_invalid`).
+2. `POST /v1/teams`: no team yet (below).
+3. `POST /v1/join`: the team id in the invite code picks the team.
+4. Every other endpoint: the team id in the bearer token picks the team, then the token hash is looked up in that team's file only. A token of an unknown or suspended team, and a token moved to another team, get the same 401 `unauthenticated` as an unknown token.
+
+No endpoint takes a team id in the path.
+
+**New team.** `POST /v1/teams {code, team, owner}`. The names are checked first. In one transaction of `relay.db`: the code is checked (live, not used); the team file is made with its team row, its owner, and a `team_created` row; the code is marked used; the team row is added. A failure removes the file and keeps the code. Then the team is opened.
+
+**Operator.** `apassy-relay admin` sends one JSON line to `admin.sock` of the running relay and prints the answer. There is no operator endpoint on HTTP.
+
+| Command | Does |
+| --- | --- |
+| `team-code [--hours N]` | a one-time team code, printed once on stdout (1 to 720 hours, default 72) |
+| `teams` | id, name, state, legacy, created, suspended, and for an active team the counts of live members, items, and agents and the time of its last audit row. No names of members or items, no runs, no audit |
+| `suspend ID` | the team's state becomes `suspended`; a row `team_suspended` (actor `operator`) in its audit; its sessions end, its run keys go, its long polls wake, and it leaves the hub: its tokens fail at the next request |
+| `resume ID` | opens the team again (a restart for that team: `ready` runs become `ended`); a row `team_resumed` |
+| `delete ID` | only a suspended team: removes its row and file key from `relay.db`, then its file. No undo |
+
+**Proxy addresses.** The proxy connects only to public addresses: after DNS it drops loopback, private, link-local, CGNAT, unique-local, multicast, documentation, benchmark, reserved, and unspecified addresses, and IPv6 forms that carry such an IPv4 address. A host with no public address fails with 502 `upstream_failed`. A team cannot reach the relay's machine or its networks.
+
+**Migration.** `apassy-relay migrate` moves a relay from before teams (one `team.db`, keyed with `APASSY_RELAY_OLD_KEY`):
+
+1. Refuses if `relay.db` exists, if there is no `team.db`, or if `team.db.pre-teams` exists. Opens `team.db` with the old key and checks its version (version 1 is refused as in section 8).
+2. Copies it to `teams/<new id>.db.migrating`, gives the copy a new random key (`PRAGMA rekey`), and checks that the copy opens with the new key and not with the old one.
+3. Makes `relay.db` with the master key, with the team marked `legacy`.
+4. Renames the copy to `teams/<id>.db`, and `team.db` to `team.db.pre-teams` (it opens with the old key only).
+
+Any failure removes what it made and leaves `team.db` as it was. Member and agent tokens without a team id keep working for the legacy team; new tokens of that team name it.
+
+**What this does not protect.** The master key and every team file are on the same machine: the operator, root, or a disk snapshot can open every team's metadata. Item values stay sealed (section 21). All teams share one process. There are no limits per team yet.

@@ -210,6 +210,57 @@ fn join_sends_the_code_without_a_bearer_and_saves_the_new_token() {
 }
 
 #[test]
+fn create_sends_the_team_code_without_a_bearer_and_saves_the_owner_token() {
+    let code_text = format!("apassy_tcd_{}", "4".repeat(64));
+    let mock = Mock::always(
+        200,
+        json!({"team_id": "t_abcdefgh23", "member_id": 1, "secret": MEMBER_TOKEN}),
+    );
+    let cli = Cli::new().with("APASSY_EDGE_SECRET", EDGE);
+    let output = cli.run(
+        &[
+            "create", "--relay", &mock.url, "--team", "Family", "--name", "rafal",
+        ],
+        Some(&format!("{code_text}\n")),
+    );
+    assert_eq!(code(&output), 0, "{}", text(&output.stderr));
+    let seen = mock.requests();
+    assert_eq!(
+        (seen[0].method.as_str(), seen[0].url.as_str()),
+        ("POST", "/v1/teams")
+    );
+    assert_eq!(seen[0].header("authorization"), None);
+    assert_eq!(seen[0].header("x-apassy-edge"), Some(EDGE));
+    assert_eq!(
+        seen[0].json(),
+        json!({"code": code_text, "team": "Family", "owner": "rafal"})
+    );
+    let saved: Value =
+        serde_json::from_str(&std::fs::read_to_string(cli.settings_file()).unwrap()).unwrap();
+    assert_eq!(saved["member_token"], MEMBER_TOKEN);
+    let printed = format!("{}{}", text(&output.stdout), text(&output.stderr));
+    assert!(printed.contains("t_abcdefgh23"), "{printed}");
+    assert!(!printed.contains(MEMBER_TOKEN) && !printed.contains(&code_text));
+    // A refused code writes nothing.
+    let refused = Mock::start(|_, _| err(403, "invite_invalid", "The team code is not valid."));
+    let other = Cli::new();
+    let output = other.run(
+        &[
+            "create",
+            "--relay",
+            &refused.url,
+            "--team",
+            "Family",
+            "--name",
+            "rafal",
+        ],
+        Some(&code_text),
+    );
+    assert_eq!(code(&output), 4);
+    assert!(!other.settings_file().exists());
+}
+
+#[test]
 fn a_refused_invite_writes_nothing() {
     let mock = Mock::start(|_, _| err(403, "invite_invalid", "The invite code is not valid."));
     let cli = Cli::new();

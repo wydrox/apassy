@@ -25,6 +25,11 @@ const VALUE_B: &str = "ghp_SyntheticCanaryValueForGithub0123456789abcdefgh";
 const VALUE_Q: &str = "sk_test_51Synthetic/Canary+Value=0123456789abcdefABCDEF";
 const RELAY_HEADER: &str = "X-Apassy-Relay";
 
+/// The team of the sessions of these tests.
+fn team() -> apassy_relay::ids::TeamId {
+    apassy_relay::ids::TeamId::parse("t_proxytest2").unwrap()
+}
+
 /// `%XX` escapes decoded, for the tests.
 fn percent_decode(text: &str) -> String {
     let bytes = text.as_bytes();
@@ -120,8 +125,14 @@ impl Harness {
         let placeholder_a = secrets[0].placeholder.expose().to_owned();
         let placeholder_b = secrets[1].placeholder.expose().to_owned();
         let placeholder_q = secrets[2].placeholder.expose().to_owned();
-        let key = new_token(TokenKind::Session).unwrap().expose().to_owned();
-        let expired_key = new_token(TokenKind::Session).unwrap().expose().to_owned();
+        let key = new_token(TokenKind::Session, &team())
+            .unwrap()
+            .expose()
+            .to_owned();
+        let expired_key = new_token(TokenKind::Session, &team())
+            .unwrap()
+            .expose()
+            .to_owned();
         for (session_key, id, expires_at) in [
             (&key, 1u64, now() + 3600),
             (&expired_key, 2, now().saturating_sub(1)),
@@ -129,6 +140,7 @@ impl Harness {
             sessions.sessions.lock().unwrap().insert(
                 session_key.clone(),
                 Arc::new(LiveSession {
+                    team: team(),
                     id: SessionId(id),
                     run_id: RunId(10 + id),
                     agent_id: AgentId(20 + id),
@@ -184,8 +196,19 @@ impl Harness {
         self.send("GET", path, headers, b"")
     }
 
+    /// The events so far. The proxy records an event after it has answered, so this
+    /// waits until no new event has come for a moment (at most 2 seconds).
     fn events(&self) -> Vec<ProxyEvent> {
-        self.sessions.events.lock().unwrap().clone()
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut seen = self.sessions.events.lock().unwrap().len();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let now = self.sessions.events.lock().unwrap().len();
+            if now == seen || std::time::Instant::now() > deadline {
+                return self.sessions.events.lock().unwrap().clone();
+            }
+            seen = now;
+        }
     }
 
     /// The last event. The proxy records an event after it has answered, so a test
@@ -697,8 +720,8 @@ fn a_host_that_is_not_in_the_session_is_refused() {
 #[test]
 fn an_unknown_expired_or_malformed_key_is_session_invalid() {
     let h = Harness::new();
-    let unknown = new_token(TokenKind::Session).unwrap();
-    let wrong_kind = new_token(TokenKind::Agent).unwrap();
+    let unknown = new_token(TokenKind::Session, &team()).unwrap();
+    let wrong_kind = new_token(TokenKind::Agent, &team()).unwrap();
     for key in [
         unknown.expose().to_owned(),
         h.expired_key.clone(),

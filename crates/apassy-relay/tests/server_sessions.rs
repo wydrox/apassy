@@ -331,6 +331,7 @@ fn record_writes_a_proxy_request_row_with_no_secret() {
     let source = relay.sessions();
     let now = now_unix();
     source.record(ProxyEvent {
+        team: Some(relay.team_id.clone()),
         session_id: Some(SessionId(1)),
         run_id: Some(RunId(run)),
         agent_id: Some(AgentId(team.agent_id)),
@@ -343,7 +344,9 @@ fn record_writes_a_proxy_request_row_with_no_secret() {
         code: None,
         swapped: vec!["STRIPE_API_KEY".into()],
     });
+    // A refused request in the team (a session of the team, then a bad host).
     source.record(ProxyEvent {
+        team: Some(relay.team_id.clone()),
         session_id: None,
         run_id: None,
         agent_id: None,

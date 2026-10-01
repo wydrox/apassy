@@ -56,16 +56,15 @@ fn edge_refusals_leave_at_most_one_audit_row_and_no_secret() {
     for _ in 0..8 {
         relay.call_no_edge("GET", "/v1/me");
     }
+    // A request without the edge header names no team: it goes to the audit of the
+    // relay, at most one row, and never to a team.
     let audit = relay.ok("GET", "/v1/audit", &relay.owner_token, None);
-    let rows: Vec<_> = audit
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|row| row["actor"] == "edge")
-        .collect();
-    assert_eq!(rows.len(), 1, "{audit}");
-    assert_eq!(rows[0]["action"], "auth_failed");
-    assert!(!audit.to_string().contains(&relay.edge_secret));
+    assert!(!audit.to_string().contains("\"actor\":\"edge\""), "{audit}");
+    let rows = relay.relay_audit();
+    let edge: Vec<_> = rows.iter().filter(|r| r.0 == "edge").collect();
+    assert_eq!(edge.len(), 1, "{rows:?}");
+    assert_eq!(edge[0].1, "auth_failed");
+    assert!(!format!("{rows:?}").contains(&relay.edge_secret));
 }
 
 #[test]
@@ -575,7 +574,7 @@ fn agent_lifetime_is_1_to_365_days() {
         default["secret"]
             .as_str()
             .unwrap()
-            .starts_with("apassy_agt_")
+            .starts_with("apassy_tagt_t_")
     );
     relay.fails(
         "POST",

@@ -16,7 +16,7 @@ use apassy::vault::ExecRule;
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{
-    AgentId, AuditId, CollectionId, GrantId, InviteId, ItemId, MemberId, RunId, SessionId,
+    AgentId, AuditId, CollectionId, GrantId, InviteId, ItemId, MemberId, RunId, SessionId, TeamId,
 };
 use crate::secret::SecretString;
 
@@ -48,6 +48,7 @@ pub mod paths {
     pub const HEALTH: &str = "/healthz";
     pub const ME: &str = "/v1/me";
     pub const JOIN: &str = "/v1/join";
+    pub const TEAMS: &str = "/v1/teams";
     pub const INVITES: &str = "/v1/invites";
     pub const MEMBERS: &str = "/v1/members";
     pub const COLLECTIONS: &str = "/v1/collections";
@@ -94,6 +95,9 @@ pub enum PrincipalKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MeView {
     pub team: String,
+    /// The public id of the team (ADR 0019). `None` from a relay before teams.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_id: Option<TeamId>,
     pub kind: PrincipalKind,
     pub member_id: MemberId,
     pub member_name: String,
@@ -135,6 +139,43 @@ pub struct IssuedRef<'a> {
     pub secret: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<u64>,
+}
+
+/// `POST /v1/teams` (no bearer; edge secret only): a one-time team code of the
+/// operator makes a new team and its owner. Read side.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TeamCreate {
+    pub code: SecretString,
+    /// The team name. 1 to 64 bytes, no control character.
+    pub team: String,
+    /// The owner's member name. 1 to 64 bytes, letters, digits, `.-_`.
+    pub owner: String,
+}
+
+/// Write side of `TeamCreate`.
+#[derive(Debug, Serialize)]
+pub struct TeamCreateRef<'a> {
+    pub code: &'a str,
+    pub team: &'a str,
+    pub owner: &'a str,
+}
+
+/// The result of `POST /v1/teams`. Read side.
+#[derive(Debug, Deserialize)]
+pub struct TeamCreated {
+    pub team_id: TeamId,
+    pub member_id: MemberId,
+    /// The owner token. Shown once.
+    pub secret: SecretString,
+}
+
+/// Write side of `TeamCreated`.
+#[derive(Debug, Serialize)]
+pub struct TeamCreatedRef<'a> {
+    pub team_id: &'a TeamId,
+    pub member_id: MemberId,
+    pub secret: &'a str,
 }
 
 /// `POST /v1/join` (no bearer; edge secret only). Read side.

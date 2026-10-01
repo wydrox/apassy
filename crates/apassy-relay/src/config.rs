@@ -2,11 +2,11 @@
 //!
 //! | Variable | Meaning | Default |
 //! | --- | --- | --- |
-//! | `APASSY_RELAY_DATA` | Data directory; the vault is `<dir>/team.db` | `/data` |
+//! | `APASSY_RELAY_DATA` | Data directory: `relay.db`, `teams/<team id>.db`, `admin.sock` | `/data` |
 //! | `APASSY_RELAY_LISTEN` | Address of the plain HTTP listener | `0.0.0.0:8080` |
 //! | `APASSY_RELAY_PUBLIC_URL` | The public `https://` origin, no trailing slash | required |
 //! | `APASSY_RELAY_EDGE_SECRET` or `APASSY_RELAY_EDGE_SECRET_FILE` | The secret the Worker adds as `X-Apassy-Edge`; at least 32 bytes | required |
-//! | `APASSY_RELAY_KEY` or `APASSY_RELAY_KEY_FILE` | The passphrase of the team vault; at least 16 bytes | required |
+//! | `APASSY_RELAY_KEY` or `APASSY_RELAY_KEY_FILE` | The master key: it opens `relay.db`, which holds the key of each team file; at least 16 bytes | required |
 //! | `APASSY_RELAY_SESSION_TTL` | Seconds a proxy session lives; 60 to 3600 | `900` |
 //! | `APASSY_RELAY_APPROVAL_TIMEOUT` | Seconds a run waits for the owner's host; 30 to 86400 | `600` |
 //!
@@ -25,8 +25,15 @@ pub const MIN_KEY_BYTES: usize = 16;
 pub const DEFAULT_SESSION_TTL_SECS: u64 = 900;
 pub const MAX_SESSION_TTL_SECS: u64 = 3600;
 pub const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 600;
-/// The file name of the team vault in the data directory.
-pub const VAULT_FILE: &str = "team.db";
+/// The directory of the relay in the data directory: the teams and their keys.
+pub const DIRECTORY_FILE: &str = "relay.db";
+/// The folder of the team files in the data directory.
+pub const TEAMS_DIR: &str = "teams";
+/// The one team vault of a relay from before teams (ADR 0019). `apassy-relay migrate`
+/// moves it into `teams/`.
+pub const LEGACY_VAULT_FILE: &str = "team.db";
+/// The Unix socket of the operator in the data directory.
+pub const ADMIN_SOCKET: &str = "admin.sock";
 
 /// How the proxy reaches upstream hosts.
 #[derive(Debug, Clone)]
@@ -85,7 +92,9 @@ pub struct RelayConfig {
     /// For example `https://apassy-relay.wyderka.cc`. Base URLs start with it.
     pub public_url: String,
     pub edge_secret: SecretString,
-    pub vault_key: SecretString,
+    /// Opens the directory `relay.db`. Each team file has its own random key, kept in
+    /// the directory.
+    pub master_key: SecretString,
     pub session_ttl_secs: u64,
     pub approval_timeout_secs: u64,
     pub upstream: UpstreamOptions,
@@ -93,8 +102,26 @@ pub struct RelayConfig {
 }
 
 impl RelayConfig {
-    pub fn vault_path(&self) -> PathBuf {
-        self.data_dir.join(VAULT_FILE)
+    pub fn directory_path(&self) -> PathBuf {
+        self.data_dir.join(DIRECTORY_FILE)
+    }
+
+    pub fn teams_dir(&self) -> PathBuf {
+        self.data_dir.join(TEAMS_DIR)
+    }
+
+    /// The file of one team.
+    pub fn team_path(&self, team: &crate::ids::TeamId) -> PathBuf {
+        self.teams_dir().join(format!("{team}.db"))
+    }
+
+    /// The vault of a relay from before teams.
+    pub fn legacy_vault_path(&self) -> PathBuf {
+        self.data_dir.join(LEGACY_VAULT_FILE)
+    }
+
+    pub fn admin_socket_path(&self) -> PathBuf {
+        self.data_dir.join(ADMIN_SOCKET)
     }
 
     /// Reads the process environment.
@@ -120,10 +147,10 @@ impl RelayConfig {
                 "The edge secret must have at least {MIN_EDGE_SECRET_BYTES} bytes."
             )));
         }
-        let vault_key = secret_from(&lookup, "APASSY_RELAY_KEY")?;
-        if vault_key.len() < MIN_KEY_BYTES {
+        let master_key = secret_from(&lookup, "APASSY_RELAY_KEY")?;
+        if master_key.len() < MIN_KEY_BYTES {
             return Err(RelayError::invalid(format!(
-                "The vault key must have at least {MIN_KEY_BYTES} bytes."
+                "The master key must have at least {MIN_KEY_BYTES} bytes."
             )));
         }
         let session_ttl_secs = number(
@@ -145,7 +172,7 @@ impl RelayConfig {
             listen,
             public_url,
             edge_secret,
-            vault_key,
+            master_key,
             session_ttl_secs,
             approval_timeout_secs,
             upstream: UpstreamOptions::default(),
@@ -169,6 +196,15 @@ pub fn checked_public_url(text: &str) -> RelayResult<String> {
         ));
     }
     Ok(trimmed.to_string())
+}
+
+/// The key of the vault from before teams, for `apassy-relay migrate`:
+/// `APASSY_RELAY_OLD_KEY` or `APASSY_RELAY_OLD_KEY_FILE`.
+pub fn old_key_from_env() -> RelayResult<SecretString> {
+    secret_from(
+        &|name: &str| std::env::var(name).ok(),
+        "APASSY_RELAY_OLD_KEY",
+    )
 }
 
 fn secret_from(lookup: &impl Fn(&str) -> Option<String>, name: &str) -> RelayResult<SecretString> {
@@ -228,7 +264,13 @@ mod tests {
         .unwrap();
         assert_eq!(config.public_url, "https://relay.example.test");
         assert_eq!(config.listen.to_string(), "0.0.0.0:8080");
-        assert_eq!(config.vault_path(), PathBuf::from("/data/team.db"));
+        assert_eq!(config.directory_path(), PathBuf::from("/data/relay.db"));
+        assert_eq!(config.legacy_vault_path(), PathBuf::from("/data/team.db"));
+        let team = crate::ids::TeamId::parse("t_abcdefgh23").unwrap();
+        assert_eq!(
+            config.team_path(&team),
+            PathBuf::from("/data/teams/t_abcdefgh23.db")
+        );
         assert_eq!(config.session_ttl_secs, DEFAULT_SESSION_TTL_SECS);
         assert_eq!(config.edge_secret.expose(), EDGE);
     }
@@ -264,6 +306,6 @@ mod tests {
             ("APASSY_RELAY_KEY_FILE", path.to_str().unwrap()),
         ]))
         .unwrap();
-        assert_eq!(config.vault_key.expose(), "passphrase from a file");
+        assert_eq!(config.master_key.expose(), "passphrase from a file");
     }
 }

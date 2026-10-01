@@ -29,21 +29,23 @@ upstream API hosts (api.stripe.com, api.openai.com, ...)
 
 ## 2. Secrets
 
-The relay needs two secrets: the vault key and the edge secret. Make them with `openssl rand -hex 32`, into files that only you can read:
+The relay needs two secrets: the master key and the edge secret. Make them with `openssl rand -hex 32`, into files that only you can read:
 
 ```sh
 mkdir -p ~/.apassy-relay && chmod 700 ~/.apassy-relay
-openssl rand -hex 32 > ~/.apassy-relay/vault_key
+openssl rand -hex 32 > ~/.apassy-relay/master_key
 openssl rand -hex 32 > ~/.apassy-relay/edge_secret
-chmod 600 ~/.apassy-relay/vault_key ~/.apassy-relay/edge_secret
+chmod 600 ~/.apassy-relay/master_key ~/.apassy-relay/edge_secret
 ```
 
+The examples below use `master_key` as the file name.
+
 - Never put a secret in a shell history, a repo, or an image.
-- The vault key opens the vault. If you lose it, the vault is lost. Back it up somewhere apart from the vault backup.
+- The master key opens `relay.db`, which holds the random key of each team file (section 17). If you lose it, every team is lost. Back it up somewhere apart from the vault backup.
 - The edge secret must be the same text in the relay and in the Worker.
 - Keep the folder under your home folder. Colima shares only the home folder with its VM. A folder in `/tmp` shows up empty in the container, and the relay then says it cannot read the file.
 - Every secret the CLI needs (a member token, an invite code, an item value) is read from stdin. The CLI refuses to read it from a terminal.
-- The vault holds only sealed item values, so the vault key protects less than before: a stolen vault or backup gives only ciphertext. The item keys are in `keys.json` on the owner's Mac (section 9). Back that file up apart from the vault.
+- The vault holds only sealed item values, so the master key protects less than before: a stolen vault or backup gives only ciphertext. The item keys are in `keys.json` on each owner's machine (section 9). Back that file up apart from the vault.
 
 ## 3. Build the image
 
@@ -59,13 +61,13 @@ docker buildx build --platform linux/amd64 -t apassy-relay:alpha-amd64 .
 
 The image holds two programs: `apassy-relay` (the entry point) and `apassy-team`. It runs as user 10001 and keeps its data in the volume `/data`.
 
-## 4. Create the team
+## 4. Create the relay and the first team
 
-Run this once. It creates the vault, the team, and the owner. It prints the owner token once. Copy the token into `~/.apassy-relay/owner_token.txt` at once (mode 0600). The file must hold only the token.
+Run this once. It creates the directory `relay.db`, the first team, and its owner. It prints the owner token once. Copy the token into `~/.apassy-relay/owner_token.txt` at once (mode 0600). The file must hold only the token. More teams come later from team codes (section 17). Without `--team` and `--owner`, `init` makes a relay with no team.
 
 ```sh
 docker run --rm -v apassy-relay-data:/data -v ~/.apassy-relay:/run/secrets:ro \
-  -e APASSY_RELAY_KEY_FILE=/run/secrets/vault_key \
+  -e APASSY_RELAY_KEY_FILE=/run/secrets/master_key \
   -e APASSY_RELAY_EDGE_SECRET_FILE=/run/secrets/edge_secret \
   -e APASSY_RELAY_PUBLIC_URL=https://apassy-relay.wyderka.cc \
   apassy-relay:alpha init --team <name> --owner <name>
@@ -73,7 +75,7 @@ docker run --rm -v apassy-relay-data:/data -v ~/.apassy-relay:/run/secrets:ro \
 
 `APASSY_RELAY_PUBLIC_URL` is the URL that agents use. The relay puts it in the base URLs of a session. If it is wrong, agents get wrong base URLs.
 
-If the volume already holds a team, `init` refuses.
+If the volume already holds a relay, or a `team.db` from before teams, `init` refuses.
 
 ## 5. Start
 
@@ -82,7 +84,7 @@ The same command, with `-d --name apassy-relay --restart unless-stopped -p 127.0
 ```sh
 docker run -d --name apassy-relay --restart unless-stopped -p 127.0.0.1:8080:8080 \
   -v apassy-relay-data:/data -v ~/.apassy-relay:/run/secrets:ro \
-  -e APASSY_RELAY_KEY_FILE=/run/secrets/vault_key \
+  -e APASSY_RELAY_KEY_FILE=/run/secrets/master_key \
   -e APASSY_RELAY_EDGE_SECRET_FILE=/run/secrets/edge_secret \
   -e APASSY_RELAY_PUBLIC_URL=https://apassy-relay.wyderka.cc \
   apassy-relay:alpha serve
@@ -311,16 +313,16 @@ The audit records team changes, runs, decisions, sessions, and proxy requests. I
 
 ## 13. Backup
 
-The vault is one file, `team.db`, in the volume `/data`. To back it up:
+The vault is `relay.db` and the folder `teams/` in the volume `/data`. Back them up together, with the relay stopped:
 
 ```sh
 docker stop apassy-relay
 docker run --rm -v apassy-relay-data:/data:ro -v "$PWD":/backup debian:trixie-slim \
-  cp /data/team.db /backup/team.db
+  sh -c 'cp /data/relay.db /backup/ && cp -r /data/teams /backup/'
 docker start apassy-relay
 ```
 
-The file is encrypted with the vault key, and it holds no readable value: each item is sealed, and its key is not on the relay. Keep the vault key apart from the backup. To restore, copy the file into a fresh volume with the same key.
+`relay.db` is encrypted with the master key, and holds the key of each team file. Each team file is encrypted with its own key and holds no readable value: each item is sealed, and its key is not on the relay. Keep the master key apart from the backup. To restore, copy both into a fresh volume and start with the same master key. A backup of `relay.db` can open the teams of that time for as long as you keep it and the master key: a team that you delete later stays in old backups.
 
 Also back up `keys.json` on the owner's Mac (`~/.config/apassy-team/keys.json`, or under `$XDG_CONFIG_HOME`). It is plain text in the alpha, so keep the copy private and apart from the vault backup. Losing it means adding the items again. With the vault backup alone nobody can read a value, and with `keys.json` alone nobody can open anything.
 
@@ -337,7 +339,7 @@ A revocation works at the next request. The relay looks up each token every time
 
 To rotate a credential, archive the item and add a new one (`item add` makes a new key). There is no edit in the alpha.
 
-To rotate the edge secret, change the file, restart the container, and run `wrangler secret put EDGE_SECRET` with the new text. The vault key cannot be rotated in the alpha.
+To rotate the edge secret, change the file, restart the container, and run `wrangler secret put EDGE_SECRET` with the new text. The master key cannot be rotated in the alpha.
 
 ## 15. Limits and what this does not protect
 
@@ -383,8 +385,8 @@ agent ──HTTPS──▶ Worker apassy-relay.wyderka.cc   adds X-Apassy-Edge
 | --- | --- |
 | Compose project | `apassy` in `/opt/apassy`, a copy of `deploy/vps/compose.yaml` |
 | Image | `apassy-relay:host-keys-<commit>`, built on the VPS from `git archive` of that commit |
-| Data | the volume `apassy-relay-data`, file `team.db` (owner 10001, mode 0600) |
-| Relay secrets | `/opt/apassy/secrets/relay/vault_key` and `edge_secret`, owner 10001, mode 0400 |
+| Data | the volume `apassy-relay-data`: `relay.db` and `teams/` (owner 10001, mode 0600 and 0700) |
+| Relay secrets | `/opt/apassy/secrets/relay/master_key` and `edge_secret`, owner 10001, mode 0400. `vault_key` is the key of the old `team.db.pre-teams` only |
 | Tunnel token | `/opt/apassy/secrets/tunnel/token`, owner 65532 (cloudflared), mode 0400 |
 | Tunnel | `apassy-relay`, id `044bd7e2-2257-4927-925b-f1f8c0796700` |
 | VPC service | `apassy-relay`, id `01a0f70c-70ec-7882-9121-853d63b9eece`: host `relay`, HTTP port 8080 |
@@ -414,10 +416,63 @@ ssh ottervibe 'cd /opt/apassy && docker compose up -d --wait'
 
 A restart ends every session (section 5).
 
-Back up the vault as in section 13, with the project stopped: `docker compose stop relay`, then copy `team.db` out of `apassy-relay-data`, then `docker compose start relay`.
+Back up the vault as in section 13, with the project stopped: `docker compose stop relay`, then copy `relay.db` and `teams/` out of `apassy-relay-data`, then `docker compose start relay`.
+
+The operator commands of section 17 run in the container:
+
+```sh
+ssh ottervibe 'cd /opt/apassy && docker compose exec relay apassy-relay admin teams'
+```
 
 Go back to the Mac:
 
 1. On the VPS: `docker compose stop relay`. Copy `team.db` to the Mac volume if the VPS changed it.
 2. On the Mac: start the container and a quick tunnel (sections 5 and 6).
 3. In `deploy/worker/wrangler.jsonc`, remove `vpc_services` and set `RELAY_ORIGIN` to the tunnel URL. Then `wrangler deploy`.
+
+## 17. Teams
+
+One relay holds several teams (ADR 0019 of the core). Each team is its own file in `teams/`, with its own key, its own audit, and its own sessions. A token, an invite code, and a session key name their team (`apassy_mbr_t_7k2m9q4x8c_...`), and the relay looks a token up only in that team. People in one team cannot see another team, and the same person in two teams is two members.
+
+The operator works on the server, with `apassy-relay admin` in the container. It talks to the running relay through `admin.sock` in the data directory. There is no operator page or endpoint.
+
+**A new team.** The operator makes a one-time team code and gives it to the future owner, like a password:
+
+```sh
+docker compose exec relay apassy-relay admin team-code --hours 72 > team-code-file
+```
+
+The code is printed once. The future owner creates the team. It becomes the owner, and the settings are saved like `init` does:
+
+```sh
+apassy-team create --relay https://apassy-relay.wyderka.cc --team "Family" --name rafal < team-code-file
+apassy-team me          # team Family (t_...): member rafal (id 1, owner)
+```
+
+A code works once. A typo in a name does not use it. The owner then invites members (section 9) and runs `apassy-team host` for the team's items (section 11). A host serves the team of its owner token.
+
+**The teams.** `admin teams` lists each team: id, name, state, and for an active team the number of members, items, and agents, and the time of its last audit row. It shows no names of people or items, no runs, and no audit.
+
+**Suspend, resume, delete.**
+
+```sh
+docker compose exec relay apassy-relay admin suspend t_7k2m9q4x8c
+docker compose exec relay apassy-relay admin resume t_7k2m9q4x8c
+docker compose exec relay apassy-relay admin delete t_7k2m9q4x8c   # only a suspended team; no undo
+```
+
+A suspended team's tokens fail at the next request; its sessions and waiting runs end. Each action is a row in the audit of the team (actor `operator`) and of the relay. Delete removes the team's key from `relay.db` and its file. Old backups still hold both (section 13).
+
+**What the operator can see.** The master key and every team file are on the same machine. The operator, root on the VPS, or a disk snapshot can open the names, members, hosts, commands, and audit of every team. Item values stay sealed: their keys are on each owner's machine. Tell the owners this.
+
+**From a relay before teams.** A data volume with one `team.db` must be migrated once. With the relay stopped:
+
+```sh
+openssl rand -hex 32 > master_key                 # the new master key
+docker compose run --rm \
+  -e APASSY_RELAY_KEY_FILE=/run/secrets/relay/master_key \
+  -e APASSY_RELAY_OLD_KEY_FILE=/run/secrets/relay/vault_key \
+  relay migrate                                     # prints the new team id
+```
+
+`migrate` copies `team.db` into `teams/<id>.db` with a new random key, makes `relay.db` with the master key, and renames the old file to `team.db.pre-teams` (it opens with the old key only). Any failure leaves `team.db` as it was. The old owner token, member tokens, agent tokens, and `keys.json` keep working for the migrated team. New tokens of that team name it. Delete `team.db.pre-teams` and the old vault key when you no longer need a way back.

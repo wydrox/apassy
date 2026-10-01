@@ -1,8 +1,9 @@
 //! Track server: the relay server (docs/SPEC.md).
 //!
-//! The team vault (sealed item values only), the auth of the edge and of tokens, the
-//! admin API, the decision per run, the one-time keys of pending runs, the endpoints
-//! of the owner's host, the live sessions, the audit, and the remote MCP endpoint.
+//! The directory of teams and one vault per team (sealed item values only), the auth
+//! of the edge and of tokens, the admin API, the decision per run, the one-time keys of
+//! pending runs, the endpoints of the owner's host, the live sessions, the audit, the
+//! remote MCP endpoint, and the socket of the operator.
 //! The proxy path `/p/` goes to `crate::proxy::Proxy::handle`.
 //!
 //! The public interface below is fixed by the skeleton: the `apassy-relay`
@@ -13,43 +14,50 @@ pub mod approvals;
 pub mod audit;
 pub mod auth;
 pub mod decide;
+pub mod directory;
 pub mod env;
 pub mod host;
 pub mod http;
+pub mod hub;
 pub mod mcp;
+pub mod operator;
 pub mod runkeys;
 pub mod sessions;
 pub mod store;
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 
 use apassy::broker::packs::RuleSet;
-use rusqlite::params;
-use serde_json::json;
 
-use crate::api::Role;
 use crate::config::RelayConfig;
-use crate::error::{RelayError, RelayResult};
+use crate::error::{RelayError, RelayResult, codes};
+use crate::ids::TeamId;
 use crate::proxy::Proxy;
-use crate::secret::{SecretString, TokenKind, new_token, token_hash};
+use crate::secret::{SecretString, new_file_key};
 use crate::server::approvals::{LongPolls, Notifier};
-use crate::server::audit::{Audit, RELAY_ACTOR};
+use crate::server::audit::Audit;
+use crate::server::directory::{Directory, insert_team};
+use crate::server::hub::{Hub, make_team_file, remove_team_file};
 use crate::server::runkeys::RunKeys;
 use crate::server::sessions::SessionTable;
-use crate::server::store::{Store, db, to_i, to_u};
+use crate::server::store::Store;
 use crate::session::SessionSource;
 
-/// The state that every request handler shares.
+/// The state of one team that every request handler of that team shares. A handler
+/// gets exactly one `Core`, chosen by the hub from the team id of the request.
 pub struct Core {
-    pub config: RelayConfig,
+    /// The team of this state.
+    pub team: TeamId,
+    pub config: Arc<RelayConfig>,
     pub store: Arc<Store>,
     pub audit: Arc<Audit>,
     pub sessions: Arc<SessionTable>,
-    /// The built-in rule packs of the core, loaded once at start.
-    pub rules: RuleSet,
+    /// The built-in rule packs of the core, loaded once at start, shared by the teams.
+    pub rules: Arc<RuleSet>,
     pub notify: Notifier,
     /// The open long polls of each agent.
     pub polls: LongPolls,
@@ -60,12 +68,22 @@ pub struct Core {
     /// The host of the public URL. A command that names it is not a foreign host.
     pub public_host: String,
     stop: Arc<AtomicBool>,
+    /// Set when the team is suspended or the relay stops.
+    closed: AtomicBool,
 }
 
 impl Core {
-    /// True after `RunningRelay::stop`.
+    /// True after `RunningRelay::stop`, or once the team is suspended.
     pub fn stopping(&self) -> bool {
-        self.stop.load(Ordering::Relaxed)
+        self.stop.load(Ordering::Relaxed) || self.closed.load(Ordering::Relaxed)
+    }
+
+    /// Ends every session, drops every run key, and wakes the long polls.
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::Relaxed);
+        self.notify.notify();
+        self.sessions.clear();
+        self.run_keys.clear();
     }
 }
 
@@ -76,9 +94,10 @@ pub struct Relay;
 pub struct RunningRelay {
     /// The bound address (useful when the config asked for port 0).
     pub addr: SocketAddr,
-    core: Arc<Core>,
+    hub: Arc<Hub>,
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
+    operator: Option<JoinHandle<()>>,
 }
 
 impl RunningRelay {
@@ -87,9 +106,14 @@ impl RunningRelay {
         format!("http://{}", self.addr)
     }
 
-    /// The live sessions, as the proxy reads them.
+    /// The live sessions of every team, as the proxy reads them.
     pub fn sessions(&self) -> Arc<dyn SessionSource> {
-        self.core.sessions.clone()
+        self.hub.clone()
+    }
+
+    /// The teams of this relay.
+    pub fn hub(&self) -> Arc<Hub> {
+        self.hub.clone()
     }
 
     /// Blocks until the server stops.
@@ -102,128 +126,175 @@ impl RunningRelay {
     /// Stops accepting requests and ends every live session.
     pub fn stop(mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        self.core.notify.notify();
+        for core in self.hub.all() {
+            core.notify.notify();
+        }
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
-        self.core.sessions.clear();
-        self.core.run_keys.clear();
+        if let Some(handle) = self.operator.take() {
+            let _ = handle.join();
+        }
+        self.hub.close_all();
     }
 }
 
+/// The data directory has a relay already (a directory or a vault from before teams).
+fn refuse_existing(config: &RelayConfig) -> RelayResult<()> {
+    if std::fs::symlink_metadata(config.directory_path()).is_ok() {
+        return Err(RelayError::new(
+            codes::CONFLICT,
+            "The relay already exists. Refusing to create it again.",
+        ));
+    }
+    if std::fs::symlink_metadata(config.legacy_vault_path()).is_ok() {
+        return Err(RelayError::new(
+            codes::CONFLICT,
+            "This data directory holds the vault of a relay from before teams. Run `apassy-relay migrate`.",
+        ));
+    }
+    Ok(())
+}
+
 impl Relay {
-    /// Creates the team vault at `config.vault_path()` with the team and its owner.
-    /// Returns the owner token once. Refuses if the vault exists.
-    pub fn init(config: &RelayConfig, team: &str, owner: &str) -> RelayResult<SecretString> {
-        let team = team.trim();
-        if team.is_empty()
-            || team.len() > crate::api::MAX_NAME_BYTES
-            || team.chars().any(char::is_control)
-        {
-            return Err(RelayError::invalid(
-                "The team name is 1 to 64 bytes with no control character.",
-            ));
-        }
-        let owner = admin::checked_member_name(owner)?;
-        let token = new_token(TokenKind::Member)?;
-        let hash = token_hash(token.expose());
-        let now = crate::now_unix();
-        let store = Store::create(config)?;
-        let audit = Audit::new();
-        let made =
-            store.tx(|tx| {
-                tx.execute(
-                    "INSERT INTO team (id, name, created_at) VALUES (1, ?1, ?2)",
-                    params![team, to_i(now)],
-                )
-                .map_err(db)?;
-                tx.execute(
-                "INSERT INTO member (name, role, token_hash, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![owner, auth::role_text(Role::Owner), hash.0.as_slice(), to_i(now)],
-            )
-            .map_err(db)?;
-                let owner_id = to_u(tx.last_insert_rowid());
-                audit.write_on(
-                    tx,
-                    now,
-                    RELAY_ACTOR,
-                    "team_created",
-                    None,
-                    &json!({"team": team, "owner": owner, "owner_id": owner_id}),
-                )?;
-                Ok(())
-            });
-        if let Err(error) = made {
-            drop(store);
-            let _ = std::fs::remove_file(config.vault_path());
-            return Err(error);
-        }
-        Ok(token)
+    /// Creates the directory of a new relay with no team. Teams come from team codes
+    /// (`apassy-relay admin team-code`). Refuses if the relay exists.
+    pub fn init_empty(config: &RelayConfig) -> RelayResult<()> {
+        refuse_existing(config)?;
+        Directory::create(config).map(drop)
     }
 
-    /// Opens the team vault, binds `config.listen`, and serves in background threads.
-    pub fn start(config: RelayConfig) -> RelayResult<RunningRelay> {
-        let store = Arc::new(Store::open(&config)?);
-        let audit = Audit::new();
+    /// Creates a new relay with one team and its owner. Returns the owner token once.
+    /// Refuses if the relay exists.
+    pub fn init(config: &RelayConfig, team: &str, owner: &str) -> RelayResult<SecretString> {
+        refuse_existing(config)?;
+        // The names are checked before any file is made.
+        hub::checked_team_name(team)?;
+        admin::checked_member_name(owner)?;
         let now = crate::now_unix();
-        store.tx(|tx| {
-            // A restart ends every session. It also drops every run key: a pending run
-            // from before is never shown to the host, and times out.
-            let ended: Vec<u64> = {
-                let mut statement = tx
-                    .prepare("SELECT id FROM run WHERE status = 'ready'")
-                    .map_err(db)?;
-                statement
-                    .query_map([], |row| Ok(to_u(row.get(0)?)))
-                    .map_err(db)?
-                    .collect::<Result<_, _>>()
-                    .map_err(db)?
-            };
-            for id in ended {
-                tx.execute(
-                    "UPDATE run SET status = 'ended' WHERE id = ?1",
-                    params![to_i(id)],
-                )
-                .map_err(db)?;
-                audit.write_on(
-                    tx,
-                    now,
-                    RELAY_ACTOR,
-                    "session_ended",
-                    Some(crate::ids::RunId(id)),
-                    &json!({"reason": "restart"}),
-                )?;
+        let directory = Directory::create(config)?;
+        let made = make_team_file(config, team, owner, now).and_then(|new| {
+            let added = directory
+                .store
+                .tx(|tx| insert_team(tx, &new.id, team.trim(), &new.file_key, false, now));
+            match added {
+                Ok(()) => Ok(new.owner_token),
+                Err(error) => {
+                    remove_team_file(config, &new.id);
+                    Err(error)
+                }
             }
+        });
+        if made.is_err() {
+            drop(directory);
+            let _ = std::fs::remove_file(config.directory_path());
+        }
+        made
+    }
+
+    /// Moves the vault of a relay from before teams into a team (ADR 0019, section 12).
+    ///
+    /// `team.db` is copied, the copy gets a new random key (`PRAGMA rekey`), and a new
+    /// `relay.db` with the master key holds that key. Old member and agent tokens (no
+    /// team id) keep working for this team. The original file stays as
+    /// `team.db.pre-teams`: it opens with the old key only. Returns the team id.
+    pub fn migrate(config: &RelayConfig, old_key: &SecretString) -> RelayResult<TeamId> {
+        let legacy = config.legacy_vault_path();
+        if std::fs::symlink_metadata(config.directory_path()).is_ok() {
+            return Err(RelayError::new(
+                codes::CONFLICT,
+                "The relay has a directory already: there is nothing to migrate.",
+            ));
+        }
+        if std::fs::symlink_metadata(&legacy).is_err() {
+            return Err(RelayError::internal(
+                "There is no team.db in the data directory to migrate.",
+            ));
+        }
+        let backup = config.data_dir.join("team.db.pre-teams");
+        if std::fs::symlink_metadata(&backup).is_ok() {
+            return Err(RelayError::new(
+                codes::CONFLICT,
+                "team.db.pre-teams exists. Move it away before a new migration.",
+            ));
+        }
+        // Check the old file and its key before anything changes.
+        let name = Store::open_team(&legacy, old_key)?.with(store::team_name)?;
+        let id = TeamId::generate()
+            .map_err(|_| RelayError::internal("The system has no random source."))?;
+        let file_key = new_file_key()?;
+        let target = config.team_path(&id);
+        let mut temp = target.clone().into_os_string();
+        temp.push(".migrating");
+        let temp = PathBuf::from(temp);
+        let undo = |config: &RelayConfig| {
+            let _ = std::fs::remove_file(&temp);
+            let _ = std::fs::remove_file(config.directory_path());
+            remove_team_file(config, &id);
+        };
+        let result = (|| {
+            std::fs::create_dir_all(config.teams_dir())
+                .map_err(|_| RelayError::internal("The teams folder cannot be created."))?;
+            std::fs::copy(&legacy, &temp)
+                .map_err(|_| RelayError::internal("team.db cannot be copied."))?;
+            {
+                let copy = Store::open_team(&temp, old_key)?;
+                copy.rekey(&file_key)?;
+            }
+            // The copy opens with the new key, and not with the old one.
+            Store::open_team(&temp, &file_key)?;
+            if Store::open_team(&temp, old_key).is_ok() {
+                return Err(RelayError::internal(
+                    "The new key of the team file did not take.",
+                ));
+            }
+            let directory = Directory::create(config)?;
+            directory
+                .store
+                .tx(|tx| insert_team(tx, &id, &name, &file_key, true, crate::now_unix()))?;
+            drop(directory);
+            std::fs::rename(&temp, &target)
+                .map_err(|_| RelayError::internal("The team file cannot be moved into place."))?;
+            std::fs::rename(&legacy, &backup).map_err(|_| {
+                RelayError::internal("team.db cannot be renamed to team.db.pre-teams.")
+            })?;
             Ok(())
+        })();
+        match result {
+            Ok(()) => Ok(id),
+            Err(error) => {
+                undo(config);
+                Err(error)
+            }
+        }
+    }
+
+    /// The file and key of one team, for tests and for the operator's backup tools.
+    pub fn team_vault(config: &RelayConfig, team: &TeamId) -> RelayResult<(PathBuf, SecretString)> {
+        let directory = Directory::open(config)?;
+        let row = directory
+            .team(team)?
+            .ok_or_else(|| RelayError::not_found("team"))?;
+        Ok((config.team_path(team), row.file_key))
+    }
+
+    /// Opens the directory and the active teams, binds `config.listen`, opens the
+    /// operator socket, and serves in background threads.
+    pub fn start(config: RelayConfig) -> RelayResult<RunningRelay> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let hub = Hub::open(config, stop.clone())?;
+        let source: Arc<dyn SessionSource> = hub.clone();
+        let proxy = Arc::new(Proxy::new(&hub.config.upstream, source)?);
+        let server = tiny_http::Server::http(hub.config.listen).map_err(|_| {
+            RelayError::internal(format!("Cannot listen on {}.", hub.config.listen))
         })?;
-        let sessions = SessionTable::new(store.clone(), audit.clone());
-        let rules = RuleSet::builtin().map_err(|_| {
-            RelayError::internal("The built-in rule packs of the core cannot be loaded.")
-        })?;
-        let source: Arc<dyn SessionSource> = sessions.clone();
-        let proxy = Arc::new(Proxy::new(&config.upstream, source)?);
-        let server = tiny_http::Server::http(config.listen)
-            .map_err(|_| RelayError::internal(format!("Cannot listen on {}.", config.listen)))?;
         let addr = server
             .server_addr()
             .to_ip()
             .ok_or_else(|| RelayError::internal("The listener has no IP address."))?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let core = Arc::new(Core {
-            public_host: crate::decision::public_host(&config.public_url),
-            polls: LongPolls::new(config.limits.long_polls_per_agent),
-            host_polls: LongPolls::new(config.limits.host_long_polls),
-            run_keys: RunKeys::default(),
-            config,
-            store,
-            audit,
-            sessions,
-            rules,
-            notify: Notifier::default(),
-            stop: stop.clone(),
-        });
+        let operator = operator::listen(hub.clone(), stop.clone())?;
         let serving = http::Serving {
-            core: core.clone(),
+            hub: hub.clone(),
             proxy,
             server,
             stop: stop.clone(),
@@ -234,9 +305,10 @@ impl Relay {
             .map_err(|_| RelayError::internal("The accept thread cannot start."))?;
         Ok(RunningRelay {
             addr,
-            core,
+            hub,
             stop,
             handle: Some(handle),
+            operator: Some(operator),
         })
     }
 }

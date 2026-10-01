@@ -15,7 +15,7 @@ use serde_json::Value;
 use crate::api::AuditEntry;
 use crate::error::{RelayError, RelayResult};
 use crate::ids::{AuditId, RunId};
-use crate::secret::{SecretString, TOKEN_HEX_LEN, TokenKind};
+use crate::secret::{SecretString, token_len_at};
 use crate::server::store::{Store, db, to_i, to_u};
 
 /// Seconds between two audit rows of the same kind of unauthenticated request.
@@ -86,7 +86,8 @@ impl Masker {
     }
 }
 
-/// Replaces every token form (`apassy_(mbr|agt|inv|ses)_` plus 64 hex) by `[apassy:token]`.
+/// Replaces every token form (`secret::parse_token`: a prefix, the team id if any, and
+/// 64 hex) by `[apassy:token]`.
 pub fn mask_tokens(text: &str) -> String {
     const MARK: &str = "apassy_";
     if !text.contains(MARK) {
@@ -97,17 +98,7 @@ pub fn mask_tokens(text: &str) -> String {
     while let Some(at) = rest.find(MARK) {
         out.push_str(&rest[..at]);
         let candidate = &rest[at..];
-        let token_len = TokenKind::ALL
-            .iter()
-            .map(|kind| kind.prefix())
-            .find(|prefix| candidate.starts_with(prefix))
-            .map(|prefix| prefix.len() + TOKEN_HEX_LEN);
-        let is_token = token_len.is_some_and(|len| {
-            candidate.len() >= len
-                && candidate.is_char_boundary(len)
-                && TokenKind::of(&candidate[..len]).is_some()
-        });
-        if let (true, Some(len)) = (is_token, token_len) {
+        if let Some(len) = token_len_at(candidate) {
             out.push_str("[apassy:token]");
             rest = &candidate[len..];
         } else {
@@ -344,18 +335,8 @@ mod tests {
         drop(last);
         // Inside the window the call returns before it touches the store.
         let dir = tempfile::tempdir().unwrap();
-        let config = crate::config::RelayConfig {
-            data_dir: dir.path().to_path_buf(),
-            listen: "127.0.0.1:0".parse().unwrap(),
-            public_url: "http://127.0.0.1".into(),
-            edge_secret: SecretString::new("e".repeat(40)),
-            vault_key: SecretString::new("a synthetic vault passphrase".into()),
-            session_ttl_secs: 60,
-            approval_timeout_secs: 30,
-            upstream: Default::default(),
-            limits: Default::default(),
-        };
-        let store = Store::create(&config).unwrap();
+        let key = SecretString::new("a synthetic vault passphrase".into());
+        let store = Store::create_team(&dir.path().join("t.db"), &key).unwrap();
         store
             .with(|c| {
                 c.execute_batch("INSERT INTO team VALUES (1,'t',0)")

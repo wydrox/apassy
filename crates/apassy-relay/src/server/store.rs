@@ -1,6 +1,7 @@
-//! The team vault: one SQLCipher file (docs/SPEC.md, "Team vault").
+//! The team vault: one SQLCipher file for each team (docs/SPEC.md, "Team vault"), and
+//! the same code for the directory of the relay (`server::directory`).
 //!
-//! The file is keyed with the vault passphrase and the core SQLCipher 4 parameters.
+//! A file is keyed with its passphrase and the core SQLCipher 4 parameters.
 //! One connection sits behind a `Mutex`. The build must have the flags of
 //! `.cargo/config.toml`, or the vault refuses to open.
 
@@ -16,7 +17,6 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use zeroize::Zeroizing;
 
 use crate::api::Policy;
-use crate::config::RelayConfig;
 use crate::error::{RelayError, RelayResult, codes};
 use crate::ids::{CollectionId, ItemId, MemberId};
 use crate::secret::SecretString;
@@ -102,41 +102,41 @@ pub struct Store {
 }
 
 impl Store {
-    /// Creates a new vault file. Refuses when the file exists.
-    pub fn create(config: &RelayConfig) -> RelayResult<Self> {
-        let path = config.vault_path();
-        prepare_dir(&config.data_dir)?;
-        if fs::symlink_metadata(&path).is_ok() {
-            return Err(RelayError::new(
+    /// Creates a new encrypted file with `schema`. Refuses when the file exists. The
+    /// parent directory is made with mode 0700.
+    pub fn create_at(path: &Path, key: &SecretString, schema: &str) -> RelayResult<Self> {
+        if let Some(parent) = path.parent() {
+            prepare_dir(parent)?;
+        }
+        let exists = || {
+            RelayError::new(
                 codes::CONFLICT,
-                "The team vault already exists. Refusing to create it again.",
-            ));
+                "The vault file already exists. Refusing to create it again.",
+            )
+        };
+        if fs::symlink_metadata(path).is_ok() {
+            return Err(exists());
         }
         let created = OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(&path);
+            .open(path);
         match created {
             Ok(file) => drop(file),
-            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                return Err(RelayError::new(
-                    codes::CONFLICT,
-                    "The team vault already exists. Refusing to create it again.",
-                ));
-            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => return Err(exists()),
             Err(_) => return Err(RelayError::internal("The vault file cannot be created.")),
         }
-        let conn = match open_keyed(&path, &config.vault_key) {
+        let conn = match open_keyed(path, key) {
             Ok(conn) => conn,
             Err(error) => {
-                let _ = fs::remove_file(&path);
+                let _ = fs::remove_file(path);
                 return Err(error);
             }
         };
-        if let Err(error) = conn.execute_batch(SCHEMA) {
+        if let Err(error) = conn.execute_batch(schema) {
             drop(conn);
-            let _ = fs::remove_file(&path);
+            let _ = fs::remove_file(path);
             return Err(db(error));
         }
         Ok(Self {
@@ -144,24 +144,34 @@ impl Store {
         })
     }
 
-    /// Opens an existing vault. A wrong key, a wrong build, or a wrong schema is refused.
-    pub fn open(config: &RelayConfig) -> RelayResult<Self> {
-        let path = config.vault_path();
-        prepare_dir(&config.data_dir)?;
-        let meta = fs::symlink_metadata(&path).map_err(|_| {
-            RelayError::internal("There is no team vault. Run `apassy-relay init` first.")
-        })?;
-        if !meta.is_file() {
-            return Err(RelayError::internal(
-                "The team vault is not a regular file.",
-            ));
+    /// Opens an existing encrypted file. A wrong key or a wrong build is refused. The
+    /// caller checks the schema version.
+    pub fn open_at(path: &Path, key: &SecretString) -> RelayResult<Self> {
+        if let Some(parent) = path.parent() {
+            prepare_dir(parent)?;
         }
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+        let meta = fs::symlink_metadata(path)
+            .map_err(|_| RelayError::internal("The vault file does not exist."))?;
+        if !meta.is_file() {
+            return Err(RelayError::internal("The vault is not a regular file."));
+        }
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
             .map_err(|_| RelayError::internal("The vault file mode cannot be set to 0600."))?;
-        let conn = open_keyed(&path, &config.vault_key)?;
-        let version: i64 = conn
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .map_err(db)?;
+        let conn = open_keyed(path, key)?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
+    /// Creates the file of one team (the team schema).
+    pub fn create_team(path: &Path, key: &SecretString) -> RelayResult<Self> {
+        Self::create_at(path, key, SCHEMA)
+    }
+
+    /// Opens the file of one team and checks its schema version.
+    pub fn open_team(path: &Path, key: &SecretString) -> RelayResult<Self> {
+        let store = Self::open_at(path, key)?;
+        let version = store.user_version()?;
         if version == 1 {
             return Err(RelayError::internal(
                 "This team vault is from the first alpha and holds plaintext item values. Start with a new data volume: there is no migration.",
@@ -172,8 +182,22 @@ impl Store {
                 "The team vault has an unknown schema version.",
             ));
         }
-        Ok(Self {
-            conn: Mutex::new(conn),
+        Ok(store)
+    }
+
+    /// `PRAGMA user_version` of the file.
+    pub fn user_version(&self) -> RelayResult<i64> {
+        self.with(|conn| {
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))
+                .map_err(db)
+        })
+    }
+
+    /// Encrypts the file again with a new key (`PRAGMA rekey`).
+    pub fn rekey(&self, key: &SecretString) -> RelayResult<()> {
+        self.with(|conn| {
+            conn.execute_batch(&key_statement_for("rekey", key.expose()))
+                .map_err(|_| RelayError::internal("The vault cannot get a new key."))
         })
     }
 
@@ -279,11 +303,18 @@ fn pragma_i64(conn: &Connection, name: &str) -> RelayResult<i64> {
 
 /// `PRAGMA key = '<passphrase>'` in a buffer that is erased on drop.
 fn key_statement(passphrase: &str) -> Zeroizing<String> {
+    key_statement_for("key", passphrase)
+}
+
+/// `PRAGMA <pragma> = '<passphrase>'` in a buffer that is erased on drop.
+fn key_statement_for(pragma: &str, passphrase: &str) -> Zeroizing<String> {
     let quotes = passphrase.matches('\'').count();
     let mut sql = Zeroizing::new(String::with_capacity(
-        "PRAGMA key = ''".len() + passphrase.len() + quotes + 1,
+        "PRAGMA  = ''".len() + pragma.len() + passphrase.len() + quotes + 1,
     ));
-    sql.push_str("PRAGMA key = '");
+    sql.push_str("PRAGMA ");
+    sql.push_str(pragma);
+    sql.push_str(" = '");
     for ch in passphrase.chars() {
         if ch == '\'' {
             sql.push('\'');
@@ -464,6 +495,10 @@ mod tests {
     #[test]
     fn key_statement_doubles_quotes() {
         assert_eq!(key_statement("a'b").as_str(), "PRAGMA key = 'a''b'");
+        assert_eq!(
+            key_statement_for("rekey", "c'd").as_str(),
+            "PRAGMA rekey = 'c''d'"
+        );
     }
 
     #[test]

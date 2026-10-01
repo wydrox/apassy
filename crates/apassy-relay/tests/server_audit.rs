@@ -526,7 +526,8 @@ fn a_placeholder_is_masked_after_its_session_ended() {
 #[test]
 fn auth_failures_are_rate_limited_and_hold_no_token() {
     let relay = start(UpstreamOptions::default());
-    let secret_looking = format!("apassy_mbr_{}", "cd".repeat(32));
+    // A token of this team that is not known: the team's audit, at most one row.
+    let secret_looking = format!("apassy_mbr_{}_{}", relay.team_id, "cd".repeat(32));
     for _ in 0..6 {
         relay.call("GET", "/v1/me", Some(&secret_looking), None);
     }
@@ -537,4 +538,21 @@ fn auth_failures_are_rate_limited_and_hold_no_token() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["actor"], "edge");
     assert!(!Value::Array(rows).to_string().contains(&secret_looking));
+    // A token that names no known team goes to the audit of the relay, not of a team.
+    let no_team = format!("apassy_mbr_{}", "ef".repeat(32));
+    for _ in 0..6 {
+        relay.call("GET", "/v1/me", Some(&no_team), None);
+    }
+    let rows = actions(&relay)
+        .into_iter()
+        .filter(|r| r["action"] == "auth_failed")
+        .count();
+    assert_eq!(rows, 1);
+    let relay_rows = relay.relay_audit();
+    assert_eq!(
+        relay_rows.iter().filter(|r| r.1 == "auth_failed").count(),
+        1,
+        "{relay_rows:?}"
+    );
+    assert!(!format!("{relay_rows:?}").contains(&no_team));
 }

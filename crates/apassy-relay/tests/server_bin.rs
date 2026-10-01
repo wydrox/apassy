@@ -29,8 +29,8 @@ fn init_prints_the_owner_token_once_and_only_on_stdout() {
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8(output.stdout).unwrap();
     let token = stdout.trim_end();
-    assert!(token.starts_with("apassy_mbr_"), "{stdout}");
-    assert_eq!(token.len(), "apassy_mbr_".len() + 64);
+    assert!(token.starts_with("apassy_mbr_t_"), "{stdout}");
+    assert_eq!(token.len(), "apassy_mbr_".len() + 12 + 1 + 64);
     assert_eq!(stdout.lines().count(), 1);
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(!stderr.contains(token), "the token is not on stderr");
@@ -50,7 +50,6 @@ fn usage_errors_exit_with_2() {
     let dir = tempfile::tempdir().unwrap();
     for args in [
         vec!["bogus"],
-        vec!["init"],
         vec!["init", "--team", "T"],
         vec!["init", "--owner", "o"],
         vec!["init", "--team", "T", "--owner", "o", "--extra", "x"],

@@ -17,14 +17,16 @@ use tiny_http::{Header, Request, Response};
 
 use crate::api::{
     self, DecisionRequest, EDGE_HEADER, Envelope, JoinRequest, NewItem, Policy, ReleaseRequest,
-    RunRequest, paths,
+    RunRequest, TeamCreate, TeamCreatedRef, paths,
 };
 use crate::error::{RelayError, RelayResult, codes};
 use crate::ids::{AgentId, CollectionId, GrantId, ItemId, MemberId, RunId};
 use crate::now_unix;
 use crate::proxy::Proxy;
+use crate::secret::TokenKind;
 use crate::server::approvals::Denier;
 use crate::server::auth::{self, Need, Principal};
+use crate::server::hub::Hub;
 use crate::server::{Core, admin, approvals, decide, host, mcp};
 
 /// Seconds a client waits after 503 `busy` (`Retry-After`).
@@ -36,6 +38,7 @@ const MAINTENANCE_SECS: u64 = 5;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Endpoint {
     Me,
+    TeamCreate,
     Join,
     InviteCreate,
     InviteList,
@@ -92,6 +95,7 @@ pub fn route(method: &str, path: &str) -> RelayResult<Routed> {
             .map_err(|_| RelayError::new(codes::METHOD_NOT_ALLOWED, "MCP takes POST only.")),
         ["v1", "me"] => pick(method, &[("GET", Need::Any, Me)]),
         ["v1", "join"] => pick(method, &[("POST", Need::Edge, Join)]),
+        ["v1", "teams"] => pick(method, &[("POST", Need::Edge, TeamCreate)]),
         ["v1", "invites"] => pick(
             method,
             &[
@@ -157,7 +161,7 @@ pub fn route(method: &str, path: &str) -> RelayResult<Routed> {
 
 /// What the accept loop needs.
 pub struct Serving {
-    pub core: Arc<Core>,
+    pub hub: Arc<Hub>,
     pub proxy: Arc<Proxy>,
     pub server: tiny_http::Server,
     pub stop: Arc<AtomicBool>,
@@ -195,12 +199,12 @@ impl Slots {
 /// limit gets 503 `busy` with `Retry-After`.
 pub fn serve(serving: Serving) {
     let Serving {
-        core,
+        hub,
         proxy,
         server,
         stop,
     } = serving;
-    let limits = core.config.limits;
+    let limits = hub.config.limits;
     let agent_max = limits.max_active.saturating_sub(limits.member_reserve);
     let slots = Arc::new(Slots {
         all: AtomicUsize::new(0),
@@ -221,11 +225,11 @@ pub fn serve(serving: Serving) {
                     if agent {
                         slots.agent.fetch_add(1, Ordering::Relaxed);
                     }
-                    let (core, proxy, held) = (core.clone(), proxy.clone(), slots.clone());
+                    let (hub, proxy, held) = (hub.clone(), proxy.clone(), slots.clone());
                     let spawned = std::thread::Builder::new()
                         .name("relay-request".to_string())
                         .spawn(move || {
-                            handle(&core, &proxy, request);
+                            handle(&hub, &proxy, request);
                             held.release(agent);
                         });
                     if spawned.is_err() {
@@ -238,8 +242,13 @@ pub fn serve(serving: Serving) {
         }
         if last_maintenance.elapsed() >= Duration::from_secs(MAINTENANCE_SECS) {
             last_maintenance = Instant::now();
-            if approvals::maintenance(&core, now_unix()).is_err() {
-                eprintln!("apassy-relay: the maintenance sweep failed");
+            for core in hub.all() {
+                if approvals::maintenance(&core, now_unix()).is_err() {
+                    eprintln!(
+                        "apassy-relay: the maintenance sweep of team {} failed",
+                        core.team
+                    );
+                }
             }
         }
     }
@@ -297,7 +306,7 @@ fn respond_ok(request: Request, result: Value) {
 }
 
 /// Handles one request.
-fn handle(core: &Core, proxy: &Proxy, mut request: Request) {
+fn handle(hub: &Hub, proxy: &Proxy, mut request: Request) {
     let now = now_unix();
     let method = request.method().as_str().to_string();
     let url = request.url().to_string();
@@ -310,9 +319,8 @@ fn handle(core: &Core, proxy: &Proxy, mut request: Request) {
         return;
     }
     let edge = header_value(&request, EDGE_HEADER);
-    if !auth::edge_ok(&core.config.edge_secret, edge.as_deref()) {
-        core.audit.refusal(
-            &core.store,
+    if !auth::edge_ok(&hub.config.edge_secret, edge.as_deref()) {
+        hub.refusal(
             now,
             "edge",
             "auth_failed",
@@ -345,8 +353,47 @@ fn handle(core: &Core, proxy: &Proxy, mut request: Request) {
             return;
         }
     };
+    // Two endpoints have no bearer: a new team names no team yet, and an invite code
+    // names its team.
+    match endpoint {
+        Endpoint::TeamCreate => {
+            match team_create(hub, &body, now) {
+                Ok(result) => respond_ok(request, result),
+                Err(error) => respond_error(request, &error),
+            }
+            return;
+        }
+        Endpoint::Join => {
+            let result = parse_body::<JoinRequest>(&body).and_then(|join| {
+                let code = join.code.expose();
+                let core = (TokenKind::of(code) == Some(TokenKind::Invite))
+                    .then(|| hub.for_token(code))
+                    .flatten()
+                    .ok_or_else(admin::invite_invalid)?;
+                admin::join(&core, &join, now)
+            });
+            match result {
+                Ok(result) => respond_ok(request, result),
+                Err(error) => respond_error(request, &error),
+            }
+            return;
+        }
+        _ => {}
+    }
+    // Every other endpoint: the team comes from the token, before anything is opened.
     let authorization = header_value(&request, "Authorization");
-    let principal = match authenticate(core, need, authorization.as_deref(), now) {
+    let token = auth::bearer(authorization.as_deref());
+    let Some(core) = token.and_then(|token| hub.for_token(token)) else {
+        hub.refusal(
+            now,
+            "token",
+            "auth_failed",
+            &json!({"code": codes::UNAUTHENTICATED, "path_kind": endpoint_kind(endpoint)}),
+        );
+        respond_error(request, &RelayError::unauthenticated());
+        return;
+    };
+    let principal = match authenticate(&core, need, token, now) {
         Ok(principal) => principal,
         Err(error) => {
             if error.code == codes::UNAUTHENTICATED || error.code == codes::TOKEN_EXPIRED {
@@ -363,13 +410,24 @@ fn handle(core: &Core, proxy: &Proxy, mut request: Request) {
         }
     };
     if endpoint == Endpoint::Mcp {
-        respond_mcp(core, request, principal, &body);
+        respond_mcp(&core, request, principal, &body);
         return;
     }
-    match dispatch(core, endpoint, principal.as_ref(), &query, &body, now) {
+    match dispatch(&core, endpoint, principal.as_ref(), &query, &body, now) {
         Ok(result) => respond_ok(request, result),
         Err(error) => respond_error(request, &error),
     }
+}
+
+/// `POST /v1/teams`.
+fn team_create(hub: &Hub, body: &[u8], now: u64) -> RelayResult<Value> {
+    let request: TeamCreate = parse_body(body)?;
+    let (team_id, member_id, token) = hub.create_team(&request, now)?;
+    to_value(&TeamCreatedRef {
+        team_id: &team_id,
+        member_id,
+        secret: token.expose(),
+    })
 }
 
 /// A short name of an endpoint for the audit. No path, so no id or query leaks.
@@ -384,13 +442,13 @@ fn endpoint_kind(endpoint: Endpoint) -> &'static str {
 fn authenticate(
     core: &Core,
     need: Need,
-    authorization: Option<&str>,
+    token: Option<&str>,
     now: u64,
 ) -> RelayResult<Option<Principal>> {
     if need == Need::Edge {
         return Ok(None);
     }
-    let principal = match auth::bearer(authorization) {
+    let principal = match token {
         Some(token) => Some(
             core.store
                 .with(|conn| auth::authenticate(conn, token, now))?,
@@ -512,7 +570,7 @@ fn dispatch(
     use Endpoint::*;
     match endpoint {
         Me => admin::me(core, principal.ok_or_else(RelayError::unauthenticated)?),
-        Join => admin::join(core, &parse_body::<JoinRequest>(body)?, now),
+        Join | TeamCreate => Err(RelayError::internal("This endpoint is served elsewhere.")),
         InviteCreate => admin::invite_create(core, member_of(principal)?, &parse_body(body)?, now),
         InviteList => admin::invite_list(core),
         MemberList => admin::member_list(core),

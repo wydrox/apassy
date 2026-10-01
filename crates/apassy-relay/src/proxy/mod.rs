@@ -89,6 +89,7 @@ impl Context {
         swapped: Vec<String>,
     ) -> ProxyEvent {
         ProxyEvent {
+            team: self.session.as_ref().map(|s| s.team.clone()),
             session_id: self.session.as_ref().map(|s| s.id),
             run_id: self.session.as_ref().map(|s| s.run_id),
             agent_id: self.session.as_ref().map(|s| s.agent_id),

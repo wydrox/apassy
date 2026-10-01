@@ -15,8 +15,8 @@ use serde_json::json;
 
 use crate::api::SessionView;
 use crate::error::{RelayError, RelayResult};
-use crate::ids::{RunId, SessionId};
-use crate::secret::{TokenHash, TokenKind, new_token, token_hash};
+use crate::ids::{RunId, SessionId, TeamId};
+use crate::secret::{TokenHash, TokenKind, new_token, parse_token, token_hash};
 use crate::server::audit::{Audit, RELAY_ACTOR, agent_actor};
 use crate::server::env::{self, EnvItem};
 use crate::server::store::{Store, db, to_i};
@@ -27,8 +27,9 @@ struct Entry {
     view: SessionView,
 }
 
-/// The table of live sessions.
+/// The table of live sessions of one team.
 pub struct SessionTable {
+    team: TeamId,
     inner: Mutex<HashMap<TokenHash, Entry>>,
     audit: Arc<Audit>,
     store: Arc<Store>,
@@ -36,8 +37,9 @@ pub struct SessionTable {
 }
 
 impl SessionTable {
-    pub fn new(store: Arc<Store>, audit: Arc<Audit>) -> Arc<Self> {
+    pub fn new(team: TeamId, store: Arc<Store>, audit: Arc<Audit>) -> Arc<Self> {
         Arc::new(Self {
+            team,
             inner: Mutex::new(HashMap::new()),
             audit,
             store,
@@ -60,7 +62,7 @@ impl SessionTable {
         expires_at: u64,
         items: &[EnvItem],
     ) -> RelayResult<(SessionView, TokenHash)> {
-        let key = new_token(TokenKind::Session)?;
+        let key = new_token(TokenKind::Session, &self.team)?;
         let hash = token_hash(key.expose());
         let mut secrets = Vec::with_capacity(items.len());
         let mut placeholders = Vec::with_capacity(items.len());
@@ -91,6 +93,7 @@ impl SessionTable {
             &placeholders,
         );
         let session = Arc::new(LiveSession {
+            team: self.team.clone(),
             id: session_id,
             run_id,
             agent_id,
@@ -200,7 +203,8 @@ impl SessionTable {
 
 impl SessionSource for SessionTable {
     fn find(&self, session_key: &str, now: u64) -> Option<Arc<LiveSession>> {
-        if TokenKind::of(session_key) != Some(TokenKind::Session) {
+        let parsed = parse_token(session_key)?;
+        if parsed.kind != TokenKind::Session || parsed.team.as_ref() != Some(&self.team) {
             return None;
         }
         let hash = token_hash(session_key);

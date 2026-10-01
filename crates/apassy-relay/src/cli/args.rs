@@ -67,6 +67,11 @@ pub enum Command {
     Init {
         relay: String,
     },
+    Create {
+        relay: String,
+        team: String,
+        name: String,
+    },
     Join {
         relay: String,
         name: String,
@@ -300,6 +305,9 @@ apassy-team: the CLI of the Apassy team relay
 
 Setup
   init --relay URL              read a member token from stdin, check it, save settings
+  create --relay URL --team NAME --name NAME
+                                read a team code of the operator from stdin, make a new
+                                team with you as its owner, save settings
   join --relay URL --name NAME  read an invite code from stdin, join, save settings
   me                            who am I
 
@@ -356,6 +364,15 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
             s.positional(0, "init --relay URL")?;
             Ok(Command::Init {
                 relay: s.required("relay")?,
+            })
+        }
+        "create" => {
+            let s = scan(rest, &["relay", "team", "name"], &[])?;
+            s.positional(0, "create --relay URL --team NAME --name NAME")?;
+            Ok(Command::Create {
+                relay: s.required("relay")?,
+                team: s.required("team")?,
+                name: s.required("name")?,
             })
         }
         "join" => {
@@ -630,6 +647,14 @@ mod tests {
             }
         );
         assert_eq!(
+            p("create --relay https://r.example --team Family --name rafal").unwrap(),
+            Command::Create {
+                relay: "https://r.example".into(),
+                team: "Family".into(),
+                name: "rafal".into()
+            }
+        );
+        assert_eq!(
             p("join --relay=https://r.example --name bob").unwrap(),
             Command::Join {
                 relay: "https://r.example".into(),
@@ -802,6 +827,8 @@ mod tests {
             "init --relay",
             "init --relay a --relay b",
             "init --bogus 1",
+            "create --relay a --team T",
+            "create --relay a --name n extra",
             "me extra",
             "member revoke",
             "member revoke zero",

@@ -17,14 +17,14 @@ fn wrong_key_is_refused() {
     let relay = start(UpstreamOptions::default());
     relay.setup("staging");
     let (mut config, _dir) = relay.stop_keep();
-    config.vault_key = SecretString::new("another synthetic vault passphrase".to_string());
+    config.master_key = SecretString::new("another synthetic vault passphrase".to_string());
     let error = Relay::start(config.clone())
         .err()
         .expect("a wrong key must fail");
     assert!(error.message.contains("key"), "{error}");
     assert!(!error.to_string().contains("passphrase"), "{error}");
     // The right key still opens it.
-    config.vault_key = SecretString::new(relay::VAULT_KEY.to_string());
+    config.master_key = SecretString::new(relay::VAULT_KEY.to_string());
     Relay::start(config)
         .expect("the right key opens the vault")
         .stop();
@@ -34,20 +34,29 @@ fn wrong_key_is_refused() {
 fn file_bytes_hold_no_value_and_no_plain_header() {
     let relay = start(UpstreamOptions::default());
     relay.setup("staging");
+    let team = relay.team_id.clone();
     let (config, dir) = relay.stop_keep();
-    let path = config.vault_path();
-    let bytes = std::fs::read(&path).expect("vault file");
-    assert!(bytes.len() >= 4096);
-    let has = |needle: &str| bytes.windows(needle.len()).any(|w| w == needle.as_bytes());
-    assert!(!has(CANARY), "the value is in the file");
-    assert!(!has("SQLite format 3"), "the file is not encrypted");
-    assert!(!has("Test Team"), "the team name is in the file");
-    assert!(!has("payments"), "a collection name is in the file");
-    // No journal or other file is left with a value either.
-    for entry in std::fs::read_dir(dir.path().join("data")).unwrap() {
-        let name = entry.unwrap().file_name().to_string_lossy().to_string();
-        assert_eq!(name, "team.db", "unexpected file {name}");
+    for path in [config.team_path(&team), config.directory_path()] {
+        let bytes = std::fs::read(&path).expect("vault file");
+        assert!(bytes.len() >= 4096);
+        let has = |needle: &str| bytes.windows(needle.len()).any(|w| w == needle.as_bytes());
+        assert!(!has(CANARY), "the value is in {path:?}");
+        assert!(!has("SQLite format 3"), "{path:?} is not encrypted");
+        assert!(!has("Test Team"), "the team name is in {path:?}");
+        assert!(!has("payments"), "a collection name is in {path:?}");
+        assert!(!has(team.as_str()), "the team id is in {path:?}");
     }
+    // No journal, socket, or other file is left.
+    let names = |path: std::path::PathBuf| -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(path)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(names(dir.path().join("data")), ["relay.db", "teams"]);
+    assert_eq!(names(config.teams_dir()), [format!("{team}.db")]);
 }
 
 #[test]
@@ -69,11 +78,11 @@ fn init_checks_its_names() {
     assert!(Relay::init(&config, "Team", "bad name").is_err());
     assert!(Relay::init(&config, "Team", "").is_err());
     assert!(
-        !config.vault_path().exists(),
-        "no vault after a refused init"
+        !config.directory_path().exists() && !config.teams_dir().exists(),
+        "no relay after a refused init"
     );
     let token = Relay::init(&config, "Team", "owner.one").expect("init");
-    assert!(token.expose().starts_with("apassy_mbr_"));
+    assert!(token.expose().starts_with("apassy_mbr_t_"));
 }
 
 #[test]
@@ -103,10 +112,13 @@ fn compile_options_are_checked() {
 #[test]
 fn file_mode_is_0600_and_dir_mode_is_0700() {
     let relay = start(UpstreamOptions::default());
-    let file = std::fs::metadata(relay.config.vault_path()).unwrap();
-    assert_eq!(file.permissions().mode() & 0o777, 0o600);
-    let dir = std::fs::metadata(&relay.config.data_dir).unwrap();
-    assert_eq!(dir.permissions().mode() & 0o777, 0o700);
+    let mode =
+        |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&relay.config.team_path(&relay.team_id)), 0o600);
+    assert_eq!(mode(&relay.config.directory_path()), 0o600);
+    assert_eq!(mode(&relay.config.admin_socket_path()), 0o600);
+    assert_eq!(mode(&relay.config.data_dir), 0o700);
+    assert_eq!(mode(&relay.config.teams_dir()), 0o700);
 }
 
 #[test]
@@ -122,7 +134,7 @@ fn a_file_that_is_not_a_vault_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let config = relay::test_config(dir.path(), UpstreamOptions::default());
     std::fs::create_dir_all(&config.data_dir).unwrap();
-    std::fs::write(config.vault_path(), vec![7u8; 8192]).unwrap();
+    std::fs::write(config.directory_path(), vec![7u8; 8192]).unwrap();
     assert!(Relay::start(config).is_err());
 }
 
@@ -183,14 +195,16 @@ fn data_survives_a_restart_and_sessions_do_not() {
     assert!(audit.to_string().contains("session_ended"));
 }
 
-/// The first alpha kept the item values in the vault (user_version 1). This relay
-/// refuses such a vault at start, and does not touch it.
+/// The first alpha kept the item values in the vault (user_version 1). A relay from
+/// before teams is refused at start (it needs `migrate`), and `migrate` refuses a
+/// version 1 vault without touching it.
 #[test]
 fn a_vault_from_the_first_alpha_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let config = relay::test_config(dir.path(), UpstreamOptions::default());
+    let old_key = SecretString::new(relay::VAULT_KEY.to_string());
     std::fs::create_dir_all(&config.data_dir).unwrap();
-    let conn = rusqlite::Connection::open(config.vault_path()).unwrap();
+    let conn = rusqlite::Connection::open(config.legacy_vault_path()).unwrap();
     conn.execute_batch(&format!("PRAGMA key = '{}';", relay::VAULT_KEY))
         .unwrap();
     conn.execute_batch(
@@ -206,25 +220,36 @@ fn a_vault_from_the_first_alpha_is_refused() {
     )
     .unwrap();
     drop(conn);
-    let before = std::fs::read(config.vault_path()).unwrap();
+    let before = std::fs::read(config.legacy_vault_path()).unwrap();
     let error = Relay::start(config.clone())
         .err()
-        .expect("a version 1 vault must be refused");
+        .expect("a relay from before teams needs migrate");
+    assert!(error.message.contains("migrate"), "{error}");
+    let error = Relay::migrate(&config, &old_key).expect_err("a version 1 vault must be refused");
     assert!(error.message.contains("first alpha"), "{error}");
     assert!(error.message.contains("plaintext"), "{error}");
     assert!(error.message.contains("new data volume"), "{error}");
     assert!(!error.to_string().contains(CANARY), "{error}");
-    assert_eq!(std::fs::read(config.vault_path()).unwrap(), before);
+    assert_eq!(std::fs::read(config.legacy_vault_path()).unwrap(), before);
+    assert!(!config.directory_path().exists());
     // A vault of a version that is not known is refused with another message.
-    let conn = rusqlite::Connection::open(config.vault_path()).unwrap();
+    let conn = rusqlite::Connection::open(config.legacy_vault_path()).unwrap();
     conn.execute_batch(&format!(
         "PRAGMA key = '{}'; PRAGMA user_version = 9;",
         relay::VAULT_KEY
     ))
     .unwrap();
     drop(conn);
-    let error = Relay::start(config).err().expect("version 9 is unknown");
+    let error = Relay::migrate(&config, &old_key).expect_err("version 9 is unknown");
     assert!(error.message.contains("unknown schema version"), "{error}");
+    assert!(!config.directory_path().exists());
+    assert!(
+        !config.teams_dir().exists()
+            || std::fs::read_dir(config.teams_dir())
+                .unwrap()
+                .next()
+                .is_none()
+    );
 }
 
 #[test]

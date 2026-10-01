@@ -11,7 +11,7 @@ use std::sync::Arc;
 use apassy::broker::proxy::HostRule;
 use serde::Serialize;
 
-use crate::ids::{AgentId, ItemId, MemberId, RunId, SessionId};
+use crate::ids::{AgentId, ItemId, MemberId, RunId, SessionId, TeamId};
 use crate::secret::SecretString;
 
 /// One variable of a session: a placeholder, its real value, and the hosts where
@@ -44,6 +44,8 @@ impl std::fmt::Debug for SessionSecret {
 /// One live proxy session: the released run of one agent.
 #[derive(Debug, Clone)]
 pub struct LiveSession {
+    /// The team of the run. The session key names it too.
+    pub team: TeamId,
     pub id: SessionId,
     pub run_id: RunId,
     pub agent_id: AgentId,
@@ -92,6 +94,10 @@ pub enum ProxyOutcome {
 /// placeholder, a session key, a query string, a header, or a body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProxyEvent {
+    /// The team of the session. `None` when the session key was not found: such a
+    /// request goes to the audit of the relay, not of a team. Not written in the row.
+    #[serde(skip)]
+    pub team: Option<TeamId>,
     /// `None` when the session key was not found.
     pub session_id: Option<SessionId>,
     pub run_id: Option<RunId>,
@@ -116,6 +122,7 @@ mod tests {
 
     fn session() -> LiveSession {
         LiveSession {
+            team: TeamId::parse("t_abcdefgh23").unwrap(),
             id: SessionId(1),
             run_id: RunId(2),
             agent_id: AgentId(3),

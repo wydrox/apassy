@@ -18,7 +18,7 @@ use crate::api::{
 use crate::error::{RelayError, RelayResult, codes};
 use crate::hostkeys;
 use crate::ids::{AgentId, CollectionId, GrantId, InviteId, ItemId, MemberId};
-use crate::secret::{TokenKind, new_token, token_hash};
+use crate::secret::{TokenKind, new_token, parse_token, token_hash};
 use crate::server::Core;
 use crate::server::approvals::invalidate_pending;
 use crate::server::audit::{self, member_actor};
@@ -80,6 +80,7 @@ pub fn me(core: &Core, who: &crate::server::auth::Principal) -> RelayResult<Valu
     let view = match who {
         crate::server::auth::Principal::Member(_) => MeView {
             team,
+            team_id: Some(core.team.clone()),
             kind: PrincipalKind::Member,
             member_id: member.id,
             member_name: member.name.clone(),
@@ -90,6 +91,7 @@ pub fn me(core: &Core, who: &crate::server::auth::Principal) -> RelayResult<Valu
         },
         crate::server::auth::Principal::Agent(agent) => MeView {
             team,
+            team_id: Some(core.team.clone()),
             kind: PrincipalKind::Agent,
             member_id: member.id,
             member_name: member.name.clone(),
@@ -102,7 +104,7 @@ pub fn me(core: &Core, who: &crate::server::auth::Principal) -> RelayResult<Valu
     to_json(&view)
 }
 
-fn invite_invalid() -> RelayError {
+pub fn invite_invalid() -> RelayError {
     RelayError::new(
         codes::INVITE_INVALID,
         "The invite code is not valid, was used, or expired.",
@@ -112,11 +114,13 @@ fn invite_invalid() -> RelayError {
 pub fn join(core: &Core, request: &JoinRequest, now: u64) -> RelayResult<Value> {
     let name = checked_member_name(&request.name)?.to_string();
     let code = request.code.expose();
-    if TokenKind::of(code) != Some(TokenKind::Invite) {
+    // The relay found this team by the team id in the code. Check it again here.
+    let parsed = parse_token(code).ok_or_else(invite_invalid)?;
+    if parsed.kind != TokenKind::Invite || parsed.team.as_ref() != Some(&core.team) {
         return Err(invite_invalid());
     }
     let code_hash = token_hash(code);
-    let token = new_token(TokenKind::Member)?;
+    let token = new_token(TokenKind::Member, &core.team)?;
     let member_hash = token_hash(token.expose());
     let (member_id, role, invite_id) = core.store.tx(|tx| {
         let invite: Option<(i64, String)> = tx
@@ -184,7 +188,7 @@ pub fn invite_create(
     if !(1..=MAX_INVITE_HOURS).contains(&hours) {
         return Err(RelayError::invalid("An invite lives 1 to 168 hours."));
     }
-    let code = new_token(TokenKind::Invite)?;
+    let code = new_token(TokenKind::Invite, &core.team)?;
     let hash = token_hash(code.expose());
     let expires_at = now + u64::from(hours) * 3600;
     let id = core.store.tx(|tx| {
@@ -857,7 +861,7 @@ pub fn agent_create(
     if !(1..=MAX_AGENT_DAYS).contains(&days) {
         return Err(RelayError::invalid("An agent token lives 1 to 365 days."));
     }
-    let token = new_token(TokenKind::Agent)?;
+    let token = new_token(TokenKind::Agent, &core.team)?;
     let hash = token_hash(token.expose());
     let expires_at = now + u64::from(days) * 86_400;
     let id = core.store.tx(|tx| {
