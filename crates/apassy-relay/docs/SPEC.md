@@ -668,9 +668,12 @@ ADR 0019 of the core, stage 1. One relay holds several teams. Separation is by f
 | `relay.db` | the directory: each team's id, name, state (`active` or `suspended`), the random key of its file, and a `legacy` flag; the team codes (hash, expiry, use); the audit of the relay. No people, no items, no runs. `user_version` 1001 | the master key (`APASSY_RELAY_KEY`) |
 | `teams/<team id>.db` | one team: the schema of section 8, unchanged (`user_version` 2) | its own random 256-bit key, kept in `relay.db` |
 | `admin.sock` | the operator socket, mode 0600 | none; file mode only |
+| `relay.lock` | an exclusive lock: `serve`, `init`, and `migrate` hold it, so one relay process at a time uses the data directory. `admin` does not take it | none |
 
 - A team id is `t_` and 10 characters of lowercase base32 (`a-z`, `2-7`), random, and public. Ids inside a team file (member 1, item 1, run 1) are local to that team and repeat between teams.
 - `apassy-relay init --team T --owner O` makes `relay.db` and one team. `apassy-relay init` alone makes `relay.db` with no team. Both refuse when the data directory has a relay or a `team.db`.
+
+**Start.** A team file that cannot be opened (missing, damaged, wrong mode) does not stop the relay: the relay logs it, serves the other teams, and lists that team with `open: false`. The operator suspends and deletes it, or fixes the file, suspends, and resumes it.
 
 **State.** Each active team has its own `Core` in memory: its file, its audit writer and masks, its session table, its run keys, its notifier, its long polls, and its limiter of refused requests. No map spans teams. The hub (`src/server/hub.rs`) keeps the active teams by id.
 
@@ -693,17 +696,17 @@ No endpoint takes a team id in the path.
 | `teams` | id, name, state, legacy, created, suspended, and for an active team the counts of live members, items, and agents and the time of its last audit row. No names of members or items, no runs, no audit |
 | `suspend ID` | the team's state becomes `suspended`; a row `team_suspended` (actor `operator`) in its audit; its sessions end, its run keys go, its long polls wake, and it leaves the hub: its tokens fail at the next request |
 | `resume ID` | opens the team again (a restart for that team: `ready` runs become `ended`); a row `team_resumed` |
-| `delete ID` | only a suspended team: removes its row and file key from `relay.db`, then its file. No undo |
+| `delete ID` | only a suspended team, and only once the requests that started before the suspension have ended (it waits up to 10 seconds, then refuses): removes its row and file key from `relay.db`, then its file. A file that cannot be deleted is an error. No undo |
 
-**Proxy addresses.** The proxy connects only to public addresses: after DNS it drops loopback, private, link-local, CGNAT, unique-local, multicast, documentation, benchmark, reserved, and unspecified addresses, and IPv6 forms that carry such an IPv4 address. A host with no public address fails with 502 `upstream_failed`. A team cannot reach the relay's machine or its networks.
+**Proxy addresses.** The proxy connects only to public addresses: after DNS it drops loopback, private, link-local, CGNAT, unique-local, site-local, multicast, documentation, benchmark, reserved, and unspecified addresses, 6to4 (`2002::/16`), local-use NAT64 (`64:ff9b:1::/48`), and IPv6 forms that carry such an IPv4 address. `APASSY_RELAY_BLOCKED_ADDRESSES` adds public addresses or networks, for the relay's own machine. It connects to the addresses it checked and does not resolve again. A name that does not resolve, an address that is not allowed, and a port that does not answer get the same 502 `upstream_failed` message.
 
 **Migration.** `apassy-relay migrate` moves a relay from before teams (one `team.db`, keyed with `APASSY_RELAY_OLD_KEY`):
 
-1. Refuses if `relay.db` exists, if there is no `team.db`, or if `team.db.pre-teams` exists. Opens `team.db` with the old key and checks its version (version 1 is refused as in section 8).
+1. Refuses if `relay.db` exists, if there is no `team.db`, if `team.db.pre-teams` exists, or if the master key is the old key. Removes `relay.db.migrating` and `teams/*.migrating` of an earlier try that stopped before its commit point (their key was never saved). Opens `team.db` with the old key and checks its version (version 1 is refused as in section 8).
 2. Copies it to `teams/<new id>.db.migrating`, gives the copy a new random key (`PRAGMA rekey`), and checks that the copy opens with the new key and not with the old one.
-3. Makes `relay.db` with the master key, with the team marked `legacy`.
-4. Renames the copy to `teams/<id>.db`, and `team.db` to `team.db.pre-teams` (it opens with the old key only).
+3. Writes the directory, with the team marked `legacy`, as `relay.db.migrating`, and renames it to `relay.db`. This rename is the commit point.
+4. Renames the copy to `teams/<id>.db`, and `team.db` to `team.db.pre-teams` (it opens with the old key only). If the process stops here, the next `serve` does these renames.
 
-Any failure removes what it made and leaves `team.db` as it was. Member and agent tokens without a team id keep working for the legacy team; new tokens of that team name it.
+A failure before the commit point removes what it made and leaves `team.db` as it was. Member and agent tokens without a team id keep working for the legacy team; new tokens of that team name it. An invite code made before the migration has no team id and stops working: make a new one.
 
 **What this does not protect.** The master key and every team file are on the same machine: the operator, root, or a disk snapshot can open every team's metadata. Item values stay sealed (section 21). All teams share one process. There are no limits per team yet.

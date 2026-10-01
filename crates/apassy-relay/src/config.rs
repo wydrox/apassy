@@ -9,11 +9,12 @@
 //! | `APASSY_RELAY_KEY` or `APASSY_RELAY_KEY_FILE` | The master key: it opens `relay.db`, which holds the key of each team file; at least 16 bytes | required |
 //! | `APASSY_RELAY_SESSION_TTL` | Seconds a proxy session lives; 60 to 3600 | `900` |
 //! | `APASSY_RELAY_APPROVAL_TIMEOUT` | Seconds a run waits for the owner's host; 30 to 86400 | `600` |
+//! | `APASSY_RELAY_BLOCKED_ADDRESSES` | Public addresses or networks the proxy refuses too, comma-separated (the relay's own) | none |
 //!
 //! A `_FILE` variable names a file whose content (trailing newline removed) is the
 //! value. It wins over the plain variable.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -34,6 +35,10 @@ pub const TEAMS_DIR: &str = "teams";
 pub const LEGACY_VAULT_FILE: &str = "team.db";
 /// The Unix socket of the operator in the data directory.
 pub const ADMIN_SOCKET: &str = "admin.sock";
+/// The lock file of the data directory: one relay process at a time.
+pub const LOCK_FILE: &str = "relay.lock";
+/// The old `team.db` after `apassy-relay migrate`. It opens with the old key only.
+pub const LEGACY_BACKUP_FILE: &str = "team.db.pre-teams";
 
 /// How the proxy reaches upstream hosts.
 #[derive(Debug, Clone)]
@@ -42,6 +47,9 @@ pub struct UpstreamOptions {
     pub extra_roots_der: Vec<Vec<u8>>,
     /// Fixed addresses for `(host, port)`, instead of DNS. Tests only.
     pub resolve: Vec<(String, u16, SocketAddr)>,
+    /// Public networks that the proxy also refuses, for example the relay's own
+    /// addresses (`APASSY_RELAY_BLOCKED_ADDRESSES`). Private ones are always refused.
+    pub blocked: Vec<IpNet>,
     pub connect_timeout: Duration,
     pub io_timeout: Duration,
 }
@@ -51,8 +59,56 @@ impl Default for UpstreamOptions {
         Self {
             extra_roots_der: Vec::new(),
             resolve: Vec::new(),
+            blocked: Vec::new(),
             connect_timeout: Duration::from_secs(10),
             io_timeout: Duration::from_secs(120),
+        }
+    }
+}
+
+/// An address with a prefix length: `9.9.9.117` or `2620:fe::/32`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IpNet {
+    pub addr: IpAddr,
+    pub prefix: u8,
+}
+
+impl IpNet {
+    /// `ip` or `ip/prefix`.
+    pub fn parse(text: &str) -> Option<Self> {
+        let (addr, prefix) = match text.trim().split_once('/') {
+            Some((addr, prefix)) => (addr, Some(prefix)),
+            None => (text.trim(), None),
+        };
+        let addr: IpAddr = addr.parse().ok()?;
+        let max = if addr.is_ipv4() { 32 } else { 128 };
+        let prefix = match prefix {
+            Some(text) => text.parse::<u8>().ok().filter(|p| *p <= max)?,
+            None => max,
+        };
+        Some(Self { addr, prefix })
+    }
+
+    /// True when `ip` is in this network. An IPv4-mapped IPv6 address counts as IPv4.
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        let ip = match ip {
+            IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+            v4 => v4,
+        };
+        match (self.addr, ip) {
+            (IpAddr::V4(net), IpAddr::V4(ip)) => {
+                let mask = u32::MAX
+                    .checked_shl(32 - u32::from(self.prefix))
+                    .unwrap_or(0);
+                u32::from(net) & mask == u32::from(ip) & mask
+            }
+            (IpAddr::V6(net), IpAddr::V6(ip)) => {
+                let mask = u128::MAX
+                    .checked_shl(128 - u32::from(self.prefix))
+                    .unwrap_or(0);
+                u128::from(net) & mask == u128::from(ip) & mask
+            }
+            _ => false,
         }
     }
 }
@@ -167,6 +223,16 @@ impl RelayConfig {
             30,
             86_400,
         )?;
+        let mut upstream = UpstreamOptions::default();
+        if let Some(text) = lookup("APASSY_RELAY_BLOCKED_ADDRESSES") {
+            for part in text.split(',').filter(|part| !part.trim().is_empty()) {
+                upstream.blocked.push(IpNet::parse(part).ok_or_else(|| {
+                    RelayError::invalid(
+                        "APASSY_RELAY_BLOCKED_ADDRESSES is a comma-separated list of addresses or networks, such as 203.0.113.7,2001:db8::/64.",
+                    )
+                })?);
+            }
+        }
         Ok(Self {
             data_dir,
             listen,
@@ -175,7 +241,7 @@ impl RelayConfig {
             master_key,
             session_ttl_secs,
             approval_timeout_secs,
-            upstream: UpstreamOptions::default(),
+            upstream,
             limits: Limits::default(),
         })
     }
@@ -292,6 +358,51 @@ mod tests {
         assert!(ttl.is_err());
         assert!(checked_public_url("https://relay.example.test/path").is_err());
         assert!(checked_public_url("ftp://relay.example.test").is_err());
+    }
+
+    #[test]
+    fn blocked_networks_parse_and_match() {
+        let config = RelayConfig::from_lookup(lookup(&[
+            ("APASSY_RELAY_PUBLIC_URL", "https://relay.example.test"),
+            ("APASSY_RELAY_EDGE_SECRET", EDGE),
+            ("APASSY_RELAY_KEY", "a synthetic vault passphrase"),
+            (
+                "APASSY_RELAY_BLOCKED_ADDRESSES",
+                "9.9.9.117, 2620:fe:0:7491::/64",
+            ),
+        ]))
+        .unwrap();
+        let blocked = &config.upstream.blocked;
+        assert_eq!(blocked.len(), 2);
+        let hit = |ip: &str| blocked.iter().any(|net| net.contains(ip.parse().unwrap()));
+        assert!(hit("9.9.9.117"));
+        assert!(hit("::ffff:9.9.9.117"));
+        assert!(!hit("9.9.9.118"));
+        assert!(hit("2620:fe:0:7491::1"));
+        assert!(hit("2620:fe:0:7491:ffff::9"));
+        assert!(!hit("2620:fe:0:7492::1"));
+        assert!(
+            IpNet::parse("10.0.0.0/8")
+                .unwrap()
+                .contains("10.9.8.7".parse().unwrap())
+        );
+        assert!(
+            IpNet::parse("0.0.0.0/0")
+                .unwrap()
+                .contains("8.8.8.8".parse().unwrap())
+        );
+        for bad in ["x", "1.2.3.4/33", "::/129", "1.2.3.4/"] {
+            assert!(IpNet::parse(bad).is_none(), "{bad}");
+        }
+        assert!(
+            RelayConfig::from_lookup(lookup(&[
+                ("APASSY_RELAY_PUBLIC_URL", "https://relay.example.test"),
+                ("APASSY_RELAY_EDGE_SECRET", EDGE),
+                ("APASSY_RELAY_KEY", "a synthetic vault passphrase"),
+                ("APASSY_RELAY_BLOCKED_ADDRESSES", "not-an-ip"),
+            ]))
+            .is_err()
+        );
     }
 
     #[test]

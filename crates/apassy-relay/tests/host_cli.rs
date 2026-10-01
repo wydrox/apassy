@@ -408,9 +408,20 @@ fn the_host_trusts_its_own_metadata_not_the_relays() {
     world.store.add(entry).unwrap();
     let host = world.start_host(HostOptions::default(), |_| Answer::No);
     let run = world.ask_for(&[world.stripe], &["git", "status"], Some(USER));
-    // The relay would allow it.
-    assert_eq!(world.relay.host_request(run)["suggestion"], "allow");
     let view = world.decided(run);
+    // The relay would allow it. (Its `run_pending` row says so; the host may have taken
+    // the run before a test could list it.)
+    let audit = world
+        .relay
+        .ok("GET", "/v1/audit?limit=500", &world.relay.owner_token, None);
+    let pending = audit
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["action"] == "run_pending" && row["run_id"] == run)
+        .unwrap()
+        .clone();
+    assert_eq!(pending["detail"]["suggestion"], "allow", "{pending}");
     assert_eq!(view["status"], "denied");
     let asked = host.asked();
     assert_eq!(

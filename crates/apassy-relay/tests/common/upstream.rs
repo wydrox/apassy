@@ -140,6 +140,7 @@ impl MockUpstream {
                 .iter()
                 .map(|host| (host.clone(), 443, self.addr))
                 .collect(),
+            blocked: Vec::new(),
             connect_timeout: Duration::from_secs(5),
             io_timeout: Duration::from_secs(20),
         }

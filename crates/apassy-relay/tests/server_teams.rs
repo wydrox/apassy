@@ -443,14 +443,20 @@ fn an_unknown_operator_command_is_refused() {
     assert_eq!(envelope["error"]["code"], codes::INVALID_REQUEST);
 }
 
-#[test]
-fn a_relay_from_before_teams_migrates_with_its_tokens() {
-    // Make a vault of the old layout: one team.db with an old key, and member and agent
-    // tokens without a team id.
+/// A data directory of the old layout: one team.db with an old key, and member and
+/// agent tokens without a team id. Returns the config, the temp dir, the old key, and
+/// the old owner and agent tokens.
+fn legacy_layout() -> (
+    apassy_relay::config::RelayConfig,
+    tempfile::TempDir,
+    SecretString,
+    String,
+    String,
+) {
     let relay = start(UpstreamOptions::default());
     let team = relay.setup("staging");
     let team_id = relay.team_id.clone();
-    let (config, _dir) = relay.stop_keep();
+    let (config, dir) = relay.stop_keep();
     let old_key = SecretString::new("the old vault passphrase of tests".to_string());
     let old_owner = format!("apassy_mbr_{}", "1a".repeat(32));
     let old_agent = format!("apassy_agt_{}", "2b".repeat(32));
@@ -472,6 +478,15 @@ fn a_relay_from_before_teams_migrates_with_its_tokens() {
     std::fs::rename(config.team_path(&team_id), config.legacy_vault_path()).unwrap();
     std::fs::remove_file(config.directory_path()).unwrap();
     std::fs::remove_dir(config.teams_dir()).unwrap();
+    (config, dir, old_key, old_owner, old_agent)
+}
+
+#[test]
+fn a_relay_from_before_teams_migrates_with_its_tokens() {
+    let (config, _dir, old_key, old_owner, old_agent) = legacy_layout();
+    // The master key must not be the old key.
+    let same = Relay::migrate(&config, &config.master_key.clone()).expect_err("same key");
+    assert!(same.message.contains("master key"), "{same}");
 
     // Start refuses, migrate moves it.
     let error = Relay::start(config.clone()).err().unwrap();
@@ -537,4 +552,103 @@ fn a_relay_from_before_teams_migrates_with_its_tokens() {
     );
     assert_eq!(status, 403);
     running.stop();
+}
+
+#[test]
+fn a_migration_that_stopped_is_finished_or_redone() {
+    // Stopped before the commit point: leftovers of an earlier try, and no relay.db.
+    let (config, _dir, old_key, old_owner, _) = legacy_layout();
+    std::fs::create_dir_all(config.teams_dir()).unwrap();
+    let leftover = config.teams_dir().join("t_leftoverab.db.migrating");
+    std::fs::write(&leftover, b"half a copy").unwrap();
+    std::fs::write(
+        config.data_dir.join("relay.db.migrating"),
+        b"half a directory",
+    )
+    .unwrap();
+    let migrated = Relay::migrate(&config, &old_key).unwrap();
+    assert!(!leftover.exists());
+    assert!(!config.data_dir.join("relay.db.migrating").exists());
+    // Stopped after the commit point: relay.db is written, the files are not renamed.
+    let path = config.team_path(&migrated);
+    let mut staged = path.clone().into_os_string();
+    staged.push(".migrating");
+    std::fs::rename(&path, &staged).unwrap();
+    let backup = config.data_dir.join("team.db.pre-teams");
+    std::fs::rename(&backup, config.legacy_vault_path()).unwrap();
+    // The next start finishes it.
+    let running = Relay::start(config.clone()).unwrap();
+    assert!(path.exists() && backup.exists() && !config.legacy_vault_path().exists());
+    let (status, me) = relay::call_url(
+        &running.url(),
+        Some(relay::EDGE_SECRET),
+        "GET",
+        "/v1/me",
+        Some(&old_owner),
+        None,
+    );
+    assert_eq!(status, 200, "{me}");
+    running.stop();
+}
+
+#[test]
+fn one_broken_team_does_not_stop_the_others() {
+    let mut relay = start(UpstreamOptions::default());
+    let owner_a = relay.owner_token.clone();
+    let owner_b = relay.new_team("Team B", "bob");
+    let id_b = team_of(&owner_b);
+    relay.switch_team(&owner_a);
+    let (config, dir) = relay.stop_keep();
+    std::fs::write(config.team_path(&id_b), vec![9u8; 8192]).unwrap();
+    // The relay starts, serves team A, and keeps team B out of service.
+    let running = Relay::start(config.clone()).unwrap();
+    let url = running.url();
+    let me = |token: &str| {
+        relay::call_url(
+            &url,
+            Some(relay::EDGE_SECRET),
+            "GET",
+            "/v1/me",
+            Some(token),
+            None,
+        )
+        .0
+    };
+    assert_eq!(me(&owner_a), 200);
+    assert_eq!(me(&owner_b), 401);
+    let send = |command: Command| {
+        apassy_relay::server::operator::send(&config.admin_socket_path(), &command)
+    };
+    let teams = send(Command::Teams).unwrap();
+    let b = teams
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == id_b.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (b["state"].clone(), b["open"].clone()),
+        (json!("active"), json!(false))
+    );
+    // The operator takes it out.
+    send(Command::Suspend { team: id_b.clone() }).unwrap();
+    send(Command::Delete { team: id_b.clone() }).unwrap();
+    assert!(!config.team_path(&id_b).exists());
+    assert_eq!(me(&owner_a), 200);
+    running.stop();
+    drop(dir);
+}
+
+#[test]
+fn two_relays_cannot_use_one_data_directory() {
+    let relay = start(UpstreamOptions::default());
+    let mut second = relay.config.clone();
+    second.listen = "127.0.0.1:0".parse().unwrap();
+    let error = Relay::start(second.clone()).err().expect("a second relay");
+    assert!(error.message.contains("Another relay"), "{error}");
+    assert!(Relay::migrate(&second, &SecretString::new("x".repeat(20))).is_err());
+    // The first relay still has its own operator socket.
+    assert!(relay.operator(Command::Teams).is_ok());
+    relay.ok("GET", "/v1/me", &relay.owner_token, None);
 }

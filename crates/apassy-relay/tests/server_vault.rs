@@ -55,7 +55,10 @@ fn file_bytes_hold_no_value_and_no_plain_header() {
         names.sort();
         names
     };
-    assert_eq!(names(dir.path().join("data")), ["relay.db", "teams"]);
+    assert_eq!(
+        names(dir.path().join("data")),
+        ["relay.db", "relay.lock", "teams"]
+    );
     assert_eq!(names(config.teams_dir()), [format!("{team}.db")]);
 }
 
@@ -202,10 +205,11 @@ fn data_survives_a_restart_and_sessions_do_not() {
 fn a_vault_from_the_first_alpha_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let config = relay::test_config(dir.path(), UpstreamOptions::default());
-    let old_key = SecretString::new(relay::VAULT_KEY.to_string());
+    const OLD_KEY: &str = "the old vault passphrase of the first alpha";
+    let old_key = SecretString::new(OLD_KEY.to_string());
     std::fs::create_dir_all(&config.data_dir).unwrap();
     let conn = rusqlite::Connection::open(config.legacy_vault_path()).unwrap();
-    conn.execute_batch(&format!("PRAGMA key = '{}';", relay::VAULT_KEY))
+    conn.execute_batch(&format!("PRAGMA key = '{OLD_KEY}';"))
         .unwrap();
     conn.execute_batch(
         "CREATE TABLE team (id INTEGER PRIMARY KEY CHECK (id = 1), name TEXT NOT NULL, created_at INTEGER NOT NULL);
@@ -235,8 +239,7 @@ fn a_vault_from_the_first_alpha_is_refused() {
     // A vault of a version that is not known is refused with another message.
     let conn = rusqlite::Connection::open(config.legacy_vault_path()).unwrap();
     conn.execute_batch(&format!(
-        "PRAGMA key = '{}'; PRAGMA user_version = 9;",
-        relay::VAULT_KEY
+        "PRAGMA key = '{OLD_KEY}'; PRAGMA user_version = 9;"
     ))
     .unwrap();
     drop(conn);

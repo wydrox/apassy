@@ -102,17 +102,22 @@ pub struct Directory {
 impl Directory {
     /// Creates `relay.db`. Refuses when it exists.
     pub fn create(config: &RelayConfig) -> RelayResult<Self> {
-        let store = Store::create_at(&config.directory_path(), &config.master_key, SCHEMA)
-            .map_err(|error| {
-                if error.code == codes::CONFLICT {
-                    RelayError::new(
-                        codes::CONFLICT,
-                        "The relay already exists. Refusing to create it again.",
-                    )
-                } else {
-                    error
-                }
-            })?;
+        Self::create_at(&config.directory_path(), &config.master_key)
+    }
+
+    /// Creates a directory file at `path` (`migrate` writes it under another name and
+    /// renames it last). Refuses when it exists.
+    pub fn create_at(path: &std::path::Path, master_key: &SecretString) -> RelayResult<Self> {
+        let store = Store::create_at(path, master_key, SCHEMA).map_err(|error| {
+            if error.code == codes::CONFLICT {
+                RelayError::new(
+                    codes::CONFLICT,
+                    "The relay already exists. Refusing to create it again.",
+                )
+            } else {
+                error
+            }
+        })?;
         Ok(Self {
             store: Arc::new(store),
             audit: Audit::new(),

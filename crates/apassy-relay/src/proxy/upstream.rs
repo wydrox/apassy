@@ -31,6 +31,10 @@ pub(super) struct Upstream {
     options: UpstreamOptions,
 }
 
+/// The one message for a host that cannot be resolved, is not public, is blocked, or
+/// does not answer.
+const UNREACHABLE: &str = "The upstream host cannot be reached.";
+
 /// Why an upstream exchange failed. The text names no value.
 #[derive(Debug)]
 pub(super) struct UpstreamError(pub &'static str);
@@ -80,16 +84,27 @@ impl Upstream {
         {
             return Ok(vec![*addr]);
         }
-        let found: Vec<SocketAddr> = (host, port).to_socket_addrs()?.collect();
-        let public: Vec<SocketAddr> = found
-            .iter()
-            .copied()
-            .filter(|addr| is_public_ip(addr.ip()))
+        // One message for a name that does not resolve, an address that is not public or
+        // is blocked, and a port that does not answer: an agent cannot tell them apart.
+        let found: Vec<SocketAddr> = (host, port)
+            .to_socket_addrs()
+            .map_err(|_| UpstreamError(UNREACHABLE))?
             .collect();
-        if public.is_empty() && !found.is_empty() {
-            return Err(UpstreamError("The upstream host has no public address."));
+        let allowed: Vec<SocketAddr> = found
+            .into_iter()
+            .filter(|addr| {
+                is_public_ip(addr.ip())
+                    && !self
+                        .options
+                        .blocked
+                        .iter()
+                        .any(|net| net.contains(addr.ip()))
+            })
+            .collect();
+        if allowed.is_empty() {
+            return Err(UpstreamError(UNREACHABLE));
         }
-        Ok(public)
+        Ok(allowed)
     }
 
     /// Opens TCP, and finishes the TLS handshake with SNI `host`. No request byte
@@ -99,7 +114,7 @@ impl Upstream {
             .addresses(host, port)?
             .into_iter()
             .find_map(|addr| TcpStream::connect_timeout(&addr, self.options.connect_timeout).ok())
-            .ok_or(UpstreamError("The upstream host cannot be reached."))?;
+            .ok_or(UpstreamError(UNREACHABLE))?;
         tcp.set_read_timeout(Some(self.options.io_timeout))?;
         tcp.set_write_timeout(Some(self.options.io_timeout))?;
         let _ = tcp.set_nodelay(true);
@@ -324,7 +339,10 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
         || ip.is_multicast()
         || (segments[0] & 0xfe00) == 0xfc00
         || (segments[0] & 0xffc0) == 0xfe80
+        || (segments[0] & 0xffc0) == 0xfec0
         || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+        || segments[0] == 0x2002
+        || (segments[0] == 0x64 && segments[1] == 0xff9b && segments[2] == 1)
         || segments[..6] == [0, 0, 0, 0, 0, 0])
 }
 
@@ -358,6 +376,10 @@ mod tests {
             "::ffff:10.0.0.1",
             "64:ff9b::a00:1",
             "::127.0.0.1",
+            "64:ff9b:1::808:808",
+            "2002:a00:1::1",
+            "2002:808:808::1",
+            "fec0::1",
         ] {
             assert!(!is_public_ip(text.parse().unwrap()), "{text}");
         }

@@ -461,7 +461,13 @@ docker compose exec relay apassy-relay admin resume t_7k2m9q4x8c
 docker compose exec relay apassy-relay admin delete t_7k2m9q4x8c   # only a suspended team; no undo
 ```
 
-A suspended team's tokens fail at the next request; its sessions and waiting runs end. Each action is a row in the audit of the team (actor `operator`) and of the relay. Delete removes the team's key from `relay.db` and its file. Old backups still hold both (section 13).
+A suspended team's tokens fail at the next request; its sessions and waiting runs end. Each action is a row in the audit of the team (actor `operator`) and of the relay. Delete waits for the requests that started before the suspension, then removes the team's key from `relay.db` and its file. Old backups still hold both (section 13).
+
+**A team that does not open.** If a team file is missing or damaged, the relay still starts and serves the other teams. It logs the team, and `admin teams` shows it with `"open": false`. Suspend and delete it, or put the file back, then suspend and resume it.
+
+**One relay per data directory.** `serve`, `init`, and `migrate` hold `relay.lock` in the data directory. A second relay on the same volume (for example `docker compose run relay` while the relay runs) refuses to start.
+
+**The relay's own addresses.** The proxy refuses private addresses by itself. Add the public addresses of the VPS so that a team cannot reach its other services through the proxy: `APASSY_RELAY_BLOCKED_ADDRESSES=9.9.9.117,2620:fe:0:7491::/64` (in `deploy/vps/compose.yaml`).
 
 **What the operator can see.** The master key and every team file are on the same machine. The operator, root on the VPS, or a disk snapshot can open the names, members, hosts, commands, and audit of every team. Item values stay sealed: their keys are on each owner's machine. Tell the owners this.
 
@@ -475,4 +481,4 @@ docker compose run --rm \
   relay migrate                                     # prints the new team id
 ```
 
-`migrate` copies `team.db` into `teams/<id>.db` with a new random key, makes `relay.db` with the master key, and renames the old file to `team.db.pre-teams` (it opens with the old key only). Any failure leaves `team.db` as it was. The old owner token, member tokens, agent tokens, and `keys.json` keep working for the migrated team. New tokens of that team name it. Delete `team.db.pre-teams` and the old vault key when you no longer need a way back.
+`migrate` copies `team.db` into `teams/<id>.db` with a new random key, makes `relay.db` with the master key, and renames the old file to `team.db.pre-teams` (it opens with the old key only). The master key must be new: `migrate` refuses the old vault key. A failure before `relay.db` is written leaves `team.db` as it was, and a new `migrate` starts over. A stop after it is finished by the next start. The old owner token, member tokens, agent tokens, and `keys.json` keep working for the migrated team. New tokens of that team name it. An invite code made before the migration stops working: make a new one. Delete `team.db.pre-teams` and the old vault key when you no longer need a way back.

@@ -6,8 +6,11 @@
 //! so ids that repeat between teams (run 5, member 1) never meet.
 
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::ErrorKind;
+use std::os::unix::fs::OpenOptionsExt;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 
 use apassy::broker::packs::RuleSet;
 use rusqlite::params;
@@ -119,13 +122,69 @@ pub fn make_team_file(
     }
 }
 
-/// Deletes the file of a team and its journal, if any.
-pub fn remove_team_file(config: &RelayConfig, id: &TeamId) {
+/// Deletes the file of a team and its journal, if any. A file that is not there is
+/// not an error; any other failure is.
+pub fn remove_team_file(config: &RelayConfig, id: &TeamId) -> RelayResult<()> {
     let path = config.team_path(id);
-    let _ = std::fs::remove_file(&path);
-    let mut journal = path.into_os_string();
+    let mut journal = path.clone().into_os_string();
     journal.push("-journal");
-    let _ = std::fs::remove_file(journal);
+    for file in [path.into_os_string(), journal] {
+        match std::fs::remove_file(&file) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(_) => return Err(RelayError::internal("The team file cannot be deleted.")),
+        }
+    }
+    Ok(())
+}
+
+/// Takes the lock of the data directory (`relay.lock`), so that one relay process at
+/// a time uses it. `serve`, `init`, and `migrate` hold it; `admin` does not.
+pub fn lock_data_dir(config: &RelayConfig) -> RelayResult<File> {
+    std::fs::create_dir_all(&config.data_dir)
+        .map_err(|_| RelayError::internal("The data directory cannot be created."))?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(config.data_dir.join(crate::config::LOCK_FILE))
+        .map_err(|_| {
+            RelayError::internal("The lock file of the data directory cannot be opened.")
+        })?;
+    file.try_lock().map_err(|_| {
+        RelayError::new(
+            codes::CONFLICT,
+            "Another relay process uses this data directory. Stop it first.",
+        )
+    })?;
+    Ok(file)
+}
+
+/// Finishes a migration that stopped after `relay.db` was written (the commit point of
+/// `Relay::migrate`): moves `teams/<id>.db.migrating` into place, and renames the old
+/// `team.db` of the migrated team to `team.db.pre-teams`.
+fn finish_migration(config: &RelayConfig, rows: &[TeamRow]) {
+    for row in rows {
+        let path = config.team_path(&row.id);
+        let mut staged = path.clone().into_os_string();
+        staged.push(".migrating");
+        if std::fs::symlink_metadata(&path).is_err()
+            && std::fs::symlink_metadata(&staged).is_ok()
+            && std::fs::rename(&staged, &path).is_ok()
+        {
+            eprintln!("apassy-relay: finished the migration of team {}", row.id);
+        }
+    }
+    let legacy = config.legacy_vault_path();
+    let backup = config.data_dir.join(crate::config::LEGACY_BACKUP_FILE);
+    if rows.iter().any(|row| row.legacy)
+        && std::fs::symlink_metadata(&legacy).is_ok()
+        && std::fs::symlink_metadata(&backup).is_err()
+        && std::fs::rename(&legacy, &backup).is_ok()
+    {
+        eprintln!("apassy-relay: renamed the migrated team.db to team.db.pre-teams");
+    }
 }
 
 /// What the operator sees of one team. No member, item, run, or audit row.
@@ -137,7 +196,10 @@ pub struct TeamInfo {
     pub legacy: bool,
     pub created_at: u64,
     pub suspended_at: Option<u64>,
-    /// Counts and the time of the last audit row. `None` while the team is suspended.
+    /// True while the team is served. An active team that is not open failed to open
+    /// at start: suspend or delete it.
+    pub open: bool,
+    /// Counts and the time of the last audit row. `None` while the team is not open.
     pub members: Option<u64>,
     pub items: Option<u64>,
     pub agents: Option<u64>,
@@ -153,11 +215,16 @@ pub struct Hub {
     rules: Arc<RuleSet>,
     public_host: String,
     stop: Arc<AtomicBool>,
+    /// Suspended teams whose requests may still run. Delete waits for them.
+    draining: Mutex<HashMap<TeamId, Weak<Core>>>,
+    /// The lock of the data directory, held until the relay stops.
+    lock: Mutex<Option<File>>,
 }
 
 impl Hub {
     /// Opens the directory and every active team.
     pub fn open(config: RelayConfig, stop: Arc<AtomicBool>) -> RelayResult<Arc<Self>> {
+        let lock = lock_data_dir(&config)?;
         if std::fs::symlink_metadata(config.directory_path()).is_err() {
             if std::fs::symlink_metadata(config.legacy_vault_path()).is_ok() {
                 return Err(RelayError::internal(
@@ -180,13 +247,24 @@ impl Hub {
             legacy: RwLock::new(None),
             rules: Arc::new(rules),
             stop,
+            draining: Mutex::new(HashMap::new()),
+            lock: Mutex::new(Some(lock)),
         });
-        for row in hub.directory.teams()? {
+        let rows = hub.directory.teams()?;
+        finish_migration(&hub.config, &rows);
+        for row in rows {
             if row.legacy {
                 *hub.legacy.write().unwrap_or_else(PoisonError::into_inner) = Some(row.id.clone());
             }
-            if row.state == TeamState::Active {
-                hub.open_team(&row)?;
+            // One team that cannot be opened does not stop the others. It stays out of
+            // service until the operator suspends or deletes it.
+            if row.state == TeamState::Active
+                && let Err(error) = hub.open_team(&row)
+            {
+                eprintln!(
+                    "apassy-relay: team {} cannot be opened and is out of service: {} Suspend or delete it with `apassy-relay admin`.",
+                    row.id, error.message
+                );
             }
         }
         Ok(hub)
@@ -276,10 +354,12 @@ impl Hub {
         // The names are checked before the code, so a typo does not use the code up.
         checked_team_name(&request.team)?;
         admin::checked_member_name(&request.owner)?;
+        let mut made: Option<TeamId> = None;
         let new = self.directory.store.tx(|tx| {
             // The code is checked before any work for the team.
             let code_id = directory::find_team_code(tx, request.code.expose(), now)?;
             let new = make_team_file(&self.config, &request.team, &request.owner, now)?;
+            made = Some(new.id.clone());
             let added = directory::mark_team_code_used(tx, code_id, &new.id, now)
                 .and_then(|()| {
                     directory::insert_team(
@@ -301,16 +381,18 @@ impl Hub {
                         &json!({"team_id": new.id, "code_id": code_id}),
                     )
                 });
-            match added {
-                Ok(_) => Ok(new),
-                Err(error) => {
-                    let id = new.id.clone();
-                    drop(new);
-                    remove_team_file(&self.config, &id);
-                    Err(error)
+            added.map(|_| new)
+        });
+        let new = match new {
+            Ok(new) => new,
+            Err(error) => {
+                // The team row did not commit: its file, if made, has no key anywhere.
+                if let Some(id) = made {
+                    let _ = remove_team_file(&self.config, &id);
                 }
+                return Err(error);
             }
-        })?;
+        };
         let NewTeam {
             id,
             owner_id,
@@ -351,6 +433,10 @@ impl Hub {
                 &json!({}),
             );
             core.close();
+            self.draining
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(id.clone(), Arc::downgrade(&core));
         }
         Ok(())
     }
@@ -368,6 +454,10 @@ impl Hub {
             ));
         }
         let core = self.open_team(&row)?;
+        self.draining
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(id);
         if let Err(error) = self.directory.set_state(id, TeamState::Active, now) {
             self.teams
                 .write()
@@ -400,8 +490,33 @@ impl Hub {
                 "Suspend the team first. Only a suspended team can be deleted.",
             ));
         }
+        // Requests that started before the suspension hold the team's state, and with
+        // it the open file. Wait a moment for them to end.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let busy = self
+                .draining
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(id)
+                .is_some_and(|weak| weak.strong_count() > 0);
+            if !busy {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                return Err(RelayError::new(
+                    codes::CONFLICT,
+                    "Requests of this team still run. Try again in a moment.",
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
         self.directory.remove(id, now)?;
-        remove_team_file(&self.config, id);
+        self.draining
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(id);
+        remove_team_file(&self.config, id)?;
         let mut legacy = self.legacy.write().unwrap_or_else(PoisonError::into_inner);
         if legacy.as_ref() == Some(id) {
             *legacy = None;
@@ -434,6 +549,7 @@ impl Hub {
                     .ok()
             });
             infos.push(TeamInfo {
+                open: self.team(&row.id).is_some(),
                 id: row.id,
                 name: row.name,
                 state: row.state,
@@ -449,10 +565,19 @@ impl Hub {
         Ok(infos)
     }
 
-    /// Ends every session and drops every run key of every team (at stop).
+    /// Ends every session and drops every run key of every team, and releases the lock
+    /// of the data directory (at stop).
     pub fn close_all(&self) {
         for core in self.all() {
             core.close();
+        }
+        if let Some(lock) = self
+            .lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            let _ = lock.unlock();
         }
     }
 
