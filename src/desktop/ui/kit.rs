@@ -1478,6 +1478,7 @@ pub(crate) enum Icon {
     List,
     Folder,
     Eye,
+    Phone,
 }
 
 /// An icon in a rounded color tile, as in System Settings.
@@ -1676,6 +1677,15 @@ pub(crate) fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color
         Icon::Eye => {
             closed(&arc(0.5, 0.5, 0.42, 0.26, 0.0, TAU));
             circle(0.5, 0.5, 0.12);
+        }
+        Icon::Phone => {
+            painter.rect_stroke(
+                Rect::from_min_max(p(0.27, 0.08), p(0.73, 0.92)),
+                size * 0.12,
+                stroke,
+                StrokeKind::Middle,
+            );
+            line(&[(0.42, 0.79), (0.58, 0.79)]);
         }
     }
 }

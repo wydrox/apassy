@@ -4,6 +4,8 @@
 //! channel, or verified isolation boundary.
 
 #[cfg(feature = "vault")]
+mod companion;
+#[cfg(feature = "vault")]
 pub mod inbox;
 #[cfg(feature = "vault")]
 mod learning_ui;
@@ -123,6 +125,9 @@ pub struct DesktopApp {
     /// Learning view state (goal item B10).
     #[cfg(feature = "vault")]
     pub(crate) learning: learning_ui::LearningUiState,
+    /// The iPhone listener and the pairing state of Settings > iPhone companion (ADR 0014).
+    #[cfg(feature = "vault")]
+    pub(crate) companion: companion::CompanionFlows,
     styled: bool,
 }
 
@@ -170,6 +175,8 @@ impl DesktopApp {
             owner: owner_check::OwnerFlows::default(),
             #[cfg(feature = "vault")]
             learning: learning_ui::LearningUiState::default(),
+            #[cfg(feature = "vault")]
+            companion: companion::CompanionFlows::default(),
             styled: false,
         }
     }
@@ -215,14 +222,17 @@ impl DesktopApp {
         };
     }
 
-    /// End every agent run that waits for the owner (goal item V3). Call it after a
-    /// lock, backup, restore, open, or passphrase change. The broker also ends such a
-    /// run when it sees the vault epoch change. This call makes the card go away at once.
+    /// End every agent run that waits for the owner (goal item V3), and stop the iPhone
+    /// listener. Call it after a lock, backup, restore, open, or passphrase change. The
+    /// broker also ends such a run when it sees the vault epoch change. This call makes
+    /// the card go away at once. The listener starts again for the new vault session, in
+    /// the next frame, when the setting is on and the vault is unlocked.
     #[cfg(feature = "vault")]
-    pub(crate) fn end_waiting_runs(&self) {
+    pub(crate) fn end_waiting_runs(&mut self) {
         if let BrokerState::Running(handle) = &self.broker {
             handle.approvals().invalidate_all();
         }
+        self.stop_companion();
     }
 
     pub fn model(&self) -> &DesktopModel {

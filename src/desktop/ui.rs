@@ -8,6 +8,10 @@
 mod activity;
 #[cfg(feature = "vault")]
 mod agents;
+#[cfg(feature = "vault")]
+mod companion;
+#[cfg(all(test, feature = "vault"))]
+mod companion_tests;
 #[cfg(not(feature = "vault"))]
 mod demo;
 #[cfg(feature = "vault")]
@@ -266,6 +270,9 @@ pub(crate) enum Sheet {
     Backup,
     #[cfg(feature = "vault")]
     Restore,
+    /// Remove every paired iPhone and make a new certificate (ADR 0014).
+    #[cfg(feature = "vault")]
+    ResetCompanion,
 }
 
 pub(crate) fn apply_style(ctx: &egui::Context) {

@@ -2,6 +2,15 @@
 
 All notable changes to Apassy. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the versions follow [Semantic Versioning](https://semver.org/). The site shows this file at <https://apassy.wyderka.cc/changelog>.
 
+## [Unreleased]
+
+### Added
+
+- **iPhone companion (experimental, off by default).** Approve or deny a run that waits for you from a paired iPhone on the same network, with Face ID. The Mac side is an HTTPS listener in the app (TLS 1.3, a self-signed certificate that the iPhone pins). It runs only while you turn it on in Settings > iPhone companion and the vault is unlocked. Pairing shows a QR code, asks you to type a 6-digit code that only the iPhone shows, and then needs your owner check. The iPhone never sees a secret value, and it cannot give access or change a rule ([iPhone companion](docs/operations/companion.md), [ADR 0014](docs/adr/0014-iphone-companion.md), [wire contract](docs/contracts/companion-v1.md)).
+- **Owner check by the iPhone.** A signature of the approval key of a paired iPhone is a third kind of owner check, next to Touch ID and the passphrase. The activity log says "Owner approved on the iPhone." for such a run.
+- **Paired iPhones.** Settings lists them with the pairing date and the last time each was seen. "Remove" and "Reset pairing" need no owner check, because they only take authority away. The vault schema is 13: it stores the certificate, the port, and each device. A restore from a backup removes the paired iPhones and turns the setting off.
+- Dependencies: `qrcode` 0.14.1 (no default features, no dependencies of its own) draws the pairing code in the app. `ring` 0.17.14 is now a direct dependency, at the version that `rustls` already builds.
+
 ## [0.2.1] - 2026-09-28
 
 Apassy builds and passes its tests on Linux. The app for Linux is not published yet: the isolation of agents uses macOS Seatbelt, and Linux needs its own version first.

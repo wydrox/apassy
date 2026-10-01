@@ -28,12 +28,12 @@ use crate::contracts::CredentialKind;
 use crate::desktop::model::{DetailDraft, ItemDraft, ModelError, ModelResult};
 use crate::vault::providers::{self, Suggestion};
 use crate::vault::{
-    AccessRequest, ActivityDecision, ActivityRecord, AgentSummary, AgentToken, Declaration,
-    Destination, EnvBinding, EnvDelivery, Environment, ExecGrant, ExecMode, ExecRule, Field,
-    GrantPlace, ItemDraft as VaultDraft, ItemEvent, ItemTimes, MAX_PASSPHRASE_BYTES,
-    MAX_PLACEHOLDER_HOSTS, MAX_TOKEN_LIFETIME_DAYS, MIN_PASSPHRASE_BYTES, Reversibility, RiskLevel,
-    Scope, SecretValue, SuggestionStats, Vault, VaultError, VaultErrorKind, checked_env_name,
-    parse_placeholder_host,
+    AccessRequest, ActivityDecision, ActivityRecord, AgentSummary, AgentToken, CompanionDevice,
+    CompanionSetting, Declaration, Destination, EnvBinding, EnvDelivery, Environment, ExecGrant,
+    ExecMode, ExecRule, Field, GrantPlace, ItemDraft as VaultDraft, ItemEvent, ItemTimes,
+    MAX_PASSPHRASE_BYTES, MAX_PLACEHOLDER_HOSTS, MAX_TOKEN_LIFETIME_DAYS, MIN_PASSPHRASE_BYTES,
+    Reversibility, RiskLevel, Scope, SecretValue, SuggestionStats, Vault, VaultError,
+    VaultErrorKind, checked_env_name, parse_placeholder_host,
 };
 
 const MAX_TAG_BYTES: usize = 64;
@@ -811,6 +811,40 @@ impl OwnerSession {
             .set_token_lifetime_days(days)
             .map_err(map_err)?;
         Ok(days)
+    }
+
+    /// The companion setting and the epoch of the open vault session. The app starts the
+    /// listener for exactly this epoch.
+    pub fn companion_status(&self) -> ModelResult<(CompanionSetting, [u8; 32])> {
+        let vault = self.unlocked()?;
+        let setting = vault.companion_setting().map_err(map_err)?;
+        Ok((setting, vault.epoch()))
+    }
+
+    /// Turn the iPhone listener on or off. It needs no owner check: the setting gives no
+    /// authority, and every endpoint except pairing needs a paired device.
+    pub fn set_companion_enabled(&mut self, enabled: bool) -> ModelResult<()> {
+        self.unlocked()?
+            .set_companion_enabled(enabled)
+            .map_err(map_err)
+    }
+
+    /// The paired iPhones, oldest first.
+    pub fn companion_devices(&self) -> ModelResult<Vec<CompanionDevice>> {
+        self.unlocked()?.companion_devices().map_err(map_err)
+    }
+
+    /// Remove one paired iPhone. It needs no owner check: it only takes authority away.
+    pub fn remove_companion_device(&mut self, device_id: &str) -> ModelResult<bool> {
+        self.unlocked()?
+            .remove_companion_device(device_id)
+            .map_err(map_err)
+    }
+
+    /// Remove every paired iPhone and the certificate. It needs no owner check: it only
+    /// takes authority away.
+    pub fn reset_companion_pairing(&mut self) -> ModelResult<()> {
+        self.unlocked()?.reset_companion_pairing().map_err(map_err)
     }
 
     /// API key items that have a connector destination, with the operations of their profile.

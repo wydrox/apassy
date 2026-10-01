@@ -1,0 +1,382 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/wydrox/apassy/main/packs/schema/rule-pack.schema.json",
+  "title": "Apassy rule pack, schema version 1",
+  "description": "Knowledge about one tool, or a group of small tools, for the command analysis of the Apassy bouncer. Built-in packs are the files in packs/. A local pack (an owner file) uses the same format with the fields schema_version, pack_version, tool, description, programs, and rules only. This schema checks the structure. The loader in src/broker/packs.rs is the authority: `apassy-packs validate <file>` runs it. See docs/operations/rule-packs.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "pack_version", "tool", "description", "programs"],
+  "properties": {
+    "schema_version": {
+      "description": "The pack format. This version of Apassy reads version 1 only.",
+      "const": 1
+    },
+    "pack_version": {
+      "description": "The version of the pack content. It starts at 1. Increase it at each change.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "tool": {
+      "description": "A unique name. A built-in pack file has the name <tool>.json. A local pack must not use the name of a built-in pack.",
+      "$ref": "#/$defs/ident"
+    },
+    "description": {
+      "description": "One sentence about the tool and what the pack knows.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "programs": {
+      "description": "Program names in lowercase, or [\"*\"] for every program. `*` must be the only item.",
+      "oneOf": [
+        { "type": "array", "items": { "const": "*" }, "minItems": 1, "maxItems": 1 },
+        {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/lowercaseProgram" }
+        }
+      ]
+    },
+    "rules": {
+      "description": "Flag rules. Each flag asks the owner. A local pack has these and nothing else.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/flagRule" }
+    },
+    "roles": {
+      "description": "Built-in packs only. Roles for the general rules: a map from a role to programs of the pack.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "output": { "$ref": "#/$defs/programList" },
+        "encoder": { "$ref": "#/$defs/programList" },
+        "network": { "$ref": "#/$defs/programList" },
+        "http_client": { "$ref": "#/$defs/programList" },
+        "heredoc_code": { "$ref": "#/$defs/programList" },
+        "heredoc_sql": { "$ref": "#/$defs/programList" },
+        "file_writer": { "$ref": "#/$defs/programList" },
+        "script_runner": { "$ref": "#/$defs/programList" },
+        "task_runner": { "$ref": "#/$defs/programList" },
+        "usage": { "$ref": "#/$defs/programList" },
+        "no_dry_run": { "$ref": "#/$defs/programList" },
+        "project_code": { "$ref": "#/$defs/programList" },
+        "command_runner": { "$ref": "#/$defs/programList" }
+      }
+    },
+    "known_hosts": {
+      "description": "Built-in packs only. Provider API hosts in lowercase, `host` or `host:port`. A secret in an auth header to these hosts is normal use.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9][a-z0-9.:-]*$" }
+    },
+    "exemptions": {
+      "description": "Built-in packs only. Exceptions to a general rule.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/exemption" }
+    },
+    "safe": {
+      "description": "Built-in packs only. Known safe commands: no remote write, no secret output, no data loss, no project code. See docs/operations/rule-packs.md, \"What known safe means\".",
+      "type": "array",
+      "items": { "$ref": "#/$defs/namedMatcher" }
+    },
+    "project_commands": {
+      "description": "Built-in packs only. Commands that run code of the project, such as `dbt run-operation`. They are not known commands.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/namedCondition" }
+    },
+    "writes": {
+      "description": "Built-in packs only. Commands that change state, such as `git push`. A known write is never a certain read and never known safe.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/namedCondition" }
+    },
+    "access_reads": {
+      "description": "Built-in packs only. Reads of the access configuration of a whole account, such as `aws iam list-users`. They are not known commands.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/namedCondition" }
+    }
+  },
+  "$defs": {
+    "ident": {
+      "type": "string",
+      "pattern": "^[a-z0-9_-]{1,64}$"
+    },
+    "lowercaseText": {
+      "description": "The analysis compares lowercase text, so list items are lowercase.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^A-Z]+$"
+    },
+    "lowercaseProgram": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^A-Z*]+$"
+    },
+    "lowercaseList": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/lowercaseText" }
+    },
+    "lowercaseListWithEmpty": {
+      "description": "As lowercaseList. An empty text stands for a missing argument.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "pattern": "^[^A-Z]*$" }
+    },
+    "writtenList": {
+      "description": "Texts compared as written.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "programList": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/lowercaseProgram" }
+    },
+    "optionList": {
+      "description": "Option words, each with a leading `-`.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "pattern": "^-[^A-Z]*$" }
+    },
+    "letter": {
+      "type": "string",
+      "pattern": "^[a-z]$"
+    },
+    "flag": {
+      "enum": [
+        "secret_output",
+        "data_loss",
+        "irreversible",
+        "production",
+        "real_recipient",
+        "remote_code",
+        "remote_access",
+        "system_change",
+        "new_dependency",
+        "privilege",
+        "hook_channel",
+        "ask_owner"
+      ]
+    },
+    "dryRun": {
+      "description": "`skip`: the rule does not apply with --dry-run or --dryrun. `skip_with_n`: also not with -n, except for a program with the role no_dry_run.",
+      "enum": ["skip", "skip_with_n"]
+    },
+    "check": {
+      "description": "The general rule that an exemption applies to.",
+      "enum": ["secret_file_argument", "production_word", "command_lexicon"]
+    },
+    "sqlCheck": {
+      "enum": ["writes", "reads", "any_arg_writes", "changes", "any_arg_changes", "plain_args_read", "schema_read"]
+    },
+    "textPattern": {
+      "description": "A text pattern. All present conditions must hold.",
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "equals": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "starts": { "$ref": "#/$defs/writtenList" },
+        "ends": { "$ref": "#/$defs/writtenList" },
+        "contains": { "$ref": "#/$defs/writtenList" },
+        "max_len": { "type": "integer", "minimum": 0 },
+        "only_chars": { "type": "string", "minLength": 1 },
+        "temp_path": { "type": "boolean" }
+      }
+    },
+    "operandAt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0 },
+        "in": { "$ref": "#/$defs/writtenList" },
+        "not_in": { "$ref": "#/$defs/writtenList" },
+        "starts": { "$ref": "#/$defs/writtenList" }
+      },
+      "oneOf": [
+        { "required": ["in"], "not": { "anyOf": [{ "required": ["not_in"] }, { "required": ["starts"] }] } },
+        { "required": ["not_in"], "not": { "anyOf": [{ "required": ["in"] }, { "required": ["starts"] }] } },
+        { "required": ["starts"], "not": { "anyOf": [{ "required": ["in"] }, { "required": ["not_in"] }] } }
+      ]
+    },
+    "operands": {
+      "description": "Conditions on the arguments from the subcommand on that do not start with `-`. Needs count, min, any, all, or at.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "as_written": { "type": "boolean" },
+        "trim_start": { "type": "string", "minLength": 1 },
+        "trim_end": { "type": "string", "minLength": 1 },
+        "skip": { "$ref": "#/$defs/optionList" },
+        "count": { "type": "integer", "minimum": 0 },
+        "min": { "type": "integer", "minimum": 0 },
+        "any": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/textPattern" } },
+        "all": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/textPattern" } },
+        "allow_none": { "type": "boolean" },
+        "at": { "$ref": "#/$defs/operandAt" }
+      },
+      "anyOf": [
+        { "required": ["count"] },
+        { "required": ["min"] },
+        { "required": ["any"] },
+        { "required": ["all"] },
+        { "required": ["at"] }
+      ],
+      "if": { "properties": { "allow_none": { "const": true } }, "required": ["allow_none"] },
+      "then": { "required": ["all"] }
+    },
+    "matcher": {
+      "description": "Conditions on one command. All present conditions must hold. A list means one of the items. An empty matcher matches every command of the programs of its pack.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "program": { "$ref": "#/$defs/programList" },
+        "raw_program": { "$ref": "#/$defs/programList" },
+        "package_runner": { "type": "boolean" },
+        "package": { "$ref": "#/$defs/lowercaseList" },
+        "program_word_contains": { "$ref": "#/$defs/writtenList" },
+        "subcommand": { "$ref": "#/$defs/lowercaseListWithEmpty" },
+        "action": { "$ref": "#/$defs/lowercaseListWithEmpty" },
+        "script": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["base"],
+          "properties": {
+            "base": { "$ref": "#/$defs/lowercaseList" },
+            "not_contains": { "$ref": "#/$defs/lowercaseList" }
+          }
+        },
+        "arg_count": { "type": "integer", "minimum": 0 },
+        "only_options": { "type": "boolean" },
+        "any_arg": { "$ref": "#/$defs/lowercaseList" },
+        "any_arg_starts": { "$ref": "#/$defs/lowercaseList" },
+        "any_arg_contains": { "$ref": "#/$defs/lowercaseList" },
+        "args_start": { "$ref": "#/$defs/lowercaseList" },
+        "args_contain": { "$ref": "#/$defs/lowercaseList" },
+        "command_contains": { "$ref": "#/$defs/lowercaseList" },
+        "command_contains_exact": { "$ref": "#/$defs/writtenList" },
+        "word_contains": { "$ref": "#/$defs/lowercaseList" },
+        "segment_contains": { "$ref": "#/$defs/lowercaseList" },
+        "segment_word_ends": { "$ref": "#/$defs/lowercaseList" },
+        "option_value": {
+          "description": "An option in `option` is followed by a value in `value`, or by a value not in `not_value`. Exactly one of the two.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["option"],
+          "properties": {
+            "option": { "$ref": "#/$defs/lowercaseList" },
+            "value": { "$ref": "#/$defs/lowercaseList" },
+            "not_value": { "$ref": "#/$defs/lowercaseList" }
+          },
+          "oneOf": [
+            { "required": ["value"], "not": { "required": ["not_value"] } },
+            { "required": ["not_value"], "not": { "required": ["value"] } }
+          ]
+        },
+        "short_option_letter": { "$ref": "#/$defs/letter" },
+        "option_letter": { "$ref": "#/$defs/letter" },
+        "operands": { "$ref": "#/$defs/operands" },
+        "push_target": { "$ref": "#/$defs/lowercaseList" },
+        "url_hosts_in": { "$ref": "#/$defs/lowercaseList" },
+        "known_host_read": { "type": "boolean" },
+        "refs_secret": { "type": "boolean" },
+        "arg_refs_secret": { "type": "boolean" },
+        "secret_file_arg": { "type": "boolean" },
+        "secret_file_arg_as_written": { "type": "boolean" },
+        "system_path_arg": { "type": "boolean" },
+        "inline_code_leaks": { "type": "boolean" },
+        "sql": { "$ref": "#/$defs/sqlCheck" },
+        "names_only": { "type": "boolean" },
+        "env": {
+          "description": "A variable in the environment of the program. `*` alone is not allowed in `name` or `value`.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name"],
+          "properties": {
+            "name": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "string", "minLength": 1, "pattern": "^[^A-Z]+$", "not": { "const": "*" } }
+            },
+            "value": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "string", "minLength": 1, "pattern": "^[^A-Z]+$", "not": { "const": "*" } }
+            }
+          }
+        },
+        "bound_secret": { "type": "boolean" },
+        "option_min": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["option", "min"],
+          "properties": {
+            "option": { "$ref": "#/$defs/optionList" },
+            "min": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "any_of": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/condition" }
+        },
+        "not": { "$ref": "#/$defs/condition" }
+      }
+    },
+    "condition": {
+      "description": "A matcher with at least one condition. `any_of` items and `not` need one.",
+      "allOf": [{ "$ref": "#/$defs/matcher" }, { "minProperties": 1 }]
+    },
+    "flagRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "flag"],
+      "properties": {
+        "id": { "$ref": "#/$defs/ident" },
+        "flag": { "$ref": "#/$defs/flag" },
+        "dry_run": { "$ref": "#/$defs/dryRun" },
+        "note": {
+          "description": "The reason for the rule, in one or two sentences. Each rule of a built-in pack needs one.",
+          "type": "string",
+          "minLength": 1
+        },
+        "when": { "$ref": "#/$defs/matcher" }
+      }
+    },
+    "exemption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "check"],
+      "properties": {
+        "id": { "$ref": "#/$defs/ident" },
+        "check": { "$ref": "#/$defs/check" },
+        "note": { "type": "string", "minLength": 1 },
+        "when": { "$ref": "#/$defs/matcher" }
+      }
+    },
+    "namedMatcher": {
+      "description": "A safe rule: an id, a note, and a matcher. An empty matcher covers every command of the programs of the pack, so a pack for every program cannot use one.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": { "$ref": "#/$defs/ident" },
+        "note": { "type": "string", "minLength": 1 },
+        "when": { "$ref": "#/$defs/matcher" }
+      }
+    },
+    "namedCondition": {
+      "description": "A project command, a write, or an access read: an id, a note, and a matcher with at least one condition.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "when"],
+      "properties": {
+        "id": { "$ref": "#/$defs/ident" },
+        "note": { "type": "string", "minLength": 1 },
+        "when": { "$ref": "#/$defs/condition" }
+      }
+    }
+  }
+}

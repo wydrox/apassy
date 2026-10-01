@@ -1,27 +1,28 @@
 #![cfg(feature = "vault")]
 
-//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 11) to
+//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 12) to
 //! the current version, with data at each version. Synthetic values only.
 //!
 //! The schema SQL below is a frozen copy of the statements that each earlier version ran
 //! at create: version 1 in commit a2f860a, 2 in 4ffdb5e, 3 in 22d1784, 4 in 2eb8366,
 //! 5 in 9ce2e01, 6 in 4193991, 7 in c5a91c0, 8 in 2acde80, 9 in cff4303, 10 and 11 in
-//! ab935b8. Do not change these copies when the current schema changes.
+//! ab935b8, 12 in the commit of ADR 0012. Do not change these copies when the current schema changes.
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use apassy::contracts::CredentialKind;
 use apassy::vault::{
-    CandidateState, DecidedBy, DecisionEntry, Declaration, DeclarationField, EnvDelivery,
-    Environment, ExecMode, ExecRule, GrantPlace, ItemEventKind, LoggedDecision, NewCandidate,
-    OwnerLabel, PatternKey, PatternState, RealOutcome, RequestSource, RequestState, Reversibility,
-    RiskLevel, Scope, ShadowAnswer, ShadowEntry, SuggestedDeclaration, Vault, VaultErrorKind,
+    CandidateState, CompanionSetting, DEFAULT_COMPANION_PORT, DecidedBy, DecisionEntry,
+    Declaration, DeclarationField, EnvDelivery, Environment, ExecMode, ExecRule, GrantPlace,
+    ItemEventKind, LoggedDecision, NewCandidate, OwnerLabel, PatternKey, PatternState, RealOutcome,
+    RequestSource, RequestState, Reversibility, RiskLevel, Scope, ShadowAnswer, ShadowEntry,
+    SuggestedDeclaration, Vault, VaultErrorKind,
 };
 use tempfile::TempDir;
 
 const PASS: &str = "synthetic-migration-passphrase";
-const CURRENT_VERSION: i64 = 12;
+const CURRENT_VERSION: i64 = 13;
 
 const V1_SQL: &str = "
 CREATE TABLE vault_meta (
@@ -294,6 +295,24 @@ UPDATE vault_meta SET schema_version = 11 WHERE id = 1;
 PRAGMA user_version = 11;
 ";
 
+const V12_SQL: &str = "
+ALTER TABLE agent ADD COLUMN see_all INTEGER NOT NULL DEFAULT 0 CHECK (see_all IN (0, 1));
+ALTER TABLE exec_grant ADD COLUMN any_folder INTEGER NOT NULL DEFAULT 0 CHECK (any_folder IN (0, 1));
+CREATE TABLE access_request (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id INTEGER NOT NULL,
+    item_id INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('open', 'granted', 'denied')),
+    decided_at INTEGER
+);
+CREATE INDEX access_request_state ON access_request(state, id);
+UPDATE vault_meta SET schema_version = 12 WHERE id = 1;
+PRAGMA user_version = 12;
+";
+
 /// Five items, one of each kind: (title, kind, notes, tags, fields as (name, value, secret)).
 type ItemRow = (
     &'static str,
@@ -389,6 +408,7 @@ fn build_legacy(path: &Path, version: i64) {
     let tx = conn.transaction().expect("transaction");
     let steps = [
         V1_SQL, V2_SQL, V3_SQL, V4_SQL, V5_SQL, V6_SQL, V7_SQL, V8_SQL, V9_SQL, V10_SQL, V11_SQL,
+        V12_SQL,
     ];
     for sql in &steps[..usize::try_from(version).expect("version")] {
         tx.execute_batch(sql).expect("legacy schema");
@@ -782,6 +802,7 @@ fn assert_version_data(vault: &mut Vault, version: i64) {
 #[test]
 fn unlock_migrates_each_earlier_schema_version_to_the_current_one() {
     for version in 1..CURRENT_VERSION {
+        let mut migrated_certificate = Vec::new();
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join(format!("v{version}.db"));
         build_legacy(&path, version);
@@ -883,6 +904,27 @@ fn unlock_migrates_each_earlier_schema_version_to_the_current_one() {
             vault.access_requests(false, 10).expect("requests")[0].id,
             request
         );
+        // Version 13: the companion is off, on the default port, with no device and no
+        // certificate. The certificate is made on demand and stays.
+        assert_eq!(
+            vault.companion_setting().expect("setting"),
+            CompanionSetting {
+                enabled: false,
+                port: DEFAULT_COMPANION_PORT
+            }
+        );
+        assert!(vault.companion_devices().expect("devices").is_empty());
+        assert!(
+            vault
+                .companion_certificate()
+                .expect("certificate")
+                .is_none()
+        );
+        vault.set_companion_enabled(true).expect("enable");
+        vault.set_companion_port(48_621).expect("port");
+        let certificate = vault.ensure_companion_certificate().expect("certificate");
+        migrated_certificate.clear();
+        migrated_certificate.extend_from_slice(&certificate.der);
         drop(vault);
         assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
 
@@ -941,6 +983,21 @@ fn unlock_migrates_each_earlier_schema_version_to_the_current_one() {
             GrantPlace::AnyFolder
         );
         assert_eq!(again.item_events(1, 10).expect("history").len(), 1);
+        assert_eq!(
+            again.companion_setting().expect("setting"),
+            CompanionSetting {
+                enabled: true,
+                port: 48_621
+            }
+        );
+        assert_eq!(
+            again
+                .companion_certificate()
+                .expect("certificate")
+                .expect("the certificate stays")
+                .der,
+            migrated_certificate
+        );
         let pattern = again.pattern(&key).expect("read").expect("pattern");
         assert_eq!(
             pattern.state(u64::try_from(now()).expect("now")),
@@ -1008,6 +1065,45 @@ fn migrated_candidate() -> NewCandidate {
         checkpoint_sha256: "0badc0de".repeat(8),
         report: "{}".to_owned(),
     }
+}
+
+/// The step from version 12 to 13 runs in one transaction. A failure after two of the
+/// three new tables leaves version 12, its data, and none of the new tables.
+#[test]
+fn a_failed_migration_from_version_12_keeps_the_old_version_and_data() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("blocked12.db");
+    build_legacy(&path, 12);
+    {
+        // A table with the name of the last table of version 13 makes the migration fail.
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        conn.execute_batch("CREATE TABLE companion_device (x INTEGER);")
+            .expect("blocking table");
+        conn.close().map_err(|(_, err)| err).expect("close");
+    }
+    let mut vault = Vault::open(&path).expect("open");
+    assert_eq!(
+        vault.unlock(PASS).unwrap_err().kind(),
+        VaultErrorKind::Storage
+    );
+    drop(vault);
+    assert_eq!(raw_versions(&path), (12, 12), "no partial migration");
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.pragma_update(None, "key", PASS).expect("key");
+        let setting = conn.prepare("SELECT enabled FROM companion_setting LIMIT 0");
+        assert!(setting.is_err(), "no table of version 13");
+        drop(setting);
+        conn.execute_batch("DROP TABLE companion_device;")
+            .expect("drop blocking table");
+        conn.close().map_err(|(_, err)| err).expect("close");
+    }
+    let mut vault = Vault::open(&path).expect("open");
+    vault.unlock(PASS).expect("unlock migrates");
+    assert_version_data(&mut vault, 12);
+    drop(vault);
+    assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
 }
 
 /// The step from version 8 to 9 runs in one transaction. A failure leaves version 8 and

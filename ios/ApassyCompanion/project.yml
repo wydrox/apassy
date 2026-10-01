@@ -1,0 +1,72 @@
+# XcodeGen spec for the iPhone companion app (ADR 0014).
+#
+# Regenerate the project after a change to this file:
+#
+#   cd ios/ApassyCompanion && xcodegen generate --spec project.yml
+#
+# The project is committed, as native/ApassyKeychain/ApassyKeychain.xcodeproj is. It sets no
+# DEVELOPMENT_TEAM: the owner selects a team in Xcode (Signing & Capabilities) or passes
+# DEVELOPMENT_TEAM=<id> to xcodebuild. Info.plist is written from the properties below.
+name: ApassyCompanion
+options:
+  bundleIdPrefix: com.wydrox.apassy
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+    GCC_TREAT_WARNINGS_AS_ERRORS: YES
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+    SUPPORTS_MACCATALYST: NO
+    SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+    # The app has no App Intents. This stops the note "Metadata extraction skipped".
+    LM_SKIP_METADATA_EXTRACTION: YES
+packages:
+  ApassyCompanionKit:
+    path: ../ApassyCompanionKit
+targets:
+  ApassyCompanion:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: Resources
+    dependencies:
+      - package: ApassyCompanionKit
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Apassy
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UIRequiredDeviceCapabilities:
+          - arm64
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSLocalNetworkUsageDescription: Apassy connects to your Mac on this Wi-Fi network to show the runs that wait for you and to send your decision.
+        NSCameraUsageDescription: Apassy uses the camera only to scan the pairing code that your Mac shows. It saves no picture.
+        NSFaceIDUsageDescription: Apassy asks for Face ID each time you approve a run, so that only you can approve.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        PRODUCT_NAME: ApassyCompanion
+        PRODUCT_BUNDLE_IDENTIFIER: com.wydrox.apassy.companion
+        INFOPLIST_FILE: Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Automatic
+        MARKETING_VERSION: 0.1.0
+        CURRENT_PROJECT_VERSION: 1
+    scheme: {}

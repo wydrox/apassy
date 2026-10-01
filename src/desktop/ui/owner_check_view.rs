@@ -32,7 +32,7 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
         ui.add_space(4.0);
         kit::note(
             ui,
-            "Apassy asks for Touch ID or the passphrase for each reveal, approval, access change, rule change, and token rotation. A notification or \"Mark as seen\" is never an approval.",
+            "Apassy asks for Touch ID or the passphrase for each reveal, approval, iPhone pairing, access change, rule change, and token rotation. A notification or \"Mark as seen\" is never an approval.",
         );
         ui.add_space(10.0);
         match running {
@@ -44,7 +44,8 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
             Some(CheckMethod::Passphrase) => {
                 kit::tone_note(ui, "Apassy is checking the passphrase.", Tone::Accent);
             }
-            None => {}
+            // The Mac dialog never starts an iPhone check: the phone signs on its own.
+            Some(CheckMethod::Companion) | None => {}
         }
         if let Some(message) = &message {
             kit::tone_note(ui, message, Tone::Critical);

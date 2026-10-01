@@ -9,6 +9,10 @@ pub mod contracts;
 #[cfg(feature = "vault")]
 pub mod broker;
 
+/// The iPhone companion, Mac side (ADR 0014). It needs the vault.
+#[cfg(feature = "vault")]
+pub mod companion;
+
 #[cfg(feature = "desktop")]
 pub mod desktop;
 

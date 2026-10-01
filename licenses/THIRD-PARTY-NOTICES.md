@@ -1,9 +1,9 @@
 # Third-party notices
 
 Date: 2026-09-26.
-Source: `Cargo.lock` at commit `768bbf3`. Review: [storage dependencies](../docs/reviews/storage-dependencies.md).
+Source: `Cargo.lock` at commit `768bbf3`, and the additions for the iPhone companion (ADR 0014) on 2026-09-30. Review: [storage dependencies](../docs/reviews/storage-dependencies.md).
 
-This file lists the licenses of the storage stack, the TLS stack, and eframe/egui.
+This file lists the licenses of the storage stack, the TLS stack, eframe/egui, and the QR code crate.
 The license texts are in the subdirectories of `licenses/`. They are verbatim copies from the crate sources in `~/.cargo/registry/src/`, except `egui/LICENSE-MIT`. That file comes from the egui repository at the crate commit `49682f8b`, because the egui crates do not include a license file.
 
 ## Scope and limits
@@ -98,7 +98,7 @@ These crates are linked on macOS (`cargo tree --target aarch64-apple-darwin`). `
 | Component | Version | License used | Text |
 | --- | --- | --- | --- |
 | rustls | 0.23.45 | MIT (choice from Apache-2.0 OR ISC OR MIT) | `rustls/LICENSE-MIT` |
-| ring | 0.17.14 | Apache-2.0 AND ISC | `ring/LICENSE`, `ring/LICENSE-other-bits` (ISC), `ring/LICENSE-BoringSSL` (Apache-2.0 and other BoringSSL notices), `ring/LICENSE-once_cell-MIT` |
+| ring | 0.17.14 (also a direct dependency, see below) | Apache-2.0 AND ISC | `ring/LICENSE`, `ring/LICENSE-other-bits` (ISC), `ring/LICENSE-BoringSSL` (Apache-2.0 and other BoringSSL notices), `ring/LICENSE-once_cell-MIT` |
 | rustls-webpki | 0.103.15 | ISC | `rustls-webpki/LICENSE` |
 | rustls-platform-verifier | 0.7.0 | MIT (choice from MIT OR Apache-2.0) | `rustls-platform-verifier/LICENSE-MIT` |
 | rustls-pki-types | 1.15.1 | MIT (choice from MIT OR Apache-2.0) | `rustls-pki-types/LICENSE-MIT` |
@@ -107,6 +107,8 @@ These crates are linked on macOS (`cargo tree --target aarch64-apple-darwin`). `
 | zeroize | 1.9.0 | MIT (choice from Apache-2.0 OR MIT) | `zeroize/LICENSE-MIT` |
 | security-framework, security-framework-sys | 3.7.0, 2.17.0 | MIT (choice from MIT OR Apache-2.0) | `security-framework/LICENSE-MIT` (same text in both crates) |
 | core-foundation, core-foundation-sys | 0.10.1, 0.8.7 | MIT (choice from MIT OR Apache-2.0) | `core-foundation/LICENSE-MIT` (same text in both crates) |
+
+ring is also a direct dependency of the `vault` feature since ADR 0014. The iPhone companion uses it for ECDSA P-256 verification, HMAC-SHA256, and SHA-256. It is the version and the code that rustls and rcgen already build, so the notice above already covers it.
 
 ## eframe and egui
 
@@ -125,6 +127,12 @@ The `default_fonts` feature embeds four fonts in the binary:
 | `emoji-icon-font.ttf` | MIT (John Slegers) | `egui-default-fonts/emoji-icon-font-mit-license.txt` |
 
 The OFL and the Ubuntu Font Licence permit embedding in an application. They do not permit the sale of the font files alone. Reserved font names ("Bitstream", "Vera") must not be used for a modified font.
+
+## QR code
+
+| Component | Version | License used | Text | In the binary |
+| --- | --- | --- | --- | --- |
+| qrcode | 0.14.1, without default features (no `image`, no other dependency) | MIT (choice from MIT OR Apache-2.0) | `qrcode/LICENSE-MIT.txt` | Yes, in the `desktop` feature. It makes the pairing QR code of Settings > Companion. |
 
 ## Patent notices
 

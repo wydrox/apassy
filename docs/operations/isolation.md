@@ -223,6 +223,15 @@ boundary holds even when the host approves every command.
   `/login`) does not work in the profile. The owner runs the login outside the
   profile, or copies the URL and opens it by hand. Section 7 has the
   measurement.
+- The iPhone companion listener (ADR 0014) is a TCP listener in the Apassy app
+  process, off by default. The profile still denies the app bundle and the
+  vault, and it does not change. A process in the profile may connect to the
+  listener as any network client can, but the listener closes each connection
+  from the Mac itself (a loopback address or an address of the Mac), and it
+  answers nothing useful without the key of a paired iPhone. So an agent in the
+  profile cannot use the companion. The listener is a network surface that is
+  open while the setting is on and the vault is unlocked. See
+  [companion](companion.md), section 8.
 - The profile does not fully hide the environment of other processes of the
   same user. See "Process information (F11)" in section 5.
 - `ps` and `top` are setuid programs. They cannot start inside any

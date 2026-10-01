@@ -51,6 +51,7 @@ flowchart LR
 - **Placeholders.** A variable can hold a placeholder that looks like the key. Apassy's proxy puts the real value only into HTTPS requests to the hosts of that credential, and refuses the placeholder anywhere else ([ADR 0011](docs/adr/0011-run-proxy-placeholders.md)).
 - **The bouncer runs on your Mac.** 64 rule packs and the `apassy-base-v1` model check every command. A production credential always waits for you ([bouncer](docs/operations/bouncer.md)).
 - **It learns.** "Approve and remember" turns a routine command into a pattern, and the Learning view shows how often you are asked ([learning](docs/operations/learning.md)).
+- **Approve from your iPhone.** An optional companion app shows the runs that wait for you on the same network and approves them with Face ID. It never sees a secret value, and it is off until you turn it on ([iPhone companion](docs/operations/companion.md)).
 - **Agents run in a sandbox.** `apassy-sandbox` starts Claude Code and Codex in a Seatbelt profile that denies the vault, the backups, the model, and the app ([isolation](docs/operations/isolation.md)).
 
 ## A look inside
@@ -141,7 +142,7 @@ Open items:
 | Start here | [Daily use](docs/operations/daily-use.md) · [Agent path](docs/operations/agent-path.md) · [Host hooks](docs/operations/host-hooks.md) |
 | Security | [Isolation](docs/operations/isolation.md) · [Key-memory review](docs/reviews/key-memory.md) · [Storage review](docs/reviews/storage-dependencies.md) · [Vault verification](docs/operations/vault-verification.md) |
 | The bouncer | [Bouncer](docs/operations/bouncer.md) · [Rule packs](docs/operations/rule-packs.md) · [Declarations](docs/operations/declarations.md) · [Base model](docs/operations/base-model.md) · [Learning](docs/operations/learning.md) |
-| Decisions | [ADRs 0001–0012](docs/adr) · [Goal](docs/goal.md) · [Evaluations](docs/evaluation) |
+| Decisions | [ADRs 0001–0014](docs/adr) · [Goal](docs/goal.md) · [Evaluations](docs/evaluation) |
 | Product | [Product vision](docs/product-vision-v1.md) · [Concept](docs/concept.md) · [Infrastructure](docs/product-infra-v1.md) · [MVP plan](docs/mvp-plan.md) |
 | Shipping | [Native app](docs/operations/native-app.md) · [Release and site](docs/operations/release.md) · [Backup and restore](docs/operations/backup-restore.md) |
 
@@ -167,3 +168,11 @@ See also [desktop development](docs/operations/desktop-development.md), [Rust co
 | `tools/` | Training and serving of the base model |
 | `site/` | The website, an Astro page on a Cloudflare Worker |
 | `docs/` | Decisions, operations, reviews, and evaluations |
+
+## Contributing and security
+
+Rule packs and provider files are data, and the easiest contribution: one JSON file, a schema, and a validator. See [CONTRIBUTING.md](CONTRIBUTING.md). Report a vulnerability through [SECURITY.md](SECURITY.md), not in a public issue.
+
+## License
+
+The code and the documents are [Apache-2.0](LICENSE). The rule packs, the provider files, and their schemas in `packs/` are public domain under [CC0-1.0](packs/LICENSE), so any tool can use that knowledge, not only Apassy. A future team server will be its own crate under its own license; this repository stays as it is. The notices of the bundled dependencies are in [licenses/THIRD-PARTY-NOTICES.md](licenses/THIRD-PARTY-NOTICES.md).

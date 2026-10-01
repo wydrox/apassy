@@ -4,13 +4,15 @@ version = "0.2.1"
 edition = "2024"
 rust-version = "1.97"
 publish = false
+license = "Apache-2.0"
+repository = "https://github.com/wydrox/apassy"
 description = "A personal credential manager with controlled agent access"
 
 [features]
 default = []
-desktop = ["dep:eframe", "dep:rustix"]
+desktop = ["dep:eframe", "dep:rustix", "dep:qrcode"]
 storage-probe = ["dep:rusqlite", "dep:tempfile"]
-vault = ["dep:rusqlite", "dep:tempfile", "dep:getrandom", "dep:rustls", "dep:rustls-platform-verifier", "dep:rcgen", "dep:time"]
+vault = ["dep:rusqlite", "dep:tempfile", "dep:getrandom", "dep:rustls", "dep:rustls-platform-verifier", "dep:rcgen", "dep:time", "dep:ring"]
 
 [dependencies]
 serde = { version = "=1.0.229", features = ["derive"] }
@@ -25,6 +27,12 @@ rustls = { version = "=0.23.45", optional = true, default-features = false, feat
 rustls-platform-verifier = { version = "=0.7.0", optional = true }
 # ADR 0011: the certificate authority of each proxied run and its host certificates.
 rcgen = { version = "=0.14.10", optional = true, default-features = false, features = ["crypto", "pem", "ring"] }
+# ADR 0014: ECDSA P-256 verification, HMAC-SHA256, and SHA-256 for the iPhone companion.
+# The version and the features are the ones that rustls and rcgen already build.
+ring = { version = "=0.17.14", optional = true, default-features = false, features = ["alloc"] }
+# ADR 0014: the pairing QR code of the desktop app. No default features, so no `image`
+# and no other dependency. The app draws the modules with egui.
+qrcode = { version = "=0.14.1", optional = true, default-features = false }
 time = { version = "=0.3.47", optional = true, default-features = false, features = ["std"] }
 # Key-memory review F6: safe setrlimit for the core-dump limit of the desktop
 # process. The same version is already in Cargo.lock through tempfile.
@@ -58,6 +66,11 @@ name = "apassy-eval"
 path = "src/bin/apassy-eval.rs"
 required-features = ["vault"]
 
+[[bin]]
+name = "apassy-packs"
+path = "src/bin/apassy-packs.rs"
+required-features = ["vault"]
+
 # Label export for the base-model data generator (goal B8, tools/basemodel/).
 # It runs the command analysis on generated commands. It is not shipped.
 [[example]]
@@ -70,6 +83,14 @@ required-features = ["vault"]
 name = "screenshots"
 path = "examples/screenshots.rs"
 required-features = ["desktop", "vault"]
+
+# A development server for the iPhone companion (ADR 0014). It makes a synthetic vault in
+# a temporary directory and speaks a line protocol on stdin and stdout, for the interop
+# test with the Swift client. It is not shipped.
+[[example]]
+name = "companion_dev"
+path = "examples/companion_dev.rs"
+required-features = ["vault"]
 
 [[test]]
 name = "sqlcipher_probe"
@@ -114,6 +135,11 @@ required-features = ["vault"]
 [[test]]
 name = "host_hook"
 path = "tests/host_hook.rs"
+required-features = ["vault"]
+
+[[test]]
+name = "companion"
+path = "tests/companion.rs"
 required-features = ["vault"]
 
 [[test]]

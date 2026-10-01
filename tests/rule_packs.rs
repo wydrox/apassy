@@ -90,10 +90,12 @@ fn every_built_in_pack_file_loads() {
     let set = builtin();
     assert!(set.load_error().is_none());
     // `packs/providers/` holds the provider data of goal item B4, not rule packs.
+    // `packs/schema/` holds the JSON Schemas, and `packs/README.md` points to them.
     let mut files: Vec<String> = std::fs::read_dir(root().join("packs"))
         .expect("packs directory")
         .map(|entry| entry.expect("entry"))
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect();
     files.sort();
@@ -499,4 +501,54 @@ fn owner_local_packs_load() {
             );
         }
     }
+}
+
+/// `apassy-packs validate`: the check of one file as a built-in pack accepts each embedded
+/// pack, names the entries without a note, and says when the file replaces an embedded pack.
+#[test]
+fn validate_builtin_accepts_every_embedded_pack() {
+    for name in packs::builtin_pack_files() {
+        let text = std::fs::read_to_string(root().join("packs").join(name)).expect("pack");
+        let summary = packs::validate_builtin(name, &text).expect(name);
+        assert_eq!(format!("{}.json", summary.tool), name);
+        assert!(summary.replaces_builtin, "{name}");
+        assert!(
+            summary.without_note.is_empty(),
+            "{name}: {:?}",
+            summary.without_note
+        );
+    }
+    let text = r#"{ "schema_version": 1, "pack_version": 1, "tool": "demo", "description": "Demo.",
+        "programs": ["demo"],
+        "rules": [{ "id": "drop", "flag": "data_loss", "when": { "subcommand": ["drop"] } }],
+        "safe": [{ "id": "list", "note": "A listing.", "when": { "subcommand": ["list"] } }] }"#;
+    let summary = packs::validate_builtin("demo.json", text).expect("a valid pack");
+    assert!(!summary.replaces_builtin);
+    assert_eq!((summary.rules, summary.safe), (1, 1));
+    assert_eq!(summary.without_note, vec!["rule `drop`".to_owned()]);
+    let error = packs::validate_builtin("demo.json", &text.replace("data_loss", "allow"))
+        .expect_err("an unknown flag");
+    assert!(error.message.contains("flag `allow`"), "{error}");
+}
+
+/// The check of one file as a local pack runs with the built-in packs loaded: it rejects
+/// a field that relaxes, and the tool name of a built-in pack.
+#[test]
+fn validate_local_checks_as_the_broker_does() {
+    let text = r#"{ "schema_version": 1, "pack_version": 1, "tool": "owner-rules",
+        "description": "Pushes need the owner.", "programs": ["*"],
+        "rules": [{ "id": "push", "flag": "ask_owner",
+                    "when": { "program": ["git"], "subcommand": ["push"] } }] }"#;
+    let summary = packs::validate_local("owner-rules.json", text).expect("a valid local pack");
+    assert_eq!(summary.programs, vec!["*".to_owned()]);
+    assert_eq!(summary.rules, 1);
+    assert!(!summary.replaces_builtin);
+
+    let relaxing = text.replace(r#""rules":"#, r#""safe": [], "rules":"#);
+    let error = packs::validate_local("owner-rules.json", &relaxing).expect_err("safe");
+    assert!(error.message.contains("built-in packs only"), "{error}");
+
+    let taken = text.replace("owner-rules", "git");
+    let error = packs::validate_local("git.json", &taken).expect_err("a built-in name");
+    assert!(error.message.contains("built-in pack"), "{error}");
 }

@@ -174,6 +174,14 @@ pub enum OwnerRequest {
     SetTokenLifetime {
         days: String,
     },
+    /// Pair an iPhone (ADR 0014). The owner typed the right code. The values are the
+    /// device exactly as it asked to pair.
+    PairCompanion {
+        device_id: String,
+        device_name: String,
+        request_key: Vec<u8>,
+        approval_key: Vec<u8>,
+    },
 }
 
 impl OwnerRequest {
@@ -230,6 +238,17 @@ impl OwnerRequest {
                 agent_id: *agent_id,
             },
             Self::SetTokenLifetime { .. } => OwnerAction::ChangeTokenLifetime,
+            Self::PairCompanion {
+                device_id,
+                device_name,
+                request_key,
+                approval_key,
+            } => OwnerAction::PairCompanion {
+                device_id: device_id.clone(),
+                device_name: device_name.clone(),
+                request_key: request_key.clone(),
+                approval_key: approval_key.clone(),
+            },
         }
     }
 
@@ -333,6 +352,9 @@ impl OwnerRequest {
             Self::SetTokenLifetime { days } => {
                 format!("Set the token lifetime to {} days.", days.trim())
             }
+            Self::PairCompanion { device_name, .. } => format!(
+                "Pair the iPhone \"{device_name}\". It can see the runs that wait for you and approve them with Face ID. It can never see a secret value."
+            ),
         }
     }
 }
@@ -670,6 +692,7 @@ impl DesktopApp {
                     Err(err) => self.set_err(err.message),
                 }
             }
+            OwnerRequest::PairCompanion { .. } => self.complete_pairing(proof),
         }
     }
 
@@ -695,6 +718,7 @@ impl DesktopApp {
         }
         self.poll_owner_check();
         self.poll_unlock(ctx);
+        self.poll_companion(ctx);
         self.owner_ui.session.expire_reveals();
         if let Some(left) = self.owner_ui.session.next_reveal_expiry() {
             ctx.request_repaint_after(left);
@@ -922,6 +946,8 @@ impl DesktopApp {
         {
             self.pending_delete = false;
         }
+        // A lock stops the iPhone listener at once and drops its key from memory.
+        self.stop_companion();
         self.erase_typed_secrets(ctx);
     }
 
@@ -946,13 +972,15 @@ impl DesktopApp {
         }
     }
 
-    /// Quit: record and end waiting runs, lock, and stop the notification threads.
+    /// Quit: record and end waiting runs, lock, stop the iPhone listener, and stop the
+    /// notification threads.
     pub(crate) fn shut_down(&mut self) {
         let approvals = self.approvals();
         let _ = self
             .owner_ui
             .session
             .lock_ending_runs(approvals.as_deref(), ENDED_BY_QUIT);
+        self.stop_companion();
         self.erase_typed_secrets(None);
         if let Some(mut center) = self.owner.notifications.take() {
             center.stop();

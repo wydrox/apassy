@@ -24,6 +24,7 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     backup_section(app, ui);
     agents_section(app, ui);
     notifications_section(app, ui);
+    super::companion::draw(app, ui);
     broker_section(app, ui);
     shortcuts_section(ui);
     kit::section(ui, Some("About"), None, |s| {

@@ -65,6 +65,7 @@ impl BrokerOptions {
 pub struct BrokerHandle {
     socket: PathBuf,
     approvals: Arc<ApprovalQueue>,
+    approval_timeout: Duration,
     bouncer_url: Option<String>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -78,6 +79,11 @@ impl BrokerHandle {
     /// Runs that wait for the owner. The desktop app shows them.
     pub fn approvals(&self) -> &Arc<ApprovalQueue> {
         &self.approvals
+    }
+
+    /// How long a run waits for the owner before it times out.
+    pub fn approval_timeout(&self) -> Duration {
+        self.approval_timeout
     }
 
     /// Address of the bouncer, if one is set.
@@ -131,6 +137,7 @@ pub fn start_with(
     options: BrokerOptions,
 ) -> io::Result<BrokerHandle> {
     let approvals = Arc::new(ApprovalQueue::new());
+    let approval_timeout = options.approval_timeout;
     let bouncer_url = options.bouncer.as_ref().map(|b| b.url().to_owned());
     let ctx = BrokerContext {
         vault,
@@ -155,6 +162,7 @@ pub fn start_with(
     Ok(BrokerHandle {
         socket: socket.to_path_buf(),
         approvals,
+        approval_timeout,
         bouncer_url,
         stop,
         thread: Some(thread),
