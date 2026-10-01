@@ -18,6 +18,7 @@ pub mod exec;
 pub mod host;
 pub mod keystore;
 pub mod mcp_stdio;
+pub mod service;
 pub mod settings;
 
 /// An error that ends the command with an exit code and one line on stderr.

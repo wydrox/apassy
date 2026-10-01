@@ -156,7 +156,14 @@ pub enum Command {
     Host {
         ask_all: bool,
         auto_limit: Option<u32>,
+        dialog: bool,
     },
+    HostInstall {
+        ask_all: bool,
+        auto_limit: Option<u32>,
+    },
+    HostUninstall,
+    HostStatus,
 }
 
 /// The options found in one command line.
@@ -329,11 +336,15 @@ Team (owner or manager)
   audit [--after ID] [--limit N] [--json]
 
 Owner's machine (the owner token; keys.json lives here, back it up)
-  host [--ask-all] [--auto-limit N]
-      keep the item keys, and decide every run: a known safe run of a non-production
-      item is released at once (at most N per item per hour, default 30); every other
-      run asks on the terminal; --ask-all asks for every run. The host must be online
-      for any run to start.
+  host [--ask-all] [--auto-limit N] [--dialog]
+      keep the item keys and decide each run. A known safe run with a non-production
+      item starts at once (at most N per item per hour, default 30). Other runs need
+      approval on the terminal or in a desktop dialog (--dialog).
+  host install [--ask-all] [--auto-limit N]
+      install and start the user service with desktop dialogs at login
+  host uninstall                stop and remove the user service
+  host status                   show the user service status
+      --ask-all asks for each run. The host must be online for any run to start.
 
 Members
   agent create NAME [--days N]  print an agent token once
@@ -459,15 +470,39 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
             scan(rest, &[], &[])?.positional(0, "mcp")?;
             Ok(Command::Mcp)
         }
-        "host" => {
-            let s = scan(rest, &["auto-limit"], &["ask-all"])?;
-            s.positional(0, "host [--ask-all] [--auto-limit N]")?;
-            Ok(Command::Host {
+        "host" => host(rest),
+        other => Err(CliError::usage(format!("Unknown command `{other}`."))),
+    }
+}
+
+fn host(rest: &[String]) -> Result<Command, CliError> {
+    match rest.first().map(String::as_str) {
+        Some("install") => {
+            let s = scan(&rest[1..], &["auto-limit"], &["ask-all"])?;
+            s.positional(0, "host install [--ask-all] [--auto-limit N]")?;
+            Ok(Command::HostInstall {
                 ask_all: s.switch("ask-all"),
                 auto_limit: s.num("auto-limit")?,
             })
         }
-        other => Err(CliError::usage(format!("Unknown command `{other}`."))),
+        Some("uninstall") | Some("status") => {
+            let action = rest[0].as_str();
+            scan(&rest[1..], &[], &[])?.positional(0, &format!("host {action}"))?;
+            Ok(if action == "uninstall" {
+                Command::HostUninstall
+            } else {
+                Command::HostStatus
+            })
+        }
+        _ => {
+            let s = scan(rest, &["auto-limit"], &["ask-all", "dialog"])?;
+            s.positional(0, "host [--dialog] [--ask-all] [--auto-limit N]")?;
+            Ok(Command::Host {
+                ask_all: s.switch("ask-all"),
+                auto_limit: s.num("auto-limit")?,
+                dialog: s.switch("dialog"),
+            })
+        }
     }
 }
 
@@ -726,17 +761,62 @@ mod tests {
             p("host").unwrap(),
             Command::Host {
                 ask_all: false,
-                auto_limit: None
+                auto_limit: None,
+                dialog: false
             }
         );
         assert_eq!(
             p("host --ask-all --auto-limit 5").unwrap(),
             Command::Host {
                 ask_all: true,
-                auto_limit: Some(5)
+                auto_limit: Some(5),
+                dialog: false
             }
         );
         assert_eq!(p("--help").unwrap(), Command::Help);
+    }
+
+    #[test]
+    fn host_dialog_and_service_commands() {
+        assert_eq!(
+            p("host --dialog").unwrap(),
+            Command::Host {
+                ask_all: false,
+                auto_limit: None,
+                dialog: true,
+            }
+        );
+        assert_eq!(
+            p("host --dialog --ask-all --auto-limit=0").unwrap(),
+            Command::Host {
+                ask_all: true,
+                auto_limit: Some(0),
+                dialog: true,
+            }
+        );
+        assert_eq!(
+            p("host install").unwrap(),
+            Command::HostInstall {
+                ask_all: false,
+                auto_limit: None,
+            }
+        );
+        assert_eq!(
+            p("host install --ask-all --auto-limit 5").unwrap(),
+            Command::HostInstall {
+                ask_all: true,
+                auto_limit: Some(5),
+            }
+        );
+        assert_eq!(
+            p("host install --auto-limit=0").unwrap(),
+            Command::HostInstall {
+                ask_all: false,
+                auto_limit: Some(0),
+            }
+        );
+        assert_eq!(p("host uninstall").unwrap(), Command::HostUninstall);
+        assert_eq!(p("host status").unwrap(), Command::HostStatus);
     }
 
     #[test]
@@ -850,6 +930,31 @@ mod tests {
             "host --auto-limit",
             "host --auto-limit many",
             "host --auto-limit -1",
+            "host --auto-limit 4294967296",
+            "host --auto-limit 1 --auto-limit 2",
+            "host --dialog=yes",
+            "host --unknown",
+            "host start",
+            "host --dialog install",
+            "host install extra",
+            "host install status",
+            "host install --dialog",
+            "host install --ask-all=yes",
+            "host install --auto-limit",
+            "host install --auto-limit many",
+            "host install --auto-limit -1",
+            "host install --auto-limit 4294967296",
+            "host install --auto-limit 1 --auto-limit 2",
+            "host install --unknown",
+            "host uninstall extra",
+            "host uninstall --ask-all",
+            "host uninstall --auto-limit 1",
+            "host uninstall --dialog",
+            "host status extra",
+            "host status --json",
+            "host status --ask-all",
+            "host status --auto-limit 1",
+            "host status --dialog",
             "item add --collection 1",
             "agent",
             "-x",

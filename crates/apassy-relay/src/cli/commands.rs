@@ -45,13 +45,27 @@ pub fn execute(command: Command) -> Result<i32, CliError> {
         Command::Host {
             ask_all,
             auto_limit,
+            dialog,
         } => crate::cli::host::run(
             &settings::load()?,
             crate::cli::host::HostOptions {
                 ask_all,
                 auto_limit: auto_limit.unwrap_or(crate::cli::host::DEFAULT_AUTO_LIMIT),
             },
+            dialog,
         ),
+        Command::HostInstall {
+            ask_all,
+            auto_limit,
+        } => crate::cli::service::install(
+            &settings::load()?,
+            crate::cli::host::HostOptions {
+                ask_all,
+                auto_limit: auto_limit.unwrap_or(crate::cli::host::DEFAULT_AUTO_LIMIT),
+            },
+        ),
+        Command::HostUninstall => crate::cli::service::uninstall(),
+        Command::HostStatus => crate::cli::service::status(),
         other => {
             let settings = settings::load()?;
             member_command(&settings, other)?;
@@ -568,6 +582,9 @@ fn member_command(settings: &Settings, command: Command) -> Result<(), CliError>
         | Command::Join { .. }
         | Command::Run(_)
         | Command::Host { .. }
+        | Command::HostInstall { .. }
+        | Command::HostUninstall
+        | Command::HostStatus
         | Command::Mcp => Ok(()),
     }
 }
