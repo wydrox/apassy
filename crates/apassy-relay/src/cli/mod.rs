@@ -14,12 +14,16 @@
 pub mod args;
 pub mod client;
 pub mod commands;
+pub mod devicekey;
+pub mod devices;
 pub mod exec;
 pub mod host;
 pub mod keystore;
 pub mod mcp_stdio;
+pub mod onboarding;
 pub mod service;
 pub mod settings;
+pub mod signin;
 
 /// An error that ends the command with an exit code and one line on stderr.
 #[derive(Debug, Clone, PartialEq, Eq)]

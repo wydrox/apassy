@@ -16,18 +16,18 @@ use serde_json::{Value, json};
 use tiny_http::{Header, Request, Response};
 
 use crate::api::{
-    self, DecisionRequest, EDGE_HEADER, Envelope, JoinRequest, NewItem, Policy, ReleaseRequest,
-    RunRequest, TeamCreate, TeamCreatedRef, paths,
+    self, ChallengeRequest, DecisionRequest, EDGE_HEADER, Envelope, JoinRequest, LinkRequest,
+    NewItem, Policy, ReleaseRequest, RunRequest, TeamCreate, TeamCreatedRef, TokenRequest, paths,
 };
 use crate::error::{RelayError, RelayResult, codes};
-use crate::ids::{AgentId, CollectionId, GrantId, ItemId, MemberId, RunId};
+use crate::ids::{AgentId, CollectionId, DeviceId, GrantId, ItemId, MemberId, RunId};
 use crate::now_unix;
 use crate::proxy::Proxy;
 use crate::secret::{TokenKind, parse_token};
 use crate::server::approvals::Denier;
 use crate::server::auth::{self, Need, Principal};
 use crate::server::hub::Hub;
-use crate::server::{Core, admin, approvals, decide, host, mcp};
+use crate::server::{Core, admin, approvals, decide, devices, host, joins, mcp};
 
 /// Seconds a client waits after 503 `busy` (`Retry-After`).
 pub const BUSY_RETRY_AFTER: &str = "2";
@@ -40,6 +40,22 @@ pub enum Endpoint {
     Me,
     TeamCreate,
     Join,
+    Challenge,
+    Token,
+    DeviceEnroll,
+    DeviceList,
+    DeviceRevoke(u64),
+    KeyHolder(u64),
+    LinkCreate,
+    Link,
+    LinkList,
+    LinkConfirm(u64),
+    LinkRefuse(u64),
+    JoinList,
+    JoinConfirm(u64),
+    JoinRefuse(u64),
+    Leave,
+    MemberRole(u64),
     InviteCreate,
     InviteList,
     MemberList,
@@ -94,6 +110,37 @@ pub fn route(method: &str, path: &str) -> RelayResult<Routed> {
         ["mcp"] => pick(method, &[("POST", Need::Agent, Mcp)])
             .map_err(|_| RelayError::new(codes::METHOD_NOT_ALLOWED, "MCP takes POST only.")),
         ["v1", "me"] => pick(method, &[("GET", Need::Any, Me)]),
+        ["v1", "auth", "challenge"] => pick(method, &[("POST", Need::Edge, Challenge)]),
+        ["v1", "auth", "token"] => pick(method, &[("POST", Need::Edge, Token)]),
+        ["v1", "devices", "enroll"] => pick(method, &[("POST", Need::Member, DeviceEnroll)]),
+        ["v1", "devices"] => pick(method, &[("GET", Need::Member, DeviceList)]),
+        ["v1", "devices", "links"] => pick(
+            method,
+            &[
+                ("POST", Need::Member, LinkCreate),
+                ("GET", Need::Member, LinkList),
+            ],
+        ),
+        ["v1", "devices", "link"] => pick(method, &[("POST", Need::Edge, Link)]),
+        ["v1", "devices", "links", n, "confirm"] => {
+            pick(method, &[("POST", Need::Member, LinkConfirm(id(n)?))])
+        }
+        ["v1", "devices", "links", n, "refuse"] => {
+            pick(method, &[("POST", Need::Member, LinkRefuse(id(n)?))])
+        }
+        ["v1", "devices", n, "key-holder"] => {
+            pick(method, &[("POST", Need::Owner, KeyHolder(id(n)?))])
+        }
+        ["v1", "devices", n] => pick(method, &[("DELETE", Need::Member, DeviceRevoke(id(n)?))]),
+        ["v1", "joins"] => pick(method, &[("GET", Need::Approver, JoinList)]),
+        ["v1", "joins", n, "confirm"] => {
+            pick(method, &[("POST", Need::Approver, JoinConfirm(id(n)?))])
+        }
+        ["v1", "joins", n, "refuse"] => {
+            pick(method, &[("POST", Need::Approver, JoinRefuse(id(n)?))])
+        }
+        ["v1", "leave"] => pick(method, &[("POST", Need::Member, Leave)]),
+        ["v1", "members", n, "role"] => pick(method, &[("PUT", Need::Owner, MemberRole(id(n)?))]),
         ["v1", "join"] => pick(method, &[("POST", Need::Edge, Join)]),
         ["v1", "teams"] => pick(method, &[("POST", Need::Edge, TeamCreate)]),
         ["v1", "invites"] => pick(
@@ -291,7 +338,11 @@ pub fn serve(serving: Serving) {
         if last_maintenance.elapsed() >= Duration::from_secs(MAINTENANCE_SECS) {
             last_maintenance = Instant::now();
             for core in hub.all() {
-                if approvals::maintenance(&core, now_unix()).is_err() {
+                if approvals::maintenance(&core, now_unix())
+                    .and_then(|()| devices::maintenance(&core, now_unix()))
+                    .and_then(|()| joins::expire(&core, now_unix()))
+                    .is_err()
+                {
                     eprintln!(
                         "apassy-relay: the maintenance sweep of team {} failed",
                         core.team
@@ -413,9 +464,20 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request) {
             return;
         }
     };
-    // Two endpoints have no bearer: a new team names no team yet, and an invite code
-    // names its team. They need the body to know the team.
-    if matches!(endpoint, Endpoint::TeamCreate | Endpoint::Join) {
+    // Edge endpoints choose a team only from their contract body or code.
+    if matches!(
+        endpoint,
+        Endpoint::TeamCreate
+            | Endpoint::Join
+            | Endpoint::Challenge
+            | Endpoint::Token
+            | Endpoint::Link
+    ) {
+        let authorization = header_value(&request, "Authorization");
+        if auth::bearer(authorization.as_deref()).is_some() {
+            respond_error(request, &RelayError::unauthenticated());
+            return;
+        }
         let body = match read_body(&mut request, &method) {
             Ok(body) => body,
             Err(error) => {
@@ -423,18 +485,7 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request) {
                 return;
             }
         };
-        let result = if endpoint == Endpoint::TeamCreate {
-            team_create(hub, &body, now)
-        } else {
-            parse_body::<JoinRequest>(&body).and_then(|join| {
-                let code = join.code.expose();
-                let core = (TokenKind::of(code) == Some(TokenKind::Invite))
-                    .then(|| hub.for_token(code))
-                    .flatten()
-                    .ok_or_else(admin::invite_invalid)?;
-                admin::join(&core, &join, now)
-            })
-        };
+        let result = dispatch_edge(hub, endpoint, &body, now);
         match result {
             Ok(result) => respond_ok(request, result),
             Err(error) => respond_error(request, &error),
@@ -491,6 +542,20 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request) {
             return;
         }
     };
+    // A body can take a long time to arrive. Read the caller again now, so a device or
+    // member revoked, or a role changed, while the body was on its way counts for this
+    // request too (the token was checked first only to protect the team's slots).
+    let principal = if method == "POST" || method == "PUT" {
+        match authenticate(&core, need, token, now_unix()) {
+            Ok(principal) => principal,
+            Err(error) => {
+                respond_error(request, &error);
+                return;
+            }
+        }
+    } else {
+        principal
+    };
     if endpoint == Endpoint::Mcp {
         respond_mcp(&core, request, principal, &body);
         return;
@@ -501,14 +566,54 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request) {
     }
 }
 
+fn dispatch_edge(hub: &Hub, endpoint: Endpoint, body: &[u8], now: u64) -> RelayResult<Value> {
+    match endpoint {
+        Endpoint::TeamCreate => team_create(hub, body, now),
+        Endpoint::Join => {
+            let request: JoinRequest = parse_body(body)?;
+            let code = request.code.expose();
+            let core = (TokenKind::of(code) == Some(TokenKind::Invite))
+                .then(|| hub.for_token(code))
+                .flatten()
+                .ok_or_else(admin::invite_invalid)?;
+            joins::join(&core, &request, now)
+        }
+        Endpoint::Link => {
+            let request: LinkRequest = parse_body(body)?;
+            let code = request.code.expose();
+            let core = (TokenKind::of(code) == Some(TokenKind::Link))
+                .then(|| hub.for_token(code))
+                .flatten()
+                .ok_or_else(RelayError::unauthenticated)?;
+            joins::link(&core, &request, now)
+        }
+        Endpoint::Challenge => {
+            let request: ChallengeRequest = parse_body(body)?;
+            let core = hub
+                .team(&request.team_id)
+                .ok_or_else(RelayError::unauthenticated)?;
+            devices::challenge(&core, &request, now)
+        }
+        Endpoint::Token => {
+            let request: TokenRequest = parse_body(body)?;
+            let core = hub
+                .team(&request.team_id)
+                .ok_or_else(RelayError::unauthenticated)?;
+            devices::token(&core, &request, now)
+        }
+        _ => Err(RelayError::internal("This endpoint needs a bearer token.")),
+    }
+}
+
 /// `POST /v1/teams`.
 fn team_create(hub: &Hub, body: &[u8], now: u64) -> RelayResult<Value> {
     let request: TeamCreate = parse_body(body)?;
-    let (team_id, member_id, token) = hub.create_team(&request, now)?;
+    let (team_id, member_id, device_id) = hub.create_team(&request, now)?;
     to_value(&TeamCreatedRef {
         team_id: &team_id,
         member_id,
-        secret: token.expose(),
+        secret: None,
+        device_id: Some(device_id),
     })
 }
 
@@ -531,10 +636,7 @@ fn authenticate(
         return Ok(None);
     }
     let principal = match token {
-        Some(token) => Some(
-            core.store
-                .with(|conn| auth::authenticate(conn, token, now))?,
-        ),
+        Some(token) => Some(auth::authenticate_core(core, token, now)?),
         None => None,
     };
     auth::allow(need, principal.as_ref())?;
@@ -650,9 +752,35 @@ fn dispatch(
     now: u64,
 ) -> RelayResult<Value> {
     use Endpoint::*;
+    if matches!(endpoint, HostRequests | HostRelease(_) | HostDeny(_)) {
+        devices::authorize_host(core, member_of(principal)?)?;
+    }
     match endpoint {
         Me => admin::me(core, principal.ok_or_else(RelayError::unauthenticated)?),
-        Join | TeamCreate => Err(RelayError::internal("This endpoint is served elsewhere.")),
+        DeviceEnroll => devices::enroll(core, member_of(principal)?, &parse_body(body)?, now),
+        DeviceList => devices::list(core, member_of(principal)?),
+        DeviceRevoke(id) => devices::revoke(core, member_of(principal)?, DeviceId(id), now),
+        KeyHolder(id) => devices::key_holder(core, member_of(principal)?, DeviceId(id), now),
+        LinkCreate => joins::links_create(core, member_of(principal)?, now),
+        LinkList => joins::links_list(core, member_of(principal)?, now),
+        LinkConfirm(id) => {
+            joins::links_confirm(core, member_of(principal)?, id, &parse_body(body)?, now)
+        }
+        LinkRefuse(id) => joins::links_refuse(core, member_of(principal)?, id, now),
+        JoinList => joins::list(core, now),
+        JoinConfirm(id) => joins::confirm(core, member_of(principal)?, id, &parse_body(body)?, now),
+        JoinRefuse(id) => joins::refuse(core, member_of(principal)?, id, now),
+        Leave => admin::leave(core, member_of(principal)?, now),
+        MemberRole(id) => admin::role_change(
+            core,
+            member_of(principal)?,
+            MemberId(id),
+            &parse_body(body)?,
+            now,
+        ),
+        Join | TeamCreate | Challenge | Token | Link => {
+            Err(RelayError::internal("This endpoint is served elsewhere."))
+        }
         InviteCreate => admin::invite_create(core, member_of(principal)?, &parse_body(body)?, now),
         InviteList => admin::invite_list(core),
         MemberList => admin::member_list(core),

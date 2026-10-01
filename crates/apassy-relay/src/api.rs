@@ -16,7 +16,8 @@ use apassy::vault::ExecRule;
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{
-    AgentId, AuditId, CollectionId, GrantId, InviteId, ItemId, MemberId, RunId, SessionId, TeamId,
+    AgentId, AuditId, CollectionId, DeviceId, GrantId, InviteId, ItemId, MemberId, RunId,
+    SessionId, TeamId,
 };
 use crate::secret::SecretString;
 
@@ -49,6 +50,20 @@ pub mod paths {
     pub const ME: &str = "/v1/me";
     pub const JOIN: &str = "/v1/join";
     pub const TEAMS: &str = "/v1/teams";
+    /// Sign-in of a device (section 23).
+    pub const AUTH_CHALLENGE: &str = "/v1/auth/challenge";
+    pub const AUTH_TOKEN: &str = "/v1/auth/token";
+    /// `GET`: devices; `DELETE /v1/devices/{id}`; `POST /v1/devices/{id}/key-holder`.
+    pub const DEVICES: &str = "/v1/devices";
+    pub const DEVICE_ENROLL: &str = "/v1/devices/enroll";
+    /// `POST`: a link code (existing device); `GET`: links waiting for this member;
+    /// `POST /v1/devices/links/{id}/confirm` and `/refuse`.
+    pub const DEVICE_LINKS: &str = "/v1/devices/links";
+    /// `POST`: a new device asks to join its member with a link code.
+    pub const DEVICE_LINK: &str = "/v1/devices/link";
+    /// `GET`: joins waiting for a confirmation; `POST /v1/joins/{id}/confirm` and `/refuse`.
+    pub const JOINS: &str = "/v1/joins";
+    pub const LEAVE: &str = "/v1/leave";
     pub const INVITES: &str = "/v1/invites";
     pub const MEMBERS: &str = "/v1/members";
     pub const COLLECTIONS: &str = "/v1/collections";
@@ -108,9 +123,16 @@ pub struct MeView {
     pub agent_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<u64>,
+    /// The device that signed in, for an access token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<DeviceId>,
+    /// True when that device holds the item keys of the team.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub key_holder: bool,
 }
 
-/// `POST /v1/invites` (owner or manager; only the owner may invite a manager).
+/// `POST /v1/invites` (owner or manager; only the owner may invite a manager or an
+/// owner).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InviteRequest {
@@ -118,6 +140,15 @@ pub struct InviteRequest {
     /// 1 to 168 hours. Default 72.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_hours: Option<u32>,
+    /// The member name of the new member. When set, the joiner cannot choose another.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Collections that the new member may use once the join is confirmed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<CollectionId>,
+    /// A shared device (for example a family computer), not a person. Role member only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared: bool,
 }
 
 /// A new secret for its receiver, sent once: an invite code, a member token after
@@ -151,6 +182,12 @@ pub struct TeamCreate {
     pub team: String,
     /// The owner's member name. 1 to 64 bytes, letters, digits, `.-_`.
     pub owner: String,
+    /// The owner's first device. With it, the owner gets a device (the key holder) and
+    /// no member token.
+    #[serde(default)]
+    pub device_name: Option<String>,
+    #[serde(default)]
+    pub public_key: Option<String>,
 }
 
 /// Write side of `TeamCreate`.
@@ -159,6 +196,10 @@ pub struct TeamCreateRef<'a> {
     pub code: &'a str,
     pub team: &'a str,
     pub owner: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<&'a str>,
 }
 
 /// The result of `POST /v1/teams`. Read side.
@@ -166,8 +207,13 @@ pub struct TeamCreateRef<'a> {
 pub struct TeamCreated {
     pub team_id: TeamId,
     pub member_id: MemberId,
-    /// The owner token. Shown once.
-    pub secret: SecretString,
+    /// The owner token, shown once, when the request had no device key. With a device
+    /// key there is no member token: the device signs in (section 23).
+    #[serde(default)]
+    pub secret: Option<SecretString>,
+    /// The owner's device, when the request had a device key. It holds the item keys.
+    #[serde(default)]
+    pub device_id: Option<DeviceId>,
 }
 
 /// Write side of `TeamCreated`.
@@ -175,23 +221,220 @@ pub struct TeamCreated {
 pub struct TeamCreatedRef<'a> {
     pub team_id: &'a TeamId,
     pub member_id: MemberId,
-    pub secret: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<DeviceId>,
 }
 
-/// `POST /v1/join` (no bearer; edge secret only). Read side.
+/// `POST /v1/join` (no bearer; edge secret only). Read side. Since section 23 a join
+/// carries the key of the joiner's device and waits for a confirmation. A body without
+/// `device_name` and `public_key` (an old CLI) is refused with a message to update.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JoinRequest {
     pub code: SecretString,
-    /// The member name, unique in the team. 1 to 64 bytes, letters, digits, `.-_`.
-    pub name: String,
+    /// The member name, unique among the live members of the team. 1 to 64 bytes,
+    /// letters, digits, `.-_`. Ignored when the invite sets a name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The name of the joiner's device, 1 to 64 bytes, no control character.
+    #[serde(default)]
+    pub device_name: Option<String>,
+    /// The public key of the joiner's device, base64url (`device::decode_public_key`).
+    #[serde(default)]
+    pub public_key: Option<String>,
 }
 
 /// Write side of `JoinRequest`.
 #[derive(Debug, Serialize)]
 pub struct JoinRequestRef<'a> {
     pub code: &'a str,
-    pub name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<&'a str>,
+    pub device_name: &'a str,
+    pub public_key: &'a str,
+}
+
+// ---- Devices, sign-in, joins, and links (docs/SPEC.md section 23) ----
+
+/// `POST /v1/auth/challenge` (edge only). The team comes from the body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChallengeRequest {
+    pub team_id: TeamId,
+    /// base64url, 65 bytes.
+    pub public_key: String,
+}
+
+/// A one-time nonce to sign, valid for 60 seconds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Challenge {
+    /// base64url, 32 bytes.
+    pub nonce: String,
+    pub expires_at: u64,
+    /// The relay's own public URL. The client signs ITS configured URL; if this differs,
+    /// the client says so instead of failing with a bare 401.
+    pub origin: String,
+}
+
+/// `POST /v1/auth/token` (edge only): the signed nonce.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TokenRequest {
+    pub team_id: TeamId,
+    pub public_key: String,
+    pub nonce: String,
+    /// base64url of the DER signature of `device::sign_in_message`.
+    pub signature: String,
+}
+
+/// The access token of a device, 15 minutes. Read side.
+#[derive(Debug, Deserialize)]
+pub struct AccessGranted {
+    pub token: SecretString,
+    pub expires_at: u64,
+    pub team_id: TeamId,
+    pub team: String,
+    pub member_id: MemberId,
+    pub member_name: String,
+    pub role: Role,
+    pub device_id: DeviceId,
+    pub key_holder: bool,
+}
+
+/// Write side of `AccessGranted`.
+#[derive(Debug, Serialize)]
+pub struct AccessGrantedRef<'a> {
+    pub token: &'a str,
+    pub expires_at: u64,
+    pub team_id: &'a TeamId,
+    pub team: &'a str,
+    pub member_id: MemberId,
+    pub member_name: &'a str,
+    pub role: Role,
+    pub device_id: DeviceId,
+    pub key_holder: bool,
+}
+
+/// `POST /v1/devices/enroll` with a member token: the first device of that member.
+/// The member token stops working once the device exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceEnroll {
+    pub name: String,
+    pub public_key: String,
+}
+
+/// One device. Members see their own; the owner sees all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceView {
+    pub id: DeviceId,
+    pub member_id: MemberId,
+    pub member_name: String,
+    pub name: String,
+    pub key_holder: bool,
+    pub created_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<u64>,
+    /// True for the device that made the request.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub current: bool,
+}
+
+/// `POST /v1/devices/links`: a one-time code for a new device of the same member, 10
+/// minutes. Read side.
+#[derive(Debug, Deserialize)]
+pub struct LinkCreated {
+    pub secret: SecretString,
+    pub expires_at: u64,
+}
+
+/// Write side of `LinkCreated`.
+#[derive(Debug, Serialize)]
+pub struct LinkCreatedRef<'a> {
+    pub secret: &'a str,
+    pub expires_at: u64,
+}
+
+/// `POST /v1/devices/link` (edge only): a new device asks to join its member. Read side.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkRequest {
+    pub code: SecretString,
+    pub device_name: String,
+    pub public_key: String,
+}
+
+/// Write side of `LinkRequest`.
+#[derive(Debug, Serialize)]
+pub struct LinkRequestRef<'a> {
+    pub code: &'a str,
+    pub device_name: &'a str,
+    pub public_key: &'a str,
+}
+
+/// The answer to a join or a link: it waits for a confirmation. The joiner shows the
+/// safety words and compares them with the confirmer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pending {
+    /// The id of the join or of the link.
+    pub id: u64,
+    pub team_id: TeamId,
+    pub team: String,
+    /// Two words (`device::safety_words`). The CLI checks them against its own.
+    pub safety: String,
+    pub expires_at: u64,
+    /// The member that made the invite (a join) or that owns the device (a link).
+    pub by: String,
+}
+
+/// `GET /v1/joins`: a join that waits for an owner or a manager.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JoinView {
+    pub id: u64,
+    pub name: String,
+    pub device_name: String,
+    pub role: Role,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared: bool,
+    /// The names of the collections that the invite grants.
+    pub grants: Vec<String>,
+    pub invited_by: String,
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
+/// `POST /v1/joins/{id}/confirm`: the new member and its device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JoinConfirmed {
+    pub member_id: MemberId,
+    pub device_id: DeviceId,
+}
+
+/// `GET /v1/devices/links`: a link that waits on a device of this member.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkView {
+    pub id: u64,
+    pub device_name: String,
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
+/// `POST /v1/joins/{id}/confirm` and `POST /v1/devices/links/{id}/confirm`: the two
+/// safety words that the joiner or the new device shows. The relay refuses the
+/// confirmation (409) if they differ, so the confirmer must get them from that person.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfirmRequest {
+    pub safety: String,
+}
+
+/// `PUT /v1/members/{id}/role` (owner).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleChange {
+    pub role: Role,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,6 +444,12 @@ pub struct MemberView {
     pub role: Role,
     pub created_at: u64,
     pub revoked: bool,
+    /// A shared device, not a person.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared: bool,
+    /// The number of live devices. 0 for a member that still signs in with a member token.
+    #[serde(default)]
+    pub devices: u64,
 }
 
 /// `GET /v1/invites`: invites without their codes.
@@ -211,6 +460,9 @@ pub struct InviteView {
     pub created_at: u64,
     pub expires_at: u64,
     pub used_by: Option<MemberId>,
+    /// When a join arrived with this invite (section 23). The invite is used from then on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

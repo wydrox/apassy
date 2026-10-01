@@ -79,8 +79,12 @@ pub enum TokenKind {
     Invite,
     /// The key of one proxy session, in the base URLs of a run. `apassy_ses_`.
     Session,
-    /// A one-time code of the operator that creates one team. `apassy_tcd_`.
+    /// A one-time code of the operator that makes one team. `apassy_tcd_`.
     TeamCode,
+    /// The access token of a signed-in device, 15 minutes, in memory. `apassy_acc_`.
+    Access,
+    /// A one-time code that adds a device to its member, 10 minutes. `apassy_lnk_`.
+    Link,
 }
 
 /// The agent prefix of the first alpha, without a team id. Only the migrated team
@@ -88,12 +92,14 @@ pub enum TokenKind {
 pub const LEGACY_AGENT_PREFIX: &str = apassy::vault::AGENT_TOKEN_PREFIX;
 
 impl TokenKind {
-    pub const ALL: [TokenKind; 5] = [
+    pub const ALL: [TokenKind; 7] = [
         Self::Member,
         Self::Agent,
         Self::Invite,
         Self::Session,
         Self::TeamCode,
+        Self::Access,
+        Self::Link,
     ];
 
     pub const fn prefix(self) -> &'static str {
@@ -103,6 +109,8 @@ impl TokenKind {
             Self::Invite => "apassy_inv_",
             Self::Session => "apassy_ses_",
             Self::TeamCode => "apassy_tcd_",
+            Self::Access => "apassy_acc_",
+            Self::Link => "apassy_lnk_",
         }
     }
 

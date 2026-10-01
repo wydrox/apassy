@@ -60,6 +60,10 @@ row_id!(
     /// One audit row.
     AuditId
 );
+row_id!(
+    /// One device (key pair) of one member. Local to its team.
+    DeviceId
+);
 
 /// The public id of a team: `t_` and 10 characters of lowercase base32 (`a-z`, `2-7`).
 /// It is in every credential of the team, so the relay finds the team before it opens

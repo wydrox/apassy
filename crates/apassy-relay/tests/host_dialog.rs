@@ -287,6 +287,7 @@ fn generated_plist_passes_the_mac_validator() {
     let path = dir.path().join("team-host.plist");
     let xml = generate_plist(
         Path::new("/Applications/a &<>'\"/apassy-team"),
+        &apassy_relay::ids::TeamId::parse("t_abcdefgh23").unwrap(),
         HostOptions {
             ask_all: true,
             auto_limit: 0,

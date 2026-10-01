@@ -15,8 +15,7 @@ use zeroize::Zeroizing;
 use crate::api::{
     self, AccessView, AgentCreate, AgentView, ApprovalView, AuditEntry, CollectionCreate,
     CollectionView, Created, DecisionRequest, GrantCreate, GrantView, InviteRequest, InviteView,
-    Issued, ItemCreated, ItemView, JoinRequestRef, MeView, MemberView, NewItemRef, Policy, RunView,
-    TeamCreateRef, TeamCreated,
+    Issued, ItemCreated, ItemView, MeView, MemberView, NewItemRef, Policy, RunView,
 };
 use crate::cli::CliError;
 use crate::cli::args::{Command, ItemAddArgs, USAGE};
@@ -28,7 +27,12 @@ use crate::secret::SecretString;
 
 /// Runs one parsed command and returns the exit code.
 pub fn execute(command: Command) -> Result<i32, CliError> {
+    execute_for(command, None)
+}
+
+fn execute_for(command: Command, selected: Option<&str>) -> Result<i32, CliError> {
     match command {
+        Command::Selected { team, command } => execute_for(*command, Some(&team)),
         Command::Help => {
             print!("{USAGE}");
             Ok(0)
@@ -38,16 +42,95 @@ pub fn execute(command: Command) -> Result<i32, CliError> {
             Ok(0)
         }
         Command::Init { relay } => init(&relay),
-        Command::Create { relay, team, name } => create(&relay, &team, &name),
-        Command::Join { relay, name } => join(&relay, &name),
-        Command::Mcp => crate::cli::mcp_stdio::run(&settings::load()?),
-        Command::Run(args) => crate::cli::exec::run(&settings::load()?, args),
+        Command::Create {
+            relay,
+            team,
+            name,
+            device,
+        } => crate::cli::onboarding::create(&relay, &team, &name, device.as_deref()),
+        Command::Join {
+            relay,
+            name,
+            device,
+            no_wait,
+            resume,
+        } => crate::cli::onboarding::join(
+            relay.as_deref(),
+            name.as_deref(),
+            device.as_deref(),
+            no_wait,
+            resume,
+            selected,
+            false,
+        ),
+        Command::DeviceLink {
+            relay,
+            device,
+            no_wait,
+            resume,
+        } => crate::cli::onboarding::join(
+            relay.as_deref(),
+            None,
+            device.as_deref(),
+            no_wait,
+            resume,
+            selected,
+            true,
+        ),
+        Command::TeamList { json } => {
+            let saved = settings::saved_teams()?;
+            let teams = saved.teams;
+            if json {
+                let rows: Vec<_> = teams
+                    .iter()
+                    .map(|(id, team)| {
+                        serde_json::json!({
+                            "id": id, "relay_url": team.relay_url, "team": team.team,
+                            "member": team.member, "device_id": team.device_id
+                        })
+                    })
+                    .collect();
+                print_json(&rows)?;
+            } else {
+                let current = saved.current;
+                table(
+                    &["CURRENT", "ID", "TEAM", "MEMBER", "RELAY"],
+                    teams
+                        .iter()
+                        .map(|(id, team)| {
+                            vec![
+                                if current.as_ref() == Some(id) {
+                                    "*"
+                                } else {
+                                    ""
+                                }
+                                .into(),
+                                id.to_string(),
+                                clean(&team.team),
+                                clean(&team.member),
+                                clean(&team.relay_url),
+                            ]
+                        })
+                        .collect(),
+                );
+            }
+            Ok(0)
+        }
+        Command::TeamUse { id } => {
+            let id = crate::ids::TeamId::parse(&id)
+                .ok_or_else(|| CliError::usage("The team id is not valid."))?;
+            settings::set_current(&id)?;
+            println!("Current team: {id}.");
+            Ok(0)
+        }
+        Command::Mcp => crate::cli::mcp_stdio::run(&settings::load_for(selected)?),
+        Command::Run(args) => crate::cli::exec::run(&settings::load_for(selected)?, args),
         Command::Host {
             ask_all,
             auto_limit,
             dialog,
         } => crate::cli::host::run(
-            &settings::load()?,
+            &settings::load_for(selected)?,
             crate::cli::host::HostOptions {
                 ask_all,
                 auto_limit: auto_limit.unwrap_or(crate::cli::host::DEFAULT_AUTO_LIMIT),
@@ -58,7 +141,7 @@ pub fn execute(command: Command) -> Result<i32, CliError> {
             ask_all,
             auto_limit,
         } => crate::cli::service::install(
-            &settings::load()?,
+            &settings::load_for(selected)?,
             crate::cli::host::HostOptions {
                 ask_all,
                 auto_limit: auto_limit.unwrap_or(crate::cli::host::DEFAULT_AUTO_LIMIT),
@@ -67,7 +150,7 @@ pub fn execute(command: Command) -> Result<i32, CliError> {
         Command::HostUninstall => crate::cli::service::uninstall(),
         Command::HostStatus => crate::cli::service::status(),
         other => {
-            let settings = settings::load()?;
+            let settings = settings::load_for(selected)?;
             member_command(&settings, other)?;
             Ok(0)
         }
@@ -75,11 +158,7 @@ pub fn execute(command: Command) -> Result<i32, CliError> {
 }
 
 fn member_client(settings: &Settings) -> Result<Client, CliError> {
-    Ok(Client::new(
-        settings.relay()?,
-        Some(settings.member()?),
-        settings.edge_secret.as_ref(),
-    ))
+    Client::member(settings)
 }
 
 fn agent_client(settings: &Settings) -> Result<Client, CliError> {
@@ -132,6 +211,11 @@ fn init(relay: &str) -> Result<i32, CliError> {
         "the member token",
         "apassy-team init --relay URL < owner-token-file",
     )?;
+    if token.expose().starts_with("apassy_acc_") {
+        return Err(CliError::usage(
+            "Access tokens cannot be saved. Use a device key to sign in, or supply a legacy member token.",
+        ));
+    }
     let edge = settings::env_secret(settings::ENV_EDGE_SECRET);
     let client = Client::new(&relay, Some(&token), edge.as_ref());
     let me: MeView = client.ok(Method::Get, api::paths::ME, None)?;
@@ -140,7 +224,32 @@ fn init(relay: &str) -> Result<i32, CliError> {
             "That is an agent token. `init` needs a member token.",
         ));
     }
-    let path = settings::save(&relay, &token)?;
+    let team_id = me.team_id.as_ref().ok_or_else(|| {
+        CliError::usage("The relay did not return a team id. Update the relay first.")
+    })?;
+    if crate::cli::devicekey::store()?
+        .load(&relay, team_id)?
+        .is_some()
+        || settings::list()?
+            .iter()
+            .any(|(id, entry)| id == team_id && entry.device_id.is_some())
+    {
+        return Err(CliError::usage(
+            "This machine already has a device for that team. Use `team use ID`.",
+        ));
+    }
+    let path = settings::save_team(
+        team_id,
+        &settings::TeamSettings {
+            relay_url: relay,
+            team: me.team.clone(),
+            member: me.member_name.clone(),
+            device_id: None,
+            member_token: Some(token),
+            safety_verified: None,
+        },
+        false,
+    )?;
     println!(
         "Saved settings for {} ({}) of team {} in {}.",
         clean(&me.member_name),
@@ -151,74 +260,15 @@ fn init(relay: &str) -> Result<i32, CliError> {
     Ok(0)
 }
 
-fn create(relay: &str, team: &str, name: &str) -> Result<i32, CliError> {
-    let relay = settings::normalize_url(relay)?;
-    let code = read_secret(
-        "the team code",
-        "apassy-team create --relay URL --team NAME --name NAME < team-code-file",
-    )?;
-    let edge = settings::env_secret(settings::ENV_EDGE_SECRET);
-    let client = Client::new(&relay, None, edge.as_ref());
-    let payload = body(&TeamCreateRef {
-        code: code.expose(),
-        team,
-        owner: name,
-    })?;
-    let made: TeamCreated = client.ok(Method::Post, api::paths::TEAMS, Some(&payload))?;
-    let path = settings::save(&relay, &made.secret)?;
-    println!(
-        "Created team {} ({}). You are its owner {} (member {}). Settings saved in {}.",
-        clean(team),
-        made.team_id,
-        clean(name),
-        made.member_id,
-        path.display()
-    );
-    Ok(0)
-}
-
-fn join(relay: &str, name: &str) -> Result<i32, CliError> {
-    let relay = settings::normalize_url(relay)?;
-    let code = read_secret(
-        "the invite code",
-        "apassy-team join --relay URL --name NAME < invite-code-file",
-    )?;
-    let edge = settings::env_secret(settings::ENV_EDGE_SECRET);
-    let client = Client::new(&relay, None, edge.as_ref());
-    let payload = body(&JoinRequestRef {
-        code: code.expose(),
-        name,
-    })?;
-    let issued: Issued = client.ok(Method::Post, api::paths::JOIN, Some(&payload))?;
-    let path = settings::save(&relay, &issued.secret)?;
-    println!(
-        "Joined as {} (member {}). Settings saved in {}.",
-        clean(name),
-        issued.id,
-        path.display()
-    );
-    Ok(0)
-}
-
 fn member_command(settings: &Settings, command: Command) -> Result<(), CliError> {
     use api::paths;
     match command {
         Command::Me { json } => {
-            // Either kind of token works for `me`.
-            let token = settings
-                .member_token
-                .as_ref()
-                .or(settings.agent_token.as_ref());
-            let token = token.ok_or_else(|| {
-                CliError::usage(
-                    "No token. Set APASSY_TEAM_TOKEN or APASSY_TOKEN, or run `apassy-team init`.",
-                )
-            })?;
-            let client = Client::new(
-                settings.relay()?,
-                Some(token),
-                settings.edge_secret.as_ref(),
-            );
+            let client = if settings.device_id.is_some() || settings.member_token.is_some() {
+                member_client(settings)?
+            } else {
+                agent_client(settings)?
+            };
             let me: MeView = client.ok(Method::Get, paths::ME, None)?;
             if json {
                 return print_json(&me);
@@ -244,15 +294,24 @@ fn member_command(settings: &Settings, command: Command) -> Result<(), CliError>
             }
             Ok(())
         }
-        Command::Invite { role, hours } => {
+        Command::Invite {
+            role,
+            hours,
+            name,
+            grants,
+            shared,
+        } => {
             let client = member_client(settings)?;
             let payload = body(&InviteRequest {
                 role,
                 expires_hours: hours,
+                name,
+                grants: grants.into_iter().map(crate::ids::CollectionId).collect(),
+                shared,
             })?;
             let issued: Issued = client.ok(Method::Post, paths::INVITES, Some(&payload))?;
             // The one-time output: the code alone on stdout, the rest on stderr.
-            println!("{}", issued.secret.expose());
+            println!("{}/join#{}", client.base(), issued.secret.expose());
             eprintln!(
                 "Invite {} for role {}, expires {}. The code works once. Send it over a private channel.",
                 issued.id,
@@ -574,18 +633,22 @@ fn member_command(settings: &Settings, command: Command) -> Result<(), CliError>
             }
             Ok(())
         }
-        // Handled by `execute`.
-        Command::Help
-        | Command::Version
-        | Command::Init { .. }
-        | Command::Create { .. }
-        | Command::Join { .. }
-        | Command::Run(_)
-        | Command::Host { .. }
-        | Command::HostInstall { .. }
-        | Command::HostUninstall
-        | Command::HostStatus
-        | Command::Mcp => Ok(()),
+        command @ (Command::DeviceEnroll { .. }
+        | Command::DeviceList { .. }
+        | Command::DeviceRevoke { .. }
+        | Command::DeviceKeyHolder { .. }
+        | Command::DeviceAdd
+        | Command::DevicePending { .. }
+        | Command::DeviceConfirm { .. }
+        | Command::DeviceRefuse { .. }
+        | Command::Joins { .. }
+        | Command::Confirm { .. }
+        | Command::Refuse { .. }
+        | Command::Leave
+        | Command::MemberRole { .. }) => crate::cli::devices::execute(settings, command),
+        _ => Err(CliError::usage(
+            "This command cannot run as a member command.",
+        )),
     }
 }
 
@@ -675,7 +738,7 @@ fn item_add(settings: &Settings, args: &ItemAddArgs) -> Result<(), CliError> {
     );
     let done = match uploaded {
         Ok(done) => done,
-        Err(error @ (CallError::Api(_) | CallError::Unsent(_))) => {
+        Err(error @ (CallError::Api(_) | CallError::Unsent(_) | CallError::Usage(_))) => {
             // The relay did not take the item: no item, so no key to keep.
             if store.remove(&uid).is_err() {
                 eprintln!(
@@ -810,7 +873,7 @@ fn print_pending(run: &ApprovalView) {
     println!("  note:     {}", clean(&run.note));
 }
 
-fn print_json<T: Serialize>(value: &T) -> Result<(), CliError> {
+pub(crate) fn print_json<T: Serialize>(value: &T) -> Result<(), CliError> {
     let text = serde_json::to_string_pretty(value)
         .map_err(|_| CliError::relay("Cannot encode the answer."))?;
     println!("{text}");
@@ -818,7 +881,7 @@ fn print_json<T: Serialize>(value: &T) -> Result<(), CliError> {
 }
 
 /// Prints rows in aligned columns. An empty list prints only the header.
-fn table(header: &[&str], rows: Vec<Vec<String>>) {
+pub(crate) fn table(header: &[&str], rows: Vec<Vec<String>>) {
     let mut widths: Vec<usize> = header.iter().map(|h| h.chars().count()).collect();
     for row in &rows {
         for (i, cell) in row.iter().enumerate() {

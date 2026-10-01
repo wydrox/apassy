@@ -1,6 +1,7 @@
 //! The settings file of the CLI (relay URL and member token), mode 0600, and the environment variables that override it.
 //!
-//! Variables win over the file. An empty variable counts as unset.
+//! Variables can override a selected entry only when the team and relay agree.
+//! An empty variable counts as unset.
 
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
@@ -19,30 +20,51 @@ pub const ENV_EDGE_SECRET: &str = "APASSY_EDGE_SECRET";
 /// The variables that a child of `run` must not inherit.
 pub const CREDENTIAL_VARS: [&str; 3] = [ENV_AGENT_TOKEN, ENV_TEAM_TOKEN, ENV_EDGE_SECRET];
 
-/// Read side of the file.
+/// One saved team. Device keys and access tokens are never stored here.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TeamSettings {
+    pub relay_url: String,
+    #[serde(default)]
+    pub team: String,
+    #[serde(default)]
+    pub member: String,
+    #[serde(default)]
+    pub device_id: Option<crate::ids::DeviceId>,
+    #[serde(default)]
+    pub safety_verified: Option<bool>,
+    #[serde(default)]
+    pub member_token: Option<SecretString>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct FileSettings {
+    #[serde(default)]
+    version: Option<u32>,
+    #[serde(default)]
+    current: Option<crate::ids::TeamId>,
+    #[serde(default)]
+    teams: std::collections::BTreeMap<crate::ids::TeamId, TeamSettings>,
     #[serde(default)]
     relay_url: Option<String>,
     #[serde(default)]
     member_token: Option<SecretString>,
 }
 
-/// Write side of the file.
-#[derive(Serialize)]
-struct FileSettingsRef<'a> {
-    relay_url: &'a str,
-    member_token: &'a str,
-}
-
-/// The settings after the variables and the file are merged.
+/// The selected team after the variables and file are merged.
 #[derive(Debug, Default)]
 pub struct Settings {
     pub relay_url: Option<String>,
     pub member_token: Option<SecretString>,
     pub agent_token: Option<SecretString>,
     pub edge_secret: Option<SecretString>,
+    pub team_id: Option<crate::ids::TeamId>,
+    pub device_id: Option<crate::ids::DeviceId>,
+    pub safety_verified: Option<bool>,
+    pub team: Option<String>,
+    pub member: Option<String>,
 }
+
+pub const ENV_TEAM: &str = "APASSY_TEAM";
 
 fn env_text(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
@@ -87,7 +109,18 @@ fn read_file() -> Result<FileSettings, CliError> {
             )));
         }
     };
-    if let Ok(meta) = std::fs::metadata(&path)
+    let file: FileSettings = serde_json::from_str(&text).map_err(|_| {
+        CliError::usage(format!(
+            "The settings file {} is not valid.",
+            path.display()
+        ))
+    })?;
+    if file.version.is_some_and(|v| v != 1 && v != 2) {
+        return Err(CliError::usage("The settings version is not supported."));
+    }
+    // Legacy migration protects the replacement and archive before returning.
+    if file.version == Some(2)
+        && let Ok(meta) = std::fs::metadata(&path)
         && meta.permissions().mode() & 0o077 != 0
     {
         eprintln!(
@@ -96,26 +129,78 @@ fn read_file() -> Result<FileSettings, CliError> {
             path.display()
         );
     }
-    serde_json::from_str(&text).map_err(|_| {
-        CliError::usage(format!(
-            "The settings file {} is not valid. Run `apassy-team init` again.",
-            path.display()
-        ))
-    })
+    Ok(file)
 }
 
-/// Loads the variables and the file. A missing file is fine.
+/// Loads the current team. A missing file is permitted.
 pub fn load() -> Result<Settings, CliError> {
-    let file = read_file()?;
-    let relay_url = match env_text(ENV_RELAY_URL).or(file.relay_url) {
-        Some(url) => Some(normalize_url(&url)?),
+    load_for(None)
+}
+
+/// An explicit selector wins over APASSY_TEAM, which wins over current.
+pub fn load_for(team: Option<&str>) -> Result<Settings, CliError> {
+    let mut file = read_file()?;
+    let selector = team.map(str::to_owned).or_else(|| env_text(ENV_TEAM));
+    let explicit_team = selector.is_some();
+    migrate(&mut file)?;
+    let team_id = match selector {
+        Some(text) => Some(
+            crate::ids::TeamId::parse(&text)
+                .ok_or_else(|| CliError::usage("The team id is not valid."))?,
+        ),
+        None => file.current.clone(),
+    };
+    let entry = match &team_id {
+        Some(id) => Some(file.teams.get(id).ok_or_else(|| {
+            CliError::usage(format!("There is no settings entry for team {id}."))
+        })?),
         None => None,
     };
+    let env_relay = env_text(ENV_RELAY_URL)
+        .map(|url| normalize_url(&url))
+        .transpose()?;
+    let env_token = env_secret(ENV_TEAM_TOKEN);
+    if let Some(entry) = entry {
+        if let Some(relay) = &env_relay
+            && relay != &normalize_url(&entry.relay_url)?
+        {
+            return Err(CliError::usage(
+                "APASSY_RELAY_URL does not match the relay of the selected team.",
+            ));
+        }
+        if let Some(token) = &env_token {
+            let token_team = crate::secret::parse_token(token.expose()).and_then(|t| t.team);
+            match token_team {
+                Some(id) if Some(&id) != team_id.as_ref() => {
+                    return Err(CliError::usage(
+                        "APASSY_TEAM_TOKEN does not match the selected team.",
+                    ));
+                }
+                None if explicit_team => {
+                    return Err(CliError::usage(
+                        "APASSY_TEAM_TOKEN has no team id. Remove --team and APASSY_TEAM, or use a token with a team id.",
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+    let relay_url = env_relay
+        .or_else(|| entry.map(|t| t.relay_url.clone()))
+        .or(file.relay_url);
+    let relay_url = relay_url.map(|url| normalize_url(&url)).transpose()?;
     Ok(Settings {
         relay_url,
-        member_token: env_secret(ENV_TEAM_TOKEN).or(file.member_token),
+        member_token: env_token
+            .or_else(|| entry.and_then(|t| t.member_token.clone()))
+            .or(file.member_token),
         agent_token: env_secret(ENV_AGENT_TOKEN),
         edge_secret: env_secret(ENV_EDGE_SECRET),
+        team_id,
+        device_id: entry.and_then(|t| t.device_id),
+        safety_verified: entry.and_then(|t| t.safety_verified),
+        team: entry.map(|t| t.team.clone()),
+        member: entry.map(|t| t.member.clone()),
     })
 }
 
@@ -194,35 +279,270 @@ pub fn ensure_private_dir(dir: &std::path::Path) -> Result<(), CliError> {
         .map_err(|e| fail("protect the settings directory", e))
 }
 
-/// Writes the settings file: directory 0700, file 0600, replaced atomically.
-pub fn save(relay_url: &str, member_token: &SecretString) -> Result<PathBuf, CliError> {
-    let dir = settings_dir()?;
-    let fail = |what: &str, err: std::io::Error| {
-        CliError::relay(format!("Cannot {what}: {}.", err.kind()))
+/// Resolves the old single-team entry without applying environment overrides.
+fn migrate(file: &mut FileSettings) -> Result<(), CliError> {
+    if file.version == Some(2) {
+        return Ok(());
+    }
+    let resolve = || -> Result<_, CliError> {
+        let (Some(relay), Some(token)) = (&file.relay_url, &file.member_token) else {
+            return Err(CliError::usage("The old settings entry is incomplete."));
+        };
+        let relay = normalize_url(relay)?;
+        if let Some(id) = crate::secret::parse_token(token.expose()).and_then(|t| t.team) {
+            return Ok((
+                id,
+                TeamSettings {
+                    relay_url: relay,
+                    member_token: Some(token.clone()),
+                    ..TeamSettings::default()
+                },
+            ));
+        }
+        let edge = env_secret(ENV_EDGE_SECRET);
+        let client = crate::cli::client::Client::new(&relay, Some(token), edge.as_ref());
+        let me: crate::api::MeView = client.ok(crate::cli::client::Method::Get, "/v1/me", None)?;
+        let id = me.team_id.ok_or_else(|| {
+            CliError::usage("The relay did not return a team id. Update the relay.")
+        })?;
+        Ok((
+            id,
+            TeamSettings {
+                relay_url: relay,
+                team: me.team,
+                member: me.member_name,
+                device_id: me.device_id,
+                safety_verified: None,
+                member_token: Some(token.clone()),
+            },
+        ))
     };
+    let legacy_entry = file.relay_url.is_some() || file.member_token.is_some();
+    if legacy_entry {
+        match resolve() {
+            Ok((id, entry)) => {
+                file.teams.insert(id.clone(), entry);
+                file.current = Some(id);
+            }
+            Err(_) => {
+                let archive = archive_legacy()?;
+                *file = FileSettings {
+                    version: Some(2),
+                    ..FileSettings::default()
+                };
+                write_file(file)?;
+                eprintln!(
+                    "apassy-team: warning: The old settings could not identify a team. The original file is in {}.",
+                    archive.display()
+                );
+                return Ok(());
+            }
+        }
+    }
+    file.version = Some(2);
+    file.relay_url = None;
+    file.member_token = None;
+    if legacy_entry {
+        write_file(file)?;
+    }
+    Ok(())
+}
+
+/// Saves the exact legacy bytes without replacing an existing archive.
+fn archive_legacy() -> Result<PathBuf, CliError> {
+    let path = settings_path()?;
+    let dir = settings_dir()?;
     ensure_private_dir(&dir)?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|_| CliError::relay("Cannot protect the old settings file."))?;
+    for index in 0u64.. {
+        let archive = dir.join(if index == 0 {
+            "settings.v1.json".to_owned()
+        } else {
+            format!("settings.v1.{index}.json")
+        });
+        match std::fs::hard_link(&path, &archive) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return Err(CliError::relay("Cannot create the old settings archive.")),
+        }
+        std::fs::remove_file(&path)
+            .map_err(|_| CliError::relay("Cannot move the old settings file to the archive."))?;
+        return Ok(archive);
+    }
+    unreachable!()
+}
+
+fn write_file(file: &FileSettings) -> Result<PathBuf, CliError> {
+    if file.teams.values().any(|team| {
+        team.member_token
+            .as_ref()
+            .is_some_and(|token| token.expose().starts_with("apassy_acc_"))
+    }) {
+        return Err(CliError::usage(
+            "Access tokens cannot be saved in settings.json.",
+        ));
+    }
+    let dir = settings_dir()?;
+    ensure_private_dir(&dir)?;
+    #[derive(Serialize)]
+    struct TeamRef<'a> {
+        relay_url: &'a str,
+        team: &'a str,
+        member: &'a str,
+        device_id: Option<crate::ids::DeviceId>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        safety_verified: Option<bool>,
+        member_token: Option<&'a str>,
+    }
+    #[derive(Serialize)]
+    struct FileRef<'a> {
+        version: u32,
+        current: &'a Option<crate::ids::TeamId>,
+        teams: std::collections::BTreeMap<&'a crate::ids::TeamId, TeamRef<'a>>,
+    }
+    let teams = file
+        .teams
+        .iter()
+        .map(|(id, t)| {
+            (
+                id,
+                TeamRef {
+                    relay_url: &t.relay_url,
+                    team: &t.team,
+                    member: &t.member,
+                    device_id: t.device_id,
+                    safety_verified: t.safety_verified,
+                    member_token: t.member_token.as_ref().map(SecretString::expose),
+                },
+            )
+        })
+        .collect();
     let body = zeroize::Zeroizing::new(
-        serde_json::to_string_pretty(&FileSettingsRef {
-            relay_url,
-            member_token: member_token.expose(),
+        serde_json::to_string_pretty(&FileRef {
+            version: 2,
+            current: &file.current,
+            teams,
         })
         .map_err(|_| CliError::relay("Cannot encode the settings."))?,
     );
     let path = dir.join("settings.json");
-    let tmp = dir.join("settings.json.tmp");
-    let _ = std::fs::remove_file(&tmp);
-    let mut file = std::fs::OpenOptions::new()
+    let tmp = dir.join(format!("settings.json.{}.tmp", std::process::id()));
+    let mut output = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(&tmp)
-        .map_err(|e| fail("create the settings file", e))?;
-    file.write_all(body.as_bytes())
-        .and_then(|_| file.write_all(b"\n"))
-        .and_then(|_| file.sync_all())
-        .map_err(|e| fail("write the settings file", e))?;
-    std::fs::rename(&tmp, &path).map_err(|e| fail("replace the settings file", e))?;
+        .map_err(|_| CliError::relay("Cannot create the settings file."))?;
+    let result = output
+        .write_all(body.as_bytes())
+        .and_then(|_| output.write_all(b"\n"))
+        .and_then(|_| output.sync_all())
+        .and_then(|_| std::fs::rename(&tmp, &path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result.map_err(|_| CliError::relay("Cannot write the settings file."))?;
     Ok(path)
+}
+
+/// Writes a member-token entry after GET /v1/me identifies the team.
+pub fn save(relay_url: &str, member_token: &SecretString) -> Result<PathBuf, CliError> {
+    let relay = normalize_url(relay_url)?;
+    let edge = env_secret(ENV_EDGE_SECRET);
+    let client = crate::cli::client::Client::new(&relay, Some(member_token), edge.as_ref());
+    let me: crate::api::MeView = client.ok(crate::cli::client::Method::Get, "/v1/me", None)?;
+    let id = me
+        .team_id
+        .ok_or_else(|| CliError::usage("The relay did not return a team id. Update the relay."))?;
+    save_team(
+        &id,
+        &TeamSettings {
+            relay_url: relay,
+            team: me.team,
+            member: me.member_name,
+            device_id: me.device_id,
+            safety_verified: None,
+            member_token: Some(member_token.clone()),
+        },
+        // `init` succeeded: this is the team the person works with now.
+        true,
+    )
+}
+
+pub fn save_team(
+    id: &crate::ids::TeamId,
+    entry: &TeamSettings,
+    make_current: bool,
+) -> Result<PathBuf, CliError> {
+    normalize_url(&entry.relay_url)?;
+    let mut file = read_file()?;
+    migrate(&mut file)?;
+    file.teams.insert(id.clone(), entry.clone());
+    // The first team of a machine is its current team, whatever saved it.
+    let current_is_live = file
+        .current
+        .as_ref()
+        .is_some_and(|current| file.teams.contains_key(current));
+    if make_current || !current_is_live {
+        file.current = Some(id.clone());
+    }
+    write_file(&file)
+}
+
+pub struct SavedTeams {
+    pub current: Option<crate::ids::TeamId>,
+    pub teams: Vec<(crate::ids::TeamId, TeamSettings)>,
+}
+
+pub fn saved_teams() -> Result<SavedTeams, CliError> {
+    let mut file = read_file()?;
+    migrate(&mut file)?;
+    Ok(SavedTeams {
+        current: file.current,
+        teams: file.teams.into_iter().collect(),
+    })
+}
+
+pub fn list() -> Result<Vec<(crate::ids::TeamId, TeamSettings)>, CliError> {
+    Ok(saved_teams()?.teams)
+}
+
+pub fn contains_team(id: &crate::ids::TeamId) -> Result<bool, CliError> {
+    Ok(list()?.iter().any(|(saved, _)| saved == id))
+}
+
+/// Complete migration before a remote operation can invalidate the legacy token.
+pub fn migrate_legacy() -> Result<(), CliError> {
+    let mut file = read_file()?;
+    if file.version != Some(2) && file.member_token.is_some() {
+        migrate(&mut file)?;
+    }
+    Ok(())
+}
+
+pub fn remove_team(id: &crate::ids::TeamId) -> Result<(), CliError> {
+    let mut file = read_file()?;
+    migrate(&mut file)?;
+    file.teams.remove(id);
+    if file.current.as_ref() == Some(id) {
+        file.current = file.teams.keys().next().cloned();
+    }
+    write_file(&file)?;
+    Ok(())
+}
+
+pub fn set_current(id: &crate::ids::TeamId) -> Result<(), CliError> {
+    let mut file = read_file()?;
+    migrate(&mut file)?;
+    if !file.teams.contains_key(id) {
+        return Err(CliError::usage(format!(
+            "There is no settings entry for team {id}."
+        )));
+    }
+    file.current = Some(id.clone());
+    write_file(&file)?;
+    Ok(())
 }
 
 #[cfg(test)]

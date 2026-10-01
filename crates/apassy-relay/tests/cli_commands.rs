@@ -732,7 +732,10 @@ fn invite_and_agent_create_print_the_secret_once_on_stdout_only() {
     );
     let output = Cli::new().member(&mock.url).run(&["invite"], None);
     assert_eq!(code(&output), 0);
-    assert_eq!(text(&output.stdout), format!("{secret}\n"));
+    assert_eq!(
+        text(&output.stdout),
+        format!("{}/join#{secret}\n", mock.url)
+    );
     assert!(!text(&output.stderr).contains(secret));
     assert!(text(&output.stderr).contains("Invite 3"));
 
@@ -793,7 +796,7 @@ fn usage_errors_exit_2_and_send_nothing() {
         vec!["approve", "abc"],
         vec!["me", "--nope"],
         vec!["run", "--items", "1", "--purpose", "x"],
-        vec!["invite", "--role", "owner"],
+        vec!["invite", "--role", "invalid"],
     ] {
         let output = cli.run(&args, None);
         assert_eq!(code(&output), 2, "{args:?}");

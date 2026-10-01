@@ -40,6 +40,12 @@ pub mod codes {
     /// A release from the host did not open or did not match the run. The run is
     /// denied. Also the `RunView.code` of that run.
     pub const RELEASE_INVALID: &str = "release_invalid";
+    /// Sign-in of a device whose join or link waits for a confirmation.
+    pub const JOIN_PENDING: &str = "join_pending";
+    /// Sign-in of a device whose join or link was refused or expired.
+    pub const JOIN_REFUSED: &str = "join_refused";
+    /// A host endpoint called by a device that does not hold the item keys.
+    pub const NOT_KEY_HOLDER: &str = "not_key_holder";
     // Proxy.
     pub const SESSION_INVALID: &str = "session_invalid";
     pub const HOST_NOT_IN_SESSION: &str = "host_not_in_session";
@@ -78,7 +84,10 @@ pub fn status_of(code: &str) -> u16 {
         | PLACEHOLDER_IN_BODY
         | APPROVE_ON_HOST
         | RELEASE_INVALID
-        | TEAM_LIMIT => 403,
+        | TEAM_LIMIT
+        | JOIN_PENDING
+        | JOIN_REFUSED
+        | NOT_KEY_HOLDER => 403,
         NOT_FOUND => 404,
         METHOD_NOT_ALLOWED => 405,
         CONFLICT | RUN_NOT_PENDING => 409,

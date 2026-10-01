@@ -395,7 +395,7 @@ fn a_manager_works_but_cannot_invite_a_manager_or_revoke() {
 }
 
 #[test]
-fn the_owner_cannot_revoke_themselves() {
+fn the_last_owner_cannot_revoke_themselves() {
     let relay = start(UpstreamOptions::default());
     let members = relay.ok("GET", "/v1/members", &relay.owner_token, None);
     let owner_id = members[0]["id"].as_u64().unwrap();
@@ -405,8 +405,8 @@ fn the_owner_cannot_revoke_themselves() {
         &format!("/v1/members/{owner_id}"),
         Some(&relay.owner_token),
         None,
-        403,
-        "forbidden",
+        409,
+        "conflict",
     );
     relay.ok("GET", "/v1/me", &relay.owner_token, None);
 }
@@ -536,8 +536,15 @@ fn an_expired_agent_token_says_token_expired() {
         401,
         "token_expired",
     );
-    // The member token still works.
-    relay.ok("GET", "/v1/me", &team.member_token, None);
+    // A restart ends the device access token.
+    relay.fails(
+        "GET",
+        "/v1/me",
+        Some(&team.member_token),
+        None,
+        401,
+        "unauthenticated",
+    );
 }
 
 #[test]
@@ -598,33 +605,42 @@ fn an_invite_works_once() {
     let code = invite["secret"].as_str().unwrap();
     assert!(code.starts_with("apassy_inv_"));
     assert!(invite["expires_at"].as_u64().unwrap() > 0);
+    let key = apassy_relay::device::DeviceKey::generate().unwrap();
     let joined = relay.ok(
         "POST",
         "/v1/join",
         "",
-        Some(&json!({"code": code, "name": "dave"})),
+        Some(
+            &json!({"code": code, "name": "dave", "device_name": "Dave device",
+            "public_key": key.public_key_b64()}),
+        ),
     );
-    assert!(
-        joined["secret"]
-            .as_str()
-            .unwrap()
-            .starts_with("apassy_mbr_")
-    );
+    assert!(joined.get("secret").is_none());
+    let other_key = apassy_relay::device::DeviceKey::generate().unwrap();
     relay.fails(
         "POST",
         "/v1/join",
         None,
-        Some(&json!({"code": code, "name": "erin"})),
+        Some(
+            &json!({"code": code, "name": "erin", "device_name": "Erin device",
+            "public_key": other_key.public_key_b64()}),
+        ),
         403,
         "invite_invalid",
     );
-    // The new member token works and has the role of the invite.
-    let me = relay.ok("GET", "/v1/me", joined["secret"].as_str().unwrap(), None);
+    let confirmed = relay.ok(
+        "POST",
+        &format!("/v1/joins/{}/confirm", joined["id"]),
+        &relay.owner_token,
+        Some(&json!({"safety": joined["safety"]})),
+    );
+    let token = relay.sign_in(&relay.team_id, &key);
+    assert!(token.starts_with("apassy_acc_"));
+    let me = relay.ok("GET", "/v1/me", &token, None);
     assert_eq!(me["member_name"], "dave");
     assert_eq!(me["role"], "member");
-    // The list shows the invite as used and never a code.
     let list = relay.ok("GET", "/v1/invites", &relay.owner_token, None);
-    assert_eq!(list[0]["used_by"], joined["id"]);
+    assert_eq!(list[0]["used_by"], confirmed["member_id"]);
     assert!(!list.to_string().contains("apassy_inv_"));
 }
 
@@ -658,7 +674,7 @@ fn an_expired_wrong_or_malformed_code_is_invite_invalid() {
             "POST",
             "/v1/join",
             None,
-            Some(&json!({"code": wrong, "name": "frank"})),
+            Some(&json!({"code": wrong, "name": "frank", "device_name": "Test device", "public_key": apassy_relay::device::DeviceKey::generate().unwrap().public_key_b64()})),
             403,
             "invite_invalid",
         );
@@ -682,7 +698,7 @@ fn a_taken_name_is_a_conflict_and_keeps_the_invite() {
         "POST",
         "/v1/join",
         None,
-        Some(&json!({"code": code, "name": "gina"})),
+        Some(&json!({"code": code, "name": "gina", "device_name": "Test device", "public_key": apassy_relay::device::DeviceKey::generate().unwrap().public_key_b64()})),
         409,
         "conflict",
     );
@@ -690,7 +706,7 @@ fn a_taken_name_is_a_conflict_and_keeps_the_invite() {
         "POST",
         "/v1/join",
         None,
-        Some(&json!({"code": code, "name": "owner"})),
+        Some(&json!({"code": code, "name": "owner", "device_name": "Test device", "public_key": apassy_relay::device::DeviceKey::generate().unwrap().public_key_b64()})),
         409,
         "conflict",
     );
@@ -699,7 +715,7 @@ fn a_taken_name_is_a_conflict_and_keeps_the_invite() {
             "POST",
             "/v1/join",
             None,
-            Some(&json!({"code": code, "name": bad})),
+            Some(&json!({"code": code, "name": bad, "device_name": "Test device", "public_key": apassy_relay::device::DeviceKey::generate().unwrap().public_key_b64()})),
             400,
             "invalid_request",
         );
@@ -709,7 +725,7 @@ fn a_taken_name_is_a_conflict_and_keeps_the_invite() {
         "POST",
         "/v1/join",
         "",
-        Some(&json!({"code": code, "name": "gina.2"})),
+        Some(&json!({"code": code, "name": "gina.2", "device_name": "Test device", "public_key": apassy_relay::device::DeviceKey::generate().unwrap().public_key_b64()})),
     );
 }
 
@@ -726,13 +742,11 @@ fn invite_options_are_checked() {
             "invalid_request",
         );
     }
-    relay.fails(
+    relay.ok(
         "POST",
         "/v1/invites",
-        Some(&relay.owner_token),
+        &relay.owner_token,
         Some(&json!({"role": "owner"})),
-        400,
-        "invalid_request",
     );
     let short = relay.ok(
         "POST",

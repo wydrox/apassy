@@ -219,6 +219,9 @@ impl Cli {
         for (name, value) in &self.env {
             command.env(name, value);
         }
+        // Integration tests must never read or change the real login Keychain.
+        // Set this last so a test's custom environment cannot select Keychain.
+        command.env("APASSY_TEAM_KEY_STORE", "file");
         command
     }
 
@@ -236,7 +239,10 @@ impl Cli {
         let mut child = command.spawn().unwrap();
         if let Some(text) = stdin {
             let mut pipe = child.stdin.take().unwrap();
-            pipe.write_all(text.as_bytes()).unwrap();
+            // A command that refuses its arguments exits before it reads stdin.
+            if let Err(error) = pipe.write_all(text.as_bytes()) {
+                assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe, "{error}");
+            }
         }
         child.wait_with_output().unwrap()
     }
