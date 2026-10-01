@@ -4,7 +4,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, describe, it } from "node:test";
 
-import worker from "../src/index.ts";
+import worker, { type RelayService } from "../src/index.ts";
 
 const SECRET = "edge-secret-synthetic-0123456789abcdef0123";
 const PUBLIC = "https://apassy-relay.wyderka.cc";
@@ -19,6 +19,7 @@ interface Seen {
 let server: http.Server;
 let origin: string;
 let seen: Seen[] = [];
+let vpcTargets: string[] = [];
 
 /** Every value of a header, as the relay would see them on the wire. */
 function values(request: Seen, name: string): string[] {
@@ -63,8 +64,20 @@ after(() => {
   server.closeAllConnections();
 });
 
+/** A fake Workers VPC binding. Like the real one, it ignores the host of the URL. */
+function vpc(): RelayService {
+  return {
+    fetch(input, init) {
+      vpcTargets.push(input);
+      const url = new URL(input);
+      return fetch(origin + url.pathname + url.search, init);
+    },
+  };
+}
+
 function call(path: string, init: RequestInit & { duplex?: "half" } = {}, env = {}) {
   seen = [];
+  vpcTargets = [];
   const request = new Request(PUBLIC + path, { duplex: "half", ...init });
   return worker.fetch(request, { RELAY_ORIGIN: origin, EDGE_SECRET: SECRET, ...env });
 }
@@ -165,6 +178,34 @@ describe("pass through", () => {
   });
 });
 
+describe("VPC binding", () => {
+  it("is used instead of RELAY_ORIGIN", async () => {
+    const response = await call("/v1/me?x=1", {}, { RELAY: vpc(), RELAY_ORIGIN: "http://127.0.0.1:1" });
+    assert.equal(response.status, 201);
+    assert.deepEqual(vpcTargets, ["http://relay/v1/me?x=1"]);
+    assert.deepEqual(values(seen[0]!, "x-apassy-edge"), [SECRET]);
+  });
+
+  it("works without RELAY_ORIGIN and passes the body", async () => {
+    const response = await call("/v1/runs", { method: "POST", body: "{}" }, { RELAY: vpc(), RELAY_ORIGIN: undefined });
+    assert.equal(await response.text(), "echo:{}");
+    assert.equal(seen[0]!.method, "POST");
+  });
+
+  it("keeps //evil.example/x on the relay host", async () => {
+    await call("//evil.example/x?a=1", {}, { RELAY: vpc() });
+    assert.equal(new URL(vpcTargets[0]!).host, "relay");
+    assert.equal(seen[0]!.url, "//evil.example/x?a=1");
+  });
+
+  it("answers 502 when the binding fails, without the URL", async () => {
+    const down: RelayService = { fetch: () => Promise.reject(new Error("tunnel down")) };
+    const response = await call("/p/apassy_ses_k/api.example.com/x", {}, { RELAY: down });
+    assert.equal(response.status, 502);
+    assert.equal(await response.text(), "relay unreachable");
+  });
+});
+
 describe("configuration and failures", () => {
   it("answers 503 when RELAY_ORIGIN or EDGE_SECRET is missing or bad", async () => {
     for (const env of [
@@ -178,6 +219,13 @@ describe("configuration and failures", () => {
       assert.equal(response.status, 503);
       assert.equal(await response.text(), "relay not configured");
     }
+    assert.equal(seen.length, 0);
+  });
+
+  it("answers 503 for a VPC binding without EDGE_SECRET", async () => {
+    const response = await call("/v1/me", {}, { RELAY: vpc(), EDGE_SECRET: undefined });
+    assert.equal(response.status, 503);
+    assert.equal(await response.text(), "relay not configured");
     assert.equal(seen.length, 0);
   });
 

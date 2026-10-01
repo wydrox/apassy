@@ -4,6 +4,10 @@
   "compatibility_date": "2026-09-01",
   "workers_dev": false,
   "routes": [{ "pattern": "apassy-relay.wyderka.cc", "custom_domain": true }],
+  // The relay on the VPS, through the named tunnel apassy-relay (OPERATIONS.md, section 16).
+  // When RELAY is bound, RELAY_ORIGIN is not used. To go back to a quick tunnel, remove
+  // this binding and set RELAY_ORIGIN.
+  "vpc_services": [{ "binding": "RELAY", "service_id": "01a0f70c-70ec-7882-9121-853d63b9eece", "remote": true }],
   "vars": { "RELAY_ORIGIN": "https://replace-me.trycloudflare.com" },
   "observability": { "enabled": false }
 }

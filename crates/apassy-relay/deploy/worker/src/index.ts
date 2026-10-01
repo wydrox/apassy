@@ -3,14 +3,25 @@
 // Erasable TypeScript only (no enums, namespaces, or parameter properties), so
 // Node can run it with type stripping in the tests.
 
+/** A Workers VPC service binding: a tunnel from the relay's host, no public origin. */
+export interface RelayService {
+  fetch(input: string, init?: RequestInit): Promise<Response>;
+}
+
 export interface Env {
   /** The origin of the relay, for example a quick tunnel URL. A var. */
   RELAY_ORIGIN?: string;
   /** The edge secret. A Worker secret. */
   EDGE_SECRET?: string;
+  /** The relay through Workers VPC. When it is bound, RELAY_ORIGIN is not used. */
+  RELAY?: RelayService;
 }
 
 const EDGE_HEADER = "x-apassy-edge";
+
+// The VPC service config picks the target and the port. The host of the URL only
+// fills the Host header.
+const VPC_ORIGIN = "http://relay";
 
 function text(status: number, body: string): Response {
   return new Response(body, {
@@ -21,14 +32,16 @@ function text(status: number, body: string): Response {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    if (!env.RELAY_ORIGIN || !env.EDGE_SECRET) {
+    if (!env.EDGE_SECRET || (!env.RELAY && !env.RELAY_ORIGIN)) {
       return text(503, "relay not configured");
     }
-    let origin: string;
-    try {
-      origin = new URL(env.RELAY_ORIGIN).origin;
-    } catch {
-      return text(503, "relay not configured");
+    let origin = VPC_ORIGIN;
+    if (!env.RELAY) {
+      try {
+        origin = new URL(env.RELAY_ORIGIN!).origin;
+      } catch {
+        return text(503, "relay not configured");
+      }
     }
     // Built by string. `new URL(path, origin)` would let a path such as
     // `//evil.example/x` change the host and send the edge secret there.
@@ -51,7 +64,7 @@ export default {
     try {
       // The body and the answer stream. Nothing is buffered, and no URL is logged:
       // the path holds session keys.
-      return await fetch(target, init);
+      return await (env.RELAY ? env.RELAY.fetch(target, init) : fetch(target, init));
     } catch {
       return text(502, "relay unreachable");
     }

@@ -4,6 +4,8 @@ Plain steps to run the alpha. The design is in [SPEC.md](SPEC.md). Names such as
 
 ## 1. What runs where
 
+Since 2026-10-01 the relay runs on a Linux VPS, behind a named tunnel and a Workers VPC binding. See section 16. The layout below, with a quick tunnel to a container on the owner's Mac, is the first setup. It still works as a fallback.
+
 ```
 agent (cloud session, CI, laptop)
    │ HTTPS
@@ -122,7 +124,9 @@ The Worker lives in `deploy/worker/`. It has three settings:
 - The secret `EDGE_SECRET`: the same text as the edge secret file. Set it with `wrangler secret put EDGE_SECRET`.
 - The custom domain `apassy-relay.wyderka.cc`, in `wrangler.jsonc`. The zone must be in the same Cloudflare account.
 
-Without both values, the Worker answers 503 "relay not configured". If the tunnel is not reachable, it answers 502.
+A fourth setting, the Workers VPC binding `RELAY`, replaces `RELAY_ORIGIN` when it is set (section 16).
+
+Without the edge secret, or without both `RELAY` and `RELAY_ORIGIN`, the Worker answers 503 "relay not configured". If the relay is not reachable, it answers 502.
 
 The Worker makes the target URL by string concatenation: origin, path, query. It does not use `new URL(path, origin)`, so a path like `//evil.example/x` cannot send the edge secret to another host. It deletes any `X-Apassy-Edge` from the client and sets its own. It does not log URLs, because paths hold session keys.
 
@@ -363,3 +367,57 @@ What the alpha does not do:
 - TLS in the relay, several teams per relay, a key typed at start.
 
 The full list is in section 2 of [SPEC.md](SPEC.md). The threat notes are in sections 20 and 21.
+
+## 16. On a VPS
+
+The live relay runs on a Linux VPS since 2026-10-01: `ssh ottervibe`, Debian 12, x86_64. Nothing on the VPS is public. The Worker reaches the relay through a Workers VPC binding and a named tunnel. The tunnel URL never changes, so a restart needs no Worker deploy.
+
+```
+agent ──HTTPS──▶ Worker apassy-relay.wyderka.cc   adds X-Apassy-Edge
+   ──Workers VPC binding RELAY──▶ VPC service apassy-relay ──▶ tunnel apassy-relay
+   ──▶ container apassy-relay-tunnel (cloudflared, outbound only)
+   ──HTTP──▶ container apassy-relay  relay:8080, volume apassy-relay-data
+```
+
+| What | Where |
+| --- | --- |
+| Compose project | `apassy` in `/opt/apassy`, a copy of `deploy/vps/compose.yaml` |
+| Image | `apassy-relay:host-keys-<commit>`, built on the VPS from `git archive` of that commit |
+| Data | the volume `apassy-relay-data`, file `team.db` (owner 10001, mode 0600) |
+| Relay secrets | `/opt/apassy/secrets/relay/vault_key` and `edge_secret`, owner 10001, mode 0400 |
+| Tunnel token | `/opt/apassy/secrets/tunnel/token`, owner 65532 (cloudflared), mode 0400 |
+| Tunnel | `apassy-relay`, id `044bd7e2-2257-4927-925b-f1f8c0796700` |
+| VPC service | `apassy-relay`, id `01a0f70c-70ec-7882-9121-853d63b9eece`: host `relay`, HTTP port 8080 |
+| Owner's check port | `127.0.0.1:8787` on the VPS only |
+
+- The VPC service names the relay by the host name `relay`. Cloudflared looks it up with the DNS of its own container, which is Docker's DNS. Keep both containers in the same Compose project.
+- The Worker uses the binding `RELAY` when it is set, and `RELAY_ORIGIN` only when it is not.
+- `/opt/apassy/secrets` is root's, mode 0711. The user `otter` cannot read the files in it. Change them with `sudo`.
+- The VPS also runs other services (Pretix, mail). The relay has its own limits: 2 CPUs, 512 MiB, 512 processes.
+
+Check it:
+
+```sh
+curl https://apassy-relay.wyderka.cc/healthz
+ssh ottervibe 'cd /opt/apassy && docker compose ps && docker compose logs --tail 20'
+apassy-team me
+```
+
+Deploy a new commit:
+
+```sh
+git archive --format=tar HEAD | ssh ottervibe 'rm -rf /opt/apassy/build && mkdir -p /opt/apassy/build && tar -x -C /opt/apassy/build'
+ssh ottervibe 'cd /opt/apassy/build && docker build -t apassy-relay:host-keys-<commit> .'
+# Set the new tag in /opt/apassy/compose.yaml, then:
+ssh ottervibe 'cd /opt/apassy && docker compose up -d --wait'
+```
+
+A restart ends every session (section 5).
+
+Back up the vault as in section 13, with the project stopped: `docker compose stop relay`, then copy `team.db` out of `apassy-relay-data`, then `docker compose start relay`.
+
+Go back to the Mac:
+
+1. On the VPS: `docker compose stop relay`. Copy `team.db` to the Mac volume if the VPS changed it.
+2. On the Mac: start the container and a quick tunnel (sections 5 and 6).
+3. In `deploy/worker/wrangler.jsonc`, remove `vpc_services` and set `RELAY_ORIGIN` to the tunnel URL. Then `wrangler deploy`.
