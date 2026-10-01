@@ -465,7 +465,8 @@ pub fn save(relay_url: &str, member_token: &SecretString) -> Result<PathBuf, Cli
             safety_verified: None,
             member_token: Some(member_token.clone()),
         },
-        false,
+        // `init` succeeded: this is the team the person works with now.
+        true,
     )
 }
 
@@ -478,7 +479,12 @@ pub fn save_team(
     let mut file = read_file()?;
     migrate(&mut file)?;
     file.teams.insert(id.clone(), entry.clone());
-    if make_current {
+    // The first team of a machine is its current team, whatever saved it.
+    let current_is_live = file
+        .current
+        .as_ref()
+        .is_some_and(|current| file.teams.contains_key(current));
+    if make_current || !current_is_live {
         file.current = Some(id.clone());
     }
     write_file(&file)
