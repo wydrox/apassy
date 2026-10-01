@@ -652,3 +652,83 @@ fn two_relays_cannot_use_one_data_directory() {
     assert!(relay.operator(Command::Teams).is_ok());
     relay.ok("GET", "/v1/me", &relay.owner_token, None);
 }
+
+#[test]
+fn an_operator_backup_restores_every_team() {
+    let mut relay = start(UpstreamOptions::default());
+    let owner_a = relay.owner_token.clone();
+    relay.setup("staging");
+    let owner_b = relay.new_team("Team B", "bob");
+    relay.switch_team(&owner_b);
+    relay.add_collection("family", json!({}));
+    let owner_c = relay.new_team("Team C", "carol");
+    relay
+        .operator(Command::Suspend {
+            team: team_of(&owner_c),
+        })
+        .unwrap();
+    let made = relay.operator(Command::Backup).unwrap();
+    assert_eq!(made["teams"], 3);
+    let dir = std::path::PathBuf::from(made["dir"].as_str().unwrap());
+    let names: Vec<&str> = made["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names.len(), 4, "relay.db and three teams: {names:?}");
+    assert!(names.contains(&"relay.db"));
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&dir), 0o700);
+    assert_eq!(mode(&dir.join("relay.db")), 0o600);
+    assert_eq!(mode(&dir.join("MANIFEST.json")), 0o600);
+    let manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("MANIFEST.json")).unwrap()).unwrap();
+    assert_eq!(manifest["files"], made["files"]);
+    // The values are not in the backup.
+    for name in &names {
+        let bytes = std::fs::read(dir.join(name)).unwrap();
+        assert!(!bytes.windows(CANARY.len()).any(|w| w == CANARY.as_bytes()));
+    }
+    // A second backup in the same second is refused, not mixed in.
+    let again = relay.operator(Command::Backup);
+    assert!(again.is_err() || again.unwrap()["dir"] != made["dir"]);
+
+    // Restore into a new data directory with the same master key.
+    let mut config = relay.config.clone();
+    relay.switch_team(&owner_a);
+    let fresh = tempfile::tempdir().unwrap();
+    config.data_dir = fresh.path().join("data");
+    config.listen = "127.0.0.1:0".parse().unwrap();
+    std::fs::create_dir_all(config.teams_dir()).unwrap();
+    for name in &names {
+        std::fs::copy(dir.join(name), config.data_dir.join(name)).unwrap();
+    }
+    let restored = Relay::start(config.clone()).unwrap();
+    let url = restored.url();
+    let me = |token: &str| {
+        relay::call_url(
+            &url,
+            Some(relay::EDGE_SECRET),
+            "GET",
+            "/v1/me",
+            Some(token),
+            None,
+        )
+    };
+    assert_eq!(me(&owner_a).1["result"]["team"], "Test Team");
+    assert_eq!(me(&owner_b).1["result"]["team"], "Team B");
+    // Team C was suspended in the backup and stays so.
+    assert_eq!(me(&owner_c).0, 401);
+    let (_, items) = relay::call_url(
+        &url,
+        Some(relay::EDGE_SECRET),
+        "GET",
+        "/v1/items",
+        Some(&owner_a),
+        None,
+    );
+    assert_eq!(items["result"].as_array().unwrap().len(), 1);
+    restored.stop();
+}

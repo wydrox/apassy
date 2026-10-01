@@ -185,6 +185,14 @@ impl Store {
         Ok(store)
     }
 
+    /// Copies the file to `dest` (mode 0600) while no other statement can run: the
+    /// connection is locked, so no transaction is open and the file on disk is whole
+    /// (journal mode DELETE, one process: `relay.lock`). Returns the bytes copied.
+    pub fn copy_to(&self, source: &Path, dest: &Path) -> RelayResult<u64> {
+        let _conn = self.lock();
+        copy_private(source, dest)
+    }
+
     /// `PRAGMA user_version` of the file.
     pub fn user_version(&self) -> RelayResult<i64> {
         self.with(|conn| {
@@ -219,6 +227,23 @@ impl Store {
         tx.commit().map_err(db)?;
         Ok(out)
     }
+}
+
+/// Copies a file to a new file with mode 0600. Refuses to overwrite.
+pub fn copy_private(source: &Path, dest: &Path) -> RelayResult<u64> {
+    let mut from = fs::File::open(source)
+        .map_err(|_| RelayError::internal("A file to back up cannot be read."))?;
+    let mut to = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(dest)
+        .map_err(|_| RelayError::internal("A backup file cannot be created."))?;
+    let bytes = std::io::copy(&mut from, &mut to)
+        .map_err(|_| RelayError::internal("A file cannot be copied to the backup."))?;
+    to.sync_all()
+        .map_err(|_| RelayError::internal("A backup file cannot be written to disk."))?;
+    Ok(bytes)
 }
 
 /// The data directory gets mode 0700.

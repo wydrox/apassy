@@ -24,11 +24,13 @@ const USAGE: &str = "Usage:
   apassy-relay admin team-code [--hours <n>]
   apassy-relay admin teams
   apassy-relay admin suspend|resume|delete <team id>
+  apassy-relay admin backup
 
 The configuration is read from the environment:
   APASSY_RELAY_DATA, APASSY_RELAY_LISTEN, APASSY_RELAY_PUBLIC_URL,
   APASSY_RELAY_EDGE_SECRET or _FILE, APASSY_RELAY_KEY or _FILE (the master key),
-  APASSY_RELAY_SESSION_TTL, APASSY_RELAY_APPROVAL_TIMEOUT.
+  APASSY_RELAY_SESSION_TTL, APASSY_RELAY_APPROVAL_TIMEOUT,
+  APASSY_RELAY_BLOCKED_ADDRESSES, APASSY_RELAY_BACKUP_DIR.
 `migrate` also reads APASSY_RELAY_OLD_KEY or _FILE: the key of the old team.db.
 `admin` reads only APASSY_RELAY_DATA and talks to the running relay.";
 
@@ -91,6 +93,7 @@ fn parse_admin(args: &[String]) -> Result<Operator, String> {
         "delete" => Ok(Operator::Delete {
             team: team_arg(rest)?,
         }),
+        "backup" if rest.is_empty() => Ok(Operator::Backup),
         other => Err(format!("Unknown admin command: {other}")),
     }
 }

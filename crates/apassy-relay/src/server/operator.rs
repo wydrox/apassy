@@ -47,6 +47,8 @@ pub enum Command {
     Delete {
         team: TeamId,
     },
+    /// A consistent copy of `relay.db` and every team file, with a manifest.
+    Backup,
 }
 
 /// Runs one command.
@@ -70,6 +72,7 @@ pub fn run(hub: &Hub, command: &Command, now: u64) -> RelayResult<Value> {
             hub.delete(team, now)?;
             Ok(json!({"team": team, "state": "deleted"}))
         }
+        Command::Backup => hub.backup(now),
     }
 }
 

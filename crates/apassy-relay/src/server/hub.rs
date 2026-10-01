@@ -565,6 +565,98 @@ impl Hub {
         Ok(infos)
     }
 
+    /// `admin backup`: a consistent copy of `relay.db` and of every team file in a new
+    /// folder `<backup dir>/<UTC time>` (mode 0700, files 0600), with `MANIFEST.json`.
+    /// Each file is copied while its connection is locked. The files stay encrypted: the
+    /// master key is not in the backup.
+    pub fn backup(&self, now: u64) -> RelayResult<serde_json::Value> {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::DirBuilderExt;
+        let name = crate::cli::commands::fmt_time(now)
+            .replace(' ', "T")
+            .replace(':', "-");
+        let dir = self.config.backup_dir.join(&name);
+        let teams_dir = dir.join(crate::config::TEAMS_DIR);
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&self.config.backup_dir)
+            .map_err(|_| RelayError::internal("The backup folder cannot be created."))?;
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&dir)
+            .map_err(|error| {
+                if error.kind() == ErrorKind::AlreadyExists {
+                    RelayError::new(
+                        codes::CONFLICT,
+                        "A backup of this second exists. Try again.",
+                    )
+                } else {
+                    RelayError::internal("The backup folder cannot be created.")
+                }
+            })?;
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&teams_dir)
+            .map_err(|_| RelayError::internal("The backup folder cannot be created."))?;
+        let mut copied: Vec<(String, std::path::PathBuf, u64)> = Vec::new();
+        let target = dir.join(crate::config::DIRECTORY_FILE);
+        let bytes = self
+            .directory
+            .store
+            .copy_to(&self.config.directory_path(), &target)?;
+        copied.push((crate::config::DIRECTORY_FILE.to_string(), target, bytes));
+        let rows = self.directory.teams()?;
+        for row in &rows {
+            let source = self.config.team_path(&row.id);
+            let file = format!("{}/{}.db", crate::config::TEAMS_DIR, row.id);
+            let target = dir.join(&file);
+            let bytes = match self.team(&row.id) {
+                Some(core) => core.store.copy_to(&source, &target)?,
+                // A suspended team (or one that did not open) has no open connection.
+                None if std::fs::symlink_metadata(&source).is_ok() => {
+                    crate::server::store::copy_private(&source, &target)?
+                }
+                None => continue,
+            };
+            copied.push((file, target, bytes));
+        }
+        let mut files = Vec::new();
+        for (file, path, bytes) in &copied {
+            let data = std::fs::read(path)
+                .map_err(|_| RelayError::internal("A backup file cannot be read back."))?;
+            let digest = Sha256::digest(&data);
+            let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+            files.push(json!({"name": file, "bytes": bytes, "sha256": hex}));
+        }
+        let manifest = json!({
+            "dir": dir.to_string_lossy(),
+            "created_at": now,
+            "teams": rows.len(),
+            "files": files,
+        });
+        let text = serde_json::to_vec_pretty(&manifest)
+            .map_err(|_| RelayError::internal("The manifest cannot be written."))?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(dir.join("MANIFEST.json"))
+            .map_err(|_| RelayError::internal("The manifest cannot be written."))?;
+        std::io::Write::write_all(&mut file, &text)
+            .and_then(|()| file.sync_all())
+            .map_err(|_| RelayError::internal("The manifest cannot be written."))?;
+        let _ = self.directory.audit.write(
+            &self.directory.store,
+            now,
+            OPERATOR_ACTOR,
+            "backup_made",
+            None,
+            &json!({"name": name, "teams": rows.len()}),
+        );
+        Ok(manifest)
+    }
+
     /// Ends every session and drops every run key of every team, and releases the lock
     /// of the data directory (at stop).
     pub fn close_all(&self) {

@@ -9,6 +9,7 @@
 //! | `APASSY_RELAY_KEY` or `APASSY_RELAY_KEY_FILE` | The master key: it opens `relay.db`, which holds the key of each team file; at least 16 bytes | required |
 //! | `APASSY_RELAY_SESSION_TTL` | Seconds a proxy session lives; 60 to 3600 | `900` |
 //! | `APASSY_RELAY_APPROVAL_TIMEOUT` | Seconds a run waits for the owner's host; 30 to 86400 | `600` |
+//! | `APASSY_RELAY_BACKUP_DIR` | Where `admin backup` writes a new dated folder | `/backups` |
 //! | `APASSY_RELAY_BLOCKED_ADDRESSES` | Public addresses or networks the proxy refuses too, comma-separated (the relay's own) | none |
 //!
 //! A `_FILE` variable names a file whose content (trailing newline removed) is the
@@ -155,6 +156,8 @@ pub struct RelayConfig {
     pub approval_timeout_secs: u64,
     pub upstream: UpstreamOptions,
     pub limits: Limits,
+    /// Where `apassy-relay admin backup` writes (`APASSY_RELAY_BACKUP_DIR`).
+    pub backup_dir: PathBuf,
 }
 
 impl RelayConfig {
@@ -243,6 +246,9 @@ impl RelayConfig {
             approval_timeout_secs,
             upstream,
             limits: Limits::default(),
+            backup_dir: PathBuf::from(
+                lookup("APASSY_RELAY_BACKUP_DIR").unwrap_or_else(|| "/backups".to_string()),
+            ),
         })
     }
 }
