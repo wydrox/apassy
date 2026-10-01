@@ -287,18 +287,40 @@ fn check_saved_settings(settings: &Settings, path: &Path) -> Result<(), CliError
         )
     })?);
     let saved: SavedServiceSettings = serde_json::from_str(&text).map_err(|_| {
-        CliError::usage("The saved service settings are invalid. Run `apassy-team init` again.")
+        CliError::usage("The saved service settings are invalid. Check settings.json.")
     })?;
-    let relay = saved
+    let entry = if saved.version == Some(2) {
+        let current = saved.current.as_ref().ok_or_else(|| {
+            CliError::usage("The service needs a current team. Use `team use ID`.")
+        })?;
+        if settings.team_id.as_ref() != Some(current) {
+            return Err(CliError::usage(
+                "The service uses the saved current team. Use `team use ID` before `host install`.",
+            ));
+        }
+        saved
+            .teams
+            .get(current)
+            .ok_or_else(|| CliError::usage("The saved current team is missing."))?
+    } else if saved.version.is_none() || saved.version == Some(1) {
+        &saved.legacy
+    } else {
+        return Err(CliError::usage(
+            "The saved settings version is not supported.",
+        ));
+    };
+    let relay = entry
         .relay_url
         .as_deref()
         .and_then(|url| settings::normalize_url(url).ok());
     if relay.as_deref() != Some(settings.relay()?)
-        || saved.member_token.as_ref().map(|token| token.expose())
-            != Some(settings.member()?.expose())
+        || entry.member_token.as_ref().map(|token| token.expose())
+            != settings.member_token.as_ref().map(|token| token.expose())
+        || entry.device_id != settings.device_id
+        || entry.member_token.is_none() && entry.device_id.is_none()
     {
         return Err(CliError::usage(
-            "The shell settings differ from the saved settings. Run `apassy-team init` with the same relay and owner token first.",
+            "The shell settings differ from the saved settings. Use the saved current team's relay and credentials before `host install`.",
         ));
     }
     if settings.edge_secret.is_some() {
@@ -311,8 +333,19 @@ fn check_saved_settings(settings: &Settings, path: &Path) -> Result<(), CliError
 
 #[derive(serde::Deserialize)]
 struct SavedServiceSettings {
+    version: Option<u32>,
+    current: Option<crate::ids::TeamId>,
+    #[serde(default)]
+    teams: std::collections::BTreeMap<crate::ids::TeamId, SavedServiceEntry>,
+    #[serde(flatten)]
+    legacy: SavedServiceEntry,
+}
+
+#[derive(serde::Deserialize)]
+struct SavedServiceEntry {
     relay_url: Option<String>,
     member_token: Option<crate::secret::SecretString>,
+    device_id: Option<crate::ids::DeviceId>,
 }
 
 /// Check the owner, write the per-user service, and start it.
@@ -532,6 +565,27 @@ mod tests {
         let error = check_saved_settings(&settings, &path).unwrap_err();
         assert_eq!(error.code, 2);
         assert!(!error.message.contains("secret-edge-value"));
+    }
+
+    #[test]
+    fn saved_device_settings_use_the_current_team_without_a_member_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let team = crate::ids::TeamId::parse("t_abcdefgh23").unwrap();
+        let mut settings = Settings {
+            relay_url: Some("https://relay.example.test".into()),
+            team_id: Some(team.clone()),
+            device_id: Some(crate::ids::DeviceId(3)),
+            ..Settings::default()
+        };
+        fs::write(&path, serde_json::json!({"version":2,"current":team,"teams":{
+            team.as_str():{"relay_url":"https://relay.example.test","device_id":3,"member_token":null}
+        }}).to_string()).unwrap();
+        check_saved_settings(&settings, &path).unwrap();
+        settings.team_id = crate::ids::TeamId::parse("t_abcdefgh24");
+        let error = check_saved_settings(&settings, &path).unwrap_err();
+        assert_eq!(error.code, 2);
+        assert!(error.message.contains("saved current team"));
     }
 
     #[test]

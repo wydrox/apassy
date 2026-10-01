@@ -62,30 +62,103 @@ docker run -d --name apassy-relay --restart unless-stopped -p 127.0.0.1:8080:808
   apassy-relay:alpha serve
 ```
 
-Save the owner token in a file, then log in. A secret always comes from stdin, never from an argument. Talking to the container directly needs the edge secret:
+Save the owner token in `owner-token-file`. Enroll the bootstrap owner as a device before the legacy token expires.
+Use an unused configuration directory. `device enroll` refuses an existing key or team settings entry.
+For direct access to the container, set the edge secret:
 
 ```sh
+export XDG_CONFIG_HOME="$HOME/.config/apassy-device"
+export APASSY_RELAY_URL=http://127.0.0.1:8080
 export APASSY_EDGE_SECRET="$(cat ~/.apassy-relay/edge_secret)"
-apassy-team init --relay http://127.0.0.1:8080 < owner-token-file
+export APASSY_TEAM_TOKEN="$(cat owner-token-file)"
+apassy-team device enroll --name "Owner laptop"
+unset APASSY_TEAM_TOKEN
 apassy-team me
 ```
 
-Add a credential and let an agent use it. `item add` seals the value on this machine and keeps its key in `~/.config/apassy-team/keys.json`. Back that file up: without it the item cannot be used, and you add it again.
+The sole bootstrap owner's first device becomes the key holder. Enrollment invalidates the old member token.
+For an operator-issued team code, use `apassy-team create` instead. It always creates an owner device:
+
+```sh
+apassy-team create --relay https://apassy-relay.wyderka.cc --team myteam \
+  --name olga --device "Owner laptop" < team-code-file
+```
+
+Settings version 2 keeps several teams in `settings.json`, with directory mode 0700 and file mode 0600.
+Use `team list` and `team use TEAM_ID` to see and select teams.
+Use `--team TEAM_ID` or `APASSY_TEAM=TEAM_ID` for a member command. Otherwise, the current team applies.
+In `create --team NAME`, `--team` gives the new team's name.
+The CLI stores device private keys in the login Keychain on macOS.
+The Keychain service is `apassy-team`, and the account is `<relay host> <team id>`.
+On other systems, `device-<team id>.key` next to settings has mode 0600.
+Private keys never enter settings or command output. Device access tokens stay only in process memory for 15 minutes.
+
+`create`, `join`, `device link`, and `device enroll` refuse an existing device key or settings entry for that team.
+On macOS, separate configuration directories still share the same Keychain account for a relay and team.
+Use another machine for a second member of the same team.
+
+Add credentials on the key-holder machine. `item add` seals the value and keeps its key in `keys.json` next to settings.
+Back up this file separately from the relay's vault backup. Without the item keys, add the items again.
 
 ```sh
 apassy-team collection create payments
 apassy-team item add --collection 1 --name "Stripe test" --env STRIPE_API_KEY \
   --environment staging --provider stripe < stripe-key-file
-apassy-team invite                       # send the code to the member
-apassy-team grant --collection 1 --member 2
-apassy-team agent create ci              # the member runs this; it prints the token once
+apassy-team invite --role member --name bob --grant 1 > invite-link-file
+```
 
-apassy-team host install                 # on the owner's machine; starts at login
+`invite` prints `<relay URL>/join#<code>` once. Repeat `--grant ID` for more collections.
+Use `--shared` only for role `member` on a shared device.
+Send the link through a private channel. On the member's machine, read the link or raw code from stdin:
 
-export APASSY_TOKEN=...                  # in the agent's environment
+```sh
+apassy-team join --relay http://127.0.0.1:8080 --device "Bob laptop" < invite-link-file
+```
+
+For this loopback example, use the same machine with a separate configuration directory on Linux.
+Set `APASSY_EDGE_SECRET` there too. A remote member needs the HTTPS relay URL from the full setup.
+For a second member on macOS, use another machine with that HTTPS URL.
+If the invite has no member name, add `--name bob`.
+The member's CLI saves its key before the request and checks the safety words locally.
+The member gives these words to the inviter through a trusted channel. The inviter confirms:
+
+```sh
+apassy-team joins
+apassy-team confirm JOIN_ID --words "W1 W2"
+```
+
+Replace `W1 W2` with the member's words. `--words` is mandatory. `joins` does not print safety words.
+`join` waits up to 10 minutes. Use `--no-wait` to return immediately and `join --resume` to wait again.
+The CLI retains the same key after an uncertain request result.
+
+To add a device for the same member, use `device add > device-link-code-file` on an existing device.
+On the new device, use `device link --relay URL < device-link-code-file`.
+Get its words through a trusted channel, then use `device pending` and `device confirm LINK_ID --words "W1 W2"`.
+`device pending` does not print safety words. Device links expire after 10 minutes.
+Before `device key-holder DEVICE_ID`, copy `keys.json` to the new owner's device. The command does not copy item keys.
+
+On the member's device, make an agent token:
+
+```sh
+apassy-team agent create ci > agent-token-file
+```
+
+On the key-holder machine, install the host:
+
+```sh
+apassy-team host install
+```
+
+In the agent's environment, use its token:
+
+```sh
+export APASSY_TOKEN="$(cat agent-token-file)"
 apassy-team run --items 1 --purpose "Check the balance" \
   --request "Show me the Stripe balance" -- stripe balance retrieve
 ```
+
+Input commands read team codes, invite codes, device-link codes, item values, and legacy `init` tokens only from stdin.
+Never put these secrets in command arguments. Agent tokens use `APASSY_TOKEN`.
 
 Each run waits for `apassy-team host`. A known safe command with a staging item starts automatically (the `stripe balance retrieve` example). Other runs show a desktop dialog. Only a click on `Release` releases the keys. `Deny` is the default button. Return, Escape, a closed dialog, or a dialog error denies the run. A timeout expires the request without a release.
 

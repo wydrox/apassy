@@ -911,6 +911,7 @@ pub fn serve(
         );
         let requests = match polled {
             Ok(requests) => requests,
+            Err(CallError::Usage(message)) => return Err(CliError::usage(message)),
             Err(CallError::Api(e)) if !e.is_busy() => return Err(CallError::Api(e).into_cli()),
             Err(error) => {
                 if stop.load(Ordering::Relaxed) {
@@ -971,15 +972,16 @@ fn sleep_unless_stopped(stop: &AtomicBool, time: Duration) {
 
 /// Check the same owner identity for the host and service installation.
 pub fn check_owner(settings: &Settings) -> Result<(Client, MeView), CliError> {
-    let client = Client::new(
-        settings.relay()?,
-        Some(settings.member()?),
-        settings.edge_secret.as_ref(),
-    );
+    let client = Client::member(settings)?;
     let me: MeView = client.ok(Method::Get, api::paths::ME, None)?;
     if me.kind != api::PrincipalKind::Member || me.role != Role::Owner {
         return Err(CliError::usage(
-            "`apassy-team host` needs the owner token: only the owner's host holds the keys.",
+            "`apassy-team host` needs an owner device or a legacy owner member token.",
+        ));
+    }
+    if me.device_id.is_some() && !me.key_holder {
+        return Err(CliError::usage(
+            "This device is not the key holder. Copy keys.json and move the key-holder flag before you start host.",
         ));
     }
     Ok((client, me))

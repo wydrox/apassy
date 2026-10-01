@@ -146,16 +146,46 @@ This needs Node 22.18 or later. It needs no npm install.
 curl https://apassy-relay.wyderka.cc/healthz
 ```
 
-It prints `ok`. Then log in as the owner:
+The command prints `ok`. For a team from `apassy-relay init`, the owner can use the bootstrap token:
 
 ```sh
 apassy-team init --relay https://apassy-relay.wyderka.cc < ~/.apassy-relay/owner_token.txt
 apassy-team me
 ```
 
-`init` checks the token with the relay and saves the settings in `~/.config/apassy-team/settings.json` (or under `$XDG_CONFIG_HOME`). The directory has mode 0700 and the file 0600. The token is plain text in that file in the alpha.
+`init` checks the token with the relay. It saves legacy member-token settings, not a device key.
+Legacy member tokens expire 14 days after team creation or migration to server schema version 3.
+Enroll a device before this period ends. See section 9.
 
-To talk to the container directly, without the Worker, set the edge secret and use the local URL:
+Settings version 2 keeps several teams in `settings.json`.
+The path is `$XDG_CONFIG_HOME/apassy-team/settings.json` or `~/.config/apassy-team/settings.json`.
+The directory has mode 0700. The file has mode 0600.
+The file contains the current team and each team's relay URL, member name, and device ID.
+The CLI reads old settings and writes version 2 at the next save.
+
+```sh
+apassy-team team list
+apassy-team team use TEAM_ID
+apassy-team --team TEAM_ID me
+APASSY_TEAM=TEAM_ID apassy-team me
+```
+
+`--team ID` selects a team for a member command. Otherwise, `APASSY_TEAM` selects it, then the current team.
+In `create --team NAME`, `--team` gives the new team's name.
+
+The CLI stores each device private key separately.
+On macOS, it uses the login Keychain: service `apassy-team`, account `<relay host> <team id>`.
+On other systems, it uses `device-<team id>.key` next to `settings.json`, with mode 0600.
+It never prints the private key or puts it in `settings.json`.
+`APASSY_TEAM_KEY_STORE=file` selects the file store for tests only.
+Tests must not use the real login Keychain.
+
+Each member command signs in with its device key.
+Its access token lasts 15 minutes and stays only in process memory.
+A 401 causes one new sign-in and one retry. A second 401 fails.
+If the relay's sign-in origin differs from the saved URL, the CLI stops.
+
+For direct access to the container, set the edge secret and the local URL:
 
 ```sh
 export APASSY_EDGE_SECRET="$(cat ~/.apassy-relay/edge_secret)"
@@ -164,106 +194,234 @@ apassy-team init --relay http://127.0.0.1:8080 < ~/.apassy-relay/owner_token.txt
 
 The CLI accepts plain `http://` only for `127.0.0.1`, `::1`, and `localhost`.
 
-Settings come from these variables first, then from the file:
-
 | Variable | Meaning |
 | --- | --- |
-| `APASSY_RELAY_URL` | the relay origin |
-| `APASSY_TEAM_TOKEN` | a member token |
-| `APASSY_TOKEN` | an agent token (for `access`, `run`, `mcp`) |
-| `APASSY_EDGE_SECRET` | optional; adds `X-Apassy-Edge` |
+| `APASSY_RELAY_URL` | The relay origin. |
+| `APASSY_TEAM` | The team ID for a member command. |
+| `APASSY_TEAM_TOKEN` | A legacy member token, before its expiry. |
+| `APASSY_TOKEN` | An agent token for `access`, `run`, and `mcp`. |
+| `APASSY_EDGE_SECRET` | An optional secret for `X-Apassy-Edge`. |
 
 ## 9. Team setup walkthrough
 
-The owner makes a collection, adds an item, and invites a member:
+For a new team, get a one-time team code from the operator.
+Read the code from stdin:
+
+```sh
+apassy-team create --relay https://apassy-relay.wyderka.cc --team myteam \
+  --name olga --device "Olga Mac" < team-code-file
+```
+
+`create` always makes an owner device. This device is the team's key holder.
+The CLI saves the team as current. It does not save a new owner token.
+
+For an existing team, use `device enroll` with its legacy member token.
+`create`, `join`, `device link`, and `device enroll` refuse an existing key or settings entry for that team.
+Thus, do not enroll in the directory where `init` saved the legacy settings.
+Use an unused configuration directory and the token in the environment:
+
+```sh
+export XDG_CONFIG_HOME="$HOME/.config/apassy-device"
+export APASSY_RELAY_URL=https://apassy-relay.wyderka.cc
+export APASSY_TEAM_TOKEN="$(cat ~/.apassy-relay/owner_token.txt)"
+apassy-team device enroll --name "Olga Mac"
+unset APASSY_TEAM_TOKEN
+apassy-team me
+```
+
+Enrollment removes the member token from the settings. The relay invalidates that member's old token.
+The first device becomes the key holder only for the sole live owner when no key holder exists.
+If the host already has item keys, copy `keys.json` into the new configuration directory before you start it.
+Keep the new `XDG_CONFIG_HOME` for later commands and the host service.
+On macOS, another configuration directory still uses the same Keychain account for that relay and team.
+Use another machine for a second member of the same team on macOS.
+
+The owner makes a collection, adds an item, and makes an invite link:
 
 ```sh
 apassy-team collection create payments --mode bouncer
 apassy-team item add --collection 1 --name "Stripe test" --env STRIPE_API_KEY \
   --environment staging --provider stripe < stripe-test-key-file
-apassy-team invite --role member --hours 72 > invite-code-file
+apassy-team invite --role member --hours 72 --name bob --grant 1 > invite-link-file
 ```
 
-`item add` reads the value from stdin and checks it on this machine (1 to 4096 bytes of printable ASCII, no `"` and no `\`, long and varied enough for a placeholder). It makes a uid and a key, seals the value, writes the key to `keys.json` next to `settings.json` (directory 0700, file 0600), and sends only the uid and the sealed text to the relay. Run `item add` as the owner, on the machine where `apassy-team host` runs: only that machine holds the keys. A manager can add an item too, but its key is on the manager's machine, so every run with it is denied at the owner's host ("Unknown item on this host.").
+`item add` reads the value from stdin. It checks the value on this machine.
+It seals the value and saves the item key in `keys.json` next to `settings.json`.
+The directory has mode 0700. The file has mode 0600.
+Only the sealed value goes to the relay.
+Add items on the key-holder machine that runs `apassy-team host`.
+A key on another machine cannot release an item from this host.
 
-**Back up `keys.json`.** It is plain text in the alpha. Without it the items on the relay cannot be used, and you add them again. With it, and a copy of the vault, anyone can read the items: keep the two apart.
+Back up `keys.json`. Item keys remain plain text in this file.
+Without the keys, add the items again. Keep this backup separate from the relay's vault backup.
 
-An item needs at least one host. A provider that the core knows, such as `stripe`, brings its hosts. For another API, give `--host api.example.com`. A host covers every subdomain too, so give the exact API host. The relay refuses a public suffix (`herokuapp.com`, `github.io`, `supabase.co`) and a whole domain (`example.com`): someone else may own a subdomain of it. Add `--allow-broad-host` only when you own every subdomain; the audit records it. Add `--environment production` for a production credential: the host asks you for every run with it.
+A known provider, such as `stripe`, supplies API hosts.
+For another API, use `--host api.example.com` with the exact API host.
+A host also covers its subdomains.
+The relay refuses public suffixes and whole domains.
+Use `--allow-broad-host` only if you own every subdomain. The audit records this choice.
+Use `--environment production` for a production credential. The host asks for every run with it.
 
-The member joins with the code. The code works once:
+`invite` prints a link once: `<relay URL>/join#<code>`.
+Use `--name NAME` to set the member name and repeat `--grant ID` for collection grants.
+Use `--shared` only for role `member` on a shared device.
+Only an owner can invite a manager or another owner.
+Send the invite link through a private channel. The code works once.
+
+The member reads the link or raw invite code from stdin:
 
 ```sh
-apassy-team join --relay https://apassy-relay.wyderka.cc --name bob < invite-code-file
-apassy-team me
+apassy-team join --relay https://apassy-relay.wyderka.cc --device "Bob laptop" < invite-link-file
 ```
 
-The owner finds the member id and grants the collection:
+If the invite has no name, add `--name bob`.
+The CLI saves the device key before it sends the request.
+It prints two safety words and checks them against words it computes locally.
+If the words differ, it stops. Tell the inviter the words through a trusted channel.
+
+The inviter lists requests and confirms with the words from the member:
 
 ```sh
-apassy-team members
-apassy-team grant --collection 1 --member 2
+apassy-team joins
+apassy-team confirm JOIN_ID --words "W1 W2"
 ```
 
-The member makes an agent token. It is printed once:
+Replace `W1 W2` with the member's words. `--words` is mandatory.
+`joins` does not print safety words. Never confirm from a list or from the invite code alone.
+Use `apassy-team refuse JOIN_ID` to refuse the request.
+
+`join` waits up to 10 minutes. A pending join can remain open for 72 hours.
+Use `--no-wait` to return immediately, then `apassy-team join --resume` to wait again.
+The CLI uses the same saved key after an uncertain request result.
+Do not remove the key or make another join request with a new key.
+
+For a join or device link, settings can contain `safety_verified`.
+It starts as `false` and becomes `true` only after the local safety-word check.
+The nonsecret `recovery-<team id>.json` file saves the pending name, device name, request kind, and blocked state.
+It contains no code, private key, or token.
+
+If a network error or `busy` leaves the request result unknown, supply the original code or link on stdin.
+For a join, use `apassy-team join --resume < original-code-file`.
+For a device link, use `apassy-team device link --resume < original-code-file`.
+The CLI repeats the request with the same saved key, checks the safety words, then waits.
+After a successful `--no-wait`, resume needs no stdin.
+
+A safety-word mismatch blocks resume.
+Stop and tell the person who supplied the code.
+Do not remove the saved key or change the recovery file.
+
+Shared members cannot make device links.
+To add another device for the same person, use the existing device:
+
+```sh
+apassy-team device add > device-link-code-file
+```
+
+On the new machine:
+
+```sh
+apassy-team device link --relay https://apassy-relay.wyderka.cc \
+  --device "Second laptop" < device-link-code-file
+```
+
+On the existing device, get the words from the new device and confirm:
+
+```sh
+apassy-team device pending
+apassy-team device confirm LINK_ID --words "W1 W2"
+```
+
+`device pending` does not print safety words. Device links expire after 10 minutes.
+Use `--no-wait` with `device link`, then `apassy-team device link --resume` to wait again.
+Use `device refuse LINK_ID` to refuse a link and `device revoke DEVICE_ID` to revoke a device.
+A new device does not become the key holder automatically.
+
+```sh
+apassy-team device list
+apassy-team device key-holder DEVICE_ID
+```
+
+Before you move the key-holder flag, copy `keys.json` to the new owner's device.
+Protect the copy with mode 0600. The command moves the flag, not the item keys.
+Only the current key-holder device can move the flag when one exists.
+
+The member can make an agent token. The CLI prints it once:
 
 ```sh
 apassy-team agent create ci --days 30 > agent-token-file
-```
-
-The agent then sees what it may use:
-
-```sh
 APASSY_TOKEN="$(cat agent-token-file)" apassy-team access
 ```
+
+An owner can change a member role with `member role MEMBER_ID ROLE`.
+Use `member`, `manager`, or `owner` for `ROLE`.
+Move the key-holder flag before you change its member's owner role.
+Use `leave` to leave a team. The last live owner cannot leave or lose the owner role.
 
 Policy flags for `collection create` and `collection policy ID`:
 
 | Flag | Meaning |
 | --- | --- |
-| `--mode ask\|bouncer` | `ask`: the relay suggests asking for every run. `bouncer`: the relay suggests a release for a known-safe command, and asking for the rest. (The host runs its own check either way.) |
-| `--allow-prefix P` | the command must start with one of these (repeat) |
-| `--forbid WORD` | a command with this word is denied (repeat) |
-| `--max-runs-per-hour N` | at most N runs per hour |
-| `--instruction TEXT` | a note for the owner |
-| `--rule-expires-at UNIX` | the rule stops working at this time |
+| `--mode ask\|bouncer` | `ask` suggests a question for every run. `bouncer` suggests release for a known safe command. The host checks each run. |
+| `--allow-prefix P` | The command must start with a permitted prefix. Repeat for more prefixes. |
+| `--forbid WORD` | The relay denies a command with this word. Repeat for more words. |
+| `--max-runs-per-hour N` | At most N runs per hour. |
+| `--instruction TEXT` | A note for the owner. |
+| `--rule-expires-at UNIX` | The rule stops at this time. |
 
-`collection policy` replaces the whole policy. Flags you leave out go back to their defaults.
+`collection policy` replaces the whole policy. Omitted flags return to their defaults.
+Secrets enter input commands through stdin, never command arguments.
+This includes team codes, invite codes, device-link codes, item values, and legacy tokens for `init`.
+The CLI refuses a secret from a terminal. Agent tokens use `APASSY_TOKEN`.
 
 ## 10. Agents
 
-There are three ways.
+The agent uses an agent token. Device access tokens stay in member processes.
+There are three ways to run an agent.
 
-**The CLI.** It asks for a run, waits for the owner's host, then runs the command with the session environment. The variables never reach the transcript of the agent.
+The CLI requests a run, waits for the key-holder host, and starts the command with the session environment:
 
 ```sh
 export APASSY_RELAY_URL=https://apassy-relay.wyderka.cc
-export APASSY_TOKEN=...
+export APASSY_TOKEN="$(cat agent-token-file)"
 apassy-team run --items 1 --purpose "Check the balance" \
   --request "Show me the Stripe balance" -- stripe balance retrieve
 ```
 
-`run` exits with the code of the command (128 plus the signal number when it dies from a signal). It exits 3 if the run is denied (by a hard rule, by the host, or for lack of access) or times out, 4 on a relay or network error, and 2 on a usage error. The command does not inherit `APASSY_TOKEN`, `APASSY_TEAM_TOKEN`, or `APASSY_EDGE_SECRET`. Use `--wait SECONDS` to limit how long it waits for the host (the default is 900).
+The command does not inherit `APASSY_TOKEN`, `APASSY_TEAM_TOKEN`, or `APASSY_EDGE_SECRET`.
+`run` returns the command's exit code, or 128 plus its signal number.
+It returns 3 for a denied run or timeout, 4 for a relay or network error, and 2 for usage errors.
+Use `--wait SECONDS` to limit the wait. The default is 900 seconds.
 
-**Remote MCP, for Claude Code.** Put this in `.mcp.json` in a repo:
+For remote MCP with Claude Code, put this configuration in `.mcp.json`:
 
 ```json
 {"mcpServers": {"apassy": {"type": "http", "url": "https://apassy-relay.wyderka.cc/mcp",
   "headers": {"Authorization": "Bearer ${APASSY_TOKEN}"}}}}
 ```
 
-**Stdio MCP.** The adapter forwards each line to the relay:
+For stdio MCP, use this configuration:
 
 ```json
 {"mcpServers": {"apassy": {"command": "apassy-team", "args": ["mcp"]}}}
 ```
 
-It needs `APASSY_RELAY_URL` and `APASSY_TOKEN` in the environment.
+The adapter needs `APASSY_RELAY_URL` and `APASSY_TOKEN` in its environment.
+With MCP, the agent starts its own command with `session.env`.
+Thus, placeholders can enter its transcript. A placeholder needs the relay to work.
+The CLI keeps the session environment outside the agent's transcript.
 
-With MCP, the agent must run the command itself with `session.env` set. Then the placeholders can end up in its transcript. A placeholder alone is useless without the relay, but the CLI is the better way.
+Cloud sessions need `apassy-relay.wyderka.cc` in their network allowlist and `APASSY_TOKEN` in their environment.
+Use that exact token variable name for Claude Code MCP headers.
 
-**Cloud sessions.** A cloud session needs `apassy-relay.wyderka.cc` in the network allowlist of its environment (Custom access). It needs `APASSY_TOKEN` in its environment. Use the name `APASSY_TOKEN`: Claude Code reads some credential names as empty in MCP headers.
+Each item supplies a placeholder variable and `APASSY_BASE_<NAME>`, a relay base URL.
+Known providers also supply `STRIPE_API_BASE`, `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, or `GITHUB_API_URL`.
+The command must send API requests to the relay base URL.
+The relay inserts the real value only in a permitted authentication position.
+It refuses placeholders in other positions.
 
-What the session gives the command: for each item, a variable with the item's name that holds a placeholder, and `APASSY_BASE_<NAME>`, a base URL on the relay. Some providers also get a standard variable: `STRIPE_API_BASE`, `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `GITHUB_API_URL`. The command must send its requests to that base URL. The relay puts the real value only in an auth position: the `Authorization` header, a known API key header, or a known key query parameter. A placeholder anywhere else is refused.
+The host signs in as the selected team's key-holder device. One host serves one team.
+Other owner devices cannot release the item keys.
+Terminal prompts, desktop dialogs, and the host service still work. See section 11 for service commands and logs.
 
 ## 11. Runs and the host
 

@@ -62,6 +62,10 @@ pub struct RunArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    Selected {
+        team: String,
+        command: Box<Command>,
+    },
     Help,
     Version,
     Init {
@@ -71,10 +75,14 @@ pub enum Command {
         relay: String,
         team: String,
         name: String,
+        device: Option<String>,
     },
     Join {
-        relay: String,
-        name: String,
+        relay: Option<String>,
+        name: Option<String>,
+        device: Option<String>,
+        no_wait: bool,
+        resume: bool,
     },
     Me {
         json: bool,
@@ -82,6 +90,9 @@ pub enum Command {
     Invite {
         role: Role,
         hours: Option<u32>,
+        name: Option<String>,
+        grants: Vec<u64>,
+        shared: bool,
     },
     Invites {
         json: bool,
@@ -91,6 +102,56 @@ pub enum Command {
     },
     MemberRevoke {
         id: u64,
+    },
+    MemberRole {
+        id: u64,
+        role: Role,
+    },
+    DeviceEnroll {
+        name: Option<String>,
+    },
+    DeviceList {
+        json: bool,
+    },
+    DeviceRevoke {
+        id: u64,
+    },
+    DeviceKeyHolder {
+        id: u64,
+    },
+    DeviceAdd,
+    DeviceLink {
+        relay: Option<String>,
+        device: Option<String>,
+        no_wait: bool,
+        resume: bool,
+    },
+    DevicePending {
+        json: bool,
+    },
+    DeviceConfirm {
+        id: u64,
+        words: String,
+    },
+    DeviceRefuse {
+        id: u64,
+    },
+    Joins {
+        json: bool,
+    },
+    Confirm {
+        id: u64,
+        words: String,
+    },
+    Refuse {
+        id: u64,
+    },
+    Leave,
+    TeamList {
+        json: bool,
+    },
+    TeamUse {
+        id: String,
     },
     CollectionCreate {
         name: String,
@@ -205,10 +266,15 @@ fn scan(args: &[String], value_opts: &[&str], switches: &[&str]) -> Result<Scan,
         } else if value_opts.contains(&name) {
             let value = match inline {
                 Some(value) => value,
-                None => iter
-                    .next()
-                    .cloned()
-                    .ok_or_else(|| CliError::usage(format!("Option --{name} needs a value.")))?,
+                None => {
+                    let value = iter.next().cloned().ok_or_else(|| {
+                        CliError::usage(format!("Option --{name} needs a value."))
+                    })?;
+                    if value.starts_with("--") {
+                        return Err(CliError::usage(format!("Option --{name} needs a value.")));
+                    }
+                    value
+                }
             };
             out.values.push((name.to_owned(), value));
         } else {
@@ -312,15 +378,20 @@ apassy-team: the CLI of the Apassy team relay
 
 Setup
   init --relay URL              read a member token from stdin, check it, save settings
-  create --relay URL --team NAME --name NAME
+  create --relay URL --team NAME --name NAME [--device NAME]
                                 read a team code of the operator from stdin, make a new
                                 team with you as its owner, save settings
-  join --relay URL --name NAME  read an invite code from stdin, join, save settings
+  join --relay URL [--name NAME] [--device NAME] [--no-wait]
+                                read an invite code or link from stdin, wait for confirmation
+  join --resume                wait for a previous join
   me                            who am I
 
 Team (owner or manager)
-  invite [--role member|manager] [--hours N]   print a one-time invite code
-  invites | members | member revoke ID
+  invite [--role member|manager|owner] [--hours N] [--name NAME]
+         [--grant ID]... [--shared]   print a one-time invite link
+  invites | joins | confirm ID --words \"W1 W2\" | refuse ID
+  members | member revoke ID | member role ID ROLE
+  leave | team list | team use ID
   collection create NAME [policy flags] | collection list | collection policy ID [policy flags]
       policy flags: --mode ask|bouncer  --allow-prefix P  --forbid WORD
                     --max-runs-per-hour N  --instruction TEXT  --rule-expires-at UNIX
@@ -335,7 +406,16 @@ Team (owner or manager)
   approve RUN_ID [--reason TEXT]   (refused: the keys are on the owner's host; use `host`)
   audit [--after ID] [--limit N] [--json]
 
-Owner's machine (the owner token; keys.json lives here, back it up)
+Devices
+  device enroll [--name NAME]   change from a member token to a device key
+  device list | device revoke ID | device key-holder ID
+  device add                   print a one-time link code
+  device link --relay URL [--device NAME] [--no-wait]
+                                read a link code from stdin, wait for confirmation
+  device link --resume          wait for a previous link
+  device pending | device confirm ID --words \"W1 W2\" | device refuse ID
+
+Owner's machine (the key-holder device; keys.json lives here, back it up)
   host [--ask-all] [--auto-limit N] [--dialog]
       keep the item keys and decide each run. A known safe run with a non-production
       item starts at once (at most N per item per hour, default 30). Other runs need
@@ -356,13 +436,76 @@ Agents (APASSY_TOKEN)
       [--cwd DIR] -- CMD ARGS...   ask for a run, then run the command
   mcp                           stdio MCP adapter
 
-Most list commands take --json.
-Environment: APASSY_RELAY_URL, APASSY_TEAM_TOKEN, APASSY_TOKEN, APASSY_EDGE_SECRET.
+Most list commands take --json. Member commands take --team ID.
+Environment: APASSY_RELAY_URL, APASSY_TEAM, APASSY_TEAM_TOKEN, APASSY_TOKEN, APASSY_EDGE_SECRET.
 Secrets are read from stdin, never from arguments.
 Exit codes: 0 ok (or the child's code), 2 usage, 3 run denied or timed out, 4 relay or network error.
 ";
 
 pub fn parse(args: &[String]) -> Result<Command, CliError> {
+    // Create uses --team as the new team's name, not as an existing team selector.
+    if args.first().is_some_and(|name| name == "create") {
+        return parse_command(args);
+    }
+    let mut command_args = Vec::new();
+    let mut team = None;
+    let mut iter = args.iter();
+    while let Some(word) = iter.next() {
+        if word == "--" {
+            command_args.push(word.clone());
+            command_args.extend(iter.cloned());
+            break;
+        }
+        let selection = if word == "--team" {
+            Some(
+                iter.next()
+                    .cloned()
+                    .ok_or_else(|| CliError::usage("Option --team needs a value."))?,
+            )
+        } else {
+            word.strip_prefix("--team=").map(str::to_owned)
+        };
+        if let Some(selection) = selection {
+            if team.is_some() {
+                return Err(CliError::usage("Option --team is given twice."));
+            }
+            if selection.trim().is_empty() || selection.starts_with('-') {
+                return Err(CliError::usage("Option --team needs a team ID."));
+            }
+            team = Some(selection);
+        } else {
+            command_args.push(word.clone());
+        }
+    }
+    let command = parse_command(&command_args)?;
+    let Some(team) = team else {
+        return Ok(command);
+    };
+    if matches!(
+        command,
+        Command::Help
+            | Command::Version
+            | Command::Init { .. }
+            | Command::Create { .. }
+            | Command::Join { resume: false, .. }
+            | Command::DeviceLink { resume: false, .. }
+            | Command::TeamList { .. }
+            | Command::TeamUse { .. }
+            | Command::Access { .. }
+            | Command::Run(_)
+            | Command::Mcp
+    ) {
+        return Err(CliError::usage(
+            "Option --team selects a team for a member command.",
+        ));
+    }
+    Ok(Command::Selected {
+        team,
+        command: Box::new(command),
+    })
+}
+
+fn parse_command(args: &[String]) -> Result<Command, CliError> {
     let Some(name) = args.first() else {
         return Err(CliError::usage("No command."));
     };
@@ -378,38 +521,60 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
             })
         }
         "create" => {
-            let s = scan(rest, &["relay", "team", "name"], &[])?;
+            let s = scan(rest, &["relay", "team", "name", "device"], &[])?;
             s.positional(0, "create --relay URL --team NAME --name NAME")?;
             Ok(Command::Create {
                 relay: s.required("relay")?,
                 team: s.required("team")?,
                 name: s.required("name")?,
+                device: s.one("device")?,
             })
         }
         "join" => {
-            let s = scan(rest, &["relay", "name"], &[])?;
-            s.positional(0, "join --relay URL --name NAME")?;
+            let s = scan(rest, &["relay", "name", "device"], &["no-wait", "resume"])?;
+            s.positional(
+                0,
+                "join --relay URL [--name NAME] [--device NAME] [--no-wait] | join --resume",
+            )?;
+            let (relay, device, resume) = enrollment_options(&s)?;
+            let name = s.one("name")?;
+            if resume && name.is_some() {
+                return Err(CliError::usage(
+                    "Option --name cannot be used with --resume.",
+                ));
+            }
             Ok(Command::Join {
-                relay: s.required("relay")?,
-                name: s.required("name")?,
+                relay,
+                name,
+                device,
+                no_wait: s.switch("no-wait"),
+                resume,
             })
         }
         "me" => no_args(rest).map(|json| Command::Me { json }),
         "invite" => {
-            let s = scan(rest, &["role", "hours"], &[])?;
-            s.positional(0, "invite [--role member|manager] [--hours N]")?;
-            let role = match s.one("role")?.as_deref() {
-                None | Some("member") => Role::Member,
-                Some("manager") => Role::Manager,
-                Some(other) => {
-                    return Err(CliError::usage(format!(
-                        "--role must be member or manager, not `{other}`."
-                    )));
+            let s = scan(rest, &["role", "hours", "name", "grant"], &["shared"])?;
+            s.positional(0, "invite [--role member|manager|owner] [--hours N] [--name NAME] [--grant ID]... [--shared]")?;
+            let role = parse_role(s.one("role")?.as_deref().unwrap_or("member"))?;
+            if s.switch("shared") && role != Role::Member {
+                return Err(CliError::usage("Option --shared needs role member."));
+            }
+            let mut grants = Vec::new();
+            for value in s.many("grant") {
+                for entry in value.split(',') {
+                    let id = parse_id("--grant entry", entry.trim())?;
+                    if grants.contains(&id) {
+                        return Err(CliError::usage("Option --grant has a repeated ID."));
+                    }
+                    grants.push(id);
                 }
-            };
+            }
             Ok(Command::Invite {
                 role,
                 hours: s.num("hours")?,
+                name: s.one("name")?,
+                grants,
+                shared: s.switch("shared"),
             })
         }
         "invites" => no_args(rest).map(|json| Command::Invites { json }),
@@ -422,8 +587,32 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
                     id: parse_id("ID", &words[0])?,
                 })
             }
-            _ => Err(CliError::usage("Usage: apassy-team member revoke ID")),
+            Some("role") => {
+                let s = scan(&rest[1..], &[], &[])?;
+                let words = s.positional(2, "member role ID ROLE")?;
+                Ok(Command::MemberRole {
+                    id: parse_id("ID", &words[0])?,
+                    role: parse_role(&words[1])?,
+                })
+            }
+            _ => Err(CliError::usage(
+                "Usage: apassy-team member revoke ID | member role ID ROLE",
+            )),
         },
+        "device" => device(rest),
+        "team" => team(rest),
+        "joins" => no_args(rest).map(|json| Command::Joins { json }),
+        "confirm" => {
+            let (id, words) = confirmation(rest, "confirm ID --words \"W1 W2\"")?;
+            Ok(Command::Confirm { id, words })
+        }
+        "refuse" => Ok(Command::Refuse {
+            id: id_argument(rest, "refuse ID")?,
+        }),
+        "leave" => {
+            scan(rest, &[], &[])?.positional(0, "leave")?;
+            Ok(Command::Leave)
+        }
         "collection" => collection(rest),
         "item" => item(rest),
         "grant" => {
@@ -472,6 +661,124 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
         }
         "host" => host(rest),
         other => Err(CliError::usage(format!("Unknown command `{other}`."))),
+    }
+}
+
+fn parse_role(value: &str) -> Result<Role, CliError> {
+    match value {
+        "owner" => Ok(Role::Owner),
+        "manager" => Ok(Role::Manager),
+        "member" => Ok(Role::Member),
+        _ => Err(CliError::usage(format!(
+            "Role must be member, manager, or owner, not `{value}`."
+        ))),
+    }
+}
+
+fn enrollment_options(s: &Scan) -> Result<(Option<String>, Option<String>, bool), CliError> {
+    let resume = s.switch("resume");
+    let relay = s.one("relay")?;
+    let device = s.one("device")?;
+    if resume {
+        if relay.is_some() || device.is_some() {
+            return Err(CliError::usage(
+                "Options --relay and --device cannot be used with --resume.",
+            ));
+        }
+    } else if relay.is_none() {
+        return Err(CliError::usage("Option --relay is required."));
+    }
+    Ok((relay, device, resume))
+}
+
+fn id_argument(rest: &[String], usage: &str) -> Result<u64, CliError> {
+    let s = scan(rest, &[], &[])?;
+    let words = s.positional(1, usage)?;
+    parse_id("ID", &words[0])
+}
+
+fn confirmation(rest: &[String], usage: &str) -> Result<(u64, String), CliError> {
+    let s = scan(rest, &["words"], &[])?;
+    let ids = s.positional(1, usage)?;
+    let id = parse_id("ID", &ids[0])?;
+    let words = s.required("words")?;
+    if words.split_whitespace().count() != 2 {
+        return Err(CliError::usage("Option --words needs two safety words."));
+    }
+    Ok((id, words))
+}
+
+fn device(rest: &[String]) -> Result<Command, CliError> {
+    let tail = rest.get(1..).unwrap_or_default();
+    match rest.first().map(String::as_str) {
+        Some("enroll") => {
+            let s = scan(tail, &["name"], &[])?;
+            s.positional(0, "device enroll [--name NAME]")?;
+            Ok(Command::DeviceEnroll {
+                name: s.one("name")?,
+            })
+        }
+        Some("list") => Ok(Command::DeviceList {
+            json: no_args(tail)?,
+        }),
+        Some("revoke") => Ok(Command::DeviceRevoke {
+            id: id_argument(tail, "device revoke ID")?,
+        }),
+        Some("key-holder") => Ok(Command::DeviceKeyHolder {
+            id: id_argument(tail, "device key-holder ID")?,
+        }),
+        Some("add") => {
+            scan(tail, &[], &[])?.positional(0, "device add")?;
+            Ok(Command::DeviceAdd)
+        }
+        Some("link") => {
+            let s = scan(tail, &["relay", "device"], &["no-wait", "resume"])?;
+            s.positional(
+                0,
+                "device link --relay URL [--device NAME] [--no-wait] | device link --resume",
+            )?;
+            let (relay, device, resume) = enrollment_options(&s)?;
+            Ok(Command::DeviceLink {
+                relay,
+                device,
+                resume,
+                no_wait: s.switch("no-wait"),
+            })
+        }
+        Some("pending") => Ok(Command::DevicePending {
+            json: no_args(tail)?,
+        }),
+        Some("confirm") => {
+            let (id, words) = confirmation(tail, "device confirm ID --words \"W1 W2\"")?;
+            Ok(Command::DeviceConfirm { id, words })
+        }
+        Some("refuse") => Ok(Command::DeviceRefuse {
+            id: id_argument(tail, "device refuse ID")?,
+        }),
+        _ => Err(CliError::usage(
+            "Usage: apassy-team device enroll|list|revoke|key-holder|add|link|pending|confirm|refuse ...",
+        )),
+    }
+}
+
+fn team(rest: &[String]) -> Result<Command, CliError> {
+    match rest.first().map(String::as_str) {
+        Some("list") => Ok(Command::TeamList {
+            json: no_args(&rest[1..])?,
+        }),
+        Some("use") => {
+            let s = scan(&rest[1..], &[], &[])?;
+            let words = s.positional(1, "team use ID")?;
+            if words[0].trim().is_empty() {
+                return Err(CliError::usage("Team ID must not be empty."));
+            }
+            Ok(Command::TeamUse {
+                id: words[0].clone(),
+            })
+        }
+        _ => Err(CliError::usage(
+            "Usage: apassy-team team list | team use ID",
+        )),
     }
 }
 
@@ -686,14 +993,18 @@ mod tests {
             Command::Create {
                 relay: "https://r.example".into(),
                 team: "Family".into(),
-                name: "rafal".into()
+                name: "rafal".into(),
+                device: None
             }
         );
         assert_eq!(
             p("join --relay=https://r.example --name bob").unwrap(),
             Command::Join {
-                relay: "https://r.example".into(),
-                name: "bob".into()
+                relay: Some("https://r.example".into()),
+                name: Some("bob".into()),
+                device: None,
+                no_wait: false,
+                resume: false
             }
         );
         assert_eq!(p("me --json").unwrap(), Command::Me { json: true });
@@ -701,14 +1012,20 @@ mod tests {
             p("invite --role manager --hours 5").unwrap(),
             Command::Invite {
                 role: Role::Manager,
-                hours: Some(5)
+                hours: Some(5),
+                name: None,
+                grants: vec![],
+                shared: false
             }
         );
         assert_eq!(
             p("invite").unwrap(),
             Command::Invite {
                 role: Role::Member,
-                hours: None
+                hours: None,
+                name: None,
+                grants: vec![],
+                shared: false
             }
         );
         assert_eq!(
@@ -774,6 +1091,277 @@ mod tests {
             }
         );
         assert_eq!(p("--help").unwrap(), Command::Help);
+    }
+
+    fn exact(words: &[&str]) -> Result<Command, CliError> {
+        parse(
+            &words
+                .iter()
+                .map(|word| (*word).to_owned())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[test]
+    fn device_join_invite_and_team_commands() {
+        assert_eq!(
+            p("create --relay r --team Family --name rafal --device mac").unwrap(),
+            Command::Create {
+                relay: "r".into(),
+                team: "Family".into(),
+                name: "rafal".into(),
+                device: Some("mac".into())
+            }
+        );
+        assert_eq!(
+            p("join --relay r --device mac --no-wait").unwrap(),
+            Command::Join {
+                relay: Some("r".into()),
+                name: None,
+                device: Some("mac".into()),
+                no_wait: true,
+                resume: false
+            }
+        );
+        assert_eq!(
+            p("join --resume").unwrap(),
+            Command::Join {
+                relay: None,
+                name: None,
+                device: None,
+                no_wait: false,
+                resume: true
+            }
+        );
+        assert_eq!(
+            p("device enroll").unwrap(),
+            Command::DeviceEnroll { name: None }
+        );
+        assert_eq!(
+            p("device enroll --name mac").unwrap(),
+            Command::DeviceEnroll {
+                name: Some("mac".into())
+            }
+        );
+        assert_eq!(
+            p("device list --json").unwrap(),
+            Command::DeviceList { json: true }
+        );
+        assert_eq!(
+            p("device revoke 3").unwrap(),
+            Command::DeviceRevoke { id: 3 }
+        );
+        assert_eq!(
+            p("device key-holder 3").unwrap(),
+            Command::DeviceKeyHolder { id: 3 }
+        );
+        assert_eq!(p("device add").unwrap(), Command::DeviceAdd);
+        assert_eq!(
+            p("device link --relay r --device mac --no-wait").unwrap(),
+            Command::DeviceLink {
+                relay: Some("r".into()),
+                device: Some("mac".into()),
+                no_wait: true,
+                resume: false
+            }
+        );
+        assert_eq!(
+            p("device link --resume").unwrap(),
+            Command::DeviceLink {
+                relay: None,
+                device: None,
+                no_wait: false,
+                resume: true
+            }
+        );
+        assert_eq!(
+            p("device pending --json").unwrap(),
+            Command::DevicePending { json: true }
+        );
+        assert_eq!(
+            exact(&["device", "confirm", "4", "--words", "W1 W2"]).unwrap(),
+            Command::DeviceConfirm {
+                id: 4,
+                words: "W1 W2".into()
+            }
+        );
+        assert_eq!(
+            p("device refuse 4").unwrap(),
+            Command::DeviceRefuse { id: 4 }
+        );
+        assert_eq!(
+            p("invite --role owner --name alice --grant 1,2 --grant 3 --hours 4").unwrap(),
+            Command::Invite {
+                role: Role::Owner,
+                hours: Some(4),
+                name: Some("alice".into()),
+                grants: vec![1, 2, 3],
+                shared: false
+            }
+        );
+        assert_eq!(
+            p("invite --shared").unwrap(),
+            Command::Invite {
+                role: Role::Member,
+                hours: None,
+                name: None,
+                grants: vec![],
+                shared: true
+            }
+        );
+        assert_eq!(p("joins --json").unwrap(), Command::Joins { json: true });
+        assert_eq!(
+            exact(&["confirm", "5", "--words=W1 W2"]).unwrap(),
+            Command::Confirm {
+                id: 5,
+                words: "W1 W2".into()
+            }
+        );
+        assert_eq!(p("refuse 5").unwrap(), Command::Refuse { id: 5 });
+        assert_eq!(p("leave").unwrap(), Command::Leave);
+        for (text, role) in [
+            ("owner", Role::Owner),
+            ("manager", Role::Manager),
+            ("member", Role::Member),
+        ] {
+            assert_eq!(
+                p(&format!("member role 6 {text}")).unwrap(),
+                Command::MemberRole { id: 6, role }
+            );
+        }
+        assert_eq!(
+            p("team list --json").unwrap(),
+            Command::TeamList { json: true }
+        );
+        assert_eq!(
+            p("team use t_example").unwrap(),
+            Command::TeamUse {
+                id: "t_example".into()
+            }
+        );
+    }
+
+    #[test]
+    fn team_selection_preserves_create_name_and_member_command() {
+        for line in [
+            "--team t_one me --json",
+            "me --team=t_one --json",
+            "me --json --team t_one",
+        ] {
+            assert_eq!(
+                p(line).unwrap(),
+                Command::Selected {
+                    team: "t_one".into(),
+                    command: Box::new(Command::Me { json: true })
+                }
+            );
+        }
+        for line in [
+            "device list --team t_one --json",
+            "invite --team t_one",
+            "member role 3 owner --team t_one",
+            "host --team t_one",
+            "agent list --team t_one",
+            "join --resume --team t_one",
+            "device link --resume --team t_one",
+        ] {
+            assert!(
+                matches!(p(line).unwrap(), Command::Selected { team, .. } if team == "t_one"),
+                "{line}"
+            );
+        }
+        assert!(
+            matches!(p("create --relay r --team t_one --name n").unwrap(), Command::Create { team, .. } if team == "t_one")
+        );
+        let Command::Run(run) = p("run --items 1 --purpose check -- echo --team t_child").unwrap()
+        else {
+            panic!("wrong command")
+        };
+        assert_eq!(run.command, ["echo", "--team", "t_child"]);
+    }
+
+    #[test]
+    fn new_commands_reject_unsafe_or_incomplete_arguments() {
+        for line in [
+            "join",
+            "join --relay",
+            "join --relay --no-wait",
+            "join --resume --relay r",
+            "join --resume --name n",
+            "join --resume --device n",
+            "join --relay r --code secret",
+            "join --relay r --invite secret",
+            "join --relay r secret",
+            "device",
+            "device enroll --key secret",
+            "device enroll extra",
+            "device list extra",
+            "device add --json",
+            "device revoke 0",
+            "device revoke x",
+            "device revoke",
+            "device key-holder 0",
+            "device key-holder 1 extra",
+            "device link",
+            "device link --resume --relay r",
+            "device link --resume --device n",
+            "device link --relay r --name n",
+            "device link --relay r --code secret",
+            "device pending --words one",
+            "device confirm 1",
+            "device confirm 0 --words=x",
+            "device confirm 1 --words",
+            "device refuse 0",
+            "device refuse 1 extra",
+            "confirm 1",
+            "confirm 1 --words",
+            "confirm --words=one",
+            "refuse 0",
+            "refuse 1 extra",
+            "joins extra",
+            "leave extra",
+            "leave --json",
+            "member role 0 owner",
+            "member role 1 admin",
+            "member role 1",
+            "team",
+            "team list extra",
+            "team use",
+            "team use a b",
+            "invite --role owner --shared",
+            "invite --role manager --shared",
+            "invite --grant 0",
+            "invite --grant 1,",
+            "invite --grant x",
+            "invite --grant 1 --grant 1",
+            "invite --name a --name b",
+            "--team",
+            "me --team=",
+            "me --team a --team b",
+            "me --team --json",
+            "init --relay r --team t_one",
+            "join --relay r --team t_one",
+            "device link --relay r --team t_one",
+            "access --team t_one",
+            "run --items 1 --purpose check --team t_one -- true",
+            "mcp --team t_one",
+            "team list --team t_one",
+        ] {
+            assert_eq!(p(line).unwrap_err().code, 2, "{line}");
+        }
+        for words in ["", "one", "one two three"] {
+            for prefix in [vec!["confirm", "1"], vec!["device", "confirm", "1"]] {
+                let mut args = prefix;
+                args.extend(["--words", words]);
+                assert_eq!(exact(&args).unwrap_err().code, 2, "{args:?}");
+            }
+        }
+        assert_eq!(
+            exact(&["confirm", "1", "--words", "one two", "--words", "one two"])
+                .unwrap_err()
+                .code,
+            2
+        );
     }
 
     #[test]
@@ -914,7 +1502,7 @@ mod tests {
             "member revoke zero",
             "member revoke 0",
             "grant --collection 1",
-            "invite --role owner",
+            "invite --role other",
             "invite --hours x",
             "approve",
             "approve 1 2",

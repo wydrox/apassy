@@ -51,6 +51,8 @@ pub struct RawError {
     /// connection, failed TLS handshake). True when it may have (a timeout or a
     /// broken connection after the connect).
     pub maybe_sent: bool,
+    pub usage: bool,
+    pub api: Option<ApiError>,
 }
 
 /// The envelope with a typed `result`, so a secret in it lands in a `SecretString`.
@@ -91,6 +93,8 @@ impl ApiError {
 }
 
 pub enum CallError {
+    /// The local settings or sign-in origin are wrong.
+    Usage(String),
     Api(ApiError),
     /// The call failed and the relay may have got the request.
     Transport(String),
@@ -101,6 +105,10 @@ pub enum CallError {
 impl CallError {
     pub fn into_cli(self) -> CliError {
         match self {
+            Self::Usage(m) => CliError::usage(m),
+            Self::Api(e) if e.code == "not_key_holder" => CliError::relay(
+                "This device is not the key holder. Copy keys.json and move the key-holder flag before you start host.",
+            ),
             Self::Api(e) => CliError::relay(format!("relay: {}: {}", e.code, e.message)),
             Self::Transport(m) | Self::Unsent(m) => CliError::relay(m),
         }
@@ -109,7 +117,8 @@ impl CallError {
 
 pub struct Client {
     base: String,
-    bearer: Option<SecretString>,
+    bearer: std::sync::Mutex<Option<SecretString>>,
+    device: Option<(crate::ids::TeamId, crate::device::DeviceKey)>,
     edge: Option<SecretString>,
 }
 
@@ -118,9 +127,53 @@ impl Client {
     pub fn new(base: &str, bearer: Option<&SecretString>, edge: Option<&SecretString>) -> Self {
         Self {
             base: base.to_owned(),
-            bearer: bearer.cloned(),
+            bearer: std::sync::Mutex::new(bearer.cloned()),
+            device: None,
             edge: edge.cloned(),
         }
+    }
+
+    /// Device authentication wins unless a member token is explicitly supplied.
+    pub fn member(settings: &crate::cli::settings::Settings) -> Result<Self, CliError> {
+        let relay = settings.relay()?;
+        let explicit_token = crate::cli::settings::env_secret(crate::cli::settings::ENV_TEAM_TOKEN);
+        if explicit_token.is_some() || settings.device_id.is_none() {
+            return Ok(Self::new(
+                relay,
+                Some(settings.member()?),
+                settings.edge_secret.as_ref(),
+            ));
+        }
+        let team = settings
+            .team_id
+            .as_ref()
+            .ok_or_else(|| CliError::usage("There is no team id for this device."))?;
+        let key = crate::cli::devicekey::store()?
+            .load(relay, team)?
+            .ok_or_else(|| {
+                CliError::usage(
+                    "There is no device key for this team. Use another device to make a link.",
+                )
+            })?;
+        Self::with_device(relay, settings.edge_secret.as_ref(), team.clone(), key)
+    }
+
+    /// Starts a process-local access token using an injected device key.
+    pub fn with_device(
+        base: &str,
+        edge: Option<&SecretString>,
+        team: crate::ids::TeamId,
+        key: crate::device::DeviceKey,
+    ) -> Result<Self, CliError> {
+        let mut client = Self::new(base, None, edge);
+        let access =
+            crate::cli::signin::sign_in(&client, &team, &key).map_err(CallError::into_cli)?;
+        *client
+            .bearer
+            .get_mut()
+            .map_err(|_| CliError::relay("Cannot read the access token."))? = Some(access.token);
+        client.device = Some((team, key));
+        Ok(client)
     }
 
     pub fn base(&self) -> &str {
@@ -146,6 +199,43 @@ impl Client {
         accept: Option<&str>,
         timeout: Duration,
     ) -> Result<RawReply, RawError> {
+        let reply = self.raw_once(method, path, body, accept, timeout)?;
+        if reply.status == 401
+            && let Some((team, key)) = &self.device
+        {
+            let auth = Self::new(&self.base, None, self.edge.as_ref());
+            let token = crate::cli::signin::sign_in(&auth, team, key).map_err(|error| {
+                let api = match &error {
+                    CallError::Api(api) => Some(api.clone()),
+                    _ => None,
+                };
+                let error = error.into_cli();
+                RawError {
+                    message: error.message,
+                    maybe_sent: false,
+                    usage: error.code == 2,
+                    api,
+                }
+            })?;
+            *self.bearer.lock().map_err(|_| RawError {
+                message: "Cannot read the access token.".into(),
+                maybe_sent: false,
+                usage: false,
+                api: None,
+            })? = Some(token.token);
+            return self.raw_once(method, path, body, accept, timeout);
+        }
+        Ok(reply)
+    }
+
+    fn raw_once(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&str>,
+        accept: Option<&str>,
+        timeout: Duration,
+    ) -> Result<RawReply, RawError> {
         let url = format!("{}{}", self.base, path);
         let mut builder = ureq::http::Request::builder()
             .method(method.as_str())
@@ -154,26 +244,39 @@ impl Client {
         if body.is_some() {
             builder = builder.header("Content-Type", "application/json");
         }
-        if let Some(token) = &self.bearer {
+        let bearer = self.bearer.lock().map_err(|_| RawError {
+            message: "Cannot read the access token.".into(),
+            maybe_sent: false,
+            usage: false,
+            api: None,
+        })?;
+        if let Some(token) = &*bearer {
             builder = builder.header("Authorization", format!("Bearer {}", token.expose()));
         }
         if let Some(edge) = &self.edge {
             builder = builder.header(EDGE_HEADER, edge.expose());
         }
+        drop(bearer);
         let request = builder
             .body(body.unwrap_or("").to_owned())
             .map_err(|_| RawError {
                 message: "The request is not valid (check the tokens and the URL).".to_owned(),
                 maybe_sent: false,
+                usage: false,
+                api: None,
             })?;
         let mut response = Self::agent(timeout).run(request).map_err(|e| RawError {
             message: format!("Cannot reach the relay: {}", transport_words(&e)),
             maybe_sent: !failed_before_send(&e),
+            usage: false,
+            api: None,
         })?;
         let status = response.status().as_u16();
         let text = response.body_mut().read_to_string().map_err(|e| RawError {
             message: format!("Cannot read the relay answer: {}", transport_words(&e)),
             maybe_sent: true,
+            usage: false,
+            api: None,
         })?;
         Ok(RawReply {
             status,
@@ -190,7 +293,11 @@ impl Client {
         timeout: Duration,
     ) -> Result<T, CallError> {
         let reply = self.raw(method, path, body, None, timeout).map_err(|e| {
-            if e.maybe_sent {
+            if let Some(api) = e.api {
+                CallError::Api(api)
+            } else if e.usage {
+                CallError::Usage(e.message)
+            } else if e.maybe_sent {
                 CallError::Transport(e.message)
             } else {
                 CallError::Unsent(e.message)

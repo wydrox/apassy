@@ -8,7 +8,7 @@ use cli_support::*;
 use serde_json::{Value, json};
 
 fn me_member() -> Value {
-    json!({"team": "T", "kind": "member", "member_id": 1, "member_name": "olga", "role": "owner"})
+    json!({"team": "T", "team_id": "t_abcdefgh23", "kind": "member", "member_id": 1, "member_name": "olga", "role": "owner"})
 }
 
 fn mode(path: &std::path::Path) -> u32 {
@@ -38,11 +38,11 @@ fn init_checks_the_token_and_writes_the_file_with_private_modes() {
     assert_eq!(mode(file.parent().unwrap()), 0o700);
     let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
     assert_eq!(
-        saved["relay_url"],
+        saved["teams"]["t_abcdefgh23"]["relay_url"],
         mock.url.as_str(),
         "the trailing slash is removed"
     );
-    assert_eq!(saved["member_token"], MEMBER_TOKEN);
+    assert_eq!(saved["teams"]["t_abcdefgh23"]["member_token"], MEMBER_TOKEN);
     assert!(!text(&output.stdout).contains(MEMBER_TOKEN));
     assert!(!text(&output.stderr).contains(MEMBER_TOKEN));
     assert!(text(&output.stdout).contains("olga"));
@@ -184,96 +184,25 @@ fn init_and_join_need_a_pipe_and_a_relay_option() {
 }
 
 #[test]
-fn join_sends_the_code_without_a_bearer_and_saves_the_new_token() {
-    let code_text = "apassy_inv_3333333333333333333333333333333333333333333333333333333333333333";
-    let mock = Mock::always(200, json!({"id": 5, "secret": MEMBER_TOKEN}));
-    let cli = Cli::new().with("APASSY_EDGE_SECRET", EDGE);
-    let output = cli.run(
-        &["join", "--relay", &mock.url, "--name", "bob"],
-        Some(&format!("{code_text}\n")),
-    );
-    assert_eq!(code(&output), 0, "{}", text(&output.stderr));
-    let seen = mock.requests();
-    assert_eq!(
-        (seen[0].method.as_str(), seen[0].url.as_str()),
-        ("POST", "/v1/join")
-    );
-    assert_eq!(seen[0].header("authorization"), None);
-    assert_eq!(seen[0].header("x-apassy-edge"), Some(EDGE));
-    // Until stage 3 of section 23 the CLI sends no device key.
-    assert_eq!(
-        seen[0].json(),
-        json!({"code": code_text, "name": "bob", "device_name": "", "public_key": ""})
-    );
-    let file = cli.settings_file();
-    assert_eq!(mode(&file), 0o600);
-    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
-    assert_eq!(saved["member_token"], MEMBER_TOKEN);
-    let printed = format!("{}{}", text(&output.stdout), text(&output.stderr));
-    assert!(!printed.contains(MEMBER_TOKEN) && !printed.contains(code_text));
-}
-
-#[test]
-fn create_sends_the_team_code_without_a_bearer_and_saves_the_owner_token() {
-    let code_text = format!("apassy_tcd_{}", "4".repeat(64));
-    let mock = Mock::always(
-        200,
-        json!({"team_id": "t_abcdefgh23", "member_id": 1, "secret": MEMBER_TOKEN}),
-    );
-    let cli = Cli::new().with("APASSY_EDGE_SECRET", EDGE);
-    let output = cli.run(
-        &[
-            "create", "--relay", &mock.url, "--team", "Family", "--name", "rafal",
-        ],
-        Some(&format!("{code_text}\n")),
-    );
-    assert_eq!(code(&output), 0, "{}", text(&output.stderr));
-    let seen = mock.requests();
-    assert_eq!(
-        (seen[0].method.as_str(), seen[0].url.as_str()),
-        ("POST", "/v1/teams")
-    );
-    assert_eq!(seen[0].header("authorization"), None);
-    assert_eq!(seen[0].header("x-apassy-edge"), Some(EDGE));
-    assert_eq!(
-        seen[0].json(),
-        json!({"code": code_text, "team": "Family", "owner": "rafal"})
-    );
-    let saved: Value =
-        serde_json::from_str(&std::fs::read_to_string(cli.settings_file()).unwrap()).unwrap();
-    assert_eq!(saved["member_token"], MEMBER_TOKEN);
-    let printed = format!("{}{}", text(&output.stdout), text(&output.stderr));
-    assert!(printed.contains("t_abcdefgh23"), "{printed}");
-    assert!(!printed.contains(MEMBER_TOKEN) && !printed.contains(&code_text));
-    // A refused code writes nothing.
-    let refused = Mock::start(|_, _| err(403, "invite_invalid", "The team code is not valid."));
-    let other = Cli::new();
-    let output = other.run(
-        &[
-            "create",
-            "--relay",
-            &refused.url,
-            "--team",
-            "Family",
-            "--name",
-            "rafal",
-        ],
-        Some(&code_text),
-    );
-    assert_eq!(code(&output), 4);
-    assert!(!other.settings_file().exists());
-}
-
-#[test]
-fn a_refused_invite_writes_nothing() {
+fn a_refused_invite_keeps_the_device_key_for_a_retry() {
     let mock = Mock::start(|_, _| err(403, "invite_invalid", "The invite code is not valid."));
     let cli = Cli::new();
     let output = cli.run(
         &["join", "--relay", &mock.url, "--name", "bob"],
-        Some("apassy_inv_x"),
+        Some(&format!("apassy_inv_t_abcdefgh23_{}", "3".repeat(64))),
     );
     assert_eq!(code(&output), 4);
-    assert!(!cli.settings_file().exists());
+    let saved: Value =
+        serde_json::from_slice(&std::fs::read(cli.settings_file()).unwrap()).unwrap();
+    let entry = &saved["teams"]["t_abcdefgh23"];
+    assert!(entry["member_token"].is_null());
+    assert!(entry["device_id"].is_null());
+    let key = cli
+        .settings_file()
+        .parent()
+        .unwrap()
+        .join("device-t_abcdefgh23.key");
+    assert_eq!(mode(&key), 0o600);
 }
 
 #[test]
@@ -314,4 +243,91 @@ fn plain_http_is_refused_except_for_loopback() {
         .run(&["me"], None);
     assert_eq!(code(&output), 2);
     assert!(text(&output.stderr).contains("https://"));
+}
+
+#[test]
+fn version_one_identifies_the_team_and_migrates_only_on_the_next_save() {
+    let mock = Mock::always(200, me_member());
+    let cli = Cli::new();
+    let path = cli.settings_file();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let legacy = serde_json::to_vec(&json!({
+        "version": 1, "relay_url": mock.url, "member_token": MEMBER_TOKEN,
+    }))
+    .unwrap();
+    std::fs::write(&path, &legacy).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let listed = cli.run(&["team", "list"], None);
+    assert_eq!(code(&listed), 0, "{}", text(&listed.stderr));
+    assert!(text(&listed.stdout).contains("t_abcdefgh23"));
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        legacy,
+        "a read must not save the migration"
+    );
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        (requests[0].method.as_str(), requests[0].url.as_str()),
+        ("GET", "/v1/me")
+    );
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some(format!("Bearer {MEMBER_TOKEN}").as_str())
+    );
+
+    let selected = cli.run(&["me", "--team", "t_abcdefgh23"], None);
+    assert_eq!(code(&selected), 0, "{}", text(&selected.stderr));
+    assert_eq!(std::fs::read(&path).unwrap(), legacy);
+
+    let saved = cli.run(&["team", "use", "t_abcdefgh23"], None);
+    assert_eq!(code(&saved), 0, "{}", text(&saved.stderr));
+    let settings: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(settings["version"], 2);
+    assert_eq!(settings["current"], "t_abcdefgh23");
+    assert_eq!(settings["teams"].as_object().unwrap().len(), 1);
+    let entry = &settings["teams"]["t_abcdefgh23"];
+    assert_eq!(entry["relay_url"], mock.url);
+    assert_eq!(entry["team"], "T");
+    assert_eq!(entry["member"], "olga");
+    assert_eq!(entry["member_token"], MEMBER_TOKEN);
+    assert!(entry["device_id"].is_null());
+    assert!(settings.get("relay_url").is_none());
+    assert!(settings.get("member_token").is_none());
+    assert_eq!(mode(&path), 0o600);
+    assert_eq!(mode(path.parent().unwrap()), 0o700);
+}
+
+#[test]
+fn an_unknown_settings_version_is_refused_without_a_request_or_write() {
+    let mock = Mock::always(200, me_member());
+    let cli = Cli::new();
+    let path = cli.settings_file();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let bytes = serde_json::to_vec(&json!({
+        "version": 9, "relay_url": mock.url, "member_token": MEMBER_TOKEN,
+    }))
+    .unwrap();
+    std::fs::write(&path, &bytes).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let output = cli.run(&["me"], None);
+    assert_eq!(code(&output), 2);
+    assert!(text(&output.stderr).contains("version is not supported"));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert!(mock.requests().is_empty());
+}
+
+#[test]
+fn init_never_saves_an_access_token_supplied_on_stdin() {
+    let mock = Mock::always(200, me_member());
+    let cli = Cli::new();
+    let access = format!("apassy_acc_t_abcdefgh23_{}", "a".repeat(64));
+    let output = cli.run(&["init", "--relay", &mock.url], Some(&access));
+    assert_eq!(code(&output), 2);
+    assert!(text(&output.stderr).contains("Access tokens cannot be saved"));
+    assert!(mock.requests().is_empty());
+    assert!(!cli.settings_file().exists());
+    assert!(!text(&output.stderr).contains(&access));
+    assert!(!text(&output.stdout).contains(&access));
 }
