@@ -8,6 +8,9 @@
   // When RELAY is bound, RELAY_ORIGIN is not used. To go back to a quick tunnel, remove
   // this binding and set RELAY_ORIGIN.
   "vpc_services": [{ "binding": "RELAY", "service_id": "01a0f70c-70ec-7882-9121-853d63b9eece", "remote": true }],
+  "ratelimits": [{ "name": "CREATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 10, "period": 60 } }],
+  // /guide explicitly fetches /guide.html; do not redirect that asset back to /guide.
+  "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true, "html_handling": "none" },
   "vars": { "RELAY_ORIGIN": "https://replace-me.trycloudflare.com" },
   "observability": { "enabled": false }
 }
