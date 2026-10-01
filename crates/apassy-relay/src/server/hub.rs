@@ -148,9 +148,13 @@ fn make_team_file_with_device(
 /// not an error; any other failure is.
 pub fn remove_team_file(config: &RelayConfig, id: &TeamId) -> RelayResult<()> {
     let path = config.team_path(id);
-    let mut journal = path.clone().into_os_string();
-    journal.push("-journal");
-    for file in [path.into_os_string(), journal] {
+    let with = |suffix: &str| {
+        let mut name = path.clone().into_os_string();
+        name.push(suffix);
+        name
+    };
+    let extra = [with("-journal"), with(".pre-v3"), with(".pre-v3.tmp")];
+    for file in std::iter::once(path.clone().into_os_string()).chain(extra) {
         match std::fs::remove_file(&file) {
             Ok(()) => {}
             Err(error) if error.kind() == ErrorKind::NotFound => {}

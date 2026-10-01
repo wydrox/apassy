@@ -257,6 +257,41 @@ fn last_owner(conn: &Connection, id: MemberId) -> RelayResult<bool> {
     .map_err(db)
 }
 
+/// True when, after a change, at least one live owner can still sign in: with a live
+/// device, or with a member token that still works (no device, before the deadline).
+/// `without_member` leaves a member out (revoked, left, or no longer an owner);
+/// `without_device` leaves a device out (revoked). Every change that could lock all
+/// owners out checks this first.
+pub fn owner_can_sign_in_after(
+    conn: &Connection,
+    now: u64,
+    without_member: Option<MemberId>,
+    without_device: Option<DeviceId>,
+) -> RelayResult<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM member m \
+         WHERE m.role = 'owner' AND m.revoked_at IS NULL AND m.id != ?1 \
+         AND (EXISTS(SELECT 1 FROM device d WHERE d.member_id = m.id AND d.revoked_at IS NULL AND d.id != ?2) \
+              OR (m.token_hash IS NOT NULL \
+                  AND NOT EXISTS(SELECT 1 FROM device d WHERE d.member_id = m.id AND d.revoked_at IS NULL) \
+                  AND COALESCE((SELECT member_tokens_until FROM team WHERE id = 1), ?3 + 1) > ?3)))",
+        params![
+            without_member.map_or(-1, |m| to_i(m.0)),
+            without_device.map_or(-1, |d| to_i(d.0)),
+            to_i(now)
+        ],
+        |row| row.get(0),
+    )
+    .map_err(db)
+}
+
+fn no_owner_left() -> RelayError {
+    RelayError::new(
+        codes::CONFLICT,
+        "This would leave no owner who can sign in. Add or enroll another owner device first.",
+    )
+}
+
 pub fn member_revoke(
     core: &Core,
     owner: &MemberAuth,
@@ -278,6 +313,9 @@ fn revoke_member(core: &Core, by: &MemberAuth, id: MemberId, now: u64) -> RelayR
         if last_owner(tx, id)? {
             return Err(RelayError::new(codes::CONFLICT, "The last live owner cannot leave or be revoked."));
         }
+        if !owner_can_sign_in_after(tx, now, Some(id), None)? {
+            return Err(no_owner_left());
+        }
         let changed = tx
             .execute(
                 "UPDATE member SET revoked_at = ?2 WHERE id = ?1 AND revoked_at IS NULL",
@@ -287,6 +325,13 @@ fn revoke_member(core: &Core, by: &MemberAuth, id: MemberId, now: u64) -> RelayR
         if changed == 0 {
             return Err(RelayError::not_found("member"));
         }
+        let held_keys: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM device WHERE member_id = ?1 AND revoked_at IS NULL AND key_holder = 1)",
+                params![to_i(id.0)],
+                |row| row.get(0),
+            )
+            .map_err(db)?;
         let devices: Vec<DeviceId> = {
             let mut statement = tx
                 .prepare("SELECT id FROM device WHERE member_id = ?1 AND revoked_at IS NULL")
@@ -348,11 +393,17 @@ fn revoke_member(core: &Core, by: &MemberAuth, id: MemberId, now: u64) -> RelayR
             None,
             &json!({"member_id": id}),
         )?;
-        Ok(devices)
+        Ok((devices, held_keys))
     })?;
+    let (devices, held_keys) = devices;
     crate::server::devices::drop_tokens(core, &devices);
     core.notify.notify();
-    created(id.0)
+    let mut result = json!({"id": id.0});
+    if held_keys {
+        result["message"] =
+            json!("The team has no key holder. An owner device must claim the keys.");
+    }
+    Ok(result)
 }
 
 pub fn role_change(
@@ -383,6 +434,11 @@ pub fn role_change(
         if parse_role(&old_role) != request.role {
             if request.role != Role::Owner && last_owner(tx, id)? {
                 return Err(RelayError::new(codes::CONFLICT, "The last live owner must keep the owner role."));
+            }
+            if parse_role(&old_role) == Role::Owner
+                && !owner_can_sign_in_after(tx, now, Some(id), None)?
+            {
+                return Err(no_owner_left());
             }
             let key_holder: bool = tx
                 .query_row(

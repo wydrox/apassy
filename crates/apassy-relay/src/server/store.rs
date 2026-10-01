@@ -283,7 +283,12 @@ impl Store {
             ));
         }
         if version == 2 {
-            store.migrate_v3(path)?;
+            store.migrate_v3(path).map_err(|error| {
+                RelayError::internal(format!(
+                    "The team file cannot be moved to schema version 3: {} It is still version 2 and unchanged; free disk space or read the log, then start the relay again.",
+                    error.message
+                ))
+            })?;
         } else if version != SCHEMA_VERSION {
             return Err(RelayError::internal(
                 "The team vault has an unknown schema version.",
@@ -295,9 +300,7 @@ impl Store {
     /// Keeps an encrypted version 2 backup and changes the team schema in one transaction.
     fn migrate_v3(&self, path: &Path) -> RelayResult<()> {
         let mut conn = self.lock();
-        let mut backup = path.as_os_str().to_os_string();
-        backup.push(".pre-v3");
-        copy_private(path, Path::new(&backup))?;
+        write_pre_v3(path)?;
 
         // SQLite ignores this change inside a transaction. Never rename the old
         // tables: that would change the names in the existing child foreign keys.
@@ -394,6 +397,40 @@ pub fn copy_private(source: &Path, dest: &Path) -> RelayResult<u64> {
     to.sync_all()
         .map_err(|_| RelayError::internal("A backup file cannot be written to disk."))?;
     Ok(bytes)
+}
+
+/// Writes `<file>.pre-v3`: a copy of the version 2 file, the way back for an image that
+/// cannot read version 3. The copy goes to `.pre-v3.tmp`, is synced, and is renamed over
+/// `.pre-v3`, so a stop at any point leaves either the old backup or the new one. A
+/// `.pre-v3` that exists while the file is still version 2 comes from a migration that
+/// did not commit: the file itself is the truth, so the backup is made again from it.
+fn write_pre_v3(path: &Path) -> RelayResult<()> {
+    let mut backup = path.as_os_str().to_os_string();
+    backup.push(".pre-v3");
+    let mut temp = backup.clone();
+    temp.push(".tmp");
+    let (backup, temp) = (Path::new(&backup), Path::new(&temp));
+    match fs::remove_file(temp) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(_) => {
+            return Err(RelayError::internal(
+                "An old .pre-v3.tmp cannot be removed.",
+            ));
+        }
+    }
+    if let Err(error) = copy_private(path, temp) {
+        let _ = fs::remove_file(temp);
+        return Err(error);
+    }
+    fs::rename(temp, backup)
+        .map_err(|_| RelayError::internal("The .pre-v3 backup cannot be moved into place."))?;
+    if let Some(parent) = path.parent()
+        && let Ok(dir) = fs::File::open(parent)
+    {
+        let _ = dir.sync_all();
+    }
+    Ok(())
 }
 
 /// The data directory gets mode 0700.
@@ -769,22 +806,34 @@ mod tests {
     }
 
     #[test]
-    fn v3_migration_refuses_when_backup_exists() {
+    fn a_stale_backup_of_a_v2_file_is_made_again_and_the_migration_goes_on() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("team.db");
         let key = SecretString::new("schema migration test passphrase".into());
         drop(v2_vault(&path, &key));
-        fs::write(dir.path().join("team.db.pre-v3"), b"keep this backup").unwrap();
+        // A migration that stopped before its commit left these behind.
+        fs::write(dir.path().join("team.db.pre-v3"), b"a half copy").unwrap();
+        fs::write(dir.path().join("team.db.pre-v3.tmp"), b"a half temp copy").unwrap();
         let original = fs::read(&path).unwrap();
-        assert!(Store::open_team(&path, &key).is_err());
-        assert_eq!(fs::read(&path).unwrap(), original);
+        let store = Store::open_team(&path, &key).unwrap();
+        assert_eq!(store.user_version().unwrap(), 3);
         assert_eq!(
-            Store::open_at(&path, &key).unwrap().user_version().unwrap(),
-            2
+            fs::read(dir.path().join("team.db.pre-v3")).unwrap(),
+            original
+        );
+        assert!(!dir.path().join("team.db.pre-v3.tmp").exists());
+        drop(store);
+        // A version 3 file opens again and keeps its backup.
+        assert_eq!(
+            Store::open_team(&path, &key)
+                .unwrap()
+                .user_version()
+                .unwrap(),
+            3
         );
         assert_eq!(
             fs::read(dir.path().join("team.db.pre-v3")).unwrap(),
-            b"keep this backup"
+            original
         );
     }
 

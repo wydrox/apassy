@@ -542,6 +542,20 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request) {
             return;
         }
     };
+    // A body can take a long time to arrive. Read the caller again now, so a device or
+    // member revoked, or a role changed, while the body was on its way counts for this
+    // request too (the token was checked first only to protect the team's slots).
+    let principal = if method == "POST" || method == "PUT" {
+        match authenticate(&core, need, token, now_unix()) {
+            Ok(principal) => principal,
+            Err(error) => {
+                respond_error(request, &error);
+                return;
+            }
+        }
+    } else {
+        principal
+    };
     if endpoint == Endpoint::Mcp {
         respond_mcp(&core, request, principal, &body);
         return;

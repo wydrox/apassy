@@ -276,8 +276,10 @@ pub fn revoke(core: &Core, by: &MemberAuth, id: DeviceId, now: u64) -> RelayResu
     let was_holder = core.store.tx(|conn| {
         let target = view(conn, id, None)?;
         if by.role != Role::Owner && target.member_id != by.id { return Err(RelayError::not_found("device")); }
-        let last_owner_device: bool = conn.query_row("SELECT m.role = 'owner' AND (SELECT count(*) FROM member WHERE role = 'owner' AND revoked_at IS NULL) = 1 AND (SELECT count(*) FROM device WHERE member_id = m.id AND revoked_at IS NULL) = 1 FROM member m WHERE m.id = ?1", params![to_i(target.member_id.0)], |row| row.get(0)).map_err(db)?;
-        if last_owner_device { return Err(RelayError::new(codes::CONFLICT, "The last device of the last owner cannot be revoked.")); }
+        // No change may leave the team without an owner who can sign in (review).
+        if !crate::server::admin::owner_can_sign_in_after(conn, now, None, Some(id))? {
+            return Err(RelayError::new(codes::CONFLICT, "This would leave no owner who can sign in: the last device of the last owner cannot be revoked."));
+        }
         let agents = {
             let mut statement = conn.prepare("SELECT id FROM agent WHERE device_id = ?1").map_err(db)?;
             statement.query_map(params![to_i(id.0)], |row| Ok(AgentId(to_u(row.get(0)?)))).map_err(db)?.collect::<Result<Vec<_>, _>>().map_err(db)?

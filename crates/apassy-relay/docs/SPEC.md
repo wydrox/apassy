@@ -760,7 +760,7 @@ ADR 0019 of the core, stages 2 and 3. This section takes precedence over the ear
 
 `Store::open_team` migrates a version 2 file to version 3 **(review: exact order)**:
 
-1. Copy the file to `<file>.pre-v3` (mode 0600; refuse to migrate if that copy cannot be made; keep it — the version 2 image refuses version 3, so it is the way back).
+1. Copy the file to `<file>.pre-v3` (mode 0600; refuse to migrate if that copy cannot be made; keep it — the version 2 image refuses version 3, so it is the way back). The copy is written as `<file>.pre-v3.tmp`, synced, and renamed over `.pre-v3`. A `.pre-v3` that exists while the file is still version 2 comes from a migration that did not commit; the file is the truth, so the copy is made again and the migration goes on. A failure says that the file is still version 2 and unchanged.
 2. `PRAGMA foreign_keys = OFF` — outside any transaction (it is ignored inside one).
 3. `BEGIN IMMEDIATE`.
 4. Create the new tables under temporary names (`member_v3`, `invite_v3`), `INSERT INTO … SELECT …` with every id kept.
@@ -880,6 +880,10 @@ The five edge endpoints (`/v1/auth/challenge`, `/v1/auth/token`, `/v1/join`, `/v
 `GET /v1/members` fills `shared` and `devices`. `GET /v1/me` with an access token fills `device_id` and `key_holder`.
 
 Maintenance (every 5 seconds, per team): pending joins and links past `expires_at` become `expired`; open link codes past `expires_at` become `expired`; expired nonces and access tokens leave the tables.
+
+**(implementation review)** No change may leave the team without an owner who can sign in: revoking a device, revoking a member, `leave`, and taking the owner role away are refused (409) when afterwards no live owner has a live device or a member token that still works. Revoking the member whose device holds the keys says, like revoking that device, that the team has no key holder.
+
+**(implementation review)** A POST or PUT checks its token when the headers arrive (before it takes a slot of the team) and again after the body has arrived. A device or member revoked, or a role changed, while a slow body was on its way, counts for that request.
 
 Every new audit row holds no key, nonce, signature, code, or token. Public keys are not written to the audit; device ids and names are.
 

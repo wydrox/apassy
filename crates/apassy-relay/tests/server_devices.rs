@@ -986,3 +986,78 @@ fn edge_endpoints_refuse_a_bearer_instead_of_selecting_a_team_from_the_body() {
         );
     }
 }
+
+#[test]
+fn owners_cannot_revoke_devices_until_no_owner_can_sign_in() {
+    let mut relay = start(UpstreamOptions::default());
+    let (first, _, _) = enroll_owner(&mut relay);
+    let (_, second_owner, _) = relay.join_device("owner", "bob");
+    let devices = relay.ok("GET", "/v1/devices", &second_owner, None);
+    let second = devices
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["member_name"] == "bob")
+        .unwrap()["id"]
+        .as_u64()
+        .unwrap();
+    // Bob may revoke the first owner's only device: Bob can still sign in.
+    let revoked = relay.ok(
+        "DELETE",
+        &format!("/v1/devices/{first}"),
+        &second_owner,
+        None,
+    );
+    assert!(revoked["message"].as_str().unwrap().contains("key holder"));
+    // Now Bob's device is the last way in for any owner: refused.
+    relay.fails(
+        "DELETE",
+        &format!("/v1/devices/{second}"),
+        Some(&second_owner),
+        None,
+        409,
+        "conflict",
+    );
+    relay.ok("GET", "/v1/me", &second_owner, None);
+}
+
+#[test]
+fn a_device_revoked_while_its_body_arrives_cannot_finish_the_request() {
+    use std::io::{Read, Write};
+    let mut relay = start(UpstreamOptions::default());
+    let (first, _, _) = enroll_owner(&mut relay);
+    let stolen = relay.owner_token.clone();
+    let (_, second_owner, _) = relay.join_device("owner", "bob");
+    let invites_before = relay.ok("GET", "/v1/invites", &second_owner, None);
+    let body = br#"{"role":"owner"}"#;
+    let addr = relay.url.trim_start_matches("http://").to_string();
+    let mut stream = std::net::TcpStream::connect(&addr).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(20)))
+        .unwrap();
+    // The headers arrive, the body does not yet: the relay checks the token and waits.
+    write!(
+        stream,
+        "POST /v1/invites HTTP/1.1\r\nHost: {addr}\r\nX-Apassy-Edge: {}\r\nAuthorization: Bearer {stolen}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        relay.edge_secret,
+        body.len()
+    )
+    .unwrap();
+    stream.flush().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    // The other owner revokes the device while the body is on its way.
+    relay.ok(
+        "DELETE",
+        &format!("/v1/devices/{first}"),
+        &second_owner,
+        None,
+    );
+    stream.write_all(body).unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    let status = answer.lines().next().unwrap_or_default().to_string();
+    assert!(status.contains(" 401 "), "{status}");
+    // No invite was made.
+    let invites = relay.ok("GET", "/v1/invites", &second_owner, None);
+    assert_eq!(invites, invites_before);
+}

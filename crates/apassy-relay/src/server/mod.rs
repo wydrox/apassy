@@ -307,7 +307,25 @@ impl Relay {
         let staged_directory = config.data_dir.join("relay.db.migrating");
         remove_staged(config, &staged_directory)?;
         // Check the old file and its key before anything changes.
-        let name = Store::open_team(&legacy, old_key)?.with(store::team_name)?;
+        // Check the old file and its key without changing it: `open_team` would move it
+        // to schema version 3 in place. The copy below is migrated instead.
+        let name = {
+            let old = Store::open_at(&legacy, old_key)?;
+            match old.user_version()? {
+                2 | 3 => {}
+                1 => {
+                    return Err(RelayError::internal(
+                        "This team vault is from the first alpha and holds plaintext item values. Start with a new data volume: there is no migration.",
+                    ));
+                }
+                _ => {
+                    return Err(RelayError::internal(
+                        "The team vault has an unknown schema version.",
+                    ));
+                }
+            }
+            old.with(store::team_name)?
+        };
         let id = TeamId::generate()
             .map_err(|_| RelayError::internal("The system has no random source."))?;
         let file_key = new_file_key()?;
