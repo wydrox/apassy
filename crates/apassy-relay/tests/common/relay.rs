@@ -125,6 +125,24 @@ fn free_port() -> u16 {
     listener.local_addr().expect("addr").port()
 }
 
+/// Starts the relay. The port of a test config is picked before the relay binds it, so
+/// another test can take it in between: then the relay starts on a new free port, and
+/// the config (listen address and public URL) follows it.
+pub fn start_on_free_port(cfg: &mut RelayConfig) -> RunningRelay {
+    for _ in 0..5 {
+        match Relay::start(cfg.clone()) {
+            Ok(running) => return running,
+            Err(error) if error.message.starts_with("Cannot listen") => {
+                let port = free_port();
+                cfg.listen = format!("127.0.0.1:{port}").parse().expect("addr");
+                cfg.public_url = format!("http://127.0.0.1:{port}");
+            }
+            Err(error) => panic!("start: {error:?}"),
+        }
+    }
+    panic!("the relay found no free port in 5 tries")
+}
+
 /// The default config of a test relay.
 pub fn test_config(dir: &std::path::Path, upstream: UpstreamOptions) -> RelayConfig {
     let port = free_port();
@@ -151,7 +169,7 @@ pub fn start_with(config: impl FnOnce(&mut RelayConfig), upstream: UpstreamOptio
     let mut cfg = test_config(dir.path(), upstream);
     config(&mut cfg);
     let owner = Relay::init(&cfg, "Test Team", "owner").expect("init");
-    let running = Relay::start(cfg.clone()).expect("start");
+    let running = start_on_free_port(&mut cfg);
     TestRelay {
         url: running.url(),
         edge_secret: cfg.edge_secret.expose().to_string(),
@@ -320,7 +338,9 @@ impl TestRelay {
         if let Some(running) = self.running.take() {
             running.stop();
         }
-        self.running = Some(Relay::start(self.config.clone()).expect("restart"));
+        let running = start_on_free_port(&mut self.config);
+        self.url = running.url();
+        self.running = Some(running);
         self
     }
 
@@ -333,7 +353,9 @@ impl TestRelay {
         let conn = open_team_file(&self.config, &self.team_id);
         conn.execute_batch(sql).expect("edit");
         drop(conn);
-        self.running = Some(Relay::start(self.config.clone()).expect("restart"));
+        let running = start_on_free_port(&mut self.config);
+        self.url = running.url();
+        self.running = Some(running);
     }
 
     /// Runs SQL on the vault file while the relay runs (to set a time in the past on

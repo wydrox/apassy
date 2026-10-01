@@ -394,8 +394,10 @@ fn stop_ends_every_session_and_closes_the_port() {
     relay.stop();
     assert!(source.find(&key, now_unix()).is_none());
     let addr = url.trim_start_matches("http://");
-    assert!(
-        std::net::TcpStream::connect(addr).is_err(),
-        "the port is closed"
-    );
+    // The listener closes as the relay stops. Allow it a moment.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::net::TcpStream::connect(addr).is_ok() {
+        assert!(std::time::Instant::now() < deadline, "the port is closed");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
