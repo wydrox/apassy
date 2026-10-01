@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Apassy team relay — alpha guide</title>
+  <!-- Guide source: docs/ONBOARDING.md. Keep the text and commands the same. -->
+  <style>
+    :root {
+      color-scheme: light dark;
+      --background: #fafbfc;
+      --foreground: #17212b;
+      --muted: #526171;
+      --panel: #eef2f6;
+      --border: #cbd5df;
+      --accent: #0754a6;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--background);
+      color: var(--foreground);
+      font-family: system-ui, sans-serif;
+      font-size: 1rem;
+      line-height: 1.65;
+    }
+    main { max-width: 52rem; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    h1 { font-size: clamp(1.65rem, 5vw, 2.4rem); line-height: 1.2; }
+    h2 { font-size: 1.35rem; line-height: 1.3; }
+    section { margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+    p { margin: 1rem 0; }
+    code { font-family: ui-monospace, monospace; font-size: 0.9em; }
+    p code { padding: 0.1em 0.25em; background: var(--panel); border-radius: 0.25rem; overflow-wrap: anywhere; }
+    pre {
+      max-width: 100%;
+      margin: 1.25rem 0;
+      padding: 1rem;
+      overflow-x: auto;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 0.5rem;
+      line-height: 1.5;
+    }
+    #what-the-alpha-does-not-protect { color: var(--accent); }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --background: #101820;
+        --foreground: #e5edf5;
+        --muted: #b3c0ce;
+        --panel: #1c2935;
+        --border: #425466;
+        --accent: #90c7ff;
+      }
+    }
+    @media (max-width: 36rem) {
+      main { padding: 1.25rem 1rem 2.5rem; }
+      pre { padding: 0.75rem; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+      <h1>Apassy team relay — alpha guide</h1>
+      <p>This guide is for a team owner and a member. The relay URL is <code>https://apassy-relay.wyderka.cc</code>. The CLI is <code>apassy-team</code>.</p>
+    <section aria-labelledby="install">
+      <h2 id="install">Install</h2>
+      <p>Run these commands on the owner&#x27;s machine and each member&#x27;s machine.</p>
+      <pre><code class="language-sh">curl -fsSL https://apassy-relay.wyderka.cc/install.sh -o install.sh
+sh install.sh</code></pre>
+      <p>The installer checks the SHA-256 checksum before it installs the CLI. It installs the CLI in <code>$HOME/.local/bin</code>. It prints the installed path and the version. If that directory is not in <code>PATH</code>, use the line that the installer prints.</p>
+      <p>The first binaries are for macOS ARM64 (<code>darwin-arm64</code>) and Linux x86-64 (<code>linux-x86_64</code>). If your binary is not available, the installer stops with an error. Use <code>APASSY_RELAY_URL</code> to change the download URL. Use <code>APASSY_INSTALL_DIR</code> to change the install directory. The installer refuses root unless <code>APASSY_INSTALL_AS_ROOT=1</code>. It does not use <code>sudo</code>.</p>
+    </section>
+    <section aria-labelledby="create-a-team-owner">
+      <h2 id="create-a-team-owner">Create a team (owner)</h2>
+      <p>Get a one-time team code from the relay operator. The code starts with <code>apassy_tcd_</code>. Save the code in <code>team-code-file</code>. Replace <code>NAME</code> with the team name. Replace <code>OWNERNAME</code> with the owner&#x27;s name.</p>
+      <pre><code class="language-sh">apassy-team create --relay https://apassy-relay.wyderka.cc --team &quot;NAME&quot; --name OWNERNAME &lt; team-code-file
+apassy-team me</code></pre>
+      <p>The CLI reads secrets from stdin, never from command arguments. This applies to team codes, invite codes, item values, and tokens. The CLI refuses to read a secret from a terminal. Use a file as stdin, as shown above.</p>
+    </section>
+    <section aria-labelledby="add-members">
+      <h2 id="add-members">Add members</h2>
+      <p>Owner: make an invite code file.</p>
+      <pre><code class="language-sh">apassy-team invite --role member &gt; invite-code-file</code></pre>
+      <p>Send the file to the member through a private channel. The invite code works once. Member: replace <code>NAME</code> with your name. Use the invite code file to join the team.</p>
+      <pre><code class="language-sh">apassy-team join --relay https://apassy-relay.wyderka.cc --name NAME &lt; invite-code-file
+apassy-team me</code></pre>
+      <p>Owner: find the member ID.</p>
+      <pre><code class="language-sh">apassy-team members</code></pre>
+      <p>Create a collection for the credentials.</p>
+      <pre><code class="language-sh">apassy-team collection create payments</code></pre>
+      <p>Give the member access to that collection. Replace <code>1</code> with the collection ID. Replace <code>2</code> with the member ID.</p>
+      <pre><code class="language-sh">apassy-team grant --collection 1 --member 2</code></pre>
+    </section>
+    <section aria-labelledby="add-credentials">
+      <h2 id="add-credentials">Add credentials</h2>
+      <p>Owner: add items on the machine that will run <code>apassy-team host</code>. Use the collection ID from the previous section. Save the API key in <code>value-file</code>. Add a Stripe staging key.</p>
+      <pre><code class="language-sh">apassy-team item add --collection 1 --name &quot;Stripe test&quot; --env STRIPE_API_KEY \
+  --environment staging --provider stripe &lt; value-file</code></pre>
+      <p>For another HTTP API, use its host instead of a provider. Use the exact API host. Replace <code>api.example.com</code> with that host. Replace <code>API_KEY</code> with the environment variable that your tool reads.</p>
+      <pre><code class="language-sh">apassy-team item add --collection 1 --name &quot;API test&quot; --env API_KEY \
+  --environment staging --host api.example.com &lt; value-file</code></pre>
+      <p>For a production key, use <code>--environment production</code> instead of <code>--environment staging</code>. The host asks the owner before every run with a production item. Use the item ID that the CLI prints in the run command below.</p>
+      <p>The CLI seals the value on the owner&#x27;s machine. It keeps the key in <code>~/.config/apassy-team/keys.json</code>. Make a backup of this file. Keep the backup separate from the relay&#x27;s vault backup. If you lose the keys, you must add the items again.</p>
+    </section>
+    <section aria-labelledby="let-agents-use-them">
+      <h2 id="let-agents-use-them">Let agents use them</h2>
+      <p>Owner or member: make an agent token file. Replace <code>NAME</code> with the agent&#x27;s name.</p>
+      <pre><code class="language-sh">apassy-team agent create NAME --days 30 &gt; agent-token-file</code></pre>
+      <p>Keep the token file private. Read the token from the file into <code>APASSY_TOKEN</code>. Keep the owner&#x27;s host online before you start a run. Replace <code>1</code> with the item ID.</p>
+      <pre><code class="language-sh">APASSY_TOKEN=&quot;$(cat agent-token-file)&quot; apassy-team run --items 1 \
+  --purpose &quot;Check the balance&quot; --request &quot;Show me the Stripe balance&quot; \
+  -- stripe balance retrieve</code></pre>
+      <p>The alpha supports only HTTP API keys. The tool must accept a base URL. The run gives the tool a placeholder and a relay base URL. The tool must send API requests to that base URL. The base URL variables are <code>APASSY_BASE_&lt;NAME&gt;</code>, <code>STRIPE_API_BASE</code>, <code>OPENAI_BASE_URL</code>, <code>ANTHROPIC_BASE_URL</code>, and <code>GITHUB_API_URL</code>. The alpha does not support the <code>gh</code> CLI, database URLs, or compressed responses.</p>
+      <p>For remote MCP, set the token in the client&#x27;s environment.</p>
+      <pre><code class="language-sh">export APASSY_TOKEN=&quot;$(cat agent-token-file)&quot;</code></pre>
+      <p>Put this configuration in <code>.mcp.json</code>.</p>
+      <pre><code class="language-json">{
+  &quot;mcpServers&quot;: {
+    &quot;apassy&quot;: {
+      &quot;type&quot;: &quot;http&quot;,
+      &quot;url&quot;: &quot;https://apassy-relay.wyderka.cc/mcp&quot;,
+      &quot;headers&quot;: {
+        &quot;Authorization&quot;: &quot;Bearer ${APASSY_TOKEN}&quot;
+      }
+    }
+  }
+}</code></pre>
+      <p>With MCP, the agent must run the command with <code>session.env</code> from the relay. Each MCP run also waits for the owner&#x27;s host.</p>
+    </section>
+    <section aria-labelledby="keep-the-host-running">
+      <h2 id="keep-the-host-running">Keep the host running</h2>
+      <p>Owner: run the host on the machine with <code>keys.json</code>. Keep this command active in a terminal.</p>
+      <pre><code class="language-sh">apassy-team host</code></pre>
+      <p>Every run waits for the owner&#x27;s host. The host can release a known-safe command with non-production items without a question. For other runs, the host asks:</p>
+      <pre><code class="language-text">Release the keys for run N? [y/N]</code></pre>
+      <p>Read the command, the purpose, the request, and the items before you answer. Enter <code>y</code> only if you permit the run. A production item always requires the owner&#x27;s answer. The host must be online for every run.</p>
+    </section>
+    <section aria-labelledby="what-the-alpha-does-not-protect">
+      <h2 id="what-the-alpha-does-not-protect">What the alpha does not protect</h2>
+      <p>The relay operator or root on the VPS can read each team&#x27;s metadata. This includes team, member, collection, and item names, hosts, commands, and audit records. The operator cannot read stored item values without the owner&#x27;s keys. Stored item values stay sealed with keys on the owner&#x27;s machine. The relay opens item values in memory for a run that the host permits.</p>
+      <p>Cloudflare sees traffic in clear. Tokens are plain text in <code>~/.config/apassy-team/settings.json</code>. Item keys are plain text in <code>~/.config/apassy-team/keys.json</code>. Protect these files and the owner&#x27;s machine.</p>
+      <p>The owner&#x27;s host must be online for every run. This is an alpha with no SLA. Relay backups are daily. You must also make a backup of the owner&#x27;s <code>keys.json</code> file.</p>
+    </section>
+    <section aria-labelledby="get-help">
+      <h2 id="get-help">Get help</h2>
+      <p>Contact the relay operator who gave you the team code.</p>
+    </section>
+  </main>
+</body>
+</html>
