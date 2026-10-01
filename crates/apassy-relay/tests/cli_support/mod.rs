@@ -219,6 +219,9 @@ impl Cli {
         for (name, value) in &self.env {
             command.env(name, value);
         }
+        // Integration tests must never read or change the real login Keychain.
+        // Set this last so a test's custom environment cannot select Keychain.
+        command.env("APASSY_TEAM_KEY_STORE", "file");
         command
     }
 

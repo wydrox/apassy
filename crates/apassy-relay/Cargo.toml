@@ -55,3 +55,7 @@ unsafe_code = "forbid"
 
 [lints.clippy]
 all = "warn"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Device keys in the login Keychain. The file store is used for all tests.
+security-framework = "=3.7.0"
