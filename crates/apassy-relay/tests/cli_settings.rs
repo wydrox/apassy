@@ -2,7 +2,7 @@
 
 mod cli_support;
 
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use cli_support::*;
 use serde_json::{Value, json};
@@ -13,6 +13,202 @@ fn me_member() -> Value {
 
 fn mode(path: &std::path::Path) -> u32 {
     std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+fn write_settings(cli: &Cli, value: Value) -> Vec<u8> {
+    let path = cli.settings_file();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let bytes = serde_json::to_vec(&value).unwrap();
+    std::fs::write(&path, &bytes).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    bytes
+}
+
+fn selected_settings(cli: &Cli, relay: &str) {
+    write_settings(
+        cli,
+        json!({
+            "version": 2, "current": "t_abcdefgh23",
+            "teams": {"t_abcdefgh23": {"relay_url": relay, "member_token": MEMBER_TOKEN}}
+        }),
+    );
+}
+
+#[test]
+fn selected_team_refuses_a_token_for_another_team_before_any_request() {
+    for selector in [None, Some("flag"), Some("env")] {
+        let mock = Mock::always(200, me_member());
+        let cli = Cli::new();
+        selected_settings(&cli, &mock.url);
+        let token = format!("apassy_mbr_t_bcdefgh234_{}", "a".repeat(64));
+        let mut cli = cli.with("APASSY_TEAM_TOKEN", &token);
+        let args = if selector == Some("flag") {
+            vec!["me", "--team", "t_abcdefgh23"]
+        } else {
+            vec!["me"]
+        };
+        if selector == Some("env") {
+            cli = cli.with("APASSY_TEAM", "t_abcdefgh23");
+        }
+        let output = cli.run(&args, None);
+        assert_eq!(
+            code(&output),
+            2,
+            "selector={selector:?}: {}",
+            text(&output.stderr)
+        );
+        assert!(mock.requests().is_empty());
+        assert!(!text(&output.stderr).contains(&token));
+    }
+}
+
+#[test]
+fn an_explicit_team_refuses_a_team_less_environment_token() {
+    for flag in [true, false] {
+        let mock = Mock::always(200, me_member());
+        let cli = Cli::new();
+        selected_settings(&cli, &mock.url);
+        let mut cli = cli.with("APASSY_TEAM_TOKEN", MEMBER_TOKEN);
+        let args = if flag {
+            vec!["me", "--team", "t_abcdefgh23"]
+        } else {
+            vec!["me"]
+        };
+        if !flag {
+            cli = cli.with("APASSY_TEAM", "t_abcdefgh23");
+        }
+        let output = cli.run(&args, None);
+        assert_eq!(code(&output), 2, "{}", text(&output.stderr));
+        assert!(mock.requests().is_empty());
+    }
+}
+
+#[test]
+fn selected_team_refuses_a_different_environment_relay_before_any_request() {
+    let saved = Mock::always(200, me_member());
+    let other = Mock::always(200, me_member());
+    let cli = Cli::new();
+    selected_settings(&cli, &saved.url);
+    let output = cli.with("APASSY_RELAY_URL", &other.url).run(&["me"], None);
+    assert_eq!(code(&output), 2, "{}", text(&output.stderr));
+    assert!(saved.requests().is_empty());
+    assert!(other.requests().is_empty());
+}
+
+#[test]
+fn version_one_team_scoped_token_migrates_without_a_network_request() {
+    let mock = Mock::always(200, me_member());
+    let cli = Cli::new();
+    let token = format!("apassy_mbr_t_abcdefgh23_{}", "a".repeat(64));
+    write_settings(
+        &cli,
+        json!({"version":1,"relay_url":mock.url,"member_token":token}),
+    );
+    let output = cli.run(&["team", "list"], None);
+    assert_eq!(code(&output), 0, "{}", text(&output.stderr));
+    assert!(text(&output.stdout).contains("t_abcdefgh23"));
+    assert!(mock.requests().is_empty());
+    let migrated: Value =
+        serde_json::from_slice(&std::fs::read(cli.settings_file()).unwrap()).unwrap();
+    assert_eq!(migrated["version"], 2);
+    assert_eq!(migrated["teams"]["t_abcdefgh23"]["member_token"], token);
+
+    // The default selection must use the offline migration, too.
+    let me = cli.run(&["me"], None);
+    assert_eq!(code(&me), 0, "{}", text(&me.stderr));
+    assert_eq!(mock.requests().len(), 1);
+    assert_eq!(
+        mock.requests()[0].header("authorization"),
+        Some(format!("Bearer {token}").as_str())
+    );
+}
+
+#[test]
+fn failed_version_one_migration_archives_exact_bytes_and_continues_with_empty_v2() {
+    for relay_result in ["network", "401", "missing_team", "invalid_url", "bad_json"] {
+        let mock = Mock::start(move |_, _| match relay_result {
+            "401" => err(401, "unauthenticated", "Refused."),
+            "bad_json" => raw(200, "not json"),
+            _ => ok(
+                json!({"team":"T","kind":"member","member_id":1,"member_name":"olga","role":"owner"}),
+            ),
+        });
+        let relay = match relay_result {
+            "network" => dead_url(),
+            "invalid_url" => "http://relay.example".to_owned(),
+            _ => mock.url.clone(),
+        };
+        let cli = Cli::new();
+        let original = write_settings(
+            &cli,
+            json!({"version":1,"relay_url":relay,"member_token":MEMBER_TOKEN}),
+        );
+        let inode = std::fs::metadata(cli.settings_file()).unwrap().ino();
+        std::fs::set_permissions(cli.settings_file(), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        let dir = cli.settings_file().parent().unwrap().to_owned();
+        let previous = dir.join("settings.v1.json");
+        let numbered = relay_result == "network";
+        if numbered {
+            std::fs::write(&previous, b"previous archive").unwrap();
+        }
+        let output = cli.run(&["team", "list"], None);
+        assert_eq!(
+            code(&output),
+            0,
+            "case={relay_result}: {}",
+            text(&output.stderr)
+        );
+        let archive = dir.join(if numbered {
+            "settings.v1.1.json"
+        } else {
+            "settings.v1.json"
+        });
+        assert_eq!(std::fs::read(&archive).unwrap(), original);
+        assert_eq!(std::fs::metadata(&archive).unwrap().ino(), inode);
+        assert_eq!(mode(&archive), 0o600);
+        if numbered {
+            assert_eq!(std::fs::read(previous).unwrap(), b"previous archive");
+        }
+        let settings: Value =
+            serde_json::from_slice(&std::fs::read(cli.settings_file()).unwrap()).unwrap();
+        assert_eq!(settings["version"], 2);
+        assert_eq!(settings["teams"], json!({}));
+        assert!(settings["current"].is_null());
+        let stderr = text(&output.stderr);
+        assert_eq!(stderr.matches("warning:").count(), 1);
+        assert!(stderr.contains(archive.to_str().unwrap()));
+        assert!(!stderr.contains(MEMBER_TOKEN));
+        let again = cli.run(&["team", "list"], None);
+        assert_eq!(code(&again), 0);
+        assert!(text(&again.stderr).is_empty());
+        assert!(!dir.join("settings.v1.2.json").exists());
+    }
+}
+
+#[test]
+fn matching_environment_team_and_normalized_relay_can_override_a_selected_entry() {
+    for flag in [true, false] {
+        let mock = Mock::always(200, me_member());
+        let cli = Cli::new();
+        selected_settings(&cli, &format!("{}/", mock.url));
+        let token = format!("apassy_mbr_t_abcdefgh23_{}", "b".repeat(64));
+        let cli = cli
+            .with("APASSY_TEAM_TOKEN", &token)
+            .with("APASSY_RELAY_URL", &format!(" {}/ ", mock.url));
+        let args = if flag {
+            vec!["me", "--team", "t_abcdefgh23"]
+        } else {
+            vec!["me"]
+        };
+        let output = cli.run(&args, None);
+        assert_eq!(code(&output), 0, "{}", text(&output.stderr));
+        assert_eq!(mock.requests().len(), 1);
+        assert_eq!(
+            mock.requests()[0].header("authorization"),
+            Some(format!("Bearer {token}").as_str())
+        );
+    }
 }
 
 #[test]
@@ -66,6 +262,7 @@ fn later_commands_read_the_saved_settings() {
     let cli = Cli::new();
     let init = cli.run(&["init", "--relay", &mock.url], Some(MEMBER_TOKEN));
     assert_eq!(code(&init), 0);
+    assert_eq!(code(&cli.run(&["team", "use", "t_abcdefgh23"], None)), 0);
     let me = cli.run(&["me"], None);
     assert_eq!(code(&me), 0, "{}", text(&me.stderr));
     let seen = mock.requests();
@@ -77,13 +274,16 @@ fn later_commands_read_the_saved_settings() {
 }
 
 #[test]
-fn variables_win_over_the_file() {
+fn variables_supply_credentials_when_no_team_is_selected() {
     let from_file = Mock::always(200, me_member());
     let from_env = Mock::always(200, me_member());
     let cli = Cli::new();
-    assert_eq!(
-        code(&cli.run(&["init", "--relay", &from_file.url], Some(MEMBER_TOKEN))),
-        0
+    write_settings(
+        &cli,
+        json!({
+            "version": 2, "current": null,
+            "teams": {"t_abcdefgh23": {"relay_url": from_file.url, "member_token": MEMBER_TOKEN}}
+        }),
     );
     let other = "apassy_mbr_ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
     let cli = cli
@@ -91,29 +291,12 @@ fn variables_win_over_the_file() {
         .with("APASSY_TEAM_TOKEN", other);
     let output = cli.run(&["me"], None);
     assert_eq!(code(&output), 0, "{}", text(&output.stderr));
-    assert_eq!(
-        from_file.requests().len(),
-        1,
-        "only init went to the file's relay"
-    );
+    assert!(from_file.requests().is_empty());
     let seen = from_env.requests();
     assert_eq!(seen.len(), 1);
     assert_eq!(
         seen[0].header("authorization"),
         Some(format!("Bearer {other}").as_str())
-    );
-    // A partial override: the URL from the variable, the token from the file.
-    let cli = Cli {
-        home: cli.home,
-        env: vec![("APASSY_RELAY_URL".into(), from_env.url.clone())],
-        xdg: true,
-    };
-    let output = cli.run(&["me"], None);
-    assert_eq!(code(&output), 0, "{}", text(&output.stderr));
-    let seen = from_env.requests();
-    assert_eq!(
-        seen[1].header("authorization"),
-        Some(format!("Bearer {MEMBER_TOKEN}").as_str())
     );
 }
 
@@ -125,6 +308,7 @@ fn an_empty_variable_counts_as_unset() {
         code(&cli.run(&["init", "--relay", &mock.url], Some(MEMBER_TOKEN))),
         0
     );
+    assert_eq!(code(&cli.run(&["team", "use", "t_abcdefgh23"], None)), 0);
     let cli = cli
         .with("APASSY_RELAY_URL", "")
         .with("APASSY_TEAM_TOKEN", "  ");
@@ -213,6 +397,7 @@ fn a_loose_file_is_reported_and_init_tightens_it() {
         code(&cli.run(&["init", "--relay", &mock.url], Some(MEMBER_TOKEN))),
         0
     );
+    assert_eq!(code(&cli.run(&["team", "use", "t_abcdefgh23"], None)), 0);
     let file = cli.settings_file();
     std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
     let output = cli.run(&["me"], None);
@@ -246,7 +431,7 @@ fn plain_http_is_refused_except_for_loopback() {
 }
 
 #[test]
-fn version_one_identifies_the_team_and_migrates_only_on_the_next_save() {
+fn version_one_identifies_the_team_and_saves_v2_on_first_load() {
     let mock = Mock::always(200, me_member());
     let cli = Cli::new();
     let path = cli.settings_file();
@@ -261,10 +446,11 @@ fn version_one_identifies_the_team_and_migrates_only_on_the_next_save() {
     let listed = cli.run(&["team", "list"], None);
     assert_eq!(code(&listed), 0, "{}", text(&listed.stderr));
     assert!(text(&listed.stdout).contains("t_abcdefgh23"));
+    let migrated = std::fs::read(&path).unwrap();
+    assert_ne!(migrated, legacy);
     assert_eq!(
-        std::fs::read(&path).unwrap(),
-        legacy,
-        "a read must not save the migration"
+        serde_json::from_slice::<Value>(&migrated).unwrap()["version"],
+        2
     );
     let requests = mock.requests();
     assert_eq!(requests.len(), 1);
@@ -279,7 +465,12 @@ fn version_one_identifies_the_team_and_migrates_only_on_the_next_save() {
 
     let selected = cli.run(&["me", "--team", "t_abcdefgh23"], None);
     assert_eq!(code(&selected), 0, "{}", text(&selected.stderr));
-    assert_eq!(std::fs::read(&path).unwrap(), legacy);
+    assert_eq!(std::fs::read(&path).unwrap(), migrated);
+    assert_eq!(
+        mock.requests().len(),
+        2,
+        "only one migration lookup and one me request"
+    );
 
     let saved = cli.run(&["team", "use", "t_abcdefgh23"], None);
     assert_eq!(code(&saved), 0, "{}", text(&saved.stderr));

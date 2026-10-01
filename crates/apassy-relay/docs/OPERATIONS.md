@@ -427,7 +427,22 @@ Terminal prompts, desktop dialogs, and the host service still work. See section 
 
 Each run that passes the hard rules waits for the host of the owner. A run cannot start without a release. The relay cannot approve a run because it does not hold the keys.
 
-Use the owner token on the machine that holds `keys.json`. Save the token with `apassy-team init`. To start the host on a terminal, use:
+Use the key-holder device of the selected team on the machine that holds `keys.json`.
+For a legacy team, enroll the device with the procedure in section 9.
+Use `apassy-team team use TEAM_ID` to select the enrolled team.
+Replace `TEAM_ID` with the team ID from the enrollment output.
+After enrollment, make a new agent token:
+
+```sh
+apassy-team agent create NAME --days 30 > agent-token-file
+```
+
+Replace `NAME` with the name of the agent.
+Use the new token for the agent.
+Legacy `apassy_agt_` tokens without a team ID stop at the member-token deadline of the team.
+Enrollment does not extend this deadline.
+
+To start the host on a terminal, use:
 
 ```sh
 apassy-team host
@@ -439,6 +454,20 @@ To use desktop dialogs in the foreground, use:
 apassy-team host --dialog
 ```
 
+After an update to `apassy-team`, macOS can show one Keychain prompt for access to the device key.
+Before you start the background host, run `apassy-team me` in a terminal.
+If macOS shows this Keychain prompt, select **Always Allow**.
+The background host cannot run before you select **Always Allow**.
+
+To use file storage on macOS, set `APASSY_TEAM_KEY_STORE=file` before you make or enroll the device.
+The CLI saves the key in `device-<team id>.key` next to `settings.json`, with mode 0600.
+Use this variable for all foreground commands with the device.
+The CLI does not copy a key from the Keychain to the file store.
+
+The foreground host can also use file storage.
+For a host service with file storage, set `APASSY_TEAM_KEY_STORE=file` in the service environment before the host starts.
+A shell setting does not set the service environment.
+
 To install and start the host as a user service, use:
 
 ```sh
@@ -446,7 +475,10 @@ apassy-team host install
 apassy-team host status
 ```
 
-The service needs the same relay URL and owner token in `settings.json` as the shell. Installation refuses different shell settings. The service file contains no token. A service cannot use `APASSY_EDGE_SECRET` from the shell. Use a relay endpoint that does not need this variable.
+The service must use the same saved relay URL and selected team as the shell.
+The service must also use the key-holder device key.
+Installation stops with different shell settings. The service file contains no token.
+A service cannot use `APASSY_EDGE_SECRET` from the shell. Use a relay endpoint that operates without this variable.
 
 The service starts at login and uses desktop dialogs. On macOS, it uses a LaunchAgent. On Linux, it uses a systemd user service. Keep the desktop session open for approval dialogs.
 

@@ -88,20 +88,25 @@ apassy-team team use TEAM_ID
 apassy-team --team TEAM_ID me
 APASSY_TEAM=TEAM_ID apassy-team me</code></pre>
       <p>Replace <code>TEAM_ID</code> with the team ID. <code>--team ID</code> selects a team for a member command. Otherwise, <code>APASSY_TEAM</code> selects it, then the current team. In <code>create --team NAME</code>, <code>--team</code> gives the new team&#x27;s name.</p>
-      <p>On macOS, the login Keychain stores the device private key. Its service is <code>apassy-team</code>. Its account is <code>&lt;relay host&gt; &lt;team id&gt;</code>. On other systems, <code>device-&lt;team id&gt;.key</code> stores the key next to <code>settings.json</code>, with mode 0600. The CLI never prints this key or puts it in <code>settings.json</code>.</p>
-      <p><code>APASSY_TEAM_KEY_STORE=file</code> is a test-only switch. Tests must not use the real login Keychain.</p>
-      <p><code>create</code>, <code>join</code>, <code>device link</code>, and <code>device enroll</code> refuse an existing key or settings entry for that team. Do not remove a saved key to bypass this check. For a second member of the same team on macOS, use another machine. Another configuration directory still uses the same Keychain account for that relay and team.</p>
+      <p>On macOS, the login Keychain stores the device private key. Its service is <code>apassy-team</code>. Its account is <code>&lt;relay host&gt; &lt;team id&gt; &lt;settings dir&gt;</code>. The settings directory is an absolute path. On other systems, <code>device-&lt;team id&gt;.key</code> stores the key next to <code>settings.json</code>, with mode 0600. The CLI never prints this key or puts it in <code>settings.json</code>.</p>
+      <p>To use file storage on macOS, set <code>APASSY_TEAM_KEY_STORE=file</code> before you make or enroll the device. The CLI saves the key in <code>device-&lt;team id&gt;.key</code> next to <code>settings.json</code>, with mode 0600. Use this variable for all foreground commands with the device. The CLI does not copy a key from the Keychain to the file store. Tests must not use the real login Keychain.</p>
+      <p><code>create</code>, <code>join</code>, and <code>device link</code> stop if the team has a key or settings entry in this directory. Do not remove a saved key to bypass this check. For a different member of the same team on macOS, use a different <code>XDG_CONFIG_HOME</code>. Each configuration directory uses a different Keychain account for the same relay and team.</p>
     </section>
     <section aria-labelledby="enroll-a-legacy-member">
       <h2 id="enroll-a-legacy-member">Enroll a legacy member</h2>
-      <p>A legacy team from <code>apassy-relay init</code> has an owner token. Legacy member tokens expire 14 days after team creation or migration to server schema version 3. Enroll a device before this period ends. Use an unused configuration directory. Do not use a directory where <code>init</code> saved this team&#x27;s settings.</p>
+      <p>A legacy team from <code>apassy-relay init</code> has an owner token. Legacy member tokens expire 14 days after team creation or migration to server schema version 3. Enroll a device before this period ends. Use a configuration directory without an enrolled device for this team. <code>init</code> and <code>device enroll</code> do not change the current team. Keep <code>APASSY_TEAM_TOKEN</code> set until enrollment succeeds.</p>
       <pre><code class="language-sh">export XDG_CONFIG_HOME=&quot;$HOME/.config/apassy-device&quot;
 export APASSY_RELAY_URL=https://apassy-relay.wyderka.cc
 export APASSY_TEAM_TOKEN=&quot;$(cat owner-token-file)&quot;
 apassy-team device enroll --name &quot;Owner laptop&quot;
 unset APASSY_TEAM_TOKEN
+apassy-team team use TEAM_ID
 apassy-team me</code></pre>
+      <p>Replace <code>TEAM_ID</code> with the team ID from the enrollment output. If enrollment stops before the result is known, run <code>apassy-team device enroll</code> again. Keep the same configuration directory for the retry. The CLI uses the same saved key for the retry. If the enrollment request returns an HTTP error, the CLI removes the new key. <code>device enroll</code> stops if this directory has an enrolled device for the team.</p>
       <p>Enrollment removes the member token from the settings. The relay invalidates that member&#x27;s old token. The first device becomes the key holder only for the sole live owner when no key holder exists. If item keys already exist, copy <code>keys.json</code> into the new configuration directory before you start the host. Keep the new <code>XDG_CONFIG_HOME</code> for later commands and the host service.</p>
+      <p>After enrollment, make a new agent token:</p>
+      <pre><code class="language-sh">apassy-team agent create NAME --days 30 &gt; agent-token-file</code></pre>
+      <p>Replace <code>NAME</code> with the name of the agent. Use the new token for the agent. Legacy <code>apassy_agt_</code> tokens without a team ID stop at the member-token deadline of the team. Enrollment does not extend this deadline.</p>
     </section>
     <section aria-labelledby="add-members">
       <h2 id="add-members">Add members</h2>
@@ -157,7 +162,7 @@ apassy-team device confirm LINK_ID --words &quot;W1 W2&quot;</code></pre>
     </section>
     <section aria-labelledby="let-agents-use-them">
       <h2 id="let-agents-use-them">Let agents use them</h2>
-      <p>Owner or member: make an agent token file. Replace <code>NAME</code> with the agent&#x27;s name.</p>
+      <p>Owner or member: make an agent token file. Replace <code>NAME</code> with the name of the agent.</p>
       <pre><code class="language-sh">apassy-team agent create NAME --days 30 &gt; agent-token-file</code></pre>
       <p>Keep the token file private. Read the token into <code>APASSY_TOKEN</code>. Keep the key-holder host online before you start a run. Replace <code>1</code> with the item ID:</p>
       <pre><code class="language-sh">APASSY_TOKEN=&quot;$(cat agent-token-file)&quot; apassy-team run --items 1 \
@@ -182,6 +187,8 @@ apassy-team device confirm LINK_ID --words &quot;W1 W2&quot;</code></pre>
     </section>
     <section aria-labelledby="keep-the-host-running">
       <h2 id="keep-the-host-running">Keep the host running</h2>
+      <p>After an update to <code>apassy-team</code>, macOS can show one Keychain prompt for access to the device key. Before you start the background host, run <code>apassy-team me</code> in a terminal. If macOS shows this Keychain prompt, select <strong>Always Allow</strong>. The background host cannot run before you select <strong>Always Allow</strong>.</p>
+      <p>The foreground host can also use file storage. For a host service with file storage, set <code>APASSY_TEAM_KEY_STORE=file</code> in the service environment before the host starts. A shell setting does not set the service environment.</p>
       <p>Owner: install the host service on the key-holder machine with <code>keys.json</code>:</p>
       <pre><code class="language-sh">apassy-team host install
 apassy-team host status</code></pre>

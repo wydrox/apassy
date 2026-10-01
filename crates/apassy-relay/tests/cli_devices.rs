@@ -294,7 +294,7 @@ fn join_resume_uses_the_same_key_and_waits_five_seconds_between_pending_attempts
         Some(INVITE),
     ));
     let key = read_key(&key_path(&cli)).public_key_b64();
-    let output = cli.run(&["join", "--resume"], None);
+    let output = cli.run(&["--team", TEAM, "join", "--resume"], None);
     successful(&output);
     assert!(format!("{}{}", text(&output.stdout), text(&output.stderr)).contains("Joined"));
     let times = attempts.lock().unwrap();
@@ -309,6 +309,7 @@ fn join_resume_uses_the_same_key_and_waits_five_seconds_between_pending_attempts
         1
     );
     assert!(settings(&cli)["teams"][TEAM]["member_token"].is_null());
+    assert_eq!(settings(&cli)["current"], TEAM);
 }
 
 #[test]
@@ -396,7 +397,7 @@ fn a_member_token_entry_enrolls_and_keeps_the_token_until_the_device_exists() {
         json!({"version":2,"current":TEAM,"teams":{TEAM:{"relay_url":relay,
         "team":"Family","member":"alice","device_id":device,"member_token":MEMBER_TOKEN}}})
     };
-    // The relay fails: the token stays in the file, and the key is kept for a resume.
+    // An HTTP error leaves the token in the file and removes the key.
     let failing = Mock::start(|request, _| {
         if request.url == "/v1/me" {
             ok(me())
@@ -410,7 +411,7 @@ fn a_member_token_entry_enrolls_and_keeps_the_token_until_the_device_exists() {
     assert_ne!(code(&output), 0);
     assert_eq!(settings(&cli)["teams"][TEAM]["member_token"], MEMBER_TOKEN);
     assert!(settings(&cli)["teams"][TEAM]["device_id"].is_null());
-    assert!(key_path(&cli).exists());
+    assert!(!key_path(&cli).exists());
     // The relay enrolls: the device is saved and the token leaves the file.
     let working = Mock::start(|request, _| {
         if request.url == "/v1/me" {
@@ -918,7 +919,7 @@ fn a_safety_mismatch_cannot_be_bypassed_with_resume_without_resupplying_the_code
     assert_eq!(code(&output), 2);
     let before = mock.requests().len();
     let key = std::fs::read(key_path(&cli)).unwrap();
-    let output = cli.run(&["join", "--resume"], None);
+    let output = cli.run(&["--team", TEAM, "join", "--resume"], None);
     assert_eq!(code(&output), 2, "{}", text(&output.stderr));
     assert_eq!(
         mock.requests().len(),
@@ -936,6 +937,11 @@ fn a_safety_mismatch_cannot_be_bypassed_with_resume_without_resupplying_the_code
     let recovery: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(recovery["blocked"], true);
     assert_eq!(settings(&cli)["teams"][TEAM]["safety_verified"], false);
+    let output = cli.run(&["--team", TEAM, "device", "enroll"], None);
+    assert_eq!(code(&output), 2, "{}", text(&output.stderr));
+    assert!(text(&output.stderr).contains("safety check"));
+    assert_eq!(mock.requests().len(), before);
+    assert_eq!(std::fs::read(key_path(&cli)).unwrap(), key);
 }
 
 #[test]
@@ -964,14 +970,14 @@ fn an_unknown_join_result_can_resume_with_the_original_code_and_saved_key() {
     assert_eq!(settings(&cli)["teams"][TEAM]["safety_verified"], false);
     let key = std::fs::read(key_path(&cli)).unwrap();
     let requests_before = mock.requests().len();
-    let output = cli.run(&["join", "--resume"], None);
+    let output = cli.run(&["--team", TEAM, "join", "--resume"], None);
     assert_eq!(code(&output), 2);
     assert_eq!(
         mock.requests().len(),
         requests_before,
         "the original code is required before HTTP"
     );
-    let output = cli.run(&["join", "--resume"], Some(INVITE));
+    let output = cli.run(&["--team", TEAM, "join", "--resume"], Some(INVITE));
     successful(&output);
     assert_eq!(std::fs::read(key_path(&cli)).unwrap(), key);
     let posts = mock
@@ -1019,7 +1025,7 @@ fn a_failed_recovery_probe_preserves_the_key_for_a_later_process_with_the_origin
     let before = std::fs::read(key_path(&cli)).unwrap();
     assert_eq!(settings(&cli)["teams"][TEAM]["safety_verified"], false);
     assert_eq!(mock.requests().len(), 2);
-    successful(&cli.run(&["join", "--resume"], Some(INVITE)));
+    successful(&cli.run(&["--team", TEAM, "join", "--resume"], Some(INVITE)));
     assert_eq!(std::fs::read(key_path(&cli)).unwrap(), before);
     let posts = mock
         .requests()
@@ -1136,4 +1142,238 @@ fn host_stops_when_sign_in_after_a_401_refuses_the_device() {
     assert_eq!(code(&output), 4, "{}", text(&output.stderr));
     assert!(text(&output.stderr).contains("device was revoked"));
     assert_eq!(mock.requests().len(), 5);
+}
+
+#[test]
+fn enroll_http_errors_remove_the_key_and_allow_a_retry() {
+    for status in [200, 400, 401, 403, 404, 409, 429, 500, 503] {
+        let mock = Mock::start(move |request, index| {
+            if request.url == "/v1/me" {
+                ok(me())
+            } else if index == 1 {
+                if status == 200 {
+                    err(200, "relay_error", "The relay refused enrollment.")
+                } else {
+                    raw(status, "HTTP error without an envelope")
+                }
+            } else {
+                ok(device_view())
+            }
+        });
+        let cli = Cli::new();
+        write_settings(
+            &cli,
+            json!({"version":2,"current":TEAM,"teams":{TEAM:{
+            "relay_url":mock.url,"member_token":MEMBER_TOKEN,"device_id":null}}}),
+        );
+        let output = cli.run(&["device", "enroll", "--name", "Laptop"], None);
+        assert_eq!(code(&output), 4, "HTTP {status}: {}", text(&output.stderr));
+        assert!(
+            !key_path(&cli).exists(),
+            "HTTP {status} must remove the key"
+        );
+        assert_eq!(settings(&cli)["teams"][TEAM]["member_token"], MEMBER_TOKEN);
+        successful(&cli.run(&["device", "enroll", "--name", "Laptop"], None));
+        assert_eq!(settings(&cli)["teams"][TEAM]["device_id"], 3);
+    }
+}
+
+#[test]
+fn enroll_resumes_a_saved_key_before_using_an_expired_member_token() {
+    let mock = Mock::start(|request, _| {
+        auth_answer(request)
+            .unwrap_or_else(|| err(401, "unauthenticated", "The member token has ended."))
+    });
+    let cli = Cli::new();
+    let key = seed_device(&cli, &mock.url);
+    let mut saved = settings(&cli);
+    saved["teams"][TEAM]["device_id"] = Value::Null;
+    saved["teams"][TEAM]["member_token"] = json!(MEMBER_TOKEN);
+    write_settings(&cli, saved);
+    let before = std::fs::read(key_path(&cli)).unwrap();
+    let output = cli.run(&["device", "enroll"], None);
+    successful(&output);
+    assert!(text(&output.stdout).contains("Enrolled"));
+    assert_eq!(std::fs::read(key_path(&cli)).unwrap(), before);
+    assert_eq!(
+        mock.requests()
+            .iter()
+            .map(|r| r.url.as_str())
+            .collect::<Vec<_>>(),
+        ["/v1/auth/challenge", "/v1/auth/token"]
+    );
+    assert_eq!(
+        mock.requests()[0].json()["public_key"],
+        key.public_key_b64()
+    );
+    assert_eq!(settings(&cli)["teams"][TEAM]["device_id"], 3);
+    assert!(settings(&cli)["teams"][TEAM]["member_token"].is_null());
+}
+
+#[test]
+fn enroll_retries_an_unknown_device_with_the_same_saved_key() {
+    let mock = Mock::start(|request, _| match request.url.as_str() {
+        "/v1/auth/challenge" => err(401, "unauthenticated", "No such device."),
+        "/v1/me" => ok(me()),
+        "/v1/devices/enroll" => ok(device_view()),
+        _ => err(500, "unexpected", "Unexpected request."),
+    });
+    let cli = Cli::new();
+    let key = seed_device(&cli, &mock.url);
+    let mut saved = settings(&cli);
+    saved["teams"][TEAM]["device_id"] = Value::Null;
+    saved["teams"][TEAM]["member_token"] = json!(MEMBER_TOKEN);
+    write_settings(&cli, saved);
+    let before = std::fs::read(key_path(&cli)).unwrap();
+    successful(&cli.run(&["device", "enroll", "--name", "Laptop"], None));
+    assert_eq!(std::fs::read(key_path(&cli)).unwrap(), before);
+    let requests = mock.requests();
+    assert_eq!(
+        requests.iter().map(|r| r.url.as_str()).collect::<Vec<_>>(),
+        ["/v1/auth/challenge", "/v1/me", "/v1/devices/enroll"]
+    );
+    assert_eq!(requests[2].json()["public_key"], key.public_key_b64());
+}
+
+#[test]
+fn pending_join_and_link_do_not_change_the_current_team() {
+    for link in [false, true] {
+        let mock = Mock::start(|request, _| pending(request));
+        let cli = Cli::new();
+        write_settings(
+            &cli,
+            json!({"version":2,"current":OTHER,"teams":{OTHER:{
+            "relay_url":mock.url,"device_id":9}}}),
+        );
+        let args = if link {
+            vec!["device", "link", "--relay", &mock.url, "--no-wait"]
+        } else {
+            vec!["join", "--relay", &mock.url, "--name", "bob", "--no-wait"]
+        };
+        successful(&cli.run(&args, Some(if link { LINK } else { INVITE })));
+        assert_eq!(settings(&cli)["current"], OTHER);
+        assert!(settings(&cli)["teams"][TEAM]["device_id"].is_null());
+    }
+}
+
+#[test]
+fn enroll_transport_failure_keeps_the_key_for_a_retry() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let relay = format!("http://{}", listener.local_addr().unwrap());
+    let public_keys = Arc::new(Mutex::new(Vec::new()));
+    let seen = public_keys.clone();
+    let thread = std::thread::spawn(move || {
+        for index in 0..5 {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8(head).unwrap();
+            let length = head
+                .lines()
+                .find_map(|line| {
+                    line.split_once(':').and_then(|(name, value)| {
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                })
+                .unwrap_or(0);
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).unwrap();
+            if index == 1 || index == 4 {
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                seen.lock()
+                    .unwrap()
+                    .push(body["public_key"].as_str().unwrap().to_owned());
+            }
+            if index == 1 {
+                continue;
+            } // Connection closes before any HTTP answer.
+            let answer = if index == 2 {
+                err(401, "unauthenticated", "No such device.")
+            } else if index == 4 {
+                ok(device_view())
+            } else {
+                ok(me())
+            };
+            write!(stream, "HTTP/1.1 {} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                answer.status, answer.body.len(), answer.body).unwrap();
+        }
+    });
+    let cli = Cli::new();
+    write_settings(
+        &cli,
+        json!({"version":2,"current":TEAM,"teams":{TEAM:{
+        "relay_url":relay,"member_token":MEMBER_TOKEN,"device_id":null}}}),
+    );
+    let output = cli.run(&["device", "enroll", "--name", "Laptop"], None);
+    assert_eq!(code(&output), 4);
+    assert!(text(&output.stderr).contains("device enroll"));
+    assert!(!text(&output.stderr).contains("join --resume"));
+    let before = std::fs::read(key_path(&cli)).unwrap();
+    assert_eq!(settings(&cli)["teams"][TEAM]["member_token"], MEMBER_TOKEN);
+    successful(&cli.run(&["device", "enroll", "--name", "Laptop"], None));
+    thread.join().unwrap();
+    assert_eq!(std::fs::read(key_path(&cli)).unwrap(), before);
+    let keys = public_keys.lock().unwrap();
+    assert_eq!(keys.len(), 2);
+    assert_eq!(keys[0], keys[1]);
+}
+
+#[test]
+fn a_finished_join_or_link_selects_the_team_only_after_sign_in() {
+    for link in [false, true] {
+        let mock = Mock::start(|request, _| match request.url.as_str() {
+            "/v1/join" | "/v1/devices/link" => pending(request),
+            _ => auth_answer(request).unwrap(),
+        });
+        let cli = Cli::new();
+        write_settings(
+            &cli,
+            json!({"version":2,"current":OTHER,"teams":{OTHER:{
+            "relay_url":mock.url,"device_id":9}}}),
+        );
+        let args = if link {
+            vec!["device", "link", "--relay", &mock.url]
+        } else {
+            vec!["join", "--relay", &mock.url, "--name", "bob"]
+        };
+        successful(&cli.run(&args, Some(if link { LINK } else { INVITE })));
+        assert_eq!(settings(&cli)["current"], TEAM);
+        assert_eq!(settings(&cli)["teams"][TEAM]["device_id"], 3);
+        assert!(
+            mock.requests()
+                .iter()
+                .any(|request| request.url == "/v1/auth/token")
+        );
+    }
+}
+
+#[test]
+fn init_and_enroll_do_not_change_the_current_team() {
+    let mock = Mock::start(|request, _| {
+        if request.url == "/v1/me" {
+            ok(me())
+        } else {
+            ok(device_view())
+        }
+    });
+    let cli = Cli::new();
+    write_settings(
+        &cli,
+        json!({"version":2,"current":OTHER,"teams":{OTHER:{
+        "relay_url":mock.url,"device_id":9}}}),
+    );
+    successful(&cli.run(&["init", "--relay", &mock.url], Some(MEMBER_TOKEN)));
+    assert_eq!(settings(&cli)["current"], OTHER);
+    successful(&cli.run(&["--team", TEAM, "device", "enroll"], None));
+    assert_eq!(settings(&cli)["current"], OTHER);
+    assert_eq!(settings(&cli)["teams"][TEAM]["device_id"], 3);
 }

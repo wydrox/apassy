@@ -46,6 +46,8 @@ pub struct RawReply {
 /// reached the relay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawError {
+    /// HTTP status when the relay answered but the body could not be read.
+    pub status: Option<u16>,
     pub message: String,
     /// False when the request certainly did not reach the relay (no route, refused
     /// connection, failed TLS handshake). True when it may have (a timeout or a
@@ -211,6 +213,7 @@ impl Client {
                 };
                 let error = error.into_cli();
                 RawError {
+                    status: None,
                     message: error.message,
                     maybe_sent: false,
                     usage: error.code == 2,
@@ -218,6 +221,7 @@ impl Client {
                 }
             })?;
             *self.bearer.lock().map_err(|_| RawError {
+                status: None,
                 message: "Cannot read the access token.".into(),
                 maybe_sent: false,
                 usage: false,
@@ -245,6 +249,7 @@ impl Client {
             builder = builder.header("Content-Type", "application/json");
         }
         let bearer = self.bearer.lock().map_err(|_| RawError {
+            status: None,
             message: "Cannot read the access token.".into(),
             maybe_sent: false,
             usage: false,
@@ -260,12 +265,14 @@ impl Client {
         let request = builder
             .body(body.unwrap_or("").to_owned())
             .map_err(|_| RawError {
+                status: None,
                 message: "The request is not valid (check the tokens and the URL).".to_owned(),
                 maybe_sent: false,
                 usage: false,
                 api: None,
             })?;
         let mut response = Self::agent(timeout).run(request).map_err(|e| RawError {
+            status: None,
             message: format!("Cannot reach the relay: {}", transport_words(&e)),
             maybe_sent: !failed_before_send(&e),
             usage: false,
@@ -273,6 +280,7 @@ impl Client {
         })?;
         let status = response.status().as_u16();
         let text = response.body_mut().read_to_string().map_err(|e| RawError {
+            status: Some(status),
             message: format!("Cannot read the relay answer: {}", transport_words(&e)),
             maybe_sent: true,
             usage: false,

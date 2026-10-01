@@ -72,25 +72,30 @@ Otherwise, `APASSY_TEAM` selects it, then the current team.
 In `create --team NAME`, `--team` gives the new team's name.
 
 On macOS, the login Keychain stores the device private key.
-Its service is `apassy-team`. Its account is `<relay host> <team id>`.
+Its service is `apassy-team`. Its account is `<relay host> <team id> <settings dir>`.
+The settings directory is an absolute path.
 On other systems, `device-<team id>.key` stores the key next to `settings.json`, with mode 0600.
 The CLI never prints this key or puts it in `settings.json`.
 
-`APASSY_TEAM_KEY_STORE=file` is a test-only switch.
+To use file storage on macOS, set `APASSY_TEAM_KEY_STORE=file` before you make or enroll the device.
+The CLI saves the key in `device-<team id>.key` next to `settings.json`, with mode 0600.
+Use this variable for all foreground commands with the device.
+The CLI does not copy a key from the Keychain to the file store.
 Tests must not use the real login Keychain.
 
-`create`, `join`, `device link`, and `device enroll` refuse an existing key or settings entry for that team.
+`create`, `join`, and `device link` stop if the team has a key or settings entry in this directory.
 Do not remove a saved key to bypass this check.
-For a second member of the same team on macOS, use another machine.
-Another configuration directory still uses the same Keychain account for that relay and team.
+For a different member of the same team on macOS, use a different `XDG_CONFIG_HOME`.
+Each configuration directory uses a different Keychain account for the same relay and team.
 
 ## Enroll a legacy member
 
 A legacy team from `apassy-relay init` has an owner token.
 Legacy member tokens expire 14 days after team creation or migration to server schema version 3.
 Enroll a device before this period ends.
-Use an unused configuration directory.
-Do not use a directory where `init` saved this team's settings.
+Use a configuration directory without an enrolled device for this team.
+`init` and `device enroll` do not change the current team.
+Keep `APASSY_TEAM_TOKEN` set until enrollment succeeds.
 
 ```sh
 export XDG_CONFIG_HOME="$HOME/.config/apassy-device"
@@ -98,14 +103,33 @@ export APASSY_RELAY_URL=https://apassy-relay.wyderka.cc
 export APASSY_TEAM_TOKEN="$(cat owner-token-file)"
 apassy-team device enroll --name "Owner laptop"
 unset APASSY_TEAM_TOKEN
+apassy-team team use TEAM_ID
 apassy-team me
 ```
+
+Replace `TEAM_ID` with the team ID from the enrollment output.
+If enrollment stops before the result is known, run `apassy-team device enroll` again.
+Keep the same configuration directory for the retry.
+The CLI uses the same saved key for the retry.
+If the enrollment request returns an HTTP error, the CLI removes the new key.
+`device enroll` stops if this directory has an enrolled device for the team.
 
 Enrollment removes the member token from the settings.
 The relay invalidates that member's old token.
 The first device becomes the key holder only for the sole live owner when no key holder exists.
 If item keys already exist, copy `keys.json` into the new configuration directory before you start the host.
 Keep the new `XDG_CONFIG_HOME` for later commands and the host service.
+
+After enrollment, make a new agent token:
+
+```sh
+apassy-team agent create NAME --days 30 > agent-token-file
+```
+
+Replace `NAME` with the name of the agent.
+Use the new token for the agent.
+Legacy `apassy_agt_` tokens without a team ID stop at the member-token deadline of the team.
+Enrollment does not extend this deadline.
 
 ## Add members
 
@@ -266,7 +290,7 @@ The command moves the flag, not the item keys.
 ## Let agents use them
 
 Owner or member: make an agent token file.
-Replace `NAME` with the agent's name.
+Replace `NAME` with the name of the agent.
 
 ```sh
 apassy-team agent create NAME --days 30 > agent-token-file
@@ -316,6 +340,15 @@ With MCP, the agent must run the command with `session.env` from the relay.
 Each MCP run also waits for the key-holder host.
 
 ## Keep the host running
+
+After an update to `apassy-team`, macOS can show one Keychain prompt for access to the device key.
+Before you start the background host, run `apassy-team me` in a terminal.
+If macOS shows this Keychain prompt, select **Always Allow**.
+The background host cannot run before you select **Always Allow**.
+
+The foreground host can also use file storage.
+For a host service with file storage, set `APASSY_TEAM_KEY_STORE=file` in the service environment before the host starts.
+A shell setting does not set the service environment.
 
 Owner: install the host service on the key-holder machine with `keys.json`:
 

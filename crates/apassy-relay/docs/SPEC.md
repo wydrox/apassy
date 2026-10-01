@@ -894,7 +894,7 @@ Settings version 2, `settings.json` (directory 0700, file 0600):
 ```
 
 - A version 1 file (`relay_url`, `member_token`) is read as one team whose id comes from `GET /v1/me`, and written back as version 2 on the next save.
-- The device private key (PKCS#8) of a team: on macOS in the login Keychain (generic password, service `apassy-team`, account `<relay host> <team id>`); on Linux and elsewhere in `device-<team id>.key` next to `settings.json` (base64url, mode 0600). Never in `settings.json`, never printed.
+- The device private key (PKCS#8) of a team: on macOS in the login Keychain (generic password, service `apassy-team`, account `<relay host> <team id> <settings dir>` with an absolute settings directory); on Linux and elsewhere in `device-<team id>.key` next to `settings.json` (base64url, mode 0600). Never in `settings.json`, never printed.
 - **(review)** `create`, `join`, `device link`, and `device enroll` refuse when this machine already has a key or a settings entry for that team (a second key would overwrite the first). To be a second member of the same team on one machine (for example a shared device on the owner's Mac), use another `XDG_CONFIG_HOME`.
 - **(review)** The CLI makes and stores the device key BEFORE it sends a join or a link request. After an error it asks `/v1/auth/challenge` to learn whether the request arrived, and retries with the same key.
 - **(review)** The CLI computes the safety words itself and stops (exit 2) if `Pending.safety` differs.
