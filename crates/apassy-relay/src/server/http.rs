@@ -413,61 +413,41 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request) {
             return;
         }
     };
-    // Charge a known team before a potentially slow agent POST body is read.
-    let authorization = header_value(&request, "Authorization");
-    let token = auth::bearer(authorization.as_deref());
-    let agent_core = if is_agent_path(&path) {
-        token.and_then(|token| hub.for_token(token))
-    } else {
-        None
-    };
-    let _guard = if let Some(core) = &agent_core {
-        match TeamSlotGuard::take(core, now) {
-            Some(guard) => Some(guard),
-            None => {
-                respond_busy(request);
+    // Two endpoints have no bearer: a new team names no team yet, and an invite code
+    // names its team. They need the body to know the team.
+    if matches!(endpoint, Endpoint::TeamCreate | Endpoint::Join) {
+        let body = match read_body(&mut request, &method) {
+            Ok(body) => body,
+            Err(error) => {
+                respond_error(request, &error);
                 return;
             }
-        }
-    } else {
-        None
-    };
-    let body = match read_body(&mut request, &method) {
-        Ok(body) => body,
-        Err(error) => {
-            respond_error(request, &error);
-            return;
-        }
-    };
-    // Two endpoints have no bearer: a new team names no team yet, and an invite code
-    // names its team.
-    match endpoint {
-        Endpoint::TeamCreate => {
-            match team_create(hub, &body, now) {
-                Ok(result) => respond_ok(request, result),
-                Err(error) => respond_error(request, &error),
-            }
-            return;
-        }
-        Endpoint::Join => {
-            let result = parse_body::<JoinRequest>(&body).and_then(|join| {
+        };
+        let result = if endpoint == Endpoint::TeamCreate {
+            team_create(hub, &body, now)
+        } else {
+            parse_body::<JoinRequest>(&body).and_then(|join| {
                 let code = join.code.expose();
                 let core = (TokenKind::of(code) == Some(TokenKind::Invite))
                     .then(|| hub.for_token(code))
                     .flatten()
                     .ok_or_else(admin::invite_invalid)?;
                 admin::join(&core, &join, now)
-            });
-            match result {
-                Ok(result) => respond_ok(request, result),
-                Err(error) => respond_error(request, &error),
-            }
-            return;
+            })
+        };
+        match result {
+            Ok(result) => respond_ok(request, result),
+            Err(error) => respond_error(request, &error),
         }
-        _ => {}
+        return;
     }
     // Every other endpoint: the team comes from the token, before anything is opened.
-    let Some(core) = agent_core.or_else(|| token.and_then(|token| hub.for_token(token))) else {
+    // The token is checked before the body is read and before a slot of the team is
+    // taken, so a caller without a valid token cannot hold a team's slots (team ids are
+    // public).
+    let authorization = header_value(&request, "Authorization");
+    let token = auth::bearer(authorization.as_deref());
+    let Some(core) = token.and_then(|token| hub.for_token(token)) else {
         hub.refusal(
             now,
             "token",
@@ -489,6 +469,24 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request) {
                     &json!({"code": error.code, "path_kind": endpoint_kind(endpoint)}),
                 );
             }
+            respond_error(request, &error);
+            return;
+        }
+    };
+    let _guard = if is_agent_path(&path) {
+        match TeamSlotGuard::take(&core, now) {
+            Some(guard) => Some(guard),
+            None => {
+                respond_busy(request);
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let body = match read_body(&mut request, &method) {
+        Ok(body) => body,
+        Err(error) => {
             respond_error(request, &error);
             return;
         }
