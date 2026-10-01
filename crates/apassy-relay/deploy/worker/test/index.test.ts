@@ -242,6 +242,44 @@ describe("configuration and failures", () => {
   });
 });
 
+describe("sign-in rate limit", () => {
+  for (const path of ["/v1/auth/challenge", "/v1/auth/token"]) {
+    it(`uses AUTH_LIMITER, not CREATE_LIMITER, for POST ${path}`, async () => {
+      const used: string[] = [];
+      const limiter = (name: string, success: boolean) => ({
+        async limit({ key }: { key: string }) {
+          used.push(`${name}:${key}`);
+          return { success };
+        },
+      });
+      const refused = await call(path, { method: "POST", body: "{}", headers: { "cf-connecting-ip": "203.0.113.9" } }, {
+        AUTH_LIMITER: limiter("auth", false),
+        CREATE_LIMITER: limiter("create", true),
+      });
+      assert.equal(refused.status, 429);
+      assert.equal(seen.length, 0);
+      assert.deepEqual(used, ["auth:203.0.113.9"]);
+      used.length = 0;
+      const passed = await call(path, { method: "POST", body: "{}" }, {
+        AUTH_LIMITER: limiter("auth", true),
+        CREATE_LIMITER: limiter("create", false),
+      });
+      assert.equal(passed.status, 201);
+      assert.deepEqual(used, ["auth:unknown"]);
+    });
+  }
+
+  it("uses CREATE_LIMITER for a device link request", async () => {
+    let calls = 0;
+    const response = await call("/v1/devices/link", { method: "POST", body: "{}" }, {
+      CREATE_LIMITER: { async limit() { calls++; return { success: false }; } },
+    });
+    assert.equal(response.status, 429);
+    assert.equal(calls, 1);
+    assert.equal(seen.length, 0);
+  });
+});
+
 describe("creation rate limit", () => {
   for (const path of ["/v1/join", "/v1/teams"]) {
     it(`blocks POST ${path} before the relay`, async () => {

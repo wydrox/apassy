@@ -599,6 +599,6 @@ The binaries are not in git (`deploy/worker/public/dl/` is ignored). Before `wra
 
 The installer refuses a binary whose checksum is not in `SHA256SUMS`. A missing platform is a clear error.
 
-`POST /v1/join` and `POST /v1/teams` have a limit per IP address at the Worker: about 10 a minute (Workers Rate Limiting). Over it, the Worker answers 429 `rate_limited` and the request does not reach the relay. The count is kept in each Cloudflare location and is approximate, so a burst can pass a few more. If the limiter fails, requests go on: the relay checks every code itself.
+`POST /v1/join`, `POST /v1/teams`, and `POST /v1/devices/link` have a limit per IP address at the Worker: about 10 a minute (Workers Rate Limiting). Device sign-in (`POST /v1/auth/challenge` and `/v1/auth/token`) has a looser one, about 60 a minute, because a waiting CLI asks every 5 seconds and several people can share one address. Over it, the Worker answers 429 `rate_limited` and the request does not reach the relay. The count is kept in each Cloudflare location and is approximate, so a burst can pass a few more. If the limiter fails, requests go on: the relay checks every code itself.
 
 A workflow in `.github/workflows/health.yml` checks `/healthz` and `/v1/me` (401) every hour. A failed run is the alert: GitHub notifies the owner of the repository.

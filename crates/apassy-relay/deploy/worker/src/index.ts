@@ -25,6 +25,8 @@ export interface Env {
   RELAY?: RelayService;
   /** A per-IP guard for the unauthenticated creation endpoints. */
   CREATE_LIMITER?: CreateLimiter;
+  /** A looser per-IP guard for device sign-in, which a waiting CLI calls every 5 s. */
+  AUTH_LIMITER?: CreateLimiter;
   /** Static files served without the relay or its edge secret. */
   ASSETS?: AssetService;
 }
@@ -60,6 +62,22 @@ function staticResponse(response: Response, noStore: boolean): Response {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
+// The unauthenticated POST endpoints and their per-IP limiter. Creation (a team, a
+// join, a device link) is rare; sign-in is frequent (a waiting CLI asks every 5 s).
+function limiterFor(path: string, env: Env): CreateLimiter | undefined {
+  switch (path) {
+    case "/v1/join":
+    case "/v1/teams":
+    case "/v1/devices/link":
+      return env.CREATE_LIMITER;
+    case "/v1/auth/challenge":
+    case "/v1/auth/token":
+      return env.AUTH_LIMITER;
+    default:
+      return undefined;
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     // Check the raw path before URL parsing removes dot segments or backslashes.
@@ -83,21 +101,20 @@ export default {
       return staticResponse(await env.ASSETS.fetch(assetRequest), noStore);
     }
 
-    if (request.method === "POST" && (url.pathname === "/v1/join" || url.pathname === "/v1/teams")) {
-      // Fail open if the binding is absent or fails: the relay itself checks
-      // codes; this limit is a guard against floods, not an authorization check.
-      if (env.CREATE_LIMITER) {
-        try {
-          const { success } = await env.CREATE_LIMITER.limit({ key: request.headers.get("cf-connecting-ip") ?? "unknown" });
-          if (!success) {
-            return new Response('{"ok":false,"error":{"code":"rate_limited","message":"Too many requests. Try again in a minute."}}', {
-              status: 429,
-              headers: { "content-type": "application/json", "cache-control": "no-store", "retry-after": "60" },
-            });
-          }
-        } catch {
-          // Continue to the relay when the flood guard is unavailable.
+    const limiter = request.method === "POST" ? limiterFor(url.pathname, env) : undefined;
+    if (limiter) {
+      // Fail open if the binding fails: the relay itself checks codes, keys, and
+      // signatures; this limit is a guard against floods, not an authorization check.
+      try {
+        const { success } = await limiter.limit({ key: request.headers.get("cf-connecting-ip") ?? "unknown" });
+        if (!success) {
+          return new Response('{"ok":false,"error":{"code":"rate_limited","message":"Too many requests. Try again in a minute."}}', {
+            status: 429,
+            headers: { "content-type": "application/json", "cache-control": "no-store", "retry-after": "60" },
+          });
         }
+      } catch {
+        // Continue to the relay when the flood guard is unavailable.
       }
     }
 
