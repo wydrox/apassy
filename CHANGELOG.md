@@ -4,6 +4,10 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-01
+
+The owner command line, keyboard use, and the install from source.
+
 ### Added
 
 - **Install from source with one command.** `/bin/bash -c "$(curl -fsSL https://apassy.wyderka.cc/install.sh)"` checks the Mac, clones the newest release, builds, signs, and checks it with `scripts/build-app.sh`, and installs it in Applications. It asks before it replaces an app and never uses sudo; `--check` only checks the Mac. On the site, "Coming soon for macOS" opens a note with the command until the signed download is published ([`scripts/install.sh`](scripts/install.sh)).
@@ -109,7 +113,8 @@ The alpha. It was not published.
 - Secrets for agent processes with owner approval: the socket never returns a secret value ([ADR 0006](docs/adr/0006-process-secrets.md)).
 - Plain-language rules and a local bouncer on Laya ([ADR 0007](docs/adr/0007-rules-and-local-bouncer.md)).
 
-[Unreleased]: https://github.com/wydrox/apassy/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/wydrox/apassy/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/wydrox/apassy/releases/tag/v0.3.1
 [0.3.0]: https://github.com/wydrox/apassy/releases/tag/v0.3.0
 [0.2.1]: https://github.com/wydrox/apassy/releases/tag/v0.2.1
 [0.2.0]: https://github.com/wydrox/apassy/releases/tag/v0.2.0
