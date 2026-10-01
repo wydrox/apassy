@@ -10,7 +10,7 @@ use crate::api::{
 use crate::cli::CliError;
 use crate::cli::args::Command;
 use crate::cli::client::{Client, Method};
-use crate::cli::commands::{clean, print_json, table};
+use crate::cli::commands::{clean, fmt_time, print_json, table};
 use crate::cli::devicekey;
 use crate::cli::settings::{self, Settings, TeamSettings};
 use crate::device::DeviceKey;
@@ -46,9 +46,8 @@ pub fn execute(settings: &Settings, command: Command) -> Result<(), CliError> {
                             clean(&d.name),
                             yes(d.current),
                             yes(d.key_holder),
-                            d.created_at.to_string(),
-                            d.last_seen_at
-                                .map_or_else(|| "-".to_owned(), |at| at.to_string()),
+                            fmt_time(d.created_at),
+                            d.last_seen_at.map_or_else(|| "-".to_owned(), fmt_time),
                         ]
                     })
                     .collect(),
@@ -82,7 +81,7 @@ pub fn execute(settings: &Settings, command: Command) -> Result<(), CliError> {
             );
             eprintln!(
                 "The link expires at {}. Compare the safety words before you confirm the device.",
-                link.expires_at
+                fmt_time(link.expires_at)
             );
         }
         Command::DevicePending { json } => {
@@ -98,8 +97,8 @@ pub fn execute(settings: &Settings, command: Command) -> Result<(), CliError> {
                         vec![
                             link.id.to_string(),
                             clean(&link.device_name),
-                            link.created_at.to_string(),
-                            link.expires_at.to_string(),
+                            fmt_time(link.created_at),
+                            fmt_time(link.expires_at),
                         ]
                     })
                     .collect(),
@@ -159,7 +158,7 @@ pub fn execute(settings: &Settings, command: Command) -> Result<(), CliError> {
                             yes(join.shared),
                             clean(&join.grants.join(", ")),
                             clean(&join.invited_by),
-                            join.expires_at.to_string(),
+                            fmt_time(join.expires_at),
                         ]
                     })
                     .collect(),
