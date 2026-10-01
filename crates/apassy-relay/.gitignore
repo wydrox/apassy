@@ -4,3 +4,4 @@
 *.db-*
 .wrangler/
 node_modules/
+deploy/worker/public/dl/
