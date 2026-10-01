@@ -262,6 +262,7 @@ pub fn invite_list(core: &Core) -> RelayResult<Value> {
                     created_at: to_u(row.get(2)?),
                     expires_at: to_u(row.get(3)?),
                     used_by: row.get::<_, Option<i64>>(4)?.map(|v| MemberId(to_u(v))),
+                    used_at: None,
                 })
             })
             .map_err(db)?;

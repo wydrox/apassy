@@ -273,6 +273,9 @@ pub struct Challenge {
     /// base64url, 32 bytes.
     pub nonce: String,
     pub expires_at: u64,
+    /// The relay's own public URL. The client signs ITS configured URL; if this differs,
+    /// the client says so instead of failing with a bare 401.
+    pub origin: String,
 }
 
 /// `POST /v1/auth/token` (edge only): the signed nonce.
@@ -379,7 +382,7 @@ pub struct Pending {
     pub id: u64,
     pub team_id: TeamId,
     pub team: String,
-    /// Two words (`device::safety_words`).
+    /// Two words (`device::safety_words`). The CLI checks them against its own.
     pub safety: String,
     pub expires_at: u64,
     /// The member that made the invite (a join) or that owns the device (a link).
@@ -397,7 +400,6 @@ pub struct JoinView {
     pub shared: bool,
     /// The names of the collections that the invite grants.
     pub grants: Vec<String>,
-    pub safety: String,
     pub invited_by: String,
     pub created_at: u64,
     pub expires_at: u64,
@@ -415,9 +417,17 @@ pub struct JoinConfirmed {
 pub struct LinkView {
     pub id: u64,
     pub device_name: String,
-    pub safety: String,
     pub created_at: u64,
     pub expires_at: u64,
+}
+
+/// `POST /v1/joins/{id}/confirm` and `POST /v1/devices/links/{id}/confirm`: the two
+/// safety words that the joiner or the new device shows. The relay refuses the
+/// confirmation (409) if they differ, so the confirmer must get them from that person.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfirmRequest {
+    pub safety: String,
 }
 
 /// `PUT /v1/members/{id}/role` (owner).
@@ -450,6 +460,9 @@ pub struct InviteView {
     pub created_at: u64,
     pub expires_at: u64,
     pub used_by: Option<MemberId>,
+    /// When a join arrived with this invite (section 23). The invite is used from then on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
