@@ -41,24 +41,30 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[PendingRu
         Some("Runs that wait for you, requests that Apassy blocked, and every agent request."),
         |_| {},
     );
-    notifications_notice(app, ui);
-    access_requests(app, ui);
-    if !pending.is_empty() {
-        ui.label(kit::text("Waiting for you", Font::Headline).color(kit::LABEL));
-        ui.add_space(4.0);
-        for run in pending {
-            approval_card(app, ui, run);
-            ui.add_space(14.0);
+    // Each block can come or go when an agent asks. A scope keeps the IDs below it the
+    // same, so the keyboard focus stays on its control.
+    ui.scope(|ui| notifications_notice(app, ui));
+    ui.scope(|ui| access_requests(app, ui));
+    ui.scope(|ui| {
+        if !pending.is_empty() {
+            ui.label(kit::text("Waiting for you", Font::Headline).color(kit::LABEL));
+            ui.add_space(4.0);
+            for run in pending {
+                ui.push_id(("waiting-run", run.id), |ui| approval_card(app, ui, run));
+                ui.add_space(14.0);
+            }
+            ui.add_space(6.0);
         }
-        ui.add_space(6.0);
-    }
+    });
     let mut tab = app.ui.activity_tab;
-    kit::segmented(
+    let picker = kit::segmented(
         ui,
         "activity-tab",
         &mut tab,
         &[(Tab::Inbox, "Inbox"), (Tab::Requests, "All requests")],
     );
+    ui.ctx()
+        .accesskit_node_builder(picker.id, |node| node.set_label("Activity list"));
     app.ui.activity_tab = tab;
     ui.add_space(12.0);
     match tab {

@@ -34,8 +34,9 @@ ring = { version = "=0.17.14", optional = true, default-features = false }
 # 0.3.0: the zip archive of a 1Password export (.1pux). The version that png already uses.
 flate2 = { version = "=1.1.10", optional = true, default-features = false, features = ["rust_backend"] }
 # Key-memory review F6: safe setrlimit for the core-dump limit of the desktop
-# process. The same version is already in Cargo.lock through tempfile.
-rustix = { version = "=1.1.4", optional = true, default-features = false, features = ["std", "process"] }
+# process. The same version is already in Cargo.lock through tempfile. `termios`:
+# the owner command line turns off the echo when it reads a secret (ADR 0017).
+rustix = { version = "=1.1.4", optional = true, default-features = false, features = ["std", "process", "termios"] }
 
 [[bin]]
 name = "apassy"

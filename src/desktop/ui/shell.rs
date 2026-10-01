@@ -39,29 +39,60 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     sheets(app, &ui.ctx().clone());
 }
 
-/// Window shortcuts. They act only when no sheet, alert, token, or owner check is open.
+/// Window shortcuts. They act only when no sheet, alert, token, or owner check is open,
+/// except ⌘L.
 ///
+/// - ⌘1 to ⌘4: Credentials, Agents, Activity, Learning. ⌘,: Settings.
+/// - ⌘[: back from a credential or an agent to its list.
 /// - ⌘N: a new credential.
 /// - ⌘F: search the credentials.
 /// - ⌘⇧H: show or hide the secret values of the open credential. ⌘H stays the macOS
 ///   shortcut for "Hide Apassy": the app menu takes it before the window.
+/// - ⌘L: lock the vault, also with a sheet open, but not during an owner check.
 ///
-/// Tab and Shift-Tab move the focus. Space or Enter presses the focused control, and
-/// selects the next option of a segmented picker.
+/// Tab and Shift-Tab move the focus, and the page scrolls to it. Space or Return
+/// presses the focused control. Page Up, Page Down, Home, and End scroll the page.
 #[cfg(feature = "vault")]
 fn shortcuts(app: &mut DesktopApp, ctx: &egui::Context) {
     use eframe::egui::{Key, Modifiers};
 
+    if app.owner.check.is_none() && kit::shortcut(ctx, Modifiers::COMMAND, Key::L) {
+        app.lock_vault(Some(ctx));
+        return;
+    }
     let busy = app.ui.sheet.is_some()
         || app.pending_delete
         || app.owner_ui.fresh_token.is_some()
-        || app.owner.check.is_some();
+        || app.owner.check.is_some()
+        || app.learning.inspected.is_some();
     if busy {
         return;
+    }
+    let views = [
+        (Key::Num1, OwnerView::Vault),
+        (Key::Num2, OwnerView::Agents),
+        (Key::Num3, OwnerView::Activity),
+        (Key::Num4, OwnerView::Learning),
+        (Key::Comma, OwnerView::Settings),
+    ];
+    for (key, view) in views {
+        if kit::shortcut(ctx, Modifiers::COMMAND, key) {
+            navigate(app, view);
+            app.ui.focus.focus_page_start();
+            return;
+        }
     }
     if kit::shortcut(ctx, Modifiers::COMMAND | Modifiers::SHIFT, Key::H) {
         if app.view == OwnerView::Item {
             super::items::toggle_masking(app, ctx);
+        }
+    } else if kit::shortcut(ctx, Modifiers::COMMAND, Key::OpenBracket) {
+        if app.view == OwnerView::Item {
+            app.view = OwnerView::Vault;
+            app.ui.focus.focus_page_start();
+        } else if app.view == OwnerView::Agents && app.owner_ui.selected_agent.is_some() {
+            app.owner_ui.selected_agent = None;
+            app.ui.focus.focus_page_start();
         }
     } else if kit::shortcut(ctx, Modifiers::COMMAND, Key::N) {
         app.view = OwnerView::Vault;
@@ -268,21 +299,29 @@ fn content(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
         Rect::from_min_size(full.min, Vec2::new(full.width(), kit::TITLE_BAR)),
     );
     ui.add_space(kit::TITLE_BAR + 6.0);
+    let ctx = ui.ctx().clone();
     ScrollArea::vertical()
         .id_salt(("page", app.view))
         .auto_shrink([false, false])
         .show(ui, |ui| {
             kit::column(ui, PAGE_WIDTH, |ui| {
+                super::focus::page_start(&mut app.ui.focus, &ctx);
+                // The scope keeps the IDs of the page the same when the banner comes
+                // or goes, so the focus stays on its control.
                 #[cfg(feature = "vault")]
-                if app.view != OwnerView::Activity {
-                    approval_banner(app, ui, pending);
-                }
+                ui.scope(|ui| {
+                    if app.view != OwnerView::Activity {
+                        approval_banner(app, ui, pending);
+                    }
+                });
                 #[cfg(feature = "vault")]
-                super::updates::banner(app, ui);
+                ui.scope(|ui| super::updates::banner(app, ui));
                 #[cfg(feature = "vault")]
-                super::sync::banner(app, ui);
+                ui.scope(|ui| super::sync::banner(app, ui));
                 page(app, ui, pending);
             });
+            kit::follow_focus(ui);
+            kit::keyboard_scroll(ui);
         });
 }
 

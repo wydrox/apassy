@@ -116,9 +116,12 @@ pub(super) fn draw_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
         if add {
             open_add(app);
         }
+        // No search field without credentials. ⌘F must not focus it later by surprise.
+        app.ui.focus_search = false;
         return;
     }
-    review_notice(app, ui);
+    // The scope keeps the IDs below the notice the same when it comes or goes.
+    ui.scope(|ui| review_notice(app, ui));
     toolbar(app, ui);
     ui.add_space(18.0);
 
@@ -238,40 +241,59 @@ pub(super) fn draw_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
 }
 
 /// Search, filter, and sort in one row. ⌘F puts the focus in the search field. The
-/// menus go first from the right, and the search field takes the rest of the width.
+/// search field takes the width that the two menus leave. The controls draw from left
+/// to right, so Tab visits them in the order that the owner sees.
 fn toolbar(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    const MENU_WIDTH: f32 = 150.0;
     let width = ui.available_width();
     ui.allocate_ui_with_layout(
         Vec2::new(width, 28.0),
-        Layout::right_to_left(Align::Center),
+        Layout::left_to_right(Align::Center),
         |ui| {
-            let mut sort = app.ui.credential_sort;
-            kit::menu("credential-sort", format!("Sort: {}", sort.label()), 150.0).show_ui(
-                ui,
-                |ui| {
-                    for option in Sort::ALL {
-                        ui.selectable_value(&mut sort, option, option.label());
-                    }
-                },
-            );
-            app.ui.credential_sort = sort;
-            let mut filter = app.ui.credential_filter;
-            kit::menu("credential-filter", filter.label(), 150.0).show_ui(ui, |ui| {
-                for option in Filter::ALL {
-                    ui.selectable_value(&mut filter, option, option.label());
-                }
-            });
-            app.ui.credential_filter = filter;
-            let field = kit::text_input(
-                ui,
-                &mut app.search,
-                "credential-search",
-                "Search by name, project, service, or notes",
-            )
-            .on_hover_text("Search  ⌘F");
+            let gap = ui.spacing().item_spacing.x;
+            // A menu button is its width plus the button padding and the chevron.
+            let menus = 2.0 * (MENU_WIDTH + ui.spacing().button_padding.x * 2.0 + 20.0 + gap);
+            let search_width = (width - menus).max(160.0);
+            let field = ui
+                .scope(|ui| {
+                    ui.set_width(search_width);
+                    kit::text_input(
+                        ui,
+                        &mut app.search,
+                        "credential-search",
+                        "Search by name, project, service, or notes",
+                    )
+                    .on_hover_text("Search  ⌘F")
+                })
+                .inner;
+            ui.ctx()
+                .accesskit_node_builder(field.id, |node| node.set_label("Search credentials"));
             if std::mem::take(&mut app.ui.focus_search) {
                 field.request_focus();
             }
+            let mut filter = app.ui.credential_filter;
+            let filters: Vec<(Filter, String)> = Filter::ALL
+                .into_iter()
+                .map(|option| (option, option.label().to_owned()))
+                .collect();
+            let label = filter.label();
+            kit::picker(
+                ui,
+                "credential-filter",
+                &mut filter,
+                &filters,
+                label,
+                MENU_WIDTH,
+            );
+            app.ui.credential_filter = filter;
+            let mut sort = app.ui.credential_sort;
+            let sorts: Vec<(Sort, String)> = Sort::ALL
+                .into_iter()
+                .map(|option| (option, option.label().to_owned()))
+                .collect();
+            let label = format!("Sort: {}", sort.label());
+            kit::picker(ui, "credential-sort", &mut sort, &sorts, label, MENU_WIDTH);
+            app.ui.credential_sort = sort;
         },
     );
 }
@@ -467,14 +489,14 @@ pub(super) fn draw_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
     kit::section(ui, None, None, |s| {
         if !details.archived {
             archive = s
-                .clickable_row(|ui| {
+                .clickable_row("Archive credential…", |ui| {
                     ui.label(kit::text("Archive credential…", Font::Body).color(kit::LABEL));
                     kit::note(ui, "Agents cannot use it. Search still finds it.");
                 })
                 .clicked();
         }
         delete = s
-            .clickable_row(|ui| {
+            .clickable_row("Delete credential…", |ui| {
                 ui.label(kit::text("Delete credential…", Font::Body).color(Tone::Critical.text()));
             })
             .clicked();
@@ -533,9 +555,16 @@ fn secret_value(ui: &mut egui::Ui, app: &DesktopApp, id: u64, name: &str) {
 /// "Show" or "Hide" for the secret values, with the masked value while hidden.
 fn mask_button(ui: &mut egui::Ui, revealed: bool, masked: bool) -> bool {
     let label = if revealed { "Hide" } else { "Show" };
-    let clicked = kit::button_with(ui, Some(Icon::Eye), label, Style::Link, Size::Small)
-        .on_hover_text("Show or hide secret values  ⌘⇧H")
-        .clicked();
+    let button = kit::button_with(ui, Some(Icon::Eye), label, Style::Link, Size::Small)
+        .on_hover_text("Show or hide secret values  ⌘⇧H");
+    let name = if revealed {
+        "Hide the secret values"
+    } else {
+        "Show the secret values"
+    };
+    ui.ctx()
+        .accesskit_node_builder(button.id, |node| node.set_label(name));
+    let clicked = button.clicked();
     if masked {
         ui.label(kit::text(MASKED_VALUE, Font::Mono).color(kit::SECONDARY));
     }
@@ -629,7 +658,7 @@ fn details_section(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetai
             }
             if details.details.len() < MAX_DETAILS {
                 add_detail = s
-                    .clickable_row(|ui| {
+                    .clickable_row("Add custom detail", |ui| {
                         ui.horizontal(|ui| {
                             kit::paint_icon_in(ui, Icon::Plus, 12.0, kit::ACCENT);
                             ui.label(
@@ -888,7 +917,7 @@ pub(super) fn draw_delete_alert(app: &mut DesktopApp, ctx: &egui::Context) {
             |_| {},
             |ui| {
                 delete = kit::button(ui, "Delete", Style::DestructiveProminent).clicked();
-                cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
+                cancel = kit::alert_cancel(ui).clicked();
             },
         );
     });
@@ -1048,6 +1077,8 @@ pub(super) fn add_sheet(app: &mut DesktopApp, ctx: &egui::Context, kind_chosen: 
             app.add_form.kind = kind;
             app.owner_ui.add_secrets.clear();
             app.ui.sheet = Some(Sheet::AddItem { kind_chosen: true });
+            // The picked card goes away. The Name field takes the focus.
+            app.ui.focus_form_name = true;
         }
         FormAction::Save => {
             let draft = app.add_form.clone();
@@ -1085,7 +1116,8 @@ fn new_title(kind: CredentialKind) -> &'static str {
 fn kind_card(ui: &mut egui::Ui, kind: CredentialKind, width: f32) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 58.0), Sense::click());
     let label = kind.label();
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    let name = format!("{label}: {}", kind_blurb(kind));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         let fill = if response.is_pointer_button_down_on() {
@@ -1117,6 +1149,9 @@ fn kind_card(ui: &mut egui::Ui, kind: CredentialKind, width: f32) -> egui::Respo
             kit::LABEL,
         );
         painter.galley(Pos2::new(x, rect.center().y + 2.0), blurb, kit::SECONDARY);
+        if response.has_focus() {
+            kit::focus_ring(painter, rect, 10);
+        }
     }
     response
 }
@@ -1214,14 +1249,19 @@ fn item_form(
     editing: bool,
 ) {
     let kind = form.kind;
+    let focus_name = std::mem::take(&mut state.focus_form_name);
     kit::section(ui, None, None, |s| {
         s.field("Name", |ui| {
-            kit::text_input(
+            let field = kit::text_input(
                 ui,
                 &mut form.name,
                 &format!("{salt}-name"),
                 name_placeholder(kind),
-            )
+            );
+            if focus_name && kit::keyboard_mode(ui.ctx()) {
+                field.request_focus();
+            }
+            field
         });
         for field in DesktopModel::extra_fields(kind) {
             let (value, placeholder) = extra_value(form, *field);
@@ -1307,9 +1347,18 @@ fn detail_rows(ui: &mut egui::Ui, form: &mut ItemDraft, secrets: &mut SecretForm
                     });
                 });
                 for (index, detail) in form.details.iter_mut().enumerate() {
+                    // VoiceOver names each field of the row, as the captions above do.
+                    let row_name = if detail.label.trim().is_empty() {
+                        format!("detail {}", index + 1)
+                    } else {
+                        format!("\"{}\"", detail.label.trim())
+                    };
+                    let name_label = |ctx: &egui::Context, id: egui::Id, text: String| {
+                        ctx.accesskit_node_builder(id, |node| node.set_label(text));
+                    };
                     s.row(|ui| {
                         ui.horizontal(|ui| {
-                            ui.allocate_ui(Vec2::new(150.0, 26.0), |ui| {
+                            let name_field = ui.allocate_ui(Vec2::new(150.0, 26.0), |ui| {
                                 ui.add(
                                     egui::TextEdit::singleline(&mut detail.label)
                                         .id_salt(format!("{salt}-detail-label-{index}"))
@@ -1323,8 +1372,13 @@ fn detail_rows(ui: &mut egui::Ui, form: &mut ItemDraft, secrets: &mut SecretForm
                                         .desired_width(f32::INFINITY),
                                 )
                             });
+                            name_label(
+                                ui.ctx(),
+                                name_field.inner.id,
+                                format!("Name of {row_name}"),
+                            );
                             let width = (ui.available_width() - 92.0).max(120.0);
-                            ui.allocate_ui(Vec2::new(width, 26.0), |ui| {
+                            let value_field = ui.allocate_ui(Vec2::new(width, 26.0), |ui| {
                                 if detail.hidden {
                                     let placeholder = if detail.stored.is_some() {
                                         "Unchanged"
@@ -1337,18 +1391,23 @@ fn detail_rows(ui: &mut egui::Ui, form: &mut ItemDraft, secrets: &mut SecretForm
                                         &mut secrets.details[index],
                                         SECRET_VALUE_CAPACITY,
                                         placeholder,
-                                    );
+                                    )
                                 } else {
                                     kit::text_input(
                                         ui,
                                         &mut detail.value,
                                         &format!("{salt}-detail-value-{index}"),
                                         "Value",
-                                    );
+                                    )
                                 }
                             });
+                            name_label(
+                                ui.ctx(),
+                                value_field.inner.id,
+                                format!("Value of {row_name}"),
+                            );
                             let mut hidden = detail.hidden;
-                            if kit::toggle(ui, &mut hidden, "Hidden")
+                            if kit::toggle(ui, &mut hidden, &format!("Hidden: {row_name}"))
                                 .on_hover_text(
                                     "Hidden: masked, and showing it needs your passphrase",
                                 )
@@ -1356,9 +1415,13 @@ fn detail_rows(ui: &mut egui::Ui, form: &mut ItemDraft, secrets: &mut SecretForm
                             {
                                 set_hidden(detail, &mut secrets.details[index], hidden);
                             }
-                            if kit::button_with(ui, Some(Icon::Xmark), "", Style::Link, Size::Small)
-                                .on_hover_text("Remove this detail")
-                                .clicked()
+                            if kit::icon_button(
+                                ui,
+                                Icon::Xmark,
+                                &format!("Remove {row_name}"),
+                                Size::Small,
+                            )
+                            .clicked()
                             {
                                 remove = Some(index);
                             }
@@ -1702,20 +1765,24 @@ fn provider_picker(ui: &mut egui::Ui, form: &mut DeclarationForm, id: u64) -> eg
         .as_deref()
         .and_then(providers::find)
         .map_or("None", |provider| provider.label.as_str());
-    kit::menu(("decl-provider", id), selected, 220.0)
-        .show_ui(ui, |ui| {
-            ui.selectable_value(&mut form.provider, None, "None");
-            if let Ok(catalog) = providers::builtin() {
-                for provider in catalog.providers() {
-                    ui.selectable_value(
-                        &mut form.provider,
-                        Some(provider.id.clone()),
-                        provider.label.as_str(),
-                    );
-                }
-            }
-        })
-        .response
+    let selected = selected.to_owned();
+    let mut options = vec![(None, "None".to_owned())];
+    if let Ok(catalog) = providers::builtin() {
+        options.extend(
+            catalog
+                .providers()
+                .iter()
+                .map(|provider| (Some(provider.id.clone()), provider.label.clone())),
+        );
+    }
+    kit::picker(
+        ui,
+        ("decl-provider", id),
+        &mut form.provider,
+        &options,
+        selected,
+        220.0,
+    )
 }
 
 /// The known hosts of the chosen provider, and the suggested provider when the owner
@@ -1835,21 +1902,19 @@ pub(super) fn variable_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool 
                 });
                 if fields.len() > 1 {
                     s.field("Secret field", |ui| {
-                        kit::menu(
+                        let options: Vec<(String, String)> = fields
+                            .iter()
+                            .map(|field| (field.clone(), field_label(field)))
+                            .collect();
+                        let selected = field_label(&app.owner_ui.env_field_input);
+                        kit::picker(
+                            ui,
                             ("env-field", id),
-                            field_label(&app.owner_ui.env_field_input),
+                            &mut app.owner_ui.env_field_input,
+                            &options,
+                            selected,
                             220.0,
                         )
-                        .show_ui(ui, |ui| {
-                            for field in &fields {
-                                ui.selectable_value(
-                                    &mut app.owner_ui.env_field_input,
-                                    field.clone(),
-                                    field_label(field),
-                                );
-                            }
-                        })
-                        .response
                     });
                 }
             },

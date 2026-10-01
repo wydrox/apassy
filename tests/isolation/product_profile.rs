@@ -1849,3 +1849,58 @@ fn keychain_item_is_not_readable_in_profile() {
     );
     assert!(err.contains("Operation not permitted"), "{err}");
 }
+
+/// ADR 0017: the owner socket lives in the denied data directory, and the profile
+/// re-allows only the broker socket. A process in the profile cannot connect to the
+/// owner socket, so it cannot reach the owner command line. `nc -U` is the client;
+/// the broker socket in the same directory is the positive control.
+#[test]
+fn profile_denies_the_owner_socket_and_keeps_the_broker_socket() {
+    require_sandbox();
+    let fx = fixture();
+    let owner = fx.layout.data_dir.join("owner.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&owner).expect("owner socket");
+    listener.set_nonblocking(true).expect("nonblocking");
+    let nc = |socket: &Path| -> (bool, String, String) {
+        let target = socket.display().to_string();
+        in_sandbox(&fx, &["/usr/bin/nc", "-U", "-w", "1", target.as_str()])
+    };
+
+    // Control: a process outside the profile connects to the owner socket.
+    let outside = Command::new("/usr/bin/nc")
+        .args(["-U", "-w", "1"])
+        .arg(&owner)
+        .stdin(Stdio::null())
+        .output()
+        .expect("nc outside");
+    assert!(outside.status.success(), "control: {outside:?}");
+
+    let (ok, _, _) = nc(&fx.layout.socket);
+    assert!(ok, "the broker socket stays reachable in the profile");
+    let (ok, _, stderr) = nc(&owner);
+    assert!(
+        !ok,
+        "the owner socket must be denied in the profile: {stderr}"
+    );
+    drop(listener);
+}
+
+/// ADR 0017: the launcher removes APASSY_SESSION from the host environment.
+#[test]
+fn launcher_removes_the_owner_session_from_the_host_environment() {
+    require_sandbox();
+    let fx = fixture();
+    let mut args = sandbox_args(&fx);
+    args.push("/usr/bin/env".to_owned());
+    let output = Command::new(env!("CARGO_BIN_EXE_apassy-sandbox"))
+        .args(&args)
+        .env_remove(DEV_ANY_CALLER)
+        .env("APASSY_SESSION", "apassy_cli_session-canary")
+        .env("APASSY_SANDBOX_MARKER", "kept")
+        .output()
+        .expect("run apassy-sandbox");
+    assert!(output.status.success(), "{output:?}");
+    let env = String::from_utf8_lossy(&output.stdout);
+    assert!(env.contains("APASSY_SANDBOX_MARKER=kept"), "{env}");
+    assert!(!env.contains("APASSY_SESSION"), "{env}");
+}

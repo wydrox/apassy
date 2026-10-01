@@ -39,7 +39,7 @@ The app contains five main views:
 - **Activity and approvals:** decision history, durable approval inbox, alerts, and notification delivery health.
 
 A visual owner interface is required for MVP. The desktop or local-web form and first platform are decisions in P0, not reasons to defer the interface.
-CLI and MCP connect agents and support diagnostics. They are not the primary way the owner manages credentials and rules.
+CLI and MCP connect agents and support diagnostics. They are not the primary way the owner manages credentials and rules. Since [ADR 0017](adr/0017-owner-command-line.md), the `apassy` command line also does owner operations through the running app, with the same owner checks.
 
 ### Credential coverage
 

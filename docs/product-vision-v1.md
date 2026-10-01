@@ -16,7 +16,7 @@ A bouncer checks agent requests, permits normal use, pauses uncertain requests, 
 
 The vault is the product's foundation, not an incidental place to keep a GitHub token.
 A human-facing interface, plain-language rules, and useful alerts belong in MVP.
-CLI and MCP are ways to connect agents. They do not replace the human experience.
+CLI and MCP are ways to connect agents. They do not replace the human experience. The owner command line ([ADR 0017](adr/0017-owner-command-line.md)) is a second way to reach the app: every check still happens in the app.
 
 ## 2. The everyday experience
 

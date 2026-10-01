@@ -637,6 +637,31 @@ impl OwnerSession {
         self.slot().as_ref().map(|vault| vault.path().to_path_buf())
     }
 
+    /// The epoch of the unlocked vault session. A lock or an unlock changes it.
+    pub fn epoch(&self) -> Option<[u8; 32]> {
+        self.slot()
+            .as_ref()
+            .filter(|vault| !vault.is_locked())
+            .map(Vault::epoch)
+    }
+
+    /// The remembered patterns (ADR 0010).
+    pub fn patterns(&self) -> ModelResult<Vec<crate::vault::PatternRecord>> {
+        self.unlocked()?.patterns().map_err(map_err)
+    }
+
+    /// Remove a pattern. Matching runs ask the owner again. It takes authority away, so
+    /// it needs no owner check.
+    pub fn remove_pattern(&mut self, id: u64) -> ModelResult<()> {
+        self.unlocked()?.remove_pattern(id).map_err(map_err)
+    }
+
+    /// All decisions as JSON Lines (`docs/operations/learning.md`). They have commands
+    /// and user requests, but no secret value.
+    pub fn export_decisions(&self) -> ModelResult<String> {
+        self.unlocked()?.export_decisions_jsonl().map_err(map_err)
+    }
+
     pub fn search(&self, query: &str) -> ModelResult<Vec<OwnerSummary>> {
         let found = {
             let vault = self.unlocked()?;
@@ -1834,7 +1859,8 @@ fn require_path(path: &Path) -> ModelResult<()> {
 
 /// A folder must be an existing directory that is not the root. It is stored in its
 /// canonical form.
-fn checked_place(place: &GrantPlace) -> ModelResult<GrantPlace> {
+/// The place of a grant with a canonical, existing folder that is not `/`.
+pub(crate) fn checked_place(place: &GrantPlace) -> ModelResult<GrantPlace> {
     let GrantPlace::Folder(dir) = place else {
         return Ok(GrantPlace::AnyFolder);
     };

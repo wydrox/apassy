@@ -109,10 +109,16 @@
 
 ;; --- Denials -------------------------------------------------------------
 
-;; The Apassy data directory holds the vault, the broker socket, and the Laya
-;; model at <data dir>/laya. Deny the whole subtree.
+;; The Apassy data directory holds the vault, the broker socket, the owner
+;; socket, and the Laya model at <data dir>/laya. Deny the whole subtree.
 (deny file-read* file-write* (subpath (param "APASSY_DATA_DIR")))
 (apassy-seal-ancestors (param "APASSY_DATA_DIR"))
+
+;; A connect to a Unix socket is not a file read or write, so the rule above
+;; does not stop it (measured on 2026-10-01). Deny every socket in the data
+;; directory: the owner socket of the command line (ADR 0017) is there, and an
+;; agent must never reach it. The broker socket is re-allowed below.
+(deny network-outbound (remote unix-socket (subpath (param "APASSY_DATA_DIR"))))
 
 ;; The vault file. The owner can place it outside the data directory.
 (apassy-deny-db (param "APASSY_VAULT_FILE"))

@@ -13,7 +13,9 @@ The profile denies read and write to:
 
 - the Apassy data directory (`~/Library/Application Support/Apassy`). This
   directory holds the vaults, the vault list `vaults.json`, the broker socket,
-  and the Laya model at `.../Apassy/laya`.
+  the owner socket of the command line
+  ([ADR 0017](../adr/0017-owner-command-line.md)), and the Laya model at
+  `.../Apassy/laya`.
 - the vault file. The owner can place it outside the data directory.
 - each other vault file in the vault list that is outside the data directory
   ([several vaults](multiple-vaults.md), ADR 0013).
@@ -31,9 +33,19 @@ The profile denies read and write to:
   `<file>.push.nosync`, and its SQLite companions. Only these files, not the
   folder: an agent's projects can live in the same Dropbox folder.
 
+The profile also denies a connection to every Unix socket in the data directory.
+A `connect()` to a Unix socket is not a file read or write, so the file rule does
+not stop it: a measurement on 2026-10-01 connected to a second socket in the
+denied directory. The rule `(deny network-outbound (remote unix-socket (subpath
+DATA_DIR)))` closes it. So an agent cannot reach the owner socket of the command
+line.
+
 The profile permits a connection to the broker socket. The socket lives inside
 the denied data directory. A later rule in the profile re-opens only the socket
 node. So `apassy-mcp` still reaches the broker.
+
+`apassy-sandbox` removes `APASSY_SESSION`, the command-line session of the owner,
+from the environment of the host.
 
 The profile also denies each measured route to start a program OUTSIDE the
 sandbox as the same user, because such a program is not confined and can read
@@ -329,6 +341,8 @@ a vault canary, a fake Laya file, a backup canary, and a live broker socket.
 | rename the Dropbox folder of a synced file | denied |
 | read another file in that Dropbox folder, or work on a project next to it | allowed |
 | connect to the broker socket | allowed |
+| connect to the owner socket (`nc -U`) | denied (2026-10-01) |
+| `APASSY_SESSION` in the host environment | removed by the launcher (2026-10-01) |
 | read a project file | allowed |
 | write a file in a temporary directory | allowed |
 
@@ -347,7 +361,7 @@ socket in the denied data directory.
 | `apassy_use_credential` (`get_sales_summary`) | 318 orders, permitted fields only. No secret. |
 
 The evidence for these checks is `cargo test --locked --features desktop,vault
---test isolation_profile`. It has 16 tests. All pass. If `sandbox-exec` is
+--test isolation_profile`. It has 27 tests. All pass. If `sandbox-exec` is
 absent, or the host is not macOS, the test fails. There is no skip (goal I4).
 
 ### The Apassy app bundle

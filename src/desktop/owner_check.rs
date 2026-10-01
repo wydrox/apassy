@@ -174,6 +174,8 @@ pub enum OwnerRequest {
     SetTokenLifetime {
         days: String,
     },
+    /// Open a command-line session (ADR 0017). Only the command line asks for it.
+    OpenCliSession,
 }
 
 impl OwnerRequest {
@@ -230,6 +232,7 @@ impl OwnerRequest {
                 agent_id: *agent_id,
             },
             Self::SetTokenLifetime { .. } => OwnerAction::ChangeTokenLifetime,
+            Self::OpenCliSession => OwnerAction::OpenCliSession,
         }
     }
 
@@ -333,6 +336,7 @@ impl OwnerRequest {
             Self::SetTokenLifetime { days } => {
                 format!("Set the token lifetime to {} days.", days.trim())
             }
+            Self::OpenCliSession => "Start a command-line session. apassy commands in your terminal can then list, add, and change credentials and agents for 30 idle minutes. They can never show a secret value. Grants, approvals, and new tokens still ask you here.".to_owned(),
         }
     }
 }
@@ -354,6 +358,9 @@ pub(crate) struct CheckDialog {
     pub(crate) running: Option<(CheckMethod, Task<Result<OwnerProof, OwnerAuthError>>)>,
     /// The result of the last try.
     pub(crate) message: Option<String>,
+    /// The command-line request that asked for this check (ADR 0017). It gets the
+    /// answer. `None` for a check from the views.
+    pub(crate) origin: Option<super::owner_cli::CliTicket>,
 }
 
 /// Touch ID unlock state for the open vault file.
@@ -464,6 +471,7 @@ impl DesktopApp {
             passphrase: String::with_capacity(super::ui::PASSPHRASE_CAPACITY),
             running: None,
             message: None,
+            origin: None,
         });
         if self.owner.touch_id_ready() {
             self.start_owner_check(OwnerCheck::TouchId, ctx.cloned());
@@ -670,6 +678,19 @@ impl DesktopApp {
                     Err(err) => self.set_err(err.message),
                 }
             }
+            OwnerRequest::OpenCliSession => self.open_cli_session(proof),
+        }
+    }
+
+    /// Do the request of a passed check, and answer the command line when it asked.
+    fn finish_owner_check(&mut self, dialog: CheckDialog, proof: OwnerProof) {
+        let CheckDialog {
+            request, origin, ..
+        } = dialog;
+        let before = self.status_seq;
+        self.complete_owner_request(request, proof);
+        if let Some(ticket) = origin {
+            self.answer_cli_ticket(ticket, before);
         }
     }
 
@@ -681,7 +702,7 @@ impl DesktopApp {
         let proof = self
             .owner_gate()
             .authorize(dialog.request.action(), check)?;
-        self.complete_owner_request(dialog.request, proof);
+        self.finish_owner_check(dialog, proof);
         Ok(())
     }
 
@@ -732,13 +753,18 @@ impl DesktopApp {
                 let Some(dialog) = self.owner.check.take() else {
                     return;
                 };
-                self.complete_owner_request(dialog.request, proof);
+                self.finish_owner_check(dialog, proof);
             }
             Err(err) if err.passphrase_fallback() || err == OwnerAuthError::WrongPassphrase => {
                 dialog.message = Some(err.message());
             }
             Err(err) => {
-                self.owner.check = None;
+                if let Some(ticket) = self.owner.check.take().and_then(|mut d| d.origin.take()) {
+                    ticket.send(crate::owner::wire::Response::error(
+                        "owner_check_failed",
+                        err.message(),
+                    ));
+                }
                 self.set_err(err.message());
             }
         }
@@ -960,6 +986,8 @@ impl DesktopApp {
 
     /// Quit: record and end waiting runs, lock, and stop the notification threads.
     pub(crate) fn shut_down(&mut self) {
+        // The command line gets "stopped", and every session ends (ADR 0017).
+        self.cli.stop();
         let approvals = self.approvals();
         let _ = self
             .owner_ui

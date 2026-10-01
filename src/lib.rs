@@ -3,6 +3,9 @@
 #![forbid(unsafe_code)]
 
 pub mod agent;
+/// The `apassy` owner command line (ADR 0017).
+#[cfg(feature = "desktop")]
+pub mod cli;
 pub mod contracts;
 
 /// Local agent broker (ADR 0004). It needs the vault.
@@ -21,6 +24,8 @@ pub mod desktop;
 pub mod import;
 
 pub mod native;
+/// The owner command line channel (ADR 0017): wire and client.
+pub mod owner;
 pub mod paths;
 /// The list of vaults on this computer (ADR 0013). It needs no feature, so the
 /// sandbox launcher reads it.

@@ -42,8 +42,20 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
             );
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .show(ui, |ui| centered(ui, |ui| screen(app, ui)));
+                .show(ui, |ui| {
+                    super::focus::page_start(&mut app.ui.focus, &ui.ctx().clone());
+                    centered(ui, |ui| screen(app, ui));
+                    kit::follow_focus(ui);
+                    kit::keyboard_scroll(ui);
+                });
         });
+}
+
+/// The first field of a step takes the focus once, after [`go`].
+fn first_field(app: &mut DesktopApp, field: &egui::Response) {
+    if std::mem::take(&mut app.ui.focus_start_field) && kit::keyboard_mode(&field.ctx) {
+        field.request_focus();
+    }
 }
 
 /// A column of `WIDTH`, centered in the window. The height of the last frame gives the
@@ -112,7 +124,7 @@ fn title(ui: &mut egui::Ui, title: &str, subtitle: &str) {
 
 fn back(app: &mut DesktopApp, ui: &mut egui::Ui) {
     if kit::back_link(ui, "Back") {
-        app.ui.start = Step::Home;
+        go(app, Step::Home);
     }
     ui.add_space(8.0);
 }
@@ -143,9 +155,14 @@ fn welcome(app: &mut DesktopApp, ui: &mut egui::Ui) {
 }
 
 /// Go to a start step with an empty name field.
+/// Go to a step. Its first field takes the focus (for a keyboard user).
 fn go(app: &mut DesktopApp, step: Step) {
     app.vault_list.name_input.clear();
     app.ui.start = step;
+    app.ui.focus_start_field = step != Step::Home;
+    if step == Step::Home {
+        app.ui.focus.focus_page_start();
+    }
 }
 
 /// Fill an empty path field with the default location.
@@ -179,8 +196,17 @@ fn create(app: &mut DesktopApp, ui: &mut egui::Ui) {
         None,
         Some("12 or more characters. A sentence of several words is strong and easy to remember."),
         |s| {
-            vaults::name_field(app, s, "vault-create-name", name_hint);
-            s.field("Passphrase", |ui| {
+            let name = vaults::name_field(app, s, "vault-create-name", name_hint);
+            if std::mem::take(&mut app.ui.focus_start_field) && kit::keyboard_mode(&ctx) {
+                name.request_focus();
+            }
+            // Return in a field goes on to the next one.
+            if enter_pressed(&name) {
+                ctx.memory_mut(|memory| {
+                    memory.request_focus(super::secret_field_id(VAULT_PASSPHRASE_FIELD));
+                });
+            }
+            let first = s.field("Passphrase", |ui| {
                 secure_input(
                     ui,
                     VAULT_PASSPHRASE_FIELD,
@@ -189,6 +215,11 @@ fn create(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     "Required",
                 )
             });
+            if enter_pressed(&first) {
+                ctx.memory_mut(|memory| {
+                    memory.request_focus(super::secret_field_id(VAULT_REPEAT_FIELD));
+                });
+            }
             let repeat = s.field("Repeat", |ui| {
                 secure_input(
                     ui,
@@ -356,6 +387,7 @@ fn open(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     "/Volumes/Work/work.db",
                 )
             });
+            first_field(app, &field);
             submit = enter_pressed(&field);
             let name = vaults::name_field(app, s, "vault-open-name", &name_hint);
             submit |= enter_pressed(&name);
@@ -404,7 +436,7 @@ pub(super) fn restore_form(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool {
             "The passphrase is the one of the backup. The restored vault is a new vault in your list. Leave the file empty for the default folder. Touch ID unlock stays off for the restored file.",
         ),
         |s| {
-            s.field("Backup file", |ui| {
+            let source = s.field("Backup file", |ui| {
                 kit::text_input(
                     ui,
                     &mut app.owner_ui.restore_source,
@@ -412,6 +444,7 @@ pub(super) fn restore_form(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool {
                     "/Volumes/Backup/apassy.backup",
                 )
             });
+            first_field(app, &source);
             vaults::name_field(app, s, "vault-restore-name", &name_hint);
             s.field("New vault file", |ui| {
                 kit::text_input(

@@ -684,14 +684,14 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     );
                 });
             }
-            if s.clickable_row(|ui| {
+            if s.clickable_row("New vault…", |ui| {
                 ui.label(kit::text("New vault…", Font::Body).color(kit::ACCENT_TEXT));
             })
             .clicked()
             {
                 leave = Some(Step::Create);
             }
-            if s.clickable_row(|ui| {
+            if s.clickable_row("Open vault file…", |ui| {
                 ui.label(kit::text("Open vault file…", Font::Body).color(kit::ACCENT_TEXT));
             })
             .clicked()

@@ -1198,7 +1198,7 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     }
                 });
             }
-            if s.clickable_row(|ui| {
+            if s.clickable_row("Open a synced vault…", |ui| {
                 ui.label(kit::text("Open a synced vault…", Font::Body).color(kit::ACCENT_TEXT));
             })
             .clicked()

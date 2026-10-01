@@ -152,8 +152,8 @@ fn fold_toggle(app: &mut DesktopApp, s: &mut kit::Section<'_>, key: &str, total:
         format!("Show all {total}")
     };
     let clicked = s
-        .clickable_row(|ui| {
-            ui.label(kit::text(label, Font::Body).color(kit::ACCENT_TEXT));
+        .clickable_row(&label, |ui| {
+            ui.label(kit::text(&label, Font::Body).color(kit::ACCENT_TEXT));
         })
         .clicked();
     if clicked {

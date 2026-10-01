@@ -19,8 +19,8 @@ use crate::desktop::owner_store::{Ephemeral, SecretForm};
 use crate::desktop::{BrokerState, DesktopApp, ItemDraft, OwnerView};
 use crate::native::{Biometry, HelperErrorCode, NativeHelper};
 
-const PASS: &str = "ui-owner-pass-ok";
-const WRONG: &str = "ui-owner-pass-no";
+pub(super) const PASS: &str = "ui-owner-pass-ok";
+pub(super) const WRONG: &str = "ui-owner-pass-no";
 const TOKEN: &str = "ui-owner-token-canary";
 const SIZE: Vec2 = Vec2::new(1280.0, 2400.0);
 
@@ -41,7 +41,7 @@ fn card_frame(ctx: &egui::Context, app: &mut DesktopApp, time: f64, events: Vec<
 
 /// Three frames of the whole app. A new dialog is invisible in its first frame, while
 /// egui measures it. Returns the painted text of the last frame.
-fn app_frame(ctx: &egui::Context, app: &mut DesktopApp) -> String {
+pub(super) fn app_frame(ctx: &egui::Context, app: &mut DesktopApp) -> String {
     let mut text = String::new();
     for _ in 0..3 {
         let output = ctx.run_ui(input(0.0, Vec::new()), |ui| draw(app, ui));
@@ -54,7 +54,7 @@ fn app_frame(ctx: &egui::Context, app: &mut DesktopApp) -> String {
     text
 }
 
-fn collect(shape: &egui::Shape, out: &mut String) {
+pub(super) fn collect(shape: &egui::Shape, out: &mut String) {
     match shape {
         egui::Shape::Text(text) => {
             out.push_str(text.galley.text());
@@ -225,7 +225,7 @@ fn not_available_helper(dir: &Path) -> NativeHelper {
 }
 
 /// Poll the app until the running owner check ends.
-fn finish_check(app: &mut DesktopApp, ctx: &egui::Context) {
+pub(super) fn finish_check(app: &mut DesktopApp, ctx: &egui::Context) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while app
         .owner
@@ -239,7 +239,7 @@ fn finish_check(app: &mut DesktopApp, ctx: &egui::Context) {
     }
 }
 
-fn unlocked_app_with_item(dir: &TempDir) -> (DesktopApp, u64) {
+pub(super) fn unlocked_app_with_item(dir: &TempDir) -> (DesktopApp, u64) {
     let mut app = locked_app(dir, "items.db");
     app.owner_ui.session.unlock(PASS).expect("unlock");
     let mut secrets = SecretForm::default();
@@ -373,7 +373,7 @@ fn waiting_run(agent: &str) -> PendingRun {
     }
 }
 
-fn socket_dir(dir: &TempDir) -> PathBuf {
+pub(super) fn socket_dir(dir: &TempDir) -> PathBuf {
     dir.path().join("s").join("broker.sock")
 }
 

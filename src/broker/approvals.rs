@@ -126,6 +126,9 @@ struct QueueState {
     closed: bool,
     pending: Vec<PendingRun>,
     decisions: BTreeMap<u64, Answer>,
+    /// When each waiting run started to wait. It is not part of the run, so the
+    /// equality of two runs (and an owner proof for one) does not depend on it.
+    waiting_since: BTreeMap<u64, Instant>,
 }
 
 type Notifier = Box<dyn Fn() + Send + Sync>;
@@ -195,6 +198,26 @@ impl ApprovalQueue {
         self.state().pending.clone()
     }
 
+    /// Runs that wait for a decision, oldest first, with the time since each one started
+    /// to wait. `apassy runs` shows it.
+    pub fn pending_with_age(&self) -> Vec<(PendingRun, Duration)> {
+        let state = self.state();
+        let now = Instant::now();
+        state
+            .pending
+            .iter()
+            .map(|run| {
+                let age = state
+                    .waiting_since
+                    .get(&run.id)
+                    .map_or(Duration::ZERO, |since| {
+                        now.saturating_duration_since(*since)
+                    });
+                (run.clone(), age)
+            })
+            .collect()
+    }
+
     /// Approve a waiting run (goal item A4). `proof` must come from
     /// [`OwnerGate::authorize`] for [`OwnerAction::ApproveRun`] or
     /// [`OwnerAction::ApproveAndRemember`], with the run exactly as it waits now. A
@@ -242,7 +265,14 @@ impl ApprovalQueue {
 
     fn settle(state: &mut QueueState, id: u64, answer: Answer) {
         state.pending.retain(|run| run.id != id);
+        state.waiting_since.remove(&id);
         state.decisions.insert(id, answer);
+    }
+
+    /// Remove a run that ended without a decision: a timeout, or an invalid session.
+    fn forget(state: &mut QueueState, id: u64) {
+        state.pending.retain(|pending| pending.id != id);
+        state.waiting_since.remove(&id);
     }
 
     /// End every waiting run and every decision that a run did not use yet. The
@@ -252,6 +282,7 @@ impl ApprovalQueue {
         let mut state = self.state();
         state.generation = state.generation.wrapping_add(1);
         state.pending.clear();
+        state.waiting_since.clear();
         state.decisions.clear();
         self.changed.notify_all();
     }
@@ -283,13 +314,14 @@ impl ApprovalQueue {
         let generation = state.generation;
         run.id = id;
         state.pending.push(run);
+        state.waiting_since.insert(id, Instant::now());
         self.changed.notify_all();
         drop(state);
         self.notify_owner();
         loop {
             let mut state = self.state();
             if state.generation != generation {
-                state.pending.retain(|pending| pending.id != id);
+                Self::forget(&mut state, id);
                 state.decisions.remove(&id);
                 return ApprovalOutcome::Invalidated;
             }
@@ -302,7 +334,7 @@ impl ApprovalQueue {
             }
             let now = Instant::now();
             if now >= deadline {
-                state.pending.retain(|pending| pending.id != id);
+                Self::forget(&mut state, id);
                 return ApprovalOutcome::TimedOut;
             }
             let wait = (deadline - now).min(WATCH_INTERVAL);
@@ -316,7 +348,7 @@ impl ApprovalQueue {
             // and then the queue lock, so do not hold the queue lock here.
             if !still_valid() {
                 let mut state = self.state();
-                state.pending.retain(|pending| pending.id != id);
+                Self::forget(&mut state, id);
                 state.decisions.remove(&id);
                 return ApprovalOutcome::Invalidated;
             }

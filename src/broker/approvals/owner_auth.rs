@@ -67,6 +67,9 @@ pub enum OwnerAction {
     /// Return the bouncer to the model before one promotion (goal item B9). The proof
     /// names the promotion.
     RollbackModel { activation_id: u64 },
+    /// Open a command-line session (ADR 0017). The session can read and change the vault
+    /// like the views, but every action in this list still needs its own check.
+    OpenCliSession,
 }
 
 impl OwnerAction {
@@ -98,6 +101,7 @@ impl OwnerAction {
             }
             Self::PromoteModel { .. } => "promote a new model for the bouncer".to_owned(),
             Self::RollbackModel { .. } => "roll back the model of the bouncer".to_owned(),
+            Self::OpenCliSession => "start a command-line session".to_owned(),
         }
     }
 

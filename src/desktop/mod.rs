@@ -13,6 +13,10 @@ pub mod notify;
 #[cfg(feature = "vault")]
 pub mod owner_check;
 #[cfg(feature = "vault")]
+pub(crate) mod owner_cli;
+#[cfg(feature = "vault")]
+pub(crate) mod owner_socket;
+#[cfg(feature = "vault")]
 pub mod owner_store;
 mod ui;
 #[cfg(feature = "vault")]
@@ -140,6 +144,9 @@ pub struct DesktopApp {
     /// Sync of the vaults through a folder (ADR 0014).
     #[cfg(feature = "vault")]
     pub(crate) sync: ui::sync::SyncUiState,
+    /// The owner socket and the command-line sessions (ADR 0017).
+    #[cfg(feature = "vault")]
+    pub(crate) cli: owner_cli::CliHost,
     styled: bool,
 }
 
@@ -195,6 +202,8 @@ impl DesktopApp {
             updates: update::Updater::idle(),
             #[cfg(feature = "vault")]
             sync: ui::sync::SyncUiState::default(),
+            #[cfg(feature = "vault")]
+            cli: owner_cli::CliHost::default(),
             styled: false,
         }
     }
@@ -214,6 +223,7 @@ impl DesktopApp {
             app.load_vault_list(crate::paths::data_dir(), true);
             app.open_last_vault(Some(&cc.egui_ctx));
             app.start_updates(&cc.egui_ctx);
+            app.start_cli(&crate::owner::client::default_socket_path(), &cc.egui_ctx);
         }
         app
     }
@@ -371,6 +381,15 @@ impl eframe::App for DesktopApp {
             self.shut_down();
             self.finish_updates();
         }
+    }
+
+    /// eframe calls this each frame, and also while the window is hidden or minimized.
+    /// So the command line gets its answer without a visible window.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(feature = "vault")]
+        self.poll_cli(ctx);
+        #[cfg(not(feature = "vault"))]
+        let _ = ctx;
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {

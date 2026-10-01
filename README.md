@@ -126,6 +126,23 @@ cargo test --locked --features desktop,vault      # the test suite
 
 The full first-day checklist is [daily use](docs/operations/daily-use.md).
 
+Or from a terminal: `eval "$(apassy login)"`, then `apassy setup claude --write` registers the agent and connects the MCP server, with the token in a wrapper script instead of the host configuration. The prompt hook needs `--hook PATH` with an `apassy-hook` from a source build.
+
+## Command line
+
+The `apassy` program in the app is also an owner command line. It talks to the running window, so every grant, approval, and new token still asks for Touch ID or the passphrase there. It never shows a secret value and never takes one as an argument ([command line](docs/operations/cli.md), [ADR 0017](docs/adr/0017-owner-command-line.md)).
+
+```sh
+ln -s /Applications/Apassy.app/Contents/MacOS/apassy /usr/local/bin/apassy
+eval "$(apassy login)"                           # Touch ID in the window
+apassy item add "Stripe test" --kind api-key     # asks for the token with the echo off
+apassy import .env --project billing             # or a 1Password or Bitwarden CSV export
+apassy item env "Stripe test" STRIPE_SECRET_KEY
+apassy grant set "Claude Code" "Stripe test" --folder ~/src/billing
+apassy runs approve 41
+apassy doctor
+```
+
 ## What Apassy does not protect
 
 Read these limits before you add a production credential:
@@ -150,11 +167,11 @@ Open items:
 
 | Topic | Documents |
 | --- | --- |
-| Start here | [Daily use](docs/operations/daily-use.md) · [Agent path](docs/operations/agent-path.md) · [Host hooks](docs/operations/host-hooks.md) · [Import from 1Password](docs/operations/import-1password.md) |
+| Start here | [Daily use](docs/operations/daily-use.md) · [Command line](docs/operations/cli.md) · [Agent path](docs/operations/agent-path.md) · [Host hooks](docs/operations/host-hooks.md) · [Import from 1Password](docs/operations/import-1password.md) |
 | Vaults | [Several vaults](docs/operations/multiple-vaults.md) · [Sync](docs/operations/sync.md) · [Backup and restore](docs/operations/backup-restore.md) |
 | Security | [Isolation](docs/operations/isolation.md) · [Key-memory review](docs/reviews/key-memory.md) · [Storage review](docs/reviews/storage-dependencies.md) · [Vault verification](docs/operations/vault-verification.md) |
 | The bouncer | [Bouncer](docs/operations/bouncer.md) · [Rule packs](docs/operations/rule-packs.md) · [Declarations](docs/operations/declarations.md) · [Base model](docs/operations/base-model.md) · [Learning](docs/operations/learning.md) |
-| Decisions | [ADRs 0001–0016](docs/adr) · [Goal](docs/goal.md) · [Evaluations](docs/evaluation) |
+| Decisions | [ADRs 0001–0017](docs/adr) · [Goal](docs/goal.md) · [Evaluations](docs/evaluation) |
 | Product | [Product vision](docs/product-vision-v1.md) · [Concept](docs/concept.md) · [Infrastructure](docs/product-infra-v1.md) · [MVP plan](docs/mvp-plan.md) |
 | Shipping | [Native app](docs/operations/native-app.md) · [Release and site](docs/operations/release.md) · [Updates](docs/operations/updates.md) |
 
@@ -165,6 +182,7 @@ Open items:
 | `cargo run --locked --features desktop,vault --bin apassy` | The desktop app with the owner vaults. It creates, opens, switches, or restores an encrypted vault ([desktop UI](docs/operations/desktop-ui.md)). |
 | `cargo run --locked --features desktop --bin apassy` | The older in-memory demo. "Open vault" there is not owner authentication. |
 | `cargo run --locked --features desktop,vault --bin apassy -- --smoke-test` | A model check without a window. |
+| `cargo run --locked --features desktop,vault --bin apassy -- status` | The owner command line, against the running window ([command line](docs/operations/cli.md)). |
 | `scripts/build-app.sh` · `scripts/build-dmg.sh` | The signed app, and the disk image ([release](docs/operations/release.md)). |
 | `scripts/screenshots.sh` | The screenshots in `docs/images`, from the real app with synthetic data. |
 | `cd site && npm ci && npm run dev` | The website ([release](docs/operations/release.md)). |
@@ -173,7 +191,7 @@ See also [desktop development](docs/operations/desktop-development.md), [Rust co
 
 | Path | Contents |
 | --- | --- |
-| `src/` | The Rust crate: vault, broker, bouncer, desktop app, and the programs `apassy`, `apassy-mcp`, `apassy-hook`, `apassy-sandbox` |
+| `src/` | The Rust crate: vault, broker, bouncer, desktop app, the owner command line, and the programs `apassy`, `apassy-mcp`, `apassy-hook`, `apassy-sandbox` |
 | `native/` | The Swift helpers: Touch ID, Keychain, notifications |
 | `packs/` | The rule packs of the bouncer |
 | `sandbox/` | The Seatbelt profile of agent hosts |

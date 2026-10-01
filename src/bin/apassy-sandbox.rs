@@ -41,7 +41,8 @@
 //!
 //! The host name and its arguments follow `--`. Set the host environment (for
 //! example `APASSY_AGENT_TOKEN`) before you start this launcher; the launcher
-//! passes the environment through to the host.
+//! passes the environment through to the host, without `APASSY_SESSION`: a
+//! command-line session of the owner never reaches an agent (ADR 0017).
 //!
 //! The launcher fails closed. It stops with an error when the vault list cannot
 //! be read or is not valid, because then it cannot name each vault file, and
@@ -67,6 +68,9 @@ const PROFILE_NAME: &str = "apassy-agent-host.sb";
 const PROFILE_ENV: &str = "APASSY_SANDBOX_PROFILE";
 /// Environment override for the broker socket path. It matches the client.
 const SOCKET_ENV: &str = "APASSY_BROKER_SOCKET";
+/// The owner command-line session (ADR 0017). The launcher removes it from the
+/// host environment.
+const SESSION_ENV: &str = "APASSY_SESSION";
 /// The default installed app bundle.
 const DEFAULT_APP: &str = "/Applications/Apassy.app";
 /// The app bundle that `scripts/build-app.sh` writes into the target directory.
@@ -232,6 +236,7 @@ fn run(args: &[String]) -> Result<(), String> {
     }
     command.arg(&parsed.host[0]);
     command.args(&parsed.host[1..]);
+    command.env_remove(SESSION_ENV);
 
     if parsed.print {
         let mut params: Vec<(&str, Option<&PathBuf>)> = vec![
@@ -545,6 +550,9 @@ Options:
   --profile FILE      SBPL profile (default: found near the program)
   --print             print the resolved sandbox-exec command; do not run it
   -h, --help          print this help
+
+The host gets the environment of this launcher without APASSY_SESSION, so an
+owner command-line session never reaches an agent.
 
 Examples (turn off only the host's inner sandbox; keep its approval prompts):
   apassy-sandbox -- claude --settings '{\"sandbox\":{\"enabled\":false}}'

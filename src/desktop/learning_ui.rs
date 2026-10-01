@@ -832,7 +832,13 @@ mod vault_view {
                     } else {
                         "Model"
                     };
-                    let response = s.clickable_row(|ui| {
+                    let name = format!(
+                        "{} by {by}, {}, {}",
+                        short(&entry.command),
+                        entry.agent_name,
+                        format_utc(entry.at)
+                    );
+                    let response = s.clickable_row(&name, |ui| {
                         egui::Sides::new().shrink_left().truncate().show(
                             ui,
                             |ui| {
@@ -994,7 +1000,12 @@ mod vault_view {
                                 );
                             },
                             |ui| {
-                                if kit::small_button(ui, "Remove", Style::Destructive).clicked() {
+                                let button = kit::small_button(ui, "Remove", Style::Destructive);
+                                let name = format!("Remove the pattern {}", pattern.display);
+                                ui.ctx().accesskit_node_builder(button.id, |node| {
+                                    node.set_label(name);
+                                });
+                                if button.clicked() {
                                     remove = Some(pattern.id);
                                 }
                                 kit::tag(ui, &state, tone);

@@ -161,7 +161,7 @@ pub fn start_with(
     })
 }
 
-fn prepare_directory(socket: &Path) -> io::Result<()> {
+pub(crate) fn prepare_directory(socket: &Path) -> io::Result<()> {
     let parent = socket
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -190,7 +190,7 @@ fn prepare_directory(socket: &Path) -> io::Result<()> {
     }
 }
 
-fn remove_stale_socket(socket: &Path) -> io::Result<()> {
+pub(crate) fn remove_stale_socket(socket: &Path) -> io::Result<()> {
     match fs::symlink_metadata(socket) {
         Ok(meta) if meta.file_type().is_socket() => {
             if UnixStream::connect(socket).is_ok() {

@@ -211,7 +211,7 @@ fn draw_agent(app: &mut DesktopApp, ui: &mut egui::Ui, agent_id: u64) {
     let mut revoke = false;
     kit::section(ui, None, None, |s| {
         revoke = s
-            .clickable_row(|ui| {
+            .clickable_row("Revoke agent…", |ui| {
                 ui.label(kit::text("Revoke agent…", Font::Body).color(Tone::Critical.text()));
             })
             .clicked();
@@ -335,7 +335,7 @@ fn process_access_section(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &Agent
             }
             if items.len() > 1 {
                 let clicked = s
-                    .clickable_row(|ui| {
+                    .clickable_row("Give access to several credentials…", |ui| {
                         ui.label(
                             kit::text("Give access to several credentials…", Font::Body)
                                 .color(kit::ACCENT_TEXT),
@@ -530,16 +530,17 @@ pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
     let mut dismiss = false;
     kit::sheet(ctx, "fresh-token", 580.0, |ui| {
         kit::sheet_title(ui, &title, Some(intro));
-        ui.label(kit::text("Token", Font::Headline).color(kit::LABEL));
-        kit::code_block(ui, token, 1);
+        let heading = ui.label(kit::text("Token", Font::Headline).color(kit::LABEL));
+        kit::code_block(ui, token, 1).labelled_by(heading.id);
         ui.add_space(12.0);
-        ui.label(kit::text("MCP server configuration", Font::Headline).color(kit::LABEL));
+        let config_heading =
+            ui.label(kit::text("MCP server configuration", Font::Headline).color(kit::LABEL));
         let config = format!(
             "{{\n  \"mcpServers\": {{\n    \"apassy\": {{\n      \"command\": \"{}\",\n      \"env\": {{ \"APASSY_AGENT_TOKEN\": \"{}\" }}\n    }}\n  }}\n}}",
             adapter_path(),
             token
         );
-        kit::code_block(ui, &config, 7);
+        kit::code_block(ui, &config, 7).labelled_by(config_heading.id);
         kit::note(
             ui,
             "Add this server to the agent host. For Claude Code, set MCP_TOOL_TIMEOUT higher than 120000.",
@@ -580,7 +581,7 @@ pub(super) fn revoke_sheet(
             |_| {},
             |ui| {
                 revoke = kit::button(ui, "Revoke", Style::DestructiveProminent).clicked();
-                cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
+                cancel = kit::alert_cancel(ui).clicked();
             },
         );
     });
@@ -1048,7 +1049,8 @@ fn rule_form(ui: &mut egui::Ui, form: &mut RuleForm) -> bool {
         ),
         |s| {
             s.row(|ui| {
-                ui.label(kit::text("Allowed command prefixes", Font::Body).color(kit::LABEL));
+                let label =
+                    ui.label(kit::text("Allowed command prefixes", Font::Body).color(kit::LABEL));
                 kit::note(ui, "One per line. Empty permits any command.");
                 kit::text_area(
                     ui,
@@ -1056,10 +1058,11 @@ fn rule_form(ui: &mut egui::Ui, form: &mut RuleForm) -> bool {
                     "rule-prefixes",
                     "npm run migrate\nnpm test",
                     2,
-                );
+                )
+                .labelled_by(label.id);
             });
             s.row(|ui| {
-                ui.label(kit::text("Forbidden words", Font::Body).color(kit::LABEL));
+                let label = ui.label(kit::text("Forbidden words", Font::Body).color(kit::LABEL));
                 kit::note(ui, "One per line.");
                 kit::text_area(
                     ui,
@@ -1067,7 +1070,8 @@ fn rule_form(ui: &mut egui::Ui, form: &mut RuleForm) -> bool {
                     "rule-forbidden",
                     "prod\n--force",
                     2,
-                );
+                )
+                .labelled_by(label.id);
             });
             s.field("Expires after", |ui| {
                 let field = kit::number_input(ui, &mut form.expires_hours, "rule-expiry", "never");
@@ -1085,13 +1089,15 @@ fn rule_form(ui: &mut egui::Ui, form: &mut RuleForm) -> bool {
         Some("In plain words. The bouncer checks each request against it."),
         |s| {
             s.row(|ui| {
-                kit::text_area(
+                let field = kit::text_area(
                     ui,
                     &mut form.instruction,
                     "rule-instruction",
                     "Only run migrations and tests on staging. Never print or send keys.",
                     2,
                 );
+                ui.ctx()
+                    .accesskit_node_builder(field.id, |node| node.set_label("Your instruction"));
             });
         },
     );
