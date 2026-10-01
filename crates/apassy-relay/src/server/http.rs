@@ -508,7 +508,8 @@ fn team_create(hub: &Hub, body: &[u8], now: u64) -> RelayResult<Value> {
     to_value(&TeamCreatedRef {
         team_id: &team_id,
         member_id,
-        secret: token.expose(),
+        secret: Some(token.expose()),
+        device_id: None,
     })
 }
 

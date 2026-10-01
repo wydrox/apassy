@@ -734,3 +734,154 @@ At start, directory version 1001 becomes 1002. The relay adds `limits TEXT` and 
 A failure before the commit point removes what it made and leaves `team.db` as it was. Member and agent tokens without a team id keep working for the legacy team; new tokens of that team name it. An invite code made before the migration has no team id and stops working: make a new one.
 
 **What this does not protect.** The master key and every team file are on the same machine. The operator, root, or a disk snapshot can open the metadata of every team. Item values stay sealed (section 21). All teams share one process. Team limits restrict resource use in that process.
+**What this does not protect.** The master key and every team file are on the same machine: the operator, root, or a disk snapshot can open every team's metadata. Item values stay sealed (section 21). All teams share one process. There are no limits per team yet.
+
+## 23. Devices, sign-in, joins, and links
+
+ADR 0019 of the core, stages 2 and 3. A person (or a shared device) is a member of one team. Each member has devices; each device has a P-256 key pair. A device signs in and gets an access token for 15 minutes. A join or a new device waits for a confirmation, with two safety words that both sides see. The shared code is `src/device.rs` (keys, the sign-in message, the safety words) and the types in `src/api.rs` ("Devices, sign-in, joins, and links").
+
+### 23.1 Words and limits
+
+| Thing | Rule |
+| --- | --- |
+| Device name | 1 to 64 bytes, no control character (`checked_label` rules) |
+| Public key | base64url of 65 bytes, first byte 0x04 (`device::decode_public_key`); unique among the live devices of a team |
+| Sign-in nonce | 32 random bytes, base64url; 60 seconds; one use; at most 4 open per public key and 1000 per team (the oldest goes) |
+| Access token | `apassy_acc_<team id>_<64 hex>`; 900 seconds; in memory only (a restart ends them, clients sign in again); the hash is the key of the table |
+| Invite code | as today, `apassy_inv_<team id>_<64 hex>`, one use; the link form is `<relay URL>/join#<code>` (the CLI makes and reads it; the relay never sees the fragment) |
+| Join | waits up to 72 hours for a confirmation, then `expired` |
+| Link code | `apassy_lnk_<team id>_<64 hex>`; 600 seconds; one use |
+| Link | waits up to 600 seconds from the link request, then `expired` |
+| Safety words | `device::safety_words(team, code, public_key)`; the relay computes them when the join or link arrives and keeps them |
+
+### 23.2 Schema version 3 (team file)
+
+`Store::open_team` migrates a version 2 file to version 3 in one transaction, with `PRAGMA foreign_keys = OFF` around a table rebuild (the SQLite "12 steps"), then `PRAGMA foreign_key_check`, then `PRAGMA user_version = 3`. A new team file is made at version 3. Version 1 and unknown versions are refused as today.
+
+```sql
+-- member: token_hash becomes NULL-able (a member with a device has no member token);
+-- the name is unique among live members only; kind is person or shared.
+CREATE TABLE member (
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('owner','manager','member')),
+  kind TEXT NOT NULL DEFAULT 'person' CHECK (kind IN ('person','shared')),
+  token_hash BLOB UNIQUE, created_at INTEGER NOT NULL, revoked_at INTEGER);
+CREATE UNIQUE INDEX member_name_live ON member(name) WHERE revoked_at IS NULL;
+-- invite: the role may be owner; an optional name; grants; shared.
+CREATE TABLE invite (
+  id INTEGER PRIMARY KEY, code_hash BLOB NOT NULL UNIQUE,
+  role TEXT NOT NULL CHECK (role IN ('owner','manager','member')),
+  name TEXT, grants TEXT NOT NULL DEFAULT '[]', shared INTEGER NOT NULL DEFAULT 0,
+  created_by INTEGER NOT NULL REFERENCES member(id), created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL, used_by INTEGER REFERENCES member(id), used_at INTEGER);
+CREATE TABLE device (
+  id INTEGER PRIMARY KEY, member_id INTEGER NOT NULL REFERENCES member(id),
+  name TEXT NOT NULL, public_key BLOB NOT NULL,
+  key_holder INTEGER NOT NULL DEFAULT 0 CHECK (key_holder IN (0,1)),
+  created_at INTEGER NOT NULL, last_seen_at INTEGER, revoked_at INTEGER);
+CREATE UNIQUE INDEX device_key_live ON device(public_key) WHERE revoked_at IS NULL;
+CREATE UNIQUE INDEX device_key_holder ON device(key_holder) WHERE key_holder = 1 AND revoked_at IS NULL;
+CREATE TABLE join_request (
+  id INTEGER PRIMARY KEY, invite_id INTEGER NOT NULL REFERENCES invite(id),
+  name TEXT NOT NULL, device_name TEXT NOT NULL, public_key BLOB NOT NULL, safety TEXT NOT NULL,
+  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','confirmed','refused','expired')),
+  decided_by INTEGER REFERENCES member(id), decided_at INTEGER,
+  member_id INTEGER REFERENCES member(id), device_id INTEGER REFERENCES device(id));
+CREATE TABLE device_link (
+  id INTEGER PRIMARY KEY, member_id INTEGER NOT NULL REFERENCES member(id),
+  code_hash BLOB NOT NULL UNIQUE, made_by_device INTEGER NOT NULL REFERENCES device(id),
+  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  device_name TEXT, public_key BLOB, safety TEXT, requested_at INTEGER,
+  state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','pending','confirmed','refused','expired')),
+  decided_at INTEGER, device_id INTEGER REFERENCES device(id));
+ALTER TABLE agent ADD COLUMN device_id INTEGER REFERENCES device(id);  -- NULL: made with a member token
+```
+
+The rows of `member`, `invite`, and `agent` keep their ids in the migration. Existing members keep their token hashes (kind `person`). Existing invites keep `grants = '[]'`, `shared = 0`.
+
+### 23.3 Sign-in
+
+`POST /v1/auth/challenge` (edge; body `ChallengeRequest`). The team comes from `team_id`: an unknown or closed team is 401 `unauthenticated`.
+
+1. A live device (not revoked; its member not revoked) with this public key: a new nonce in the team's in-memory challenge table, keyed by the nonce, with the device id and the expiry. Answer `Challenge`.
+2. Otherwise, a `pending` join or a `pending` link with this key: 403 `join_pending`.
+3. Otherwise, a `refused` or `expired` join or link with this key, and no live device: 403 `join_refused`.
+4. Otherwise: 401 `unauthenticated`.
+
+`POST /v1/auth/token` (edge; body `TokenRequest`). The relay takes the nonce out of the table (one use) and checks: it is not expired; it was made for this public key; the device is still live; the signature verifies over `device::sign_in_message(public_url, team_id, public_key, nonce)` with the relay's own `public_url`. Any failure: 401 `unauthenticated`, one message, and a refusal row (rate-limited). Success: an access token, `last_seen_at` of the device set, a row `device_signed_in` (at most one per device per hour), answer `AccessGrantedRef`.
+
+An access token works everywhere a member token works. `authenticate` returns the member and the device (`MemberAuth.device: Option<DeviceAuth { id, key_holder }>`). A token of a revoked device or member fails at once: revocation removes the device's access tokens from the table in the same request.
+
+Member tokens still work for a member that has no device. The first device of a member (`POST /v1/devices/enroll`, member token only) sets that member's `token_hash` to NULL: the member token stops in the same transaction.
+
+### 23.4 Endpoints
+
+| Method and path | Auth | Body | Result |
+| --- | --- | --- | --- |
+| `POST /v1/auth/challenge` | edge | `ChallengeRequest` | `Challenge`; 403 `join_pending` / `join_refused`; 401 |
+| `POST /v1/auth/token` | edge | `TokenRequest` | `AccessGranted` |
+| `POST /v1/devices/enroll` | member token (not an access token) | `DeviceEnroll` | `DeviceView`. The device is the key holder when the member is an owner and the team has no live key holder. 409 `conflict` if the member has a live device already, or the key is taken |
+| `GET /v1/devices` | member | | `[DeviceView]`: the caller's devices; the owner sees all live devices. `current` marks the caller's device |
+| `DELETE /v1/devices/{id}` | member: own device; owner: any | | `Created`. Revokes the device, its access tokens, its agents (as `DELETE /v1/agents`: their sessions end and their pending runs are invalidated). Revoking the key holder leaves the team without one (the message says so) |
+| `POST /v1/devices/{id}/key-holder` | owner, with an access token of a device of the same owner | | `DeviceView`. Moves the flag to that device. The keys in `keys.json` must be copied to it first (the CLI says so) |
+| `POST /v1/devices/links` | member with an access token, kind person | | `LinkCreatedRef` |
+| `POST /v1/devices/link` | edge | `LinkRequest` | `Pending` (`by` = the member name). The code must be an open, unexpired link code of this team; the link becomes `pending` (one use). The key must not be live in the team |
+| `GET /v1/devices/links` | member with an access token | | `[LinkView]`: pending links of the caller's member |
+| `POST /v1/devices/links/{id}/confirm` | member with an access token of the same member | | `DeviceView` of the new device (never the key holder). Row `device_added`; when the member is an owner, also `owner_device_added` |
+| `POST /v1/devices/links/{id}/refuse` | same | | `Created` |
+| `POST /v1/invites` | approver | `InviteRequest` (with `name`, `grants`, `shared`) | `Issued` as today. Role `manager` or `owner`: owner only. `shared`: role member only. `grants`: existing collections only. `name`: `checked_member_name` |
+| `POST /v1/join` | edge | `JoinRequest` | `Pending` (`by` = the inviter's name). Without `device_name` and `public_key`: 400 `invalid_request` "This apassy-team is too old: update it (curl -fsSL <relay URL>/install.sh ...)". The invite is used at once (one use). The name is the invite's name if it has one, else the request's (required then); it must not be the name of a live member or of another pending join, else 409. A code of a used invite writes a row `invite_reused` (rate-limited) and answers 403 `invite_invalid` like any bad code |
+| `GET /v1/joins` | approver | | `[JoinView]` pending, oldest first |
+| `POST /v1/joins/{id}/confirm` | approver; a join for the role manager or owner: owner only | | `JoinConfirmed`. One transaction: the member (role and kind from the invite, no token), its device (not the key holder), a grant for each collection of the invite that still exists, rows `member_joined` and `device_added`. A live member with that name now: 409 |
+| `POST /v1/joins/{id}/refuse` | approver | | `Created`. Row `join_refused` |
+| `POST /v1/leave` | member | | `Created`: revokes the caller (as `DELETE /v1/members`). The last live owner cannot leave (409) |
+| `PUT /v1/members/{id}/role` | owner | `RoleChange` | `MemberView`. A shared member stays `member`. The last live owner cannot lose the role (409) |
+| `DELETE /v1/members/{id}` | owner | | as today, and it also revokes the member's devices and their access tokens |
+| `POST /v1/teams` | edge | `TeamCreate` (with `device_name`, `public_key`) | With a key: the owner has no token and its device is the key holder; the answer has `device_id` and no `secret`. Without: as today |
+| host endpoints (`/v1/host/...`) | the key holder | | An access token of the key holder device, or (until the owner enrolls a device) the owner's member token. Another device: 403 `not_key_holder` |
+
+`GET /v1/members` fills `shared` and `devices`. `GET /v1/me` with an access token fills `device_id` and `key_holder`.
+
+Maintenance (every 5 seconds, per team): pending joins and links past `expires_at` become `expired`; open link codes past `expires_at` become `expired`; expired nonces and access tokens leave the tables.
+
+Every new audit row holds no key, nonce, signature, code, or token. Public keys are not written to the audit; device ids and names are.
+
+### 23.5 The CLI
+
+Settings version 2, `settings.json` (directory 0700, file 0600):
+
+```json
+{"version": 2, "current": "t_7k2m9q4x8c",
+ "teams": {"t_7k2m9q4x8c": {"relay_url": "https://...", "team": "Family", "member": "rafal",
+                            "device_id": 3, "member_token": null}}}
+```
+
+- A version 1 file (`relay_url`, `member_token`) is read as one team whose id comes from `GET /v1/me`, and written back as version 2 on the next save.
+- The device private key (PKCS#8) of a team: on macOS in the login Keychain (generic password, service `apassy-team`, account `<relay host> <team id>`); on Linux and elsewhere in `device-<team id>.key` next to `settings.json` (base64url, mode 0600). Never in `settings.json`, never printed.
+- `APASSY_TEAM` (a team id) or `--team ID` on any member command picks the team; else `current`.
+- Each member command signs in when the team has a device (challenge, sign, token) and keeps the access token in memory for that process only. A 401 with an access token signs in once more and repeats the call once.
+- `APASSY_TEAM_TOKEN` still works as a member token (CI, scripts).
+
+Commands (secrets only on stdin, as today):
+
+| Command | Does |
+| --- | --- |
+| `create --relay URL --team NAME --name NAME [--device NAME]` | makes a device key (device name default: the host name), sends it with the team code; saves the team as current |
+| `join --relay URL [--name NAME] [--device NAME] [--no-wait]` | stdin: an invite code or a link `.../join#code`. Makes a device key, `POST /v1/join`, prints the team, the inviter, the team id, and the safety words, and says "Tell <inviter> these words". Then signs in every 5 seconds until the join is confirmed (prints "Joined") or refused/expired (exit 3), at most 10 minutes; `--no-wait` returns at once (exit 0) and `apassy-team join --resume` waits again |
+| `device enroll [--name NAME]` | with the team's member token: makes a key, `POST /v1/devices/enroll`, removes the member token from the settings |
+| `device list`, `device revoke ID`, `device key-holder ID` | |
+| `device add` | on an existing device: `POST /v1/devices/links`; prints the link code once on stdout and the next steps on stderr |
+| `device link --relay URL [--device NAME] [--no-wait]` | on the new device, stdin: the link code; like `join` |
+| `device pending`, `device confirm ID`, `device refuse ID` | on an existing device: links that wait; confirm prints the safety words of the link first |
+| `invite [--role member\|manager\|owner] [--hours N] [--name NAME] [--grant ID]... [--shared]` | prints the link `<relay URL>/join#<code>` once on stdout |
+| `joins`, `confirm ID`, `refuse ID` | approver: joins that wait (with the safety words), confirm, refuse |
+| `leave`, `member role ID ROLE` | |
+| `team list`, `team use ID` | the teams of this machine |
+| `host` | as today, for the current team; it signs in with the key holder device; 403 `not_key_holder` ends it with a clear message |
+
+### 23.6 What this does not protect
+
+- On Linux the device key is a file: whoever reads it is that device until it is revoked.
+- An owner or manager who confirms a join without checking the safety words with the person lets the wrong person in.
+- The relay operator can still add a device to the team's file by hand (section 22).

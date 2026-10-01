@@ -200,7 +200,11 @@ fn join_sends_the_code_without_a_bearer_and_saves_the_new_token() {
     );
     assert_eq!(seen[0].header("authorization"), None);
     assert_eq!(seen[0].header("x-apassy-edge"), Some(EDGE));
-    assert_eq!(seen[0].json(), json!({"code": code_text, "name": "bob"}));
+    // Until stage 3 of section 23 the CLI sends no device key.
+    assert_eq!(
+        seen[0].json(),
+        json!({"code": code_text, "name": "bob", "device_name": "", "public_key": ""})
+    );
     let file = cli.settings_file();
     assert_eq!(mode(&file), 0o600);
     let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();

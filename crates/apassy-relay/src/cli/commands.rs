@@ -159,13 +159,19 @@ fn create(relay: &str, team: &str, name: &str) -> Result<i32, CliError> {
     )?;
     let edge = settings::env_secret(settings::ENV_EDGE_SECRET);
     let client = Client::new(&relay, None, edge.as_ref());
+    // Section 23 (stage 2) replaces this member token with a device key.
     let payload = body(&TeamCreateRef {
         code: code.expose(),
         team,
         owner: name,
+        device_name: None,
+        public_key: None,
     })?;
     let made: TeamCreated = client.ok(Method::Post, api::paths::TEAMS, Some(&payload))?;
-    let path = settings::save(&relay, &made.secret)?;
+    let secret = made
+        .secret
+        .ok_or_else(|| CliError::relay("The relay did not return an owner token."))?;
+    let path = settings::save(&relay, &secret)?;
     println!(
         "Created team {} ({}). You are its owner {} (member {}). Settings saved in {}.",
         clean(team),
@@ -185,9 +191,12 @@ fn join(relay: &str, name: &str) -> Result<i32, CliError> {
     )?;
     let edge = settings::env_secret(settings::ENV_EDGE_SECRET);
     let client = Client::new(&relay, None, edge.as_ref());
+    // Section 23 (stage 3) sends the device key here and waits for a confirmation.
     let payload = body(&JoinRequestRef {
         code: code.expose(),
-        name,
+        name: Some(name),
+        device_name: "",
+        public_key: "",
     })?;
     let issued: Issued = client.ok(Method::Post, api::paths::JOIN, Some(&payload))?;
     let path = settings::save(&relay, &issued.secret)?;
@@ -249,6 +258,9 @@ fn member_command(settings: &Settings, command: Command) -> Result<(), CliError>
             let payload = body(&InviteRequest {
                 role,
                 expires_hours: hours,
+                name: None,
+                grants: Vec::new(),
+                shared: false,
             })?;
             let issued: Issued = client.ok(Method::Post, paths::INVITES, Some(&payload))?;
             // The one-time output: the code alone on stdout, the rest on stderr.

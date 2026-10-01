@@ -88,6 +88,8 @@ pub fn me(core: &Core, who: &crate::server::auth::Principal) -> RelayResult<Valu
             agent_id: None,
             agent_name: None,
             expires_at: None,
+            device_id: None,
+            key_holder: false,
         },
         crate::server::auth::Principal::Agent(agent) => MeView {
             team,
@@ -99,6 +101,8 @@ pub fn me(core: &Core, who: &crate::server::auth::Principal) -> RelayResult<Valu
             agent_id: Some(agent.id),
             agent_name: Some(agent.name.clone()),
             expires_at: Some(agent.expires_at),
+            device_id: None,
+            key_holder: false,
         },
     };
     to_json(&view)
@@ -112,7 +116,8 @@ pub fn invite_invalid() -> RelayError {
 }
 
 pub fn join(core: &Core, request: &JoinRequest, now: u64) -> RelayResult<Value> {
-    let name = checked_member_name(&request.name)?.to_string();
+    // Section 23 (stage 3) replaces this flow with a join that waits for a confirmation.
+    let name = checked_member_name(request.name.as_deref().unwrap_or_default())?.to_string();
     let code = request.code.expose();
     // The relay found this team by the team id in the code. Check it again here.
     let parsed = parse_token(code).ok_or_else(invite_invalid)?;
@@ -278,6 +283,8 @@ pub fn member_list(core: &Core) -> RelayResult<Value> {
                     role: parse_role(&row.get::<_, String>(2)?),
                     created_at: to_u(row.get(3)?),
                     revoked: row.get::<_, Option<i64>>(4)?.is_some(),
+                    shared: false,
+                    devices: 0,
                 })
             })
             .map_err(db)?;

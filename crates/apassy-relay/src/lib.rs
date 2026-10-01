@@ -6,7 +6,8 @@
 //! in the response. The design is in `docs/SPEC.md`.
 //!
 //! Shared modules: `api`, `config`, `error`, `ids`, `secret`, `session`, and
-//! `hostkeys` (the crypto of host-held item keys), `decision` (the pure part of the
+//! `hostkeys` (the crypto of host-held item keys), `device` (device keys, sign-in, and
+//! safety words), `decision` (the pure part of the
 //! decision per run, used by the relay and by the owner's host).
 //! Track modules: `server` (track server), `proxy` (track proxy), `cli` (track client).
 #![forbid(unsafe_code)]
@@ -14,6 +15,7 @@
 pub mod api;
 pub mod config;
 pub mod decision;
+pub mod device;
 pub mod error;
 pub mod hostkeys;
 pub mod ids;
