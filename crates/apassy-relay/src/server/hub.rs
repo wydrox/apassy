@@ -20,7 +20,7 @@ use serde_json::json;
 use crate::api::{Role, TeamCreate};
 use crate::config::RelayConfig;
 use crate::error::{RelayError, RelayResult, codes};
-use crate::ids::{MemberId, TeamId};
+use crate::ids::{DeviceId, MemberId, TeamId};
 use crate::secret::{SecretString, TokenKind, new_file_key, new_token, parse_token, token_hash};
 use crate::server::approvals::{LongPolls, Notifier};
 use crate::server::audit::{Audit, RELAY_ACTOR};
@@ -64,6 +64,16 @@ pub fn make_team_file(
     owner: &str,
     now: u64,
 ) -> RelayResult<NewTeam> {
+    make_team_file_with_device(config, name, owner, now, None)
+}
+
+fn make_team_file_with_device(
+    config: &RelayConfig,
+    name: &str,
+    owner: &str,
+    now: u64,
+    device: Option<(&str, &[u8])>,
+) -> RelayResult<NewTeam> {
     let name = checked_team_name(name)?;
     let owner = admin::checked_member_name(owner)?;
     let mut id =
@@ -83,8 +93,8 @@ pub fn make_team_file(
     let audit = Audit::new();
     let made = store.tx(|tx| {
         tx.execute(
-            "INSERT INTO team (id, name, created_at) VALUES (1, ?1, ?2)",
-            params![name, to_i(now)],
+            "INSERT INTO team (id, name, created_at, member_tokens_until) VALUES (1, ?1, ?2, ?3)",
+            params![name, to_i(now), to_i(now.saturating_add(14 * 86400))],
         )
         .map_err(db)?;
         tx.execute(
@@ -92,12 +102,22 @@ pub fn make_team_file(
             params![
                 owner,
                 auth::role_text(Role::Owner),
-                hash.0.as_slice(),
+                device.is_none().then_some(hash.0.as_slice()),
                 to_i(now)
             ],
         )
         .map_err(db)?;
         let owner_id = to_u(tx.last_insert_rowid());
+        if let Some((device_name, public_key)) = device {
+            crate::server::devices::end_host_bootstrap_on(tx, &audit, now)?;
+            tx.execute(
+                "INSERT INTO device (member_id, name, public_key, key_holder, created_at) VALUES (?1, ?2, ?3, 1, ?4)",
+                params![to_i(owner_id), device_name, public_key, to_i(now)],
+            ).map_err(db)?;
+            let device_id = to_u(tx.last_insert_rowid());
+            audit.write_on(tx, now, RELAY_ACTOR, "device_added", None,
+                &json!({"member_id": owner_id, "device_id": device_id, "name": device_name}))?;
+        }
         audit.write_on(
             tx,
             now,
@@ -300,6 +320,7 @@ impl Hub {
             polls: LongPolls::new(limits.long_polls_per_agent),
             host_polls: LongPolls::new(limits.host_long_polls),
             run_keys: RunKeys::default(),
+            device_auth: crate::server::devices::DeviceAuthState::default(),
             public_host: self.public_host.clone(),
             stop: self.stop.clone(),
             closed: AtomicBool::new(false),
@@ -356,15 +377,34 @@ impl Hub {
         &self,
         request: &TeamCreate,
         now: u64,
-    ) -> RelayResult<(TeamId, MemberId, SecretString)> {
+    ) -> RelayResult<(TeamId, MemberId, DeviceId)> {
         // The names are checked before the code, so a typo does not use the code up.
         checked_team_name(&request.team)?;
         admin::checked_member_name(&request.owner)?;
+        let update = || {
+            RelayError::invalid(format!(
+                "This apassy-team is too old: update it (curl -fsSL {}/install.sh ...)",
+                self.config.public_url.trim_end_matches('/')
+            ))
+        };
+        let device_name = admin::checked_label(
+            request.device_name.as_deref().ok_or_else(update)?,
+            "device name",
+        )?;
+        let public_key =
+            crate::device::decode_public_key(request.public_key.as_deref().ok_or_else(update)?)
+                .map_err(|_| RelayError::invalid("The device public key is not valid."))?;
         let mut made: Option<TeamId> = None;
         let new = self.directory.store.tx(|tx| {
             // The code is checked before any work for the team.
             let code_id = directory::find_team_code(tx, request.code.expose(), now)?;
-            let new = make_team_file(&self.config, &request.team, &request.owner, now)?;
+            let new = make_team_file_with_device(
+                &self.config,
+                &request.team,
+                &request.owner,
+                now,
+                Some((&device_name, &public_key)),
+            )?;
             made = Some(new.id.clone());
             let added = directory::mark_team_code_used(tx, code_id, &new.id, now)
                 .and_then(|()| {
@@ -402,12 +442,20 @@ impl Hub {
         let NewTeam {
             id,
             owner_id,
-            owner_token,
             store,
             ..
         } = new;
+        let device_id = store.with(|conn| {
+            conn.query_row(
+                "SELECT id FROM device WHERE member_id = ?1 AND revoked_at IS NULL",
+                params![to_i(owner_id.0)],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|id| DeviceId(to_u(id)))
+            .map_err(db)
+        })?;
         self.register(id.clone(), store, TeamLimits::default());
-        Ok((id, owner_id, owner_token))
+        Ok((id, owner_id, device_id))
     }
 
     /// Suspends a team: its tokens stop at the next request, its sessions and waiting

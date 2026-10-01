@@ -23,7 +23,8 @@ use crate::secret::SecretString;
 
 /// The schema version in `PRAGMA user_version`. Version 1 was the first alpha: it kept
 /// the item values in the vault. Version 2 keeps only sealed values (`uid`, `sealed`).
-pub const SCHEMA_VERSION: i64 = 2;
+/// Version 3 adds devices and permits members without member tokens.
+pub const SCHEMA_VERSION: i64 = 3;
 
 const KDF_ITER: i64 = 256_000;
 const PAGE_SIZE: i64 = 4096;
@@ -31,6 +32,106 @@ const HMAC: &str = "HMAC_SHA512";
 const KDF: &str = "PBKDF2_HMAC_SHA512";
 
 const SCHEMA: &str = "
+CREATE TABLE team (id INTEGER PRIMARY KEY CHECK (id = 1), name TEXT NOT NULL, created_at INTEGER NOT NULL,
+  member_tokens_until INTEGER DEFAULT (unixepoch() + 1209600));
+CREATE TABLE member (
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('owner','manager','member')),
+  kind TEXT NOT NULL DEFAULT 'person' CHECK (kind IN ('person','shared')),
+  token_hash BLOB UNIQUE, created_at INTEGER NOT NULL, revoked_at INTEGER);
+CREATE UNIQUE INDEX member_name_live ON member(name) WHERE revoked_at IS NULL;
+CREATE TABLE invite (
+  id INTEGER PRIMARY KEY, code_hash BLOB NOT NULL UNIQUE,
+  role TEXT NOT NULL CHECK (role IN ('owner','manager','member')),
+  name TEXT, grants TEXT NOT NULL DEFAULT '[]', shared INTEGER NOT NULL DEFAULT 0,
+  created_by INTEGER NOT NULL REFERENCES member(id), created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL, used_by INTEGER REFERENCES member(id), used_at INTEGER,
+  revoked_at INTEGER);
+CREATE TABLE collection (
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, policy TEXT NOT NULL,
+  created_at INTEGER NOT NULL);
+CREATE TABLE item (
+  id INTEGER PRIMARY KEY, collection_id INTEGER NOT NULL REFERENCES collection(id),
+  name TEXT NOT NULL, env_name TEXT NOT NULL, uid TEXT NOT NULL UNIQUE, sealed BLOB NOT NULL,
+  provider TEXT, hosts TEXT NOT NULL,
+  environment TEXT NOT NULL, risk TEXT NOT NULL, scope TEXT NOT NULL, reversibility TEXT NOT NULL,
+  created_by INTEGER NOT NULL REFERENCES member(id), created_at INTEGER NOT NULL, archived_at INTEGER);
+CREATE UNIQUE INDEX item_env ON item(collection_id, env_name) WHERE archived_at IS NULL;
+CREATE TABLE access_grant (
+  id INTEGER PRIMARY KEY, collection_id INTEGER NOT NULL REFERENCES collection(id),
+  member_id INTEGER NOT NULL REFERENCES member(id), created_by INTEGER NOT NULL REFERENCES member(id),
+  created_at INTEGER NOT NULL, revoked_at INTEGER);
+CREATE UNIQUE INDEX grant_live ON access_grant(collection_id, member_id) WHERE revoked_at IS NULL;
+CREATE TABLE agent (
+  id INTEGER PRIMARY KEY, member_id INTEGER NOT NULL REFERENCES member(id), name TEXT NOT NULL,
+  token_hash BLOB NOT NULL UNIQUE, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, revoked_at INTEGER);
+CREATE TABLE run (
+  id INTEGER PRIMARY KEY, agent_id INTEGER NOT NULL REFERENCES agent(id), member_id INTEGER NOT NULL REFERENCES member(id),
+  items TEXT NOT NULL, command TEXT NOT NULL, purpose TEXT NOT NULL, user_request TEXT, cwd TEXT,
+  ttl_secs INTEGER NOT NULL, flags TEXT NOT NULL, note TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending','ready','denied','timed_out','ended')),
+  decided_by TEXT, approver_id INTEGER REFERENCES member(id), code TEXT,
+  created_at INTEGER NOT NULL, expires_at INTEGER, decided_at INTEGER, session_expires_at INTEGER);
+CREATE TABLE audit (
+  id INTEGER PRIMARY KEY, at INTEGER NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL,
+  run_id INTEGER, detail TEXT NOT NULL);
+";
+
+const DEVICE_SCHEMA: &str = "
+CREATE TABLE device (
+  id INTEGER PRIMARY KEY, member_id INTEGER NOT NULL REFERENCES member(id),
+  name TEXT NOT NULL, public_key BLOB NOT NULL,
+  key_holder INTEGER NOT NULL DEFAULT 0 CHECK (key_holder IN (0,1)),
+  created_at INTEGER NOT NULL, last_seen_at INTEGER, revoked_at INTEGER);
+CREATE UNIQUE INDEX device_key_live ON device(public_key) WHERE revoked_at IS NULL;
+CREATE UNIQUE INDEX device_key_holder ON device(key_holder) WHERE key_holder = 1 AND revoked_at IS NULL;
+CREATE INDEX device_member ON device(member_id);
+CREATE TABLE join_request (
+  id INTEGER PRIMARY KEY, invite_id INTEGER NOT NULL REFERENCES invite(id),
+  name TEXT NOT NULL, device_name TEXT NOT NULL, public_key BLOB NOT NULL, safety TEXT NOT NULL,
+  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','confirmed','refused','expired')),
+  decided_by INTEGER REFERENCES member(id), decided_at INTEGER,
+  member_id INTEGER REFERENCES member(id), device_id INTEGER REFERENCES device(id));
+CREATE INDEX join_request_key ON join_request(public_key);
+CREATE TABLE device_link (
+  id INTEGER PRIMARY KEY, member_id INTEGER NOT NULL REFERENCES member(id),
+  code_hash BLOB NOT NULL UNIQUE, made_by_device INTEGER NOT NULL REFERENCES device(id),
+  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  device_name TEXT, public_key BLOB, safety TEXT, requested_at INTEGER,
+  state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','pending','confirmed','refused','expired')),
+  decided_at INTEGER, device_id INTEGER REFERENCES device(id));
+CREATE INDEX device_link_key ON device_link(public_key);
+ALTER TABLE agent ADD COLUMN device_id INTEGER REFERENCES device(id);
+";
+
+const REBUILD_V3: &str = "
+CREATE TABLE member_v3 (
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('owner','manager','member')),
+  kind TEXT NOT NULL DEFAULT 'person' CHECK (kind IN ('person','shared')),
+  token_hash BLOB UNIQUE, created_at INTEGER NOT NULL, revoked_at INTEGER);
+INSERT INTO member_v3 (id, name, role, token_hash, created_at, revoked_at)
+  SELECT id, name, role, token_hash, created_at, revoked_at FROM member;
+CREATE TABLE invite_v3 (
+  id INTEGER PRIMARY KEY, code_hash BLOB NOT NULL UNIQUE,
+  role TEXT NOT NULL CHECK (role IN ('owner','manager','member')),
+  name TEXT, grants TEXT NOT NULL DEFAULT '[]', shared INTEGER NOT NULL DEFAULT 0,
+  created_by INTEGER NOT NULL REFERENCES member(id), created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL, used_by INTEGER REFERENCES member(id), used_at INTEGER,
+  revoked_at INTEGER);
+INSERT INTO invite_v3 (id, code_hash, role, created_by, created_at, expires_at, used_by, used_at)
+  SELECT id, code_hash, role, created_by, created_at, expires_at, used_by, used_at FROM invite;
+DROP TABLE member;
+DROP TABLE invite;
+ALTER TABLE member_v3 RENAME TO member;
+ALTER TABLE invite_v3 RENAME TO invite;
+CREATE UNIQUE INDEX member_name_live ON member(name) WHERE revoked_at IS NULL;
+ALTER TABLE team ADD COLUMN member_tokens_until INTEGER;
+";
+
+#[cfg(test)]
+const SCHEMA_V2: &str = "
 CREATE TABLE team (id INTEGER PRIMARY KEY CHECK (id = 1), name TEXT NOT NULL, created_at INTEGER NOT NULL);
 CREATE TABLE member (
   id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE,
@@ -165,7 +266,11 @@ impl Store {
 
     /// Creates the file of one team (the team schema).
     pub fn create_team(path: &Path, key: &SecretString) -> RelayResult<Self> {
-        Self::create_at(path, key, SCHEMA)
+        Self::create_at(
+            path,
+            key,
+            &format!("{SCHEMA}{DEVICE_SCHEMA}PRAGMA user_version = 3;"),
+        )
     }
 
     /// Opens the file of one team and checks its schema version.
@@ -177,12 +282,55 @@ impl Store {
                 "This team vault is from the first alpha and holds plaintext item values. Start with a new data volume: there is no migration.",
             ));
         }
-        if version != SCHEMA_VERSION {
+        if version == 2 {
+            store.migrate_v3(path)?;
+        } else if version != SCHEMA_VERSION {
             return Err(RelayError::internal(
                 "The team vault has an unknown schema version.",
             ));
         }
         Ok(store)
+    }
+
+    /// Keeps an encrypted version 2 backup and changes the team schema in one transaction.
+    fn migrate_v3(&self, path: &Path) -> RelayResult<()> {
+        let mut conn = self.lock();
+        let mut backup = path.as_os_str().to_os_string();
+        backup.push(".pre-v3");
+        copy_private(path, Path::new(&backup))?;
+
+        // SQLite ignores this change inside a transaction. Never rename the old
+        // tables: that would change the names in the existing child foreign keys.
+        conn.pragma_update(None, "foreign_keys", "OFF")
+            .map_err(db)?;
+        let migration = (|| {
+            let tx = Transaction::new(&mut conn, TransactionBehavior::Immediate).map_err(db)?;
+            tx.execute_batch(REBUILD_V3).map_err(db)?;
+            tx.execute_batch(DEVICE_SCHEMA).map_err(db)?;
+            tx.execute(
+                "UPDATE team SET member_tokens_until = ?1",
+                params![to_i(crate::now_unix().saturating_add(14 * 24 * 60 * 60))],
+            )
+            .map_err(db)?;
+            let invalid = tx
+                .query_row("PRAGMA foreign_key_check", [], |_| Ok(()))
+                .optional()
+                .map_err(db)?
+                .is_some();
+            if invalid {
+                return Err(RelayError::internal(
+                    "The team vault has invalid foreign keys. The schema change was rolled back.",
+                ));
+            }
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+                .map_err(db)?;
+            tx.commit().map_err(db)
+        })();
+        // The transaction is committed or rolled back before this pragma runs,
+        // including all error paths inside the migration.
+        let foreign_keys = conn.pragma_update(None, "foreign_keys", "ON").map_err(db);
+        migration?;
+        foreign_keys
     }
 
     /// Copies the file to `dest` (mode 0600) while no other statement can run: the
@@ -239,6 +387,8 @@ pub fn copy_private(source: &Path, dest: &Path) -> RelayResult<u64> {
         .mode(0o600)
         .open(dest)
         .map_err(|_| RelayError::internal("A backup file cannot be created."))?;
+    to.set_permissions(fs::Permissions::from_mode(0o600))
+        .map_err(|_| RelayError::internal("The backup file mode cannot be set to 0600."))?;
     let bytes = std::io::copy(&mut from, &mut to)
         .map_err(|_| RelayError::internal("A file cannot be copied to the backup."))?;
     to.sync_all()
@@ -491,6 +641,203 @@ pub fn member_name(conn: &Connection, id: MemberId) -> RelayResult<Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn v2_vault(path: &Path, key: &SecretString) -> Store {
+        let store = Store::create_at(path, key, SCHEMA_V2).unwrap();
+        store
+            .with(|conn| {
+                conn.execute_batch(
+                    "INSERT INTO team VALUES (1, 'Old Team', 100);
+                 INSERT INTO member VALUES (7, 'Owner', 'owner', X'0102', 100, NULL);
+                 INSERT INTO member VALUES (19, 'Retired', 'member', X'0304', 101, 105);
+                 INSERT INTO invite VALUES (23, X'0506', 'member', 7, 102, 1000, 19, 104);
+                 INSERT INTO collection VALUES (31, 'Production', '{}', 100);
+                 INSERT INTO item VALUES (41, 31, 'Key', 'KEY', 'uid', X'0708', NULL,
+                    '[]', 'production', 'low', 'read', 'yes', 7, 100, NULL);
+                 INSERT INTO access_grant VALUES (47, 31, 19, 7, 100, NULL);
+                 INSERT INTO agent VALUES (53, 19, 'Agent', X'090A', 100, 1000, NULL);
+                 INSERT INTO run VALUES (59, 53, 19, '[]', 'true', 'test', NULL, NULL,
+                    60, '{}', '', 'ended', 'owner', 7, NULL, 100, 160, 101, 160);
+                 INSERT INTO audit VALUES (61, 100, 'owner', 'test', 59, '{}');",
+                )
+                .map_err(db)
+            })
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn v3_migration_keeps_a_working_member_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("team.db");
+        let key = SecretString::new("member token migration passphrase".into());
+        let team = crate::ids::TeamId::parse("t_abcdefghij").unwrap();
+        let token = crate::secret::new_token(crate::secret::TokenKind::Member, &team).unwrap();
+        let hash = crate::secret::token_hash(token.expose());
+        let old = v2_vault(&path, &key);
+        old.with(|conn| {
+            conn.execute(
+                "UPDATE member SET token_hash = ?1 WHERE id = 7",
+                params![hash.0.as_slice()],
+            )
+            .map(|_| ())
+            .map_err(db)
+        })
+        .unwrap();
+        drop(old);
+        let store = Store::open_team(&path, &key).unwrap();
+        let who = store
+            .with(|conn| crate::server::auth::authenticate(conn, token.expose(), crate::now_unix()))
+            .unwrap();
+        assert_eq!(who.member().id, MemberId(7));
+        assert_eq!(who.member().name, "Owner");
+        assert!(who.member().device.is_none());
+    }
+
+    #[test]
+    fn v3_migration_keeps_rows_foreign_keys_and_encrypted_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("team.db");
+        let backup = dir.path().join("team.db.pre-v3");
+        let key = SecretString::new("schema migration test passphrase".into());
+        drop(v2_vault(&path, &key));
+        let original = fs::read(&path).unwrap();
+        let before = crate::now_unix();
+        let store = Store::open_team(&path, &key).unwrap();
+        let after = crate::now_unix();
+        assert_eq!(store.user_version().unwrap(), 3);
+        assert_eq!(fs::read(&backup).unwrap(), original);
+        assert_eq!(
+            fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(
+            !original
+                .windows(b"Old Team".len())
+                .any(|bytes| bytes == b"Old Team")
+        );
+        store.with(|conn| {
+            assert_eq!(pragma_i64(conn, "foreign_keys")?, 1);
+            let deadline: i64 = conn.query_row("SELECT member_tokens_until FROM team", [], |r| r.get(0)).unwrap();
+            assert!((to_i(before + 1209600)..=to_i(after + 1209600)).contains(&deadline));
+            let member: (i64, Vec<u8>, String) = conn.query_row(
+                "SELECT id, token_hash, kind FROM member WHERE id = 7", [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            ).unwrap();
+            assert_eq!(member, (7, vec![1, 2], "person".into()));
+            let invite: (i64, i64, i64, i64, String, i64) = conn.query_row(
+                "SELECT id, created_by, used_by, used_at, grants, shared FROM invite", [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            ).unwrap();
+            assert_eq!(invite, (23, 7, 19, 104, "[]".into(), 0));
+            for (table, id) in [("collection", 31), ("item", 41), ("access_grant", 47), ("agent", 53), ("run", 59), ("audit", 61)] {
+                let found: i64 = conn.query_row(&format!("SELECT id FROM {table}"), [], |r| r.get(0)).unwrap();
+                assert_eq!(found, id);
+            }
+            assert!(conn.query_row("PRAGMA foreign_key_check", [], |_| Ok(())).optional().unwrap().is_none());
+            let old_names: i64 = conn.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE sql LIKE '%member_v3%' OR sql LIKE '%invite_v3%'", [], |r| r.get(0),
+            ).unwrap();
+            assert_eq!(old_names, 0);
+            conn.execute_batch(
+                "INSERT INTO member (name, role, created_at) VALUES ('Retired', 'member', 200);
+                 INSERT INTO member (name, role, created_at) VALUES ('Other', 'owner', 200);
+                 INSERT INTO invite (code_hash, role, created_by, created_at, expires_at)
+                    VALUES (X'FFFF', 'owner', 7, 200, 1000);
+                 INSERT INTO device (member_id, name, public_key, key_holder, created_at)
+                    VALUES (7, 'Host', X'04AA', 1, 200);",
+            ).unwrap();
+            assert!(conn.execute("INSERT INTO device (member_id, name, public_key, key_holder, created_at) VALUES (7, 'Second', X'04BB', 1, 200)", []).is_err());
+            assert!(conn.execute("INSERT INTO device (member_id, name, public_key, created_at) VALUES (999, 'Bad', X'04CC', 200)", []).is_err());
+            Ok(())
+        }).unwrap();
+        drop(store);
+        assert_eq!(
+            Store::open_at(&backup, &key)
+                .unwrap()
+                .user_version()
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            Store::open_team(&path, &key)
+                .unwrap()
+                .user_version()
+                .unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn v3_migration_refuses_when_backup_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("team.db");
+        let key = SecretString::new("schema migration test passphrase".into());
+        drop(v2_vault(&path, &key));
+        fs::write(dir.path().join("team.db.pre-v3"), b"keep this backup").unwrap();
+        let original = fs::read(&path).unwrap();
+        assert!(Store::open_team(&path, &key).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(
+            Store::open_at(&path, &key).unwrap().user_version().unwrap(),
+            2
+        );
+        assert_eq!(
+            fs::read(dir.path().join("team.db.pre-v3")).unwrap(),
+            b"keep this backup"
+        );
+    }
+
+    #[test]
+    fn v3_migration_rolls_back_invalid_foreign_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("team.db");
+        let key = SecretString::new("schema migration test passphrase".into());
+        let store = v2_vault(&path, &key);
+        store.with(|conn| conn.execute_batch(
+            "PRAGMA foreign_keys = OFF; UPDATE agent SET member_id = 999; PRAGMA foreign_keys = ON;",
+        ).map_err(db)).unwrap();
+        let original = fs::read(&path).unwrap();
+        // Keep the connection so the failure path can also prove that FK checks
+        // are on again after the transaction rolls back.
+        assert!(store.migrate_v3(&path).is_err());
+        assert_eq!(store.user_version().unwrap(), 2);
+        store.with(|conn| {
+            assert_eq!(pragma_i64(conn, "foreign_keys")?, 1);
+            let new_tables: i64 = conn.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('device','join_request','device_link','member_v3','invite_v3')", [], |r| r.get(0)).unwrap();
+            assert_eq!(new_tables, 0);
+            let deadline_columns: i64 = conn.query_row("SELECT count(*) FROM pragma_table_info('team') WHERE name = 'member_tokens_until'", [], |r| r.get(0)).unwrap();
+            assert_eq!(deadline_columns, 0);
+            Ok(())
+        }).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(
+            fs::read(dir.path().join("team.db.pre-v3")).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn fresh_team_uses_v3_and_has_a_member_token_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SecretString::new("new schema test passphrase".into());
+        let store = Store::create_team(&dir.path().join("team.db"), &key).unwrap();
+        assert_eq!(store.user_version().unwrap(), 3);
+        store
+            .with(|conn| {
+                conn.execute(
+                    "INSERT INTO team (id, name, created_at) VALUES (1, 'New', 100)",
+                    [],
+                )
+                .unwrap();
+                let deadline: i64 = conn
+                    .query_row("SELECT member_tokens_until FROM team", [], |r| r.get(0))
+                    .unwrap();
+                assert!(deadline >= to_i(crate::now_unix() + 1209600 - 1));
+                Ok(())
+            })
+            .unwrap();
+    }
 
     fn options(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()

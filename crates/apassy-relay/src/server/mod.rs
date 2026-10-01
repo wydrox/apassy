@@ -14,11 +14,13 @@ pub mod approvals;
 pub mod audit;
 pub mod auth;
 pub mod decide;
+pub mod devices;
 pub mod directory;
 pub mod env;
 pub mod host;
 pub mod http;
 pub mod hub;
+pub mod joins;
 pub mod mcp;
 pub mod operator;
 pub mod runkeys;
@@ -72,6 +74,8 @@ pub struct Core {
     pub host_polls: LongPolls,
     /// The one-time keys of pending runs. In memory only.
     pub run_keys: RunKeys,
+    /// Device nonces and access tokens, in memory only.
+    pub device_auth: devices::DeviceAuthState,
     /// The host of the public URL. A command that names it is not a foreign host.
     pub public_host: String,
     stop: Arc<AtomicBool>,
@@ -127,6 +131,7 @@ impl Core {
         self.notify.notify();
         self.sessions.clear();
         self.run_keys.clear();
+        self.device_auth.clear();
     }
 }
 

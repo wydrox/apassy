@@ -737,7 +737,7 @@ A failure before the commit point removes what it made and leaves `team.db` as i
 
 ## 23. Devices, sign-in, joins, and links
 
-ADR 0019 of the core, stages 2 and 3. A person (or a shared device) is a member of one team. Each member has devices; each device has a P-256 key pair. A device signs in and gets an access token for 15 minutes. A join or a new device waits for a confirmation, and the confirmer must type the two safety words that the joiner sees. The shared code is `src/device.rs` (keys, the sign-in message, the safety words) and the types in `src/api.rs` ("Devices, sign-in, joins, and links"). This section was reviewed before it was built; the rules marked **(review)** close holes that the review found.
+ADR 0019 of the core, stages 2 and 3. This section takes precedence over the earlier auth, schema, join, host, and team-creation rules in sections 7, 8, 9, 21, and 22. A person (or a shared device) is a member of one team. Each member has devices; each device has a P-256 key pair. A device signs in and gets an access token for 15 minutes. A join or a new device waits for a confirmation, and the confirmer must type the two safety words that the joiner sees. The shared code is `src/device.rs` (keys, the sign-in message, the safety words) and the types in `src/api.rs` ("Devices, sign-in, joins, and links"). This section was reviewed before it was built; the rules marked **(review)** close holes that the review found.
 
 ### 23.1 Words and limits
 
@@ -774,6 +774,8 @@ A new team file is made at version 3. Version 1 and unknown versions are refused
 ```sql
 -- team: the end of member tokens.
 ALTER TABLE team ADD COLUMN member_tokens_until INTEGER;
+-- The migration sets this to migration time + 1209600. A new file uses
+-- DEFAULT (unixepoch() + 1209600); creation also sets it from the creation time.
 -- member: token_hash becomes NULL-able (a member with a device has no member token; many
 -- NULLs are allowed under UNIQUE); the name is unique among live members only; kind.
 CREATE TABLE member (
@@ -834,14 +836,14 @@ These answers tell a caller who knows a public key whether it waits; a public ke
 
 `POST /v1/auth/token` (edge; body `TokenRequest`). The relay takes the nonce out of the table (one use) and checks: it is not expired; it was made for this public key; the device is still live (read from the file now); the signature verifies over `device::sign_in_message(public_url, team_id, public_key, nonce)` with the relay's own `public_url`. Any failure: 401 `unauthenticated`, one message, and a refusal row (rate-limited). Success: an access token, `last_seen_at` of the device set, a row `device_signed_in` (at most one per device per hour), answer `AccessGrantedRef`.
 
-An access token works everywhere a member token works. `authenticate` reads the device and the member from the file for each request and returns `MemberAuth` with `device: Option<DeviceAuth { id, key_holder }>`. A token of a revoked device or member fails at the next request (and revocation also drops the device's entries from the table).
+An access token works on member endpoints except `/v1/devices/enroll`. `authenticate` reads the device and the member from the file for each request and returns `MemberAuth` with `device: Option<DeviceAuth { id, key_holder }>`. A token of a revoked device or member fails at the next request (and revocation also drops the device's entries from the table).
 
-Member tokens still work, until the team's `member_tokens_until`, for a member that has no device. The first device of a member (`POST /v1/devices/enroll`, member token only) sets that member's `token_hash` to NULL in the same transaction, binds the member's agents that have no device to the new device **(review)**, and writes `member_enrolled`.
+Member tokens still work, until the team's `member_tokens_until`, for a member that has no device. The deadline applies to member tokens of both forms and agent tokens of the old form `apassy_agt_`; agent tokens with a team id keep their own expiry. The first device of a member (`POST /v1/devices/enroll`, member token only) sets that member's `token_hash` to NULL in the same transaction, binds the member's agents that have no device to the new device **(review)**, and writes `member_enrolled`.
 
 ### 23.4 The key holder **(review)**
 
 - The host endpoints (`/v1/host/...`) need an access token of a live device with the key-holder flag whose member is a live owner — both read from the file on each request. Another device: 403 `not_key_holder`; not an owner: 403 `forbidden`.
-- Until the team has a live device of any owner, the host endpoints also accept a member token of a live owner (the path of the migrated team and of a team made by `apassy-relay init`). Once any owner has a live device, member tokens never reach the host endpoints again.
+- Until the team has a live device of any owner, the host endpoints also accept a member token of a live owner (the path of the migrated team and of a team made by `apassy-relay init`). Once any owner has a live device, member tokens never reach the host endpoints again. A permanent, secret-free audit row `host_bootstrap_ended` records this transition. Device creation for an owner, owner enrollment, and promotion of a member with a live device write this row in the same transaction. Revocation or later role changes do not reopen the bootstrap path.
 - `enroll` sets the key-holder flag only when the member is an owner, the team has no live key holder, and the member is the only live owner.
 - `POST /v1/devices/{id}/key-holder` (owner): if the team has a live key holder, only that device may call it (an access token of the current key holder), and the target must be a live device of a live owner; if the team has none, an owner's device may claim the flag for itself. Row `key_holder_moved` or `key_holder_claimed`. The CLI reminds the person to copy `keys.json` first.
 - `PUT /v1/members/{id}/role` refuses (409) to change the role of the member whose device holds the keys. Move the flag first.
@@ -849,22 +851,24 @@ Member tokens still work, until the team's `member_tokens_until`, for a member t
 
 ### 23.5 Endpoints
 
+The five edge endpoints (`/v1/auth/challenge`, `/v1/auth/token`, `/v1/join`, `/v1/devices/link`, and `/v1/teams`) reject a nonempty bearer token with 401 `unauthenticated`. These endpoints use only the body or code for team selection. Every authenticated endpoint selects its team from the bearer token, never from a body field.
+
 | Method and path | Auth | Body | Result |
 | --- | --- | --- | --- |
 | `POST /v1/auth/challenge` | edge | `ChallengeRequest` | `Challenge`; 403 `join_pending` / `join_refused`; 401; 503 `busy` when the team's nonce table is full |
 | `POST /v1/auth/token` | edge | `TokenRequest` | `AccessGranted` |
-| `POST /v1/devices/enroll` | member token (not an access token) | `DeviceEnroll` | `DeviceView`. 409 `conflict` if the member has a live device already, or the key is taken |
+| `POST /v1/devices/enroll` | member token (not an access token) | `DeviceEnroll` | `DeviceView`. 409 `conflict` if an authenticated member has a live device already, or the key is taken. An access token is 401; after successful enrollment the old member token is also 401 |
 | `GET /v1/devices` | member | | `[DeviceView]`: the caller's devices; the owner sees all live devices. `current` marks the caller's device |
 | `DELETE /v1/devices/{id}` | member: own device; owner: any | | `Created`. Revokes the device, its access tokens, its agents (as `DELETE /v1/agents`: their sessions end and their pending runs are invalidated), and the links it made **(review)**. 409 for the last live device of the last live owner **(review)** |
 | `POST /v1/devices/{id}/key-holder` | section 23.4 | | `DeviceView` |
 | `POST /v1/devices/links` | member with an access token, kind person | | `LinkCreatedRef`. 409 at 10 live devices |
-| `POST /v1/devices/link` | edge | `LinkRequest` | `Pending` (`by` = the member name). The code must be an open, unexpired link code of this team whose device and member are still live; the link becomes `pending` (one use). The key must not be live in the team. The same code with the same key again (a retry) returns the same `Pending` **(review)** |
+| `POST /v1/devices/link` | edge | `LinkRequest` | `Pending` (`by` = the member name). The code must be an open, unexpired link code of this team whose device and member are still live; the link becomes `pending` (one use). The key must not be live in the team. The same code with the same key again (a retry) returns the same `Pending` while the link is pending, unexpired, and its maker device and member are live. Terminal links cannot be retried. Invalid or used link codes are 403 `forbidden`; a code with no active team is 401 **(review)** |
 | `GET /v1/devices/links` | member with an access token | | `[LinkView]`: pending links of the caller's member |
-| `POST /v1/devices/links/{id}/confirm` | member with an access token of the same member | `ConfirmRequest` | `DeviceView` of the new device (never the key holder). `safety` must equal the link's words (else 409 `conflict`, the link stays pending). Only a `pending` link with `expires_at > now` **(review)**. Row `device_added`; when the member is an owner, also `owner_device_added` |
+| `POST /v1/devices/links/{id}/confirm` | member with an access token of the same member | `ConfirmRequest` | `DeviceView` of the new device (never the key holder). `safety` must equal the link's words (else 409 `conflict`, the link stays pending). Only a `pending` link with `expires_at > now` **(review)**. A link of another member returns 404 `not_found`, including for an owner. Row `device_added`; when the member is an owner, also `owner_device_added` |
 | `POST /v1/devices/links/{id}/refuse` | same | | `Created` |
 | `POST /v1/invites` | approver | `InviteRequest` (with `name`, `grants`, `shared`) | `Issued` as today. Role `manager` or `owner`: owner only. `shared`: role member only. `grants`: existing collections only. `name`: `checked_member_name` |
 | `GET /v1/invites` | approver | | `[InviteView]` with `used_at` |
-| `POST /v1/join` | edge | `JoinRequest` | `Pending` (`by` = the inviter's name). Without `device_name` and `public_key`: 400 `invalid_request` "This apassy-team is too old: update it (curl -fsSL <relay URL>/install.sh ...)". The invite must be live, and its maker a live member who may still invite that role **(review)**. The invite is used at once (`used_at`). The name is the invite's name if it has one, else the request's (required then); it must not be the name of a live member or of another pending join, else 409. The same code with the same key again returns the same `Pending` (a retry) **(review)**. A code of a used invite with another key writes a row `invite_reused` (rate-limited) and answers 403 `invite_invalid` with the message "The invite code is not valid, was used, or expired. If you did not use it, tell the person who invited you." |
+| `POST /v1/join` | edge | `JoinRequest` | `Pending` (`by` = the inviter's name). Without `device_name` and `public_key`: 400 `invalid_request` "This apassy-team is too old: update it (curl -fsSL <relay URL>/install.sh ...)". The invite must be live, and its maker a live member who may still invite that role **(review)**. The invite is used at once (`used_at`). The name is the invite's name if it has one, else the request's (required then); it must not be the name of a live member or of another pending join, else 409. The same code with the same key again returns the same `Pending` (a retry) while the join is pending and unexpired and the invite maker still has permission. Terminal joins cannot be retried **(review)**. A code of a used invite with another key writes a row `invite_reused` (rate-limited) and answers 403 `invite_invalid` with the message "The invite code is not valid, was used, or expired. If you did not use it, tell the person who invited you." |
 | `GET /v1/joins` | approver | | `[JoinView]` pending, oldest first |
 | `POST /v1/joins/{id}/confirm` | approver; a join for the role manager or owner: owner only | `ConfirmRequest` | `JoinConfirmed`. `safety` must equal the join's words (else 409, the join stays pending). Only a `pending` join with `expires_at > now`, whose invite's maker is still a live member allowed to invite that role **(review)**. One transaction: the member (role and kind from the invite, no token), its device (not the key holder), a grant for each collection of the invite that still exists, `invite.used_by`, rows `member_joined` and `device_added`. A live member with that name now: 409 |
 | `POST /v1/joins/{id}/refuse` | approver | | `Created`. Row `join_refused` |

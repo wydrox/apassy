@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use apassy_relay::config::{RelayConfig, UpstreamOptions};
+use apassy_relay::device::{self, DeviceKey};
 use apassy_relay::hostkeys::{self, Key32};
 use apassy_relay::ids::TeamId;
 use apassy_relay::secret::{SecretString, parse_token};
@@ -395,25 +396,76 @@ impl TestRelay {
         rows.collect::<Result<_, _>>().expect("collect")
     }
 
-    /// Adds an invite for `role`, joins as `name`, and returns the member id and token.
-    pub fn join_member(&self, role: &str, name: &str) -> (u64, String) {
+    /// Signs in a device and returns its in-memory access token.
+    pub fn sign_in(&self, team: &TeamId, key: &DeviceKey) -> String {
+        let public_key = key.public_key_b64();
+        let challenge = self.ok(
+            "POST",
+            "/v1/auth/challenge",
+            "",
+            Some(&json!({"team_id": team, "public_key": public_key})),
+        );
+        let nonce = challenge["nonce"].as_str().expect("nonce");
+        let signature = key
+            .sign(&device::sign_in_message(
+                &self.config.public_url,
+                team,
+                &public_key,
+                nonce,
+            ))
+            .expect("sign");
+        let granted = self.ok(
+            "POST",
+            "/v1/auth/token",
+            "",
+            Some(&json!({"team_id": team, "public_key": public_key,
+                "nonce": nonce, "signature": hostkeys::encode_b64(&signature)})),
+        );
+        granted["token"].as_str().expect("access token").to_string()
+    }
+
+    /// Adds an invite, confirms the join, and signs in its fresh device.
+    /// Returns the member id, the access token, and the key for a later sign-in.
+    pub fn join_device(&self, role: &str, name: &str) -> (u64, String, DeviceKey) {
+        let key = DeviceKey::generate().expect("device key");
         let invite = self.ok(
             "POST",
             "/v1/invites",
             &self.owner_token,
             Some(&json!({"role": role})),
         );
-        let code = invite["secret"].as_str().expect("code").to_string();
+        let code = invite["secret"].as_str().expect("code");
         let joined = self.ok(
             "POST",
             "/v1/join",
             "",
-            Some(&json!({"code": code, "name": name})),
+            Some(
+                &json!({"code": code, "name": name, "device_name": "Test device",
+                "public_key": key.public_key_b64()}),
+            ),
         );
+        assert_eq!(
+            joined["safety"],
+            device::safety_words(&self.team_id, code, &key.public_key())
+        );
+        let confirmed = self.ok(
+            "POST",
+            &format!("/v1/joins/{}/confirm", joined["id"]),
+            &self.owner_token,
+            Some(&json!({"safety": joined["safety"]})),
+        );
+        let token = self.sign_in(&self.team_id, &key);
         (
-            joined["id"].as_u64().expect("id"),
-            joined["secret"].as_str().expect("token").to_string(),
+            confirmed["member_id"].as_u64().expect("member id"),
+            token,
+            key,
         )
+    }
+
+    /// Adds a confirmed member and returns its id and device access token.
+    pub fn join_member(&self, role: &str, name: &str) -> (u64, String) {
+        let (id, token, _) = self.join_device(role, name);
+        (id, token)
     }
 
     /// A collection of the owner. Returns its id.
@@ -600,6 +652,12 @@ impl TestRelay {
 
     /// A new team through a team code of the operator. Returns its owner token.
     pub fn new_team(&self, name: &str, owner: &str) -> String {
+        self.new_team_device(name, owner).0
+    }
+
+    /// A new team and its owner's device key, for another sign-in after a restart.
+    pub fn new_team_device(&self, name: &str, owner: &str) -> (String, DeviceKey) {
+        let key = DeviceKey::generate().expect("device key");
         let code = self
             .operator(apassy_relay::server::operator::Command::TeamCode { hours: 1 })
             .expect("team code");
@@ -607,9 +665,11 @@ impl TestRelay {
             "POST",
             "/v1/teams",
             "",
-            Some(&json!({"code": code["code"], "team": name, "owner": owner})),
+            Some(&json!({"code": code["code"], "team": name, "owner": owner,
+                "device_name": "Owner device", "public_key": key.public_key_b64()})),
         );
-        made["secret"].as_str().expect("owner token").to_string()
+        let team: TeamId = serde_json::from_value(made["team_id"].clone()).expect("team id");
+        (self.sign_in(&team, &key), key)
     }
 }
 

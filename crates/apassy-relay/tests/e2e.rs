@@ -183,15 +183,25 @@ fn make_team(relay: &TestRelay, config: &Path) -> Team {
         owner,
         Some(&json!({"role": "member"})),
     );
-    let invite_code = invite["secret"].as_str().expect("code").to_string();
+    let invite_code = invite["secret"].as_str().unwrap().to_string();
+    let key = apassy_relay::device::DeviceKey::generate().unwrap();
     let joined = relay.ok(
         "POST",
         "/v1/join",
         "",
-        Some(&json!({"code": invite_code, "name": "alice"})),
+        Some(&json!({
+            "code": invite_code, "name": "alice", "device_name": "Alice device",
+            "public_key": key.public_key_b64()
+        })),
     );
-    let member_id = joined["id"].as_u64().expect("member id");
-    let member_token = joined["secret"].as_str().expect("token").to_string();
+    let confirmed = relay.ok(
+        "POST",
+        &format!("/v1/joins/{}/confirm", joined["id"]),
+        owner,
+        Some(&json!({"safety": joined["safety"]})),
+    );
+    let member_id = confirmed["member_id"].as_u64().unwrap();
+    let member_token = relay.sign_in(&relay.team_id, &key);
     let grant = relay.ok(
         "POST",
         "/v1/grants",

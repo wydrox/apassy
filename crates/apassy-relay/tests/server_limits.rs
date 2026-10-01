@@ -204,7 +204,7 @@ fn member_limit_counts_active_members_and_leaves_invite_usable() {
     set(&relay, json!({"members":2}));
     let (member, _) = relay.join_member("member", "alice");
     let code = invite(&relay);
-    let join = json!({"code":code["secret"],"name":"carol"});
+    let join = json!({"code":code["secret"],"name":"carol", "device_name":"Carol device", "public_key":apassy_relay::device::DeviceKey::generate().unwrap().public_key_b64()});
     relay.fails("POST", "/v1/join", None, Some(&join), 403, "team_limit");
     let conn = relay::open_team_file(&relay.config, &relay.team_id);
     assert_eq!(
@@ -228,7 +228,23 @@ fn member_limit_counts_active_members_and_leaves_invite_usable() {
         &relay.owner_token,
         None,
     );
-    relay.ok("POST", "/v1/join", "", Some(&join));
+    let pending = relay.ok("POST", "/v1/join", "", Some(&join));
+    relay.ok(
+        "POST",
+        &format!("/v1/joins/{}/confirm", pending["id"]),
+        &relay.owner_token,
+        Some(&json!({"safety": pending["safety"]})),
+    );
+    let conn = relay::open_team_file(&relay.config, &relay.team_id);
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM member WHERE revoked_at IS NULL",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        2
+    );
 }
 
 #[test]
@@ -568,8 +584,13 @@ fn directory_1001_migrates_to_1002_without_losing_teams_codes_or_audit() {
             Some(owner),
             None,
         );
-        assert_eq!(status, 200, "{body}");
-        assert_eq!(body["result"]["team_id"], id.as_str());
+        if owner == &a {
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(body["result"]["team_id"], id.as_str());
+        } else {
+            // Access tokens live in memory and end at a restart.
+            assert_eq!(status, 401, "{body}");
+        }
         assert_eq!(
             apassy_relay::server::operator::send(
                 &config.admin_socket_path(),
@@ -611,7 +632,9 @@ fn directory_1001_migrates_to_1002_without_losing_teams_codes_or_audit() {
         "POST",
         "/v1/teams",
         None,
-        Some(&json!({"code":unused["code"],"team":"Team C","owner":"carol"})),
+        Some(
+            &json!({"code":unused["code"],"team":"Team C","owner":"carol", "device_name":"Carol device", "public_key":apassy_relay::device::DeviceKey::generate().unwrap().public_key_b64()}),
+        ),
     );
     assert_eq!(status, 200, "{body}");
     running.stop();

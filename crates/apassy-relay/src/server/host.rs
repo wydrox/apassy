@@ -46,6 +46,7 @@ pub fn list(core: &Core, owner: &MemberAuth, wait_secs: u64) -> RelayResult<Vec<
     let wait_secs = if poll.is_some() { wait_secs } else { 0 };
     let deadline = Instant::now() + Duration::from_secs(wait_secs.min(MAX_WAIT_SECS));
     loop {
+        crate::server::devices::authorize_host(core, owner)?;
         let now = now_unix();
         approvals::maintenance(core, now)?;
         let seen = core.notify.current();
@@ -163,6 +164,7 @@ pub fn release(
     request: &ReleaseRequest,
     now: u64,
 ) -> RelayResult<RunView> {
+    crate::server::devices::authorize_host(core, owner)?;
     // Masked after the session exists: only then does the relay know the values.
     let reason = checked_reason(request.reason.as_deref())?;
     let mut created = None;

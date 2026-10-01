@@ -339,7 +339,7 @@ mod tests {
         let store = Store::create_team(&dir.path().join("t.db"), &key).unwrap();
         store
             .with(|c| {
-                c.execute_batch("INSERT INTO team VALUES (1,'t',0)")
+                c.execute_batch("INSERT INTO team (id, name, created_at) VALUES (1,'t',0)")
                     .map_err(db)
             })
             .unwrap();

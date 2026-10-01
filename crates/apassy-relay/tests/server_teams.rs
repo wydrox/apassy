@@ -204,13 +204,17 @@ fn an_invite_joins_only_its_own_team() {
     );
     let code = invite["secret"].as_str().unwrap().to_string();
     assert_eq!(team_of(&code), team_of(&owner_b));
+    let key = apassy_relay::device::DeviceKey::generate().unwrap();
     // The code moved to team A is not an invite of team A.
     let moved = moved_to(&code, &team_of(&owner_a));
     relay.fails(
         "POST",
         "/v1/join",
         None,
-        Some(&json!({"code": moved, "name": "carol"})),
+        Some(
+            &json!({"code": moved, "name": "carol", "device_name": "Carol device",
+            "public_key": key.public_key_b64()}),
+        ),
         403,
         codes::INVITE_INVALID,
     );
@@ -218,11 +222,20 @@ fn an_invite_joins_only_its_own_team() {
         "POST",
         "/v1/join",
         "",
-        Some(&json!({"code": code, "name": "carol"})),
+        Some(
+            &json!({"code": code, "name": "carol", "device_name": "Carol device",
+            "public_key": key.public_key_b64()}),
+        ),
     );
-    let token = joined["secret"].as_str().unwrap();
-    assert_eq!(team_of(token), team_of(&owner_b));
-    assert_eq!(relay.ok("GET", "/v1/me", token, None)["team"], "Team B");
+    relay.ok(
+        "POST",
+        &format!("/v1/joins/{}/confirm", joined["id"]),
+        &owner_b,
+        Some(&json!({"safety": joined["safety"]})),
+    );
+    let token = relay.sign_in(&team_of(&owner_b), &key);
+    assert_eq!(team_of(&token), team_of(&owner_b));
+    assert_eq!(relay.ok("GET", "/v1/me", &token, None)["team"], "Team B");
     let members_a = relay.ok("GET", "/v1/members", &owner_a, None);
     assert!(!members_a.to_string().contains("carol"));
 }
@@ -235,12 +248,13 @@ fn a_team_code_works_once_and_a_typo_does_not_use_it() {
         .unwrap()
         .to_string();
     assert!(code.starts_with("apassy_tcd_"));
+    let key = apassy_relay::device::DeviceKey::generate().unwrap();
     // A bad name is refused before the code is used.
     relay.fails(
         "POST",
         "/v1/teams",
         None,
-        Some(&json!({"code": code, "team": "", "owner": "bob"})),
+        Some(&json!({"code": code, "team": "", "owner": "bob", "device_name": "Owner device", "public_key": key.public_key_b64()})),
         400,
         codes::INVALID_REQUEST,
     );
@@ -248,7 +262,7 @@ fn a_team_code_works_once_and_a_typo_does_not_use_it() {
         "POST",
         "/v1/teams",
         None,
-        Some(&json!({"code": code, "team": "B", "owner": "bad name"})),
+        Some(&json!({"code": code, "team": "B", "owner": "bad name", "device_name": "Owner device", "public_key": key.public_key_b64()})),
         400,
         codes::INVALID_REQUEST,
     );
@@ -259,7 +273,7 @@ fn a_team_code_works_once_and_a_typo_does_not_use_it() {
             "POST",
             "/v1/teams",
             None,
-            Some(&json!({"code": bad, "team": "B", "owner": "bob"})),
+            Some(&json!({"code": bad, "team": "B", "owner": "bob", "device_name": "Owner device", "public_key": key.public_key_b64()})),
             403,
             codes::INVITE_INVALID,
         );
@@ -268,20 +282,22 @@ fn a_team_code_works_once_and_a_typo_does_not_use_it() {
         "POST",
         "/v1/teams",
         "",
-        Some(&json!({"code": code, "team": "B", "owner": "bob"})),
+        Some(&json!({"code": code, "team": "B", "owner": "bob", "device_name": "Owner device", "public_key": key.public_key_b64()})),
     );
-    let token = made["secret"].as_str().unwrap();
-    assert_eq!(made["team_id"], team_of(token).as_str());
+    assert!(made.get("secret").is_none());
+    let team = serde_json::from_value(made["team_id"].clone()).unwrap();
+    let token = relay.sign_in(&team, &key);
+    assert_eq!(made["team_id"], team_of(&token).as_str());
     relay.fails(
         "POST",
         "/v1/teams",
         None,
-        Some(&json!({"code": code, "team": "C", "owner": "eve"})),
+        Some(&json!({"code": code, "team": "C", "owner": "eve", "device_name": "Owner device", "public_key": key.public_key_b64()})),
         403,
         codes::INVITE_INVALID,
     );
     // The team has its own file.
-    assert!(relay.config.team_path(&team_of(token)).exists());
+    assert!(relay.config.team_path(&team_of(&token)).exists());
     // A code that lives too long is refused.
     assert!(relay.operator(Command::TeamCode { hours: 0 }).is_err());
     assert!(relay.operator(Command::TeamCode { hours: 721 }).is_err());
@@ -291,7 +307,7 @@ fn a_team_code_works_once_and_a_typo_does_not_use_it() {
 fn the_operator_suspends_resumes_and_deletes_a_team() {
     let mut relay = start(UpstreamOptions::default());
     let owner_a = relay.owner_token.clone();
-    let owner_b = relay.new_team("Team B", "bob");
+    let (owner_b, owner_key_b) = relay.new_team_device("Team B", "bob");
     let id_b = team_of(&owner_b);
     relay.switch_team(&owner_b);
     let team_b = relay.setup("staging");
@@ -378,6 +394,15 @@ fn the_operator_suspends_resumes_and_deletes_a_team() {
     relay
         .operator(Command::Resume { team: id_b.clone() })
         .unwrap();
+    relay.fails(
+        "GET",
+        "/v1/me",
+        Some(&owner_b),
+        None,
+        401,
+        codes::UNAUTHENTICATED,
+    );
+    let owner_b = relay.sign_in(&id_b, &owner_key_b);
     relay.ok("GET", "/v1/me", &owner_b, None);
     let audit = relay
         .ok("GET", "/v1/audit?limit=500", &owner_b, None)
@@ -548,7 +573,9 @@ fn a_relay_from_before_teams_migrates_with_its_tokens() {
         "POST",
         "/v1/join",
         "",
-        Some(&json!({"code": format!("apassy_inv_{}", "3c".repeat(32)), "name": "x"})),
+        Some(
+            &json!({"code": format!("apassy_inv_{}", "3c".repeat(32)), "name": "x", "device_name": "Test device", "public_key": apassy_relay::device::DeviceKey::generate().unwrap().public_key_b64()}),
+        ),
     );
     assert_eq!(status, 403);
     running.stop();
@@ -718,7 +745,22 @@ fn an_operator_backup_restores_every_team() {
         )
     };
     assert_eq!(me(&owner_a).1["result"]["team"], "Test Team");
-    assert_eq!(me(&owner_b).1["result"]["team"], "Team B");
+    // Backups contain the team metadata, but do not contain access tokens.
+    assert_eq!(me(&owner_b).0, 401);
+    let team_b = team_of(&owner_b);
+    let conn = relay::open_team_file(&config, &team_b);
+    assert_eq!(
+        conn.query_row("SELECT name FROM team", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "Team B"
+    );
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM collection", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    drop(conn);
     // Team C was suspended in the backup and stays so.
     assert_eq!(me(&owner_c).0, 401);
     let (_, items) = relay::call_url(

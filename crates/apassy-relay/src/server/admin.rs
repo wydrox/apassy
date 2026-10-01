@@ -12,13 +12,13 @@ use serde_json::{Value, json};
 
 use crate::api::{
     AccessItem, AccessView, AgentCreate, AgentView, CollectionCreate, CollectionView, Created,
-    GrantCreate, GrantView, InviteRequest, InviteView, IssuedRef, ItemCreated, ItemView,
-    JoinRequest, MeView, MemberView, NewItem, Policy, PolicyMode, PrincipalKind, Role,
+    GrantCreate, GrantView, InviteRequest, InviteView, IssuedRef, ItemCreated, ItemView, MeView,
+    MemberView, NewItem, Policy, PolicyMode, PrincipalKind, Role, RoleChange,
 };
 use crate::error::{RelayError, RelayResult, codes};
 use crate::hostkeys;
-use crate::ids::{AgentId, CollectionId, GrantId, InviteId, ItemId, MemberId};
-use crate::secret::{TokenKind, new_token, parse_token, token_hash};
+use crate::ids::{AgentId, CollectionId, DeviceId, GrantId, InviteId, ItemId, MemberId};
+use crate::secret::{TokenKind, new_token, token_hash};
 use crate::server::Core;
 use crate::server::approvals::invalidate_pending;
 use crate::server::audit::{self, member_actor};
@@ -43,7 +43,7 @@ fn created(id: u64) -> RelayResult<Value> {
 }
 
 /// A name for a collection, item, or agent: 1 to 64 bytes, no control character.
-fn checked_label(text: &str, what: &str) -> RelayResult<String> {
+pub(crate) fn checked_label(text: &str, what: &str) -> RelayResult<String> {
     let text = text.trim();
     if text.is_empty()
         || text.len() > crate::api::MAX_NAME_BYTES
@@ -88,8 +88,11 @@ pub fn me(core: &Core, who: &crate::server::auth::Principal) -> RelayResult<Valu
             agent_id: None,
             agent_name: None,
             expires_at: None,
-            device_id: None,
-            key_holder: false,
+            device_id: member.device.as_ref().map(|device| device.id),
+            key_holder: member
+                .device
+                .as_ref()
+                .is_some_and(|device| device.key_holder),
         },
         crate::server::auth::Principal::Agent(agent) => MeView {
             team,
@@ -111,91 +114,8 @@ pub fn me(core: &Core, who: &crate::server::auth::Principal) -> RelayResult<Valu
 pub fn invite_invalid() -> RelayError {
     RelayError::new(
         codes::INVITE_INVALID,
-        "The invite code is not valid, was used, or expired.",
+        "The invite code is not valid, was used, or expired. If you did not use it, tell the person who invited you.",
     )
-}
-
-pub fn join(core: &Core, request: &JoinRequest, now: u64) -> RelayResult<Value> {
-    // Section 23 (stage 3) replaces this flow with a join that waits for a confirmation.
-    let name = checked_member_name(request.name.as_deref().unwrap_or_default())?.to_string();
-    let code = request.code.expose();
-    // The relay found this team by the team id in the code. Check it again here.
-    let parsed = parse_token(code).ok_or_else(invite_invalid)?;
-    if parsed.kind != TokenKind::Invite || parsed.team.as_ref() != Some(&core.team) {
-        return Err(invite_invalid());
-    }
-    let code_hash = token_hash(code);
-    let token = new_token(TokenKind::Member, &core.team)?;
-    let member_hash = token_hash(token.expose());
-    let (member_id, role, invite_id) = core.store.tx(|tx| {
-        let invite: Option<(i64, String)> = tx
-            .query_row(
-                "SELECT id, role FROM invite WHERE code_hash = ?1 AND used_by IS NULL AND expires_at > ?2",
-                params![code_hash.0.as_slice(), to_i(now)],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(db)?;
-        let (invite_id, role) = invite.ok_or_else(invite_invalid)?;
-        let name_used: bool = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM member WHERE name = ?1)",
-                params![name],
-                |row| row.get(0),
-            )
-            .map_err(db)?;
-        if name_used {
-            return Err(RelayError::new(
-                codes::CONFLICT,
-                "A member with this name exists.",
-            ));
-        }
-        let members: i64 = tx
-            .query_row(
-                "SELECT count(*) FROM member WHERE revoked_at IS NULL",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(db)?;
-        if to_u(members) >= core.limits().members {
-            return Ok(Err(core.limit_error_on(tx, now, "members")?));
-        }
-        let inserted = tx.execute(
-            "INSERT INTO member (name, role, token_hash, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![name, role, member_hash.0.as_slice(), to_i(now)],
-        );
-        match inserted {
-            Ok(_) => {}
-            Err(error) if is_unique_violation(&error) => {
-                return Err(RelayError::new(
-                    codes::CONFLICT,
-                    "A member with this name exists.",
-                ));
-            }
-            Err(error) => return Err(db(error)),
-        }
-        let member_id = tx.last_insert_rowid();
-        tx.execute(
-            "UPDATE invite SET used_by = ?1, used_at = ?2 WHERE id = ?3",
-            params![member_id, to_i(now), invite_id],
-        )
-        .map_err(db)?;
-        core.audit.write_on(
-            tx,
-            now,
-            &member_actor(to_u(member_id)),
-            "member_joined",
-            None,
-            &json!({"name": name, "role": role, "invite_id": to_u(invite_id)}),
-        )?;
-        Ok(Ok((to_u(member_id), role, to_u(invite_id))))
-    })??;
-    let _ = (role, invite_id);
-    to_json(&IssuedRef {
-        id: member_id,
-        secret: token.expose(),
-        expires_at: None,
-    })
 }
 
 pub fn invite_create(
@@ -204,14 +124,29 @@ pub fn invite_create(
     request: &InviteRequest,
     now: u64,
 ) -> RelayResult<Value> {
-    if request.role == Role::Owner {
-        return Err(RelayError::invalid(
-            "An invite is for a manager or a member.",
+    if !by.role.is_approver() {
+        return Err(RelayError::forbidden(
+            "Only an owner or manager makes an invite.",
         ));
     }
-    if request.role == Role::Manager && by.role != Role::Owner {
-        return Err(RelayError::forbidden("Only the owner invites a manager."));
+    if request.role != Role::Member && by.role != Role::Owner {
+        return Err(RelayError::forbidden(
+            "Only an owner invites a manager or owner.",
+        ));
     }
+    if request.shared && request.role != Role::Member {
+        return Err(RelayError::invalid("A shared member has the member role."));
+    }
+    let name = request
+        .name
+        .as_deref()
+        .map(checked_member_name)
+        .transpose()?;
+    let mut grants = request.grants.clone();
+    grants.sort_unstable();
+    grants.dedup();
+    let grants_text = serde_json::to_string(&grants)
+        .map_err(|_| RelayError::internal("The invite grants cannot be written."))?;
     let hours = request.expires_hours.unwrap_or(DEFAULT_INVITE_HOURS);
     if !(1..=MAX_INVITE_HOURS).contains(&hours) {
         return Err(RelayError::invalid("An invite lives 1 to 168 hours."));
@@ -220,14 +155,22 @@ pub fn invite_create(
     let hash = token_hash(code.expose());
     let expires_at = now + u64::from(hours) * 3600;
     let id = core.store.tx(|tx| {
+        for collection in &grants {
+            if collection_view(tx, *collection)?.is_none() {
+                return Err(RelayError::not_found("collection"));
+            }
+        }
         tx.execute(
-            "INSERT INTO invite (code_hash, role, created_by, created_at, expires_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO invite (code_hash, role, created_by, created_at, expires_at, name, grants, shared) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 hash.0.as_slice(),
                 role_text(request.role),
                 to_i(by.id.0),
                 to_i(now),
-                to_i(expires_at)
+                to_i(expires_at),
+                name,
+                grants_text,
+                i64::from(request.shared)
             ],
         )
         .map_err(db)?;
@@ -252,7 +195,9 @@ pub fn invite_create(
 pub fn invite_list(core: &Core) -> RelayResult<Value> {
     core.store.with(|conn| {
         let mut statement = conn
-            .prepare("SELECT id, role, created_at, expires_at, used_by FROM invite ORDER BY id")
+            .prepare(
+                "SELECT id, role, created_at, expires_at, used_by, used_at FROM invite ORDER BY id",
+            )
             .map_err(db)?;
         let rows = statement
             .query_map([], |row| {
@@ -262,7 +207,7 @@ pub fn invite_list(core: &Core) -> RelayResult<Value> {
                     created_at: to_u(row.get(2)?),
                     expires_at: to_u(row.get(3)?),
                     used_by: row.get::<_, Option<i64>>(4)?.map(|v| MemberId(to_u(v))),
-                    used_at: None,
+                    used_at: row.get::<_, Option<i64>>(5)?.map(to_u),
                 })
             })
             .map_err(db)?;
@@ -271,27 +216,45 @@ pub fn invite_list(core: &Core) -> RelayResult<Value> {
     })
 }
 
+fn member_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemberView> {
+    Ok(MemberView {
+        id: MemberId(to_u(row.get(0)?)),
+        name: row.get(1)?,
+        role: parse_role(&row.get::<_, String>(2)?),
+        created_at: to_u(row.get(3)?),
+        revoked: row.get::<_, Option<i64>>(4)?.is_some(),
+        shared: row.get::<_, String>(5)? == "shared",
+        devices: to_u(row.get(6)?),
+    })
+}
+
+const MEMBER_VIEW_SQL: &str = "SELECT m.id, m.name, m.role, m.created_at, m.revoked_at, m.kind, \
+     (SELECT count(*) FROM device d WHERE d.member_id = m.id AND d.revoked_at IS NULL) \
+     FROM member m";
+
 pub fn member_list(core: &Core) -> RelayResult<Value> {
     core.store.with(|conn| {
         let mut statement = conn
-            .prepare("SELECT id, name, role, created_at, revoked_at FROM member ORDER BY id")
+            .prepare(&format!("{MEMBER_VIEW_SQL} ORDER BY m.id"))
             .map_err(db)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok(MemberView {
-                    id: MemberId(to_u(row.get(0)?)),
-                    name: row.get(1)?,
-                    role: parse_role(&row.get::<_, String>(2)?),
-                    created_at: to_u(row.get(3)?),
-                    revoked: row.get::<_, Option<i64>>(4)?.is_some(),
-                    shared: false,
-                    devices: 0,
-                })
-            })
+        let list: Vec<MemberView> = statement
+            .query_map([], member_from_row)
+            .map_err(db)?
+            .collect::<Result<_, _>>()
             .map_err(db)?;
-        let list: Vec<MemberView> = rows.collect::<Result<_, _>>().map_err(db)?;
         to_json(&list)
     })
+}
+
+fn last_owner(conn: &Connection, id: MemberId) -> RelayResult<bool> {
+    conn.query_row(
+        "SELECT (SELECT role FROM member WHERE id = ?1 AND revoked_at IS NULL) = 'owner' \
+         AND NOT EXISTS(SELECT 1 FROM member WHERE role = 'owner' AND revoked_at IS NULL AND id != ?1)",
+        params![to_i(id.0)],
+        |row| row.get::<_, Option<bool>>(0),
+    )
+    .map(|value| value.unwrap_or(false))
+    .map_err(db)
 }
 
 pub fn member_revoke(
@@ -300,10 +263,21 @@ pub fn member_revoke(
     id: MemberId,
     now: u64,
 ) -> RelayResult<Value> {
-    if id == owner.id {
-        return Err(RelayError::forbidden("The owner cannot revoke themselves."));
+    if owner.role != Role::Owner {
+        return Err(RelayError::forbidden("Only an owner revokes a member."));
     }
-    core.store.tx(|tx| {
+    revoke_member(core, owner, id, now)
+}
+
+pub fn leave(core: &Core, by: &MemberAuth, now: u64) -> RelayResult<Value> {
+    revoke_member(core, by, by.id, now)
+}
+
+fn revoke_member(core: &Core, by: &MemberAuth, id: MemberId, now: u64) -> RelayResult<Value> {
+    let devices = core.store.tx(|tx| {
+        if last_owner(tx, id)? {
+            return Err(RelayError::new(codes::CONFLICT, "The last live owner cannot leave or be revoked."));
+        }
         let changed = tx
             .execute(
                 "UPDATE member SET revoked_at = ?2 WHERE id = ?1 AND revoked_at IS NULL",
@@ -313,6 +287,39 @@ pub fn member_revoke(
         if changed == 0 {
             return Err(RelayError::not_found("member"));
         }
+        let devices: Vec<DeviceId> = {
+            let mut statement = tx
+                .prepare("SELECT id FROM device WHERE member_id = ?1 AND revoked_at IS NULL")
+                .map_err(db)?;
+            statement
+                .query_map(params![to_i(id.0)], |row| Ok(DeviceId(to_u(row.get(0)?))))
+                .map_err(db)?
+                .collect::<Result<_, _>>()
+                .map_err(db)?
+        };
+        tx.execute(
+            "UPDATE device SET revoked_at = ?2 WHERE member_id = ?1 AND revoked_at IS NULL",
+            params![to_i(id.0), to_i(now)],
+        )
+        .map_err(db)?;
+        tx.execute(
+            "UPDATE invite SET revoked_at = ?2 WHERE created_by = ?1 AND used_at IS NULL \
+             AND revoked_at IS NULL AND expires_at > ?2",
+            params![to_i(id.0), to_i(now)],
+        )
+        .map_err(db)?;
+        tx.execute(
+            "UPDATE join_request SET state = 'refused', decided_by = ?3, decided_at = ?2 \
+             WHERE state = 'pending' AND invite_id IN (SELECT id FROM invite WHERE created_by = ?1)",
+            params![to_i(id.0), to_i(now), to_i(by.id.0)],
+        )
+        .map_err(db)?;
+        tx.execute(
+            "UPDATE device_link SET state = 'expired', decided_at = ?2 \
+             WHERE member_id = ?1 AND state IN ('open', 'pending')",
+            params![to_i(id.0), to_i(now)],
+        )
+        .map_err(db)?;
         tx.execute(
             "UPDATE agent SET revoked_at = ?2 WHERE member_id = ?1 AND revoked_at IS NULL",
             params![to_i(id.0), to_i(now)],
@@ -323,12 +330,11 @@ pub fn member_revoke(
             params![to_i(id.0), to_i(now)],
         )
         .map_err(db)?;
-        // The pending runs of this member are denied, and their keys are dropped.
         invalidate_pending(
             core,
             tx,
             now,
-            &member_actor(owner.id.0),
+            &member_actor(by.id.0),
             "member_revoked",
             |run| run.member_id == id,
         )?;
@@ -337,15 +343,91 @@ pub fn member_revoke(
         core.audit.write_on(
             tx,
             now,
-            &member_actor(owner.id.0),
+            &member_actor(by.id.0),
             "member_revoked",
             None,
             &json!({"member_id": id}),
         )?;
-        Ok(())
+        Ok(devices)
     })?;
+    crate::server::devices::drop_tokens(core, &devices);
     core.notify.notify();
     created(id.0)
+}
+
+pub fn role_change(
+    core: &Core,
+    by: &MemberAuth,
+    id: MemberId,
+    request: &RoleChange,
+    now: u64,
+) -> RelayResult<Value> {
+    if by.role != Role::Owner {
+        return Err(RelayError::forbidden(
+            "Only an owner changes a member role.",
+        ));
+    }
+    let view = core.store.tx(|tx| {
+        let (old_role, kind): (String, String) = tx
+            .query_row(
+                "SELECT role, kind FROM member WHERE id = ?1 AND revoked_at IS NULL",
+                params![to_i(id.0)],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(db)?
+            .ok_or_else(|| RelayError::not_found("member"))?;
+        if kind == "shared" && request.role != Role::Member {
+            return Err(RelayError::new(codes::CONFLICT, "A shared member must keep the member role."));
+        }
+        if parse_role(&old_role) != request.role {
+            if request.role != Role::Owner && last_owner(tx, id)? {
+                return Err(RelayError::new(codes::CONFLICT, "The last live owner must keep the owner role."));
+            }
+            let key_holder: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM device WHERE member_id = ?1 AND revoked_at IS NULL AND key_holder = 1)",
+                    params![to_i(id.0)],
+                    |row| row.get(0),
+                )
+                .map_err(db)?;
+            if key_holder {
+                return Err(RelayError::new(codes::CONFLICT, "Move the key-holder flag before you change this member role."));
+            }
+            tx.execute(
+                "UPDATE member SET role = ?2 WHERE id = ?1",
+                params![to_i(id.0), role_text(request.role)],
+            )
+            .map_err(db)?;
+            if request.role == Role::Owner {
+                let has_device: bool = tx
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM device WHERE member_id = ?1 AND revoked_at IS NULL)",
+                        params![to_i(id.0)],
+                        |row| row.get(0),
+                    )
+                    .map_err(db)?;
+                if has_device {
+                    crate::server::devices::end_host_bootstrap_on(tx, &core.audit, now)?;
+                }
+            }
+            core.audit.write_on(
+                tx,
+                now,
+                &member_actor(by.id.0),
+                "member_role_changed",
+                None,
+                &json!({"member_id": id, "from": old_role, "role": role_text(request.role)}),
+            )?;
+        }
+        tx.query_row(
+            &format!("{MEMBER_VIEW_SQL} WHERE m.id = ?1"),
+            params![to_i(id.0)],
+            member_from_row,
+        )
+        .map_err(db)
+    })?;
+    to_json(&view)
 }
 
 // ---- Collections ----
@@ -919,6 +1001,25 @@ pub fn agent_create(
     let hash = token_hash(token.expose());
     let expires_at = now + u64::from(days) * 86_400;
     let id = core.store.tx(|tx| {
+        // Authentication precedes body reads. Enrollment or revocation can finish
+        // while the body waits, so never create an agent from an old principal.
+        if let Some(device) = by.device {
+            let current = crate::server::auth::device_member(tx, device.id)?;
+            if current.id != by.id {
+                return Err(RelayError::unauthenticated());
+            }
+        } else {
+            let live: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM member m WHERE m.id = ?1 AND m.revoked_at IS NULL \
+                 AND m.token_hash IS NOT NULL AND NOT EXISTS(SELECT 1 FROM device d \
+                 WHERE d.member_id = m.id AND d.revoked_at IS NULL))",
+                params![to_i(by.id.0)], |row| row.get(0),
+            ).map_err(db)?;
+            if !live {
+                return Err(RelayError::unauthenticated());
+            }
+        }
+
         let agents: i64 = tx
             .query_row(
                 "SELECT count(*) FROM agent a JOIN member m ON m.id = a.member_id \
@@ -931,13 +1032,14 @@ pub fn agent_create(
             return Ok(Err(core.limit_error_on(tx, now, "agents")?));
         }
         tx.execute(
-            "INSERT INTO agent (member_id, name, token_hash, created_at, expires_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO agent (member_id, name, token_hash, created_at, expires_at, device_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 to_i(by.id.0),
                 name,
                 hash.0.as_slice(),
                 to_i(now),
-                to_i(expires_at)
+                to_i(expires_at),
+                by.device.as_ref().map(|device| to_i(device.id.0))
             ],
         )
         .map_err(db)?;
@@ -1094,6 +1196,27 @@ pub fn access(core: &Core, agent: &AgentAuth) -> RelayResult<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_live_owners_permit_an_owner_to_leave() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE member (id INTEGER PRIMARY KEY, role TEXT NOT NULL, revoked_at INTEGER); \
+             INSERT INTO member VALUES (1, 'owner', NULL), (2, 'member', NULL), (3, 'owner', 10);",
+        )
+        .unwrap();
+        assert!(last_owner(&conn, MemberId(1)).unwrap());
+        assert!(!last_owner(&conn, MemberId(2)).unwrap());
+        assert!(!last_owner(&conn, MemberId(3)).unwrap());
+        assert!(!last_owner(&conn, MemberId(99)).unwrap());
+        conn.execute("UPDATE member SET role = 'owner' WHERE id = 2", [])
+            .unwrap();
+        assert!(!last_owner(&conn, MemberId(1)).unwrap());
+        assert!(!last_owner(&conn, MemberId(2)).unwrap());
+        conn.execute("UPDATE member SET revoked_at = 11 WHERE id = 1", [])
+            .unwrap();
+        assert!(last_owner(&conn, MemberId(2)).unwrap());
+    }
 
     #[test]
     fn broad_hosts_are_public_suffixes_and_whole_domains() {
