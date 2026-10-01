@@ -13,7 +13,7 @@ This is an alpha. The design is in [docs/SPEC.md](docs/SPEC.md). It follows ADR 
 - Collections of items. Each collection has a policy. A grant gives one member the use of one collection.
 - Each member makes agent tokens.
 - Host-held item keys. A stolen vault or backup gives only ciphertext. A relay that is taken over gets only the values of the runs that the host released while it ran.
-- The owner's host releases a known-safe command with a non-production item at once, and asks the owner on the terminal for every other run. A production credential always asks. A hard-rule failure is denied by the relay. Nobody approves on the relay.
+- The owner's host releases a known safe command with a non-production item at once. Other runs need approval on the terminal or in a desktop dialog. Production credentials always need approval. The relay denies a hard-rule failure. Nobody approves on the relay.
 - An audit log with no values, no placeholders, no tokens, no keys.
 - Agents use a remote MCP endpoint, a stdio MCP adapter, or `apassy-team run`.
 
@@ -80,14 +80,16 @@ apassy-team invite                       # send the code to the member
 apassy-team grant --collection 1 --member 2
 apassy-team agent create ci              # the member runs this; it prints the token once
 
-apassy-team host                         # on the owner's Mac; keep it running
+apassy-team host install                 # on the owner's machine; starts at login
 
 export APASSY_TOKEN=...                  # in the agent's environment
 apassy-team run --items 1 --purpose "Check the balance" \
   --request "Show me the Stripe balance" -- stripe balance retrieve
 ```
 
-Every run waits for `apassy-team host`. It releases a known-safe command with a staging item by itself (the `stripe balance retrieve` above), and asks you at the terminal about any other run: `Release the keys for run N? [y/N]`. The host must be online for any run to start.
+Each run waits for `apassy-team host`. A known safe command with a staging item starts automatically (the `stripe balance retrieve` example). Other runs show a desktop dialog. Only a click on `Release` releases the keys. `Deny` is the default button. Return, Escape, a closed dialog, or a dialog error denies the run. A timeout expires the request without a release.
+
+Use `apassy-team host status` to check the user service. Use `apassy-team host uninstall` to stop and remove it. For a foreground host, use `apassy-team host` on a terminal or `apassy-team host --dialog` for desktop dialogs. The host must be online for each run. See [section 11 of the operations guide](docs/OPERATIONS.md#11-runs-and-the-host) for service options and logs.
 
 The full setup, with the Cloudflare Worker and the tunnel, is in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 

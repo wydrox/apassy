@@ -9,7 +9,9 @@
 //! ends in a question to the person or in a denial, never in a release.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
@@ -219,17 +221,17 @@ pub fn evaluate(
 /// What the person said.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Answer {
-    /// Only `y` or `yes`.
+    /// Only `y` or `yes`, or an explicit dialog release.
     Yes,
     /// Anything else.
     No,
-    /// There is no terminal, or it closed.
+    /// There is no terminal or desktop dialog program, or the terminal closed.
     NoTerminal,
     /// The run expired while the host waited for an answer.
     Expired,
 }
 
-/// Asks the person about one run. The binary uses the terminal; tests give answers.
+/// Asks the person about one run through a terminal or dialog. Tests give answers.
 pub trait Asker {
     /// `local[i]` is the key store entry of `request.items[i]`. `why` says why the
     /// host asks instead of releasing.
@@ -411,6 +413,236 @@ impl Asker for TtyAsker {
             }
         }
     }
+}
+
+// The script is fixed. Agent text is passed only in argv, never in AppleScript.
+const DIALOG_SCRIPT: &str = r#"on run argv
+    activate
+    try
+        set dialogResult to display dialog (item 1 of argv) with title (item 2 of argv) buttons {"Deny", "Release"} default button "Deny" cancel button "Deny" giving up after (item 3 of argv as integer) with icon caution
+        if gave up of dialogResult then
+            return "timeout"
+        else if button returned of dialogResult is "Release" then
+            return "release"
+        end if
+    on error
+        return "deny"
+    end try
+    return "deny"
+end run"#;
+
+#[derive(Debug, Clone, Copy)]
+pub enum DialogKind {
+    MacOs,
+    Zenity,
+}
+
+/// A native question. A missing GUI or program never permits a release.
+pub struct DialogAsker {
+    program: Option<PathBuf>,
+    kind: DialogKind,
+}
+
+impl DialogAsker {
+    pub fn new() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::with_program("/usr/bin/osascript", DialogKind::MacOs)
+        } else {
+            let desktop = ["DISPLAY", "WAYLAND_DISPLAY"]
+                .iter()
+                .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()));
+            let program = desktop.then(find_zenity).flatten();
+            Self {
+                program,
+                kind: DialogKind::Zenity,
+            }
+        }
+    }
+
+    /// Tests can supply an absolute path to a fake dialog program.
+    pub fn with_program(path: impl AsRef<Path>, kind: DialogKind) -> Self {
+        Self {
+            program: path
+                .as_ref()
+                .is_absolute()
+                .then(|| path.as_ref().to_path_buf()),
+            kind,
+        }
+    }
+}
+
+impl Default for DialogAsker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn find_zenity() -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::split_paths(&std::env::var_os("PATH")?).find_map(|dir| {
+        let path = dir.join("zenity").canonicalize().ok()?;
+        let meta = path.metadata().ok()?;
+        (meta.is_file() && meta.permissions().mode() & 0o111 != 0).then_some(path)
+    })
+}
+
+/// Limit characters, not bytes, so a UTF-8 character is never split.
+pub fn dialog_text(text: &str) -> String {
+    const LIMIT: usize = 3000;
+    const MARKER: &str = "\n(cut)";
+    if text.chars().count() <= LIMIT {
+        text.to_string()
+    } else {
+        let mut cut: String = text.chars().take(LIMIT - MARKER.chars().count()).collect();
+        cut.push_str(MARKER);
+        cut
+    }
+}
+
+impl Asker for DialogAsker {
+    fn ask(&mut self, request: &HostRequestView, local: &[&KeyEntry], why: &str) -> Answer {
+        let Some(program) = &self.program else {
+            return Answer::NoTerminal;
+        };
+        let now = now_unix();
+        let left = request.expires_at.saturating_sub(now);
+        // There is no valid dialog duration below the minimum of five seconds.
+        if left < 5 {
+            return Answer::Expired;
+        }
+        let secs = left.min(i32::MAX as u64);
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        let text = dialog_text(&render_request(request, local, why, now));
+        let title = format!("Apassy: release run {}?", request.run_id);
+        let mut command = Command::new(program);
+        command
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        // Only desktop/session settings are needed. In particular, no tokens pass.
+        for name in [
+            "HOME",
+            "LANG",
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "XDG_RUNTIME_DIR",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "XAUTHORITY",
+        ] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+        match self.kind {
+            DialogKind::MacOs => {
+                command.args(["-e", DIALOG_SCRIPT, "--", &text, &title, &secs.to_string()]);
+            }
+            DialogKind::Zenity => {
+                command.args([
+                    "--question",
+                    "--title",
+                    &title,
+                    "--text",
+                    &text,
+                    "--ok-label",
+                    "Release",
+                    "--cancel-label",
+                    "Deny",
+                    "--default-cancel",
+                    "--timeout",
+                    &secs.to_string(),
+                    "--no-markup",
+                    "--width",
+                    "600",
+                ]);
+            }
+        }
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Answer::NoTerminal;
+            }
+            Err(_) => return Answer::No,
+        };
+        let Some(stdout) = child.stdout.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Answer::No;
+        };
+        let (send, receive) = channel();
+        // Bound output, and drain it independently so the child cannot block us.
+        if std::thread::Builder::new()
+            .name("host-dialog-output".into())
+            .spawn(move || {
+                let mut bytes = Vec::new();
+                let result = stdout.take(65).read_to_end(&mut bytes).map(|_| bytes);
+                let _ = send.send(result);
+            })
+            .is_err()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Answer::No;
+        }
+        let status = loop {
+            if Instant::now() >= deadline || now_unix() >= request.expires_at {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Answer::Expired;
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Answer::No;
+                }
+            }
+        };
+        match self.kind {
+            DialogKind::MacOs if status.success() => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                match receive.recv_timeout(remaining.min(Duration::from_secs(1))) {
+                    Ok(Ok(bytes)) => match bytes.as_slice() {
+                        b"release" | b"release\n" if now_unix() < request.expires_at => Answer::Yes,
+                        b"timeout" | b"timeout\n" => Answer::Expired,
+                        _ => Answer::No,
+                    },
+                    _ => Answer::No,
+                }
+            }
+            DialogKind::Zenity => match status.code() {
+                Some(0) if now_unix() < request.expires_at => Answer::Yes,
+                Some(5) => Answer::Expired,
+                _ => Answer::No,
+            },
+            _ => Answer::No,
+        }
+    }
+}
+
+/// The file remains open for the complete host lifetime. Do not unlink it:
+/// a new inode would allow a second host to take a separate lock.
+pub fn lock_host(dir: &Path) -> Result<std::fs::File, CliError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    crate::cli::settings::ensure_private_dir(dir)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(dir.join("host.lock"))
+        .map_err(|_| CliError::usage("Cannot open host.lock."))?;
+    file.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => CliError::usage(
+            "A host already runs for this config directory. Stop it before you start another host.",
+        ),
+        std::fs::TryLockError::Error(_) => CliError::usage("Cannot lock host.lock."),
+    })?;
+    Ok(file)
 }
 
 // ---- The log ----
@@ -737,8 +969,8 @@ fn sleep_unless_stopped(stop: &AtomicBool, time: Duration) {
     }
 }
 
-/// `apassy-team host`.
-pub fn run(settings: &Settings, options: HostOptions) -> Result<i32, CliError> {
+/// Check the same owner identity for the host and service installation.
+pub fn check_owner(settings: &Settings) -> Result<(Client, MeView), CliError> {
     let client = Client::new(
         settings.relay()?,
         Some(settings.member()?),
@@ -750,7 +982,14 @@ pub fn run(settings: &Settings, options: HostOptions) -> Result<i32, CliError> {
             "`apassy-team host` needs the owner token: only the owner's host holds the keys.",
         ));
     }
+    Ok((client, me))
+}
+
+/// `apassy-team host`.
+pub fn run(settings: &Settings, options: HostOptions, dialog: bool) -> Result<i32, CliError> {
     let store = KeyStore::open()?;
+    let _lock = lock_host(store.dir())?;
+    let (client, me) = check_owner(settings)?;
     let count = store
         .load()?
         .iter()
@@ -780,7 +1019,11 @@ pub fn run(settings: &Settings, options: HostOptions) -> Result<i32, CliError> {
         poll_secs: POLL_SECS,
     };
     let stop = AtomicBool::new(false);
-    serve(&ctx, &mut TtyAsker::new(), &stop)?;
+    if dialog {
+        serve(&ctx, &mut DialogAsker::new(), &stop)?;
+    } else {
+        serve(&ctx, &mut TtyAsker::new(), &stop)?;
+    }
     Ok(0)
 }
 

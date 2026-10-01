@@ -267,40 +267,94 @@ What the session gives the command: for each item, a variable with the item's na
 
 ## 11. Runs and the host
 
-Every run that passes the hard rules waits for the owner's host. Nothing starts without a release, and the relay cannot approve a run on its own: it does not hold the keys.
+Each run that passes the hard rules waits for the host of the owner. A run cannot start without a release. The relay cannot approve a run because it does not hold the keys.
 
-On the owner's Mac, where `keys.json` is, run:
+Use the owner token on the machine that holds `keys.json`. Save the token with `apassy-team init`. To start the host on a terminal, use:
 
 ```sh
 apassy-team host
 ```
 
-Use the owner token (`apassy-team init` with it). Keep it running, in `tmux` or a launchd job that has a terminal for questions. The host must be online for every run. A run with no host times out after `APASSY_RELAY_APPROVAL_TIMEOUT` seconds (600 by default), and the agent sees `timed_out`.
+To use desktop dialogs in the foreground, use:
 
-The host handles the runs one at a time, oldest first. For each run it checks, on its own, with the metadata in `keys.json` and its own run of the core analysis (not with what the relay says):
+```sh
+apassy-team host --dialog
+```
 
-- Every item must be in `keys.json` for this relay, else the run is denied ("Unknown item on this host.").
-- It releases the keys by itself only if all of these are true: you did not start it with `--ask-all`; the relay suggests a release and flags nothing; no item is `production` in `keys.json`; the host's own analysis says known safe with no flag; and the item was not released automatically 30 times in the last hour (`--auto-limit N` changes the number). `git status`, `ls -la`, `cargo test`, and `stripe balance retrieve` with a staging item are known safe.
-- Otherwise it shows you the run: the agent, the member, the command, the purpose, the user's request, the working directory, the items with their environment from `keys.json`, the flags, the relay's note, and why it asks. Then it asks `Release the keys for run 7? [y/N]` on the terminal. Only `y` or `yes` releases. Anything else denies. With no terminal it denies ("No one at the host."). If the run expires while it waits, it moves on.
+To install and start the host as a user service, use:
 
-Every request is one line in `host.log` next to `keys.json`: the time, the run id, the agent, the member, the item uids and names, and the decision (`auto`, `approved`, `denied`, `unknown_item`, `expired`, `error`). It holds no key.
+```sh
+apassy-team host install
+apassy-team host status
+```
 
-There is no flag or variable that makes the host say yes by itself. `--ask-all` only asks more.
+The service needs the same relay URL and owner token in `settings.json` as the shell. Installation refuses different shell settings. The service file contains no token. A service cannot use `APASSY_EDGE_SECRET` from the shell. Use a relay endpoint that does not need this variable.
 
-To see and deny waiting runs from anywhere, the owner or a manager can use the CLI. This is for looking, and for saying no:
+The service starts at login and uses desktop dialogs. On macOS, it uses a LaunchAgent. On Linux, it uses a systemd user service. Keep the desktop session open for approval dialogs.
+
+After installation, the host starts at each login until you remove the service. `--ask-all` and `--auto-limit N` also apply to `host install`:
+
+```sh
+apassy-team host install --ask-all --auto-limit 0
+```
+
+On Linux, the user service needs the environment of the desktop session. If dialogs cannot open, import the applicable variables:
+
+```sh
+systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS
+systemctl --user restart apassy-team-host.service
+```
+
+To stop and remove the user service, use:
+
+```sh
+apassy-team host uninstall
+```
+
+The host must be online for each run. Without the host, a run expires after `APASSY_RELAY_APPROVAL_TIMEOUT` seconds (600 by default). The agent sees `timed_out`.
+
+The host checks one run at a time, oldest first. It uses the metadata in `keys.json` and its own command analysis:
+
+Each item must exist in `keys.json` for this relay. Otherwise, the host denies the run with "Unknown item on this host."
+
+Automatic release requires all conditions below:
+
+- `--ask-all` is absent.
+- The relay suggests release without flags.
+- No item has the `production` environment in `keys.json`.
+- The host analysis identifies a known safe command without flags.
+- Each item stays below the automatic release limit (30 per hour by default). `--auto-limit N` changes this limit.
+
+`git status`, `ls -la`, `cargo test`, and `stripe balance retrieve` with a staging item are known safe commands.
+
+Other runs need a decision from the owner. The host shows the agent, member, command, purpose, user request, working directory, items, environments, and flags. It also shows the relay note and the reason for approval.
+
+On the terminal, the host asks `Release the keys for run 7? [y/N]`. Only `y` or `yes` releases the keys. All other answers deny the run. Without a terminal, the terminal mode denies the run with "No one at the host."
+
+In dialog mode, only an explicit click on `Release` releases the keys. `Deny` is the default button. Return, Escape, a closed dialog, or a dialog error denies the run. A dialog timeout expires the request without a release. If fewer than five seconds remain, the host records an expired request without a dialog. A dialog never stays open beyond the expiry time of the run.
+
+The host holds `host.lock` next to `keys.json` while it runs. A second host for the same key store cannot start. This lock also prevents a foreground host and the user service from running together.
+
+Each request adds one line to `host.log` next to `keys.json`. The line gives the time, run id, agent, member, item uids, item names, and decision. Decisions are `auto`, `approved`, `denied`, `unknown_item`, `expired`, or `error`. The log contains no key.
+
+The service writes process output to `~/Library/Logs/apassy-team-host.log` on macOS. On Linux, it writes process output to `service.log` next to `host.log`. Use `host.log` to check decisions and the process log to check service errors.
+
+`--ask-all` requires approval for each run. `--auto-limit 0` prevents automatic release. Neither option permits an automatic approval of an unknown command.
+
+The owner or a manager can examine and deny waiting runs from another machine:
 
 ```sh
 apassy-team pending
 apassy-team deny 7 --reason "Not this key"
 ```
 
-`apassy-team approve` does not approve: the relay answers `approve_on_host`, and the CLI says "The keys are on the owner's host. Approve there with apassy-team host."
+`apassy-team approve` cannot release keys. The relay answers `approve_on_host`. The CLI says "The keys are on the owner's host. Approve there with apassy-team host."
 
-- A run that no one decides times out. The agent sees `timed_out`.
-- If the agent, the grant, the member, or the item is revoked while a run waits, the run is denied at once with `approval_invalidated`, and its key is dropped.
-- A release that does not check (a wrong run, a changed text, a wrong set of items) denies the run with `release_invalid`. Each run key works once.
-- There is no web page or app in the alpha. The owner decides at the terminal of the host.
-- The owner's host may release a run of the owner's own agent.
+- A run without a decision expires. The agent sees `timed_out`.
+- If a member revokes an agent, grant, member, or item, the relay denies its waiting run with `approval_invalidated`.
+- A wrong run, changed text, or wrong item set causes `release_invalid`. Each run key works once.
+- The owner decides on the host terminal or in its desktop dialog.
+- The host can release a run of the agent of the owner.
 
 ## 12. Audit
 
