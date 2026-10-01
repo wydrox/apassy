@@ -313,18 +313,18 @@ The audit records team changes, runs, decisions, sessions, and proxy requests. I
 
 ## 13. Backup
 
-The vault is `relay.db` and the folder `teams/` in the volume `/data`. Back them up together, with the relay stopped:
+`apassy-relay admin backup` copies `relay.db` and every team file while the relay runs. Each file is copied while its connection is locked, so the copy is whole. The copy goes to a new folder `<APASSY_RELAY_BACKUP_DIR>/<UTC time>` (default `/backups`; mode 0700, files 0600), with `MANIFEST.json`: the name, size, and SHA-256 of each file, and the number of teams.
 
 ```sh
-docker stop apassy-relay
-docker run --rm -v apassy-relay-data:/data:ro -v "$PWD":/backup debian:trixie-slim \
-  sh -c 'cp /data/relay.db /backup/ && cp -r /data/teams /backup/'
-docker start apassy-relay
+docker compose exec -T relay apassy-relay admin backup
 ```
 
-`relay.db` is encrypted with the master key, and holds the key of each team file. Each team file is encrypted with its own key and holds no readable value: each item is sealed, and its key is not on the relay. Keep the master key apart from the backup. To restore, copy both into a fresh volume and start with the same master key. A backup of `relay.db` can open the teams of that time for as long as you keep it and the master key: a team that you delete later stays in old backups.
+- The files stay encrypted. `relay.db` opens with the master key; each team file opens with its own key, which is in `relay.db`. Keep the master key apart from the backups: a backup with the master key opens every team's metadata (never an item value).
+- A suspended team is copied too.
+- On the VPS the folder is `/opt/apassy/backups/relay`. `deploy/vps/backup/` has a daily timer (03:30 UTC, 14 days kept, at least the 3 newest), a weekly restore test, and a pull to the owner's Mac (see its README).
+- To restore: stop the relay; put `relay.db` and `teams/` of one backup into an empty data volume (owner 10001, mode 0700, files 0600); start with the same master key. A team deleted after the backup comes back with it.
 
-Also back up `keys.json` on the owner's Mac (`~/.config/apassy-team/keys.json`, or under `$XDG_CONFIG_HOME`). It is plain text in the alpha, so keep the copy private and apart from the vault backup. Losing it means adding the items again. With the vault backup alone nobody can read a value, and with `keys.json` alone nobody can open anything.
+Also back up `keys.json` on each owner's machine (`~/.config/apassy-team/keys.json`, or under `$XDG_CONFIG_HOME`). It is plain text in the alpha, so keep the copy private and apart from the relay backups. Losing it means adding the items again. With a relay backup alone nobody can read a value, and with `keys.json` alone nobody can open anything.
 
 ## 14. Revocation
 
@@ -416,7 +416,7 @@ ssh ottervibe 'cd /opt/apassy && docker compose up -d --wait'
 
 A restart ends every session (section 5).
 
-Back up the vault as in section 13, with the project stopped: `docker compose stop relay`, then copy `relay.db` and `teams/` out of `apassy-relay-data`, then `docker compose start relay`.
+Back up the vault as in section 13: `docker compose exec -T relay apassy-relay admin backup` writes to `/opt/apassy/backups/relay` on the VPS. The timer of `deploy/vps/backup/` does it every day.
 
 The operator commands of section 17 run in the container:
 
@@ -482,3 +482,31 @@ docker compose run --rm \
 ```
 
 `migrate` copies `team.db` into `teams/<id>.db` with a new random key, makes `relay.db` with the master key, and renames the old file to `team.db.pre-teams` (it opens with the old key only). The master key must be new: `migrate` refuses the old vault key. A failure before `relay.db` is written leaves `team.db` as it was, and a new `migrate` starts over. A stop after it is finished by the next start. The old owner token, member tokens, agent tokens, and `keys.json` keep working for the migrated team. New tokens of that team name it. An invite code made before the migration stops working: make a new one. Delete `team.db.pre-teams` and the old vault key when you no longer need a way back.
+
+## 18. Install, guide, and limits at the edge
+
+The Worker serves three things itself, without the relay and without the edge secret:
+
+| Path | What |
+| --- | --- |
+| `/install.sh` | installs `apassy-team` into `~/.local/bin` after a SHA-256 check (`deploy/worker/public/install.sh`) |
+| `/guide` | the alpha guide for owners and members (`deploy/worker/public/guide.html`; source `docs/ONBOARDING.md`) |
+| `/dl/*` | the CLI binaries and `SHA256SUMS` |
+
+Users install with:
+
+```sh
+curl -fsSL https://apassy-relay.wyderka.cc/install.sh -o install.sh && sh install.sh
+```
+
+The binaries are not in git (`deploy/worker/public/dl/` is ignored). Before `wrangler deploy`, put them there:
+
+- `apassy-team-darwin-arm64`: `cargo build --release --locked --bin apassy-team` on an Apple silicon Mac.
+- `apassy-team-linux-x86_64`: the same in a `rust:1.97.0-bullseye` container (glibc 2.31, so it runs on Debian 11 and Ubuntu 20.04 or later), then `strip`.
+- `SHA256SUMS`: `shasum -a 256 apassy-team-* > SHA256SUMS` in that folder.
+
+The installer refuses a binary whose checksum is not in `SHA256SUMS`. A missing platform is a clear error.
+
+`POST /v1/join` and `POST /v1/teams` have a limit per IP address at the Worker: about 10 a minute (Workers Rate Limiting). Over it, the Worker answers 429 `rate_limited` and the request does not reach the relay. The count is kept in each Cloudflare location and is approximate, so a burst can pass a few more. If the limiter fails, requests go on: the relay checks every code itself.
+
+A workflow in `.github/workflows/health.yml` checks `/healthz` and `/v1/me` (401) every hour. A failed run is the alert: GitHub notifies the owner of the repository.
