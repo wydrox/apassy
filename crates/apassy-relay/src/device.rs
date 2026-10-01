@@ -185,6 +185,15 @@ pub fn safety_words(team: &TeamId, code: &str, public_key: &[u8]) -> String {
     )
 }
 
+/// True when `typed` names the same two words as `expected`, ignoring case and the
+/// spaces around and between them.
+pub fn same_safety(typed: &str, expected: &str) -> bool {
+    let words =
+        |text: &str| -> Vec<String> { text.split_whitespace().map(str::to_lowercase).collect() };
+    let typed = words(typed);
+    typed.len() == 2 && typed == words(expected)
+}
+
 const WORDS: [&str; 256] = [
     "acid", "acorn", "actor", "adult", "agent", "alarm", "album", "alert", "alpha", "amber",
     "angle", "apple", "april", "arena", "armor", "arrow", "atlas", "attic", "audio", "aunt",
@@ -273,6 +282,15 @@ mod tests {
         assert!(decode_public_key(&encode_b64(&[4u8; 65])).is_ok());
         assert!(!new_nonce().unwrap().is_empty());
         assert_ne!(new_nonce().unwrap(), new_nonce().unwrap());
+    }
+
+    #[test]
+    fn typed_safety_words_ignore_case_and_spaces() {
+        assert!(same_safety(" Lion   PEBBLE ", "lion pebble"));
+        assert!(!same_safety("lion", "lion pebble"));
+        assert!(!same_safety("pebble lion", "lion pebble"));
+        assert!(!same_safety("lion pebble extra", "lion pebble"));
+        assert!(!same_safety("", "lion pebble"));
     }
 
     #[test]

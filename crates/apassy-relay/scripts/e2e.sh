@@ -71,7 +71,9 @@ export APASSY_RELAY_KEY_FILE="$TMP/vault_key"
 export APASSY_RELAY_EDGE_SECRET_FILE="$TMP/edge_secret"
 export APASSY_RELAY_APPROVAL_TIMEOUT=120
 # The CLI must not pick up the settings or tokens of the person running this.
-unset APASSY_RELAY_URL APASSY_TEAM_TOKEN APASSY_TOKEN APASSY_EDGE_SECRET
+unset APASSY_RELAY_URL APASSY_TEAM_TOKEN APASSY_TOKEN APASSY_EDGE_SECRET APASSY_TEAM
+# Device keys go to files in the temp config dirs, never to the macOS Keychain.
+export APASSY_TEAM_KEY_STORE=file
 
 wait_healthy() {
 	for _ in $(seq 1 100); do
@@ -113,11 +115,15 @@ MEMBER_CFG="$TMP/member-config"
 AGENT_CFG="$TMP/agent-config"
 mkdir -p "$OWNER_CFG" "$MEMBER_CFG" "$AGENT_CFG"
 owner() { XDG_CONFIG_HOME="$OWNER_CFG" APASSY_EDGE_SECRET="$EDGE" "$TEAM_BIN" "$@"; }
-# The same, cut off from the controlling terminal (setsid), for `apassy-team host`.
-owner_detached() {
-	XDG_CONFIG_HOME="$OWNER_CFG" APASSY_EDGE_SECRET="$EDGE" \
-		perl -MPOSIX -e 'POSIX::setsid() or die "setsid: $!\n"; exec @ARGV or die "exec: $!\n"' \
-		"$TEAM_BIN" "$@"
+# Starts the owner's host in the background, cut off from any terminal. The subshell
+# execs, so $! (HOST_PID) is the host process itself and `kill` stops it.
+start_host() {
+	(
+		export XDG_CONFIG_HOME="$OWNER_CFG" APASSY_EDGE_SECRET="$EDGE"
+		exec perl -MPOSIX -e 'POSIX::setsid() or die "setsid: $!\n"; exec @ARGV or die "exec: $!\n"' \
+			"$TEAM_BIN" host
+	) >"$1" 2>"$2" &
+	HOST_PID=$!
 }
 mode_of() { perl -e 'printf "%o\n", (stat $ARGV[0])[2] & 0777' "$1"; }
 member() { XDG_CONFIG_HOME="$MEMBER_CFG" APASSY_EDGE_SECRET="$EDGE" "$TEAM_BIN" "$@"; }
@@ -148,15 +154,30 @@ fi
 ITEM_KEYS=$(sed -n 's/^ *"key": *"\([^"]*\)".*/\1/p' "$KEYS")
 [ "$(printf '%s\n' "$ITEM_KEYS" | wc -l | tr -d ' ')" = 2 ] || fail "keys.json does not hold two keys"
 ok "keys.json has both keys (mode 0600, directory 0700); the value is not in it"
-owner invite --role member >"$TMP/invite_code" 2>/dev/null
-member join --relay "$URL" --name alice <"$TMP/invite_code" >"$TMP/join.out"
-MEMBER_ID=$(sed -n 's/.*(member \([0-9][0-9]*\)).*/\1/p' "$TMP/join.out")
-[ -n "$MEMBER_ID" ] || fail "join did not print a member id"
-if member join --relay "$URL" --name bob <"$TMP/invite_code" >/dev/null 2>&1; then
+owner invite --role member --name alice --grant "$COLLECTION" >"$TMP/invite_link" 2>/dev/null
+grep -Eq "^$URL/join#apassy_inv_t_[a-z2-7]{10}_[0-9a-f]{64}\$" "$TMP/invite_link" || fail "invite did not print one link"
+member join --relay "$URL" --device alice-laptop --no-wait <"$TMP/invite_link" >"$TMP/join.out" 2>"$TMP/join.err" ||
+	fail "join failed: $(cat "$TMP/join.err")"
+WORDS=$(sed -n 's/.*Safety words: //p' "$TMP/join.out")
+[ "$(printf '%s\n' "$WORDS" | wc -w | tr -d ' ')" = 2 ] || fail "join did not print two safety words: $(cat "$TMP/join.out")"
+JOIN_ID=$(owner joins | awk '$2 == "alice" {print $1}')
+[ -n "$JOIN_ID" ] || fail "the owner does not see the join of alice"
+if owner joins --json | grep -qF "$WORDS"; then fail "the relay shows the safety words to the confirmer"; fi
+if owner confirm "$JOIN_ID" --words "wrong words" >/dev/null 2>&1; then fail "a join was confirmed with wrong words"; fi
+owner confirm "$JOIN_ID" --words "$WORDS" >/dev/null || fail "the owner could not confirm with the right words"
+member join --resume >"$TMP/joined.out" 2>&1 || fail "join --resume failed: $(cat "$TMP/joined.out")"
+grep -q "Joined" "$TMP/joined.out" || fail "the member did not join: $(cat "$TMP/joined.out")"
+member me | grep -q "member alice" || fail "alice cannot sign in with her device"
+BOB_CFG="$TMP/bob-config"
+mkdir -p "$BOB_CFG"
+if XDG_CONFIG_HOME="$BOB_CFG" APASSY_EDGE_SECRET="$EDGE" "$TEAM_BIN" join --relay "$URL" --name bob \
+	--device bob-laptop --no-wait <"$TMP/invite_link" >/dev/null 2>&1; then
 	fail "an invite code worked twice"
 fi
-ok "alice joined as member $MEMBER_ID; the invite code does not work twice"
-GRANT=$(owner grant --collection "$COLLECTION" --member "$MEMBER_ID")
+MEMBER_ID=$(owner members | awk '$2 == "alice" {print $1}')
+ok "alice joined as member $MEMBER_ID with a device after the owner typed her words; the invite works once"
+GRANT=$(owner grants | awk '/alice/ {print $1}')
+[ -n "$GRANT" ] || fail "the invite did not grant the collection"
 AGENT_TOKEN=$(member agent create alice-agent 2>/dev/null)
 case "$AGENT_TOKEN" in apassy_tagt_t_*) ;; *) fail "agent create did not print a token" ;; esac
 ok "grant $GRANT; alice made an agent token"
@@ -167,8 +188,7 @@ step "Start the owner's host (no terminal)"
 # The host asks the person on /dev/tty. Here there is no person: setsid cuts the
 # process off from any terminal, so a question can only end in a denial. There is no
 # switch that says yes.
-owner_detached host >"$TMP/host.out" 2>"$TMP/host.err" &
-HOST_PID=$!
+start_host "$TMP/host.out" "$TMP/host.err"
 for _ in $(seq 1 100); do
 	if grep -q "apassy-team host: team" "$TMP/host.err" 2>/dev/null; then break; fi
 	if ! kill -0 "$HOST_PID" 2>/dev/null; then fail "the host exited: $(cat "$TMP/host.err")"; fi
@@ -284,6 +304,33 @@ owner approve 1 >/dev/null 2>"$TMP/approve.err" || status=$?
 [ "$status" = 2 ] && grep -q "apassy-team host" "$TMP/approve.err" || fail "apassy-team approve: exit $status"
 ok "approve: 403 approve_on_host, and the CLI points to apassy-team host"
 
+step "The owner moves from the owner token to a device key"
+kill "$HOST_PID" 2>/dev/null || true
+wait "$HOST_PID" 2>/dev/null || true
+HOST_PID=""
+owner device enroll --name owner-mac >"$TMP/enroll.out" 2>&1 || fail "device enroll failed: $(cat "$TMP/enroll.out")"
+grep -q "Enrolled device" "$TMP/enroll.out" || fail "device enroll did not enroll: $(cat "$TMP/enroll.out")"
+if grep -qF "$(cat "$TMP/owner_token")" "$OWNER_CFG/apassy-team/settings.json"; then
+	fail "the owner token is still in the settings"
+fi
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "X-Apassy-Edge: $EDGE" \
+	-H "Authorization: Bearer $(cat "$TMP/owner_token")" "$URL/v1/me")
+[ "$code" = 401 ] || fail "the owner token still works after enroll ($code)"
+owner device list | grep -q "owner-mac" || fail "the owner cannot sign in with the device"
+start_host "$TMP/host2.out" "$TMP/host2.err"
+for _ in $(seq 1 100); do
+	if grep -q "apassy-team host: team" "$TMP/host2.err" 2>/dev/null; then break; fi
+	if ! kill -0 "$HOST_PID" 2>/dev/null; then fail "the device host exited: $(cat "$TMP/host2.err")"; fi
+	sleep 0.1
+done
+grep -q "apassy-team host: team" "$TMP/host2.err" || fail "the device host did not start: $(cat "$TMP/host2.err")"
+owner grant --collection "$COLLECTION" --member "$MEMBER_ID" >/dev/null
+agent run --items "$STRIPE_ITEM" --purpose "list the files" \
+	--request "Show me the files in this folder." --wait 60 -- ls -la >/dev/null 2>"$TMP/ls2.err" ||
+	fail "the run through the device host failed: $(cat "$TMP/ls2.err")"
+[ "$(last_decision)" = auto ] || fail "the device host did not release it (log: $(tail -n1 "$HOST_LOG"))"
+ok "the owner token stopped; the key-holder device signs in and its host releases a run"
+
 step "A second team on the same relay"
 "$RELAY_BIN" admin team-code --hours 1 >"$TMP/team_code" 2>/dev/null
 grep -Eq '^apassy_tcd_[0-9a-f]{64}$' "$TMP/team_code" || fail "admin team-code did not print one code"
@@ -311,7 +358,7 @@ for action in run_approved run_allowed; do
 	if grep -q "\"$action\"" "$TMP/audit.json"; then fail "the audit has $action"; fi
 done
 for needle in "$STRIPE_CANARY" "$GITHUB_CANARY" "$PLACEHOLDER" "$AGENT_TOKEN" \
-	"$(cat "$TMP/owner_token")" "$(cat "$TMP/invite_code")" "$(cat "$TMP/team_code")" "$EDGE" \
+	"$(cat "$TMP/owner_token")" "$(sed 's/.*#//' "$TMP/invite_link")" "$(cat "$TMP/team_code")" "$EDGE" \
 	apassy_ses_ $ITEM_KEYS; do
 	if grep -qF "$needle" "$TMP/audit.json" "$HOST_LOG"; then fail "the audit or host.log holds a secret"; fi
 done

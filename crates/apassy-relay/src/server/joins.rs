@@ -8,6 +8,7 @@ use crate::api::{
     ConfirmRequest, Created, JoinConfirmed, JoinRequest, JoinView, LinkCreatedRef, LinkRequest,
     LinkView, Pending, Role,
 };
+use crate::device;
 use crate::device::{decode_public_key, safety_words};
 use crate::error::{RelayError, RelayResult, codes};
 use crate::ids::{CollectionId, DeviceId, MemberId};
@@ -299,7 +300,7 @@ pub fn confirm(
             return Err(RelayError::forbidden("Only an owner can confirm an owner or manager join."));
         }
         if !maker_valid(&invite) { return Err(invite_invalid()); }
-        if request.safety != safety { return Err(conflict("The safety words do not match.")); }
+        if !device::same_safety(&request.safety, &safety) { return Err(conflict("The safety words do not match.")); }
         let used: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM member WHERE name = ?1 AND revoked_at IS NULL)", params![name], |row| row.get(0)).map_err(db)?;
         if used { return Err(conflict("A live member has this name.")); }
         key_free(tx, &key)?;
@@ -492,7 +493,7 @@ pub fn links_confirm(
 ) -> RelayResult<Value> {
     core.store.tx(|tx| {
         let link = own_link(tx, by, id, now)?;
-        if link.safety.as_deref() != Some(request.safety.as_str()) { return Err(conflict("The safety words do not match.")); }
+        if !link.safety.as_deref().is_some_and(|words| device::same_safety(&request.safety, words)) { return Err(conflict("The safety words do not match.")); }
         let name = link.name.ok_or_else(|| RelayError::internal("The link has no device name."))?;
         let key = link.key.ok_or_else(|| RelayError::internal("The link has no public key."))?;
         let device = add_device(tx, by.id, &name, &key, now)?;

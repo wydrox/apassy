@@ -243,9 +243,17 @@ fn enroll(settings: &Settings, name: Option<String>) -> Result<(), CliError> {
         .team_id
         .ok_or_else(|| CliError::usage("The relay did not return a team id."))?;
     let keys = devicekey::store()?;
-    if settings::contains_team(&team)? || keys.load(relay, &team)?.is_some() {
+    // Enrollment upgrades this machine's own member-token entry, so that entry may
+    // exist. A device key, or an entry that has a device already, would be overwritten.
+    let existing = settings::list()?
+        .into_iter()
+        .find(|(saved, _)| saved == &team)
+        .map(|(_, entry)| entry);
+    if keys.load(relay, &team)?.is_some()
+        || existing.as_ref().is_some_and(|e| e.device_id.is_some())
+    {
         return Err(CliError::usage(format!(
-            "This machine already has a key or settings entry for team {team}. Use another XDG_CONFIG_HOME."
+            "This machine already has a device key for team {team}. Use another XDG_CONFIG_HOME."
         )));
     }
     let name = crate::cli::onboarding::device_name(name.as_deref())?;
@@ -255,14 +263,17 @@ fn enroll(settings: &Settings, name: Option<String>) -> Result<(), CliError> {
         name,
         public_key: key.public_key_b64(),
     })?;
-    // Keep the key after a lost answer: the member token may already be invalid.
+    // Keep the key after a lost answer: the relay may have enrolled it, and then the
+    // member token no longer works. Keep the member token too until the answer says the
+    // device exists: if the request never arrived, the token is still the way in.
     keys.save(relay, &team, &key)?;
     let mut saved = TeamSettings {
         relay_url: relay.to_owned(),
         team: me.team,
         member: me.member_name,
         device_id: None,
-        member_token: None,
+        // Only a token that the file held: a token from APASSY_TEAM_TOKEN stays out.
+        member_token: existing.and_then(|entry| entry.member_token),
         safety_verified: None,
     };
     settings::save_team(&team, &saved)?;
@@ -276,6 +287,7 @@ fn enroll(settings: &Settings, name: Option<String>) -> Result<(), CliError> {
             ),
         })?;
     saved.device_id = Some(device.id);
+    saved.member_token = None;
     settings::save_team(&team, &saved)?;
     println!(
         "Enrolled device {} ({}) for team {}.",

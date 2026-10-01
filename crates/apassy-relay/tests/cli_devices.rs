@@ -391,25 +391,47 @@ fn enroll_with_an_environment_member_token_learns_the_team_then_saves_only_the_d
 }
 
 #[test]
-fn an_existing_settings_entry_refuses_enroll_even_when_it_only_has_a_member_token() {
-    let mock = Mock::always(200, me());
-    let cli = Cli::new().member(&mock.url);
-    write_settings(
-        &cli,
-        json!({"version":2,"current":TEAM,"teams":{TEAM:{"relay_url":mock.url,
-        "team":"Family","member":"alice","device_id":null,"member_token":MEMBER_TOKEN}}}),
-    );
+fn a_member_token_entry_enrolls_and_keeps_the_token_until_the_device_exists() {
+    let entry = |relay: &str, device: Value| {
+        json!({"version":2,"current":TEAM,"teams":{TEAM:{"relay_url":relay,
+        "team":"Family","member":"alice","device_id":device,"member_token":MEMBER_TOKEN}}})
+    };
+    // The relay fails: the token stays in the file, and the key is kept for a resume.
+    let failing = Mock::start(|request, _| {
+        if request.url == "/v1/me" {
+            ok(me())
+        } else {
+            err(500, "relay_error", "synthetic failure")
+        }
+    });
+    let cli = Cli::new();
+    write_settings(&cli, entry(&failing.url, Value::Null));
+    let output = cli.run(&["device", "enroll", "--name", "Laptop"], None);
+    assert_ne!(code(&output), 0);
+    assert_eq!(settings(&cli)["teams"][TEAM]["member_token"], MEMBER_TOKEN);
+    assert!(settings(&cli)["teams"][TEAM]["device_id"].is_null());
+    assert!(key_path(&cli).exists());
+    // The relay enrolls: the device is saved and the token leaves the file.
+    let working = Mock::start(|request, _| {
+        if request.url == "/v1/me" {
+            ok(me())
+        } else {
+            ok(device_view())
+        }
+    });
+    let cli = Cli::new();
+    write_settings(&cli, entry(&working.url, Value::Null));
+    let output = cli.run(&["device", "enroll", "--name", "Laptop"], None);
+    successful(&output);
+    assert_eq!(settings(&cli)["teams"][TEAM]["device_id"], 3);
+    assert!(settings(&cli)["teams"][TEAM]["member_token"].is_null());
+    // An entry that has a device already refuses, and nothing changes.
+    let cli = Cli::new().member(&working.url);
+    write_settings(&cli, entry(&working.url, json!(3)));
     let before = std::fs::read(cli.settings_file()).unwrap();
     let output = cli.run(&["device", "enroll", "--name", "Laptop"], None);
     assert_eq!(code(&output), 2);
     assert_eq!(std::fs::read(cli.settings_file()).unwrap(), before);
-    assert!(!key_path(&cli).exists());
-    assert!(
-        !mock
-            .requests()
-            .iter()
-            .any(|r| r.url == "/v1/devices/enroll")
-    );
 }
 
 #[test]
