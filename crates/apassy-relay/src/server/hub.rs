@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::ErrorKind;
 use std::os::unix::fs::OpenOptionsExt;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 
 use apassy::broker::packs::RuleSet;
@@ -24,7 +24,9 @@ use crate::ids::{MemberId, TeamId};
 use crate::secret::{SecretString, TokenKind, new_file_key, new_token, parse_token, token_hash};
 use crate::server::approvals::{LongPolls, Notifier};
 use crate::server::audit::{Audit, RELAY_ACTOR};
-use crate::server::directory::{self, Directory, OPERATOR_ACTOR, TeamRow, TeamState};
+use crate::server::directory::{
+    self, Directory, OPERATOR_ACTOR, TeamLimits, TeamLimitsUpdate, TeamRow, TeamState,
+};
 use crate::server::runkeys::RunKeys;
 use crate::server::sessions::SessionTable;
 use crate::server::store::{Store, db, to_i, to_u};
@@ -196,6 +198,7 @@ pub struct TeamInfo {
     pub legacy: bool,
     pub created_at: u64,
     pub suspended_at: Option<u64>,
+    pub limits: TeamLimits,
     /// True while the team is served. An active team that is not open failed to open
     /// at start: suspend or delete it.
     pub open: bool,
@@ -274,10 +277,10 @@ impl Hub {
     /// a run that was `ready` becomes `ended`.
     fn open_team(&self, row: &TeamRow) -> RelayResult<Arc<Core>> {
         let store = Store::open_team(&self.config.team_path(&row.id), &row.file_key)?;
-        Ok(self.register(row.id.clone(), store))
+        Ok(self.register(row.id.clone(), store, row.limits))
     }
 
-    fn register(&self, id: TeamId, store: Store) -> Arc<Core> {
+    fn register(&self, id: TeamId, store: Store, team_limits: TeamLimits) -> Arc<Core> {
         let store = Arc::new(store);
         let audit = Audit::new();
         if end_ready_runs(&store, &audit, crate::now_unix()).is_err() {
@@ -300,6 +303,9 @@ impl Hub {
             public_host: self.public_host.clone(),
             stop: self.stop.clone(),
             closed: AtomicBool::new(false),
+            team_limits: RwLock::new(team_limits),
+            agent_requests: AtomicUsize::new(0),
+            last_limit: Mutex::new(HashMap::new()),
         });
         self.teams
             .write()
@@ -400,7 +406,7 @@ impl Hub {
             store,
             ..
         } = new;
-        self.register(id.clone(), store);
+        self.register(id.clone(), store, TeamLimits::default());
         Ok((id, owner_id, owner_token))
     }
 
@@ -527,6 +533,7 @@ impl Hub {
     /// The teams as the operator sees them.
     pub fn team_infos(&self) -> RelayResult<Vec<TeamInfo>> {
         let mut infos = Vec::new();
+        let now = crate::now_unix();
         for row in self.directory.teams()? {
             let counts = self.team(&row.id).and_then(|core| {
                 core.store
@@ -542,7 +549,14 @@ impl Hub {
                         Ok((
                             count("SELECT count(*) FROM member WHERE revoked_at IS NULL")?,
                             count("SELECT count(*) FROM item WHERE archived_at IS NULL")?,
-                            count("SELECT count(*) FROM agent WHERE revoked_at IS NULL")?,
+                            conn.query_row(
+                                "SELECT count(*) FROM agent a JOIN member m ON m.id = a.member_id \
+                                 WHERE a.revoked_at IS NULL AND a.expires_at > ?1 AND m.revoked_at IS NULL",
+                                [to_i(now)],
+                                |r| r.get::<_, i64>(0),
+                            )
+                            .map(to_u)
+                            .map_err(db)?,
                             last.map(to_u),
                         ))
                     })
@@ -556,6 +570,7 @@ impl Hub {
                 legacy: row.legacy,
                 created_at: row.created_at,
                 suspended_at: row.suspended_at,
+                limits: row.limits,
                 members: counts.map(|c| c.0),
                 items: counts.map(|c| c.1),
                 agents: counts.map(|c| c.2),
@@ -563,6 +578,67 @@ impl Hub {
             });
         }
         Ok(infos)
+    }
+
+    /// Reads or changes the effective limits of a team.
+    pub fn limits(
+        &self,
+        id: &TeamId,
+        set: Option<TeamLimitsUpdate>,
+        now: u64,
+    ) -> RelayResult<TeamLimits> {
+        let Some(update) = set else {
+            return self
+                .directory
+                .team(id)?
+                .map(|row| row.limits)
+                .ok_or_else(|| RelayError::not_found("team"));
+        };
+        // A suspended team can still have requests that hold its open file.
+        let core = self.team(id).or_else(|| {
+            self.draining
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(id)
+                .and_then(Weak::upgrade)
+        });
+        let limits = self.directory.store.tx(|tx| {
+            let row =
+                directory::team_by_id(tx, id)?.ok_or_else(|| RelayError::not_found("team"))?;
+            let limits = row.limits.apply(update)?;
+            let (store, audit) = match &core {
+                Some(core) => (core.store.clone(), core.audit.clone()),
+                None => (
+                    Arc::new(Store::open_team(&self.config.team_path(id), &row.file_key)?),
+                    Audit::new(),
+                ),
+            };
+            let detail = json!({"team_id": id, "limits": limits});
+            let text = serde_json::to_string(&limits)
+                .map_err(|_| RelayError::internal("The limits cannot be written."))?;
+            tx.execute(
+                "UPDATE team SET limits = ?1 WHERE id = ?2",
+                params![text, id.as_str()],
+            )
+            .map_err(db)?;
+            self.directory.audit.write_on(
+                tx,
+                now,
+                OPERATOR_ACTOR,
+                "limits_changed",
+                None,
+                &detail,
+            )?;
+            audit.write(&store, now, OPERATOR_ACTOR, "limits_changed", None, &detail)?;
+            Ok(limits)
+        })?;
+        if let Some(core) = core {
+            *core
+                .team_limits
+                .write()
+                .unwrap_or_else(PoisonError::into_inner) = limits;
+        }
+        Ok(limits)
     }
 
     /// `admin backup`: a consistent copy of `relay.db` and of every team file in a new

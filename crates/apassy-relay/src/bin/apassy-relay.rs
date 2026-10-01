@@ -15,6 +15,7 @@ use std::process::ExitCode;
 use apassy_relay::config::{ADMIN_SOCKET, RelayConfig, old_key_from_env};
 use apassy_relay::ids::TeamId;
 use apassy_relay::server::Relay;
+use apassy_relay::server::directory::{TeamLimits, TeamLimitsUpdate};
 use apassy_relay::server::operator::{self, Command as Operator};
 
 const USAGE: &str = "Usage:
@@ -23,6 +24,8 @@ const USAGE: &str = "Usage:
   apassy-relay migrate
   apassy-relay admin team-code [--hours <n>]
   apassy-relay admin teams
+  apassy-relay admin limits <team id> [--members <n>] [--items <n>] [--agents <n>]
+    [--runs-per-hour <n>] [--pending-runs <n>] [--agent-requests <n>]
   apassy-relay admin suspend|resume|delete <team id>
   apassy-relay admin backup
 
@@ -84,6 +87,47 @@ fn parse_admin(args: &[String]) -> Result<Operator, String> {
             Ok(Operator::TeamCode { hours })
         }
         "teams" if rest.is_empty() => Ok(Operator::Teams),
+        "limits" => {
+            let Some(id) = rest.first() else {
+                return Err("Give one team id, such as t_7k2m9q4x8c.".to_string());
+            };
+            let team = team_arg(std::slice::from_ref(id))?;
+            let names = [
+                "--members",
+                "--items",
+                "--agents",
+                "--runs-per-hour",
+                "--pending-runs",
+                "--agent-requests",
+            ];
+            let flags = parse_flags(&rest[1..], &names)?;
+            let mut values = [None; 6];
+            for (index, text) in flags.iter().enumerate() {
+                if let Some(text) = text {
+                    values[index] =
+                        Some(text.parse::<u64>().map_err(|_| {
+                            format!("{} must be a positive integer.", names[index])
+                        })?);
+                }
+            }
+            let set = flags
+                .iter()
+                .any(Option::is_some)
+                .then_some(TeamLimitsUpdate {
+                    members: values[0],
+                    items: values[1],
+                    agents: values[2],
+                    runs_per_hour: values[3],
+                    pending_runs: values[4],
+                    agent_requests: values[5],
+                });
+            if let Some(update) = set {
+                TeamLimits::default()
+                    .apply(update)
+                    .map_err(|error| error.message)?;
+            }
+            Ok(Operator::Limits { team, set })
+        }
         "suspend" => Ok(Operator::Suspend {
             team: team_arg(rest)?,
         }),
@@ -218,5 +262,97 @@ fn main() -> ExitCode {
             Err(error) => fail(&error.message),
         },
         Command::Help | Command::Admin(_) => ExitCode::SUCCESS,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn limits_command_reads_or_updates_selected_fields() {
+        let team = TeamId::parse("t_abcdefgh23").unwrap();
+        assert_eq!(
+            parse_admin(&args(&["limits", team.as_str()])).unwrap(),
+            Operator::Limits {
+                team: team.clone(),
+                set: None
+            }
+        );
+        assert_eq!(
+            parse_admin(&args(&[
+                "limits",
+                team.as_str(),
+                "--members",
+                "7",
+                "--agent-requests",
+                "224",
+            ]))
+            .unwrap(),
+            Operator::Limits {
+                team,
+                set: Some(TeamLimitsUpdate {
+                    members: Some(7),
+                    agent_requests: Some(224),
+                    ..Default::default()
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn limits_command_refuses_bad_arguments() {
+        for values in [
+            vec!["limits"],
+            vec!["limits", "bad"],
+            vec!["limits", "t_abcdefgh23", "--items"],
+            vec!["limits", "t_abcdefgh23", "--items", "-1"],
+            vec!["limits", "t_abcdefgh23", "--items", "0"],
+            vec!["limits", "t_abcdefgh23", "--items", "1000001"],
+            vec!["limits", "t_abcdefgh23", "--agent-requests", "225"],
+            vec!["limits", "t_abcdefgh23", "--items", "1", "--items", "2"],
+            vec!["limits", "t_abcdefgh23", "--unknown", "1"],
+            vec!["limits", "t_abcdefgh23", "t_bcdefgh234"],
+        ] {
+            assert!(parse_admin(&args(&values)).is_err(), "{values:?}");
+        }
+    }
+
+    #[test]
+    fn limits_command_accepts_each_flag() {
+        assert_eq!(
+            parse_admin(&args(&[
+                "limits",
+                "t_abcdefgh23",
+                "--members",
+                "1",
+                "--items",
+                "2",
+                "--agents",
+                "3",
+                "--runs-per-hour",
+                "4",
+                "--pending-runs",
+                "5",
+                "--agent-requests",
+                "6",
+            ]))
+            .unwrap(),
+            Operator::Limits {
+                team: TeamId::parse("t_abcdefgh23").unwrap(),
+                set: Some(TeamLimitsUpdate {
+                    members: Some(1),
+                    items: Some(2),
+                    agents: Some(3),
+                    runs_per_hour: Some(4),
+                    pending_runs: Some(5),
+                    agent_requests: Some(6),
+                }),
+            }
+        );
     }
 }

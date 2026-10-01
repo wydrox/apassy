@@ -132,6 +132,29 @@ pub fn join(core: &Core, request: &JoinRequest, now: u64) -> RelayResult<Value> 
             .optional()
             .map_err(db)?;
         let (invite_id, role) = invite.ok_or_else(invite_invalid)?;
+        let name_used: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM member WHERE name = ?1)",
+                params![name],
+                |row| row.get(0),
+            )
+            .map_err(db)?;
+        if name_used {
+            return Err(RelayError::new(
+                codes::CONFLICT,
+                "A member with this name exists.",
+            ));
+        }
+        let members: i64 = tx
+            .query_row(
+                "SELECT count(*) FROM member WHERE revoked_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(db)?;
+        if to_u(members) >= core.limits().members {
+            return Ok(Err(core.limit_error_on(tx, now, "members")?));
+        }
         let inserted = tx.execute(
             "INSERT INTO member (name, role, token_hash, created_at) VALUES (?1, ?2, ?3, ?4)",
             params![name, role, member_hash.0.as_slice(), to_i(now)],
@@ -160,8 +183,8 @@ pub fn join(core: &Core, request: &JoinRequest, now: u64) -> RelayResult<Value> 
             None,
             &json!({"name": name, "role": role, "invite_id": to_u(invite_id)}),
         )?;
-        Ok((to_u(member_id), role, to_u(invite_id)))
-    })?;
+        Ok(Ok((to_u(member_id), role, to_u(invite_id))))
+    })??;
     let _ = (role, invite_id);
     to_json(&IssuedRef {
         id: member_id,
@@ -592,6 +615,29 @@ pub fn item_create(core: &Core, by: &MemberAuth, request: NewItem, now: u64) -> 
                 "An item with this uid exists.",
             ));
         }
+        let env_used: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM item WHERE collection_id = ?1 AND env_name = ?2 AND archived_at IS NULL)",
+                params![to_i(request.collection_id.0), env_name],
+                |row| row.get(0),
+            )
+            .map_err(db)?;
+        if env_used {
+            return Err(RelayError::new(
+                codes::CONFLICT,
+                "This collection has an item with this variable name.",
+            ));
+        }
+        let items: i64 = tx
+            .query_row(
+                "SELECT count(*) FROM item WHERE archived_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(db)?;
+        if to_u(items) >= core.limits().items {
+            return Ok(Err(core.limit_error_on(tx, now, "items")?));
+        }
         match tx.execute(
             "INSERT INTO item (collection_id, name, env_name, uid, sealed, provider, hosts, \
              environment, risk, scope, reversibility, created_by, created_at) \
@@ -634,8 +680,8 @@ pub fn item_create(core: &Core, by: &MemberAuth, request: NewItem, now: u64) -> 
                 "environment": environment, "broad_hosts": broad_hosts
             }),
         )?;
-        Ok(id)
-    })?;
+        Ok(Ok(id))
+    })??;
     to_json(&ItemCreated { id, hosts })
 }
 
@@ -865,6 +911,17 @@ pub fn agent_create(
     let hash = token_hash(token.expose());
     let expires_at = now + u64::from(days) * 86_400;
     let id = core.store.tx(|tx| {
+        let agents: i64 = tx
+            .query_row(
+                "SELECT count(*) FROM agent a JOIN member m ON m.id = a.member_id \
+                 WHERE a.revoked_at IS NULL AND a.expires_at > ?1 AND m.revoked_at IS NULL",
+                params![to_i(now)],
+                |row| row.get(0),
+            )
+            .map_err(db)?;
+        if to_u(agents) >= core.limits().agents {
+            return Ok(Err(core.limit_error_on(tx, now, "agents")?));
+        }
         tx.execute(
             "INSERT INTO agent (member_id, name, token_hash, created_at, expires_at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
@@ -885,8 +942,8 @@ pub fn agent_create(
             None,
             &json!({"agent_id": id, "name": name, "expires_at": expires_at}),
         )?;
-        Ok(id)
-    })?;
+        Ok(Ok(id))
+    })??;
     to_json(&IssuedRef {
         id,
         secret: token.expose(),

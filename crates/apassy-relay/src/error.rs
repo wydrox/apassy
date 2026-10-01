@@ -51,6 +51,7 @@ pub mod codes {
     pub const ENCODED_RESPONSE: &str = "encoded_response";
     // Load.
     pub const BUSY: &str = "busy";
+    pub const TEAM_LIMIT: &str = "team_limit";
     // Anything else.
     pub const RELAY_ERROR: &str = "relay_error";
 }
@@ -76,7 +77,8 @@ pub fn status_of(code: &str) -> u16 {
         | WRONG_HOST
         | PLACEHOLDER_IN_BODY
         | APPROVE_ON_HOST
-        | RELEASE_INVALID => 403,
+        | RELEASE_INVALID
+        | TEAM_LIMIT => 403,
         NOT_FOUND => 404,
         METHOD_NOT_ALLOWED => 405,
         CONFLICT | RUN_NOT_PENDING => 409,
@@ -162,6 +164,7 @@ mod tests {
         assert_eq!(RelayError::new(codes::BUSY, "x").status(), 503);
         assert_eq!(RelayError::new(codes::APPROVE_ON_HOST, "x").status(), 403);
         assert_eq!(RelayError::new(codes::RELEASE_INVALID, "x").status(), 403);
+        assert_eq!(RelayError::new(codes::TEAM_LIMIT, "x").status(), 403);
         assert_eq!(RelayError::internal("x").status(), 500);
         assert_eq!(status_of("something_new"), 500);
     }

@@ -659,13 +659,13 @@ Every request is one JSON line in `host.log` next to `keys.json` (mode 0600): ti
 
 ## 22. Teams
 
-ADR 0019 of the core, stage 1. One relay holds several teams. Separation is by file and by state, not by a column.
+ADR 0019 of the core, stages 1 and 4. One relay holds several teams. Separation is by file and by state, not by a column.
 
 **Files.** The data directory has:
 
 | File | What | Key |
 | --- | --- | --- |
-| `relay.db` | the directory: each team's id, name, state (`active` or `suspended`), the random key of its file, and a `legacy` flag; the team codes (hash, expiry, use); the audit of the relay. No people, no items, no runs. `user_version` 1001 | the master key (`APASSY_RELAY_KEY`) |
+| `relay.db` | the directory: each team's id, name, state (`active` or `suspended`), file key, `legacy` flag, and limits; team codes; relay audit. No people, items, or runs. `user_version` 1002 | the master key (`APASSY_RELAY_KEY`) |
 | `teams/<team id>.db` | one team: the schema of section 8, unchanged (`user_version` 2) | its own random 256-bit key, kept in `relay.db` |
 | `admin.sock` | the operator socket, mode 0600 | none; file mode only |
 | `relay.lock` | an exclusive lock: `serve`, `init`, and `migrate` hold it, so one relay process at a time uses the data directory. `admin` does not take it | none |
@@ -676,6 +676,25 @@ ADR 0019 of the core, stage 1. One relay holds several teams. Separation is by f
 **Start.** A team file that cannot be opened (missing, damaged, wrong mode) does not stop the relay: the relay logs it, serves the other teams, and lists that team with `open: false`. The operator suspends and deletes it, or fixes the file, suspends, and resumes it.
 
 **State.** Each active team has its own `Core` in memory: its file, its audit writer and masks, its session table, its run keys, its notifier, its long polls, and its limiter of refused requests. No map spans teams. The hub (`src/server/hub.rs`) keeps the active teams by id.
+
+**Limits.** Each team has six limits. The nullable `limits TEXT` column in `relay.db` holds a JSON object. A null column uses all defaults. A missing JSON field uses its default.
+
+| Field | Default | Count |
+| --- | --- | --- |
+| `members` | 50 | members without revocation, including the owner |
+| `items` | 500 | items without archive status |
+| `agents` | 100 | agents without revocation or expiry, whose members have no revocation |
+| `runs_per_hour` | 1000 | all run rows made in the last 3600 seconds, including denials |
+| `pending_runs` | 50 | run rows with status `pending` |
+| `agent_requests` | 56 | simultaneous requests in the agent lane for this team |
+
+All values are integers from 1 to 1000000, except `agent_requests`, which permits 1 to 224. The global request limits of section 9 also apply. Team agent requests cannot use the member reserve.
+
+The relay checks counts and inserts rows in the same team transaction. A full member limit does not use the invite code. An expired agent does not use a slot. A refused run does not add a run row or a run key.
+
+Count limits return HTTP 403 `team_limit`. The agent request limit returns HTTP 503 `busy`, with `Retry-After: 2`. A team audit row has action `limit_reached`, actor `relay`, and detail `{"limit":"<field>"}`. The relay writes at most one such row per field per ten seconds. No limit check changes the policy or the decision for an allowed run.
+
+The relay uses new limits immediately. A lower limit does not revoke members or agents, archive items, or stop runs. New operations can start only if the applicable limit permits them.
 
 **Routing.** For each request, after the edge check:
 
@@ -693,10 +712,15 @@ No endpoint takes a team id in the path.
 | Command | Does |
 | --- | --- |
 | `team-code [--hours N]` | a one-time team code, printed once on stdout (1 to 720 hours, default 72) |
-| `teams` | id, name, state, legacy, created, suspended, and for an active team the counts of live members, items, and agents and the time of its last audit row. No names of members or items, no runs, no audit |
+| `teams` | id, name, state, effective limits, legacy flag, and creation and suspension times. Active teams also show live counts and last activity. No member or item names, runs, or audit. |
+| `limits ID [--members N] [--items N] [--agents N] [--runs-per-hour N] [--pending-runs N] [--agent-requests N]` | without flags, reads effective limits. Flags change only the supplied fields. Prints all six effective values. Works for active and suspended teams. |
 | `suspend ID` | the team's state becomes `suspended`; a row `team_suspended` (actor `operator`) in its audit; its sessions end, its run keys go, its long polls wake, and it leaves the hub: its tokens fail at the next request |
 | `resume ID` | opens the team again (a restart for that team: `ready` runs become `ended`); a row `team_resumed` |
 | `delete ID` | only a suspended team, and only once the requests that started before the suspension have ended (it waits up to 10 seconds, then refuses): removes its row and file key from `relay.db`, then its file. A file that cannot be deleted is an error. No undo |
+
+The socket command is `{"command":"limits","team":"t_7k2m9q4x8c","set":{"members":25}}`. An absent or null `set` reads the limits. The result contains the six effective fields. Each change writes `limits_changed` with actor `operator` in the team audit and relay audit.
+
+At start, directory version 1001 becomes 1002. The relay adds `limits TEXT` and changes `PRAGMA user_version` in one transaction. Existing teams use the defaults. New directories use version 1002. The relay refuses unknown versions.
 
 **Proxy addresses.** The proxy connects only to public addresses: after DNS it drops loopback, private, link-local, CGNAT, unique-local, site-local, multicast, documentation, benchmark, reserved, and unspecified addresses, 6to4 (`2002::/16`), local-use NAT64 (`64:ff9b:1::/48`), and IPv6 forms that carry such an IPv4 address. `APASSY_RELAY_BLOCKED_ADDRESSES` adds public addresses or networks, for the relay's own machine. It connects to the addresses it checked and does not resolve again. A name that does not resolve, an address that is not allowed, and a port that does not answer get the same 502 `upstream_failed` message.
 
@@ -709,4 +733,4 @@ No endpoint takes a team id in the path.
 
 A failure before the commit point removes what it made and leaves `team.db` as it was. Member and agent tokens without a team id keep working for the legacy team; new tokens of that team name it. An invite code made before the migration has no team id and stops working: make a new one.
 
-**What this does not protect.** The master key and every team file are on the same machine: the operator, root, or a disk snapshot can open every team's metadata. Item values stay sealed (section 21). All teams share one process. There are no limits per team yet.
+**What this does not protect.** The master key and every team file are on the same machine. The operator, root, or a disk snapshot can open the metadata of every team. Item values stay sealed (section 21). All teams share one process. Team limits restrict resource use in that process.

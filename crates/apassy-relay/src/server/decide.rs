@@ -319,6 +319,27 @@ pub fn request_run(
                 return Ok(Err(error));
             }
         };
+        let limits = core.limits();
+        let runs: i64 = tx
+            .query_row(
+                "SELECT count(*) FROM run WHERE created_at >= ?1",
+                params![to_i(now.saturating_sub(3600))],
+                |row| row.get(0),
+            )
+            .map_err(db)?;
+        if to_u(runs) >= limits.runs_per_hour {
+            return Ok(Err(core.limit_error_on(tx, now, "runs_per_hour")?));
+        }
+        let pending: i64 = tx
+            .query_row(
+                "SELECT count(*) FROM run WHERE status = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(db)?;
+        if to_u(pending) >= limits.pending_runs {
+            return Ok(Err(core.limit_error_on(tx, now, "pending_runs")?));
+        }
         let ttl = request.ttl_secs.unwrap_or(core.config.session_ttl_secs);
         let mask = |text: &str| core.audit.mask_text(text);
         let mut row = RunRow {

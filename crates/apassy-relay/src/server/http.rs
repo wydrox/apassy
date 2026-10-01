@@ -23,7 +23,7 @@ use crate::error::{RelayError, RelayResult, codes};
 use crate::ids::{AgentId, CollectionId, GrantId, ItemId, MemberId, RunId};
 use crate::now_unix;
 use crate::proxy::Proxy;
-use crate::secret::TokenKind;
+use crate::secret::{TokenKind, parse_token};
 use crate::server::approvals::Denier;
 use crate::server::auth::{self, Need, Principal};
 use crate::server::hub::Hub;
@@ -194,6 +194,53 @@ impl Slots {
     }
 }
 
+/// Owns the global slots even if the handler panics or its thread cannot start.
+struct SlotGuard {
+    slots: Arc<Slots>,
+    agent: bool,
+}
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        self.slots.release(self.agent);
+    }
+}
+
+/// Owns one team's agent slot until the response and handler are complete.
+struct TeamSlotGuard {
+    core: Arc<Core>,
+}
+
+impl TeamSlotGuard {
+    fn take(core: &Arc<Core>, now: u64) -> Option<Self> {
+        let limits = core
+            .team_limits
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let acquired = core
+            .agent_requests
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |active| {
+                (active < limits.agent_requests as usize).then_some(active + 1)
+            })
+            .is_ok();
+        drop(limits);
+        if acquired {
+            Some(Self { core: core.clone() })
+        } else {
+            let _ = core
+                .store
+                .with(|conn| core.limit_error_on(conn, now, "agent_requests"));
+            None
+        }
+    }
+}
+
+impl Drop for TeamSlotGuard {
+    fn drop(&mut self) {
+        self.core.agent_requests.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// Accepts requests until `stop` is set. At most `max_active` requests run at
 /// once, and agent paths leave `member_reserve` of them free. A request over a
 /// limit gets 503 `busy` with `Retry-After`.
@@ -225,16 +272,17 @@ pub fn serve(serving: Serving) {
                     if agent {
                         slots.agent.fetch_add(1, Ordering::Relaxed);
                     }
-                    let (hub, proxy, held) = (hub.clone(), proxy.clone(), slots.clone());
-                    let spawned = std::thread::Builder::new()
+                    let (hub, proxy) = (hub.clone(), proxy.clone());
+                    let guard = SlotGuard {
+                        slots: slots.clone(),
+                        agent,
+                    };
+                    let _ = std::thread::Builder::new()
                         .name("relay-request".to_string())
                         .spawn(move || {
+                            let _guard = guard;
                             handle(&hub, &proxy, request);
-                            held.release(agent);
                         });
-                    if spawned.is_err() {
-                        slots.release(agent);
-                    }
                 }
             }
             Ok(None) => {}
@@ -336,6 +384,25 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request) {
         return;
     }
     if path.starts_with(paths::PROXY_PREFIX) {
+        // Parse only: the proxy still validates and finds the session itself.
+        let core = path
+            .strip_prefix(paths::PROXY_PREFIX)
+            .and_then(|rest| rest.split('/').next())
+            .and_then(parse_token)
+            .filter(|parsed| parsed.kind == TokenKind::Session)
+            .and_then(|parsed| parsed.team)
+            .and_then(|team| hub.team(&team));
+        let _guard = if let Some(core) = core {
+            match TeamSlotGuard::take(&core, now) {
+                Some(guard) => Some(guard),
+                None => {
+                    respond_busy(request);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         proxy.handle(request, now);
         return;
     }
@@ -345,6 +412,25 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request) {
             respond_error(request, &error);
             return;
         }
+    };
+    // Charge a known team before a potentially slow agent POST body is read.
+    let authorization = header_value(&request, "Authorization");
+    let token = auth::bearer(authorization.as_deref());
+    let agent_core = if is_agent_path(&path) {
+        token.and_then(|token| hub.for_token(token))
+    } else {
+        None
+    };
+    let _guard = if let Some(core) = &agent_core {
+        match TeamSlotGuard::take(core, now) {
+            Some(guard) => Some(guard),
+            None => {
+                respond_busy(request);
+                return;
+            }
+        }
+    } else {
+        None
     };
     let body = match read_body(&mut request, &method) {
         Ok(body) => body,
@@ -381,9 +467,7 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request) {
         _ => {}
     }
     // Every other endpoint: the team comes from the token, before anything is opened.
-    let authorization = header_value(&request, "Authorization");
-    let token = auth::bearer(authorization.as_deref());
-    let Some(core) = token.and_then(|token| hub.for_token(token)) else {
+    let Some(core) = agent_core.or_else(|| token.and_then(|token| hub.for_token(token))) else {
         hub.refusal(
             now,
             "token",
@@ -676,6 +760,78 @@ fn to_value<T: serde::Serialize>(value: &T) -> RelayResult<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn team_core() -> (tempfile::TempDir, Arc<Hub>, Arc<Core>) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::config::RelayConfig::from_lookup(|name| match name {
+            "APASSY_RELAY_DATA" => Some(dir.path().join("data").display().to_string()),
+            "APASSY_RELAY_PUBLIC_URL" => Some("https://relay.example.test".into()),
+            "APASSY_RELAY_EDGE_SECRET" => Some("synthetic-edge-secret-0123456789abcdef".into()),
+            "APASSY_RELAY_KEY" => Some("synthetic-master-key-for-test".into()),
+            _ => None,
+        })
+        .unwrap();
+        crate::server::Relay::init(&config, "Test", "owner").unwrap();
+        let hub = Hub::open(config, Arc::new(AtomicBool::new(false))).unwrap();
+        let core = hub.all().pop().unwrap();
+        (dir, hub, core)
+    }
+
+    #[test]
+    fn slot_guards_release_during_unwind() {
+        let (_dir, _hub, core) = team_core();
+        let slots = Arc::new(Slots {
+            all: AtomicUsize::new(1),
+            agent: AtomicUsize::new(1),
+        });
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _global = SlotGuard {
+                slots: slots.clone(),
+                agent: true,
+            };
+            let _team = TeamSlotGuard::take(&core, now_unix()).unwrap();
+            assert_eq!(core.agent_requests.load(Ordering::Relaxed), 1);
+            panic!("synthetic handler panic");
+        }));
+        assert!(result.is_err());
+        assert_eq!(slots.all.load(Ordering::Relaxed), 0);
+        assert_eq!(slots.agent.load(Ordering::Relaxed), 0);
+        assert_eq!(core.agent_requests.load(Ordering::Relaxed), 0);
+        assert!(TeamSlotGuard::take(&core, now_unix()).is_some());
+        assert_eq!(core.agent_requests.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn limit_audit_has_an_independent_ten_second_window_per_kind() {
+        let (_dir, _hub, core) = team_core();
+        for (now, kind) in [
+            (100, "members"),
+            (105, "members"),
+            (105, "items"),
+            (110, "members"),
+        ] {
+            let error = core
+                .store
+                .with(|conn| core.limit_error_on(conn, now, kind))
+                .unwrap();
+            assert_eq!(error.code, codes::TEAM_LIMIT);
+            assert!(error.message.contains(kind));
+        }
+        let rows = core
+            .store
+            .with(|conn| crate::server::audit::list(conn, 0, 100))
+            .unwrap();
+        let rows: Vec<_> = rows
+            .iter()
+            .filter(|row| row.action == "limit_reached")
+            .collect();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows.iter().map(|row| row.at).collect::<Vec<_>>(),
+            [100, 105, 110]
+        );
+        assert!(rows.iter().all(|row| row.actor == "relay"));
+    }
 
     #[test]
     fn routes_and_methods() {

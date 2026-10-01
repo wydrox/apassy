@@ -25,10 +25,11 @@ pub mod runkeys;
 pub mod sessions;
 pub mod store;
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::thread::JoinHandle;
 
 use apassy::broker::packs::RuleSet;
@@ -40,7 +41,7 @@ use crate::proxy::Proxy;
 use crate::secret::{SecretString, new_file_key};
 use crate::server::approvals::{LongPolls, Notifier};
 use crate::server::audit::Audit;
-use crate::server::directory::{Directory, insert_team};
+use crate::server::directory::{Directory, TeamLimits, insert_team};
 use crate::server::hub::{Hub, make_team_file, remove_team_file};
 use crate::server::runkeys::RunKeys;
 use crate::server::sessions::SessionTable;
@@ -55,6 +56,12 @@ pub struct Core {
     pub config: Arc<RelayConfig>,
     pub store: Arc<Store>,
     pub audit: Arc<Audit>,
+    /// Effective limits, changed only through the operator socket.
+    pub team_limits: RwLock<TeamLimits>,
+    /// Agent-lane requests of this team currently in flight.
+    pub agent_requests: AtomicUsize,
+    /// Last limit audit row, by kind. Kept separate from authentication refusals.
+    pub(crate) last_limit: Mutex<HashMap<&'static str, u64>>,
     pub sessions: Arc<SessionTable>,
     /// The built-in rule packs of the core, loaded once at start, shared by the teams.
     pub rules: Arc<RuleSet>,
@@ -73,6 +80,42 @@ pub struct Core {
 }
 
 impl Core {
+    pub fn limits(&self) -> TeamLimits {
+        *self
+            .team_limits
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Writes at most one audit row per limit kind per ten seconds. Call on the
+    /// insertion transaction, and commit the refusal so the audit row stays.
+    pub fn limit_error_on(
+        &self,
+        conn: &rusqlite::Connection,
+        now: u64,
+        kind: &'static str,
+    ) -> RelayResult<RelayError> {
+        let mut last = self
+            .last_limit
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if last.get(kind).is_none_or(|at| now >= at.saturating_add(10)) {
+            self.audit.write_on(
+                conn,
+                now,
+                crate::server::audit::RELAY_ACTOR,
+                "limit_reached",
+                None,
+                &serde_json::json!({"limit": kind}),
+            )?;
+            last.insert(kind, now);
+        }
+        Ok(RelayError::new(
+            codes::TEAM_LIMIT,
+            format!("The team's {kind} limit is reached."),
+        ))
+    }
+
     /// True after `RunningRelay::stop`, or once the team is suspended.
     pub fn stopping(&self) -> bool {
         self.stop.load(Ordering::Relaxed) || self.closed.load(Ordering::Relaxed)

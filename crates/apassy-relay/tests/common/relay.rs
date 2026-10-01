@@ -292,6 +292,11 @@ impl TestRelay {
         self.running.as_ref().expect("running").sessions()
     }
 
+    /// The live hub, for checks of per-team request counters.
+    pub fn hub(&self) -> Arc<apassy_relay::server::hub::Hub> {
+        self.running.as_ref().expect("running").hub()
+    }
+
     /// Stops the relay. The temp dir goes with the handle.
     pub fn stop(mut self) {
         if let Some(running) = self.running.take() {

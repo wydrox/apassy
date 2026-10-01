@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::RelayConfig;
 use crate::error::{RelayError, RelayResult, codes};
@@ -20,14 +20,14 @@ use crate::server::store::{Store, db, to_i, to_u};
 
 /// `PRAGMA user_version` of the directory. Far from the team versions, so one file is
 /// never taken for the other.
-pub const DIRECTORY_VERSION: i64 = 1001;
+pub const DIRECTORY_VERSION: i64 = 1002;
 
 const SCHEMA: &str = "
 CREATE TABLE team (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, file_key TEXT NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('active','suspended')),
   legacy INTEGER NOT NULL DEFAULT 0 CHECK (legacy IN (0, 1)),
-  created_at INTEGER NOT NULL, suspended_at INTEGER);
+  created_at INTEGER NOT NULL, suspended_at INTEGER, limits TEXT);
 CREATE UNIQUE INDEX team_legacy ON team(legacy) WHERE legacy = 1;
 CREATE TABLE team_code (
   id INTEGER PRIMARY KEY, code_hash BLOB NOT NULL UNIQUE, created_at INTEGER NOT NULL,
@@ -35,7 +35,7 @@ CREATE TABLE team_code (
 CREATE TABLE audit (
   id INTEGER PRIMARY KEY, at INTEGER NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL,
   run_id INTEGER, detail TEXT NOT NULL);
-PRAGMA user_version = 1001;
+PRAGMA user_version = 1002;
 ";
 
 /// The actor of an operator action, in the directory and in the team's own audit.
@@ -43,6 +43,84 @@ pub const OPERATOR_ACTOR: &str = "operator";
 
 /// The longest life of a team code, in hours.
 pub const MAX_TEAM_CODE_HOURS: u64 = 720;
+
+/// The effective resource limits of one team.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TeamLimits {
+    pub members: u64,
+    pub items: u64,
+    pub agents: u64,
+    pub runs_per_hour: u64,
+    pub pending_runs: u64,
+    pub agent_requests: u64,
+}
+
+impl Default for TeamLimits {
+    fn default() -> Self {
+        Self {
+            members: 50,
+            items: 500,
+            agents: 100,
+            runs_per_hour: 1000,
+            pending_runs: 50,
+            agent_requests: 56,
+        }
+    }
+}
+
+/// Only the fields supplied by the operator change.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TeamLimitsUpdate {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub members: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub items: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agents: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runs_per_hour: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_runs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_requests: Option<u64>,
+}
+
+impl TeamLimits {
+    pub fn validate(&self) -> RelayResult<()> {
+        for (field, value) in [
+            ("members", self.members),
+            ("items", self.items),
+            ("agents", self.agents),
+            ("runs_per_hour", self.runs_per_hour),
+            ("pending_runs", self.pending_runs),
+        ] {
+            if !(1..=1_000_000).contains(&value) {
+                return Err(RelayError::invalid(format!(
+                    "{field} must be 1 to 1000000."
+                )));
+            }
+        }
+        if !(1..=224).contains(&self.agent_requests) {
+            return Err(RelayError::invalid("agent_requests must be 1 to 224."));
+        }
+        Ok(())
+    }
+
+    pub fn apply(self, update: TeamLimitsUpdate) -> RelayResult<Self> {
+        let limits = Self {
+            members: update.members.unwrap_or(self.members),
+            items: update.items.unwrap_or(self.items),
+            agents: update.agents.unwrap_or(self.agents),
+            runs_per_hour: update.runs_per_hour.unwrap_or(self.runs_per_hour),
+            pending_runs: update.pending_runs.unwrap_or(self.pending_runs),
+            agent_requests: update.agent_requests.unwrap_or(self.agent_requests),
+        };
+        limits.validate()?;
+        Ok(limits)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -71,11 +149,22 @@ pub struct TeamRow {
     pub legacy: bool,
     pub created_at: u64,
     pub suspended_at: Option<u64>,
+    pub limits: TeamLimits,
 }
 
 fn team_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamRow> {
     let id: String = row.get(0)?;
     let state: String = row.get(3)?;
+    let text: Option<String> = row.get(7)?;
+    let limits = match text {
+        Some(text) => {
+            serde_json::from_str::<TeamLimits>(&text).map_err(|_| rusqlite::Error::InvalidQuery)?
+        }
+        None => TeamLimits::default(),
+    };
+    limits
+        .validate()
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
     Ok(TeamRow {
         id: TeamId::parse(&id).ok_or(rusqlite::Error::InvalidQuery)?,
         name: row.get(1)?,
@@ -88,10 +177,11 @@ fn team_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamRow> {
         legacy: row.get::<_, i64>(4)? == 1,
         created_at: to_u(row.get(5)?),
         suspended_at: row.get::<_, Option<i64>>(6)?.map(to_u),
+        limits,
     })
 }
 
-const TEAM_COLUMNS: &str = "id, name, file_key, state, legacy, created_at, suspended_at";
+const TEAM_COLUMNS: &str = "id, name, file_key, state, legacy, created_at, suspended_at, limits";
 
 /// The directory: its file, and the audit writer of the relay.
 pub struct Directory {
@@ -127,10 +217,19 @@ impl Directory {
     /// Opens `relay.db` and checks its version.
     pub fn open(config: &RelayConfig) -> RelayResult<Self> {
         let store = Store::open_at(&config.directory_path(), &config.master_key)?;
-        if store.user_version()? != DIRECTORY_VERSION {
-            return Err(RelayError::internal(
-                "relay.db is not the directory of a relay, or has an unknown version.",
-            ));
+        match store.user_version()? {
+            DIRECTORY_VERSION => {}
+            1001 => store.tx(|tx| {
+                tx.execute_batch(
+                    "ALTER TABLE team ADD COLUMN limits TEXT; PRAGMA user_version = 1002;",
+                )
+                .map_err(db)
+            })?,
+            _ => {
+                return Err(RelayError::internal(
+                    "relay.db is not the directory of a relay, or has an unknown version.",
+                ));
+            }
         }
         Ok(Self {
             store: Arc::new(store),
@@ -311,4 +410,163 @@ pub fn insert_team(
     )
     .map_err(db)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(dir: &std::path::Path) -> RelayConfig {
+        RelayConfig::from_lookup(|name| match name {
+            "APASSY_RELAY_DATA" => Some(dir.to_string_lossy().into_owned()),
+            "APASSY_RELAY_PUBLIC_URL" => Some("https://relay.example.test".to_string()),
+            "APASSY_RELAY_EDGE_SECRET" => Some("test-edge-secret-32-bytes-minimum".to_string()),
+            "APASSY_RELAY_KEY" => Some("test-master-key-16-bytes-minimum".to_string()),
+            _ => None,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn limits_defaults_partial_json_and_validation() {
+        let defaults = TeamLimits::default();
+        assert_eq!(
+            serde_json::to_value(defaults).unwrap(),
+            serde_json::json!({
+                "members": 50, "items": 500, "agents": 100,
+                "runs_per_hour": 1000, "pending_runs": 50, "agent_requests": 56,
+            })
+        );
+        assert_eq!(serde_json::from_str::<TeamLimits>("{}").unwrap(), defaults);
+        let partial: TeamLimits = serde_json::from_str(r#"{"members":7}"#).unwrap();
+        assert_eq!(partial.members, 7);
+        assert_eq!(partial.items, defaults.items);
+        let update: TeamLimitsUpdate = serde_json::from_str(r#"{"agent_requests":224}"#).unwrap();
+        assert_eq!(defaults.apply(update).unwrap().agent_requests, 224);
+        assert_eq!(
+            serde_json::to_string(&update).unwrap(),
+            r#"{"agent_requests":224}"#
+        );
+        assert!(serde_json::from_str::<TeamLimitsUpdate>(r#"{"unknown":1}"#).is_err());
+        assert!(serde_json::from_str::<TeamLimitsUpdate>(r#"{"members":-1}"#).is_err());
+        assert!(serde_json::from_str::<TeamLimitsUpdate>(r#"{"members":1.5}"#).is_err());
+        for field in [
+            "members",
+            "items",
+            "agents",
+            "runs_per_hour",
+            "pending_runs",
+        ] {
+            for value in [0, 1_000_001] {
+                let update =
+                    serde_json::from_value::<TeamLimitsUpdate>(serde_json::json!({field: value}))
+                        .unwrap();
+                assert!(defaults.apply(update).is_err(), "{field}={value}");
+            }
+            for value in [1, 1_000_000] {
+                let update =
+                    serde_json::from_value::<TeamLimitsUpdate>(serde_json::json!({field: value}))
+                        .unwrap();
+                assert!(defaults.apply(update).is_ok(), "{field}={value}");
+            }
+        }
+        for value in [0, 225] {
+            assert!(
+                defaults
+                    .apply(TeamLimitsUpdate {
+                        agent_requests: Some(value),
+                        ..Default::default()
+                    })
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn directory_migrates_1001_and_defaults_null_or_partial_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        let old_schema = SCHEMA
+            .replace(", limits TEXT", "")
+            .replace("user_version = 1002", "user_version = 1001");
+        let store =
+            Store::create_at(&config.directory_path(), &config.master_key, &old_schema).unwrap();
+        let id = TeamId::parse("t_abcdefgh23").unwrap();
+        let key = SecretString::new("test-team-file-key".to_string());
+        store
+            .with(|conn| insert_team(conn, &id, "Team", &key, false, 42))
+            .unwrap();
+        drop(store);
+
+        let directory = Directory::open(&config).unwrap();
+        assert_eq!(directory.store.user_version().unwrap(), DIRECTORY_VERSION);
+        let row = directory.team(&id).unwrap().unwrap();
+        assert_eq!(row.name, "Team");
+        assert_eq!(row.created_at, 42);
+        assert_eq!(row.file_key, key);
+        assert_eq!(row.limits, TeamLimits::default());
+        directory
+            .store
+            .with(|conn| {
+                conn.execute("UPDATE team SET limits = ?1", [r#"{"members":7}"#])
+                    .map_err(db)?;
+                Ok(())
+            })
+            .unwrap();
+        let row = directory.team(&id).unwrap().unwrap();
+        assert_eq!(row.limits.members, 7);
+        assert_eq!(row.limits.items, 500);
+        drop(directory);
+        assert_eq!(
+            Directory::open(&config)
+                .unwrap()
+                .team(&id)
+                .unwrap()
+                .unwrap()
+                .limits
+                .members,
+            7
+        );
+    }
+
+    #[test]
+    fn new_directory_uses_1002_and_refuses_unknown_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        let directory = Directory::create(&config).unwrap();
+        assert_eq!(directory.store.user_version().unwrap(), DIRECTORY_VERSION);
+        directory
+            .store
+            .with(|conn| conn.pragma_update(None, "user_version", 1003).map_err(db))
+            .unwrap();
+        drop(directory);
+        assert!(Directory::open(&config).is_err());
+        assert_eq!(
+            Store::open_at(&config.directory_path(), &config.master_key)
+                .unwrap()
+                .user_version()
+                .unwrap(),
+            1003
+        );
+    }
+
+    #[test]
+    fn failed_migration_does_not_advance_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        let directory = Directory::create(&config).unwrap();
+        directory
+            .store
+            .with(|conn| conn.pragma_update(None, "user_version", 1001).map_err(db))
+            .unwrap();
+        drop(directory);
+        assert!(Directory::open(&config).is_err());
+        assert_eq!(
+            Store::open_at(&config.directory_path(), &config.master_key)
+                .unwrap()
+                .user_version()
+                .unwrap(),
+            1001
+        );
+    }
 }

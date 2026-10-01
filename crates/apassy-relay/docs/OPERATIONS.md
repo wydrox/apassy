@@ -451,7 +451,45 @@ apassy-team me          # team Family (t_...): member rafal (id 1, owner)
 
 A code works once. A typo in a name does not use it. The owner then invites members (section 9) and runs `apassy-team host` for the team's items (section 11). A host serves the team of its owner token.
 
-**The teams.** `admin teams` lists each team: id, name, state, and for an active team the number of members, items, and agents, and the time of its last audit row. It shows no names of people or items, no runs, and no audit.
+**The teams.** `admin teams` shows the id, name, state, and effective limits of each team. For an active team, it also shows the member, item, and agent counts and the time of the last audit row. It shows no names of people or items, no runs, and no audit.
+
+**Team limits.** Each team starts with these limits:
+
+| Field | Default |
+| --- | --- |
+| `members` | 50 |
+| `items` | 500 |
+| `agents` | 100 |
+| `runs_per_hour` | 1000 |
+| `pending_runs` | 50 |
+| `agent_requests` | 56 |
+
+Read all effective values:
+
+```sh
+docker compose exec relay apassy-relay admin limits t_7k2m9q4x8c
+```
+
+Change only the necessary fields:
+
+```sh
+docker compose exec relay apassy-relay admin limits t_7k2m9q4x8c --members 25 --items 200
+docker compose exec relay apassy-relay admin limits t_7k2m9q4x8c --agents 40 --runs-per-hour 500 --pending-runs 20 --agent-requests 28
+```
+
+The command prints all six effective values. If a field has no flag, its value stays the same. Values must be integers from 1 to 1000000. The `agent_requests` range is 1 to 224.
+
+Use the command for active or suspended teams. A change adds `limits_changed` with actor `operator` to the team audit and relay audit.
+
+Members without revocation use member slots. Items without archive status use item slots. Agents without revocation or expiry use agent slots. Agents of revoked members do not use slots. The hourly limit counts all run rows from the last 3600 seconds. It also counts denials.
+
+The pending limit counts runs with status `pending`.
+
+A count limit returns HTTP 403 `team_limit`. A full agent request limit returns HTTP 503 `busy`, with `Retry-After: 2`. Member requests and the host of the owner keep the global member reserve. The team audit records a limit refusal at most once per field per ten seconds.
+
+New limits apply immediately. A lower limit does not remove existing data or stop existing runs. New operations can start only if the applicable limit permits them. Limits stay in `relay.db` after a restart.
+
+The relay automatically changes directory version 1001 to 1002 at start. The new nullable `limits TEXT` column holds JSON. A null column or an absent JSON field uses the default. The column change and version change use one transaction. Unknown versions stop the relay.
 
 **Suspend, resume, delete.**
 

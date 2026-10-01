@@ -21,6 +21,7 @@ use serde_json::{Value, json};
 use crate::api::Envelope;
 use crate::error::{RelayError, RelayResult};
 use crate::ids::TeamId;
+use crate::server::directory::TeamLimitsUpdate;
 use crate::server::hub::Hub;
 
 /// The longest request line.
@@ -36,6 +37,11 @@ pub enum Command {
     },
     /// The teams: id, name, state, counts, last activity.
     Teams,
+    /// Reads or changes the limits of one team.
+    Limits {
+        team: TeamId,
+        set: Option<TeamLimitsUpdate>,
+    },
     /// Tokens stop, sessions and waiting runs end, the file closes.
     Suspend {
         team: TeamId,
@@ -59,6 +65,8 @@ pub fn run(hub: &Hub, command: &Command, now: u64) -> RelayResult<Value> {
             Ok(json!({"code": code.expose(), "expires_at": expires_at}))
         }
         Command::Teams => serde_json::to_value(hub.team_infos()?)
+            .map_err(|_| RelayError::internal("A result cannot be written.")),
+        Command::Limits { team, set } => serde_json::to_value(hub.limits(team, *set, now)?)
             .map_err(|_| RelayError::internal("A result cannot be written.")),
         Command::Suspend { team } => {
             hub.suspend(team, now)?;
@@ -181,6 +189,23 @@ mod tests {
             ),
             (Command::Teams, r#"{"command":"teams"}"#),
             (
+                Command::Limits {
+                    team: team.clone(),
+                    set: None,
+                },
+                r#"{"command":"limits","team":"t_abcdefgh23","set":null}"#,
+            ),
+            (
+                Command::Limits {
+                    team: team.clone(),
+                    set: Some(TeamLimitsUpdate {
+                        members: Some(7),
+                        ..Default::default()
+                    }),
+                },
+                r#"{"command":"limits","team":"t_abcdefgh23","set":{"members":7}}"#,
+            ),
+            (
                 Command::Suspend { team: team.clone() },
                 r#"{"command":"suspend","team":"t_abcdefgh23"}"#,
             ),
@@ -197,5 +222,16 @@ mod tests {
                 .is_err()
         );
         assert!(serde_json::from_str::<Command>(r#"{"command":"suspend","team":"bad"}"#).is_err());
+        assert!(matches!(
+            serde_json::from_str::<Command>(r#"{"command":"limits","team":"t_abcdefgh23"}"#)
+                .unwrap(),
+            Command::Limits { set: None, .. }
+        ));
+        assert!(
+            serde_json::from_str::<Command>(
+                r#"{"command":"limits","team":"t_abcdefgh23","set":{"unknown":1}}"#
+            )
+            .is_err()
+        );
     }
 }
