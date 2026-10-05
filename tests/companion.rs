@@ -8,7 +8,7 @@
 #[path = "support/companion.rs"]
 mod companion_support;
 
-use std::io::{ErrorKind, Read, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -2025,9 +2025,7 @@ fn a_connection_from_the_mac_itself_is_closed_at_once() {
     // The peer is a loopback address. The listener closes before the TLS handshake.
     let mut raw = tcp(port);
     let begin = Instant::now();
-    let mut byte = [0u8; 1];
-    let closed = raw.read(&mut byte).map_or(true, |read| read == 0);
-    assert!(closed, "no byte comes from a closed connection");
+    require_closed(&mut raw).expect("network EOF or reset before the TLS handshake");
     assert!(begin.elapsed() < Duration::from_secs(2));
     let result = try_exchange(
         port,
@@ -2058,21 +2056,59 @@ fn own_ipv4_addresses() -> Vec<Ipv4Addr> {
         })
         .filter(|address: &Ipv4Addr| !address.is_loopback())
         .collect();
+    addresses.sort_unstable();
     addresses.dedup();
     addresses
 }
 
-/// A connection to `to` from the local address `from`, made by `nc -s` (`std` cannot
-/// choose the source address). `None` when `nc` is not there. The child keeps its stdin
-/// open, so it stays connected until the other side closes.
-fn connect_from(from: Ipv4Addr, to: Ipv4Addr, port: u16) -> Option<std::process::Child> {
-    std::process::Command::new("/usr/bin/nc")
-        .args(["-s", &from.to_string(), &to.to_string(), &port.to_string()])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()
+/// Use a native socket so connection completion and network EOF are independent of
+/// a netcat process's stdin lifetime. A timeout is a test failure, not closure.
+fn connect_from(from: Ipv4Addr, to: Ipv4Addr, port: u16) -> io::Result<TcpStream> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    socket.bind(&SocketAddr::from((from, 0)).into())?;
+    socket.connect_timeout(&SocketAddr::from((to, port)).into(), Duration::from_secs(2))?;
+    Ok(socket.into())
+}
+
+fn require_closed(stream: &mut TcpStream) -> io::Result<()> {
+    let mut byte = [0u8; 1];
+    match stream.read(&mut byte) {
+        Ok(0) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error),
+        Ok(_) => Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "a closed connection must send no byte",
+        )),
+    }
+}
+
+#[test]
+fn a_read_timeout_does_not_count_as_a_closed_connection() {
+    let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("listener");
+    let mut client = TcpStream::connect(listener.local_addr().expect("address")).expect("connect");
+    let (held, _) = listener.accept().expect("accept");
+    client
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .expect("timeout");
+    let error = require_closed(&mut client).expect_err("an open, silent socket is not closed");
+    assert!(
+        matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock),
+        "{error}"
+    );
+    drop(held);
+    require_closed(&mut client).expect("actual network EOF is closure");
 }
 
 fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
@@ -2099,53 +2135,71 @@ fn a_connection_from_any_address_of_the_mac_is_closed_at_once() {
         options.bind = Ipv4Addr::UNSPECIFIED;
     });
     let addresses = own_ipv4_addresses();
-    let [first, rest @ ..] = addresses.as_slice() else {
-        // A host with only a loopback address: `a_connection_from_the_mac_itself_is_
-        // closed_at_once` covers it, and `is_address_of_this_host` has unit tests.
+    if addresses.is_empty() {
+        // A host with only loopback is covered by the real loopback rejection test.
+        // The server unit tests also cover two distinct addresses of one host.
         return;
-    };
-    // With two addresses, a program binds its source to one and connects to the other.
-    // The peer is then an address of the Mac that is not the address it reached, and
-    // the connection arrives on the loopback interface.
-    let source_bound = rest.first().and_then(|second| {
-        Some((
-            *second,
-            connect_from(*second, *first, closed.handle.port())?,
-        ))
-    });
-    if let Some((second, mut child)) = source_bound {
-        wait_until(
-            &format!("the connection from {second} to {first} is closed"),
-            || child.try_wait().expect("nc").is_some(),
-        );
-        assert_eq!(closed.handle.open_connections(), 0);
-        // The same connection is served when local peers are allowed.
-        let mut child = connect_from(second, *first, open.handle.port()).expect("nc again");
-        wait_until("the connection is served", || {
+    }
+    for (index, to) in addresses.iter().enumerate() {
+        // Prefer a distinct local source on a host with multiple interfaces. Check the
+        // same route with the permitted listener before attributing a failure to the
+        // guard: a Docker or VPN route can block even a connection to a local address.
+        let from = addresses[(index + 1) % addresses.len()];
+        let mut held = match connect_from(from, *to, open.handle.port()) {
+            Ok(stream) => stream,
+            Err(error) => {
+                eprintln!(
+                    "local route {from} -> {to} is unavailable: {error}; checking the same-interface route"
+                );
+                connect_from(*to, *to, open.handle.port())
+                    .expect("same-interface control connection")
+            }
+        };
+        let from = match held.local_addr().expect("bound source").ip() {
+            std::net::IpAddr::V4(address) => address,
+            other => panic!("expected an IPv4 source: {other}"),
+        };
+        wait_until("the bound control connection is served", || {
             open.handle.open_connections() == 1
         });
-        assert!(child.try_wait().expect("nc").is_none());
-        child.kill().expect("kill nc");
-        child.wait().expect("wait nc");
+        held.set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("control timeout");
+        let error = require_closed(&mut held)
+            .expect_err("the permitted listener keeps this connection open");
+        assert!(
+            matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock),
+            "{from} -> {to}: {error}"
+        );
+        drop(held);
+        wait_until("the control connection ended", || {
+            open.handle.open_connections() == 0
+        });
+
+        let mut rejected = connect_from(from, *to, closed.handle.port())
+            .expect("the control proved this route connects");
+        rejected
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("rejection timeout");
+        let begin = Instant::now();
+        require_closed(&mut rejected).unwrap_or_else(|error| {
+            panic!("the connection from {from} to {to} must close at once: {error}")
+        });
+        assert!(begin.elapsed() < Duration::from_secs(2));
+        assert_eq!(closed.handle.open_connections(), 0);
+        eprintln!("local TCP route {from} -> {to}: control stays open, guarded listener closes");
+
+        // Also verify the OS-selected source for each local destination.
+        let mut plain = TcpStream::connect_timeout(
+            &SocketAddr::from((*to, closed.handle.port())),
+            Duration::from_secs(2),
+        )
+        .expect("plain connect");
+        plain
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("plain timeout");
+        require_closed(&mut plain).expect("the connection with the OS-selected source closes");
+        assert_eq!(closed.handle.open_connections(), 0);
     }
-    // A program that connects to a non-loopback address of the Mac without choosing a
-    // source: the peer is the address it reached.
-    let mut plain =
-        TcpStream::connect(SocketAddr::from((*first, closed.handle.port()))).expect("connect");
-    plain
-        .set_read_timeout(Some(Duration::from_secs(3)))
-        .expect("timeout");
-    let mut byte = [0u8; 1];
-    assert!(
-        plain.read(&mut byte).map_or(true, |read| read == 0),
-        "no byte comes from a closed connection"
-    );
-    assert_eq!(closed.handle.open_connections(), 0);
-    let held = TcpStream::connect(SocketAddr::from((*first, open.handle.port()))).expect("connect");
-    wait_until("the plain connection is served", || {
-        open.handle.open_connections() == 1
-    });
-    drop(held);
 }
 
 #[test]

@@ -175,3 +175,7 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+[dev-dependencies]
+# Source-bound TCP tests use native sockets, not platform-specific netcat processes.
+socket2 = { version = "=0.6.3", default-features = false }
