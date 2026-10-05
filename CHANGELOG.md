@@ -21,6 +21,7 @@ Clearer setup on a second Mac, sync recovery, and complete command-line tools in
 ### Fixed
 
 - A wrong vault passphrase preserves the selected file and returns focus to the passphrase field.
+- Anonymous cloud snapshots use private file permissions on macOS and Linux.
 - Cloud folder checks have bounded waits. Retry detects newly available folders and preserves the selected file.
 - Sync status distinguishes a local folder write from receipt on another Mac.
 - CLI setup distinguishes configuration from a verified connection. The tool installer checks executable files.
