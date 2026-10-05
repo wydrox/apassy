@@ -29,7 +29,7 @@ mod state;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Seek, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -844,6 +844,7 @@ fn copy_cloud_to_new_with(
 ) -> Result<(File, String), SyncError> {
     let parent = dest.parent().ok_or(SyncError::Io)?;
     let snapshot = tempfile::tempfile_in(parent).map_err(|_| SyncError::Io)?;
+    let snapshot = private_snapshot(snapshot)?;
     let (mut snapshot, expected_hash) = read(snapshot)?;
     let mut dest_file = create_new_private(dest).map_err(|_| SyncError::Io)?;
     match copy_hashing(&mut snapshot, &mut dest_file) {
@@ -854,6 +855,16 @@ fn copy_cloud_to_new_with(
             Err(SyncError::Io)
         }
     }
+}
+
+/// Linux O_TMPFILE creation can use the process umask instead of mode 0600.
+/// The descriptor is still anonymous and empty here. Set its mode before the
+/// cloud worker can write any vault bytes, without changing the process umask.
+fn private_snapshot(snapshot: File) -> Result<File, SyncError> {
+    snapshot
+        .set_permissions(fs::Permissions::from_mode(0o600))
+        .map_err(|_| SyncError::Io)?;
+    Ok(snapshot)
 }
 
 /// Copy `source` to the new file `dest` (mode `0600`) and sync it. Returns the open
@@ -954,6 +965,46 @@ mod tests {
         assert_eq!(fs::read(&dest).unwrap(), fs::read(&source).unwrap());
         assert_eq!(hash, hash_path(&dest).unwrap());
         assert_eq!(fs::metadata(&dest).unwrap().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn cloud_staging_and_copy_stay_private_with_public_source_permissions() {
+        let root = tempfile::tempdir().expect("test root");
+        // Simulate the mode of an anonymous Linux O_TMPFILE independently of
+        // this test process's umask and of the host operating system.
+        let snapshot = tempfile::tempfile_in(root.path()).expect("anonymous snapshot");
+        snapshot
+            .set_permissions(fs::Permissions::from_mode(0o644))
+            .expect("public snapshot permissions");
+        assert_eq!(snapshot.metadata().unwrap().mode() & 0o777, 0o644);
+        let snapshot = private_snapshot(snapshot).expect("private snapshot");
+        let metadata = snapshot.metadata().unwrap();
+        assert_eq!(metadata.mode() & 0o777, 0o600);
+        assert_eq!(metadata.nlink(), 0, "the snapshot must remain anonymous");
+        assert_eq!(
+            metadata.len(),
+            0,
+            "the mode changes before any bytes arrive"
+        );
+        drop(snapshot);
+
+        let source = root.path().join("encrypted-cloud-copy");
+        fs::write(&source, b"synthetic encrypted bytes").expect("source");
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o644))
+            .expect("public source permissions");
+        let dest = root.path().join("private-work-copy");
+        let (_held, hash) = copy_cloud_to_new_with(&dest, |snapshot| {
+            let metadata = snapshot.metadata().expect("snapshot metadata");
+            assert_eq!(metadata.mode() & 0o777, 0o600);
+            assert_eq!(metadata.nlink(), 0);
+            snapshot_cloud_file(&source, snapshot, None)
+        })
+        .expect("cloud copy");
+        assert_eq!(fs::read(&dest).unwrap(), fs::read(&source).unwrap());
+        assert_eq!(hash, hash_path(&dest).unwrap());
+        assert_eq!(fs::metadata(&dest).unwrap().mode() & 0o777, 0o600);
+        assert_eq!(fs::metadata(&source).unwrap().mode() & 0o777, 0o644);
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
     }
 
     #[test]
