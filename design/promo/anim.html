@@ -1,0 +1,760 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>apassy — animated promo (15 s, square)</title>
+<!--
+  An animated explainer. One continuous scene, no cuts. A deterministic timeline:
+  window.renderAt(t) draws the frame at t seconds. Open with ?t=4.5 to see one frame.
+  Render with `node render.mjs --page anim.html`.
+
+  1. A small agent robot hops in. Every key flies to it: today, agents get every key.
+  2. The apassy shield slams down. The keys go back into locked slots. The robot shows
+     its task. Only the Database key opens. The key goes into apassy's runner, never to
+     the robot. The result comes back.
+  3. A note ("reset the db!") lands on the robot. Its request turns red. The shield
+     shakes "no" and asks you. You tap Deny. The note falls off.
+  4. The shield becomes the logo: agents get access, never your secrets.
+-->
+<style>
+:root {
+  --ink: #1d1d1f;
+  --gray: #6e6e73;
+  --gray2: #86868b;
+  --blue: #0a84ff;
+  --sans: -apple-system, system-ui, "Helvetica Neue", sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 720px; height: 720px; overflow: hidden; background: #f6f6f8; }
+#stage {
+  position: relative; width: 720px; height: 720px; overflow: hidden;
+  font-family: var(--sans); color: var(--ink); -webkit-font-smoothing: antialiased;
+  background: radial-gradient(640px 520px at 50% 48%, #ffffff 0%, #f4f4f7 70%, #ececf1 100%);
+}
+svg text { font-family: var(--sans); }
+.abs { position: absolute; }
+
+/* Kinetic captions */
+.cap { position: absolute; left: 20px; right: 20px; top: 62px; text-align: center; font-size: 42px; font-weight: 700; letter-spacing: -1.2px; line-height: 1.1; }
+.cap .w { display: inline-block; opacity: 0; will-change: transform, opacity; }
+.cap .g { color: var(--gray2); }
+.cap .b { color: #0071e3; }
+.cap .r { color: #d70015; }
+
+/* End card text */
+#word { left: 326px; top: 260px; height: 80px; width: 260px; overflow: hidden; }
+#word span { display: block; font-size: 66px; font-weight: 750; letter-spacing: -2.2px; line-height: 80px; }
+#tag { left: 0; right: 0; top: 396px; text-align: center; }
+#tag .l { font-size: 46px; font-weight: 700; letter-spacing: -1.4px; line-height: 1.12; }
+#tag .l1 { color: var(--gray2); }
+#tag .w { display: inline-block; opacity: 0; }
+#url { left: 0; right: 0; top: 536px; text-align: center; font-size: 21px; font-weight: 500; color: #0071e3; opacity: 0; }
+</style>
+</head>
+<body>
+<div id="stage">
+<svg id="svg" width="720" height="720" viewBox="0 0 720 720" class="abs" style="left:0;top:0">
+  <defs>
+    <filter id="sh" x="-40%" y="-40%" width="180%" height="200%"><feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#000" flood-opacity=".10"/></filter>
+    <filter id="shSoft" x="-40%" y="-40%" width="180%" height="200%"><feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#000" flood-opacity=".12"/></filter>
+    <linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#34a8ff"/><stop offset="1" stop-color="#0060d6"/></linearGradient>
+    <linearGradient id="amber" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffc24d"/><stop offset="1" stop-color="#ff8a00"/></linearGradient>
+    <linearGradient id="beamG" x1="1" y1="1" x2="0" y2="0"><stop offset="0" stop-color="#0a84ff" stop-opacity=".30"/><stop offset="1" stop-color="#0a84ff" stop-opacity=".04"/></linearGradient>
+    <linearGradient id="beamA" x1="1" y1="1" x2="0" y2="0"><stop offset="0" stop-color="#ff9500" stop-opacity=".34"/><stop offset="1" stop-color="#ff9500" stop-opacity=".05"/></linearGradient>
+    <symbol id="key" viewBox="-24 -14 48 28" overflow="visible">
+      <circle cx="-11" cy="0" r="8.5" fill="none" stroke="currentColor" stroke-width="5.5"/>
+      <rect x="-3" y="-2.8" width="24" height="5.6" rx="2.8" fill="currentColor"/>
+      <rect x="13" y="1" width="4.6" height="8.5" rx="2" fill="currentColor"/>
+      <rect x="5.5" y="1" width="4.6" height="6.5" rx="2" fill="currentColor"/>
+    </symbol>
+    <clipPath id="cardClip"><rect id="clipRect" x="-86" y="-24" width="172" height="48" rx="16"/></clipPath>
+    <linearGradient id="sweepG" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset=".5" stop-color="#fff" stop-opacity="1"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+    <mask id="sweepM"><rect id="sweepMask" x="-120" y="-30" width="60" height="60" fill="url(#sweepG)"/></mask>
+  </defs>
+
+  <g id="world">
+    <!-- Ground shadows -->
+    <ellipse id="botShadow" cx="0" cy="560" rx="46" ry="8" fill="#000" opacity=".08"/>
+    <ellipse id="shieldShadow" cx="370" cy="560" rx="62" ry="9" fill="#000" opacity="0"/>
+
+    <!-- Scan beam and links -->
+    <path id="beam" fill="url(#beamG)" opacity="0"/>
+    <line id="bubLink" x1="370" y1="436" x2="370" y2="300" stroke="#d1d1d6" stroke-width="3" stroke-dasharray="2 8" stroke-linecap="round" opacity="0"/>
+
+    <!-- The key shelf (the vault) -->
+    <g id="shelf"></g>
+
+    <!-- The runner: apassy uses the key here -->
+    <circle id="ring" cx="370" cy="498" r="84" fill="none" stroke="#0a84ff" stroke-width="5" stroke-linecap="round" opacity="0" transform="rotate(-90 370 498)"/>
+    <g id="cap" opacity="0">
+      <rect x="-94" y="-19" width="188" height="38" rx="19" fill="#fff" filter="url(#sh)"/>
+      <text x="-74" y="5" font-size="14.5" font-weight="600" style="font-family: var(--mono)" fill="#1d1d1f">npm run migrate</text>
+      <g id="capSpin" transform="translate(74 0)">
+        <circle r="8" fill="none" stroke="#0a84ff" stroke-opacity=".2" stroke-width="3"/>
+        <path d="M0 -8 A8 8 0 0 1 8 0" fill="none" stroke="#0a84ff" stroke-width="3" stroke-linecap="round"/>
+      </g>
+      <g id="capDone" transform="translate(74 0)" opacity="0">
+        <circle r="10" fill="#34c759"/>
+        <path d="M-4.5 0.5 L-1.2 3.8 L4.8 -3" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </g>
+    </g>
+
+    <!-- The shield (the bouncer) -->
+    <g id="shield">
+      <g id="shieldBody">
+        <rect x="-62" y="-124" width="124" height="124" rx="30" fill="url(#lg)" filter="url(#sh)"/>
+        <rect id="shieldAmber" x="-62" y="-124" width="124" height="124" rx="30" fill="url(#amber)" opacity="0"/>
+        <path d="M0 -104 L30 -92.5 V-69 C30 -49 17.5 -35.5 0 -28 C-17.5 -35.5 -30 -49 -30 -69 V-92.5 Z" fill="none" stroke="#fff" stroke-width="6.5" stroke-linejoin="round"/>
+        <circle cx="0" cy="-72" r="8.8" fill="#fff"/>
+        <path d="M-4.6 -67 H4.6 L6.9 -50 H-6.9 Z" fill="#fff"/>
+      </g>
+    </g>
+
+    <!-- The robot -->
+    <g id="bot">
+      <g id="botBody">
+        <rect x="-24" y="-24" width="15" height="24" rx="7" fill="#1d1d1f"/>
+        <rect x="9" y="-24" width="15" height="24" rx="7" fill="#1d1d1f"/>
+        <g id="armL" transform="translate(-46 -74)"><rect x="-14" y="-6" width="16" height="38" rx="8" fill="#1d1d1f"/></g>
+        <g id="armR" transform="translate(46 -74)"><rect x="-2" y="-6" width="16" height="38" rx="8" fill="#1d1d1f"/></g>
+        <rect x="-48" y="-120" width="96" height="102" rx="30" fill="#1d1d1f"/>
+        <rect x="-36" y="-106" width="72" height="52" rx="17" fill="#3a3a3c"/>
+        <g id="eyesN">
+          <ellipse id="eyeL" cx="-14" cy="-80" rx="7" ry="8.5" fill="#64d2ff"/>
+          <ellipse id="eyeR" cx="14" cy="-80" rx="7" ry="8.5" fill="#64d2ff"/>
+        </g>
+        <g id="eyesHappy" opacity="0" fill="none" stroke="#64d2ff" stroke-width="4.5" stroke-linecap="round">
+          <path d="M-21 -77 Q-14 -88 -7 -77"/>
+          <path d="M7 -77 Q14 -88 21 -77"/>
+        </g>
+        <g id="eyesSpin" opacity="0" fill="none" stroke="#ffb340" stroke-width="3" stroke-linecap="round">
+          <path id="spinL" d="M-14 -80 m0 0 a2 2 0 1 1 2 2 a4 4 0 1 1 -4 -4 a6 6 0 1 1 6 6"/>
+          <path id="spinR" d="M14 -80 m0 0 a2 2 0 1 1 2 2 a4 4 0 1 1 -4 -4 a6 6 0 1 1 6 6"/>
+        </g>
+        <line x1="0" y1="-120" x2="0" y2="-138" stroke="#1d1d1f" stroke-width="5" stroke-linecap="round"/>
+        <circle id="ant" cx="0" cy="-142" r="7.5" fill="#0a84ff"/>
+      </g>
+    </g>
+
+    <!-- The robot's request -->
+    <g id="card" opacity="0">
+      <g id="cardFlip">
+        <path d="M-10 22 L0 34 L10 22 Z" id="cardTail" fill="#fff"/>
+        <rect id="cardBg" x="-86" y="-24" width="172" height="48" rx="16" fill="#fff" filter="url(#sh)"/>
+        <text id="cardText" x="0" y="6" text-anchor="middle" font-size="17" font-weight="600" fill="#1d1d1f">run the migrations</text>
+        <g clip-path="url(#cardClip)"><rect id="sweep" x="-160" y="-30" width="320" height="60" fill="#0a84ff" mask="url(#sweepM)" opacity="0"/></g>
+      </g>
+    </g>
+
+    <!-- The result, back to the robot -->
+    <g id="res" opacity="0">
+      <rect x="-112" y="-22" width="224" height="44" rx="22" fill="#fff" filter="url(#sh)"/>
+      <circle cx="-86" cy="0" r="11" fill="#34c759"/>
+      <path d="M-91 0.5 L-87.5 4 L-81 -3.2" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="-66" y="6" font-size="17" font-weight="600" fill="#1d1d1f">3 migrations applied</text>
+    </g>
+
+    <!-- The keys -->
+    <g id="keys"></g>
+
+    <!-- The note -->
+    <g id="note" opacity="0">
+      <g filter="url(#shSoft)">
+        <rect x="-38" y="-34" width="76" height="68" rx="4" fill="#ffd60a"/>
+        <path d="M22 34 L38 18 L38 34 Z" fill="#e6b800"/>
+      </g>
+      <text x="0" y="-6" text-anchor="middle" font-size="18" fill="#5e4700" style="font-family:'Marker Felt','Noteworthy',cursive">reset</text>
+      <text x="0" y="16" text-anchor="middle" font-size="18" fill="#5e4700" style="font-family:'Marker Felt','Noteworthy',cursive">the db!</text>
+    </g>
+
+    <!-- apassy asks you -->
+    <g id="bub" opacity="0">
+      <rect x="-160" y="-66" width="320" height="132" rx="22" fill="#fff" filter="url(#sh)"/>
+      <circle cx="-126" cy="-34" r="8" fill="#ff9500"/>
+      <text x="-110" y="-27" font-size="20" font-weight="700" fill="#1d1d1f">Not what you asked.</text>
+      <text x="-136" y="1" font-size="14.5" fill="#86868b">You asked: “run the migrations”</text>
+      <rect id="denyBtn" x="-136" y="14" width="130" height="38" rx="19" fill="#e8e8ed"/>
+      <text x="-71" y="39" text-anchor="middle" font-size="16" font-weight="600" fill="#1d1d1f">Deny</text>
+      <rect x="6" y="14" width="130" height="38" rx="19" fill="#0a84ff"/>
+      <text x="71" y="39" text-anchor="middle" font-size="16" font-weight="600" fill="#fff">Allow once</text>
+    </g>
+    <circle id="tap" r="0" fill="#1d1d1f" opacity="0"/>
+    <circle id="tapRing" r="0" fill="none" stroke="#1d1d1f" stroke-width="2" opacity="0"/>
+    <g id="parts"></g>
+    <g id="dust"></g>
+  </g>
+</svg>
+
+<div class="cap" id="c1"></div>
+<div class="cap" id="c2"></div>
+<div class="cap" id="c3"></div>
+<div class="cap" id="c4"></div>
+
+<div id="word" class="abs"><span>apassy</span></div>
+<div id="tag" class="abs"><div class="l l1" id="t1"></div><div class="l l2" id="t2"></div></div>
+<div id="url" class="abs">github.com/wydrox/apassy</div>
+</div>
+
+<script>
+window.PROMO = { width: 720, height: 720, duration: 15, out: 'apassy-promo-anim-15s.mp4' };
+
+// ---------- Math ----------
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+const ease = (x) => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2);
+const eo = (x) => 1 - Math.pow(1 - x, 3);
+const ei = (x) => x * x * x;
+const back = (x) => { const c1 = 1.9, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); };
+// A damped spring from 0 to 1.
+const spring = (x) => (x <= 0 ? 0 : x >= 1.5 ? 1 : 1 - Math.exp(-6.5 * x) * Math.cos(13 * x));
+// A damped wobble around 0.
+const wobble = (d, freq = 22, damp = 7) => (d <= 0 ? 0 : Math.sin(d * freq) * Math.exp(-d * damp));
+const lerp = (a, b, x) => a + (b - a) * x;
+const $ = (id) => document.getElementById(id);
+const NS = 'http://www.w3.org/2000/svg';
+function tf(el, x, y, sx = 1, sy = sx, r = 0) {
+  el.setAttribute('transform', `translate(${x.toFixed(2)} ${y.toFixed(2)}) rotate(${r.toFixed(2)}) scale(${sx.toFixed(4)} ${sy.toFixed(4)})`);
+}
+const op = (el, v) => el.setAttribute('opacity', clamp(v).toFixed(3));
+// A point on a quadratic curve.
+const quad = (p0, p1, p2, u) => [
+  (1 - u) * (1 - u) * p0[0] + 2 * (1 - u) * u * p1[0] + u * u * p2[0],
+  (1 - u) * (1 - u) * p0[1] + 2 * (1 - u) * u * p1[1] + u * u * p2[1],
+];
+
+const GROUND = 560;
+const SHIELD_X = 370;
+
+// ---------- Beats (seconds) ----------
+const T = {
+  enter: 0.3,     // the robot hops in
+  ask: 1.05,      // its request shows
+  grab: 1.35,     // every key flies to it
+  drop: 2.62,     // the shield falls
+  impact: 2.95,   // it lands; the keys go to the vault
+  present: 3.55,  // the robot shows its task
+  scan: 3.8,
+  unlock: 4.3,    // only the Database key opens
+  toRunner: 4.55, // the key goes into apassy's runner
+  running: 5.0,
+  result: 5.55,   // the result goes to the robot
+  keyBack: 5.7,
+  note: 6.55,     // a note flies in
+  stick: 7.15,
+  flip: 7.25,     // the request turns red
+  march: 7.55,
+  scan2: 7.9,
+  refuse: 8.32,   // the shield shakes "no"
+  bubble: 8.6,    // apassy asks you
+  denyTap: 9.42,
+  burst: 9.55,
+  noteOff: 9.65,
+  exit: 10.3,     // everything but the shield leaves
+  logo: 10.55,
+  end: 15,
+};
+
+// ---------- Keys and the shelf ----------
+const KEYS = [
+  { name: 'Stripe', color: '#635bff' },
+  { name: 'Database', color: '#0a84ff' },
+  { name: 'AWS', color: '#ff9900' },
+  { name: 'GitHub', color: '#1d1d1f' },
+];
+const DB = 1;
+const FLOAT = [[300, 318], [400, 290], [500, 318], [590, 290]];
+const ON_BOT = [[-70, -92], [72, -92], [-66, -30], [68, -30]];
+const SLOT_X = 462, SLOT_Y0 = 312, SLOT_H = 54, SLOT_GAP = 10;
+const slotPos = (i) => [SLOT_X, SLOT_Y0 + i * (SLOT_H + SLOT_GAP)];
+const slotKey = (i) => [SLOT_X + 30, SLOT_Y0 + i * (SLOT_H + SLOT_GAP) + SLOT_H / 2];
+
+const keyEls = KEYS.map((k, i) => {
+  const g = document.createElementNS(NS, 'g');
+  g.innerHTML = `<circle class="glow" r="30" fill="#ff3b30" opacity="0"/>`
+    + `<use href="#key" x="-24" y="-14" width="48" height="28" style="color:${k.color}"/>`
+    + `<text class="lbl" x="0" y="36" text-anchor="middle" font-size="15" font-weight="600" fill="#6e6e73">${k.name}</text>`;
+  $('keys').appendChild(g);
+  return g;
+});
+const slotEls = KEYS.map((k, i) => {
+  const g = document.createElementNS(NS, 'g');
+  g.innerHTML = `<rect class="bg" x="0" y="0" width="172" height="${SLOT_H}" rx="16" fill="#fff" filter="url(#sh)"/>`
+    + `<rect class="tint" x="0" y="0" width="172" height="${SLOT_H}" rx="16" fill="#e8f2ff" opacity="0"/>`
+    + `<text x="56" y="${SLOT_H / 2 + 5.5}" font-size="16" font-weight="600" fill="#1d1d1f">${k.name}</text>`
+    + `<g class="lock" transform="translate(152 ${SLOT_H / 2})">`
+    + `<rect x="-8" y="-3" width="16" height="13" rx="3.5" fill="currentColor"/>`
+    + `<path class="shackle" d="M-5 -3 V-7 A5 5 0 0 1 5 -7 V-3" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/>`
+    + `</g>`;
+  $('shelf').appendChild(g);
+  return g;
+});
+
+// ---------- The robot ----------
+// Moves: [start, end, fromX, toX, hops, height].
+const MOVES = [
+  [T.enter, 1.05, -110, 150, 3, 38],
+  [T.impact, 3.18, 150, 138, 1, 14],
+  [3.2, 3.42, 138, 150, 1, 8],
+  [T.present, 3.8, 150, 176, 1, 18],
+  [6.02, 6.32, 176, 176, 1, 24],
+  [T.march, 7.85, 176, 196, 1, 16],
+  [9.92, 10.16, 196, 176, 1, 10],
+  [T.exit, 10.95, 176, -140, 2, 30],
+];
+const LANDINGS = [...MOVES.map((m) => m[1]), T.stick];
+
+function robot(t) {
+  let x = -110, lift = 0, air = 0;
+  for (const [a, b, x0, x1, hops, h] of MOVES) {
+    if (t >= b) x = x1;
+    if (t >= a && t < b) {
+      const u = prog(t, a, b);
+      x = lerp(x0, x1, ease(u));
+      const f = (u * hops) % 1;
+      lift = -h * 4 * f * (1 - f);
+      air = Math.sin(f * Math.PI);
+    }
+  }
+  // Squash on each landing, stretch in the air.
+  let sq = 0;
+  for (const l of LANDINGS) sq += 0.16 * wobble(t - l, 20, 8) * (t >= l ? 1 : 0);
+  // The shield lands next to it: a startle.
+  sq += 0.1 * wobble(t - T.impact, 24, 9) * (t >= T.impact ? 1 : 0);
+  const breathe = 0.012 * Math.sin(t * 3.2);
+  const sy = 1 + 0.07 * air - Math.abs(sq) * Math.sign(sq) + breathe;
+  const sx = 1 - 0.05 * air + sq * 0.8;
+  return { x, lift, sx, sy };
+}
+
+function renderRobot(t, R) {
+  tf($('bot'), R.x, GROUND + R.lift);
+  tf($('botBody'), 0, 0, R.sx, R.sy);
+  const sh = $('botShadow');
+  sh.setAttribute('cx', R.x);
+  sh.setAttribute('rx', 46 * (1 + R.lift / 160));
+  sh.setAttribute('opacity', 0.09 * (1 + R.lift / 120));
+
+  // Eyes: normal, wide, happy, confused. They blink now and then.
+  const wide = t >= 1.85 && t < T.impact + 0.3;
+  const happy = t >= 6.05 && t < 6.8;
+  const confused = t >= T.stick + 0.05 && t < T.noteOff + 0.2;
+  let blink = 1;
+  for (const b of [0.95, 2.3, 4.95, 7.0, 12]) {
+    const d = t - b;
+    if (d > 0 && d < 0.14) blink = Math.abs(d - 0.07) / 0.07;
+  }
+  const eyeScale = wide ? 1.3 : 1;
+  for (const e of [$('eyeL'), $('eyeR')]) {
+    e.setAttribute('rx', 7 * eyeScale);
+    e.setAttribute('ry', 8.5 * eyeScale * Math.max(0.12, blink));
+  }
+  // The eyes look at what matters: the keys, the shield, the result.
+  const look = t < 1.3 ? 3 : t < T.impact ? -2 : t < 5.5 ? 4 : t < 6.6 ? -1 : 4;
+  tf($('eyesN'), look, 0);
+  op($('eyesN'), happy || confused ? 0 : 1);
+  op($('eyesHappy'), happy ? 1 : 0);
+  op($('eyesSpin'), confused ? 1 : 0);
+  const spin = t * 400;
+  $('spinL').setAttribute('transform', `rotate(${spin} -14 -80)`);
+  $('spinR').setAttribute('transform', `rotate(${spin} 14 -80)`);
+  $('ant').setAttribute('fill', confused ? '#ff9500' : wide ? '#ff3b30' : '#0a84ff');
+  $('ant').setAttribute('r', 7.5 + (wide || confused ? 1.2 * Math.abs(Math.sin(t * 9)) : 0));
+
+  // Arms: up to show the request, up to catch the result, a wave at the start.
+  const armUp = Math.max(
+    ease(prog(t, T.present, T.present + 0.25)) * (1 - ease(prog(t, T.scan + 0.6, T.scan + 0.9))),
+    ease(prog(t, 5.85, 6.05)) * (1 - ease(prog(t, 6.5, 6.75))),
+    ease(prog(t, T.march, T.march + 0.2)) * (1 - ease(prog(t, T.scan2 + 0.5, T.scan2 + 0.8))),
+  );
+  const wave = t > 1.05 && t < 1.5 ? 18 * Math.sin((t - 1.05) * 28) * (1 - prog(t, 1.05, 1.5)) : 0;
+  $('armR').setAttribute('transform', `translate(46 -74) rotate(${-150 * armUp + wave} 6 0)`);
+  $('armL').setAttribute('transform', `translate(-46 -74) rotate(${8 * Math.sin(t * 3)} -6 0)`);
+}
+
+// ---------- The robot's request ----------
+function renderCard(t, R) {
+  const card = $('card');
+  const inP = prog(t, T.ask, T.ask + 0.45);
+  const outP = ease(prog(t, T.exit, T.exit + 0.3));
+  op(card, eo(inP) * (1 - outP));
+  const s = lerp(0.6, 1, spring(inP * 1.2));
+  tf(card, R.x + 22, 372 + R.lift * 0.6 - 8 * ease(prog(t, T.present, T.present + 0.25)) * (1 - ease(prog(t, T.scan + 0.6, T.scan + 0.9))), s);
+  // Flip to the red request, and back after the denial.
+  const f1 = prog(t, T.flip, T.flip + 0.26);
+  const f2 = prog(t, 9.85, 10.1);
+  let sx = 1;
+  if (f1 > 0 && f1 < 1) sx = Math.abs(Math.cos(f1 * Math.PI));
+  if (f2 > 0 && f2 < 1) sx = Math.abs(Math.cos(f2 * Math.PI));
+  const red = (t >= T.flip + 0.13) && !(t >= 9.85 + 0.125);
+  tf($('cardFlip'), 0, 0, sx, 1);
+  $('cardBg').setAttribute('fill', red ? '#fff0ef' : '#fff');
+  $('cardTail').setAttribute('fill', red ? '#fff0ef' : '#fff');
+  const txt = $('cardText');
+  txt.textContent = red ? 'npm run db:reset --force' : 'run the migrations';
+  txt.setAttribute('fill', red ? '#d70015' : '#1d1d1f');
+  txt.setAttribute('font-size', red ? 15.5 : 17);
+  txt.style.fontFamily = red ? 'var(--mono)' : '';
+  const w = red ? 246 : 172;
+  for (const el of [$('cardBg'), $('clipRect')]) { el.setAttribute('x', -w / 2); el.setAttribute('width', w); }
+  // The scan sweep over the card.
+  const sw = (a, color) => {
+    const p = prog(t, a + 0.1, a + 0.45);
+    return p > 0 && p < 1 ? { x: lerp(-190, 130, ease(p)), color } : null;
+  };
+  const s1 = sw(T.scan, '#0a84ff') || sw(T.scan2, '#ff9500');
+  const sweep = $('sweep');
+  if (s1) { $('sweepMask').setAttribute('x', s1.x); sweep.setAttribute('fill', s1.color); op(sweep, 0.3); } else op(sweep, 0);
+}
+
+// ---------- The shield ----------
+function shieldState(t) {
+  // It falls with gravity, lands with a squash, and settles.
+  let y = 0, sx = 1, sy = 1, r = 0, x = SHIELD_X, s = 1;
+  if (t < T.drop) y = -700;
+  else if (t < T.impact) y = lerp(-620, 0, ei(prog(t, T.drop, T.impact)));
+  const d = t - T.impact;
+  if (d >= 0) {
+    const w = wobble(d, 18, 7);
+    sy = 1 - 0.18 * w;
+    sx = 1 + 0.14 * w;
+  }
+  // It takes the key in: a small pulse.
+  const gulp = 0.07 * wobble(t - T.running, 16, 6) * (t >= T.running ? 1 : 0);
+  sx += gulp; sy += gulp;
+  // "No": a shake.
+  r = 9 * wobble(t - T.refuse, 30, 5) * (t >= T.refuse ? 1 : 0);
+  // The end: it becomes the logo.
+  const e = ease(prog(t, T.exit + 0.05, T.logo + 0.55));
+  x = lerp(SHIELD_X, 263, e);
+  y = lerp(y, 330 - GROUND, e);
+  s = lerp(1, 0.867, e);
+  return { x, y, sx: sx * s, sy: sy * s, r, s };
+}
+function renderShield(t, S) {
+  tf($('shield'), S.x, GROUND + S.y, 1, 1, S.r);
+  tf($('shieldBody'), 0, 0, S.sx, S.sy);
+  const amber = ease(prog(t, T.scan2 + 0.35, T.scan2 + 0.55)) * (1 - ease(prog(t, T.burst, T.burst + 0.3)));
+  op($('shieldAmber'), amber);
+  const ss = $('shieldShadow');
+  const onGround = t >= T.drop ? clamp(1 - Math.abs(S.y) / 500) : 0;
+  op(ss, 0.1 * onGround * (1 - ease(prog(t, T.exit, T.exit + 0.4))));
+  ss.setAttribute('rx', 62 * (0.5 + 0.5 * onGround));
+}
+
+// ---------- The scan beam ----------
+function renderBeam(t, R, S) {
+  const b1 = Math.min(ease(prog(t, T.scan, T.scan + 0.15)), 1 - ease(prog(t, T.scan + 0.45, T.scan + 0.6)));
+  const b2 = Math.min(ease(prog(t, T.scan2, T.scan2 + 0.15)), 1 - ease(prog(t, T.scan2 + 0.5, T.scan2 + 0.65)));
+  const v = Math.max(b1, b2);
+  const beam = $('beam');
+  op(beam, v);
+  if (v <= 0) return;
+  beam.setAttribute('fill', b2 > b1 ? 'url(#beamA)' : 'url(#beamG)');
+  const kx = S.x - 4, ky = GROUND + S.y - 70;
+  const cy = 372 + R.lift * 0.6 - 8;
+  const half = t > T.flip ? 123 : 86;
+  beam.setAttribute('d', `M ${kx} ${ky} L ${R.x + 22 + half} ${cy - 22} L ${R.x + 22 + half - 40} ${cy + 26} Z`);
+}
+
+// ---------- Keys ----------
+function renderKeys(t, R) {
+  keyEls.forEach((g, i) => {
+    const bob = 6 * Math.sin(t * 2.4 + i * 1.3);
+    let [x, y] = [FLOAT[i][0], FLOAT[i][1] + bob];
+    let s = 1.55, r = -8 + 6 * Math.sin(t * 1.8 + i);
+    let o = 1;
+    const botAt = (dx, dy) => [R.x + dx, GROUND + R.lift + dy];
+    // 1. They fly to the robot.
+    const g1 = prog(t, T.grab + i * 0.07, T.grab + 0.5 + i * 0.07);
+    if (g1 > 0) {
+      const to = botAt(ON_BOT[i][0], ON_BOT[i][1]);
+      const from = [FLOAT[i][0], FLOAT[i][1]];
+      const ctrl = [(from[0] + to[0]) / 2, Math.min(from[1], to[1]) - 110];
+      [x, y] = quad(from, ctrl, to, ease(g1));
+      r = lerp(-8, -8 + 360, ease(g1));
+      s = lerp(1.55, 1.2, ease(g1));
+      if (g1 >= 1) {
+        // Stuck to the robot, trembling.
+        x += 1.5 * Math.sin(t * 50 + i);
+        r = -8 + 4 * Math.sin(t * 13 + i);
+      }
+    }
+    // 2. The shield lands: they fly into the vault.
+    const g2 = prog(t, T.impact + i * 0.05, T.impact + 0.55 + i * 0.05);
+    if (g2 > 0) {
+      const from = botAt(ON_BOT[i][0], ON_BOT[i][1]);
+      const to = slotKey(i);
+      const ctrl = [(from[0] + to[0]) / 2 + 30, 200];
+      [x, y] = quad(from, ctrl, to, ease(g2));
+      r = lerp(-8, 0 - 360, ease(g2));
+      s = lerp(1.2, 1.0, ease(g2));
+    }
+    // 3. The Database key goes into the runner and back.
+    if (i === DB) {
+      const hole = [SHIELD_X, 488];
+      const a = prog(t, T.toRunner, T.toRunner + 0.45);
+      const b = prog(t, T.keyBack, T.keyBack + 0.45);
+      if (a > 0 && b <= 0) {
+        [x, y] = quad(slotKey(i), [440, 330], hole, ease(a));
+        s = lerp(1.0, 0.45, ease(a));
+        r = lerp(0, -300, ease(a));
+        o *= 1 - ease(prog(a, 0.7, 1));
+      }
+      if (b > 0) {
+        [x, y] = quad(hole, [440, 320], slotKey(i), ease(b));
+        s = lerp(0.45, 1.0, ease(b));
+        r = lerp(60, 360, ease(b));
+        o *= ease(prog(b, 0, 0.3));
+      }
+    }
+    // Locked in the vault: a small jiggle when the robot asks for the wrong thing.
+    if (i === DB && t >= T.refuse) r += 14 * wobble(t - T.refuse - 0.08, 32, 6);
+    // 4. The end: the vault leaves.
+    const out = ease(prog(t, T.exit + i * 0.04, T.exit + 0.45 + i * 0.04));
+    x += 260 * out;
+    o *= 1 - out;
+    tf(g, x, y, s, s, r);
+    op(g, o);
+    // Labels only while they float free.
+    op(g.querySelector('.lbl'), 1 - eo(prog(t, T.grab - 0.1, T.grab + 0.15)));
+    g.querySelector('.lbl').setAttribute('transform', `rotate(${-r})`);
+    // The red glow while every key sits on the robot.
+    const glow = g.querySelector('.glow');
+    const warn = prog(t, T.grab + 0.55, T.grab + 0.7) * (1 - prog(t, T.impact, T.impact + 0.1));
+    op(glow, warn * (0.1 + 0.08 * Math.sin(t * 12 + i)));
+  });
+}
+
+function renderShelf(t) {
+  slotEls.forEach((g, i) => {
+    const [sx, sy] = slotPos(i);
+    const inP = prog(t, T.impact + 0.05 + i * 0.05, T.impact + 0.45 + i * 0.05);
+    const outP = ease(prog(t, T.exit + i * 0.04, T.exit + 0.45 + i * 0.04));
+    tf(g, sx + 60 * (1 - eo(inP)) + 260 * outP, sy);
+    // Only the Database slot opens. The others step back.
+    const open = i === DB ? ease(prog(t, T.unlock, T.unlock + 0.2)) * (1 - ease(prog(t, T.keyBack + 0.45, T.keyBack + 0.6))) : 0;
+    const dimmed = i !== DB ? ease(prog(t, T.unlock, T.unlock + 0.3)) * (1 - ease(prog(t, T.keyBack + 0.4, T.keyBack + 0.7))) : 0;
+    op(g, eo(inP) * (1 - outP) * (1 - 0.5 * dimmed));
+    op(g.querySelector('.tint'), open);
+    const lock = g.querySelector('.lock');
+    const lp = prog(t, T.impact + 0.4 + i * 0.06, T.impact + 0.75 + i * 0.06);
+    const ls = spring(lp * 1.3);
+    let lr = 0;
+    if (i === DB && t >= T.refuse) lr = 18 * wobble(t - T.refuse - 0.08, 32, 6);
+    lock.setAttribute('transform', `translate(152 ${SLOT_H / 2}) rotate(${lr}) scale(${ls})`);
+    lock.style.color = open > 0.5 ? '#0a84ff' : '#aeaeb2';
+    const shackle = lock.querySelector('.shackle');
+    const up = i === DB ? spring(prog(t, T.unlock, T.unlock + 0.5) * 1.3) * (1 - ease(prog(t, T.keyBack + 0.45, T.keyBack + 0.6))) : 0;
+    shackle.setAttribute('transform', `translate(0 ${-5 * up}) rotate(${-25 * up} 5 -3)`);
+  });
+}
+
+// ---------- The runner and the result ----------
+function renderRunner(t) {
+  const cap = $('cap');
+  const inP = prog(t, T.toRunner + 0.2, T.toRunner + 0.6);
+  const outP = ease(prog(t, T.keyBack + 0.2, T.keyBack + 0.45));
+  op(cap, eo(inP) * (1 - outP));
+  tf(cap, SHIELD_X - 8, 398, lerp(0.5, 1, spring(inP * 1.2)) * (1 - 0.2 * outP));
+  $('capSpin').setAttribute('transform', `translate(74 0) rotate(${t * 520})`);
+  const done = t >= T.result;
+  op($('capSpin'), done ? 0 : 1);
+  op($('capDone'), done ? 1 : 0);
+  $('capDone').setAttribute('transform', `translate(74 0) scale(${done ? spring(prog(t, T.result, T.result + 0.5) * 1.3) : 0})`);
+  // The progress ring around the shield while it works.
+  const ring = $('ring');
+  const C = 2 * Math.PI * 84;
+  const rp = ease(prog(t, T.running, T.result));
+  ring.setAttribute('stroke-dasharray', `${C} ${C}`);
+  ring.setAttribute('stroke-dashoffset', `${C * (1 - rp)}`);
+  ring.setAttribute('stroke', t >= T.result ? '#34c759' : '#0a84ff');
+  op(ring, ease(prog(t, T.running - 0.1, T.running + 0.1)) * (1 - ease(prog(t, T.result + 0.2, T.result + 0.45))));
+
+  // The result comes out of the shield and flies to the robot.
+  const res = $('res');
+  const r = prog(t, T.result + 0.1, T.result + 0.55);
+  const rOut = ease(prog(t, 6.55, 6.8));
+  const [x, y] = quad([SHIELD_X, 470], [290, 300], [196, 302], ease(r));
+  op(res, eo(prog(t, T.result + 0.1, T.result + 0.25)) * (1 - rOut));
+  tf(res, x, y - 8 * rOut, lerp(0.5, 1, ease(r)));
+}
+
+// ---------- The note ----------
+function renderNote(t, R) {
+  const n = $('note');
+  const a = prog(t, T.note, T.stick);
+  const off = prog(t, T.noteOff, T.noteOff + 0.7);
+  const stuck = [R.x + 54, GROUND + R.lift - 112];
+  let x, y, r, o = 1, s = 1;
+  if (t < T.note) { op(n, 0); return; }
+  if (a < 1) {
+    // It flutters in, side to side.
+    const from = [760, 150];
+    x = lerp(from[0], stuck[0], ease(a)) + 26 * Math.sin(a * Math.PI * 3) * (1 - a);
+    y = lerp(from[1], stuck[1], ei(a) * 0.4 + ease(a) * 0.6);
+    r = 25 * Math.sin(a * Math.PI * 3) * (1 - a) + 16;
+    s = lerp(1, 0.82, a);
+  } else {
+    [x, y] = stuck;
+    r = 16 + 10 * wobble(t - T.stick, 26, 8);
+    s = 0.82 - 0.1 * wobble(t - T.stick, 26, 9);
+  }
+  if (off > 0) {
+    // It peels off and falls.
+    x = stuck[0] + 60 * off;
+    y = stuck[1] + 260 * off * off - 30 * Math.sin(off * Math.PI);
+    r = 16 + 140 * off;
+    s = 0.82;
+    o = 1 - ease(prog(off, 0.5, 1));
+  }
+  op(n, o);
+  tf(n, x, y, s, s, r);
+}
+
+// ---------- apassy asks you ----------
+const PARTS = Array.from({ length: 14 }, (_, i) => {
+  const c = document.createElementNS(NS, 'circle');
+  c.setAttribute('r', 4 + (i % 3));
+  c.setAttribute('fill', ['#0a84ff', '#ff9500', '#aeaeb2', '#34c759'][i % 4]);
+  $('parts').appendChild(c);
+  return { el: c, ang: (i / 14) * Math.PI * 2 + (i % 2) * 0.2, dist: 110 + (i % 4) * 30 };
+});
+function renderAsk(t) {
+  const b = $('bub');
+  const inP = prog(t, T.bubble, T.bubble + 0.55);
+  const burst = prog(t, T.burst, T.burst + 0.2);
+  const pos = [SHIELD_X, 236];
+  op(b, eo(prog(t, T.bubble, T.bubble + 0.15)) * (1 - burst));
+  tf(b, pos[0], pos[1], lerp(0.5, 1, spring(inP * 1.2)) * (1 + 0.08 * burst));
+  op($('bubLink'), eo(prog(t, T.bubble, T.bubble + 0.3)) * (1 - burst));
+  const pressed = t > T.denyTap - 0.05 && t < T.burst;
+  $('denyBtn').setAttribute('fill', pressed ? '#d1d1d6' : '#e8e8ed');
+  // Your tap.
+  const tap = $('tap'), ring = $('tapRing');
+  const tx = pos[0] - 71, ty = pos[1] + 33;
+  const tp = prog(t, T.denyTap - 0.25, T.denyTap);
+  const td = prog(t, T.denyTap, T.denyTap + 0.4);
+  tap.setAttribute('cx', tx); tap.setAttribute('cy', ty);
+  tap.setAttribute('r', lerp(26, 18, ease(tp)));
+  op(tap, t > T.denyTap - 0.25 && t < T.denyTap + 0.2 ? 0.16 * eo(tp) * (1 - prog(t, T.denyTap + 0.05, T.denyTap + 0.2)) : 0);
+  ring.setAttribute('cx', tx); ring.setAttribute('cy', ty);
+  ring.setAttribute('r', lerp(18, 46, eo(td)));
+  op(ring, td > 0 && td < 1 ? 0.35 * (1 - td) : 0);
+  // The question pops.
+  const pb = prog(t, T.burst, T.burst + 0.5);
+  for (const p of PARTS) {
+    const d = p.dist * eo(pb);
+    p.el.setAttribute('cx', pos[0] + Math.cos(p.ang) * d);
+    p.el.setAttribute('cy', pos[1] + Math.sin(p.ang) * d * 0.7);
+    op(p.el, pb > 0 && pb < 1 ? 1 - pb : 0);
+  }
+}
+
+const DUST = Array.from({ length: 8 }, (_, i) => {
+  const c = document.createElementNS(NS, 'circle');
+  c.setAttribute('fill', '#d1d1d6');
+  $('dust').appendChild(c);
+  return { el: c, side: i % 2 ? 1 : -1, k: 1 + (i >> 1) * 0.35 };
+});
+function renderDust(t) {
+  const p = prog(t, T.impact, T.impact + 0.6);
+  for (const d of DUST) {
+    d.el.setAttribute('cx', SHIELD_X + d.side * (60 + 70 * eo(p) * d.k));
+    d.el.setAttribute('cy', GROUND - 6 - 22 * Math.sin(p * Math.PI) * d.k * 0.6);
+    d.el.setAttribute('r', 5 + 6 * eo(p) / d.k);
+    op(d.el, p > 0 && p < 1 ? 0.7 * (1 - p) : 0);
+  }
+}
+
+// ---------- Camera ----------
+function renderCamera(t) {
+  const d = t - T.impact;
+  const shake = d > 0 ? 5 * wobble(d, 60, 10) : 0;
+  const d2 = t - T.refuse;
+  const shake2 = d2 > 0 ? 2 * wobble(d2, 50, 9) : 0;
+  $('world').setAttribute('transform', `translate(${(-72 + shake2).toFixed(2)} ${(-32 + shake).toFixed(2)}) scale(1.2)`);
+}
+
+// ---------- Kinetic type ----------
+function words(el, html) {
+  // html: plain words and {class:words}.
+  const out = [];
+  for (const m of html.matchAll(/\{(\w+):([^}]+)\}|([^{]+)/g)) {
+    const cls = m[1] || '';
+    for (const w of (m[2] || m[3]).split(' ').filter(Boolean)) out.push([w, cls]);
+  }
+  el.innerHTML = '';
+  return out.map(([w, cls], i) => {
+    const s = document.createElement('span');
+    s.className = 'w ' + cls;
+    s.textContent = w;
+    el.appendChild(s);
+    if (i < out.length - 1) el.appendChild(document.createTextNode(' '));
+    return s;
+  });
+}
+const CAPS = [
+  { el: $('c1'), ws: words($('c1'), 'Today, agents get {r:every key.}'), a: 0.2, b: 2.55 },
+  { el: $('c2'), ws: words($('c2'), 'apassy opens {b:only the one it needs.}'), a: 3.3, b: 4.85 },
+  { el: $('c3'), ws: words($('c3'), 'It uses the key. {g:Never hands it over.}'), a: 5.3, b: 6.45 },
+  { el: $('c4'), ws: words($('c4'), 'Off-task? {g:It stops and asks you.}'), a: 6.95, b: 10.15 },
+];
+function kinetic(ws, t, a, b) {
+  ws.forEach((w, i) => {
+    const p = prog(t, a + i * 0.055, a + i * 0.055 + 0.5);
+    const q = prog(t, b + i * 0.025, b + i * 0.025 + 0.28);
+    const pin = back(p);
+    w.style.opacity = Math.min(eo(prog(t, a + i * 0.055, a + i * 0.055 + 0.2)), 1 - eo(q));
+    w.style.transform = `translateY(${(26 * (1 - pin) - 20 * ei(q)).toFixed(2)}px) rotate(${(-7 * (1 - eo(p))).toFixed(2)}deg) scale(${(0.86 + 0.14 * eo(p)).toFixed(3)})`;
+  });
+}
+
+// ---------- The end ----------
+const T1 = words($('t1'), 'Agents get access.');
+const T2 = words($('t2'), 'Never your secrets.');
+function renderEnd(t) {
+  const wp = prog(t, T.logo + 0.35, T.logo + 0.95);
+  const span = $('word').querySelector('span');
+  span.style.transform = `translateX(${(-230 * (1 - eo(wp))).toFixed(2)}px)`;
+  span.style.opacity = eo(prog(t, T.logo + 0.35, T.logo + 0.6));
+  kinetic(T1, t, T.logo + 0.95, 99);
+  kinetic(T2, t, T.logo + 1.3, 99);
+  const u = eo(prog(t, T.logo + 1.9, T.logo + 2.4));
+  $('url').style.opacity = u;
+  $('url').style.transform = `translateY(${10 * (1 - u)}px)`;
+}
+
+window.renderAt = function renderAt(t) {
+  const R = robot(t);
+  const S = shieldState(t);
+  renderCamera(t);
+  renderShelf(t);
+  renderRunner(t);
+  renderShield(t, S);
+  renderRobot(t, R);
+  renderCard(t, R);
+  renderBeam(t, R, S);
+  renderKeys(t, R);
+  renderNote(t, R);
+  renderAsk(t);
+  renderDust(t);
+  for (const c of CAPS) kinetic(c.ws, t, c.a, c.b);
+  renderEnd(t);
+};
+
+// Preview: ?t=4.5 shows one frame. Without it, the page plays in real time.
+const q = new URLSearchParams(location.search);
+if (q.has('t')) {
+  window.renderAt(Number(q.get('t')));
+} else if (!q.has('capture')) {
+  const start = performance.now();
+  const tick = () => {
+    window.renderAt(((performance.now() - start) / 1000) % T.end);
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+</script>
+</body>
+</html>

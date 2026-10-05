@@ -179,6 +179,11 @@ mod tests {
             classify(Error, "Owner approved. The run timed out and was stopped."),
             Some(InboxKind::ApprovalEnded { approved: true })
         );
+        // An approval on the iPhone (ADR 0014) is an approval event too.
+        assert_eq!(
+            classify(Allow, "Owner approved on the iPhone. Exit code 0."),
+            Some(InboxKind::ApprovalEnded { approved: true })
+        );
         assert_eq!(classify(Allow, "Bouncer allowed. Exit code 0."), None);
         for reason in [
             "The owner denied this run. Risk: low.",

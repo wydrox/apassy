@@ -207,6 +207,9 @@ impl DesktopApp {
     /// unlock or change that still runs, inbox marks, the learning view, and a parsed
     /// 1Password export. A training stops: it reads and writes the vault that was open.
     pub(crate) fn reset_vault_state(&mut self, ctx: Option<&egui::Context>) {
+        self.ui.discard_item_changes = false;
+        self.ui.discard_item_kind_change = false;
+        self.files.forget();
         self.erase_typed_secrets(ctx);
         self.view = OwnerView::Vault;
         self.selected_item_id = None;
@@ -684,14 +687,14 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     );
                 });
             }
-            if s.clickable_row(|ui| {
+            if s.clickable_row("New vault…", |ui| {
                 ui.label(kit::text("New vault…", Font::Body).color(kit::ACCENT_TEXT));
             })
             .clicked()
             {
                 leave = Some(Step::Create);
             }
-            if s.clickable_row(|ui| {
+            if s.clickable_row("Open vault file…", |ui| {
                 ui.label(kit::text("Open vault file…", Font::Body).color(kit::ACCENT_TEXT));
             })
             .clicked()

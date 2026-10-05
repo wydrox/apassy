@@ -46,9 +46,9 @@ pub(super) const CHILD_TABLES: [&str; 6] = [
     "destination",
 ];
 
-/// Tables that stay on each Mac. A pushed copy has none of their rows, and a merge never
+/// Tables that stay on each Mac. A pushed copy keeps only the default companion setting, and a merge never
 /// reads them from another copy.
-pub const LOCAL_TABLES: [&str; 18] = [
+pub const LOCAL_TABLES: [&str; 21] = [
     "agent",
     "grant_rule",
     "activity",
@@ -67,6 +67,9 @@ pub const LOCAL_TABLES: [&str; 18] = [
     "suggestion_outcome",
     "sync_stamp",
     "sync_device",
+    "companion_setting",
+    "companion_certificate",
+    "companion_device",
 ];
 
 /// Tables whose rows sync. `vault_meta` syncs as the one row of the file; its token
@@ -108,6 +111,9 @@ pub const TOMBSTONE_DAYS: i64 = 180;
 
 /// The alias of the other copy during a merge.
 const REMOTE: &str = "sync_remote";
+/// A synced creation event records the origin without a schema change. Its UUID binds
+/// the copy UUID to the origin UUID; no editable item text establishes this relation.
+pub(super) const CONFLICT_ORIGIN_PREFIX: &str = "apassy:conflict-origin:v1:";
 /// The alias of the copy that a push strips.
 pub(super) const PUSH: &str = "sync_push";
 
@@ -270,15 +276,15 @@ pub(super) fn ensure_device(conn: &Connection) -> VaultResult<()> {
         })
         .map_err(|_| err(VaultErrorKind::Storage))?;
     if present > 0 {
-        return Ok(());
+        return preserve_legacy_conflict_origins(conn);
     }
     conn.execute(
         "INSERT OR IGNORE INTO sync_device (id, device_id, device_name)
          VALUES (1, lower(hex(randomblob(16))), '')",
         [],
     )
-    .map(|_| ())
-    .map_err(|_| err(VaultErrorKind::Storage))
+    .map_err(|_| err(VaultErrorKind::Storage))?;
+    preserve_legacy_conflict_origins(conn)
 }
 
 /// A new device ID, for a restored file: it is a new copy, not the old writer.
@@ -773,6 +779,12 @@ pub(super) fn strip_attached(conn: &mut Connection, alias: &str) -> VaultResult<
         tx.execute(&format!("DELETE FROM {alias}.{table}"), [])
             .map_err(storage)?;
     }
+    // A new Mac needs a valid setting row. Never export this Mac's enabled state or port.
+    tx.execute(
+        &format!("INSERT INTO {alias}.companion_setting (id, enabled, port) VALUES (1, 0, ?1)"),
+        [super::companion::DEFAULT_COMPANION_PORT],
+    )
+    .map_err(storage)?;
     tx.execute(
         &format!(
             "DELETE FROM {alias}.item_event WHERE uuid IS NULL OR kind NOT IN ({})",
@@ -1081,6 +1093,140 @@ fn delete_record(tx: &rusqlite::Transaction<'_>, id: i64) -> VaultResult<()> {
     Ok(())
 }
 
+fn conflict_origin_event_uuid(copy: &str, origin: &str) -> String {
+    derived_uuid(&["conflict-origin-v1", copy, origin])
+}
+
+pub(super) fn verified_conflict_origin<'a>(
+    copy: &str,
+    detail: &'a str,
+    event_uuid: &str,
+) -> Option<&'a str> {
+    let origin = detail.strip_prefix(CONFLICT_ORIGIN_PREFIX)?;
+    (origin.len() == 32
+        && origin.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && origin != copy
+        && event_uuid == conflict_origin_event_uuid(copy, origin))
+    .then_some(origin)
+}
+
+fn record_conflict_origin(conn: &Connection, id: i64, copy: &str, origin: &str) -> VaultResult<()> {
+    let event_uuid = conflict_origin_event_uuid(copy, origin);
+    let present: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM item_event WHERE uuid = ?1)",
+            [&event_uuid],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    if present {
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO item_event (item_id, at, kind, detail, uuid)
+         VALUES (?1, ?2, 'created', ?3, ?4)",
+        (
+            id,
+            now_secs(),
+            format!("{CONFLICT_ORIGIN_PREFIX}{origin}"),
+            event_uuid,
+        ),
+    )
+    .map(|_| ())
+    .map_err(storage)
+}
+
+/// Read only sync metadata, never fields or secret values. Older unmodified copies
+/// are recognized by the exact UUID derivation, independently of their title.
+fn conflict_origins(conn: &Connection, include_legacy: bool) -> VaultResult<BTreeMap<i64, String>> {
+    let mut origins = BTreeMap::new();
+    let mut stmt = conn
+        .prepare(
+            "SELECT e.item_id, i.uuid, e.detail, e.uuid
+             FROM item_event e JOIN item i ON i.id = e.item_id
+             WHERE e.kind = 'created' AND e.detail LIKE 'apassy:conflict-origin:v1:%'",
+        )
+        .map_err(storage)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(storage)?;
+    for row in rows {
+        let (id, copy, detail, event_uuid) = row.map_err(storage)?;
+        let Some(origin) = verified_conflict_origin(&copy, &detail, &event_uuid) else {
+            continue;
+        };
+        origins.insert(id, origin.to_owned());
+    }
+    if !include_legacy {
+        return Ok(origins);
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT i.id, i.uuid, i.clock, i.updated_at, i.updated_by FROM item i
+             JOIN item_archive a ON a.item_id = i.id
+             WHERE i.title LIKE '% (conflict copy, %)'",
+        )
+        .map_err(storage)?;
+    let records: Vec<(i64, String, String, i64, String)> = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    if records.iter().all(|(id, ..)| origins.contains_key(id)) {
+        return Ok(origins);
+    }
+    let mut stmt = conn
+        .prepare("SELECT uuid FROM item UNION SELECT uuid FROM sync_tombstone")
+        .map_err(storage)?;
+    let candidates: Vec<String> = stmt
+        .query_map([], |row| row.get(0))
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    for (id, copy, clock, at, by) in records {
+        if origins.contains_key(&id) || clock.is_empty() || by.is_empty() {
+            continue;
+        }
+        let clock = clock_text(&parse_clock(&clock));
+        let at = at.to_string();
+        if let Some(origin) = candidates.iter().find(|origin| {
+            **origin != copy && derived_uuid(&["conflict", origin, &clock, &at, &by]) == copy
+        }) {
+            origins.insert(id, origin.clone());
+        }
+    }
+    Ok(origins)
+}
+
+/// Upgrade verified legacy copies before an edit can change their version metadata.
+/// Existing files keep their schema and normal unlocks with no copies stay read-only.
+fn preserve_legacy_conflict_origins(conn: &Connection) -> VaultResult<()> {
+    for (id, origin) in conflict_origins(conn, true)? {
+        let copy: String = conn
+            .query_row("SELECT uuid FROM item WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .map_err(storage)?;
+        record_conflict_origin(conn, id, &copy, &origin)?;
+    }
+    Ok(())
+}
+
 /// Keep `loser` as an archived credential "<title> (conflict copy, <device>)", without
 /// its agent settings, so no variable or connector is there twice. Its UUID, version, and
 /// clock come from the loser, so each Mac that sees the conflict makes the same copy.
@@ -1110,7 +1256,8 @@ fn keep_conflict_copy(
         })
         .optional()
         .map_err(storage)?;
-    if exists.is_some() {
+    if let Some(id) = exists {
+        record_conflict_origin(tx, id, &uuid, &loser.uuid)?;
         return Ok(());
     }
     tx.execute(
@@ -1135,6 +1282,7 @@ fn keep_conflict_copy(
         (id, now_secs()),
     )
     .map_err(storage)?;
+    record_conflict_origin(tx, id, &uuid, &loser.uuid)?;
     Ok(())
 }
 
@@ -1392,6 +1540,7 @@ fn merge_attached(conn: &mut Connection, scope: &SyncScope) -> VaultResult<Merge
     )
     .map_err(storage)?;
     merge_events(&tx)?;
+    preserve_legacy_conflict_origins(&tx)?;
     set_applying(&tx, false)?;
     tx.commit().map_err(storage)?;
     Ok(report)
@@ -1448,8 +1597,11 @@ fn merge_events(tx: &rusqlite::Transaction<'_>) -> VaultResult<()> {
     let keep = i64::try_from(MAX_ITEM_EVENTS).map_err(storage)?;
     for item in touched {
         tx.execute(
-            "DELETE FROM item_event WHERE item_id = ?1 AND id NOT IN
-                 (SELECT id FROM item_event WHERE item_id = ?1 ORDER BY at DESC, id DESC LIMIT ?2)",
+            "DELETE FROM item_event WHERE item_id = ?1
+                 AND NOT (kind = 'created' AND detail LIKE 'apassy:conflict-origin:v1:%')
+                 AND id NOT IN (SELECT id FROM item_event WHERE item_id = ?1
+                     AND NOT (kind = 'created' AND detail LIKE 'apassy:conflict-origin:v1:%')
+                     ORDER BY at DESC, id DESC LIMIT ?2)",
             (item, keep),
         )
         .map_err(storage)?;
@@ -1458,6 +1610,28 @@ fn merge_events(tx: &rusqlite::Transaction<'_>) -> VaultResult<()> {
 }
 
 impl Vault {
+    /// Conflict copies by local item ID. The value is the original local item ID, or
+    /// `None` when that item was deleted. A title never establishes the relation.
+    /// Restored copies remain in this map; callers can filter by archive state.
+    pub fn conflict_copies(&self) -> VaultResult<BTreeMap<u64, Option<u64>>> {
+        let conn = self.conn_ref()?;
+        conflict_origins(conn, false)?
+            .into_iter()
+            .map(|(copy, origin)| {
+                let id: Option<i64> = conn
+                    .query_row("SELECT id FROM item WHERE uuid = ?1", [&origin], |row| {
+                        row.get(0)
+                    })
+                    .optional()
+                    .map_err(storage)?;
+                Ok((
+                    super::to_public_id(copy)?,
+                    id.map(super::to_public_id).transpose()?,
+                ))
+            })
+            .collect()
+    }
+
     /// The synced-content digest of the scope: each credential with its version, the
     /// tombstones, and the synced history. A change of local data (agents, activity) does
     /// not change it. The vault must be unlocked.
@@ -1508,6 +1682,204 @@ impl Vault {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const PASS: &str = "synthetic-conflict-pass";
+
+    fn draft(title: &str, value: &str) -> super::super::ItemDraft {
+        super::super::ItemDraft {
+            title: title.to_owned(),
+            kind: crate::contracts::CredentialKind::ApiKey,
+            notes: String::new(),
+            tags: Vec::new(),
+            fields: vec![super::super::Field {
+                name: "token".to_owned(),
+                value: super::super::SecretValue::new(value.to_owned()),
+                secret: true,
+            }],
+        }
+    }
+
+    fn edit(vault: &mut Vault, id: u64, title: &str, value: &str) {
+        let revision = vault.details(id).unwrap().summary.revision;
+        vault.update(id, revision, draft(title, value)).unwrap();
+    }
+
+    /// Two actual device versions of one credential, with a merge-created copy.
+    fn conflict_world() -> (tempfile::TempDir, Vault, Vault, u64, u64) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut a = Vault::create(&dir.path().join("a.db"), PASS).unwrap();
+        a.unlock(PASS).unwrap();
+        let origin = a.add(draft("Alpha", "SYNTH-seed")).unwrap().id;
+        let seed = dir.path().join("seed.db");
+        a.write_sync_copy(&seed, "Mac A").unwrap();
+        let (mut b, _) = Vault::adopt_sync_copy(&seed, &dir.path().join("b.db"), PASS).unwrap();
+        b.unlock(PASS).unwrap();
+        edit(&mut a, origin, "Alpha", "SYNTH-a");
+        edit(&mut b, origin, "Alpha", "SYNTH-b");
+        let remote = dir.path().join("remote.db");
+        b.write_sync_copy(&remote, "Mac B").unwrap();
+        let report = a.merge_from(&remote, &SyncScope::vault()).unwrap();
+        assert_eq!(report.conflicts.len(), 1);
+        let copies = a.conflict_copies().unwrap();
+        assert_eq!(copies.len(), 1);
+        let (&copy, &related) = copies.first_key_value().unwrap();
+        assert_eq!(related, Some(origin));
+        assert!(a.is_archived(copy).unwrap());
+        let events = a.item_events(copy, MAX_ITEM_EVENTS).unwrap();
+        assert!(events.iter().any(|event| {
+            event.kind == super::super::ItemEventKind::Created
+                && event.detail == "Sync kept this conflict copy."
+        }));
+        assert!(
+            events
+                .iter()
+                .all(|event| !event.detail.contains(CONFLICT_ORIGIN_PREFIX))
+        );
+        assert_ne!(
+            a.reveal(copy, "token").unwrap().expose(),
+            a.reveal(origin, "token").unwrap().expose()
+        );
+        (dir, a, b, origin, copy)
+    }
+
+    #[test]
+    fn conflict_metadata_ignores_user_text_and_invalid_event_proof() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut vault = Vault::create(&dir.path().join("fake.db"), PASS).unwrap();
+        vault.unlock(PASS).unwrap();
+        let origin = vault.add(draft("Alpha", "SYNTH-original")).unwrap().id;
+        let fake = vault
+            .add(draft("Alpha (conflict copy, Mac A)", "SYNTH-fake"))
+            .unwrap()
+            .id;
+        vault.set_archived(fake, true).unwrap();
+        let origin_uuid: String = vault
+            .conn_ref()
+            .unwrap()
+            .query_row(
+                "SELECT uuid FROM item WHERE id = ?1",
+                [origin as i64],
+                |row| row.get(0),
+            )
+            .unwrap();
+        // Even a marker-looking detail cannot establish the relation without its
+        // deterministic event UUID. Ordinary item text never reaches this channel.
+        vault
+            .conn_ref()
+            .unwrap()
+            .execute(
+                "INSERT INTO item_event (item_id, at, kind, detail)
+                 VALUES (?1, 1, 'created', ?2)",
+                (
+                    fake as i64,
+                    format!("{CONFLICT_ORIGIN_PREFIX}{origin_uuid}"),
+                ),
+            )
+            .unwrap();
+        vault.lock().unwrap();
+        vault.unlock(PASS).unwrap();
+        assert!(vault.conflict_copies().unwrap().is_empty());
+        assert_eq!(vault.reveal(fake, "token").unwrap().expose(), "SYNTH-fake");
+    }
+
+    #[test]
+    fn conflict_metadata_survives_sync_reopen_rename_restore_and_origin_deletion() {
+        let (dir, mut a, mut b, origin, copy) = conflict_world();
+        edit(&mut a, origin, "Original renamed", "SYNTH-original-renamed");
+        edit(&mut a, copy, "Saved other version", "SYNTH-copy-renamed");
+        a.set_archived(copy, false).unwrap();
+        assert_eq!(a.conflict_copies().unwrap().get(&copy), Some(&Some(origin)));
+
+        let pushed = dir.path().join("renamed.db");
+        a.write_sync_copy(&pushed, "Mac A").unwrap();
+        b.merge_from(&pushed, &SyncScope::vault()).unwrap();
+        let related = b.conflict_copies().unwrap();
+        assert_eq!(related.len(), 1);
+        let (&b_copy, &b_origin) = related.first_key_value().unwrap();
+        assert_eq!(
+            b.details(b_copy).unwrap().summary.title,
+            "Saved other version"
+        );
+        assert_eq!(
+            b.details(b_origin.unwrap()).unwrap().summary.title,
+            "Original renamed"
+        );
+        assert!(!b.is_archived(b_copy).unwrap());
+        let before = b.sync_content(&SyncScope::vault()).unwrap();
+        b.lock().unwrap();
+        b.unlock(PASS).unwrap();
+        assert_eq!(b.conflict_copies().unwrap(), related);
+        assert_eq!(b.sync_content(&SyncScope::vault()).unwrap(), before);
+
+        let backup = dir.path().join("backup.db");
+        b.backup(&backup).unwrap();
+        b.unlock(PASS).unwrap();
+        let mut restored = Vault::restore(&backup, &dir.path().join("restored.db"), PASS).unwrap();
+        restored.unlock(PASS).unwrap();
+        assert_eq!(restored.conflict_copies().unwrap(), related);
+
+        let revision = a.details(origin).unwrap().summary.revision;
+        a.delete(origin, revision).unwrap();
+        assert_eq!(a.conflict_copies().unwrap().get(&copy), Some(&None));
+        let deleted = dir.path().join("deleted.db");
+        a.write_sync_copy(&deleted, "Mac A").unwrap();
+        b.merge_from(&deleted, &SyncScope::vault()).unwrap();
+        assert_eq!(b.conflict_copies().unwrap().get(&b_copy), Some(&None));
+        let b_push = dir.path().join("b-converged.db");
+        b.write_sync_copy(&b_push, "Mac B").unwrap();
+        a.merge_from(&b_push, &SyncScope::vault()).unwrap();
+        assert_eq!(
+            a.sync_content(&SyncScope::vault()).unwrap(),
+            b.sync_content(&SyncScope::vault()).unwrap()
+        );
+    }
+
+    #[test]
+    fn conflict_metadata_upgrades_unmodified_legacy_copies_before_edits() {
+        let (_dir, mut a, _b, origin, copy) = conflict_world();
+        a.conn_ref()
+            .unwrap()
+            .execute(
+                "DELETE FROM item_event WHERE detail LIKE 'apassy:conflict-origin:v1:%'",
+                [],
+            )
+            .unwrap();
+        assert!(a.conflict_copies().unwrap().is_empty());
+        // Unlock verifies the original copy UUID, then saves the stable marker.
+        a.lock().unwrap();
+        a.unlock(PASS).unwrap();
+        assert_eq!(a.conflict_copies().unwrap().get(&copy), Some(&Some(origin)));
+        edit(&mut a, copy, "Renamed legacy copy", "SYNTH-legacy");
+        a.set_archived(copy, false).unwrap();
+        a.lock().unwrap();
+        a.unlock(PASS).unwrap();
+        assert_eq!(a.conflict_copies().unwrap().get(&copy), Some(&Some(origin)));
+    }
+
+    #[test]
+    fn conflict_metadata_survives_local_and_merge_history_pruning() {
+        let (dir, mut a, mut b, origin, copy) = conflict_world();
+        for index in 0..MAX_ITEM_EVENTS + 5 {
+            history::record(
+                a.conn_ref().unwrap(),
+                copy as i64,
+                super::super::ItemEventKind::Edited,
+                &format!("synthetic-{index}"),
+            )
+            .unwrap();
+        }
+        assert_eq!(a.conflict_copies().unwrap().get(&copy), Some(&Some(origin)));
+        let push = dir.path().join("many-events.db");
+        a.write_sync_copy(&push, "Mac A").unwrap();
+        b.merge_from(&push, &SyncScope::vault()).unwrap();
+        let related = b.conflict_copies().unwrap();
+        assert_eq!(related.len(), 1);
+        let (&b_copy, &b_origin) = related.first_key_value().unwrap();
+        assert!(b_origin.is_some());
+        let events = b.item_events(b_copy, MAX_ITEM_EVENTS).unwrap();
+        assert_eq!(events.len(), MAX_ITEM_EVENTS);
+        assert!(events.iter().all(|event| !event.detail.contains("SYNTH-")));
+    }
 
     #[test]
     fn derived_uuids_are_stable_and_distinct() {

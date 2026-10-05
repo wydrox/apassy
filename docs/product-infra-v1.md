@@ -29,6 +29,7 @@ Local operation does not imply complete offline operation: contextual models and
 | State and audit | Sessions, grants, requests, approvals, counters, outcomes, and recovery | Durable, bounded records without secret values. |
 | Notification service | Durable inbox, delivery attempts, grouping, and actionable alerts | Acknowledgment and delivery do not grant access. |
 | Agent CLI and MCP bridge | Discover permitted uses and submit requests | No vault-wide inventory, owner session, rule activation, or self-approval authority. |
+| Owner command line (`apassy`, [ADR 0017](adr/0017-owner-command-line.md)) | The owner operations of the app from a terminal, over the owner socket of the running app | A session after an owner check in the app. Each grant, approval, token, and agent setting asks for its own owner check in the app. Never a reveal, a restore, or a secret as an argument. The agent profile denies the socket. |
 
 Rule interpretation and runtime risk assessment use separate versioned contracts.
 Jev is the planned risk provider. Its suitability for rule interpretation is unverified and must not be assumed.

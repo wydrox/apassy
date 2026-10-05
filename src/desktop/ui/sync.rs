@@ -18,9 +18,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use eframe::egui::{self, Align, Label};
+use eframe::egui::{self, Label};
 use zeroize::Zeroize;
 
+use super::files::{self, DialogKind};
 use super::kit::{self, Font, Style, Tone};
 use super::start::Step;
 use super::vaults::VaultSheet;
@@ -62,6 +63,9 @@ pub(crate) struct SyncUiState {
     pub(crate) icloud: Option<PathBuf>,
     /// The synced folders of this Mac (iCloud Drive first).
     pub(crate) folders: Vec<SyncFolder>,
+    /// A failed folder discovery must not look like an empty successful scan.
+    folder_error: Option<SyncError>,
+    detected_folders: bool,
     /// The step before a lock, and what it did.
     hook: Arc<Mutex<HookShared>>,
     hook_installed: bool,
@@ -88,6 +92,14 @@ pub(crate) struct SyncUiState {
     pub(crate) open_pick: Option<PathBuf>,
     /// The file field of "Open a synced vault".
     pub(crate) open_path: String,
+    /// Successful adoption for the next setup step. Set only after unlock.
+    pub(crate) adopted_vault: Option<String>,
+    /// Cached discovery prevents repeated cloud I/O after a failure.
+    open_found: Option<Vec<(String, FolderEntry)>>,
+    open_error: Option<SyncError>,
+    open_error_from_adopt: bool,
+    open_waiting: bool,
+    open_next_download: Option<Instant>,
     /// List IDs of vaults for which the app asked iCloud for a download.
     downloads: BTreeSet<String>,
 }
@@ -145,9 +157,9 @@ impl UiStatus {
     /// The short tag and its tone.
     pub(crate) fn tag(&self) -> (&'static str, Tone) {
         match self {
-            Self::UpToDate(_) => ("Up to date", Tone::Good),
-            Self::Syncing => ("Syncing", Tone::Accent),
-            Self::Waiting => ("Downloading", Tone::Neutral),
+            Self::UpToDate(_) => ("Saved to sync folder", Tone::Good),
+            Self::Syncing => ("Sync pending", Tone::Accent),
+            Self::Waiting => ("Waiting for file", Tone::Neutral),
             Self::NeedsPassphrase => ("Needs the new passphrase", Tone::Warning),
             Self::FolderUnavailable => ("Folder not available", Tone::Warning),
             Self::Damaged => ("Damaged copy", Tone::Warning),
@@ -158,9 +170,15 @@ impl UiStatus {
     /// The status in a sentence.
     pub(crate) fn words(&self, icloud: bool) -> String {
         match self {
-            Self::UpToDate(Some(at)) => format!("Up to date. Last sync {}.", ago(*at)),
-            Self::UpToDate(None) => "Up to date.".to_owned(),
-            Self::Syncing => "Syncing: a change waits to sync.".to_owned(),
+            Self::UpToDate(Some(at)) => format!(
+                "This Mac matches the local file in the sync folder. Last folder sync {}. Receipt on another Mac is not confirmed.",
+                ago(*at)
+            ),
+            Self::UpToDate(None) => {
+                "This Mac matches the local file in the sync folder. Receipt on another Mac is not confirmed."
+                    .to_owned()
+            }
+            Self::Syncing => "Saved on this Mac. A change waits for the sync folder.".to_owned(),
             Self::Waiting if icloud => "Waiting for iCloud to download the synced file.".to_owned(),
             Self::Waiting => "Waiting for the synced file to download.".to_owned(),
             Self::NeedsPassphrase => {
@@ -320,8 +338,15 @@ impl DesktopApp {
     /// Read the synced folders of this Mac for the window.
     pub(crate) fn sync_detect_folders(&mut self) {
         self.sync.offered = true;
+        self.sync.detected_folders = true;
         self.sync.icloud = crate::sync::icloud_folder();
-        self.sync.folders = crate::sync::detect_folders();
+        match crate::sync::try_detect_folders() {
+            Ok(folders) => {
+                self.sync.folders = folders;
+                self.sync.folder_error = None;
+            }
+            Err(error) => self.sync.folder_error = Some(error),
+        }
     }
 
     fn sync_config(&self, entry: &VaultEntry) -> Option<SyncConfig> {
@@ -697,7 +722,7 @@ impl DesktopApp {
             Some(Ok(outcome)) => {
                 let text = match (&outcome.merge, outcome.pushed) {
                     (Some(merge), _) if merge.changed_local() => format!(
-                        "Synced: {} credential{} changed here.",
+                        "Folder sync: {} credential{} changed on this Mac.",
                         merge.inserted + merge.updated + merge.deleted,
                         if merge.inserted + merge.updated + merge.deleted == 1 {
                             ""
@@ -705,8 +730,8 @@ impl DesktopApp {
                             "s"
                         }
                     ),
-                    (_, true) => "Synced: the synced file has the changes of this Mac.".to_owned(),
-                    _ => "Up to date.".to_owned(),
+                    (_, true) => "Saved to the sync folder on this Mac.".to_owned(),
+                    _ => "Saved to the sync folder on this Mac.".to_owned(),
                 };
                 self.set_ok(text);
             }
@@ -764,7 +789,7 @@ impl DesktopApp {
             )
         } else {
             format!(
-                "“{}” syncs with {label} as {}. Your other Macs open it with “Open a synced vault…”.",
+                "“{}” syncs with {label} as {}. On your other Mac, select “Use a vault from another Mac”.",
                 entry.name, report.file_name
             )
         })
@@ -880,6 +905,10 @@ impl DesktopApp {
             forget_secret_field(ctx, VAULT_PASSPHRASE_FIELD);
         }
         if passphrase.expose().is_empty() {
+            self.ui.focus_start_field = true;
+            if let Some(ctx) = ctx {
+                ctx.request_repaint();
+            }
             self.set_err("Type the passphrase of the vault.");
             return;
         }
@@ -903,6 +932,20 @@ impl DesktopApp {
         match sync.adopt(file_name, passphrase.expose()) {
             Ok((vault, _)) => drop(vault),
             Err(err) => {
+                self.sync.open_error = Some(err);
+                self.sync.open_error_from_adopt = true;
+                self.ui.focus_start_field = err != SyncError::NotDownloaded;
+                if self.ui.focus_start_field
+                    && let Some(ctx) = ctx
+                {
+                    ctx.request_repaint();
+                }
+                if err == SyncError::TimedOut {
+                    self.sync.open_next_download = None;
+                }
+                if err == SyncError::NotDownloaded {
+                    self.sync_select_open_file(file.to_path_buf(), true, ctx);
+                }
                 self.set_err(adopt_error(err));
                 return;
             }
@@ -924,18 +967,24 @@ impl DesktopApp {
         self.view = OwnerView::Vault;
         if unlocked.is_ok() {
             let _ = self.sync_after_unlock();
+            self.sync.adopted_vault = Some(id);
         }
         let _ = self.apply(
             unlocked,
             &format!(
-                "“{name}” is on this Mac now and stays in sync with {}. Register the agents of this Mac in Agents.",
+                "“{name}” is on this Mac. Folder sync is on for {}.",
                 folder_label(&self.sync.folders, folder)
             ),
         );
     }
 
     /// The synced files in the folders of this Mac that no vault of the list syncs with.
+    #[cfg(test)]
     pub(crate) fn sync_unlisted(&self) -> Vec<(String, FolderEntry)> {
+        self.sync_unlisted_report().0
+    }
+
+    fn sync_unlisted_report(&self) -> (Vec<(String, FolderEntry)>, Option<SyncError>) {
         let synced: BTreeSet<PathBuf> = self
             .vault_list
             .registry
@@ -944,21 +993,40 @@ impl DesktopApp {
             .filter_map(VaultEntry::sync_file)
             .collect();
         let mut found = Vec::new();
+        let mut failure = self.sync.folder_error;
         for folder in &self.sync.folders {
-            if let Ok(entries) = list_folder_vaults(&folder.path) {
-                for entry in entries {
-                    if !synced.contains(&entry.path) {
-                        found.push((folder.label.clone(), entry));
+            match list_folder_vaults(&folder.path) {
+                Ok(entries) => {
+                    for entry in entries {
+                        if !synced.contains(&entry.path) {
+                            found.push((folder.label.clone(), entry));
+                        }
                     }
                 }
+                Err(error) => failure = Some(error),
             }
         }
-        found
+        (found, failure)
     }
 }
 
 #[cfg(test)]
 impl DesktopApp {
+    pub(crate) fn sync_retry_open_in_for_test(&mut self, home: &Path) {
+        self.sync.detected_folders = true;
+        self.sync_retry_open_with(|| Ok(crate::sync::detect_folders_in(home)));
+    }
+
+    pub(crate) fn sync_open_error_for_test(&mut self, error: SyncError) {
+        self.sync.open_found = Some(Vec::new());
+        self.sync.open_error = Some(error);
+        self.sync.open_next_download = None;
+    }
+
+    pub(crate) fn sync_open_waiting_for_test(&self) -> bool {
+        self.sync.open_waiting
+    }
+
     /// Pretend that a change of a credential waits to sync since `since`.
     pub(crate) fn sync_force_settled_for_test(&mut self, since: Instant) {
         self.sync.changed_since = Some(since);
@@ -992,6 +1060,7 @@ fn enable_error(err: SyncError, vault: &str) -> String {
 
 fn adopt_error(err: SyncError) -> String {
     match err {
+        SyncError::TimedOut => "The synced file did not respond in time. No vault was added. Check the sync service and try again.".to_owned(),
         SyncError::Vault(VaultErrorKind::WrongKeyOrCorrupt) => "The passphrase does not open this synced vault, or the file is damaged. Nothing changed on this Mac.".to_owned(),
         SyncError::NotDownloaded => "The file is not on this Mac yet. Apassy asked iCloud for it. Try again when the download ends.".to_owned(),
         SyncError::Vault(VaultErrorKind::UnsupportedSchema) => "This file is from another Apassy version, or it is not a synced vault. Update Apassy, then try again.".to_owned(),
@@ -1086,7 +1155,13 @@ fn sync_picker(
         Some(path) => folder_label(folders, path),
     };
     let mut pick = None;
-    kit::menu(salt, kit::text(label, Font::Body), 220.0).show_ui(ui, |ui| {
+    kit::menu(
+        salt,
+        kit::text(&label, Font::Body),
+        ui.available_width().min(220.0),
+    )
+    .truncate()
+    .show_ui(ui, |ui| {
         if ui.selectable_label(current.is_none(), "Off").clicked() {
             pick = Some(Pick::Off);
         }
@@ -1099,7 +1174,9 @@ fn sync_picker(
         if ui.selectable_label(false, "Choose folder…").clicked() {
             pick = Some(Pick::Choose);
         }
-    });
+    })
+    .response
+    .on_hover_text(label);
     pick
 }
 
@@ -1134,36 +1211,39 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 let status = app.sync.statuses.get(&entry.id);
                 let link = entry.sync.as_ref().filter(|_| entry.sync_state().is_some());
                 s.row(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(kit::medium(&entry.name, Font::Body).color(kit::LABEL));
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add(
+                            Label::new(kit::medium(&entry.name, Font::Body).color(kit::LABEL))
+                                .wrap(),
+                        );
                         if let Some(status) = status.filter(|_| link.is_some()) {
                             let (tag, tone) = status.tag();
                             kit::tag(ui, tag, tone);
                         }
-                        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                            if open_unlocked {
-                                let folder = link.map(|link| link.folder.as_path());
-                                if let Some(pick) = sync_picker(
-                                    ui,
-                                    &format!("sync-picker-{}", entry.id),
-                                    &app.sync.folders,
-                                    folder,
-                                ) {
-                                    action = Some((entry.id.clone(), pick));
-                                }
-                                if link.is_some()
-                                    && kit::small_button(ui, "Sync now", Style::Bordered).clicked()
-                                {
-                                    sync_now = true;
-                                }
-                            } else if link.is_some()
-                                && kit::small_button(ui, "Turn off…", Style::Link).clicked()
-                            {
-                                sheet = Some(SyncSheet::TurnOff {
-                                    id: entry.id.clone(),
-                                });
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        if open_unlocked {
+                            let folder = link.map(|link| link.folder.as_path());
+                            if let Some(pick) = sync_picker(
+                                ui,
+                                &format!("sync-picker-{}", entry.id),
+                                &app.sync.folders,
+                                folder,
+                            ) {
+                                action = Some((entry.id.clone(), pick));
                             }
-                        });
+                            if link.is_some()
+                                && kit::small_button(ui, "Sync now", Style::Bordered).clicked()
+                            {
+                                sync_now = true;
+                            }
+                        } else if link.is_some()
+                            && kit::small_button(ui, "Turn off…", Style::Link).clicked()
+                        {
+                            sheet = Some(SyncSheet::TurnOff {
+                                id: entry.id.clone(),
+                            });
+                        }
                     });
                     let icloud =
                         link.is_some_and(|link| Some(&link.folder) == app.sync.icloud.as_ref());
@@ -1198,7 +1278,7 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     }
                 });
             }
-            if s.clickable_row(|ui| {
+            if s.clickable_row("Open a synced vault…", |ui| {
                 ui.label(kit::text("Open a synced vault…", Font::Body).color(kit::ACCENT_TEXT));
             })
             .clicked()
@@ -1445,17 +1525,31 @@ fn replace_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &VaultEntry) 
     response.escape
 }
 
-/// "Open a synced vault…" on the welcome and the unlock screens.
+/// Begin second-Mac setup. Discard stale panel results and old form data.
+pub(super) fn begin_open(app: &mut DesktopApp) {
+    app.files.forget();
+    app.vault_list.name_input.clear();
+    app.owner_ui.passphrase.zeroize();
+    app.sync.open_pick = None;
+    app.sync.open_path.clear();
+    app.sync.open_found = None;
+    app.sync.open_error = None;
+    app.sync.open_error_from_adopt = false;
+    app.sync.open_waiting = false;
+    app.sync.open_next_download = None;
+    app.ui.start = Step::OpenSynced;
+    app.ui.focus_start_field = true;
+    app.ui.focus.focus_page_start();
+}
+
+/// Second-Mac setup remains available from a locked vault.
 pub(super) fn start_link(app: &mut DesktopApp, ui: &mut egui::Ui) {
     if !app.sync.offered {
         return;
     }
     ui.vertical_centered(|ui| {
-        if kit::small_button(ui, "Open a synced vault…", Style::Link).clicked() {
-            app.vault_list.name_input.clear();
-            app.sync.open_pick = None;
-            app.sync.open_path.clear();
-            app.ui.start = Step::OpenSynced;
+        if kit::small_button(ui, "Use a vault from another Mac…", Style::Link).clicked() {
+            begin_open(app);
         }
     });
 }
@@ -1536,7 +1630,7 @@ pub(super) fn after_create(app: &mut DesktopApp) -> Result<Option<String>, Strin
     };
     match app.sync_enable(&id, &folder) {
         Ok(_) => Ok(Some(format!(
-            " It syncs with {}.",
+            " Folder sync is on for {}.",
             folder_label(&app.sync.folders, &folder)
         ))),
         Err(message) => Err(format!(
@@ -1545,123 +1639,326 @@ pub(super) fn after_create(app: &mut DesktopApp) -> Result<Option<String>, Strin
     }
 }
 
-/// The screen "Open a synced vault": the synced files of this Mac that are not in the
-/// list, and a field for any `.apassy` file.
+impl DesktopApp {
+    /// Keep the selected file through discovery retries and placeholder downloads.
+    pub(crate) fn sync_select_open_file(
+        &mut self,
+        path: PathBuf,
+        waiting: bool,
+        ctx: Option<&egui::Context>,
+    ) {
+        if self.sync.open_pick.as_ref() != Some(&path) {
+            let stem = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("Vault");
+            self.vault_list.name_input = self.vault_list.registry.free_name(stem);
+            self.owner_ui.passphrase.zeroize();
+            if let Some(ctx) = ctx {
+                forget_secret_field(ctx, VAULT_PASSPHRASE_FIELD);
+            }
+            self.ui.focus_start_field = true;
+        }
+        self.sync.open_path = path.display().to_string();
+        self.sync.open_pick = Some(path.clone());
+        self.sync.open_waiting = waiting;
+        self.sync.open_error = None;
+        self.sync.open_error_from_adopt = false;
+        self.sync.open_next_download = waiting.then(|| Instant::now() + DOWNLOAD_EVERY);
+        if waiting {
+            crate::sync::start_download(&path);
+        }
+    }
+
+    pub(crate) fn sync_retry_open(&mut self) {
+        if self.sync.detected_folders {
+            self.sync.icloud = crate::sync::icloud_folder();
+        }
+        self.sync_retry_open_with(crate::sync::try_detect_folders);
+    }
+
+    fn sync_retry_open_with(
+        &mut self,
+        detect: impl FnOnce() -> Result<Vec<SyncFolder>, SyncError>,
+    ) {
+        // Explicit retries redetect providers, including after an empty scan.
+        // Synthetic test apps never inspect this Mac's real cloud folders.
+        if self.sync.detected_folders {
+            match detect() {
+                Ok(folders) => {
+                    self.sync.folders = folders;
+                    self.sync.folder_error = None;
+                }
+                Err(error) => self.sync.folder_error = Some(error),
+            }
+        }
+        self.sync_refresh_open_files();
+    }
+
+    fn sync_refresh_open_files(&mut self) {
+        // Automatic download checks use the existing folder list. Keep safe form state.
+        let (mut found, mut error) = self.sync_unlisted_report();
+        // A native panel can select a file outside the discovered service folders.
+        // Use the same bounded read when that file needs a download.
+        if let Some(parent) = self.sync.open_pick.as_deref().and_then(Path::parent)
+            && !self.sync.folders.iter().any(|folder| folder.path == parent)
+        {
+            match list_folder_vaults(parent) {
+                Ok(entries) => found.extend(
+                    entries
+                        .into_iter()
+                        .map(|entry| ("Selected folder".to_owned(), entry)),
+                ),
+                Err(err) => error = Some(err),
+            }
+        }
+        if let Some(path) = &self.sync.open_pick
+            && let Some((_, entry)) = found.iter().find(|(_, entry)| &entry.path == path)
+        {
+            self.sync.open_waiting = !entry.downloaded;
+        }
+        self.sync.open_found = Some(found);
+        self.sync.open_error = error;
+        self.sync.open_error_from_adopt = false;
+        self.sync.open_next_download =
+            (self.sync.open_waiting && error.is_none()).then(|| Instant::now() + DOWNLOAD_EVERY);
+    }
+}
+
+/// Choose a file first, then enter its existing passphrase.
 pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
     if kit::back_link(ui, "Back") {
+        app.files.forget();
         app.sync.open_pick = None;
+        app.sync.open_waiting = false;
+        app.sync.open_next_download = None;
         app.ui.start = Step::Home;
+        app.ui.focus.focus_page_start();
+        return;
     }
     ui.add_space(8.0);
-    ui.label(kit::text("Open a synced vault", Font::Title).color(kit::LABEL));
+    ui.label(kit::text("Use a vault from another Mac", Font::Title).color(kit::LABEL));
     kit::paragraph(
         ui,
-        "Pick a synced vault: from another Mac of yours, or a vault that your team shares in a folder. Apassy copies it to this Mac, checks it with its passphrase, and keeps it in sync. Agents stay on each Mac: register the agents of this Mac after.",
+        "Select your vault file. Use the same vault passphrase as on the other Mac. Apassy keeps a local copy on this Mac.",
+        Font::Callout,
+        kit::SECONDARY,
+    );
+    kit::paragraph(
+        ui,
+        "macOS can ask for permission to use iCloud Drive before Apassy can read the file.",
         Font::Callout,
         kit::SECONDARY,
     );
     ui.add_space(14.0);
-    let found = app.sync_unlisted();
+    if app.sync.open_found.is_none()
+        || app
+            .sync
+            .open_next_download
+            .is_some_and(|at| Instant::now() >= at)
+    {
+        app.sync_refresh_open_files();
+    }
+    if let Some(at) = app.sync.open_next_download {
+        ui.ctx()
+            .request_repaint_after(at.saturating_duration_since(Instant::now()));
+    }
+    let found = app.sync.open_found.clone().unwrap_or_default();
     let mut pick = None;
-    let mut download = None;
     if !found.is_empty() {
-        kit::section(ui, Some("In your synced folders"), None, |s| {
+        kit::section(ui, Some("Vaults in your synced folders"), None, |s| {
             for (label, entry) in &found {
                 let chosen = app.sync.open_pick.as_deref() == Some(entry.path.as_path());
                 let subtitle = match (&entry.duplicate_of, entry.downloaded) {
-                    (_, false) => format!("{label} · not on this Mac yet"),
+                    (_, false) => format!("{label} · file download required"),
                     (Some(base), true) => format!("{label} · a duplicate of {base}"),
                     (None, true) => label.clone(),
                 };
-                let stem = entry
-                    .name
-                    .strip_suffix(SYNC_FILE_EXTENSION)
-                    .unwrap_or(&entry.name);
                 let detail =
-                    chosen.then(|| kit::text("Chosen", Font::Footnote).color(kit::ACCENT_TEXT));
+                    chosen.then(|| kit::text("Selected", Font::Footnote).color(kit::ACCENT_TEXT));
                 let gray = egui::Color32::from_rgb(99, 99, 104);
-                if s.nav(Some((kit::Icon::Lock, gray)), stem, Some(&subtitle), detail)
-                    .clicked()
+                if s.nav(
+                    Some((kit::Icon::Lock, gray)),
+                    &entry.name,
+                    Some(&subtitle),
+                    detail,
+                )
+                .clicked()
                 {
-                    if entry.downloaded {
-                        pick = Some(entry.path.clone());
-                    } else {
-                        download = Some(entry.path.clone());
-                    }
+                    pick = Some((entry.path.clone(), !entry.downloaded));
                 }
             }
         });
+    } else if app.sync.open_error.is_none() {
+        kit::paragraph(
+            ui,
+            "No vault files were found. Select a file from your synced folder.",
+            Font::Callout,
+            kit::SECONDARY,
+        );
     }
-    if let Some(path) = download {
-        crate::sync::start_download(&path);
-        app.set_note("Apassy asked iCloud for the file. Pick it again when the download ends.");
+    if let Some(error) = app.sync.open_error {
+        let text = if app.sync.open_error_from_adopt {
+            adopt_error(error)
+        } else if error == SyncError::TimedOut {
+            "The synced folder did not respond in time. The cause is not known. Your selected file and name stay in this form. Check for a macOS permission request or a file download. Then try again.".to_owned()
+        } else {
+            format!("Apassy could not read the synced file or folder: {error}.")
+        };
+        kit::paragraph(ui, &text, Font::Callout, kit::SECONDARY);
     }
-    kit::section(
-        ui,
-        None,
-        Some("Or type the path of an .apassy file in any synced folder."),
-        |s| {
-            let field = s.field("File", |ui| {
-                kit::text_input(
-                    ui,
-                    &mut app.sync.open_path,
-                    "sync-open-path",
-                    "/Users/me/Dropbox/Apassy/Team.apassy",
-                )
-            });
-            if field.changed() {
-                app.sync.open_pick = None;
-            }
-        },
-    );
-    if let Some(path) = pick {
-        let stem = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("Vault")
-            .to_owned();
-        app.vault_list.name_input = app.vault_list.registry.free_name(&stem);
-        app.sync.open_path = path.display().to_string();
-        app.sync.open_pick = Some(path);
-    }
-    let file = match (&app.sync.open_pick, app.sync.open_path.trim()) {
-        (Some(path), _) => Some(path.clone()),
-        (None, "") => None,
-        (None, typed) => Some(PathBuf::from(typed)),
+    let refresh_label = if app.sync.open_error.is_some() {
+        "Retry"
+    } else {
+        "Refresh"
     };
-    let Some(file) = file else {
-        return;
-    };
-    let stem = file
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("Vault")
-        .to_owned();
-    let mut submit = false;
-    kit::section(
+    if kit::small_button(ui, refresh_label, Style::Bordered).clicked() {
+        app.sync_retry_open();
+    }
+    let ctx = ui.ctx().clone();
+    if let Some((path, waiting)) = pick.take() {
+        app.sync_select_open_file(path, waiting, Some(&ctx));
+    }
+    if files::choose_file(
         ui,
-        None,
-        Some(
-            "The new vault file goes to the Apassy data folder, which the sandbox profile closes to agents.",
-        ),
-        |s| {
-            super::vaults::name_field(app, s, "vault-sync-name", &stem);
-            let field = s.field("Passphrase", |ui| {
-                secure_input(
-                    ui,
-                    VAULT_PASSPHRASE_FIELD,
-                    &mut app.owner_ui.passphrase,
-                    PASSPHRASE_CAPACITY,
-                    "Passphrase of the vault",
-                )
+        &mut app.files,
+        &mut app.sync.open_path,
+        "sync-open-path",
+        "Choose another file…",
+        DialogKind::OpenSyncedVault,
+    )
+    .changed()
+    {
+        let path = PathBuf::from(app.sync.open_path.trim());
+        app.sync_select_open_file(path, false, Some(&ctx));
+    }
+    let mut help = app.ui.is_expanded("sync-open-help");
+    if kit::disclosure(ui, &mut help, "Help with iCloud").changed() {
+        app.ui.set_expanded("sync-open-help", help);
+    }
+    if help {
+        kit::paragraph(
+            ui,
+            "If macOS shows an iCloud permission request, permit access for Apassy. In Finder, open iCloud Drive and find the vault file. If the file needs a download, use Download Now. Then select Refresh or Retry.",
+            Font::Callout,
+            kit::SECONDARY,
+        );
+    }
+    if let Some(file) = app.sync.open_pick.clone() {
+        let filename = file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Vault file");
+        let service = file
+            .parent()
+            .map(|folder| folder_label(&app.sync.folders, folder))
+            .unwrap_or_default();
+        // Unknown folders belong in Details, not in the main choice summary.
+        let service = if app
+            .sync
+            .folders
+            .iter()
+            .any(|folder| Some(folder.path.as_path()) == file.parent())
+        {
+            service
+        } else {
+            "Selected folder".to_owned()
+        };
+        ui.add_space(10.0);
+        kit::paragraph(
+            ui,
+            format!("Selected: {filename} · {service}"),
+            Font::Body,
+            kit::LABEL,
+        );
+        if app.sync.open_waiting {
+            kit::paragraph(
+                ui,
+                "The file download is not complete. Apassy keeps this selection and checks the file again.",
+                Font::Callout,
+                kit::SECONDARY,
+            );
+        }
+        let mut submit = false;
+        if !app.sync.open_waiting {
+            kit::section(
+                ui,
+                None,
+                Some(
+                    "Use the existing passphrase. After an open error, type the passphrase again.",
+                ),
+                |s| {
+                    let field = s.field("Existing vault passphrase", |ui| {
+                        secure_input(
+                            ui,
+                            VAULT_PASSPHRASE_FIELD,
+                            &mut app.owner_ui.passphrase,
+                            PASSPHRASE_CAPACITY,
+                            "Vault passphrase",
+                        )
+                    });
+                    if std::mem::take(&mut app.ui.focus_start_field) && kit::keyboard_mode(&ctx) {
+                        field.request_focus();
+                    }
+                    submit = field.lost_focus()
+                        && field.ctx.input(|input| input.key_pressed(egui::Key::Enter));
+                },
+            );
+        }
+        let mut details = app.ui.is_expanded("sync-open-details");
+        if kit::disclosure(ui, &mut details, "Details").changed() {
+            app.ui.set_expanded("sync-open-details", details);
+        }
+        if details {
+            kit::section(
+                ui,
+                None,
+                Some("The local name comes from the filename. You can change the local name."),
+                |s| {
+                    let field = s.field("Full path", |ui| {
+                        kit::text_input(
+                            ui,
+                            &mut app.sync.open_path,
+                            "sync-open-manual-path",
+                            "Absolute path of an .apassy file",
+                        )
+                    });
+                    if field.changed() {
+                        pick = Some((PathBuf::from(app.sync.open_path.trim()), false));
+                    }
+                    super::vaults::name_field(app, s, "vault-sync-name", "Name on this Mac");
+                },
+            );
+        }
+        if pick.is_none()
+            && !app.sync.open_waiting
+            && (kit::wide_button(ui, "Use this vault", Style::Prominent).clicked() || submit)
+        {
+            app.sync_open_vault(&file, Some(&ctx));
+        }
+    } else {
+        let mut details = app.ui.is_expanded("sync-open-details");
+        if kit::disclosure(ui, &mut details, "Details").changed() {
+            app.ui.set_expanded("sync-open-details", details);
+        }
+        if details {
+            kit::section(ui, None, None, |s| {
+                let field = s.field("Full path", |ui| {
+                    kit::text_input(
+                        ui,
+                        &mut app.sync.open_path,
+                        "sync-open-manual-path",
+                        "Absolute path of an .apassy file",
+                    )
+                });
+                if field.changed() {
+                    pick = Some((PathBuf::from(app.sync.open_path.trim()), false));
+                }
             });
-            submit =
-                field.lost_focus() && field.ctx.input(|input| input.key_pressed(egui::Key::Enter));
-        },
-    );
-    if kit::wide_button(ui, "Open synced vault", Style::Prominent).clicked() || submit {
-        let ctx = ui.ctx().clone();
-        app.sync_open_vault(&file, Some(&ctx));
+        }
+    }
+    if let Some((path, waiting)) = pick {
+        app.sync_select_open_file(path, waiting, Some(&ctx));
     }
 }
 

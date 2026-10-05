@@ -1,7 +1,8 @@
 //! Credentials: the list, the detail page, and their sheets (vault build).
 //!
 //! The list shows each credential with its agent status. It sorts and filters, and it
-//! hides archived credentials unless the owner searches or picks the "Archived" filter.
+//! hides archived credentials unless the owner searches or selects their archive filter.
+//! Sync conflict copies have a persistent review notice and a separate filter.
 //! The detail page shows the secret (masked), the details that are set, the custom
 //! details, three agent settings, the change history, and the agent requests. Each
 //! change opens a sheet. A change that decides where a secret goes needs the owner check.
@@ -39,11 +40,13 @@ pub(crate) enum Filter {
     Kind(CredentialKind),
     /// No declaration, or a review after a restore.
     NeedsSetup,
+    /// Archived versions retained after concurrent sync changes.
+    Conflicts,
     Archived,
 }
 
 impl Filter {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::All,
         Self::Kind(CredentialKind::ApiKey),
         Self::Kind(CredentialKind::Login),
@@ -51,6 +54,7 @@ impl Filter {
         Self::Kind(CredentialKind::Database),
         Self::Kind(CredentialKind::Custom),
         Self::NeedsSetup,
+        Self::Conflicts,
         Self::Archived,
     ];
 
@@ -59,8 +63,36 @@ impl Filter {
             Self::All => "All credentials",
             Self::Kind(kind) => kind_plural(kind),
             Self::NeedsSetup => "Needs setup",
+            Self::Conflicts => "Conflicting changes",
             Self::Archived => "Archived",
         }
+    }
+}
+
+/// Conflict copies have a separate review list and archive count. A search still
+/// finds them with a distinct label. Restored copies follow the active filters.
+fn matches_filter(
+    item: &OwnerSummary,
+    filter: Filter,
+    searching: bool,
+    archived: bool,
+    conflict: bool,
+    needs_setup: impl FnOnce(u64) -> bool,
+) -> bool {
+    let conflict = archived && conflict;
+    if filter == Filter::Conflicts {
+        return conflict;
+    }
+    if filter == Filter::Archived {
+        return archived && !conflict;
+    }
+    if archived && !searching {
+        return false;
+    }
+    match filter {
+        Filter::Kind(kind) => item.kind == kind,
+        Filter::NeedsSetup => needs_setup(item.id),
+        Filter::All | Filter::Archived | Filter::Conflicts => true,
     }
 }
 
@@ -116,14 +148,27 @@ pub(super) fn draw_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
         if add {
             open_add(app);
         }
+        // No search field without credentials. ⌘F must not focus it later by surprise.
+        app.ui.focus_search = false;
         return;
     }
-    review_notice(app, ui);
+    let archived = app.owner_ui.session.archived().unwrap_or_default();
+    let conflicts = app.owner_ui.session.conflict_copies().unwrap_or_default();
+    let conflict_count = all
+        .iter()
+        .filter(|item| archived.contains_key(&item.id) && conflicts.contains_key(&item.id))
+        .count();
+    let archived_count = all
+        .iter()
+        .filter(|item| archived.contains_key(&item.id) && !conflicts.contains_key(&item.id))
+        .count();
+    // Each scope keeps the IDs below a notice the same when it comes or goes.
+    ui.scope(|ui| review_notice(app, ui));
+    ui.scope(|ui| conflict_notice(app, ui, conflict_count));
     toolbar(app, ui);
     ui.add_space(18.0);
 
     let session = &app.owner_ui.session;
-    let archived = session.archived().unwrap_or_default();
     let times = session.item_times().unwrap_or_default();
     let query = app.search.trim().to_owned();
     let filter = app.ui.credential_filter;
@@ -140,32 +185,28 @@ pub(super) fn draw_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let mut items: Vec<OwnerSummary> = found
         .into_iter()
         .filter(|item| {
-            let is_archived = archived.contains_key(&item.id);
-            if filter == Filter::Archived {
-                return is_archived;
-            }
-            // An archived credential shows only in a search.
-            if is_archived && query.is_empty() {
-                return false;
-            }
-            match filter {
-                Filter::Kind(kind) => item.kind == kind,
-                Filter::NeedsSetup => needs_setup(item.id),
-                Filter::All | Filter::Archived => true,
-            }
+            matches_filter(
+                item,
+                filter,
+                !query.is_empty(),
+                archived.contains_key(&item.id),
+                conflicts.contains_key(&item.id),
+                needs_setup,
+            )
         })
         .collect();
     sort_items(&mut items, sort, &times);
     let hidden_archived = if filter == Filter::Archived || !query.is_empty() {
         0
     } else {
-        archived.len()
+        archived_count
     };
 
     if items.is_empty() {
         let message = match filter {
             _ if !query.is_empty() => format!("No credential matches “{query}”."),
             Filter::Archived => "No credential is archived.".to_owned(),
+            Filter::Conflicts => "No archived conflict copy needs review.".to_owned(),
             Filter::NeedsSetup => "Every credential has a declaration.".to_owned(),
             _ => "No credential matches the filter.".to_owned(),
         };
@@ -173,11 +214,13 @@ pub(super) fn draw_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
         ui.add_space(12.0);
     }
     let mut open = None;
-    let grouped = sort == Sort::Name && !matches!(filter, Filter::Kind(_));
+    let grouped = sort == Sort::Name && !matches!(filter, Filter::Kind(_) | Filter::Conflicts);
     let row = |s: &mut Section<'_>, item: &OwnerSummary, open: &mut Option<u64>| {
         let meta = meta_line(&item.project, &item.service);
         let subtitle = (!meta.is_empty()).then_some(meta.as_str());
-        let detail = if archived.contains_key(&item.id) {
+        let detail = if archived.contains_key(&item.id) && conflicts.contains_key(&item.id) {
+            kit::medium("Conflict copy", Font::Callout).color(Tone::Warning.text())
+        } else if archived.contains_key(&item.id) {
             kit::medium("Archived", Font::Callout).color(kit::SECONDARY)
         } else {
             row_detail(app, item.id, sort, times.get(&item.id))
@@ -208,6 +251,7 @@ pub(super) fn draw_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
     } else if !items.is_empty() {
         let title = match filter {
             Filter::Kind(kind) => kind_plural(kind).to_owned(),
+            Filter::Conflicts => format!("Conflicting changes ({conflict_count})"),
             _ => sort.title().to_owned(),
         };
         kit::section(ui, Some(&title), None, |s| {
@@ -238,40 +282,59 @@ pub(super) fn draw_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
 }
 
 /// Search, filter, and sort in one row. ⌘F puts the focus in the search field. The
-/// menus go first from the right, and the search field takes the rest of the width.
+/// search field takes the width that the two menus leave. The controls draw from left
+/// to right, so Tab visits them in the order that the owner sees.
 fn toolbar(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    const MENU_WIDTH: f32 = 150.0;
     let width = ui.available_width();
     ui.allocate_ui_with_layout(
         Vec2::new(width, 28.0),
-        Layout::right_to_left(Align::Center),
+        Layout::left_to_right(Align::Center),
         |ui| {
-            let mut sort = app.ui.credential_sort;
-            kit::menu("credential-sort", format!("Sort: {}", sort.label()), 150.0).show_ui(
-                ui,
-                |ui| {
-                    for option in Sort::ALL {
-                        ui.selectable_value(&mut sort, option, option.label());
-                    }
-                },
-            );
-            app.ui.credential_sort = sort;
-            let mut filter = app.ui.credential_filter;
-            kit::menu("credential-filter", filter.label(), 150.0).show_ui(ui, |ui| {
-                for option in Filter::ALL {
-                    ui.selectable_value(&mut filter, option, option.label());
-                }
-            });
-            app.ui.credential_filter = filter;
-            let field = kit::text_input(
-                ui,
-                &mut app.search,
-                "credential-search",
-                "Search by name, project, service, or notes",
-            )
-            .on_hover_text("Search  ⌘F");
+            let gap = ui.spacing().item_spacing.x;
+            // A menu button is its width plus the button padding and the chevron.
+            let menus = 2.0 * (MENU_WIDTH + ui.spacing().button_padding.x * 2.0 + 20.0 + gap);
+            let search_width = (width - menus).max(160.0);
+            let field = ui
+                .scope(|ui| {
+                    ui.set_width(search_width);
+                    kit::text_input(
+                        ui,
+                        &mut app.search,
+                        "credential-search",
+                        "Search by name, project, service, or notes",
+                    )
+                    .on_hover_text("Search  ⌘F")
+                })
+                .inner;
+            ui.ctx()
+                .accesskit_node_builder(field.id, |node| node.set_label("Search credentials"));
             if std::mem::take(&mut app.ui.focus_search) {
                 field.request_focus();
             }
+            let mut filter = app.ui.credential_filter;
+            let filters: Vec<(Filter, String)> = Filter::ALL
+                .into_iter()
+                .map(|option| (option, option.label().to_owned()))
+                .collect();
+            let label = filter.label();
+            kit::picker(
+                ui,
+                "credential-filter",
+                &mut filter,
+                &filters,
+                label,
+                MENU_WIDTH,
+            );
+            app.ui.credential_filter = filter;
+            let mut sort = app.ui.credential_sort;
+            let sorts: Vec<(Sort, String)> = Sort::ALL
+                .into_iter()
+                .map(|option| (option, option.label().to_owned()))
+                .collect();
+            let label = format!("Sort: {}", sort.label());
+            kit::picker(ui, "credential-sort", &mut sort, &sorts, label, MENU_WIDTH);
+            app.ui.credential_sort = sort;
         },
     );
 }
@@ -371,6 +434,99 @@ fn review_notice(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
 }
 
+/// This notice comes from retained vault records, not the latest sync result.
+fn conflict_notice(app: &mut DesktopApp, ui: &mut egui::Ui, count: usize) {
+    if count == 0 {
+        return;
+    }
+    let review = kit::notice(
+        ui,
+        Tone::Warning,
+        &format!("Review conflicting changes ({count})"),
+        Some(
+            "Sync kept another version in an archived conflict copy. Agents cannot use that copy.",
+        ),
+        |ui| kit::small_button(ui, "Review conflicting changes", Style::Bordered).clicked(),
+    );
+    if review {
+        app.search.clear();
+        app.ui.credential_filter = Filter::Conflicts;
+    }
+}
+
+/// Show the relationship without a secret value or a change to either version.
+fn conflict_detail(app: &mut DesktopApp, ui: &mut egui::Ui, id: u64, archived: bool) {
+    let conflicts = app.owner_ui.session.conflict_copies().unwrap_or_default();
+    if conflicts.is_empty() {
+        return;
+    }
+    let items = app.owner_ui.session.search("").unwrap_or_default();
+    let archives = app.owner_ui.session.archived().unwrap_or_default();
+    let mut open = None;
+    if let Some(original) = conflicts.get(&id) {
+        let current = original.and_then(|original| items.iter().find(|item| item.id == original));
+        let description = match current {
+            Some(current) if !archives.contains_key(&current.id) => format!(
+                "The current version is active: {}. This copy keeps the other version from sync.",
+                current.name
+            ),
+            Some(current) => format!(
+                "The current version is archived: {}. This copy keeps the other version from sync.",
+                current.name
+            ),
+            None => "The original credential is no longer in this vault. This copy keeps the other version from sync.".to_owned(),
+        };
+        kit::notice(
+            ui,
+            Tone::Warning,
+            if archived {
+                "Conflict copy"
+            } else {
+                "Restored conflict copy"
+            },
+            Some(&description),
+            |ui| {
+                if let Some(current) = current
+                    && kit::small_button(ui, "Open current version", Style::Bordered).clicked()
+                {
+                    open = Some(current.id);
+                }
+            },
+        );
+    } else {
+        let retained: Vec<_> = items
+            .iter()
+            .filter(|item| {
+                conflicts.get(&item.id) == Some(&Some(id)) && archives.contains_key(&item.id)
+            })
+            .collect();
+        if !retained.is_empty() {
+            kit::notice(
+                ui,
+                Tone::Warning,
+                if archived {
+                    "Current version · Archived"
+                } else {
+                    "Current version · Active"
+                },
+                Some(
+                    "Sync kept this version as the current version. The other versions stay in archived conflict copies.",
+                ),
+                |ui| {
+                    for copy in &retained {
+                        if kit::small_button(ui, &copy.name, Style::Bordered).clicked() {
+                            open = Some(copy.id);
+                        }
+                    }
+                },
+            );
+        }
+    }
+    if let Some(id) = open {
+        app.select_item(id.to_string());
+    }
+}
+
 // ---- The detail page. ----
 
 fn selected_id(app: &DesktopApp) -> Option<u64> {
@@ -421,6 +577,7 @@ pub(super) fn draw_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
         });
     });
     ui.add_space(20.0);
+    conflict_detail(app, ui, id, details.archived);
     if details.archived {
         let restore = kit::notice(
             ui,
@@ -467,14 +624,14 @@ pub(super) fn draw_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
     kit::section(ui, None, None, |s| {
         if !details.archived {
             archive = s
-                .clickable_row(|ui| {
+                .clickable_row("Archive credential…", |ui| {
                     ui.label(kit::text("Archive credential…", Font::Body).color(kit::LABEL));
                     kit::note(ui, "Agents cannot use it. Search still finds it.");
                 })
                 .clicked();
         }
         delete = s
-            .clickable_row(|ui| {
+            .clickable_row("Delete credential…", |ui| {
                 ui.label(kit::text("Delete credential…", Font::Body).color(Tone::Critical.text()));
             })
             .clicked();
@@ -533,9 +690,16 @@ fn secret_value(ui: &mut egui::Ui, app: &DesktopApp, id: u64, name: &str) {
 /// "Show" or "Hide" for the secret values, with the masked value while hidden.
 fn mask_button(ui: &mut egui::Ui, revealed: bool, masked: bool) -> bool {
     let label = if revealed { "Hide" } else { "Show" };
-    let clicked = kit::button_with(ui, Some(Icon::Eye), label, Style::Link, Size::Small)
-        .on_hover_text("Show or hide secret values  ⌘⇧H")
-        .clicked();
+    let button = kit::button_with(ui, Some(Icon::Eye), label, Style::Link, Size::Small)
+        .on_hover_text("Show or hide secret values  ⌘⇧H");
+    let name = if revealed {
+        "Hide the secret values"
+    } else {
+        "Show the secret values"
+    };
+    ui.ctx()
+        .accesskit_node_builder(button.id, |node| node.set_label(name));
+    let clicked = button.clicked();
     if masked {
         ui.label(kit::text(MASKED_VALUE, Font::Mono).color(kit::SECONDARY));
     }
@@ -629,7 +793,7 @@ fn details_section(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetai
             }
             if details.details.len() < MAX_DETAILS {
                 add_detail = s
-                    .clickable_row(|ui| {
+                    .clickable_row("Add custom detail", |ui| {
                         ui.horizontal(|ui| {
                             kit::paint_icon_in(ui, Icon::Plus, 12.0, kit::ACCENT);
                             ui.label(
@@ -888,7 +1052,7 @@ pub(super) fn draw_delete_alert(app: &mut DesktopApp, ctx: &egui::Context) {
             |_| {},
             |ui| {
                 delete = kit::button(ui, "Delete", Style::DestructiveProminent).clicked();
-                cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
+                cancel = kit::alert_cancel(ui).clicked();
             },
         );
     });
@@ -969,6 +1133,80 @@ enum FormAction {
     Save,
 }
 
+fn new_form_dirty(app: &DesktopApp) -> bool {
+    let blank = ItemDraft {
+        kind: app.add_form.kind,
+        ..ItemDraft::default()
+    };
+    app.add_form != blank || !app.owner_ui.add_secrets.is_blank()
+}
+
+fn change_kind(app: &mut DesktopApp, ctx: &egui::Context) {
+    app.owner_ui.add_secrets.clear();
+    forget_secret_form(ctx, "add");
+    app.add_form = ItemDraft::default();
+    app.ui.sheet = Some(Sheet::AddItem { kind_chosen: false });
+}
+
+/// Cancel a credential form only after the owner confirms the loss of typed data.
+/// The draft and secret buffers stay in place while the confirmation is open.
+pub(super) fn request_close_form(app: &mut DesktopApp, ctx: &egui::Context) {
+    let dirty = match app.ui.sheet {
+        Some(Sheet::EditItem) => selected_id(app).is_some_and(|id| {
+            !app.owner_ui
+                .session
+                .is_unchanged(id, &app.edit_form, &app.owner_ui.edit_secrets)
+                .unwrap_or(false)
+        }),
+        Some(Sheet::AddItem { kind_chosen: true }) => new_form_dirty(app),
+        _ => false,
+    };
+    if dirty {
+        app.ui.focus.remember_modal_origin();
+        app.ui.discard_item_kind_change = false;
+        app.ui.discard_item_changes = true;
+        ctx.request_repaint();
+    } else {
+        close_sheet(app, ctx);
+    }
+}
+
+pub(super) fn discard_changes_alert(app: &mut DesktopApp, ctx: &egui::Context) {
+    let mut discard = false;
+    let mut cancel = false;
+    let response = kit::sheet(ctx, "discard-item-changes", 380.0, |ui| {
+        kit::sheet_title(
+            ui,
+            "Discard changes?",
+            Some("The changes are not saved. Discard removes the text that you typed."),
+        );
+        kit::sheet_buttons(
+            ui,
+            |_| {},
+            |ui| {
+                discard = kit::button(ui, "Discard", Style::DestructiveProminent).clicked();
+                let keep = kit::button(ui, "Keep editing", Style::Bordered);
+                if kit::sheet_just_opened(ui.ctx()) && kit::keyboard_mode(ui.ctx()) {
+                    keep.request_focus();
+                }
+                cancel = keep.clicked();
+            },
+        );
+    });
+    if cancel || response.escape {
+        app.ui.discard_item_changes = false;
+        app.ui.discard_item_kind_change = false;
+    }
+    if discard {
+        app.ui.discard_item_changes = false;
+        if std::mem::take(&mut app.ui.discard_item_kind_change) {
+            change_kind(app, ctx);
+        } else {
+            close_sheet(app, ctx);
+        }
+    }
+}
+
 pub(super) fn add_sheet(app: &mut DesktopApp, ctx: &egui::Context, kind_chosen: bool) -> bool {
     let mut action = FormAction::None;
     let response = kit::sheet(ctx, "add-item", 500.0, |ui| {
@@ -1033,21 +1271,32 @@ pub(super) fn add_sheet(app: &mut DesktopApp, ctx: &egui::Context, kind_chosen: 
             },
         );
     });
-    if kind_chosen && matches!(action, FormAction::None) && super::save_pressed(app, ctx) {
+    if kind_chosen
+        && !app.ui.discard_item_changes
+        && matches!(action, FormAction::None)
+        && super::save_pressed(app, ctx)
+    {
         action = FormAction::Save;
     }
     match action {
         FormAction::None => {}
-        FormAction::Cancel => close_sheet(app, ctx),
+        FormAction::Cancel => request_close_form(app, ctx),
         FormAction::Back => {
-            app.owner_ui.add_secrets.clear();
-            forget_secret_form(ctx, "add");
-            app.ui.sheet = Some(Sheet::AddItem { kind_chosen: false });
+            if new_form_dirty(app) {
+                app.ui.focus.remember_modal_origin();
+                app.ui.discard_item_kind_change = true;
+                app.ui.discard_item_changes = true;
+                ctx.request_repaint();
+            } else {
+                change_kind(app, ctx);
+            }
         }
         FormAction::Pick(kind) => {
             app.add_form.kind = kind;
             app.owner_ui.add_secrets.clear();
             app.ui.sheet = Some(Sheet::AddItem { kind_chosen: true });
+            // The picked card goes away. The Name field takes the focus.
+            app.ui.focus_form_name = true;
         }
         FormAction::Save => {
             let draft = app.add_form.clone();
@@ -1085,7 +1334,8 @@ fn new_title(kind: CredentialKind) -> &'static str {
 fn kind_card(ui: &mut egui::Ui, kind: CredentialKind, width: f32) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 58.0), Sense::click());
     let label = kind.label();
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    let name = format!("{label}: {}", kind_blurb(kind));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         let fill = if response.is_pointer_button_down_on() {
@@ -1117,6 +1367,9 @@ fn kind_card(ui: &mut egui::Ui, kind: CredentialKind, width: f32) -> egui::Respo
             kit::LABEL,
         );
         painter.galley(Pos2::new(x, rect.center().y + 2.0), blurb, kit::SECONDARY);
+        if response.has_focus() {
+            kit::focus_ring(painter, rect, 10);
+        }
     }
     response
 }
@@ -1156,11 +1409,14 @@ pub(super) fn edit_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
             },
         );
     });
-    if matches!(action, FormAction::None) && super::save_pressed(app, ctx) {
+    if !app.ui.discard_item_changes
+        && matches!(action, FormAction::None)
+        && super::save_pressed(app, ctx)
+    {
         action = FormAction::Save;
     }
     match action {
-        FormAction::Cancel => close_sheet(app, ctx),
+        FormAction::Cancel => request_close_form(app, ctx),
         FormAction::Save => save_edit(app, ctx, id),
         _ => {}
     }
@@ -1214,14 +1470,19 @@ fn item_form(
     editing: bool,
 ) {
     let kind = form.kind;
+    let focus_name = std::mem::take(&mut state.focus_form_name);
     kit::section(ui, None, None, |s| {
         s.field("Name", |ui| {
-            kit::text_input(
+            let field = kit::text_input(
                 ui,
                 &mut form.name,
                 &format!("{salt}-name"),
                 name_placeholder(kind),
-            )
+            );
+            if focus_name && kit::keyboard_mode(ui.ctx()) {
+                field.request_focus();
+            }
+            field
         });
         for field in DesktopModel::extra_fields(kind) {
             let (value, placeholder) = extra_value(form, *field);
@@ -1307,9 +1568,18 @@ fn detail_rows(ui: &mut egui::Ui, form: &mut ItemDraft, secrets: &mut SecretForm
                     });
                 });
                 for (index, detail) in form.details.iter_mut().enumerate() {
+                    // VoiceOver names each field of the row, as the captions above do.
+                    let row_name = if detail.label.trim().is_empty() {
+                        format!("detail {}", index + 1)
+                    } else {
+                        format!("\"{}\"", detail.label.trim())
+                    };
+                    let name_label = |ctx: &egui::Context, id: egui::Id, text: String| {
+                        ctx.accesskit_node_builder(id, |node| node.set_label(text));
+                    };
                     s.row(|ui| {
                         ui.horizontal(|ui| {
-                            ui.allocate_ui(Vec2::new(150.0, 26.0), |ui| {
+                            let name_field = ui.allocate_ui(Vec2::new(150.0, 26.0), |ui| {
                                 ui.add(
                                     egui::TextEdit::singleline(&mut detail.label)
                                         .id_salt(format!("{salt}-detail-label-{index}"))
@@ -1323,8 +1593,13 @@ fn detail_rows(ui: &mut egui::Ui, form: &mut ItemDraft, secrets: &mut SecretForm
                                         .desired_width(f32::INFINITY),
                                 )
                             });
+                            name_label(
+                                ui.ctx(),
+                                name_field.inner.id,
+                                format!("Name of {row_name}"),
+                            );
                             let width = (ui.available_width() - 92.0).max(120.0);
-                            ui.allocate_ui(Vec2::new(width, 26.0), |ui| {
+                            let value_field = ui.allocate_ui(Vec2::new(width, 26.0), |ui| {
                                 if detail.hidden {
                                     let placeholder = if detail.stored.is_some() {
                                         "Unchanged"
@@ -1337,18 +1612,23 @@ fn detail_rows(ui: &mut egui::Ui, form: &mut ItemDraft, secrets: &mut SecretForm
                                         &mut secrets.details[index],
                                         SECRET_VALUE_CAPACITY,
                                         placeholder,
-                                    );
+                                    )
                                 } else {
                                     kit::text_input(
                                         ui,
                                         &mut detail.value,
                                         &format!("{salt}-detail-value-{index}"),
                                         "Value",
-                                    );
+                                    )
                                 }
                             });
+                            name_label(
+                                ui.ctx(),
+                                value_field.inner.id,
+                                format!("Value of {row_name}"),
+                            );
                             let mut hidden = detail.hidden;
-                            if kit::toggle(ui, &mut hidden, "Hidden")
+                            if kit::toggle(ui, &mut hidden, &format!("Hidden: {row_name}"))
                                 .on_hover_text(
                                     "Hidden: masked, and showing it needs your passphrase",
                                 )
@@ -1356,9 +1636,13 @@ fn detail_rows(ui: &mut egui::Ui, form: &mut ItemDraft, secrets: &mut SecretForm
                             {
                                 set_hidden(detail, &mut secrets.details[index], hidden);
                             }
-                            if kit::button_with(ui, Some(Icon::Xmark), "", Style::Link, Size::Small)
-                                .on_hover_text("Remove this detail")
-                                .clicked()
+                            if kit::icon_button(
+                                ui,
+                                Icon::Xmark,
+                                &format!("Remove {row_name}"),
+                                Size::Small,
+                            )
+                            .clicked()
                             {
                                 remove = Some(index);
                             }
@@ -1702,20 +1986,24 @@ fn provider_picker(ui: &mut egui::Ui, form: &mut DeclarationForm, id: u64) -> eg
         .as_deref()
         .and_then(providers::find)
         .map_or("None", |provider| provider.label.as_str());
-    kit::menu(("decl-provider", id), selected, 220.0)
-        .show_ui(ui, |ui| {
-            ui.selectable_value(&mut form.provider, None, "None");
-            if let Ok(catalog) = providers::builtin() {
-                for provider in catalog.providers() {
-                    ui.selectable_value(
-                        &mut form.provider,
-                        Some(provider.id.clone()),
-                        provider.label.as_str(),
-                    );
-                }
-            }
-        })
-        .response
+    let selected = selected.to_owned();
+    let mut options = vec![(None, "None".to_owned())];
+    if let Ok(catalog) = providers::builtin() {
+        options.extend(
+            catalog
+                .providers()
+                .iter()
+                .map(|provider| (Some(provider.id.clone()), provider.label.clone())),
+        );
+    }
+    kit::picker(
+        ui,
+        ("decl-provider", id),
+        &mut form.provider,
+        &options,
+        selected,
+        220.0,
+    )
 }
 
 /// The known hosts of the chosen provider, and the suggested provider when the owner
@@ -1835,21 +2123,19 @@ pub(super) fn variable_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool 
                 });
                 if fields.len() > 1 {
                     s.field("Secret field", |ui| {
-                        kit::menu(
+                        let options: Vec<(String, String)> = fields
+                            .iter()
+                            .map(|field| (field.clone(), field_label(field)))
+                            .collect();
+                        let selected = field_label(&app.owner_ui.env_field_input);
+                        kit::picker(
+                            ui,
                             ("env-field", id),
-                            field_label(&app.owner_ui.env_field_input),
+                            &mut app.owner_ui.env_field_input,
+                            &options,
+                            selected,
                             220.0,
                         )
-                        .show_ui(ui, |ui| {
-                            for field in &fields {
-                                ui.selectable_value(
-                                    &mut app.owner_ui.env_field_input,
-                                    field.clone(),
-                                    field_label(field),
-                                );
-                            }
-                        })
-                        .response
                     });
                 }
             },
@@ -2047,4 +2333,315 @@ pub(super) fn connector_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool
         close_sheet(app, ctx);
     }
     response.escape
+}
+
+#[cfg(test)]
+mod conflict_tests {
+    use super::*;
+    use crate::broker::approvals::OwnerCheck;
+    use crate::desktop::owner_store::SecretForm;
+    use crate::vault::{Field, ItemDraft as VaultDraft, SecretValue, SyncScope, Vault};
+
+    const PASS: &str = "conflict-ui-test-pass";
+    const CANARY: &str = "conflict-ui-secret-canary";
+
+    fn summary() -> OwnerSummary {
+        OwnerSummary {
+            id: 1,
+            name: "User name (conflict copy, Mac)".to_owned(),
+            kind: CredentialKind::ApiKey,
+            service: String::new(),
+            project: String::new(),
+            revision: 1,
+        }
+    }
+
+    #[test]
+    fn conflict_filter_separates_verified_copies_and_preserves_search() {
+        let item = summary();
+        let matches = |filter, searching, archived, conflict| {
+            matches_filter(&item, filter, searching, archived, conflict, |_| true)
+        };
+        // A user-selected name cannot make an ordinary archived item a conflict.
+        assert!(matches(Filter::Archived, false, true, false));
+        assert!(!matches(Filter::Conflicts, true, true, false));
+        assert!(matches(Filter::Conflicts, false, true, true));
+        assert!(!matches(Filter::Archived, true, true, true));
+        assert!(!matches(Filter::All, false, true, true));
+        assert!(matches(Filter::All, true, true, true));
+        assert!(matches(
+            Filter::Kind(CredentialKind::ApiKey),
+            true,
+            true,
+            true
+        ));
+        assert!(!matches(
+            Filter::Kind(CredentialKind::Login),
+            true,
+            true,
+            true
+        ));
+        // A deliberate restore removes the copy from the archived review list.
+        assert!(!matches(Filter::Conflicts, false, false, true));
+        assert!(matches(Filter::All, false, false, true));
+        assert!(matches(Filter::NeedsSetup, false, false, true));
+    }
+
+    fn add(app: &mut DesktopApp, name: &str) -> u64 {
+        let mut secrets = SecretForm::default();
+        secrets.token = CANARY.to_owned();
+        app.owner_ui
+            .session
+            .add(
+                &ItemDraft {
+                    name: name.to_owned(),
+                    ..ItemDraft::default()
+                },
+                &secrets,
+            )
+            .expect("add synthetic credential")
+            .id
+    }
+
+    fn text(app: &mut DesktopApp, detail: bool) -> String {
+        fn collect(shape: &egui::Shape, text: &mut String) {
+            match shape {
+                egui::Shape::Text(shape) => {
+                    text.push_str(shape.galley.text());
+                    text.push('\n');
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| collect(shape, text)),
+                _ => {}
+            }
+        }
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        for _ in 0..3 {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 2400.0))),
+                    ..Default::default()
+                },
+                |ui| {
+                    if detail {
+                        draw_detail(app, ui);
+                    } else {
+                        draw_list(app, ui);
+                    }
+                },
+            );
+            text.clear();
+            for shape in &output.shapes {
+                collect(&shape.shape, &mut text);
+            }
+            output.drop_without_applying_deltas();
+        }
+        assert!(
+            !text.contains(CANARY),
+            "a secret entered the conflict summary"
+        );
+        text
+    }
+
+    #[test]
+    fn retained_conflicts_stay_visible_after_reopen_and_show_both_versions() {
+        let dir = tempfile::TempDir::new().expect("synthetic files only");
+        let path = dir.path().join("owner.db");
+        let baseline = dir.path().join("baseline.apassy");
+        let remote_path = dir.path().join("remote.db");
+        let incoming = dir.path().join("incoming.apassy");
+        let mut app = DesktopApp::new();
+        app.owner_ui
+            .session
+            .create_file(&path, PASS)
+            .expect("create");
+        app.owner_ui.session.unlock(PASS).expect("unlock");
+        let original = add(&mut app, "Current credential");
+        app.owner_ui
+            .session
+            .with_vault(|vault| {
+                vault
+                    .write_sync_copy(&baseline, "First Mac")
+                    .expect("baseline");
+            })
+            .expect("open vault");
+        let (mut remote, _) = Vault::adopt_sync_copy(&baseline, &remote_path, PASS).expect("adopt");
+        remote.unlock(PASS).expect("unlock remote");
+        let details = app.owner_ui.session.details(original).expect("details");
+        let mut draft = details.to_draft();
+        draft.notes = "First Mac edit".to_owned();
+        app.owner_ui
+            .session
+            .update(original, details.revision, &draft, &SecretForm::default())
+            .expect("local edit");
+        let remote_item = remote.search("").expect("search").remove(0);
+        remote
+            .update(
+                remote_item.id,
+                remote_item.revision,
+                VaultDraft {
+                    title: "Current credential".to_owned(),
+                    kind: CredentialKind::ApiKey,
+                    notes: "Second Mac edit".to_owned(),
+                    tags: Vec::new(),
+                    fields: vec![Field {
+                        name: "token".to_owned(),
+                        value: SecretValue::new(CANARY.to_owned()),
+                        secret: true,
+                    }],
+                },
+            )
+            .expect("remote edit");
+        remote
+            .write_sync_copy(&incoming, "Second Mac")
+            .expect("remote copy");
+        app.owner_ui
+            .session
+            .with_vault(|vault| {
+                let report = vault
+                    .merge_from(&incoming, &SyncScope::vault())
+                    .expect("merge");
+                assert_eq!(report.conflicts.len(), 1);
+            })
+            .expect("open vault");
+        let copies = app.owner_ui.session.conflict_copies().expect("metadata");
+        assert_eq!(copies.len(), 1);
+        let copy = *copies.keys().next().expect("copy ID");
+        assert_eq!(copies[&copy], Some(original));
+        let ordinary = add(&mut app, "Ordinary archive");
+        let title_only = add(&mut app, "User name (conflict copy, Mac)");
+        app.owner_ui.session.archive(ordinary).expect("archive");
+        app.owner_ui
+            .session
+            .archive(title_only)
+            .expect("archive user title");
+        // No latest sync report is required. The notice uses retained vault metadata.
+        drop(app);
+        let mut app = DesktopApp::new();
+        app.owner_ui.session.open_file(&path).expect("reopen");
+        app.owner_ui
+            .session
+            .unlock(PASS)
+            .expect("unlock after reopen");
+        let list = text(&mut app, false);
+        assert!(list.contains("Review conflicting changes (1)"), "{list}");
+        assert!(
+            list.contains("2 archived credentials are hidden."),
+            "{list}"
+        );
+        app.search = "no matching credential".to_owned();
+        let list = text(&mut app, false);
+        assert!(list.contains("Review conflicting changes (1)"), "{list}");
+        app.search.clear();
+        app.ui.credential_filter = Filter::Archived;
+        let list = text(&mut app, false);
+        assert!(
+            list.contains("Ordinary archive") && list.contains("User name (conflict copy, Mac)"),
+            "{list}"
+        );
+        assert!(
+            !list.contains("Current credential (conflict copy"),
+            "{list}"
+        );
+        app.ui.credential_filter = Filter::Conflicts;
+        let list = text(&mut app, false);
+        assert!(
+            list.contains("Conflict copy") && list.contains("Current credential (conflict copy"),
+            "{list}"
+        );
+        assert!(!list.contains("Ordinary archive"), "{list}");
+        app.select_item(copy.to_string());
+        let detail = text(&mut app, true);
+        assert!(
+            detail.contains("The current version is active: Current credential."),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("Open current version") && detail.contains("Restore from archive"),
+            "{detail}"
+        );
+        assert!(
+            app.owner_ui
+                .session
+                .is_archived(copy)
+                .expect("still archived")
+        );
+        app.select_item(original.to_string());
+        let detail = text(&mut app, true);
+        assert!(
+            detail.contains("Current version · Active")
+                && detail.contains("Current credential (conflict copy"),
+            "{detail}"
+        );
+        app.owner_ui
+            .session
+            .archive(original)
+            .expect("archive current version");
+        app.select_item(copy.to_string());
+        let detail = text(&mut app, true);
+        assert!(
+            detail.contains("The current version is archived: Current credential."),
+            "{detail}"
+        );
+        let revision = app
+            .owner_ui
+            .session
+            .details(original)
+            .expect("original details")
+            .revision;
+        app.owner_ui
+            .session
+            .delete(original, revision)
+            .expect("delete original");
+        let detail = text(&mut app, true);
+        assert!(
+            detail.contains("The original credential is no longer in this vault."),
+            "{detail}"
+        );
+        assert!(!detail.contains("Open current version"), "{detail}");
+        let name = app
+            .owner_ui
+            .session
+            .details(copy)
+            .expect("copy details")
+            .name;
+        app.ask_owner(
+            OwnerRequest::Unarchive {
+                item_id: copy,
+                name: name.clone(),
+            },
+            None,
+        );
+        assert!(
+            app.confirm_owner_now(OwnerCheck::passphrase("wrong-passphrase"))
+                .is_err()
+        );
+        assert!(
+            app.owner_ui
+                .session
+                .is_archived(copy)
+                .expect("wrong passphrase preserves archive")
+        );
+        app.ask_owner(
+            OwnerRequest::Unarchive {
+                item_id: copy,
+                name,
+            },
+            None,
+        );
+        app.confirm_owner_now(OwnerCheck::passphrase(PASS))
+            .expect("restore needs the passphrase");
+        assert!(!app.owner_ui.session.is_archived(copy).expect("restored"));
+        assert!(
+            app.owner_ui
+                .session
+                .declaration(copy)
+                .expect("agent settings")
+                .is_none()
+        );
+        app.ui.credential_filter = Filter::All;
+        let list = text(&mut app, false);
+        assert!(!list.contains("Review conflicting changes"), "{list}");
+        assert!(list.contains("Current credential (conflict copy"), "{list}");
+    }
 }

@@ -8,7 +8,7 @@ use eframe::egui::{self, Align, Frame, Id, Key, Label, Rect, Vec2};
 
 use super::kit::{self, Font, Icon, Style, Tone};
 use super::{
-    PASSPHRASE_CAPACITY, VAULT_PASSPHRASE_FIELD, VAULT_REPEAT_FIELD, default_vault_path,
+    PASSPHRASE_CAPACITY, VAULT_PASSPHRASE_FIELD, VAULT_REPEAT_FIELD, default_vault_path, files,
     forget_secret_field, secure_input, vaults,
 };
 use crate::desktop::owner_store::Ephemeral;
@@ -42,8 +42,20 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
             );
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .show(ui, |ui| centered(ui, |ui| screen(app, ui)));
+                .show(ui, |ui| {
+                    super::focus::page_start(&mut app.ui.focus, &ui.ctx().clone());
+                    centered(ui, |ui| screen(app, ui));
+                    kit::follow_focus(ui);
+                    kit::keyboard_scroll(ui);
+                });
         });
+}
+
+/// The first field of a step takes the focus once, after [`go`].
+fn first_field(app: &mut DesktopApp, field: &egui::Response) {
+    if std::mem::take(&mut app.ui.focus_start_field) && kit::keyboard_mode(&field.ctx) {
+        field.request_focus();
+    }
 }
 
 /// A column of `WIDTH`, centered in the window. The height of the last frame gives the
@@ -112,7 +124,7 @@ fn title(ui: &mut egui::Ui, title: &str, subtitle: &str) {
 
 fn back(app: &mut DesktopApp, ui: &mut egui::Ui) {
     if kit::back_link(ui, "Back") {
-        app.ui.start = Step::Home;
+        go(app, Step::Home);
     }
     ui.add_space(8.0);
 }
@@ -126,26 +138,38 @@ fn welcome(app: &mut DesktopApp, ui: &mut egui::Ui) {
     );
     vaults::start_notices(app, ui);
     vaults::welcome_list(app, ui);
-    if kit::wide_button(ui, "Create a new vault", Style::Prominent).clicked() {
+    if kit::wide_button(ui, "Create my first vault", Style::Prominent).clicked() {
         go(app, Step::Create);
     }
-    ui.add_space(8.0);
-    if kit::wide_button(ui, "Open an existing vault", Style::Bordered).clicked() {
-        go(app, Step::Open);
+    if app.sync.offered {
+        ui.add_space(8.0);
+        if kit::wide_button(ui, "Use a vault from another Mac", Style::Bordered).clicked() {
+            super::sync::begin_open(app);
+        }
     }
+    ui.add_space(10.0);
+    ui.vertical_centered(|ui| {
+        if kit::small_button(ui, "Open a local vault file…", Style::Link).clicked() {
+            go(app, Step::Open);
+        }
+    });
     ui.add_space(10.0);
     ui.vertical_centered(|ui| {
         if kit::small_button(ui, "Restore from a backup…", Style::Link).clicked() {
             go(app, Step::Restore);
         }
     });
-    super::sync::start_link(app, ui);
 }
 
 /// Go to a start step with an empty name field.
+/// Go to a step. Its first field takes the focus (for a keyboard user).
 fn go(app: &mut DesktopApp, step: Step) {
     app.vault_list.name_input.clear();
     app.ui.start = step;
+    app.ui.focus_start_field = step != Step::Home;
+    if step == Step::Home {
+        app.ui.focus.focus_page_start();
+    }
 }
 
 /// Fill an empty path field with the default location.
@@ -179,8 +203,17 @@ fn create(app: &mut DesktopApp, ui: &mut egui::Ui) {
         None,
         Some("12 or more characters. A sentence of several words is strong and easy to remember."),
         |s| {
-            vaults::name_field(app, s, "vault-create-name", name_hint);
-            s.field("Passphrase", |ui| {
+            let name = vaults::name_field(app, s, "vault-create-name", name_hint);
+            if std::mem::take(&mut app.ui.focus_start_field) && kit::keyboard_mode(&ctx) {
+                name.request_focus();
+            }
+            // Return in a field goes on to the next one.
+            if enter_pressed(&name) {
+                ctx.memory_mut(|memory| {
+                    memory.request_focus(super::secret_field_id(VAULT_PASSPHRASE_FIELD));
+                });
+            }
+            let first = s.field("Passphrase", |ui| {
                 secure_input(
                     ui,
                     VAULT_PASSPHRASE_FIELD,
@@ -189,6 +222,11 @@ fn create(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     "Required",
                 )
             });
+            if enter_pressed(&first) {
+                ctx.memory_mut(|memory| {
+                    memory.request_focus(super::secret_field_id(VAULT_REPEAT_FIELD));
+                });
+            }
             let repeat = s.field("Repeat", |ui| {
                 secure_input(
                     ui,
@@ -221,16 +259,16 @@ fn create(app: &mut DesktopApp, ui: &mut egui::Ui) {
         kit::section(
             ui,
             None,
-            Some(
-                "Leave the field empty for the default folder. The Apassy sandbox profile closes it to agents. A vault in another folder is closed to agents that start after you create it.",
-            ),
+            Some("Leave the field empty to use the Apassy data folder."),
             |s| {
                 s.field("File", |ui| {
-                    kit::text_input(
+                    files::path_input(
                         ui,
+                        &mut app.files,
                         &mut app.owner_ui.create_path,
                         "vault-create-path",
                         &default,
+                        files::DialogKind::SaveVault,
                     )
                 });
             },
@@ -251,6 +289,11 @@ pub(super) fn create_vault(app: &mut DesktopApp, ctx: &egui::Context) {
     let (name, path) = match app.new_vault_target(&app.owner_ui.create_path, fallback) {
         Ok(target) => target,
         Err(message) => {
+            if app.vault_list.name_input.trim().is_empty() && fallback.is_none() {
+                // Keep the typed passphrases and return to the missing field.
+                app.ui.focus_start_field = true;
+                ctx.request_repaint();
+            }
             app.set_err(message);
             return;
         }
@@ -349,13 +392,16 @@ fn open(app: &mut DesktopApp, ui: &mut egui::Ui) {
         Some("A file in your vaults opens as it is. A new file gets the name."),
         |s| {
             let field = s.field("File", |ui| {
-                kit::text_input(
+                files::path_input(
                     ui,
+                    &mut app.files,
                     &mut app.owner_ui.open_path,
                     "vault-open-path",
                     "/Volumes/Work/work.db",
+                    files::DialogKind::OpenVault,
                 )
             });
+            first_field(app, &field);
             submit = enter_pressed(&field);
             let name = vaults::name_field(app, s, "vault-open-name", &name_hint);
             submit |= enter_pressed(&name);
@@ -404,21 +450,26 @@ pub(super) fn restore_form(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool {
             "The passphrase is the one of the backup. The restored vault is a new vault in your list. Leave the file empty for the default folder. Touch ID unlock stays off for the restored file.",
         ),
         |s| {
-            s.field("Backup file", |ui| {
-                kit::text_input(
+            let source = s.field("Backup file", |ui| {
+                files::path_input(
                     ui,
+                    &mut app.files,
                     &mut app.owner_ui.restore_source,
                     "vault-restore-source",
                     "/Volumes/Backup/apassy.backup",
+                    files::DialogKind::OpenBackup,
                 )
             });
+            first_field(app, &source);
             vaults::name_field(app, s, "vault-restore-name", &name_hint);
             s.field("New vault file", |ui| {
-                kit::text_input(
+                files::path_input(
                     ui,
+                    &mut app.files,
                     &mut app.owner_ui.restore_dest,
                     "vault-restore-dest",
                     &dest_hint,
+                    files::DialogKind::SaveVault,
                 )
             });
             let field = s.field("Passphrase", |ui| {
@@ -541,10 +592,12 @@ pub(super) fn draw_unlock_card(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 "Required",
             )
         });
-        if ctx.memory(|memory| memory.focused().is_none()) && app.owner.check.is_none() {
+        // Check Return before restoring focus. A single-line TextEdit surrenders
+        // focus on Return; requesting it again would hide that submit event.
+        submit = enter_pressed(&field);
+        if !submit && ctx.memory(|memory| memory.focused().is_none()) && app.owner.check.is_none() {
             field.request_focus();
         }
-        submit = enter_pressed(&field);
     });
     if kit::wide_button(ui, "Unlock", Style::Prominent).clicked() || submit {
         unlock_with_passphrase(app, &ctx);

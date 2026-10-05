@@ -46,6 +46,12 @@ Core contracts:
 cargo test --locked --test contracts
 ```
 
+iPhone companion, Swift client against the Rust listener over the loopback wire (needs macOS and Xcode 27, synthetic data only):
+
+```
+scripts/companion-interop.sh
+```
+
 Desktop model:
 
 ```

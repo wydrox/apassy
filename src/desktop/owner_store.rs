@@ -28,12 +28,12 @@ use crate::contracts::CredentialKind;
 use crate::desktop::model::{DetailDraft, ItemDraft, ModelError, ModelResult};
 use crate::vault::providers::{self, Suggestion};
 use crate::vault::{
-    AccessRequest, ActivityDecision, ActivityRecord, AgentSummary, AgentToken, Declaration,
-    Destination, EnvBinding, EnvDelivery, Environment, ExecGrant, ExecMode, ExecRule, Field,
-    GrantPlace, ItemDraft as VaultDraft, ItemEvent, ItemTimes, MAX_PASSPHRASE_BYTES,
-    MAX_PLACEHOLDER_HOSTS, MAX_TOKEN_LIFETIME_DAYS, MIN_PASSPHRASE_BYTES, Reversibility, RiskLevel,
-    Scope, SecretValue, SuggestionStats, Vault, VaultError, VaultErrorKind, checked_env_name,
-    parse_placeholder_host,
+    AccessRequest, ActivityDecision, ActivityRecord, AgentSummary, AgentToken, CompanionDevice,
+    CompanionSetting, Declaration, Destination, EnvBinding, EnvDelivery, Environment, ExecGrant,
+    ExecMode, ExecRule, Field, GrantPlace, ItemDraft as VaultDraft, ItemEvent, ItemTimes,
+    MAX_PASSPHRASE_BYTES, MAX_PLACEHOLDER_HOSTS, MAX_TOKEN_LIFETIME_DAYS, MIN_PASSPHRASE_BYTES,
+    Reversibility, RiskLevel, Scope, SecretValue, SuggestionStats, Vault, VaultError,
+    VaultErrorKind, checked_env_name, parse_placeholder_host,
 };
 
 const MAX_TAG_BYTES: usize = 64;
@@ -637,6 +637,31 @@ impl OwnerSession {
         self.slot().as_ref().map(|vault| vault.path().to_path_buf())
     }
 
+    /// The epoch of the unlocked vault session. A lock or an unlock changes it.
+    pub fn epoch(&self) -> Option<[u8; 32]> {
+        self.slot()
+            .as_ref()
+            .filter(|vault| !vault.is_locked())
+            .map(Vault::epoch)
+    }
+
+    /// The remembered patterns (ADR 0010).
+    pub fn patterns(&self) -> ModelResult<Vec<crate::vault::PatternRecord>> {
+        self.unlocked()?.patterns().map_err(map_err)
+    }
+
+    /// Remove a pattern. Matching runs ask the owner again. It takes authority away, so
+    /// it needs no owner check.
+    pub fn remove_pattern(&mut self, id: u64) -> ModelResult<()> {
+        self.unlocked()?.remove_pattern(id).map_err(map_err)
+    }
+
+    /// All decisions as JSON Lines (`docs/operations/learning.md`). They have commands
+    /// and user requests, but no secret value.
+    pub fn export_decisions(&self) -> ModelResult<String> {
+        self.unlocked()?.export_decisions_jsonl().map_err(map_err)
+    }
+
     pub fn search(&self, query: &str) -> ModelResult<Vec<OwnerSummary>> {
         let found = {
             let vault = self.unlocked()?;
@@ -878,6 +903,40 @@ impl OwnerSession {
             .set_token_lifetime_days(days)
             .map_err(map_err)?;
         Ok(days)
+    }
+
+    /// The companion setting and the epoch of the open vault session. The app starts the
+    /// listener for exactly this epoch.
+    pub fn companion_status(&self) -> ModelResult<(CompanionSetting, [u8; 32])> {
+        let vault = self.unlocked()?;
+        let setting = vault.companion_setting().map_err(map_err)?;
+        Ok((setting, vault.epoch()))
+    }
+
+    /// Turn the iPhone listener on or off. It needs no owner check: the setting gives no
+    /// authority, and every endpoint except pairing needs a paired device.
+    pub fn set_companion_enabled(&mut self, enabled: bool) -> ModelResult<()> {
+        self.unlocked()?
+            .set_companion_enabled(enabled)
+            .map_err(map_err)
+    }
+
+    /// The paired iPhones, oldest first.
+    pub fn companion_devices(&self) -> ModelResult<Vec<CompanionDevice>> {
+        self.unlocked()?.companion_devices().map_err(map_err)
+    }
+
+    /// Remove one paired iPhone. It needs no owner check: it only takes authority away.
+    pub fn remove_companion_device(&mut self, device_id: &str) -> ModelResult<bool> {
+        self.unlocked()?
+            .remove_companion_device(device_id)
+            .map_err(map_err)
+    }
+
+    /// Remove every paired iPhone and the certificate. It needs no owner check: it only
+    /// takes authority away.
+    pub fn reset_companion_pairing(&mut self) -> ModelResult<()> {
+        self.unlocked()?.reset_companion_pairing().map_err(map_err)
     }
 
     /// API key items that have a connector destination, with the operations of their profile.
@@ -1318,6 +1377,12 @@ impl OwnerSession {
     /// Archived items and the time of the archive.
     pub fn archived(&self) -> ModelResult<BTreeMap<u64, u64>> {
         self.unlocked()?.archived_items().map_err(map_err)
+    }
+
+    /// Verified conflict copies and their original item, when it still exists.
+    /// Restored copies retain the relation. Item titles do not establish it.
+    pub fn conflict_copies(&self) -> ModelResult<BTreeMap<u64, Option<u64>>> {
+        self.unlocked()?.conflict_copies().map_err(map_err)
     }
 
     /// When each item was added, changed, and used, for sorting.
@@ -1834,7 +1899,8 @@ fn require_path(path: &Path) -> ModelResult<()> {
 
 /// A folder must be an existing directory that is not the root. It is stored in its
 /// canonical form.
-fn checked_place(place: &GrantPlace) -> ModelResult<GrantPlace> {
+/// The place of a grant with a canonical, existing folder that is not `/`.
+pub(crate) fn checked_place(place: &GrantPlace) -> ModelResult<GrantPlace> {
     let GrantPlace::Folder(dir) = place else {
         return Ok(GrantPlace::AnyFolder);
     };

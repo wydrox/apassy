@@ -8,12 +8,25 @@
 mod activity;
 #[cfg(feature = "vault")]
 mod agents;
+#[cfg(all(test, feature = "vault"))]
+mod cli_tests;
+#[cfg(feature = "vault")]
+mod cli_tools;
+#[cfg(feature = "vault")]
+mod companion;
+#[cfg(all(test, feature = "vault"))]
+mod companion_tests;
 #[cfg(not(feature = "vault"))]
 mod demo;
+#[cfg(feature = "vault")]
+pub(crate) mod files;
+mod focus;
 #[cfg(feature = "vault")]
 pub(crate) mod import;
 #[cfg(feature = "vault")]
 mod items;
+#[cfg(all(test, feature = "vault"))]
+mod keyboard_tests;
 pub(crate) mod kit;
 #[cfg(feature = "vault")]
 mod owner_check_view;
@@ -193,6 +206,8 @@ pub(crate) struct UiState {
     toast_shown: Option<(u64, f64)>,
     /// The status message that the owner closed.
     toast_closed: u64,
+    /// Keyboard focus across sheets and pages.
+    pub(crate) focus: focus::FocusState,
     /// Open disclosure groups.
     #[cfg_attr(not(feature = "vault"), allow(dead_code))]
     expanded: BTreeSet<String>,
@@ -211,6 +226,22 @@ pub(crate) struct UiState {
     /// ⌘F: the search field takes the focus in the next frame.
     #[cfg(feature = "vault")]
     pub(crate) focus_search: bool,
+    /// The Name field of the add form takes the focus in the next frame, after the
+    /// owner picked a kind with the keyboard.
+    #[cfg(feature = "vault")]
+    pub(crate) focus_form_name: bool,
+    #[cfg(feature = "vault")]
+    pub(crate) discard_item_changes: bool,
+    #[cfg(feature = "vault")]
+    pub(crate) discard_item_kind_change: bool,
+    #[cfg(feature = "vault")]
+    pub(crate) setup_host: usize,
+    /// The newly adopted vault whose local agent setup is still offered.
+    #[cfg(feature = "vault")]
+    pub(crate) setup_vault: Option<String>,
+    /// The first field of a start screen takes the focus, after a step change.
+    #[cfg(feature = "vault")]
+    pub(crate) focus_start_field: bool,
     /// The form of a grant for several credentials or of an access request.
     #[cfg(feature = "vault")]
     pub(crate) grant: agents::GrantForm,
@@ -287,6 +318,9 @@ pub(crate) enum Sheet {
     /// Import from 1Password.
     #[cfg(feature = "vault")]
     Import,
+    /// Remove every paired iPhone and make a new certificate (ADR 0020).
+    #[cfg(feature = "vault")]
+    ResetCompanion,
 }
 
 pub(crate) fn apply_style(ctx: &egui::Context) {
@@ -295,10 +329,17 @@ pub(crate) fn apply_style(ctx: &egui::Context) {
 
 pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
+    focus::begin_frame(&mut app.ui.focus, &ctx);
     #[cfg(feature = "vault")]
     {
         app.poll_owner_flows(&ctx);
         app.poll_sync(&ctx);
+        if let Some(id) = app.sync.adopted_vault.take() {
+            app.ui.setup_vault = Some(id);
+        }
+        if app.ui.setup_vault.as_ref() != app.vault_list.current.as_ref() {
+            app.ui.setup_vault = None;
+        }
         close_sheet_after_check(app);
         let session = &app.owner_ui.session;
         if !session.has_file() || session.is_locked() {
@@ -316,11 +357,18 @@ pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     draw_toast(app, &ctx);
     #[cfg(feature = "vault")]
     owner_check_view::draw(app, &ctx);
+    focus::end_frame(&mut app.ui.focus, &ctx);
 }
 
 /// Close the sheet. Typed secrets of its form and their undo history are erased.
 pub(crate) fn close_sheet(app: &mut DesktopApp, ctx: &egui::Context) {
     let _ = ctx;
+    #[cfg(feature = "vault")]
+    {
+        app.ui.discard_item_changes = false;
+        app.ui.discard_item_kind_change = false;
+        app.files.forget();
+    }
     #[cfg(feature = "vault")]
     match app.ui.sheet.take() {
         Some(Sheet::AddItem { .. }) => {
@@ -428,7 +476,12 @@ fn draw_toast(app: &mut DesktopApp, ctx: &egui::Context) {
         StatusKind::Error => kit::Tone::Critical,
         StatusKind::Neutral => kit::Tone::Accent,
     };
-    if kit::toast(ctx, &app.status_text, tone, opacity, error) {
+    // Escape closes an error message when no sheet or menu is open.
+    let escape = error
+        && ctx.memory(|memory| memory.top_modal_layer()).is_none()
+        && !egui::Popup::is_any_open(ctx)
+        && ctx.input(|input| input.key_pressed(egui::Key::Escape));
+    if kit::toast(ctx, &app.status_text, tone, opacity, error) || escape {
         app.ui.toast_closed = app.status_seq;
     }
 }
@@ -596,6 +649,26 @@ mod tests {
         (app, item.id)
     }
 
+    #[cfg(feature = "vault")]
+    #[test]
+    fn adoption_next_steps_belong_only_to_the_adopted_unlocked_vault() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let mut app = app_with_vault(&dir);
+        app.vault_list.current = Some("adopted-test-vault".to_owned());
+        app.sync.adopted_vault = app.vault_list.current.clone();
+        let (text, _) = draw_frames(&mut app, DEFAULT_SIZE, 3);
+        assert!(text.contains("Use this vault on this Mac"), "{text}");
+        assert!(app.sync.adopted_vault.is_none());
+        app.owner_ui.session.lock().expect("lock");
+        let (locked, _) = draw_frames(&mut app, DEFAULT_SIZE, 3);
+        assert!(!locked.contains("Use this vault on this Mac"), "{locked}");
+        app.owner_ui.session.unlock(UI_PASS).expect("unlock");
+        app.vault_list.current = Some("another-vault".to_owned());
+        let (other, _) = draw_frames(&mut app, DEFAULT_SIZE, 3);
+        assert!(app.ui.setup_vault.is_none());
+        assert!(!other.contains("Use this vault on this Mac"), "{other}");
+    }
+
     /// A proof after a passed passphrase check (goal item A4).
     #[cfg(feature = "vault")]
     fn owner_ok(
@@ -611,12 +684,14 @@ mod tests {
     #[test]
     fn start_screen_without_a_file_offers_create_and_open() {
         let mut app = DesktopApp::new();
+        app.sync.offered = true;
         let (text, shape_count) = draw_frames(&mut app, DEFAULT_SIZE, 3);
         assert!(shape_count > 0);
         for expected in [
             "Welcome to Apassy",
-            "Create a new vault",
-            "Open an existing vault",
+            "Create my first vault",
+            "Use a vault from another Mac",
+            "Open a local vault file",
             "Restore from a backup",
         ] {
             assert!(text.contains(expected), "missing {expected}: {text}");

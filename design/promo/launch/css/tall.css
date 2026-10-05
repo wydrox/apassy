@@ -1,0 +1,50 @@
+/* The 9:16 version (?format=tall, 1080×1920): only what differs from the wide layout.
+   Content stays between y 250 and 1500, clear of the Reels and TikTok overlays. */
+
+/* Hook */
+.tall .envwin .tbody { font-size: 26px; padding: 24px 34px; }
+.tall .scanbar { height: 46px; }
+.tall .danger { width: 940px; padding: 26px 34px 30px; }
+.tall .danger .lbl { font-size: 28px; }
+.tall .danger .ln { font-size: 26px; }
+.tall .meet { top: 890px; }
+
+/* Reveal and outro */
+.tall .tagline { font-size: 50px; line-height: 1.22; }
+
+/* Placeholder: the diagram runs top to bottom; the two hosts share a row. */
+.tall .svc .nh, .tall .evil .nh { font-size: 26px; }
+.tall .svc .nh svg, .tall .evil .nh svg { width: 26px; height: 26px; }
+.tall .svc .nl, .tall .evil .nl { font-size: 20px; }
+.tall .svc .d2, .tall .evil .d2 { font-size: 18px; }
+.tall .proxy .plabel { top: 58px; left: 172px; width: 260px; text-align: left; }
+
+/* Bouncer: the gate at the top, the lanes as rows below it. */
+.tall .gatebeam { left: 799px; top: 470px; height: 240px; }
+.tall .gate { left: 736px; top: 526px; }
+.tall .lane { left: 90px; width: 900px; height: 170px; border-radius: 26px; }
+.tall .lane .lh { top: 20px; font-size: 28px; }
+.tall .lane .lc { font-size: 72px; bottom: 14px; }
+
+/* Vault and Learning chips */
+.tall .bigchip { font-size: 29px; padding: 16px 28px 16px 22px; }
+.tall .bigchip .ci, .tall .bigchip .ci svg { width: 30px; height: 30px; }
+
+/* Proof: the two numbers stacked; the agents above and below the icon. */
+.tall .eyebrow { top: 300px; }
+.tall .stat .big { font-size: 250px; }
+.tall .vdiv { left: 290px; top: 829px; width: 500px; height: 2px;
+  background: linear-gradient(90deg, rgba(210,210,215,0), #d2d2d7 22%, #d2d2d7 78%, rgba(210,210,215,0)); }
+.tall .hub { left: 465px; top: 820px; }
+.tall .agentchip { top: 598px; }
+.tall .agentchip + .agentchip { top: 1108px; }
+.tall .link { left: 539px; top: 682px; width: 2px; height: 138px; transform-origin: 50% 0; }
+.tall .link.r { left: 539px; top: 970px; width: 2px; height: 138px; transform-origin: 50% 0; }
+.tall .linklab { left: 562px; top: 736px; width: 220px; text-align: left; }
+.tall .linklab.r { left: 562px; top: 1024px; }
+.tall .pbadges { top: 1268px; left: 90px; width: 900px; flex-wrap: wrap; gap: 14px; }
+
+/* Outro: a larger button and line for a phone screen. */
+.tall .cta { height: 86px; padding: 0 42px 0 34px; font-size: 36px; }
+.tall .cta svg { width: 30px; height: 30px; }
+.tall .ctasub { font-size: 29px; }

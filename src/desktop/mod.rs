@@ -4,6 +4,8 @@
 //! channel, or verified isolation boundary.
 
 #[cfg(feature = "vault")]
+mod companion;
+#[cfg(feature = "vault")]
 pub mod inbox;
 #[cfg(feature = "vault")]
 mod learning_ui;
@@ -12,6 +14,10 @@ pub mod model;
 pub mod notify;
 #[cfg(feature = "vault")]
 pub mod owner_check;
+#[cfg(feature = "vault")]
+pub(crate) mod owner_cli;
+#[cfg(feature = "vault")]
+pub(crate) mod owner_socket;
 #[cfg(feature = "vault")]
 pub mod owner_store;
 mod ui;
@@ -133,6 +139,8 @@ pub struct DesktopApp {
     /// a lock.
     #[cfg(feature = "vault")]
     pub(crate) import: ui::import::ImportState,
+    #[cfg(feature = "vault")]
+    pub(crate) files: ui::files::FilePickerState,
     /// Update checks, downloads, and the installer (ADR 0015). Idle until the window
     /// starts it.
     #[cfg(feature = "vault")]
@@ -140,6 +148,12 @@ pub struct DesktopApp {
     /// Sync of the vaults through a folder (ADR 0014).
     #[cfg(feature = "vault")]
     pub(crate) sync: ui::sync::SyncUiState,
+    /// The owner socket and the command-line sessions (ADR 0017).
+    #[cfg(feature = "vault")]
+    pub(crate) cli: owner_cli::CliHost,
+    /// The iPhone listener and the pairing state of Settings > iPhone companion (ADR 0020).
+    #[cfg(feature = "vault")]
+    pub(crate) companion: companion::CompanionFlows,
     styled: bool,
 }
 
@@ -192,9 +206,14 @@ impl DesktopApp {
             #[cfg(feature = "vault")]
             import: ui::import::ImportState::default(),
             #[cfg(feature = "vault")]
+            files: Default::default(),
+            #[cfg(feature = "vault")]
             updates: update::Updater::idle(),
             #[cfg(feature = "vault")]
             sync: ui::sync::SyncUiState::default(),
+            #[cfg(feature = "vault")]
+            cli: owner_cli::CliHost::default(),
+            companion: companion::CompanionFlows::default(),
             styled: false,
         }
     }
@@ -214,6 +233,7 @@ impl DesktopApp {
             app.load_vault_list(crate::paths::data_dir(), true);
             app.open_last_vault(Some(&cc.egui_ctx));
             app.start_updates(&cc.egui_ctx);
+            app.start_cli(&crate::owner::client::default_socket_path(), &cc.egui_ctx);
         }
         app
     }
@@ -230,14 +250,17 @@ impl DesktopApp {
         };
     }
 
-    /// End every agent run that waits for the owner (goal item V3). Call it after a
-    /// lock, backup, restore, open, or passphrase change. The broker also ends such a
-    /// run when it sees the vault epoch change. This call makes the card go away at once.
+    /// End every agent run that waits for the owner (goal item V3), and stop the iPhone
+    /// listener. Call it after a lock, backup, restore, open, or passphrase change. The
+    /// broker also ends such a run when it sees the vault epoch change. This call makes
+    /// the card go away at once. The listener starts again for the new vault session, in
+    /// the next frame, when the setting is on and the vault is unlocked.
     #[cfg(feature = "vault")]
-    pub(crate) fn end_waiting_runs(&self) {
+    pub(crate) fn end_waiting_runs(&mut self) {
         if let BrokerState::Running(handle) = &self.broker {
             handle.approvals().invalidate_all();
         }
+        self.stop_companion();
     }
 
     pub fn model(&self) -> &DesktopModel {
@@ -371,6 +394,15 @@ impl eframe::App for DesktopApp {
             self.shut_down();
             self.finish_updates();
         }
+    }
+
+    /// eframe calls this each frame, and also while the window is hidden or minimized.
+    /// So the command line gets its answer without a visible window.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(feature = "vault")]
+        self.poll_cli(ctx);
+        #[cfg(not(feature = "vault"))]
+        let _ = ctx;
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {

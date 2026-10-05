@@ -42,6 +42,11 @@ pub(super) enum Probe {
 
 /// Whether the folder exists: `None` when it does, else `NoFolder` or `Unavailable`.
 pub(super) fn folder_missing(folder: &Path) -> Result<Option<Probe>, SyncError> {
+    let folder = folder.to_owned();
+    super::directory::read(move || folder_missing_inner(&folder))
+}
+
+fn folder_missing_inner(folder: &Path) -> Result<Option<Probe>, SyncError> {
     match fs::metadata(folder) {
         Ok(meta) if meta.is_dir() => Ok(None),
         Ok(_) => Err(SyncError::FolderUnavailable),
@@ -59,7 +64,14 @@ pub(super) fn folder_missing(folder: &Path) -> Result<Option<Probe>, SyncError> 
 
 /// Look up `name` in `folder`.
 pub(super) fn probe(folder: &Path, name: &str) -> Result<Probe, SyncError> {
-    if let Some(missing) = folder_missing(folder)? {
+    let folder = folder.to_owned();
+    let name = name.to_owned();
+    super::directory::read(move || probe_inner(&folder, &name))
+}
+
+/// For a caller that already runs on the bounded read worker.
+pub(super) fn probe_inner(folder: &Path, name: &str) -> Result<Probe, SyncError> {
+    if let Some(missing) = folder_missing_inner(folder)? {
         return Ok(missing);
     }
     let path = folder.join(name);
@@ -181,7 +193,12 @@ pub struct FolderEntry {
 /// is listed with `downloaded: false`. A missing folder whose parent exists gives an
 /// empty list; a folder that is not available gives `FolderUnavailable`.
 pub fn list_folder_vaults(folder: &Path) -> Result<Vec<FolderEntry>, SyncError> {
-    match folder_missing(folder)? {
+    let folder = folder.to_owned();
+    super::directory::read(move || list_folder_vaults_inner(&folder))
+}
+
+fn list_folder_vaults_inner(folder: &Path) -> Result<Vec<FolderEntry>, SyncError> {
+    match folder_missing_inner(folder)? {
         Some(Probe::Unavailable) => return Err(SyncError::FolderUnavailable),
         Some(_) => return Ok(Vec::new()),
         None => {}
@@ -226,9 +243,7 @@ pub fn list_folder_vaults(folder: &Path) -> Result<Vec<FolderEntry>, SyncError> 
 
 /// The iCloud duplicates of `name` in `folder` (`<stem> 2.apassy`, ...), sorted.
 pub(super) fn duplicates_of(folder: &Path, name: &str) -> Result<Vec<String>, SyncError> {
-    let Ok(read) = fs::read_dir(folder) else {
-        return Ok(Vec::new());
-    };
+    let read = fs::read_dir(folder).map_err(|_| SyncError::Io)?;
     let mut found = Vec::new();
     for dir_entry in read {
         let dir_entry = dir_entry.map_err(|_| SyncError::Io)?;
@@ -299,6 +314,15 @@ pub(super) fn icloud_drive(home: &Path) -> PathBuf {
 /// services), and `~/Dropbox`. Only folders that exist count. Each result is the Apassy
 /// folder inside.
 pub fn detect_folders_in(home: &Path) -> Vec<SyncFolder> {
+    try_detect_folders_in(home).unwrap_or_default()
+}
+
+pub(super) fn try_detect_folders_in(home: &Path) -> Result<Vec<SyncFolder>, SyncError> {
+    let home = home.to_owned();
+    super::directory::read(move || detect_folders_in_inner(&home))
+}
+
+fn detect_folders_in_inner(home: &Path) -> Result<Vec<SyncFolder>, SyncError> {
     let mut found = Vec::new();
     let icloud = icloud_drive(home);
     if icloud.is_dir() {
@@ -308,14 +332,19 @@ pub fn detect_folders_in(home: &Path) -> Vec<SyncFolder> {
         });
     }
     let storage = home.join("Library").join("CloudStorage");
-    let mut providers: Vec<PathBuf> = fs::read_dir(&storage)
-        .map(|dir| {
-            dir.filter_map(Result::ok)
-                .map(|entry| entry.path())
-                .filter(|path| path.is_dir())
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut providers = Vec::new();
+    match fs::read_dir(&storage) {
+        Ok(entries) => {
+            for entry in entries {
+                let path = entry.map_err(|_| SyncError::Io)?.path();
+                if path.is_dir() {
+                    providers.push(path);
+                }
+            }
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(_) => return Err(SyncError::Io),
+    }
     providers.sort();
     for root in providers {
         let Some(name) = root.file_name().and_then(|name| name.to_str()) else {
@@ -344,7 +373,7 @@ pub fn detect_folders_in(home: &Path) -> Vec<SyncFolder> {
             path: dropbox.join(FOLDER_NAME),
         });
     }
-    found
+    Ok(found)
 }
 
 /// The owner label and the service of a `~/Library/CloudStorage` folder name.
@@ -373,6 +402,24 @@ fn provider_label(name: &str) -> (String, &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_directory_scans_do_not_report_empty_success() {
+        let home = tempfile::tempdir().expect("home");
+        let library = home.path().join("Library");
+        fs::create_dir(&library).expect("library");
+        let invalid_folder = library.join("CloudStorage");
+        fs::write(&invalid_folder, b"not a directory").expect("invalid folder");
+        assert_eq!(
+            duplicates_of(&invalid_folder, "Synthetic.apassy"),
+            Err(SyncError::Io)
+        );
+        assert_eq!(try_detect_folders_in(home.path()), Err(SyncError::Io));
+        assert_eq!(
+            list_folder_vaults(&invalid_folder),
+            Err(SyncError::FolderUnavailable)
+        );
+    }
 
     #[test]
     fn cloud_file_names_are_safe_and_do_not_look_like_duplicates() {

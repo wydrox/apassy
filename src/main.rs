@@ -1,6 +1,7 @@
-//! Native desktop entry for Apassy.
+//! Native desktop entry for Apassy, and the `apassy` owner command line (ADR 0017).
 //!
-//! This binary is a demo shell. It does not read or print secrets.
+//! Without arguments, it opens the window. With a command, it talks to the running
+//! window over the owner socket. It never prints a secret value of an item.
 
 use rustix::process::{Resource, Rlimit, setrlimit};
 
@@ -37,8 +38,8 @@ fn main() -> eframe::Result {
     if args.len() == 2 && args[0] == "--notify-check" {
         std::process::exit(apassy::native::check::run_notify_check(&args[1]));
     }
-    eprintln!("Unknown option. Permitted options: --smoke-test, --notify-check STEP");
-    std::process::exit(2);
+    // Every other argument list is a command of the owner command line.
+    std::process::exit(apassy::cli::run(args));
 }
 
 /// Set the soft and the hard core file size limit to 0. Child processes, such as

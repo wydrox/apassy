@@ -1,0 +1,64 @@
+:root {
+  --sans: -apple-system, "SF Pro Display", system-ui, sans-serif;
+  --text: -apple-system, "SF Pro Text", system-ui, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  /* Light, as on apple.com: one canvas, white surfaces, one accent (the blue of the logo). */
+  --canvas: #f5f5f7;
+  --ink: #0e1820;
+  --ink2: #3a3a3c;
+  --gray: #6e6e73;
+  --gray2: #86868b;
+  --line: #d2d2d7;
+  --blue: #0a77fe;
+  --blue-text: #0066cc;
+  --green: #34c759;
+  --green-text: #1f7a36;
+  --orange: #ff9500;
+  --orange-text: #b64400;
+  --red: #ff3b30;
+  --red-text: #d70015;
+  --card-shadow: 0 0 0 1px rgba(0,0,0,.05), 0 2px 6px rgba(0,0,0,.04), 0 16px 40px rgba(0,0,0,.08);
+  --W: 1920px; /* the stage; main.js sets the size of the format */
+  --H: 1080px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: var(--W); height: var(--H); overflow: hidden; background: var(--canvas); }
+#stage {
+  position: relative; width: var(--W); height: var(--H); overflow: hidden;
+  font-family: var(--sans); color: var(--ink); background: var(--canvas);
+  -webkit-font-smoothing: antialiased; text-rendering: geometricPrecision;
+  transform-origin: 0 0;
+}
+#content { position: absolute; left: 0; top: 0; width: var(--W); height: var(--H); z-index: 5; transform-origin: 50% 50%; }
+.scene { position: absolute; left: 0; top: 0; width: var(--W); height: var(--H); }
+.abs { position: absolute; }
+.mono { font-family: var(--mono); }
+
+/* Headlines: SF Pro Display semibold, solid colors. */
+.hx {
+  position: absolute; left: 0; width: var(--W); text-align: center;
+  font-weight: 600; letter-spacing: -0.022em; line-height: 1.08; white-space: nowrap;
+  color: var(--ink);
+}
+.hx .w, .hx .c { display: inline-block; transform-origin: 50% 80%; }
+.hx .hl { color: var(--blue); }
+.hx .dim { color: var(--gray2); }
+.hx .red { color: var(--red); }
+.hx .green { color: var(--green-text); }
+.hx .orange { color: var(--orange); }
+.mask { display: inline-block; overflow: hidden; vertical-align: bottom; padding: 0 .05em .12em; margin: 0 -.05em -.12em; }
+.mask > .w { display: inline-block; }
+
+/* The logo lockup (logo.js). */
+.lockup { position: absolute; left: 0; top: 0; }
+.lockup svg { display: block; overflow: visible; }
+.appicon { display: block; }
+
+/* Preview controls (not in capture). */
+#ctl {
+  position: fixed; left: 0; right: 0; bottom: 0; height: 44px; z-index: 1000;
+  display: flex; align-items: center; gap: 12px; padding: 0 14px;
+  background: rgba(20,20,24,.92); color: #ddd; font: 13px/1 -apple-system, system-ui;
+}
+#ctl input[type=range] { flex: 1; }
+#ctl button { font: inherit; padding: 4px 10px; border-radius: 6px; border: 1px solid #555; background: #2a2a2e; color: #eee; }

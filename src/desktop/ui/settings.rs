@@ -26,7 +26,9 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     super::import::section(app, ui);
     agents_section(app, ui);
     notifications_section(app, ui);
+    super::companion::draw(app, ui);
     broker_section(app, ui);
+    command_line_section(app, ui);
     shortcuts_section(ui);
     super::updates::section(app, ui);
     kit::section(ui, Some("About"), None, |s| {
@@ -62,7 +64,7 @@ fn vault_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 kit::text(path, Font::MonoSmall).color(kit::SECONDARY),
             );
             lock = s
-                .clickable_row(|ui| {
+                .clickable_row("Lock now", |ui| {
                     ui.label(kit::text("Lock now", Font::Body).color(kit::ACCENT_TEXT));
                 })
                 .clicked();
@@ -143,17 +145,26 @@ fn unlock_method(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 "Touch ID setup, backup restore, and recovery need the passphrase. A fingerprint change turns Touch ID unlock off.",
             );
             ui.horizontal(|ui| {
-                ui.scope(|ui| {
-                    ui.set_max_width(220.0);
-                    secure_input(
-                        ui,
-                        TOUCH_ID_SETUP_FIELD,
-                        &mut app.owner.unlock.setup_passphrase,
-                        PASSPHRASE_CAPACITY,
-                        "Passphrase",
-                    );
+                let field = ui
+                    .scope(|ui| {
+                        ui.set_max_width(220.0);
+                        secure_input(
+                            ui,
+                            TOUCH_ID_SETUP_FIELD,
+                            &mut app.owner.unlock.setup_passphrase,
+                            PASSPHRASE_CAPACITY,
+                            "Passphrase",
+                        )
+                    })
+                    .inner;
+                ctx.accesskit_node_builder(field.id, |node| {
+                    node.set_label("Passphrase for Touch ID unlock");
                 });
-                if kit::small_button(ui, "Turn on Touch ID unlock", Style::Bordered).clicked() {
+                let submit =
+                    field.lost_focus() && ctx.input(|input| input.key_pressed(egui::Key::Enter));
+                if kit::small_button(ui, "Turn on Touch ID unlock", Style::Bordered).clicked()
+                    || submit
+                {
                     app.start_touch_id_setup(&ctx);
                 }
             });
@@ -220,7 +231,9 @@ fn agents_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 &placeholder,
             );
             ui.label(kit::text("days (1 to 365)", Font::Body).color(kit::SECONDARY));
-            save = kit::small_button(ui, "Save", Style::Bordered).clicked();
+            // Return in the field saves, as the button does.
+            save = kit::small_button(ui, "Save", Style::Bordered).clicked()
+                || (field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)));
             field
         });
     });
@@ -322,25 +335,33 @@ fn shortcuts_section(ui: &mut egui::Ui) {
         ui,
         Some("Keyboard shortcuts"),
         Some(
-            "⌘H is the macOS shortcut for \"Hide Apassy\". The app menu takes it before the window, so showing values uses ⌘⇧H.",
+            "⌘H is the macOS shortcut for \"Hide Apassy\". The app menu takes it before the window, so showing values uses ⌘⇧H. The page scrolls to the focused control, and a closed sheet gives the focus back to the control that opened it.",
         ),
         |s| {
             for (keys, action) in [
+                ("⌘1 ⌘2 ⌘3 ⌘4", "Credentials, Agents, Activity, Learning"),
+                ("⌘,", "Settings"),
+                ("⌘[", "Back to the list"),
                 ("⌘N", "New credential"),
                 ("⌘F", "Search credentials"),
-                ("⌘S", "Save the open sheet"),
+                ("⌘L", "Lock the vault"),
+                ("Return, ⌘S", "The default action of the open sheet"),
                 (
                     "⌘⇧H",
                     "Show or hide the secret values of the open credential",
                 ),
                 ("Tab, ⇧Tab", "Move to the next or the previous control"),
+                ("← → ↑ ↓", "Move to the nearest control"),
                 (
                     "Space",
                     "Press the control, or select the next option of a picker",
                 ),
-                ("← →", "Select the previous or the next option of a picker"),
-                ("Return", "Confirm a passphrase field"),
-                ("Esc", "Close the sheet"),
+                ("← → on a picker", "Select the previous or the next option"),
+                (
+                    "Page Up, Page Down, Home, End",
+                    "Scroll the page or the sheet",
+                ),
+                ("Esc", "Close the sheet, a menu, or an error message"),
             ] {
                 s.labeled(action, kit::text(keys, Font::Mono).color(kit::SECONDARY));
             }
@@ -398,6 +419,71 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             }
         },
     );
+}
+
+/// The owner command line (ADR 0017).
+fn command_line_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    let open = app.cli_sessions_open();
+    let mut end = false;
+    let mut install = false;
+    kit::section(
+        ui,
+        Some("Command line"),
+        Some(
+            "The apassy command talks to this window. apassy login asks you here first. Commands never show a secret value, and grants, approvals, and new tokens ask you here each time.",
+        ),
+        |s| {
+            s.row(|ui| {
+                install = kit::button(ui, "Install CLI tools", Style::Bordered).clicked();
+            });
+            s.row(|ui| {
+                kit::note(ui, "Install links in ~/.local/bin. Existing commands are not replaced. Then run these commands in Terminal:");
+                kit::code_block(ui, "export PATH=\"$HOME/.local/bin:$PATH\"\neval \"$(apassy login)\"\napassy doctor", 3);
+                kit::note(ui, "The PATH command applies to this terminal session. Add it to ~/.zshrc to use the tools in each new terminal.");
+            });
+            match (app.cli.socket_path(), app.cli.problem.as_deref()) {
+                (Some(path), _) => s.labeled(
+                    "Socket",
+                    kit::text(path.display().to_string(), Font::MonoSmall).color(kit::SECONDARY),
+                ),
+                (None, Some(problem)) => s.labeled(
+                    "Socket",
+                    kit::text(problem, Font::Callout).color(Tone::Critical.text()),
+                ),
+                (None, None) => s.labeled(
+                    "Socket",
+                    kit::text("Starts with the desktop window", Font::Callout)
+                        .color(kit::SECONDARY),
+                ),
+            }
+            let sessions = match open {
+                0 => "None open".to_owned(),
+                1 => "1 open".to_owned(),
+                count => format!("{count} open"),
+            };
+            s.labeled(
+                "Sessions",
+                kit::text(sessions, Font::Callout).color(kit::SECONDARY),
+            );
+            if open > 0 {
+                s.row(|ui| {
+                    end = kit::small_button(ui, "End all sessions", Style::Bordered).clicked();
+                });
+            }
+        },
+    );
+    if install {
+        match super::cli_tools::install() {
+            Ok(()) => app.set_ok(
+                "CLI tools are installed in ~/.local/bin. Run the commands below in Terminal.",
+            ),
+            Err(error) => app.set_err(error),
+        }
+    }
+    if end {
+        app.end_cli_sessions();
+        app.set_ok("Every command-line session ended.");
+    }
 }
 
 // ---- Sheets. ----
@@ -511,11 +597,13 @@ pub(super) fn backup_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
             Some("Keep the backup in a safe place, for example on an external disk."),
             |s| {
                 let field = s.field("Backup file", |ui| {
-                    kit::text_input(
+                    super::files::path_input(
                         ui,
+                        &mut app.files,
                         &mut app.owner_ui.backup_path,
                         "vault-backup-path",
                         "/Volumes/Backup/apassy.backup",
+                        super::files::DialogKind::SaveBackup,
                     )
                 });
                 backup = field.lost_focus()

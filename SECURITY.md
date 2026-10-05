@@ -41,6 +41,7 @@ Apassy makes these promises. A way to break one of them is a vulnerability.
 | A notification shows the agent name and the event type only. No command, request, or value. | [Goal](docs/goal.md) N2 |
 | No secret value, placeholder, or proxy password appears in the activity log, the decision log, the run answer, or the MCP output. | [ADR 0011](docs/adr/0011-run-proxy-placeholders.md) §5 |
 | The vault at rest is one SQLCipher file. Without the passphrase, its content is not readable. Key material is not left in a file. | [Vault verification](docs/operations/vault-verification.md), [Key memory](docs/reviews/key-memory.md) |
+| The iPhone companion listener answers only paired devices. A request needs a valid signature, a fresh time, and a new nonce. Pairing needs a 6-digit code that only the iPhone shows and a fresh owner check on the Mac. An approval from the iPhone is a signature of its approval key, made with Face ID, over the run exactly as the Mac showed it. The listener refuses a connection from the Mac itself. It runs only while the setting is on and the vault is unlocked, and a lock stops it. | [ADR 0020](docs/adr/0020-iphone-companion.md), [Companion](docs/operations/companion.md) |
 | The published `Apassy.dmg` and every program in it are signed with the Developer ID and notarized. | [Release](docs/operations/release.md) |
 
 Also in scope: an injection through the purpose, the user request, a command, or a tool output that changes a decision the documents say cannot change, and a dependency or build step that does not match what the documents say.
@@ -53,6 +54,7 @@ These are recorded. A report that only restates one of them gets a pointer to th
 - Seatbelt does not protect memory, the clipboard, or processes outside the profile. Apple marks `sandbox-exec` as deprecated. A program that the owner starts later outside the profile, for example from a git hook or a Makefile that a sandboxed process wrote, is not confined. See [Isolation](docs/operations/isolation.md) §4.
 - A program that needs the real value (a signed request such as AWS SigV4, a database protocol, HTTP/2 only, a value the program uses itself) gets it when the owner selects real value mode. The proxy does not protect that mode.
 - The bouncer is a classifier. A miss on a command it has not seen is a quality problem, not a vulnerability, unless it breaks a promise above. Report it as a normal issue with the synthetic command and the expected decision. The evaluation sets are in [docs/evaluation](docs/evaluation).
+- The iPhone companion adds a network surface while its setting is on and the vault is unlocked: it answers on every network the Mac joins. The iPhone shows commands to whoever holds it unlocked, and an unlocked iPhone can deny runs. There is no push notification and no access away from the local network. See [Companion](docs/operations/companion.md), section 8.
 - An attacker who controls the owner account, the Mac, or the trusted agent host. See [Product vision](docs/product-vision-v1.md) §4.
 - Linux has no network rule for the run proxy yet. The codebase does not build for Windows.
 

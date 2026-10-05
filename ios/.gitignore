@@ -1,0 +1,8 @@
+# Build output, Xcode user data, and Swift package state.
+.build/
+.swiftpm/
+DerivedData/
+build/
+xcuserdata/
+*.xcuserstate
+.DS_Store

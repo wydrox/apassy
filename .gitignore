@@ -5,6 +5,10 @@
 *.pem
 *.key
 /target/
+# Local test evidence, app archives, and synthetic vaults.
+/output/
+# Swift package build products can remain after a branch change.
+**/.build/
 # Local Wrangler state of a run at the repository root.
 /.wrangler/
 # The promo renders and their tools: the sources are in git, the output is not.

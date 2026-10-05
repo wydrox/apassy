@@ -1,0 +1,15 @@
+/* The shorts (index.html?film=3am). Scoped by film, so the launch film is untouched. */
+
+/* 3:07am: the night is the dark side of the same system; the morning is the light one. */
+.film-3am .scene-night .hx { color: #f5f5f7; }
+.film-3am .scene-night .hx .dim { color: #8e8e93; }
+.film-3am .scene-night .hx.sub { color: #a1a1a6; letter-spacing: -0.012em; }
+.film-3am .scene-morning .hx .dim { color: var(--gray); }
+.film-3am .term { box-shadow: 0 0 0 1px rgba(255,255,255,.07), 0 30px 80px rgba(0,0,0,.55); }
+.s3term .tbody { font-size: 36px; line-height: 1.6; padding: 20px 26px; }
+.feed .s3term .tbody { font-size: 31px; }
+.s3notif { background: rgba(44,44,46,.95); color: #f5f5f7;
+  box-shadow: 0 0 0 .5px rgba(255,255,255,.14), 0 18px 50px rgba(0,0,0,.55); }
+.s3notif .tx b { color: #fff; }
+.s3notif .tx .when { color: #98989d; }
+.feed.film-3am .tagline { font-size: 44px; }

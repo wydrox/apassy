@@ -36,7 +36,7 @@ With an unlocked vault, the sidebar has these views:
 | Agents | The list with the token state. "Register" opens a sheet, then the token sheet shows the token and the MCP configuration one time. The agent page has the token expiry, "Rotate token…", "What it can see" (switch "All credentials, without values"), "Process access" for each credential with a variable and "Give access to several credentials…", "API operations" as switches, "Recent requests" (the access log of the agent), and "Revoke agent…". A process grant works in "This folder" or "Any folder" ([ADR 0012](../adr/0012-agent-visibility-and-access-requests.md)). |
 | Activity | "Access requests" of agents with "Give access…" and "Deny", then "Waiting for you" with an approval card for each waiting run, then "Inbox" and "All requests". The sidebar count has the waiting runs and the open requests. |
 | Learning | Three figures for the last 7 days, the ask rate chart for 14 days with the 10% goal line, the automatic decisions, and the remembered patterns. "Advanced" has the calibration and the candidate model. |
-| Settings | Vault file and "Lock now", "Vaults" (each vault with its file, "Open", "Rename…", "Remove from list…", "New vault…", "Open vault file…", and Sync: the folder of each vault (Off, iCloud Drive, the detected folders, "Choose folder…"), its status, "Sync now", "Turn off…", and "Open a synced vault…"; [sync](sync.md)), "Change passphrase", the unlock method, backup and restore, the token lifetime, notifications, the broker and bouncer state, and Updates ([updates](updates.md)). |
+| Settings | Vault file and "Lock now", "Vaults" (each vault with its file, "Open", "Rename…", "Remove from list…", "New vault…", "Open vault file…", and Sync: the folder of each vault (Off, iCloud Drive, the detected folders, "Choose folder…"), its status, "Sync now", "Turn off…", and "Open a synced vault…"; [sync](sync.md)), "Change passphrase", the unlock method, backup and restore, the token lifetime, notifications, the iPhone companion (the setting, the pairing QR code, the paired iPhones, and "Reset pairing"; see [companion](companion.md)), the broker and bouncer state, and Updates ([updates](updates.md)). |
 
 A run that waits for you shows a banner on each view but Activity. A new version that is ready shows the banner "Apassy X is ready." with "Restart now" and "Later" on each view but Settings. A sync note (both versions of a credential kept, a damaged synced copy, a taken variable name) and a passphrase that changed on another Mac show a banner on each view ([sync](sync.md)). The Create screen has the Sync choice, off by default; the welcome and unlock screens have "Open a synced vault…". "Review" opens its approval card in a sheet. Each approval, reveal, and change of agent authority opens the owner check sheet "Confirm that it is you". A sheet with a change closes only when the check passes.
 
@@ -70,19 +70,41 @@ Each timeline shows 5 rows and "Show all".
 
 ### Keyboard
 
+Every control can be reached and used without a pointer (keyboard review, 2026-10-01).
+
 | Keys | Action |
 | --- | --- |
+| ⌘1, ⌘2, ⌘3, ⌘4 | Credentials, Agents, Activity, Learning. The focus goes to the first control of the page. |
+| ⌘, | Settings |
+| ⌘[ | Back from a credential or an agent to its list |
 | ⌘N | New credential |
 | ⌘F | Search credentials |
-| ⌘S | The default action of the open sheet: Save, Add, Register, Archive, and so on |
+| ⌘L | Lock the vault, also with a sheet open (not during an owner check) |
+| Return, ⌘Return, ⌘S | The default action of the open sheet: Save, Add, Register, Archive, and so on. A focused button takes Return itself, and a multi-line field takes it as a new line. A destructive alert (Delete, Revoke, Reset pairing) never takes Return as its action. |
 | ⌘⇧H | Show or hide the secret values of the open credential (the owner check first) |
-| Tab, ⇧Tab | Move the focus to the next or the previous control. A focused row or control has a blue ring. |
+| Tab, ⇧Tab | Move the focus to the next or the previous control. The page scrolls to it. |
+| ← → ↑ ↓ | Move the focus to the nearest control. In a sheet, the focus stays in the sheet. |
 | Space | Press the focused control. On a segmented picker, select the next option. |
-| ← → | On a focused segmented picker, select the previous or the next option. |
-| Return | Confirm a passphrase field |
-| Esc | Close the sheet |
+| ← → on a segmented picker | Select the previous or the next option. The focus stays on the picker. |
+| Space on a menu, then Tab and Return | Open the menu, move through its options, and choose one. The menu closes, and the focus goes back to the menu button. |
+| Page Up, Page Down, Home, End | Scroll the page or the sheet, when no text field has the focus |
+| Esc | Close the sheet, a menu, or an error message |
+
+The focus follows the owner:
+
+- A sheet that opens takes the focus: its first control, or Cancel in a destructive alert. When it closes, the focus goes back to the control that opened it.
+- After a navigation with the keyboard, or when the focused control goes away (for example "Mark as seen"), the first control of the page takes the focus. The next Tab does not start again at the sidebar.
+- After picking a kind in the add sheet, the Name field takes the focus. A new start screen focuses its first field, and Return in the first passphrase field moves to the second.
+- The focus ring is 2 points of solid accent on every control, including rows, the sidebar, switches, pickers, kind cards, and code blocks. It passes 3:1 (WCAG 1.4.11).
+- The window moves the focus only for a keyboard user. After a click, no focus ring appears that the owner did not ask for.
+
+VoiceOver gets a name for every control: icon-only buttons ("Close the message", "Remove detail …"), rows, tags, a sidebar item with its count ("Activity, 3 waiting"), a navigation row with its status, a segmented picker with its value, a disclosure with its state, and the fields of a custom detail.
 
 ⌘H is not used. In macOS it is "Hide Apassy" in the app menu, and the menu takes the key before the window. Settings > Keyboard shortcuts lists the same keys.
+
+### Command line
+
+Settings > Command line shows the owner socket of the `apassy` command line and the open sessions, with "End all sessions" ([command line](cli.md), [ADR 0017](../adr/0017-owner-command-line.md)). An owner check that the command line asked for says so in the dialog, and a change from the command line shows a message that starts with "Command line:".
 
 ## 3. Where the old controls are
 
@@ -103,6 +125,7 @@ Each timeline shows 5 rows and "Show all".
 | Grant checkboxes | API operations switches |
 | Approval card on every view | Banner on every view, and the card in Activity |
 | Inbox card: channel and buttons | Settings > Notifications |
+| iPhone companion, pairing, and paired iPhones | Settings > iPhone companion, Pair an iPhone, Paired iPhones |
 | Broker card | Settings > Broker and bouncer |
 | Rules view (vault build) | Removed. It was a fixture demo. Rules of a process grant are in its sheet. The demo build keeps the view. |
 | Demo request card (vault build) | Removed. It was a fixture simulation. The demo build keeps it. |
@@ -110,5 +133,7 @@ Each timeline shows 5 rows and "Show all".
 ## 4. Checks
 
 The headless tests draw each view with `egui::Context::run_ui` and read the painted text. They cover the start screens, each view at 1180 × 800 and 900 × 600, the owner check before each guarded action, sheets that erase their secrets on close, a sheet that closes only after a passed check, the lock, and the toast. They do not prove pixel layout.
+
+The keyboard tests (`src/desktop/ui/keyboard_tests.rs`) keep one context across frames and read the AccessKit tree: Tab to "Edit", Return opens the sheet and its first field takes the focus, Esc gives the focus back; Return in a field registers an agent; a delete alert starts on Cancel; the arrows change a picker without moving the focus; ⌘1 to ⌘4, ⌘, ⌘[ and ⌘L; each focused control on the long Settings page is on screen, and Page Up, Page Down, Home, and End scroll; a menu choice with the keyboard closes the menu; the focus survives a control that goes away; Esc closes an error message. The command-line tests (`src/desktop/ui/cli_tests.rs`) drive the app through the owner socket.
 
 On 2026-09-27 the agent also drew each screen in a real window with synthetic data (a separate `HOME` under `/tmp`) and looked at a capture of that window only.

@@ -1,7 +1,8 @@
 //! Owner authorization for sensitive owner actions (goal item A4, ADR 0010).
 //!
 //! Reveal, approval of a run, "Approve and remember", changes to grants and rules, and
-//! token rotation need a fresh owner check: Touch ID now, or the master passphrase now.
+//! token rotation need a fresh owner check: Touch ID now, the master passphrase now, or,
+//! for the approval of a run only, the Face ID signature of a paired iPhone (ADR 0020).
 //! [`OwnerGate::authorize`] is the only function that does this check. It is also the
 //! only way to make an [`OwnerProof`]. Each guarded action takes a proof by value:
 //!
@@ -14,23 +15,38 @@
 //!
 //! The passphrase check opens a second, read-only SQLCipher connection and closes it
 //! at once ([`Vault::verify_passphrase_at`]). The gate does not keep the passphrase.
-//! [`OwnerCheck::Passphrase`] erases its copy on drop. A notification, an inbox
-//! acknowledgment, or an agent request cannot make a proof (goal item N4).
+//! [`OwnerCheck::Passphrase`] erases its copy on drop.
+//!
+//! The iPhone check ([`OwnerCheck::Companion`]) verifies an ECDSA P-256 signature of the
+//! approval string of the contract (`docs/contracts/companion-v1.md`, section 7) with
+//! the approval key of a paired device. The Secure Enclave signs only after Face ID. The
+//! gate rebuilds the signed text from the action, so the signature names one run exactly
+//! as the Mac showed it. A phone can approve a run only: it can never make a proof for a
+//! reveal, a grant, or a pairing.
+//!
+//! A notification, an inbox acknowledgment, or an agent request cannot make a proof
+//! (goal item N4).
 
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::PoisonError;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use zeroize::Zeroizing;
 
 use super::PendingRun;
 use crate::broker::SharedVault;
+use crate::companion::crypto::{ApproveAction, approve_string, verify_ecdsa};
+use crate::companion::digest::run_digest_hex;
+use crate::companion::wire::valid_device_id;
 use crate::native::{HelperErrorCode, MAX_AGENT_NAME_CHARS, NativeError, NativeHelper};
 use crate::vault::{Vault, VaultErrorKind};
 
 /// How long a proof stays valid after the owner check.
 pub const PROOF_LIFETIME: Duration = Duration::from_secs(60);
+
+/// A phone approval may have a time this many seconds ahead of the Mac clock.
+const COMPANION_FUTURE_SLACK: u64 = 60;
 
 /// An owner action that needs a fresh owner check. The target is part of the action.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +83,17 @@ pub enum OwnerAction {
     /// Return the bouncer to the model before one promotion (goal item B9). The proof
     /// names the promotion.
     RollbackModel { activation_id: u64 },
+    /// Open a command-line session (ADR 0017). The session can read and change the vault
+    /// like the views, but every action in this list still needs its own check.
+    OpenCliSession,
+    /// Pair an iPhone (ADR 0020). The proof names the device exactly as the owner
+    /// confirmed it: its ID, its name, and both public keys (X9.63, 65 bytes each).
+    PairCompanion {
+        device_id: String,
+        device_name: String,
+        request_key: Vec<u8>,
+        approval_key: Vec<u8>,
+    },
 }
 
 impl OwnerAction {
@@ -98,6 +125,10 @@ impl OwnerAction {
             }
             Self::PromoteModel { .. } => "promote a new model for the bouncer".to_owned(),
             Self::RollbackModel { .. } => "roll back the model of the bouncer".to_owned(),
+            Self::OpenCliSession => "start a command-line session".to_owned(),
+            Self::PairCompanion { device_name, .. } => {
+                format!("pair the iPhone \"{}\"", short_device_name(device_name))
+            }
         }
     }
 
@@ -125,11 +156,27 @@ fn short_name(run: &PendingRun) -> String {
     }
 }
 
+/// Device name for the prompt: printable characters only, at most 40 characters.
+fn short_device_name(name: &str) -> String {
+    let name: String = name
+        .chars()
+        .filter(|c| !c.is_control() && *c != '"')
+        .take(MAX_AGENT_NAME_CHARS)
+        .collect();
+    if name.trim().is_empty() {
+        "unknown".to_owned()
+    } else {
+        name
+    }
+}
+
 /// How the owner confirmed an action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckMethod {
     TouchId,
     Passphrase,
+    /// Face ID on a paired iPhone, as a signature of the approval key.
+    Companion,
 }
 
 /// The check that the owner does now.
@@ -138,6 +185,14 @@ pub enum OwnerCheck {
     TouchId,
     /// The master passphrase. The buffer is erased on drop.
     Passphrase(Zeroizing<String>),
+    /// The approval signature of a paired iPhone (ADR 0020). `time` is the Unix time in
+    /// the signed text, and `signature` is the DER ECDSA signature. It works for the
+    /// approval of a run only.
+    Companion {
+        device_id: String,
+        time: u64,
+        signature: Vec<u8>,
+    },
 }
 
 impl OwnerCheck {
@@ -150,6 +205,7 @@ impl OwnerCheck {
         match self {
             Self::TouchId => CheckMethod::TouchId,
             Self::Passphrase(_) => CheckMethod::Passphrase,
+            Self::Companion { .. } => CheckMethod::Companion,
         }
     }
 }
@@ -159,6 +215,12 @@ impl fmt::Debug for OwnerCheck {
         match self {
             Self::TouchId => f.write_str("OwnerCheck::TouchId"),
             Self::Passphrase(_) => f.write_str("OwnerCheck::Passphrase([redacted])"),
+            Self::Companion {
+                device_id, time, ..
+            } => write!(
+                f,
+                "OwnerCheck::Companion {{ device_id: {device_id}, time: {time}, signature: [redacted] }}"
+            ),
         }
     }
 }
@@ -182,6 +244,13 @@ pub enum OwnerAuthError {
     TouchIdFailed,
     /// The vault was locked, unlocked, or replaced during the check.
     SessionChanged,
+    /// The time of an iPhone approval is more than [`PROOF_LIFETIME`] old, or more than
+    /// 60 seconds ahead of the Mac clock.
+    CompanionStale,
+    /// The device is not paired, or its signature does not verify for this approval.
+    CompanionRejected,
+    /// An iPhone can confirm the approval of a run only.
+    CompanionUnsupported,
     /// Another failure. The text has no secret value.
     Other(String),
 }
@@ -205,6 +274,17 @@ impl OwnerAuthError {
             }
             Self::SessionChanged => {
                 "The vault was locked or changed during the check. Apassy did nothing.".to_owned()
+            }
+            Self::CompanionStale => {
+                "The iPhone confirmation is too old. Confirm again. Nothing was approved."
+                    .to_owned()
+            }
+            Self::CompanionRejected => {
+                "The iPhone confirmation does not match a paired iPhone. Nothing was approved."
+                    .to_owned()
+            }
+            Self::CompanionUnsupported => {
+                "An iPhone can confirm the approval of a run only. Apassy did nothing.".to_owned()
             }
             Self::Other(text) => format!("The owner check failed: {text}"),
         }
@@ -365,9 +445,10 @@ impl OwnerGate {
 
     /// The one owner-authorization function (goal item A4).
     ///
-    /// It checks the owner now, with Touch ID or the passphrase, and returns a proof
-    /// for `action` only. The call blocks: Touch ID waits for the owner, and the
-    /// passphrase check derives the SQLCipher key. Call it from a worker thread.
+    /// It checks the owner now, with Touch ID, the passphrase, or the signature of a
+    /// paired iPhone, and returns a proof for `action` only. The call blocks: Touch ID
+    /// waits for the owner, and the passphrase check derives the SQLCipher key. Call it
+    /// from a worker thread. The iPhone check does not block: it verifies a signature.
     pub fn authorize(
         &self,
         action: OwnerAction,
@@ -384,6 +465,11 @@ impl OwnerGate {
                 };
                 helper.authenticate(&action.reason()).map_err(from_native)?;
             }
+            OwnerCheck::Companion {
+                device_id,
+                time,
+                signature,
+            } => self.check_companion(&action, &device_id, time, &signature, epoch)?,
             OwnerCheck::Passphrase(passphrase) => {
                 if passphrase.is_empty() {
                     return Err(OwnerAuthError::EmptyPassphrase);
@@ -409,6 +495,59 @@ impl OwnerGate {
                 Ok(OwnerProof::issue(action, method, epoch))
             }
             _ => Err(OwnerAuthError::SessionChanged),
+        }
+    }
+
+    /// Verify the approval signature of a paired iPhone (ADR 0020, contract section 7).
+    ///
+    /// Only for the approval of a run. The gate loads the approval key of the device from
+    /// the vault in the session `epoch`, rebuilds the approval string from the action
+    /// (the action name, the ID of the run, the digest of the run as it waits) and `time`,
+    /// checks the time, and verifies the signature. Any other action is refused.
+    fn check_companion(
+        &self,
+        action: &OwnerAction,
+        device_id: &str,
+        time: u64,
+        signature: &[u8],
+        epoch: [u8; 32],
+    ) -> Result<(), OwnerAuthError> {
+        let (approve, run) = match action {
+            OwnerAction::ApproveRun(run) => (ApproveAction::Approve, run),
+            OwnerAction::ApproveAndRemember(run) => (ApproveAction::ApproveAndRemember, run),
+            _ => return Err(OwnerAuthError::CompanionUnsupported),
+        };
+        if !valid_device_id(device_id) {
+            return Err(OwnerAuthError::CompanionRejected);
+        }
+        let keys = {
+            let guard = self.vault.lock().unwrap_or_else(PoisonError::into_inner);
+            match guard.as_ref() {
+                Some(vault) if !vault.is_locked() && vault.epoch() == epoch => vault
+                    .companion_device_keys(device_id)
+                    .map_err(|error| OwnerAuthError::Other(error.to_string()))?,
+                _ => return Err(OwnerAuthError::SessionChanged),
+            }
+        };
+        let Some(keys) = keys else {
+            return Err(OwnerAuthError::CompanionRejected);
+        };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs());
+        if time.saturating_add(PROOF_LIFETIME.as_secs()) < now
+            || time > now.saturating_add(COMPANION_FUTURE_SLACK)
+        {
+            return Err(OwnerAuthError::CompanionStale);
+        }
+        let Some(text) = approve_string(device_id, approve, run.id, &run_digest_hex(run), time)
+        else {
+            return Err(OwnerAuthError::CompanionRejected);
+        };
+        if verify_ecdsa(&keys.approval_key, text.as_bytes(), signature) {
+            Ok(())
+        } else {
+            Err(OwnerAuthError::CompanionRejected)
         }
     }
 

@@ -1515,6 +1515,8 @@ pub(super) fn query_activity(
 ///
 /// - Revoke every active agent. The owner registers the agents again.
 /// - Remove every grant and every rule of a process grant.
+/// - Remove every paired iPhone and the certificate of the companion listener, and turn
+///   the companion setting off.
 /// - Mark each item with agent settings (declaration, environment variable, or
 ///   connector) for an owner review (goal item V4). The broker refuses an agent
 ///   request with a marked item until the owner confirms the settings.
@@ -1537,6 +1539,9 @@ pub(super) fn prepare_restored(conn: &mut Connection) -> VaultResult<()> {
     tx.execute("DELETE FROM access_request", [])
         .map_err(|_| err(VaultErrorKind::Storage))?;
     super::learning::forget_all_patterns(&tx)?;
+    // A restored device is not trusted either. The owner pairs each iPhone again, and
+    // the listener gets a new certificate and starts off (ADR 0020).
+    super::companion::prepare_restored(&tx)?;
     tx.execute(
         "INSERT OR REPLACE INTO restore_review (item_id, restored_at)
          SELECT id, ?1 FROM item WHERE id IN (

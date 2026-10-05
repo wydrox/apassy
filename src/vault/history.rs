@@ -48,7 +48,8 @@ pub(super) const SCHEMA_V10_COLUMNS: [&str; 3] = [
     "SELECT activity_id, item_id FROM activity_item LIMIT 0",
 ];
 
-/// The history keeps this many events for each item. Older events go.
+/// The history keeps this many events for each item. Older events go. The stable
+/// conflict-origin metadata is retained separately from this limit.
 pub const MAX_ITEM_EVENTS: usize = 200;
 /// Longer detail text is cut.
 const MAX_EVENT_DETAIL_BYTES: usize = 300;
@@ -252,8 +253,11 @@ pub(super) fn record(
     .map_err(|_| err(VaultErrorKind::Storage))?;
     let keep = i64::try_from(MAX_ITEM_EVENTS).map_err(|_| err(VaultErrorKind::Storage))?;
     conn.execute(
-        "DELETE FROM item_event WHERE item_id = ?1 AND id NOT IN
-             (SELECT id FROM item_event WHERE item_id = ?1 ORDER BY id DESC LIMIT ?2)",
+        "DELETE FROM item_event WHERE item_id = ?1
+             AND NOT (kind = 'created' AND detail LIKE 'apassy:conflict-origin:v1:%')
+             AND id NOT IN (SELECT id FROM item_event WHERE item_id = ?1
+                 AND NOT (kind = 'created' AND detail LIKE 'apassy:conflict-origin:v1:%')
+                 ORDER BY id DESC LIMIT ?2)",
         (item, keep),
     )
     .map_err(|_| err(VaultErrorKind::Storage))?;
@@ -321,8 +325,9 @@ impl Vault {
         let conn = self.conn_ref()?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, at, kind, detail FROM item_event WHERE item_id = ?1
-                 ORDER BY id DESC LIMIT ?2",
+                "SELECT e.id, e.at, e.kind, e.detail, e.uuid, i.uuid
+                 FROM item_event e JOIN item i ON i.id = e.item_id
+                 WHERE e.item_id = ?1 ORDER BY e.id DESC LIMIT ?2",
             )
             .map_err(|_| err(VaultErrorKind::Storage))?;
         let rows = stmt
@@ -332,12 +337,21 @@ impl Vault {
                     row.get::<_, i64>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
                 ))
             })
             .map_err(|_| err(VaultErrorKind::Storage))?;
         let mut events = Vec::new();
         for row in rows {
-            let (id, at, kind, detail) = row.map_err(|_| err(VaultErrorKind::Storage))?;
+            let (id, at, kind, mut detail, event_uuid, item_uuid) =
+                row.map_err(|_| err(VaultErrorKind::Storage))?;
+            if kind == "created"
+                && super::merge::verified_conflict_origin(&item_uuid, &detail, &event_uuid)
+                    .is_some()
+            {
+                detail = "Sync kept this conflict copy.".to_owned();
+            }
             events.push(ItemEvent {
                 id: to_public_id(id)?,
                 at: u64::try_from(at).map_err(|_| err(VaultErrorKind::Storage))?,

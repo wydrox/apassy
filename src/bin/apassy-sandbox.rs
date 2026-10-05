@@ -41,7 +41,8 @@
 //!
 //! The host name and its arguments follow `--`. Set the host environment (for
 //! example `APASSY_AGENT_TOKEN`) before you start this launcher; the launcher
-//! passes the environment through to the host.
+//! passes the environment through to the host, without `APASSY_SESSION`: a
+//! command-line session of the owner never reaches an agent (ADR 0017).
 //!
 //! The launcher fails closed. It stops with an error when the vault list cannot
 //! be read or is not valid, because then it cannot name each vault file, and
@@ -67,6 +68,9 @@ const PROFILE_NAME: &str = "apassy-agent-host.sb";
 const PROFILE_ENV: &str = "APASSY_SANDBOX_PROFILE";
 /// Environment override for the broker socket path. It matches the client.
 const SOCKET_ENV: &str = "APASSY_BROKER_SOCKET";
+/// The owner command-line session (ADR 0017). The launcher removes it from the
+/// host environment.
+const SESSION_ENV: &str = "APASSY_SESSION";
 /// The default installed app bundle.
 const DEFAULT_APP: &str = "/Applications/Apassy.app";
 /// The app bundle that `scripts/build-app.sh` writes into the target directory.
@@ -232,6 +236,7 @@ fn run(args: &[String]) -> Result<(), String> {
     }
     command.arg(&parsed.host[0]);
     command.args(&parsed.host[1..]);
+    command.env_remove(SESSION_ENV);
 
     if parsed.print {
         let mut params: Vec<(&str, Option<&PathBuf>)> = vec![
@@ -466,18 +471,29 @@ fn resolve(path: &Path) -> PathBuf {
     path.to_owned()
 }
 
-/// The build app bundle next to the target directory of this program:
-/// `<target>/Apassy.app` when the program is `<target>/<profile>/apassy-sandbox`
-/// and the directory is named `target`. `scripts/build-app.sh` writes the app
-/// there.
+/// Protect the bundle that contains this launcher, including a bundle outside
+/// /Applications. Source builds also protect <target>/Apassy.app.
 fn default_build_app() -> Option<PathBuf> {
-    let exe = env::current_exe().ok()?;
-    let target = exe.parent()?.parent()?;
-    (target.file_name()? == "target").then(|| target.join(BUILD_APP_NAME))
+    app_for_executable(&env::current_exe().ok()?)
+}
+
+fn app_for_executable(exe: &Path) -> Option<PathBuf> {
+    let dir = exe.parent()?;
+    let contents = dir.parent()?;
+    if dir.file_name()? == "MacOS" && contents.file_name()? == "Contents" {
+        let bundle = contents.parent()?;
+        if bundle
+            .extension()
+            .is_some_and(|extension| extension == "app")
+        {
+            return Some(bundle.to_path_buf());
+        }
+    }
+    (contents.file_name()? == "target").then(|| contents.join(BUILD_APP_NAME))
 }
 
 /// Find the SBPL profile. Order: the flag, the environment, next to the
-/// program, then `sandbox/` in the working directory.
+/// program, in bundle Resources, then `sandbox/` in the working directory.
 fn resolve_profile(flag: Option<&str>) -> Result<PathBuf, String> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(flag) = flag {
@@ -486,19 +502,37 @@ fn resolve_profile(flag: Option<&str>) -> Result<PathBuf, String> {
     if let Some(env_path) = env::var_os(PROFILE_ENV).filter(|value| !value.is_empty()) {
         candidates.push(PathBuf::from(env_path));
     }
-    if let Ok(exe) = env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        candidates.push(dir.join(PROFILE_NAME));
-        candidates.push(dir.join("sandbox").join(PROFILE_NAME));
-        // From `target/<profile>/apassy-sandbox` up to the repository root.
-        if let Some(root) = dir.parent().and_then(Path::parent) {
-            candidates.push(root.join("sandbox").join(PROFILE_NAME));
-        }
+    if let Ok(exe) = env::current_exe() {
+        candidates.extend(profile_paths(&exe));
     }
     candidates.push(PathBuf::from("sandbox").join(PROFILE_NAME));
 
-    for candidate in &candidates {
+    select_profile(&candidates)
+}
+
+/// Development copies can place the profile beside the launcher. A signed app
+/// stores the profile in Resources, because MacOS is a directory for code.
+fn profile_paths(exe: &Path) -> Vec<PathBuf> {
+    let Some(dir) = exe.parent() else {
+        return Vec::new();
+    };
+    let mut candidates = vec![dir.join(PROFILE_NAME)];
+    if dir.file_name().is_some_and(|name| name == "MacOS")
+        && let Some(contents) = dir.parent()
+        && contents.file_name().is_some_and(|name| name == "Contents")
+    {
+        candidates.push(contents.join("Resources").join(PROFILE_NAME));
+    }
+    candidates.push(dir.join("sandbox").join(PROFILE_NAME));
+    // From target/<profile>/apassy-sandbox up to the repository root.
+    if let Some(root) = dir.parent().and_then(Path::parent) {
+        candidates.push(root.join("sandbox").join(PROFILE_NAME));
+    }
+    candidates
+}
+
+fn select_profile(candidates: &[PathBuf]) -> Result<PathBuf, String> {
+    for candidate in candidates {
         if candidate.is_file() {
             return Ok(resolve(candidate));
         }
@@ -538,13 +572,16 @@ Options:
   --socket FILE       broker socket (default: <data-dir>/broker.sock)
   --home DIR          owner home directory for the autostart denials (default: $HOME)
   --app DIR           installed app bundle (default: /Applications/Apassy.app)
-  --app-build DIR     second app bundle (default: <target>/Apassy.app when this
-                      program runs from <target>/<profile>/)
+  --app-build DIR     second app bundle (default: the bundle that contains this
+                      program, or <target>/Apassy.app for a source build)
   --cloud-dir DIR     Apassy folder in iCloud Drive (default: $HOME/Library/Mobile
                       Documents/com~apple~CloudDocs/Apassy)
   --profile FILE      SBPL profile (default: found near the program)
   --print             print the resolved sandbox-exec command; do not run it
   -h, --help          print this help
+
+The host gets the environment of this launcher without APASSY_SESSION, so an
+owner command-line session never reaches an agent.
 
 Examples (turn off only the host's inner sandbox; keep its approval prompts):
   apassy-sandbox -- claude --settings '{\"sandbox\":{\"enabled\":false}}'
@@ -565,6 +602,61 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("temp dir");
         resolve(&dir)
+    }
+
+    #[test]
+    fn signed_bundle_resources_and_adjacent_development_profiles_are_found() {
+        let root = temp_dir("profile-paths");
+        let macos = root.join("Apassy Test.app/Contents/MacOS");
+        let resources = root.join("Apassy Test.app/Contents/Resources");
+        std::fs::create_dir_all(&macos).expect("MacOS directory");
+        std::fs::create_dir_all(&resources).expect("Resources directory");
+        let resource_profile = resources.join(PROFILE_NAME);
+        std::fs::write(&resource_profile, "(version 1)").expect("resource profile");
+        let paths = profile_paths(&macos.join("apassy-sandbox"));
+        assert_eq!(
+            select_profile(&paths).expect("bundle profile"),
+            resource_profile
+        );
+        let adjacent_profile = macos.join(PROFILE_NAME);
+        std::fs::write(&adjacent_profile, "(version 1)").expect("development override");
+        assert_eq!(
+            select_profile(&paths).expect("adjacent profile"),
+            adjacent_profile
+        );
+        std::fs::remove_file(adjacent_profile).expect("remove development override");
+        std::fs::remove_file(resource_profile).expect("remove resource");
+        assert!(
+            select_profile(&paths).is_err(),
+            "missing profiles fail closed"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn launcher_protects_its_own_bundle_and_the_source_build_bundle() {
+        for bundle in [
+            "/Applications/Apassy.app",
+            "/Users/me/Apps/Apassy.app",
+            "/Users/me/Project/target/Apassy.app",
+            "/Users/me/Apps/Apassy Test.app",
+        ] {
+            let exe = Path::new(bundle).join("Contents/MacOS/apassy-sandbox");
+            assert_eq!(app_for_executable(&exe), Some(PathBuf::from(bundle)));
+        }
+        for profile in ["debug", "release"] {
+            let exe = Path::new("/Users/me/Project/target")
+                .join(profile)
+                .join("apassy-sandbox");
+            assert_eq!(
+                app_for_executable(&exe),
+                Some(PathBuf::from("/Users/me/Project/target/Apassy.app"))
+            );
+        }
+        assert_eq!(
+            app_for_executable(Path::new("/usr/local/bin/apassy-sandbox")),
+            None
+        );
     }
 
     #[test]

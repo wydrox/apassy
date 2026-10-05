@@ -1,0 +1,12 @@
+{
+  "name": "apassy-launch-video",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "preview": "node preview.mjs",
+    "audio": "node render.mjs --cues && node audio.mjs",
+    "render": "node render.mjs --cues && node audio.mjs && node render.mjs",
+    "draft": "node render.mjs --fps 30 --mb 1 --scale 0.5 --preset veryfast --out draft.mp4",
+    "render:tall": "node render.mjs --format tall"
+  }
+}

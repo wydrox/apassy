@@ -1,6 +1,6 @@
 [package]
 name = "apassy"
-version = "0.3.0"
+version = "0.3.2"
 edition = "2024"
 rust-version = "1.97"
 publish = false
@@ -10,7 +10,7 @@ description = "A personal credential manager with controlled agent access"
 
 [features]
 default = []
-desktop = ["dep:eframe", "dep:rustix"]
+desktop = ["dep:eframe", "dep:rustix", "dep:rfd", "dep:qrcode"]
 storage-probe = ["dep:rusqlite", "dep:tempfile"]
 vault = ["dep:rusqlite", "dep:tempfile", "dep:getrandom", "dep:rustls", "dep:rustls-platform-verifier", "dep:rcgen", "dep:time", "dep:ring", "dep:flate2"]
 
@@ -19,6 +19,8 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 zeroize = "=1.9.0"
 eframe = { version = "=0.36.2", optional = true, default-features = false, features = ["accesskit", "default_fonts", "glow"] }
+# Native open/save panels. The async API keeps the desktop event loop free.
+rfd = { version = "=0.17.2", optional = true, default-features = false, features = ["xdg-portal"] }
 rusqlite = { version = "=0.40.2", optional = true, default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }
 tempfile = { version = "=3.27.0", optional = true }
 getrandom = { version = "=0.4.3", optional = true }
@@ -27,15 +29,19 @@ rustls = { version = "=0.23.45", optional = true, default-features = false, feat
 rustls-platform-verifier = { version = "=0.7.0", optional = true }
 # ADR 0011: the certificate authority of each proxied run and its host certificates.
 rcgen = { version = "=0.14.10", optional = true, default-features = false, features = ["crypto", "pem", "ring"] }
+# ADR 0020: ECDSA P-256 verification, HMAC-SHA256, and SHA-256 for the iPhone companion.
+# The version and the features are the ones that rustls and rcgen already build.
+ring = { version = "=0.17.14", optional = true, default-features = false, features = ["alloc"] }
+# ADR 0020: the pairing QR code of the desktop app. No default features, so no `image`
+# and no other dependency. The app draws the modules with egui.
+qrcode = { version = "=0.14.1", optional = true, default-features = false }
 time = { version = "=0.3.47", optional = true, default-features = false, features = ["std"] }
-# 0.3.0: SHA-256 of an update image and of an iCloud copy of a vault. The version
-# that rustls already uses.
-ring = { version = "=0.17.14", optional = true, default-features = false }
 # 0.3.0: the zip archive of a 1Password export (.1pux). The version that png already uses.
 flate2 = { version = "=1.1.10", optional = true, default-features = false, features = ["rust_backend"] }
 # Key-memory review F6: safe setrlimit for the core-dump limit of the desktop
-# process. The same version is already in Cargo.lock through tempfile.
-rustix = { version = "=1.1.4", optional = true, default-features = false, features = ["std", "process"] }
+# process. The same version is already in Cargo.lock through tempfile. `termios`:
+# the owner command line turns off the echo when it reads a secret (ADR 0017).
+rustix = { version = "=1.1.4", optional = true, default-features = false, features = ["std", "process", "termios"] }
 
 [[bin]]
 name = "apassy"
@@ -83,6 +89,14 @@ name = "screenshots"
 path = "examples/screenshots.rs"
 required-features = ["desktop", "vault"]
 
+# A development server for the iPhone companion (ADR 0020). It makes a synthetic vault in
+# a temporary directory and speaks a line protocol on stdin and stdout, for the interop
+# test with the Swift client. It is not shipped.
+[[example]]
+name = "companion_dev"
+path = "examples/companion_dev.rs"
+required-features = ["vault"]
+
 [[test]]
 name = "sqlcipher_probe"
 path = "tests/sqlcipher_probe.rs"
@@ -129,6 +143,11 @@ path = "tests/host_hook.rs"
 required-features = ["vault"]
 
 [[test]]
+name = "companion"
+path = "tests/companion.rs"
+required-features = ["vault"]
+
+[[test]]
 name = "onepassword_import"
 path = "tests/onepassword_import.rs"
 required-features = ["vault"]
@@ -148,3 +167,11 @@ unsafe_code = "forbid"
 
 [lints.clippy]
 all = "warn"
+
+# Keep target/ small: line tables are enough for backtraces with file:line,
+# and dependencies need no debug info at all.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

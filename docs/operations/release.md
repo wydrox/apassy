@@ -20,6 +20,12 @@ The site is a static Astro page in `site/`, served by a Cloudflare Worker on the
 
 Before the owner adds the Apple secrets, the release workflow publishes nothing and shows a warning. Without `CLOUDFLARE_API_TOKEN`, the site workflow builds the site and skips the deploy with a warning. The site then says "Coming soon for macOS", because `/latest.json` does not exist.
 
+### Source releases
+
+A GitHub source release does not prove that an installer is available. For 0.3.2, the release tag is `0.3.2`. The compatibility tag `v0.3.2` points to the same commit, because existing copies of `scripts/install.sh` select tags with a `v` prefix.
+
+Before a source release, push the release commit to `main` and check CI on that exact commit. Then create both tags and the GitHub release. A tag push does not start app CI or publish a disk image. If release credentials are absent, the release notes must state that the release contains source code only. Do not attach an Apple Development build as a public installer.
+
 The release workflow runs on `macos-15`:
 
 1. It checks that the commit is still the head of `main`. CI runs finish in any order, and an older commit must not replace a newer image.

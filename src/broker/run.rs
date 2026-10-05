@@ -43,7 +43,7 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use super::approvals::{ApprovalOutcome, PendingRun};
+use super::approvals::{ApprovalOutcome, CheckMethod, PendingRun};
 use super::bouncer::{
     BouncerRequest, BouncerVerdict, DecisionContext, before_model, decide_learned, owner_required,
 };
@@ -72,6 +72,9 @@ const MAX_ARG_BYTES: usize = 4096;
 const MAX_PURPOSE_BYTES: usize = 500;
 const MAX_PATH_BYTES: usize = 4096;
 
+/// The start of the activity text of a run that the owner approved on the iPhone. It
+/// starts with "Owner approved", so the desktop inbox classifies it as before.
+const OWNER_APPROVED_ON_IPHONE: &str = "Owner approved on the iPhone";
 const INVALIDATED: &str = "The vault was locked, or Apassy stopped, before the run started. The approval is not valid. Send the request again after the owner unlocks the vault.";
 const RELOCKED: &str =
     "The vault was locked while Apassy checked this request. Send the request again.";
@@ -323,6 +326,9 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
     } else {
         "Bouncer allowed"
     };
+    // The activity log names an approval on the iPhone. The answer to the agent keeps
+    // `decided_by`, and the inbox reads the prefix "Owner approved" in both cases.
+    let mut logged_decided_by = decided_by;
     // The decision log entry (ADR 0009). It has no secret value.
     let logged = LoggedRequest {
         at: now,
@@ -373,7 +379,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                 .as_ref()
                 .is_some_and(|vault| !vault.is_locked() && vault.epoch() == checked.epoch)
         };
-        let outcome = ctx.approvals.wait_for(
+        let (outcome, checked_with) = ctx.approvals.wait_for_decision(
             PendingRun {
                 id: 0,
                 agent: checked.agent.name.clone(),
@@ -390,6 +396,9 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
             ctx.approval_timeout,
             same_session,
         );
+        if checked_with == Some(CheckMethod::Companion) {
+            logged_decided_by = OWNER_APPROVED_ON_IPHONE;
+        }
         // The wait record goes. False when a lock or a quit already gave the run its
         // final entry, or when the vault is locked now. Then the ticket goes, so the
         // next unlock ends a record that is still there.
@@ -566,12 +575,12 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         Ok(output) => {
             let reason = if output.timed_out {
                 format!(
-                    "{decided_by}. The run timed out and was stopped. Directory: {}. {log_note}.",
+                    "{logged_decided_by}. The run timed out and was stopped. Directory: {}. {log_note}.",
                     checked.cwd.display()
                 )
             } else {
                 format!(
-                    "{decided_by}. Exit code {}. Directory: {}. {log_note}.{proxy_note}",
+                    "{logged_decided_by}. Exit code {}. Directory: {}. {log_note}.{proxy_note}",
                     output
                         .exit_code
                         .map_or_else(|| "none".to_owned(), |code| code.to_string()),

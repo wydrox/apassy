@@ -171,7 +171,7 @@ pub(super) fn draw_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let mut delete = false;
     kit::section(ui, None, None, |s| {
         delete = s
-            .clickable_row(|ui| {
+            .clickable_row("Delete item…", |ui| {
                 ui.label(kit::text("Delete item…", Font::Body).color(Tone::Critical.text()));
             })
             .clicked();
@@ -232,7 +232,7 @@ pub(super) fn draw_delete_alert(app: &mut DesktopApp, ctx: &egui::Context) {
             |_| {},
             |ui| {
                 delete = kit::button(ui, "Delete", Style::DestructiveProminent).clicked();
-                cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
+                cancel = kit::alert_cancel(ui).clicked();
             },
         );
     });
@@ -620,11 +620,19 @@ pub(super) fn draw_activity(app: &mut DesktopApp, ui: &mut egui::Ui) {
         ),
         |ui| {
             ui.horizontal(|ui| {
-                kit::menu("demo_scenario", app.scenario.label(), 200.0).show_ui(ui, |ui| {
-                    for scenario in DemoScenario::ALL {
-                        ui.selectable_value(&mut app.scenario, scenario, scenario.label());
-                    }
-                });
+                let options: Vec<(DemoScenario, String)> = DemoScenario::ALL
+                    .into_iter()
+                    .map(|scenario| (scenario, scenario.label().to_owned()))
+                    .collect();
+                let selected = app.scenario.label();
+                kit::picker(
+                    ui,
+                    "demo_scenario",
+                    &mut app.scenario,
+                    &options,
+                    selected,
+                    200.0,
+                );
                 if kit::small_button(ui, "Send request", Style::Prominent).clicked() {
                     match app.model.simulate(app.scenario) {
                         Ok(request) if request.decision == Decision::Deny => {

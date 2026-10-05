@@ -262,11 +262,13 @@ fn file_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
             ),
             |s| {
                 let field = s.field("Export file", |ui| {
-                    kit::text_input(
+                    super::files::path_input(
                         ui,
+                        &mut app.files,
                         &mut app.import.path,
                         "import-path",
                         "~/Downloads/1PasswordExport.1pux",
+                        super::files::DialogKind::ImportExport,
                     )
                 });
                 read = field.lost_focus()

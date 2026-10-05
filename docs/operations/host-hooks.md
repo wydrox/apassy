@@ -97,6 +97,8 @@ The activity log entry has a maximum of 700 bytes. It keeps the first 240 bytes 
 
 ## 6. Install
 
+`apassy setup claude --write` or `apassy setup codex --write` does the steps of this section: it registers the agent, writes `~/.config/apassy/apassy-hook-HOST.sh` and `~/.config/apassy/apassy-mcp-HOST.sh` with mode 0700, and adds the hook and the MCP server to the host configuration ([command line](cli.md)). The app contains `apassy-hook` and `apassy-mcp`. The command uses both programs from the app. If an older app lacks the hook, install the current app first. The steps by hand follow.
+
 Build the programs:
 
 ```

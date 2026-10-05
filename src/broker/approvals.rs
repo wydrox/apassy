@@ -116,6 +116,13 @@ impl ApprovalRefusal {
     }
 }
 
+/// An answer with the check that the owner did for it. A denial has no check.
+#[derive(Debug, Clone, Copy)]
+struct Decision {
+    answer: Answer,
+    method: Option<CheckMethod>,
+}
+
 #[derive(Debug, Default)]
 struct QueueState {
     next_id: u64,
@@ -125,7 +132,10 @@ struct QueueState {
     /// The broker stopped. A new run does not wait.
     closed: bool,
     pending: Vec<PendingRun>,
-    decisions: BTreeMap<u64, Answer>,
+    decisions: BTreeMap<u64, Decision>,
+    /// When each waiting run started to wait. It is not part of the run, so the
+    /// equality of two runs (and an owner proof for one) does not depend on it.
+    waiting_since: BTreeMap<u64, Instant>,
 }
 
 type Notifier = Box<dyn Fn() + Send + Sync>;
@@ -195,6 +205,26 @@ impl ApprovalQueue {
         self.state().pending.clone()
     }
 
+    /// Runs that wait for a decision, oldest first, with the time since each one started
+    /// to wait. The iPhone inbox shows it as `waiting_seconds`.
+    pub fn pending_with_age(&self) -> Vec<(PendingRun, Duration)> {
+        let state = self.state();
+        let now = Instant::now();
+        state
+            .pending
+            .iter()
+            .map(|run| {
+                let age = state
+                    .waiting_since
+                    .get(&run.id)
+                    .map_or(Duration::ZERO, |since| {
+                        now.saturating_duration_since(*since)
+                    });
+                (run.clone(), age)
+            })
+            .collect()
+    }
+
     /// Approve a waiting run (goal item A4). `proof` must come from
     /// [`OwnerGate::authorize`] for [`OwnerAction::ApproveRun`] or
     /// [`OwnerAction::ApproveAndRemember`], with the run exactly as it waits now. A
@@ -213,6 +243,7 @@ impl ApprovalQueue {
             OwnerAction::ApproveAndRemember(_) => Answer::ApproveAndRemember,
             _ => Answer::Approve,
         };
+        let method = proof.method();
         let mut state = self.state();
         match state.pending.iter().find(|run| run.id == confirmed.id) {
             None => Err(ApprovalRefusal::NotWaiting),
@@ -221,7 +252,7 @@ impl ApprovalQueue {
                 Err(ApprovalRefusal::NothingToRemember)
             }
             Some(_) => {
-                Self::settle(&mut state, confirmed.id, answer);
+                Self::settle(&mut state, confirmed.id, answer, Some(method));
                 self.changed.notify_all();
                 Ok(())
             }
@@ -235,14 +266,21 @@ impl ApprovalQueue {
         if !state.pending.iter().any(|run| run.id == id) {
             return false;
         }
-        Self::settle(&mut state, id, Answer::Deny);
+        Self::settle(&mut state, id, Answer::Deny, None);
         self.changed.notify_all();
         true
     }
 
-    fn settle(state: &mut QueueState, id: u64, answer: Answer) {
+    fn settle(state: &mut QueueState, id: u64, answer: Answer, method: Option<CheckMethod>) {
         state.pending.retain(|run| run.id != id);
-        state.decisions.insert(id, answer);
+        state.waiting_since.remove(&id);
+        state.decisions.insert(id, Decision { answer, method });
+    }
+
+    /// Remove a run that ended without a decision: a timeout, or an invalid session.
+    fn forget(state: &mut QueueState, id: u64) {
+        state.pending.retain(|pending| pending.id != id);
+        state.waiting_since.remove(&id);
     }
 
     /// End every waiting run and every decision that a run did not use yet. The
@@ -252,6 +290,7 @@ impl ApprovalQueue {
         let mut state = self.state();
         state.generation = state.generation.wrapping_add(1);
         state.pending.clear();
+        state.waiting_since.clear();
         state.decisions.clear();
         self.changed.notify_all();
     }
@@ -269,41 +308,55 @@ impl ApprovalQueue {
     /// [`ApprovalOutcome::Invalidated`], also after an approval that the run did not use.
     pub fn wait_for(
         &self,
-        mut run: PendingRun,
+        run: PendingRun,
         timeout: Duration,
         still_valid: impl Fn() -> bool,
     ) -> ApprovalOutcome {
+        self.wait_for_decision(run, timeout, still_valid).0
+    }
+
+    /// Like [`Self::wait_for`], and also the check that the owner did for an approval:
+    /// Touch ID, the passphrase, or the iPhone. The check is `None` for every other
+    /// outcome. The activity log names it.
+    pub fn wait_for_decision(
+        &self,
+        mut run: PendingRun,
+        timeout: Duration,
+        still_valid: impl Fn() -> bool,
+    ) -> (ApprovalOutcome, Option<CheckMethod>) {
         let deadline = Instant::now() + timeout;
         let mut state = self.state();
         if state.closed {
-            return ApprovalOutcome::Invalidated;
+            return (ApprovalOutcome::Invalidated, None);
         }
         state.next_id = state.next_id.wrapping_add(1);
         let id = state.next_id;
         let generation = state.generation;
         run.id = id;
         state.pending.push(run);
+        state.waiting_since.insert(id, Instant::now());
         self.changed.notify_all();
         drop(state);
         self.notify_owner();
         loop {
             let mut state = self.state();
             if state.generation != generation {
-                state.pending.retain(|pending| pending.id != id);
+                Self::forget(&mut state, id);
                 state.decisions.remove(&id);
-                return ApprovalOutcome::Invalidated;
+                return (ApprovalOutcome::Invalidated, None);
             }
-            if let Some(answer) = state.decisions.remove(&id) {
-                return match answer {
+            if let Some(decision) = state.decisions.remove(&id) {
+                let outcome = match decision.answer {
                     Answer::Approve => ApprovalOutcome::Approved,
                     Answer::ApproveAndRemember => ApprovalOutcome::ApprovedAndRemembered,
                     Answer::Deny => ApprovalOutcome::Denied,
                 };
+                return (outcome, decision.method);
             }
             let now = Instant::now();
             if now >= deadline {
-                state.pending.retain(|pending| pending.id != id);
-                return ApprovalOutcome::TimedOut;
+                Self::forget(&mut state, id);
+                return (ApprovalOutcome::TimedOut, None);
             }
             let wait = (deadline - now).min(WATCH_INTERVAL);
             drop(
@@ -316,9 +369,9 @@ impl ApprovalQueue {
             // and then the queue lock, so do not hold the queue lock here.
             if !still_valid() {
                 let mut state = self.state();
-                state.pending.retain(|pending| pending.id != id);
+                Self::forget(&mut state, id);
                 state.decisions.remove(&id);
-                return ApprovalOutcome::Invalidated;
+                return (ApprovalOutcome::Invalidated, None);
             }
         }
     }
@@ -594,6 +647,70 @@ mod tests {
         );
         assert!(started.elapsed() < Duration::from_secs(2));
         assert!(queue.pending().is_empty());
+    }
+
+    /// A waiting run has an age, and the age is not part of the run: two reads of the
+    /// same run are equal, and a proof for the run stays valid as the age grows.
+    #[test]
+    fn pending_with_age_reports_how_long_a_run_waits() {
+        let queue = Arc::new(ApprovalQueue::new());
+        assert!(queue.pending_with_age().is_empty());
+        let waiter = start_waiter(&queue);
+        let id = wait_until_pending(&queue);
+        let first = queue.pending_with_age();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].0.id, id);
+        assert!(first[0].1 < Duration::from_secs(5));
+        // A run that started to wait 90 seconds ago.
+        let since = Instant::now()
+            .checked_sub(Duration::from_secs(90))
+            .expect("old instant");
+        queue.state().waiting_since.insert(id, since);
+        let aged = queue.pending_with_age();
+        assert!(aged[0].1 >= Duration::from_secs(90));
+        assert!(aged[0].1 < Duration::from_secs(95));
+        assert_eq!(aged[0].0, first[0].0, "the age is not part of the run");
+        assert_eq!(queue.pending(), vec![first[0].0.clone()]);
+        // The proof for the run works after it aged.
+        assert_eq!(queue.approve(proof_for(&queue, id)), Ok(()));
+        assert_eq!(waiter.join().expect("join"), ApprovalOutcome::Approved);
+        assert!(queue.pending_with_age().is_empty());
+        assert!(
+            queue.state().waiting_since.is_empty(),
+            "the age is dropped when the run settles"
+        );
+    }
+
+    /// Every way that a wait ends drops its start time: a denial, a timeout, an invalid
+    /// session, and an invalidation of the queue.
+    #[test]
+    fn the_start_time_is_dropped_when_a_run_ends() {
+        let queue = Arc::new(ApprovalQueue::new());
+        let waiter = start_waiter(&queue);
+        let id = wait_until_pending(&queue);
+        assert!(queue.deny(id));
+        waiter.join().expect("join");
+        assert!(queue.state().waiting_since.is_empty(), "denied");
+
+        assert_eq!(
+            queue.wait_for(run(), Duration::from_millis(20), || true),
+            ApprovalOutcome::TimedOut
+        );
+        assert!(queue.state().waiting_since.is_empty(), "timed out");
+
+        assert_eq!(
+            queue.wait_for(run(), Duration::from_secs(5), || false),
+            ApprovalOutcome::Invalidated
+        );
+        assert!(queue.state().waiting_since.is_empty(), "invalid session");
+
+        let waiter = start_waiter(&queue);
+        wait_until_pending(&queue);
+        assert_eq!(queue.pending_with_age().len(), 1);
+        queue.invalidate_all();
+        assert_eq!(waiter.join().expect("join"), ApprovalOutcome::Invalidated);
+        assert!(queue.state().waiting_since.is_empty(), "invalidated");
+        assert!(queue.pending_with_age().is_empty());
     }
 
     #[test]

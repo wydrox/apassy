@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>apassy — launch video</title>
+<!--
+  The apassy launch video: a deterministic 1920×1080 timeline.
+  window.renderAt(t) draws the frame at t seconds. render.mjs captures the frames and
+  audio.mjs makes the sound track from window.CUES.
+
+  Preview: `node preview.mjs`, then open the printed address. Add ?t=12.5 to open at a
+  time, ?format=tall for the 9:16 version, ?film=3am for the 3:07am short (with
+  ?format=tall or ?format=feed). Space plays and pauses, the arrow keys step.
+  All names and values in the video are synthetic.
+-->
+<link rel="stylesheet" href="css/base.css">
+<link rel="stylesheet" href="css/app.css">
+<link rel="stylesheet" href="css/scenes.css">
+<link rel="stylesheet" href="css/tall.css">
+<link rel="stylesheet" href="css/shorts.css">
+</head>
+<body>
+<div id="stage">
+  <div id="content"></div>
+</div>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

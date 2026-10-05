@@ -46,6 +46,168 @@ fn status(agent: &AgentSummary, now: u64) -> (&'static str, Tone) {
     }
 }
 
+/// Continue after a synced vault opens. The caller ties panel visibility to the
+/// vault identity. A host choice or Skip ends this panel; CLI keeps its steps open.
+pub(super) fn next_steps_panel(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool {
+    if app.owner_ui.session.is_locked() {
+        return false;
+    }
+    let intro = match (
+        app.owner_ui.session.search(""),
+        app.owner_ui.session.archived(),
+    ) {
+        (Ok(items), Ok(archived)) => {
+            let count = items
+                .iter()
+                .filter(|item| !archived.contains_key(&item.id))
+                .count();
+            if count == 1 {
+                "The vault is open. 1 active credential is available on this Mac.".to_owned()
+            } else {
+                format!("The vault is open. {count} active credentials are available on this Mac.")
+            }
+        }
+        _ => "The vault is open. Check Credentials for the available items.".to_owned(),
+    };
+    let mut host = None;
+    let mut skip = false;
+    let mut cli = app.ui.is_expanded("next-step-cli");
+    kit::section(ui, Some("Use this vault on this Mac"), Some(&intro), |s| {
+        s.row(|ui| {
+            kit::note(ui, "Agents and grants stay on this Mac. Set them here before an agent can use a credential.");
+        });
+        s.row(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                if kit::button(ui, "Claude Code", Style::Bordered).clicked() {
+                    host = Some(0);
+                }
+                if kit::button(ui, "Codex", Style::Bordered).clicked() {
+                    host = Some(1);
+                }
+                if kit::button(ui, "CLI", Style::Bordered).clicked() {
+                    cli = !cli;
+                }
+                skip = kit::button(ui, "Skip", Style::Link).clicked();
+            });
+        });
+        s.row(|ui| {
+            kit::note(
+                ui,
+                "You can do these steps later in Agents or Settings > Command line.",
+            );
+        });
+    });
+    app.ui.set_expanded("next-step-cli", cli);
+    if cli {
+        connection_progress(app, ui, true);
+        cli_guidance(app, ui);
+    }
+    if let Some(host) = host {
+        choose_host(app, host);
+        return true;
+    }
+    skip
+}
+
+fn choose_host(app: &mut DesktopApp, host: usize) {
+    let name = if host == 0 { "Claude Code" } else { "Codex" };
+    app.ui.setup_host = host;
+    app.ui.set_expanded("agent-setup", true);
+    let existing = app.owner_ui.session.agents().ok().and_then(|agents| {
+        agents
+            .into_iter()
+            .find(|agent| !agent.revoked && agent.name == name)
+    });
+    app.view = OwnerView::Agents;
+    if let Some(agent) = existing {
+        app.owner_ui.selected_agent = Some(agent.id);
+        app.ui.sheet = None;
+    } else {
+        app.owner_ui.selected_agent = None;
+        app.owner_ui.new_agent_name = name.to_owned();
+        app.ui.sheet = Some(Sheet::RegisterAgent);
+    }
+}
+
+/// The app knows the first three stages. A settings file or an allowed activity
+/// entry cannot prove the last two: access requests can wait and runs can fail.
+fn connection_progress(app: &mut DesktopApp, ui: &mut egui::Ui, cli: bool) {
+    let links = super::cli_tools::installed();
+    let window = app.cli.socket_path().is_some();
+    let unlocked = !app.owner_ui.session.is_locked();
+    let session = cli && app.cli_sessions_open() > 0;
+    kit::section(ui, Some("Setup checks"), None, |s| {
+        for (label, complete, detail) in [
+            (
+                "CLI tools installed",
+                links,
+                "Check in Settings > Command line",
+            ),
+            (
+                "App available to CLI",
+                window,
+                "Check the owner socket in Settings",
+            ),
+            ("Vault unlocked", unlocked, "Unlock the vault"),
+            (
+                if cli {
+                    "CLI connected"
+                } else {
+                    "Host connected"
+                },
+                session,
+                if cli {
+                    "Run apassy login, then apassy status"
+                } else if app.ui.setup_host == 1 {
+                    "Restart Codex. Trust the hook with /hooks. Check Apassy with /mcp."
+                } else {
+                    "Check Apassy in the host's /mcp view"
+                },
+            ),
+            (
+                "First successful request",
+                false,
+                "Check the result of a test request and its entry in Activity",
+            ),
+        ] {
+            s.labeled(
+                label,
+                kit::text(if complete { "Checked" } else { "To check" }, Font::Callout).color(
+                    if complete {
+                        Tone::Good.text()
+                    } else {
+                        kit::SECONDARY
+                    },
+                ),
+            );
+            if !complete {
+                s.row(|ui| kit::note(ui, detail));
+            }
+        }
+        s.row(|ui| kit::note(ui, "CLI links do not set PATH. Host settings do not prove a connection or a successful request."));
+    });
+}
+
+fn cli_guidance(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    let mut install = false;
+    kit::section(ui, Some("Use the CLI"), None, |s| {
+        s.row(|ui| {
+            kit::note(ui, "Install the CLI tools. Then run these commands in Terminal.");
+            install = kit::button(ui, "Install CLI tools", Style::Bordered).clicked();
+            kit::code_block(ui, "export PATH=\"$HOME/.local/bin:$PATH\"\neval \"$(apassy login)\"\napassy status\napassy doctor", 4);
+            kit::note(ui, "Confirm the login in Apassy. Keep the window open and the vault unlocked.");
+            kit::note(ui, "The PATH command applies to this Terminal session. Add it to ~/.zshrc for new sessions.");
+            kit::note(ui, "CLI login is separate from an agent token. It does not give an agent access to credentials.");
+        });
+    });
+    if install {
+        match super::cli_tools::install() {
+            Ok(()) => app.set_ok("CLI tools are installed in ~/.local/bin. Run the Terminal commands to check the connection."),
+            Err(error) => app.set_err(error),
+        }
+    }
+}
+
 fn draw_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let agents = match app.owner_ui.session.agents() {
         Ok(agents) => agents,
@@ -191,6 +353,8 @@ fn draw_agent(app: &mut DesktopApp, ui: &mut egui::Ui, agent_id: u64) {
         return;
     }
     token_section(app, ui, &agent, now);
+    connection_progress(app, ui, false);
+    setup_guidance(&mut app.ui, ui, false);
     visibility_section(app, ui, &agent);
     process_access_section(app, ui, &agent);
     operations_section(app, ui, agent_id);
@@ -211,7 +375,7 @@ fn draw_agent(app: &mut DesktopApp, ui: &mut egui::Ui, agent_id: u64) {
     let mut revoke = false;
     kit::section(ui, None, None, |s| {
         revoke = s
-            .clickable_row(|ui| {
+            .clickable_row("Revoke agent…", |ui| {
                 ui.label(kit::text("Revoke agent…", Font::Body).color(Tone::Critical.text()));
             })
             .clicked();
@@ -335,7 +499,7 @@ fn process_access_section(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &Agent
             }
             if items.len() > 1 {
                 let clicked = s
-                    .clickable_row(|ui| {
+                    .clickable_row("Give access to several credentials…", |ui| {
                         ui.label(
                             kit::text("Give access to several credentials…", Font::Body)
                                 .color(kit::ACCENT_TEXT),
@@ -499,14 +663,111 @@ pub(super) fn register_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool 
     response.escape
 }
 
-fn adapter_path() -> String {
+fn shell_word(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+fn cli_path() -> String {
     std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("apassy-mcp")))
-        .map_or_else(
-            || "apassy-mcp".to_owned(),
-            |path| path.display().to_string(),
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "apassy".to_owned())
+}
+
+/// These steps stay available after the one-time token sheet closes.
+fn setup_guidance(state: &mut super::UiState, ui: &mut egui::Ui, fresh: bool) {
+    let mut expanded = fresh || state.is_expanded("agent-setup");
+    if !fresh {
+        kit::disclosure(ui, &mut expanded, "Connect to an agent host");
+    }
+    state.set_expanded("agent-setup", expanded);
+    if !expanded {
+        return;
+    }
+    let selected = if state.setup_host == 0 {
+        "Claude Code"
+    } else {
+        "Codex"
+    };
+    kit::picker(
+        ui,
+        "setup-host",
+        &mut state.setup_host,
+        &[(0, "Claude Code".to_owned()), (1, "Codex".to_owned())],
+        selected,
+        200.0,
+    );
+    let host = if state.setup_host == 0 {
+        "claude"
+    } else {
+        "codex"
+    };
+    kit::note(
+        ui,
+        format!("First, install {selected}. Make sure `{host} --version` works in Terminal."),
+    );
+    kit::note(
+        ui,
+        "1. Open Terminal. Run this command. Paste the token when Terminal waits, then press Return. The token is hidden as you type.",
+    );
+    let command = format!(
+        "read -r -s APASSY_SETUP_TOKEN\nprintf '%s' \"$APASSY_SETUP_TOKEN\" | {} setup {host} --token-stdin --write\nunset APASSY_SETUP_TOKEN",
+        shell_word(&cli_path())
+    );
+    kit::code_block(ui, &command, 3);
+    kit::note(
+        ui,
+        "This writes the MCP server and prompt hook settings. It does not check the connection. Apassy keeps a copy of changed settings.",
+    );
+    if host == "codex" {
+        kit::note(
+            ui,
+            "2. Restart Codex. Use /hooks to trust the Apassy hook. Check the Apassy server with /mcp.",
+        );
+    } else {
+        kit::note(
+            ui,
+            "2. Restart Claude Code. Use /mcp to check that Apassy is connected.",
+        );
+    }
+    kit::note(
+        ui,
+        "3. Open a credential and set its Environment variable. Return here to give this agent access to that credential and project.",
+    );
+    kit::note(
+        ui,
+        "4. In your project folder, run this command. Ask the agent to use the test credential. Check its request in Activity.",
+    );
+    let sandbox = std::path::Path::new(&cli_path())
+        .parent()
+        .map(|p| p.join("apassy-sandbox").display().to_string())
+        .unwrap_or_else(|| "apassy-sandbox".to_owned());
+    let launch = if host == "claude" {
+        format!(
+            "MCP_TOOL_TIMEOUT=180000 {} -- claude --settings '{{\"sandbox\":{{\"enabled\":false}}}}'",
+            shell_word(&sandbox)
         )
+    } else {
+        format!(
+            "{} -- codex -c sandbox_mode=danger-full-access",
+            shell_word(&sandbox)
+        )
+    };
+    kit::code_block(ui, &launch, 2);
+    kit::note(
+        ui,
+        "This uses the Apassy sandbox instead of the host's inner sandbox. Your host approval prompts stay active.",
+    );
+    kit::note(
+        ui,
+        "Check the result of the test request. Then check its entry in Activity. An Allowed entry alone does not prove success.",
+    );
+    if !fresh {
+        kit::note(
+            ui,
+            "Use the token you saved. If you lost it, select Rotate token to get a new one. The old token will stop working.",
+        );
+    }
 }
 
 /// A new token after a registration or a rotation. Apassy shows it one time. Escape
@@ -530,20 +791,30 @@ pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
     let mut dismiss = false;
     kit::sheet(ctx, "fresh-token", 580.0, |ui| {
         kit::sheet_title(ui, &title, Some(intro));
-        ui.label(kit::text("Token", Font::Headline).color(kit::LABEL));
-        kit::code_block(ui, token, 1);
-        ui.add_space(12.0);
-        ui.label(kit::text("MCP server configuration", Font::Headline).color(kit::LABEL));
-        let config = format!(
-            "{{\n  \"mcpServers\": {{\n    \"apassy\": {{\n      \"command\": \"{}\",\n      \"env\": {{ \"APASSY_AGENT_TOKEN\": \"{}\" }}\n    }}\n  }}\n}}",
-            adapter_path(),
-            token
-        );
-        kit::code_block(ui, &config, 7);
-        kit::note(
-            ui,
-            "Add this server to the agent host. For Claude Code, set MCP_TOOL_TIMEOUT higher than 120000.",
-        );
+        kit::sheet_body(ui, |ui| {
+            let heading = ui.label(kit::text("Token", Font::Headline).color(kit::LABEL));
+            kit::code_block(ui, token, 1).labelled_by(heading.id);
+            ui.add_space(12.0);
+            setup_guidance(&mut app.ui, ui, true);
+            let mut manual = app.ui.is_expanded("manual-mcp-config");
+            kit::disclosure(ui, &mut manual, "Other hosts: manual MCP configuration");
+            app.ui.set_expanded("manual-mcp-config", manual);
+            if manual {
+                let adapter = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|p| p.join("apassy-mcp")))
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "apassy-mcp".to_owned());
+                let config = zeroize::Zeroizing::new(serde_json::to_string_pretty(&serde_json::json!({
+                    "mcpServers": { "apassy": { "command": adapter, "env": { "APASSY_AGENT_TOKEN": token } } }
+                })).unwrap_or_default());
+                kit::code_block(ui, &config, 7);
+                kit::note(
+                    ui,
+                    "Add this server to your host. Keep the token private. Manual MCP setup does not install the prompt hook.",
+                );
+            }
+        });
         ui.add_space(8.0);
         kit::sheet_buttons(
             ui,
@@ -580,7 +851,7 @@ pub(super) fn revoke_sheet(
             |_| {},
             |ui| {
                 revoke = kit::button(ui, "Revoke", Style::DestructiveProminent).clicked();
-                cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
+                cancel = kit::alert_cancel(ui).clicked();
             },
         );
     });
@@ -1048,7 +1319,8 @@ fn rule_form(ui: &mut egui::Ui, form: &mut RuleForm) -> bool {
         ),
         |s| {
             s.row(|ui| {
-                ui.label(kit::text("Allowed command prefixes", Font::Body).color(kit::LABEL));
+                let label =
+                    ui.label(kit::text("Allowed command prefixes", Font::Body).color(kit::LABEL));
                 kit::note(ui, "One per line. Empty permits any command.");
                 kit::text_area(
                     ui,
@@ -1056,10 +1328,11 @@ fn rule_form(ui: &mut egui::Ui, form: &mut RuleForm) -> bool {
                     "rule-prefixes",
                     "npm run migrate\nnpm test",
                     2,
-                );
+                )
+                .labelled_by(label.id);
             });
             s.row(|ui| {
-                ui.label(kit::text("Forbidden words", Font::Body).color(kit::LABEL));
+                let label = ui.label(kit::text("Forbidden words", Font::Body).color(kit::LABEL));
                 kit::note(ui, "One per line.");
                 kit::text_area(
                     ui,
@@ -1067,7 +1340,8 @@ fn rule_form(ui: &mut egui::Ui, form: &mut RuleForm) -> bool {
                     "rule-forbidden",
                     "prod\n--force",
                     2,
-                );
+                )
+                .labelled_by(label.id);
             });
             s.field("Expires after", |ui| {
                 let field = kit::number_input(ui, &mut form.expires_hours, "rule-expiry", "never");
@@ -1085,15 +1359,45 @@ fn rule_form(ui: &mut egui::Ui, form: &mut RuleForm) -> bool {
         Some("In plain words. The bouncer checks each request against it."),
         |s| {
             s.row(|ui| {
-                kit::text_area(
+                let field = kit::text_area(
                     ui,
                     &mut form.instruction,
                     "rule-instruction",
                     "Only run migrations and tests on staging. Never print or send keys.",
                     2,
                 );
+                ui.ctx()
+                    .accesskit_node_builder(field.id, |node| node.set_label("Your instruction"));
             });
         },
     );
     kit::button(ui, "Save rule", Style::Bordered).clicked()
+}
+
+#[cfg(test)]
+mod onboarding_tests {
+    use super::*;
+
+    #[test]
+    fn host_choice_prepares_registration_and_reuses_an_existing_agent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut app, _) = super::super::owner_tests::unlocked_app_with_item(&dir);
+        choose_host(&mut app, 1);
+        assert_eq!(app.ui.setup_host, 1);
+        assert_eq!(app.owner_ui.new_agent_name, "Codex");
+        assert!(matches!(app.ui.sheet, Some(Sheet::RegisterAgent)));
+        assert!(app.owner_ui.session.agents().unwrap().is_empty());
+        assert!(app.owner_ui.fresh_token.is_none());
+
+        let (agent, _token) = app.owner_ui.session.register_agent("Codex").unwrap();
+        choose_host(&mut app, 1);
+        assert_eq!(app.owner_ui.selected_agent, Some(agent.id));
+        assert!(app.ui.sheet.is_none());
+        assert!(app.ui.is_expanded("agent-setup"));
+        assert_eq!(app.owner_ui.session.agents().unwrap(), vec![agent]);
+        assert!(
+            app.owner_ui.fresh_token.is_none(),
+            "the token did not rotate"
+        );
+    }
 }

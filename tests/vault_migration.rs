@@ -1,6 +1,6 @@
 #![cfg(feature = "vault")]
 
-//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 13) to
+//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 14) to
 //! the current version, with data at each version. Synthetic values only.
 //!
 //! The schema SQL below is a frozen copy of the statements that each earlier version ran
@@ -22,7 +22,7 @@ use apassy::vault::{
 use tempfile::TempDir;
 
 const PASS: &str = "synthetic-migration-passphrase";
-const CURRENT_VERSION: i64 = 14;
+const CURRENT_VERSION: i64 = 15;
 /// The vault ID of the frozen version 13 file.
 const V13_VAULT_ID: &str = "6f1c2d3e-4a5b-4c6d-8e7f-0123456789ab";
 
@@ -832,7 +832,7 @@ fn assert_version_data(vault: &mut Vault, version: i64) {
 #[test]
 fn unlock_migrates_each_earlier_schema_version_to_the_current_one() {
     let mut sync_ids: Vec<String> = Vec::new();
-    for version in 1..CURRENT_VERSION {
+    for version in 1..14 {
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join(format!("v{version}.db"));
         build_legacy(&path, version);
@@ -868,6 +868,20 @@ fn unlock_migrates_each_earlier_schema_version_to_the_current_one() {
         );
         sync_ids.push(identity.vault_id.clone());
 
+        assert_eq!(
+            vault.companion_setting().expect("setting"),
+            apassy::vault::CompanionSetting {
+                enabled: false,
+                port: apassy::vault::DEFAULT_COMPANION_PORT
+            }
+        );
+        assert!(vault.companion_devices().expect("devices").is_empty());
+        assert!(
+            vault
+                .companion_certificate()
+                .expect("certificate")
+                .is_none()
+        );
         // The current features work on the migrated file.
         vault.set_token_lifetime_days(60).expect("lifetime");
         let (agent, token) = vault.register_agent("MIG new agent").expect("register");
@@ -1525,4 +1539,186 @@ fn restore_migrates_an_old_backup() {
     );
     // Item 1 has a connector and a variable. Item 2 has a variable.
     assert_eq!(restored.items_needing_review().expect("review"), vec![1, 2]);
+}
+
+// Frozen schema 14, before the companion tables. Do not use current migration code.
+const V14_SQL: &str = r#"
+ALTER TABLE item ADD COLUMN uuid TEXT;
+ALTER TABLE item ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE item ADD COLUMN updated_by TEXT NOT NULL DEFAULT '';
+ALTER TABLE item ADD COLUMN clock TEXT NOT NULL DEFAULT '';
+ALTER TABLE item_event ADD COLUMN uuid TEXT;
+CREATE TABLE sync_tombstone (
+    uuid TEXT PRIMARY KEY,
+    deleted_at INTEGER NOT NULL,
+    deleted_by TEXT NOT NULL,
+    clock TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE sync_stamp (
+    uuid TEXT PRIMARY KEY,
+    updated_at INTEGER NOT NULL,
+    updated_by TEXT NOT NULL
+);
+CREATE TABLE sync_device (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    device_id TEXT NOT NULL,
+    device_name TEXT NOT NULL,
+    applying INTEGER NOT NULL DEFAULT 0 CHECK (applying IN (0, 1))
+);
+CREATE TABLE sync_peer (
+    device_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    seen_at INTEGER NOT NULL
+);
+INSERT INTO sync_device (id, device_id, device_name) VALUES (1, lower(hex(randomblob(16))), '');
+UPDATE item SET uuid = printf('%032x', id);
+UPDATE item_event SET uuid = printf('%032x', id);
+INSERT INTO sync_stamp (uuid, updated_at, updated_by) SELECT uuid, updated_at, updated_by FROM item;
+
+CREATE UNIQUE INDEX item_uuid ON item(uuid);
+CREATE UNIQUE INDEX item_event_uuid ON item_event(uuid);
+CREATE TRIGGER item_sync_insert AFTER INSERT ON item WHEN NEW.uuid IS NULL BEGIN
+    UPDATE item SET uuid = lower(hex(randomblob(16))), updated_at = CAST(ROUND((julianday('now') - 2440587.5) * 86400000.0) AS INTEGER),
+        updated_by = COALESCE((SELECT device_id FROM sync_device WHERE id = 1), '') WHERE id = NEW.id;
+END;
+CREATE TRIGGER item_sync_update AFTER UPDATE ON item
+WHEN NEW.updated_at = OLD.updated_at AND COALESCE((SELECT applying FROM sync_device WHERE id = 1), 0) = 0 BEGIN
+    UPDATE item SET updated_at = CAST(ROUND((julianday('now') - 2440587.5) * 86400000.0) AS INTEGER), updated_by = COALESCE((SELECT device_id FROM sync_device WHERE id = 1), '') WHERE id = NEW.id;
+END;
+CREATE TRIGGER item_sync_delete AFTER DELETE ON item
+WHEN OLD.uuid IS NOT NULL AND COALESCE((SELECT applying FROM sync_device WHERE id = 1), 0) = 0 BEGIN
+    INSERT OR REPLACE INTO sync_tombstone (uuid, deleted_at, deleted_by, clock)
+        VALUES (OLD.uuid, CAST(ROUND((julianday('now') - 2440587.5) * 86400000.0) AS INTEGER), COALESCE((SELECT device_id FROM sync_device WHERE id = 1), ''), OLD.clock);
+END;
+CREATE TRIGGER item_event_sync_insert AFTER INSERT ON item_event WHEN NEW.uuid IS NULL BEGIN
+    UPDATE item_event SET uuid = lower(hex(randomblob(16))) WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER item_tag_sync_insert AFTER INSERT ON item_tag WHEN COALESCE((SELECT applying FROM sync_device WHERE id = 1), 0) = 0 BEGIN
+    UPDATE item SET updated_at = CAST(ROUND((julianday('now') - 2440587.5) * 86400000.0) AS INTEGER), updated_by = COALESCE((SELECT device_id FROM sync_device WHERE id = 1), '') WHERE id = NEW.item_id;
+END;
+CREATE TRIGGER item_tag_sync_update AFTER UPDATE ON item_tag WHEN COALESCE((SELECT applying FROM sync_device WHERE id = 1), 0) = 0 BEGIN
+    UPDATE item SET updated_at = CAST(ROUND((julianday('now') - 2440587.5) * 86400000.0) AS INTEGER), updated_by = COALESCE((SELECT device_id FROM sync_device WHERE id = 1), '')
+        WHERE id IN (NEW.item_id, OLD.item_id);
+END;
+CREATE TRIGGER item_tag_sync_delete AFTER DELETE ON item_tag WHEN COALESCE((SELECT applying FROM sync_device WHERE id = 1), 0) = 0 BEGIN
+    UPDATE item SET updated_at = CAST(ROUND((julianday('now') - 2440587.5) * 86400000.0) AS INTEGER), updated_by = COALESCE((SELECT device_id FROM sync_device WHERE id = 1), '') WHERE id = OLD.item_id;
+END;
+
+CREATE TRIGGER item_field_sync_insert AFTER INSERT ON item_field WHEN COALESCE((SELECT applying FROM sync_device WHERE id = 1), 0) = 0 BEGIN
+    UPDATE item SET updated_at = CAST(ROUND((julianday('now') - 2440587.5) * 86400000.0) AS INTEGER), updated_by = COALESCE((SELECT device_id FROM sync_device WHERE id = 1), '') WHERE id = NEW.item_id;
+END;
+CREATE TRIGGER item_field_sync_update AFTER UPDATE ON item_field WHEN COALESCE((SELECT applying FROM sync_device WHERE id = 1), 0) = 0 BEGIN
+    UPDATE item SET updated_at = CAST(ROUND((julianday('now') - 2440587.5) * 86400000.0) AS INTEGER), updated_by = COALESCE((SELECT device_id FROM sync_device WHERE id = 1), '')
+        WHERE id IN (NEW.item_id, OLD.item_id);
+END;
+CREATE TRIGGER item_field_sync_delete AFTER DELETE ON item_field WHEN COALESCE((SELECT applying FROM sync_device WHERE id = 1), 0) = 0 BEGIN
+    UPDATE item SET updated_at = CAST(ROUND((julianday('now') - 2440587.5) * 86400000.0) AS INTEGER), updated_by = COALESCE((SELECT device_id FROM sync_device WHERE id = 1), '') WHERE id = OLD.item_id;
+END;
+
+CREATE TRIGGER item_archive_sync_insert AFTER INSERT ON item_archive WHEN COALESCE((SELECT applying FROM sync_device WHERE id = 1), 0) = 0 BEGIN
+    UPDATE item SET updated_at = CAST(ROUND((julianday('now') - 2440587.5) * 86400000.0) AS INTEGER), updated_by = COALESCE((SELECT device_id FROM sync_device WHERE id = 1), '') WHERE id = NEW.item_id;
+END;
+CREATE TRIGGER item_archive_sync_update AFTER UPDATE ON item_archive WHEN COALESCE((SELECT applying FROM sync_device WHERE id = 1), 0) = 0 BEGIN
+    UPDATE item SET updated_at = CAST(ROUND((julianday('now') - 2440587.5) * 86400000.0) AS INTEGER), updated_by = COALESCE((SELECT device_id FROM sync_device WHERE id = 1), '')
+        WHERE id IN (NEW.item_id, OLD.item_id);
+END;
+CREATE TRIGGER item_archive_sync_delete AFTER DELETE ON item_archive WHEN COALESCE((SELECT applying FROM sync_device WHERE id = 1), 0) = 0 BEGIN
+    UPDATE item SET updated_at = CAST(ROUND((julianday('now') - 2440587.5) * 86400000.0) AS INTEGER), updated_by = COALESCE((SELECT device_id FROM sync_device WHERE id = 1), '') WHERE id = OLD.item_id;
+END;
+
+CREATE TRIGGER declaration_sync_insert AFTER INSERT ON declaration WHEN COALESCE((SELECT applying FROM sync_device WHERE id = 1), 0) = 0 BEGIN
+    UPDATE item SET updated_at = CAST(ROUND((julianday('now') - 2440587.5) * 86400000.0) AS INTEGER), updated_by = COALESCE((SELECT device_id FROM sync_device WHERE id = 1), '') WHERE id = NEW.item_id;
+END;
+CREATE TRIGGER declaration_sync_update AFTER UPDATE ON declaration WHEN COALESCE((SELECT applying FROM sync_device WHERE id = 1), 0) = 0 BEGIN
+    UPDATE item SET updated_at = CAST(ROUND((julianday('now') - 2440587.5) * 86400000.0) AS INTEGER), updated_by = COALESCE((SELECT device_id FROM sync_device WHERE id = 1), '')
+        WHERE id IN (NEW.item_id, OLD.item_id);
+END;
+CREATE TRIGGER declaration_sync_delete AFTER DELETE ON declaration WHEN COALESCE((SELECT applying FROM sync_device WHERE id = 1), 0) = 0 BEGIN
+    UPDATE item SET updated_at = CAST(ROUND((julianday('now') - 2440587.5) * 86400000.0) AS INTEGER), updated_by = COALESCE((SELECT device_id FROM sync_device WHERE id = 1), '') WHERE id = OLD.item_id;
+END;
+
+CREATE TRIGGER env_binding_sync_insert AFTER INSERT ON env_binding WHEN COALESCE((SELECT applying FROM sync_device WHERE id = 1), 0) = 0 BEGIN
+    UPDATE item SET updated_at = CAST(ROUND((julianday('now') - 2440587.5) * 86400000.0) AS INTEGER), updated_by = COALESCE((SELECT device_id FROM sync_device WHERE id = 1), '') WHERE id = NEW.item_id;
+END;
+CREATE TRIGGER env_binding_sync_update AFTER UPDATE ON env_binding WHEN COALESCE((SELECT applying FROM sync_device WHERE id = 1), 0) = 0 BEGIN
+    UPDATE item SET updated_at = CAST(ROUND((julianday('now') - 2440587.5) * 86400000.0) AS INTEGER), updated_by = COALESCE((SELECT device_id FROM sync_device WHERE id = 1), '')
+        WHERE id IN (NEW.item_id, OLD.item_id);
+END;
+CREATE TRIGGER env_binding_sync_delete AFTER DELETE ON env_binding WHEN COALESCE((SELECT applying FROM sync_device WHERE id = 1), 0) = 0 BEGIN
+    UPDATE item SET updated_at = CAST(ROUND((julianday('now') - 2440587.5) * 86400000.0) AS INTEGER), updated_by = COALESCE((SELECT device_id FROM sync_device WHERE id = 1), '') WHERE id = OLD.item_id;
+END;
+
+CREATE TRIGGER destination_sync_insert AFTER INSERT ON destination WHEN COALESCE((SELECT applying FROM sync_device WHERE id = 1), 0) = 0 BEGIN
+    UPDATE item SET updated_at = CAST(ROUND((julianday('now') - 2440587.5) * 86400000.0) AS INTEGER), updated_by = COALESCE((SELECT device_id FROM sync_device WHERE id = 1), '') WHERE id = NEW.item_id;
+END;
+CREATE TRIGGER destination_sync_update AFTER UPDATE ON destination WHEN COALESCE((SELECT applying FROM sync_device WHERE id = 1), 0) = 0 BEGIN
+    UPDATE item SET updated_at = CAST(ROUND((julianday('now') - 2440587.5) * 86400000.0) AS INTEGER), updated_by = COALESCE((SELECT device_id FROM sync_device WHERE id = 1), '')
+        WHERE id IN (NEW.item_id, OLD.item_id);
+END;
+CREATE TRIGGER destination_sync_delete AFTER DELETE ON destination WHEN COALESCE((SELECT applying FROM sync_device WHERE id = 1), 0) = 0 BEGIN
+    UPDATE item SET updated_at = CAST(ROUND((julianday('now') - 2440587.5) * 86400000.0) AS INTEGER), updated_by = COALESCE((SELECT device_id FROM sync_device WHERE id = 1), '') WHERE id = OLD.item_id;
+END;
+UPDATE vault_meta SET schema_version = 14 WHERE id = 1;
+PRAGMA user_version = 14;
+"#;
+
+#[test]
+fn version_14_migration_keeps_sync_records_and_is_atomic() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("v14.db");
+    build_legacy(&path, 13);
+    let conn = rusqlite::Connection::open(&path).expect("open");
+    conn.pragma_update(None, "key", PASS).expect("key");
+    conn.execute_batch(V14_SQL).expect("frozen schema 14");
+    let device: String = conn
+        .query_row("SELECT device_id FROM sync_device WHERE id = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    conn.execute_batch("CREATE TABLE companion_device (x INTEGER);")
+        .unwrap();
+    conn.close().map_err(|(_, e)| e).unwrap();
+    let before = sync_columns(&path);
+    let mut vault = Vault::open(&path).expect("open");
+    assert_eq!(
+        vault.unlock(PASS).unwrap_err().kind(),
+        VaultErrorKind::Storage
+    );
+    drop(vault);
+    assert_eq!(raw_versions(&path), (14, 14));
+    let conn = rusqlite::Connection::open(&path).expect("open");
+    conn.pragma_update(None, "key", PASS).unwrap();
+    assert!(conn.prepare("SELECT id FROM companion_setting").is_err());
+    assert!(
+        conn.prepare("SELECT id FROM companion_certificate")
+            .is_err()
+    );
+    conn.execute_batch("DROP TABLE companion_device;").unwrap();
+    conn.close().map_err(|(_, e)| e).unwrap();
+    let mut vault = Vault::open(&path).expect("open");
+    vault.unlock(PASS).expect("schema 14 to 15");
+    assert_version_data(&mut vault, 14);
+    assert_eq!(vault.sync_identity().unwrap().vault_id, V13_VAULT_ID);
+    assert_eq!(
+        vault.companion_setting().unwrap(),
+        apassy::vault::CompanionSetting {
+            enabled: false,
+            port: apassy::vault::DEFAULT_COMPANION_PORT
+        }
+    );
+    assert!(vault.companion_devices().unwrap().is_empty());
+    assert!(vault.companion_certificate().unwrap().is_none());
+    assert_eq!(sync_columns(&path), before, "record IDs and clocks stay");
+    drop(vault);
+    let conn = rusqlite::Connection::open(&path).expect("open");
+    conn.pragma_update(None, "key", PASS).unwrap();
+    let after: String = conn
+        .query_row("SELECT device_id FROM sync_device WHERE id = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(device, after, "this is a migration, not a restore");
+    conn.close().map_err(|(_, e)| e).unwrap();
+    assert_eq!(raw_versions(&path), (15, 15));
 }

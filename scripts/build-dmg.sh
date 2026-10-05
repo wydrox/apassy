@@ -54,6 +54,11 @@ for tool in codesign ditto git hdiutil openssl plutil security shasum xcrun; do
   command -v "$tool" >/dev/null 2>&1 || fail "missing tool: $tool"
 done
 [ -d "$APP" ] || fail "missing $APP. Run scripts/build-app.sh first."
+for tool in apassy apassy-mcp apassy-hook apassy-sandbox; do
+  [ -x "$APP/Contents/MacOS/$tool" ] || fail "missing $tool in $APP. Run scripts/build-app.sh again."
+done
+[ -s "$APP/Contents/Resources/apassy-agent-host.sb" ] \
+  || fail "missing agent profile in $APP. Run scripts/build-app.sh again."
 codesign --verify --deep --strict "$APP" || fail "the signature of $APP is not valid"
 codesign -dvv "$APP" >"$TMP/info.txt" 2>&1
 SIGN_NAME="$(sed -n 's/^Authority=//p' "$TMP/info.txt" | head -n 1)"

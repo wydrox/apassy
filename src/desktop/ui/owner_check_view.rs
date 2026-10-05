@@ -15,6 +15,7 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
     let action = dialog.request.describe();
     let running = dialog.running.as_ref().map(|(method, _)| *method);
     let message = dialog.message.clone();
+    let from_cli = dialog.origin.is_some();
     let note = app.owner.touch_id_note();
     let has_helper = app.owner.helper.is_some();
     let mut touch_id = false;
@@ -29,10 +30,18 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
         });
         ui.add_space(8.0);
         kit::paragraph(ui, action, Font::Body, kit::LABEL);
+        if from_cli {
+            ui.add_space(4.0);
+            kit::tone_note(
+                ui,
+                crate::desktop::owner_cli::CLI_ORIGIN_NOTE,
+                Tone::Warning,
+            );
+        }
         ui.add_space(4.0);
         kit::note(
             ui,
-            "Apassy asks for Touch ID or the passphrase for each reveal, approval, access change, rule change, and token rotation. A notification or \"Mark as seen\" is never an approval.",
+            "Apassy asks for Touch ID or the passphrase for each reveal, approval, iPhone pairing, access change, rule change, token rotation, and command-line session. A notification or \"Mark as seen\" is never an approval.",
         );
         ui.add_space(10.0);
         match running {
@@ -44,7 +53,8 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
             Some(CheckMethod::Passphrase) => {
                 kit::tone_note(ui, "Apassy is checking the passphrase.", Tone::Accent);
             }
-            None => {}
+            // The Mac dialog never starts an iPhone check: the phone signs on its own.
+            Some(CheckMethod::Companion) | None => {}
         }
         if let Some(message) = &message {
             kit::tone_note(ui, message, Tone::Critical);

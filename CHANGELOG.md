@@ -4,13 +4,58 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-05
+
+Clearer setup on a second Mac, sync recovery, and complete command-line tools in the app bundle.
+
+### Added
+
+- A guided flow to find and open an existing vault from iCloud Drive or another sync folder.
+- Setup choices for Claude Code, Codex, and the CLI after a synced vault opens. Agents and grants stay local to each Mac.
+- A persistent conflict review with links between retained copies and the current credential.
+- Native file panels for vault, import, backup, and sync paths.
+- The iPhone companion source, with QR pairing, device removal, and owner approval for runs. Its listener is off by default. Device trust stays local to each Mac.
+- Source files for the promotional videos.
+- Design records for the local bouncer, shared-vault relay, and relay accounts.
+
+### Fixed
+
+- A wrong vault passphrase preserves the selected file and returns focus to the passphrase field.
+- Cloud folder checks have bounded waits. Retry detects newly available folders and preserves the selected file.
+- Sync status distinguishes a local folder write from receipt on another Mac.
+- CLI setup distinguishes configuration from a verified connection. The tool installer checks executable files.
+- The app bundle includes `apassy-hook`, `apassy-sandbox`, and the agent profile. Build checks verify those files.
+- Keyboard actions, edit cancellation, CLI help, and error output are clearer.
+
+### Changed
+
+- Vault schema 15 adds local companion settings, certificates, and paired devices. Migration keeps schemas 13 and 14. A restore or adoption clears device trust.
+- Updated site build dependencies. The dependency audit reports no known vulnerabilities.
+
+### Release status
+
+- This release publishes source code. A signed and notarized download still requires the Apple and Cloudflare release credentials.
+
+## [0.3.1] - 2026-10-01
+
+The owner command line, keyboard use, and the install from source.
+
 ### Added
 
 - **Install from source with one command.** `/bin/bash -c "$(curl -fsSL https://apassy.wyderka.cc/install.sh)"` checks the Mac, clones the newest release, builds, signs, and checks it with `scripts/build-app.sh`, and installs it in Applications. It asks before it replaces an app and never uses sudo; `--check` only checks the Mac. On the site, "Coming soon for macOS" opens a note with the command until the signed download is published ([`scripts/install.sh`](scripts/install.sh)).
+- **Owner command line.** `apassy` with a command talks to the running window over a new owner socket: credentials (list, show, add, edit, archive, delete, history, agent settings), import of `.env` files and of 1Password and Bitwarden CSV exports, agents (register, rotate, revoke, see all, token lifetime), grants and rules, access requests, runs that wait, remembered patterns, activity, the decision export, backup, and the passphrase change. `apassy login` opens a session after Touch ID or the passphrase in the window; it ends after 30 idle minutes, at a lock, and when another vault opens. Every grant, approval, token, and agent setting still asks for its own owner check in the window, which says that the command line asked. The command line never shows a secret value, never takes one as an argument, and never unlocks or restores ([command line](docs/operations/cli.md), [ADR 0017](docs/adr/0017-owner-command-line.md), [wire](docs/contracts/owner-cli-v1.md)).
+- **`apassy setup claude|codex`.** Registers an agent and writes the MCP server and the prompt hook. The token is in two wrapper scripts with mode 0700, not in a host file.
+- **`apassy doctor`.** Checks the window, the vault, the broker, the session, the programs, the data directory, and the agent hosts, with a fix for each problem.
+- **Settings > Command line.** The owner socket and the open sessions, with "End all sessions".
+- **Keyboard use.** The focus follows the owner: a sheet takes the focus when it opens and gives it back when it closes; a destructive alert starts on Cancel; the page scrolls to the focused control; after a navigation or a control that goes away, the first control of the page takes the focus. Return does the default action of a sheet. New shortcuts: ⌘1 to ⌘4 and ⌘, for the views, ⌘[ for back, ⌘L to lock, Page Up, Page Down, Home, and End to scroll, and Esc to close an error message. A menu choice with the keyboard closes the menu. The arrows of a segmented picker no longer move the focus. The focus ring is 2 points of solid accent on every control. VoiceOver gets a name for every icon-only button, row, tag, picker, and custom detail field.
 
 ### Fixed
 
 - A copy without a Developer ID signature, such as a build from source, no longer downloads new versions every 6 hours only to refuse them. It shows the version and the download page, and the installer updates it ([updates](docs/operations/updates.md)).
+
+### Security
+
+- **The agent profile denies the Unix sockets of the data directory.** The file rule did not stop a `connect()` to a socket there. Now only the broker socket is open to agents, and the owner socket is closed. `apassy-sandbox` removes `APASSY_SESSION` from the agent environment.
 
 ## [0.3.0] - 2026-09-28
 
@@ -100,7 +145,9 @@ The alpha. It was not published.
 - Secrets for agent processes with owner approval: the socket never returns a secret value ([ADR 0006](docs/adr/0006-process-secrets.md)).
 - Plain-language rules and a local bouncer on Laya ([ADR 0007](docs/adr/0007-rules-and-local-bouncer.md)).
 
-[Unreleased]: https://github.com/wydrox/apassy/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/wydrox/apassy/compare/0.3.2...HEAD
+[0.3.2]: https://github.com/wydrox/apassy/releases/tag/0.3.2
+[0.3.1]: https://github.com/wydrox/apassy/releases/tag/v0.3.1
 [0.3.0]: https://github.com/wydrox/apassy/releases/tag/v0.3.0
 [0.2.1]: https://github.com/wydrox/apassy/releases/tag/v0.2.1
 [0.2.0]: https://github.com/wydrox/apassy/releases/tag/v0.2.0

@@ -192,7 +192,7 @@ fn create_with_sync_writes_the_file_and_settings_shows_the_status() {
     let folders = folders();
     let mut app = folders.mac("mac-a");
     let text = frames(&mut app);
-    assert!(text.contains("Open a synced vault"), "{text}");
+    assert!(text.contains("Use a vault from another Mac"), "{text}");
     app.ui.start = Step::Create;
     let text = frames(&mut app);
     assert!(text.contains("Sync"), "{text}");
@@ -200,7 +200,7 @@ fn create_with_sync_writes_the_file_and_settings_shows_the_status() {
 
     create(&mut app, "Personal", PASS, Some(&folders.dropbox));
     assert!(
-        app.status_text.contains("It syncs with Dropbox"),
+        app.status_text.contains("Folder sync is on for Dropbox"),
         "{}",
         app.status_text
     );
@@ -221,7 +221,7 @@ fn create_with_sync_writes_the_file_and_settings_shows_the_status() {
     let text = frames(&mut app);
     for expected in [
         "Sync",
-        "Up to date",
+        "Saved to sync folder",
         "Personal.apassy",
         "Dropbox",
         "Sync now",
@@ -472,7 +472,7 @@ fn open_a_synced_vault_adds_it_with_sync_on() {
     let mut b = folders.mac("mac-b");
     b.ui.start = Step::OpenSynced;
     let text = frames(&mut b);
-    assert!(text.contains("Open a synced vault"), "{text}");
+    assert!(text.contains("Use a vault from another Mac"), "{text}");
     assert!(text.contains("Team"), "the Dropbox file is listed: {text}");
 
     let file = folders.dropbox.join("Team.apassy");
@@ -625,4 +625,147 @@ fn without_sync_the_app_shows_no_sync_control() {
     app.view = OwnerView::Settings;
     let text = frames(&mut app);
     assert!(!text.contains("Sync now"), "{text}");
+}
+
+#[test]
+fn second_mac_flow_shows_file_service_and_existing_passphrase_without_paths() {
+    let folders = folders();
+    let mut a = folders.mac("mac-a");
+    create(&mut a, "Team", PASS, Some(&folders.dropbox));
+    let mut b = folders.mac("mac-b");
+    super::sync::begin_open(&mut b);
+    let file = folders.dropbox.join("Team.apassy");
+    b.sync_select_open_file(file.clone(), false, None);
+    assert_eq!(b.vault_list.name_input, "Team");
+    let text = frames(&mut b);
+    for expected in [
+        "Team.apassy",
+        "Dropbox",
+        "Existing vault passphrase",
+        "Choose another file",
+        "Details",
+        "Help with iCloud",
+        "Refresh",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    assert!(!text.contains("sandbox"), "{text}");
+    assert!(
+        !text.contains(&file.display().to_string()),
+        "full path belongs in Details: {text}"
+    );
+    b.ui.set_expanded("sync-open-details", true);
+    let text = frames(&mut b);
+    assert!(text.contains(&file.display().to_string()), "{text}");
+    assert!(text.contains("Name"), "{text}");
+}
+
+#[test]
+fn discovery_timeout_has_retry_and_help_and_preserves_safe_values() {
+    let folders = folders();
+    let mut b = folders.mac("mac-b");
+    super::sync::begin_open(&mut b);
+    let file = folders.dropbox.join("Team.apassy");
+    b.sync_select_open_file(file.clone(), false, None);
+    b.vault_list.name_input = "My local name".to_owned();
+    b.sync_open_error_for_test(crate::sync::SyncError::TimedOut);
+    let text = frames(&mut b);
+    assert!(text.contains("did not respond in time"), "{text}");
+    assert!(text.contains("cause is not known"), "{text}");
+    assert!(
+        text.contains("Retry") && text.contains("Help with iCloud"),
+        "{text}"
+    );
+    assert_eq!(b.sync.open_pick, Some(file.clone()));
+    assert_eq!(b.vault_list.name_input, "My local name");
+    b.sync_retry_open();
+    assert_eq!(b.sync.open_pick, Some(file.clone()));
+    assert_eq!(b.sync.open_path, file.display().to_string());
+    assert_eq!(b.vault_list.name_input, "My local name");
+    assert!(b.vault_list.registry.is_empty());
+}
+
+#[test]
+fn custom_folder_placeholder_keeps_selection_and_advances_when_ready() {
+    let folders = folders();
+    let custom = folders.root.path().join("Shared vaults");
+    let mut a = folders.mac("mac-a");
+    create(&mut a, "Team", PASS, Some(&custom));
+    let file = custom.join("Team.apassy");
+    let contents = fs::read(&file).expect("synced file");
+    fs::remove_file(&file).expect("remove local downloaded content");
+    let placeholder = custom.join(".Team.apassy.icloud");
+    fs::write(&placeholder, b"").expect("placeholder");
+    let mut b = folders.mac("mac-b");
+    super::sync::begin_open(&mut b);
+    b.sync_select_open_file(file.clone(), true, None);
+    b.vault_list.name_input = "Local Team".to_owned();
+    b.sync_retry_open();
+    let text = frames(&mut b);
+    assert!(b.sync_open_waiting_for_test());
+    assert!(!text.contains("Existing vault passphrase"), "{text}");
+    assert_eq!(b.sync.open_pick, Some(file.clone()));
+    fs::remove_file(placeholder).expect("download removes placeholder");
+    fs::write(&file, contents).expect("downloaded file");
+    b.sync_retry_open();
+    assert!(!b.sync_open_waiting_for_test());
+    assert_eq!(b.sync.open_pick, Some(file.clone()));
+    assert_eq!(b.vault_list.name_input, "Local Team");
+    let text = frames(&mut b);
+    assert!(text.contains("Existing vault passphrase"), "{text}");
+    b.owner_ui.passphrase.push_str(PASS);
+    b.sync_open_vault(&file, None);
+    assert!(!b.owner_ui.session.is_locked(), "{}", b.status_text);
+    assert_eq!(b.current_vault_name().as_deref(), Some("Local Team"));
+    assert_eq!(
+        b.sync.adopted_vault.as_deref(),
+        b.vault_list.current.as_deref()
+    );
+}
+
+#[test]
+fn folder_sync_status_does_not_claim_receipt_on_another_mac() {
+    for status in [UiStatus::UpToDate(None), UiStatus::UpToDate(Some(0))] {
+        let text = status.words(true);
+        assert!(text.contains("local file in the sync folder"), "{text}");
+        assert!(
+            text.contains("Receipt on another Mac is not confirmed"),
+            "{text}"
+        );
+        assert_eq!(status.tag().0, "Saved to sync folder");
+    }
+    assert!(UiStatus::Syncing.words(false).contains("Saved on this Mac"));
+    assert_eq!(UiStatus::Waiting.tag().0, "Waiting for file");
+    let folders = folders();
+    let mut a = folders.mac("mac-a");
+    create(&mut a, "Team", PASS, Some(&folders.dropbox));
+    a.sync_now();
+    assert!(
+        a.status_text.contains("Saved to the sync folder"),
+        "{}",
+        a.status_text
+    );
+}
+
+#[test]
+fn retry_finds_a_provider_that_appears_after_an_empty_scan() {
+    let home = TempDir::new().expect("synthetic home");
+    let mut app = DesktopApp::new();
+    app.load_vault_list(home.path().join("data"), true);
+    app.sync.offered = true;
+    super::sync::begin_open(&mut app);
+    app.sync_retry_open_in_for_test(home.path());
+    assert!(app.sync.folders.is_empty());
+    let folder = home.path().join("Dropbox").join("Apassy");
+    fs::create_dir_all(&folder).expect("new provider");
+    fs::write(folder.join("Team.apassy"), b"synthetic list entry").expect("entry");
+    app.sync_retry_open_in_for_test(home.path());
+    assert_eq!(app.sync.folders.len(), 1);
+    let text = frames(&mut app);
+    assert!(text.contains("Team.apassy"), "{text}");
+    assert!(text.contains("Dropbox"), "{text}");
+    assert!(
+        app.vault_list.registry.is_empty(),
+        "discovery does not adopt a file"
+    );
 }

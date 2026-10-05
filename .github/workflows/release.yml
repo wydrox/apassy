@@ -123,7 +123,7 @@ jobs:
       # key is in a keychain.
       - name: Build the Rust binaries
         if: steps.head.outputs.publish == 'true'
-        run: cargo build --release --locked --features desktop,vault --bin apassy --bin apassy-mcp --bin apassy-sandbox
+        run: cargo build --release --locked --features desktop,vault --bin apassy --bin apassy-mcp --bin apassy-hook --bin apassy-sandbox
 
       # The checkpoint is not in the repository (docs/operations/base-model.md).
       # The owner uploads it once to models/ in the bucket. The Worker does not

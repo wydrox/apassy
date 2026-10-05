@@ -22,16 +22,17 @@
 //! The engine does not know the vault list. The caller gives each path in
 //! [`SyncConfig`]. One sync covers one [`SyncScope`]: now the whole vault.
 
+mod directory;
 mod folder;
 mod state;
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read, Seek, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub use folder::{
     FOLDER_NAME, FolderEntry, PUSH_SUFFIX, SYNC_FILE_EXTENSION, SyncFolder, detect_folders_in,
@@ -41,7 +42,7 @@ pub use state::SyncState;
 
 use crate::vault::{
     MergeReport, SyncIdentity, SyncScope, Vault, VaultError, VaultErrorKind, copy_hashing,
-    hash_open_file, sync_dir, to_hex,
+    hash_open_file, to_hex,
 };
 use folder::Probe;
 
@@ -73,7 +74,15 @@ pub fn icloud_folder() -> Option<PathBuf> {
 /// The synced folders of the owner: iCloud Drive, the folders of
 /// `~/Library/CloudStorage`, and `~/Dropbox`, when they exist.
 pub fn detect_folders() -> Vec<SyncFolder> {
-    home().map_or_else(Vec::new, |home| detect_folders_in(&home))
+    try_detect_folders().unwrap_or_default()
+}
+
+/// Discover synced folders, with an error if the sync service does not respond.
+pub fn try_detect_folders() -> Result<Vec<SyncFolder>, SyncError> {
+    home().map_or_else(
+        || Ok(Vec::new()),
+        |home| folder::try_detect_folders_in(&home),
+    )
 }
 
 /// The name of this computer for the sync record: `scutil --get ComputerName` on macOS,
@@ -234,6 +243,8 @@ pub enum SyncError {
     Vault(VaultErrorKind),
     /// A file operation failed.
     Io,
+    /// The synced folder did not finish a directory flush within the time limit.
+    TimedOut,
 }
 
 impl fmt::Display for SyncError {
@@ -255,6 +266,9 @@ impl fmt::Display for SyncError {
             Self::State => f.write_str("the sync state file is damaged"),
             Self::Vault(kind) => fmt::Display::fmt(&VaultError::new(*kind), f),
             Self::Io => f.write_str("a file operation for sync failed"),
+            Self::TimedOut => f.write_str(
+                "the synced folder did not respond in time. The local vault is safe. Check the sync service and try again",
+            ),
         }
     }
 }
@@ -342,9 +356,14 @@ impl FolderSync {
 
     /// The state of the synced file. No key, no change to any file.
     pub fn status(&self) -> Result<StatusReport, SyncError> {
+        let sync = self.clone();
+        directory::read(move || sync.status_inner())
+    }
+
+    fn status_inner(&self) -> Result<StatusReport, SyncError> {
         let state = self.require_state()?;
         let name = &state.file_name;
-        let probe = folder::probe(&self.config.folder, name)?;
+        let probe = folder::probe_inner(&self.config.folder, name)?;
         let duplicates = match probe {
             Probe::Unavailable | Probe::NoFolder => Vec::new(),
             _ => folder::duplicates_of(&self.config.folder, name)?,
@@ -399,6 +418,16 @@ impl FolderSync {
         vault: &mut Vault,
         state: &mut SyncState,
     ) -> Result<SyncOutcome, SyncError> {
+        self.sync_with_directory_sync(vault, state, directory::sync)
+    }
+
+    fn sync_with_directory_sync(
+        &self,
+        vault: &mut Vault,
+        state: &mut SyncState,
+        flush_directory: impl FnOnce(&Path) -> Result<(), SyncError>,
+    ) -> Result<SyncOutcome, SyncError> {
+        let confirmed_hash = state.last_file_sha256.clone();
         let name = state.file_name.clone();
         let path = match self.probe_ready(&name)? {
             Some(path) => path,
@@ -414,9 +443,9 @@ impl FolderSync {
         };
         let mut merge = None;
         let mut file_content = state.last_content.clone();
-        if Some(hash_path(&path)?) != state.last_file_sha256 {
+        if Some(file_sha256(&path)?) != state.last_file_sha256 {
             let work = TempFile::new(self.work_path(&name, "merge")?)?;
-            let (_held, hash) = copy_to_new(&path, &work.path)?;
+            let (_held, hash) = copy_cloud_to_new(&path, &work.path)?;
             let report = vault
                 .merge_from(&work.path, &self.scope)
                 .map_err(copy_error)?;
@@ -429,6 +458,12 @@ impl FolderSync {
         if pushed {
             self.push(vault, state)?;
         } else {
+            // A prior push may have renamed the file but timed out before the
+            // directory flush. Reading that file does not confirm its durability.
+            // This comparison also covers retry after an app restart.
+            if confirmed_hash != state.last_file_sha256 {
+                flush_directory(&self.config.folder)?;
+            }
             state.last_content = Some(content);
         }
         self.write_state(state)?;
@@ -461,6 +496,15 @@ impl FolderSync {
     /// `<name>.apassy.push.nosync` in the synced folder, sync it, rename it to the file
     /// name, and sync the folder.
     fn push(&self, vault: &mut Vault, state: &mut SyncState) -> Result<(), SyncError> {
+        self.push_with_directory_sync(vault, state, directory::sync)
+    }
+
+    fn push_with_directory_sync(
+        &self,
+        vault: &mut Vault,
+        state: &mut SyncState,
+        flush_directory: impl FnOnce(&Path) -> Result<(), SyncError>,
+    ) -> Result<(), SyncError> {
         let name = state.file_name.clone();
         let work = TempFile::new(self.work_path(&name, "push")?)?;
         let copy = vault.write_sync_copy(&work.path, &device_name())?;
@@ -471,7 +515,7 @@ impl FolderSync {
         }
         fs::rename(&temp.path, self.config.folder.join(&name)).map_err(|_| SyncError::Io)?;
         temp.keep = true;
-        sync_dir(&self.config.folder).map_err(|_| SyncError::Io)?;
+        flush_directory(&self.config.folder)?;
         state.last_file_sha256 = Some(hash);
         state.last_content = Some(to_hex(&copy.content));
         Ok(())
@@ -511,7 +555,7 @@ impl FolderSync {
             return Err(SyncError::Vault(VaultErrorKind::NotFound));
         };
         let work = TempFile::new(self.work_path(&name, "passphrase")?)?;
-        copy_to_new(&path, &work.path)?;
+        copy_cloud_to_new(&path, &work.path)?;
         vault.take_passphrase_of_copy(&work.path, passphrase)?;
         drop(work);
         self.sync_with(vault, &mut state)
@@ -558,7 +602,7 @@ impl FolderSync {
                 }
                 Probe::Present(path) => {
                     let work = TempFile::new(self.work_path(&name, "check")?)?;
-                    copy_to_new(&path, &work.path)?;
+                    copy_cloud_to_new(&path, &work.path)?;
                     match vault.check_sync_copy(&work.path, &self.scope) {
                         Ok(theirs) if theirs.vault_id == local.vault_id => {
                             drop(work);
@@ -599,6 +643,15 @@ impl FolderSync {
         file_name: &str,
         passphrase: &str,
     ) -> Result<(Vault, AdoptReport), SyncError> {
+        self.adopt_with_reader(file_name, passphrase, copy_cloud_to_new)
+    }
+
+    fn adopt_with_reader(
+        &self,
+        file_name: &str,
+        passphrase: &str,
+        read: impl FnOnce(&Path, &Path) -> Result<(File, String), SyncError>,
+    ) -> Result<(Vault, AdoptReport), SyncError> {
         if !folder::valid_file_name(file_name) {
             return Err(SyncError::InvalidName);
         }
@@ -617,7 +670,7 @@ impl FolderSync {
             Probe::Unavailable => return Err(SyncError::FolderUnavailable),
         };
         let work = TempFile::new(self.work_path(file_name, "adopt")?)?;
-        let (_held, hash) = copy_to_new(&path, &work.path)?;
+        let (_held, hash) = read(&path, &work.path)?;
         let (vault, adopted) =
             Vault::adopt_sync_copy(&work.path, &self.config.vault_path, passphrase)?;
         let mut state = SyncState::new(file_name, &adopted.identity.vault_id);
@@ -686,7 +739,8 @@ pub fn read_state(path: &Path) -> Result<Option<SyncState>, SyncError> {
 
 /// Lowercase hexadecimal SHA-256 of the file at `path`.
 pub fn file_sha256(path: &Path) -> Result<String, SyncError> {
-    hash_path(path)
+    let path = path.to_owned();
+    directory::read(move || hash_path(&path))
 }
 
 /// Lowercase hexadecimal SHA-256 of the file at `path`. A missing file is
@@ -713,6 +767,95 @@ fn create_new_private(path: &Path) -> std::io::Result<File> {
         .open(path)
 }
 
+/// Read cloud bytes without giving the worker a named destination or a vault.
+/// A timed-out worker can only write its anonymous local file. The channel drops
+/// a late result, which closes that file. Only this caller publishes a work file.
+fn copy_cloud_to_new(source: &Path, dest: &Path) -> Result<(File, String), SyncError> {
+    let source = source.to_owned();
+    copy_cloud_to_new_with(dest, move |snapshot| {
+        directory::read_until(move |deadline| {
+            snapshot_cloud_file(&source, snapshot, Some(deadline))
+        })
+    })
+}
+
+fn snapshot_cloud_file(
+    source: &Path,
+    snapshot: File,
+    deadline: Option<Instant>,
+) -> Result<(File, String), SyncError> {
+    let source = File::open(source).map_err(|_| SyncError::Io)?;
+    let metadata = source.metadata().map_err(|_| SyncError::Io)?;
+    if !metadata.is_file() {
+        return Err(SyncError::Io);
+    }
+    snapshot_bytes(source, snapshot, metadata.len(), deadline)
+}
+
+/// Bound growth to the initial length without a new product size limit. Reject
+/// a shorter or longer read and stop after a timed-out syscall returns.
+fn snapshot_bytes(
+    mut source: impl Read,
+    mut snapshot: File,
+    expected: u64,
+    deadline: Option<Instant>,
+) -> Result<(File, String), SyncError> {
+    let expired = || deadline.is_some_and(|at| Instant::now() >= at);
+    let mut bytes = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    let mut hash = ring::digest::Context::new(&ring::digest::SHA256);
+    loop {
+        if expired() {
+            return Err(SyncError::TimedOut);
+        }
+        let limit = expected
+            .saturating_sub(bytes)
+            .saturating_add(1)
+            .min(buffer.len() as u64) as usize;
+        let read = source
+            .read(&mut buffer[..limit])
+            .map_err(|_| SyncError::Io)?;
+        if expired() {
+            return Err(SyncError::TimedOut);
+        }
+        if read == 0 {
+            break;
+        }
+        bytes += read as u64;
+        if bytes > expected {
+            return Err(SyncError::Io);
+        }
+        snapshot
+            .write_all(&buffer[..read])
+            .map_err(|_| SyncError::Io)?;
+        hash.update(&buffer[..read]);
+    }
+    if bytes != expected {
+        return Err(SyncError::Io);
+    }
+    snapshot.sync_all().map_err(|_| SyncError::Io)?;
+    snapshot.rewind().map_err(|_| SyncError::Io)?;
+    Ok((snapshot, to_hex(hash.finish().as_ref())))
+}
+
+fn copy_cloud_to_new_with(
+    dest: &Path,
+    read: impl FnOnce(File) -> Result<(File, String), SyncError>,
+) -> Result<(File, String), SyncError> {
+    let parent = dest.parent().ok_or(SyncError::Io)?;
+    let snapshot = tempfile::tempfile_in(parent).map_err(|_| SyncError::Io)?;
+    let (mut snapshot, expected_hash) = read(snapshot)?;
+    let mut dest_file = create_new_private(dest).map_err(|_| SyncError::Io)?;
+    match copy_hashing(&mut snapshot, &mut dest_file) {
+        Ok(hash) if to_hex(&hash) == expected_hash => Ok((dest_file, expected_hash)),
+        _ => {
+            drop(dest_file);
+            let _ = fs::remove_file(dest);
+            Err(SyncError::Io)
+        }
+    }
+}
+
 /// Copy `source` to the new file `dest` (mode `0600`) and sync it. Returns the open
 /// copy and the hash of the bytes.
 fn copy_to_new(source: &Path, dest: &Path) -> Result<(File, String), SyncError> {
@@ -732,4 +875,160 @@ fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn adopt_timeout_creates_no_vault_or_state_and_can_retry() {
+        let root = tempfile::tempdir().expect("test root");
+        let cloud = root.path().join("cloud");
+        fs::create_dir(&cloud).expect("cloud folder");
+        let passphrase = "synthetic-adopt-timeout-pass";
+        drop(Vault::create(&cloud.join("Synthetic.apassy"), passphrase).expect("source vault"));
+        let local = root.path().join("new-vault.db");
+        let sync = FolderSync::new(SyncConfig::in_data_dir(
+            root.path(),
+            &local,
+            &cloud,
+            "new-vault",
+        ));
+        assert_eq!(
+            sync.adopt_with_reader("Synthetic.apassy", passphrase, |_, _| Err(
+                SyncError::TimedOut
+            ))
+            .expect_err("cloud read timeout"),
+            SyncError::TimedOut
+        );
+        assert!(!local.exists());
+        assert!(!sync.config.state_path.exists());
+        assert_eq!(fs::read_dir(&sync.config.work_dir).unwrap().count(), 0);
+
+        let (vault, _) = sync.adopt("Synthetic.apassy", passphrase).expect("retry");
+        assert!(vault.is_locked());
+        assert!(local.exists());
+        assert!(sync.state().unwrap().is_some());
+    }
+
+    #[test]
+    fn timed_out_cloud_read_cannot_publish_a_late_file_and_retry_succeeds() {
+        let root = tempfile::tempdir().expect("test root");
+        let source = root.path().join("encrypted-cloud-copy");
+        fs::write(&source, b"synthetic encrypted bytes").expect("source");
+        let dest = root.path().join("work-copy");
+        let state = root.path().join("state.json");
+        let vault = root.path().join("vault.db");
+        let worker = directory::DirectorySync::default();
+        let (release, wait) = mpsc::channel();
+        let (finished, done) = mpsc::channel();
+        let late_source = source.clone();
+        let error = copy_cloud_to_new_with(&dest, |snapshot| {
+            let metadata = snapshot.metadata().expect("snapshot metadata");
+            assert_eq!(metadata.mode() & 0o777, 0o600);
+            assert_eq!(metadata.nlink(), 0, "the worker file must have no name");
+            worker.run(Duration::from_millis(25), move || {
+                wait.recv().expect("release cloud open");
+                let result = snapshot_cloud_file(&late_source, snapshot, None);
+                finished.send(()).expect("completed late cloud read");
+                result
+            })
+        })
+        .expect_err("cloud open must time out");
+        assert_eq!(error, SyncError::TimedOut);
+        assert!(!dest.exists());
+        release.send(()).expect("release worker");
+        done.recv_timeout(Duration::from_secs(1))
+            .expect("late read completes");
+        assert!(!dest.exists());
+        assert!(!state.exists());
+        assert!(!vault.exists());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+
+        // The successful path publishes a private named copy only after the read.
+        let (_held, hash) = copy_cloud_to_new(&source, &dest).expect("fresh retry");
+        assert_eq!(fs::read(&dest).unwrap(), fs::read(&source).unwrap());
+        assert_eq!(hash, hash_path(&dest).unwrap());
+        assert_eq!(fs::metadata(&dest).unwrap().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn cloud_snapshot_rejects_size_changes_and_stops_after_deadline() {
+        for expected in [2, 4] {
+            let snapshot = tempfile::tempfile().unwrap();
+            assert_eq!(
+                snapshot_bytes(&b"abc"[..], snapshot, expected, None).expect_err("size changed"),
+                SyncError::Io
+            );
+        }
+        let snapshot = tempfile::tempfile().unwrap();
+        assert_eq!(
+            snapshot_bytes(&b"abc"[..], snapshot, 3, Some(Instant::now()))
+                .expect_err("deadline passed"),
+            SyncError::TimedOut
+        );
+    }
+
+    #[test]
+    fn push_timeout_keeps_state_unconfirmed_and_allows_retry() {
+        let root = tempfile::tempdir().expect("test root");
+        let folder = root.path().join("cloud");
+        fs::create_dir(&folder).expect("cloud folder");
+        let vault_path = root.path().join("vault.db");
+        let passphrase = "synthetic-directory-timeout-pass";
+        let mut vault = Vault::create(&vault_path, passphrase).expect("vault");
+        vault.unlock(passphrase).expect("unlock");
+        let identity = vault.sync_identity().expect("identity");
+        let sync = FolderSync::new(SyncConfig::in_data_dir(
+            root.path(),
+            &vault_path,
+            &folder,
+            "test",
+        ));
+        let mut state = SyncState::new("Synthetic.apassy", &identity.vault_id);
+        let before = state.clone();
+        let error = sync
+            .push_with_directory_sync(&mut vault, &mut state, |_| Err(SyncError::TimedOut))
+            .expect_err("an unconfirmed directory flush must fail");
+        assert_eq!(error, SyncError::TimedOut);
+        assert_eq!(state, before);
+        assert!(sync.state().expect("state read").is_none());
+        assert!(!vault.is_locked());
+        let copy = folder.join("Synthetic.apassy");
+        assert_eq!(
+            Vault::inspect_sync_copy(&copy, passphrase)
+                .expect("complete encrypted copy")
+                .vault_id,
+            identity.vault_id
+        );
+
+        for last_hash in [None, Some("0".repeat(64))] {
+            let mut retry = before.clone();
+            retry.last_file_sha256 = last_hash;
+            let mut checked = false;
+            assert_eq!(
+                sync.sync_with_directory_sync(&mut vault, &mut retry, |_| {
+                    checked = true;
+                    Err(SyncError::TimedOut)
+                }),
+                Err(SyncError::TimedOut)
+            );
+            assert!(
+                checked,
+                "a changed checkpoint needs a fresh directory flush"
+            );
+            assert!(sync.state().unwrap().is_none());
+        }
+
+        // Retry recognizes the already renamed file, checks it, and records a
+        // confirmed sync instead of creating a duplicate or losing local data.
+        let report = sync.enable(&mut vault, "Synthetic").expect("retry");
+        assert!(report.linked);
+        assert_eq!(report.file_name, "Synthetic.apassy");
+        assert!(sync.state().expect("confirmed state").is_some());
+    }
 }

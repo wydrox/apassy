@@ -460,9 +460,16 @@ impl Vault {
         let identity = Self::inspect_sync_copy(source, passphrase)?;
         copy_into_new_file(source, &dest)?;
         let prepared = open_working_conn(&dest, passphrase).and_then(|mut conn| {
-            let result = merge::new_device(&conn)
-                .and_then(|()| merge::mark_seen(&mut conn))
-                .and_then(|()| merge::sync_content_digest(&conn, "main", &SyncScope::vault()));
+            let result = (|| {
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(|_| err(VaultErrorKind::Storage))?;
+                super::companion::prepare_adopted(&tx)?;
+                merge::new_device(&tx)?;
+                tx.commit().map_err(|_| err(VaultErrorKind::Storage))
+            })()
+            .and_then(|()| merge::mark_seen(&mut conn))
+            .and_then(|()| merge::sync_content_digest(&conn, "main", &SyncScope::vault()));
             let closed = close_conn(conn);
             result.and_then(|content| closed.map(|()| content))
         });

@@ -242,7 +242,8 @@ fn visuals() -> egui::Visuals {
     v.warn_fg_color = Tone::Warning.text();
     v.error_fg_color = Tone::Critical.text();
     v.selection.bg_fill = Color32::from_rgb(196, 222, 255);
-    v.selection.stroke = Stroke::new(1.5, ACCENT);
+    // The focus ring of a text field. 2 points of solid accent pass 3:1 (WCAG 1.4.11).
+    v.selection.stroke = Stroke::new(2.0, ACCENT);
     v.indent_has_left_vline = false;
     v.striped = false;
     v.button_frame = true;
@@ -268,7 +269,8 @@ fn visuals() -> egui::Visuals {
     w.hovered.expansion = 0.0;
     w.active.bg_fill = FILL_PRESSED;
     w.active.weak_bg_fill = FILL_PRESSED;
-    w.active.bg_stroke = Stroke::new(1.0, ACCENT);
+    // egui draws a focused built-in widget, such as a menu button, as active.
+    w.active.bg_stroke = Stroke::new(2.0, ACCENT);
     w.active.fg_stroke = Stroke::new(1.0, LABEL);
     w.active.corner_radius = radius;
     w.active.expansion = 0.0;
@@ -447,8 +449,8 @@ impl Section<'_> {
             .inner
     }
 
-    /// A whole-row button with a hover highlight.
-    pub(crate) fn clickable_row(&mut self, add: impl FnOnce(&mut Ui)) -> Response {
+    /// A whole-row button with a hover highlight. `label` is its name for VoiceOver.
+    pub(crate) fn clickable_row(&mut self, label: &str, add: impl FnOnce(&mut Ui)) -> Response {
         self.separator();
         let background = self.ui.painter().add(Shape::Noop);
         let response = self
@@ -475,14 +477,14 @@ impl Section<'_> {
                 .painter()
                 .set(background, epaint::RectShape::filled(rect, 6, fill));
             if response.has_focus() {
-                self.ui.painter().rect_stroke(
-                    rect,
-                    6,
-                    Stroke::new(1.5, ACCENT.gamma_multiply(0.6)),
-                    StrokeKind::Inside,
-                );
+                inner_focus_ring(self.ui.painter(), rect, 6);
             }
         }
+        if response.gained_focus() {
+            response.scroll_to_me(None);
+        }
+        let enabled = self.ui.is_enabled();
+        response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, label));
         response
     }
 
@@ -511,7 +513,15 @@ impl Section<'_> {
         subtitle: Option<&str>,
         detail: Option<RichText>,
     ) -> Response {
-        let response = self.clickable_row(|ui| {
+        // VoiceOver reads the title with the status on the right, for example
+        // "Touch ID unlock, Not set".
+        let name = match &detail {
+            Some(detail) if !detail.text().trim().is_empty() => {
+                format!("{title}, {}", detail.text())
+            }
+            _ => title.to_owned(),
+        };
+        self.clickable_row(&name, |ui| {
             ui.horizontal(|ui| {
                 if let Some((icon, color)) = icon {
                     icon_tile(ui, icon, color);
@@ -532,9 +542,7 @@ impl Section<'_> {
                     }
                 });
             });
-        });
-        response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, title));
-        response
+        })
     }
 
     /// A form row: a label on the left and a control that fills the rest.
@@ -686,10 +694,29 @@ pub(crate) fn button_with(
     button_sized(ui, icon, label, style, size, 0.0)
 }
 
+/// A button with an icon and no text. `name` is its name for VoiceOver and its
+/// tooltip.
+pub(crate) fn icon_button(ui: &mut Ui, icon: Icon, name: &str, size: Size) -> Response {
+    button_named(ui, Some(icon), "", Some(name), Style::Link, size, 0.0).on_hover_text(name)
+}
+
 fn button_sized(
     ui: &mut Ui,
     icon: Option<Icon>,
     label: &str,
+    style: Style,
+    size: Size,
+    min_width: f32,
+) -> Response {
+    button_named(ui, icon, label, None, style, size, min_width)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn button_named(
+    ui: &mut Ui,
+    icon: Option<Icon>,
+    label: &str,
+    name: Option<&str>,
     style: Style,
     size: Size,
     min_width: f32,
@@ -716,7 +743,11 @@ fn button_sized(
     let width = (galley.size().x + icon_space + 2.0 * pad).max(min_width);
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, size.height()), Sense::click());
     let enabled = ui.is_enabled();
-    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, label));
+    let name = name.unwrap_or(label);
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, name));
+    if response.gained_focus() {
+        response.scroll_to_me(None);
+    }
     if !ui.is_rect_visible(rect) {
         return response;
     }
@@ -775,12 +806,7 @@ fn button_sized(
     let painter = ui.painter();
     painter.rect_filled(rect, radius, fill);
     if response.has_focus() {
-        painter.rect_stroke(
-            rect.expand(2.0),
-            radius + 2,
-            Stroke::new(2.0, ACCENT.gamma_multiply(0.5)),
-            StrokeKind::Outside,
-        );
+        focus_ring(painter, rect, radius);
     }
     let content = Vec2::new(icon_space + galley.size().x, galley.size().y);
     let start = rect.center() - content / 2.0;
@@ -872,10 +898,11 @@ pub(crate) fn text_area(
     )
 }
 
-/// Read-only monospace text that the owner can select, for a command or a token.
-pub(crate) fn code_block(ui: &mut Ui, value: &str, rows: usize) {
-    let mut shown = value.to_owned();
-    ui.add(
+/// Read-only monospace text that the owner can select, for a command or a token. The
+/// keyboard can focus it and select the text with ⌘A.
+pub(crate) fn code_block(ui: &mut Ui, value: &str, rows: usize) -> Response {
+    let mut shown: &str = value;
+    let response = ui.add(
         TextEdit::multiline(&mut shown)
             .font(TextStyle::Monospace)
             .frame(
@@ -888,7 +915,10 @@ pub(crate) fn code_block(ui: &mut Ui, value: &str, rows: usize) {
             .desired_rows(rows)
             .desired_width(f32::INFINITY),
     );
-    shown.clear();
+    if response.has_focus() {
+        focus_ring(ui.painter(), response.rect, 8);
+    }
+    response
 }
 
 /// A macOS switch.
@@ -898,6 +928,9 @@ pub(crate) fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     if response.clicked() {
         *on = !*on;
         response.mark_changed();
+    }
+    if response.gained_focus() {
+        response.scroll_to_me(None);
     }
     let enabled = ui.is_enabled();
     let value = *on;
@@ -929,12 +962,7 @@ pub(crate) fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
         );
         painter.circle_filled(center, radius, Color32::WHITE);
         if response.has_focus() {
-            painter.rect_stroke(
-                rect.expand(2.0),
-                11,
-                Stroke::new(2.0, ACCENT.gamma_multiply(0.5)),
-                StrokeKind::Outside,
-            );
+            focus_ring(painter, rect, 9);
         }
     }
     response
@@ -981,6 +1009,21 @@ pub(crate) fn segmented<T: PartialEq + Copy>(
             None => Some(selected.map_or(0, |index| (index + 1) % count)),
         };
     }
+    if response.has_focus() {
+        // The arrow keys belong to the picker. Without this, egui also moves the focus.
+        ui.memory_mut(|memory| {
+            memory.set_focus_lock_filter(
+                response.id,
+                egui::EventFilter {
+                    horizontal_arrows: true,
+                    ..Default::default()
+                },
+            );
+        });
+    }
+    if response.gained_focus() {
+        response.scroll_to_me(None);
+    }
     if response.has_focus() && count > 0 {
         let (left, right) = ui.input(|input| {
             (
@@ -1005,7 +1048,16 @@ pub(crate) fn segmented<T: PartialEq + Copy>(
         .find(|(option, _)| option == value)
         .map_or("", |(_, label)| *label)
         .to_owned();
-    response.widget_info(|| WidgetInfo::labeled(WidgetType::ComboBox, enabled, &current));
+    // No label here: a form row names the picker with `labelled_by`, and VoiceOver
+    // reads the selected option as the value.
+    response.widget_info(|| WidgetInfo {
+        current_text_value: Some(current.clone()),
+        ..WidgetInfo::new(WidgetType::ComboBox)
+    });
+    if !enabled {
+        ui.ctx()
+            .accesskit_node_builder(response.id, |node| node.set_disabled());
+    }
     if !ui.is_rect_visible(rect) {
         return response;
     }
@@ -1043,14 +1095,26 @@ pub(crate) fn segmented<T: PartialEq + Copy>(
     response
 }
 
+/// The keyboard focus ring: 2 points of solid accent. It passes 3:1 against the window
+/// and the sidebar (WCAG 1.4.11).
+pub(crate) const FOCUS_STROKE: Stroke = Stroke {
+    width: 2.0,
+    color: ACCENT,
+};
+
 /// The keyboard focus ring around a control.
 pub(crate) fn focus_ring(painter: &Painter, rect: Rect, radius: u8) {
     painter.rect_stroke(
         rect.expand(2.0),
         radius + 2,
-        Stroke::new(2.0, ACCENT.gamma_multiply(0.5)),
+        FOCUS_STROKE,
         StrokeKind::Outside,
     );
+}
+
+/// The keyboard focus ring inside a full-width row.
+pub(crate) fn inner_focus_ring(painter: &Painter, rect: Rect, radius: u8) {
+    painter.rect_stroke(rect, radius, FOCUS_STROKE, StrokeKind::Inside);
 }
 
 /// True once when the owner presses `key` with `modifiers`. The key is consumed.
@@ -1058,9 +1122,11 @@ pub(crate) fn shortcut(ctx: &egui::Context, modifiers: egui::Modifiers, key: Key
     ctx.input_mut(|input| input.consume_shortcut(&egui::KeyboardShortcut::new(modifiers, key)))
 }
 
-/// ⌘S in a sheet: the default action.
+/// The default action of a sheet: ⌘S, ⌘Return, or Return (see [`sheet`]).
 pub(crate) fn save_shortcut(ctx: &egui::Context) -> bool {
-    shortcut(ctx, egui::Modifiers::COMMAND, Key::S)
+    let command = shortcut(ctx, egui::Modifiers::COMMAND, Key::S)
+        | shortcut(ctx, egui::Modifiers::COMMAND, Key::Enter);
+    command | take_sheet_enter(ctx)
 }
 
 /// A menu `Picker`: a combo box with the macOS up and down chevrons.
@@ -1095,6 +1161,38 @@ pub(crate) fn menu(
         })
 }
 
+/// A menu `Picker` for a value. A choice with Return or Space closes the menu, as a
+/// click does, and the focus goes back to the menu button after a choice or Escape.
+pub(crate) fn picker<T: PartialEq + Clone>(
+    ui: &mut Ui,
+    salt: impl std::hash::Hash + std::fmt::Debug,
+    value: &mut T,
+    options: &[(T, String)],
+    selected: impl Into<WidgetText>,
+    width: f32,
+) -> Response {
+    let output = menu(salt, selected, width).show_ui(ui, |ui| {
+        for (option, label) in options {
+            if ui.selectable_value(value, option.clone(), label).clicked() {
+                ui.close();
+            }
+        }
+    });
+    let response = output.response;
+    let ctx = ui.ctx();
+    let open = egui::ComboBox::is_open(ctx, response.id);
+    let key = response.id.with("apassy-picker-open");
+    let was_open = ctx.data(|data| data.get_temp::<bool>(key)).unwrap_or(false);
+    ctx.data_mut(|data| data.insert_temp(key, open));
+    if was_open && !open && keyboard_mode(ctx) {
+        response.request_focus();
+    }
+    if response.gained_focus() {
+        response.scroll_to_me(None);
+    }
+    response
+}
+
 /// A `DisclosureGroup` label with a chevron. Flips `open` on a click.
 pub(crate) fn disclosure(ui: &mut Ui, open: &mut bool, label: &str) -> Response {
     let galley = galley(ui, medium(label, Font::Body));
@@ -1107,6 +1205,11 @@ pub(crate) fn disclosure(ui: &mut Ui, open: &mut bool, label: &str) -> Response 
     let expanded = *open;
     response
         .widget_info(|| WidgetInfo::selected(WidgetType::CollapsingHeader, true, expanded, label));
+    ui.ctx()
+        .accesskit_node_builder(response.id, |node| node.set_expanded(expanded));
+    if response.gained_focus() {
+        response.scroll_to_me(None);
+    }
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         if response.hovered() {
@@ -1141,6 +1244,7 @@ pub(crate) fn tag(ui: &mut Ui, label: &str, tone: Tone) -> Response {
     let galley = galley(ui, medium(label, Font::Footnote));
     let size = galley.size() + Vec2::new(14.0, 4.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, label));
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         painter.rect_filled(rect, rect.height() / 2.0, tone.tint());
@@ -1185,8 +1289,13 @@ pub(crate) fn sidebar_item(
 ) -> Response {
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::click());
+    let name = match badge.filter(|(count, _)| *count > 0) {
+        Some((count, Tone::Neutral)) => format!("{label}, {count}"),
+        Some((count, _)) => format!("{label}, {count} waiting"),
+        None => label.to_owned(),
+    };
     response
-        .widget_info(|| WidgetInfo::selected(WidgetType::SelectableLabel, true, selected, label));
+        .widget_info(|| WidgetInfo::selected(WidgetType::SelectableLabel, true, selected, &name));
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         if selected {
@@ -1195,12 +1304,7 @@ pub(crate) fn sidebar_item(
             painter.rect_filled(rect, 6, Color32::from_rgb(232, 232, 236));
         }
         if response.has_focus() {
-            painter.rect_stroke(
-                rect,
-                6,
-                Stroke::new(1.5, ACCENT.gamma_multiply(0.6)),
-                StrokeKind::Inside,
-            );
+            inner_focus_ring(painter, rect, 6);
         }
         let icon_rect = Rect::from_center_size(
             Pos2::new(rect.left() + 18.0, rect.center().y),
@@ -1331,15 +1435,92 @@ pub(crate) struct SheetResponse {
     pub escape: bool,
 }
 
+/// The input of the last frame came from the keyboard, not the pointer. The focus
+/// helpers move the focus only for a keyboard user, so a pointer user sees no focus
+/// ring that they did not ask for.
+pub(crate) fn keyboard_mode(ctx: &egui::Context) -> bool {
+    ctx.data(|data| data.get_temp(Id::new("apassy-keyboard-mode")))
+        .unwrap_or(false)
+}
+
+pub(crate) fn set_keyboard_mode(ctx: &egui::Context, on: bool) {
+    ctx.data_mut(|data| data.insert_temp(Id::new("apassy-keyboard-mode"), on));
+}
+
+fn sheet_enter_id() -> Id {
+    Id::new("apassy-sheet-enter")
+}
+
+/// True once when the owner pressed Return in the top sheet for its default action.
+/// [`save_shortcut`] reads it. A destructive alert never calls it, so Return never
+/// deletes or revokes.
+fn take_sheet_enter(ctx: &egui::Context) -> bool {
+    ctx.data_mut(|data| data.remove_temp::<bool>(sheet_enter_id()))
+        .unwrap_or(false)
+}
+
+/// True in the frame where the sheet that is drawing became the top sheet. A
+/// destructive alert uses it to put the focus on Cancel.
+pub(crate) fn sheet_just_opened(ctx: &egui::Context) -> bool {
+    ctx.data(|data| data.get_temp(Id::new("apassy-sheet-opened")))
+        .unwrap_or(false)
+}
+
+/// The Cancel button of a destructive alert. It takes the focus when the alert opens,
+/// so Return or Space on a new alert cancels: it never deletes, revokes, or resets.
+pub(crate) fn alert_cancel(ui: &mut Ui) -> Response {
+    let cancel = button(ui, "Cancel", Style::Bordered);
+    if sheet_just_opened(ui.ctx()) && keyboard_mode(ui.ctx()) {
+        cancel.request_focus();
+    }
+    cancel
+}
+
 /// A macOS sheet: a modal card over a dimmed window. A click outside does not close
 /// it, so typed text is not lost.
+///
+/// The keyboard:
+/// - When the sheet becomes the top sheet, the focus moves to its first control (for a
+///   keyboard user). The page behind keeps its focus for the return.
+/// - Return does the default action when no button has the focus: in a single-line
+///   field, or with no focus. A focused button takes Return itself. A multi-line field
+///   takes Return as a new line.
+/// - Escape closes the sheet. The arrow keys do not move the focus out of the sheet.
 pub(crate) fn sheet(
     ctx: &egui::Context,
     id: &str,
     width: f32,
     add: impl FnOnce(&mut Ui),
 ) -> SheetResponse {
-    let response = Modal::new(Id::new(("apassy-sheet", id)))
+    let modal_id = Id::new(("apassy-sheet", id));
+    let layer = egui::LayerId::new(Order::Foreground, modal_id);
+    let top_key = modal_id.with("was-top");
+    let top_now = ctx.memory(|memory| memory.top_modal_layer()) == Some(layer);
+    let was_top = ctx
+        .data(|data| data.get_temp::<bool>(top_key))
+        .unwrap_or(false);
+    let opened = top_now && !was_top;
+    ctx.data_mut(|data| {
+        data.insert_temp(Id::new("apassy-sheet-opened"), opened);
+        // Return belongs to the sheet that draws now, and to this frame only.
+        data.remove_temp::<bool>(sheet_enter_id());
+    });
+    // A focused control in the sheet went away, for example after a failed save with
+    // Return. The focus goes to the first control again, not behind the sheet.
+    let lost = top_now
+        && ctx.memory(|memory| memory.focused()).is_none()
+        && !ctx.input(|input| input.key_pressed(Key::Escape));
+    if (opened || lost) && keyboard_mode(ctx) {
+        // The next control that registers takes the focus: the first one of the sheet.
+        ctx.memory_mut(|memory| {
+            if let Some(focused) = memory.focused() {
+                memory.surrender_focus(focused);
+            }
+            memory.move_focus(egui::FocusDirection::Next);
+        });
+    }
+    let before = ctx.memory(|memory| memory.focused());
+    let response = Modal::new(modal_id)
         .backdrop_color(Color32::from_black_alpha(46))
         .frame(
             Frame::NONE
@@ -1354,9 +1535,34 @@ pub(crate) fn sheet(
             ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
             add(ui)
         });
-    let escape = response.is_top_modal
-        && !response.any_popup_open
-        && ctx.input(|input| input.key_pressed(Key::Escape));
+    ctx.data_mut(|data| {
+        data.insert_temp(top_key, response.is_top_modal);
+        data.insert_temp(Id::new("apassy-sheet-opened"), false);
+    });
+    let quiet = response.is_top_modal && !response.any_popup_open;
+    let escape = quiet && ctx.input(|input| input.key_pressed(Key::Escape));
+    let after = ctx.memory(|memory| memory.focused());
+    let enter = quiet
+        && ctx.input(|input| input.key_pressed(Key::Enter) && !input.modifiers.any())
+        // No focus, or a single-line field that gave up the focus on Return.
+        && (before.is_none() || after.is_none());
+    if enter {
+        ctx.data_mut(|data| data.insert_temp(sheet_enter_id(), true));
+    }
+    if quiet && let Some(focused) = after {
+        // The arrow keys stay in the sheet. egui would move the focus to a control
+        // behind it, and the control would drop the focus.
+        ctx.memory_mut(|memory| {
+            memory.set_focus_lock_filter(
+                focused,
+                egui::EventFilter {
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    ..Default::default()
+                },
+            );
+        });
+    }
     SheetResponse { escape }
 }
 
@@ -1381,10 +1587,78 @@ pub(crate) fn sheet_body<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
         .max_height(max)
         .min_scrolled_height(last.min(max))
         .auto_shrink([false, true])
-        .show(ui, add);
+        .show(ui, |ui| {
+            let inner = add(ui);
+            follow_focus(ui);
+            keyboard_scroll(ui);
+            inner
+        });
     let height = output.content_size.y;
     ui.ctx().data_mut(|data| data.insert_temp(id, height));
     output.inner
+}
+
+/// Scroll the focused control into view when the focus moves to it, also for a control
+/// that does not do it itself, such as a text field. Call it at the end of the content
+/// of a [`ScrollArea`].
+pub(crate) fn follow_focus(ui: &Ui) {
+    let ctx = ui.ctx();
+    let Some(focused) = ctx.memory(|memory| memory.focused()) else {
+        return;
+    };
+    let key = ui.id().with("apassy-follow-focus");
+    if ctx.data(|data| data.get_temp::<Id>(key)) == Some(focused) {
+        return;
+    }
+    let Some(response) = ctx.read_response(focused) else {
+        return;
+    };
+    if response.layer_id != ui.layer_id() || !ui.min_rect().intersects(response.rect) {
+        return;
+    }
+    ui.scroll_to_rect(response.rect.expand(16.0), None);
+    ctx.data_mut(|data| data.insert_temp(key, focused));
+}
+
+/// Page Up, Page Down, Home, and End scroll the content of a [`ScrollArea`]. They do
+/// nothing in a text field, in a menu, or behind a sheet.
+pub(crate) fn keyboard_scroll(ui: &Ui) {
+    let ctx = ui.ctx();
+    if ctx.text_edit_focused()
+        || egui::Popup::is_any_open(ctx)
+        || !ctx.memory(|memory| memory.allows_interaction(ui.layer_id()))
+    {
+        return;
+    }
+    let (page_up, page_down, home, end) = ctx.input(|input| {
+        let plain = !input.modifiers.any();
+        (
+            plain && input.key_pressed(Key::PageUp),
+            plain && input.key_pressed(Key::PageDown),
+            plain && input.key_pressed(Key::Home),
+            plain && input.key_pressed(Key::End),
+        )
+    });
+    let page = ui.clip_rect().height() * 0.9;
+    let content = ui.min_rect();
+    if page_down {
+        ui.scroll_with_delta(Vec2::new(0.0, -page));
+    } else if page_up {
+        ui.scroll_with_delta(Vec2::new(0.0, page));
+    } else if home {
+        ui.scroll_to_rect(
+            Rect::from_min_size(content.min, Vec2::new(content.width(), 1.0)),
+            Some(Align::TOP),
+        );
+    } else if end {
+        ui.scroll_to_rect(
+            Rect::from_min_size(
+                Pos2::new(content.left(), content.bottom() - 1.0),
+                Vec2::new(content.width(), 1.0),
+            ),
+            Some(Align::BOTTOM),
+        );
+    }
 }
 
 /// The button row of a sheet: `leading` on the left (for a destructive action), and
@@ -1439,10 +1713,13 @@ pub(crate) fn toast(
                             .wrap(),
                         );
                         if closable {
-                            close =
-                                button_with(ui, Some(Icon::Xmark), "", Style::Link, Size::Small)
-                                    .on_hover_text("Close")
-                                    .clicked();
+                            close = icon_button(
+                                ui,
+                                Icon::Xmark,
+                                "Close the message (Esc)",
+                                Size::Small,
+                            )
+                            .clicked();
                         }
                     });
                 });
@@ -1478,6 +1755,7 @@ pub(crate) enum Icon {
     List,
     Folder,
     Eye,
+    Phone,
 }
 
 /// An icon in a rounded color tile, as in System Settings.
@@ -1676,6 +1954,15 @@ pub(crate) fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color
         Icon::Eye => {
             closed(&arc(0.5, 0.5, 0.42, 0.26, 0.0, TAU));
             circle(0.5, 0.5, 0.12);
+        }
+        Icon::Phone => {
+            painter.rect_stroke(
+                Rect::from_min_max(p(0.27, 0.08), p(0.73, 0.92)),
+                size * 0.12,
+                stroke,
+                StrokeKind::Middle,
+            );
+            line(&[(0.42, 0.79), (0.58, 0.79)]);
         }
     }
 }

@@ -385,13 +385,13 @@ fn agent_side_data_never_syncs_and_is_stripped_from_the_pushed_copy() {
     let _ = vault_a.reveal(alpha.id, "token").expect("reveal");
     a.sync.enable(&mut vault_a, "Personal").expect("enable");
 
-    // Inside the pushed copy: the credential and its settings, no local row.
+    // Inside the pushed copy: no local data, and a default companion setting.
     let (_dir, conn) = peek(&world.file(), PASS);
     for table in LOCAL_TABLES {
         assert_eq!(
             count(&conn, &format!("SELECT count(*) FROM {table}")),
-            0,
-            "{table} must be empty in the pushed copy"
+            i64::from(table == "companion_setting"),
+            "{table} has only the default setting singleton, or no rows"
         );
     }
     assert_eq!(count(&conn, "SELECT count(*) FROM item"), 1);
