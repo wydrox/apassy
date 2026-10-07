@@ -55,6 +55,21 @@ The bucket keeps only the latest build. The Worker serves only `Apassy.dmg` and 
 }
 ```
 
+## Relay first
+
+A release that uses relay sync needs the relay in step with the app, so deploy in this order. The relay code is in the separate repository `apassy-relay` (the branch that holds SPEC section 24); its deploy commands are in its `docs/OPERATIONS.md`, section 16. Stop at the first step that fails.
+
+1. Commit the relay branch. Deploy only a commit, so the image tag names it.
+2. Back up on the VPS: `ssh ottervibe 'cd /opt/apassy && docker compose exec -T relay apassy-relay admin backup'`. Check that the new folder in `/opt/apassy/backups/relay` has `MANIFEST.json`.
+3. Build and deploy the relay image as in OPERATIONS section 16: send `git archive` of the commit to the VPS, `docker build -t apassy-relay:<tag>`, set the tag in `/opt/apassy/compose.yaml`, then `docker compose up -d --wait`. On the first start every team file migrates to schema 4 and keeps `teams/<id>.db.pre-v4`. An image of schema 3 cannot open a migrated file. A restart ends every session.
+   - Rollback: stop the relay, put the `.pre-v4` copy back as `teams/<id>.db` (or restore the backup of step 2), start the old image. Pushes made after the migration are lost with it.
+4. Confirm that the sync routes exist: `GET https://apassy-relay.wyderka.cc/v1/sync/head` without a token must answer 401, not 404. A 404 means the old image still runs.
+5. In `deploy/worker`: `npm test` and `npm run typecheck`, then `wrangler deploy`. This adds the new routes, the body length checks, and the rate limits (`SYNC_LIMITER`, `CREATE_LIMITER` for `link/cancel`). Put the CLI binaries in `public/dl/` first, as OPERATIONS section 18 says.
+6. Verify a `PUT /v1/sync/snapshot` of a few MiB through the real edge and the tunnel, with a test team and its device (or the app against a scratch vault). The relay must see the `Content-Length` header: the Worker refuses `Transfer-Encoding`, and the relay refuses a chunked body. Check that an oversized declared length gets 413 at the edge, and that the 64 MiB limit of the Cloudflare plan holds (ADR 0022, open question 3). Delete the test team with `admin delete`.
+7. Only then publish the app: the source release and tags of [Source releases](#source-releases), or the push to `main` that runs the release workflow.
+
+Vault schema 16. A vault that the new app opened no longer opens in an app before this release (`verify_user_version`), and a merge refuses a copy of another schema (`src/vault/merge.rs`). So Macs that sync one vault through a folder or the relay must all update. Say this in the release notes: the "Upgrade notes" of the changelog do.
+
 ## One-time setup
 
 ### 1. Apple
