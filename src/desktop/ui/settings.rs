@@ -66,6 +66,7 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
         SettingsTab::General => {
             super::vaults::settings_section(app, ui);
             super::import::section(app, ui);
+            super::browser_settings::section(app, ui);
         }
         SettingsTab::Security => {
             security_section(app, ui);

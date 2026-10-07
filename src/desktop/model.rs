@@ -69,6 +69,9 @@ pub struct ItemDraft {
     pub project: String,
     pub notes: String,
     pub username: String,
+    /// The address of the login page of a login (ADR 0021). The browser extension fills
+    /// the login only on this site.
+    pub website: String,
     pub host: String,
     pub database_name: String,
     pub field_name: String,
@@ -98,6 +101,7 @@ impl Default for ItemDraft {
             project: String::new(),
             notes: String::new(),
             username: String::new(),
+            website: String::new(),
             host: String::new(),
             database_name: String::new(),
             field_name: String::new(),
@@ -1214,7 +1218,7 @@ impl DesktopModel {
     pub fn extra_fields(kind: CredentialKind) -> &'static [ExtraField] {
         match kind {
             CredentialKind::ApiKey => &[],
-            CredentialKind::Login => &[ExtraField::Username],
+            CredentialKind::Login => &[ExtraField::Username, ExtraField::Website],
             CredentialKind::SshKey => &[ExtraField::PublicLabel],
             CredentialKind::Database => &[
                 ExtraField::Username,
@@ -1229,6 +1233,7 @@ impl DesktopModel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtraField {
     Username,
+    Website,
     Host,
     DatabaseName,
     FieldName,
@@ -1239,6 +1244,7 @@ impl ExtraField {
     pub fn label(self) -> &'static str {
         match self {
             Self::Username => "Username",
+            Self::Website => "Website",
             Self::Host => "Host",
             Self::DatabaseName => "Database name",
             Self::FieldName => "Field name",
@@ -1783,6 +1789,7 @@ fn checked_fields(draft: ItemDraft, _require_kind: bool) -> ModelResult<ItemDraf
         project: draft.project.trim().to_owned(),
         notes: draft.notes.trim().to_owned(),
         username: draft.username.trim().to_owned(),
+        website: draft.website.trim().to_owned(),
         host: draft.host.trim().to_owned(),
         database_name: draft.database_name.trim().to_owned(),
         field_name: draft.field_name.trim().to_owned(),

@@ -64,6 +64,11 @@ path = "src/bin/apassy-dev-reporting.rs"
 name = "apassy-sandbox"
 path = "src/bin/apassy-sandbox.rs"
 
+# ADR 0021: the native messaging host of the browser extension. It needs no feature.
+[[bin]]
+name = "apassy-browser-host"
+path = "src/bin/apassy-browser-host.rs"
+
 # Held-out evaluation harness (goal B2). Needs the vault feature and a live Laya
 # server. It is not part of `cargo test`.
 [[bin]]

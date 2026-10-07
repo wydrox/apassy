@@ -119,12 +119,14 @@ fn write_wrapper(path: &Path, program: &Path, token: &SecretText) -> Result<(), 
 }
 
 pub fn run(cli: &Cli, mut args: Args) -> Outcome {
-    let host = match args.required("host: claude or codex")?.as_str() {
+    let host = match args.required("host: claude, codex, or browser")?.as_str() {
         "claude" | "claude-code" => Host::Claude,
         "codex" => Host::Codex,
+        // ADR 0021: the browser extension. It registers no agent.
+        "browser" => return super::browser::run(args),
         other => {
             return Err(Failure::Usage(usage(format!(
-                "Unknown host \"{other}\". Use claude or codex."
+                "Unknown host \"{other}\". Use claude, codex, or browser."
             ))));
         }
     };

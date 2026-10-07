@@ -6,6 +6,12 @@
 #   Apassy.app/Contents/MacOS/apassy-mcp      Rust MCP adapter for agents
 #   Apassy.app/Contents/MacOS/apassy-hook     Rust prompt hook for agents
 #   Apassy.app/Contents/MacOS/apassy-sandbox  Rust agent sandbox launcher
+#   Apassy.app/Contents/MacOS/apassy-browser-host
+#                                             Rust native messaging host of
+#                                             the browser extension (ADR 0021)
+#   Apassy.app/Contents/Resources/browser-extension
+#                                             The browser extension, for
+#                                             "Load unpacked" (extension/)
 #   Apassy.app/Contents/Resources/apassy-agent-host.sb
 #                                             Seatbelt profile for the launcher
 #   Apassy.app/Contents/MacOS/apassy-helper   Swift helper: Touch ID
@@ -261,7 +267,7 @@ else
   warn "git cannot name the commit. The app has no build identity and updates only to a higher version."
 fi
 APASSY_BUILD_COMMIT="$BUILD_COMMIT" APASSY_BUILD_DATE="$BUILD_DATE" \
-  cargo build --release --locked --features desktop,vault --bin apassy --bin apassy-mcp --bin apassy-hook --bin apassy-sandbox
+  cargo build --release --locked --features desktop,vault --bin apassy --bin apassy-mcp --bin apassy-hook --bin apassy-sandbox --bin apassy-browser-host
 
 step "Build the Swift helper"
 mkdir -p "$NATIVE_OUT"
@@ -324,11 +330,21 @@ printf 'APPL????' >"$APP/Contents/PkgInfo"
 printf 'APPL????' >"$KC_APP/Contents/PkgInfo"
 printf 'APPL????' >"$NT_APP/Contents/PkgInfo"
 cp target/release/apassy target/release/apassy-mcp target/release/apassy-hook \
-  target/release/apassy-sandbox "$APP/Contents/MacOS/"
+  target/release/apassy-sandbox target/release/apassy-browser-host "$APP/Contents/MacOS/"
 # The launcher reads the profile from Resources without the repository or a
 # profile flag. The app signature seals this resource.
 mkdir -p "$APP/Contents/Resources"
 cp sandbox/apassy-agent-host.sb "$APP/Contents/Resources/"
+# The browser extension (ADR 0021). The owner loads this folder with "Load
+# unpacked", so an update of the app updates the extension. The app signature
+# seals it. A browser refuses a file whose name starts with "_".
+EXT_VERSION="$(plutil -extract version raw -o - extension/manifest.json)"
+[ "$EXT_VERSION" = "$VERSION" ] \
+  || fail "extension/manifest.json has version $EXT_VERSION, Cargo.toml has $VERSION"
+cp -R extension "$APP/Contents/Resources/browser-extension"
+find "$APP/Contents/Resources/browser-extension" -name .DS_Store -delete
+[ -z "$(find "$APP/Contents/Resources/browser-extension" -name '_*')" ] \
+  || fail "the browser extension has a file whose name starts with _"
 cp "$NATIVE_OUT/apassy-helper" "$APP/Contents/MacOS/apassy-helper"
 cp "$NATIVE_OUT/apassy-helper" "$KC_APP/Contents/MacOS/$KEYCHAIN_EXE"
 cp "$NATIVE_OUT/$NOTIFY_EXE" "$NT_APP/Contents/MacOS/$NOTIFY_EXE"
@@ -436,7 +452,7 @@ sign --entitlements "$KC_ENTITLEMENTS" "$KC_APP"
 # A bundle signature takes the identifier from CFBundleIdentifier.
 sign --entitlements packaging/Apassy.entitlements "$NT_APP"
 sign --identifier "$APP_ID.helper" --entitlements packaging/Apassy.entitlements "$APP/Contents/MacOS/apassy-helper"
-for tool in mcp hook sandbox; do
+for tool in mcp hook sandbox browser-host; do
   sign --identifier "$APP_ID.$tool" --entitlements packaging/Apassy.entitlements "$APP/Contents/MacOS/apassy-$tool"
 done
 sign --entitlements packaging/Apassy.entitlements "$APP"
@@ -444,7 +460,7 @@ sign --entitlements packaging/Apassy.entitlements "$APP"
 # ---------------------------------------------------------------- verify
 step "Verify the signatures"
 codesign --verify --deep --strict --verbose=2 "$APP"
-for code in "$APP" "$APP/Contents/MacOS/apassy-mcp" "$APP/Contents/MacOS/apassy-hook" "$APP/Contents/MacOS/apassy-sandbox" "$APP/Contents/MacOS/apassy-helper" "$KC_APP" "$NT_APP"; do
+for code in "$APP" "$APP/Contents/MacOS/apassy-mcp" "$APP/Contents/MacOS/apassy-hook" "$APP/Contents/MacOS/apassy-sandbox" "$APP/Contents/MacOS/apassy-browser-host" "$APP/Contents/MacOS/apassy-helper" "$KC_APP" "$NT_APP"; do
   codesign -d --verbose=2 "$code" >"$TMP/info.txt" 2>&1
   grep -q "flags=.*(runtime)" "$TMP/info.txt" || fail "hardened runtime is off for $code"
   grep -q "TeamIdentifier=${CERT_TEAM:-}" "$TMP/info.txt" || fail "unexpected team for $code"
@@ -461,11 +477,11 @@ entitlements_json() {
   if [ -z "$xml" ]; then echo "{}"; else printf '%s' "$xml" | plutil -convert json -o - -; echo; fi
 }
 echo "Entitlements of ApassyKeychain.app: $(entitlements_json "$KC_APP")"
-for code in "$APP" "$APP/Contents/MacOS/apassy-mcp" "$APP/Contents/MacOS/apassy-hook" "$APP/Contents/MacOS/apassy-sandbox" "$APP/Contents/MacOS/apassy-helper" "$NT_APP"; do
+for code in "$APP" "$APP/Contents/MacOS/apassy-mcp" "$APP/Contents/MacOS/apassy-hook" "$APP/Contents/MacOS/apassy-sandbox" "$APP/Contents/MacOS/apassy-browser-host" "$APP/Contents/MacOS/apassy-helper" "$NT_APP"; do
   ENT="$(entitlements_json "$code")"
   [ "$ENT" = "{}" ] || fail "$code has unexpected entitlements: $ENT"
 done
-echo "Entitlements of apassy, apassy-mcp, apassy-hook, apassy-sandbox, apassy-helper, ApassyNotify.app: {}"
+echo "Entitlements of apassy, apassy-mcp, apassy-hook, apassy-sandbox, apassy-browser-host, apassy-helper, ApassyNotify.app: {}"
 
 # Key-memory review F7: each program in the bundle has the hardened runtime,
 # and no program has an entitlement that lets a debugger read its memory or
@@ -501,7 +517,7 @@ while IFS= read -r -d '' code; do
   FOUND="$(forbidden_entitlements "$code" | tr '\n' ' ')"
   [ -z "$FOUND" ] || fail "$code has forbidden entitlements: $FOUND"
 done < <(find "$APP" -type f -print0)
-[ "$PROGRAMS" = "7" ] || fail "expected 7 programs in the bundle, found $PROGRAMS"
+[ "$PROGRAMS" = "8" ] || fail "expected 8 programs in the bundle, found $PROGRAMS"
 echo "Hardened runtime on all $PROGRAMS programs. None has get-task-allow, disable-library-validation, or allow-dyld-environment-variables."
 
 # ---------------------------------------------------------------- self-check
@@ -522,6 +538,18 @@ for tool in mcp hook; do
 done
 "$APP/Contents/MacOS/apassy-sandbox" --help >"$TMP/sandbox-help.txt"
 check_output "apassy-sandbox --help" "$(cat "$TMP/sandbox-help.txt")" "^apassy-sandbox"
+# The browser host (ADR 0021): another caller gets exit status 2. The extension
+# gets not_running when no app listens. A message is a 4-byte length, then JSON.
+BH_EXE="$APP/Contents/MacOS/apassy-browser-host"
+# A shell variable cannot hold the NUL bytes of the length, so a function writes it.
+bh_status() { printf '\x16\x00\x00\x00{"v":1,"cmd":"status"}'; }
+if bh_status | "$BH_EXE" "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/" >/dev/null 2>&1; then
+  fail "apassy-browser-host answered another extension"
+fi
+echo "ok: apassy-browser-host refuses another extension"
+check_output "apassy-browser-host without the app" \
+  "$(bh_status | APASSY_BROWSER_SOCKET="$TMP/none.sock" "$BH_EXE" "chrome-extension://clopaaapnilhoeplaenolhdmjpompeeh/" | tail -c +5)" \
+  '"code":"not_running"'
 
 H_EXE="$APP/Contents/MacOS/apassy-helper"
 KC_EXE="$KC_APP/Contents/MacOS/$KEYCHAIN_EXE"
@@ -626,7 +654,7 @@ chmod 700 "$PROFILE_DIR/d"
 in_profile() {
   "$SANDBOX_BIN" --data-dir "$PROFILE_DIR/d" -- "$@"
 }
-for program in "$KC_EXE" "$NT_EXE" "$H_EXE" "$APP/Contents/MacOS/apassy"; do
+for program in "$KC_EXE" "$NT_EXE" "$H_EXE" "$APP/Contents/MacOS/apassy" "$APP/Contents/MacOS/apassy-browser-host"; do
   if PROFILE_OUT="$(printf '%s\n' '{"cmd":"ping"}' | in_profile "$program" 2>&1)"; then
     fail "${program#"$APP"/} started in the agent profile: $PROFILE_OUT"
   fi

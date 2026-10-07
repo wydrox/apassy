@@ -184,6 +184,8 @@ Without `--write`, `setup` prints the configuration. With `--write`, it adds the
 
 A copy of each changed file stays next to it (`.before-apassy`). Trust the hook in Codex with `/hooks`.
 
+`apassy setup browser` connects the browser extension: it writes the native messaging host manifest for each browser on this Mac and prints the folder of the extension. It registers no agent and needs no session. `--browser NAME` selects one browser, and `--remove` deletes the manifests ([browser](browser.md)).
+
 ## 6. Requests, runs, and history
 
 ```sh

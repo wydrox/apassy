@@ -3,6 +3,9 @@
 //! This module is a demo UI. It is not a secure vault, authenticated owner
 //! channel, or verified isolation boundary.
 
+/// The browser socket (ADR 0021).
+#[cfg(feature = "vault")]
+pub(crate) mod browser;
 #[cfg(feature = "vault")]
 mod companion;
 #[cfg(feature = "vault")]
@@ -157,6 +160,9 @@ pub struct DesktopApp {
     /// The owner socket and the command-line sessions (ADR 0017).
     #[cfg(feature = "vault")]
     pub(crate) cli: owner_cli::CliHost,
+    /// The browser socket and the fill on its way to the extension (ADR 0021).
+    #[cfg(feature = "vault")]
+    pub(crate) browser: browser::BrowserHost,
     /// The iPhone listener and the pairing state of Settings > iPhone companion (ADR 0020).
     #[cfg(feature = "vault")]
     pub(crate) companion: companion::CompanionFlows,
@@ -224,6 +230,8 @@ impl DesktopApp {
             #[cfg(feature = "vault")]
             cli: owner_cli::CliHost::default(),
             #[cfg(feature = "vault")]
+            browser: browser::BrowserHost::default(),
+            #[cfg(feature = "vault")]
             companion: companion::CompanionFlows::default(),
             #[cfg(feature = "vault")]
             model_server: None,
@@ -253,6 +261,7 @@ impl DesktopApp {
             app.start_sync_worker(&cc.egui_ctx);
             app.start_updates(&cc.egui_ctx);
             app.start_cli(&crate::owner::client::default_socket_path(), &cc.egui_ctx);
+            app.start_browser(&crate::browser::wire::default_socket_path(), &cc.egui_ctx);
         }
         app
     }
@@ -432,7 +441,10 @@ impl eframe::App for DesktopApp {
     /// So the command line gets its answer without a visible window.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         #[cfg(feature = "vault")]
-        self.poll_cli(ctx);
+        {
+            self.poll_cli(ctx);
+            self.poll_browser(ctx);
+        }
         #[cfg(not(feature = "vault"))]
         let _ = ctx;
     }
@@ -648,6 +660,7 @@ fn draft_from_details(details: &ItemDetails) -> ItemDraft {
         project: details.project.clone(),
         notes: details.notes.clone(),
         username: details.username.clone(),
+        website: String::new(),
         host: details.host.clone(),
         database_name: details.database_name.clone(),
         field_name: details.field_name.clone(),

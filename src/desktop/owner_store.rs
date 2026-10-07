@@ -36,6 +36,9 @@ use crate::vault::{
     VaultErrorKind, checked_env_name, parse_placeholder_host,
 };
 
+mod browser;
+pub use browser::{FillValues, PageLogin};
+
 const MAX_TAG_BYTES: usize = 64;
 /// The most tags on one item (`MAX_TAG_COUNT` in `src/vault/types.rs`).
 const MAX_TAG_COUNT: usize = 32;
@@ -71,6 +74,7 @@ pub fn field_label(name: &str) -> String {
         "private_key" => "Private key".to_owned(),
         "passphrase" => "Key passphrase".to_owned(),
         "username" => "Username".to_owned(),
+        "website" => "Website".to_owned(),
         "host" => "Host".to_owned(),
         "database" => "Database".to_owned(),
         "public_key" => "Public key".to_owned(),
@@ -1479,12 +1483,13 @@ impl OwnerSession {
 
     fn details_from_meta(&self, meta: crate::vault::ItemDetails) -> ModelResult<OwnerDetails> {
         let id = meta.summary.id;
-        let (service, project, username, host, database_name, public_label) = {
+        let (service, project, username, website, host, database_name, public_label) = {
             let vault = self.unlocked()?;
             (
                 plain_value(&vault, id, "service")?,
                 plain_value(&vault, id, "project")?,
                 plain_value(&vault, id, "username")?,
+                plain_value(&vault, id, "website")?,
                 plain_value(&vault, id, "host")?,
                 plain_value(&vault, id, "database")?,
                 plain_value(&vault, id, "public_key")?,
@@ -1540,6 +1545,7 @@ impl OwnerSession {
             project,
             notes: meta.notes,
             username,
+            website,
             host,
             database_name,
             field_name,
@@ -1666,6 +1672,8 @@ pub struct OwnerDetails {
     pub project: String,
     pub notes: String,
     pub username: String,
+    /// The `website` field of a login (ADR 0021).
+    pub website: String,
     pub host: String,
     pub database_name: String,
     pub field_name: String,
@@ -1703,6 +1711,7 @@ impl OwnerDetails {
             project: String::new(),
             notes: String::new(),
             username: String::new(),
+            website: String::new(),
             host: String::new(),
             database_name: String::new(),
             field_name: String::new(),
@@ -1724,6 +1733,7 @@ impl OwnerDetails {
             project: self.project.clone(),
             notes: self.notes.clone(),
             username: self.username.clone(),
+            website: self.website.clone(),
             host: self.host.clone(),
             database_name: self.database_name.clone(),
             field_name: self.field_name.clone(),
@@ -1975,6 +1985,14 @@ fn build_vault_draft(
                 &draft.username,
                 "Enter the username.",
             )?;
+            let website = draft.website.trim();
+            if !website.is_empty() && crate::browser::site::Website::parse(website).is_none() {
+                return Err(fail(
+                    "invalid_input",
+                    "Enter the website as a web address, for example https://example.com/login.",
+                ));
+            }
+            push_plain(&mut fields, "website", website);
             push_secret(
                 &mut fields,
                 vault,
@@ -2233,6 +2251,7 @@ fn is_reserved_field(name: &str) -> bool {
             | "private_key"
             | "passphrase"
             | "username"
+            | "website"
             | "host"
             | "database"
             | "public_key"

@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "Apassy",
+  "version": "0.3.4",
+  "description": "Fill a login from Apassy. Each fill needs Touch ID or your passphrase in Apassy.",
+  "minimum_chrome_version": "120",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2pmzfJB0XcJarv576aWkvwvzdXyR7/G+CXQadAGFX0c4DYk9JuPGmSmWJ/i6SqiCP+VD8tBUi4rswzMWWdtanAicyga9mAlEJAdSie/OspctJN0wpkSJJl7DQsrXe5C8x4hmukXlNDy4It6uZD3fHaY9EtswWN1x4w0LkzQUJxzt9w5/NhhJQXn9i0eMvqFV6QCycj7EBiNcvGfTbOLQMcGkGQEF9tdQ2hUg7uD9i8PpZ8A1VC/9+UHaRmgvRKYYsi+8rIGoYET6us+7xdh/aR7tq6EBOa4HJgqkFGhpdYpgzGJbP69qKCmqP9GJ64lqCo/jEYySeA3zvvmbqEHvewIDAQAB",
+  "permissions": ["nativeMessaging", "activeTab", "scripting"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Apassy",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/16.png",
+      "32": "icons/32.png",
+      "48": "icons/48.png",
+      "128": "icons/128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+L",
+        "mac": "Command+Shift+L"
+      },
+      "description": "Open Apassy"
+    }
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'"
+  }
+}

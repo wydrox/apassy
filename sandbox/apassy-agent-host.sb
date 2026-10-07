@@ -28,8 +28,10 @@
 ;; The profile also denies each route that starts a program OUTSIDE the
 ;; sandbox as the same user, because that program is not confined and can read
 ;; the vault: LaunchServices (`open`/`lsopen`), Apple Events, the Shortcuts and
-;; Automator services, and a write to an autostart location (LaunchAgents,
-;; LaunchDaemons, login items, application scripts, and shell startup files).
+;; Automator services, a write to an autostart location (LaunchAgents,
+;; LaunchDaemons, login items, application scripts, and shell startup files),
+;; a write to a NativeMessagingHosts folder of a browser, and a change of the
+;; settings of a browser profile.
 ;; The measurements are in docs/operations/isolation.md.
 ;;
 ;; Parameters (pass with `sandbox-exec -D KEY=VALUE`). Use absolute, resolved
@@ -281,3 +283,31 @@
       "/.bashrc" "/.bash_profile" "/.bash_login" "/.profile")))
 
 (apassy-deny-autostart (param "APASSY_HOME"))
+
+;; Native messaging hosts. When an extension connects to a native messaging
+;; host, the browser starts the program of the host manifest outside the
+;; sandbox. A process in the profile that writes a manifest can replace the host
+;; of an installed extension, for example the host of the Apassy extension, and
+;; read what passes through it: the password of a fill after the owner's Touch
+;; ID (ADR 0021). Deny a write to each NativeMessagingHosts folder, at any path:
+;; each Chromium browser and each profile folder has one, and Firefox has one
+;; too. The pattern also denies the creation and the rename of such a folder,
+;; so a folder with another name cannot become one.
+(deny file-write* (regex #"/NativeMessagingHosts(/|$)"))
+
+;; The profiles of the Chromium browsers that `apassy setup browser` knows. A
+;; profile keeps the folder of each unpacked extension in Preferences and
+;; Secure Preferences. A Chromium build has no secret seed for the check of
+;; Secure Preferences, so a process in the profile could point the ID of the
+;; Apassy extension at a folder of its own, and the browser would run that code
+;; at its next start (ADR 0021). Deny a write to these files and to Local State
+;; (the list of profiles), and the creation, the rename, and the delete of a
+;; browser folder and of each folder and file directly in it, so a prepared
+;; profile cannot replace the real one. Files inside a profile stay writable.
+;; A browser that a process in the profile starts with one of these real
+;; profile folders cannot start; a temporary profile folder works.
+(deny file-write*
+  (regex #"/Library/Application Support/(net\.imput\.helium|Google/Chrome[^/]*|Chromium|BraveSoftware/Brave-Browser[^/]*|Microsoft Edge[^/]*|Arc/User Data|Vivaldi)/([^/]+/(Secure )?Preferences|Local State)$"))
+(deny file-write-create file-write-unlink
+  (regex #"/Library/Application Support/(net\.imput\.helium|Google/Chrome[^/]*|Chromium|BraveSoftware/Brave-Browser[^/]*|Microsoft Edge[^/]*|Arc/User Data|Vivaldi)(/[^/]+)?$")
+  (regex #"/Library/Application Support/(Google|BraveSoftware|Arc)$"))

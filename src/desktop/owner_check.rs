@@ -74,6 +74,15 @@ impl<T: Send + 'static> Task<T> {
     }
 }
 
+/// At most 64 characters of a username from the browser, for the dialog.
+fn dialog_cut(text: &str) -> String {
+    let mut cut: String = text.chars().take(64).collect();
+    if cut.len() < text.len() {
+        cut.push('…');
+    }
+    cut
+}
+
 /// The decision of a process grant, for the owner check dialog.
 fn decides(mode: ExecMode) -> &'static str {
     match mode {
@@ -98,6 +107,29 @@ pub struct VariableBinding {
 pub enum OwnerRequest {
     Reveal {
         item_id: u64,
+    },
+    /// Fill one login in the browser (ADR 0021). Only the browser socket asks for it.
+    /// The name and the username are for the dialog.
+    FillLogin {
+        item_id: u64,
+        item_name: String,
+        username: String,
+        origin: String,
+    },
+    /// Save the login that the owner typed on a page (ADR 0021). The password waits in
+    /// the browser ticket of the dialog.
+    SaveLogin {
+        title: String,
+        username: String,
+        origin: String,
+    },
+    /// Make a login with a new password and fill it in the browser (ADR 0021).
+    CreateLogin {
+        title: String,
+        username: String,
+        origin: String,
+        length: u32,
+        symbols: bool,
     },
     ApproveRun(PendingRun),
     /// Approve one run and add one approval to its pattern (ADR 0010).
@@ -214,6 +246,38 @@ impl OwnerRequest {
     pub fn action(&self) -> OwnerAction {
         match self {
             Self::Reveal { item_id } => OwnerAction::Reveal { item_id: *item_id },
+            Self::FillLogin {
+                item_id,
+                item_name,
+                origin,
+                ..
+            } => OwnerAction::FillLogin {
+                item_id: *item_id,
+                login: item_name.clone(),
+                origin: origin.clone(),
+            },
+            Self::SaveLogin {
+                title,
+                username,
+                origin,
+            } => OwnerAction::SaveLogin {
+                title: title.clone(),
+                username: username.clone(),
+                origin: origin.clone(),
+            },
+            Self::CreateLogin {
+                title,
+                username,
+                origin,
+                length,
+                symbols,
+            } => OwnerAction::CreateLogin {
+                title: title.clone(),
+                username: username.clone(),
+                origin: origin.clone(),
+                length: *length,
+                symbols: *symbols,
+            },
             Self::ApproveRun(run) => OwnerAction::ApproveRun(run.clone()),
             Self::ApproveAndRemember(run) => OwnerAction::ApproveAndRemember(run.clone()),
             Self::ApplyCalibration { level } => OwnerAction::ChangeCalibration { level: *level },
@@ -298,6 +362,34 @@ impl OwnerRequest {
     pub fn describe(&self) -> String {
         match self {
             Self::Reveal { .. } => "Show the secret values of this item for 30 seconds.".to_owned(),
+            Self::FillLogin {
+                item_name,
+                username,
+                origin,
+                ..
+            } => format!(
+                "Fill the login \"{item_name}\" ({username}) on {origin} in your browser. The page gets the username and the password once."
+            ),
+            // The site comes first: the title and the username come from the browser.
+            Self::SaveLogin {
+                title,
+                username,
+                origin,
+            } => format!(
+                "For {origin}: save the login \"{title}\" ({}). The password comes from the page.",
+                dialog_cut(username)
+            ),
+            Self::CreateLogin {
+                title,
+                username,
+                origin,
+                length,
+                symbols,
+            } => format!(
+                "For {origin}: create the login \"{title}\" ({}) with a new {length}-character password{}, and fill it in your browser.",
+                dialog_cut(username),
+                if *symbols { " with symbols" } else { " of letters and digits" }
+            ),
             Self::ApproveRun(run) => format!(
                 "Approve one run of agent \"{}\": {}",
                 run.agent,
@@ -431,6 +523,8 @@ pub(crate) struct CheckDialog {
     /// The command-line request that asked for this check (ADR 0017). It gets the
     /// answer. `None` for a check from the views.
     pub(crate) origin: Option<super::owner_cli::CliTicket>,
+    /// The browser request that asked for this check (ADR 0021). It gets the answer.
+    pub(crate) browser: Option<super::browser::BrowserTicket>,
 }
 
 /// Touch ID unlock state for the open vault file.
@@ -542,6 +636,7 @@ impl DesktopApp {
             running: None,
             message: None,
             origin: None,
+            browser: None,
         });
         if self.owner.touch_id_ready() {
             self.start_owner_check(OwnerCheck::TouchId, ctx.cloned());
@@ -591,6 +686,21 @@ impl DesktopApp {
                 Ok(details) => self.set_ok(details.reveal_warning()),
                 Err(err) => self.set_err(err.message),
             },
+            OwnerRequest::FillLogin {
+                item_id, origin, ..
+            } => self.complete_fill(item_id, &origin, proof),
+            OwnerRequest::SaveLogin {
+                title,
+                username,
+                origin,
+            } => self.complete_save(&title, &username, &origin, proof),
+            OwnerRequest::CreateLogin {
+                title,
+                username,
+                origin,
+                length,
+                symbols,
+            } => self.complete_create(&title, &username, &origin, length, symbols, proof),
             OwnerRequest::ApproveRun(run) => {
                 let result = match self.approvals() {
                     Some(approvals) => approvals.approve(proof).map_err(|r| r.message()),
@@ -757,15 +867,25 @@ impl DesktopApp {
         }
     }
 
-    /// Do the request of a passed check, and answer the command line when it asked.
+    /// Do the request of a passed check, and answer the command line or the browser when
+    /// it asked.
     fn finish_owner_check(&mut self, dialog: CheckDialog, proof: OwnerProof) {
         let CheckDialog {
-            request, origin, ..
+            request,
+            origin,
+            mut browser,
+            ..
         } = dialog;
+        if let Some(ticket) = browser.as_mut() {
+            self.hold_browser_secret(ticket);
+        }
         let before = self.status_seq;
         self.complete_owner_request(request, proof);
         if let Some(ticket) = origin {
             self.answer_cli_ticket(ticket, before);
+        }
+        if let Some(ticket) = browser {
+            self.answer_browser_ticket(ticket, before);
         }
     }
 
@@ -789,7 +909,8 @@ impl DesktopApp {
             self.owner.native = state;
             self.owner.native_probe = None;
         }
-        self.poll_owner_check();
+        self.poll_owner_check(ctx);
+        self.expire_browser_check(ctx);
         self.poll_unlock(ctx);
         self.poll_companion(ctx);
         self.owner_ui.session.expire_reveals();
@@ -809,7 +930,7 @@ impl DesktopApp {
         }
     }
 
-    fn poll_owner_check(&mut self) {
+    fn poll_owner_check(&mut self, ctx: &egui::Context) {
         let Some(dialog) = self.owner.check.as_mut() else {
             return;
         };
@@ -840,13 +961,25 @@ impl DesktopApp {
                     ) =>
             {
                 dialog.message = Some(err.message());
+                // A fill waits in the background. The passphrase field is in the window.
+                if dialog.browser.is_some() && err.passphrase_fallback() {
+                    super::owner_cli::bring_to_front(ctx);
+                }
             }
             Err(err) => {
-                if let Some(ticket) = self.owner.check.take().and_then(|mut d| d.origin.take()) {
-                    ticket.send(crate::owner::wire::Response::error(
-                        "owner_check_failed",
-                        err.message(),
-                    ));
+                if let Some(mut dialog) = self.owner.check.take() {
+                    if let Some(ticket) = dialog.origin.take() {
+                        ticket.send(crate::owner::wire::Response::error(
+                            "owner_check_failed",
+                            err.message(),
+                        ));
+                    }
+                    if let Some(ticket) = dialog.browser.take() {
+                        ticket.send(crate::browser::wire::Response::error(
+                            "owner_check_failed",
+                            err.message(),
+                        ));
+                    }
                 }
                 self.set_err(err.message());
             }
@@ -1077,6 +1210,8 @@ impl DesktopApp {
     pub(crate) fn shut_down(&mut self) {
         // The command line gets "stopped", and every session ends (ADR 0017).
         self.cli.stop();
+        // A fill that waits gets "stopped" or "cancelled" (ADR 0021).
+        self.browser.stop();
         let approvals = self.approvals();
         let _ = self
             .owner_ui

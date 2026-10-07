@@ -28,6 +28,7 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
     let running = dialog.running.as_ref().map(|(method, _)| *method);
     let message = dialog.message.clone();
     let from_cli = dialog.origin.is_some();
+    let from_browser = dialog.browser.is_some();
     let note = app.owner.touch_id_note();
     let has_helper = app.owner.helper.is_some();
     let mut touch_id = false;
@@ -54,10 +55,18 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
                 Tone::Warning,
             );
         }
+        if from_browser {
+            ui.add_space(4.0);
+            kit::tone_note(
+                ui,
+                crate::desktop::browser::BROWSER_ORIGIN_NOTE,
+                Tone::Warning,
+            );
+        }
         ui.add_space(4.0);
         kit::note(
             ui,
-            "Apassy asks for Touch ID or the passphrase for each reveal, approval, iPhone pairing, new Mac for relay sync, access change, rule change, token rotation, and command-line session. A notification or \"Mark as seen\" is never an approval.",
+            "Apassy asks for Touch ID or the passphrase for each reveal, browser fill and save, approval, iPhone pairing, new Mac for relay sync, access change, rule change, token rotation, and command-line session. A notification or \"Mark as seen\" is never an approval.",
         );
         ui.add_space(10.0);
         match running {
