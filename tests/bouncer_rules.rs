@@ -14,6 +14,9 @@ use apassy::agent::wire::{Action, WireResponse};
 use apassy::broker::approvals::{OwnerAction, OwnerCheck, OwnerGate};
 use apassy::broker::bouncer::{BouncerClient, BouncerRequest};
 use apassy::broker::http::TlsClient;
+use apassy::broker::model_server::{
+    BouncerSettings, Layout, ModelGate, ModelServer, OFF_REASON, StartMode,
+};
 use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault};
 use apassy::contracts::CredentialKind;
 use apassy::vault::{
@@ -47,6 +50,14 @@ fn staging_declaration() -> Declaration {
 }
 
 fn fixture(bouncer: Option<&str>, rule: ExecRule) -> Fixture {
+    fixture_with_gate(bouncer, rule, None)
+}
+
+fn fixture_with_gate(
+    bouncer: Option<&str>,
+    rule: ExecRule,
+    gate: Option<Arc<dyn ModelGate>>,
+) -> Fixture {
     let dir = TempDir::new().expect("temp dir");
     let project = dir.path().join("project");
     std::fs::create_dir_all(&project).expect("project");
@@ -91,6 +102,7 @@ fn fixture(bouncer: Option<&str>, rule: ExecRule) -> Fixture {
             .expect("url")
             .with_timeout(Duration::from_millis(500))
     });
+    options.model_gate = gate;
     let socket = dir.path().join("run").join("broker.sock");
     let broker = broker::start_with(Arc::clone(&shared), &socket, options).expect("broker");
     Fixture {
@@ -374,6 +386,114 @@ fn risky_or_unavailable_bouncer_waits_for_the_owner() {
     .expect("answer");
     assert_eq!(code(&response), "approval_timeout");
     assert!(last_reason(&fx).contains("no declaration"));
+}
+
+/// A model server hook that records how many model requests the fake bouncer had when
+/// the broker called it.
+#[derive(Debug)]
+struct FakeGate {
+    bodies: Arc<Mutex<Vec<String>>>,
+    seen: Mutex<Vec<usize>>,
+    answer: Result<(), String>,
+}
+
+impl ModelGate for FakeGate {
+    fn before_model(&self) -> Result<(), String> {
+        let asked = self.bodies.lock().expect("bodies").len();
+        self.seen.lock().expect("seen").push(asked);
+        self.answer.clone()
+    }
+}
+
+/// Settings > Agents: "Off" asks no model. The run waits for the owner with the reason.
+#[test]
+fn the_bouncer_off_in_settings_skips_the_model() {
+    let bouncer = common::fake_bouncer(&[]);
+    let dir = TempDir::new().expect("temp dir");
+    let server = ModelServer::start_with(
+        None,
+        BouncerSettings {
+            start: StartMode::Off,
+            ..BouncerSettings::default()
+        },
+        Layout {
+            script: None,
+            laya_dir: dir.path().join("laya"),
+            checkpoints: Vec::new(),
+            log: dir.path().join("bouncer.log"),
+        },
+    );
+    let gate: Arc<dyn ModelGate> = server.clone();
+    let fx = fixture_with_gate(Some(&bouncer.url), echo_only(), Some(gate));
+    assert_eq!(
+        code(&run(
+            &fx,
+            &["sh", "-c", "echo done; node -e 0"],
+            "Print done."
+        )),
+        "approval_timeout"
+    );
+    assert!(
+        last_reason(&fx).contains(OFF_REASON),
+        "{}",
+        last_reason(&fx)
+    );
+    assert!(bouncer.bodies.lock().expect("bodies").is_empty());
+    server.shutdown();
+}
+
+/// "When a run needs it": the broker calls the hook (which starts the model server)
+/// before it asks the model. A server that does not start makes the run wait.
+#[test]
+fn a_run_starts_the_model_server_before_the_model() {
+    let bouncer = common::fake_bouncer(&[]);
+    let gate = Arc::new(FakeGate {
+        bodies: Arc::clone(&bouncer.bodies),
+        seen: Mutex::new(Vec::new()),
+        answer: Ok(()),
+    });
+    let fx = fixture_with_gate(Some(&bouncer.url), echo_only(), Some(gate.clone()));
+    let response = run(&fx, &["sh", "-c", "echo done; node -e 0"], "Print done.");
+    assert!(response.ok, "{response:?}");
+    assert_eq!(
+        response.result.expect("result")["decided_by"],
+        "Bouncer allowed"
+    );
+    assert_eq!(
+        *gate.seen.lock().expect("seen"),
+        vec![0],
+        "the hook ran first"
+    );
+    assert_eq!(bouncer.bodies.lock().expect("bodies").len(), 1);
+
+    // A rule flag skips the model, and the hook too: no server starts for it.
+    let flagged = run(&fx, &["sh", "-c", "echo $DEMO_KEY | base64"], "Debug.");
+    assert_eq!(code(&flagged), "approval_timeout");
+    assert!(last_reason(&fx).contains("secret_output"));
+    assert_eq!(gate.seen.lock().expect("seen").len(), 1);
+
+    let failing = common::fake_bouncer(&[]);
+    let gate = Arc::new(FakeGate {
+        bodies: Arc::clone(&failing.bodies),
+        seen: Mutex::new(Vec::new()),
+        answer: Err("the model server did not answer within 25 seconds".to_owned()),
+    });
+    let fx = fixture_with_gate(Some(&failing.url), echo_only(), Some(gate.clone()));
+    assert_eq!(
+        code(&run(
+            &fx,
+            &["sh", "-c", "echo done; node -e 0"],
+            "Print done."
+        )),
+        "approval_timeout"
+    );
+    assert!(
+        last_reason(&fx).contains("Bouncer unavailable: the model server did not answer"),
+        "{}",
+        last_reason(&fx)
+    );
+    assert!(failing.bodies.lock().expect("bodies").is_empty());
+    assert_eq!(gate.seen.lock().expect("seen").len(), 1);
 }
 
 fn set_environment(fx: &Fixture, item_id: u64, environment: Environment) {

@@ -256,6 +256,8 @@ impl LoggedRequest<'_> {
             note: note.to_owned(),
             instruction: self.scope.instruction.trim().to_owned(),
         }
+        // The export names the model that answered (`model_version`).
+        .with_model_version(self.verdict.model())
     }
 }
 

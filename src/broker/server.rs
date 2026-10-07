@@ -20,6 +20,7 @@ use super::approvals::ApprovalQueue;
 use super::bouncer::BouncerClient;
 use super::decide::{self, BrokerContext};
 use super::http::TlsClient;
+use super::model_server::{ModelGate, ModelServer};
 use super::prompts::{self, PromptStore};
 use crate::agent::wire::{MAX_LINE_BYTES, WireRequest, WireResponse};
 
@@ -35,6 +36,9 @@ pub struct BrokerOptions {
     pub approval_timeout: Duration,
     pub run_timeout: Duration,
     pub bouncer: Option<BouncerClient>,
+    /// The hook before each model request: the setting of Settings > Agents and the
+    /// model server that Apassy starts. `None`: the broker asks the model directly.
+    pub model_gate: Option<Arc<dyn ModelGate>>,
     /// Host transcript directories for the check of hook prompts (goal item B6).
     pub transcript_roots: Vec<PathBuf>,
 }
@@ -54,6 +58,7 @@ impl BrokerOptions {
             approval_timeout: Duration::from_secs(120),
             run_timeout: Duration::from_secs(300),
             bouncer: None,
+            model_gate: None,
             transcript_roots: prompts::default_transcript_roots(),
         }
     }
@@ -121,6 +126,21 @@ pub fn start(vault: SharedVault, socket: &Path) -> io::Result<BrokerHandle> {
     start_with(vault, socket, BrokerOptions::platform()?)
 }
 
+/// Start the broker as [`start`] does, with the model server of Settings > Agents: the
+/// address of `bouncer.json` (`APASSY_BOUNCER_URL` wins) and its hook before each model
+/// request.
+pub fn start_with_model_server(
+    vault: SharedVault,
+    socket: &Path,
+    server: &Arc<ModelServer>,
+) -> io::Result<BrokerHandle> {
+    let _ = super::packs::activate_local_dir(&super::packs::default_local_dir());
+    let mut options = BrokerOptions::with_tls(TlsClient::platform()?);
+    options.bouncer = server.client().ok();
+    options.model_gate = Some(Arc::clone(server) as Arc<dyn ModelGate>);
+    start_with(vault, socket, options)
+}
+
 /// Start the broker with a specific TLS client and default timeouts.
 pub fn start_with_tls(
     vault: SharedVault,
@@ -146,6 +166,7 @@ pub fn start_with(
         approval_timeout: options.approval_timeout,
         run_timeout: options.run_timeout,
         bouncer: options.bouncer,
+        model_gate: options.model_gate,
         prompts: Arc::new(PromptStore::new(options.transcript_roots)),
     };
     prepare_directory(socket)?;

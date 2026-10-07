@@ -23,6 +23,7 @@ use super::SharedVault;
 use super::approvals::ApprovalQueue;
 use super::bouncer::BouncerClient;
 use super::http::{self, HttpFailure, TlsClient, parse_destination};
+use super::model_server::ModelGate;
 use super::profile::{self, OperationSpec};
 use super::prompts::PromptStore;
 use crate::agent::wire::{Action, WIRE_VERSION, WireRequest, WireResponse};
@@ -44,6 +45,9 @@ pub struct BrokerContext {
     pub run_timeout: Duration,
     /// Local decision model (ADR 0007). `None` means that every run needs the owner.
     pub bouncer: Option<BouncerClient>,
+    /// The hook before each model request (Settings > Agents). It can start the model
+    /// server first, or say that the bouncer is off. `None`: ask the model directly.
+    pub model_gate: Option<Arc<dyn ModelGate>>,
     /// User requests from host hooks (goal item B6).
     pub prompts: Arc<PromptStore>,
 }

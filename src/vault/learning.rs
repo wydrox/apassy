@@ -272,7 +272,8 @@ pub struct DecisionEntry {
     pub decided_by: DecidedBy,
     /// The owner used "Approve and remember".
     pub remembered: bool,
-    /// Bouncer contract and active thresholds.
+    /// Bouncer contract and active thresholds, and the model version that answered
+    /// ([`DecisionEntry::with_model_version`]).
     pub policy: String,
     /// The decision note. No secret values.
     pub note: String,
@@ -280,7 +281,31 @@ pub struct DecisionEntry {
     pub instruction: String,
 }
 
+/// The part of `policy` that names the model version, for example
+/// `apassy-bouncer-v7; task_match 0.75; model apassy-base-v1+1a2b3c4d`. The policy text
+/// keeps it, so the schema of the decision log does not change.
+const POLICY_MODEL: &str = "; model ";
+
 impl DecisionEntry {
+    /// Add the version of the model that answered to `policy`. A missing or invalid
+    /// version (see [`super::valid_model_version`]) adds nothing.
+    #[must_use]
+    pub fn with_model_version(mut self, model: Option<&str>) -> Self {
+        if let Some(model) = model.filter(|model| super::valid_model_version(model)) {
+            self.policy.push_str(POLICY_MODEL);
+            self.policy.push_str(model);
+        }
+        self
+    }
+
+    /// The model version in `policy`, if the model answered with one.
+    pub fn model_version(&self) -> Option<&str> {
+        self.policy
+            .rsplit_once(POLICY_MODEL)
+            .map(|(_, model)| model)
+            .filter(|model| super::valid_model_version(model))
+    }
+
     pub fn fact(&self, name: &str) -> Option<f64> {
         self.model_facts
             .iter()
@@ -1203,14 +1228,15 @@ fn declaration_from_json(value: &Value) -> VaultResult<Option<Declaration>> {
     }))
 }
 
-/// One export line. Field names are in `docs/operations/learning.md`.
+/// One export line. Field names are in `docs/operations/learning.md`. `model_version`
+/// is there only when the model answered with a version.
 fn export_line(entry: &DecisionEntry) -> Value {
     let facts: Map<String, Value> = entry
         .model_facts
         .iter()
         .map(|(name, p)| (name.clone(), json!(p)))
         .collect();
-    json!({
+    let mut line = json!({
         "schema": EXPORT_SCHEMA,
         "time": rfc3339(entry.at),
         "at": entry.at,
@@ -1232,7 +1258,11 @@ fn export_line(entry: &DecisionEntry) -> Value {
         "decision": entry.decision.as_str(),
         "decided_by": entry.decided_by.as_str(),
         "remembered": entry.remembered,
-    })
+    });
+    if let (Some(model), Some(line)) = (entry.model_version(), line.as_object_mut()) {
+        line.insert("model_version".to_owned(), json!(model));
+    }
+    line
 }
 
 /// `YYYY-MM-DDTHH:MM:SSZ`.
@@ -1395,6 +1425,42 @@ mod tests {
             .map(|pattern| pattern.display)
             .collect();
         assert_eq!(blocked, vec!["z".to_owned(), "y".to_owned()]);
+    }
+
+    /// The export has `model_version` only for a decision where the model answered
+    /// with a valid version. The policy text keeps the version.
+    #[test]
+    fn the_export_names_the_model_version() {
+        let (_dir, mut vault) = temp_vault();
+        let mut answered = entry(1, DecidedBy::Model, LoggedDecision::Allow);
+        answered.policy = "apassy-bouncer-v7; task_match 0.75".to_owned();
+        let answered = answered.with_model_version(Some("apassy-base-v1+1a2b3c4d"));
+        assert_eq!(
+            answered.policy,
+            "apassy-bouncer-v7; task_match 0.75; model apassy-base-v1+1a2b3c4d"
+        );
+        let mut owner = entry(2, DecidedBy::Owner, LoggedDecision::Deny);
+        owner.policy = "apassy-bouncer-v7; task_match 0.75".to_owned();
+        let bad = owner.clone().with_model_version(Some("bad version; x"));
+        assert_eq!(bad.policy, owner.policy, "an invalid version adds nothing");
+        assert_eq!(bad.model_version(), None);
+        for decision in [&answered, &owner.with_model_version(None)] {
+            vault.record_decision(decision).expect("record");
+        }
+        let log = vault.decision_log().expect("log");
+        assert_eq!(
+            log[0].entry.model_version(),
+            Some("apassy-base-v1+1a2b3c4d")
+        );
+        assert_eq!(log[1].entry.model_version(), None);
+        let lines: Vec<Value> = vault
+            .export_decisions_jsonl()
+            .expect("export")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("json"))
+            .collect();
+        assert_eq!(lines[0]["model_version"], "apassy-base-v1+1a2b3c4d");
+        assert!(lines[1].get("model_version").is_none(), "{}", lines[1]);
     }
 
     #[test]

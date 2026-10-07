@@ -14,13 +14,61 @@ uv pip install --python .venv/bin/python "laya[serve]==0.3.20"
 LAYA_HOST=127.0.0.1 LAYA_PORT=8770 LAYA_MODELS=english .venv/bin/laya-serve
 ```
 
-- The first start downloads the weights from Hugging Face (`convaiinnovations/laya`).
+- If `.venv` exists but `.venv/bin/python` does not work, for example after `brew uninstall python@3.12`, use `uv venv --clear --python 3.12 .venv`. Without `--clear`, `uv venv` stops with "A virtual environment already exists".
+- The first start downloads the base weights from Hugging Face (`convaiinnovations/laya`, about 800 MB) into the Hugging Face cache: `HF_HUB_CACHE`, else `$HF_HOME/hub`, else `~/.cache/huggingface/hub`. To download them before the first start, run `.venv/bin/python -B tools/basemodel/fetch_weights.py` (after the packages of `tools/basemodel/requirements.txt`). It downloads the revision that `tools/basemodel/common.py` pins (`BASE_REVISION`), the same as the base-model server.
 - The first decision loads the model. It took about 8 seconds on an M1 Pro. After that, one decision took about 0.4 seconds.
 - Keep `LAYA_HOST=127.0.0.1`. Apassy accepts only a loopback bouncer.
 - The Apassy data directory must have mode `0700`. The broker does not start in a directory with a wider mode.
 - `APASSY_BOUNCER_URL` changes the address. The default is `http://127.0.0.1:8770`. `APASSY_BOUNCER_KEY` sends a bearer key if `LAYA_API_KEY` is set.
 
 If Laya does not answer in 3 seconds, the bouncer is unavailable. Then every run waits for the owner.
+
+### Install from Apassy
+
+You do not need Terminal for these commands. In Settings > Agents > Broker and bouncer, choose "With Apassy" or "When a run needs it". While the Laya environment is missing, the section shows "Install the model":
+
+- Apassy runs the same `uv` commands: `uv venv --python 3.12 .venv` (only when `.venv/bin/python` is missing, with `--clear` when `.venv` exists without it), `uv pip install --python .venv/bin/python "laya[serve]==0.3.20"`, and `uv pip install --python .venv/bin/python -r tools/basemodel/requirements.txt`. The requirements come from `Apassy.app/Contents/Resources/tools/basemodel`, or from the repository when Apassy runs from `target/`.
+- The last step, "Downloading the model weights", runs `.venv/bin/python -B tools/basemodel/fetch_weights.py`. It downloads the pinned base weights (about 800 MB) into the Hugging Face cache of the user, so the first start of the server does not wait for them. Weights that are already there are not downloaded again. `-B`, and the scripts themselves, write no `__pycache__` next to the scripts: in `Apassy.app` it would break the code signature.
+- It runs them in `APASSY_LAYA_DIR`, by default `~/Library/Application Support/Apassy/laya`. A new folder gets mode `0700`.
+- Each command is an argument vector. No command goes through a shell. `uv` and the Python get only `HOME`, `PATH`, `TMPDIR`, the locale, the user, the proxy variables, and the `UV_`, `SSL_CERT_`, and `HF_` variables. With `HF_HOME` or `HF_HUB_CACHE`, the weights go where the server looks for them.
+- Apassy looks for `uv` in `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `~/.cargo/bin`, and then in `PATH`. Without `uv`, the section says "Install uv first: brew install uv". Apassy does not install Homebrew or `uv`.
+- The section shows the step ("step 2 of 4, Install Laya") and "Cancel install". Cancel stops `uv` or the Python and their child processes.
+- The output goes to `~/Library/Logs/Apassy/bouncer-install.log` (mode `0600`). A failed step shows the last lines of this log and "Open install log". "Install the model" then tries again.
+- If only the download of the weights fails (for example, a network or a proxy that blocks huggingface.co), the environment is still installed. The install says so, the server can start, and its first start downloads the weights. While the weights are not in the cache, the section shows "Install the model" again, to try the download again, and the command for Terminal.
+- After the install, also after a failed download of the weights, "With Apassy" starts the server. "When a run needs it" starts it on the next run.
+- The checkpoint search does not change. See "Start command with the base model".
+
+### Start from Apassy
+
+Settings > Agents > Broker and bouncer > "Start the model" sets how Apassy starts the model server on this Mac:
+
+- **With Apassy**: Apassy starts it when the app starts and stops it when the app quits. The vault does not need to be unlocked.
+- **When a run needs it**: the first run that needs the model starts it. The run waits up to 25 seconds for the first answer. "Stop after" (10, 30, or 60 minutes without a run, default 30) stops it again. Apassy stops only a server that it started.
+- **Managed outside Apassy**: Apassy starts and stops nothing. It only uses the address. This is the default.
+- **Off**: the broker asks no model. Every run that needs it waits for you. The log and the approval card say "The bouncer is off in Settings."
+
+Apassy runs `/bin/bash tools/basemodel/start.sh` from `Apassy.app/Contents/Resources`, or from the repository when it runs from `target/`. It sets `LAYA_HOST=127.0.0.1`, `LAYA_PORT` from the address, `APASSY_LAYA_DIR`, and `APASSY_BASE_MODEL` only when it finds a checkpoint. Without a checkpoint the model is zero-shot. The server gets its own process group. Stop sends SIGTERM, then SIGKILL after 5 seconds. The output goes to `~/Library/Logs/Apassy/bouncer.log`. "Open log" opens it.
+
+Without the base weights in the Hugging Face cache, the first start downloads them. Apassy checks for `model.safetensors` and `rl_agent_config.json` of the pinned revision; for the zero-shot model, the snapshot of `refs/main` also counts. The zero-shot `laya-serve` does not pin a revision: it asks Hugging Face for `main`. If `main` is no longer the pinned revision, its first start downloads the new weights even when Apassy counts them as there, and the status shows only "Starting (N s)" with the normal limits. During a start that Apassy knows downloads the weights:
+
+- The status says "Starting (downloading the model weights, first start only)".
+- The server has 30 minutes to answer, not 180 seconds.
+- In "When a run needs it", the run waits up to 45 seconds, not 25. With the 120 seconds that a run waits for you, the run ends within the 180-second tool time-out of `apassy setup` (`MCP_TOOL_TIMEOUT=180000`, `tool_timeout_sec = 180`). If the server still starts, the run waits for you with the reason "The model server downloads the model weights (first start only). This run waits for you. Later runs use the model." The download goes on. Later runs do not wait for it again: they wait for you with the same reason until the server answers.
+
+"Start now" shows only when the server can start. While the start script or the Laya environment is missing ("Cannot start"), the section has no "Start now", and the rows below the status name what is missing.
+
+If a healthy server already answers on the port, for example from a LaunchAgent, Apassy does not start a second one. The status says "Running (started outside Apassy)". If another program uses the port, the status says so.
+
+Apassy reads `~/Library/LaunchAgents` when it starts and then each minute. It reads each `.plist` with `plutil -convert json`. A LaunchAgent counts when its `ProgramArguments` name `tools/basemodel/start.sh`, for example `com.wydrox.apassy.bouncer.plist`. The section shows a note for it in two cases:
+
+- Its `APASSY_BASE_MODEL` does not exist. Then `start.sh` stops at each start.
+- The setting is "With Apassy" or "When a run needs it". Then Apassy starts the server itself.
+
+The note has the commands that remove it, for example `launchctl bootout gui/$(id -u)/com.wydrox.apassy.bouncer` and `rm ~/Library/LaunchAgents/com.wydrox.apassy.bouncer.plist`. Apassy never changes or removes a LaunchAgent.
+
+The status row shows what is missing: the start script, the Laya environment, or a free port. For a missing environment it shows "Install the model" (see "Install from Apassy") and the install commands above with the paths of this Mac. Until the server runs, every run waits for you.
+
+The setting is in `bouncer.json` in the Apassy data directory, mode `0600`. It is not in the vault, so each Mac has its own. The fields are `start` (`with_apassy`, `when_needed`, `external`, or `off`), `idle_minutes`, and an optional `url`. The `url` must be a loopback `http://` address. `APASSY_BOUNCER_URL` wins over the file. A missing or damaged file gives `external` and 30 minutes. A change in Settings needs no owner check: a model that does not run only makes runs wait for you.
 
 ### Start command with the base model (goal B8)
 

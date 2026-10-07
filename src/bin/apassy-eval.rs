@@ -258,6 +258,7 @@ fn main() {
         approval_timeout: Duration::from_millis(5),
         run_timeout: Duration::from_secs(5),
         bouncer: Some(bouncer),
+        model_gate: None,
         // No host hook in the evaluation: each case gives its user request directly.
         prompts: Arc::new(PromptStore::new(Vec::new())),
     };

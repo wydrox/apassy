@@ -28,7 +28,12 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+# No __pycache__ next to this script: in Apassy.app it breaks the code signature.
+_WRITE_BYTECODE = sys.dont_write_bytecode
+sys.dont_write_bytecode = True
 import common  # noqa: E402
+
+sys.dont_write_bytecode = _WRITE_BYTECODE
 
 
 def read_manifest(checkpoint, manifest):
