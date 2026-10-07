@@ -19,6 +19,7 @@ mod watchtower;
 mod wire;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -62,9 +63,16 @@ pub struct Core {
     /// The passphrase of the unlocked vault when the app asked to keep it (`unlock`
     /// with `keep`), for `resume` after `suspend`. `lock` erases it.
     kept: Mutex<Option<Zeroizing<String>>>,
+    /// Counts each close of the vault, under the vault mutex. An unlock derives the key
+    /// without the mutex and stores the vault only when no close came in between: a
+    /// `lock`, `suspend`, or `select` during the key derivation wins.
+    closes: AtomicU64,
     /// The relay sync of the selected vault, when it syncs through the relay.
     relay: Mutex<Option<RelaySync>>,
     join: Mutex<Option<join::Joining>>,
+    /// Counts each start, cancel, and end of a join. A poll that ran while the join was
+    /// replaced or cancelled gives its join up instead of putting it back.
+    joins: AtomicU64,
     status: Mutex<sync::Memory>,
 }
 
@@ -193,10 +201,15 @@ impl Core {
             list: Mutex::new(list),
             vault: Mutex::new(None),
             kept: Mutex::new(None),
+            closes: AtomicU64::new(0),
             relay: Mutex::new(None),
             join: Mutex::new(None),
+            joins: AtomicU64::new(0),
             status: Mutex::new(sync::Memory::default()),
         };
+        if core.role == Role::App {
+            core.clear_unfinished_joins();
+        }
         core.select_relay()?;
         Ok(core)
     }
@@ -212,7 +225,8 @@ impl Core {
     /// Lock, end the relay calls, and cancel a join: the process ends.
     pub fn shutdown(&self) {
         self.close(true);
-        if let Some(joining) = guard(&self.join).take() {
+        let joining = guard(&self.join).take();
+        if let Some(joining) = joining {
             joining.abandon();
         }
     }
@@ -407,10 +421,12 @@ impl Core {
             }
             // 5.4
             "generate" => {
+                self.require_app()?;
                 let options: generate::Options = params(request)?;
                 Ok(ok(&generate::generate(&options)?))
             }
             "strength" => {
+                self.require_app()?;
                 #[derive(Deserialize)]
                 struct Value {
                     value: Secret,
@@ -469,13 +485,7 @@ impl Core {
     fn info(&self) -> CoreResult<String> {
         // The app may have changed the list since this process read it.
         if self.role == Role::Autofill {
-            let fresh = PhoneList::load(&self.paths.data_dir)?;
-            let mut list = guard(&self.list);
-            let selected = list.selected.clone().filter(|id| fresh.get(id).is_some());
-            *list = fresh;
-            if selected.is_some() {
-                list.selected = selected;
-            }
+            *guard(&self.list) = PhoneList::load(&self.paths.data_dir)?;
         }
         // Lock order: the vault and the join before the list, as everywhere.
         let unlocked = guard(&self.vault)
@@ -543,9 +553,17 @@ impl Core {
     fn unlock(&self, passphrase: &str, keep: bool) -> CoreResult<()> {
         let entry = self.selected()?;
         self.close(true);
+        let closes = self.closes.load(Ordering::SeqCst);
         let mut vault = Vault::open(&self.paths.vault_file(&entry.id))?;
         vault.unlock(passphrase)?;
-        *guard(&self.vault) = Some(vault);
+        let mut slot = guard(&self.vault);
+        if self.closes.load(Ordering::SeqCst) != closes {
+            // A lock, a suspend, or a selection came during the key derivation.
+            drop(slot);
+            let _ = vault.lock();
+            return Err(CoreError::locked());
+        }
+        *slot = Some(vault);
         if keep {
             *guard(&self.kept) = Some(Zeroizing::new(passphrase.to_owned()));
         }
@@ -558,7 +576,10 @@ impl Core {
         if let Some(relay) = guard(&self.relay).as_ref() {
             relay.forget();
         }
-        if let Some(mut vault) = guard(&self.vault).take() {
+        // Lock order: the vault, then the kept passphrase, as in `unlock`.
+        let mut slot = guard(&self.vault);
+        self.closes.fetch_add(1, Ordering::SeqCst);
+        if let Some(mut vault) = slot.take() {
             let _ = vault.lock();
         }
         if forget {
@@ -641,6 +662,30 @@ impl Core {
         self.select_relay()?;
         self.unlock(passphrase, false)?;
         Ok(entry)
+    }
+}
+
+impl Core {
+    /// Remove the files of a join that a crash ended between the adoption and the
+    /// rename: `vaults/.new-*` and `sync/new-*.json`. The app process only, at start.
+    fn clear_unfinished_joins(&self) {
+        let dirs = [
+            (self.paths.data_dir.join("vaults"), ".new-"),
+            (self.paths.data_dir.join("sync"), "new-"),
+        ];
+        for (dir, prefix) in dirs {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if name.to_str().is_some_and(|name| name.starts_with(prefix))
+                    && entry.file_type().is_ok_and(|kind| kind.is_file())
+                {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
     }
 }
 

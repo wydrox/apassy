@@ -202,7 +202,7 @@ The owner selects "Add a device…" on the Mac; the Mac shows a QR code and the 
 | `sync` | | `{"status": Status}`. Merges the relay copy and pushes this iPhone's changes. Blocks for the network. |
 | `sync_status` **R** | | `{"status": Status}`. No network. |
 | `sync_wait` | `timeout` (1–25 s) | `{"changed": bool}`. A long poll: true when the relay has a version this iPhone has not merged. `locked` when the vault locks during the wait. |
-| `take_new_passphrase` | `passphrase` | `{"status": Status}`. After `needs_passphrase`: the vault takes the new passphrase of the copy and merges. A wrong one is `wrong_passphrase`. |
+| `take_new_passphrase` | `passphrase` | `{"status": Status, "rekeyed": bool}`. After `needs_passphrase`: the vault takes the new passphrase of the copy and merges (`rekeyed: true`). Without an anchor (after `use_relay_copy`) the passphrase only opens the copy for the merge and the vault keeps its own (`rekeyed: false`); the app then must not store the typed passphrase for Face ID. A wrong one is `wrong_passphrase`. |
 | `use_relay_copy` | | `{"status": Status}`. After `stale_copy` or `forked_copy`: the owner keeps the relay copy; the iPhone drops its anchor and merges. |
 | `devices` | | `{"devices": [{"id": 3, "name": "Rafał’s iPhone", "this": true, "last_seen_at": 1791200000 or null}]}` |
 

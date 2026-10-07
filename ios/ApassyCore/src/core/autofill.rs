@@ -32,7 +32,8 @@ impl Site {
             Some(_) => return None,
             None => text,
         };
-        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        // A backslash ends the host as `/` does in a browser.
+        let authority = rest.split(['/', '?', '#', '\\']).next().unwrap_or("");
         let authority = authority
             .rsplit_once('@')
             .map_or(authority, |(_, host)| host);
@@ -197,6 +198,11 @@ mod tests {
         assert_eq!(
             Site::parse("https://user@Example.COM./x").unwrap().host,
             "example.com"
+        );
+        // A browser reads the host before the backslash.
+        assert_eq!(
+            Site::parse("https://evil.com\\@github.com/").unwrap().host,
+            "evil.com"
         );
     }
 }

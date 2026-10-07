@@ -69,6 +69,12 @@ struct Devices {
 }
 
 #[derive(Serialize)]
+struct Taken {
+    status: Status,
+    rekeyed: bool,
+}
+
+#[derive(Serialize)]
 struct Waited {
     changed: bool,
 }
@@ -211,15 +217,20 @@ impl Core {
                     passphrase: Secret,
                 }
                 let Take { passphrase } = params(request)?;
+                // Without an anchor the typed passphrase only opens the copy for the merge,
+                // and the vault keeps its own (ADR 0022, "Use the relay copy").
+                let rekeyed = !relay.keeps_passphrase();
                 let inner =
                     relay.take_new_passphrase_shared(&self.vault, accept, passphrase.expose())?;
-                // The vault opens with the new passphrase now.
-                let mut kept = guard(&self.kept);
-                if kept.is_some() {
-                    *kept = Some(passphrase.into_inner());
+                if rekeyed {
+                    // The vault opens with the new passphrase now.
+                    let mut kept = guard(&self.kept);
+                    if kept.is_some() {
+                        *kept = Some(passphrase.into_inner());
+                    }
                 }
-                drop(kept);
-                Ok(ok(&self.record(inner)?))
+                let StatusAnswer { status } = self.record(inner)?;
+                Ok(ok(&Taken { status, rekeyed }))
             }
             "sync_wait" => {
                 #[derive(Deserialize)]
@@ -234,12 +245,10 @@ impl Core {
                 }
             }
             "devices" => {
-                let devices = if relay.has_session() {
-                    relay.devices(KeySource::Memory)?
-                } else {
-                    // The first call after an unlock signs in with the key in the vault.
-                    self.with_vault(|vault| Ok(relay.devices(KeySource::Vault(vault))?))?
-                };
+                // The key comes from the vault into memory without a network call; the
+                // call itself runs without the vault mutex.
+                self.with_vault(|vault| Ok(relay.relay_transport(vault).map(|_| ())?))?;
+                let devices = relay.devices(KeySource::Memory)?;
                 let this = self.selected()?.device_id;
                 Ok(ok(&Devices {
                     devices: devices
@@ -274,16 +283,19 @@ impl Core {
             }
             let relay = if selected { self.relay() } else { None };
             let leave = match relay {
-                Some(relay) => self
-                    .with_vault(|vault| {
-                        Ok(match relay.remove_device(KeySource::Vault(vault), device) {
+                // The key comes into memory under the vault mutex; the call runs
+                // without it.
+                Some(relay) => {
+                    match self.with_vault(|vault| Ok(relay.relay_transport(vault).map(|_| ())?)) {
+                        Ok(()) => match relay.remove_device(KeySource::Memory, device) {
                             // Another device removed this one already.
                             Ok(()) | Err(SyncError::RemovedFromRelay) => Leave::Left,
                             Err(SyncError::Relay(RelayRefusal::Conflict)) => Leave::Last,
                             Err(error) => Leave::Failed(error.into()),
-                        })
-                    })
-                    .unwrap_or_else(Leave::Failed),
+                        },
+                        Err(error) => Leave::Failed(error),
+                    }
+                }
                 None => Leave::Failed(CoreError::locked()),
             };
             match leave {
@@ -299,14 +311,30 @@ impl Core {
         let file = self.paths.vault_file(id);
         let _ = fs::remove_file(&file);
         let _ = fs::remove_file(super::sidecar(&file));
-        let _ = fs::remove_file(self.paths.data_dir.join("sync").join(format!("{id}.json")));
-        apassy::sync::clear_relay_work(&self.paths.data_dir);
+        let sync_dir = self.paths.data_dir.join("sync");
+        let _ = fs::remove_file(sync_dir.join(format!("{id}.json")));
+        // The work files of this vault only (`.<state name>.relay.<purpose>`): another
+        // vault may sync, or a join may hold its download.
+        if let Ok(entries) = fs::read_dir(&sync_dir) {
+            let prefix = format!(".{id}.relay.");
+            for entry in entries.flatten() {
+                if entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(&prefix))
+                {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
         {
             let mut list = guard(&self.list);
             list.remove(id);
             list.save(&self.paths.data_dir)?;
         }
-        self.select_relay()?;
+        if selected {
+            self.select_relay()?;
+        }
         Ok(ok(&Removed { left_relay }))
     }
 }

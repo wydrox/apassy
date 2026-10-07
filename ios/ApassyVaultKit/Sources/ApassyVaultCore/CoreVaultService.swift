@@ -217,8 +217,8 @@ public final class CoreVaultService: VaultService, @unchecked Sendable {
         try await call("sync_wait", ["timeout": timeout], as: Waited.self).changed
     }
 
-    public func takeNewPassphrase(_ passphrase: String) async throws -> SyncStatus {
-        try await call("take_new_passphrase", ["passphrase": passphrase], as: StatusAnswer.self).status
+    public func takeNewPassphrase(_ passphrase: String) async throws -> PassphraseChange {
+        try await call("take_new_passphrase", ["passphrase": passphrase])
     }
 
     public func useRelayCopy() async throws -> SyncStatus {

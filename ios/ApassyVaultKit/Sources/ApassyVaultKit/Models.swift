@@ -560,3 +560,17 @@ public struct CredentialIdentity: Codable, Sendable, Hashable {
         self.host = host
     }
 }
+
+/// The answer of `take_new_passphrase`.
+public struct PassphraseChange: Codable, Sendable, Equatable {
+    public var status: SyncStatus
+    /// Whether the vault took the typed passphrase. False when the iPhone had no anchor
+    /// ("Use the relay copy"): the passphrase only opened the copy, and the vault keeps its
+    /// own, so the app must not store the typed one for Face ID.
+    public var rekeyed: Bool
+
+    public init(status: SyncStatus, rekeyed: Bool) {
+        self.status = status
+        self.rekeyed = rekeyed
+    }
+}

@@ -28,7 +28,7 @@ The C interface is the only `unsafe` code, in its own crate; the `apassy` crate 
 
 - The passphrase is the root key, as on the Mac (ADR 0003). Unlock with Face ID is optional: the app keeps the passphrase in the keychain with `.biometryCurrentSet` and `WhenPasscodeSetThisDeviceOnly`. It never leaves the iPhone, iCloud Keychain does not carry it, and a new Face ID enrollment or a removed passcode deletes it; the owner types the passphrase once more.
 - The keychain item is in a group that the app and its AutoFill extension share. Nothing else reads it.
-- Auto-lock: by default the vault locks when the app leaves the screen. With a longer time (1 minute to 1 hour), the core keeps the passphrase in an erasing buffer in the app's memory for that time, so the vault opens again without Face ID; a lock erases it.
+- Auto-lock: by default the vault locks when the app leaves the screen. With a longer time (1 minute to 1 hour), the core keeps the passphrase in an erasing buffer in the app's memory, so the vault opens again without Face ID when the owner comes back within that time. iOS gives a suspended app no time to erase it when the time is up: it stays in memory until the app comes back (then the app locks if the time passed, measured with a clock that the owner cannot set back) or iOS ends the app. A lock erases it.
 
 ### 4. A secret for a human, after a check each time
 

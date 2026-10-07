@@ -264,6 +264,60 @@ fn a_local_vault_lists_shows_reveals_and_saves_like_the_mac() {
     );
     assert_eq!(fails(&phone, json!({"op": "item", "id": api})), "not_found");
 
+    // The name decides the secret flag; a field of another kind is refused.
+    let flagged = call(
+        &phone,
+        json!({"op": "save", "id": null, "revision": null, "item":
+        {"title": "Flags", "kind": "login", "fields": [
+            {"name": "username", "value": "u", "secret": true},
+            {"name": "password", "value": "synthetic-flag-pw", "secret": false}]}}),
+    );
+    let detail = call(&phone, json!({"op": "item", "id": flagged["id"]}));
+    assert_eq!(detail["fields"][0]["secret"], false);
+    assert_eq!(detail["fields"][1]["secret"], true);
+    assert_eq!(detail["fields"][1]["value"], Value::Null);
+    assert_eq!(
+        fails(
+            &phone,
+            json!({"op": "save", "id": null, "revision": null, "item":
+            {"title": "X", "kind": "login", "fields": [
+                {"name": "username", "value": "u", "secret": false},
+                {"name": "password", "value": "p", "secret": true},
+                {"name": "token", "value": "t", "secret": true}]}})
+        ),
+        "invalid_input"
+    );
+    assert_eq!(
+        fails(
+            &phone,
+            json!({"op": "save", "id": null, "revision": null, "item":
+            {"title": "X", "kind": "custom", "fields": [
+                {"name": "one", "value": "1", "secret": true},
+                {"name": "two", "value": "2", "secret": true}]}})
+        ),
+        "invalid_input"
+    );
+    let answer: Value = serde_json::from_str(
+        &phone.call(
+            &json!({"op": "save", "id": null, "revision": null, "item":
+        {"title": "Long", "kind": "api_key", "fields": [
+            {"name": "service", "value": "s".repeat(80), "secret": false},
+            {"name": "token", "value": "t", "secret": true}]}})
+            .to_string(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(answer["ok"], false);
+    assert!(
+        !answer.to_string().contains(&"s".repeat(80)),
+        "the message quotes no value"
+    );
+    let flags = call(&phone, json!({"op": "item", "id": flagged["id"]}));
+    call(
+        &phone,
+        json!({"op": "delete", "id": flagged["id"], "revision": flags["revision"]}),
+    );
+
     // Generator and strength.
     let generated = call(
         &phone,
@@ -356,7 +410,15 @@ fn a_local_vault_lists_shows_reveals_and_saves_like_the_mac() {
             .len(),
         3
     );
-    for op in ["sync", "watchtower", "history", "join_start", "suspend"] {
+    for op in [
+        "sync",
+        "watchtower",
+        "history",
+        "join_start",
+        "suspend",
+        "generate",
+        "strength",
+    ] {
         assert_eq!(
             fails(&extension, json!({"op": op, "id": 1, "link": "x"})),
             "not_allowed",
@@ -377,6 +439,35 @@ fn a_local_vault_lists_shows_reveals_and_saves_like_the_mac() {
     );
     call(&extension, json!({"op": "lock"}));
     call(&phone, json!({"op": "unlock", "passphrase": PASS}));
+
+    // Remove a vault that is not selected: the selected one stays open.
+    let other = call(
+        &phone,
+        json!({"op": "create_local_vault", "name": "Other", "passphrase": PASS}),
+    )["vault"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    call(&phone, json!({"op": "select", "vault_id": id}));
+    call(&phone, json!({"op": "unlock", "passphrase": PASS}));
+    assert_eq!(
+        call(
+            &phone,
+            json!({"op": "remove_vault", "vault_id": other, "force": true})
+        )["left_relay"],
+        true
+    );
+    assert_eq!(call(&phone, json!({"op": "info"}))["selected"], json!(id));
+    assert_eq!(
+        call(&phone, json!({"op": "items"}))["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+
+    // A join that was cancelled is gone.
+    assert_eq!(fails(&phone, json!({"op": "join_poll"})), "invalid_input");
 
     // Remove the vault from this iPhone.
     assert_eq!(
@@ -534,12 +625,56 @@ fn an_iphone_joins_a_mac_vault_on_the_relay_and_syncs_both_ways() {
         "ok"
     );
 
+    // The passphrase changes on the Mac: the iPhone takes it, and it opens the vault after.
+    mac_vault
+        .change_passphrase(PASS, "synthetic-new-pass")
+        .unwrap();
+    mac_vault.add(api_item("Gamma", "SYNTH-gamma")).unwrap();
+    mac.sync(&mut mac_vault).unwrap();
+    assert_eq!(
+        call(&phone, json!({"op": "sync"}))["status"]["state"],
+        "needs_passphrase"
+    );
+    assert_eq!(
+        fails(
+            &phone,
+            json!({"op": "take_new_passphrase", "passphrase": "synthetic-wrong-pass"})
+        ),
+        "wrong_passphrase"
+    );
+    let taken = call(
+        &phone,
+        json!({"op": "take_new_passphrase", "passphrase": "synthetic-new-pass"}),
+    );
+    assert_eq!(taken["rekeyed"], true, "{taken}");
+    assert_eq!(taken["status"]["state"], "ok");
+    assert_eq!(
+        call(&phone, json!({"op": "items"}))["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
+    call(&phone, json!({"op": "lock"}));
+    assert_eq!(
+        fails(&phone, json!({"op": "unlock", "passphrase": PASS})),
+        "wrong_passphrase"
+    );
+    call(
+        &phone,
+        json!({"op": "unlock", "passphrase": "synthetic-new-pass"}),
+    );
+    call(&phone, json!({"op": "lock"}));
+
     // Locked, the iPhone does not sync.
     call(&phone, json!({"op": "lock"}));
     assert_eq!(fails(&phone, json!({"op": "sync"})), "locked");
 
     // Remove: the iPhone leaves the team; the Mac keeps its vault.
-    call(&phone, json!({"op": "unlock", "passphrase": PASS}));
+    call(
+        &phone,
+        json!({"op": "unlock", "passphrase": "synthetic-new-pass"}),
+    );
     assert_eq!(
         call(
             &phone,

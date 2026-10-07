@@ -411,6 +411,21 @@ pub struct DraftFieldIn {
     pub secret: bool,
 }
 
+/// Whether `name` is a built-in field of `kind`, and then whether it is secret.
+fn kind_field(kind: CredentialKind, name: &str) -> Option<bool> {
+    match (kind, name) {
+        (_, "service" | "project") => Some(false),
+        (CredentialKind::Login, "username") => Some(false),
+        (CredentialKind::Login, "password") => Some(true),
+        (CredentialKind::ApiKey, "token") => Some(true),
+        (CredentialKind::SshKey, "private_key" | "passphrase") => Some(true),
+        (CredentialKind::SshKey, "public_key") => Some(false),
+        (CredentialKind::Database, "host" | "database" | "username") => Some(false),
+        (CredentialKind::Database, "password") => Some(true),
+        _ => None,
+    }
+}
+
 fn name_ok(name: &str) -> bool {
     (1..=64).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
@@ -474,8 +489,9 @@ pub fn build_draft(vault: &Vault, existing: Option<u64>, draft: DraftIn) -> Core
     let mut names = BTreeSet::new();
     let mut labels = BTreeSet::new();
     let mut details = 0;
+    let mut main_fields = 0;
     for field in draft.fields {
-        let (name, label, detail) = match (&field.label, &field.name) {
+        let (name, label, detail, secret) = match (&field.label, &field.name) {
             (Some(label), _) => {
                 let label = label.trim();
                 if label.is_empty() {
@@ -497,7 +513,13 @@ pub fn build_draft(vault: &Vault, existing: Option<u64>, draft: DraftIn) -> Core
                         "An item can have at most {MAX_DETAILS} custom details."
                     )));
                 }
-                (detail_field_name(label), label.to_owned(), true)
+                // A custom detail is hidden or visible as the owner chose.
+                (
+                    detail_field_name(label),
+                    label.to_owned(),
+                    true,
+                    field.secret,
+                )
             }
             (None, Some(name)) => {
                 if !name_ok(name) || name.starts_with(DETAIL_PREFIX) {
@@ -505,7 +527,27 @@ pub fn build_draft(vault: &Vault, existing: Option<u64>, draft: DraftIn) -> Core
                         "A field name can have only letters, digits, and _, and cannot start with x_.",
                     ));
                 }
-                (name.clone(), field_label(name), false)
+                // The name decides whether a field is secret, as on the Mac: the flag of
+                // the request does not.
+                let secret = match kind_field(kind, name) {
+                    Some(secret) => secret,
+                    None if kind == CredentialKind::Custom && !is_builtin(name) => {
+                        main_fields += 1;
+                        true
+                    }
+                    // A field that the item has already (an older import) keeps its flag.
+                    None => current
+                        .as_ref()
+                        .and_then(|current| current.fields.iter().find(|f| f.name == *name))
+                        .map(|stored| stored.secret)
+                        .ok_or_else(|| {
+                            CoreError::invalid(format!(
+                                "“{}” is not a field of this kind of item.",
+                                field_label(name)
+                            ))
+                        })?,
+                };
+                (name.clone(), field_label(name), false, secret)
             }
             (None, None) => return Err(CoreError::invalid("A field has no name.")),
         };
@@ -531,7 +573,7 @@ pub fn build_draft(vault: &Vault, existing: Option<u64>, draft: DraftIn) -> Core
                     .unwrap_or_else(|| format!("Type the value of “{label}”.")),
             )
         };
-        if field.secret {
+        if secret {
             let typed = field
                 .value
                 .map(Secret::into_inner)
@@ -570,6 +612,11 @@ pub fn build_draft(vault: &Vault, existing: Option<u64>, draft: DraftIn) -> Core
         if !fields.iter().any(|field| field.name == *name) {
             return Err(CoreError::invalid(*message));
         }
+    }
+    if kind == CredentialKind::Custom && main_fields > 1 {
+        return Err(CoreError::invalid(
+            "An item of the kind Other has one secret field.",
+        ));
     }
     if kind == CredentialKind::Custom
         && !fields.iter().any(|field| {
@@ -622,7 +669,9 @@ fn build_tags(
             return Ok(());
         }
         if tag.len() > MAX_TAG_BYTES {
-            return Err(CoreError::invalid(format!("The tag “{tag}” is too long.")));
+            return Err(CoreError::invalid(format!(
+                "A tag, the service, or the project is too long. Use {MAX_TAG_BYTES} bytes or fewer."
+            )));
         }
         if tags.len() >= MAX_TAGS {
             return Err(CoreError::invalid(format!(

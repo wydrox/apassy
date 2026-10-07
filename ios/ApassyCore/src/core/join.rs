@@ -5,6 +5,7 @@
 //! passphrase.
 
 use std::fs;
+use std::sync::atomic::Ordering;
 
 use serde::{Deserialize, Serialize};
 
@@ -103,9 +104,7 @@ impl Core {
             }
             "join_poll" => Ok(ok(&self.join_poll()?)),
             "join_cancel" => {
-                if let Some(joining) = guard(&self.join).take() {
-                    joining.abandon();
-                }
+                self.end_join();
                 Ok(ok(&Empty {}))
             }
             "join_finish" => {
@@ -117,10 +116,38 @@ impl Core {
         }
     }
 
-    fn join_start(&self, link: &str, device_name: &str) -> CoreResult<JoinOut> {
-        if let Some(joining) = guard(&self.join).take() {
+    /// Give up the join that waits, if any. The relay calls run without the mutex.
+    fn end_join(&self) {
+        let joining = {
+            let mut slot = guard(&self.join);
+            self.joins.fetch_add(1, Ordering::SeqCst);
+            slot.take()
+        };
+        if let Some(joining) = joining {
             joining.abandon();
         }
+    }
+
+    /// Put a join back after a call that ran without the mutex, unless a start or a
+    /// cancel came in between: then the join is given up.
+    fn put_back(&self, joining: Joining, joins: u64) {
+        let rest = {
+            let mut slot = guard(&self.join);
+            if self.joins.load(Ordering::SeqCst) == joins && slot.is_none() {
+                *slot = Some(joining);
+                None
+            } else {
+                Some(joining)
+            }
+        };
+        if let Some(joining) = rest {
+            joining.abandon();
+        }
+    }
+
+    fn join_start(&self, link: &str, device_name: &str) -> CoreResult<JoinOut> {
+        self.end_join();
+        let joins = self.joins.load(Ordering::SeqCst);
         let (url, code) = PendingJoin::parse_link(link, DEFAULT_RELAY_URL)?;
         let team_id = link_code_team(&code).unwrap_or_default().to_owned();
         let pending = PendingJoin::request(link, DEFAULT_RELAY_URL, device_name)
@@ -140,16 +167,19 @@ impl Core {
             download: None,
         };
         let view = joining.view();
-        *guard(&self.join) = Some(joining);
+        self.put_back(joining, joins);
         Ok(view)
     }
 
     fn join_poll(&self) -> CoreResult<JoinOut> {
         // The relay calls run with the join taken out, so `join_cancel` and `info` do
-        // not wait for them; a cancel in between finds no join and the device is
-        // given up below.
-        let mut joining = guard(&self.join)
-            .take()
+        // not wait for them. A cancel or a new start in between counts in `joins`, and
+        // the join of this poll is given up instead of put back.
+        let (joining, joins) = {
+            let mut slot = guard(&self.join);
+            (slot.take(), self.joins.load(Ordering::SeqCst))
+        };
+        let mut joining = joining
             .ok_or_else(|| CoreError::invalid("No join waits. Scan the code of the Mac again."))?;
         let result = (|| -> CoreResult<()> {
             if joining.download.is_some() {
@@ -177,7 +207,7 @@ impl Core {
         match result {
             Ok(()) => {
                 let view = joining.view();
-                *guard(&self.join) = Some(joining);
+                self.put_back(joining, joins);
                 Ok(view)
             }
             // The Mac refused, or the link expired: the join ends.
@@ -186,17 +216,34 @@ impl Core {
                 Err(error)
             }
             Err(error) => {
-                *guard(&self.join) = Some(joining);
+                self.put_back(joining, joins);
                 Err(error)
             }
         }
     }
 
     fn join_finish(&self, passphrase: &str) -> CoreResult<VaultEntry> {
-        let mut slot = guard(&self.join);
-        let joining = slot
-            .as_mut()
-            .ok_or_else(|| CoreError::invalid("No join waits."))?;
+        // The two key derivations run with the join taken out, as a poll does.
+        let (joining, joins) = {
+            let mut slot = guard(&self.join);
+            (slot.take(), self.joins.load(Ordering::SeqCst))
+        };
+        let joining = joining.ok_or_else(|| CoreError::invalid("No join waits."))?;
+        match self.adopt_joined(&joining, passphrase) {
+            Ok(entry) => {
+                // The join is done: its key is in the vault now.
+                self.joins.fetch_add(1, Ordering::SeqCst);
+                Ok(entry)
+            }
+            Err(error) => {
+                // A wrong passphrase keeps the download: the owner tries again.
+                self.put_back(joining, joins);
+                Err(error)
+            }
+        }
+    }
+
+    fn adopt_joined(&self, joining: &Joining, passphrase: &str) -> CoreResult<VaultEntry> {
         let (Some(joined), Some(download)) = (&joining.joined, &joining.download) else {
             return Err(CoreError::invalid(
                 "The Mac did not confirm this iPhone yet.",
@@ -207,6 +254,8 @@ impl Core {
         let token = format!("{}-{}", now(), joining.team_id);
         let temp_file = self.paths.new_vault_file(&token);
         let temp_state = format!("new-{token}");
+        let sync_dir = self.paths.data_dir.join("sync");
+        let temp_state_file = sync_dir.join(format!("{temp_state}.json"));
         let relay = RelaySync::new(RelayConfig::in_data_dir(
             &self.paths.data_dir,
             &temp_file,
@@ -214,37 +263,37 @@ impl Core {
             &temp_state,
         ));
         let (vault, report) = relay.adopt(joined, download, passphrase)?;
-        relay.forget();
         let id = report.identity.vault_id.clone();
         drop(vault);
-        if !super::config::valid_id(&id) {
+        let remove_temp = || {
             let _ = fs::remove_file(&temp_file);
+            let _ = fs::remove_file(super::sidecar(&temp_file));
+            let _ = fs::remove_file(&temp_state_file);
+        };
+        if !super::config::valid_id(&id) {
+            remove_temp();
             return Err(CoreError::new(
                 "damaged",
                 "The copy has a vault ID that Apassy does not take.",
             ));
         }
         if guard(&self.list).get(&id).is_some() {
-            let _ = fs::remove_file(&temp_file);
-            let _ = fs::remove_file(super::sidecar(&temp_file));
-            let _ = fs::remove_file(
-                self.paths
-                    .data_dir
-                    .join("sync")
-                    .join(format!("{temp_state}.json")),
-            );
+            remove_temp();
             return Err(CoreError::invalid("This vault is on this iPhone already."));
         }
         self.close(true);
         let file = self.paths.vault_file(&id);
-        let sync_dir = self.paths.data_dir.join("sync");
-        fs::rename(&temp_file, &file).map_err(|_| CoreError::io())?;
+        let renamed = fs::rename(&temp_file, &file)
+            .and_then(|()| fs::rename(&temp_state_file, sync_dir.join(format!("{id}.json"))));
+        if renamed.is_err() {
+            let _ = fs::remove_file(&file);
+            remove_temp();
+            return Err(CoreError::io());
+        }
         let _ = fs::remove_file(super::sidecar(&temp_file));
-        fs::rename(
-            sync_dir.join(format!("{temp_state}.json")),
-            sync_dir.join(format!("{id}.json")),
-        )
-        .map_err(|_| CoreError::io())?;
+        // The session of the adoption ends only now: until the files have their names, a
+        // cancel can still remove the device from the relay.
+        relay.forget();
         let entry = VaultEntry {
             id,
             name: joining.team.clone(),
@@ -253,9 +302,6 @@ impl Core {
             device_id: Some(report.link.device_id),
             added_at: now() as i64,
         };
-        // The join is done: its key is in the vault now.
-        *slot = None;
-        drop(slot);
         {
             let mut list = guard(&self.list);
             list.put(entry.clone());

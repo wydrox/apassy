@@ -483,12 +483,12 @@ public actor PreviewVaultService: VaultService {
         return false
     }
 
-    public func takeNewPassphrase(_ passphrase: String) async throws -> SyncStatus {
+    public func takeNewPassphrase(_ passphrase: String) async throws -> PassphraseChange {
         guard passphrase == Self.passphrase else {
             throw VaultError(.wrongPassphrase, "The passphrase does not open the copy on the relay.")
         }
         status.state = .ok
-        return status
+        return PassphraseChange(status: status, rekeyed: true)
     }
 
     public func useRelayCopy() async throws -> SyncStatus {

@@ -93,7 +93,8 @@ public protocol VaultService: Sendable {
     func syncStatus() async throws -> SyncStatus
     /// A long poll: true when the relay has a version that this iPhone has not merged.
     func syncWait(timeout: Int) async throws -> Bool
-    func takeNewPassphrase(_ passphrase: String) async throws -> SyncStatus
+    /// After `needsPassphrase`. Store the typed passphrase for Face ID only when `rekeyed`.
+    func takeNewPassphrase(_ passphrase: String) async throws -> PassphraseChange
     func useRelayCopy() async throws -> SyncStatus
     func devices() async throws -> [RelayDevice]
 
