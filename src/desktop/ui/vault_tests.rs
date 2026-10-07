@@ -379,6 +379,8 @@ fn settings_show_how_the_bouncer_model_starts() {
 /// environment is missing. A LaunchAgent that runs start.sh with a missing model, or
 /// in a mode where Apassy starts the server, gets a note with the commands that remove
 /// it. The test does not run the install.
+// macOS only: the LaunchAgent is read with `/usr/bin/plutil`.
+#[cfg(target_os = "macos")]
 #[test]
 fn settings_offer_the_model_install_and_name_a_launch_agent() {
     use crate::broker::model_server::{BouncerSettings, Host, Layout, ModelServer, StartMode};

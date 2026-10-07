@@ -2541,6 +2541,7 @@ mod tests {
 
     /// The base-model block of `scripts/build-app.sh` in a scratch HOME. It returns
     /// the exit status, the output, and the error output.
+    #[cfg(target_os = "macos")]
     fn build_app_model_block(
         home: &Path,
         root: &Path,
@@ -2584,6 +2585,8 @@ mod tests {
     /// Mac only when it matches the manifest. An old or retrained one gives an app
     /// without a model, so `scripts/install.sh` does not fail. An explicit
     /// `APASSY_BASE_MODEL` that does not match stops the build.
+    /// macOS only: `scripts/build-app.sh` reads the manifest with `plutil`.
+    #[cfg(target_os = "macos")]
     #[test]
     fn build_app_ships_the_local_checkpoint_only_when_it_matches() {
         let dir = TempDir::new().expect("temp dir");
@@ -2873,6 +2876,7 @@ mod tests {
         server.shutdown();
     }
 
+    #[cfg(target_os = "macos")]
     fn plist(label: &str, program: &str, model: Option<&str>) -> String {
         let env = model.map_or_else(String::new, |model| {
             format!(
@@ -2884,6 +2888,8 @@ mod tests {
         )
     }
 
+    /// macOS only: a LaunchAgent is read with `/usr/bin/plutil`.
+    #[cfg(target_os = "macos")]
     #[test]
     fn launch_agents_that_run_start_sh_are_found_and_checked() {
         let dir = TempDir::new().expect("temp dir");
