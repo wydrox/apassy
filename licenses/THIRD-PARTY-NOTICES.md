@@ -140,3 +140,11 @@ The OFL and the Ubuntu Font Licence permit embedding in an application. They do 
 - BSD-3-Clause, MIT, ISC, OFL, and the Ubuntu Font Licence have no patent grant.
 - The only patent text in the OpenSSL 3.6.3 source is a prior-art comment in `crypto/ec/ec2_oct.c` about binary-field point compression. SQLCipher does not use that code.
 - The SQLCipher and SQLite sources have no patent notice.
+
+## The iPhone app (ADR 0023)
+
+The vault core of the iPhone app (`ios/ApassyCore`) links the storage and TLS stacks above, built for iOS. It adds this data file:
+
+| Component | Version | License used | Text | In the binary |
+| --- | --- | --- | --- | --- |
+| EFF Long Wordlist (Electronic Frontier Foundation) | 2016 | CC BY 3.0 US | `eff-wordlist/NOTICE.md` | Yes, the words, for memorable passwords |

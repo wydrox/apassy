@@ -275,6 +275,9 @@ fn a_local_vault_lists_shows_reveals_and_saves_like_the_mac() {
         0
     );
 
+    // The owner check by passphrase works while the vault is open.
+    assert_eq!(call(&phone, json!({"op": "check_passphrase", "passphrase": PASS}))["ok"], true);
+
     // A local vault does not sync.
     assert_eq!(
         call(&phone, json!({"op": "sync"}))["status"]["state"],

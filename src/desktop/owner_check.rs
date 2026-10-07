@@ -199,8 +199,9 @@ pub enum OwnerRequest {
         request_key: Vec<u8>,
         approval_key: Vec<u8>,
     },
-    /// Add a Mac to the relay sync of the vault `vault` (a list ID; ADR 0022). The values
-    /// are the link exactly as the "Add a Mac…" sheet showed it with its safety words.
+    /// Add a device to the relay sync of the vault `vault` (a list ID; ADR 0022). The
+    /// values are the link exactly as the "Add a device…" sheet showed it with its safety
+    /// words.
     ConfirmSyncDevice {
         vault: String,
         link_id: u64,
@@ -405,7 +406,7 @@ impl OwnerRequest {
                 "Pair the iPhone \"{device_name}\". It can see the runs that wait for you and approve them with Face ID. It can never see a secret value."
             ),
             Self::ConfirmSyncDevice { device_name, .. } => format!(
-                "Add the Mac \"{device_name}\" to the sync of this vault through the Apassy relay. It gets the encrypted copy and can send changes. It still needs the passphrase to open the vault."
+                "Add the device \"{device_name}\" to the sync of this vault through the Apassy relay. It gets the encrypted copy and can send changes. It still needs the passphrase to open the vault."
             ),
         }
     }

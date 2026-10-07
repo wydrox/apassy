@@ -1,13 +1,34 @@
 # iOS
 
-The iPhone companion of Apassy ([ADR 0020](../docs/adr/0020-iphone-companion.md)). The wire is in [companion-v1](../docs/contracts/companion-v1.md).
+The iPhone app of Apassy: the vault on the iPhone ([ADR 0023](../docs/adr/0023-iphone-vault.md)), and the companion that approves agent runs ([ADR 0020](../docs/adr/0020-iphone-companion.md)). The wires are in [ios-core-v1](../docs/contracts/ios-core-v1.md) and [companion-v1](../docs/contracts/companion-v1.md).
 
 | Folder | What it is |
 | --- | --- |
-| `ApassyCompanionKit` | A Swift package with everything except the screens: the wire client, the signing strings, the pairing link, the Secure Enclave keys, the pinned TLS check, the pairing store, and the text of a command as the owner reads it. It uses Apple frameworks only (Foundation, CryptoKit, Security, LocalAuthentication). |
-| `ApassyCompanion` | The iPhone app in SwiftUI. It uses the kit. See "The app" below. |
+| `ApassyCore` | The vault core: a Rust static library (crate `apassy-core`) with a JSON C interface over the vault and the relay sync code of the Mac app. `scripts/build-ios-core.sh` builds it as `ApassyCore/build/ApassyCore.xcframework` (not committed). |
+| `ApassyVaultKit` | A Swift package. `ApassyVaultKit`: the typed calls of the core (`VaultService`), an in-memory vault for previews and tests, the Face ID passphrase store, the owner check, the local-only clipboard, and the QuickType identities. `ApassyVaultCore`: `VaultService` over the core. |
+| `ApassyCompanionKit` | A Swift package with everything of the companion except the screens: the wire client, the signing strings, the pairing link, the Secure Enclave keys, the pinned TLS check, the pairing store, and the text of a command as the owner reads it. It uses Apple frameworks only (Foundation, CryptoKit, Security, LocalAuthentication). |
+| `ApassyCompanion` | The iPhone app in SwiftUI, and its AutoFill extension (`AutoFill/`). See "The app" below. |
 
-## The kit
+## The vault core
+
+It needs Rust 1.97 with the targets `aarch64-apple-ios`, `aarch64-apple-ios-sim`, and `aarch64-apple-darwin` (the script adds them), and Xcode 27.
+
+```
+scripts/build-ios-core.sh            # iPhone, Simulator, and macOS
+scripts/build-ios-core.sh device     # iPhone only
+cargo test -p apassy-core            # the calls of the contract, end to end
+```
+
+The tests drive the JSON calls as the app makes them. One test runs a Mac and an iPhone on the in-process fake relay of the Mac's tests (`tests/common/fake_relay.rs`): the iPhone joins with the device link and the safety words, the Mac confirms, and both sync changes to each other.
+
+The Swift side over the real core runs on macOS:
+
+```
+cd ios/ApassyVaultKit
+swift test
+```
+
+## The companion kit
 
 It needs Xcode 27 (Swift 6.4). It builds for iOS 26 and macOS 15, and its tests run on macOS. No iOS simulator and no Secure Enclave are needed.
 
@@ -121,3 +142,20 @@ The link is the text of the QR code. It is a secret for five minutes, so use a l
 ### The icon
 
 `scripts/make-ios-icon.sh` renders `AppIcon.png` (1024x1024, no alpha channel) and the small `CoverIcon.png` of the privacy cover from `packaging/AppIcon.svg`, with `qlmanage` and `sips`. iOS masks the icon itself, so the script draws the mark across the whole square. Run it after a change to the SVG, and commit both files.
+
+## TestFlight
+
+`scripts/ios-testflight.sh` archives the app with its AutoFill extension and uploads the build to App Store Connect. Xcode signs with automatic signing and makes the certificates and profiles it needs with the API key.
+
+Once, in App Store Connect: Apps > + > New App, platform iOS, bundle ID `com.wydrox.apassy.companion` (the API cannot make the record). The bundle IDs `com.wydrox.apassy.companion` and `com.wydrox.apassy.companion.autofill` are registered in team 7S3F9767BM.
+
+```
+APASSY_TEAM=7S3F9767BM \
+APASSY_NOTARY_KEY=~/.appstoreconnect/private_keys/AuthKey_<key id>.p8 \
+APASSY_NOTARY_KEY_ID=<key id> APASSY_NOTARY_ISSUER=<issuer id> \
+scripts/ios-testflight.sh
+```
+
+The build number is the minutes since 1970, so each run is higher than the last; the version is `MARKETING_VERSION` in `project.yml`. App Store Connect needs a few minutes to process a build. Internal testers of the team see it in TestFlight then. `--no-upload` writes the `.ipa` to `target/ios/export` instead.
+
+The app declares `ITSAppUsesNonExemptEncryption = NO` (ADR 0023, section 8), so a build needs no export compliance answer.

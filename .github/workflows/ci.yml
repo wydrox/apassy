@@ -65,6 +65,14 @@ jobs:
       - name: Check vault API compile failures
         run: cargo test --offline --locked --features vault --doc
 
+      # The vault core of the iPhone app (ADR 0023) is a workspace member, outside the
+      # default members above. Its tests drive the JSON calls end to end with the fake
+      # relay, built for macOS; the iPhone slices need Xcode (ios/README.md).
+      - name: Run the iPhone vault core tests
+        run: |
+          cargo clippy --offline --locked -p apassy-core --all-targets -- -D warnings
+          cargo test --offline --locked -p apassy-core
+
       - name: Run P0 Node model tests
         run: node --test design/walkthrough/model.test.mjs
 

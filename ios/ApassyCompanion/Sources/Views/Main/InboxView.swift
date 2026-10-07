@@ -1,21 +1,18 @@
 import ApassyCompanionKit
 import SwiftUI
 
-/// The runs that wait, then the open access requests, under a floating status capsule.
+/// The runs that wait, then the open access requests. `CompanionView` puts it under the
+/// floating status capsule.
 struct InboxView: View {
     let session: SessionModel
     /// The run in the sheet. It is a copy of the run as the owner opened it.
     @State private var opened: PendingRun?
 
     var body: some View {
-        NavigationStack {
-            content
-                .navigationTitle("Inbox")
-                .connectionCapsule(session)
-        }
-        .sheet(item: $opened) { run in
-            RunDetailView(session: session, run: run)
-        }
+        content
+            .sheet(item: $opened) { run in
+                RunDetailView(session: session, run: run)
+            }
     }
 
     @ViewBuilder
@@ -119,22 +116,22 @@ struct ConnectionUnavailableView: View {
 
 #if DEBUG
     #Preview("Inbox") {
-        InboxView(session: .preview())
+        CompanionView(session: .preview())
     }
 
     #Preview("Nothing waits") {
-        InboxView(session: .preview(inbox: Inbox(runs: [], accessRequests: [], activity: [])))
+        CompanionView(session: .preview(inbox: Inbox(runs: [], accessRequests: [], activity: [])))
     }
 
     #Preview("Not reachable") {
-        InboxView(session: .preview(inbox: nil, state: .unreachable))
+        CompanionView(session: .preview(inbox: nil, state: .unreachable))
     }
 
     #Preview("Not reachable, nothing waited") {
-        InboxView(session: .preview(inbox: Inbox(runs: [], accessRequests: [], activity: []), state: .unreachable))
+        CompanionView(session: .preview(inbox: Inbox(runs: [], accessRequests: [], activity: []), state: .unreachable))
     }
 
     #Preview("Not the paired Mac") {
-        InboxView(session: .preview(state: .pinMismatch))
+        CompanionView(session: .preview(state: .pinMismatch))
     }
 #endif
