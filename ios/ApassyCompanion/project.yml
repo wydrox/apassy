@@ -45,6 +45,10 @@ targets:
     sources:
       - path: Sources
       - path: Resources
+      # The notices and license texts of the code and data in the app (Settings > Licenses).
+      - path: ../../licenses
+        type: folder
+        buildPhase: resources
     dependencies:
       - package: ApassyCompanionKit
       - package: ApassyVaultKit

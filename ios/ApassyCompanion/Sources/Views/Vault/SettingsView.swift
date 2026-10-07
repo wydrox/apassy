@@ -64,6 +64,7 @@ struct SettingsView: View {
             if let info = root.vault?.info {
                 LabeledContent("Vault core", value: "\(info.version), schema \(info.schema)")
             }
+            NavigationLink("Licenses") { LicensesView() }
         } header: {
             Text("About")
         } footer: {

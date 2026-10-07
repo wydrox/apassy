@@ -40,6 +40,7 @@
 		866E0C2F76BB1C522007252B /* FlowLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = A37147DA2D368F8D09352F30 /* FlowLayout.swift */; };
 		88D297705A24C7750135FFE6 /* JoinModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A24AC166DBA7F3F58D3F484 /* JoinModel.swift */; };
 		8978D6FB472BF35AC15B9BFE /* PairingFlowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2852EDCFD6A280976A327162 /* PairingFlowView.swift */; };
+		8D524F2EC39AF6DF75652AAB /* LicensesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3767CC017257A886D4694D81 /* LicensesView.swift */; };
 		939B7B4EEFA0419E68FC61B3 /* ApassyVaultKit in Frameworks */ = {isa = PBXBuildFile; productRef = 353E83378BBC3FDA45A62FDC /* ApassyVaultKit */; };
 		96BFFFBB07804A2D3E07D4E3 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AF93D2413F24FB5B4F38F18 /* SettingsView.swift */; };
 		97A2E6135F036E9C6B224D8A /* ItemEditorModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C0D707D429BDDECB6D010D2 /* ItemEditorModel.swift */; };
@@ -50,6 +51,7 @@
 		BBF4A5AD64CFAD14F670286E /* GeneratorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38F3E0A15FE766FA331F02FD /* GeneratorView.swift */; };
 		BD37047CC6B15911AFA24AD5 /* AutoFillViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BC42EE11D63D65DD187A2A1 /* AutoFillViews.swift */; };
 		BDD9FABC86173D3F21C383A8 /* ItemEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D22401E12E72EAFD4F8B7F52 /* ItemEditorView.swift */; };
+		C2F00BA1D5A39FA070564E99 /* licenses in Resources */ = {isa = PBXBuildFile; fileRef = A39426ACDE89948C0EDB59C1 /* licenses */; };
 		C42C4BC25E83C2DFFE8F7810 /* CredentialProviderViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B210B98EF4836F5C25B4F8E9 /* CredentialProviderViewController.swift */; };
 		C75F905D2E169F09022BA2A5 /* CoverPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = F822347FA7AB2283110B8D02 /* CoverPolicy.swift */; };
 		CC7A69ACA7CEA7FCC99380BB /* ApassyAutoFill.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = D3E90CB21B3E02087D2ADE0F /* ApassyAutoFill.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -103,6 +105,7 @@
 		2F434C376345E9C5F41FD05C /* QRScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRScannerView.swift; sourceTree = "<group>"; };
 		33EFF55AA7ADF95410EB9472 /* ApprovalsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalsView.swift; sourceTree = "<group>"; };
 		35FEB27DAC4943C23B689CEA /* ScanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanView.swift; sourceTree = "<group>"; };
+		3767CC017257A886D4694D81 /* LicensesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LicensesView.swift; sourceTree = "<group>"; };
 		38500713C126F8B4EEE9C6F5 /* VaultSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaultSettings.swift; sourceTree = "<group>"; };
 		38F3E0A15FE766FA331F02FD /* GeneratorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeneratorView.swift; sourceTree = "<group>"; };
 		52A768E41BE6FD6BA91F0FC9 /* CodeScannerPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeScannerPanel.swift; sourceTree = "<group>"; };
@@ -129,6 +132,7 @@
 		A1A7B7089BA3A509093E8685 /* AutoFillModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoFillModel.swift; sourceTree = "<group>"; };
 		A30BE0E798882BAE6EEF527A /* ApassyVaultKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = ApassyVaultKit; path = ../ApassyVaultKit; sourceTree = SOURCE_ROOT; };
 		A37147DA2D368F8D09352F30 /* FlowLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlowLayout.swift; sourceTree = "<group>"; };
+		A39426ACDE89948C0EDB59C1 /* licenses */ = {isa = PBXFileReference; lastKnownFileType = folder; name = licenses; path = ../../licenses; sourceTree = SOURCE_ROOT; };
 		ACB44566CDBBB8C618ED0233 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B210B98EF4836F5C25B4F8E9 /* CredentialProviderViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialProviderViewController.swift; sourceTree = "<group>"; };
 		B8A7940F84FC12C29393A036 /* PairingModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingModel.swift; sourceTree = "<group>"; };
@@ -220,6 +224,7 @@
 		72C2FA9447F32FFF3EF0552B = {
 			isa = PBXGroup;
 			children = (
+				DEA10FBA9B7470ADE5663B84 /* apassy-ios */,
 				751942F1E044A6B3896124D2 /* AutoFill */,
 				869A26A7BA633E3F312E5677 /* Packages */,
 				47F184B0B0DAC0AB82A3563C /* Resources */,
@@ -249,6 +254,7 @@
 				F3D12AC62CA251B3BDB3D870 /* ItemDetailView.swift */,
 				D22401E12E72EAFD4F8B7F52 /* ItemEditorView.swift */,
 				FF384FB7C7A9E213F181560D /* JoinFlowView.swift */,
+				3767CC017257A886D4694D81 /* LicensesView.swift */,
 				BA1978BE1A25B04CCD8F98DB /* LockView.swift */,
 				6AF93D2413F24FB5B4F38F18 /* SettingsView.swift */,
 				801D958711CB9104B029DFE7 /* VaultComponents.swift */,
@@ -335,6 +341,15 @@
 				6E55AB118DA00EE6D0529187 /* VaultText.swift */,
 			);
 			path = Vault;
+			sourceTree = "<group>";
+		};
+		DEA10FBA9B7470ADE5663B84 /* apassy-ios */ = {
+			isa = PBXGroup;
+			children = (
+				A39426ACDE89948C0EDB59C1 /* licenses */,
+			);
+			name = "apassy-ios";
+			path = ../..;
 			sourceTree = "<group>";
 		};
 		E409E008BFAF2CE02E8FC229 /* Sources */ = {
@@ -443,6 +458,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				691C57166953082B01AC26AB /* Assets.xcassets in Resources */,
+				C2F00BA1D5A39FA070564E99 /* licenses in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -483,6 +499,7 @@
 				BDD9FABC86173D3F21C383A8 /* ItemEditorView.swift in Sources */,
 				F076F449DEDCF35058629720 /* JoinFlowView.swift in Sources */,
 				88D297705A24C7750135FFE6 /* JoinModel.swift in Sources */,
+				8D524F2EC39AF6DF75652AAB /* LicensesView.swift in Sources */,
 				B1EA08F2EA7D9DF46537774F /* LockView.swift in Sources */,
 				4F69B92A4364426CA93EE63B /* MacConnection.swift in Sources */,
 				1A52B124D8933244BA388026 /* MacView.swift in Sources */,

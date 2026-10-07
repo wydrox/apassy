@@ -4,6 +4,15 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Added
+
+- The Apassy app for the iPhone holds your vault, like a second Mac ([ADR 0023](docs/adr/0023-iphone-vault.md)). Add the iPhone with "Add a device…" on the Mac: scan the QR code, compare the two safety words, confirm on the Mac with Touch ID, and type the passphrase on the iPhone. The vault syncs both ways through the Apassy relay. The app has Home (favorites, recently changed, kinds), Items, Search, item details, new and edited items, the password generator (random, memorable, PIN), Watchtower (weak, reused, and old passwords, conflict copies), Face ID unlock, auto-lock, and Settings. Each reveal, copy, one-time code, or large type of a secret needs Face ID or the passphrase; a copy stays on the iPhone and expires after 60 seconds. Password AutoFill fills logins and one-time codes in Safari and apps after Face ID. The companion of ADR 0020 is the Approvals tab. The app is in TestFlight.
+- The vault core of the iPhone app (`ios/ApassyCore`) runs the same vault and relay sync code as the Mac (contract `docs/contracts/ios-core-v1.md`). `scripts/build-ios-core.sh` builds it, and `scripts/ios-testflight.sh` archives and uploads the app.
+
+### Changed
+
+- "Add a Mac…" in Settings > General > Sync is "Add a device…". It shows the device link as a QR code for the iPhone, and as text for another Mac.
+
 ## [0.3.4] - 2026-10-07
 
 Vault sync through the Apassy relay, a background sync worker, bouncer start modes in Settings, and fixes in the window and the owner command line.
