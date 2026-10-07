@@ -5,6 +5,7 @@ import type { AddressInfo } from "node:net";
 import { after, before, describe, it } from "node:test";
 
 import worker, { type RelayService } from "../src/index.ts";
+import { MAX_JSON_LENGTH, MAX_PROXY_LENGTH, MAX_SNAPSHOT_LENGTH } from "../src/limits.ts";
 
 const SECRET = "edge-secret-synthetic-0123456789abcdef0123";
 const PUBLIC = "https://apassy-relay.wyderka.cc";
@@ -269,14 +270,267 @@ describe("sign-in rate limit", () => {
     });
   }
 
-  it("uses CREATE_LIMITER for a device link request", async () => {
-    let calls = 0;
-    const response = await call("/v1/devices/link", { method: "POST", body: "{}" }, {
-      CREATE_LIMITER: { async limit() { calls++; return { success: false }; } },
+  for (const path of ["/v1/devices/link", "/v1/devices/link/cancel"]) {
+    it(`uses CREATE_LIMITER, not AUTH_LIMITER, for POST ${path}`, async () => {
+      const keys: string[] = [];
+      const response = await call(path, { method: "POST", body: "{}", headers: { "cf-connecting-ip": "192.0.2.7" } }, {
+        CREATE_LIMITER: { async limit({ key }: { key: string }) { keys.push(`create:${key}`); return { success: false }; } },
+        AUTH_LIMITER: { async limit({ key }: { key: string }) { keys.push(`auth:${key}`); return { success: true }; } },
+      });
+      assert.equal(response.status, 429);
+      assert.equal(response.headers.get("retry-after"), "60");
+      assert.deepEqual(keys, ["create:192.0.2.7"]);
+      assert.equal(seen.length, 0);
     });
+  }
+});
+
+/** A relay that records the headers it is sent and does not read the body. */
+function recordingRelay() {
+  const forwarded: { target: string; headers: Headers }[] = [];
+  const relay: RelayService = {
+    async fetch(input, init) {
+      forwarded.push({ target: input, headers: new Headers(init?.headers) });
+      return new Response("ok", { status: 201 });
+    },
+  };
+  return { forwarded, relay };
+}
+
+describe("body length", () => {
+  const refusing = () => {
+    const keys: string[] = [];
+    const limiter = { async limit({ key }: { key: string }) { keys.push(key); return { success: false }; } };
+    return { keys, env: { SYNC_LIMITER: limiter, CREATE_LIMITER: limiter, AUTH_LIMITER: limiter } };
+  };
+  // Paths near the push that the relay answers early (404, 405, 401): tiny_http then
+  // reads the whole declared body, so each one must be bounded too.
+  const others: [string, string][] = [
+    ["PUT", "/v1/sync/snapshot/"],
+    ["POST", "/v1/sync/snapshot"],
+    ["PATCH", "/v1/sync/snapshot"],
+    ["PUT", "/v1/sync/head"],
+    ["POST", "/v1/sync/receipt"],
+    ["DELETE", "/v1/sync"],
+    ["PUT", "/anything"],
+    ["POST", "/v1/runs"],
+    ["POST", "/v1/join"],
+    ["POST", "/mcp"],
+  ];
+
+  it("refuses a large declared length on every other route, before the limiter and the relay", async () => {
+    const { forwarded, relay } = recordingRelay();
+    const limits = refusing();
+    for (const [method, path] of others) {
+      for (const declared of ["99999999", String(MAX_SNAPSHOT_LENGTH), String(MAX_JSON_LENGTH + 1)]) {
+        const label = `${method} ${path} ${declared}`;
+        const response = await call(path, { method, body: "x", headers: { "content-length": declared } }, {
+          ...limits.env,
+          RELAY: relay,
+        });
+        assert.equal(response.status, 413, label);
+        assert.equal(response.headers.get("content-type"), "application/json", label);
+        assert.equal((await envelope(response)).error.code, "payload_too_large", label);
+      }
+    }
+    assert.deepEqual(forwarded, []);
+    assert.deepEqual(limits.keys, []);
+  });
+
+  it("refuses a malformed length on every other route", async () => {
+    const { forwarded, relay } = recordingRelay();
+    for (const [method, path] of others) {
+      for (const declared of ["", "abc", "3, 3", "-1", "1e3", "123456789012345678901"]) {
+        const label = `${method} ${path} ${JSON.stringify(declared)}`;
+        const response = await call(path, { method, body: "x", headers: { "content-length": declared } }, {
+          RELAY: relay,
+        });
+        assert.equal(response.status, 400, label);
+        assert.equal((await envelope(response)).error.code, "invalid_request", label);
+      }
+    }
+    assert.deepEqual(forwarded, []);
+  });
+
+  it("passes a JSON body up to 64 KiB plus the margin", async () => {
+    assert.equal(MAX_JSON_LENGTH, 128 * 1024);
+    const { forwarded, relay } = recordingRelay();
+    for (const [method, path] of others) {
+      const response = await call(path, { method, body: "x", headers: { "content-length": String(MAX_JSON_LENGTH) } }, {
+        RELAY: relay,
+      });
+      assert.equal(response.status, 201, `${method} ${path}`);
+    }
+    assert.equal(forwarded.length, others.length);
+    assert.ok(forwarded.every((f) => f.headers.get("content-length") === String(MAX_JSON_LENGTH)));
+  });
+
+  it("bounds an agent proxy body at 8 MiB plus the margin", async () => {
+    assert.equal(MAX_PROXY_LENGTH, 8 * 1024 * 1024 + 64 * 1024);
+    const { forwarded, relay } = recordingRelay();
+    const path = "/p/apassy_ses_k/api.example.com/v1/upload";
+    for (const declared of [String(MAX_PROXY_LENGTH + 1), String(MAX_SNAPSHOT_LENGTH)]) {
+      const response = await call(path, { method: "POST", body: "x", headers: { "content-length": declared } }, {
+        RELAY: relay,
+      });
+      assert.equal(response.status, 413, declared);
+      assert.equal((await envelope(response)).error.code, "payload_too_large", declared);
+    }
+    assert.equal(forwarded.length, 0);
+    for (const declared of [String(MAX_PROXY_LENGTH), String(MAX_JSON_LENGTH + 1)]) {
+      const response = await call(path, { method: "PUT", body: "x", headers: { "content-length": declared } }, {
+        RELAY: relay,
+      });
+      assert.equal(response.status, 201, declared);
+    }
+    assert.deepEqual(forwarded.map((f) => f.headers.get("content-length")), [String(MAX_PROXY_LENGTH), String(MAX_JSON_LENGTH + 1)]);
+  });
+
+  it("forwards GET and HEAD without a declared length", async () => {
+    const { forwarded, relay } = recordingRelay();
+    for (const method of ["GET", "HEAD"]) {
+      const response = await call("/v1/sync/snapshot/", {
+        method,
+        headers: { "content-length": "99999999", "transfer-encoding": "chunked" },
+      }, { RELAY: relay });
+      assert.equal(response.status, 201, method);
+    }
+    assert.equal(forwarded.length, 2);
+    for (const { headers } of forwarded) {
+      assert.equal(headers.get("content-length"), null);
+      assert.equal(headers.get("transfer-encoding"), null);
+      assert.equal(headers.get("x-apassy-edge"), SECRET);
+    }
+  });
+});
+
+/** The JSON error envelope of an answer. */
+async function envelope(response: Response) {
+  return (await response.json()) as { ok: boolean; error: { code: string; message: string } };
+}
+
+describe("snapshot push", () => {
+  const counting = (success: boolean) => {
+    const keys: string[] = [];
+    return { keys, limiter: { async limit({ key }: { key: string }) { keys.push(key); return { success }; } } };
+  };
+
+  it("refuses a missing, non-numeric, or chunked length before the limiter and the relay", async () => {
+    const sync = counting(true);
+    for (const headers of [
+      {},
+      { "content-length": "" },
+      { "content-length": "abc" },
+      { "content-length": "12a" },
+      { "content-length": "-1" },
+      { "content-length": "1.5" },
+      { "content-length": "1e3" },
+      { "content-length": "0x10" },
+      { "content-length": "3, 3" },
+      { "content-length": "123456789012345678901" },
+      { "content-length": "3", "transfer-encoding": "chunked" },
+    ] as Record<string, string>[]) {
+      const label = JSON.stringify(headers);
+      const response = await call("/v1/sync/snapshot", { method: "PUT", body: "abc", headers }, {
+        SYNC_LIMITER: sync.limiter,
+        RELAY: vpc(),
+      });
+      assert.equal(response.status, 400, label);
+      assert.equal(response.headers.get("content-type"), "application/json", label);
+      assert.equal(response.headers.get("cache-control"), "no-store", label);
+      assert.equal((await envelope(response)).error.code, "invalid_request", label);
+      assert.equal(seen.length, 0, label);
+      assert.equal(vpcTargets.length, 0, label);
+    }
+    assert.deepEqual(sync.keys, []);
+  });
+
+  it("refuses a length above 64 MiB plus the margin, and passes one at the limit", async () => {
+    // A relay that does not read the body: the declared length is all that counts here.
+    const forwarded: string[] = [];
+    const relay: RelayService = {
+      async fetch(input, init) {
+        forwarded.push(new Headers(init?.headers).get("content-length") ?? "");
+        return new Response("ok", { status: 201 });
+      },
+    };
+    assert.equal(MAX_SNAPSHOT_LENGTH, 64 * 1024 * 1024 + 64 * 1024);
+    for (const declared of [String(MAX_SNAPSHOT_LENGTH + 1), String(2 ** 40), "18446744073709551615", "99999999999999999999"]) {
+      const response = await call("/v1/sync/snapshot", { method: "PUT", body: "x", headers: { "content-length": declared } }, {
+        RELAY: relay,
+      });
+      assert.equal(response.status, 413, declared);
+      const body = await envelope(response);
+      assert.equal(body.ok, false, declared);
+      assert.equal(body.error.code, "payload_too_large", declared);
+    }
+    assert.deepEqual(forwarded, []);
+    for (const declared of [String(MAX_SNAPSHOT_LENGTH), "67108864", "0", "007"]) {
+      const response = await call("/v1/sync/snapshot", { method: "PUT", body: "x", headers: { "content-length": declared } }, {
+        RELAY: relay,
+      });
+      assert.equal(response.status, 201, declared);
+    }
+    assert.deepEqual(forwarded, [String(MAX_SNAPSHOT_LENGTH), "67108864", "0", "007"]);
+  });
+
+  it("uses SYNC_LIMITER per client address and passes an allowed push with its body", async () => {
+    const refused = counting(false);
+    const create = counting(true);
+    const response = await call("/v1/sync/snapshot", {
+      method: "PUT",
+      body: "snapshot",
+      headers: { "content-length": "8", "cf-connecting-ip": "198.51.100.8", "if-match": '"0"' },
+    }, { SYNC_LIMITER: refused.limiter, CREATE_LIMITER: create.limiter, AUTH_LIMITER: create.limiter, RELAY: vpc() });
     assert.equal(response.status, 429);
-    assert.equal(calls, 1);
+    assert.equal(response.headers.get("retry-after"), "60");
+    assert.equal((await envelope(response)).error.code, "rate_limited");
+    assert.deepEqual(refused.keys, ["198.51.100.8"]);
+    assert.deepEqual(create.keys, []);
     assert.equal(seen.length, 0);
+    assert.equal(vpcTargets.length, 0);
+
+    const allowed = counting(true);
+    const passed = await call("/v1/sync/snapshot", {
+      method: "PUT",
+      body: "snapshot",
+      headers: { "content-length": "8", "if-match": '"0"' },
+    }, { SYNC_LIMITER: allowed.limiter, RELAY: vpc() });
+    assert.equal(passed.status, 201);
+    assert.equal(await passed.text(), "echo:snapshot");
+    assert.deepEqual(allowed.keys, ["unknown"]);
+    assert.equal(seen[0]!.method, "PUT");
+    assert.equal(seen[0]!.url, "/v1/sync/snapshot");
+    assert.deepEqual(values(seen[0]!, "content-length"), ["8"]);
+    assert.deepEqual(values(seen[0]!, "if-match"), ['"0"']);
+    assert.deepEqual(values(seen[0]!, "x-apassy-edge"), [SECRET]);
+  });
+
+  it("passes a push when the limiter is missing or fails", async () => {
+    for (const SYNC_LIMITER of [undefined, { async limit() { throw new Error("limiter unavailable"); } }]) {
+      const response = await call("/v1/sync/snapshot", { method: "PUT", body: "abc", headers: { "content-length": "3" } }, {
+        SYNC_LIMITER,
+      });
+      assert.equal(response.status, 201);
+      assert.equal(await response.text(), "echo:abc");
+    }
+  });
+
+  it("does not limit a snapshot download or other sync routes, nor check a body without a length", async () => {
+    const sync = counting(false);
+    for (const [method, path] of [
+      ["GET", "/v1/sync/snapshot?version=1"],
+      ["HEAD", "/v1/sync/snapshot"],
+      ["GET", "/v1/sync/head?since=0&wait=25"],
+      ["POST", "/v1/sync/receipt"],
+      ["DELETE", "/v1/sync"],
+      ["PUT", "/v1/sync/head"],
+    ]) {
+      const response = await call(path!, { method }, { SYNC_LIMITER: sync.limiter });
+      assert.equal(response.status, 201, `${method} ${path}`);
+      assert.equal(seen.length, 1, `${method} ${path}`);
+    }
+    assert.deepEqual(sync.keys, []);
   });
 });
 
@@ -358,6 +612,7 @@ describe("creation rate limit", () => {
       ["POST", "/v1/join/"],
       ["POST", "/v1/teams/member"],
       ["POST", "/v1/me"],
+      ["POST", "/v1/sync/snapshot"],
       ["POST", "/p/session/example.com/v1/join"],
     ]) {
       const response = await call(path!, { method }, { CREATE_LIMITER });
@@ -529,5 +784,12 @@ describe("public assets", () => {
       assert.equal(seen.length, 0, path);
       assert.equal(vpcTargets.length, 0, path);
     }
+  });
+});
+
+describe("main module", () => {
+  it("exports only the handler, because workerd refuses any other value there", async () => {
+    const main = await import("../src/index.ts");
+    assert.deepEqual(Object.keys(main), ["default"]);
   });
 });
