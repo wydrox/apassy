@@ -60,7 +60,8 @@ public protocol VaultService: Sendable {
     func removeVault(id: String, force: Bool) async throws -> Bool
 
     // 5.2 Joining a vault
-    func joinStart(link: String) async throws -> JoinInfo
+    /// `deviceName`: the name that the Mac shows for this iPhone.
+    func joinStart(link: String, deviceName: String) async throws -> JoinInfo
     func joinPoll() async throws -> JoinInfo
     func joinCancel() async throws
     func joinFinish(passphrase: String) async throws -> VaultEntry

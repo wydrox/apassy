@@ -236,7 +236,7 @@ public actor PreviewVaultService: VaultService {
 
     // MARK: - 5.2
 
-    public func joinStart(link: String) async throws -> JoinInfo {
+    public func joinStart(link: String, deviceName: String) async throws -> JoinInfo {
         guard link.contains("apassy_lnk_") else {
             throw VaultError(.linkInvalid, "This is not a device link of the Apassy relay.")
         }

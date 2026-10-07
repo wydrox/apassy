@@ -125,7 +125,9 @@ public final class CoreVaultService: VaultService, @unchecked Sendable {
 
     // MARK: - 5.2
 
-    public func joinStart(link: String) async throws -> JoinInfo { try await call("join_start", ["link": link]) }
+    public func joinStart(link: String, deviceName: String) async throws -> JoinInfo {
+        try await call("join_start", ["link": link, "device_name": deviceName])
+    }
 
     public func joinPoll() async throws -> JoinInfo { try await call("join_poll") }
 

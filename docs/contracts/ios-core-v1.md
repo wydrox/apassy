@@ -121,7 +121,7 @@ The owner selects "Add a device…" on the Mac; the Mac shows a QR code and the 
 
 | Op | Parameters | Result |
 | --- | --- | --- |
-| `join_start` | `link` | `Join`. Makes a device key in memory and sends the link. A join that was waiting is cancelled first. |
+| `join_start` | `link`, `device_name` (optional; the config name by default) | `Join`. Makes a device key in memory and sends the link with the name of this iPhone. A join that was waiting is cancelled first. |
 | `join_poll` | | `Join`. Asks the relay whether the Mac confirmed. After the confirmation it downloads the copy in the same call, then answers `ready`. Call it every 2 s while `waiting`. |
 | `join_cancel` | | `{}`. Cancels the link on the relay, or removes the device after a confirmation. |
 | `join_finish` | `passphrase` | `{"vault": Vault}`. Opens the copy with the passphrase, makes the vault on this iPhone, turns on relay sync, selects and unlocks it. A wrong passphrase is `wrong_passphrase` and keeps the download: the owner tries again. |
