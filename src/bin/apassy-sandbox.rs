@@ -364,7 +364,8 @@ fn listed_vaults(data_dir: &Path) -> Result<Vec<PathBuf>, String> {
 
 /// The synced vault files of the vault list (ADR 0014). A list that cannot be read, or
 /// a synced vault without a valid file, stops the launcher: the profile cannot deny a
-/// file that it does not know.
+/// file that it does not know. A vault that syncs through the relay (ADR 0022) has no
+/// synced file, so the launcher skips it.
 fn listed_sync_files(data_dir: &Path) -> Result<Vec<PathBuf>, String> {
     let registry = match apassy::vaults::Registry::read(data_dir) {
         Ok(None) => return Ok(Vec::new()),
@@ -383,9 +384,10 @@ fn listed_sync_files(data_dir: &Path) -> Result<Vec<PathBuf>, String> {
         }
         match entry.sync_file() {
             Some(file) => files.push(file),
+            None if entry.sync_relay().is_some() => {}
             None => {
                 return Err(format!(
-                    "the vault “{}” syncs, but the vault list has no valid synced file for it, so the host does not start. In Apassy, turn its sync off and on again (Settings > Vaults).",
+                    "the vault “{}” syncs, but the vault list has no valid synced file for it, so the host does not start. In Apassy, turn its sync off and on again (Settings > General > Sync).",
                     entry.name
                 ));
             }
@@ -414,7 +416,7 @@ fn sync_file_params(
     }
     if files.len() > MAX_SYNC_FILES {
         return Err(format!(
-            "the vault list has {} synced vault files outside iCloud Drive. The profile can deny at most {MAX_SYNC_FILES}, so the host does not start. Sync some vaults through iCloud Drive, or turn their sync off in Apassy (Settings > Vaults).",
+            "the vault list has {} synced vault files outside iCloud Drive. The profile can deny at most {MAX_SYNC_FILES}, so the host does not start. Sync some vaults through iCloud Drive, or turn their sync off in Apassy (Settings > General > Sync).",
             files.len()
         ));
     }
@@ -439,7 +441,7 @@ fn extra_vault_files(
     }
     if extra.len() > MAX_EXTRA_VAULTS {
         return Err(format!(
-            "the vault list has {} vault files outside {}. The profile can deny at most {MAX_EXTRA_VAULTS}, so the host does not start. Move vaults into the data directory, or remove vaults from the list in Apassy (Settings > Vaults).",
+            "the vault list has {} vault files outside {}. The profile can deny at most {MAX_EXTRA_VAULTS}, so the host does not start. Move vaults into the data directory, or remove vaults from the list in Apassy (Settings > General > Vaults).",
             extra.len(),
             data_dir.display()
         ));
@@ -800,6 +802,30 @@ mod tests {
         registry.save(&data).expect("save");
         let err = listed_sync_files(&data).expect_err("no valid file");
         assert!(err.contains("does not start"), "{err}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ADR 0022: a vault that syncs through the relay has no synced file. The launcher
+    /// skips it and still denies the files of the folder links.
+    #[test]
+    fn relay_links_are_skipped() {
+        let root = temp_dir("relay");
+        let data = root.join("d");
+        let dropbox = root.join("Dropbox").join("Apassy");
+        let mut registry = apassy::vaults::Registry::new();
+        let relay = registry.add("R", &root.join("r.db"), 1).expect("add");
+        registry.entry_mut(&relay).expect("entry").sync = Some(apassy::vaults::SyncLink::relay(
+            &relay,
+            apassy::vaults::RelayLink::new("https://apassy-relay.wyderka.cc", "t_7k2m9q4x8c", 2),
+        ));
+        let folder = registry.add("F", &root.join("f.db"), 1).expect("add");
+        registry.entry_mut(&folder).expect("entry").sync =
+            Some(apassy::vaults::SyncLink::new(&folder, &dropbox, "F.apassy"));
+        registry.save(&data).expect("save");
+        assert_eq!(
+            listed_sync_files(&data).expect("the relay link does not stop the launcher"),
+            vec![dropbox.join("F.apassy")]
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

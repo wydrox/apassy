@@ -20,6 +20,7 @@ mod history;
 mod learning;
 mod merge;
 pub mod providers;
+mod relay_device;
 mod suggestions;
 mod sync;
 mod types;
@@ -68,6 +69,7 @@ pub use merge::{
     ConflictCopy, LOCAL_TABLES, MergeReport, SYNCED_EVENT_KINDS, SYNCED_TABLES, SyncScope,
     TOMBSTONE_DAYS,
 };
+pub use relay_device::RelayDevice;
 pub use suggestions::{DeclarationField, SuggestedDeclaration, SuggestionOutcome, SuggestionStats};
 pub use sync::{AdoptedCopy, MAX_DEVICE_NAME_BYTES, SyncCopy, SyncIdentity};
 pub(crate) use sync::{copy_hashing, hash_open_file, sync_dir, to_hex};
@@ -137,6 +139,7 @@ const PLACEHOLDER_SCHEMA_VERSION: i64 = 11;
 const ACCESS_SCHEMA_VERSION: i64 = 12;
 const SYNC_META_SCHEMA_VERSION: i64 = 13;
 const RECORD_SYNC_SCHEMA_VERSION: i64 = 14;
+const COMPANION_SCHEMA_VERSION: i64 = 15;
 
 /// Encrypted local vault. Connection state is private. Debug is redacted.
 pub struct Vault {
@@ -939,6 +942,7 @@ fn verify_user_version(conn: &Connection) -> VaultResult<i64> {
         | ACCESS_SCHEMA_VERSION
         | SYNC_META_SCHEMA_VERSION
         | RECORD_SYNC_SCHEMA_VERSION
+        | COMPANION_SCHEMA_VERSION
         | SCHEMA_VERSION) => Ok(version),
         _ => Err(err(VaultErrorKind::UnsupportedSchema)),
     }
@@ -1066,8 +1070,13 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
     } else {
         &[]
     };
-    let v15: &[&str] = if version >= SCHEMA_VERSION {
+    let v15: &[&str] = if version >= COMPANION_SCHEMA_VERSION {
         &companion::SCHEMA_V15_COLUMNS
+    } else {
+        &[]
+    };
+    let v16: &[&str] = if version >= SCHEMA_VERSION {
+        &relay_device::SCHEMA_V16_COLUMNS
     } else {
         &[]
     };
@@ -1087,6 +1096,7 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
         .chain(v13)
         .chain(v14)
         .chain(v15)
+        .chain(v16)
     {
         let sql = sql.replacen(" FROM ", &format!(" FROM {schema}."), 1);
         drop(
@@ -1162,7 +1172,11 @@ fn migrate_to_current(conn: &mut Connection, from: i64) -> VaultResult<()> {
     if from < RECORD_SYNC_SCHEMA_VERSION {
         merge::add_schema_v14(&tx)?;
     }
-    tx.execute_batch(companion::SCHEMA_V15_SQL)
+    if from < COMPANION_SCHEMA_VERSION {
+        tx.execute_batch(companion::SCHEMA_V15_SQL)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+    }
+    tx.execute_batch(relay_device::SCHEMA_V16_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     verify_expected_columns(conn, SCHEMA_VERSION)
@@ -1212,6 +1226,8 @@ fn initialize_new_db(path: &Path, passphrase: &str) -> VaultResult<()> {
     sync::add_schema_v13(&tx)?;
     merge::add_schema_v14(&tx)?;
     tx.execute_batch(companion::SCHEMA_V15_SQL)
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    tx.execute_batch(relay_device::SCHEMA_V16_SQL)
         .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     close_conn(conn)

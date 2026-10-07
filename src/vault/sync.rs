@@ -465,6 +465,7 @@ impl Vault {
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(|_| err(VaultErrorKind::Storage))?;
                 super::companion::prepare_adopted(&tx)?;
+                super::relay_device::prepare_adopted(&tx)?;
                 merge::new_device(&tx)?;
                 tx.commit().map_err(|_| err(VaultErrorKind::Storage))
             })()
