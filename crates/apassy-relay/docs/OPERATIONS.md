@@ -557,7 +557,7 @@ The audit records team changes, runs, decisions, sessions, and proxy requests. I
 
 ## 13. Backup
 
-`apassy-relay admin backup` copies `relay.db` and every team file while the relay runs. Each file is copied while its connection is locked, so the copy is whole. The copy goes to a new folder `<APASSY_RELAY_BACKUP_DIR>/<UTC time>` (default `/backups`; mode 0700, files 0600), with `MANIFEST.json`: the name, size, and SHA-256 of each file, and the number of teams.
+`apassy-relay admin backup` copies `relay.db`, every team file, and the vault sync snapshots of each team (`teams/<id>.sync/`, the current and the previous version) while the relay runs. Each file is copied while its connection is locked, so the copy is whole. A snapshot is copied while no push of its team can commit. The copy goes to a new folder `<APASSY_RELAY_BACKUP_DIR>/<UTC time>` (default `/backups`; mode 0700, files 0600), with `MANIFEST.json`: the name, size, and SHA-256 of each file, and the number of teams.
 
 ```sh
 docker compose exec -T relay apassy-relay admin backup
@@ -567,6 +567,8 @@ docker compose exec -T relay apassy-relay admin backup
 - A suspended team is copied too.
 - On the VPS the folder is `/opt/apassy/backups/relay`. `deploy/vps/backup/` has a daily timer (03:30 UTC, 14 days kept, at least the 3 newest), a weekly restore test, and a pull to the owner's Mac (see its README).
 - To restore: stop the relay; put `relay.db` and `teams/` of one backup into an empty data volume (owner 10001, mode 0700, files 0600); start with the same master key. A team deleted after the backup comes back with it.
+- A restored relay can hold an older vault snapshot than the Macs saw. The Macs then refuse it ("The relay has an older copy than this Mac saw") and keep their vaults; the owner turns relay sync off and on again on one Mac, and that Mac pushes again.
+- Snapshots are each vault's SQLCipher file: encrypted with the vault's passphrase, which is not on the relay. They add up to about 128 MiB per team to a backup.
 
 Also back up `keys.json` on each owner's machine (`~/.config/apassy-team/keys.json`, or under `$XDG_CONFIG_HOME`). It is plain text in the alpha, so keep the copy private and apart from the relay backups. Losing it means adding the items again. With a relay backup alone nobody can read a value, and with `keys.json` alone nobody can open anything.
 
@@ -676,7 +678,7 @@ Go back to the Mac:
 
 ## 17. Teams
 
-One relay holds several teams (ADR 0019 of the core). Each team is its own file in `teams/`, with its own key, its own audit, and its own sessions. A token, an invite code, and a session key name their team (`apassy_mbr_t_7k2m9q4x8c_...`), and the relay looks a token up only in that team. People in one team cannot see another team, and the same person in two teams is two members.
+One relay holds several teams (ADR 0019 of the core). Each team is its own file in `teams/`, with its own key, its own audit, and its own sessions. A token, an invite code, and a session key name their team (`apassy_mbr_t_7k2m5q4x3c_...`), and the relay looks a token up only in that team. People in one team cannot see another team, and the same person in two teams is two members.
 
 The operator works on the server, with `apassy-relay admin` in the container. It talks to the running relay through `admin.sock` in the data directory. There is no operator page or endpoint.
 
@@ -695,7 +697,7 @@ apassy-team me          # team Family (t_...): member rafal (id 1, owner)
 
 A code works once. A typo in a name does not use it. The owner then invites members (section 9) and runs `apassy-team host` for the team's items (section 11). A host serves the team of its owner token.
 
-**The teams.** `admin teams` shows the id, name, state, and effective limits of each team. For an active team, it also shows the member, item, and agent counts and the time of the last audit row. It shows no names of people or items, no runs, and no audit.
+**The teams.** `admin teams` shows the id, name, state, and effective limits of each team. For an active team, it also shows the member, item, and agent counts, the time of the last audit row, and the vault sync version and the size of its snapshot (`sync_version`, `sync_size`; 0 without a snapshot). It shows no names of people or items, no runs, and no audit.
 
 **Team limits.** Each team starts with these limits:
 
@@ -707,21 +709,25 @@ A code works once. A typo in a name does not use it. The owner then invites memb
 | `runs_per_hour` | 1000 |
 | `pending_runs` | 50 |
 | `agent_requests` | 56 |
+| `sync_bytes` | 67108864 (64 MiB) |
+| `sync_pushes_per_hour` | 600 |
+| `sync_transfers` | 2 |
 
 Read all effective values:
 
 ```sh
-docker compose exec relay apassy-relay admin limits t_7k2m9q4x8c
+docker compose exec relay apassy-relay admin limits t_7k2m5q4x3c
 ```
 
 Change only the necessary fields:
 
 ```sh
-docker compose exec relay apassy-relay admin limits t_7k2m9q4x8c --members 25 --items 200
-docker compose exec relay apassy-relay admin limits t_7k2m9q4x8c --agents 40 --runs-per-hour 500 --pending-runs 20 --agent-requests 28
+docker compose exec relay apassy-relay admin limits t_7k2m5q4x3c --members 25 --items 200
+docker compose exec relay apassy-relay admin limits t_7k2m5q4x3c --agents 40 --runs-per-hour 500 --pending-runs 20 --agent-requests 28
+docker compose exec relay apassy-relay admin limits t_7k2m5q4x3c --sync-bytes 33554432 --sync-pushes-per-hour 300 --sync-transfers 4
 ```
 
-The command prints all six effective values. If a field has no flag, its value stays the same. Values must be integers from 1 to 1000000. The `agent_requests` range is 1 to 224.
+The command prints all nine effective values. If a field has no flag, its value stays the same. Values must be integers from 1 to 1000000. The `agent_requests` range is 1 to 224. The `sync_bytes` range is 1048576 to 67108864 (the largest vault snapshot, in bytes; 64 MiB is also the most that the app and the head grammar allow), and the `sync_transfers` range is 1 to 8 (snapshot uploads and downloads of the team at once; over it, 503 `busy`). The relay also allows at most 16 snapshot transfers of all teams at once.
 
 Use the command for active or suspended teams. A change adds `limits_changed` with actor `operator` to the team audit and relay audit.
 
@@ -735,15 +741,19 @@ New limits apply immediately. A lower limit does not remove existing data or sto
 
 The relay automatically changes directory version 1001 to 1002 at start. The new nullable `limits TEXT` column holds JSON. A null column or an absent JSON field uses the default. The column change and version change use one transaction. Unknown versions stop the relay.
 
+**Vault sync.** A team can hold one vault snapshot of the Apassy app (docs/SPEC.md section 24): the encrypted SQLCipher file of the vault, with a head signed by the device that pushed it. The relay keeps the current and the previous version in `teams/<id>.sync/` and never opens them. A team made by the app for its vault has one owner and the owner's Macs as devices. The audit of the team records `sync_pushed`, `sync_fetched`, `sync_received`, and `sync_deleted`, with versions, device ids, and sizes only.
+
+The first start of this version moves each team file to schema version 4: it copies the file to `teams/<id>.db.pre-v4` (the way back for an older image), then adds the two sync tables. A team whose copy cannot be made stays at version 3 and does not open; free disk space and start again. Delete `.pre-v4` files when you no longer need the older image.
+
 **Suspend, resume, delete.**
 
 ```sh
-docker compose exec relay apassy-relay admin suspend t_7k2m9q4x8c
-docker compose exec relay apassy-relay admin resume t_7k2m9q4x8c
-docker compose exec relay apassy-relay admin delete t_7k2m9q4x8c   # only a suspended team; no undo
+docker compose exec relay apassy-relay admin suspend t_7k2m5q4x3c
+docker compose exec relay apassy-relay admin resume t_7k2m5q4x3c
+docker compose exec relay apassy-relay admin delete t_7k2m5q4x3c   # only a suspended team; no undo
 ```
 
-A suspended team's tokens fail at the next request; its sessions and waiting runs end. Each action is a row in the audit of the team (actor `operator`) and of the relay. Delete waits for the requests that started before the suspension, then removes the team's key from `relay.db` and its file. Old backups still hold both (section 13).
+A suspended team's tokens fail at the next request; its sessions and waiting runs end. Each action is a row in the audit of the team (actor `operator`) and of the relay. Delete waits for the requests that started before the suspension, then removes the team's key from `relay.db`, its file, and its vault snapshots. Old backups still hold them (section 13).
 
 **A team that does not open.** If a team file is missing or damaged, the relay still starts and serves the other teams. It logs the team, and `admin teams` shows it with `"open": false`. Suspend and delete it, or put the file back, then suspend and resume it.
 
@@ -789,6 +799,8 @@ The binaries are not in git (`deploy/worker/public/dl/` is ignored). Before `wra
 
 The installer refuses a binary whose checksum is not in `SHA256SUMS`. A missing platform is a clear error.
 
-`POST /v1/join`, `POST /v1/teams`, and `POST /v1/devices/link` have a limit per IP address at the Worker: about 10 a minute (Workers Rate Limiting). Device sign-in (`POST /v1/auth/challenge` and `/v1/auth/token`) has a looser one, about 60 a minute, because a waiting CLI asks every 5 seconds and several people can share one address. Over it, the Worker answers 429 `rate_limited` and the request does not reach the relay. The count is kept in each Cloudflare location and is approximate, so a burst can pass a few more. If the limiter fails, requests go on: the relay checks every code itself.
+`POST /v1/join`, `POST /v1/teams`, `POST /v1/devices/link`, and `POST /v1/devices/link/cancel` have a limit per IP address at the Worker: about 10 a minute (Workers Rate Limiting, binding `CREATE_LIMITER`). Device sign-in (`POST /v1/auth/challenge` and `/v1/auth/token`) has a looser one, about 60 a minute (`AUTH_LIMITER`), because a waiting CLI asks every 5 seconds and several people can share one address. Vault snapshot pushes (`PUT /v1/sync/snapshot`) have their own, about 60 a minute (`SYNC_LIMITER`). Over it, the Worker answers 429 `rate_limited` and the request does not reach the relay. The count is kept in each Cloudflare location and is approximate, so a burst can pass a few more. If the limiter fails, or its binding is missing, requests go on: the relay checks every code itself. The three bindings are in `wrangler.jsonc`; a deploy creates them.
+
+The Worker also checks the declared length of every request body before it forwards it, because the relay reads every declared byte of a body even when it answers early, on any path (docs/SPEC.md section 24.10). A snapshot push (exactly `PUT /v1/sync/snapshot`) with `Transfer-Encoding` or with a missing or non-numeric `Content-Length` gets 400 `invalid_request`; one that declares more than 64 MiB plus 64 KiB gets 413 `payload_too_large`. A body under `/p/` (the agent proxy) may declare up to 8 MiB plus 64 KiB; every other body, on any other path or method (`PUT /v1/sync/snapshot/` or `POST /v1/sync/snapshot` included), up to 128 KiB. Above that: 413; a non-numeric length: 400. The relay keeps its own checks. This bounds bytes, not time: a client that sends a body slowly still holds a relay thread until the connection ends, and only pushes are rate-limited.
 
 A workflow in `.github/workflows/health.yml` checks `/healthz` and `/v1/me` (401) every hour. A failed run is the alert: GitHub notifies the owner of the repository.
