@@ -4,6 +4,10 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-10-07
+
+Vault sync through the Apassy relay, a background sync worker, bouncer start modes in Settings, and fixes in the window and the owner command line.
+
 ### Added
 
 - Settings > Agents > Broker and bouncer can start the local model: with Apassy, when a run needs it (it stops after 10, 30, or 60 idle minutes), managed outside Apassy (the default), or off. It shows the state, the model version, and what is missing, with "Start now", "Stop", and "Open log". The setting is `bouncer.json` in the data folder.
@@ -197,7 +201,8 @@ The alpha. It was not published.
 - Secrets for agent processes with owner approval: the socket never returns a secret value ([ADR 0006](docs/adr/0006-process-secrets.md)).
 - Plain-language rules and a local bouncer on Laya ([ADR 0007](docs/adr/0007-rules-and-local-bouncer.md)).
 
-[Unreleased]: https://github.com/wydrox/apassy/compare/0.3.2...HEAD
+[Unreleased]: https://github.com/wydrox/apassy/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/wydrox/apassy/releases/tag/v0.3.4
 [0.3.2]: https://github.com/wydrox/apassy/releases/tag/0.3.2
 [0.3.1]: https://github.com/wydrox/apassy/releases/tag/v0.3.1
 [0.3.0]: https://github.com/wydrox/apassy/releases/tag/v0.3.0
