@@ -20,7 +20,13 @@ pub(crate) mod owner_cli;
 pub(crate) mod owner_socket;
 #[cfg(feature = "vault")]
 pub mod owner_store;
+/// Folder sync in the background (ADR 0014).
+#[cfg(feature = "vault")]
+pub(crate) mod sync_worker;
 mod ui;
+/// The view settings that survive a restart: `ui.json`.
+#[cfg(feature = "vault")]
+pub(crate) mod ui_prefs;
 #[cfg(feature = "vault")]
 pub mod unlock;
 /// Automatic updates of the macOS app (ADR 0015).
@@ -154,6 +160,10 @@ pub struct DesktopApp {
     /// The iPhone listener and the pairing state of Settings > iPhone companion (ADR 0020).
     #[cfg(feature = "vault")]
     pub(crate) companion: companion::CompanionFlows,
+    /// The bouncer model server of Settings > Agents. Only the window starts it, so
+    /// tests start nothing.
+    #[cfg(feature = "vault")]
+    pub(crate) model_server: Option<std::sync::Arc<crate::broker::model_server::ModelServer>>,
     styled: bool,
 }
 
@@ -213,7 +223,10 @@ impl DesktopApp {
             sync: ui::sync::SyncUiState::default(),
             #[cfg(feature = "vault")]
             cli: owner_cli::CliHost::default(),
+            #[cfg(feature = "vault")]
             companion: companion::CompanionFlows::default(),
+            #[cfg(feature = "vault")]
+            model_server: None,
             styled: false,
         }
     }
@@ -224,6 +237,9 @@ impl DesktopApp {
         app.styled = true;
         #[cfg(feature = "vault")]
         {
+            // `bouncer.json`: the broker uses its address, and in "With Apassy" the
+            // model server starts now.
+            app.model_server = Some(crate::broker::model_server::ModelServer::start_default());
             app.start_broker(&crate::agent::client::default_socket_path());
             // The notification center sets the notifier of the approval queue. It
             // wakes its watcher and repaints the window when a run starts to wait.
@@ -231,7 +247,10 @@ impl DesktopApp {
             // The last used vault opens locked, so the window starts on the unlock
             // screen (ADR 0013).
             app.load_vault_list(crate::paths::data_dir(), true);
+            app.ui.load_prefs(crate::paths::data_dir());
             app.open_last_vault(Some(&cc.egui_ctx));
+            // Folder sync runs on its own thread, also while the window is hidden.
+            app.start_sync_worker(&cc.egui_ctx);
             app.start_updates(&cc.egui_ctx);
             app.start_cli(&crate::owner::client::default_socket_path(), &cc.egui_ctx);
         }
@@ -241,7 +260,12 @@ impl DesktopApp {
     /// Start the agent broker on `socket`. It shares the owner vault slot.
     #[cfg(feature = "vault")]
     pub fn start_broker(&mut self, socket: &std::path::Path) {
-        self.broker = match crate::broker::start(self.owner_ui.session.shared_vault(), socket) {
+        let vault = self.owner_ui.session.shared_vault();
+        let started = match &self.model_server {
+            Some(server) => crate::broker::start_with_model_server(vault, socket, server),
+            None => crate::broker::start(vault, socket),
+        };
+        self.broker = match started {
             Ok(handle) => BrokerState::Running(handle),
             Err(err) => BrokerState::Failed(format!(
                 "The agent broker did not start at {}: {err}",
@@ -391,7 +415,15 @@ impl eframe::App for DesktopApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         #[cfg(feature = "vault")]
         {
+            // A Mac that joins through the relay cancels its link or its device.
+            self.relay_quit();
+            // No background sync after this: the lock in `shut_down` syncs last.
+            self.stop_sync_worker();
             self.shut_down();
+            // A model server that Apassy started stops with the app.
+            if let Some(server) = &self.model_server {
+                server.shutdown();
+            }
             self.finish_updates();
         }
     }

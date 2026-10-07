@@ -1,4 +1,4 @@
-//! Settings > Updates, and the banner of a ready update (ADR 0015).
+//! Settings > About > Updates, and the banner of a ready update (ADR 0015).
 
 use eframe::egui;
 
@@ -71,14 +71,16 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 );
             });
         }
-        s.row(|ui| {
-            if kit::small_button(ui, "What's new in Apassy", Style::Link)
-                .on_hover_text(CHANGELOG_URL)
-                .clicked()
-            {
-                action = Some(Action::OpenChangelog);
-            }
-        });
+        // A whole-row link, as "New vault…" in Settings > General: its text lines up
+        // with the other rows.
+        let changelog = s
+            .clickable_row("What's new in Apassy", |ui| {
+                ui.label(kit::text("What's new in Apassy", Font::Body).color(kit::ACCENT_TEXT));
+            })
+            .on_hover_text(CHANGELOG_URL);
+        if changelog.clicked() {
+            action = Some(Action::OpenChangelog);
+        }
     });
     if auto_check != view.auto_check {
         app.updates.set_auto_check(auto_check);
@@ -210,10 +212,10 @@ fn status(view: &UpdateView, ui: &mut egui::Ui, action: &mut Option<Action>) {
 
 const IMAGE_NOTE: &str = "Apassy cannot replace itself in its folder. Open the disk image, quit Apassy, and drag Apassy to Applications.";
 
-/// "Apassy X is ready" on top of each page but Settings, which has the same
+/// "Apassy X is ready" on top of each page but Settings > About, which has the same
 /// buttons.
 pub(super) fn banner(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    if app.view == OwnerView::Settings {
+    if app.view == OwnerView::Settings && app.ui.settings_tab == super::SettingsTab::About {
         return;
     }
     let view = app.updates.view();
@@ -352,7 +354,7 @@ mod tests {
     fn settings_show_the_updates_section() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let mut app = unlocked(&dir);
-        app.view = OwnerView::Settings;
+        crate::desktop::ui::open_settings(&mut app, crate::desktop::ui::SettingsTab::About);
         let text = draw(&mut app, TALL);
         assert!(text.contains("Updates"), "{text}");
         let version = app.updates.build().label();

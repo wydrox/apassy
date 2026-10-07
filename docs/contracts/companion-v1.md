@@ -10,7 +10,7 @@ Status: experimental. This contract supports the iPhone companion in [ADR 0020](
 | Wire types, signatures, pairing, device store | `src/companion/` | `vault` |
 | The companion owner check | `src/broker/approvals/owner_auth.rs` (`OwnerCheck::Companion`) | `vault` |
 | HTTPS listener on the local network | `src/companion/server.rs` | `vault` |
-| Settings > iPhone companion in the Mac app | `src/desktop/ui/` | `desktop` |
+| Settings > Notifications > iPhone companion in the Mac app | `src/desktop/ui/` | `desktop` |
 | Paired devices and listener settings | the vault, schema version 15 | `vault` |
 | Wire client, key store, pinned TLS | `ios/ApassyCompanionKit` (Swift package) | iOS 26, and macOS 15 for `swift test` |
 | iPhone app | `ios/ApassyCompanion` (XcodeGen project) | iOS 26 |
@@ -77,7 +77,7 @@ Which code wins:
 
 ### 5.1 The pairing link
 
-The owner selects "Pair an iPhone" in Settings > iPhone companion. The Mac makes a 32-byte random secret and opens a pairing window for 5 minutes. It shows the link as a QR code only. It never puts the link on the pasteboard: an agent can read the pasteboard (isolation section 4).
+The owner selects "Pair an iPhone" in Settings > Notifications > iPhone companion. The Mac makes a 32-byte random secret and opens a pairing window for 5 minutes. It shows the link as a QR code only. It never puts the link on the pasteboard: an agent can read the pasteboard (isolation section 4).
 
 ```
 apassy://pair?v=1&h=Mac-mini.local,192.168.1.20&p=48620&c=<pin b64u>&s=<secret b64u>&n=Mac%20mini&e=1790000300
@@ -150,7 +150,7 @@ When the phone gets `401` for its pair request while the link is not expired, it
 
 ### 5.4 The owner confirms on the Mac
 
-Settings > iPhone companion shows: `"Test iPhone" wants to pair. Type the 6-digit code that the iPhone shows.` The owner types the code and selects **Pair**. The Mac compares the typed code, in constant time, with the code it computes from the waiting request. A wrong code pairs nothing; three wrong codes close the window. A right code starts the owner check (Touch ID or the passphrase) for `OwnerAction::PairCompanion { device_id, device_name, request_key, approval_key }`. After the check, the vault stores the device and the window closes. **Cancel** closes the window; it needs no check. The Mac has one window at a time. A leaked link alone pairs nothing: the attacker's request has a code that only the attacker's device shows.
+Settings > Notifications > iPhone companion shows: `"Test iPhone" wants to pair. Type the 6-digit code that the iPhone shows.` The owner types the code and selects **Pair**. The Mac compares the typed code, in constant time, with the code it computes from the waiting request. A wrong code pairs nothing; three wrong codes close the window. A right code starts the owner check (Touch ID or the passphrase) for `OwnerAction::PairCompanion { device_id, device_name, request_key, approval_key }`. After the check, the vault stores the device and the window closes. **Cancel** closes the window; it needs no check. The Mac has one window at a time. A leaked link alone pairs nothing: the attacker's request has a code that only the attacker's device shows.
 
 ### 5.5 Pair status
 

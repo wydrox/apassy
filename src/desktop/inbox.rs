@@ -90,6 +90,8 @@ pub struct InboxEvent {
     pub kind: InboxKind,
     /// UTC time, or "now" for a waiting run.
     pub when: String,
+    /// Unix time of the entry. `None` for a run that waits now.
+    pub at: Option<u64>,
     pub agent: String,
     /// The request: `run <command>` or a connector operation.
     pub summary: String,
@@ -136,6 +138,7 @@ fn from_row(row: AgentActivityRow) -> Option<InboxEvent> {
         key: EventKey::Activity(row.id),
         kind,
         when: row.when,
+        at: Some(row.at),
         agent: row.agent,
         summary: row.operation,
         detail: row.reason,
@@ -147,6 +150,7 @@ fn from_run(run: &PendingRun) -> InboxEvent {
         key: EventKey::Run(run.id),
         kind: InboxKind::ApprovalWaiting,
         when: "now".to_owned(),
+        at: None,
         agent: run.agent.clone(),
         summary: format!("run {}", run.command.join(" ")),
         detail: format!("Purpose: {}", run.purpose),

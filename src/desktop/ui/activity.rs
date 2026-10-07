@@ -92,6 +92,7 @@ fn notifications_notice(app: &mut DesktopApp, ui: &mut egui::Ui) {
     );
     if open {
         app.view = OwnerView::Settings;
+        app.ui.settings_tab = super::settings::SettingsTab::Notifications;
     }
 }
 
@@ -142,8 +143,7 @@ fn access_requests(app: &mut DesktopApp, ui: &mut egui::Ui) {
                             }
                         },
                     );
-                    ui.horizontal(|ui| {
-                        ui.add_space(18.0);
+                    kit::indented(ui, kit::DOT_INDENT, |ui| {
                         ui.add(
                             Label::new(
                                 kit::text(
@@ -154,15 +154,12 @@ fn access_requests(app: &mut DesktopApp, ui: &mut egui::Ui) {
                             )
                             .wrap(),
                         );
-                    });
-                    if !request.cwd.is_empty() {
-                        ui.horizontal(|ui| {
-                            ui.add_space(18.0);
+                        if !request.cwd.is_empty() {
                             ui.label(
                                 kit::text(&request.cwd, Font::MonoSmall).color(kit::SECONDARY),
                             );
-                        });
-                    }
+                        }
+                    });
                 });
             }
         },
@@ -502,6 +499,7 @@ fn draw_inbox(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[PendingRun]) {
         return;
     }
     let mut seen = None;
+    let now = kit::now();
     kit::section(
         ui,
         None,
@@ -520,13 +518,15 @@ fn draw_inbox(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[PendingRun]) {
                         |ui| {
                             kit::dot(ui, event_tone(event.kind));
                             ui.label(kit::medium(event.kind.label(), Font::Body).color(kit::LABEL));
-                            ui.label(
-                                kit::text(
-                                    format!("{} · {}", event.when, event.agent),
-                                    Font::Callout,
-                                )
-                                .color(kit::SECONDARY),
+                            let when = event.at.map_or_else(
+                                || event.when.clone(),
+                                |at| kit::relative_time(at, now),
                             );
+                            ui.label(
+                                kit::text(format!("{when} · {}", event.agent), Font::Callout)
+                                    .color(kit::SECONDARY),
+                            )
+                            .on_hover_text(&event.when);
                         },
                         |ui| {
                             if acknowledged {
@@ -536,19 +536,23 @@ fn draw_inbox(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[PendingRun]) {
                             }
                         },
                     );
-                    ui.add(
-                        Label::new(kit::text(&event.summary, Font::MonoSmall).color(kit::LABEL))
+                    kit::indented(ui, kit::DOT_INDENT, |ui| {
+                        ui.add(
+                            Label::new(
+                                kit::text(&event.summary, Font::MonoSmall).color(kit::LABEL),
+                            )
                             .truncate(),
-                    )
-                    .on_hover_text(&event.summary);
-                    kit::note(ui, &event.detail);
-                    if let Some(delivery) = &delivery {
-                        let tone = match delivery {
-                            Delivery::Failed(_) => Tone::Critical,
-                            _ => Tone::Neutral,
-                        };
-                        kit::tone_note(ui, delivery.label(), tone);
-                    }
+                        )
+                        .on_hover_text(&event.summary);
+                        kit::note(ui, &event.detail);
+                        if let Some(delivery) = &delivery {
+                            let tone = match delivery {
+                                Delivery::Failed(_) => Tone::Critical,
+                                _ => Tone::Neutral,
+                            };
+                            kit::tone_note(ui, delivery.label(), tone);
+                        }
+                    });
                 });
             }
         },
@@ -578,6 +582,7 @@ fn draw_requests(app: &mut DesktopApp, ui: &mut egui::Ui) {
         );
         return;
     }
+    let now = kit::now();
     kit::section(ui, None, None, |s| {
         for row in rows {
             s.row(|ui| {
@@ -598,7 +603,22 @@ fn draw_requests(app: &mut DesktopApp, ui: &mut egui::Ui) {
                         kit::tag(ui, label, tone);
                     },
                 );
-                kit::note(ui, format!("{} · {} · {}", row.when, row.agent, row.item));
+                ui.add(
+                    Label::new(
+                        kit::text(
+                            format!(
+                                "{} · {} · {}",
+                                kit::relative_time(row.at, now),
+                                row.agent,
+                                row.item
+                            ),
+                            Font::Footnote,
+                        )
+                        .color(kit::SECONDARY),
+                    )
+                    .wrap(),
+                )
+                .on_hover_text(&row.when);
                 if !row.reason.is_empty() {
                     kit::note(ui, &row.reason);
                 }

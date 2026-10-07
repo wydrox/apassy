@@ -90,6 +90,41 @@ impl Window {
         }
     }
 
+    /// Click the first painted text that is `needle` with the pointer, then draw frames
+    /// until the focus settles.
+    fn click(&mut self, app: &mut DesktopApp, needle: &str) {
+        let at = self
+            .texts
+            .iter()
+            .find(|(text, _)| text == needle)
+            .map(|(_, pos)| *pos + Vec2::new(4.0, 4.0))
+            .unwrap_or_else(|| panic!("\"{needle}\" is not on the screen: {}", self.text));
+        let button = |pressed| Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        self.frame(app, vec![Event::PointerMoved(at)]);
+        self.frame(app, vec![button(true)]);
+        self.frame(app, vec![button(false)]);
+        self.idle(app);
+    }
+
+    /// Scroll the page to its end with the mouse wheel.
+    fn wheel_to_end(&mut self, app: &mut DesktopApp) {
+        let at = Pos2::new(SIZE.x * 0.6, SIZE.y * 0.5);
+        self.frame(app, vec![Event::PointerMoved(at)]);
+        let wheel = Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Page,
+            delta: Vec2::new(0.0, -10.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+        };
+        self.frame(app, vec![wheel]);
+        self.idle(app);
+    }
+
     fn focused(&self) -> Option<egui::Id> {
         self.ctx.memory(|memory| memory.focused())
     }
@@ -111,6 +146,17 @@ impl Window {
             "Tab did not reach \"{name}\". Last focus: {:?}",
             self.focused_name()
         );
+    }
+
+    /// Press Tab until a text field has the focus. Fails after `max` presses.
+    fn tab_to_text_field(&mut self, app: &mut DesktopApp, max: usize) {
+        for _ in 0..max {
+            self.press(app, Key::Tab, Modifiers::NONE);
+            if self.ctx.text_edit_focused() {
+                return;
+            }
+        }
+        panic!("Tab did not reach a text field");
     }
 
     /// The layer of the focused control.
@@ -485,6 +531,54 @@ fn a_delete_alert_starts_on_cancel() {
     assert_eq!(window.focused_name().as_deref(), Some("Delete credential…"));
 }
 
+/// A destructive alert opened with the pointer shows no focus ring. Return or Space
+/// still presses Cancel: the key never reaches Delete, the first control of the alert.
+#[test]
+fn return_on_a_delete_alert_opened_with_the_pointer_cancels() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, id) = open_item(&dir);
+    let mut window = Window::new();
+    window.idle(&mut app);
+    for key in [Key::Enter, Key::Space] {
+        window.wheel_to_end(&mut app);
+        window.click(&mut app, "Delete credential…");
+        assert!(app.pending_delete, "the alert is open");
+        assert!(!kit::keyboard_mode(&window.ctx), "a pointer user");
+        assert_ne!(
+            window.focused_layer().map(|layer| layer.order),
+            Some(egui::Order::Foreground),
+            "no control of the alert has the focus"
+        );
+        window.press(&mut app, key, Modifiers::NONE);
+        assert!(!app.pending_delete, "{key:?} pressed Cancel");
+        assert!(
+            app.owner_ui.session.details(id).is_ok_and(|d| !d.hidden),
+            "{key:?} kept the credential"
+        );
+    }
+}
+
+/// "Discard changes?" opened with the pointer: Return keeps editing and the typed text.
+#[test]
+fn return_on_a_discard_alert_opened_with_the_pointer_keeps_editing() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = open_item(&dir);
+    let mut window = Window::new();
+    window.idle(&mut app);
+    window.click(&mut app, "Edit");
+    assert_eq!(app.ui.sheet, Some(Sheet::EditItem));
+    window.frame(&mut app, vec![Event::Text(" unsaved".to_owned())]);
+    let draft = app.edit_form.clone();
+    window.click(&mut app, "Cancel");
+    assert!(app.ui.discard_item_changes, "the alert is open");
+    assert!(window.text.contains("Discard changes?"));
+    assert!(!kit::keyboard_mode(&window.ctx), "a pointer user");
+    window.press(&mut app, Key::Enter, Modifiers::NONE);
+    assert!(!app.ui.discard_item_changes, "Return pressed Keep editing");
+    assert_eq!(app.ui.sheet, Some(Sheet::EditItem), "the form stays");
+    assert_eq!(app.edit_form, draft, "the typed text stays");
+}
+
 /// The arrow keys change a segmented picker and keep the focus on it.
 #[test]
 fn arrows_change_a_picker_without_moving_the_focus() {
@@ -559,13 +653,13 @@ fn shortcuts_switch_views_go_back_and_lock() {
     assert!(app.owner_ui.session.is_locked(), "⌘L locks");
 }
 
-/// Tab through the long Settings page: the page scrolls, so each focused control is on
-/// screen. Page Down scrolls without a focus.
+/// Tab through Settings > Agents, which is longer than the window: the page scrolls, so
+/// each focused control is on screen. Page Down scrolls Settings > About without a focus.
 #[test]
 fn the_page_scrolls_to_the_focus_and_with_page_keys() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&dir);
-    app.view = OwnerView::Settings;
+    super::open_settings(&mut app, super::SettingsTab::Agents);
     let mut window = Window::new();
     window.idle(&mut app);
     let screen = Rect::from_min_size(Pos2::ZERO, SIZE);
@@ -592,24 +686,31 @@ fn the_page_scrolls_to_the_focus_and_with_page_keys() {
     let mut fresh = Window::new();
     let second = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&second);
-    app.view = OwnerView::Settings;
+    super::open_settings(&mut app, super::SettingsTab::About);
     fresh.idle(&mut app);
-    let top = text_top(&fresh, "Lock now").expect("the top of Settings shows");
-    assert_eq!(text_top(&fresh, "About"), None, "the bottom is out of view");
+    let top = text_top(&fresh, "Updates").expect("the top of Settings shows");
+    assert_eq!(
+        text_top(&fresh, "Contract"),
+        None,
+        "the bottom is out of view"
+    );
     fresh.press(&mut app, Key::PageDown, Modifiers::NONE);
-    let after = text_top(&fresh, "Lock now");
+    let after = text_top(&fresh, "Updates");
     assert!(
         after.is_none_or(|after| after < top - SIZE.y / 2.0),
         "Page Down scrolled: {top} -> {after:?}"
     );
     fresh.press(&mut app, Key::PageUp, Modifiers::NONE);
-    let back = text_top(&fresh, "Lock now").expect("Page Up came back");
+    let back = text_top(&fresh, "Updates").expect("Page Up came back");
     assert!((back - top).abs() < 2.0, "{top} -> {back}");
     fresh.press(&mut app, Key::End, Modifiers::NONE);
-    assert!(text_top(&fresh, "About").is_some(), "End shows the bottom");
-    assert_eq!(text_top(&fresh, "Lock now"), None);
+    assert!(
+        text_top(&fresh, "Contract").is_some(),
+        "End shows the bottom"
+    );
+    assert_eq!(text_top(&fresh, "Updates"), None);
     fresh.press(&mut app, Key::Home, Modifiers::NONE);
-    let home = text_top(&fresh, "Lock now").expect("Home scrolled back up");
+    let home = text_top(&fresh, "Updates").expect("Home scrolled back up");
     assert!((home - top).abs() < 2.0, "{top} -> {home}");
 }
 
@@ -691,6 +792,229 @@ fn the_focus_survives_a_control_that_goes_away() {
         window.focused_name().as_deref(),
         Some("Archive credential…")
     );
+}
+
+#[test]
+fn a_sheet_opened_with_the_pointer_focuses_its_first_text_field() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    app.view = OwnerView::Agents;
+    let mut window = Window::new();
+    window.idle(&mut app);
+    assert!(
+        !kit::keyboard_mode(&window.ctx),
+        "the test starts as a pointer user"
+    );
+    app.ui.sheet = Some(Sheet::RegisterAgent);
+    window.idle(&mut app);
+    assert!(
+        window.ctx.text_edit_focused(),
+        "the Name field of the new sheet takes the focus"
+    );
+    window.frame(&mut app, vec![Event::Text("Pointer agent".to_owned())]);
+    assert_eq!(app.owner_ui.new_agent_name, "Pointer agent");
+
+    // After the pick of a kind, the Name field of the credential form takes the focus.
+    app.ui.sheet = None;
+    window.idle(&mut app);
+    app.view = OwnerView::Vault;
+    app.ui.sheet = Some(Sheet::AddItem { kind_chosen: true });
+    app.ui.focus_form_name = true;
+    window.idle(&mut app);
+    window.frame(&mut app, vec![Event::Text("Pointer key".to_owned())]);
+    assert_eq!(app.add_form.name, "Pointer key");
+}
+
+#[test]
+fn return_moves_through_the_new_vault_fields_and_creates_the_vault() {
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = DesktopApp::new();
+    app.load_vault_list(dir.path().join("data"), true);
+    let mut window = Window::new();
+    window.idle(&mut app);
+    window.tab_to(&mut app, "Create my first vault", 15);
+    window.press(&mut app, Key::Enter, Modifiers::NONE);
+    assert_eq!(app.ui.start, super::start::Step::Create);
+    assert!(
+        window.ctx.text_edit_focused(),
+        "the Name field has the focus"
+    );
+    window.frame(&mut app, vec![Event::Text("Keyboard vault".to_owned())]);
+    window.press(&mut app, Key::Enter, Modifiers::NONE);
+    assert_eq!(
+        window.focused(),
+        Some(super::secret_field_id(super::VAULT_PASSPHRASE_FIELD)),
+        "Return in Name goes on to Passphrase, not to {:?}",
+        window.focused_name()
+    );
+    window.frame(
+        &mut app,
+        vec![Event::Text(super::owner_tests::PASS.to_owned())],
+    );
+    window.press(&mut app, Key::Enter, Modifiers::NONE);
+    assert_eq!(
+        window.focused(),
+        Some(super::secret_field_id(super::VAULT_REPEAT_FIELD)),
+        "Return in Passphrase goes on to Repeat"
+    );
+    window.frame(
+        &mut app,
+        vec![Event::Text(super::owner_tests::PASS.to_owned())],
+    );
+    window.press(&mut app, Key::Enter, Modifiers::NONE);
+    assert!(
+        !app.owner_ui.session.is_locked(),
+        "Return in Repeat creates and opens the vault: {}",
+        app.status_text
+    );
+    assert_eq!(app.current_vault_name().as_deref(), Some("Keyboard vault"));
+}
+
+#[test]
+fn control_command_s_hides_and_shows_the_sidebar() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    app.view = OwnerView::Vault;
+    let mut window = Window::new();
+    window.idle(&mut app);
+    assert!(window.text.contains("Learning"), "{}", window.text);
+    // The open vault has a name for VoiceOver, with where it lives.
+    assert!(
+        window
+            .names
+            .values()
+            .any(|name| name.starts_with("Vault ") && name.ends_with("On this Mac")),
+        "{:?}",
+        window.names.values().collect::<Vec<_>>()
+    );
+    window.press(&mut app, Key::S, Modifiers::COMMAND | Modifiers::CTRL);
+    assert!(app.ui.sidebar_hidden);
+    assert!(!window.text.contains("Learning"), "{}", window.text);
+    // The shortcuts of the views still work without the sidebar.
+    window.press(&mut app, Key::Num2, Modifiers::COMMAND);
+    assert_eq!(app.view, OwnerView::Agents);
+    window.press(&mut app, Key::S, Modifiers::COMMAND | Modifiers::CTRL);
+    assert!(!app.ui.sidebar_hidden);
+    assert!(window.text.contains("Learning"), "{}", window.text);
+}
+
+#[test]
+fn a_full_path_typed_by_hand_keeps_the_focus_until_return() {
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = DesktopApp::new();
+    app.load_vault_list(dir.path().join("data"), true);
+    app.sync.offered = true;
+    super::sync::begin_open(&mut app);
+    app.ui.set_expanded("sync-open-details", true);
+    let mut window = Window::new();
+    window.idle(&mut app);
+    // The path field: the only single-line field on the screen before a pick.
+    let field = window
+        .ctx
+        .memory(|memory| memory.focused())
+        .filter(|_| window.ctx.text_edit_focused());
+    if field.is_none() {
+        window.tab_to_text_field(&mut app, 30);
+    }
+    // A keyboard sends a key and its text for each character.
+    for ch in "/tmp/Team.apassy".chars() {
+        window.frame(
+            &mut app,
+            vec![
+                Event::Key {
+                    key: Key::A,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                },
+                Event::Text(ch.to_string()),
+            ],
+        );
+    }
+    window.idle(&mut app);
+    assert_eq!(
+        app.sync.open_path, "/tmp/Team.apassy",
+        "each character goes into the path field"
+    );
+    assert!(
+        app.owner_ui.passphrase.is_empty(),
+        "no character went into the passphrase field"
+    );
+    // Return picks the file; then the passphrase field takes the focus.
+    window.press(&mut app, Key::Enter, Modifiers::NONE);
+    assert_eq!(
+        app.sync.open_pick.as_deref(),
+        Some(std::path::Path::new("/tmp/Team.apassy"))
+    );
+    assert_eq!(
+        window.focused(),
+        Some(super::secret_field_id(super::VAULT_PASSPHRASE_FIELD))
+    );
+}
+
+#[test]
+fn a_vault_file_picked_with_the_pointer_gives_the_focus_to_the_passphrase() {
+    let dir = TempDir::new().expect("temp dir");
+    let folder = dir.path().join("Mobile Documents").join("Apassy");
+    std::fs::create_dir_all(&folder).expect("synced folder");
+    let file = folder.join("Team.apassy");
+    std::fs::write(&file, b"synthetic synced vault").expect("vault file");
+    let mut app = DesktopApp::new();
+    app.load_vault_list(dir.path().join("data"), true);
+    app.sync.offered = true;
+    app.sync.folders = vec![crate::sync::SyncFolder {
+        label: "iCloud Drive".to_owned(),
+        path: folder,
+    }];
+    super::sync::begin_open(&mut app);
+    let mut window = Window::new();
+    window.idle(&mut app);
+    // A click on the file in the list, as a pointer user picks it.
+    window.click(&mut app, "Team.apassy");
+    assert_eq!(app.sync.open_pick.as_deref(), Some(file.as_path()));
+    assert_eq!(
+        window.focused(),
+        Some(super::secret_field_id(super::VAULT_PASSPHRASE_FIELD)),
+        "the passphrase field takes the focus after the pick, so the owner can type at once"
+    );
+}
+
+#[test]
+fn a_click_on_apassy_relay_gives_the_focus_to_the_link_field() {
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = DesktopApp::new();
+    app.load_vault_list(dir.path().join("data"), true);
+    app.sync.offered = true;
+    super::sync::begin_open(&mut app);
+    let mut window = Window::new();
+    window.idle(&mut app);
+    window.click(&mut app, "Apassy relay");
+    assert!(window.ctx.text_edit_focused(), "a text field has the focus");
+    // What the owner pastes goes into the link field.
+    let link = "https://relay.example.test/link#apassy_lnk_synthetic";
+    window.frame(&mut app, vec![Event::Text(link.to_owned())]);
+    window.idle(&mut app);
+    assert_eq!(app.sync.relay.link_input.as_str(), link);
+}
+
+#[test]
+fn a_click_on_create_my_first_vault_gives_the_focus_to_the_name() {
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = DesktopApp::new();
+    app.load_vault_list(dir.path().join("data"), true);
+    app.sync.offered = true;
+    let mut window = Window::new();
+    window.idle(&mut app);
+    window.click(&mut app, "Create my first vault");
+    assert_eq!(app.ui.start, super::start::Step::Create);
+    assert!(
+        window.ctx.text_edit_focused(),
+        "the name field has the focus"
+    );
+    window.frame(&mut app, vec![Event::Text("Work".to_owned())]);
+    window.idle(&mut app);
+    assert_eq!(app.vault_list.name_input, "Work");
 }
 
 #[test]

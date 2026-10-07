@@ -88,9 +88,13 @@ fn next_steps_distinguish_a_cli_session_from_a_successful_agent_request() {
     let token = login(&mut app, &ctx);
     app.ui.set_expanded("next-step-cli", true);
     let text = next_steps_text(&mut app, &ctx);
-    assert!(text.contains("CLI connected\nChecked"), "{text}");
+    // A status row paints its state first, then its title and the hint of an open
+    // check, so the state names the row that follows it.
+    assert!(text.contains("Checked\nCLI connected"), "{text}");
     assert!(
-        text.contains("First successful request\nTo check"),
+        text.contains(
+            "To check\nFirst successful request\nCheck the result of a test request and its entry in Activity"
+        ),
         "{text}"
     );
     assert!(text.contains("apassy status"), "{text}");
@@ -846,6 +850,9 @@ fn backup_locks_and_restore_opens_the_sheet() {
     );
     assert!(restore.ok, "{restore:?}");
     assert!(matches!(app.ui.sheet, Some(super::Sheet::Restore)));
+    // Settings > Security has Backup, under the sheet.
+    assert_eq!(app.view, crate::desktop::OwnerView::Settings);
+    assert_eq!(app.ui.settings_tab, super::SettingsTab::Security);
     assert_eq!(app.owner_ui.restore_source, backup.display().to_string());
 }
 
@@ -1085,4 +1092,347 @@ fn the_command_line_program_drives_the_app() {
     );
     assert_eq!(program(&mut app, &ctx, &with(&["lock"]), None), 0);
     assert!(app.owner_ui.session.is_locked());
+}
+
+/// Add an API key from the command line. Returns its ID.
+fn add_key(app: &mut DesktopApp, ctx: &egui::Context, token: &str, name: &str) -> u64 {
+    let added = run(
+        app,
+        ctx,
+        token,
+        Command::ItemAdd {
+            item: ItemInput {
+                name: Some(name.to_owned()),
+                kind: Some(CredentialKind::ApiKey),
+                secret: Some(SecretText::new(SECRET.to_owned())),
+                ..ItemInput::default()
+            },
+        },
+    );
+    let Data::Items { items } = added.data else {
+        panic!("no item: {added:?}");
+    };
+    items[0].id
+}
+
+fn bind(item_id: u64, name: &str) -> crate::owner::wire::VariableInput {
+    crate::owner::wire::VariableInput {
+        item_id,
+        name: name.to_owned(),
+    }
+}
+
+/// The variables of the vault: (item ID, variable).
+fn bound_variables(app: &DesktopApp) -> Vec<(u64, String)> {
+    app.owner_ui
+        .session
+        .env_bound_items()
+        .unwrap()
+        .into_iter()
+        .map(|(id, _, name)| (id, name))
+        .collect()
+}
+
+/// ADR 0017, D1: one owner check binds every variable. The dialog lists each name and
+/// the count. The app refuses invalid names and taken names before the check, and the
+/// answer reports them per item.
+#[test]
+fn a_batch_binding_asks_one_owner_check_and_lists_every_name() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, guarded) = unlocked_app_with_item(&dir);
+    let ctx = egui::Context::default();
+    let token = login(&mut app, &ctx);
+
+    // The first item takes a name. A later batch cannot take it.
+    let answer = ask(
+        &mut app,
+        &ctx,
+        Some(&token),
+        Command::ItemSetVariable {
+            item: guarded.to_string(),
+            name: "TAKEN_KEY".to_owned(),
+            field: None,
+            hosts: Vec::new(),
+        },
+    );
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("owner check");
+    assert!(answer.try_recv().expect("answer").ok);
+
+    let stripe = add_key(&mut app, &ctx, &token, "Stripe batch");
+    let github = add_key(&mut app, &ctx, &token, "GitHub batch");
+    let openai = add_key(&mut app, &ctx, &token, "OpenAI batch");
+    let lower = add_key(&mut app, &ctx, &token, "Lower batch");
+    let taken = add_key(&mut app, &ctx, &token, "Taken batch");
+    let answer = ask(
+        &mut app,
+        &ctx,
+        Some(&token),
+        Command::ItemBindVariables {
+            variables: vec![
+                bind(stripe, "STRIPE_SECRET_KEY"),
+                bind(github, "GITHUB_TOKEN"),
+                bind(openai, "OPENAI_API_KEY"),
+                bind(lower, "lower_key"),
+                bind(taken, "TAKEN_KEY"),
+                bind(999_999, "MISSING_KEY"),
+            ],
+        },
+    );
+    assert!(
+        answer.try_recv().is_err(),
+        "the binding waits for the owner"
+    );
+    let dialog = app.owner.check.as_ref().expect("one owner check");
+    let action = dialog.request.action();
+    assert_eq!(
+        action,
+        crate::broker::approvals::OwnerAction::BindVariables {
+            variables: vec![
+                (stripe, "STRIPE_SECRET_KEY".to_owned()),
+                (github, "GITHUB_TOKEN".to_owned()),
+                (openai, "OPENAI_API_KEY".to_owned()),
+            ],
+        }
+    );
+    assert_eq!(action.reason(), "bind 3 environment variables");
+
+    let text = app_frame(&ctx, &mut app);
+    for name in [
+        "Stripe batch",
+        "STRIPE_SECRET_KEY",
+        "GitHub batch",
+        "GITHUB_TOKEN",
+        "OpenAI batch",
+        "OPENAI_API_KEY",
+        "3 variables",
+        CLI_ORIGIN_NOTE,
+    ] {
+        assert!(text.contains(name), "{name}: {text}");
+    }
+    // The vault list behind the dialog shows the item names, so only the refused
+    // variables are checked.
+    for refused in ["lower_key", "MISSING_KEY"] {
+        assert!(!text.contains(refused), "{refused} is not in the dialog");
+    }
+    assert!(!text.contains(SECRET));
+
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("owner check");
+    assert!(app.owner.check.is_none(), "one check for all of them");
+    let response = answer.try_recv().expect("answer");
+    assert!(response.ok, "{response:?}");
+    assert!(!as_json(&response).contains(SECRET));
+    let Data::Bindings { results } = response.data else {
+        panic!("no bindings: {:?}", response.data);
+    };
+    assert_eq!(results.len(), 6);
+    let result = |item_id: u64| {
+        results
+            .iter()
+            .find(|row| row.item_id == item_id)
+            .expect("a row for each variable")
+    };
+    for item_id in [stripe, github, openai] {
+        assert!(result(item_id).bound, "{:?}", result(item_id));
+        assert!(result(item_id).reason.is_empty());
+    }
+    assert!(!result(lower).bound);
+    assert!(result(lower).reason.contains("A-Z"), "{:?}", result(lower));
+    assert!(!result(taken).bound);
+    assert!(
+        result(taken).reason.contains("Guarded key"),
+        "{:?}",
+        result(taken)
+    );
+    assert!(!result(999_999).bound);
+
+    let mut variables = bound_variables(&app);
+    variables.sort();
+    let mut expected = vec![
+        (guarded, "TAKEN_KEY".to_owned()),
+        (stripe, "STRIPE_SECRET_KEY".to_owned()),
+        (github, "GITHUB_TOKEN".to_owned()),
+        (openai, "OPENAI_API_KEY".to_owned()),
+    ];
+    expected.sort();
+    assert_eq!(variables, expected);
+    assert_eq!(app.status_text, "Command line: 3 variables are bound.");
+
+    // When every name is refused, nothing waits for the owner.
+    let refused = run(
+        &mut app,
+        &ctx,
+        &token,
+        Command::ItemBindVariables {
+            variables: vec![bind(lower, "PATH"), bind(taken, "GITHUB_TOKEN")],
+        },
+    );
+    assert!(refused.ok, "{refused:?}");
+    assert!(app.owner.check.is_none());
+    let Data::Bindings { results } = refused.data else {
+        panic!("no bindings");
+    };
+    assert!(results.iter().all(|row| !row.bound));
+    assert!(results[1].reason.contains("GitHub batch"), "{results:?}");
+}
+
+/// A cancel binds nothing, and a long list shows its count.
+#[test]
+fn a_cancelled_batch_binding_binds_nothing() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    let ctx = egui::Context::default();
+    let token = login(&mut app, &ctx);
+    let variables: Vec<_> = (0..40)
+        .map(|index| {
+            let id = add_key(&mut app, &ctx, &token, &format!("Key {index:02}"));
+            bind(id, &format!("KEY_{index:02}"))
+        })
+        .collect();
+    let answer = ask(
+        &mut app,
+        &ctx,
+        Some(&token),
+        Command::ItemBindVariables { variables },
+    );
+    let text = app_frame(&ctx, &mut app);
+    assert!(text.contains("40 variables"), "{text}");
+    assert!(text.contains("Bind 40 credentials"), "{text}");
+    assert!(text.contains("KEY_00"), "{text}");
+    app.close_owner_check(Some(&ctx));
+    assert_eq!(answer.try_recv().expect("answer").code, "cancelled");
+    assert!(bound_variables(&app).is_empty());
+}
+
+/// Run the `apassy` program, and confirm or cancel each owner check that it opens.
+/// Returns the exit code and the number of owner checks.
+fn program_with_checks(
+    app: &mut DesktopApp,
+    ctx: &egui::Context,
+    words: &[String],
+    session: &str,
+    confirm: bool,
+) -> (i32, usize) {
+    let words = words.to_vec();
+    let session = Some(SecretText::new(session.to_owned()));
+    let thread = std::thread::spawn(move || crate::cli::run_with(words, session));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut checks = 0;
+    while !thread.is_finished() {
+        assert!(Instant::now() < deadline, "the program did not end");
+        app.poll_cli(ctx);
+        if app.owner.check.is_some() {
+            checks += 1;
+            if confirm {
+                app.confirm_owner_now(OwnerCheck::passphrase(PASS))
+                    .expect("owner check");
+            } else {
+                app.close_owner_check(Some(ctx));
+            }
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    (thread.join().expect("program thread"), checks)
+}
+
+/// `apassy import --bind`: one owner check for the variables of a .env file. Without
+/// `--bind`, nothing is bound. A cancel binds nothing.
+#[test]
+fn import_bind_binds_the_keys_of_a_env_file_with_one_check() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, guarded) = unlocked_app_with_item(&dir);
+    let ctx = egui::Context::default();
+    let socket = socket_dir(&dir).with_file_name("owner.sock");
+    app.start_cli(&socket, &ctx);
+    let socket = socket.display().to_string();
+    let token = login(&mut app, &ctx);
+    let words = |file: &std::path::Path, bind: bool| -> Vec<String> {
+        let mut words = vec![
+            "--socket".to_owned(),
+            socket.clone(),
+            "import".to_owned(),
+            file.display().to_string(),
+        ];
+        if bind {
+            words.push("--bind".to_owned());
+        }
+        words
+    };
+
+    // Without --bind, an import binds nothing and asks nothing.
+    let plain = dir.path().join("plain.env");
+    std::fs::write(&plain, format!("PLAIN_KEY={SECRET}\n")).unwrap();
+    assert_eq!(
+        program_with_checks(&mut app, &ctx, &words(&plain, false), &token, true),
+        (0, 0)
+    );
+    assert_eq!(app.owner_ui.session.search("PLAIN_KEY").unwrap().len(), 1);
+    assert!(bound_variables(&app).is_empty());
+
+    // A cancel adds the items and binds nothing.
+    let cancelled = dir.path().join("cancelled.env");
+    std::fs::write(&cancelled, format!("CANCELLED_KEY={SECRET}\n")).unwrap();
+    let mut json = words(&cancelled, true);
+    json.insert(2, "--json".to_owned());
+    assert_eq!(
+        program_with_checks(&mut app, &ctx, &json, &token, false),
+        (1, 1)
+    );
+    assert_eq!(
+        app.owner_ui.session.search("CANCELLED_KEY").unwrap().len(),
+        1
+    );
+    assert!(bound_variables(&app).is_empty());
+
+    // A name of another item, a system name, and a lowercase name are refused. The
+    // others bind with one check.
+    let answer = ask(
+        &mut app,
+        &ctx,
+        Some(&token),
+        Command::ItemSetVariable {
+            item: guarded.to_string(),
+            name: "TAKEN_KEY".to_owned(),
+            field: None,
+            hosts: Vec::new(),
+        },
+    );
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("owner check");
+    assert!(answer.try_recv().expect("answer").ok);
+    let env = dir.path().join("bind.env");
+    std::fs::write(
+        &env,
+        format!(
+            "STRIPE_SECRET_KEY={SECRET}\nGITHUB_TOKEN=ghp_cli-canary-abcdef0123456789\nOPENAI_API_KEY={SECRET}\nTAKEN_KEY={SECRET}\nPATH=/tmp/canary\nlower_key={SECRET}\n"
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        program_with_checks(&mut app, &ctx, &words(&env, true), &token, true),
+        (1, 1),
+        "one owner check; the refused names make the exit code 1"
+    );
+    let mut names: Vec<String> = bound_variables(&app)
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "GITHUB_TOKEN",
+            "OPENAI_API_KEY",
+            "STRIPE_SECRET_KEY",
+            "TAKEN_KEY"
+        ]
+    );
+    for name in ["TAKEN_KEY", "PATH", "lower_key"] {
+        assert_eq!(
+            app.owner_ui.session.search(name).unwrap().len(),
+            1,
+            "{name} is added"
+        );
+    }
 }

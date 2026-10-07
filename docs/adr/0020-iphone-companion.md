@@ -29,7 +29,7 @@ The owner asked for a native iOS companion app in SwiftUI with the Liquid Glass 
 | Part | Where | What it does |
 | --- | --- | --- |
 | Companion listener | `src/companion/`, in the Mac app process | HTTPS on the local network, TLS 1.3 with a self-signed certificate from the vault. It runs only while the setting is on and the vault is unlocked. |
-| Settings > iPhone companion | the Mac app | The setting, the pairing QR code, the pairing confirmation with the owner check, the paired devices, "Remove" and "Reset pairing". |
+| Settings > Notifications > iPhone companion | the Mac app | The setting, the pairing QR code, the pairing confirmation with the owner check, the paired devices, "Remove" and "Reset pairing". |
 | Device store | the vault, schema 15 | The certificate and its key, the port, the setting, and each device: name, two public keys, pairing time, last seen. |
 | iPhone app | `ios/ApassyCompanion` | SwiftUI, iOS 26, Liquid Glass. Inbox, Activity, Mac. |
 | Wire kit | `ios/ApassyCompanionKit` | The wire client, the pinned TLS check, the Secure Enclave keys, the signing strings. It builds and tests on macOS with `swift test`. |
@@ -54,7 +54,7 @@ So a phone approval is as strong as Touch ID on the Mac: the owner's biometry, n
 
 ### 5. The network
 
-- The listener is off by default. The owner turns it on in Settings > iPhone companion. Turning it on gives no authority: every endpoint except pairing needs a paired device, and pairing needs the owner check.
+- The listener is off by default. The owner turns it on in Settings > Notifications > iPhone companion. Turning it on gives no authority: every endpoint except pairing needs a paired device, and pairing needs the owner check.
 - It runs only while the vault is unlocked. A lock stops it at once, drops its TLS key from memory, and ends every waiting run, as today.
 - It closes each connection from the Mac itself (a loopback address, or any address of the Mac). An agent on the Mac cannot use it.
 - The phone trusts only the pinned certificate. It does not use the system trust store, so a certificate from a public authority cannot replace it.

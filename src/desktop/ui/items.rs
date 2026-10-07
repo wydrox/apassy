@@ -132,11 +132,29 @@ impl Sort {
 pub(super) fn draw_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let all = app.owner_ui.session.search("").unwrap_or_default();
     let mut add = false;
+    // With no credential, the empty state has the one main action (⌘N still works).
     kit::page_header(ui, "Credentials", None, |ui| {
-        add = kit::button_with(ui, Some(Icon::Plus), "Add", Style::Prominent, Size::Regular)
-            .on_hover_text("New credential  ⌘N")
-            .clicked();
+        if !all.is_empty() {
+            add = kit::button_with(ui, Some(Icon::Plus), "Add", Style::Prominent, Size::Regular)
+                .on_hover_text("New credential  ⌘N")
+                .clicked();
+        }
     });
+    // A vault from another Mac: its agents stay on that Mac, so this one sets them up
+    // here. The panel is part of this page, under its title.
+    if app.ui.setup_vault.is_some() && super::agents::next_steps_panel(app, ui) {
+        app.ui.setup_vault = None;
+    }
+    // The steps of a new vault. With no credential, they replace the empty state:
+    // "Add a credential" is then the one main action.
+    let guided = super::get_started::draw(app, ui);
+    if all.is_empty() && guided {
+        if add {
+            open_add(app);
+        }
+        app.ui.focus_search = false;
+        return;
+    }
     if all.is_empty() {
         add |= kit::empty_state(
             ui,
@@ -292,8 +310,9 @@ fn toolbar(app: &mut DesktopApp, ui: &mut egui::Ui) {
         Layout::left_to_right(Align::Center),
         |ui| {
             let gap = ui.spacing().item_spacing.x;
-            // A menu button is its width plus the button padding and the chevron.
-            let menus = 2.0 * (MENU_WIDTH + ui.spacing().button_padding.x * 2.0 + 20.0 + gap);
+            // A menu button is exactly `MENU_WIDTH` wide, with its padding and chevron.
+            // The search field takes the rest, so the toolbar ends at the page edge.
+            let menus = 2.0 * (MENU_WIDTH + gap);
             let search_width = (width - menus).max(160.0);
             let field = ui
                 .scope(|ui| {
@@ -1185,11 +1204,7 @@ pub(super) fn discard_changes_alert(app: &mut DesktopApp, ctx: &egui::Context) {
             |_| {},
             |ui| {
                 discard = kit::button(ui, "Discard", Style::DestructiveProminent).clicked();
-                let keep = kit::button(ui, "Keep editing", Style::Bordered);
-                if kit::sheet_just_opened(ui.ctx()) && kit::keyboard_mode(ui.ctx()) {
-                    keep.request_focus();
-                }
-                cancel = keep.clicked();
+                cancel = kit::alert_default_button(ui, "Keep editing").clicked();
             },
         );
     });
@@ -1479,7 +1494,9 @@ fn item_form(
                 &format!("{salt}-name"),
                 name_placeholder(kind),
             );
-            if focus_name && kit::keyboard_mode(ui.ctx()) {
+            // Also for a pointer user: after the pick of a kind, the owner types the
+            // name next.
+            if focus_name {
                 field.request_focus();
             }
             field

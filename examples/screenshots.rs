@@ -32,10 +32,13 @@ fn main() {
     match args.as_slice() {
         [cmd, home] if cmd == "seed" => seed(Path::new(home)),
         [cmd] if cmd == "run" => run(),
-        _ => {
-            eprintln!("usage: screenshots seed HOME | screenshots run");
+        [] => {
+            eprintln!("usage: screenshots seed HOME | screenshots run | screenshots COMMAND…");
             std::process::exit(2);
         }
+        // Each other command goes to the owner command line, as in the app binary. The
+        // token sheet of the tour names this program, so `setup` works from it.
+        _ => std::process::exit(apassy::cli::run(args)),
     }
 }
 
@@ -497,6 +500,15 @@ enum Step {
     Click(f32, f32),
     Scroll(f32, f32, f32),
     Shot(&'static str),
+    /// A key press with modifiers: `key cmd+1`, `key escape`, `key shift+tab`.
+    Key(egui::Key, egui::Modifiers),
+    /// Resize the window to this inner size in points.
+    Size(f32, f32),
+    /// Save the window content as `$APASSY_SNAP_DIR/NAME.png` (egui screenshot, no
+    /// Screen Recording permission needed).
+    Snap(&'static str),
+    /// Minimize the window (`true`) or bring it back (`false`).
+    Minimize(bool),
     Quit,
 }
 
@@ -506,6 +518,12 @@ struct Tour {
     events: Vec<egui::Event>,
     next_at: Instant,
     waiting_for: Option<PathBuf>,
+    /// The name of a requested egui screenshot that has not arrived yet.
+    snapping: Option<String>,
+    /// Events for the frame after the next one, for example a key release.
+    next_frame: Vec<egui::Event>,
+    /// Live mode: the last batch ended and `done` is written.
+    live_idle: bool,
 }
 
 fn run() {
@@ -526,6 +544,9 @@ fn run() {
                 events: Vec::new(),
                 next_at: Instant::now() + Duration::from_secs(2),
                 waiting_for: None,
+                snapping: None,
+                next_frame: Vec::new(),
+                live_idle: false,
             }))
         }),
     )
@@ -534,67 +555,190 @@ fn run() {
 
 /// The tour. Positions are in points of the 1180 x 740 window. `APASSY_TOUR` names a
 /// file with other steps after the unlock, one per line: `click X Y`, `scroll X Y DY`,
-/// `wait S`, `shot NAME`. It helps to find the positions of a new layout.
+/// `wait S`, `shot NAME`, `snap NAME`, `size W H`, `type TEXT`, `key cmd+2`. It helps
+/// to find the positions of a new layout. With `APASSY_TOUR_RAW` set, the file steps
+/// run alone, without the unlock: for a scratch HOME with no vault (onboarding).
 fn tour_steps() -> Vec<Step> {
     use Step::*;
-    let mut steps = vec![
-        Type(PASS),
-        Wait(0.5),
-        Click(590.0, 461.0),
-        Wait(3.5),
-        Shot("vault"),
-    ];
+    let mut steps = if std::env::var_os("APASSY_TOUR_RAW").is_some() {
+        vec![Wait(1.0)]
+    } else {
+        vec![
+            Type(PASS),
+            Wait(0.5),
+            Click(590.0, 461.0),
+            Wait(3.5),
+            Shot("vault"),
+        ]
+    };
     match std::env::var("APASSY_TOUR") {
-        Ok(file) => {
-            for line in std::fs::read_to_string(&file).expect("tour file").lines() {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                let num = |i: usize| {
-                    parts
-                        .get(i)
-                        .and_then(|p| p.parse::<f32>().ok())
-                        .unwrap_or(0.0)
-                };
-                match parts.first().copied() {
-                    Some("click") => steps.push(Click(num(1), num(2))),
-                    Some("scroll") => steps.push(Scroll(num(1), num(2), num(3))),
-                    Some("wait") => steps.push(Wait(f64::from(num(1)))),
-                    Some("shot") => {
-                        steps.push(Shot(Box::leak(parts[1].to_owned().into_boxed_str())))
-                    }
-                    _ => {}
-                }
-            }
-        }
+        Ok(file) => steps.extend(parse_steps(
+            &std::fs::read_to_string(&file).expect("tour file"),
+        )),
         Err(_) => steps.extend([
             // A production credential: its declaration and variable.
-            Click(415.0, 675.0),
+            Click(415.0, 708.0),
             Wait(1.5),
             Shot("credential"),
             // Claude Code: process access per credential, then its recent requests.
-            Click(65.0, 92.0),
+            // The views open with their shortcuts, so the tour does not depend on the
+            // layout of the sidebar.
+            Key(egui::Key::Num2, egui::Modifiers::COMMAND),
             Wait(1.0),
             Click(404.0, 135.0),
             Wait(1.5),
+            // Past the token and the setup checks, to what it can see and use.
+            Scroll(700.0, 500.0, -645.0),
+            Wait(1.0),
             Shot("agent"),
             Scroll(700.0, 500.0, -500.0),
             Wait(1.0),
             Shot("requests"),
             // Access requests and blocked runs.
-            Click(65.0, 122.0),
-            Wait(1.5),
+            Key(egui::Key::Num3, egui::Modifiers::COMMAND),
+            Wait(1.0),
+            // A click on an empty part of the sidebar ends the keyboard focus that the
+            // shortcut gave to the first control of the page.
+            Click(110.0, 600.0),
+            Wait(1.0),
             Shot("activity"),
             // The ask rate over two weeks.
-            Click(65.0, 152.0),
-            Wait(2.0),
+            Key(egui::Key::Num4, egui::Modifiers::COMMAND),
+            Wait(1.0),
+            Click(110.0, 600.0),
+            Wait(1.5),
             Shot("learning"),
         ]),
     }
-    steps.push(Quit);
+    // A live tour waits for more steps (`APASSY_TOUR_LIVE`) and ends on `quit`.
+    if std::env::var_os("APASSY_TOUR_LIVE").is_none() {
+        steps.push(Quit);
+    }
     steps
 }
 
+/// Tour steps, one per line.
+fn parse_steps(text: &str) -> Vec<Step> {
+    use Step::*;
+    let mut steps = Vec::new();
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        let num = |i: usize| {
+            parts
+                .get(i)
+                .and_then(|p| p.parse::<f32>().ok())
+                .unwrap_or(0.0)
+        };
+        let name = |i: usize| Box::leak(parts[i].to_owned().into_boxed_str()) as &'static str;
+        match parts.first().copied() {
+            Some("click") => steps.push(Click(num(1), num(2))),
+            Some("scroll") => steps.push(Scroll(num(1), num(2), num(3))),
+            Some("wait") => steps.push(Wait(f64::from(num(1)))),
+            Some("shot") => steps.push(Shot(name(1))),
+            Some("snap") => steps.push(Snap(name(1))),
+            Some("size") => steps.push(Size(num(1), num(2))),
+            Some("type") => steps.push(Type(Box::leak(parts[1..].join(" ").into_boxed_str()))),
+            Some("key") => {
+                let (key, modifiers) = parse_key(parts[1]);
+                steps.push(Key(key, modifiers));
+            }
+            Some("quit") => steps.push(Quit),
+            Some("minimize") => steps.push(Minimize(true)),
+            Some("restore") => steps.push(Minimize(false)),
+            _ => {}
+        }
+    }
+    steps
+}
+
+/// `cmd+shift+h` → the key and its modifiers.
+fn parse_key(spec: &str) -> (egui::Key, egui::Modifiers) {
+    let mut modifiers = egui::Modifiers::NONE;
+    let mut key = None;
+    for part in spec.split('+') {
+        match part.to_ascii_lowercase().as_str() {
+            "cmd" => modifiers |= egui::Modifiers::COMMAND,
+            "shift" => modifiers |= egui::Modifiers::SHIFT,
+            "alt" => modifiers |= egui::Modifiers::ALT,
+            name => {
+                // `ArrowRight` as egui spells it, or `enter`, `n`, `comma`.
+                key = egui::Key::from_name(part)
+                    .or_else(|| egui::Key::from_name(name))
+                    .or_else(|| egui::Key::from_name(&name.to_ascii_uppercase()))
+                    .or_else(|| {
+                        let mut chars = name.chars();
+                        let first = chars.next()?.to_ascii_uppercase();
+                        egui::Key::from_name(&format!("{first}{}", chars.as_str()))
+                    })
+            }
+        }
+    }
+    (
+        key.unwrap_or_else(|| panic!("unknown key {spec}")),
+        modifiers,
+    )
+}
+
+/// Write an sRGBA image as a PNG file: one IDAT, filter 0 on each row.
+fn write_png(path: &Path, image: &egui::ColorImage) {
+    use flate2::Compression;
+    use flate2::write::ZlibEncoder;
+    let [width, height] = image.size;
+    let mut raw = Vec::with_capacity(height * (width * 4 + 1));
+    for row in image.pixels.chunks(width) {
+        raw.push(0);
+        for pixel in row {
+            raw.extend_from_slice(&pixel.to_srgba_unmultiplied());
+        }
+    }
+    let mut zlib = ZlibEncoder::new(Vec::new(), Compression::fast());
+    zlib.write_all(&raw).expect("deflate");
+    let data = zlib.finish().expect("deflate");
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut chunk = |kind: &[u8], body: &[u8]| {
+        out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        let mut crc = flate2::Crc::new();
+        crc.update(kind);
+        crc.update(body);
+        out.extend_from_slice(kind);
+        out.extend_from_slice(body);
+        out.extend_from_slice(&crc.sum().to_be_bytes());
+    };
+    let mut header = Vec::new();
+    header.extend_from_slice(&(width as u32).to_be_bytes());
+    header.extend_from_slice(&(height as u32).to_be_bytes());
+    header.extend_from_slice(&[8, 6, 0, 0, 0]);
+    chunk(b"IHDR", &header);
+    chunk(b"IDAT", &data);
+    chunk(b"IEND", &[]);
+    std::fs::write(path, out).expect("png");
+}
+
 impl Tour {
+    /// Live mode: when the steps run out, write `done` once, then take the steps of
+    /// `next.txt` in `$APASSY_TOUR_LIVE` when it appears. A script drives the window
+    /// one batch at a time and reads the result between batches.
+    fn next_live_batch(&mut self) {
+        let Some(dir) = std::env::var_os("APASSY_TOUR_LIVE").map(PathBuf::from) else {
+            return;
+        };
+        if !self.live_idle {
+            self.live_idle = true;
+            let _ = std::fs::write(dir.join("done"), b"");
+        }
+        let next = dir.join("next.txt");
+        if let Ok(text) = std::fs::read_to_string(&next) {
+            let _ = std::fs::remove_file(&next);
+            let _ = std::fs::remove_file(dir.join("done"));
+            self.steps.extend(parse_steps(&text));
+            self.live_idle = false;
+        }
+    }
+
     fn advance(&mut self, ctx: &egui::Context) {
+        if self.snapping.is_some() {
+            return;
+        }
         if let Some(flag) = &self.waiting_for {
             if !flag.exists() {
                 return;
@@ -607,6 +751,7 @@ impl Tour {
             return;
         }
         let Some(step) = self.steps.pop_front() else {
+            self.next_live_batch();
             return;
         };
         let mut pause = 0.4;
@@ -644,6 +789,34 @@ impl Tour {
                 let _ = std::io::stdout().flush();
                 self.waiting_for = Some(PathBuf::from(format!("{name}.done")));
             }
+            Step::Key(key, modifiers) => {
+                // The press and the release come in two frames, as from a keyboard.
+                let event = |pressed| egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers,
+                };
+                self.events.push(event(true));
+                self.next_frame.push(event(false));
+            }
+            Step::Size(width, height) => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(width, height)));
+                pause = 1.0;
+            }
+            Step::Snap(name) => {
+                self.events.push(egui::Event::PointerGone);
+                self.snapping = Some(name.to_owned());
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+            }
+            Step::Minimize(minimized) => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(minimized));
+                if !minimized {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                pause = 1.0;
+            }
             Step::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
         }
         self.next_at = Instant::now() + Duration::from_secs_f64(pause);
@@ -659,17 +832,37 @@ impl eframe::App for Tour {
         self.app.on_exit(gl);
     }
 
+    /// The app answers the owner command line here, also while the window is hidden.
+    /// The tour advances here too, so a minimized window still takes its steps.
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.app.logic(ctx, frame);
+        self.advance(ctx);
+        ctx.request_repaint_after(Duration::from_millis(50));
+    }
+
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
         self.app.clear_color(visuals)
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        for event in &raw_input.events {
+            if let egui::Event::Screenshot { image, .. } = event
+                && let Some(name) = self.snapping.take()
+            {
+                let dir = std::env::var("APASSY_SNAP_DIR").unwrap_or_else(|_| ".".to_owned());
+                let path = Path::new(&dir).join(format!("{name}.png"));
+                write_png(&path, image);
+                println!("SNAP {}", path.display());
+                let _ = std::io::stdout().flush();
+                self.next_at = Instant::now() + Duration::from_millis(200);
+            }
+        }
         raw_input.events.append(&mut self.events);
+        // Events of this step wait one frame; then they go in.
+        self.events.append(&mut self.next_frame);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.app.ui(ui, frame);
-        self.advance(ui.ctx());
-        ui.ctx().request_repaint_after(Duration::from_millis(50));
     }
 }

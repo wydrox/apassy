@@ -27,7 +27,7 @@ use crate::companion::crypto::{
 };
 use crate::companion::pairing::{PairingView, pair_proof};
 use crate::desktop::companion::{Listener, QUIET_ZONE, QrModules, now};
-use crate::desktop::{BrokerState, DesktopApp, OwnerView};
+use crate::desktop::{BrokerState, DesktopApp};
 use crate::native::base64::{decode_url, encode_url};
 
 const MAC_LINK_HOST: &str = "192.0.2.10";
@@ -90,10 +90,10 @@ fn can_connect(port: u16) -> bool {
     .is_ok()
 }
 
-/// The text of the settings page after three frames, and the output commands of the last
-/// one (a copy to the pasteboard would be one).
+/// The text of Settings > Notifications after three frames, and the output commands of
+/// the last one (a copy to the pasteboard would be one).
 fn settings_frame(ctx: &egui::Context, app: &mut DesktopApp) -> (String, Vec<OutputCommand>) {
-    app.view = OwnerView::Settings;
+    super::open_settings(app, super::SettingsTab::Notifications);
     let mut text = String::new();
     let mut commands = Vec::new();
     for _ in 0..3 {

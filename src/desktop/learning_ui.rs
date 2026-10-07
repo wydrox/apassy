@@ -203,6 +203,10 @@ mod vault_view {
     /// Days in the ask rate table.
     const DAYS_SHOWN: u64 = 14;
     const AUTOMATIC_SHOWN: usize = 25;
+    /// Automatic decisions before "Show all".
+    const AUTOMATIC_FOLDED: usize = 8;
+    /// The disclosure key of the full list of automatic decisions.
+    const AUTOMATIC_ALL: &str = "learning-automatic-all";
     /// The view reads the power source again after this time.
     const POWER_REFRESH: Duration = Duration::from_secs(30);
 
@@ -251,12 +255,27 @@ mod vault_view {
         patterns: Vec<PatternRecord>,
         calibration: Option<CalibrationRecord>,
         agents: BTreeMap<u64, String>,
+        /// Credential names by item id, for the pattern and decision details.
+        item_names: BTreeMap<u64, String>,
         /// The candidate in shadow mode and its numbers (goal item B9).
         candidate: Option<CandidateView>,
         /// The newest promotion or rollback.
         active: Option<ModelActivation>,
         /// Owner decisions and owner denials, for the training gate.
         owner_counts: (u32, u32),
+    }
+
+    impl Loaded {
+        /// No decision, pattern, calibration, or model yet: nothing to show.
+        fn is_empty(&self) -> bool {
+            self.owner_counts == (0, 0)
+                && self.days.iter().all(|day| day.decisions == 0)
+                && self.automatic.is_empty()
+                && self.patterns.is_empty()
+                && self.calibration.is_none()
+                && self.candidate.is_none()
+                && self.active.is_none()
+        }
     }
 
     fn load(app: &DesktopApp, now: u64) -> Option<Result<Loaded, String>> {
@@ -278,6 +297,11 @@ mod vault_view {
                     .list_agents()?
                     .into_iter()
                     .map(|agent| (agent.id, agent.name))
+                    .collect(),
+                item_names: vault
+                    .search("")?
+                    .into_iter()
+                    .map(|item| (item.id, item.title))
                     .collect(),
                 candidate: match vault.shadow_candidate()? {
                     Some(record) => Some(CandidateView::new(
@@ -309,10 +333,26 @@ mod vault_view {
             }
             Some(Ok(loaded)) => loaded,
         };
+        if loaded.is_empty() {
+            // A new vault: one explanation instead of zeros and empty lists. Learning
+            // starts with agent requests, so the action leads to the agents.
+            let agents = kit::empty_state(
+                ui,
+                Icon::Chart,
+                "Nothing to learn from yet",
+                "When agents run commands with your credentials, this page shows how often Apassy asks you, what ran without you, and the patterns that you taught it.",
+                Some("Go to Agents"),
+            );
+            if agents {
+                app.view = crate::desktop::OwnerView::Agents;
+                app.owner_ui.selected_agent = None;
+            }
+            return;
+        }
         draw_summary(ui, &loaded, now);
         draw_ask_rate(app, ui, &loaded.days, now);
-        draw_automatic(app, ui, &loaded);
         draw_patterns(app, ui, &loaded, now);
+        draw_automatic(app, ui, &loaded, now);
         let mut advanced = app.ui.is_expanded(ADVANCED);
         if kit::disclosure(ui, &mut advanced, "Advanced: calibration and models").changed() {
             app.ui.set_expanded(ADVANCED, advanced);
@@ -323,7 +363,7 @@ mod vault_view {
             draw_models(app, ui, &loaded);
         }
         if let Some(record) = &loaded.inspected {
-            draw_inspected(app, ui.ctx(), record);
+            draw_inspected(app, ui.ctx(), record, &loaded.item_names);
         }
     }
 
@@ -812,8 +852,21 @@ mod vault_view {
         }
     }
 
-    fn draw_automatic(app: &mut DesktopApp, ui: &mut egui::Ui, loaded: &Loaded) {
+    /// Rows of a folded list to show: all when expanded, else at most
+    /// `AUTOMATIC_FOLDED`.
+    pub(super) fn rows_shown(total: usize, expanded: bool) -> usize {
+        if expanded {
+            total
+        } else {
+            total.min(AUTOMATIC_FOLDED)
+        }
+    }
+
+    fn draw_automatic(app: &mut DesktopApp, ui: &mut egui::Ui, loaded: &Loaded, now: u64) {
         let mut inspect = None;
+        let total = loaded.automatic.len();
+        let expanded = app.ui.is_expanded(AUTOMATIC_ALL);
+        let mut toggle = false;
         kit::section(
             ui,
             Some("Automatic decisions"),
@@ -825,7 +878,7 @@ mod vault_view {
                     s.row(|ui| kit::note(ui, "No automatic decision yet."));
                     return;
                 }
-                for record in &loaded.automatic {
+                for record in loaded.automatic.iter().take(rows_shown(total, expanded)) {
                     let entry = &record.entry;
                     let by = if entry.decided_by == DecidedBy::Pattern {
                         "Pattern"
@@ -838,41 +891,103 @@ mod vault_view {
                         entry.agent_name,
                         format_utc(entry.at)
                     );
-                    let response = s.clickable_row(&name, |ui| {
-                        egui::Sides::new().shrink_left().truncate().show(
-                            ui,
-                            |ui| {
-                                ui.add(
-                                    Label::new(
-                                        kit::text(short(&entry.command), Font::Mono)
-                                            .color(kit::LABEL),
-                                    )
-                                    .truncate(),
-                                );
-                            },
-                            |ui| {
-                                kit::paint_icon_in(ui, Icon::ChevronRight, 12.0, kit::TERTIARY);
-                                kit::tag(ui, by, Tone::Good);
-                            },
-                        );
-                        kit::note(
-                            ui,
-                            format!("{} · {}", format_utc(entry.at), entry.agent_name),
-                        );
-                    });
+                    let response = s
+                        .clickable_row(&name, |ui| {
+                            egui::Sides::new().shrink_left().truncate().show(
+                                ui,
+                                |ui| {
+                                    ui.add(
+                                        Label::new(
+                                            kit::text(short(&entry.command), Font::Mono)
+                                                .color(kit::LABEL),
+                                        )
+                                        .truncate(),
+                                    );
+                                },
+                                |ui| {
+                                    kit::paint_icon_in(ui, Icon::ChevronRight, 12.0, kit::TERTIARY);
+                                    kit::tag(ui, by, Tone::Good);
+                                },
+                            );
+                            kit::note(
+                                ui,
+                                format!(
+                                    "{} · {}",
+                                    kit::relative_time(entry.at, now),
+                                    entry.agent_name
+                                ),
+                            );
+                        })
+                        .on_hover_text(format_utc(entry.at));
                     if response.clicked() {
                         inspect = Some(record.id);
                     }
                 }
+                if total > AUTOMATIC_FOLDED {
+                    let label = if expanded {
+                        "Show fewer".to_owned()
+                    } else {
+                        format!("Show all {total}")
+                    };
+                    toggle = s
+                        .clickable_row(&label, |ui| {
+                            ui.label(kit::text(&label, Font::Body).color(kit::ACCENT_TEXT));
+                        })
+                        .clicked();
+                }
             },
         );
+        if toggle {
+            app.ui.set_expanded(AUTOMATIC_ALL, !expanded);
+        }
         if inspect.is_some() {
             app.learning.inspected = inspect;
         }
     }
 
+    /// The name of a credential, or "Credential {id}" when the vault has no such item.
+    fn item_name(item_names: &BTreeMap<u64, String>, id: u64) -> String {
+        item_names
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| format!("Credential {id}"))
+    }
+
+    /// The meta line of a pattern: "Claude Code · /work/app · Staging database · 1 run".
+    /// A `cwd_rel` of "." or "" is the project root.
+    pub(super) fn pattern_meta(
+        agent: &str,
+        project_dir: &str,
+        cwd_rel: &str,
+        items: &[u64],
+        item_names: &BTreeMap<u64, String>,
+        uses: u64,
+    ) -> String {
+        let directory = if cwd_rel.is_empty() || cwd_rel == "." {
+            project_dir.to_owned()
+        } else {
+            format!("{project_dir} ({cwd_rel})")
+        };
+        let items = items
+            .iter()
+            .map(|id| item_name(item_names, *id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let runs = if uses == 1 {
+            "1 run".to_owned()
+        } else {
+            format!("{uses} runs")
+        };
+        format!("{agent} · {directory} · {items} · {runs}")
+    }
+
     /// What Apassy knew for one automatic decision, in a sheet.
-    fn draw_inspected(app: &mut DesktopApp, ctx: &egui::Context, record: &DecisionRecord) {
+    fn draw_inspected(
+        app: &mut DesktopApp,
+        ctx: &egui::Context,
+        record: &DecisionRecord,
+        item_names: &BTreeMap<u64, String>,
+    ) {
         let entry = &record.entry;
         let declarations: Vec<String> = entry
             .declarations
@@ -880,14 +995,15 @@ mod vault_view {
             .zip(&entry.items)
             .map(|(declaration, item)| match declaration {
                 Some(d) => format!(
-                    "item {item}: {}, {}, {} risk, {}, {}",
+                    "{}: {}, {}, {} risk, {}, {}",
+                    item_name(item_names, *item),
                     d.project,
                     d.environment.as_str(),
                     d.risk.as_str(),
                     d.scope.as_str(),
                     d.reversibility.as_str()
                 ),
-                None => format!("item {item}: no declaration"),
+                None => format!("{}: no declaration", item_name(item_names, *item)),
             })
             .collect();
         let facts: Vec<String> = entry
@@ -1016,23 +1132,15 @@ mod vault_view {
                             .get(&pattern.key.agent_id)
                             .cloned()
                             .unwrap_or_else(|| format!("Agent {}", pattern.key.agent_id));
-                        let directory = if pattern.key.cwd_rel == "." {
-                            pattern.key.project_dir.clone()
-                        } else {
-                            format!("{} ({})", pattern.key.project_dir, pattern.key.cwd_rel)
-                        };
-                        let items = pattern
-                            .key
-                            .items
-                            .iter()
-                            .map(u64::to_string)
-                            .collect::<Vec<_>>()
-                            .join(", ");
                         kit::note(
                             ui,
-                            format!(
-                                "{agent} · {directory} · items {items} · {} runs",
-                                pattern.uses
+                            pattern_meta(
+                                &agent,
+                                &pattern.key.project_dir,
+                                &pattern.key.cwd_rel,
+                                &pattern.key.items,
+                                &loaded.item_names,
+                                pattern.uses,
                             ),
                         );
                     });
@@ -1270,6 +1378,48 @@ mod tests {
         assert!(active_lines(None)[0].starts_with("Active model: the default model"));
     }
 
+    #[test]
+    fn pattern_meta_names_the_directory_credentials_and_runs() {
+        use std::collections::BTreeMap;
+        let names = BTreeMap::from([
+            (5, "Staging database".to_owned()),
+            (7, "Deploy key".to_owned()),
+        ]);
+        let meta = |cwd_rel: &str, items: &[u64], uses: u64| {
+            vault_view::pattern_meta(
+                "Claude Code",
+                "/Users/you/code/acme-api",
+                cwd_rel,
+                items,
+                &names,
+                uses,
+            )
+        };
+        assert_eq!(
+            meta("", &[5], 0),
+            "Claude Code · /Users/you/code/acme-api · Staging database · 0 runs"
+        );
+        assert_eq!(
+            meta(".", &[5, 7], 1),
+            "Claude Code · /Users/you/code/acme-api · Staging database, Deploy key · 1 run"
+        );
+        assert_eq!(
+            meta("web", &[9], 12),
+            "Claude Code · /Users/you/code/acme-api (web) · Credential 9 · 12 runs"
+        );
+    }
+
+    #[test]
+    fn automatic_decisions_fold_after_eight_rows() {
+        use vault_view::rows_shown;
+        assert_eq!(rows_shown(0, false), 0);
+        assert_eq!(rows_shown(3, false), 3);
+        assert_eq!(rows_shown(8, false), 8);
+        assert_eq!(rows_shown(25, false), 8);
+        assert_eq!(rows_shown(25, true), 25);
+        assert_eq!(rows_shown(3, true), 3);
+    }
+
     fn text_of(shape: &egui::Shape, out: &mut String) {
         match shape {
             egui::Shape::Text(text) => {
@@ -1300,6 +1450,23 @@ mod tests {
             output.drop_without_applying_deltas();
         }
         text
+    }
+
+    /// A new vault shows one empty state, not zeros and empty lists.
+    #[test]
+    fn a_new_vault_shows_one_empty_state() {
+        let dir = tempfile::TempDir::new().expect("dir");
+        let pass = "learning-empty-pass";
+        let mut app = DesktopApp::new();
+        app.owner_ui
+            .session
+            .create_file(&dir.path().join("empty.db"), pass)
+            .expect("create");
+        app.owner_ui.session.unlock(pass).expect("unlock");
+        let text = draw_view(&mut app);
+        assert!(text.contains("Nothing to learn from yet"), "{text}");
+        assert!(!text.contains("Remembered patterns"), "{text}");
+        assert!(!text.contains("Ran without you"), "{text}");
     }
 
     /// Goal item B10: the view shows the ask rate, an automatic decision with its
@@ -1381,11 +1548,17 @@ mod tests {
             "Remembered patterns",
             "git log -n <number>",
             "Runs without a prompt",
+            "Agent 1 · /work/app · Credential 1 · 0 runs",
+            "just now · View agent",
+            "Credential 1: no declaration",
             "Active task_match level: 75% (default).",
             "No candidate model.",
         ] {
             assert!(text.contains(expected), "missing {expected:?} in {text}");
         }
+        // The actionable patterns come before the read-only decision log.
+        let position = |needle: &str| text.find(needle).expect(needle);
+        assert!(position("Agent 1 · /work/app") < position("just now · View agent"));
 
         app.owner_ui.session.lock().expect("lock");
         assert!(draw_view(&mut app).contains("Unlock the vault to see learning."));

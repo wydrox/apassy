@@ -1,6 +1,6 @@
 //! Several vaults, one open at a time (ADR 0013): the vault list in the app, the
 //! switch, the switcher at the top of the sidebar, the vault picker of the start
-//! screens, and Settings > Vaults.
+//! screens, and Settings > General > Vaults.
 //!
 //! A switch locks the open vault first. Each run that waits in it ends with
 //! [`ENDED_BY_SWITCH`]. Then every piece of state of that vault goes: typed secrets,
@@ -462,49 +462,94 @@ enum Pick {
     Leave(Step),
 }
 
-/// The switcher at the top of the sidebar: the name of the open vault. Its menu has
-/// the other vaults, "New vault…", and "Open vault file…".
+/// The open vault at the top of the sidebar: its name, where it lives, and the state of
+/// its sync, with a lock button. Its menu has every vault (the open one checked),
+/// "New vault…", "Open vault file…", and "Lock".
 pub(super) fn sidebar_switcher(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let current = app.vault_list.current.clone();
     let name = app
         .current_vault_name()
         .unwrap_or_else(|| "Vault".to_owned());
+    let (status, tone) = super::sync::sidebar_status(app);
+    let tile = tile_color(&name);
     let mut pick = None;
-    let width = ui.available_width();
-    kit::menu("vault-switcher", kit::medium(name, Font::Body), width)
-        .show_ui(ui, |ui| {
-            let others: Vec<(String, String)> = app
-                .vault_list
-                .registry
-                .entries()
-                .iter()
-                .filter(|entry| Some(&entry.id) != current.as_ref())
-                .map(|entry| (entry.id.clone(), entry.name.clone()))
-                .collect();
-            for (id, name) in &others {
-                if ui.selectable_label(false, name).clicked() {
-                    pick = Some(Pick::Switch(id.clone()));
-                }
-            }
-            if !others.is_empty() {
-                ui.separator();
-            }
-            if ui.selectable_label(false, "New vault…").clicked() {
-                pick = Some(Pick::Leave(Step::Create));
-            }
-            if ui.selectable_label(false, "Open vault file…").clicked() {
-                pick = Some(Pick::Leave(Step::Open));
-            }
+    let mut lock = false;
+    let header = ui
+        .horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            let width = ui.available_width() - 28.0;
+            // The full name and status, also when the sidebar cuts them.
+            let header = kit::vault_header(ui, width, &name, &status, tone, tile).on_hover_text(
+                format!("{name}\n{status}\nSwitch vaults. The open vault locks first."),
+            );
+            lock = kit::title_bar_button(ui, kit::Icon::Lock, "Lock the vault  ⌘L").clicked();
+            header
         })
-        .response
-        .on_hover_text("Switch vaults. The open vault locks first.");
-    ui.add_space(8.0);
+        .inner;
+    // Wider than the header: a vault name and its note fit on one line.
+    let menu_width = header.rect.width().max(240.0);
+    egui::Popup::menu(&header).width(menu_width).show(|ui| {
+        ui.set_min_width(menu_width - 12.0);
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+        for entry in app.vault_list.registry.entries() {
+            let is_current = Some(&entry.id) == current.as_ref();
+            let missing = !is_current && !entry.path.exists();
+            let label = if missing {
+                format!("{} — file missing", entry.name)
+            } else {
+                entry.name.clone()
+            };
+            // The open vault carries the check mark; a click on it changes nothing.
+            if ui.selectable_label(is_current, label).clicked() && !is_current {
+                pick = Some(Pick::Switch(entry.id.clone()));
+            }
+        }
+        ui.separator();
+        if ui.selectable_label(false, "New vault…").clicked() {
+            pick = Some(Pick::Leave(Step::Create));
+        }
+        if ui.selectable_label(false, "Open vault file…").clicked() {
+            pick = Some(Pick::Leave(Step::Open));
+        }
+        ui.separator();
+        if ui
+            .selectable_label(false, format!("Lock “{name}”   ⌘L"))
+            .clicked()
+        {
+            lock = true;
+        }
+    });
+    ui.add_space(10.0);
     let ctx = ui.ctx().clone();
+    if lock {
+        // Waiting runs end and stay in the inbox. Typed passphrases, typed secrets,
+        // and their undo history do not stay after a lock.
+        app.lock_vault(Some(&ctx));
+        return;
+    }
     match pick {
         Some(Pick::Switch(id)) => app.switch_vault(&id, Some(&ctx)),
         Some(Pick::Leave(step)) => app.leave_vault_for(step, Some(&ctx)),
         None => {}
     }
+}
+
+/// A steady color for the tile of a vault, from its name: the list ID differs on each
+/// Mac, the name of a synced vault does not. So a vault looks the same each time and on
+/// each Mac, and two vaults rarely share a color.
+fn tile_color(name: &str) -> egui::Color32 {
+    const COLORS: [egui::Color32; 6] = [
+        egui::Color32::from_rgb(0, 122, 255),
+        egui::Color32::from_rgb(52, 170, 90),
+        egui::Color32::from_rgb(255, 149, 0),
+        egui::Color32::from_rgb(88, 86, 214),
+        egui::Color32::from_rgb(255, 59, 48),
+        egui::Color32::from_rgb(48, 176, 199),
+    ];
+    let sum = name.bytes().fold(0usize, |sum, byte| {
+        sum.wrapping_mul(31).wrapping_add(byte as usize)
+    });
+    COLORS[sum % COLORS.len()]
 }
 
 /// The vault picker of the unlock screen, when the list has another vault.
@@ -632,18 +677,20 @@ pub(super) fn name_field(
     })
 }
 
-/// Settings > Vaults: each vault with its file, "Rename…", and "Remove from list…".
+/// Settings > General > Vaults: each vault with its file, "Rename…", and "Remove from
+/// list…", and "Lock now".
 pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     list_note(app, ui);
     let current = app.vault_list.current.clone();
     let mut open = None;
     let mut sheet = None;
     let mut leave = None;
+    let mut lock = false;
     kit::section(
         ui,
         Some("Vaults"),
         Some(
-            "Each vault is its own encrypted file with its own passphrase, agents, grants, and rules. One vault is open at a time. A switch locks the open vault and ends the runs that wait for you. \"Remove from list\" never deletes a file.",
+            "Each vault is its own encrypted file with its own passphrase, agents, grants, and rules. One vault is open at a time. A switch locks the open vault and ends the runs that wait for you. \"Remove from list\" never deletes a file. A lock ends every run that waits for you. The broker refuses all agent requests while the vault is locked.",
         ),
         |s| {
             for entry in app.vault_list.registry.entries() {
@@ -701,10 +748,17 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             {
                 leave = Some(Step::Open);
             }
+            lock = s
+                .clickable_row("Lock now", |ui| {
+                    ui.label(kit::text("Lock now", Font::Body).color(kit::ACCENT_TEXT));
+                })
+                .clicked();
         },
     );
     let ctx = ui.ctx().clone();
-    if let Some(id) = open {
+    if lock {
+        app.lock_vault(Some(&ctx));
+    } else if let Some(id) = open {
         app.switch_vault(&id, Some(&ctx));
     } else if let Some(step) = leave {
         app.leave_vault_for(step, Some(&ctx));

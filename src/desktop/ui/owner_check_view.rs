@@ -7,12 +7,24 @@ use super::kit::{self, Font, Icon, Size, Style, Tone};
 use super::{OWNER_CHECK_FIELD, PASSPHRASE_CAPACITY, secure_input};
 use crate::broker::approvals::{CheckMethod, OwnerCheck};
 use crate::desktop::DesktopApp;
+use crate::desktop::owner_check::OwnerRequest;
+
+/// The list of variables scrolls when it is taller than this.
+const VARIABLES_HEIGHT: f32 = 200.0;
 
 pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
     let Some(dialog) = app.owner.check.as_ref() else {
         return;
     };
     let action = dialog.request.describe();
+    // The item name and the variable of each binding (ADR 0017, D1).
+    let variables: Vec<(String, String)> = match &dialog.request {
+        OwnerRequest::BindVariables { variables } => variables
+            .iter()
+            .map(|binding| (binding.item_name.clone(), binding.env_name.clone()))
+            .collect(),
+        _ => Vec::new(),
+    };
     let running = dialog.running.as_ref().map(|(method, _)| *method);
     let message = dialog.message.clone();
     let from_cli = dialog.origin.is_some();
@@ -30,6 +42,10 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
         });
         ui.add_space(8.0);
         kit::paragraph(ui, action, Font::Body, kit::LABEL);
+        if !variables.is_empty() {
+            ui.add_space(4.0);
+            variable_list(ui, &variables);
+        }
         if from_cli {
             ui.add_space(4.0);
             kit::tone_note(
@@ -41,7 +57,7 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
         ui.add_space(4.0);
         kit::note(
             ui,
-            "Apassy asks for Touch ID or the passphrase for each reveal, approval, iPhone pairing, access change, rule change, token rotation, and command-line session. A notification or \"Mark as seen\" is never an approval.",
+            "Apassy asks for Touch ID or the passphrase for each reveal, approval, iPhone pairing, new Mac for relay sync, access change, rule change, token rotation, and command-line session. A notification or \"Mark as seen\" is never an approval.",
         );
         ui.add_space(10.0);
         match running {
@@ -117,4 +133,24 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
     } else if passphrase {
         app.start_passphrase_check(ctx);
     }
+}
+
+/// Each credential and its variable, with the count. A long list scrolls.
+fn variable_list(ui: &mut egui::Ui, variables: &[(String, String)]) {
+    let count = match variables.len() {
+        1 => "1 variable".to_owned(),
+        count => format!("{count} variables"),
+    };
+    ui.label(kit::text(count, Font::Headline).color(kit::LABEL));
+    egui::ScrollArea::vertical()
+        .id_salt("owner-check-variables")
+        .max_height(VARIABLES_HEIGHT)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            kit::section(ui, None, None, |s| {
+                for (item, variable) in variables {
+                    s.labeled(item, kit::text(variable, Font::Mono).color(kit::LABEL));
+                }
+            });
+        });
 }

@@ -21,7 +21,7 @@ An approval on the iPhone is as strong as Touch ID on the Mac: your Face ID, now
 ## 2. Turn it on
 
 1. Unlock the vault.
-2. Open Settings > iPhone companion.
+2. Open Settings > Notifications > iPhone companion.
 3. Turn on "Allow the iPhone app on this network".
 
 The status then says "Listening on port 48620". Turning it on gives no access: an iPhone must pair first, and pairing needs your owner check.
@@ -79,7 +79,7 @@ It never gets a secret value, a placeholder, an agent token, a note, or a hidden
 
 | Symptom | What to check |
 | --- | --- |
-| The iPhone says the Mac is not reachable | The Mac and the iPhone are on the same Wi-Fi. The vault is unlocked (a lock stops the listener). Settings > iPhone companion says "Listening on port …". Some guest and hotel networks stop devices from talking to each other. |
+| The iPhone says the Mac is not reachable | The Mac and the iPhone are on the same Wi-Fi. The vault is unlocked (a lock stops the listener). Settings > Notifications > iPhone companion says "Listening on port …". Some guest and hotel networks stop devices from talking to each other. |
 | The iPhone app says to allow local network access | In the iPhone Settings > Privacy & Security > Local Network, turn on Apassy. iOS asks the first time the app connects. If you refused, turn it on there. |
 | The Mac asks "Do you want the application Apassy to accept incoming network connections?" | Select "Allow". macOS asks once, the first time the listener starts. If the firewall is on and you refused, open System Settings > Network > Firewall, and allow incoming connections for Apassy. |
 | "Nothing listens on the network", or "another program already uses port 48620" | Another program uses the port. Close it, then select "Try again". |

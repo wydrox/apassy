@@ -5,7 +5,7 @@ use eframe::egui::{self, Align, Frame, Layout, Margin, Pos2, Rect, ScrollArea, V
 use super::Sheet;
 #[cfg(not(feature = "vault"))]
 use super::close_sheet;
-use super::kit::{self, Icon, Size, Style, Tone};
+use super::kit::{self, Icon, Style, Tone};
 use crate::desktop::{DesktopApp, OwnerView};
 
 const SIDEBAR_WIDTH: f32 = 216.0;
@@ -24,21 +24,45 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     shortcuts(app, &ui.ctx().clone());
     #[cfg(not(feature = "vault"))]
     let pending = ();
-    egui::Panel::left("apassy-sidebar")
-        .resizable(false)
-        .exact_size(SIDEBAR_WIDTH)
-        .show_separator_line(true)
-        .frame(Frame::NONE.fill(kit::SIDEBAR).inner_margin(Margin {
-            left: 10,
-            right: 10,
-            top: 0,
-            bottom: 12,
-        }))
-        .show(ui, |ui| sidebar(app, ui, &pending));
+    if !app.ui.sidebar_hidden {
+        egui::Panel::left("apassy-sidebar")
+            .resizable(false)
+            .exact_size(SIDEBAR_WIDTH)
+            .show_separator_line(true)
+            .frame(Frame::NONE.fill(kit::SIDEBAR).inner_margin(Margin {
+                left: 10,
+                right: 10,
+                top: 0,
+                bottom: 12,
+            }))
+            .show(ui, |ui| sidebar(app, ui, &pending));
+    }
     egui::CentralPanel::default()
         .frame(Frame::NONE.fill(kit::WINDOW))
         .show(ui, |ui| content(app, ui, &pending));
+    sidebar_toggle(app, &ui.ctx().clone());
     sheets(app, &ui.ctx().clone());
+}
+
+/// The sidebar button in the title bar, right of the window buttons, as in a macOS
+/// window. It stays at the same place when the sidebar hides, so the owner finds it
+/// again. ⌃⌘S does the same.
+fn sidebar_toggle(app: &mut DesktopApp, ctx: &egui::Context) {
+    // The window buttons end at 70 points; the title bar is 38 points high.
+    let name = if app.ui.sidebar_hidden {
+        "Show sidebar  ⌃⌘S"
+    } else {
+        "Hide sidebar  ⌃⌘S"
+    };
+    let clicked = egui::Area::new(egui::Id::new("apassy-sidebar-toggle"))
+        .fixed_pos(Pos2::new(80.0, 3.0))
+        .show(ctx, |ui| {
+            kit::title_bar_button(ui, Icon::Sidebar, name).clicked()
+        })
+        .inner;
+    if clicked {
+        app.ui.toggle_sidebar();
+    }
 }
 
 /// Window shortcuts. They act only when no sheet, alert, token, or owner check is open,
@@ -51,6 +75,7 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
 /// - ⌘⇧H: show or hide the secret values of the open credential. ⌘H stays the macOS
 ///   shortcut for "Hide Apassy": the app menu takes it before the window.
 /// - ⌘L: lock the vault, also with a sheet open, but not during an owner check.
+/// - ⌃⌘S: hide or show the sidebar.
 ///
 /// Tab and Shift-Tab move the focus, and the page scrolls to it. Space or Return
 /// presses the focused control. Page Up, Page Down, Home, and End scroll the page.
@@ -68,6 +93,11 @@ fn shortcuts(app: &mut DesktopApp, ctx: &egui::Context) {
         || app.owner.check.is_some()
         || app.learning.inspected.is_some();
     if busy {
+        return;
+    }
+    // Before ⌘ alone: ⌃⌘S must not reach a ⌘S handler.
+    if kit::shortcut(ctx, Modifiers::COMMAND | Modifiers::CTRL, Key::S) {
+        app.ui.toggle_sidebar();
         return;
     }
     let views = [
@@ -170,11 +200,16 @@ fn sidebar(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
     #[cfg(feature = "vault")]
     super::vaults::sidebar_switcher(app, ui);
     ui.spacing_mut().item_spacing.y = 2.0;
-    for (view, icon) in primary_views() {
+    for (index, (view, icon)) in primary_views().iter().enumerate() {
         let selected =
             app.view == *view || (*view == OwnerView::Vault && app.view == OwnerView::Item);
         let badge = badge(app, *view, pending);
-        if kit::sidebar_item(ui, *icon, view.label(), selected, badge).clicked() {
+        // The shortcut shows on hover, as in the menus of a macOS app.
+        let hint = format!("{}  ⌘{}", view.label(), index + 1);
+        if kit::sidebar_item(ui, *icon, view.label(), selected, badge)
+            .on_hover_text(hint)
+            .clicked()
+        {
             navigate(app, *view);
         }
     }
@@ -182,36 +217,65 @@ fn sidebar(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
 }
 
 #[cfg(feature = "vault")]
-fn badge(app: &DesktopApp, view: OwnerView, pending: &Pending) -> Option<(usize, Tone)> {
+fn badge(app: &DesktopApp, view: OwnerView, pending: &Pending) -> Option<kit::Badge> {
+    let session = &app.owner_ui.session;
     match view {
         OwnerView::Vault => {
             // The count leaves out archived credentials, as the list does.
-            let session = &app.owner_ui.session;
             let archived = session.archived().map_or(0, |archived| archived.len());
-            session
-                .search("")
-                .ok()
-                .map(|items| (items.len().saturating_sub(archived), Tone::Neutral))
+            session.search("").ok().map(|items| kit::Badge {
+                count: items.len().saturating_sub(archived),
+                tone: Tone::Neutral,
+                what: "",
+            })
+        }
+        OwnerView::Agents => {
+            let expired = session
+                .agents()
+                .map_or(0, |agents| expired_tokens(&agents, kit::now()));
+            Some(kit::Badge {
+                count: expired,
+                tone: Tone::Warning,
+                what: if expired == 1 {
+                    "token expired"
+                } else {
+                    "tokens expired"
+                },
+            })
         }
         OwnerView::Activity => {
             // Runs that wait, and access requests of agents (ADR 0012).
-            let requests = app
-                .owner_ui
-                .session
+            let requests = session
                 .access_requests(true)
                 .map_or(0, |requests| requests.len());
-            Some((pending.len() + requests, Tone::Warning))
+            Some(kit::Badge {
+                count: pending.len() + requests,
+                tone: Tone::Warning,
+                what: "waiting",
+            })
         }
         _ => None,
     }
 }
 
+/// Active agents whose token expired. An expired token stops the agent until the owner
+/// rotates it; a revoked agent needs nothing.
+#[cfg(feature = "vault")]
+pub(super) fn expired_tokens(agents: &[crate::vault::AgentSummary], now: u64) -> usize {
+    agents
+        .iter()
+        .filter(|agent| !agent.revoked && agent.token_expired_at(now))
+        .count()
+}
+
 #[cfg(not(feature = "vault"))]
-fn badge(app: &DesktopApp, view: OwnerView, _pending: &Pending) -> Option<(usize, Tone)> {
+fn badge(app: &DesktopApp, view: OwnerView, _pending: &Pending) -> Option<kit::Badge> {
     match view {
-        OwnerView::Vault if !app.model.is_locked() => {
-            Some((app.model.list_items("").len(), Tone::Neutral))
-        }
+        OwnerView::Vault if !app.model.is_locked() => Some(kit::Badge {
+            count: app.model.list_items("").len(),
+            tone: Tone::Neutral,
+            what: "",
+        }),
         OwnerView::Activity => {
             let waiting = app
                 .model
@@ -219,41 +283,24 @@ fn badge(app: &DesktopApp, view: OwnerView, _pending: &Pending) -> Option<(usize
                 .iter()
                 .filter(|request| request.status == crate::desktop::RequestStatus::Pending)
                 .count();
-            Some((waiting, Tone::Warning))
+            Some(kit::Badge {
+                count: waiting,
+                tone: Tone::Warning,
+                what: "waiting",
+            })
         }
         _ => None,
     }
 }
 
-/// Settings, and the lock control with the vault file name.
+/// Settings. The lock is at the top, with the open vault it locks.
 #[cfg(feature = "vault")]
 fn sidebar_footer(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    let name = app
-        .owner_ui
-        .session
-        .location()
-        .and_then(|path| path.file_name())
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    ui.horizontal(|ui| {
-        let lock = kit::button_with(ui, Some(Icon::Lock), "Lock", Style::Link, Size::Small)
-            .on_hover_text("Lock the vault. Runs that wait for you end.");
-        if lock.clicked() {
-            // Waiting runs end and stay in the inbox. Typed passphrases, typed secrets,
-            // and their undo history do not stay after a lock.
-            let ctx = ui.ctx().clone();
-            app.lock_vault(Some(&ctx));
-        }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.add(
-                egui::Label::new(kit::text(name, kit::Font::Footnote).color(kit::SECONDARY))
-                    .truncate(),
-            );
-        });
-    });
-    ui.add_space(6.0);
     let selected = app.view == OwnerView::Settings;
-    if kit::sidebar_item(ui, Icon::Gear, OwnerView::Settings.label(), selected, None).clicked() {
+    if kit::sidebar_item(ui, Icon::Gear, OwnerView::Settings.label(), selected, None)
+        .on_hover_text("Settings  ⌘,")
+        .clicked()
+    {
         navigate(app, OwnerView::Settings);
     }
 }
@@ -270,7 +317,7 @@ fn sidebar_footer(app: &mut DesktopApp, ui: &mut egui::Ui) {
     } else {
         ("Lock vault", Icon::Lock)
     };
-    if kit::button_with(ui, Some(icon), label, Style::Bordered, Size::Small).clicked() {
+    if kit::button_with(ui, Some(icon), label, Style::Bordered, kit::Size::Small).clicked() {
         if locked {
             let result = app.model.unlock();
             let _ = app.apply(
@@ -320,10 +367,6 @@ fn content(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
                 ui.scope(|ui| super::updates::banner(app, ui));
                 #[cfg(feature = "vault")]
                 ui.scope(|ui| super::sync::banner(app, ui));
-                #[cfg(feature = "vault")]
-                if app.ui.setup_vault.is_some() && super::agents::next_steps_panel(app, ui) {
-                    app.ui.setup_vault = None;
-                }
                 page(app, ui, pending);
             });
             kit::follow_focus(ui);
@@ -448,6 +491,7 @@ fn sheets(app: &mut DesktopApp, ctx: &egui::Context) {
         Sheet::Vault(sheet) => super::vaults::sheet(app, ctx, &sheet),
         #[cfg(feature = "vault")]
         Sheet::Import => super::import::sheet(app, ctx),
+        #[cfg(feature = "vault")]
         Sheet::ResetCompanion => super::companion::reset_sheet(app, ctx),
         #[cfg(not(feature = "vault"))]
         Sheet::AddItem { kind_chosen } => super::demo::add_sheet(app, ctx, kind_chosen),
@@ -469,5 +513,29 @@ fn sheets(app: &mut DesktopApp, ctx: &egui::Context) {
         super::items::request_close_form(app, ctx);
         #[cfg(not(feature = "vault"))]
         close_sheet(app, ctx);
+    }
+}
+
+#[cfg(all(test, feature = "vault"))]
+mod tests {
+    #[test]
+    fn the_agents_badge_counts_active_agents_with_an_expired_token() {
+        use crate::vault::AgentSummary;
+        let agent = |id, revoked, expires| AgentSummary {
+            id,
+            name: format!("Agent {id}"),
+            created_at: 0,
+            revoked,
+            token_issued_at: 0,
+            token_expires_at: expires,
+        };
+        let agents = [
+            agent(1, false, 100),
+            agent(2, false, 500),
+            agent(3, true, 100),
+        ];
+        assert_eq!(super::expired_tokens(&agents, 99), 0);
+        assert_eq!(super::expired_tokens(&agents, 100), 1);
+        assert_eq!(super::expired_tokens(&agents, 600), 2);
     }
 }

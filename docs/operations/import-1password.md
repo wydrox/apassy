@@ -17,7 +17,7 @@ The export file is not encrypted. Anyone who can read it has your secrets. Secti
 ## 2. Import
 
 1. Unlock the vault.
-2. Open Settings > Import > "Import from 1Password…".
+2. Open Settings > General > Import > "Import from 1Password…".
 3. Type the path of the export file, or drop the file on the window. `~/` is your home folder. Click "Read".
 4. Apassy shows each item: the title, the 1Password vault, the 1Password category, the Apassy kind, and warnings. Nothing is in the vault yet.
 5. Check the selection. Click "Import N credentials".

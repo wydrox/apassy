@@ -1,5 +1,6 @@
 //! The commands that talk to the app.
 
+use std::fmt::Write as _;
 use std::io::Write;
 
 use super::args::{Args, usage};
@@ -10,7 +11,7 @@ use super::{Cli, Failure, Outcome, expect_owner_check, print_json};
 use crate::contracts::CredentialKind;
 use crate::owner::wire::{
     Command, Data, DeclarationInput, DetailInput, GrantMode, ItemInput, ItemRow, ItemView,
-    Response, RuleInput, SESSION_ENV, SecretText, StatusView, VaultState,
+    Response, RuleInput, SESSION_ENV, SecretText, StatusView, VariableInput, VaultState,
 };
 
 pub const SESSION_HELP: &str = "\
@@ -61,7 +62,7 @@ SECRET: the token, password, private key, or custom value. add asks on the termi
 
 pub const IMPORT_HELP: &str = "\
 apassy import FILE [--format env|1password|bitwarden|csv] [--kind KIND]
-              [--project P] [--service S] [--dry-run] [--allow-duplicates]
+              [--project P] [--service S] [--dry-run] [--allow-duplicates] [--bind]
 
 Adds each entry as a credential. The command never prints a value.
   .env        KEY=value lines. Each key is one credential named KEY, an API key by
@@ -71,6 +72,11 @@ Adds each entry as a credential. The command never prints a value.
 A row with a username and a password is a login, a password alone is an API key, and a
 note alone is a custom credential. A one-time code secret is a hidden detail.
 A credential with the same name is left out unless --allow-duplicates.
+--bind binds each added credential that has a variable name to that variable, with one
+owner check in the window for all of them. A .env key is the variable name. A 1Password
+or Bitwarden row has one only when its title is a variable name, such as STRIPE_API_KEY.
+The window lists each credential and its variable. Programs get the real values. A name
+that is not valid, or that another credential uses, is refused and reported.
 Delete the export file after the import: it holds every password in plain text.
 ";
 
@@ -752,6 +758,7 @@ pub fn import(cli: &Cli, mut args: Args) -> Outcome {
     };
     let dry_run = args.flag(&["--dry-run", "-n"]);
     let duplicates = args.flag(&["--allow-duplicates"]);
+    let bind = args.flag(&["--bind"]);
     args.finish()?;
     let mut text = zeroize::Zeroizing::new(
         std::fs::read_to_string(&path)
@@ -784,110 +791,302 @@ pub fn import(cli: &Cli, mut args: Args) -> Outcome {
             _ => Vec::new(),
         }
     };
-    let mut report = Vec::new();
-    let mut added = 0usize;
-    let mut failed = 0usize;
-    let mut left_out = 0usize;
+    let mut rows = Vec::new();
+    let mut counts = ImportCounts::default();
+    // The added items with a variable: the report row, the item ID, the variable.
+    let mut to_bind: Vec<(usize, u64, String)> = Vec::new();
     for entry in entries {
         let name = entry.item.name.clone().unwrap_or_default();
         let kind = entry.item.kind.map_or("?", kind_label);
+        let variable = entry.variable.filter(|_| bind);
         if existing.contains(&name.to_lowercase()) {
-            left_out += 1;
-            report.push((
+            counts.left_out += 1;
+            rows.push(ImportRow::new(
                 entry.line,
                 name,
                 kind,
                 "left out: the name exists".to_owned(),
+                None,
             ));
             continue;
         }
         if dry_run {
-            report.push((entry.line, name, kind, "would add".to_owned()));
+            let result = match &variable {
+                Some(variable) => format!("would add and bind {variable}"),
+                None => "would add".to_owned(),
+            };
+            rows.push(ImportRow::new(entry.line, name, kind, result, variable));
             continue;
         }
         match cli.send(Command::ItemAdd { item: entry.item })? {
             response if response.ok => {
-                added += 1;
-                report.push((entry.line, name, kind, "added".to_owned()));
+                counts.added += 1;
+                if let (Some(variable), Data::Items { items }) = (&variable, &response.data)
+                    && let Some(row) = items.first()
+                {
+                    to_bind.push((rows.len(), row.id, variable.clone()));
+                }
+                rows.push(ImportRow::new(
+                    entry.line,
+                    name,
+                    kind,
+                    "added".to_owned(),
+                    variable,
+                ));
             }
             response => {
-                failed += 1;
-                report.push((
+                counts.failed += 1;
+                rows.push(ImportRow::new(
                     entry.line,
                     name,
                     kind,
                     format!("failed: {}", response.message),
+                    None,
                 ));
             }
         }
     }
-    if cli.json {
-        let rows: Vec<serde_json::Value> = report
+
+    // One owner check for every variable (ADR 0017, D1).
+    let mut bind_error = None;
+    if !to_bind.is_empty() {
+        expect_owner_check();
+        let variables = to_bind
             .iter()
-            .map(|(line, name, kind, result)| {
-                serde_json::json!({ "line": line, "name": name, "kind": kind, "result": result })
+            .map(|(_, item_id, name)| VariableInput {
+                item_id: *item_id,
+                name: name.clone(),
             })
-            .chain(skipped.iter().map(|skip| {
-                serde_json::json!({ "line": skip.line, "result": format!("left out: {}", skip.reason) })
-            }))
             .collect();
-        print_json(&serde_json::json!({
-            "ok": failed == 0,
-            "format": format.label(),
-            "added": added,
-            "failed": failed,
-            "left_out": left_out + skipped.len(),
-            "dry_run": dry_run,
-            "entries": rows,
-        }));
-    } else {
-        let mut table = Table::new(&["LINE", "NAME", "KIND", "RESULT"]);
-        for (line, name, kind, result) in &report {
-            table.row(vec![
-                line.to_string(),
-                name.clone(),
-                (*kind).to_owned(),
-                result.clone(),
-            ]);
-        }
-        for skip in &skipped {
-            table.row(vec![
-                skip.line.to_string(),
-                String::new(),
-                String::new(),
-                format!("left out: {}", skip.reason),
-            ]);
-        }
-        if !table.is_empty() {
-            print!("{}", table.render());
-        }
-        if dry_run {
-            println!(
-                "{}: {} to add, {} left out. Nothing was added (--dry-run).",
-                format.label(),
-                report.iter().filter(|row| row.3 == "would add").count(),
-                left_out + skipped.len()
-            );
-        } else {
-            println!(
-                "{}: {added} added, {failed} failed, {} left out.",
-                format.label(),
-                left_out + skipped.len()
-            );
-            if added > 0 {
-                println!(
-                    "Bind variables for agents with apassy item env ITEM NAME. Delete {path} if it was an export: it holds the values in plain text."
-                );
+        let response = cli.send(Command::ItemBindVariables { variables })?;
+        let results = match response.data {
+            Data::Bindings { results } if response.ok => results,
+            _ => Vec::new(),
+        };
+        for (row, item_id, variable) in &to_bind {
+            let row = &mut rows[*row];
+            match results.iter().find(|result| result.item_id == *item_id) {
+                Some(result) if result.bound => {
+                    counts.bound += 1;
+                    row.result = format!("added, bound to {variable}");
+                }
+                result => {
+                    counts.not_bound += 1;
+                    row.result = format!("added, {variable} not bound");
+                    row.reason =
+                        Some(result.map_or_else(
+                            || response.message.clone(),
+                            |result| result.reason.clone(),
+                        ));
+                }
             }
         }
+        if !response.ok {
+            bind_error = Some((response.code, response.message));
+        }
     }
-    if failed > 0 {
-        return Err(Failure::App {
-            code: "partial".to_owned(),
-            message: format!("{failed} entries were not added."),
-        });
+    let failure = import_failure(&counts, bind_error);
+    if cli.json {
+        print_json(&import_json(
+            format,
+            &rows,
+            &skipped,
+            &counts,
+            bind,
+            dry_run,
+            failure.as_ref(),
+        ));
+        // The answer holds the failure, so the failure is not printed again.
+        return failure.map_or(Ok(()), |_| Err(Failure::Printed));
     }
-    Ok(())
+    print!("{}", import_text(&rows, &skipped));
+    let left_out = counts.left_out + skipped.len();
+    if dry_run {
+        println!(
+            "{}: {} to add, {left_out} left out. Nothing was added (--dry-run).",
+            format.label(),
+            rows.iter()
+                .filter(|row| row.result.starts_with("would add"))
+                .count(),
+        );
+    } else {
+        let ImportCounts {
+            added,
+            failed,
+            bound,
+            not_bound,
+            ..
+        } = counts;
+        println!(
+            "{}: {added} added, {failed} failed, {left_out} left out.",
+            format.label(),
+        );
+        if bind && added > 0 {
+            println!("Variables: {bound} bound, {not_bound} not bound.");
+        }
+        if added > bound {
+            println!(
+                "Bind variables for agents with apassy item env ITEM NAME. Delete {path} if it was an export: it holds the values in plain text."
+            );
+        } else if added > 0 {
+            println!("Delete {path} if it was an export: it holds the values in plain text.");
+        }
+    }
+    failure.map_or(Ok(()), |(code, message)| {
+        Err(Failure::App { code, message })
+    })
+}
+
+/// One row of the import report. The reason says why a variable is not bound.
+struct ImportRow {
+    line: usize,
+    name: String,
+    kind: &'static str,
+    result: String,
+    variable: Option<String>,
+    reason: Option<String>,
+}
+
+impl ImportRow {
+    fn new(
+        line: usize,
+        name: String,
+        kind: &'static str,
+        result: String,
+        variable: Option<String>,
+    ) -> Self {
+        Self {
+            line,
+            name,
+            kind,
+            result,
+            variable,
+            reason: None,
+        }
+    }
+}
+
+/// The counts of an import. Left out counts the names that exist.
+#[derive(Default)]
+struct ImportCounts {
+    added: usize,
+    failed: usize,
+    left_out: usize,
+    bound: usize,
+    not_bound: usize,
+}
+
+/// The code and message of an import that did not do everything, if any.
+fn import_failure(
+    counts: &ImportCounts,
+    bind_error: Option<(String, String)>,
+) -> Option<(String, String)> {
+    if counts.failed > 0 {
+        return Some((
+            "partial".to_owned(),
+            format!("{} entries were not added.", counts.failed),
+        ));
+    }
+    if bind_error.is_some() {
+        return bind_error;
+    }
+    (counts.not_bound > 0).then(|| {
+        (
+            "partial".to_owned(),
+            format!("{} variables were not bound.", counts.not_bound),
+        )
+    })
+}
+
+/// The one JSON answer of an import. A failure adds its code and message, so `--json`
+/// prints one document.
+fn import_json(
+    format: Format,
+    rows: &[ImportRow],
+    skipped: &[import::Skipped],
+    counts: &ImportCounts,
+    bind: bool,
+    dry_run: bool,
+    failure: Option<&(String, String)>,
+) -> serde_json::Value {
+    let entries: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|row| {
+            let mut entry = serde_json::json!({
+                "line": row.line,
+                "name": row.name,
+                "kind": row.kind,
+                "result": row.result,
+            });
+            if let Some(variable) = &row.variable {
+                entry["variable"] = variable.clone().into();
+            }
+            if let Some(reason) = &row.reason {
+                entry["reason"] = reason.clone().into();
+            }
+            entry
+        })
+        .chain(skipped.iter().map(|skip| {
+            serde_json::json!({ "line": skip.line, "result": format!("left out: {}", skip.reason) })
+        }))
+        .collect();
+    let mut summary = serde_json::json!({
+        "ok": failure.is_none(),
+        "format": format.label(),
+        "added": counts.added,
+        "failed": counts.failed,
+        "left_out": counts.left_out + skipped.len(),
+        "dry_run": dry_run,
+        "entries": entries,
+    });
+    if bind {
+        summary["bound"] = counts.bound.into();
+        summary["not_bound"] = counts.not_bound.into();
+    }
+    if let Some((code, message)) = failure {
+        summary["code"] = code.clone().into();
+        summary["message"] = message.clone().into();
+    }
+    summary
+}
+
+/// The text answer of an import: the table, then why each variable is not bound. A
+/// table cell is cut at its width, so the reasons are full lines under it.
+fn import_text(rows: &[ImportRow], skipped: &[import::Skipped]) -> String {
+    let mut table = Table::new(&["LINE", "NAME", "KIND", "RESULT"]);
+    for row in rows {
+        table.row(vec![
+            row.line.to_string(),
+            row.name.clone(),
+            row.kind.to_owned(),
+            row.result.clone(),
+        ]);
+    }
+    for skip in skipped {
+        table.row(vec![
+            skip.line.to_string(),
+            String::new(),
+            String::new(),
+            format!("left out: {}", skip.reason),
+        ]);
+    }
+    let mut text = if table.is_empty() {
+        String::new()
+    } else {
+        table.render()
+    };
+    for row in rows {
+        if let (Some(variable), Some(reason)) = (&row.variable, &row.reason) {
+            let _ = writeln!(
+                text,
+                "{} is not bound (line {}): {}",
+                clean(variable),
+                row.line,
+                clean(reason)
+            );
+        }
+    }
+    text
 }
 
 // ---- Agents ----
@@ -1571,5 +1770,107 @@ mod tests {
         assert_eq!(parse_kind("SSH").unwrap(), CredentialKind::SshKey);
         assert_eq!(parse_kind("db").unwrap(), CredentialKind::Database);
         assert!(parse_kind("card").is_err());
+    }
+
+    fn not_bound(line: usize, variable: &str, reason: &str) -> ImportRow {
+        ImportRow {
+            reason: Some(reason.to_owned()),
+            ..ImportRow::new(
+                line,
+                format!("{variable} item"),
+                "api-key",
+                format!("added, {variable} not bound"),
+                Some(variable.to_owned()),
+            )
+        }
+    }
+
+    /// A cancel or a refused name ends `import --json` with one document, not two.
+    #[test]
+    fn import_json_holds_the_failure_in_one_document() {
+        let rows = [
+            not_bound(1, "CANCELLED_KEY", "The owner cancelled."),
+            ImportRow::new(
+                2,
+                "BOUND".to_owned(),
+                "api-key",
+                "added, bound to BOUND".to_owned(),
+                Some("BOUND".to_owned()),
+            ),
+        ];
+        let counts = ImportCounts {
+            added: 2,
+            bound: 1,
+            not_bound: 1,
+            ..ImportCounts::default()
+        };
+        let failure = import_failure(
+            &counts,
+            Some(("cancelled".to_owned(), "The owner cancelled.".to_owned())),
+        );
+        let summary = import_json(
+            Format::Env,
+            &rows,
+            &[],
+            &counts,
+            true,
+            false,
+            failure.as_ref(),
+        );
+        assert_eq!(summary["ok"], false);
+        assert_eq!(summary["code"], "cancelled");
+        assert_eq!(summary["message"], "The owner cancelled.");
+        assert_eq!(summary["not_bound"], 1);
+        assert_eq!(summary["entries"][0]["reason"], "The owner cancelled.");
+        assert!(summary["entries"][1].get("reason").is_none());
+        // The failure is in the document, so the command line prints nothing more.
+        assert_eq!(
+            super::super::report(Failure::Printed, true),
+            super::super::EXIT_FAILED
+        );
+
+        let refused = ImportCounts {
+            added: 1,
+            not_bound: 1,
+            ..ImportCounts::default()
+        };
+        assert_eq!(
+            import_failure(&refused, None),
+            Some((
+                "partial".to_owned(),
+                "1 variables were not bound.".to_owned()
+            ))
+        );
+        let done = ImportCounts {
+            added: 1,
+            bound: 1,
+            ..ImportCounts::default()
+        };
+        let summary = import_json(Format::Env, &rows[1..], &[], &done, true, false, None);
+        assert_eq!(summary["ok"], true);
+        assert!(summary.get("code").is_none());
+    }
+
+    /// The table cuts a long cell, so the reason of a variable that is not bound is a
+    /// full line under the table.
+    #[test]
+    fn import_text_shows_the_full_reason_of_each_variable_not_bound() {
+        let invalid = "The name is not valid: use A-Z, 0-9, and _, start with a letter or _, and no system name such as PATH.";
+        let title = "T".repeat(200);
+        let taken = format!("{title} uses this variable.");
+        let rows = [
+            not_bound(5, "PATH", invalid),
+            not_bound(6, "TAKEN_KEY", &taken),
+        ];
+        let text = import_text(&rows, &[]);
+        assert!(
+            text.contains(&format!("PATH is not bound (line 5): {invalid}")),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("TAKEN_KEY is not bound (line 6): {taken}")),
+            "{text}"
+        );
+        assert!(text.contains("added, PATH not bound"), "{text}");
     }
 }

@@ -51,11 +51,10 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
         });
 }
 
-/// The first field of a step takes the focus once, after [`go`].
+/// The first field of a step takes the focus once, after [`go`]. A text field takes
+/// it also for a pointer user, as in a macOS form: the owner types next.
 fn first_field(app: &mut DesktopApp, field: &egui::Response) {
-    if std::mem::take(&mut app.ui.focus_start_field) && kit::keyboard_mode(&field.ctx) {
-        field.request_focus();
-    }
+    kit::claim_start_focus(&mut app.ui.focus_start_field, field);
 }
 
 /// A column of `WIDTH`, centered in the window. The height of the last frame gives the
@@ -204,9 +203,7 @@ fn create(app: &mut DesktopApp, ui: &mut egui::Ui) {
         Some("12 or more characters. A sentence of several words is strong and easy to remember."),
         |s| {
             let name = vaults::name_field(app, s, "vault-create-name", name_hint);
-            if std::mem::take(&mut app.ui.focus_start_field) && kit::keyboard_mode(&ctx) {
-                name.request_focus();
-            }
+            first_field(app, &name);
             // Return in a field goes on to the next one.
             if enter_pressed(&name) {
                 ctx.memory_mut(|memory| {
@@ -660,6 +657,12 @@ fn touch_id_unlock(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
 }
 
+/// Return ended the edit of `field`. The key is then consumed: a field that takes the
+/// focus later in the same frame would see the same Return, give the focus up, and
+/// the focus would fall back to the first control of the page ("Back").
 fn enter_pressed(field: &egui::Response) -> bool {
-    field.lost_focus() && field.ctx.input(|input| input.key_pressed(Key::Enter))
+    field.lost_focus()
+        && field
+            .ctx
+            .input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Enter))
 }

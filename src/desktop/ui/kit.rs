@@ -167,6 +167,35 @@ pub(crate) fn tone_note(ui: &mut Ui, value: impl Into<String>, tone: Tone) {
     paragraph(ui, value, Font::Footnote, tone.text());
 }
 
+// ---- Time. ----
+
+/// Seconds since the Unix epoch.
+#[cfg(feature = "vault")]
+pub(crate) fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// "just now", "5 min ago", "3 h ago", "yesterday", "4 days ago", or the date. Lists
+/// show this form; the exact UTC time goes in a tooltip or a detail sheet.
+#[cfg(feature = "vault")]
+pub(crate) fn relative_time(at: u64, now: u64) -> String {
+    let age = now.saturating_sub(at);
+    match age {
+        0..60 => "just now".to_owned(),
+        60..3_600 => format!("{} min ago", age / 60),
+        3_600..86_400 => format!("{} h ago", age / 3_600),
+        86_400..172_800 => "yesterday".to_owned(),
+        172_800..604_800 => format!("{} days ago", age / 86_400),
+        _ => crate::vault::format_utc(at)
+            .split(' ')
+            .next()
+            .unwrap_or_default()
+            .to_owned(),
+    }
+}
+
 // ---- Theme. ----
 
 const SF_PRO: &str = "/System/Library/Fonts/SFNS.ttf";
@@ -329,21 +358,38 @@ pub(crate) const TITLE_BAR: f32 = 38.0;
 
 // ---- Page structure. ----
 
-/// A centered reading column with generous side margins.
+/// The smallest side margin of a page column.
+const COLUMN_MIN_SIDE: f32 = 28.0;
+
+/// A centered reading column at most `max_width` wide, with side margins of at least
+/// 28 points.
+///
+/// The column is a child UI at a computed rect, not a frame margin: `Margin` holds
+/// `i8`, so a side margin over 127 points would saturate and let the column grow
+/// past `max_width` in a wide window.
 pub(crate) fn column<R>(ui: &mut Ui, max_width: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
-    let side = ((ui.available_width() - max_width) / 2.0).max(28.0);
-    Frame::NONE
-        .inner_margin(Margin {
-            left: side as i8,
-            right: side as i8,
-            top: 0,
-            bottom: 36,
-        })
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            add(ui)
-        })
-        .inner
+    let available = ui.available_rect_before_wrap();
+    let width = (available.width() - 2.0 * COLUMN_MIN_SIDE)
+        .min(max_width)
+        .max(0.0)
+        .floor();
+    let left = (available.left() + (available.width() - width) / 2.0).round();
+    let rect = Rect::from_min_size(
+        Pos2::new(left, available.top()),
+        Vec2::new(width, available.height()),
+    );
+    ui.scope_builder(
+        UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::top_down(Align::Min)),
+        |ui| {
+            ui.set_width(width);
+            let inner = add(ui);
+            ui.add_space(36.0);
+            inner
+        },
+    )
+    .inner
 }
 
 /// The large title of a page, with controls on the right and an optional subtitle.
@@ -361,6 +407,25 @@ pub(crate) fn page_header(
         paragraph(ui, subtitle, Font::Callout, SECONDARY);
     }
     ui.add_space(18.0);
+}
+
+/// The indent of the text after a [`dot`]: the dot and the item spacing.
+pub(crate) const DOT_INDENT: f32 = 18.0;
+
+/// The lines under the first line of a list row, indented to its text (for example
+/// past a status dot). Unlike `ui.horizontal`, this adds no minimum control height,
+/// so a footnote sits close to the line above it.
+pub(crate) fn indented<R>(ui: &mut Ui, indent: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
+    Frame::NONE
+        .inner_margin(Margin {
+            left: indent.clamp(0.0, 127.0) as i8,
+            ..Margin::ZERO
+        })
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            add(ui)
+        })
+        .inner
 }
 
 /// "‹ Title" above a page title. Returns true on a click.
@@ -488,17 +553,62 @@ impl Section<'_> {
         response
     }
 
-    /// SwiftUI `LabeledContent`: a label on the left and a value on the right.
+    /// SwiftUI `LabeledContent`: a label on the left and a value on the right. A value
+    /// that does not fit on the line goes under the label, left-aligned: a long
+    /// sentence or path stays readable, and no line wraps flush right.
     pub(crate) fn labeled(&mut self, label: &str, value: impl Into<WidgetText>) {
+        const GAP: f32 = 24.0;
         let value = value.into();
         self.row(|ui| {
+            let label = text(label, Font::Body).color(LABEL);
+            let one_line = galley(ui, label.clone()).size().x
+                + GAP
+                + value
+                    .clone()
+                    .into_galley(
+                        ui,
+                        Some(TextWrapMode::Extend),
+                        f32::INFINITY,
+                        TextStyle::Body,
+                    )
+                    .size()
+                    .x;
+            if one_line <= ui.available_width() {
+                egui::Sides::new().spacing(GAP).show(
+                    ui,
+                    |ui| ui.label(label),
+                    |ui| ui.label(value),
+                );
+            } else {
+                ui.label(label);
+                ui.add(Label::new(value).wrap());
+            }
+        });
+    }
+
+    /// A status row: a title with an optional note under it, and a short value on the
+    /// right, centered on the row. The note belongs to its row, so it gets no row of
+    /// its own with a separator above.
+    pub(crate) fn status(&mut self, title: &str, note_text: Option<&str>, value: RichText) {
+        self.row(|ui| {
             egui::Sides::new()
-                .spacing(24.0)
-                .shrink_right()
+                .shrink_left()
                 .wrap_mode(TextWrapMode::Wrap)
                 .show(
                     ui,
-                    |ui| ui.label(text(label, Font::Body).color(LABEL)),
+                    |ui| match note_text {
+                        Some(note_text) => {
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 2.0;
+                                ui.label(text(title, Font::Body).color(LABEL));
+                                note(ui, note_text);
+                            });
+                        }
+                        // Alone, the title stays centered with the value.
+                        None => {
+                            ui.label(text(title, Font::Body).color(LABEL));
+                        }
+                    },
                     |ui| ui.label(value),
                 );
         });
@@ -527,14 +637,22 @@ impl Section<'_> {
                     icon_tile(ui, icon, color);
                     ui.add_space(4.0);
                 }
-                ui.vertical(|ui| {
-                    ui.label(text(title, Font::Body).color(LABEL));
-                    if let Some(subtitle) = subtitle {
-                        ui.add(
-                            Label::new(text(subtitle, Font::Footnote).color(SECONDARY)).truncate(),
-                        );
+                // A title alone sits in the row itself, so the row centers it with the
+                // icon and the detail. In a vertical group it would sit at the top.
+                match subtitle {
+                    Some(subtitle) => {
+                        ui.vertical(|ui| {
+                            ui.label(text(title, Font::Body).color(LABEL));
+                            ui.add(
+                                Label::new(text(subtitle, Font::Footnote).color(SECONDARY))
+                                    .truncate(),
+                            );
+                        });
                     }
-                });
+                    None => {
+                        ui.label(text(title, Font::Body).color(LABEL));
+                    }
+                }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     paint_icon_in(ui, Icon::ChevronRight, 12.0, TERTIARY);
                     if let Some(detail) = detail {
@@ -838,13 +956,15 @@ pub(crate) fn text_input(
     salt: &str,
     placeholder: &str,
 ) -> Response {
-    ui.add(
+    let response = ui.add(
         TextEdit::singleline(value)
             .id_salt(salt)
             .hint_text(text(placeholder, Font::Body).color(TERTIARY))
             .margin(FIELD_MARGIN)
             .desired_width(f32::INFINITY),
-    )
+    );
+    claim_first_field(&response);
+    response
 }
 
 /// A monospace text field, for names such as `STRIPE_SECRET_KEY`.
@@ -854,14 +974,16 @@ pub(crate) fn mono_input(
     salt: &str,
     placeholder: &str,
 ) -> Response {
-    ui.add(
+    let response = ui.add(
         TextEdit::singleline(value)
             .id_salt(salt)
             .font(TextStyle::Monospace)
             .hint_text(text(placeholder, Font::Mono).color(TERTIARY))
             .margin(FIELD_MARGIN)
             .desired_width(f32::INFINITY),
-    )
+    );
+    claim_first_field(&response);
+    response
 }
 
 /// A narrow field for a number.
@@ -871,13 +993,15 @@ pub(crate) fn number_input(
     salt: &str,
     placeholder: &str,
 ) -> Response {
-    ui.add(
+    let response = ui.add(
         TextEdit::singleline(value)
             .id_salt(salt)
             .hint_text(text(placeholder, Font::Body).color(TERTIARY))
             .margin(FIELD_MARGIN)
             .desired_width(90.0),
-    )
+    );
+    claim_first_field(&response);
+    response
 }
 
 /// A multi-line field.
@@ -1285,13 +1409,17 @@ pub(crate) fn sidebar_item(
     icon: Icon,
     label: &str,
     selected: bool,
-    badge: Option<(usize, Tone)>,
+    badge: Option<Badge>,
 ) -> Response {
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::click());
-    let name = match badge.filter(|(count, _)| *count > 0) {
-        Some((count, Tone::Neutral)) => format!("{label}, {count}"),
-        Some((count, _)) => format!("{label}, {count} waiting"),
+    let name = match badge.filter(|badge| badge.count > 0) {
+        Some(Badge {
+            count,
+            tone: Tone::Neutral,
+            ..
+        }) => format!("{label}, {count}"),
+        Some(Badge { count, what, .. }) => format!("{label}, {count} {what}"),
         None => label.to_owned(),
     };
     response
@@ -1299,9 +1427,9 @@ pub(crate) fn sidebar_item(
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         if selected {
-            painter.rect_filled(rect, 6, Color32::from_rgb(222, 222, 228));
+            painter.rect_filled(rect, 6, SIDEBAR_SELECTED);
         } else if response.hovered() {
-            painter.rect_filled(rect, 6, Color32::from_rgb(232, 232, 236));
+            painter.rect_filled(rect, 6, SIDEBAR_HOVER);
         }
         if response.has_focus() {
             inner_focus_ring(painter, rect, 6);
@@ -1322,17 +1450,135 @@ pub(crate) fn sidebar_item(
             galley,
             LABEL,
         );
-        if let Some((count, tone)) = badge.filter(|(count, _)| *count > 0) {
+        if let Some(badge) = badge.filter(|badge| badge.count > 0) {
             count_badge(
                 painter,
                 ui,
                 Pos2::new(rect.right() - 8.0, rect.center().y),
-                count,
-                tone,
+                badge.count,
+                badge.tone,
             );
         }
     }
     response
+}
+
+/// A count on a sidebar row. A neutral count is a total; another tone means that the
+/// owner has something to do, and `what` names it for VoiceOver ("3 waiting").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Badge {
+    pub(crate) count: usize,
+    pub(crate) tone: Tone,
+    pub(crate) what: &'static str,
+}
+
+const SIDEBAR_SELECTED: Color32 = Color32::from_rgb(222, 222, 228);
+const SIDEBAR_HOVER: Color32 = Color32::from_rgb(232, 232, 236);
+
+/// The open vault at the top of the sidebar: a tile with its initial, its name, and a
+/// status line. A click opens the vault menu. `tone` colors the status line when sync
+/// needs the owner.
+#[cfg(feature = "vault")]
+pub(crate) fn vault_header(
+    ui: &mut Ui,
+    width: f32,
+    name: &str,
+    status: &str,
+    tone: Tone,
+    tile: Color32,
+) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 40.0), Sense::click());
+    let label = format!("Vault {name}, {status}");
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::ComboBox, true, &label));
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
+        if open || response.is_pointer_button_down_on() {
+            painter.rect_filled(rect, 8, SIDEBAR_SELECTED);
+        } else if response.hovered() {
+            painter.rect_filled(rect, 8, SIDEBAR_HOVER);
+        }
+        if response.has_focus() {
+            inner_focus_ring(painter, rect, 8);
+        }
+        // The tile: the initial of the vault on its color.
+        let tile_rect = Rect::from_center_size(
+            Pos2::new(rect.left() + 18.0, rect.center().y),
+            Vec2::splat(26.0),
+        );
+        painter.rect_filled(tile_rect, 7, tile);
+        let initial: String = name
+            .chars()
+            .find(|c| c.is_alphanumeric())
+            .map_or_else(|| "V".to_owned(), |c| c.to_uppercase().collect());
+        let letter = galley(ui, medium(initial, Font::Body));
+        painter.galley(
+            tile_rect.center() - letter.size() / 2.0,
+            letter,
+            Color32::WHITE,
+        );
+        // The name and the status, cut to the room left of the chevrons.
+        let text_left = tile_rect.right() + 9.0;
+        let text_width = (rect.right() - 20.0 - text_left).max(0.0);
+        let line = |value: RichText, color: Color32| {
+            WidgetText::from(value.color(color)).into_galley(
+                ui,
+                Some(TextWrapMode::Truncate),
+                text_width,
+                TextStyle::Body,
+            )
+        };
+        let title = line(medium(name, Font::Body), LABEL);
+        let status_color = match tone {
+            Tone::Neutral => SECONDARY,
+            other => other.text(),
+        };
+        let subtitle = line(text(status, Font::Footnote), status_color);
+        let top = rect.center().y - (title.size().y + subtitle.size().y) / 2.0;
+        let subtitle_top = top + title.size().y;
+        painter.galley(Pos2::new(text_left, top), title, LABEL);
+        painter.galley(Pos2::new(text_left, subtitle_top), subtitle, status_color);
+        // Up and down chevrons, as on a macOS pop-up button.
+        let center = Pos2::new(rect.right() - 10.0, rect.center().y);
+        let stroke = Stroke::new(1.3, SECONDARY);
+        let (w, h) = (3.2, 2.6);
+        painter.line(
+            vec![
+                center + Vec2::new(-w, -1.6),
+                center + Vec2::new(0.0, -1.6 - h),
+                center + Vec2::new(w, -1.6),
+            ],
+            stroke,
+        );
+        painter.line(
+            vec![
+                center + Vec2::new(-w, 1.6),
+                center + Vec2::new(0.0, 1.6 + h),
+                center + Vec2::new(w, 1.6),
+            ],
+            stroke,
+        );
+    }
+    response
+}
+
+/// A gray icon button for the title bar, as the sidebar button of a macOS window.
+pub(crate) fn title_bar_button(ui: &mut Ui, icon: Icon, name: &str) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, name));
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        if response.is_pointer_button_down_on() {
+            painter.rect_filled(rect, 6, SIDEBAR_SELECTED);
+        } else if response.hovered() {
+            painter.rect_filled(rect, 6, SIDEBAR_HOVER);
+        }
+        if response.has_focus() {
+            inner_focus_ring(painter, rect, 6);
+        }
+        paint_icon(painter, rect.shrink(5.0), icon, SECONDARY);
+    }
+    response.on_hover_text(name)
 }
 
 // ---- Banners, empty states, figures. ----
@@ -1409,7 +1655,8 @@ pub(crate) fn empty_state(
     clicked
 }
 
-/// A stat tile: a label, a large value, and a caption.
+/// A stat tile: a label, a large value, and a caption. `width` is the outer width,
+/// with the margins and the border.
 pub(crate) fn stat_tile(ui: &mut Ui, width: f32, label: &str, value: &str, caption: &str) {
     Frame::NONE
         .fill(SURFACE)
@@ -1417,7 +1664,9 @@ pub(crate) fn stat_tile(ui: &mut Ui, width: f32, label: &str, value: &str, capti
         .corner_radius(CornerRadius::same(10))
         .inner_margin(Margin::symmetric(14, 12))
         .show(ui, |ui| {
-            ui.set_width(width - 28.0);
+            // 14 + 14 of margin and 1 + 1 of border: a frame draws its stroke inside
+            // its size. Without the border the row of tiles is wider than the page.
+            ui.set_width(width - 30.0);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
                 ui.label(text(label, Font::Callout).color(SECONDARY));
@@ -1459,25 +1708,95 @@ fn take_sheet_enter(ctx: &egui::Context) -> bool {
         .unwrap_or(false)
 }
 
-/// True in the frame where the sheet that is drawing became the top sheet. A
-/// destructive alert uses it to put the focus on Cancel.
-pub(crate) fn sheet_just_opened(ctx: &egui::Context) -> bool {
-    ctx.data(|data| data.get_temp(Id::new("apassy-sheet-opened")))
+fn first_field_id() -> Id {
+    Id::new("apassy-sheet-first-field")
+}
+
+/// Give `field` the focus once when a screen asks for it (`flag`): the first field of
+/// a start step, or the field that a choice shows. A text field takes it also for a
+/// pointer user, as in a macOS form: the owner types next. Not in a frame with a
+/// pointer press or release: egui gives the focus up at the click that changed the
+/// screen, so the field waits for the next frame.
+pub(crate) fn claim_start_focus(flag: &mut bool, field: &Response) {
+    let clicking = field
+        .ctx
+        .input(|input| input.pointer.any_pressed() || input.pointer.any_released());
+    if *flag && !clicking {
+        *flag = false;
+        field.request_focus();
+    }
+}
+
+/// As in a macOS sheet, the first single-line field of a sheet that just opened takes
+/// the focus, also for a pointer user: the owner can type at once. A keyboard user
+/// already gets the first control of the sheet. Buttons never take the focus for a
+/// pointer user, so no focus ring shows that the owner did not ask for.
+pub(crate) fn claim_first_field(response: &Response) {
+    let ctx = &response.ctx;
+    let pending = ctx.data(|data| data.get_temp::<egui::LayerId>(first_field_id()));
+    if pending == Some(response.layer_id) {
+        response.request_focus();
+        ctx.data_mut(|data| data.remove::<egui::LayerId>(first_field_id()));
+    }
+}
+
+fn sheet_takes_focus_id() -> Id {
+    Id::new("apassy-sheet-takes-focus")
+}
+
+/// True in the frame where the sheet that is drawing moves the focus to its first
+/// control, for a keyboard user: it became the top sheet, or the first key came after
+/// the pointer opened it. A destructive alert uses it to put the focus on Cancel
+/// instead. Not after the focus left a control of the sheet, as with Tab past the
+/// last control: the focus then goes on to the first control.
+pub(crate) fn sheet_takes_focus(ctx: &egui::Context) -> bool {
+    ctx.data(|data| data.get_temp(sheet_takes_focus_id()))
         .unwrap_or(false)
 }
 
-/// The Cancel button of a destructive alert. It takes the focus when the alert opens,
-/// so Return or Space on a new alert cancels: it never deletes, revokes, or resets.
+/// The Cancel button of a destructive alert. See [`alert_default_button`].
 pub(crate) fn alert_cancel(ui: &mut Ui) -> Response {
-    let cancel = button(ui, "Cancel", Style::Bordered);
-    if sheet_just_opened(ui.ctx()) && keyboard_mode(ui.ctx()) {
-        cancel.request_focus();
+    alert_default_button(ui, "Cancel")
+}
+
+/// The safe button of a destructive alert, such as Cancel or "Keep editing". It is the
+/// default button, so Return and Space never delete, revoke, or reset:
+/// - It takes the focus when the sheet moves the focus (see [`sheet_takes_focus`]).
+/// - When no control has the focus, for example in an alert opened with the pointer,
+///   Return or Space presses it.
+pub(crate) fn alert_default_button(ui: &mut Ui, label: &str) -> Response {
+    let ctx = ui.ctx().clone();
+    let layer = ui.layer_id();
+    let pressed = ctx
+        .memory(|memory| memory.top_modal_layer() == Some(layer) && memory.focused().is_none())
+        && !egui::Popup::is_any_open(&ctx)
+        && ctx.input(|input| {
+            !input.modifiers.any()
+                && (input.key_pressed(Key::Enter) || input.key_pressed(Key::Space))
+        });
+    // The button takes the focus before it registers, so egui turns the key into its
+    // click in this frame.
+    let id = ui.next_auto_id();
+    if pressed {
+        ctx.memory_mut(|memory| memory.request_focus(id));
     }
-    cancel
+    let default = button(ui, label, Style::Bordered);
+    debug_assert_eq!(default.id, id, "the button has the ID that took the focus");
+    if pressed {
+        // The key is used: the sheet does not take it as its default action too.
+        ctx.input_mut(|input| {
+            input.consume_key(egui::Modifiers::NONE, Key::Enter);
+            input.consume_key(egui::Modifiers::NONE, Key::Space);
+        });
+    } else if sheet_takes_focus(&ctx) {
+        default.request_focus();
+    }
+    default
 }
 
 /// A macOS sheet: a modal card over a dimmed window. A click outside does not close
-/// it, so typed text is not lost.
+/// it, so typed text is not lost. A sheet that opens over another sheet is drawn on
+/// top of it.
 ///
 /// The keyboard:
 /// - When the sheet becomes the top sheet, the focus moves to its first control (for a
@@ -1485,6 +1804,9 @@ pub(crate) fn alert_cancel(ui: &mut Ui) -> Response {
 /// - Return does the default action when no button has the focus: in a single-line
 ///   field, or with no focus. A focused button takes Return itself. A multi-line field
 ///   takes Return as a new line.
+/// - The focus never moves in a frame with Return or Space: the control that took it
+///   would take the key as a click too. In an alert opened with the pointer, that
+///   control is the destructive button.
 /// - Escape closes the sheet. The arrow keys do not move the focus out of the sheet.
 pub(crate) fn sheet(
     ctx: &egui::Context,
@@ -1494,31 +1816,68 @@ pub(crate) fn sheet(
 ) -> SheetResponse {
     let modal_id = Id::new(("apassy-sheet", id));
     let layer = egui::LayerId::new(Order::Foreground, modal_id);
+    // A sheet that would appear over another sheet in a frame with a pointer press waits
+    // for the next frame. A quick click (press and release in one frame) on the sheet
+    // behind brings that sheet to the front in this frame too, and egui keeps the old
+    // order of the two: the new sheet, for example the owner check, would stay hidden
+    // behind the sheet that opened it, without the focus.
+    let appears = !ctx.memory(|memory| memory.areas().visible_last_frame(&layer));
+    if appears
+        && ctx.memory(|memory| memory.top_modal_layer()).is_some()
+        && ctx.input(|input| input.pointer.any_pressed())
+    {
+        ctx.request_repaint();
+        return SheetResponse { escape: false };
+    }
     let top_key = modal_id.with("was-top");
     let top_now = ctx.memory(|memory| memory.top_modal_layer()) == Some(layer);
     let was_top = ctx
         .data(|data| data.get_temp::<bool>(top_key))
         .unwrap_or(false);
     let opened = top_now && !was_top;
+    // A control of this sheet had the focus since the sheet became the top sheet.
+    let had_key = modal_id.with("had-focus");
+    let had_focus = !opened
+        && ctx
+            .data(|data| data.get_temp::<bool>(had_key))
+            .unwrap_or(false);
+    // Read before `data_mut`: the lock of the context data does not nest.
+    let pointer_user = !keyboard_mode(ctx);
     ctx.data_mut(|data| {
-        data.insert_temp(Id::new("apassy-sheet-opened"), opened);
         // Return belongs to the sheet that draws now, and to this frame only.
         data.remove_temp::<bool>(sheet_enter_id());
+        // A pointer user: the first single-line field of the new sheet takes the
+        // focus in this frame (see [`claim_first_field`]). Only in this frame.
+        if opened && pointer_user {
+            data.insert_temp(first_field_id(), layer);
+        } else {
+            data.remove::<egui::LayerId>(first_field_id());
+        }
     });
     // A focused control in the sheet went away, for example after a failed save with
     // Return. The focus goes to the first control again, not behind the sheet.
     let lost = top_now
         && ctx.memory(|memory| memory.focused()).is_none()
         && !ctx.input(|input| input.key_pressed(Key::Escape));
-    if (opened || lost) && keyboard_mode(ctx) {
+    // Return or Space in this frame: a control that takes the focus now would also take
+    // the key as a click. The focus moves in the next frame; the key does the default
+    // action, or presses the safe button of an alert ([`alert_default_button`]).
+    let click_key =
+        ctx.input(|input| input.key_pressed(Key::Enter) || input.key_pressed(Key::Space));
+    let move_focus = (opened || lost) && keyboard_mode(ctx);
+    if move_focus {
         // The next control that registers takes the focus: the first one of the sheet.
         ctx.memory_mut(|memory| {
             if let Some(focused) = memory.focused() {
                 memory.surrender_focus(focused);
             }
-            memory.move_focus(egui::FocusDirection::Next);
+            if !click_key {
+                memory.move_focus(egui::FocusDirection::Next);
+            }
         });
     }
+    let takes_focus = move_focus && !click_key && !had_focus;
+    ctx.data_mut(|data| data.insert_temp(sheet_takes_focus_id(), takes_focus));
     let before = ctx.memory(|memory| memory.focused());
     let response = Modal::new(modal_id)
         .backdrop_color(Color32::from_black_alpha(46))
@@ -1535,13 +1894,16 @@ pub(crate) fn sheet(
             ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
             add(ui)
         });
+    let after = ctx.memory(|memory| memory.focused());
     ctx.data_mut(|data| {
         data.insert_temp(top_key, response.is_top_modal);
-        data.insert_temp(Id::new("apassy-sheet-opened"), false);
+        data.insert_temp(sheet_takes_focus_id(), false);
+        // A control behind the top sheet drops the focus, so a focus here is in it.
+        let has_focus = response.is_top_modal && after.is_some();
+        data.insert_temp(had_key, response.is_top_modal && (had_focus || has_focus));
     });
     let quiet = response.is_top_modal && !response.any_popup_open;
     let escape = quiet && ctx.input(|input| input.key_pressed(Key::Escape));
-    let after = ctx.memory(|memory| memory.focused());
     let enter = quiet
         && ctx.input(|input| input.key_pressed(Key::Enter) && !input.modifiers.any())
         // No focus, or a single-line field that gave up the focus on Return.
@@ -1756,6 +2118,8 @@ pub(crate) enum Icon {
     Folder,
     Eye,
     Phone,
+    /// A window with a sidebar, for "Hide sidebar" and "Show sidebar".
+    Sidebar,
 }
 
 /// An icon in a rounded color tile, as in System Settings.
@@ -1954,6 +2318,15 @@ pub(crate) fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color
         Icon::Eye => {
             closed(&arc(0.5, 0.5, 0.42, 0.26, 0.0, TAU));
             circle(0.5, 0.5, 0.12);
+        }
+        Icon::Sidebar => {
+            painter.rect_stroke(
+                Rect::from_min_max(p(0.06, 0.16), p(0.94, 0.84)),
+                size * 0.12,
+                stroke,
+                StrokeKind::Middle,
+            );
+            line(&[(0.38, 0.16), (0.38, 0.84)]);
         }
         Icon::Phone => {
             painter.rect_stroke(

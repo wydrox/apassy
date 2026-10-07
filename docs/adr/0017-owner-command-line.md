@@ -46,8 +46,10 @@ The profile denies the data directory, so the owner socket was thought to be clo
 ### 5. Owner commands that are local
 
 - `apassy import` reads a `.env` file, or a CSV export of 1Password or Bitwarden, in the command line, and sends one add request for each entry. It never prints a value. A name that exists is left out unless `--allow-duplicates`.
+- `apassy import --bind` binds the variables of the added credentials with one owner check (decided 2026-10-06). A `.env` key is the variable of its credential. A CSV row has a variable only when its title is a variable name already, such as `STRIPE_API_KEY`. The command sends one `item_bind_variables` request. The app refuses an invalid name, a name that another credential uses, and a credential without a secret value before the check, and reports each one. It asks for `OwnerAction::BindVariables`, which names each item and its variable. The dialog lists each credential and its variable, with the count, and the list scrolls when it is long. The Touch ID text names the count. The proof is checked once for the whole list, and each variable then binds on its own, with the real value. A cancel binds nothing. Without `--bind`, the import binds nothing.
 - `apassy setup claude|codex` registers an agent and writes two wrapper scripts with mode 0700 in `~/.config/apassy`: one for `apassy-mcp`, one for `apassy-hook`. The host configuration names the wrappers, so no host file holds the token. Apassy.app does not ship `apassy-hook`; `--hook PATH` takes the one of a source build, and without it setup connects only the MCP server. With `--write`, it adds the MCP server (`claude mcp add` or `[mcp_servers.apassy]` in the Codex configuration) and the prompt hook, and keeps a copy of each file that it changes.
 - `apassy doctor` checks the window, the vault, the broker, the session, the programs, the data directory, and the host configurations.
+- `apassy completions zsh|bash|fish` prints a completion script (decided 2026-10-06). The scripts are made from the command tables of `apassy help`, so a new command or subcommand appears in them without a second list. They complete the commands, the subcommands, and the main options. A test checks every command and subcommand of the tables in each script, and checks the syntax with `zsh -n`, `bash -n`, and `fish --no-execute`. Only bash is required: the check skips zsh or fish when the shell is not installed, as on the Linux runners of CI. Where no subcommand fits, the scripts leave the word to file-name completion. The command does not need the window, and Apassy does not install the script.
 
 ## Consequences
 
@@ -59,5 +61,4 @@ The profile denies the data directory, so the owner socket was thought to be clo
 
 ## Open decisions
 
-- D1. A batch owner check for the variables of an import (`apassy import --bind`): one check for N items, with each name in the dialog.
-- D2. Shell completions for zsh, bash, and fish.
+None. D1 (`apassy import --bind`) and D2 (shell completions) are decided in section 5.

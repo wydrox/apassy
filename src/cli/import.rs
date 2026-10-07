@@ -44,11 +44,14 @@ impl Format {
     }
 }
 
-/// One entry of the file. `line` names its place for messages.
+/// One entry of the file. `line` names its place for messages. `variable` is the
+/// environment variable that the entry names, for `--bind`: the key of a `.env` line,
+/// or a title of a CSV row that is a variable name already.
 #[derive(Debug)]
 pub struct Entry {
     pub line: usize,
     pub item: ItemInput,
+    pub variable: Option<String>,
 }
 
 /// An entry that the import leaves out, with the reason.
@@ -206,7 +209,11 @@ fn parse_env(text: &str, options: &Options) -> (Vec<Entry>, Vec<Skipped>) {
             _ => {}
         }
         item.secret = Some(SecretText::new(std::mem::take(&mut value)));
-        entries.push(Entry { line: number, item });
+        entries.push(Entry {
+            line: number,
+            item,
+            variable: Some(key.to_owned()),
+        });
     }
     (entries, skipped)
 }
@@ -445,9 +452,25 @@ fn parse_csv_items(text: &str) -> (Vec<Entry>, Vec<Skipped>) {
                 hidden: true,
             });
         }
-        entries.push(Entry { line, item });
+        entries.push(Entry {
+            line,
+            variable: title_variable(&name),
+            item,
+        });
     }
     (entries, skipped)
+}
+
+/// The variable that a title carries: a title that is a variable name already, such as
+/// `STRIPE_SECRET_KEY`. It needs an `_`, so a plain name such as `AWS` carries none.
+fn title_variable(title: &str) -> Option<String> {
+    let title = title.trim();
+    let shaped = title.contains('_')
+        && !title.as_bytes()[0].is_ascii_digit()
+        && title
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_');
+    shaped.then(|| title.to_owned())
 }
 
 /// Bitwarden custom fields: one `name: value` per line. Every value is hidden.
@@ -515,6 +538,19 @@ mod tests {
         );
         let lines: Vec<usize> = skipped.iter().map(|skip| skip.line).collect();
         assert_eq!(lines, [3, 9, 10]);
+        let variables: Vec<_> = entries
+            .iter()
+            .map(|entry| entry.variable.as_deref())
+            .collect();
+        assert_eq!(
+            variables,
+            [
+                Some("STRIPE_KEY"),
+                Some("QUOTED"),
+                Some("SINGLE"),
+                Some("PEM")
+            ]
+        );
         let debug = format!("{entries:?}");
         assert!(!debug.contains("canary"), "{debug}");
     }
@@ -589,6 +625,21 @@ Empty,,,,,false,false,,\n";
         assert_eq!(labels, ["Access key", "Region"]);
         assert_eq!(entries[1].item.kind, Some(CredentialKind::Custom));
         assert_eq!(secret(&entries[1]), "1111 2222");
+    }
+
+    #[test]
+    fn csv_items_carry_a_variable_only_when_the_title_is_one() {
+        let text = "Title,Url,Username,Password,OTPAuth,Favorite,Archived,Tags,Notes\n\
+STRIPE_SECRET_KEY,,,sk_test_canary,,false,false,,\n\
+AWS,,,aws-canary,,false,false,,\n\
+Stripe_key,,,lower-canary,,false,false,,\n\
+2FA_CODES,,,codes-canary,,false,false,,\n";
+        let (entries, _) = parse(Format::OnePassword, text, &Options::default());
+        let variables: Vec<_> = entries
+            .iter()
+            .map(|entry| entry.variable.as_deref())
+            .collect();
+        assert_eq!(variables, [Some("STRIPE_SECRET_KEY"), None, None, None]);
     }
 
     #[test]
