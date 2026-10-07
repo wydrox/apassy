@@ -54,6 +54,7 @@ The match is ambiguous, and the run waits for the owner (flag `hook_ambiguous`),
 
 - step 1 finds a prompt, but a newer prompt of another session has the same directory. This happens after `/clear` in Claude Code: the MCP server keeps the old session ID.
 - step 2 finds prompts of more than one session. This happens with two Codex sessions of one agent in one project.
+- the run names a host session, that session has no prompt, and step 2 finds the prompt of another session. This happens after `--resume`, and when the hook of this session is off or did not reach the broker. The card says "matched by the project directory, from another host session". Before 2026-10-06 this case used the other prompt without a flag.
 
 Limits of the store:
 
