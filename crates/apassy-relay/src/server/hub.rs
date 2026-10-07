@@ -144,7 +144,7 @@ fn make_team_file_with_device(
     }
 }
 
-/// Deletes the file of a team and its journal, if any. A file that is not there is
+/// Deletes the file of a team, its journal and schema backups, and its snapshots. A file that is not there is
 /// not an error; any other failure is.
 pub fn remove_team_file(config: &RelayConfig, id: &TeamId) -> RelayResult<()> {
     let path = config.team_path(id);
@@ -153,7 +153,13 @@ pub fn remove_team_file(config: &RelayConfig, id: &TeamId) -> RelayResult<()> {
         name.push(suffix);
         name
     };
-    let extra = [with("-journal"), with(".pre-v3"), with(".pre-v3.tmp")];
+    let extra = [
+        with("-journal"),
+        with(".pre-v3"),
+        with(".pre-v3.tmp"),
+        with(".pre-v4"),
+        with(".pre-v4.tmp"),
+    ];
     for file in std::iter::once(path.clone().into_os_string()).chain(extra) {
         match std::fs::remove_file(&file) {
             Ok(()) => {}
@@ -161,7 +167,14 @@ pub fn remove_team_file(config: &RelayConfig, id: &TeamId) -> RelayResult<()> {
             Err(_) => return Err(RelayError::internal("The team file cannot be deleted.")),
         }
     }
-    Ok(())
+    // The vault snapshots of the team (docs/SPEC.md section 24).
+    match std::fs::remove_dir_all(config.sync_dir(id)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(RelayError::internal(
+            "The snapshots of the team cannot be deleted.",
+        )),
+    }
 }
 
 /// Takes the lock of the data directory (`relay.lock`), so that one relay process at
@@ -231,6 +244,10 @@ pub struct TeamInfo {
     pub items: Option<u64>,
     pub agents: Option<u64>,
     pub last_activity: Option<u64>,
+    /// The current vault sync version (0: no snapshot) and the size of its snapshot.
+    /// `None` while the team is not open.
+    pub sync_version: Option<u64>,
+    pub sync_size: Option<u64>,
 }
 
 /// The teams of the relay.
@@ -246,6 +263,8 @@ pub struct Hub {
     draining: Mutex<HashMap<TeamId, Weak<Core>>>,
     /// The lock of the data directory, held until the relay stops.
     lock: Mutex<Option<File>>,
+    /// Snapshot transfers of every team in flight.
+    sync_transfers: Arc<AtomicUsize>,
 }
 
 impl Hub {
@@ -276,6 +295,7 @@ impl Hub {
             stop,
             draining: Mutex::new(HashMap::new()),
             lock: Mutex::new(Some(lock)),
+            sync_transfers: Arc::new(AtomicUsize::new(0)),
         });
         let rows = hub.directory.teams()?;
         finish_migration(&hub.config, &rows);
@@ -326,6 +346,10 @@ impl Hub {
             run_keys: RunKeys::default(),
             device_auth: crate::server::devices::DeviceAuthState::default(),
             public_host: self.public_host.clone(),
+            sync_transfers: AtomicUsize::new(0),
+            relay_sync_transfers: self.sync_transfers.clone(),
+            sync_polls: LongPolls::new(1),
+            sync_commit: Mutex::new(()),
             stop: self.stop.clone(),
             closed: AtomicBool::new(false),
             team_limits: RwLock::new(team_limits),
@@ -598,6 +622,13 @@ impl Hub {
                         let last: Option<i64> = conn
                             .query_row("SELECT max(at) FROM audit", [], |r| r.get(0))
                             .map_err(db)?;
+                        let (sync_version, sync_size): (i64, i64) = conn
+                            .query_row(
+                                "SELECT coalesce(max(version), 0), coalesce((SELECT size FROM sync_head ORDER BY version DESC LIMIT 1), 0) FROM sync_head",
+                                [],
+                                |r| Ok((r.get(0)?, r.get(1)?)),
+                            )
+                            .map_err(db)?;
                         Ok((
                             count("SELECT count(*) FROM member WHERE revoked_at IS NULL")?,
                             count("SELECT count(*) FROM item WHERE archived_at IS NULL")?,
@@ -610,6 +641,8 @@ impl Hub {
                             .map(to_u)
                             .map_err(db)?,
                             last.map(to_u),
+                            to_u(sync_version),
+                            to_u(sync_size),
                         ))
                     })
                     .ok()
@@ -627,6 +660,8 @@ impl Hub {
                 items: counts.map(|c| c.1),
                 agents: counts.map(|c| c.2),
                 last_activity: counts.and_then(|c| c.3),
+                sync_version: counts.map(|c| c.4),
+                sync_size: counts.map(|c| c.5),
             });
         }
         Ok(infos)
@@ -695,8 +730,9 @@ impl Hub {
 
     /// `admin backup`: a consistent copy of `relay.db` and of every team file in a new
     /// folder `<backup dir>/<UTC time>` (mode 0700, files 0600), with `MANIFEST.json`.
-    /// Each file is copied while its connection is locked. The files stay encrypted: the
-    /// master key is not in the backup.
+    /// Each file is copied while its connection is locked. The vault snapshots of a team
+    /// go to `teams/<id>.sync/`. The files stay encrypted: the master key is not in the
+    /// backup.
     pub fn backup(&self, now: u64) -> RelayResult<serde_json::Value> {
         use sha2::{Digest, Sha256};
         use std::os::unix::fs::DirBuilderExt;
@@ -748,13 +784,24 @@ impl Hub {
                 None => continue,
             };
             copied.push((file, target, bytes));
+            copied.extend(self.copy_snapshots(&row.id, &dir)?);
         }
         let mut files = Vec::new();
         for (file, path, bytes) in &copied {
-            let data = std::fs::read(path)
-                .map_err(|_| RelayError::internal("A backup file cannot be read back."))?;
-            let digest = Sha256::digest(&data);
-            let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+            // Read back in pieces: a snapshot can be large.
+            let read_back = || RelayError::internal("A backup file cannot be read back.");
+            let mut source = std::fs::File::open(path).map_err(|_| read_back())?;
+            let mut hasher = Sha256::new();
+            let mut buffer = vec![0u8; 64 * 1024];
+            loop {
+                let read =
+                    std::io::Read::read(&mut source, &mut buffer).map_err(|_| read_back())?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+            }
+            let hex = crate::sync_head::hex(&hasher.finalize());
             files.push(json!({"name": file, "bytes": bytes, "sha256": hex}));
         }
         let manifest = json!({
@@ -783,6 +830,55 @@ impl Hub {
             &json!({"name": name, "teams": rows.len()}),
         );
         Ok(manifest)
+    }
+
+    /// Copies the vault snapshots of one team (`teams/<id>.sync/<version>.bin`) into a
+    /// backup folder, while no push or delete of that team can commit. Returns the names
+    /// relative to the folder, the paths, and the sizes.
+    fn copy_snapshots(
+        &self,
+        id: &TeamId,
+        dir: &std::path::Path,
+    ) -> RelayResult<Vec<(String, std::path::PathBuf, u64)>> {
+        use std::os::unix::fs::DirBuilderExt;
+        let source = self.config.sync_dir(id);
+        let core = self.team(id);
+        let _commit = core.as_ref().map(|core| {
+            core.sync_commit
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+        });
+        let entries = match std::fs::read_dir(&source) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(_) => {
+                return Err(RelayError::internal(
+                    "The snapshots of a team cannot be read.",
+                ));
+            }
+        };
+        let mut names: Vec<String> = entries
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| crate::server::sync::is_snapshot_name(name))
+            .collect();
+        names.sort();
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+        let folder = format!("{}/{id}.sync", crate::config::TEAMS_DIR);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(dir.join(&folder))
+            .map_err(|_| RelayError::internal("The backup folder cannot be created."))?;
+        let mut copied = Vec::new();
+        for name in names {
+            let file = format!("{folder}/{name}");
+            let target = dir.join(&file);
+            let bytes = crate::server::store::copy_private(&source.join(&name), &target)?;
+            copied.push((file, target, bytes));
+        }
+        Ok(copied)
     }
 
     /// Ends every session and drops every run key of every team, and releases the lock

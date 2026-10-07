@@ -26,6 +26,7 @@ pub mod operator;
 pub mod runkeys;
 pub mod sessions;
 pub mod store;
+pub mod sync;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -78,6 +79,15 @@ pub struct Core {
     pub device_auth: devices::DeviceAuthState,
     /// The host of the public URL. A command that names it is not a foreign host.
     pub public_host: String,
+    /// Snapshot pushes and downloads of this team in flight (`sync_transfers`).
+    pub sync_transfers: AtomicUsize,
+    /// Snapshot transfers of every team in flight (`Limits::sync_transfers_total`). One
+    /// counter for the relay, shared by every `Core`.
+    pub relay_sync_transfers: Arc<AtomicUsize>,
+    /// The open sync long polls of each device: at most one.
+    pub sync_polls: LongPolls,
+    /// One commit, delete, or snapshot lookup of this team at a time.
+    pub sync_commit: Mutex<()>,
     stop: Arc<AtomicBool>,
     /// Set when the team is suspended or the relay stops.
     closed: AtomicBool,
@@ -312,7 +322,7 @@ impl Relay {
         let name = {
             let old = Store::open_at(&legacy, old_key)?;
             match old.user_version()? {
-                2 | 3 => {}
+                2..=store::SCHEMA_VERSION => {}
                 1 => {
                     return Err(RelayError::internal(
                         "This team vault is from the first alpha and holds plaintext item values. Start with a new data volume: there is no migration.",

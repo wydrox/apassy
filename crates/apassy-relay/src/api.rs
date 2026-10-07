@@ -76,6 +76,14 @@ pub mod paths {
     pub const RUNS: &str = "/v1/runs";
     /// `GET /v1/host/requests`, `POST /v1/host/requests/{id}/release` and `/deny`.
     pub const HOST_REQUESTS: &str = "/v1/host/requests";
+    /// `DELETE`: removes the vault snapshots of the team (docs/SPEC.md section 24).
+    pub const SYNC: &str = "/v1/sync";
+    /// `GET ?since=N&wait=S`: the current head, the chain, and the receipts.
+    pub const SYNC_HEAD: &str = "/v1/sync/head";
+    /// `GET ?version=N`: the snapshot bytes; `PUT`: a new snapshot with its head.
+    pub const SYNC_SNAPSHOT: &str = "/v1/sync/snapshot";
+    /// `POST`: this device merged a version.
+    pub const SYNC_RECEIPT: &str = "/v1/sync/receipt";
     pub const MCP: &str = "/mcp";
     /// `/p/<session key>/<host[:port]>/<path>`.
     pub const PROXY_PREFIX: &str = "/p/";
@@ -340,6 +348,9 @@ pub struct DeviceView {
     /// True for the device that made the request.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub current: bool,
+    /// The 65-byte public key, base64url. A device checks sync heads with it.
+    #[serde(default)]
+    pub public_key: String,
 }
 
 /// `POST /v1/devices/links`: a one-time code for a new device of the same member, 10
@@ -372,6 +383,15 @@ pub struct LinkRequestRef<'a> {
     pub code: &'a str,
     pub device_name: &'a str,
     pub public_key: &'a str,
+}
+
+/// `POST /v1/devices/link/cancel` (edge only): the new device takes back its pending
+/// link before a confirmation, with the code and its key.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkCancel {
+    pub code: SecretString,
+    pub public_key: String,
 }
 
 /// The answer to a join or a link: it waits for a confirmation. The joiner shows the
@@ -419,6 +439,10 @@ pub struct LinkView {
     pub device_name: String,
     pub created_at: u64,
     pub expires_at: u64,
+    /// The key of the waiting device, base64url, so the confirming device computes the
+    /// safety words itself.
+    #[serde(default)]
+    pub public_key: String,
 }
 
 /// `POST /v1/joins/{id}/confirm` and `POST /v1/devices/links/{id}/confirm`: the two
@@ -863,9 +887,104 @@ pub struct AccessView {
     pub note: String,
 }
 
+/// One head of the chain in `SyncHeadView`. The public key of `device_id` is in
+/// `SyncHeadView::signers`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncChainEntry {
+    pub version: u64,
+    /// The head text, base64url.
+    pub head: String,
+    /// The DER signature of the head text, base64url.
+    pub signature: String,
+    pub device_id: DeviceId,
+    /// The relay's clock at the push.
+    pub pushed_at: u64,
+}
+
+/// A device that signed a head of a `SyncHeadView`, with its public key. A removed
+/// device stays here for the heads it pushed while it was a member: a client accepts
+/// its signature only on a head whose version is at most `last_version`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncSigner {
+    pub device_id: DeviceId,
+    /// The 65-byte public key, base64url.
+    pub public_key: String,
+    /// True when the device or its member was removed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub removed: bool,
+    /// For a removed device: the newest version it pushed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_version: Option<u64>,
+}
+
+/// The newest version that a live device reported as merged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncReceipt {
+    pub device_id: DeviceId,
+    pub device_name: String,
+    pub version: u64,
+    pub at: u64,
+}
+
+/// `GET /v1/sync/head` and the answer of `PUT /v1/sync/snapshot` (docs/SPEC.md section
+/// 24.4). Version 0 has no head fields. A client takes every value from the head text it
+/// verified, never from the unsigned fields next to it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncHeadView {
+    pub version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<DeviceId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pushed_at: Option<u64>,
+    /// The heads of the versions after `since`, oldest first, at most 1000. With
+    /// more, the client asks again from the last one.
+    pub chain: Vec<SyncChainEntry>,
+    /// The version of the first chain entry. Absent when the chain is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_from: Option<u64>,
+    pub receipts: Vec<SyncReceipt>,
+    /// The devices that signed the current head and the chain entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signers: Vec<SyncSigner>,
+}
+
+/// `POST /v1/sync/receipt`: this device merged `version`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiptRequest {
+    pub version: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sync_head_view_of_an_empty_team_has_three_fields() {
+        let empty = SyncHeadView {
+            version: 0,
+            head: None,
+            signature: None,
+            device_id: None,
+            device_name: None,
+            pushed_at: None,
+            chain: vec![],
+            chain_from: None,
+            receipts: vec![],
+            signers: vec![],
+        };
+        assert_eq!(
+            serde_json::to_string(&empty).unwrap(),
+            r#"{"version":0,"chain":[],"receipts":[]}"#
+        );
+        assert!(serde_json::from_str::<ReceiptRequest>(r#"{"version":1,"x":2}"#).is_err());
+    }
 
     #[test]
     fn run_request_refuses_unknown_fields() {

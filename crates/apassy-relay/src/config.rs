@@ -128,6 +128,9 @@ pub struct Limits {
     /// The most long polls of the owner's host at once (`GET /v1/host/requests`). A
     /// poll over this is answered at once, as with `wait=0`.
     pub host_long_polls: usize,
+    /// The most snapshot transfers (pushes and downloads) of all teams at once. One
+    /// more gets 503 `busy`. Each team also has its own `sync_transfers` limit.
+    pub sync_transfers_total: usize,
 }
 
 impl Default for Limits {
@@ -137,6 +140,7 @@ impl Default for Limits {
             member_reserve: 32,
             long_polls_per_agent: 4,
             host_long_polls: 2,
+            sync_transfers_total: 16,
         }
     }
 }
@@ -172,6 +176,11 @@ impl RelayConfig {
     /// The file of one team.
     pub fn team_path(&self, team: &crate::ids::TeamId) -> PathBuf {
         self.teams_dir().join(format!("{team}.db"))
+    }
+
+    /// The vault snapshots of one team (docs/SPEC.md section 24).
+    pub fn sync_dir(&self, team: &crate::ids::TeamId) -> PathBuf {
+        self.teams_dir().join(format!("{team}.sync"))
     }
 
     /// The vault of a relay from before teams.

@@ -20,7 +20,8 @@ type CodeSnapshot = (i64, Vec<u8>, Option<i64>, Option<String>);
 
 fn defaults() -> Value {
     json!({"members":50,"items":500,"agents":100,"runs_per_hour":1000,
-           "pending_runs":50,"agent_requests":56})
+           "pending_runs":50,"agent_requests":56,"sync_bytes":67108864,
+           "sync_pushes_per_hour":600,"sync_transfers":2})
 }
 
 fn set(relay: &TestRelay, update: Value) -> Value {

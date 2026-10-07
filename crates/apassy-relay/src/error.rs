@@ -58,6 +58,11 @@ pub mod codes {
     // Load.
     pub const BUSY: &str = "busy";
     pub const TEAM_LIMIT: &str = "team_limit";
+    // Vault sync (docs/SPEC.md section 24).
+    /// A push whose head fails a check. The message names the check.
+    pub const SYNC_HEAD_INVALID: &str = "sync_head_invalid";
+    /// `If-Match` does not name the current version. The answer has `ETag`.
+    pub const PRECONDITION_FAILED: &str = "precondition_failed";
     // Anything else.
     pub const RELAY_ERROR: &str = "relay_error";
 }
@@ -87,10 +92,12 @@ pub fn status_of(code: &str) -> u16 {
         | TEAM_LIMIT
         | JOIN_PENDING
         | JOIN_REFUSED
-        | NOT_KEY_HOLDER => 403,
+        | NOT_KEY_HOLDER
+        | SYNC_HEAD_INVALID => 403,
         NOT_FOUND => 404,
         METHOD_NOT_ALLOWED => 405,
         CONFLICT | RUN_NOT_PENDING => 409,
+        PRECONDITION_FAILED => 412,
         PAYLOAD_TOO_LARGE => 413,
         NOT_SUPPORTED => 501,
         UPSTREAM_FAILED | ENCODED_RESPONSE => 502,
@@ -174,6 +181,11 @@ mod tests {
         assert_eq!(RelayError::new(codes::APPROVE_ON_HOST, "x").status(), 403);
         assert_eq!(RelayError::new(codes::RELEASE_INVALID, "x").status(), 403);
         assert_eq!(RelayError::new(codes::TEAM_LIMIT, "x").status(), 403);
+        assert_eq!(RelayError::new(codes::SYNC_HEAD_INVALID, "x").status(), 403);
+        assert_eq!(
+            RelayError::new(codes::PRECONDITION_FAILED, "x").status(),
+            412
+        );
         assert_eq!(RelayError::internal("x").status(), 500);
         assert_eq!(status_of("something_new"), 500);
     }

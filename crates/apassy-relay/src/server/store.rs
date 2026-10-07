@@ -23,8 +23,9 @@ use crate::secret::SecretString;
 
 /// The schema version in `PRAGMA user_version`. Version 1 was the first alpha: it kept
 /// the item values in the vault. Version 2 keeps only sealed values (`uid`, `sealed`).
-/// Version 3 adds devices and permits members without member tokens.
-pub const SCHEMA_VERSION: i64 = 3;
+/// Version 3 adds devices and permits members without member tokens. Version 4 adds
+/// the heads and receipts of vault sync (docs/SPEC.md section 24).
+pub const SCHEMA_VERSION: i64 = 4;
 
 const KDF_ITER: i64 = 256_000;
 const PAGE_SIZE: i64 = 4096;
@@ -103,6 +104,18 @@ CREATE TABLE device_link (
   decided_at INTEGER, device_id INTEGER REFERENCES device(id));
 CREATE INDEX device_link_key ON device_link(public_key);
 ALTER TABLE agent ADD COLUMN device_id INTEGER REFERENCES device(id);
+";
+
+const SYNC_SCHEMA: &str = "
+CREATE TABLE sync_head (
+  version INTEGER PRIMARY KEY CHECK (version >= 1),
+  vault_id TEXT NOT NULL, snapshot_sha256 BLOB NOT NULL, size INTEGER NOT NULL,
+  previous_sha256 BLOB NOT NULL, head_sha256 BLOB NOT NULL,
+  device_id INTEGER NOT NULL REFERENCES device(id), head_time INTEGER NOT NULL,
+  head TEXT NOT NULL, signature BLOB NOT NULL, pushed_at INTEGER NOT NULL);
+CREATE TABLE sync_receipt (
+  device_id INTEGER PRIMARY KEY REFERENCES device(id),
+  version INTEGER NOT NULL, at INTEGER NOT NULL);
 ";
 
 const REBUILD_V3: &str = "
@@ -269,7 +282,7 @@ impl Store {
         Self::create_at(
             path,
             key,
-            &format!("{SCHEMA}{DEVICE_SCHEMA}PRAGMA user_version = 3;"),
+            &format!("{SCHEMA}{DEVICE_SCHEMA}{SYNC_SCHEMA}PRAGMA user_version = 4;"),
         )
     }
 
@@ -289,10 +302,18 @@ impl Store {
                     error.message
                 ))
             })?;
-        } else if version != SCHEMA_VERSION {
+        } else if version != 3 && version != SCHEMA_VERSION {
             return Err(RelayError::internal(
                 "The team vault has an unknown schema version.",
             ));
+        }
+        if store.user_version()? == 3 {
+            store.migrate_v4(path).map_err(|error| {
+                RelayError::internal(format!(
+                    "The team file cannot be moved to schema version 4: {} It is still version 3 and unchanged; free disk space or read the log, then start the relay again.",
+                    error.message
+                ))
+            })?;
         }
         Ok(store)
     }
@@ -300,7 +321,7 @@ impl Store {
     /// Keeps an encrypted version 2 backup and changes the team schema in one transaction.
     fn migrate_v3(&self, path: &Path) -> RelayResult<()> {
         let mut conn = self.lock();
-        write_pre_v3(path)?;
+        write_pre(path, ".pre-v3")?;
 
         // SQLite ignores this change inside a transaction. Never rename the old
         // tables: that would change the names in the existing child foreign keys.
@@ -325,8 +346,7 @@ impl Store {
                     "The team vault has invalid foreign keys. The schema change was rolled back.",
                 ));
             }
-            tx.pragma_update(None, "user_version", SCHEMA_VERSION)
-                .map_err(db)?;
+            tx.pragma_update(None, "user_version", 3).map_err(db)?;
             tx.commit().map_err(db)
         })();
         // The transaction is committed or rolled back before this pragma runs,
@@ -334,6 +354,17 @@ impl Store {
         let foreign_keys = conn.pragma_update(None, "foreign_keys", "ON").map_err(db);
         migration?;
         foreign_keys
+    }
+
+    /// Keeps an encrypted version 3 backup and adds the sync tables in one transaction.
+    /// The change is additive: no table is rebuilt.
+    fn migrate_v4(&self, path: &Path) -> RelayResult<()> {
+        let mut conn = self.lock();
+        write_pre(path, ".pre-v4")?;
+        let tx = Transaction::new(&mut conn, TransactionBehavior::Immediate).map_err(db)?;
+        tx.execute_batch(SYNC_SCHEMA).map_err(db)?;
+        tx.pragma_update(None, "user_version", 4).map_err(db)?;
+        tx.commit().map_err(db)
     }
 
     /// Copies the file to `dest` (mode 0600) while no other statement can run: the
@@ -399,14 +430,15 @@ pub fn copy_private(source: &Path, dest: &Path) -> RelayResult<u64> {
     Ok(bytes)
 }
 
-/// Writes `<file>.pre-v3`: a copy of the version 2 file, the way back for an image that
-/// cannot read version 3. The copy goes to `.pre-v3.tmp`, is synced, and is renamed over
-/// `.pre-v3`, so a stop at any point leaves either the old backup or the new one. A
-/// `.pre-v3` that exists while the file is still version 2 comes from a migration that
-/// did not commit: the file itself is the truth, so the backup is made again from it.
-fn write_pre_v3(path: &Path) -> RelayResult<()> {
+/// Writes `<file><suffix>` (`.pre-v3`, `.pre-v4`): a copy of the file before a schema
+/// change, the way back for an image that cannot read the new version. The copy goes to
+/// `<suffix>.tmp`, is synced, and is renamed over `<suffix>`, so a stop at any point
+/// leaves either the old backup or the new one. A backup that exists while the file is
+/// still at the old version comes from a migration that did not commit: the file itself
+/// is the truth, so the backup is made again from it.
+fn write_pre(path: &Path, suffix: &str) -> RelayResult<()> {
     let mut backup = path.as_os_str().to_os_string();
-    backup.push(".pre-v3");
+    backup.push(suffix);
     let mut temp = backup.clone();
     temp.push(".tmp");
     let (backup, temp) = (Path::new(&backup), Path::new(&temp));
@@ -414,17 +446,18 @@ fn write_pre_v3(path: &Path) -> RelayResult<()> {
         Ok(()) => {}
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(_) => {
-            return Err(RelayError::internal(
-                "An old .pre-v3.tmp cannot be removed.",
-            ));
+            return Err(RelayError::internal(format!(
+                "An old {suffix}.tmp cannot be removed."
+            )));
         }
     }
     if let Err(error) = copy_private(path, temp) {
         let _ = fs::remove_file(temp);
         return Err(error);
     }
-    fs::rename(temp, backup)
-        .map_err(|_| RelayError::internal("The .pre-v3 backup cannot be moved into place."))?;
+    fs::rename(temp, backup).map_err(|_| {
+        RelayError::internal(format!("The {suffix} backup cannot be moved into place."))
+    })?;
     if let Some(parent) = path.parent()
         && let Ok(dir) = fs::File::open(parent)
     {
@@ -742,7 +775,7 @@ mod tests {
         let before = crate::now_unix();
         let store = Store::open_team(&path, &key).unwrap();
         let after = crate::now_unix();
-        assert_eq!(store.user_version().unwrap(), 3);
+        assert_eq!(store.user_version().unwrap(), 4);
         assert_eq!(fs::read(&backup).unwrap(), original);
         assert_eq!(
             fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
@@ -797,11 +830,18 @@ mod tests {
             2
         );
         assert_eq!(
-            Store::open_team(&path, &key)
+            Store::open_at(&dir.path().join("team.db.pre-v4"), &key)
                 .unwrap()
                 .user_version()
                 .unwrap(),
             3
+        );
+        assert_eq!(
+            Store::open_team(&path, &key)
+                .unwrap()
+                .user_version()
+                .unwrap(),
+            4
         );
     }
 
@@ -816,20 +856,20 @@ mod tests {
         fs::write(dir.path().join("team.db.pre-v3.tmp"), b"a half temp copy").unwrap();
         let original = fs::read(&path).unwrap();
         let store = Store::open_team(&path, &key).unwrap();
-        assert_eq!(store.user_version().unwrap(), 3);
+        assert_eq!(store.user_version().unwrap(), 4);
         assert_eq!(
             fs::read(dir.path().join("team.db.pre-v3")).unwrap(),
             original
         );
         assert!(!dir.path().join("team.db.pre-v3.tmp").exists());
         drop(store);
-        // A version 3 file opens again and keeps its backup.
+        // A version 4 file opens again and keeps its backup.
         assert_eq!(
             Store::open_team(&path, &key)
                 .unwrap()
                 .user_version()
                 .unwrap(),
-            3
+            4
         );
         assert_eq!(
             fs::read(dir.path().join("team.db.pre-v3")).unwrap(),
@@ -866,12 +906,102 @@ mod tests {
         );
     }
 
+    /// A version 3 file as `create_team` made it before vault sync.
+    fn v3_vault(path: &Path, key: &SecretString) {
+        let store = Store::create_at(
+            path,
+            key,
+            &format!("{SCHEMA}{DEVICE_SCHEMA}PRAGMA user_version = 3;"),
+        )
+        .unwrap();
+        store
+            .with(|conn| {
+                conn.execute_batch(
+                    "INSERT INTO team (id, name, created_at) VALUES (1, 'Team', 100);
+                     INSERT INTO member (name, role, created_at) VALUES ('owner', 'owner', 100);
+                     INSERT INTO device (member_id, name, public_key, key_holder, created_at)
+                        VALUES (1, 'Mac', X'04AA', 1, 100);",
+                )
+                .map_err(db)
+            })
+            .unwrap();
+    }
+
     #[test]
-    fn fresh_team_uses_v3_and_has_a_member_token_deadline() {
+    fn v4_migration_adds_the_sync_tables_and_keeps_a_v3_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("team.db");
+        let key = SecretString::new("schema migration test passphrase".into());
+        v3_vault(&path, &key);
+        let original = fs::read(&path).unwrap();
+        let store = Store::open_team(&path, &key).unwrap();
+        assert_eq!(store.user_version().unwrap(), 4);
+        let backup = dir.path().join("team.db.pre-v4");
+        assert_eq!(fs::read(&backup).unwrap(), original);
+        assert_eq!(
+            fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!dir.path().join("team.db.pre-v4.tmp").exists());
+        store
+            .with(|conn| {
+                conn.execute_batch(
+                    "INSERT INTO sync_head VALUES (1, 'v', X'00', 1, X'00', X'01', 1, 0, 'h', X'02', 100);
+                     INSERT INTO sync_receipt VALUES (1, 1, 100);",
+                )
+                .map_err(db)?;
+                assert!(conn.execute("INSERT INTO sync_head VALUES (0, 'v', X'00', 1, X'00', X'01', 1, 0, 'h', X'02', 100)", []).is_err());
+                assert!(conn.execute("INSERT INTO sync_receipt VALUES (9, 1, 100)", []).is_err());
+                let name: String = conn.query_row("SELECT name FROM team", [], |r| r.get(0)).map_err(db)?;
+                assert_eq!(name, "Team");
+                Ok(())
+            })
+            .unwrap();
+        drop(store);
+        assert_eq!(
+            Store::open_at(&backup, &key)
+                .unwrap()
+                .user_version()
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            Store::open_team(&path, &key)
+                .unwrap()
+                .user_version()
+                .unwrap(),
+            4
+        );
+        assert_eq!(fs::read(&backup).unwrap(), original);
+    }
+
+    #[test]
+    fn a_failed_v4_backup_leaves_version_3() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("team.db");
+        let key = SecretString::new("schema migration test passphrase".into());
+        v3_vault(&path, &key);
+        let original = fs::read(&path).unwrap();
+        // A directory where the temporary copy goes cannot be removed as a file.
+        fs::create_dir(dir.path().join("team.db.pre-v4.tmp")).unwrap();
+        fs::write(dir.path().join("team.db.pre-v4.tmp/x"), b"x").unwrap();
+        let error = Store::open_team(&path, &key).err().unwrap();
+        assert!(error.message.contains("version 4"), "{error}");
+        assert!(error.message.contains("still version 3"), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(!dir.path().join("team.db.pre-v4").exists());
+        assert_eq!(
+            Store::open_at(&path, &key).unwrap().user_version().unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn fresh_team_uses_v4_and_has_a_member_token_deadline() {
         let dir = tempfile::tempdir().unwrap();
         let key = SecretString::new("new schema test passphrase".into());
         let store = Store::create_team(&dir.path().join("team.db"), &key).unwrap();
-        assert_eq!(store.user_version().unwrap(), 3);
+        assert_eq!(store.user_version().unwrap(), 4);
         store
             .with(|conn| {
                 conn.execute(

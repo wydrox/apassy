@@ -54,6 +54,12 @@ pub struct TeamLimits {
     pub runs_per_hour: u64,
     pub pending_runs: u64,
     pub agent_requests: u64,
+    /// The largest vault snapshot, in bytes (docs/SPEC.md section 24).
+    pub sync_bytes: u64,
+    /// Snapshot pushes in the last 3600 seconds.
+    pub sync_pushes_per_hour: u64,
+    /// Snapshot pushes and downloads of the team at once.
+    pub sync_transfers: u64,
 }
 
 impl Default for TeamLimits {
@@ -65,6 +71,9 @@ impl Default for TeamLimits {
             runs_per_hour: 1000,
             pending_runs: 50,
             agent_requests: 56,
+            sync_bytes: 67_108_864,
+            sync_pushes_per_hour: 600,
+            sync_transfers: 2,
         }
     }
 }
@@ -85,6 +94,12 @@ pub struct TeamLimitsUpdate {
     pub pending_runs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_requests: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_pushes_per_hour: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_transfers: Option<u64>,
 }
 
 impl TeamLimits {
@@ -95,6 +110,7 @@ impl TeamLimits {
             ("agents", self.agents),
             ("runs_per_hour", self.runs_per_hour),
             ("pending_runs", self.pending_runs),
+            ("sync_pushes_per_hour", self.sync_pushes_per_hour),
         ] {
             if !(1..=1_000_000).contains(&value) {
                 return Err(RelayError::invalid(format!(
@@ -104,6 +120,14 @@ impl TeamLimits {
         }
         if !(1..=224).contains(&self.agent_requests) {
             return Err(RelayError::invalid("agent_requests must be 1 to 224."));
+        }
+        if !(1_048_576..=crate::sync_head::MAX_SNAPSHOT_BYTES).contains(&self.sync_bytes) {
+            return Err(RelayError::invalid(
+                "sync_bytes must be 1048576 to 67108864.",
+            ));
+        }
+        if !(1..=8).contains(&self.sync_transfers) {
+            return Err(RelayError::invalid("sync_transfers must be 1 to 8."));
         }
         Ok(())
     }
@@ -116,6 +140,11 @@ impl TeamLimits {
             runs_per_hour: update.runs_per_hour.unwrap_or(self.runs_per_hour),
             pending_runs: update.pending_runs.unwrap_or(self.pending_runs),
             agent_requests: update.agent_requests.unwrap_or(self.agent_requests),
+            sync_bytes: update.sync_bytes.unwrap_or(self.sync_bytes),
+            sync_pushes_per_hour: update
+                .sync_pushes_per_hour
+                .unwrap_or(self.sync_pushes_per_hour),
+            sync_transfers: update.sync_transfers.unwrap_or(self.sync_transfers),
         };
         limits.validate()?;
         Ok(limits)
@@ -435,6 +464,7 @@ mod tests {
             serde_json::json!({
                 "members": 50, "items": 500, "agents": 100,
                 "runs_per_hour": 1000, "pending_runs": 50, "agent_requests": 56,
+                "sync_bytes": 67108864, "sync_pushes_per_hour": 600, "sync_transfers": 2,
             })
         );
         assert_eq!(serde_json::from_str::<TeamLimits>("{}").unwrap(), defaults);

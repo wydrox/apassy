@@ -358,6 +358,18 @@ impl TestRelay {
         self.running = Some(running);
     }
 
+    /// Stops the relay, runs `edit` on its stopped data directory (to rename a team or
+    /// change a file), and starts it again. Access tokens end with the restart.
+    pub fn edit_offline(&mut self, edit: impl FnOnce(&RelayConfig)) {
+        if let Some(running) = self.running.take() {
+            running.stop();
+        }
+        edit(&self.config);
+        let running = start_on_free_port(&mut self.config);
+        self.url = running.url();
+        self.running = Some(running);
+    }
+
     /// Runs SQL on the vault file while the relay runs (to set a time in the past on
     /// a pending run, which a test cannot wait for). The relay keeps its state, in
     /// particular the run keys.

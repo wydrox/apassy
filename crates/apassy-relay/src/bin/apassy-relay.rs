@@ -26,6 +26,7 @@ const USAGE: &str = "Usage:
   apassy-relay admin teams
   apassy-relay admin limits <team id> [--members <n>] [--items <n>] [--agents <n>]
     [--runs-per-hour <n>] [--pending-runs <n>] [--agent-requests <n>]
+    [--sync-bytes <n>] [--sync-pushes-per-hour <n>] [--sync-transfers <n>]
   apassy-relay admin suspend|resume|delete <team id>
   apassy-relay admin backup
 
@@ -66,7 +67,7 @@ fn parse_flags(args: &[String], names: &[&str]) -> Result<Vec<Option<String>>, S
 fn team_arg(args: &[String]) -> Result<TeamId, String> {
     match args {
         [id] => TeamId::parse(id).ok_or_else(|| format!("Not a team id: {id}")),
-        _ => Err("Give one team id, such as t_7k2m9q4x8c.".to_string()),
+        _ => Err("Give one team id, such as t_7k2m5q4x3c.".to_string()),
     }
 }
 
@@ -89,7 +90,7 @@ fn parse_admin(args: &[String]) -> Result<Operator, String> {
         "teams" if rest.is_empty() => Ok(Operator::Teams),
         "limits" => {
             let Some(id) = rest.first() else {
-                return Err("Give one team id, such as t_7k2m9q4x8c.".to_string());
+                return Err("Give one team id, such as t_7k2m5q4x3c.".to_string());
             };
             let team = team_arg(std::slice::from_ref(id))?;
             let names = [
@@ -99,9 +100,12 @@ fn parse_admin(args: &[String]) -> Result<Operator, String> {
                 "--runs-per-hour",
                 "--pending-runs",
                 "--agent-requests",
+                "--sync-bytes",
+                "--sync-pushes-per-hour",
+                "--sync-transfers",
             ];
             let flags = parse_flags(&rest[1..], &names)?;
-            let mut values = [None; 6];
+            let mut values = [None; 9];
             for (index, text) in flags.iter().enumerate() {
                 if let Some(text) = text {
                     values[index] =
@@ -120,6 +124,9 @@ fn parse_admin(args: &[String]) -> Result<Operator, String> {
                     runs_per_hour: values[3],
                     pending_runs: values[4],
                     agent_requests: values[5],
+                    sync_bytes: values[6],
+                    sync_pushes_per_hour: values[7],
+                    sync_transfers: values[8],
                 });
             if let Some(update) = set {
                 TeamLimits::default()
@@ -314,6 +321,10 @@ mod tests {
             vec!["limits", "t_abcdefgh23", "--items", "0"],
             vec!["limits", "t_abcdefgh23", "--items", "1000001"],
             vec!["limits", "t_abcdefgh23", "--agent-requests", "225"],
+            vec!["limits", "t_abcdefgh23", "--sync-bytes", "1048575"],
+            vec!["limits", "t_abcdefgh23", "--sync-bytes", "268435457"],
+            vec!["limits", "t_abcdefgh23", "--sync-pushes-per-hour", "0"],
+            vec!["limits", "t_abcdefgh23", "--sync-transfers", "9"],
             vec!["limits", "t_abcdefgh23", "--items", "1", "--items", "2"],
             vec!["limits", "t_abcdefgh23", "--unknown", "1"],
             vec!["limits", "t_abcdefgh23", "t_bcdefgh234"],
@@ -340,6 +351,12 @@ mod tests {
                 "5",
                 "--agent-requests",
                 "6",
+                "--sync-bytes",
+                "1048576",
+                "--sync-pushes-per-hour",
+                "8",
+                "--sync-transfers",
+                "1",
             ]))
             .unwrap(),
             Operator::Limits {
@@ -351,6 +368,9 @@ mod tests {
                     runs_per_hour: Some(4),
                     pending_runs: Some(5),
                     agent_requests: Some(6),
+                    sync_bytes: Some(1_048_576),
+                    sync_pushes_per_hour: Some(8),
+                    sync_transfers: Some(1),
                 }),
             }
         );

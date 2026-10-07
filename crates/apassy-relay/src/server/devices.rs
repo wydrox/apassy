@@ -76,6 +76,26 @@ pub fn drop_tokens(core: &Core, devices: &[DeviceId]) {
     state.compact();
 }
 
+/// How often a device's `last_seen_at` is written outside sign-in, at most.
+pub const SEEN_EVERY_SECS: u64 = 60;
+
+/// Sets `last_seen_at` of a device that used the relay, at most once per
+/// `SEEN_EVERY_SECS`, so frequent calls (sync long polls) write little. A time ahead of
+/// `now` (the clock went back) is replaced too.
+pub fn mark_seen(conn: &Connection, id: DeviceId, now: u64) -> RelayResult<()> {
+    conn.execute(
+        "UPDATE device SET last_seen_at = ?2 WHERE id = ?1 \
+         AND (last_seen_at IS NULL OR last_seen_at <= ?3 OR last_seen_at > ?2)",
+        params![
+            to_i(id.0),
+            to_i(now),
+            to_i(now.saturating_sub(SEEN_EVERY_SECS))
+        ],
+    )
+    .map_err(db)?;
+    Ok(())
+}
+
 pub fn checked_label(text: &str) -> RelayResult<String> {
     let text = text.trim();
     if text.is_empty()
@@ -95,7 +115,7 @@ fn json_value(value: &impl serde::Serialize) -> RelayResult<Value> {
 
 pub fn view(conn: &Connection, id: DeviceId, current: Option<DeviceId>) -> RelayResult<DeviceView> {
     conn.query_row(
-        "SELECT d.member_id, m.name, d.name, d.key_holder, d.created_at, d.last_seen_at \
+        "SELECT d.member_id, m.name, d.name, d.key_holder, d.created_at, d.last_seen_at, d.public_key \
          FROM device d JOIN member m ON m.id = d.member_id \
          WHERE d.id = ?1 AND d.revoked_at IS NULL AND m.revoked_at IS NULL",
         params![to_i(id.0)],
@@ -109,6 +129,7 @@ pub fn view(conn: &Connection, id: DeviceId, current: Option<DeviceId>) -> Relay
                 created_at: to_u(row.get(4)?),
                 last_seen_at: row.get::<_, Option<i64>>(5)?.map(to_u),
                 current: current == Some(id),
+                public_key: crate::hostkeys::encode_b64(&row.get::<_, Vec<u8>>(6)?),
             })
         },
     )
@@ -497,6 +518,103 @@ mod tests {
             authorize_host(&core, &other).unwrap_err().code,
             codes::NOT_KEY_HOLDER
         );
+    }
+
+    /// SPEC 23.5 and 24.4: the sync calls mark a device as seen, at most once a minute.
+    #[test]
+    fn sync_calls_mark_the_device_seen_once_a_minute() {
+        use crate::api::ReceiptRequest;
+        use crate::server::auth::DeviceAuth;
+        use crate::server::sync::{self, PushRequest};
+        use sha2::{Digest, Sha256};
+
+        let (_dir, core, bearer) = fixture();
+        let t0 = crate::now_unix();
+        let owner = crate::server::auth::authenticate_core(&core, bearer.expose(), t0)
+            .unwrap()
+            .member()
+            .clone();
+        let key = DeviceKey::generate().unwrap();
+        let made = enroll(
+            &core,
+            &owner,
+            &DeviceEnroll {
+                name: "Mac".into(),
+                public_key: key.public_key_b64(),
+            },
+            t0,
+        )
+        .unwrap();
+        let id = DeviceId(made["id"].as_u64().unwrap());
+        let mac = MemberAuth {
+            device: Some(DeviceAuth {
+                id,
+                key_holder: true,
+            }),
+            ..owner
+        };
+        let last_seen = || {
+            core.store
+                .with(|conn| {
+                    conn.query_row(
+                        "SELECT last_seen_at FROM device WHERE id = ?1",
+                        params![to_i(id.0)],
+                        |row| row.get::<_, Option<i64>>(0),
+                    )
+                    .map_err(db)
+                })
+                .unwrap()
+                .map(to_u)
+        };
+        assert_eq!(last_seen(), None);
+
+        // A head poll marks it; a receipt within the minute does not write again.
+        sync::head(&core, &mac, 0, 0, t0).unwrap();
+        assert_eq!(last_seen(), Some(t0));
+        sync::receipt(&core, &mac, &ReceiptRequest { version: 0 }, t0 + 59).unwrap();
+        assert_eq!(last_seen(), Some(t0));
+        sync::receipt(&core, &mac, &ReceiptRequest { version: 0 }, t0 + 60).unwrap();
+        assert_eq!(last_seen(), Some(t0 + 60));
+
+        // A push marks it.
+        let body = b"synthetic snapshot";
+        let text = format!(
+            "apassy-relay-sync-head-v1\n0f3c2a10-5b7e-4d9a-8c21-6f0e4b1d9a77 1 {} {}\n{} {}/{} 1790000000",
+            crate::sync_head::hex(&Sha256::digest(body)),
+            body.len(),
+            "0".repeat(64),
+            core.team.as_str(),
+            id.0
+        );
+        let signature = crate::hostkeys::encode_b64(&key.sign(text.as_bytes()).unwrap());
+        let headers = [
+            ("If-Match", "\"0\"".to_owned()),
+            ("Content-Length", body.len().to_string()),
+            (
+                crate::sync_head::HEAD_HEADER,
+                crate::hostkeys::encode_b64(text.as_bytes()),
+            ),
+            (crate::sync_head::SIGNATURE_HEADER, signature),
+        ];
+        let push = PushRequest::from_headers(|name| {
+            headers
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, v)| v.clone())
+        })
+        .unwrap();
+        let reauth = || Ok(mac.clone());
+        sync::push(&core, &mac, &push, &mut &body[..], &reauth, t0 + 130).unwrap();
+        assert_eq!(last_seen(), Some(t0 + 130));
+
+        // A download marks it, and a long poll within the minute does not.
+        drop(sync::open_snapshot(&core, &mac, 1, t0 + 200).unwrap());
+        assert_eq!(last_seen(), Some(t0 + 200));
+        sync::head(&core, &mac, 0, 0, t0 + 210).unwrap();
+        assert_eq!(last_seen(), Some(t0 + 200));
+        // The device list shows it.
+        let listed = list(&core, &mac).unwrap();
+        assert_eq!(listed[0]["last_seen_at"], t0 + 200);
     }
 
     #[test]

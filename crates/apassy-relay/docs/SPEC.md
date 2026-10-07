@@ -78,6 +78,7 @@ One crate, `apassy-relay`, license `FSL-1.1-ALv2` (FSL-1.1 with the Apache-2.0 f
 | `tests/build_options.rs` | SQLCipher build flags | skeleton (frozen) |
 | `docs/SPEC.md` | This file | skeleton (frozen) |
 | `src/hostkeys.rs`, `src/decision.rs` | Host-held item keys: the crypto and formats, and the pure part of the decision (used by the relay and by the host) | server |
+| `src/sync_head.rs`, `src/server/sync.rs`, `tests/server_sync.rs` | Vault sync: the signed head, and the endpoints, storage, and limits (section 24) | server |
 | `src/server/**`, `src/bin/apassy-relay.rs`, `tests/server_*.rs`, `tests/common/relay.rs` | Track server (`server/host.rs` and `server/runkeys.rs`: the host endpoints and the run keys) | server |
 | `src/proxy/**`, `tests/proxy_*.rs`, `tests/common/upstream.rs` | Track proxy | proxy |
 | `src/cli/**`, `src/bin/apassy-team.rs`, `tests/cli_*.rs`, `tests/host_cli.rs`, `Dockerfile`, `.dockerignore`, `deploy/**`, `docs/OPERATIONS.md`, `README.md` | Track client (`cli/host.rs` and `cli/keystore.rs`: the owner's host and the key store) | client |
@@ -147,7 +148,7 @@ From `src/config.rs` (`RelayConfig::from_env`):
 | Session key | `apassy_ses_` | the relay, when the host releases a run | in the path `/p/<key>/...` | the session TTL |
 | Team code | `apassy_tcd_` | the operator, `apassy-relay admin team-code` | in the body of `POST /v1/teams` | one use, 1 to 720 hours, default 72 |
 
-- Every token of a team names its team: `<prefix><team id>_<64 hex>`, for example `apassy_mbr_t_7k2m9q4x8c_<64 hex>`. A team code names no team: `apassy_tcd_<64 hex>`. The relay reads the team id first and looks the hash up in that team's file only (section 22).
+- Every token of a team names its team: `<prefix><team id>_<64 hex>`, for example `apassy_mbr_t_7k2m5q4x3c_<64 hex>`. A team code names no team: `apassy_tcd_<64 hex>`. The relay reads the team id first and looks the hash up in that team's file only (section 22).
 - A member token `apassy_mbr_<64 hex>` or an agent token `apassy_agt_<64 hex>` of a relay from before teams has no team id. Only the migrated team accepts them.
 
 - A bearer with the wrong kind for an endpoint gets 401 `unauthenticated`. An expired agent token gets 401 `token_expired`.
@@ -501,14 +502,18 @@ CMD ["serve"]
 
 ## 17. Cloudflare Worker
 
-`deploy/worker/` (track client): `src/index.ts`, `wrangler.jsonc`, `package.json` (pinned devDependencies, not installed), `test/index.test.ts`.
+`deploy/worker/` (track client): `src/index.ts`, `src/limits.ts`, `wrangler.jsonc`, `package.json` (pinned devDependencies, not installed), `test/index.test.ts`.
+
+`src/index.ts` is the Worker's main module. It exports only the `default` handler (and types): workerd refuses to start a Worker whose main module exports any other value. Shared values, such as the body length limits, live in `src/limits.ts`. A test checks this.
 
 The Worker, about 40 lines:
 - `env.RELAY_ORIGIN` (a var, the quick tunnel URL) and `env.EDGE_SECRET` (a secret). If either is missing: 503 text "relay not configured".
 - The target URL is built by string: `origin + url.pathname + url.search`, where `origin = new URL(env.RELAY_ORIGIN).origin`. Never `new URL(path, origin)`: a path such as `//evil.example/x` would change the host and leak the edge secret.
 - Headers: a copy of the incoming headers; delete `x-apassy-edge` (any case), then set it to `env.EDGE_SECRET`.
-- `fetch(target, {method, headers, body: request.body for methods other than GET and HEAD, redirect: "manual"})`. The body streams; nothing is buffered. Return the response as is.
+- `fetch(target, {method, headers, body: request.body for methods other than GET and HEAD, redirect: "manual"})`. The body streams; nothing is buffered. Return the response as is. For GET and HEAD, no body is forwarded, so `Content-Length` and `Transfer-Encoding` are removed from the forwarded headers.
 - No logging of URLs (the path holds session keys). `observability.enabled: false`.
+- Per-IP limits (Workers Rate Limiting, keyed by `cf-connecting-ip`, fail open when the binding is missing or fails; over the limit: 429 `rate_limited` with `Retry-After: 60`, and the relay never sees the request): `CREATE_LIMITER` (10 a minute) for `POST /v1/join`, `/v1/teams`, `/v1/devices/link`, and `/v1/devices/link/cancel`; `AUTH_LIMITER` (60 a minute) for `POST /v1/auth/challenge` and `/v1/auth/token`; `SYNC_LIMITER` (60 a minute) for `PUT /v1/sync/snapshot`.
+- Body length (24.5, 24.10): tiny_http reads the rest of a declared body after any early answer, on any path. So before the limiter and the relay, the Worker checks the `Content-Length` of every request other than GET and HEAD, by its exact method and path: `PUT /v1/sync/snapshot` up to 64 MiB plus 64 KiB (`MAX_SNAPSHOT_LENGTH`); a path under `/p/` up to 8 MiB plus 64 KiB (`MAX_PROXY_LENGTH`, the proxy's `MAX_REQUEST_BODY` plus the margin); every other path, including `PUT /v1/sync/snapshot/`, `POST /v1/sync/snapshot`, and paths the relay does not route, up to 64 KiB plus 64 KiB (`MAX_JSON_LENGTH`). Above it: 413 `payload_too_large`. A `Content-Length` that is not 1 to 20 digits: 400 `invalid_request`. The push must also have a `Content-Length` and no `Transfer-Encoding` (else 400). Another request without `Content-Length` passes: it has no body or a chunked one, and tiny_http does not read the rest of a chunked body after an early answer, so the relay reads at most its own cap. The relay keeps its own checks (24.3, 12).
 
 `wrangler.jsonc`:
 
@@ -718,7 +723,7 @@ No endpoint takes a team id in the path.
 | `resume ID` | opens the team again (a restart for that team: `ready` runs become `ended`); a row `team_resumed` |
 | `delete ID` | only a suspended team, and only once the requests that started before the suspension have ended (it waits up to 10 seconds, then refuses): removes its row and file key from `relay.db`, then its file. A file that cannot be deleted is an error. No undo |
 
-The socket command is `{"command":"limits","team":"t_7k2m9q4x8c","set":{"members":25}}`. An absent or null `set` reads the limits. The result contains the six effective fields. Each change writes `limits_changed` with actor `operator` in the team audit and relay audit.
+The socket command is `{"command":"limits","team":"t_7k2m5q4x3c","set":{"members":25}}`. An absent or null `set` reads the limits. The result contains the six effective fields. Each change writes `limits_changed` with actor `operator` in the team audit and relay audit.
 
 At start, directory version 1001 becomes 1002. The relay adds `limits TEXT` and changes `PRAGMA user_version` in one transaction. Existing teams use the defaults. New directories use version 1002. The relay refuses unknown versions.
 
@@ -851,18 +856,19 @@ Member tokens still work, until the team's `member_tokens_until`, for a member t
 
 ### 23.5 Endpoints
 
-The five edge endpoints (`/v1/auth/challenge`, `/v1/auth/token`, `/v1/join`, `/v1/devices/link`, and `/v1/teams`) reject a nonempty bearer token with 401 `unauthenticated`. These endpoints use only the body or code for team selection. Every authenticated endpoint selects its team from the bearer token, never from a body field.
+The six edge endpoints (`/v1/auth/challenge`, `/v1/auth/token`, `/v1/join`, `/v1/devices/link`, `/v1/devices/link/cancel`, and `/v1/teams`) reject a nonempty bearer token with 401 `unauthenticated`. These endpoints use only the body or code for team selection. Every authenticated endpoint selects its team from the bearer token, never from a body field.
 
 | Method and path | Auth | Body | Result |
 | --- | --- | --- | --- |
 | `POST /v1/auth/challenge` | edge | `ChallengeRequest` | `Challenge`; 403 `join_pending` / `join_refused`; 401; 503 `busy` when the team's nonce table is full |
 | `POST /v1/auth/token` | edge | `TokenRequest` | `AccessGranted` |
 | `POST /v1/devices/enroll` | member token (not an access token) | `DeviceEnroll` | `DeviceView`. 409 `conflict` if an authenticated member has a live device already, or the key is taken. An access token is 401; after successful enrollment the old member token is also 401 |
-| `GET /v1/devices` | member | | `[DeviceView]`: the caller's devices; the owner sees all live devices. `current` marks the caller's device |
+| `GET /v1/devices` | member | | `[DeviceView]`: the caller's devices; the owner sees all live devices. `current` marks the caller's device. `last_seen_at` is set at each sign-in, and by the sync calls of a device (24.4) at most once a minute (`devices::mark_seen`), so a Mac that syncs shows a current time without a write on every long poll |
 | `DELETE /v1/devices/{id}` | member: own device; owner: any | | `Created`. Revokes the device, its access tokens, its agents (as `DELETE /v1/agents`: their sessions end and their pending runs are invalidated), and the links it made **(review)**. 409 for the last live device of the last live owner **(review)** |
 | `POST /v1/devices/{id}/key-holder` | section 23.4 | | `DeviceView` |
 | `POST /v1/devices/links` | member with an access token, kind person | | `LinkCreatedRef`. 409 at 10 live devices |
 | `POST /v1/devices/link` | edge | `LinkRequest` | `Pending` (`by` = the member name). The code must be an open, unexpired link code of this team whose device and member are still live; the link becomes `pending` (one use). The key must not be live in the team. The same code with the same key again (a retry) returns the same `Pending` while the link is pending, unexpired, and its maker device and member are live. Terminal links cannot be retried. Invalid or used link codes are 403 `forbidden`; a code with no active team is 401 **(review)** |
+| `POST /v1/devices/link/cancel` | edge | `LinkCancel` (`code`, `public_key`) | `Created` (the link id). The new device takes back its pending link before a confirmation (section 24): the link with this code and this key becomes `refused` (its key then gets `join_refused` at sign-in, and `GET /v1/devices/links` no longer lists it); row `device_link_cancelled` (actor `edge`). A retry after a cancel, or a cancel of an expired link, answers the same. A confirmed link is 409 `conflict`: the device signs in and removes itself (`DELETE /v1/devices/{id}`). Another key or an unknown code is 403 `forbidden`. The Worker limits it per IP address as `POST /v1/devices/link` |
 | `GET /v1/devices/links` | member with an access token | | `[LinkView]`: pending links of the caller's member |
 | `POST /v1/devices/links/{id}/confirm` | member with an access token of the same member | `ConfirmRequest` | `DeviceView` of the new device (never the key holder). `safety` must equal the link's words (else 409 `conflict`, the link stays pending). Only a `pending` link with `expires_at > now` **(review)**. A link of another member returns 404 `not_found`, including for an owner. Row `device_added`; when the member is an owner, also `owner_device_added` |
 | `POST /v1/devices/links/{id}/refuse` | same | | `Created` |
@@ -892,8 +898,8 @@ Every new audit row holds no key, nonce, signature, code, or token. Public keys 
 Settings version 2, `settings.json` (directory 0700, file 0600):
 
 ```json
-{"version": 2, "current": "t_7k2m9q4x8c",
- "teams": {"t_7k2m9q4x8c": {"relay_url": "https://...", "team": "Family", "member": "rafal",
+{"version": 2, "current": "t_7k2m5q4x3c",
+ "teams": {"t_7k2m5q4x3c": {"relay_url": "https://...", "team": "Family", "member": "rafal",
                             "device_id": 3, "member_token": null}}}
 ```
 
@@ -931,3 +937,141 @@ Commands (secrets only on stdin, as today):
 - Lost devices: if the last owner loses every device, nobody can sign in as an owner. Keep two owners. The operator cannot add an owner device through the relay in this stage.
 - An owner device added through a link and a reused invite are shown only in the audit; owners are not notified elsewhere yet.
 - The relay operator can still change a team's file by hand (section 22).
+
+## 24. Vault sync
+
+ADR 0022 of the core, stage 1. A team holds one opaque snapshot of one vault, with a head signed by the device that pushed it and a version that grows by one for each push. The relay checks the head, the chain, and the hash; it never opens a snapshot (SQLCipher ciphertext with the passphrase of the vault as its only key). The app side is `docs/contracts/relay-sync-v1.md` of the core; both documents describe one wire, and this section takes precedence for the relay. Shared code: `src/sync_head.rs` (the head grammar, its hash, and the checks), used by the server; the CLI does not use sync in this stage.
+
+### 24.1 Words and limits
+
+| Thing | Rule |
+| --- | --- |
+| Snapshot | the bytes of one push, opaque; file `teams/<team id>.sync/<version>.bin`, mode 0600, in a directory of mode 0700. The current and the previous version are kept; older files are removed at the push that makes them older |
+| Version | an integer from 1; `0` is "no snapshot"; each push is the current version plus one. After `DELETE /v1/sync` it starts at 1 again |
+| Head | the text of 24.3, signed by the pushing device, stored with its signature in `sync_head`. The newest 10000 rows are kept (maintenance) |
+| Head hash | SHA-256 of the head text; the `previous` of the next head |
+| Chain | the heads after a version, oldest first, at most 1000 in one answer: a device that is further behind asks again from the last one |
+| Signer | a device that signed a head of an answer, with its public key. A removed device stays a signer of the heads it pushed while it was a member, with the newest version it pushed (`last_version`); a client accepts its signature only on a head up to that version |
+| Receipt | the newest version a device reported as merged, one row per device |
+| Sync headers | `X-Apassy-Sync-Head` (base64url of the head text, at most 512 characters), `X-Apassy-Sync-Signature` (base64url of the DER signature, at most 96 characters) |
+| `If-Match` | `"<decimal version>"`, required on a push and on a delete; `"0"` means "no snapshot" |
+| `sync_bytes` | per team, default 67108864 (64 MiB), 1048576 to 67108864: the largest snapshot (`Content-Length` and the head's `size`). 64 MiB is the most that the head grammar and the app allow |
+| `sync_pushes_per_hour` | per team, default 600, 1 to 1000000: `sync_head` rows with `pushed_at` in the last 3600 seconds (the kept rows are always enough) |
+| `sync_transfers` | per team, default 2, 1 to 8: pushes and snapshot downloads in flight at once. Over: 503 `busy`, `Retry-After: 2` |
+| `Limits::sync_transfers_total` | per relay, 16, not read from the environment: the same for the whole process |
+| Sync long polls | at most 1 per device (`LongPolls::new(1)`); a second is answered at once, as with `wait=0`; `wait` is 0 to 25 |
+| Auth | an access token of a live device of the team. A member token is 401 `unauthenticated` (device-only, as the link endpoints). `DELETE /v1/sync` needs the device of a live owner (else 403 `forbidden`). No role limits a push in this stage |
+| Last seen | a head request (also a long poll, at its start), a push, a snapshot download, and a receipt set the device's `last_seen_at` when it is empty or at least 60 seconds old (`SEEN_EVERY_SECS`); a failure to write it does not fail the call |
+
+### 24.2 Schema version 4 (team file)
+
+`Store::open_team` migrates a version 3 file to version 4 with the copy rule of 23.2: copy to `<file>.pre-v4` (mode 0600, written as `.pre-v4.tmp`, synced, renamed; refuse to migrate when the copy cannot be made; keep it, the version 3 image refuses version 4), then in one `BEGIN IMMEDIATE` transaction create the tables and set `PRAGMA user_version = 4`. The migration is additive; no table is rebuilt. A new team file is made at version 4. Version 1 and unknown versions are refused as today. `remove_team_file` also removes `.pre-v4`, `.pre-v4.tmp`, and the `.sync` directory.
+
+```sql
+CREATE TABLE sync_head (
+  version INTEGER PRIMARY KEY CHECK (version >= 1),
+  vault_id TEXT NOT NULL, snapshot_sha256 BLOB NOT NULL, size INTEGER NOT NULL,
+  previous_sha256 BLOB NOT NULL, head_sha256 BLOB NOT NULL,
+  device_id INTEGER NOT NULL REFERENCES device(id), head_time INTEGER NOT NULL,
+  head TEXT NOT NULL, signature BLOB NOT NULL, pushed_at INTEGER NOT NULL);
+CREATE TABLE sync_receipt (
+  device_id INTEGER PRIMARY KEY REFERENCES device(id),
+  version INTEGER NOT NULL, at INTEGER NOT NULL);
+```
+
+The current version is `max(version)` of `sync_head`, or 0. The head rows are the chain; the snapshot files exist only for the current and the previous version.
+
+### 24.3 The signed head
+
+```
+apassy-relay-sync-head-v1
+<vault_id> <version> <snapshot_sha256> <size>
+<previous> <device> <time>
+```
+
+Exactly three lines joined with `\n`, no trailing newline, no `\r`, one space between fields, ASCII only. `vault_id`: 36 characters, lowercase UUID form. `version`: decimal, 1 or more, no leading zero. `snapshot_sha256`: 64 lowercase hex. `size`: decimal, 1 to 67108864 (64 MiB), no leading zero; a push also needs it at most `sync_bytes` (check 3) and equal to `Content-Length` (check 7). `previous`: 64 lowercase hex, the head hash of the current head, or 64 `0` when the team has no head. `device`: `<team id>/<device id>` with the device id decimal and no leading zero. `time`: decimal, at most 12 digits; the pushing device's clock, stored as `head_time`, not checked against the relay's clock. Any other text is 400 `invalid_request` before any signature work.
+
+The signature is ECDSA P-256 with SHA-256 over the bytes of the head text, ASN.1 DER (`device::verify`), by the public key of the device named in `device`.
+
+Checks of a push, in this order; the first failure answers and nothing is stored:
+
+1. The headers (400): `If-Match`, `Content-Length`, both sync headers present and decodable, the head parses. `Transfer-Encoding` is refused. Then a `Content-Length` above 64 MiB is 413 `payload_too_large`, also before the token: no push can have it. The Worker refuses a missing or malformed `Content-Length`, `Transfer-Encoding`, and a `Content-Length` above 64 MiB plus 64 KiB before the relay (section 17); the relay checks again.
+2. The token (401), read again after the body as 23.5 requires. An access token that expires during the upload fails this second read (401 `token_expired`) after the whole body; so a client signs in again before an upload when its token has less left than the longest upload it allows (the app: 10 minutes).
+3. `Content-Length` at most `sync_bytes` (413 `payload_too_large`). The relay asks to close the connection, but tiny_http drops that header and reads the rest of the body first (24.5).
+4. `sync_pushes_per_hour` (403 `team_limit`, a `limit_reached` row as in section 22).
+5. A transfer slot of the team and of the relay (503 `busy`).
+6. `If-Match` equals the current version (412 `precondition_failed`; the answer carries `ETag: "<current>"`).
+7. 403 `sync_head_invalid` with the message naming the check: `device` names this team and the device of the token; the signature verifies with that device's stored public key; `version` is the current version plus one; `previous` is the current head's `head_sha256`, or 64 zeros when there is none; `vault_id` equals the current head's when there is one; `size` equals `Content-Length`.
+8. The body streams to `teams/<team id>.sync/<version>.<random>.tmp` while it is hashed; fewer or more bytes than `Content-Length` is 400; a hash other than `snapshot_sha256` is 403 `sync_head_invalid` ("hash"). The temporary file is removed on every failure.
+9. Under the team's sync mutex (one commit at a time): the current version is read again (412 when another push committed first); the file is renamed to `<version>.bin`; in the transaction that inserts the row, the device and its member must still be live (401 otherwise, and the file goes): a removal takes the same store, so a device removed after step 2 still gets no head; the row is inserted; the file of version minus two is removed; `sync_pushed` is written; the notifier wakes the long polls.
+
+A refused push writes a refusal row (kind `sync`, action `sync_refused`, detail `{"reason": "<check>"}`), rate-limited as other refusals. The reasons are the checks of 7 and 8 (`device`, `signature`, `version`, `previous`, `vault id`, `size`, `hash`), `if_match` (412), `too_large` (413), and `length` (400 for the body).
+
+### 24.4 Endpoints
+
+| Method and path | Auth | Body | Result |
+| --- | --- | --- | --- |
+| `GET /v1/sync/head?since=N&wait=S` | device | | `SyncHeadView`: `version` (0 when empty), and when not empty `head` (base64url text), `signature`, `device_id`, `device_name`, `pushed_at` (relay time); `chain`: the rows of versions `since + 1` to `version`, oldest first, at most 1000 (with more, the oldest 1000: the device asks again with `since` = the last entry's version), each `{version, head, signature, device_id, pushed_at}`; `chain_from`: the version of the first chain entry, absent when the chain is empty; `signers`: `[{device_id, public_key, removed, last_version}]` for the device of the current head and of each chain entry (`public_key` base64url; `removed` and `last_version` only for a device that was removed or whose member was removed: `last_version` is the newest version of its kept heads); `receipts`: `[{device_id, device_name, version, at}]` for the live devices. `ETag: "<version>"`. `wait` 0 to 25: while `version == since`, hold the answer up to `wait` seconds on the team notifier (a push or a delete wakes it), then answer the current state. A `since` above the current version (after a delete or a restore) answers at once with an empty chain |
+| `GET /v1/sync/snapshot?version=N` | device | | the bytes: `200`, `Content-Type: application/octet-stream`, `Content-Length`, `ETag: "N"`, `X-Apassy-Sync-Head`, `X-Apassy-Sync-Signature`, `Cache-Control: no-store`, streamed from the file (`Response::from_file`). `version` is required; a version that is not the current or the previous one, or an empty team, is 404. Takes a transfer slot. Writes `sync_fetched` after the answer, at most once per device and version |
+| `PUT /v1/sync/snapshot` | device | the snapshot bytes, with `If-Match`, `Content-Type: application/octet-stream`, `Content-Length`, the two sync headers | 24.3. On success `SyncHeadView` of the new version with an empty chain and the receipts |
+| `POST /v1/sync/receipt` | device | `{"version": N}` | `{"version": N, "at": now}`; upsert of `sync_receipt` for the caller's device; `N` above the current version is 409 `conflict`; row `sync_received` |
+| `DELETE /v1/sync` | owner's device, `If-Match` | | `{"last_version": N}`. Removes every `sync_head` and `sync_receipt` row and the `.sync` directory's files; `If-Match: "0"` on an empty team is a no-op. Row `sync_deleted` with `last_version`; wakes the long polls |
+
+Changes to existing results: `DeviceView` gains `public_key` (base64url of the stored 65 bytes); `LinkView` gains `public_key` (the key of the pending request), so the confirming device computes the safety words itself. `TeamCreated` is unchanged. The chain entries carry `device_id` only; the keys are in `signers`. A client checks every head with them, not with `GET /v1/devices`, which lists live devices only: a head pushed by a device that was removed later (a Mac that turned relay sync off, or one removed in "Devices…") stays verifiable for the versions it pushed, and the other devices push on top of it. The relay never accepts a push of a removed device (its tokens end at the removal; a push is read again after its body, and its commit checks the device again in the transaction that stores the head), so its newest kept head is the last one it could sign.
+
+### 24.5 HTTP layer
+
+- Routes: `["v1","sync","head"]` GET, `["v1","sync","snapshot"]` GET and PUT, `["v1","sync","receipt"]` POST, `["v1","sync"]` DELETE. `Need::Member` for all but the delete (`Need::Owner`); the handlers then require `MemberAuth.device` (401 otherwise), as `own_device` does for links.
+- `PUT /v1/sync/snapshot` is the one route that bypasses `read_body` and `MAX_JSON_BODY`: `handle` dispatches it with the `Request` so the handler streams `as_reader()` to the temporary file. It re-authenticates after the body as every POST and PUT does. The 64 KiB cap stays for every JSON body, including `POST /v1/sync/receipt`.
+- Sync paths are in the member lane (not `is_agent_path`). The transfer slots (24.1) bound the threads a team can hold with slow transfers of a signed-in device; `Limits::sync_transfers_total` bounds the relay. A stalled client holds its thread until the TCP connection ends; this is accepted in this stage and listed in 24.10. A push that is answered before its transfer slot (a 400, 401, or 413 before the token, a 403 or 413 after it) takes no slot, so the slots do not bound those.
+- `Core` gets `sync_transfers: AtomicUsize`, `sync_polls: LongPolls`, and `sync_commit: Mutex<()>`, and `relay_sync_transfers: Arc<AtomicUsize>`: one counter of the hub, shared by every team, for `Limits::sync_transfers_total`. `sync_commit` also covers the lookup and open of a snapshot for a download, the delete, and the copy of a backup, so a file is never removed or replaced between its row and its open.
+- Every JSON answer has `Content-Length` (never chunked), and so has a snapshot download. A 503 answer has `Retry-After: 2`. tiny_http drops a `Connection: close` header: after an early answer to a push (400, 401, 412, 413, 403), it reads and drops the rest of the declared body, holding the request thread, before the connection serves another request or closes. So the app always sends the whole body (contract relay-sync-v1 section 9). Closing the socket on an early answer needs a server that exposes it (tiny_http 0.12 does not); see 24.10. The same holds for any early answer with a declared body (404, 405, 401, 413), on any path. The edge bounds what such a request can make the relay read: the Worker refuses a push without a usable `Content-Length` or with one above 64 MiB plus 64 KiB, a proxy body above 8 MiB plus 64 KiB, and any other body above 128 KiB, before forwarding it, and limits pushes (exact `PUT /v1/sync/snapshot`) per IP address with `SYNC_LIMITER` (section 17). It bounds bytes, not time.
+- Maintenance (every 5 seconds, per team): `DELETE FROM sync_head WHERE version <= current - 10000`; a `.tmp` file in the `.sync` directory older than one hour is removed.
+
+### 24.6 Audit
+
+New actions, all without the head text, the signature, or any snapshot byte: `sync_pushed {version, device_id, size}`, `sync_fetched {version, device_id}`, `sync_received {version, device_id}`, `sync_deleted {last_version}`, and the refusal `sync_refused {reason}` (actor `edge` as other refusals, rate-limited). `limit_reached` names `sync_pushes_per_hour` as other limits. The masks need no change: a head holds no token form.
+
+### 24.7 Operator
+
+`limits ID` reads and sets three more fields: `--sync-bytes N`, `--sync-pushes-per-hour N`, `--sync-transfers N`, with the ranges of 24.1; the result prints nine effective values. `TeamLimits` gets the three fields with `serde(default)`, so an existing `limits` column reads unchanged. `teams` shows, for an open team, the current sync version and the size of the current snapshot (`sync_version`, `sync_size`). `delete ID` removes the `.sync` directory with the file. The backup of each team (`deploy/vps/backup`) copies `teams/<id>.sync/` next to `teams/<id>.db`: up to about 128 MiB more per team.
+
+### 24.8 Files
+
+| File | What | Mode |
+| --- | --- | --- |
+| `teams/<team id>.sync/` | the snapshots of the team | directory 0700 |
+| `teams/<team id>.sync/<version>.bin` | the current and the previous snapshot | 0600 |
+| `teams/<team id>.sync/<version>.<random>.tmp` | a push in flight; removed on failure or by maintenance after one hour | 0600 |
+| `teams/<team id>.db.pre-v4` | the file before the migration to version 4 | 0600 |
+
+### 24.9 Tests
+
+- The head: the test vectors of the contract (both heads hash and verify; one changed character fails; another key fails); every malformed text of 24.3 is 400 before a signature is checked.
+- The sign-in and safety vectors of the contract (`src/device.rs`): the sign-in message hashes to the contract's SHA-256 and its signature verifies; the link code and the vector key give the safety hash and `tulip arrow`.
+- The contract's vectors use the team id `t_7k2m5q4x3c` (`a-z`, `2-7`): the relay parses, stores, and chains both vector heads with the contract's hashes and signatures. Head 2 on an empty team fails the `version` check (it comes before `previous`).
+- A push on an empty team with `If-Match: "0"` and head 1, then head 2 with `If-Match: "1"`: 200, the files, the rows, the audit rows, `GET /v1/sync/head?since=0` returns both chain entries and `since=1` returns one. Refused and nothing stored: head 2 on an empty team (`version`: the version check comes before the previous check); head 1 after head 1 (`version`); a stale `If-Match` (412 with `ETag`); a changed `size`, a body shorter or longer than `Content-Length`, a body with another hash; a head naming another device signed by that device's key (`device`); a head signed by a revoked device (401); a device removed after the last check of the caller and before the commit (401, no file stays); a member token (401); a snapshot of 64 MiB plus one byte (413, and the temporary file is gone; 413 also without a valid token); a vault id that differs from the current head's.
+- Signers: a device pushes, is removed, and the head answer still lists its key with `removed` and `last_version`; its push is 401; another device pushes on top of its head; a page after its heads does not name it. A unit test checks the signers of a removed member.
+- Paging: with 2500 heads, `since = 0`, `1000`, and `2000` give the versions 1 to 1000, 1001 to 2000, and 2001 to 2500, each with `chain_from = since + 1`.
+- Link cancel: a cancel with another key is 403; with a bearer, 401; with the code and the key, the link is refused (the key gets `join_refused`, the links list is empty, row `device_link_cancelled`), and a retry answers the same; a confirmed link is 409.
+- Two pushes at one version from two threads: one 200, one 412, one file, the chain has one new entry.
+- `GET /v1/sync/snapshot`: the current and the previous version stream with the headers; the version before them is 404; after a third push the first file is gone; a transfer over `sync_transfers` is 503.
+- The long poll: `wait=25` with `since` equal to the current version holds and returns on a push and on a delete; a second poll of the same device returns at once.
+- `DELETE /v1/sync`: owner's device only; `If-Match` checked; files and rows gone; the next push is version 1 with zeros.
+- Separation: the access token of team A gets 401 on every sync endpoint with the snapshot of team B; the files of team B are untouched.
+- Receipts: `POST /v1/sync/receipt` shows in `GET /v1/sync/head`; a version above the current one is 409.
+- Last seen (unit test in `src/server/devices.rs`): a head request, a receipt, a push, and a download set `last_seen_at`; a second call within 60 seconds does not change it; `GET /v1/devices` shows it.
+- The Worker (`deploy/worker/test/`): a push with no, an empty, a non-numeric, or a chunked `Content-Length` is 400 and one above 64 MiB plus 64 KiB is 413, before the limiter and the relay; one at that size passes; `SYNC_LIMITER` keys pushes by address, its refusal is 429, and a missing or failing limiter lets them pass; downloads and other sync routes are not limited; `PUT /v1/sync/snapshot/`, `POST` and `PATCH /v1/sync/snapshot`, `PUT /v1/sync/head`, `POST /v1/sync/receipt`, `DELETE /v1/sync`, an unknown path, and other JSON routes get 413 above 128 KiB and 400 for a malformed length, before the limiter and the relay, and pass at 128 KiB; a `/p/` body gets 413 above 8 MiB plus 64 KiB; GET and HEAD are forwarded without `Content-Length` or `Transfer-Encoding`; `POST /v1/devices/link/cancel` uses `CREATE_LIMITER`.
+- Limits: `sync_pushes_per_hour` gives 403 `team_limit` and one `limit_reached` row per ten seconds; the operator sets and reads the three fields; a `limits` column without them reads the defaults.
+- Migration: a version 3 file opens as version 4 with `.pre-v4` next to it; a failed copy leaves version 3.
+- No audit row, response, or vault cell holds a snapshot byte, the head signature, or a token.
+
+### 24.10 What this does not protect
+
+- A removed device's key stays in the team file and in `signers` for the heads it pushed while it was a member. Its key cannot push again; a client refuses it on a head above its `last_version`.
+- The relay checks that a head is signed by a device the team file lists. The operator, or root, can add a device row by hand and sign heads with it; a client in this stage verifies against the relay's `signers`, so it accepts them. ADR 0022 stage 2 moves the device keys into the vault.
+- The relay can withhold a push or serve an older version; a client sees it through the version and the chain and stops, it cannot be fooled into merging a fork. It can delete the snapshots; the clients keep their vaults.
+- Snapshot bytes are the vault's SQLCipher ciphertext: the operator, root, a disk snapshot, and a backup hold them, with the salt; the passphrase is not on the relay.
+- A stalled push of a signed-in device holds a request thread until the connection ends; the transfer limits bound how many.
+- An early answer does not end a request with a declared body, on any path: the relay reads the rest of it before the connection closes. The Worker bounds the bytes at the edge (section 17): a push with a missing, malformed, or chunked length, or one above 64 MiB plus 64 KiB, never reaches the relay; a body under `/p/` is bounded at 8 MiB plus 64 KiB, and every other body (a trailing slash, another method, an unknown path) at 128 KiB. Only the exact push is rate-limited: `SYNC_LIMITER` allows about 60 a minute per IP address. What stays open: a caller without a token can still trickle a body within those bounds, and each such request holds a request thread until the edge or the client ends the connection; no transfer slot bounds them. That works on any route, within about 60 pushes a minute per address for a push of up to 64 MiB and with no rate limit for the smaller bodies elsewhere; many addresses get more. A caller that reaches the relay's origin without the Worker has no such bound, but it needs the edge secret. Ending it needs a server with read timeouts that can close the socket on an early answer.
+- Sizes, times, device ids and names, and the push rate are visible to the operator and in the audit.

@@ -5,8 +5,8 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::api::{
-    ConfirmRequest, Created, JoinConfirmed, JoinRequest, JoinView, LinkCreatedRef, LinkRequest,
-    LinkView, Pending, Role,
+    ConfirmRequest, Created, JoinConfirmed, JoinRequest, JoinView, LinkCancel, LinkCreatedRef,
+    LinkRequest, LinkView, Pending, Role,
 };
 use crate::device;
 use crate::device::{decode_public_key, safety_words};
@@ -15,7 +15,7 @@ use crate::ids::{CollectionId, DeviceId, MemberId};
 use crate::secret::{TokenKind, new_token, parse_token, token_hash};
 use crate::server::Core;
 use crate::server::admin::checked_member_name;
-use crate::server::audit::member_actor;
+use crate::server::audit::{EDGE_ACTOR, member_actor};
 use crate::server::auth::{MemberAuth, parse_role};
 use crate::server::devices::{checked_label, view};
 use crate::server::store::{db, team_name, to_i, to_u};
@@ -455,13 +455,63 @@ pub fn link(core: &Core, request: &LinkRequest, now: u64) -> RelayResult<Value> 
     })
 }
 
+/// `POST /v1/devices/link/cancel`: the new device takes back its pending link before a
+/// confirmation, with the code it sent and its key. A retry after a cancel answers the
+/// same; a link that was confirmed is 409, and the device then removes itself with a
+/// token.
+pub fn link_cancel(core: &Core, request: &LinkCancel, now: u64) -> RelayResult<Value> {
+    let key = checked_key(&request.public_key)?;
+    let code = request.code.expose();
+    check_code(core, code, TokenKind::Link, link_invalid)?;
+    let hash = token_hash(code);
+    core.store.tx(|tx| {
+        let link: Option<(i64, String, Option<Vec<u8>>, i64)> = tx
+            .query_row(
+                "SELECT id, state, public_key, expires_at FROM device_link WHERE code_hash = ?1",
+                params![hash.0.as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(db)?;
+        let (id, state, link_key, expires) = link.ok_or_else(link_invalid)?;
+        if link_key.as_deref() != Some(key.as_slice()) {
+            return Err(link_invalid());
+        }
+        let id = to_u(id);
+        match state.as_str() {
+            "pending" if to_u(expires) > now => {
+                tx.execute(
+                    "UPDATE device_link SET state = 'refused', decided_at = ?1 WHERE id = ?2",
+                    params![to_i(now), to_i(id)],
+                )
+                .map_err(db)?;
+                core.audit.write_on(
+                    tx,
+                    now,
+                    EDGE_ACTOR,
+                    "device_link_cancelled",
+                    None,
+                    &json!({"link_id": id}),
+                )?;
+                json_value(&Created { id })
+            }
+            "pending" | "refused" | "expired" => json_value(&Created { id }),
+            "confirmed" => Err(conflict(
+                "The other device confirmed this link. Sign in and remove this device.",
+            )),
+            _ => Err(link_invalid()),
+        }
+    })
+}
+
 pub fn links_list(core: &Core, by: &MemberAuth, now: u64) -> RelayResult<Value> {
     core.store.with(|conn| {
         own_device(conn, by)?;
-        let mut statement = conn.prepare("SELECT id, device_name, requested_at, expires_at FROM device_link \
+        let mut statement = conn.prepare("SELECT id, device_name, requested_at, expires_at, public_key FROM device_link \
             WHERE member_id = ?1 AND state = 'pending' AND expires_at > ?2 ORDER BY requested_at, id").map_err(db)?;
         let rows = statement.query_map(params![to_i(by.id.0), to_i(now)], |row| Ok(LinkView {
             id: to_u(row.get(0)?), device_name: row.get(1)?, created_at: to_u(row.get(2)?), expires_at: to_u(row.get(3)?),
+            public_key: crate::hostkeys::encode_b64(&row.get::<_, Option<Vec<u8>>>(4)?.unwrap_or_default()),
         })).map_err(db)?;
         json_value(&rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db)?)
     })

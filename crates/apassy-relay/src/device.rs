@@ -169,6 +169,16 @@ pub fn new_nonce() -> Result<String, DeviceKeyError> {
 /// first two bytes as indexes into a list of 256 words. The joiner knows the code and
 /// its key; the relay computes the same when the join arrives and keeps the words.
 pub fn safety_words(team: &TeamId, code: &str, public_key: &[u8]) -> String {
+    let digest = safety_hash(team, code, public_key);
+    format!(
+        "{} {}",
+        WORDS[usize::from(digest[0])],
+        WORDS[usize::from(digest[1])]
+    )
+}
+
+/// The SHA-256 of the safety message of [`safety_words`].
+fn safety_hash(team: &TeamId, code: &str, public_key: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(SAFETY_DOMAIN.as_bytes());
     hasher.update([0]);
@@ -177,12 +187,7 @@ pub fn safety_words(team: &TeamId, code: &str, public_key: &[u8]) -> String {
     hasher.update(code.as_bytes());
     hasher.update([0]);
     hasher.update(public_key);
-    let digest = hasher.finalize();
-    format!(
-        "{} {}",
-        WORDS[usize::from(digest[0])],
-        WORDS[usize::from(digest[1])]
-    )
+    hasher.finalize().into()
 }
 
 /// True when `typed` names the same two words as `expected`, ignoring case and the
@@ -262,6 +267,42 @@ mod tests {
         assert!(!verify(&public, &message, &bad));
         assert!(!verify(&public[..64], &message, &signature));
         assert!(format!("{key:?}").contains("redacted"));
+    }
+
+    /// The sign-in and safety vectors of the app's contract
+    /// (`docs/contracts/relay-sync-v1.md` section 15): both sides must build the same
+    /// bytes.
+    #[test]
+    fn the_contract_sign_in_and_safety_vectors_hold() {
+        use crate::sync_head::hex;
+        let team = TeamId::parse("t_7k2m5q4x3c").unwrap();
+        let public_b64 = "BOpHkB5VvTHXawpUXZxgu44Q97I2bzq9G_uI6tFM9mj8De047e1fNWI8MIERDsaxhBC0ih1DPfXaM4mdBbExjrA";
+        let public = decode_public_key(public_b64).unwrap();
+        let nonce = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+        assert_eq!(
+            decode_b64(nonce, NONCE_BYTES).unwrap(),
+            (0u8..32).collect::<Vec<u8>>()
+        );
+        let message = sign_in_message("https://relay.example.test", &team, public_b64, nonce);
+        assert_eq!(
+            hex(&Sha256::digest(&message)),
+            "43722057f746ba2b1759952943e9532ad49c68496c11a6f1bef65709c20e7aaa"
+        );
+        let signature = decode_b64(
+            "MEUCIAyr22ugUYumzN6x8ktWI1ruvFmEVjktZGhAfa7dRmeXAiEAiHEWtFJmR5giJlad5O0jy9dVkHD3IAKRM3TZRXzwJEY",
+            MAX_SIGNATURE_BYTES,
+        )
+        .unwrap();
+        assert!(verify(&public, &message, &signature));
+        let other = sign_in_message("https://relay.example.test", &team, public_b64, "AAEC");
+        assert!(!verify(&public, &other, &signature));
+
+        let code = format!("apassy_lnk_t_7k2m5q4x3c_{}", "ab".repeat(32));
+        assert_eq!(
+            hex(&safety_hash(&team, &code, &public)),
+            "fc0f67b7df128c3d82fae26d0b646d9bcd3623adcb562f7d85d313f7456a3b7c"
+        );
+        assert_eq!(safety_words(&team, &code, &public), "tulip arrow");
     }
 
     #[test]

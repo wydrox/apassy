@@ -808,6 +808,7 @@ fn agent_requests_leave_slots_for_approvers_and_busy_is_an_envelope() {
                 member_reserve: 2,
                 long_polls_per_agent: 2,
                 host_long_polls: 2,
+                ..Default::default()
             };
         },
         UpstreamOptions::default(),

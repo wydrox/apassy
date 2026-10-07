@@ -16,8 +16,9 @@ use serde_json::{Value, json};
 use tiny_http::{Header, Request, Response};
 
 use crate::api::{
-    self, ChallengeRequest, DecisionRequest, EDGE_HEADER, Envelope, JoinRequest, LinkRequest,
-    NewItem, Policy, ReleaseRequest, RunRequest, TeamCreate, TeamCreatedRef, TokenRequest, paths,
+    self, ChallengeRequest, DecisionRequest, EDGE_HEADER, Envelope, JoinRequest, LinkCancel,
+    LinkRequest, NewItem, Policy, ReleaseRequest, RunRequest, TeamCreate, TeamCreatedRef,
+    TokenRequest, paths,
 };
 use crate::error::{RelayError, RelayResult, codes};
 use crate::ids::{AgentId, CollectionId, DeviceId, GrantId, ItemId, MemberId, RunId};
@@ -27,7 +28,8 @@ use crate::secret::{TokenKind, parse_token};
 use crate::server::approvals::Denier;
 use crate::server::auth::{self, Need, Principal};
 use crate::server::hub::Hub;
-use crate::server::{Core, admin, approvals, decide, devices, host, joins, mcp};
+use crate::server::sync::{PushRequest, SyncError};
+use crate::server::{Core, admin, approvals, decide, devices, host, joins, mcp, sync};
 
 /// Seconds a client waits after 503 `busy` (`Retry-After`).
 pub const BUSY_RETRY_AFTER: &str = "2";
@@ -48,6 +50,7 @@ pub enum Endpoint {
     KeyHolder(u64),
     LinkCreate,
     Link,
+    LinkCancel,
     LinkList,
     LinkConfirm(u64),
     LinkRefuse(u64),
@@ -83,6 +86,11 @@ pub enum Endpoint {
     HostRelease(u64),
     HostDeny(u64),
     Mcp,
+    SyncHead,
+    SyncSnapshot,
+    SyncPush,
+    SyncReceipt,
+    SyncDelete,
 }
 
 type Routed = (Need, Endpoint);
@@ -122,6 +130,7 @@ pub fn route(method: &str, path: &str) -> RelayResult<Routed> {
             ],
         ),
         ["v1", "devices", "link"] => pick(method, &[("POST", Need::Edge, Link)]),
+        ["v1", "devices", "link", "cancel"] => pick(method, &[("POST", Need::Edge, LinkCancel)]),
         ["v1", "devices", "links", n, "confirm"] => {
             pick(method, &[("POST", Need::Member, LinkConfirm(id(n)?))])
         }
@@ -202,6 +211,16 @@ pub fn route(method: &str, path: &str) -> RelayResult<Routed> {
         ["v1", "host", "requests", n, "deny"] => {
             pick(method, &[("POST", Need::Owner, HostDeny(id(n)?))])
         }
+        ["v1", "sync"] => pick(method, &[("DELETE", Need::Owner, SyncDelete)]),
+        ["v1", "sync", "head"] => pick(method, &[("GET", Need::Member, SyncHead)]),
+        ["v1", "sync", "snapshot"] => pick(
+            method,
+            &[
+                ("GET", Need::Member, SyncSnapshot),
+                ("PUT", Need::Member, SyncPush),
+            ],
+        ),
+        ["v1", "sync", "receipt"] => pick(method, &[("POST", Need::Member, SyncReceipt)]),
         _ => Err(not_found()),
     }
 }
@@ -341,6 +360,7 @@ pub fn serve(serving: Serving) {
                 if approvals::maintenance(&core, now_unix())
                     .and_then(|()| devices::maintenance(&core, now_unix()))
                     .and_then(|()| joins::expire(&core, now_unix()))
+                    .and_then(|()| sync::maintenance(&core, now_unix()))
                     .is_err()
                 {
                     eprintln!(
@@ -370,15 +390,41 @@ fn no_store_header() -> Header {
 }
 
 fn respond_json(request: Request, status: u16, envelope: &Envelope, close: bool) {
+    respond_json_with(request, status, envelope, close, Vec::new());
+}
+
+/// A JSON answer with extra headers (`ETag`, `Retry-After`).
+fn respond_json_with(
+    request: Request,
+    status: u16,
+    envelope: &Envelope,
+    close: bool,
+    headers: Vec<Header>,
+) {
     let body = serde_json::to_vec(envelope).unwrap_or_default();
+    // The body is in memory: always `Content-Length`, never chunked.
     let mut response = Response::from_data(body)
         .with_status_code(status)
         .with_header(json_header())
-        .with_header(no_store_header());
+        .with_header(no_store_header())
+        .with_chunked_threshold(usize::MAX);
     if close && let Ok(header) = Header::from_bytes(&b"Connection"[..], &b"close"[..]) {
         response.add_header(header);
     }
+    if status == 503
+        && let Ok(header) = Header::from_bytes(&b"Retry-After"[..], BUSY_RETRY_AFTER.as_bytes())
+    {
+        response.add_header(header);
+    }
+    for header in headers {
+        response.add_header(header);
+    }
     let _ = request.respond(response);
+}
+
+/// `ETag: "<version>"`.
+fn etag(version: u64) -> Option<Header> {
+    Header::from_bytes(&b"ETag"[..], format!("\"{version}\"").as_bytes()).ok()
 }
 
 /// 503 `busy` as an envelope, with `Retry-After`.
@@ -472,6 +518,7 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request) {
             | Endpoint::Challenge
             | Endpoint::Token
             | Endpoint::Link
+            | Endpoint::LinkCancel
     ) {
         let authorization = header_value(&request, "Authorization");
         if auth::bearer(authorization.as_deref()).is_some() {
@@ -492,6 +539,18 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request) {
         }
         return;
     }
+    // A push answers a malformed request (400) before it reads the token (section 24.3).
+    let push = if endpoint == Endpoint::SyncPush {
+        match PushRequest::from_headers(|name| header_value(&request, name)) {
+            Ok(push) => Some(push),
+            Err(error) => {
+                respond_error(request, &error);
+                return;
+            }
+        }
+    } else {
+        None
+    };
     // Every other endpoint: the team comes from the token, before anything is opened.
     // The token is checked before the body is read and before a slot of the team is
     // taken, so a caller without a valid token cannot hold a team's slots (team ids are
@@ -535,6 +594,15 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request) {
     } else {
         None
     };
+    if matches!(
+        endpoint,
+        Endpoint::SyncHead | Endpoint::SyncSnapshot | Endpoint::SyncPush | Endpoint::SyncDelete
+    ) {
+        respond_sync(
+            &core, endpoint, request, principal, need, token, &query, push,
+        );
+        return;
+    }
     let body = match read_body(&mut request, &method) {
         Ok(body) => body,
         Err(error) => {
@@ -566,6 +634,128 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request) {
     }
 }
 
+/// The sync endpoints with headers, a streamed body, or a streamed answer (docs/SPEC.md
+/// section 24.5). `PUT /v1/sync/snapshot` is the one route that bypasses `read_body` and
+/// its 64 KiB cap: the snapshot streams to a temporary file. It reads the caller again
+/// after the body, as every POST and PUT does.
+#[allow(clippy::too_many_arguments)]
+fn respond_sync(
+    core: &Core,
+    endpoint: Endpoint,
+    mut request: Request,
+    principal: Option<Principal>,
+    need: Need,
+    token: Option<&str>,
+    query: &str,
+    push: Option<PushRequest>,
+) {
+    let now = now_unix();
+    let Ok(member) = member_of(principal.as_ref()).cloned() else {
+        respond_error(request, &RelayError::unauthenticated());
+        return;
+    };
+    let answer: Result<(Value, Option<u64>), SyncError> = match endpoint {
+        Endpoint::SyncHead => (|| {
+            let since = number(query, "since")?.unwrap_or(0);
+            let wait = number(query, "wait")?.unwrap_or(0);
+            if wait > approvals::MAX_WAIT_SECS {
+                return Err(RelayError::invalid("The wait is from 0 to 25 seconds."));
+            }
+            let view = sync::head(core, &member, since, wait, now)?;
+            Ok((to_value(&view)?, Some(view.version)))
+        })()
+        .map_err(SyncError::from),
+        Endpoint::SyncSnapshot => {
+            let snapshot = number(query, "version").and_then(|version| {
+                let version = version
+                    .ok_or_else(|| RelayError::invalid("The query value `version` is required."))?;
+                sync::open_snapshot(core, &member, version, now)
+            });
+            match snapshot {
+                Ok(snapshot) => {
+                    let version = snapshot.version;
+                    if respond_snapshot(request, snapshot) {
+                        let _ = sync::record_fetch(core, &member, version, now_unix());
+                    }
+                }
+                Err(error) => respond_error(request, &error),
+            }
+            return;
+        }
+        Endpoint::SyncPush => {
+            let Some(push) = push else {
+                respond_error(request, &RelayError::internal("The push has no headers."));
+                return;
+            };
+            let reauth = || match authenticate(core, need, token, now_unix())? {
+                Some(Principal::Member(member)) => Ok(member),
+                _ => Err(RelayError::unauthenticated()),
+            };
+            sync::push(core, &member, &push, request.as_reader(), &reauth, now)
+                .and_then(|view| Ok((to_value(&view)?, Some(view.version))))
+        }
+        Endpoint::SyncDelete => header_value(&request, "If-Match")
+            .as_deref()
+            .and_then(sync::parse_if_match)
+            .ok_or_else(|| {
+                SyncError::from(RelayError::invalid(
+                    "If-Match is required: the version in quotes, such as \"3\".",
+                ))
+            })
+            .and_then(|if_match| sync::delete(core, &member, if_match, now))
+            .map(|value| (value, None)),
+        _ => Err(RelayError::internal("This endpoint is served elsewhere.").into()),
+    };
+    match answer {
+        Ok((value, version)) => respond_json_with(
+            request,
+            200,
+            &Envelope::success(value),
+            false,
+            version.and_then(etag).into_iter().collect(),
+        ),
+        Err(SyncError { error, current }) => respond_json_with(
+            request,
+            error.status(),
+            &error.to_envelope(),
+            error.code == codes::PAYLOAD_TOO_LARGE,
+            current.and_then(etag).into_iter().collect(),
+        ),
+    }
+}
+
+/// Streams a snapshot file with its head. True when the answer was sent.
+fn respond_snapshot(request: Request, snapshot: sync::Snapshot<'_>) -> bool {
+    let sync::Snapshot {
+        file,
+        version,
+        head,
+        signature,
+        slot,
+        ..
+    } = snapshot;
+    let headers = [
+        Header::from_bytes(&b"Content-Type"[..], &b"application/octet-stream"[..]).ok(),
+        Some(no_store_header()),
+        etag(version),
+        Header::from_bytes(crate::sync_head::HEAD_HEADER.as_bytes(), head.as_bytes()).ok(),
+        Header::from_bytes(
+            crate::sync_head::SIGNATURE_HEADER.as_bytes(),
+            signature.as_bytes(),
+        )
+        .ok(),
+    ];
+    // Always `Content-Length`, never chunked: the app checks the size.
+    let mut response = Response::from_file(file).with_chunked_threshold(usize::MAX);
+    for header in headers.into_iter().flatten() {
+        response.add_header(header);
+    }
+    let sent = request.respond(response).is_ok();
+    // The transfer slot is held until the bytes are sent.
+    drop(slot);
+    sent
+}
+
 fn dispatch_edge(hub: &Hub, endpoint: Endpoint, body: &[u8], now: u64) -> RelayResult<Value> {
     match endpoint {
         Endpoint::TeamCreate => team_create(hub, body, now),
@@ -586,6 +776,15 @@ fn dispatch_edge(hub: &Hub, endpoint: Endpoint, body: &[u8], now: u64) -> RelayR
                 .flatten()
                 .ok_or_else(RelayError::unauthenticated)?;
             joins::link(&core, &request, now)
+        }
+        Endpoint::LinkCancel => {
+            let request: LinkCancel = parse_body(body)?;
+            let code = request.code.expose();
+            let core = (TokenKind::of(code) == Some(TokenKind::Link))
+                .then(|| hub.for_token(code))
+                .flatten()
+                .ok_or_else(RelayError::unauthenticated)?;
+            joins::link_cancel(&core, &request, now)
         }
         Endpoint::Challenge => {
             let request: ChallengeRequest = parse_body(body)?;
@@ -778,7 +977,7 @@ fn dispatch(
             &parse_body(body)?,
             now,
         ),
-        Join | TeamCreate | Challenge | Token | Link => {
+        Join | TeamCreate | Challenge | Token | Link | LinkCancel => {
             Err(RelayError::internal("This endpoint is served elsewhere."))
         }
         InviteCreate => admin::invite_create(core, member_of(principal)?, &parse_body(body)?, now),
@@ -868,6 +1067,10 @@ fn dispatch(
             &parse_body::<ReleaseRequest>(body)?,
             now,
         )?),
+        SyncReceipt => sync::receipt(core, member_of(principal)?, &parse_body(body)?, now),
+        SyncHead | SyncSnapshot | SyncPush | SyncDelete => {
+            Err(RelayError::internal("This endpoint is served elsewhere."))
+        }
         HostDeny(id) => to_value(&approvals::deny(
             core,
             Denier::Host(member_of(principal)?),
@@ -1015,6 +1218,41 @@ mod tests {
             codes::NOT_FOUND
         );
         assert_eq!(route("GET", "/v1/me/").unwrap_err().code, codes::NOT_FOUND);
+        assert_eq!(
+            route("PUT", "/v1/sync/snapshot").unwrap(),
+            (Need::Member, Endpoint::SyncPush)
+        );
+        assert_eq!(
+            route("GET", "/v1/sync/snapshot").unwrap(),
+            (Need::Member, Endpoint::SyncSnapshot)
+        );
+        assert_eq!(
+            route("GET", "/v1/sync/head").unwrap(),
+            (Need::Member, Endpoint::SyncHead)
+        );
+        assert_eq!(
+            route("POST", "/v1/sync/receipt").unwrap(),
+            (Need::Member, Endpoint::SyncReceipt)
+        );
+        assert_eq!(
+            route("DELETE", "/v1/sync").unwrap(),
+            (Need::Owner, Endpoint::SyncDelete)
+        );
+        assert_eq!(
+            route("POST", "/v1/devices/link/cancel").unwrap(),
+            (Need::Edge, Endpoint::LinkCancel)
+        );
+        for (method, path) in [
+            ("GET", "/v1/sync"),
+            ("POST", "/v1/sync/snapshot"),
+            ("PUT", "/v1/sync/head"),
+        ] {
+            assert_eq!(
+                route(method, path).unwrap_err().code,
+                codes::METHOD_NOT_ALLOWED
+            );
+        }
+        assert!(!is_agent_path("/v1/sync/head?since=1&wait=25"));
     }
 
     #[test]

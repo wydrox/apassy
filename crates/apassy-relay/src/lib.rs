@@ -8,7 +8,8 @@
 //! Shared modules: `api`, `config`, `error`, `ids`, `secret`, `session`, and
 //! `hostkeys` (the crypto of host-held item keys), `device` (device keys, sign-in, and
 //! safety words), `decision` (the pure part of the
-//! decision per run, used by the relay and by the owner's host).
+//! decision per run, used by the relay and by the owner's host), `sync_head` (the
+//! signed head of a vault snapshot, docs/SPEC.md section 24).
 //! Track modules: `server` (track server), `proxy` (track proxy), `cli` (track client).
 #![forbid(unsafe_code)]
 
@@ -21,6 +22,7 @@ pub mod hostkeys;
 pub mod ids;
 pub mod secret;
 pub mod session;
+pub mod sync_head;
 
 pub mod cli;
 pub mod proxy;
