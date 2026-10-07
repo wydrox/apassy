@@ -16,12 +16,15 @@ struct JoinModelTests {
         let settings = makeSettings()
         var finished: [VaultEntry] = []
         var cancelled = 0
+        /// Whether the app is in the background, as the vault model says.
+        var away = false
         var model: JoinModel!
 
         init(biometry: Biometry = .faceID, deviceName: String = "Test iPhone") {
             model = JoinModel(
                 service: service, passphraseStore: store, settings: settings, biometry: biometry,
                 deviceName: deviceName, pollInterval: .milliseconds(20),
+                isAway: { [unowned self] in away },
                 onFinished: { [unowned self] vault in finished.append(vault) },
                 onCancel: { [unowned self] in cancelled += 1 })
         }
@@ -159,5 +162,18 @@ struct JoinModelTests {
         await fixture.model.cancel()
         #expect(fixture.cancelled == 1)
         #expect(try await fixture.service.info().join == nil)
+    }
+
+    @Test("a join that finishes while the app is away leaves the vault closed")
+    func finishWhileAway() async throws {
+        let fixture = Fixture()
+        #expect(await fixture.toPassphrase(link: link))
+        fixture.away = true
+        await fixture.model.finish(passphrase: PreviewVaultService.passphrase)
+        guard case .faceID = fixture.model.step else {
+            Issue.record("expected the Face ID offer, got \(fixture.model.step)")
+            return
+        }
+        #expect(try await !fixture.service.info().unlocked)
     }
 }

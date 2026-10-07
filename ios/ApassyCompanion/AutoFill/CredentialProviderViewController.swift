@@ -49,13 +49,17 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
 
     override func prepareInterfaceToProvideCredential(for credentialRequest: any ASCredentialRequest) {
         let identity = credentialRequest.credentialIdentity
+        // Apassy gives iOS password identities only; the username is checked before a fill.
+        let user = (identity as? ASPasswordCredentialIdentity)?.user
         switch credentialRequest.type {
         case .password:
             model.startDirect(
-                record: identity.recordIdentifier, serviceIdentifier: identity.serviceIdentifier, kind: .password)
+                record: identity.recordIdentifier, user: user, serviceIdentifier: identity.serviceIdentifier,
+                kind: .password)
         case .oneTimeCode:
             model.startDirect(
-                record: identity.recordIdentifier, serviceIdentifier: identity.serviceIdentifier, kind: .oneTimeCode)
+                record: identity.recordIdentifier, user: user, serviceIdentifier: identity.serviceIdentifier,
+                kind: .oneTimeCode)
         default:
             extensionContext.cancelRequest(withError: ASExtensionError(.failed))
         }

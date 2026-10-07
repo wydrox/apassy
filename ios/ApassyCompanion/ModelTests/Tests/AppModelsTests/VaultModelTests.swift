@@ -112,12 +112,12 @@ struct VaultModelTests {
 
         let start = recorder.now
         await vault.didEnterBackground()
-        recorder.now = start.addingTimeInterval(60)
+        recorder.now = start + .seconds(60)
         await vault.didBecomeActive()
         #expect(vault.isUnlocked)
 
         await vault.didEnterBackground()
-        recorder.now = start.addingTimeInterval(60 + 301)
+        recorder.now = start + .seconds(60 + 301)
         await vault.didBecomeActive()
         #expect(!vault.isUnlocked)
     }

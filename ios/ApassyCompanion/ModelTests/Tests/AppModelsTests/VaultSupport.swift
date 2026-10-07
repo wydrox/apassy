@@ -96,6 +96,8 @@ actor SpyVaultService: VaultService {
         var syncCount = 0
         var syncWaits: [Bool]
         var syncError: VaultError?
+        var resumeDelay: Duration?
+        var unlockError: VaultError?
     }
 
     private let inner: PreviewVaultService
@@ -112,6 +114,21 @@ actor SpyVaultService: VaultService {
     /// How many times `sync()` was called.
     nonisolated var syncCount: Int { state.withLock { $0.syncCount } }
 
+    /// How long `resume()` takes, to let a test go to the background meanwhile.
+    nonisolated var resumeDelay: Duration? {
+        get { state.withLock { $0.resumeDelay } }
+        set { state.withLock { $0.resumeDelay = newValue } }
+    }
+
+    /// An error that `unlock` throws instead of unlocking, or nil.
+    nonisolated var unlockError: VaultError? {
+        get { state.withLock { $0.unlockError } }
+        set { state.withLock { $0.unlockError = newValue } }
+    }
+
+    /// Whether the core has the vault open now.
+    func coreUnlocked() async throws -> Bool { try await inner.info().unlocked }
+
     /// An error that `sync()` throws, or nil.
     nonisolated var syncError: VaultError? {
         get { state.withLock { $0.syncError } }
@@ -122,10 +139,14 @@ actor SpyVaultService: VaultService {
     func info() async throws -> CoreInfo { try await inner.info() }
     func select(vaultID: String) async throws { try await inner.select(vaultID: vaultID) }
     func unlock(passphrase: String, keep: Bool) async throws {
+        if let error = unlockError { throw error }
         try await inner.unlock(passphrase: passphrase, keep: keep)
     }
     func suspend() async throws { try await inner.suspend() }
-    func resume() async throws -> Bool { try await inner.resume() }
+    func resume() async throws -> Bool {
+        if let delay = resumeDelay { try? await Task.sleep(for: delay) }
+        return try await inner.resume()
+    }
     func lock() async throws { try await inner.lock() }
     func checkPassphrase(_ passphrase: String) async throws -> Bool { try await inner.checkPassphrase(passphrase) }
     func createLocalVault(name: String, passphrase: String) async throws -> VaultEntry {
@@ -179,7 +200,7 @@ actor SpyVaultService: VaultService {
         return false
     }
 
-    func takeNewPassphrase(_ passphrase: String) async throws -> SyncStatus {
+    func takeNewPassphrase(_ passphrase: String) async throws -> PassphraseChange {
         try await inner.takeNewPassphrase(passphrase)
     }
     func useRelayCopy() async throws -> SyncStatus { try await inner.useRelayCopy() }
@@ -230,8 +251,8 @@ final class VaultRecorder {
     /// The vault IDs of each `replaceIdentities` call.
     var replacedIdentities: [String] = []
     var removedAllIdentities = 0
-    /// The time that the model sees.
-    var now = Date(timeIntervalSince1970: 1_800_000_000)
+    /// The time that the model sees: the continuous clock, moved by the test.
+    var now = ContinuousClock.now
 }
 
 /// The vault ID of the preview vault.

@@ -63,7 +63,7 @@ struct RootView: View {
         .environment(root)
         .onChange(of: scenePhase, initial: true) { _, phase in
             PrivacyCover.shared.setPhase(AppPhase(phase))
-            Task { await root.scenePhaseChanged(AppPhase(phase)) }
+            root.scenePhaseChanged(AppPhase(phase))
         }
         // The passphrase prompt of the owner check shows in a window of its own, above sheets.
         .onChange(of: root.vault?.gate.prompt?.id, initial: true) {

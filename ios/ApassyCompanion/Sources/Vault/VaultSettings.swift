@@ -24,9 +24,11 @@ enum LockAfter: Int, CaseIterable, Identifiable, Sendable {
 
     /// Whether the vault locks on return, after the app was left at `leftAt`. "Immediately" locks
     /// when the app goes to the background; on return it locks too, in case that did not happen.
-    func locks(leftAt: Date?, now: Date) -> Bool {
+    /// The times are of the continuous clock: it counts while the iPhone sleeps, and setting the
+    /// clock of the iPhone back does not move it.
+    func locks(leftAt: ContinuousClock.Instant?, now: ContinuousClock.Instant) -> Bool {
         guard let leftAt else { return false }
-        return now.timeIntervalSince(leftAt) >= TimeInterval(rawValue)
+        return now - leftAt >= .seconds(rawValue)
     }
 }
 

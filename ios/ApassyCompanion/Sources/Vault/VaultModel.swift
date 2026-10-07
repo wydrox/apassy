@@ -28,7 +28,9 @@ final class VaultModel {
         var firstBackoff = Duration.seconds(5)
         var maxBackoff = Duration.seconds(60)
         var saveDebounce = Duration.seconds(2)
-        var now: @MainActor () -> Date = { Date() }
+        /// The clock of the auto-lock: continuous, so it counts while the iPhone sleeps and does
+        /// not move when the owner sets the clock of the iPhone back.
+        var now: @MainActor () -> ContinuousClock.Instant = { ContinuousClock.now }
     }
 
     // MARK: State
@@ -62,10 +64,17 @@ final class VaultModel {
     /// Show the error of an action. A vault that the core closed (`locked`) shows the lock screen.
     func report(_ error: any Error) {
         if (error as? VaultError)?.code == .locked {
-            Task { await lock() }
+            Task { await closedByCore() }
             return
         }
         alert = error.localizedDescription
+    }
+
+    /// The core answered `locked`. While the app is away or the vault is suspended that is
+    /// expected, and a lock would erase the kept passphrase; else the lock screen shows.
+    private func closedByCore() async {
+        guard !isSuspended, !isInBackground else { return }
+        await lock()
     }
 
     let settings: VaultSettings
@@ -77,7 +86,12 @@ final class VaultModel {
     @ObservationIgnored private var syncTask: Task<Void, Never>?
     @ObservationIgnored private var syncGeneration = 0
     @ObservationIgnored private var debounceTask: Task<Void, Never>?
-    @ObservationIgnored private var leftAt: Date?
+    @ObservationIgnored private var leftAt: ContinuousClock.Instant?
+    /// The app is in the background: set at once when the phase changes, before any await.
+    @ObservationIgnored private(set) var isInBackground = false
+    /// The last background or foreground transition. Each one waits for the one before, so a
+    /// return never runs while the vault is still being closed.
+    @ObservationIgnored private var transition: Task<Void, Never>?
 
     init(
         service: any VaultService, settings: VaultSettings, gate: OwnerGate, passphraseStore: any PassphraseStore,
@@ -149,6 +163,10 @@ final class VaultModel {
             // The core keeps the passphrase in memory only when the vault may stay unlocked while
             // the app is away; then `resume` opens it again on return.
             try await service.unlock(passphrase: passphrase, keep: settings.lockAfter != .immediately)
+        } catch let error as VaultError where error.code == .locked {
+            // The app went away during the key derivation and the core closed the vault first.
+            unlockMessage = nil
+            return
         } catch {
             unlockMessage = error.localizedDescription
             return
@@ -163,7 +181,32 @@ final class VaultModel {
                 alert = error.localizedDescription
             }
         }
+        if isInBackground {
+            // The app went away while the core opened the vault: close it again at once.
+            await closeOpenedWhileAway()
+            return
+        }
         await didUnlock()
+    }
+
+    /// The vault opened (an unlock or a resume) after the app went to the background. Close it
+    /// inside a background task: "Immediately" locks; else it is suspended, and the return
+    /// resumes it as after any other time away.
+    private func closeOpenedWhileAway() async {
+        let end = hooks.beginBackgroundWork("Close the vault")
+        defer { end() }
+        if settings.lockAfter == .immediately {
+            await lock()
+            return
+        }
+        do {
+            try await service.suspend()
+            isUnlocked = true
+            isSuspended = true
+            leftAt = timing.now()
+        } catch {
+            await lock()
+        }
     }
 
     /// Read the stored passphrase with Face ID and unlock. Cancelled: the field stays.
@@ -226,20 +269,66 @@ final class VaultModel {
 
     // MARK: The app leaves and comes back
 
-    /// The app went to the background: stop the sync, drop revealed values, and close the vault.
-    /// The vault holds a file lock in the App Group container while it is open, and iOS kills a
-    /// suspended app that holds one, so it closes inside a background task: "Immediately" locks,
-    /// any other setting suspends (the core keeps the passphrase until the time is up).
-    func didEnterBackground() async {
+    /// The app goes to the background. Called at once on the phase change: the flag is set and
+    /// revealed values go before anything awaits; the vault closes in a transition after the
+    /// one before it.
+    func enterBackground() {
+        isInBackground = true
         gate.cancel()
         revealEpoch += 1
         stopSync()
         debounceTask?.cancel()
         debounceTask = nil
-        guard isUnlocked, !isSuspended else { return }
-        leftAt = timing.now()
+        let previous = transition
+        transition = Task { [weak self] in
+            await previous?.value
+            await self?.closeForBackground()
+        }
+    }
+
+    /// The app is active again. Waits for a background transition that still runs.
+    func enterForeground() {
+        isInBackground = false
+        let previous = transition
+        transition = Task { [weak self] in
+            await previous?.value
+            await self?.reopen()
+        }
+    }
+
+    /// `enterBackground`, and wait until the vault is closed.
+    func didEnterBackground() async {
+        enterBackground()
+        await transition?.value
+    }
+
+    /// `enterForeground`, and wait until the vault is open again or locked.
+    func didBecomeActive() async {
+        enterForeground()
+        await transition?.value
+    }
+
+    /// Wait for the last transition (tests).
+    func settle() async {
+        await transition?.value
+    }
+
+    /// Close the vault for the background. The vault holds a file lock in the App Group
+    /// container while it is open, and iOS kills a suspended app that holds one, so it closes
+    /// inside a background task: "Immediately" locks, any other setting suspends (the core keeps
+    /// the passphrase until the time is up). When the screens are not unlocked, an unlock or a
+    /// join may be opening the vault right now: the core's lock closes whatever is open (it does
+    /// nothing when nothing is). A suspended vault is never locked here: that would erase the
+    /// kept passphrase.
+    private func closeForBackground() async {
+        guard isInBackground, !isSuspended else { return }
         let end = hooks.beginBackgroundWork("Close the vault")
         defer { end() }
+        guard isUnlocked else {
+            try? await service.lock()
+            return
+        }
+        leftAt = timing.now()
         if settings.lockAfter == .immediately {
             await lock()
             return
@@ -252,10 +341,10 @@ final class VaultModel {
         }
     }
 
-    /// The app is active again: lock when it was away longer than the setting, else open the
-    /// vault again with the kept passphrase and sync.
-    func didBecomeActive() async {
-        guard isUnlocked else { return }
+    /// Lock when the app was away longer than the setting, else open the vault again with the
+    /// kept passphrase and sync.
+    private func reopen() async {
+        guard !isInBackground, isUnlocked else { return }
         guard isSuspended else {
             startSync()
             return
@@ -266,6 +355,12 @@ final class VaultModel {
         }
         guard (try? await service.resume()) == true else {
             await lock()
+            return
+        }
+        if isInBackground {
+            // The app went away again while the core opened the vault.
+            isSuspended = false
+            await closeOpenedWhileAway()
             return
         }
         isSuspended = false
@@ -288,7 +383,7 @@ final class VaultModel {
             items = try await service.items(archived: .all)
             itemsVersion += 1
         } catch let error as VaultError where error.code == .locked {
-            await lock()
+            await closedByCore()
             return
         } catch {
             report(error)
@@ -446,7 +541,7 @@ final class VaultModel {
     /// Start the sync loop: a sync now, then a long poll while the vault is unlocked and the app
     /// active. A local vault does not sync.
     func startSync() {
-        guard isUnlocked, !isSuspended, vault?.syncs == true, syncTask == nil else { return }
+        guard isUnlocked, !isSuspended, !isInBackground, vault?.syncs == true, syncTask == nil else { return }
         syncGeneration += 1
         let generation = syncGeneration
         syncTask = Task { [weak self] in
@@ -562,9 +657,11 @@ final class VaultModel {
     func takeNewPassphrase(_ passphrase: String) async throws {
         let end = hooks.beginBackgroundWork("Take the new passphrase")
         defer { end() }
-        let status = try await service.takeNewPassphrase(passphrase)
-        syncStatus = status
-        if let vault, settings.faceIDUnlock(vaultID: vault.id) {
+        let change = try await service.takeNewPassphrase(passphrase)
+        syncStatus = change.status
+        // Only a vault that took the typed passphrase stores it for Face ID. Without an anchor
+        // (after "Use the relay copy") it only opened the copy, and the vault keeps its own.
+        if change.rekeyed, let vault, settings.faceIDUnlock(vaultID: vault.id) {
             try? passphraseStore.save(passphrase, vaultID: vault.id)
         }
         await reloadAndPublish()

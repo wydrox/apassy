@@ -86,6 +86,8 @@ final class AutoFillModel {
     private var domains: [String] = []
     /// The record identifier of a QuickType suggestion.
     private var record: String?
+    /// The username that the QuickType suggestion showed.
+    private var recordUser: String?
     private var triedBiometry = false
     /// The request ended: no second fill, no second answer to iOS.
     private var done = false
@@ -104,10 +106,11 @@ final class AutoFillModel {
     }
 
     /// A QuickType suggestion: fill its item after the owner check, or show the list when
-    /// the item is not in the vault.
-    func startDirect(record: String?, serviceIdentifier: ASCredentialServiceIdentifier, kind: Kind) {
+    /// the item is not in the vault or is not the login that the suggestion showed.
+    func startDirect(record: String?, user: String?, serviceIdentifier: ASCredentialServiceIdentifier, kind: Kind) {
         self.kind = kind
         self.record = record
+        recordUser = user
         use([serviceIdentifier])
         Task { await open() }
     }
@@ -123,8 +126,17 @@ final class AutoFillModel {
         finish(.configured)
     }
 
+    /// The owner closed the sheet. An unlock that still runs is closed when it returns
+    /// (`closeIfDone`).
     func cancel() {
         Task { await close(.cancelled) }
+    }
+
+    /// The request ended while the core opened the vault: lock it again. True when it did.
+    private func closeIfDone() async -> Bool {
+        guard done else { return false }
+        await lockVault()
+        return true
     }
 
     /// The sheet went away without an answer of the extension (iOS ended the request).
@@ -212,8 +224,10 @@ final class AutoFillModel {
             unlockMessage = Self.text(of: error)
             return
         }
+        guard !done else { return }
         do {
             try await service.unlock(passphrase: stored, keep: false)
+            if await closeIfDone() { return }
         } catch let error as VaultError where error.code == .wrongPassphrase {
             canUseBiometry = false
             unlockMessage = "The saved passphrase does not open “\(vaultName)” any more."
@@ -234,6 +248,7 @@ final class AutoFillModel {
         passphrase = ""
         do {
             try await service.unlock(passphrase: typed, keep: false)
+            if await closeIfDone() { return }
         } catch {
             unlockMessage = Self.text(of: error)
             return
@@ -243,10 +258,17 @@ final class AutoFillModel {
 
     /// After the owner check: fill the suggestion, or show the list.
     private func unlocked() async {
-        if let vaultID, let id = CredentialIdentitySync.itemID(of: record, vaultID: vaultID) {
+        if await closeIfDone() { return }
+        if let service, let vaultID, let id = CredentialIdentitySync.itemID(of: record, vaultID: vaultID) {
             do {
-                try await fill(id)
-                return
+                // The suggestion names an item by its ID, which is local and may now be another
+                // login: fill only when the item has the username that the suggestion showed.
+                let item = try await service.item(id: id)
+                if await closeIfDone() { return }
+                if let user = recordUser, item.field(.username)?.value == user {
+                    try await fill(id)
+                    return
+                }
             } catch let error as VaultError where error.code == .notFound {
                 // The suggestion is older than the vault: the owner picks from the list.
             } catch {
@@ -263,6 +285,7 @@ final class AutoFillModel {
         guard let service else { return }
         do {
             let list = try await service.autofillList(domains: domains)
+            if await closeIfDone() { return }
             switch kind {
             case .password:
                 matches = list.matches

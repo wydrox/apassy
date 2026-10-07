@@ -79,6 +79,7 @@ final class RootModel {
             JoinModel(
                 service: vault.service, passphraseStore: vault.passphraseStore, settings: settings,
                 biometry: vault.gate.biometry, deviceName: settings.deviceName ?? DeviceName.current(),
+                isAway: { [weak vault] in vault?.isInBackground ?? false },
                 onFinished: { [weak self] _ in
                     guard let self else { return }
                     Task {
@@ -105,11 +106,12 @@ final class RootModel {
     }
 
     /// The scene phase changed: the vault closes in the background and opens again on return.
-    func scenePhaseChanged(_ phase: AppPhase) async {
+    /// Synchronous, so the vault knows at once that the app is away, before anything awaits.
+    func scenePhaseChanged(_ phase: AppPhase) {
         guard let vault else { return }
         switch phase {
-        case .background: await vault.didEnterBackground()
-        case .active: await vault.didBecomeActive()
+        case .background: vault.enterBackground()
+        case .active: vault.enterForeground()
         case .inactive: break
         }
     }
@@ -156,26 +158,39 @@ final class RootModel {
     }
 }
 
-/// Gives iOS the logins for the QuickType bar, one change after the other, without holding up the
-/// vault: the identity store of iOS can take long to answer (in the Simulator it sometimes never
-/// does), and the list is only a hint.
+/// Gives iOS the logins for the QuickType bar without holding up the vault: the identity store
+/// of iOS can take long to answer (in the Simulator it sometimes never does), and the list is only
+/// a hint. The latest request wins: a request that a newer one overtook while it waited is
+/// skipped, a call that does not end holds up the next one for 10 s at most, and a removal never
+/// waits, so usernames leave iOS when the vault leaves this iPhone.
 @MainActor
 private final class IdentityPublisher {
-    private var last: Task<Void, Never>?
+    private var generation = 0
+    /// The request whose call to iOS runs now.
+    private var running: Int?
 
     func replace(_ identities: [CredentialIdentity], vaultID: String) {
-        enqueue { await CredentialIdentitySync.replace(with: identities, vaultID: vaultID) }
+        submit(waits: true) { await CredentialIdentitySync.replace(with: identities, vaultID: vaultID) }
     }
 
     func removeAll() {
-        enqueue { await CredentialIdentitySync.removeAll() }
+        submit(waits: false) { await CredentialIdentitySync.removeAll() }
     }
 
-    private func enqueue(_ work: @escaping @Sendable () async -> Void) {
-        let previous = last
-        last = Task.detached {
-            await previous?.value
+    private func submit(waits: Bool, _ work: @escaping @Sendable () async -> Void) {
+        generation += 1
+        let mine = generation
+        Task { [weak self] in
+            guard let self else { return }
+            var waited = 0
+            while waits, running != nil, waited < 100 {
+                try? await Task.sleep(for: .milliseconds(100))
+                waited += 1
+            }
+            guard mine == generation else { return }
+            running = mine
             await work()
+            if running == mine { running = nil }
         }
     }
 }

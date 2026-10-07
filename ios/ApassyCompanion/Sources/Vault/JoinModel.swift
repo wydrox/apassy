@@ -44,6 +44,8 @@ final class JoinModel {
     @ObservationIgnored private let settings: VaultSettings
     @ObservationIgnored private let pollInterval: Duration
     @ObservationIgnored private let now: @MainActor () -> Date
+    /// Whether the app is in the background now (`VaultModel.isInBackground`).
+    @ObservationIgnored private let isAway: @MainActor () -> Bool
     @ObservationIgnored private let onFinished: @MainActor (VaultEntry) -> Void
     @ObservationIgnored private let onCancel: @MainActor () -> Void
     @ObservationIgnored private var pollTask: Task<Void, Never>?
@@ -53,6 +55,7 @@ final class JoinModel {
     init(
         service: any VaultService, passphraseStore: any PassphraseStore, settings: VaultSettings, biometry: Biometry,
         deviceName: String, pollInterval: Duration = .seconds(2), now: @escaping @MainActor () -> Date = { Date() },
+        isAway: @escaping @MainActor () -> Bool = { false },
         onFinished: @escaping @MainActor (VaultEntry) -> Void, onCancel: @escaping @MainActor () -> Void
     ) {
         self.service = service
@@ -62,6 +65,7 @@ final class JoinModel {
         self.deviceName = deviceName
         self.pollInterval = pollInterval
         self.now = now
+        self.isAway = isAway
         self.onFinished = onFinished
         self.onCancel = onCancel
     }
@@ -197,6 +201,9 @@ final class JoinModel {
         defer { isWorking = false }
         do {
             let vault = try await service.joinFinish(passphrase: passphrase)
+            // The core selects and unlocks the new vault. When the app went away meanwhile, it
+            // must not stay open in the background: the lock screen shows after Continue.
+            if isAway() { try? await service.lock() }
             passphraseMessage = nil
             if biometry != .none {
                 openedWith = passphrase

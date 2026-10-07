@@ -7,7 +7,7 @@ import Testing
 @MainActor
 @Suite("VaultSettings")
 struct VaultSettingsTests {
-    private let now = Date(timeIntervalSince1970: 1_800_000_000)
+    private let now = ContinuousClock.now
 
     @Test("a vault that was never left does not lock")
     func neverLeft() {
@@ -22,10 +22,10 @@ struct VaultSettingsTests {
 
     @Test("1 minute locks at 60 seconds and not before")
     func oneMinute() {
-        let left = now.addingTimeInterval(-59)
+        let left = now - .seconds(59)
         #expect(!LockAfter.oneMinute.locks(leftAt: left, now: now))
-        #expect(LockAfter.oneMinute.locks(leftAt: now.addingTimeInterval(-60), now: now))
-        #expect(LockAfter.oneMinute.locks(leftAt: now.addingTimeInterval(-61), now: now))
+        #expect(LockAfter.oneMinute.locks(leftAt: now - .seconds(60), now: now))
+        #expect(LockAfter.oneMinute.locks(leftAt: now - .seconds(61), now: now))
     }
 
     @Test("the defaults are Immediately and 1 minute")

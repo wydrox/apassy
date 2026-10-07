@@ -45,6 +45,9 @@ final class ItemDetailModel {
     @ObservationIgnored private let revealLifetime: Duration
     @ObservationIgnored private let now: @MainActor () -> Date
     @ObservationIgnored private var expiryTasks: [String: Task<Void, Never>] = [:]
+    /// Bumped by `dropSecrets`. With `vault.revealEpoch` it marks a value that arrives after the
+    /// screen dropped its secrets: such a value is not kept.
+    @ObservationIgnored private var drops = 0
 
     init(
         id: UInt64, vault: VaultModel, revealLifetime: Duration = .seconds(30),
@@ -97,7 +100,9 @@ final class ItemDetailModel {
         working.insert(field.name)
         defer { working.remove(field.name) }
         let reason = "Show the \(VaultText.phrase(field.label)) of “\(title)”"
-        guard let value = await vault.releaseSecret(itemID: id, field: field.name, reason: reason) else { return }
+        let asked = stamp
+        guard let value = await vault.releaseSecret(itemID: id, field: field.name, reason: reason), asked == stamp
+        else { return }
         revealed[field.name] = value
         expire(field.name) { model in model.revealed[field.name] = nil }
     }
@@ -117,40 +122,66 @@ final class ItemDetailModel {
 
     // MARK: One-time codes
 
-    /// Show the code after the owner check. It stays while the item is on the screen; `runCode`
-    /// fetches the next one each period.
+    /// Show the code after the owner check, for 30 s, as a revealed value. `runCode` fetches the
+    /// next one each period while it shows.
     func showCode(_ field: FieldView) async {
         guard field.role == .totp, !working.contains(field.name) else { return }
         working.insert(field.name)
         defer { working.remove(field.name) }
+        let asked = stamp
         guard await vault.gate.confirm(reason: "Show the one-time password of “\(title)”") else { return }
-        await fetchCode(field.name)
+        await fetchCode(field.name, asked: asked)
+        guard codes[field.name] != nil else { return }
+        expire(Self.codeKey(field.name)) { model in model.codes[field.name] = nil }
     }
 
     func hideCode(_ field: FieldView) {
         codes[field.name] = nil
+        expiryTasks[Self.codeKey(field.name)]?.cancel()
+        expiryTasks[Self.codeKey(field.name)] = nil
     }
 
-    /// While the code is on the screen, fetch the next one when the period ends. The view runs it
-    /// in a task, so it stops when the item leaves the screen.
+    /// While the code is on the screen, fetch the next one when the period ends. It stops when
+    /// the code expires or the secrets are dropped; the view also cancels it when the item leaves
+    /// the screen.
     func runCode(_ field: FieldView) async {
+        let started = stamp
         while !Task.isCancelled, let shown = codes[field.name] {
-            let wait = shown.remaining(at: now())
-            try? await Task.sleep(for: .milliseconds(Int(wait * 1000) + 150))
-            guard !Task.isCancelled, codes[field.name] != nil else { return }
-            await fetchCode(field.name)
+            guard started == stamp else {
+                codes[field.name] = nil
+                return
+            }
+            // A little past the end of the period, checked at least each second.
+            let wait = Double(shown.code.remaining) - now().timeIntervalSince(shown.fetchedAt) + 0.15
+            if wait > 0 {
+                try? await Task.sleep(for: .milliseconds(Int(min(wait, 1) * 1000)))
+                continue
+            }
+            await fetchCode(field.name, asked: started)
         }
     }
 
-    private func fetchCode(_ name: String) async {
+    /// Fetch a code; it is kept only when nothing was dropped since `asked`.
+    private func fetchCode(_ name: String, asked: Stamp) async {
         do {
             let code = try await vault.service.totp(id: id, field: name)
+            guard asked == stamp else { return }
             codes[name] = ShownCode(code: code, fetchedAt: now())
         } catch {
             codes[name] = nil
             vault.report(error)
         }
     }
+
+    private static func codeKey(_ name: String) -> String { "code:\(name)" }
+
+    /// The drops of the vault and of this screen at a moment.
+    private struct Stamp: Equatable {
+        let epoch: Int
+        let drops: Int
+    }
+
+    private var stamp: Stamp { Stamp(epoch: vault.revealEpoch, drops: drops) }
 
     /// Copy the current code, after its own owner check (a copy is its own action).
     func copyCode(_ field: FieldView) async {
@@ -178,7 +209,9 @@ final class ItemDetailModel {
         working.insert(field.name)
         defer { working.remove(field.name) }
         let reason = "Show the \(VaultText.phrase(field.label)) of “\(title)” in large type"
-        guard let value = await vault.releaseSecret(itemID: id, field: field.name, reason: reason) else { return }
+        let asked = stamp
+        guard let value = await vault.releaseSecret(itemID: id, field: field.name, reason: reason), asked == stamp
+        else { return }
         largeType = LargeType(label: field.label, value: value, secret: true)
         expire("largeType") { model in model.largeType = nil }
     }
@@ -193,6 +226,7 @@ final class ItemDetailModel {
 
     /// Forget every revealed value and code: the app left the screen, or the vault locked.
     func dropSecrets() {
+        drops += 1
         revealed = [:]
         codes = [:]
         if largeType?.secret == true { largeType = nil }
