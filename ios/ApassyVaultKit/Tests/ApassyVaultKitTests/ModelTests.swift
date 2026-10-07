@@ -23,8 +23,8 @@ import Testing
 
     @Test func previewServiceUnlocksOnlyWithItsPassphrase() async throws {
         let service = PreviewVaultService(unlocked: false)
-        await #expect(throws: VaultError.self) { try await service.unlock(passphrase: "wrong") }
-        try await service.unlock(passphrase: PreviewVaultService.passphrase)
+        await #expect(throws: VaultError.self) { try await service.unlock(passphrase: "wrong", keep: false) }
+        try await service.unlock(passphrase: PreviewVaultService.passphrase, keep: false)
         let items = try await service.items(archived: .no)
         #expect(!items.isEmpty)
         #expect(items.allSatisfy { !$0.archived })

@@ -37,16 +37,24 @@ pub unsafe extern "C" fn apassy_core_new(config: *const c_char) -> *mut Core {
 /// `core` comes from [`apassy_core_new`] and is not freed; `request` is a valid
 /// NUL-terminated string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn apassy_core_call(core: *const Core, request: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn apassy_core_call(
+    core: *const Core,
+    request: *const c_char,
+) -> *mut c_char {
     let answer = if core.is_null() || request.is_null() {
         error_answer("internal", "The core is not started.")
     } else {
         // SAFETY: the caller passes a live core and a valid NUL-terminated string.
         let (core, request) = unsafe { (&*core, CStr::from_ptr(request)) };
         match request.to_str() {
-            Ok(request) => catch_unwind(AssertUnwindSafe(|| core.call(request))).unwrap_or_else(
-                |_| error_answer("internal", "The vault core failed. This is a bug in Apassy."),
-            ),
+            Ok(request) => {
+                catch_unwind(AssertUnwindSafe(|| core.call(request))).unwrap_or_else(|_| {
+                    error_answer(
+                        "internal",
+                        "The vault core failed. This is a bug in Apassy.",
+                    )
+                })
+            }
             Err(_) => error_answer("invalid_input", "The request is not UTF-8."),
         }
     };

@@ -98,9 +98,17 @@ public final class CoreVaultService: VaultService, @unchecked Sendable {
 
     public func select(vaultID: String) async throws { try await call("select", ["vault_id": vaultID]) }
 
-    public func unlock(passphrase: String) async throws { try await call("unlock", ["passphrase": passphrase]) }
+    public func unlock(passphrase: String, keep: Bool) async throws {
+        try await call("unlock", ["passphrase": passphrase, "keep": keep])
+    }
 
     public func lock() async throws { try await call("lock") }
+
+    public func suspend() async throws { try await call("suspend") }
+
+    private struct Resumed: Decodable, Sendable { var unlocked: Bool }
+
+    public func resume() async throws -> Bool { try await call("resume", as: Resumed.self).unlocked }
 
     private struct Checked: Decodable, Sendable { var ok: Bool }
 

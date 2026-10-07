@@ -52,8 +52,15 @@ public protocol VaultService: Sendable {
     // 5.1 Vaults and the lock
     func info() async throws -> CoreInfo
     func select(vaultID: String) async throws
-    func unlock(passphrase: String) async throws
+    /// `keep`: the core keeps the passphrase in memory until `lock`, so `resume` can
+    /// open the vault again after `suspend` (the app's auto-lock time).
+    func unlock(passphrase: String, keep: Bool) async throws
     func lock() async throws
+    /// Close the vault when the app leaves the screen, keeping a kept passphrase. The
+    /// vault's file lock must not stay held in the background (contract section 1).
+    func suspend() async throws
+    /// Open the vault again with the kept passphrase. False when there is none.
+    func resume() async throws -> Bool
     func checkPassphrase(_ passphrase: String) async throws -> Bool
     func createLocalVault(name: String, passphrase: String) async throws -> VaultEntry
     /// Returns whether this iPhone left the relay team.

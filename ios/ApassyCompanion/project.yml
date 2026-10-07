@@ -126,6 +126,8 @@ targets:
           NSExtensionPointIdentifier: com.apple.authentication-services-credential-provider-ui
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).CredentialProviderViewController
           NSExtensionAttributes:
+            # iOS calls prepareInterfaceForExtensionConfiguration only with this key.
+            ASCredentialProviderExtensionShowsConfigurationUI: true
             ASCredentialProviderExtensionCapabilities:
               ProvidesPasswords: true
               ProvidesOneTimeCodes: true

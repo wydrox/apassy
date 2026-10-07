@@ -187,8 +187,11 @@ name = "apassy-core"
 version = "0.3.4"
 dependencies = [
  "apassy",
+ "getrandom 0.4.3",
+ "ring",
  "serde",
  "serde_json",
+ "tempfile",
  "zeroize",
 ]
 

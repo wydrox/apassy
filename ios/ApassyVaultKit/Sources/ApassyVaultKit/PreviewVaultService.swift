@@ -195,7 +195,22 @@ public actor PreviewVaultService: VaultService {
         unlocked = false
     }
 
-    public func unlock(passphrase: String) async throws {
+    private var kept = false
+    private var suspended = false
+
+    public func suspend() async throws {
+        if unlocked { suspended = true }
+        unlocked = false
+    }
+
+    public func resume() async throws -> Bool {
+        if suspended && kept { unlocked = true }
+        suspended = false
+        return unlocked
+    }
+
+    public func unlock(passphrase: String, keep: Bool) async throws {
+        kept = keep
         try requireVault()
         try await Task.sleep(for: .milliseconds(300))
         guard passphrase == Self.passphrase else {
@@ -204,7 +219,11 @@ public actor PreviewVaultService: VaultService {
         unlocked = true
     }
 
-    public func lock() async throws { unlocked = false }
+    public func lock() async throws {
+        unlocked = false
+        kept = false
+        suspended = false
+    }
 
     public func checkPassphrase(_ passphrase: String) async throws -> Bool {
         try requireVault()

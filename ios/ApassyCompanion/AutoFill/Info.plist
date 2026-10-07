@@ -33,6 +33,8 @@
 				<key>ProvidesPasswords</key>
 				<true/>
 			</dict>
+			<key>ASCredentialProviderExtensionShowsConfigurationUI</key>
+			<true/>
 		</dict>
 		<key>NSExtensionPointIdentifier</key>
 		<string>com.apple.authentication-services-credential-provider-ui</string>

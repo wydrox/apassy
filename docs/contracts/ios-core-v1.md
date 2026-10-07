@@ -13,6 +13,8 @@ Status: experimental. This contract supports the iPhone app in [ADR 0023](../adr
 | The Swift wrapper: typed requests, answers, errors | `ios/ApassyVaultKit` (Swift package) | iOS 26, and macOS 15 for `swift test` |
 | The app and the AutoFill extension | `ios/ApassyCompanion` (XcodeGen project) | iOS 26 |
 
+The vault holds an exclusive lock on `<file>.lock` while it is open, and iOS ends a suspended app that holds a file lock in an App Group container. So the core opens the vault only while it is unlocked: `lock` and `suspend` close it. The app calls `suspend` when it leaves the screen, and the AutoFill extension can then open the vault. While the app shows the vault, the extension gets `busy`.
+
 The core is the same vault code as the Mac app: the same schema (16), the same merge, the same relay client. A phone and a Mac that sync one vault must run the same schema; a copy of another schema is refused, as between two Macs.
 
 ## 2. The C interface
@@ -107,8 +109,10 @@ Error codes:
 | --- | --- | --- |
 | `info` **R** | | `{"vaults": [Vault], "selected": "<vault_id>" or null, "unlocked": bool, "join": Join or null, "schema": 16, "version": "0.3.4"}` |
 | `select` **R** | `vault_id` | `{}`. Locks the vault that was open. |
-| `unlock` **R** | `passphrase` | `{}`. Opens the selected vault. |
-| `lock` **R** | | `{}`. Locks, drops the relay key and token from memory, and ends a long poll. |
+| `unlock` **R** | `passphrase`, `keep` (bool, app only, default false) | `{}`. Opens the selected vault. With `keep`, the core keeps the passphrase in an erasing buffer until `lock`, for `resume`. |
+| `lock` **R** | | `{}`. Closes the vault, erases a kept passphrase, drops the relay key and token from memory, and ends a long poll. |
+| `suspend` | | `{}`. Closes the vault and ends the relay calls, but keeps a kept passphrase. The app calls it when it leaves the screen. |
+| `resume` | | `{"unlocked": bool}`. Opens the vault again with the kept passphrase. False when there is none (the app shows the lock screen). |
 | `check_passphrase` **R** | `passphrase` | `{"ok": bool}`. Checks against the vault file; changes nothing. For the owner check without Face ID. |
 | `create_local_vault` | `name`, `passphrase` | `{"vault": Vault}`. A new vault on this iPhone only, without the relay, selected and unlocked. The app offers it only in a Simulator build and in tests. |
 | `remove_vault` | `vault_id`, `force` (bool) | `{"left_relay": bool}`. Section 5.6. |
@@ -136,7 +140,7 @@ The owner selects "Add a device…" on the Mac; the Mac shows a QR code and the 
 | `item` **R** | `id` | `Detail` |
 | `reveal` **R** | `id`, `field` | `{"value": "…"}`. A secret field. Records the reveal in the history of the item, as the Mac does after an owner check. The app asks for Face ID or the passphrase before each call. |
 | `totp` **R** | `id`, `field` | `{"code": "123456", "period": 30, "remaining": 17, "digits": 6}`. Section 7. Never the seed. |
-| `history` | `id` | `{"events": [{"at": 1791200000, "kind": "edited", "detail": "…"}]}`, newest first, at most 50. |
+| `history` | `id` | `{"events": [{"at": 1791200000, "kind": "edited", "detail": "Changed: title, notes"}]}`, newest first, at most 50. `detail` is the text for the owner. |
 | `save` | `id` (null for a new item), `revision` (null for a new item), `item`: Draft | `{"id": 12, "revision": 3}` |
 | `archive` | `id`, `archived` (bool) | `{}` |
 | `delete` | `id`, `revision` | `{}` |
@@ -178,10 +182,10 @@ The owner selects "Add a device…" on the Mac; the Mac shows a QR code and the 
  ]}
 ```
 
-- A field has a `name` (a built-in field, or the main field of a custom item), or a `label` (a custom detail: the core makes `x_<hex>`). Not both.
+- A field has a `name` (a built-in field, or the main field of a custom item), or a `label` (a custom detail: the core makes `x_<hex>`). A custom detail may also give `name`: the stored field whose value `value: null` keeps, so a renamed hidden detail keeps its value.
 - `value: null` on a secret field of an existing item keeps the stored value. On a new item it is `invalid_input`.
 - The rules are the Mac's (`build_vault_draft`): the kind of an existing item cannot change (`invalid_input`, "The item category cannot change. Delete the item and add a new one."); the required fields of each kind (login: username and password; API key: token; SSH key: private key; database: host, database, username, and password; custom: one secret field); at most 10 custom details, each label 1 to 31 bytes, unique without regard to case; a visible detail needs a value; the main field of a custom item is `[A-Za-z0-9_]+`, does not start with `x_`, and is not a built-in name. Plain values are trimmed; secret values are kept as typed.
-- Tags: kept as given (at most 32, each 1 to 64 bytes). The phone shows the tags and lets the owner edit them; it does not add service and project as tags. (The Mac form has no tag field and keeps the tags it does not own.)
+- Tags: as the Mac keeps them: the service and the project first, then the given tags, without the old service and project values of an edit (at most 32, each 1 to 64 bytes).
 
 ### 5.4 Passwords and Watchtower
 
@@ -237,7 +241,7 @@ Written to a temporary file and renamed. The extension reads it and never writes
 
 ## 7. One-time passwords
 
-A field is a one-time password when it is secret and its label, without regard to case, is "One-time password", "OTP", "TOTP", or starts with "one-time password", or its value starts with `otpauth://`. (The 1Password import stores it as the custom detail "One-time password".) The value is an `otpauth://totp/…` URI (`secret`, `algorithm` SHA1/SHA256/SHA512, `digits` 6–8, `period` 15–120), or a bare Base32 secret (spaces and `-` ignored, any case) with SHA1, 6 digits, 30 s. RFC 6238; HMAC from `ring`. An `otpauth://hotp` value is `invalid_input`. `has_totp` in a row is true when the item has such a field (by its label; the value is not read for the list).
+A field is a one-time password (`role: totp`) when it is secret and its label, without regard to case, is "OTP", "TOTP", or starts with "one-time password". The core decides by the label only, so a list reads no secret. `totp` takes any secret field whose value parses. (The 1Password import stores it as the custom detail "One-time password".) The value is an `otpauth://totp/…` URI (`secret`, `algorithm` SHA1/SHA256/SHA512, `digits` 6–8, `period` 15–120), or a bare Base32 secret (spaces and `-` ignored, any case) with SHA1, 6 digits, 30 s. RFC 6238; HMAC from `ring`. An `otpauth://hotp` value is `invalid_input`. `has_totp` in a row is true when the item has such a field (by its label; the value is not read for the list).
 
 ## 8. Websites and matching
 
@@ -245,7 +249,7 @@ A website field is the custom detail whose label starts with "website" or "url" 
 
 ## 9. Strength and Watchtower
 
-`bits` estimates the entropy of a value: for a value from `generate`, the exact entropy of the choice; for another value, the length times log2 of the size of the character classes it uses (lowercase 26, uppercase 26, digits 10, symbols 33, other 100), minus a penalty for repeats and sequences. `score`: 0 below 28 bits, 1 below 36, 2 below 60, 3 below 80, 4 from 80.
+`bits` estimates the entropy of a value: for a value from `generate`, the exact entropy of the choice; for another value, the length times log2 of the size of the character classes it uses (lowercase 26, uppercase 26, digits 10, symbols 33, other 100), minus a penalty for repeats and sequences. `score`: 0 below 28 bits or for fewer than 8 characters, 1 below 36, 2 below 60, 3 below 80, 4 from 80.
 
 `watchtower` reads every secret field with the role `password` of the items that are not archived, in memory only, and answers:
 
