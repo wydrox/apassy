@@ -4,6 +4,61 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-10-07
+
+Vault sync through the Apassy relay, a background sync worker, bouncer start modes in Settings, and fixes in the window and the owner command line.
+
+### Added
+
+- Settings > Agents > Broker and bouncer can start the local model: with Apassy, when a run needs it (it stops after 10, 30, or 60 idle minutes), managed outside Apassy (the default), or off. It shows the state, the model version, and what is missing, with "Start now", "Stop", and "Open log". The setting is `bouncer.json` in the data folder.
+- Settings > Agents > Broker and bouncer has "Install the model" while the Laya environment is missing. It runs the `uv` commands of the bouncer guide on a background thread, shows the step, can stop, and writes `~/Library/Logs/Apassy/bouncer-install.log`. Without `uv` it says "Install uv first: brew install uv".
+- "Install the model" also downloads the pinned Laya base weights ("Downloading the model weights", `tools/basemodel/fetch_weights.py`); without them a first start says "Starting (downloading the model weights, first start only)" and a run waits up to 45 seconds, then waits for you with the reason. A failed weights download keeps the installed environment, starts the server in "With Apassy", and offers the download again; the Python steps write no `__pycache__` into the app bundle. "Start now" is hidden while a start would fail, and `apassy decisions export` lines have an optional `model_version`.
+- Settings shows a note with the remove commands for a LaunchAgent that runs `tools/basemodel/start.sh` with a missing `APASSY_BASE_MODEL`, or while Apassy starts the model itself. Apassy does not change the LaunchAgent.
+- `scripts/build-app.sh` without `APASSY_BASE_MODEL` ships the checkpoint in `$APASSY_LAYA_DIR/models` when it exists and matches the manifest, and prints which model it ships. A checkpoint that does not match gives a warning and an app without a model, so `scripts/install.sh` does not fail. GitHub Actions does not use this checkpoint.
+- Vault sync through the Apassy relay, stage 1. In Settings > General > Sync, the menu of a vault has "Apassy relay" after the detected folders. Its sheet takes the relay address, the team code from the operator, and the name of this Mac, or a link from another Mac for a vault that is on the relay already. A vault on the relay has "Add a Mac…" (a link that works once for 10 minutes, the same two safety words on both Macs, and Confirm behind Touch ID or the passphrase), "Devices…" (list and remove), and "Sync now", and statuses such as "Saved to the relay." and "Relay not reachable. Apassy syncs when it is back." "Use a vault from another Mac" has the source "Apassy relay": paste the link, compare the words, then type the passphrase. Turning relay sync off keeps the copy on the relay; the last Mac can also delete it. Every relay call that you start runs in the background, so the window stays responsive and shows what runs. "Cancel" or a quit on a Mac that joins cancels its link on the relay. Picking a folder for a relay vault asks first, and this Mac leaves the relay team; the message says what stays on the relay. A damaged relay copy has "Replace with this Mac's vault…", behind a sheet. Settings shows "Received by <Mac>" from the receipts that the other Macs send. A relay copy that this Mac refuses (an older copy after the relay came back from a backup, or a history without this Mac's last change) has "Use the relay copy…", which merges it and keeps the device, also for the last Mac of a team; a copy under another passphrase then asks for that passphrase only to open the copy: the vault keeps the passphrase of this Mac, and the merged vault goes up under it. A failed pull is tried again 5 seconds later, then 10, 20, 40, and 60. A lock, "Turn off", and a quit end every relay call at once, also while it connects. The window does not wait for a relay call, except at a lock with a change that waits: the push before the lock waits at most 10 seconds. "Turn off" needs the vault unlocked, since the key of this Mac for the relay is in the vault. A folder sync stays on until relay sync is on. See `docs/operations/sync.md`, section 17, [ADR 0022](docs/adr/0022-relay-sync.md) (accepted for stage 1), and the wire contract `docs/contracts/relay-sync-v1.md`.
+- `apassy completions zsh|bash|fish` prints a shell completion script for the commands, subcommands, and main options. It is made from the tables of `apassy help`. Where no subcommand fits, as for the file of `apassy import`, the shell completes file names.
+- `apassy import FILE --bind` binds the variables of the added credentials with one owner check: the key of a `.env` line, or a 1Password or Bitwarden title that is a variable name already. The window lists each credential and its variable with the count, and Touch ID names the count. Invalid names, names that another credential uses, and credentials without a secret value are refused, and a line under the table says why for each credential. With `--json`, the answer is one document, also when a variable is not bound. A cancel binds nothing. Without `--bind`, nothing changes.
+
+### Changed
+
+- Vault schema 16 adds the local table `relay_device` (the key of this Mac for the relay). It is never part of a sync copy. A vault that 0.3.3 opened no longer opens in 0.3.2. See Upgrade notes.
+- Folder sync runs on a background thread. It merges and pushes also while the window is hidden, minimized, or covered.
+- Settings has five tabs: General, Security, Agents, Notifications, and About.
+- The sidebar shows the open vault with its sync state and a lock button, the shortcuts on hover, and expired agent tokens. ⌃⌘S hides it.
+- Credentials of a new vault show "Get started", the steps to the first agent request.
+- The page column keeps its reading width in a wide window, and lists show relative times.
+- The app remembers a hidden sidebar and "Hide" of the Get started list (per vault) across restarts, in `ui.json` in the data folder.
+- Relay sync: "Remove" in "Devices…" asks first ("Remove <Mac> from the relay?"), and Cancel is the default for the keyboard.
+- Relay sync: after Confirm, "Add a Mac…" shows only the result and "Done", not the used link.
+- Relay sync: the team code field is masked, and its text goes after each try.
+- Relay sync: "Join from another Mac" for a vault whose relay copy has another passphrase asks for the passphrase of the copy, and the vault takes it, as on your other Macs; the step stays on the screen while the merge runs.
+
+### Fixed
+
+- Return on the Create screen moves to the next field instead of to "Back".
+- A path typed in "Use a vault from another Mac" is picked when it is complete, not after the first character.
+- The first text field of a new sheet takes the focus after a click.
+- Relay sync: a Mac that another Mac removed shows "Removed from the relay" at once and signs in to the relay only once every 15 minutes, so it syncs again by itself after the relay was suspended; to sync again after a removal, turn relay sync off, then join again with a link from another Mac.
+- Relay sync: "Turn off" on a Mac that the relay refused asks the relay to remove its device instead of trusting the earlier refusal.
+- Relay sync: a failed sign-in token no longer shows "Removed from the relay".
+- Relay sync: "Devices…" shows a current "last seen" for each Mac that syncs (the relay writes it at most once a minute per device).
+- Return or Space in a destructive alert that was opened with the pointer pressed its destructive button: Delete, Revoke, Reset pairing, Discard, and Remove or Turn off for the relay. They press Cancel (Keep editing in Discard changes) now, as in an alert opened with the keyboard.
+- A quick click on "Confirm…" (press and release in one frame, as a tap on a trackpad) could open the owner check behind "Add a Mac…": the window dimmed, the typed passphrase went nowhere, and Return closed the check with "Type the passphrase.". A sheet that opens over another sheet is now on top.
+- "Confirm" with an empty passphrase field in an owner check closed the check, and the action that waited for it was lost. The check now stays open and says "Type the passphrase.", as after a wrong passphrase.
+- Relay sync: a Mac that another Mac removed still showed "Sync now", "Add a Mac…", and "Devices…", and their sheets offered "Check again", "New link", and "Refresh", which all failed at once. Settings now shows only the sync menu for that vault, with the line that says to turn relay sync off, and the sheets show why without those buttons.
+- In "Use a vault from another Mac", a click on a file did not give the focus to the passphrase field, and a click on "Apassy relay" did not give it to the link field, so the owner had to click the field first. egui gave the focus up at that click; the field now takes it in the next frame.
+- The demo build without the vault feature (`cargo check --features desktop --bin apassy`) compiles again, and CI checks it.
+
+### Security
+
+- A run that names a host session no longer takes the hook prompt of another session without a flag. Such a prompt now has `hook_ambiguous`, so the owner decides.
+- Relay edge: the Worker refuses a request body with a malformed or too large declared length before the relay reads it (400 `invalid_request`, 413 `payload_too_large`; snapshot pushes up to 64 MiB, the agent proxy up to 8 MiB, every other route up to 128 KiB), and limits snapshot pushes to 60 a minute per IP address. This needs a Worker deploy (see `docs/operations/release.md`, "Relay first").
+
+### Upgrade notes
+
+- **Vault schema 16.** The first unlock in 0.3.3 migrates the vault, and 0.3.2 refuses it afterwards (`verify_user_version` in `src/vault/mod.rs`). Back up the vault before the first unlock if you may go back. Macs that sync one vault through a folder or through the relay must all update: a merge needs the same schema on both sides (`src/vault/merge.rs`, the check of an attached copy), so a Mac on 0.3.2 refuses a copy that a 0.3.3 Mac wrote, and the reverse.
+- **Relay sync needs a relay with SPEC section 24 deployed** (schema 4 team files, the sync endpoints, and the Worker of the same release). The first start of that relay migrates each team file and keeps `teams/<id>.db.pre-v4`; an older relay image cannot open them. Deploy the relay before you publish the app: `docs/operations/release.md`, "Relay first".
+
 ## [0.3.2] - 2026-10-05
 
 Clearer setup on a second Mac, sync recovery, and complete command-line tools in the app bundle.
@@ -146,7 +201,8 @@ The alpha. It was not published.
 - Secrets for agent processes with owner approval: the socket never returns a secret value ([ADR 0006](docs/adr/0006-process-secrets.md)).
 - Plain-language rules and a local bouncer on Laya ([ADR 0007](docs/adr/0007-rules-and-local-bouncer.md)).
 
-[Unreleased]: https://github.com/wydrox/apassy/compare/0.3.2...HEAD
+[Unreleased]: https://github.com/wydrox/apassy/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/wydrox/apassy/releases/tag/v0.3.4
 [0.3.2]: https://github.com/wydrox/apassy/releases/tag/0.3.2
 [0.3.1]: https://github.com/wydrox/apassy/releases/tag/v0.3.1
 [0.3.0]: https://github.com/wydrox/apassy/releases/tag/v0.3.0

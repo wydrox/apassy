@@ -28,7 +28,7 @@ The first vault on a Mac has the name "Personal" when you type no name.
 1. In the sidebar, click the name of the open vault at the top.
 2. Click the name of another vault.
 
-Or, on the unlock screen, pick the vault above the passphrase field. Settings > Vaults also has "Open" for each vault.
+Or, on the unlock screen, pick the vault above the passphrase field. Settings > General > Vaults also has "Open" for each vault.
 
 Apassy then does these steps:
 
@@ -50,7 +50,7 @@ A file that is in the list already opens as it is. A restore from a backup also 
 
 ## 5. Rename or remove a vault
 
-In Settings > Vaults:
+In Settings > General > Vaults:
 
 - "Rename…" changes the name. The file does not move.
 - "Remove from list…" takes the vault out of the list. Apassy does not delete the file. You can open it again with "Open vault file…". The open vault stays in the list; open another vault first. Sync of the vault stops; its synced copy stays in its folder ([sync](sync.md), section 12).

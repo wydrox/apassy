@@ -1,6 +1,6 @@
 #![cfg(feature = "vault")]
 
-//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 14) to
+//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 15) to
 //! the current version, with data at each version. Synthetic values only.
 //!
 //! The schema SQL below is a frozen copy of the statements that each earlier version ran
@@ -22,7 +22,7 @@ use apassy::vault::{
 use tempfile::TempDir;
 
 const PASS: &str = "synthetic-migration-passphrase";
-const CURRENT_VERSION: i64 = 15;
+const CURRENT_VERSION: i64 = 16;
 /// The vault ID of the frozen version 13 file.
 const V13_VAULT_ID: &str = "6f1c2d3e-4a5b-4c6d-8e7f-0123456789ab";
 
@@ -1697,7 +1697,7 @@ fn version_14_migration_keeps_sync_records_and_is_atomic() {
     conn.execute_batch("DROP TABLE companion_device;").unwrap();
     conn.close().map_err(|(_, e)| e).unwrap();
     let mut vault = Vault::open(&path).expect("open");
-    vault.unlock(PASS).expect("schema 14 to 15");
+    vault.unlock(PASS).expect("schema 14 to the current one");
     assert_version_data(&mut vault, 14);
     assert_eq!(vault.sync_identity().unwrap().vault_id, V13_VAULT_ID);
     assert_eq!(
@@ -1720,5 +1720,83 @@ fn version_14_migration_keeps_sync_records_and_is_atomic() {
         .unwrap();
     assert_eq!(device, after, "this is a migration, not a restore");
     conn.close().map_err(|(_, e)| e).unwrap();
+    assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
+}
+
+/// The tables of schema version 15 (ADR 0020), as the app made them on 2026-10-05.
+const V15_SQL: &str = "
+CREATE TABLE companion_setting (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    port INTEGER NOT NULL CHECK (port BETWEEN 1024 AND 65535)
+);
+INSERT INTO companion_setting (id, enabled, port) VALUES (1, 0, 48620);
+CREATE TABLE companion_certificate (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    cert_der BLOB NOT NULL,
+    key_pkcs8 BLOB NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE companion_device (
+    device_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    request_key BLOB NOT NULL,
+    approval_key BLOB NOT NULL,
+    paired_at INTEGER NOT NULL,
+    last_seen_at INTEGER
+);
+UPDATE vault_meta SET schema_version = 15 WHERE id = 1;
+PRAGMA user_version = 15;
+";
+
+/// ADR 0022: the migration from 15 adds the local `relay_device` table in one
+/// transaction. A failure keeps version 15 and its data.
+#[test]
+fn version_15_migration_adds_the_relay_device_table_and_is_atomic() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("v15.db");
+    build_legacy(&path, 13);
+    let conn = rusqlite::Connection::open(&path).expect("open");
+    conn.pragma_update(None, "key", PASS).expect("key");
+    conn.execute_batch(V14_SQL).expect("frozen schema 14");
+    conn.execute_batch(V15_SQL).expect("frozen schema 15");
+    conn.execute(
+        "UPDATE companion_setting SET enabled = 1, port = 49000 WHERE id = 1",
+        [],
+    )
+    .expect("setting");
+    // A table with this name but other columns makes the migration fail.
+    conn.execute_batch("CREATE TABLE relay_device (x INTEGER);")
+        .unwrap();
+    conn.close().map_err(|(_, e)| e).unwrap();
+    let before = sync_columns(&path);
+    let mut vault = Vault::open(&path).expect("open");
+    assert_eq!(
+        vault.unlock(PASS).unwrap_err().kind(),
+        VaultErrorKind::Storage
+    );
+    drop(vault);
     assert_eq!(raw_versions(&path), (15, 15));
+    let conn = rusqlite::Connection::open(&path).expect("open");
+    conn.pragma_update(None, "key", PASS).unwrap();
+    conn.execute_batch("DROP TABLE relay_device;").unwrap();
+    conn.close().map_err(|(_, e)| e).unwrap();
+
+    let mut vault = Vault::open(&path).expect("open");
+    vault.unlock(PASS).expect("schema 15 to 16");
+    assert_version_data(&mut vault, 14);
+    assert_eq!(vault.sync_identity().unwrap().vault_id, V13_VAULT_ID);
+    assert_eq!(
+        vault.companion_setting().unwrap(),
+        apassy::vault::CompanionSetting {
+            enabled: true,
+            port: 49000
+        },
+        "the companion setting stays"
+    );
+    assert!(vault.relay_device().unwrap().is_none());
+    assert_eq!(sync_columns(&path), before, "record IDs and clocks stay");
+    drop(vault);
+    assert_eq!(raw_versions(&path), (16, 16));
+    assert!(apassy::vault::LOCAL_TABLES.contains(&"relay_device"));
 }

@@ -8,7 +8,9 @@
 //!    of the same session.
 //! 2. Otherwise the run uses the newest prompt of the agent whose host directory
 //!    contains the run directory, or is inside it. Codex gives its MCP servers no
-//!    session ID, so Codex runs always use this step.
+//!    session ID, so Codex runs always use this step. A run that names a host session
+//!    with no prompt of its own gets such a prompt only with [`FLAG_AMBIGUOUS`]: it is
+//!    the request of another session, so the owner decides.
 //! 3. Without a hook prompt, the run uses the text from the agent, as before.
 //!
 //! A hook prompt replaces the agent text. If the two differ, the log and the approval
@@ -250,8 +252,12 @@ impl Resolved {
 /// How the run found the hook prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MatchedBy {
+    /// The prompt of the host session of the run.
     Session,
+    /// The newest prompt in the project directory, for a host without a session.
     Directory,
+    /// A run with a host session got the prompt of another session in its directory.
+    OtherSession,
 }
 
 /// The result of the transcript check.
@@ -367,6 +373,9 @@ impl PromptStore {
         let matched = match matched_by {
             MatchedBy::Session => "",
             MatchedBy::Directory => ", matched by the project directory",
+            MatchedBy::OtherSession => {
+                ", matched by the project directory, from another host session"
+            }
         };
         let text = entry.prompt.trim().to_owned();
         let differs = !agent_text.is_empty() && agent_text != text;
@@ -418,6 +427,13 @@ impl PromptStore {
             .iter()
             .max_by_key(|entry| entry.received)
             .copied()?;
+        if host_session.is_some() {
+            // The run names its host session, and that session sent no prompt. A
+            // prompt of another session in the same directory is not the request of
+            // this run: after `--resume` it can be, but the hook of this session can
+            // also be off. So it is used only with a flag, and the owner decides.
+            return Some((chosen.clone(), MatchedBy::OtherSession, true));
+        }
         let sessions: BTreeSet<&Option<String>> =
             by_directory.iter().map(|entry| &entry.session).collect();
         Some((chosen.clone(), MatchedBy::Directory, sessions.len() > 1))
@@ -677,6 +693,27 @@ mod tests {
         // A run in another project does not use this prompt.
         let other = resolve(&store, None, "/work/other", "Agent.");
         assert_eq!(other.text, "Agent.");
+    }
+
+    #[test]
+    fn a_run_with_a_session_never_takes_another_session_prompt_silently() {
+        let store = store();
+        store.insert(entry(Some("a"), "/p", "Reply with OK.", 10));
+        // Session "b" sent no prompt, for example its hook is off. The prompt of
+        // session "a" is not the request of "b": the owner decides.
+        let other = resolve(&store, Some("b"), "/p", "Deploy all.");
+        assert_eq!(other.text, "Reply with OK.");
+        assert_eq!(other.flags, vec![FLAG_AMBIGUOUS.to_owned()]);
+        assert!(
+            other.source.contains("from another host session"),
+            "{}",
+            other.source
+        );
+        assert_eq!(other.agent_text.as_deref(), Some("Deploy all."));
+        // A host without a session (Codex) still matches by directory, unflagged.
+        let codex = resolve(&store, None, "/p", "");
+        assert!(codex.flags.is_empty());
+        assert!(!codex.source.contains("another host session"));
     }
 
     #[test]

@@ -50,7 +50,14 @@
 #                            (apassy-base-v1.safetensors, goal B8). The script
 #                            checks it against tools/basemodel/manifest.json
 #                            and copies it with the manifest to
-#                            Contents/Resources/models/. Default: no model.
+#                            Contents/Resources/models/. Not set: the
+#                            checkpoint of this Mac,
+#                            $APASSY_LAYA_DIR/models/apassy-base-v1.safetensors,
+#                            if it exists (not in GitHub Actions). If it
+#                            does not match the manifest, a warning and no
+#                            model. Set but empty: no model.
+#   APASSY_LAYA_DIR          the Laya folder. Default:
+#                            ~/Library/Application Support/Apassy/laya.
 #   APASSY_BUILD_DATE        build time for the build identity,
 #                            YYYY-MM-DDTHH:MM:SSZ (UTC). Default: now. The
 #                            release workflow sets it once for its two builds.
@@ -335,11 +342,27 @@ done
 
 # Goal B8: the base-model checkpoint goes into the bundle before the signature,
 # so the signature seals it. The copy must match tools/basemodel/manifest.json.
+# Without APASSY_BASE_MODEL, a local build ships the checkpoint of this Mac. If
+# that checkpoint does not match the manifest (an old or retrained one), the app
+# ships no model: scripts/install.sh must not fail on it. A mismatch of
+# APASSY_BASE_MODEL stops the build. The release workflow sets APASSY_BASE_MODEL,
+# or ships none.
 MODEL_MODE="none"
+MODEL_SOURCE=""
+MODEL_LOCAL=""
+MODEL_BAD=""
+LOCAL_MODEL="${APASSY_LAYA_DIR:-$HOME/Library/Application Support/Apassy/laya}/models/apassy-base-v1.safetensors"
 if [ -n "${APASSY_BASE_MODEL:-}" ]; then
+  MODEL_SOURCE="$APASSY_BASE_MODEL"
+  [ -f "$MODEL_SOURCE" ] || fail "APASSY_BASE_MODEL does not exist: $MODEL_SOURCE"
+elif [ -z "${APASSY_BASE_MODEL+set}" ] && [ -z "${GITHUB_ACTIONS:-}" ] && [ -f "$LOCAL_MODEL" ]; then
+  MODEL_SOURCE="$LOCAL_MODEL"
+  MODEL_LOCAL=1
+fi
+if [ -n "$MODEL_SOURCE" ]; then
   step "Copy the base-model checkpoint"
+  echo "Checkpoint: $MODEL_SOURCE"
   MANIFEST="$ROOT/tools/basemodel/manifest.json"
-  [ -f "$APASSY_BASE_MODEL" ] || fail "APASSY_BASE_MODEL does not exist: $APASSY_BASE_MODEL"
   [ -f "$MANIFEST" ] || fail "missing $MANIFEST"
   command -v shasum >/dev/null 2>&1 || fail "missing tool: shasum"
   manifest_get() { plutil -extract "$1" raw -o - "$MANIFEST" 2>/dev/null || fail "manifest has no $1"; }
@@ -349,18 +372,37 @@ if [ -n "${APASSY_BASE_MODEL:-}" ]; then
   MODEL_VERSION="$(manifest_get version)"
   [[ "$MODEL_FILE" =~ ^[A-Za-z0-9._-]+\.safetensors$ ]] || fail "invalid checkpoint.file in the manifest: $MODEL_FILE"
   [[ "$MODEL_SHA" =~ ^[0-9a-f]{64}$ ]] || fail "invalid checkpoint.sha256 in the manifest"
-  GOT_SIZE="$(stat -f %z "$APASSY_BASE_MODEL")"
-  [ "$GOT_SIZE" = "$MODEL_SIZE" ] || fail "checkpoint size $GOT_SIZE does not match the manifest ($MODEL_SIZE)"
-  GOT_SHA="$(shasum -a 256 "$APASSY_BASE_MODEL" | awk '{print $1}')"
-  [ "$GOT_SHA" = "$MODEL_SHA" ] || fail "checkpoint SHA-256 $GOT_SHA does not match the manifest ($MODEL_SHA)"
   [ "$MODEL_VERSION" = "apassy-base-v1+${MODEL_SHA:0:8}" ] || fail "manifest version $MODEL_VERSION does not match the SHA-256"
-  mkdir -p "$APP/Contents/Resources/models"
-  cp "$APASSY_BASE_MODEL" "$APP/Contents/Resources/models/$MODEL_FILE"
-  cp "$MANIFEST" "$APP/Contents/Resources/models/manifest.json"
-  COPY_SHA="$(shasum -a 256 "$APP/Contents/Resources/models/$MODEL_FILE" | awk '{print $1}')"
-  [ "$COPY_SHA" = "$MODEL_SHA" ] || fail "the copied checkpoint does not match the manifest"
-  MODEL_MODE="$MODEL_VERSION"
-  echo "Base model: $MODEL_VERSION ($MODEL_SIZE bytes)"
+  GOT_SIZE="$(stat -f %z "$MODEL_SOURCE")"
+  if [ "$GOT_SIZE" != "$MODEL_SIZE" ]; then
+    MODEL_BAD="checkpoint size $GOT_SIZE does not match the manifest ($MODEL_SIZE)"
+  else
+    GOT_SHA="$(shasum -a 256 "$MODEL_SOURCE" | awk '{print $1}')"
+    [ "$GOT_SHA" = "$MODEL_SHA" ] || MODEL_BAD="checkpoint SHA-256 $GOT_SHA does not match the manifest ($MODEL_SHA)"
+  fi
+  if [ -n "$MODEL_BAD" ]; then
+    [ -n "$MODEL_LOCAL" ] || fail "$MODEL_BAD"
+    warn "$MODEL_BAD: $MODEL_SOURCE is the checkpoint of this Mac. The app ships no model. Set APASSY_BASE_MODEL to a checkpoint of the manifest to ship one."
+  else
+    mkdir -p "$APP/Contents/Resources/models"
+    cp "$MODEL_SOURCE" "$APP/Contents/Resources/models/$MODEL_FILE"
+    cp "$MANIFEST" "$APP/Contents/Resources/models/manifest.json"
+    COPY_SHA="$(shasum -a 256 "$APP/Contents/Resources/models/$MODEL_FILE" | awk '{print $1}')"
+    [ "$COPY_SHA" = "$MODEL_SHA" ] || fail "the copied checkpoint does not match the manifest"
+    MODEL_MODE="$MODEL_VERSION"
+    echo "Base model: $MODEL_VERSION ($MODEL_SIZE bytes) from $MODEL_SOURCE"
+  fi
+fi
+if [ "$MODEL_MODE" = "none" ]; then
+  if [ -n "$MODEL_BAD" ]; then
+    echo "Base model: none. $MODEL_SOURCE does not match the manifest."
+  elif [ -n "${APASSY_BASE_MODEL+set}" ]; then
+    echo "Base model: none (APASSY_BASE_MODEL is empty)."
+  elif [ -n "${GITHUB_ACTIONS:-}" ]; then
+    echo "Base model: none (no APASSY_BASE_MODEL in GitHub Actions)."
+  else
+    echo "Base model: none. No APASSY_BASE_MODEL, and no $LOCAL_MODEL."
+  fi
 fi
 
 # The training and serving scripts (goal items B8 and B9). The app starts the local
@@ -624,9 +666,9 @@ echo "Version:  $VERSION"
 echo "Build:    ${BUILD_COMMIT:-none (no build identity)}${BUILD_DATE:+, $BUILD_DATE}"
 echo "Signed:   $SIGN_NAME"
 if [ "$MODEL_MODE" = "none" ]; then
-  echo "Model:    none (set APASSY_BASE_MODEL to ship the base model)"
+  echo "Model:    none (set APASSY_BASE_MODEL, or put the checkpoint in $LOCAL_MODEL)"
 else
-  echo "Model:    $MODEL_MODE in Contents/Resources/models"
+  echo "Model:    $MODEL_MODE in Contents/Resources/models, from $MODEL_SOURCE"
 fi
 if [ "$KEYCHAIN_MODE" = "enabled" ]; then
   echo "Keychain: enabled (team $TEAM_ID, group $TEAM_ID.$APP_ID)"

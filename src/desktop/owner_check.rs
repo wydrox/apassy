@@ -82,6 +82,16 @@ fn decides(mode: ExecMode) -> &'static str {
     }
 }
 
+/// One variable of [`OwnerRequest::BindVariables`]. `field` is the main secret field of
+/// the item. The dialog shows the item name and the variable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariableBinding {
+    pub item_id: u64,
+    pub item_name: String,
+    pub env_name: String,
+    pub field: String,
+}
+
 /// An owner action that waits for the owner check. It has the parameters of the
 /// action, so the app does exactly what the owner confirmed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,6 +186,11 @@ pub enum OwnerRequest {
     },
     /// Open a command-line session (ADR 0017). Only the command line asks for it.
     OpenCliSession,
+    /// Bind the variables of several items with one check (ADR 0017, D1). Only
+    /// `apassy import --bind` asks for it. Programs get the real values.
+    BindVariables {
+        variables: Vec<VariableBinding>,
+    },
     /// Pair an iPhone (ADR 0020). The owner typed the right code. The values are the
     /// device exactly as it asked to pair.
     PairCompanion {
@@ -183,6 +198,14 @@ pub enum OwnerRequest {
         device_name: String,
         request_key: Vec<u8>,
         approval_key: Vec<u8>,
+    },
+    /// Add a Mac to the relay sync of the vault `vault` (a list ID; ADR 0022). The values
+    /// are the link exactly as the "Add a Mac…" sheet showed it with its safety words.
+    ConfirmSyncDevice {
+        vault: String,
+        link_id: u64,
+        device_name: String,
+        public_key: Vec<u8>,
     },
 }
 
@@ -241,6 +264,12 @@ impl OwnerRequest {
             },
             Self::SetTokenLifetime { .. } => OwnerAction::ChangeTokenLifetime,
             Self::OpenCliSession => OwnerAction::OpenCliSession,
+            Self::BindVariables { variables } => OwnerAction::BindVariables {
+                variables: variables
+                    .iter()
+                    .map(|binding| (binding.item_id, binding.env_name.clone()))
+                    .collect(),
+            },
             Self::PairCompanion {
                 device_id,
                 device_name,
@@ -251,6 +280,16 @@ impl OwnerRequest {
                 device_name: device_name.clone(),
                 request_key: request_key.clone(),
                 approval_key: approval_key.clone(),
+            },
+            Self::ConfirmSyncDevice {
+                link_id,
+                device_name,
+                public_key,
+                ..
+            } => OwnerAction::ConfirmSyncDevice {
+                link_id: *link_id,
+                device_name: device_name.clone(),
+                public_key: public_key.clone(),
             },
         }
     }
@@ -356,8 +395,17 @@ impl OwnerRequest {
                 format!("Set the token lifetime to {} days.", days.trim())
             }
             Self::OpenCliSession => "Start a command-line session. apassy commands in your terminal can then list, add, and change credentials and agents for 30 idle minutes. They can never show a secret value. Grants, approvals, and new tokens still ask you here.".to_owned(),
+            Self::BindVariables { variables } => match variables.len() {
+                1 => "Bind 1 credential to the environment variable below. Programs get the real value.".to_owned(),
+                count => format!(
+                    "Bind {count} credentials to the environment variables below. Programs get the real values."
+                ),
+            },
             Self::PairCompanion { device_name, .. } => format!(
                 "Pair the iPhone \"{device_name}\". It can see the runs that wait for you and approve them with Face ID. It can never see a secret value."
+            ),
+            Self::ConfirmSyncDevice { device_name, .. } => format!(
+                "Add the Mac \"{device_name}\" to the sync of this vault through the Apassy relay. It gets the encrypted copy and can send changes. It still needs the passphrase to open the vault."
             ),
         }
     }
@@ -701,7 +749,11 @@ impl DesktopApp {
                 }
             }
             OwnerRequest::OpenCliSession => self.open_cli_session(proof),
+            OwnerRequest::BindVariables { variables } => self.bind_variables(variables, proof),
             OwnerRequest::PairCompanion { .. } => self.complete_pairing(proof),
+            OwnerRequest::ConfirmSyncDevice { vault, link_id, .. } => {
+                self.relay_confirm_link(&vault, link_id, proof);
+            }
         }
     }
 
@@ -779,7 +831,14 @@ impl DesktopApp {
                 };
                 self.finish_owner_check(dialog, proof);
             }
-            Err(err) if err.passphrase_fallback() || err == OwnerAuthError::WrongPassphrase => {
+            // The owner can try again: the dialog stays open and keeps the action.
+            Err(err)
+                if err.passphrase_fallback()
+                    || matches!(
+                        err,
+                        OwnerAuthError::WrongPassphrase | OwnerAuthError::EmptyPassphrase
+                    ) =>
+            {
                 dialog.message = Some(err.message());
             }
             Err(err) => {

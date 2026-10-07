@@ -29,7 +29,7 @@ Item and agent references are text: an ID, or the exact name without regard to c
 { "ok": true, "code": "ok", "message": "CLI key is added with ID 7.", "data": { "type": "items", "items": [ … ] } }
 ```
 
-`message` is text for the owner. It has no secret value. `data.type` is one of `none`, `status`, `session`, `items`, `item`, `events`, `agents`, `agent`, `token`, `lifetime`, `requests`, `runs`, `patterns`, `activity`, `export`.
+`message` is text for the owner. It has no secret value. `data.type` is one of `none`, `status`, `session`, `items`, `item`, `events`, `agents`, `agent`, `token`, `lifetime`, `requests`, `runs`, `patterns`, `activity`, `export`, `bindings`.
 
 Only two types hold a token: `session` (after `login`) and `token` (after `agent_add` and `agent_rotate`). No type holds a secret value of an item. `item` names the secret fields and the hidden details, without values.
 
@@ -53,6 +53,7 @@ S: needs a session. C: asks for the owner check in the window, then answers.
 | `item_unarchive` | `item` | S | C | |
 | `item_history` | `item`, `limit` | S | | 1 to 1000, default 50. |
 | `item_set_variable` | `item`, `name`, `field`, `hosts` | S | C | No `hosts`: the real value. `hosts`: a placeholder (ADR 0011). `field` is a field name or a detail label; the default is the main secret. |
+| `item_bind_variables` | `variables` | S | C | Each entry has `item_id` and `name`. At most 200. The main secret of each item, with the real value. The app refuses an invalid name, a name of another item, an item that has a variable, and an item without a secret value before the check. The check (`BindVariables`) lists the rest. `data.results` (type `bindings`) has one row for each entry: `item_id`, `name`, `bound`, and `reason` when it is not bound. When every entry is refused, the answer comes at once, without a check. `apassy import --bind` uses it. |
 | `item_clear_variable` | `item` | S | | Also removes every process grant of the item. |
 | `item_set_declaration` | `item`, `declaration` | S | C | A field that is not given keeps the stored value or the suggestion. `provider: ""` is no provider. |
 | `item_set_connector` | `item`, `base_url` | S | C | An API key item only. |

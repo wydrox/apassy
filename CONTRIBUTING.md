@@ -87,6 +87,7 @@ The checks, as CI runs them ([development checks](docs/operations/checks.md)):
 ```
 cargo fmt --all -- --check
 cargo clippy --offline --locked --all-features --all-targets -- -D warnings
+cargo check --offline --locked --features desktop --bin apassy
 cargo test --offline --locked --all-features --all-targets -- --test-threads=1
 cargo test --offline --locked --features vault --doc
 node --test design/walkthrough/model.test.mjs

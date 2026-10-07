@@ -10,7 +10,7 @@ The command line never shows a secret value, and never takes one as an argument.
 
 The app contains `apassy`, `apassy-mcp`, `apassy-hook`, and `apassy-sandbox`. It also contains the Seatbelt profile for `apassy-sandbox`.
 
-In Apassy, open Settings > Command line. Use Install CLI tools to put links in `~/.local/bin`.
+In Apassy, open Settings > Agents > Command line. Use Install CLI tools to put links in `~/.local/bin`.
 
 You can also install the links from Terminal:
 
@@ -46,6 +46,36 @@ The app must run for owner commands. `apassy` without arguments, or Apassy.app, 
 /Applications/Apassy.app/Contents/MacOS/apassy doctor
 ```
 
+### Shell completions
+
+`apassy completions zsh|bash|fish` prints a completion script. The scripts complete the commands, the subcommands, and the main options (`--json`, `--socket`, `--help`, `--version`). They come from the same tables as `apassy help`, so a new command appears in them. They do not need the window.
+
+For zsh, write the script to a folder on `fpath`, then start a new shell:
+
+```sh
+mkdir -p ~/.zfunc
+apassy completions zsh > ~/.zfunc/_apassy
+# In ~/.zshrc, before compinit:
+#   fpath=(~/.zfunc $fpath)
+#   autoload -Uz compinit && compinit
+```
+
+For bash, add this line to `~/.bash_profile`. Terminal on macOS starts login shells, which read `~/.bash_profile` and not `~/.bashrc`. Use `eval`: the bash 3.2 of macOS reads nothing from `source <(...)`.
+
+```sh
+eval "$(apassy completions bash)"
+```
+
+For fish, write the script to the completions folder:
+
+```sh
+apassy completions fish > ~/.config/fish/completions/apassy.fish
+```
+
+Where no subcommand fits, as for the file of `apassy import`, zsh and bash complete file names. Fish does too.
+
+Apassy and the installer do not change shell files. Write the script again after an update, so it lists the new commands.
+
 ## 2. A session
 
 Only `status`, `login`, `lock`, and `unlock` work without a session.
@@ -57,7 +87,7 @@ apassy status
 apassy logout                 # or: eval "$(apassy logout)"
 ```
 
-`login` prints `export APASSY_SESSION='apassy_cli_…'` (`set -gx …` in fish). It refuses to print the token on a terminal: use it with `eval`, or add `--raw` for the token only. A session belongs to the open vault. It ends after 30 idle minutes, after 12 hours, at a lock, when another vault opens, after a backup or a passphrase change, and when Apassy quits. Settings > Command line shows the open sessions and ends them.
+`login` prints `export APASSY_SESSION='apassy_cli_…'` (`set -gx …` in fish). It refuses to print the token on a terminal: use it with `eval`, or add `--raw` for the token only. A session belongs to the open vault. It ends after 30 idle minutes, after 12 hours, at a lock, when another vault opens, after a backup or a passphrase change, and when Apassy quits. Settings > Agents > Command line shows the open sessions and ends them.
 
 Do not start an agent from a shell that has `APASSY_SESSION`. `apassy-sandbox` removes it from the agent environment; an agent started without the sandbox would inherit it.
 
@@ -97,6 +127,7 @@ apassy item review "Stripe test"          # after a restore
 ```sh
 apassy import .env --project billing --dry-run
 apassy import .env --project billing
+apassy import .env --project billing --bind   # one owner check for every variable
 apassy import ~/Downloads/1Password.csv
 apassy import ~/Downloads/bitwarden_export.csv
 ```
@@ -108,6 +139,16 @@ apassy import ~/Downloads/bitwarden_export.csv
 | Bitwarden CSV | The same. Custom fields are hidden details. |
 
 The format comes from the file name and the header. `--format` overrides it. A name that exists is left out unless `--allow-duplicates`. Then bind the variables with `apassy item env`, and delete the export file: it holds every password in plain text.
+
+`--bind` binds the variables in the same command, with one owner check for all of them:
+
+- A `.env` key is the variable of its credential. A 1Password or Bitwarden row has a variable only when its title is a variable name already, such as `STRIPE_API_KEY`. Other rows get no variable.
+- Only the credentials that this import adds are bound, at most 200 in one import. The main secret is the value, and programs get the real value. A placeholder needs `apassy item env --placeholder-host`.
+- The app refuses a name that is not valid (`A-Z`, `0-9`, and `_`; no system name such as `PATH`), a name that another credential uses, and a credential without a secret value. The window lists the others with their count, and Touch ID says how many variables it binds.
+- The table shows the result of each credential. Under it, one line for each variable that is not bound says why. A cancel adds the credentials and binds nothing. The exit code is 1 when a variable is not bound.
+- With `--json`, the answer is one document. An entry that is not bound has a `reason`. When something was not done, `ok` is false and the document has a `code` and a `message`.
+- With `--dry-run`, the table shows the variable that each credential would get.
+- Without `--bind`, the import binds nothing.
 
 ## 5. Agents and access
 

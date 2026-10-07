@@ -95,7 +95,7 @@ fn press_undo(ctx: &egui::Context, app: &mut DesktopApp, t: f64) {
     card_frame(ctx, app, t + 0.1, Vec::new());
 }
 
-fn locked_app(dir: &TempDir, name: &str) -> DesktopApp {
+pub(super) fn locked_app(dir: &TempDir, name: &str) -> DesktopApp {
     let mut app = DesktopApp::new();
     app.owner_ui
         .session
@@ -307,6 +307,18 @@ fn reveal_waits_for_the_owner_check_and_falls_back_to_the_passphrase() {
     assert!(message.contains("Type the passphrase"), "{message}");
     assert_eq!(app.owner_ui.session.revealed_value(item_id, "token"), None);
 
+    // "Confirm" with an empty field: the dialog stays open and asks for the passphrase.
+    app.start_passphrase_check(&ctx);
+    finish_check(&mut app, &ctx);
+    let message = app
+        .owner
+        .check
+        .as_ref()
+        .and_then(|d| d.message.clone())
+        .expect("the dialog stays open");
+    assert_eq!(message, "Type the passphrase.");
+    assert_eq!(app.owner_ui.session.revealed_value(item_id, "token"), None);
+
     // A wrong passphrase: nothing is revealed, and the field is empty again.
     app.owner
         .check
@@ -355,6 +367,67 @@ fn reveal_waits_for_the_owner_check_and_falls_back_to_the_passphrase() {
     app.ask_owner(OwnerRequest::Reveal { item_id }, Some(&ctx));
     app.close_owner_check(Some(&ctx));
     assert_eq!(app.owner_ui.session.revealed_value(item_id, "token"), None);
+}
+
+/// The top left of the first painted text that is `needle`.
+fn text_pos(shape: &egui::Shape, needle: &str) -> Option<Pos2> {
+    match shape {
+        egui::Shape::Text(text) if text.galley.text() == needle => Some(text.pos),
+        egui::Shape::Vec(nested) => nested.iter().find_map(|inner| text_pos(inner, needle)),
+        _ => None,
+    }
+}
+
+/// "Open Settings" in the "macOS notifications are off" notice of Activity opens
+/// Settings > Notifications, also when another tab was open before.
+#[test]
+fn open_settings_from_activity_shows_the_notifications_tab() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    app.start_broker(&socket_dir(&dir));
+    let approvals = app.approvals().expect("the broker runs");
+    app.owner.notifications = Some(crate::desktop::notify::NotificationCenter::start(
+        approvals,
+        app.owner_ui.session.shared_vault(),
+        not_available_helper(dir.path()),
+        || {},
+    ));
+    app.view = OwnerView::Activity;
+    app.ui.settings_tab = super::SettingsTab::About;
+    let ctx = egui::Context::default();
+    let text = app_frame(&ctx, &mut app);
+    assert!(text.contains("macOS notifications are off"), "{text}");
+
+    let output = ctx.run_ui(input(1.0, Vec::new()), |ui| draw(&mut app, ui));
+    let button = output
+        .shapes
+        .iter()
+        .find_map(|clipped| text_pos(&clipped.shape, "Open Settings"))
+        .expect("the notice has Open Settings");
+    output.drop_without_applying_deltas();
+    let at = button + Vec2::new(4.0, 4.0);
+    let click = |pressed| Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Modifiers::NONE,
+    };
+    for (time, events) in [
+        (1.1, vec![Event::PointerMoved(at)]),
+        (1.2, vec![click(true)]),
+        (1.3, vec![click(false)]),
+    ] {
+        let output = ctx.run_ui(input(time, events), |ui| draw(&mut app, ui));
+        output.drop_without_applying_deltas();
+    }
+    assert_eq!(app.view, OwnerView::Settings);
+    assert_eq!(app.ui.settings_tab, super::SettingsTab::Notifications);
+    let text = app_frame(&egui::Context::default(), &mut app);
+    assert!(
+        text.contains("A waiting approval or a blocked request causes a macOS notification."),
+        "{text}"
+    );
+    assert!(!text.contains("Keyboard shortcuts"), "{text}");
 }
 
 fn waiting_run(agent: &str) -> PendingRun {

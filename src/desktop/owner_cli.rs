@@ -11,13 +11,14 @@
 //! (the vault epoch changes), at `apassy logout`, and when the app quits.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::PoisonError;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui;
 use zeroize::Zeroizing;
 
-use super::owner_check::OwnerRequest;
+use super::owner_check::{OwnerRequest, VariableBinding};
 use super::owner_socket::{self, Envelope, OwnerSocket};
 use super::owner_store::{
     DETAIL_PREFIX, MAX_DETAILS, OwnerDetails, OwnerSummary, RuleForm, SecretForm, detail_field_name,
@@ -27,14 +28,14 @@ use crate::broker::approvals::{OwnerAction, OwnerProof};
 use crate::contracts::CredentialKind;
 use crate::desktop::model::{DetailDraft, ItemDraft, ModelError, ModelResult};
 use crate::owner::wire::{
-    ActivityRow, AgentRow, AgentView, Command, Data, DeclarationInput, DeclarationView, DetailView,
-    EventRow, GrantMode, GrantRow, ItemInput, ItemRow, ItemView, OWNER_WIRE_VERSION, OperationRow,
-    PatternRow, Request, RequestRow, Response, RuleInput, RuleView, RunRow, SecretText, StatusView,
-    VariableView, VaultState,
+    ActivityRow, AgentRow, AgentView, BindingRow, Command, Data, DeclarationInput, DeclarationView,
+    DetailView, EventRow, GrantMode, GrantRow, ItemInput, ItemRow, ItemView, OWNER_WIRE_VERSION,
+    OperationRow, PatternRow, Request, RequestRow, Response, RuleInput, RuleView, RunRow,
+    SecretText, StatusView, VariableInput, VariableView, VaultState,
 };
 use crate::vault::{
     AccessRequest, AgentSummary, EnvDelivery, Environment, ExecMode, GrantPlace, PatternState,
-    RequestState, Reversibility, RiskLevel, Scope, checked_env_name,
+    RequestState, Reversibility, RiskLevel, Scope, VaultErrorKind, checked_env_name,
 };
 
 /// A session ends after this time without a request.
@@ -47,6 +48,10 @@ pub const SESSION_PREFIX: &str = "apassy_cli_";
 const MAX_SESSIONS: usize = 8;
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 1000;
+/// At most this many variables in one batch binding (ADR 0017, D1).
+const MAX_BIND_VARIABLES: usize = 200;
+/// The text for a variable name that the vault does not take.
+const INVALID_VARIABLE: &str = "The name is not valid: use A-Z, 0-9, and _, start with a letter or _, and no system name such as PATH.";
 
 /// The note in the owner check dialog for a request from the command line.
 pub(crate) const CLI_ORIGIN_NOTE: &str = "The command line asked for this (apassy). If you did not run an apassy command just now, click Cancel.";
@@ -61,6 +66,8 @@ pub(crate) struct CliHost {
     sessions: Vec<CliSession>,
     /// The token of the session that the last owner check opened, for its ticket.
     issued: Option<SecretText>,
+    /// The rows of the last batch binding, for its ticket.
+    bound: Option<Vec<BindingRow>>,
 }
 
 impl CliHost {
@@ -76,6 +83,7 @@ impl CliHost {
         self.inbox = None;
         self.sessions.clear();
         self.issued = None;
+        self.bound = None;
     }
 
     #[cfg(test)]
@@ -100,11 +108,18 @@ pub(crate) struct CliTicket {
     after: After,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum After {
     Message,
     Session,
-    Token { agent_id: u64 },
+    Token {
+        agent_id: u64,
+    },
+    /// A batch binding. `refused` has the variables that the app refused before the
+    /// owner check.
+    Bindings {
+        refused: Vec<BindingRow>,
+    },
 }
 
 impl CliTicket {
@@ -138,6 +153,11 @@ enum Step {
     Reply(Response),
     /// Ask the owner, then do the request.
     Check(OwnerRequest),
+    /// Ask the owner for a batch binding. `refused` goes into the answer.
+    Bind {
+        request: OwnerRequest,
+        refused: Vec<BindingRow>,
+    },
 }
 
 /// A command that the app refuses. It becomes an error [`Response`].
@@ -271,6 +291,11 @@ impl DesktopApp {
         match step {
             Step::Reply(response) => ticket.send(response),
             Step::Check(request) => self.ask_owner_for_cli(request, ticket, ctx),
+            Step::Bind { request, refused } => {
+                let mut ticket = ticket;
+                ticket.after = After::Bindings { refused };
+                self.ask_owner_for_cli(request, ticket, ctx);
+            }
         }
     }
 
@@ -290,13 +315,16 @@ impl DesktopApp {
             ));
             return;
         }
-        ticket.after = match &request {
-            OwnerRequest::OpenCliSession => After::Session,
-            OwnerRequest::RotateToken { agent_id, .. } => After::Token {
-                agent_id: *agent_id,
-            },
-            _ => After::Message,
-        };
+        match &request {
+            OwnerRequest::OpenCliSession => ticket.after = After::Session,
+            OwnerRequest::RotateToken { agent_id, .. } => {
+                ticket.after = After::Token {
+                    agent_id: *agent_id,
+                };
+            }
+            // A batch binding has its refusals in the ticket already.
+            _ => {}
+        }
         self.ask_owner(request, Some(ctx));
         if let Some(dialog) = self.owner.check.as_mut() {
             dialog.origin = Some(ticket);
@@ -306,18 +334,32 @@ impl DesktopApp {
 
     /// Answer the command-line request of a finished owner check. `before` is the status
     /// sequence before the action.
-    pub(crate) fn answer_cli_ticket(&mut self, ticket: CliTicket, before: u64) {
+    pub(crate) fn answer_cli_ticket(&mut self, mut ticket: CliTicket, before: u64) {
         let failed = self.status_seq != before && self.status_kind == super::StatusKind::Error;
         let message = if self.status_seq == before {
             "Done.".to_owned()
         } else {
             self.status_text.clone()
         };
+        let after = std::mem::replace(&mut ticket.after, After::Message);
+        // A batch binding answers with a row for each variable, also when no variable
+        // could be bound after the check.
+        if let After::Bindings { mut refused } = after {
+            let response = match self.cli.bound.take() {
+                Some(rows) => {
+                    refused.extend(rows);
+                    Response::ok(message, Data::Bindings { results: refused })
+                }
+                None => Response::error("refused", message),
+            };
+            ticket.send(response);
+            return;
+        }
         if failed {
             ticket.send(Response::error("refused", message));
             return;
         }
-        let response = match ticket.after {
+        let response = match after {
             After::Message => Response::ok(message, Data::None),
             After::Session => match self.cli.issued.take() {
                 Some(token) => Response::ok(
@@ -348,6 +390,7 @@ impl DesktopApp {
                     _ => Response::error("refused", message),
                 }
             }
+            After::Bindings { .. } => Response::error("refused", message),
         };
         ticket.send(response);
     }
@@ -662,6 +705,7 @@ impl DesktopApp {
                 field,
                 hosts,
             } => self.cli_set_variable(&item, &name, field.as_deref(), hosts),
+            Command::ItemBindVariables { variables } => self.cli_bind_variables(variables),
             Command::ItemClearVariable { item } => {
                 let found = self.find_item(&item)?;
                 self.owner_ui.session.clear_env_binding(found.id)?;
@@ -1066,7 +1110,7 @@ impl DesktopApp {
                 // An open sheet closes first, and its typed secrets are erased.
                 super::ui::close_sheet(self, ctx);
                 self.owner_ui.restore_source = path.display().to_string();
-                self.view = OwnerView::Settings;
+                super::ui::open_settings(self, super::ui::SettingsTab::Security);
                 self.ui.sheet = Some(super::ui::Sheet::Restore);
                 bring_to_front(ctx);
                 done(
@@ -1346,6 +1390,169 @@ impl DesktopApp {
             field,
             delivery,
         }))
+    }
+
+    /// Check each variable of a batch binding before the owner check (ADR 0017, D1). A
+    /// refused variable gets a row with the reason. The dialog lists the others.
+    fn cli_bind_variables(&mut self, variables: Vec<VariableInput>) -> Run {
+        if variables.is_empty() {
+            return Err(invalid("Name at least one variable."));
+        }
+        if variables.len() > MAX_BIND_VARIABLES {
+            return Err(invalid(format!(
+                "Bind at most {MAX_BIND_VARIABLES} variables at one time."
+            )));
+        }
+        let session = &self.owner_ui.session;
+        let names: BTreeMap<u64, String> = session
+            .search("")?
+            .into_iter()
+            .map(|item| (item.id, item.name))
+            .collect();
+        let mut by_item = BTreeMap::new();
+        let mut by_name = BTreeMap::new();
+        for (item_id, item_name, env_name) in session.env_bound_items()? {
+            by_item.insert(item_id, env_name.clone());
+            by_name.insert(env_name, item_name);
+        }
+        let mut refused = Vec::new();
+        let mut accepted: Vec<VariableBinding> = Vec::new();
+        for VariableInput { item_id, name } in variables {
+            let env_name = name.trim().to_owned();
+            let reason = if !names.contains_key(&item_id) {
+                Some(format!("No credential has the ID {item_id}."))
+            } else if checked_env_name(&env_name).is_err() {
+                Some(INVALID_VARIABLE.to_owned())
+            } else if let Some(current) = by_item.get(&item_id) {
+                Some(format!(
+                    "The credential has the variable {current}. Change it with apassy item env."
+                ))
+            } else if let Some(other) = by_name.get(&env_name) {
+                Some(format!("{other} uses this variable."))
+            } else if accepted.iter().any(|binding| binding.item_id == item_id) {
+                Some("The credential is named twice.".to_owned())
+            } else if accepted.iter().any(|binding| binding.env_name == env_name) {
+                Some("Another credential of this request has this variable.".to_owned())
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                refused.push(BindingRow {
+                    item_id,
+                    name: env_name,
+                    bound: false,
+                    reason,
+                });
+                continue;
+            }
+            // An empty secret is never stored, so an item without its main secret
+            // field has no value to bind.
+            let field = session
+                .secret_fields(item_id)?
+                .into_iter()
+                .find(|field| !field.starts_with(DETAIL_PREFIX));
+            let Some(field) = field else {
+                refused.push(BindingRow {
+                    item_id,
+                    name: env_name,
+                    bound: false,
+                    reason: "The credential has no secret value.".to_owned(),
+                });
+                continue;
+            };
+            accepted.push(VariableBinding {
+                item_id,
+                item_name: names[&item_id].clone(),
+                env_name,
+                field,
+            });
+        }
+        if accepted.is_empty() {
+            return data(
+                "No variable can be bound. Apassy did nothing.",
+                Data::Bindings { results: refused },
+            );
+        }
+        Ok(Step::Bind {
+            request: OwnerRequest::BindVariables {
+                variables: accepted,
+            },
+            refused,
+        })
+    }
+
+    /// Bind the variables of a passed batch check (ADR 0017, D1). The proof is checked
+    /// once, with the vault mutex held, for exactly the variables of the dialog. Then
+    /// each variable binds on its own, and the answer has a row for each.
+    pub(crate) fn bind_variables(&mut self, variables: Vec<VariableBinding>, proof: OwnerProof) {
+        let action = OwnerAction::BindVariables {
+            variables: variables
+                .iter()
+                .map(|binding| (binding.item_id, binding.env_name.clone()))
+                .collect(),
+        };
+        self.cli.bound = None;
+        let shared = self.owner_ui.session.shared_vault();
+        let result = {
+            let mut slot = shared.lock().unwrap_or_else(PoisonError::into_inner);
+            match slot.as_mut() {
+                Some(vault) if !vault.is_locked() => match proof.check(&action, &vault.epoch()) {
+                    Ok(()) => Ok(variables
+                        .into_iter()
+                        .map(|binding| {
+                            let result = vault.set_env_binding_with(
+                                binding.item_id,
+                                &binding.env_name,
+                                &binding.field,
+                                &EnvDelivery::Value,
+                            );
+                            BindingRow {
+                                item_id: binding.item_id,
+                                name: binding.env_name,
+                                bound: result.is_ok(),
+                                reason: match result {
+                                    Ok(()) => String::new(),
+                                    Err(err) => match err.kind() {
+                                        VaultErrorKind::AlreadyExists => {
+                                            "Another credential uses this variable now.".to_owned()
+                                        }
+                                        VaultErrorKind::NotFound => {
+                                            "The credential or its secret is gone.".to_owned()
+                                        }
+                                        VaultErrorKind::InvalidInput => INVALID_VARIABLE.to_owned(),
+                                        _ => format!("The vault did not save it ({err})."),
+                                    },
+                                },
+                            }
+                        })
+                        .collect::<Vec<_>>()),
+                    Err(refusal) => Err(refusal.message().to_owned()),
+                },
+                _ => Err("The vault is locked. No variable is bound.".to_owned()),
+            }
+        };
+        drop(proof);
+        match result {
+            Ok(rows) => {
+                let bound = rows.iter().filter(|row| row.bound).count();
+                let message = match (bound, rows.len()) {
+                    (1, 1) => "Command line: 1 variable is bound.".to_owned(),
+                    (bound, total) if bound == total => {
+                        format!("Command line: {bound} variables are bound.")
+                    }
+                    (bound, total) => {
+                        format!("Command line: {bound} of {total} variables are bound.")
+                    }
+                };
+                if bound == 0 {
+                    self.set_err(message);
+                } else {
+                    self.set_ok(message);
+                }
+                self.cli.bound = Some(rows);
+            }
+            Err(message) => self.set_err(message),
+        }
     }
 
     fn cli_set_declaration(&mut self, item: &str, input: DeclarationInput) -> Run {

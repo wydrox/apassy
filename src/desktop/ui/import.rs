@@ -1,4 +1,4 @@
-//! Import from 1Password: Settings > Import. A sheet with three steps: the path of the
+//! Import from 1Password: Settings > General > Import. A sheet with three steps: the path of the
 //! export file, a preview with a switch for each item, and the result.
 //!
 //! The parsed preview holds the secrets of the export in erasing buffers. The app drops
@@ -524,8 +524,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::desktop::ItemDraft;
     use crate::desktop::owner_store::SecretForm;
-    use crate::desktop::{ItemDraft, OwnerView};
 
     #[allow(dead_code)]
     mod zip_fixture {
@@ -752,8 +752,8 @@ mod tests {
         );
         let ctx = egui::Context::default();
 
-        // Settings has the section.
-        app.view = OwnerView::Settings;
+        // Settings > General has the section.
+        crate::desktop::ui::open_settings(&mut app, crate::desktop::ui::SettingsTab::General);
         let text = frames(&ctx, &mut app, Vec::new());
         assert!(text.contains("Import from 1Password…"), "{text}");
 

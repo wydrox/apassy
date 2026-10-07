@@ -25,7 +25,7 @@ The broker stores one entry for each decision in the encrypted vault (schema 7, 
 | The owner approves or denies | `owner` | `allow` or `deny` | yes |
 | The owner does not answer in time, or a lock ends the wait | `no_answer` | `deny` | yes |
 
-An entry has: the time, the agent, the project directory, the working directory relative to the project (`cwd_rel`), the item IDs, the user request and its source (`agent`, `host`, or `none`), the command, the purpose, the owner instruction, the environment variable names, the declaration of each item, the rule flags, "known safe", the model facts, the generalized pattern, "a grant in ask mode", the decision, who made it, "approve and remember", the policy (bouncer contract and `task_match` level), and the decision note.
+An entry has: the time, the agent, the project directory, the working directory relative to the project (`cwd_rel`), the item IDs, the user request and its source (`agent`, `host`, or `none`), the command, the purpose, the owner instruction, the environment variable names, the declaration of each item, the rule flags, "known safe", the model facts, the generalized pattern, "a grant in ask mode", the decision, who made it, "approve and remember", the policy (bouncer contract and `task_match` level, and `; model <version>` when the model answered with a version), and the decision note.
 
 No secret value:
 
@@ -169,6 +169,9 @@ Tests: `learning_view_shows_the_ask_rate_decisions_patterns_and_candidate_slot`,
 | `decision` | string | `allow` or `deny` |
 | `decided_by` | string | `rule`, `model`, `pattern`, `owner`, or `no_answer` |
 | `remembered` | boolean | The owner used "Approve and remember" |
+| `model_version` | string, optional | The version of the model that answered, for example `apassy-base-v1+1a2b3c4d` or `laya-rl-agent`. Only when the model answered with a version. Added on 2026-10-07; older lines and readers without it stay valid |
+
+The decision log keeps the version at the end of its `policy` text (`...; model apassy-base-v1+1a2b3c4d`), so the vault schema does not change. The Learning view shows it in "Policy".
 
 The owner labels are the lines with `decided_by` = `owner`. [The fine-tune study](fine-tune.md), section 5, names some fields differently: `relative_dir` is `cwd_rel`, `owner_decision` is `decision` of an owner line, and `source` is `remembered`.
 

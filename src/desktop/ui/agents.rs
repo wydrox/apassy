@@ -93,7 +93,7 @@ pub(super) fn next_steps_panel(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool 
         s.row(|ui| {
             kit::note(
                 ui,
-                "You can do these steps later in Agents or Settings > Command line.",
+                "You can do these steps later in Agents or Settings > Agents > Command line.",
             );
         });
     });
@@ -141,7 +141,7 @@ fn connection_progress(app: &mut DesktopApp, ui: &mut egui::Ui, cli: bool) {
             (
                 "CLI tools installed",
                 links,
-                "Check in Settings > Command line",
+                "Check in Settings > Agents > Command line",
             ),
             (
                 "App available to CLI",
@@ -170,8 +170,9 @@ fn connection_progress(app: &mut DesktopApp, ui: &mut egui::Ui, cli: bool) {
                 "Check the result of a test request and its entry in Activity",
             ),
         ] {
-            s.labeled(
+            s.status(
                 label,
+                (!complete).then_some(detail),
                 kit::text(if complete { "Checked" } else { "To check" }, Font::Callout).color(
                     if complete {
                         Tone::Good.text()
@@ -180,9 +181,6 @@ fn connection_progress(app: &mut DesktopApp, ui: &mut egui::Ui, cli: bool) {
                     },
                 ),
             );
-            if !complete {
-                s.row(|ui| kit::note(ui, detail));
-            }
         }
         s.row(|ui| kit::note(ui, "CLI links do not set PATH. Host settings do not prove a connection or a successful request."));
     });
@@ -217,31 +215,43 @@ fn draw_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
         }
     };
     let mut register = false;
+    // With no active agent, the empty state has the one main action. A second
+    // prominent button in the header would say the same thing twice.
+    let empty = agents.iter().all(|agent| agent.revoked);
     kit::page_header(
         ui,
         "Agents",
         Some("An agent uses a credential through Apassy. It never receives the secret value."),
         |ui| {
-            register = kit::button_with(
-                ui,
-                Some(Icon::Plus),
-                "Register",
-                Style::Prominent,
-                Size::Regular,
-            )
-            .clicked();
+            if !empty {
+                register = kit::button_with(
+                    ui,
+                    Some(Icon::Plus),
+                    "Register",
+                    Style::Prominent,
+                    Size::Regular,
+                )
+                .clicked();
+            }
         },
     );
     let now = now();
     let (revoked, active): (Vec<_>, Vec<_>) = agents.into_iter().partition(|agent| agent.revoked);
-    if active.is_empty() && revoked.is_empty() {
-        register |= kit::empty_state(
-            ui,
-            Icon::Person,
-            "No agents yet",
-            "Register each agent host, such as Claude Code or Codex. Apassy gives it a token for the Apassy MCP server.",
-            Some("Register agent"),
-        );
+    if active.is_empty() {
+        // Revoked agents stay in the folded list below, for their history. A restore
+        // revokes every agent, so the owner registers them again here.
+        let (title, message) = if revoked.is_empty() {
+            (
+                "No agents yet",
+                "Register each agent host, such as Claude Code or Codex. Apassy gives it a token for the Apassy MCP server.",
+            )
+        } else {
+            (
+                "No active agents",
+                "Every agent of this vault is revoked, for example after a restore. Register each agent host again; it gets a new token.",
+            )
+        };
+        register |= kit::empty_state(ui, Icon::Person, title, message, Some("Register agent"));
     }
     let mut open = None;
     if !active.is_empty() {
@@ -391,29 +401,25 @@ fn draw_agent(app: &mut DesktopApp, ui: &mut egui::Ui, agent_id: u64) {
 /// The token expiry and rotation (goal item P1).
 fn token_section(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary, now: u64) {
     let lifetime = app.owner_ui.session.token_lifetime_days().ok();
-    let footer = lifetime
-        .map(|days| format!("Token lifetime: {days} days after issue. You change it in Settings."));
+    let footer = lifetime.map(|days| {
+        format!("Token lifetime: {days} days after issue. You change it in Settings > Agents.")
+    });
     let mut rotate = false;
     kit::section(ui, Some("Token"), footer.as_deref(), |s| {
         let expired = agent.token_expired_at(now);
-        let (value, tone) = if expired {
-            (
-                format!(
-                    "The token expired on {}. The agent gets token_expired.",
-                    format_utc(agent.token_expires_at)
-                ),
-                Tone::Critical,
-            )
+        let when = format_utc(agent.token_expires_at);
+        if expired {
+            s.status(
+                "Expired",
+                Some("The agent gets token_expired. Rotate the token to give it a new one."),
+                kit::text(when, Font::Callout).color(Tone::Critical.text()),
+            );
         } else {
-            (
-                format!(
-                    "The token expires on {}.",
-                    format_utc(agent.token_expires_at)
-                ),
-                Tone::Neutral,
-            )
-        };
-        s.labeled("Expiry", kit::text(value, Font::Callout).color(tone.text()));
+            s.labeled(
+                "Expires",
+                kit::text(when, Font::Callout).color(kit::SECONDARY),
+            );
+        }
         s.row(|ui| {
             egui::Sides::new().shrink_left().wrap().show(
                 ui,
@@ -452,6 +458,14 @@ fn process_access_section(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &Agent
         .session
         .exec_grants(agent.id)
         .unwrap_or_default();
+    let kinds: std::collections::BTreeMap<u64, crate::contracts::CredentialKind> = app
+        .owner_ui
+        .session
+        .search("")
+        .unwrap_or_default()
+        .into_iter()
+        .map(|item| (item.id, item.kind))
+        .collect();
     let mut open = None;
     let mut open_many = false;
     let mut go_to_credentials = false;
@@ -484,9 +498,14 @@ fn process_access_section(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &Agent
                     Some(grant) => format!("{env_name} · {}", grant.place.describe()),
                     None => env_name.clone(),
                 };
-                let terminal = (Icon::Terminal, egui::Color32::from_rgb(88, 86, 214));
+                // The icon of the credential kind, as in the credential list.
+                let icon = kinds
+                    .get(item_id)
+                    .map_or((Icon::Terminal, kit::TERTIARY), |kind| {
+                        super::kind_icon(*kind)
+                    });
                 if s.nav(
-                    Some(terminal),
+                    Some(icon),
                     item_name,
                     Some(&subtitle),
                     Some(kit::text(detail, Font::Callout).color(tone.text())),
@@ -682,6 +701,8 @@ fn setup_guidance(state: &mut super::UiState, ui: &mut egui::Ui, fresh: bool) {
     }
     state.set_expanded("agent-setup", expanded);
     if !expanded {
+        // The gap of a section, so the next section header does not touch the label.
+        ui.add_space(14.0);
         return;
     }
     let selected = if state.setup_host == 0 {

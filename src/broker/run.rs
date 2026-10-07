@@ -310,7 +310,16 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         BouncerVerdict::Unavailable("not asked".to_owned())
     } else {
         match &models.active {
-            Some(bouncer) => bouncer.evaluate(&bouncer_request),
+            // The setting of Settings > Agents: "Off" asks no model, and "When a run
+            // needs it" starts the model server first. Unavailable asks the owner.
+            Some(bouncer) => match ctx
+                .model_gate
+                .as_ref()
+                .map_or(Ok(()), |gate| gate.before_model())
+            {
+                Ok(()) => bouncer.evaluate(&bouncer_request),
+                Err(reason) => BouncerVerdict::Unavailable(reason),
+            },
             None => BouncerVerdict::Unavailable("no bouncer is set".to_owned()),
         }
     };

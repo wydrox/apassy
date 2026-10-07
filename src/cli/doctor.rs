@@ -138,7 +138,7 @@ pub fn run(cli: &Cli, args: Args) -> Outcome {
                 Level::Problem,
                 "Broker",
                 status.broker.clone(),
-                Some("Quit and open Apassy again. Settings > Broker shows the reason."),
+                Some("Quit and open Apassy again. Settings > Agents > Broker and bouncer shows the reason."),
             );
         }
         report.add(

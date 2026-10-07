@@ -7,14 +7,14 @@ Scope: the macOS app from <https://apassy.wyderka.cc>. Decision: [ADR 0015](../a
 
 - About 15 seconds after the start, and then every 6 hours while it runs, the app reads <https://apassy.wyderka.cc/latest.json>.
 - When `latest.json` names a newer build, the app downloads `Apassy.dmg`, checks it, and keeps the new app in `~/Library/Application Support/Apassy/update/Apassy.app`.
-- The main window then shows "Apassy X is ready." with "Restart now". Settings > Updates shows the same.
+- The main window then shows "Apassy X is ready." with "Restart now". Settings > About > Updates shows the same.
 - "Restart now" locks the vault, ends each run that waits for you (as a quit does), installs the new version, and opens it.
 - Without "Restart now", the new version installs when you quit Apassy. It opens at your next start.
-- The next start shows the result of the install in a message and in Settings > Updates.
+- The next start shows the result of the install in a message and in Settings > About > Updates.
 
 The app never installs an older version.
 
-## 2. Settings > Updates
+## 2. Settings > About > Updates
 
 | Control | Default | What it does |
 | --- | --- | --- |
@@ -111,7 +111,7 @@ APASSY_UPDATE_PROBE_APP=/Applications/<an app>.app \
 | `update/store.rs` | `update.json` defaults, atomic write, mode `0600`. |
 | `update/install.rs` | The installer body with test doubles: it waits for the process, replaces the bundle, refuses a bad staged app or bad arguments, and treats paths as data. |
 | `update/mod.rs` | The state: idle, checking, downloading, verifying, then ready or error. The install result at the next start. |
-| `ui/updates.rs` | Settings > Updates in each phase, and the banner. |
+| `ui/updates.rs` | Settings > About > Updates in each phase, and the banner. |
 
 ## 8. Limits
 

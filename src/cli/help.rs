@@ -3,7 +3,7 @@
 use super::args::{Args, Usage, usage};
 use super::{HELP, commands, help_for, setup};
 
-const TOPICS: &str = "status, login, logout, lock, unlock, item, import, agent, setup, grant, request, runs, pattern, activity, decisions, vault, backup, doctor, version";
+pub(super) const TOPICS: &str = "status, login, logout, lock, unlock, item, import, agent, setup, grant, request, runs, pattern, activity, decisions, vault, backup, doctor, completions, version";
 
 fn group(name: &str) -> &str {
     match name {
@@ -19,7 +19,7 @@ fn group(name: &str) -> &str {
     }
 }
 
-fn actions(group: &str) -> &'static [&'static str] {
+pub(super) fn actions(group: &str) -> &'static [&'static str] {
     match group {
         "item" => &[
             "list",
@@ -45,6 +45,7 @@ fn actions(group: &str) -> &'static [&'static str] {
         "decisions" => &["export"],
         "vault" => &["backup", "change-passphrase", "restore", "lock", "unlock"],
         "setup" => &["claude", "codex"],
+        "completions" => &["zsh", "bash", "fish"],
         _ => &[],
     }
 }
@@ -194,6 +195,7 @@ mod tests {
             "decisions",
             "vault",
             "setup",
+            "completions",
         ] {
             for action in actions(group) {
                 assert!(help(&[group, action]).is_ok(), "{group} {action}");

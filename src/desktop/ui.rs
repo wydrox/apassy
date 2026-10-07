@@ -21,6 +21,9 @@ mod demo;
 #[cfg(feature = "vault")]
 pub(crate) mod files;
 mod focus;
+/// The steps from a new vault to the first agent request.
+#[cfg(feature = "vault")]
+mod get_started;
 #[cfg(feature = "vault")]
 pub(crate) mod import;
 #[cfg(feature = "vault")]
@@ -61,6 +64,8 @@ use eframe::egui::TextEdit;
 use crate::desktop::{DesktopApp, StatusKind};
 
 pub(crate) use kit::WINDOW as WINDOW_COLOR;
+#[cfg(feature = "vault")]
+pub(crate) use settings::{SettingsTab, open as open_settings};
 
 /// Byte capacity of a passphrase field. A field holds at most `MAX_PASSPHRASE_BYTES`
 /// characters, and a character has at most 4 bytes, so typing never moves the text
@@ -174,7 +179,7 @@ fn secure_input(
     placeholder: &str,
 ) -> egui::Response {
     presize(value, capacity);
-    ui.add(
+    let response = ui.add(
         TextEdit::singleline(value)
             .password(true)
             .id(secret_field_id(salt))
@@ -182,7 +187,9 @@ fn secure_input(
             .hint_text(kit::text(placeholder, kit::Font::Body).color(kit::TERTIARY))
             .margin(kit::FIELD_MARGIN)
             .desired_width(f32::INFINITY),
-    )
+    );
+    kit::claim_first_field(&response);
+    response
 }
 
 /// The vault file of Apassy 0.2. The agent profile denies this directory (isolation,
@@ -217,6 +224,19 @@ pub(crate) struct UiState {
     /// The tab of the Activity view.
     #[cfg(feature = "vault")]
     pub(crate) activity_tab: activity::Tab,
+    /// The owner hid the sidebar (⌃⌘S or the title bar button). `ui.json` keeps it
+    /// across restarts.
+    pub(crate) sidebar_hidden: bool,
+    /// The list IDs of the vaults where the owner hid the "Get started" list. `ui.json`
+    /// keeps them across restarts.
+    #[cfg(feature = "vault")]
+    get_started_hidden: BTreeSet<String>,
+    /// `ui.json`. Only the window sets it, so a test never writes the real folder.
+    #[cfg(feature = "vault")]
+    prefs_path: Option<std::path::PathBuf>,
+    /// The tab of the Settings view.
+    #[cfg(feature = "vault")]
+    pub(crate) settings_tab: settings::SettingsTab,
     /// The filter of the credential list.
     #[cfg(feature = "vault")]
     pub(crate) credential_filter: items::Filter,
@@ -259,6 +279,36 @@ impl UiState {
         } else {
             self.expanded.remove(key);
         }
+    }
+
+    /// Read `ui.json` in `data_dir`, and keep its path for the next saves. A missing or
+    /// broken file gives the defaults.
+    #[cfg(feature = "vault")]
+    pub(crate) fn load_prefs(&mut self, data_dir: std::path::PathBuf) {
+        let path = crate::desktop::ui_prefs::UiPrefs::path(&data_dir);
+        let prefs = crate::desktop::ui_prefs::UiPrefs::load(&path);
+        self.sidebar_hidden = prefs.sidebar_hidden;
+        self.get_started_hidden = prefs.get_started_hidden;
+        self.prefs_path = Some(path);
+    }
+
+    /// Write `ui.json` when the window loaded it. A failed write is not an error for the
+    /// owner: the setting then lasts until the quit.
+    fn save_prefs(&self) {
+        #[cfg(feature = "vault")]
+        if let Some(path) = &self.prefs_path {
+            let prefs = crate::desktop::ui_prefs::UiPrefs {
+                sidebar_hidden: self.sidebar_hidden,
+                get_started_hidden: self.get_started_hidden.clone(),
+            };
+            let _ = prefs.save(path);
+        }
+    }
+
+    /// Hide or show the sidebar, and keep the choice.
+    pub(crate) fn toggle_sidebar(&mut self) {
+        self.sidebar_hidden = !self.sidebar_hidden;
+        self.save_prefs();
     }
 }
 
@@ -843,14 +893,18 @@ mod tests {
         assert!(text.contains("Active"), "{text}");
         app.owner_ui.selected_agent = Some(agent.id);
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
-        assert!(text.contains("The token expires on"), "{text}");
+        assert!(text.contains("Expires"), "{text}");
+        assert!(
+            text.contains(&crate::vault::format_utc(agent.token_expires_at)),
+            "{text}"
+        );
         assert!(text.contains("Rotate token"), "{text}");
         assert!(
             text.contains("Token lifetime: 30 days after issue."),
             "{text}"
         );
 
-        app.view = OwnerView::Settings;
+        open_settings(&mut app, SettingsTab::Agents);
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
         assert!(text.contains("Token lifetime"), "{text}");
         assert!(text.contains("Current lifetime: 30 days."), "{text}");
@@ -1112,7 +1166,8 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let mut app = app_with_vault(&dir);
         let (text, _) = draw_frames(&mut app, DEFAULT_SIZE, 3);
-        assert!(text.contains("No credentials yet"), "{text}");
+        // A new vault shows the steps; their first one adds a credential.
+        assert!(text.contains("Get started · 0 of 5"), "{text}");
         app.ui.sheet = Some(Sheet::AddItem { kind_chosen: false });
         let (text, _) = draw_frames(&mut app, DEFAULT_SIZE, 3);
         for kind in [

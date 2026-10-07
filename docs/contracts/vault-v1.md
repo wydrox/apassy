@@ -13,6 +13,7 @@ Schema version 12 (2026-09-27) adds `agent.see_all`, `exec_grant.any_folder`, an
 Schema version 13 (2026-09-28) adds the table `sync_meta` for iCloud sync ([ADR 0014](../adr/0014-icloud-sync.md)): one row with a random vault id (UUID version 4, made at create or at the migration), the sync generation, the device and the time of the last push, and the content digest of the last push. `sync_identity` reads it. `write_sync_copy` raises the generation and copies the file while the vault stays unlocked. `inspect_sync_copy` checks a copy with the passphrase, including the content digest. `adopt_sync_copy` makes a new vault from a checked copy. The migration from 12 to 13 is one transaction. A backup and a restore keep the row.
 Schema version 14 (2026-09-28) adds record-level sync ([ADR 0014](../adr/0014-icloud-sync.md), [sync](../operations/sync.md)): `item.uuid`, `item.updated_at` (Unix milliseconds), `item.updated_by` (a device ID), `item.clock` (a version vector), `item_event.uuid`, the tables `sync_tombstone` and `sync_peer` (synced), and `sync_stamp` and `sync_device` (local). SQL triggers keep the time and the device on each change of an item or of its tags, fields, archive state, declaration, variable, or connector, and write a tombstone at a delete. The migration from 13 derives the UUIDs of existing rows from the vault ID, the table, and the row ID, so copies of one vault agree. A pushed copy (`write_sync_copy`) has no local data from `LOCAL_TABLES` (the companion setting has only its disabled default row), no local history event, and the default token lifetime. `merge_from` merges a local copy with the key of the open vault; `take_passphrase_of_copy` rekeys the vault to the passphrase of a copy of the same vault. A restore gives the file a new device ID.
 Schema version 15 (2026-10-05) adds the iPhone companion ([ADR 0020](../adr/0020-iphone-companion.md), [companion contract](companion-v1.md)): the tables `companion_setting` (off by default, port 48620), `companion_certificate` (the certificate of the listener and its PKCS#8 private key), and `companion_device` (device ID, name, request key, approval key, pairing time, last seen). `add_companion_device` takes an owner proof for `OwnerAction::PairCompanion` and checks it in the vault session; a vault has at most 5 devices, and a device ID is paired once. Turning the setting on, removing one device, and `reset_companion_pairing` (all devices and the certificate) need no proof. A restore removes all devices and the certificate and turns the setting off. Adoption on another Mac removes all devices and the certificate and resets the setting to its disabled default, even for a raw vault file. The migration from 14 to 15 is one transaction.
+Schema version 16 (2026-10-06) adds the device key of relay sync ([ADR 0022](../adr/0022-relay-sync.md), [relay sync contract](relay-sync-v1.md), section 14.3): the local table `relay_device`, one row (`id = 1`) with the relay address, the team ID, the device number on the relay, the P-256 public key (65 bytes, X9.63), the PKCS#8 private key, and the time. It is in `LOCAL_TABLES` (now 22 tables), so a pushed copy never carries it. `relay_device` reads it (the key in a `Zeroizing` buffer; Debug is redacted), `set_relay_device` writes or replaces it and refuses a bad shape with `InvalidInput`, and `remove_relay_device` deletes it. A restore keeps the row: a backup is the owner's own file. An adopted copy has no row, even from a raw vault file. The migration from 15 to 16 is one transaction.
 The owner selected SQLCipher with a master passphrase after the synthetic storage probe passed.
 This contract does not permit real-secret use or claim complete P2 acceptance.
 
@@ -114,7 +115,7 @@ pub struct MergeReport { pub inserted: usize, pub updated: usize, pub deleted: u
     pub conflicts: Vec<ConflictCopy>, pub skipped_variables: Vec<String>,
     pub remote: SyncIdentity, pub remote_content: [u8; 32] }
 pub struct ConflictCopy { pub title: String, pub copy_title: String, pub device: String }
-pub const LOCAL_TABLES: [&str; 18];      // never in a pushed copy
+pub const LOCAL_TABLES: [&str; 22];      // never in a pushed copy
 pub const SYNCED_TABLES: [&str; 13];
 impl Vault {
     pub fn sync_identity(&self) -> VaultResult<SyncIdentity>;                                  // unlocked
@@ -126,6 +127,13 @@ impl Vault {
     pub fn take_passphrase_of_copy(&mut self, copy: &Path, passphrase: &str) -> VaultResult<()>;
     pub fn inspect_sync_copy(path: &Path, passphrase: &str) -> VaultResult<SyncIdentity>;
     pub fn adopt_sync_copy(source: &Path, destination: &Path, passphrase: &str) -> VaultResult<(Self, AdoptedCopy)>;
+}
+pub struct RelayDevice { pub relay_url: String, pub team_id: String, pub device_id: u64,
+    pub public_key: Vec<u8>, pub key_pkcs8: Zeroizing<Vec<u8>>, pub created_at: u64 } // schema 16
+impl Vault {
+    pub fn relay_device(&self) -> VaultResult<Option<RelayDevice>>;                            // unlocked
+    pub fn set_relay_device(&mut self, device: &RelayDevice) -> VaultResult<()>;             // replaces the row
+    pub fn remove_relay_device(&mut self) -> VaultResult<bool>;
 }
 ```
 

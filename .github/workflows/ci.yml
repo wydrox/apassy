@@ -54,6 +54,11 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --offline --locked --all-features --all-targets -- -D warnings
 
+      # The demo app builds without the vault feature. The steps above build only
+      # with all features, so they do not see vault code that is not gated.
+      - name: Check the demo build without the vault
+        run: cargo check --offline --locked --features desktop --bin apassy
+
       - name: Run Cargo tests
         run: cargo test --offline --locked --all-features --all-targets -- --test-threads=1
 

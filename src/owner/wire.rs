@@ -166,6 +166,13 @@ pub struct DeclarationInput {
     pub provider: Option<String>,
 }
 
+/// One variable of [`Command::ItemBindVariables`]: an item ID and a variable name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VariableInput {
+    pub item_id: u64,
+    pub name: String,
+}
+
 /// The rule of a process grant (ADR 0007). It replaces the stored rule.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RuleInput {
@@ -243,6 +250,13 @@ pub enum Command {
     },
     ItemClearVariable {
         item: String,
+    },
+    /// Bind the main secret of several items to variables with one owner check (ADR
+    /// 0017, D1). Programs get the real values. The app refuses each invalid name, each
+    /// name that another item uses, and each item without a secret value, and asks the
+    /// owner for the rest. `data.bindings` has one row for each variable.
+    ItemBindVariables {
+        variables: Vec<VariableInput>,
     },
     /// Owner check.
     ItemSetDeclaration {
@@ -459,6 +473,10 @@ pub enum Data {
     Export {
         jsonl: String,
     },
+    /// The result of [`Command::ItemBindVariables`] for each variable.
+    Bindings {
+        results: Vec<BindingRow>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -498,6 +516,17 @@ pub struct ItemRow {
     pub archived: bool,
     /// The environment variable of the item.
     pub variable: Option<String>,
+}
+
+/// One variable of a batch binding. `reason` says why it is not bound, and is empty
+/// when it is bound.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BindingRow {
+    pub item_id: u64,
+    pub name: String,
+    pub bound: bool,
+    #[serde(default)]
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

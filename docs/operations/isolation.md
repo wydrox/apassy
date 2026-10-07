@@ -169,7 +169,7 @@ start, in these cases:
   directory would leave a vault in another folder open without a warning. Open
   Apassy once: it moves the damaged list aside and makes a new one.
 - More than 15 listed vaults are outside the data directory. Move vaults into
-  the data directory, or remove vaults from the list in Settings > Vaults.
+  the data directory, or remove vaults from the list in Settings > General > Vaults.
 - A synced vault has no valid synced file in the list, or more than 16 synced
   files are outside the data directory and the iCloud Apassy folder. Turn the
   sync of a vault off and on again, or sync some vaults through iCloud Drive.

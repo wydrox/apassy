@@ -1,7 +1,7 @@
 # ADR 0015 — Automatic updates of the macOS app
 
 Date: 2026-09-28.
-Status: PROPOSED for 0.3.0. In the code.
+Status: accepted. Shipped in 0.3.0.
 
 ## Context
 

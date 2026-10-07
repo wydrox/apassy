@@ -13,6 +13,7 @@ pub mod exec;
 pub mod finetune;
 pub mod http;
 pub mod learning;
+pub mod model_server;
 pub mod packs;
 pub mod patterns;
 pub mod profile;
@@ -31,4 +32,6 @@ use crate::vault::Vault;
 /// The one open vault in this process. The desktop app and the broker share it.
 pub type SharedVault = Arc<Mutex<Option<Vault>>>;
 
-pub use server::{BrokerHandle, BrokerOptions, start, start_with, start_with_tls};
+pub use server::{
+    BrokerHandle, BrokerOptions, start, start_with, start_with_model_server, start_with_tls,
+};

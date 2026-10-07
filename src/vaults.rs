@@ -113,9 +113,10 @@ pub fn slug(name: &str) -> String {
     }
 }
 
-/// Sync of one vault through a folder (ADR 0014). The sync state is a file in the data
-/// directory: `sync/<state>.json`. The synced file is `<folder>/<file>`; the sandbox
-/// launcher reads it here and denies it.
+/// Sync of one vault through a folder (ADR 0014) or through the Apassy relay (ADR 0022).
+/// The sync state is a file in the data directory: `sync/<state>.json`. A folder link
+/// names the synced file `<folder>/<file>`; the sandbox launcher reads it here and
+/// denies it. A relay link has no file: `folder` and `file` are empty.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncLink {
     /// The name of the sync state file, without `.json`. An empty or invalid name
@@ -128,9 +129,39 @@ pub struct SyncLink {
     /// The name of the synced file in the folder, for example `Personal.apassy`.
     #[serde(default)]
     pub file: String,
+    /// Sync through the Apassy relay (ADR 0022). `None` for a folder link. One link
+    /// has a folder and a file, or a relay, never both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<RelayLink>,
     /// Fields of a later Apassy. They stay when this version writes the list.
     #[serde(flatten)]
     extra: Map<String, Value>,
+}
+
+/// Where a vault syncs on the relay (contract relay-sync-v1, section 14.1). No secret:
+/// the device key is in the vault.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayLink {
+    /// The relay origin, for example `https://apassy-relay.wyderka.cc`.
+    pub url: String,
+    /// The team of the vault on the relay, for example `t_7k2m9q4x8c`.
+    pub team_id: String,
+    /// The device number of this Mac on the relay.
+    pub device_id: u64,
+    /// Fields of a later Apassy. They stay when this version writes the list.
+    #[serde(flatten)]
+    extra: Map<String, Value>,
+}
+
+impl RelayLink {
+    pub fn new(url: &str, team_id: &str, device_id: u64) -> Self {
+        Self {
+            url: url.to_owned(),
+            team_id: team_id.to_owned(),
+            device_id,
+            extra: Map::new(),
+        }
+    }
 }
 
 impl SyncLink {
@@ -141,8 +172,26 @@ impl SyncLink {
             state: state.to_owned(),
             folder: folder.to_owned(),
             file: file.to_owned(),
+            relay: None,
             extra: Map::new(),
         }
+    }
+
+    /// A link to the sync state file `sync/<state>.json` and a vault on the relay. It
+    /// has no folder and no file.
+    pub fn relay(state: &str, relay: RelayLink) -> Self {
+        Self {
+            state: state.to_owned(),
+            folder: PathBuf::new(),
+            file: String::new(),
+            relay: Some(relay),
+            extra: Map::new(),
+        }
+    }
+
+    /// Whether the vault syncs through the relay. Such a link has no synced file.
+    pub fn is_relay(&self) -> bool {
+        self.relay.is_some()
     }
 
     /// The synced file, when the folder is absolute and the name is a plain file name.
@@ -199,6 +248,12 @@ impl VaultEntry {
     pub fn sync_file(&self) -> Option<PathBuf> {
         self.sync_state()?;
         self.sync.as_ref().and_then(SyncLink::file_path)
+    }
+
+    /// The relay link of the vault, when sync through the relay is on.
+    pub fn sync_relay(&self) -> Option<&RelayLink> {
+        self.sync_state()?;
+        self.sync.as_ref().and_then(|link| link.relay.as_ref())
     }
 }
 
@@ -1012,6 +1067,45 @@ mod tests {
         // Sync off writes no field.
         registry.entry_mut(&id).expect("entry").sync = None;
         assert!(!registry.to_json().contains("\"sync\""));
+    }
+
+    /// ADR 0022: a relay link round-trips, has no file, and an older list without
+    /// `relay` still loads.
+    #[test]
+    fn a_relay_link_round_trips_and_old_lists_still_load() {
+        let mut registry = Registry::new();
+        let id = registry
+            .add("Personal", Path::new("/tmp/apassy-relay.db"), 1)
+            .expect("add");
+        registry.entry_mut(&id).expect("entry").sync = Some(SyncLink::relay(
+            &id,
+            RelayLink::new("https://apassy-relay.wyderka.cc", "t_7k2m9q4x8c", 2),
+        ));
+        let text = registry.to_json();
+        assert!(text.contains("\"relay\""), "{text}");
+        let read = Registry::parse(&text).expect("parse");
+        let entry = read.get(&id).expect("entry");
+        assert_eq!(entry.sync_state(), Some(id.as_str()));
+        assert_eq!(entry.sync_file(), None);
+        let relay = entry.sync_relay().expect("relay");
+        assert_eq!(relay.team_id, "t_7k2m9q4x8c");
+        assert_eq!(relay.device_id, 2);
+        assert!(entry.sync.as_ref().expect("link").is_relay());
+
+        // A folder link writes no `relay` field, and a list of 0.3 reads as before.
+        let old = r#"{"version":1,"vaults":[{"id":"a1","name":"Personal","path":"/tmp/p.db","added_at":1,
+            "sync":{"state":"a1","folder":"/Users/me/Dropbox/Apassy","file":"Personal.apassy"}}]}"#;
+        let read = Registry::parse(old).expect("old list");
+        let entry = read.get("a1").expect("entry");
+        assert!(entry.sync_relay().is_none());
+        assert!(!entry.sync.as_ref().expect("link").is_relay());
+        assert!(!read.to_json().contains("\"relay\""));
+
+        // A later field inside `relay` stays.
+        let newer = r#"{"version":1,"vaults":[{"id":"b2","name":"Work","path":"/tmp/w.db","added_at":1,
+            "sync":{"state":"b2","folder":"","file":"","relay":{"url":"https://r.example.test","team_id":"t_aaaaaaaaaa","device_id":7,"later":true}}}]}"#;
+        let read = Registry::parse(newer).expect("newer list");
+        assert!(read.to_json().contains("\"later\": true"));
     }
 
     #[test]

@@ -7,6 +7,7 @@
 
 pub mod args;
 mod commands;
+mod completions;
 mod doctor;
 mod help;
 pub mod import;
@@ -38,6 +39,9 @@ pub enum Failure {
     },
     NotRunning(String),
     Other(String),
+    /// The command printed its own JSON answer with `"ok": false`. Only the exit code
+    /// is left, so `--json` prints one document.
+    Printed,
 }
 
 impl From<Usage> for Failure {
@@ -190,6 +194,7 @@ fn dispatch(cli: &Cli, command: &str, mut args: Args) -> Outcome {
         "backup" => commands::backup(cli, args),
         "doctor" => doctor::run(cli, args),
         "setup" => setup::run(cli, args),
+        "completions" => completions::run(args),
         other => Err(Failure::Usage(args::usage(format!(
             "Unknown command \"{other}\". Run apassy --help."
         )))),
@@ -199,6 +204,7 @@ fn dispatch(cli: &Cli, command: &str, mut args: Args) -> Outcome {
 /// Print a failure and return its exit code.
 fn report(failure: Failure, json: bool) -> i32 {
     let (code, message, exit) = match failure {
+        Failure::Printed => return EXIT_FAILED,
         Failure::Usage(usage) if usage.0.contains("apassy help") || usage.0.contains("--help") => {
             ("usage".to_owned(), usage.0, EXIT_USAGE)
         }
@@ -239,6 +245,7 @@ fn help_for(topic: Option<&str>) -> Option<&'static str> {
         "login" | "logout" | "status" => commands::SESSION_HELP,
         "doctor" => doctor::HELP,
         "setup" => setup::HELP,
+        "completions" => completions::HELP,
         _ => return None,
     })
 }
@@ -276,6 +283,7 @@ History and vault:
   decisions export            All bouncer decisions as JSON Lines.
   vault backup|change-passphrase|restore
   doctor                      Check the installation.
+  completions zsh|bash|fish   Print a shell completion script.
 
 Options:
   --json                      Machine-readable output.

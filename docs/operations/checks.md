@@ -122,22 +122,30 @@ It is not a full review of bundled SQLCipher or OpenSSL licenses.
 
 ## Configured CI
 
-The workflow `.github/workflows/ci.yml` uses one `macos-15` job.
-Triggers are `push` and `pull_request`.
+The workflow `.github/workflows/ci.yml` has two jobs: `macos` on `macos-15` and `linux` on `ubuntu-24.04`.
+Triggers are `push` to `main` and `pull_request`.
+A change only in `site/` or `design/` does not start the workflow.
 The workflow does not use secrets.
 The workflow does not publish, deploy, or comment on a pull request.
 
-After you install the toolchain, the job runs these steps:
+After you install the toolchain, the `macos` job runs these steps:
 
 ```
 cargo fetch --locked
+cargo install cargo-audit --version 0.22.2 --locked
+cargo audit
 cargo fmt --all -- --check
 cargo clippy --offline --locked --all-features --all-targets -- -D warnings
+cargo check --offline --locked --features desktop --bin apassy
 cargo test --offline --locked --all-features --all-targets -- --test-threads=1
 cargo test --offline --locked --features vault --doc
 node --test design/walkthrough/model.test.mjs
 python3 tests/isolation/test_fixture_boundary.py
 git diff --check
 ```
+
+The `linux` job runs the same Clippy, Cargo tests, doc tests, and Python fixture tests.
+Then it checks the rule packs and the provider files two times: with the JSON Schemas in `packs/schema/`, and with `apassy-packs validate`.
+Format, advisories, the Node model tests, and whitespace do not depend on the system, so only the `macos` job runs them.
 
 A configured workflow is not a remotely executed check.

@@ -1,24 +1,33 @@
 ---
 import Mark from "./Mark.astro";
-// ADR 0011: the run gets a placeholder with the prefix and the length of the value.
-// The proxy puts the real value only into requests to the hosts of the variable and
-// refuses a placeholder on its way to any other host. The shown values are cut short.
+// ADR 0011 and docs/operations/agent-path.md, section 8b. Each variable has a mode:
+// "Placeholder" (the run gets a stand-in with the prefix and length of the value; the
+// proxy puts the real value only into HTTPS requests to the hosts of the variable) or
+// "Real value" (for programs that need the key itself). A new variable starts as a
+// placeholder when the provider's hosts are known. Go programs such as the Stripe CLI
+// do not trust the run's certificate, so the example is curl. Shown values are cut short.
 ---
 <section class="section" id="placeholders">
   <div class="container">
     <header class="center">
       <p class="eyebrow" data-reveal>Placeholders</p>
-      <h2 class="h2" data-reveal style="--i:1">Your agent never sees the real key.</h2>
+      <h2 class="h2" data-reveal style="--i:1">Even the command gets a stand-in.</h2>
       <p class="lead" data-reveal style="--i:2">
-        The run gets a placeholder that looks like your key. Apassy's proxy swaps in the real value only on the way
-        to the hosts you allow. Anywhere else, the request stops, and each run gets new placeholders.
+        Your agent never receives a key. For an API key, the command it runs doesn't need one either: it gets a
+        placeholder with the key's prefix and length. Apassy's proxy puts the real value in only on the way to the
+        hosts you allow. A request that takes it anywhere else is refused, and each run gets new placeholders.
       </p>
+      <ul class="facts" data-reveal style="--i:3">
+        <li>New API keys start as placeholders when Apassy knows the provider's hosts</li>
+        <li>Keys a program must read itself, like a database password, can go in as the real value</li>
+        <li>The answer lists every request the run made</li>
+      </ul>
     </header>
 
-    <div class="diagram card" data-reveal style="--i:3">
+    <div class="diagram card" data-reveal style="--i:4">
       <div class="node run">
         <p class="label">Agent run</p>
-        <code class="cmd">stripe balance retrieve</code>
+        <code class="cmd">curl -u $STRIPE_SECRET_KEY: …/v1/balance</code>
         <code class="env">STRIPE_SECRET_KEY=<mark>sk_live_Qm7r…</mark></code>
         <p class="note">placeholder, new for each run</p>
       </div>
@@ -58,6 +67,11 @@ import Mark from "./Mark.astro";
   .center { text-align: center; max-width: 760px; margin: 0 auto; }
   .center .h2 { margin-top: 14px; }
   .center .lead { margin-top: 20px; }
+  .facts {
+    margin: 22px auto 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; justify-content: center; gap: 8px 10px;
+    font-size: 13.5px; color: var(--muted);
+  }
+  .facts li { padding: 6px 12px; border: 1px solid var(--edge); border-radius: 999px; background: var(--surface); }
 
   .diagram {
     margin-top: 64px; padding: 40px; display: grid; align-items: center;

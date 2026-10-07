@@ -48,7 +48,7 @@ pub(super) const CHILD_TABLES: [&str; 6] = [
 
 /// Tables that stay on each Mac. A pushed copy keeps only the default companion setting, and a merge never
 /// reads them from another copy.
-pub const LOCAL_TABLES: [&str; 21] = [
+pub const LOCAL_TABLES: [&str; 22] = [
     "agent",
     "grant_rule",
     "activity",
@@ -70,6 +70,7 @@ pub const LOCAL_TABLES: [&str; 21] = [
     "companion_setting",
     "companion_certificate",
     "companion_device",
+    "relay_device",
 ];
 
 /// Tables whose rows sync. `vault_meta` syncs as the one row of the file; its token
@@ -343,6 +344,29 @@ impl SyncScope {
         match self.kind {
             ScopeKind::Vault => conn
                 .execute(&format!("ATTACH DATABASE ?1 AS {alias}"), [path])
+                .map(|_| ())
+                .map_err(|_| err(VaultErrorKind::WrongKeyOrCorrupt)),
+        }
+    }
+
+    /// Attach the copy at `path` as `alias` with the key of `passphrase`, for a copy
+    /// under another passphrase than the vault.
+    fn attach_with(
+        &self,
+        conn: &Connection,
+        path: &Path,
+        alias: &str,
+        passphrase: &str,
+    ) -> VaultResult<()> {
+        let path = path
+            .to_str()
+            .ok_or_else(|| err(VaultErrorKind::InvalidInput))?;
+        match self.kind {
+            ScopeKind::Vault => conn
+                .execute(
+                    &format!("ATTACH DATABASE ?1 AS {alias} KEY ?2"),
+                    [path, passphrase],
+                )
                 .map(|_| ())
                 .map_err(|_| err(VaultErrorKind::WrongKeyOrCorrupt)),
         }
@@ -1667,6 +1691,27 @@ impl Vault {
         result
     }
 
+    /// [`Vault::merge_from`] for a copy under another passphrase: `passphrase` opens
+    /// the copy only, and the vault keeps its own passphrase. A wrong passphrase is
+    /// `WrongKeyOrCorrupt`, and nothing changes.
+    pub fn merge_from_with_passphrase(
+        &mut self,
+        path: &Path,
+        scope: &SyncScope,
+        passphrase: &str,
+    ) -> VaultResult<MergeReport> {
+        self.require_unlocked()?;
+        super::types::validate_unlock_passphrase(passphrase)?;
+        let conn = self.conn_mut()?;
+        scope.attach_with(conn, path, REMOTE, passphrase)?;
+        let result = merge_attached(conn, scope);
+        if result.is_err() {
+            let _ = conn.execute_batch("ROLLBACK");
+        }
+        detach(conn, REMOTE);
+        result
+    }
+
     /// The random device ID of this vault file, for the versions of its changes.
     pub fn sync_device_id(&self) -> VaultResult<String> {
         self.conn_ref()?
@@ -1740,6 +1785,47 @@ mod tests {
             a.reveal(origin, "token").unwrap().expose()
         );
         (dir, a, b, origin, copy)
+    }
+
+    #[test]
+    fn a_copy_under_another_passphrase_merges_with_it_and_the_vault_keeps_its_own() {
+        const OTHER: &str = "synthetic-other-copy-pass";
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut a = Vault::create(&dir.path().join("a.db"), PASS).unwrap();
+        a.unlock(PASS).unwrap();
+        a.add(draft("Alpha", "SYNTH-alpha")).unwrap();
+        let seed = dir.path().join("seed.db");
+        a.write_sync_copy(&seed, "Mac A").unwrap();
+        let (mut b, _) = Vault::adopt_sync_copy(&seed, &dir.path().join("b.db"), PASS).unwrap();
+        b.unlock(PASS).unwrap();
+        b.change_passphrase(PASS, OTHER).unwrap();
+        b.add(draft("Beta", "SYNTH-beta")).unwrap();
+        let remote = dir.path().join("remote.db");
+        b.write_sync_copy(&remote, "Mac B").unwrap();
+        let scope = SyncScope::vault();
+        assert_eq!(
+            a.merge_from(&remote, &scope).unwrap_err().kind(),
+            VaultErrorKind::WrongKeyOrCorrupt
+        );
+        assert_eq!(
+            a.merge_from_with_passphrase(&remote, &scope, "synthetic-wrong-pass")
+                .unwrap_err()
+                .kind(),
+            VaultErrorKind::WrongKeyOrCorrupt
+        );
+        let report = a
+            .merge_from_with_passphrase(&remote, &scope, OTHER)
+            .unwrap();
+        assert_eq!(report.inserted, 1);
+        let mut titles: Vec<String> = a.search("").unwrap().into_iter().map(|s| s.title).collect();
+        titles.sort();
+        assert_eq!(titles, ["Alpha", "Beta"]);
+        a.lock().unwrap();
+        assert_eq!(
+            a.unlock(OTHER).unwrap_err().kind(),
+            VaultErrorKind::WrongKeyOrCorrupt
+        );
+        a.unlock(PASS).unwrap();
     }
 
     #[test]

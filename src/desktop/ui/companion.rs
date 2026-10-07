@@ -1,4 +1,4 @@
-//! Settings > iPhone companion: the iPhone listener, the pairing QR code, the code the owner
+//! Settings > Notifications > iPhone companion: the iPhone listener, the pairing QR code, the code the owner
 //! types, and the paired iPhones (ADR 0020).
 //!
 //! The Mac never shows the 6-digit code: only the iPhone does, and the owner types it

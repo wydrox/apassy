@@ -142,6 +142,24 @@ impl BouncerVerdict {
     }
 }
 
+/// What a short health check found at the bouncer address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Health {
+    /// The server answers `GET /health` with status 200 and `"ok"`.
+    Healthy,
+    /// Nothing listens on the port.
+    NoServer,
+    /// Something listens on the port, but it is not a healthy decision server.
+    NotBouncer,
+}
+
+/// `APASSY_BOUNCER_URL`, if it is set and not empty.
+pub fn env_url() -> Option<String> {
+    std::env::var(URL_ENV)
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+}
+
 /// Client for one local decision service.
 #[derive(Debug, Clone)]
 pub struct BouncerClient {
@@ -193,10 +211,13 @@ impl BouncerClient {
 
     /// `APASSY_BOUNCER_URL`, or the default address.
     pub fn from_env() -> Result<Self, &'static str> {
-        let url = std::env::var(URL_ENV)
-            .ok()
-            .filter(|url| !url.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_URL.to_owned());
+        Self::from_env_or(DEFAULT_URL)
+    }
+
+    /// `APASSY_BOUNCER_URL`, or `url` (the address in `bouncer.json`). The environment
+    /// wins, as in [`BouncerClient::from_env`].
+    pub fn from_env_or(url: &str) -> Result<Self, &'static str> {
+        let url = env_url().unwrap_or_else(|| url.to_owned());
         let mut client = Self::new(&url)?;
         client.api_key = std::env::var("APASSY_BOUNCER_KEY")
             .ok()
@@ -206,6 +227,82 @@ impl BouncerClient {
 
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    /// The bearer key from `APASSY_BOUNCER_KEY`, if set.
+    pub fn api_key(&self) -> Option<&str> {
+        self.api_key.as_deref()
+    }
+
+    /// The TCP port of the address.
+    pub fn port(&self) -> Option<u16> {
+        match &self.destination {
+            DestinationUrl::Loopback { addr, .. } => Some(addr.port()),
+            DestinationUrl::Https { .. } => None,
+        }
+    }
+
+    /// A short `GET /health` check (the health route of `laya-serve` and `serve.py`).
+    /// It sends no request data and no key.
+    pub fn probe_health(&self, timeout: Duration) -> Health {
+        use std::io::{Read, Write};
+
+        let DestinationUrl::Loopback { addr, host_header } = &self.destination else {
+            return Health::NoServer;
+        };
+        let Ok(mut stream) = std::net::TcpStream::connect_timeout(addr, timeout) else {
+            return Health::NoServer;
+        };
+        if stream.set_read_timeout(Some(timeout)).is_err()
+            || stream.set_write_timeout(Some(timeout)).is_err()
+        {
+            return Health::NotBouncer;
+        }
+        let request = format!(
+            "GET /health HTTP/1.1\r\nHost: {host_header}\r\nAccept: application/json\r\nUser-Agent: apassy-broker/0\r\nConnection: close\r\n\r\n"
+        );
+        if stream.write_all(request.as_bytes()).is_err() {
+            return Health::NotBouncer;
+        }
+        let mut raw = Vec::new();
+        let _ = stream.take(16 * 1024).read_to_end(&mut raw);
+        let ok_status = raw.starts_with(b"HTTP/1.1 200") || raw.starts_with(b"HTTP/1.0 200");
+        let body = raw
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map_or(&[][..], |at| &raw[at + 4..]);
+        let ok_body = body.windows(4).any(|window| window == b"\"ok\"");
+        if ok_status && ok_body {
+            Health::Healthy
+        } else {
+            Health::NotBouncer
+        }
+    }
+
+    /// Ask one neutral question, so the server loads the model, and read the model
+    /// version from the answer. The question has no request data.
+    pub fn warm_up(&self, timeout: Duration) -> Result<Option<String>, String> {
+        const READY: (&str, &str) = ("ready", "Is this a readiness check?");
+        let body = json!({
+            "state": "Apassy checks that the decision model answers.",
+            "questions": { READY.0: { "type": "noul", "instructions": READY.1 } },
+        });
+        let bytes = serde_json::to_vec(&body).map_err(|err| err.to_string())?;
+        let response = http::post_json_loopback(
+            &self.destination,
+            PATH,
+            &bytes,
+            self.api_key.as_deref(),
+            timeout,
+        )
+        .map_err(|_| format!("no answer from {}", self.url))?;
+        if !(200..300).contains(&response.status) {
+            return Err(format!("status {}", response.status));
+        }
+        match parse_answers(&response.body, &[READY]) {
+            BouncerVerdict::Scored { model, .. } => Ok(model),
+            BouncerVerdict::Unavailable(reason) => Err(reason),
+        }
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {

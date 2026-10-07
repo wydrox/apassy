@@ -1,7 +1,8 @@
 //! Owner authorization for sensitive owner actions (goal item A4, ADR 0010).
 //!
-//! Reveal, approval of a run, "Approve and remember", changes to grants and rules, and
-//! token rotation need a fresh owner check: Touch ID now, the master passphrase now, or,
+//! Reveal, approval of a run, "Approve and remember", changes to grants and rules, token
+//! rotation, and a new Mac for relay sync need a fresh owner check: Touch ID now, the
+//! master passphrase now, or,
 //! for the approval of a run only, the Face ID signature of a paired iPhone (ADR 0020).
 //! [`OwnerGate::authorize`] is the only function that does this check. It is also the
 //! only way to make an [`OwnerProof`]. Each guarded action takes a proof by value:
@@ -86,6 +87,9 @@ pub enum OwnerAction {
     /// Open a command-line session (ADR 0017). The session can read and change the vault
     /// like the views, but every action in this list still needs its own check.
     OpenCliSession,
+    /// Bind the environment variables of several items with one check (ADR 0017, D1).
+    /// The proof names each item and its variable, in the order of the dialog.
+    BindVariables { variables: Vec<(u64, String)> },
     /// Pair an iPhone (ADR 0020). The proof names the device exactly as the owner
     /// confirmed it: its ID, its name, and both public keys (X9.63, 65 bytes each).
     PairCompanion {
@@ -93,6 +97,14 @@ pub enum OwnerAction {
         device_name: String,
         request_key: Vec<u8>,
         approval_key: Vec<u8>,
+    },
+    /// Add a Mac to the relay sync of the open vault (ADR 0022, contract relay-sync-v1
+    /// section 7.1). The proof names the link exactly as the owner confirmed it: its
+    /// number on the relay, the name of the Mac, and its public key (X9.63, 65 bytes).
+    ConfirmSyncDevice {
+        link_id: u64,
+        device_name: String,
+        public_key: Vec<u8>,
     },
 }
 
@@ -126,9 +138,17 @@ impl OwnerAction {
             Self::PromoteModel { .. } => "promote a new model for the bouncer".to_owned(),
             Self::RollbackModel { .. } => "roll back the model of the bouncer".to_owned(),
             Self::OpenCliSession => "start a command-line session".to_owned(),
+            Self::BindVariables { variables } => match variables.len() {
+                1 => "bind 1 environment variable".to_owned(),
+                count => format!("bind {count} environment variables"),
+            },
             Self::PairCompanion { device_name, .. } => {
                 format!("pair the iPhone \"{}\"", short_device_name(device_name))
             }
+            Self::ConfirmSyncDevice { device_name, .. } => format!(
+                "add the Mac \"{}\" to the sync of this vault",
+                short_device_name(device_name)
+            ),
         }
     }
 
