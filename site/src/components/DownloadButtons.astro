@@ -1,7 +1,7 @@
 ---
 import AppleIcon from "./AppleIcon.astro";
 import LinuxIcon from "./LinuxIcon.astro";
-import { DOWNLOAD, INSTALL_COMMAND, REPO } from "../lib/site";
+import { DOWNLOAD, INSTALL_COMMAND, REPO, TEAM_CLI_GUIDE, TEAM_CLI_LINUX, TEAM_CLI_SUMS, TEAM_INSTALL_COMMAND } from "../lib/site";
 
 interface Props {
   /** A unique prefix for the notes of this pair of buttons on the page. */
@@ -21,7 +21,7 @@ const installNote = `${id}-install`;
   <button class="btn btn-secondary" type="button" popovertarget={id} aria-haspopup="dialog">
     <LinuxIcon />
     <span>Linux</span>
-    <span class="badge">Soon</span>
+    <span class="badge">CLI</span>
   </button>
 
   <div id={installNote} popover class="note install-note" role="dialog" aria-labelledby={`${installNote}-title`} data-width="480">
@@ -56,13 +56,35 @@ const installNote = `${id}-install`;
     </p>
   </div>
 
-  <div id={id} popover class="note" role="dialog" aria-labelledby={`${id}-title`}>
-    <p class="note-title" id={`${id}-title`}><LinuxIcon /> Apassy for Linux is on the way</p>
+  <div id={id} popover class="note" role="dialog" aria-labelledby={`${id}-title`} data-width="480">
+    <p class="note-title" id={`${id}-title`}><LinuxIcon /> apassy-team for Linux</p>
     <p>
-      Apassy runs on macOS today: agents work in a macOS Seatbelt sandbox, and native macOS helpers handle Touch ID and notifications.
-      Linux needs its own versions of these protections before Apassy holds your secrets there.
+      On a Linux machine, join a team vault on the Apassy relay with the command-line tool <code>apassy-team</code> (alpha).
+      Your agents run commands with the team's keys; the owner releases each value from their own machine.
+      The installer checks the file against its SHA-256 and puts it in <code>~/.local/bin</code>.
     </p>
-    <a class="note-link" href={`${REPO}/releases`}>Follow the releases on GitHub <span aria-hidden="true">→</span></a>
+    <div class="command">
+      <div class="command-bar">
+        <span>Terminal · x86-64, glibc 2.31 or later</span>
+        <button class="copy" type="button" data-copy={TEAM_INSTALL_COMMAND} aria-label="Copy the command">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5" y="5" width="8.5" height="8.5" rx="2" /><path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5" /></svg>
+          <span data-copy-label>Copy</span>
+        </button>
+        <span class="sr-only" aria-live="polite" data-copy-status></span>
+      </div>
+      <code>{TEAM_INSTALL_COMMAND}</code>
+    </div>
+    <p class="links">
+      <a href={TEAM_CLI_LINUX} download>Download the file</a>
+      <span aria-hidden="true">·</span>
+      <a href={TEAM_CLI_SUMS}>SHA256SUMS</a>
+      <span aria-hidden="true">·</span>
+      <a href={TEAM_CLI_GUIDE}>Read the guide</a>
+    </p>
+    <p class="needs">
+      The Mac app stays macOS only for now: its agents run in a macOS Seatbelt sandbox, and native helpers handle Touch ID.
+      Linux needs its own version of these protections first.
+    </p>
   </div>
 </div>
 
@@ -112,6 +134,7 @@ const installNote = `${id}-install`;
   .copy:global(.copied) { color: #4cd964; border-color: rgba(76, 217, 100, 0.5); }
   .copy svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.4; }
   .needs { font-size: 13px; }
+  .note p > code { font-family: var(--mono); font-size: 12.5px; color: var(--ink); }
   .links { display: flex; gap: 8px; font-size: 13px; }
   .links a { color: var(--blue); font-weight: 500; }
   .links a:hover { text-decoration: underline; text-underline-offset: 3px; }

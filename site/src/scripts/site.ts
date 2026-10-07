@@ -211,13 +211,19 @@ window.addEventListener("scroll", placeOpen, { passive: true });
 window.addEventListener("resize", placeOpen);
 
 // ---- Gallery tabs: click, arrow keys, and autoplay with a progress bar ----
+// Autoplay waits while any reason holds: the gallery is off screen, the page is hidden,
+// the pointer is on the tabs, or a tab has keyboard focus. Each reason is its own flag:
+// one that ends does not restart a gallery that another one still holds. The pointer on
+// the large screenshot does not hold it: a visitor who scrolls with a trackpad leaves
+// the pointer there, and the gallery then never moved.
 for (const gallery of document.querySelectorAll<HTMLElement>("[data-gallery]")) {
   const tabs = [...gallery.querySelectorAll<HTMLButtonElement>("[role=tab]")];
   const panels = [...gallery.querySelectorAll<HTMLElement>("[role=tabpanel]")];
+  const list = gallery.querySelector<HTMLElement>("[role=tablist]");
   const INTERVAL = 6500;
   let current = 0;
   let timer = 0;
-  let paused = false;
+  const holds = new Set<string>(["offscreen"]);
   const select = (index: number, focus = false) => {
     current = (index + tabs.length) % tabs.length;
     tabs.forEach((tab, i) => {
@@ -230,7 +236,6 @@ for (const gallery of document.querySelectorAll<HTMLElement>("[data-gallery]")) 
     });
     if (focus) tabs[current].focus();
     // Keep the tab in view in a row that scrolls (small screens), without a page scroll.
-    const list = tabs[current].parentElement;
     if (list && list.scrollWidth > list.clientWidth) {
       list.scrollTo({ left: tabs[current].offsetLeft - list.clientWidth / 2 + tabs[current].offsetWidth / 2, behavior: reduced ? "auto" : "smooth" });
     }
@@ -238,18 +243,22 @@ for (const gallery of document.querySelectorAll<HTMLElement>("[data-gallery]")) 
   };
   const restart = () => {
     clearTimeout(timer);
-    if (reduced || paused) return;
     const tab = tabs[current];
     tab.classList.remove("playing");
+    if (reduced || holds.size > 0) return;
     void tab.offsetWidth; // restart the progress animation
     tab.classList.add("playing");
     timer = window.setTimeout(() => select(current + 1), INTERVAL);
   };
-  const pause = (on: boolean) => {
-    paused = on;
-    gallery.toggleAttribute("data-paused", on);
-    if (on) clearTimeout(timer);
-    else restart();
+  const hold = (reason: string, on: boolean) => {
+    const was = holds.size > 0;
+    if (on) holds.add(reason);
+    else holds.delete(reason);
+    const now = holds.size > 0;
+    gallery.toggleAttribute("data-paused", now);
+    if (now && !was) clearTimeout(timer);
+    // A hold that ends starts the current tab again, with its full time.
+    if (!now && was) restart();
   };
   tabs.forEach((tab, i) => {
     tab.addEventListener("click", () => select(i));
@@ -258,13 +267,16 @@ for (const gallery of document.querySelectorAll<HTMLElement>("[data-gallery]")) 
       if (event.key === "ArrowLeft") select(current - 1, true);
     });
   });
-  gallery.addEventListener("pointerenter", () => pause(true));
-  gallery.addEventListener("pointerleave", () => pause(false));
-  gallery.addEventListener("focusin", () => pause(true));
-  gallery.addEventListener("focusout", () => pause(false));
-  document.addEventListener("visibilitychange", () => pause(document.hidden));
-  // Autoplay only while the gallery is on screen.
-  new IntersectionObserver(([entry]) => pause(!entry.isIntersecting)).observe(gallery);
+  list?.addEventListener("pointerenter", (event) => hold("pointer", event.pointerType === "mouse"));
+  list?.addEventListener("pointerleave", () => hold("pointer", false));
+  // A mouse click also focuses a tab in some browsers; only keyboard focus holds.
+  gallery.addEventListener("focusin", (event) => hold("focus", (event.target as Element).matches(":focus-visible")));
+  gallery.addEventListener("focusout", (event) => {
+    if (!gallery.contains(event.relatedTarget as Node | null)) hold("focus", false);
+  });
+  document.addEventListener("visibilitychange", () => hold("hidden", document.hidden));
+  // Autoplay only while at least a fifth of the gallery is on screen.
+  new IntersectionObserver(([entry]) => hold("offscreen", entry.intersectionRatio < 0.2), { threshold: [0, 0.2] }).observe(gallery);
   whenVisible(gallery, () => select(0));
 }
 

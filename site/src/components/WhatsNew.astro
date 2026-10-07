@@ -1,7 +1,8 @@
 ---
-// What 0.3.0 adds: several vaults, sync between Macs, import from 1Password, and
-// automatic updates. The facts: CHANGELOG.md, docs/operations/multiple-vaults.md,
-// import-1password.md, and updates.md. The small views are drawings of the app,
+// What 0.3.0 to 0.3.4 add: sync between Macs (a folder, or the Apassy relay since 0.3.4),
+// several vaults, import from 1Password and Bitwarden, and automatic updates. The facts:
+// CHANGELOG.md, docs/operations/sync.md, multiple-vaults.md, import-1password.md, cli.md,
+// and updates.md. The small views are drawings of the app,
 // not screenshots; the text of each card says the same.
 const vaults = [
   { name: "Personal", color: "var(--blue)", open: true },
@@ -19,11 +20,12 @@ const items = [
 <section class="section" id="new">
   <div class="container">
     <header class="center">
-      <p class="eyebrow" data-reveal>New in 0.3.0</p>
-      <h2 class="h2" data-reveal style="--i:1">Keep clients apart. Keep your Macs in step.</h2>
+      <p class="eyebrow" data-reveal>New in 0.3.4</p>
+      <h2 class="h2" data-reveal style="--i:1">Your Macs stay in step, even when one is asleep.</h2>
       <p class="lead" data-reveal style="--i:2">
-        Give each client its own vault, sync a vault between your Macs, bring your keys over from 1Password,
-        and let the app update itself.
+        Sync a vault through the Apassy relay: each Mac sends an encrypted copy, and the others pick up the change
+        when they open. Keep clients in separate vaults, bring your keys over from 1Password or Bitwarden, and let
+        the app update itself.
       </p>
     </header>
 
@@ -81,9 +83,9 @@ const items = [
               </div>
               <div class="wire"><i class="packet"></i></div>
               <div class="node folder">
-                <svg viewBox="0 0 24 24"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2h9A1.5 1.5 0 0 1 21 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z" /><rect x="9.5" y="12.5" width="5" height="4" rx="0.8" /><path d="M10.5 12.5v-1a1.5 1.5 0 0 1 3 0v1" /></svg>
-                <p>Sync folder</p>
-                <p class="sub">encrypted</p>
+                <svg viewBox="0 0 24 24"><path d="M7 18.5h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 9.2 4.7 4.7 0 0 0 7 18.5z" /><rect x="9.5" y="12.5" width="5" height="3.8" rx="0.8" /><path d="M10.6 12.5v-.9a1.4 1.4 0 0 1 2.8 0v.9" /></svg>
+                <p>Apassy relay</p>
+                <p class="sub">encrypted copy</p>
               </div>
               <div class="wire back"><i class="packet"></i></div>
               <div class="node">
@@ -103,13 +105,14 @@ const items = [
             Sync between your Macs
           </h3>
           <p>
-            As with an Obsidian vault, a vault syncs through iCloud Drive, or through any folder that Dropbox,
-            Google Drive, OneDrive, or Syncthing keeps in step. Sync is off until you turn it on.
+            Sync a vault through the Apassy relay, or, as with an Obsidian vault, through iCloud Drive or any folder that
+            Dropbox, Google Drive, OneDrive, or Syncthing keeps in step. Sync is off until you turn it on.
           </p>
           <ul class="checks">
-            <li>Changes from several Macs merge, one credential at a time</li>
-            <li>When a credential changed on two Macs, the other version stays as an archived conflict copy</li>
-            <li>The synced file is encrypted with the vault passphrase</li>
+            <li>Your Macs don't need to be on together: each picks up the changes when it opens</li>
+            <li>The relay holds one copy, encrypted with the vault passphrase, which it never gets</li>
+            <li>A new Mac joins with a one-time link and two safety words that both Macs show</li>
+            <li>Changes merge one credential at a time; a clash keeps the other version as an archived conflict copy</li>
             <li>Agents, their access, and the activity stay on each Mac. Each Mac registers its own agents.</li>
           </ul>
         </div>
@@ -141,14 +144,15 @@ const items = [
         <div class="body">
           <h3>
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5v11M7.5 10l4.5 4.5 4.5-4.5M4 15.5v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" /></svg>
-            Import from 1Password
+            Import from 1Password and Bitwarden
           </h3>
-          <p>Read a 1PUX or CSV export, see every item first, and pick what to add.</p>
+          <p>Read a 1Password export, see every item first, and pick what to add. The command line also imports Bitwarden CSV and <code>.env</code> files.</p>
           <ul class="checks">
             <li>API credentials, SSH keys, databases, and servers are selected first</li>
             <li>Website logins stay in 1Password unless you pick them</li>
             <li>Secrets never go into titles, notes, or tags</li>
             <li>Afterwards, Apassy offers to delete the export file</li>
+            <li><code>apassy import --bind</code> sets each variable with one confirmation</li>
           </ul>
         </div>
       </article>
@@ -160,7 +164,7 @@ const items = [
               <span class="ready">A new version is ready.</span>
               <span class="mini-btn">Restart now</span>
             </div>
-            <div class="panel-head"><span>Settings › Updates</span></div>
+            <div class="panel-head"><span>Settings › About › Updates</span></div>
             <div class="setting">
               <span>Check for updates automatically</span>
               <span class="toggle"></span>
@@ -176,7 +180,7 @@ const items = [
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" /><path d="M12 16V8.5M8.5 11.5 12 8l3.5 3.5" /></svg>
             Automatic updates
           </h3>
-          <p>Apassy checks for a new version and installs it when you restart. Settings&nbsp;&gt;&nbsp;Updates turns it off.</p>
+          <p>Apassy checks for a new version and installs it when you restart. Settings&nbsp;&gt;&nbsp;About&nbsp;&gt;&nbsp;Updates turns it off.</p>
           <ul class="checks">
             <li>Only a build signed by the same Developer ID team</li>
             <li>Only a build notarized by Apple</li>
