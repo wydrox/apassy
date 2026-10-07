@@ -78,6 +78,18 @@ struct Finish {
     passphrase: Secret,
 }
 
+/// An error of a join, as the iPhone that joins reads it: before the Mac confirms,
+/// a refusal of the relay is about the link, not about a device that was removed.
+fn join_error(error: CoreError) -> CoreError {
+    match error.code {
+        "removed" | "not_found" => CoreError::new(
+            "link_invalid",
+            "This link does not work: it was used, it expired, or it is not valid. Make a new link on the Mac.",
+        ),
+        _ => error,
+    }
+}
+
 impl Core {
     pub(super) fn join_call(&self, op: &str, request: &str) -> CoreResult<String> {
         match op {
@@ -111,7 +123,8 @@ impl Core {
         }
         let (url, code) = PendingJoin::parse_link(link, DEFAULT_RELAY_URL)?;
         let team_id = link_code_team(&code).unwrap_or_default().to_owned();
-        let pending = PendingJoin::request(link, DEFAULT_RELAY_URL, device_name)?;
+        let pending = PendingJoin::request(link, DEFAULT_RELAY_URL, device_name)
+            .map_err(|error| join_error(error.into()))?;
         let joining = Joining {
             relay_url: url.as_str().to_owned(),
             team_id,
@@ -147,7 +160,7 @@ impl Core {
                     .pending
                     .as_ref()
                     .ok_or_else(|| CoreError::internal("The join has no link."))?;
-                match pending.poll()? {
+                match pending.poll().map_err(|error| join_error(error.into()))? {
                     None => return Ok(()),
                     Some(joined) => {
                         joining.pending = None;

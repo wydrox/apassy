@@ -25,6 +25,7 @@ struct JoinFlowView: View {
         .animation(.snappy, value: model.step)
         #if targetEnvironment(simulator)
             .task { await startFromLaunchArgument() }
+            .task(id: model.step) { await finishFromLaunchArgument() }
         #endif
     }
 
@@ -290,6 +291,15 @@ struct JoinFlowView: View {
             else { return }
             model.handleCode(text)
             await model.start()
+        }
+
+        /// With `-ApassyJoinPassphrase <synthetic passphrase>` the passphrase step goes on by
+        /// itself, once: for a join with a test relay, where nobody types.
+        private func finishFromLaunchArgument() async {
+            guard case .passphrase = model.step, !model.isWorking, model.passphraseMessage == nil,
+                let typed = UserDefaults.standard.string(forKey: "ApassyJoinPassphrase")
+            else { return }
+            await model.finish(passphrase: typed)
         }
     #endif
 }

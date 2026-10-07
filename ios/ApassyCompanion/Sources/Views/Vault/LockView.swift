@@ -79,6 +79,16 @@ struct LockView: View {
         .onChange(of: vault.isUnlocked) { _, unlocked in
             if !unlocked { passphrase = "" }
         }
+        #if targetEnvironment(simulator)
+            // A development aid: `-ApassyUnlockPassphrase <synthetic passphrase>` unlocks once
+            // at launch, where nobody types.
+            .task {
+                guard !prompted, let typed = UserDefaults.standard.string(forKey: "ApassyUnlockPassphrase")
+                else { return }
+                prompted = true
+                await vault.unlock(passphrase: typed)
+            }
+        #endif
     }
 
     private var vaultPicker: some View {
