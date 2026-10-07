@@ -38,6 +38,7 @@ const { title, description } = Astro.props;
       <div class="container bar">
         <a href="/" class="brand" aria-label="apassy home"><Lockup class="lockup" /></a>
         <nav aria-label="Main">
+          <a href="/#browser" class="navlink">Extension</a>
           <a href="/changelog" class="navlink">Changelog</a>
           <a href={DOWNLOAD} class="navlink" data-download>Download</a>
           <a href={REPO} class="pill"><GitHubIcon /> GitHub</a>
@@ -58,6 +59,7 @@ const { title, description } = Astro.props;
         <nav class="foot-links" aria-label="Footer">
           <a href={REPO}>GitHub</a>
           <a href="/changelog">Changelog</a>
+          <a href="/#browser">Browser extension</a>
           <a href={DOWNLOAD} data-download>Download</a>
           <a href={`${REPO}/tree/main/docs`}>Docs</a>
           <a href={`${REPO}/releases`}>Releases</a>
@@ -176,7 +178,7 @@ const { title, description } = Astro.props;
   }
   .pill:hover { border-color: var(--faint); transform: translateY(-1px); }
   .pill svg { width: 16px; height: 16px; }
-  @media (max-width: 560px) { .navlink:first-child { display: none; } }
+  @media (max-width: 560px) { .navlink:not([data-download]) { display: none; } }
 
   /* ---- Sections ---- */
   .section { border-top: 1px solid var(--line); padding: 112px 0; position: relative; }
