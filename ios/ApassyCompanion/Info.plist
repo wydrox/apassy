@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>ApassyAppIdentifierPrefix</key>
+	<string>$(AppIdentifierPrefix)</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
@@ -20,6 +22,8 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSAppTransportSecurity</key>
@@ -28,9 +32,9 @@
 		<true/>
 	</dict>
 	<key>NSCameraUsageDescription</key>
-	<string>Apassy uses the camera only to scan the pairing code that your Mac shows. It saves no picture.</string>
+	<string>Apassy uses the camera only to scan a code that your Mac shows, to add this iPhone. It saves no picture.</string>
 	<key>NSFaceIDUsageDescription</key>
-	<string>Apassy asks for Face ID each time you approve a run, so that only you can approve.</string>
+	<string>Apassy uses Face ID to unlock your vault, and before it shows, copies, or fills a secret, or approves a run.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Apassy connects to your Mac on this Wi-Fi network to show the runs that wait for you and to send your decision.</string>
 	<key>UIApplicationSceneManifest</key>
