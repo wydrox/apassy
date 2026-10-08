@@ -63,9 +63,13 @@ The Secure Enclave keys are compiled out of a simulator build (`#if !targetEnvir
 
 ### The vault (ADR 0023)
 
+For a personal vault, keep **iCloud Drive** selected on the Mac. On the iPhone, select **iCloud**, then select the matching `.apassy` file in **Files > iCloud Drive > Apassy**. Enter its passphrase. The app keeps an offline local vault and syncs changes in both directions while it is active and unlocked. iCloud does not need the companion QR code or a relay team. A "saved" result confirms the local iCloud file; receipt on another device needs a check on that device.
+
+If file access expires, use the file selection control in Sync settings to select the same vault again. Removing the vault from the iPhone leaves its iCloud file. Unresolved iCloud file conflicts stop publication; the local vault and conflict versions stay intact.
+
 | Part | What it does |
 | --- | --- |
-| Welcome and join | "Add your vault": on the Mac, Settings > General > Sync > "Add a device…" shows a QR code; the iPhone scans it (or pastes the link), names itself, shows the two safety words, waits for the Mac's confirmation, and asks the passphrase. Then it offers Face ID unlock. "Only approve agent runs" goes to the companion pairing. |
+| Welcome and join | **iCloud** opens the personal vault file from iCloud Drive with its passphrase. **Join a team** uses the relay QR code from "Add a device…" on the Mac. Both offer Face ID unlock. "Only approve agent runs" goes to companion pairing. |
 | Lock | The passphrase, or Face ID when the passphrase is stored behind it. A new Face ID enrollment deletes it, and the screen says so. "Lock after": immediately (the default), 1, 5, 15 minutes, or 1 hour. |
 | Home | Favorites (on this iPhone only), recently changed items, the kinds with counts, the archive, a Watchtower card, and the sync state. |
 | Items and Search | All items A to Z with an index, filters by kind and tag, sorting, and swipe actions (favorite, archive, copy). The search tab searches titles, usernames, tags, and websites. |
@@ -121,6 +125,22 @@ cargo run -p apassy-core --example relay_mac -- synthetic-sim-pass
 xcrun simctl launch booted com.wydrox.apassy.companion \
   -ApassyJoinLink '<the link>' -ApassyJoinPassphrase synthetic-sim-pass
 ```
+
+### Check personal iCloud sync
+
+Use a synthetic vault for these checks.
+
+1. On the Mac, select iCloud Drive in Settings > General > Sync. Wait for the `.apassy` file in Files on the iPhone.
+2. On the iPhone, select iCloud. Select that file and enter its passphrase.
+3. Change a credential on the Mac. Check the new value on the iPhone after sync.
+4. Change a different credential on the iPhone. Check the new value on the Mac after sync.
+5. Disconnect the iPhone from the network. Check local unlock and AutoFill. Edit a credential, then reconnect and check both devices.
+6. Edit the same credential differently on both devices before sync. Check the active item and the preserved conflict copy.
+7. Change the passphrase on the Mac. Check the new-passphrase path and Face ID unlock on the iPhone.
+8. Restart the iPhone app. Check that the bookmark still permits sync. Select the file again through Sync settings to check recovery.
+9. Remove the test vault from the iPhone. Check that its iCloud file and Mac vault remain.
+
+Local core and adapter tests do not prove iCloud delivery, persistent file access on a physical iPhone, or Face ID behavior. These checks need the updated app on a physical device.
 
 ### Generate the project
 

@@ -297,6 +297,7 @@ impl Core {
         let entry = VaultEntry {
             id,
             name: joining.team.clone(),
+            sync_source: None,
             relay_url: Some(report.link.url.clone()),
             team_id: Some(report.link.team_id.clone()),
             device_id: Some(report.link.device_id),

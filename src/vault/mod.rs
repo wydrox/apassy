@@ -71,7 +71,7 @@ pub use merge::{
 };
 pub use relay_device::RelayDevice;
 pub use suggestions::{DeclarationField, SuggestedDeclaration, SuggestionOutcome, SuggestionStats};
-pub use sync::{AdoptedCopy, MAX_DEVICE_NAME_BYTES, SyncCopy, SyncIdentity};
+pub use sync::{AdoptedCopy, CopyPassphraseError, MAX_DEVICE_NAME_BYTES, SyncCopy, SyncIdentity};
 pub(crate) use sync::{copy_hashing, hash_open_file, sync_dir, to_hex};
 pub use types::{
     Field, FieldSummary, ItemDetails, ItemDraft, ItemSummary, MAX_PASSPHRASE_BYTES,

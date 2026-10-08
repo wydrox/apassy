@@ -11,6 +11,7 @@ mod autofill;
 mod config;
 mod errors;
 mod generate;
+mod icloud;
 mod items;
 mod join;
 mod otp;
@@ -74,6 +75,8 @@ pub struct Core {
     /// replaced or cancelled gives its join up instead of putting it back.
     joins: AtomicU64,
     status: Mutex<sync::Memory>,
+    /// A private snapshot that still needs confirmation from coordinated file I/O.
+    icloud_pending: Mutex<Option<icloud::Pending>>,
 }
 
 fn guard<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -206,9 +209,11 @@ impl Core {
             join: Mutex::new(None),
             joins: AtomicU64::new(0),
             status: Mutex::new(sync::Memory::default()),
+            icloud_pending: Mutex::new(None),
         };
         if core.role == Role::App {
             core.clear_unfinished_joins();
+            core.clear_unfinished_icloud_imports();
         }
         core.select_relay()?;
         Ok(core)
@@ -312,6 +317,10 @@ impl Core {
                 self.remove_vault(&vault_id, force)
             }
             // 5.2
+            "icloud_import" | "icloud_sync_prepare" | "icloud_sync_complete" => {
+                self.require_app()?;
+                self.icloud_call(&op, request)
+            }
             "join_start" | "join_poll" | "join_cancel" | "join_finish" => {
                 self.require_app()?;
                 self.join_call(&op, request)
@@ -579,6 +588,7 @@ impl Core {
         // Lock order: the vault, then the kept passphrase, as in `unlock`.
         let mut slot = guard(&self.vault);
         self.closes.fetch_add(1, Ordering::SeqCst);
+        *guard(&self.icloud_pending) = None;
         if let Some(mut vault) = slot.take() {
             let _ = vault.lock();
         }
@@ -649,6 +659,7 @@ impl Core {
         let entry = VaultEntry {
             id,
             name: name.to_owned(),
+            sync_source: None,
             relay_url: None,
             team_id: None,
             device_id: None,

@@ -7,7 +7,7 @@ Status: experimental. This contract supports the iPhone app in [ADR 0023](../adr
 
 | Part | Location | Built for |
 | --- | --- | --- |
-| The core: a C interface over `apassy::vault` and `apassy::sync` (relay) | `ios/ApassyCore` (Rust, `staticlib`) | `aarch64-apple-ios`, `aarch64-apple-ios-sim`, `aarch64-apple-darwin` (tests) |
+| The core: a C interface over `apassy::vault` and `apassy::sync` (relay and encrypted iCloud snapshots) | `ios/ApassyCore` (Rust, `staticlib`) | `aarch64-apple-ios`, `aarch64-apple-ios-sim`, `aarch64-apple-darwin` (tests) |
 | The C header and the module map | `ios/ApassyCore/include/` | |
 | The XCFramework | `ios/ApassyCore/build/ApassyCore.xcframework`, made by `scripts/build-ios-core.sh`, not committed | |
 | The Swift wrapper: typed requests, answers, errors | `ios/ApassyVaultKit` (Swift package) | iOS 26, and macOS 15 for `swift test` |
@@ -57,6 +57,8 @@ Files in `data_dir`:
 | `phone.json` | The vaults on this iPhone (section 6). |
 | `vaults/<vault_id>.apassy` | The live vault (SQLCipher), as on the Mac. |
 | `sync/<vault_id>.json` and `sync/.*` | The relay sync state and work files, as on the Mac. |
+| `icloud-transfer/<transaction>/…` | Private encrypted input/output snapshots for one coordinated file transaction. |
+| iCloud bookmarks | Private Swift-managed file access records, keyed by vault ID. They contain no passphrase. |
 
 ## 4. Requests and answers
 
@@ -69,6 +71,7 @@ A request is `{"op": "<name>", …parameters}`. An answer is one of:
 
 - Unknown parameters are ignored. A missing parameter is `invalid_input`.
 - `message` is plain English for the owner, in the style of the Mac app. It never has a value, a passphrase, SQL, or a driver error.
+- An iCloud preparation error can include `rekeyed: true` after the local vault accepted a new passphrase but a later step failed. Swift must update the saved biometric passphrase in this case, while it reports the sync failure.
 - An ID of an item is a JSON number (`u64`), local to this iPhone. A time is Unix seconds.
 
 Error codes:
@@ -131,6 +134,20 @@ The owner selects "Add a device…" on the Mac; the Mac shows a QR code and the 
 | `join_finish` | `passphrase` | `{"vault": Vault}`. Opens the copy with the passphrase, makes the vault on this iPhone, turns on relay sync, selects and unlocks it. A wrong passphrase is `wrong_passphrase` and keeps the download: the owner tries again. |
 
 `Join`: `{"state": "waiting" | "ready", "team": "Personal", "words": ["amber", "marble"], "expires_at": 1791200600}`. `words` are the two safety words; the Mac shows the same words for this iPhone.
+
+### 5.2a Personal vaults in iCloud Drive
+
+These calls require the `app` role. The core never receives an external provider URL or a bookmark. Paths must name private regular files below `data_dir/icloud-transfer`; symbolic links and paths outside this directory are refused. Output files must not exist.
+
+| Op | Parameters | Result |
+| --- | --- | --- |
+| `icloud_import` | `input_path`, `name`, `passphrase` | `{"vault": Vault}`. Checks and strips the snapshot, creates a local vault with a new device identity, selects and unlocks it. An existing vault ID is refused without replacement. |
+| `icloud_sync_prepare` | `vault_id`, `input_path`, `output_path`, optional `passphrase` | `token`, `input_sha256`, optional `output_sha256`, `write_required`, `rekeyed`. Checks identity and merges into the selected unlocked vault. Makes a stripped output only when needed. The optional passphrase follows a remote passphrase change. This call does not confirm publication. |
+| `icloud_sync_complete` | `vault_id`, `token` | `{"status": Status}`. Consumes the preparation token after Swift confirms publication, or confirms that no write is needed. Rejects an obsolete vault session. |
+
+Swift resolves a security-scoped bookmark, coordinates a read, and copies the encrypted file to private staging. It calls prepare off the main thread. Under coordinated write access, it compares the current provider hash with `input_sha256`. On a mismatch, it retries from a fresh snapshot. Otherwise, it checks `output_sha256`, publishes atomically when needed, and completes the transaction. Failed publication must not produce a successful sync status.
+
+Swift refuses unresolved provider conflict versions before publication. It keeps the local vault usable when the file is offline, missing, or inaccessible. A new file selection must pass the core's vault identity check before it replaces the bookmark. The AutoFill extension uses the local vault only.
 
 ### 5.3 Items
 
@@ -214,7 +231,7 @@ The owner selects "Add a device…" on the Mac; the Mac shows a QR code and the 
  "merged": {"inserted": 0, "updated": 2, "deleted": 0, "conflicts": 0}}
 ```
 
-- `state`: `off` (a local vault), `never` (no sync since the app started), `ok`, `offline`, `needs_passphrase`, `removed`, `damaged`, `stale_copy`, `forked_copy`, `busy`, or `error`.
+- `state`: `off` (a local vault), `never` (no sync since the app started), `ok`, `offline`, `needs_passphrase`, `removed`, `damaged`, `stale_copy`, `forked_copy`, `busy`, `pending` (local edits or publication still need sync), or `error`.
 - `merged`: the last merge that changed something, or null.
 
 ### 5.6 Removing a vault from this iPhone
@@ -238,6 +255,8 @@ The owner selects "Add a device…" on the Mac; the Mac shows a QR code and the 
 ```
 
 Written to a temporary file and renamed. The extension reads it and never writes it.
+
+`Vault.sync_source` is optional for older lists. `"icloud"` selects the iCloud snapshot path. When it is absent, `relay_url` identifies a relay vault; a vault without either is local. Swift routes its sync methods accordingly. A missing bookmark is an access error, not a local-only vault.
 
 ## 7. One-time passwords
 

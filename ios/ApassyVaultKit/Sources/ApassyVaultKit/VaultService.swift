@@ -33,10 +33,13 @@ public struct VaultError: Error, Sendable, Equatable, LocalizedError {
 
     public var code: Code
     public var message: String
+    /// True if the core accepted a new passphrase before a later sync step failed.
+    public var rekeyed: Bool
 
-    public init(_ code: Code, _ message: String) {
+    public init(_ code: Code, _ message: String, rekeyed: Bool = false) {
         self.code = code
         self.message = message
+        self.rekeyed = rekeyed
     }
 
     public var errorDescription: String? { message }
@@ -66,6 +69,11 @@ public protocol VaultService: Sendable {
     /// Returns whether this iPhone left the relay team.
     func removeVault(id: String, force: Bool) async throws -> Bool
 
+    /// Open an encrypted vault from iCloud Drive. Keep the selected file in iCloud Drive.
+    func openICloudVault(url: URL, name: String, passphrase: String) async throws -> VaultEntry
+    /// Connect an unlocked vault to its iCloud file after an identity check.
+    func reconnectICloudVault(url: URL, vaultID: String) async throws
+
     // 5.2 Joining a vault
     /// `deviceName`: the name that the Mac shows for this iPhone.
     func joinStart(link: String, deviceName: String) async throws -> JoinInfo
@@ -91,7 +99,7 @@ public protocol VaultService: Sendable {
     // 5.5 Sync
     func sync() async throws -> SyncStatus
     func syncStatus() async throws -> SyncStatus
-    /// A long poll: true when the relay has a version that this iPhone has not merged.
+    /// True when the selected sync source has changes, or local iCloud changes need sync.
     func syncWait(timeout: Int) async throws -> Bool
     /// After `needsPassphrase`. Store the typed passphrase for Face ID only when `rekeyed`.
     func takeNewPassphrase(_ passphrase: String) async throws -> PassphraseChange
@@ -102,4 +110,14 @@ public protocol VaultService: Sendable {
     func autofillList(domains: [String]) async throws -> AutofillList
     func autofillCredential(id: UInt64) async throws -> FillCredential
     func credentialIdentities() async throws -> [CredentialIdentity]
+}
+
+public extension VaultService {
+    func openICloudVault(url: URL, name: String, passphrase: String) async throws -> VaultEntry {
+        throw VaultError(.notAllowed, "This service cannot open an iCloud vault.")
+    }
+
+    func reconnectICloudVault(url: URL, vaultID: String) async throws {
+        throw VaultError(.notAllowed, "This service cannot connect an iCloud vault.")
+    }
 }

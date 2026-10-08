@@ -98,6 +98,8 @@ private struct VaultSettingsSections: View {
     @State private var faceIDPassphrase = ""
     @State private var faceIDError: String?
     @State private var autoFillOn: Bool?
+    @State private var showsICloudPicker = false
+    @State private var reconnectModel: ICloudReconnectModel?
 
     var body: some View {
         @Bindable var settings = vault.settings
@@ -114,7 +116,9 @@ private struct VaultSettingsSections: View {
                 }
                 .disabled(working)
             } footer: {
-                Text("Removing deletes the vault on this iPhone and takes this iPhone off the relay. The vault stays on your Macs.")
+                Text(vault.vault?.isICloud == true
+                    ? "This removes the local vault and stored passphrase. The file in iCloud Drive stays."
+                    : "This removes the vault from this iPhone and from the relay. The vault stays on your Macs.")
             }
             Section("Security") {
                 if vault.gate.biometry != .none {
@@ -155,7 +159,22 @@ private struct VaultSettingsSections: View {
         ) {
             Button("Remove", role: .destructive) { remove(force: false) }
         } message: {
-            Text("The vault, its sync state, and the stored passphrase are deleted on this iPhone. Your Macs keep the vault.")
+            Text(vault.vault?.isICloud == true
+                ? "This removes the local vault, sync state, and stored passphrase. The file in iCloud Drive stays."
+                : "This removes the vault, sync state, and stored passphrase from this iPhone. Your Macs keep the vault.")
+        }
+        .sheet(isPresented: $showsICloudPicker) {
+            ICloudVaultFilePicker { url in
+                showsICloudPicker = false
+                guard let url, let reconnectModel else { return }
+                Task {
+                    vault.stopSync()
+                    if await reconnectModel.reconnect(url) {
+                        await vault.didJoin()
+                    }
+                    vault.startSync()
+                }
+            }
         }
         .alert(
             "The relay did not answer",
@@ -199,6 +218,7 @@ private struct VaultSettingsSections: View {
                 LabeledContent("Name", value: vault.vault?.name ?? "")
             }
             if vault.vault?.syncs == true {
+                LabeledContent("Sync service", value: vault.vault?.isICloud == true ? "iCloud Drive" : "Apassy relay")
                 LabeledContent("Sync") {
                     Text(vault.syncStatus?.message ?? "Not synced yet")
                         .multilineTextAlignment(.trailing)
@@ -222,7 +242,25 @@ private struct VaultSettingsSections: View {
                     }
                 }
                 .disabled(vault.isSyncing)
-                NavigationLink("Devices") { DevicesView(vault: vault) }
+                if vault.vault?.isRelay == true {
+                    NavigationLink("Devices") { DevicesView(vault: vault) }
+                }
+                if vault.vault?.isICloud == true {
+                    Button("Select the iCloud file again", systemImage: "icloud") {
+                        guard let entry = vault.vault else { return }
+                        if reconnectModel == nil {
+                            reconnectModel = ICloudReconnectModel(service: vault.service, vaultID: entry.id)
+                        }
+                        showsICloudPicker = true
+                    }
+                    .disabled(reconnectModel?.isWorking == true)
+                    Text("If sync cannot find the file, select the same .apassy file in Files > iCloud Drive > Apassy.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    if let message = reconnectModel?.message {
+                        Text(message).font(.footnote).foregroundStyle(.red)
+                    }
+                }
             } else {
                 Text("This vault is only on this iPhone.")
                     .foregroundStyle(.secondary)
@@ -230,14 +268,18 @@ private struct VaultSettingsSections: View {
         } header: {
             Text("Vault")
         } footer: {
-            if vault.vault?.syncs == true { Text("Syncs through the Apassy relay.") }
+            if vault.vault?.isICloud == true {
+                Text("Personal sync through iCloud Drive is free. The iCloud file stays when you remove this local vault.")
+            } else if vault.vault?.isRelay == true {
+                Text("Team sync uses the Apassy relay.")
+            }
         }
     }
 
     @ViewBuilder
     private var syncProblem: some View {
-        switch vault.syncStatus?.state {
-        case .needsPassphrase?:
+        switch (vault.syncStatus?.state, vault.vault?.isRelay == true) {
+        case (.needsPassphrase?, _):
             Section {
                 Text("Type the new passphrase of “\(vault.vault?.name ?? "")” to go on syncing.")
                 SecureField("New passphrase", text: $newPassphrase)
@@ -251,7 +293,7 @@ private struct VaultSettingsSections: View {
             } header: {
                 Text("The passphrase changed on a Mac")
             }
-        case .staleCopy?, .forkedCopy?:
+        case (.staleCopy?, true), (.forkedCopy?, true):
             Section {
                 Text(
                     vault.syncStatus?.state == .staleCopy
@@ -273,7 +315,7 @@ private struct VaultSettingsSections: View {
             } message: {
                 Text("This iPhone takes the copy on the relay. Its own changes that are not in that copy are lost.")
             }
-        case .removed?:
+        case (.removed?, true):
             Section {
                 Label("A Mac removed this iPhone from the vault.", systemImage: "iphone.slash")
                 Text("This iPhone does not sync any more. Remove the vault here, then add it again from the Mac if you need it.")

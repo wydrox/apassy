@@ -74,6 +74,21 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSRequiresIPhoneOS: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: com.wydrox.apassy.vault
+            UTTypeDescription: Apassy Vault
+            UTTypeConformsTo:
+              - public.data
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - apassy
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Apassy Vault
+            CFBundleTypeRole: Editor
+            LSHandlerRank: Owner
+            LSItemContentTypes:
+              - com.wydrox.apassy.vault
         ITSAppUsesNonExemptEncryption: false
         ApassyAppIdentifierPrefix: $(AppIdentifierPrefix)
         UILaunchScreen: {}

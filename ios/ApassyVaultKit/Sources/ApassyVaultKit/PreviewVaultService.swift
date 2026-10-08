@@ -29,13 +29,13 @@ public actor PreviewVaultService: VaultService {
     public init(empty: Bool = false, unlocked: Bool = true) {
         let vault = VaultEntry(
             id: "4f1c0a2b9d8e7f6a5b4c3d2e1f0a9b8c", name: "Personal",
-            relayURL: "https://apassy-relay.wyderka.cc", teamID: "t_7k2m5q4x3c", deviceID: 3,
-            addedAt: 1_791_000_000)
+            relayURL: nil, teamID: nil, deviceID: nil,
+            addedAt: 1_791_000_000, syncSource: "icloud")
         vaults = empty ? [] : [vault]
         selected = empty ? nil : vault.id
         self.unlocked = !empty && unlocked
         status = SyncStatus(
-            enabled: !empty, state: empty ? .off : .ok, message: empty ? "" : "Up to date.", version: 41,
+            enabled: !empty, state: empty ? .off : .ok, message: empty ? "" : "Saved to the iCloud file.", version: 41,
             lastSyncAt: Int64(Date().timeIntervalSince1970) - 60, pushed: false, merged: nil)
         if !empty {
             for sample in Self.samples() {
@@ -243,14 +243,37 @@ public actor PreviewVaultService: VaultService {
         return vault
     }
 
+    public func openICloudVault(url: URL, name: String, passphrase: String) async throws -> VaultEntry {
+        guard passphrase == Self.passphrase else {
+            throw VaultError(.wrongPassphrase, "The passphrase does not open this vault.")
+        }
+        let vault = VaultEntry(id: UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
+            name: name, relayURL: nil, teamID: nil, deviceID: nil,
+            addedAt: Int64(Date().timeIntervalSince1970), syncSource: "icloud")
+        vaults.append(vault)
+        selected = vault.id
+        unlocked = true
+        status = SyncStatus(enabled: true, state: .ok, message: "Saved to the iCloud file.",
+            version: 1, lastSyncAt: Int64(Date().timeIntervalSince1970), pushed: false, merged: nil)
+        return vault
+    }
+
+    public func reconnectICloudVault(url: URL, vaultID: String) async throws {
+        try requireUnlocked()
+        guard selected == vaultID, vaults.first(where: { $0.id == vaultID })?.isICloud == true else {
+            throw VaultError(.invalidInput, "Select the iCloud vault first.")
+        }
+    }
+
     public func removeVault(id: String, force: Bool) async throws -> Bool {
+        let leftRelay = vaults.first(where: { $0.id == id })?.isRelay == true
         vaults.removeAll { $0.id == id }
         if selected == id {
             selected = vaults.first?.id
             unlocked = false
             items = [:]
         }
-        return true
+        return leftRelay
     }
 
     // MARK: - 5.2
@@ -472,31 +495,46 @@ public actor PreviewVaultService: VaultService {
         try requireUnlocked()
         try await Task.sleep(for: .milliseconds(600))
         status.lastSyncAt = Int64(Date().timeIntervalSince1970)
-        return status
+        return currentSyncStatus()
     }
 
-    public func syncStatus() async throws -> SyncStatus { status }
+    private func currentSyncStatus() -> SyncStatus {
+        guard let vault = vaults.first(where: { $0.id == selected }), vault.syncs else {
+            return SyncStatus(enabled: false, state: .off, message: "", version: 0,
+                lastSyncAt: nil, pushed: false, merged: nil)
+        }
+        var current = status
+        current.enabled = true
+        if vault.isICloud, current.state == .ok { current.message = "Saved to the iCloud file." }
+        return current
+    }
+
+    public func syncStatus() async throws -> SyncStatus { currentSyncStatus() }
 
     public func syncWait(timeout: Int) async throws -> Bool {
         try requireUnlocked()
-        try await Task.sleep(for: .seconds(timeout))
+        try await Task.sleep(for: .seconds(max(1, min(timeout, 5))))
         return false
     }
 
     public func takeNewPassphrase(_ passphrase: String) async throws -> PassphraseChange {
         guard passphrase == Self.passphrase else {
-            throw VaultError(.wrongPassphrase, "The passphrase does not open the copy on the relay.")
+            throw VaultError(.wrongPassphrase, "The passphrase does not open this vault.")
         }
         status.state = .ok
         return PassphraseChange(status: status, rekeyed: true)
     }
 
     public func useRelayCopy() async throws -> SyncStatus {
+        guard vaults.first(where: { $0.id == selected })?.isRelay == true else {
+            throw VaultError(.notAllowed, "This vault does not use a relay.")
+        }
         status.state = .ok
         return status
     }
 
     public func devices() async throws -> [RelayDevice] {
+        guard vaults.first(where: { $0.id == selected })?.isRelay == true else { return [] }
         let now = Int64(Date().timeIntervalSince1970)
         return [
             RelayDevice(id: 1, name: "Mac mini", this: false, lastSeenAt: now - 120),

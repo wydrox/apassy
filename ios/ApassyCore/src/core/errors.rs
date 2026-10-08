@@ -11,6 +11,8 @@ use apassy::vault::{VaultError, VaultErrorKind};
 pub struct CoreError {
     pub code: &'static str,
     pub message: String,
+    /// An iCloud prepare can accept a new key before publication preparation fails.
+    pub rekeyed: bool,
 }
 
 pub type CoreResult<T> = Result<T, CoreError>;
@@ -20,6 +22,7 @@ impl CoreError {
         Self {
             code,
             message: message.into(),
+            rekeyed: false,
         }
     }
 

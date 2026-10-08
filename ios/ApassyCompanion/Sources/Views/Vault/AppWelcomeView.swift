@@ -19,7 +19,7 @@ struct AppWelcomeView: View {
                         .font(.largeTitle.bold())
                         .multilineTextAlignment(.center)
                     Text(
-                        "Your logins, API keys, SSH keys, and one-time passwords from the vault on your Mac, synced through the Apassy relay. Each secret shows only after Face ID."
+                        "Your vault holds logins, API keys, SSH keys, and one-time passwords. Use free iCloud sync for yourself. Use the relay for teams."
                     )
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
@@ -36,10 +36,18 @@ struct AppWelcomeView: View {
         } actions: {
             Button {
                 root.addVault()
+                root.addICloudVault()
             } label: {
-                Label("Add your vault", systemImage: "plus").frame(maxWidth: .infinity)
+                Label("iCloud · Personal · Free", systemImage: "icloud").frame(maxWidth: .infinity)
             }
             .buttonStyle(.glassProminent)
+            Button {
+                root.addVault()
+                root.joinTeam()
+            } label: {
+                Label("Join a team · Apassy relay", systemImage: "person.2").frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.glass)
             Button {
                 root.approveOnly()
             } label: {
@@ -50,7 +58,7 @@ struct AppWelcomeView: View {
         #if targetEnvironment(simulator)
             // A development aid: `-ApassyJoinLink <link>` goes on into the join flow.
             .task {
-                if UserDefaults.standard.string(forKey: "ApassyJoinLink") != nil { root.addVault() }
+                if UserDefaults.standard.string(forKey: "ApassyJoinLink") != nil { root.addVault(); root.joinTeam() }
             }
         #endif
     }

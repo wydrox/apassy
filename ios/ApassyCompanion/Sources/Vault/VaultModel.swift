@@ -582,7 +582,8 @@ final class VaultModel {
                         continue
                     }
                 }
-                if let status = try? await service.syncStatus() { syncStatus = status }
+                if let status = try? await service.syncStatus(), !Task.isCancelled { syncStatus = status }
+                if Task.isCancelled { return }
                 if let state = syncStatus?.state, Self.waitsForOwner(state) { return }
                 try? await Task.sleep(for: backoff)
                 backoff = min(backoff * 2, timing.maxBackoff)
@@ -595,13 +596,16 @@ final class VaultModel {
     static func waitsForOwner(_ state: SyncStatus.State) -> Bool {
         switch state {
         case .needsPassphrase, .removed, .damaged, .staleCopy, .forkedCopy, .off: true
-        case .never, .ok, .offline, .busy, .error: false
+        case .never, .ok, .offline, .busy, .pending, .error: false
         }
     }
 
     /// One sync, wrapped so iOS does not suspend the app inside the vault write. Reloads and
     /// publishes when the merge changed something.
     private func runSync() async throws {
+        guard let target = vault, isUnlocked, !isSuspended, !isInBackground else { return }
+        let targetID = target.id
+        let epoch = revealEpoch
         let end = hooks.beginBackgroundWork("Sync the vault")
         isSyncing = true
         defer {
@@ -612,12 +616,25 @@ final class VaultModel {
         let status: SyncStatus
         do {
             status = try await service.sync()
-        } catch let error as VaultError {
-            if error.code != .busy, let fresh = try? await service.syncStatus() { syncStatus = fresh }
+        } catch {
+            guard isCurrentSession(vaultID: targetID, epoch: epoch), !Task.isCancelled else { throw error }
+            let code = (error as? VaultError)?.code
+            if code != .busy, let fresh = try? await service.syncStatus(),
+                isCurrentSession(vaultID: targetID, epoch: epoch) {
+                syncStatus = fresh
+            }
+            // The iCloud merge can commit locally before the provider rejects publication.
+            // Its error status need not include a merge count. Refresh the local rows and
+            // AutoFill identities, but never after a lock, cancellation, or selection change.
+            if target.isICloud, code != .busy, code != .locked, code != .cancelled, !Task.isCancelled,
+                isCurrentSession(vaultID: targetID, epoch: epoch) {
+                await reloadAndPublish(vaultID: targetID, epoch: epoch)
+            }
             throw error
         }
+        guard isCurrentSession(vaultID: targetID, epoch: epoch), !Task.isCancelled else { return }
         syncStatus = status
-        if Self.merged(status, since: before) { await reloadAndPublish() }
+        if Self.merged(status, since: before) { await reloadAndPublish(vaultID: targetID, epoch: epoch) }
     }
 
     /// Whether a sync brought changes: the merge or the version moved.
@@ -655,17 +672,50 @@ final class VaultModel {
 
     /// The passphrase changed on a Mac: take the new one, and store it again for Face ID.
     func takeNewPassphrase(_ passphrase: String) async throws {
+        guard let target = vault, isUnlocked, !isSuspended, !isInBackground else {
+            throw VaultError(.locked, "Unlock the vault before you change its passphrase.")
+        }
+        let targetID = target.id
+        let epoch = revealEpoch
         let end = hooks.beginBackgroundWork("Take the new passphrase")
         defer { end() }
         let change = try await service.takeNewPassphrase(passphrase)
-        syncStatus = change.status
-        // Only a vault that took the typed passphrase stores it for Face ID. Without an anchor
-        // (after "Use the relay copy") it only opened the copy, and the vault keeps its own.
-        if change.rekeyed, let vault, settings.faceIDUnlock(vaultID: vault.id) {
-            try? passphraseStore.save(passphrase, vaultID: vault.id)
+        // A rekey can finish before publication is cancelled by a selection change. Store the
+        // new passphrase for its original vault, even when another vault is selected now.
+        // Read the registry again so a removed vault cannot get a new keychain entry.
+        if change.rekeyed, let fresh = try? await service.info(),
+            fresh.vaults.contains(where: { $0.id == targetID }), settings.faceIDUnlock(vaultID: targetID) {
+            try? passphraseStore.save(passphrase, vaultID: targetID)
         }
-        await reloadAndPublish()
+        guard isCurrentSession(vaultID: targetID, epoch: epoch) else { return }
+        syncStatus = change.status
+        await reloadAndPublish(vaultID: targetID, epoch: epoch)
+        guard isCurrentSession(vaultID: targetID, epoch: epoch) else { return }
         startSync()
+    }
+
+    private func isCurrentSession(vaultID: String, epoch: Int) -> Bool {
+        vault?.id == vaultID && revealEpoch == epoch && isUnlocked && !isSuspended && !isInBackground && !Task.isCancelled
+    }
+
+    /// Each read belongs to the captured vault session.
+    private func reloadAndPublish(vaultID: String, epoch: Int) async {
+        do {
+            let rows = try await service.items(archived: .all)
+            guard isCurrentSession(vaultID: vaultID, epoch: epoch) else { return }
+            items = rows
+            itemsVersion += 1
+        } catch {
+            guard isCurrentSession(vaultID: vaultID, epoch: epoch) else { return }
+            report(error)
+            return
+        }
+        let report = try? await service.watchtower()
+        guard isCurrentSession(vaultID: vaultID, epoch: epoch) else { return }
+        if let report { watchtower = report }
+        let identities = try? await service.credentialIdentities()
+        guard isCurrentSession(vaultID: vaultID, epoch: epoch) else { return }
+        if let identities { await hooks.replaceIdentities(identities, vaultID) }
     }
 
     /// Keep the relay copy after a stale or forked copy.

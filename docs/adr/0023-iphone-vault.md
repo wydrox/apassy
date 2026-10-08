@@ -1,7 +1,7 @@
 # ADR 0023 — The vault on the iPhone
 
 Date: 2026-10-07.
-Status: ACCEPTED in scope by the owner on 2026-10-07 ("build a companion app for iOS … like the 1Password iOS app, and add it to TestFlight"). The owner chose on the same day: the vault comes through the relay only (no iCloud file yet); copying is allowed, device-local and expiring; the TestFlight build declares that it uses exempt encryption only.
+Status: ACCEPTED in scope by the owner on 2026-10-07 ("build a companion app for iOS … like the 1Password iOS app, and add it to TestFlight"). Updated by the owner on 2026-10-08: personal vaults use the free iCloud Drive sync option; teams use the relay. The first iPhone build supported only the relay. This update adds iCloud Drive. Copying is allowed, device-local and expiring; the TestFlight build declares that it uses exempt encryption only.
 
 ## Context
 
@@ -14,13 +14,19 @@ Status: ACCEPTED in scope by the owner on 2026-10-07 ("build a companion app for
 
 ### 1. The iPhone is a device of the vault, as a Mac is
 
-The iPhone joins the vault's relay team with the existing flow of ADR 0022: the Mac shows "Add a device…" with the link as text and as a QR code; the iPhone scans it, both show the same two words, the owner confirms on the Mac with Touch ID, the iPhone downloads the copy and opens it with the passphrase. From then on it syncs through the relay like a Mac: the same merge by credential, the same signed heads and chain checks, the same "Use the relay copy" and new-passphrase paths. A vault that syncs through a folder switches to relay sync first. The iPhone does not open a file from iCloud Drive (open: an iCloud source later).
+The app offers two paths. **iCloud** opens a personal vault from iCloud Drive. **Join a team** uses the relay device link.
+
+For iCloud, the owner selects the Mac's `.apassy` file with the iOS document picker and enters the vault passphrase. Swift keeps a security-scoped bookmark. It copies encrypted snapshots under file coordination. Rust adopts a stripped local copy with a new device identity and uses the same credential merge as the Mac. The active SQLCipher vault stays in the App Group container. SQLite never opens the provider file.
+
+Each sync merges a private snapshot and prepares an encrypted output. Before publication, Swift compares the current provider file with the input snapshot under write coordination. If it changed, the app retries the merge. The core records completion only after the provider accepts the write. This confirms the local iCloud file, not receipt on another device. Unresolved iCloud file conflicts stop publication and preserve the local vault. Lost file access offers selection of the same vault again. Removing the vault from the iPhone keeps the iCloud file.
+
+For teams, the Mac shows "Add a device…" with a relay link and a QR code. The iPhone scans it. Both show the same two words. The owner confirms on the Mac, and the iPhone opens the downloaded copy with the passphrase. Relay sync keeps its signed heads and chain checks. A personal iCloud vault does not need to switch to the relay.
 
 What does not sync stays as on a Mac (`vault::LOCAL_TABLES`): the iPhone has no agents, grants, rules, activity, or learning. It shows every credential of the vault, with its secret fields after the owner check.
 
 ### 2. The same code on the phone
 
-The vault and the relay client run on the iPhone as a static library: `ios/ApassyCore` (crate `apassy-core`) links the `apassy` crate with the `vault` feature and offers a JSON C interface (contract [ios-core-v1](../contracts/ios-core-v1.md)). The Swift package `ios/ApassyVaultKit` wraps it. There is no second implementation of the schema, the merge, or the relay protocol, so a phone and a Mac cannot drift apart; they must run the same schema, as two Macs must. The library builds for the iPhone, the Simulator, and macOS (for `swift test`); SQLCipher keeps its vendored OpenSSL.
+The vault, snapshot merge, and relay client run on the iPhone as a static library: `ios/ApassyCore` (crate `apassy-core`) links the `apassy` crate with the `vault` feature and offers a JSON C interface (contract [ios-core-v1](../contracts/ios-core-v1.md)). The Swift package `ios/ApassyVaultKit` wraps it. There is no second implementation of the schema, the merge, or the relay protocol, so a phone and a Mac cannot drift apart; they must run the same schema, as two Macs must. The library builds for the iPhone, the Simulator, and macOS (for `swift test`); SQLCipher keeps its vendored OpenSSL.
 
 The C interface is the only `unsafe` code, in its own crate; the `apassy` crate keeps `forbid(unsafe_code)`.
 
@@ -64,13 +70,14 @@ TestFlight first (ADR 0020 D5 said a development build; the owner asked for Test
 - **Memory.** Revealed values pass through Swift strings, which cannot be erased; the core erases its own buffers. Best effort, as on the Mac.
 - **The pasteboard.** Another app on the iPhone can read a copy while it lasts (iOS shows a paste notice). Expiry limits the time.
 - **Usernames and hosts in iOS.** The QuickType identities are stored by iOS outside the vault.
+- **iCloud Drive** holds encrypted snapshots and file metadata. The app does not store the vault passphrase in iCloud. A person with the file and its passphrase can open it.
 - **The relay** sees what it sees for a Mac (ADR 0022): ciphertext, sizes, times, device names.
 
 ## Open decisions
 
 | # | Decision | Proposal |
 | --- | --- | --- |
-| D1 | A vault from iCloud Drive or another folder | Later: read-only first. |
+| D1 | A personal vault from iCloud Drive | Decided 2026-10-08: read and write through coordinated encrypted snapshots. Other file providers are outside this iPhone flow. |
 | D2 | Passkeys in the vault and in AutoFill | Later: it needs a new item kind on the Mac too. |
 | D3 | Favorites | On the iPhone only for now (not synced). A synced favorite needs a schema change. |
 | D4 | The App Store | After TestFlight, with a privacy policy and the export classification reviewed. |

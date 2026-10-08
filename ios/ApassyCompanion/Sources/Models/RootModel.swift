@@ -15,6 +15,8 @@ final class RootModel {
         case failed(String)
         /// No vault and no pairing.
         case welcome
+        case addVault
+        case iCloud(ICloudVaultModel)
         case join(JoinModel)
         /// No vault: only the approval of agent runs.
         case companion
@@ -28,6 +30,7 @@ final class RootModel {
     private(set) var vault: VaultModel?
     /// Where Cancel of the join flow goes back to.
     @ObservationIgnored private var beforeJoin: Screen = .welcome
+    @ObservationIgnored private var vaultBeforeAdd: String?
 
     var companionIsPaired: Bool {
         if case .paired = companion.phase { return true }
@@ -71,28 +74,54 @@ final class RootModel {
     /// "Add your vault" on the welcome, and "Add another vault" in Settings.
     func addVault() {
         guard let vault else { return }
-        if case .join = screen { return }
+        switch screen {
+        case .addVault, .iCloud, .join: return
+        default: break
+        }
         vault.stopSync()
         beforeJoin = screen
+        vaultBeforeAdd = vault.vault?.id
         if case .failed = beforeJoin { beforeJoin = .welcome }
+        screen = .addVault
+    }
+
+    func joinTeam() {
+        guard case .addVault = screen, let vault else { return }
         screen = .join(
             JoinModel(
                 service: vault.service, passphraseStore: vault.passphraseStore, settings: settings,
                 biometry: vault.gate.biometry, deviceName: settings.deviceName ?? DeviceName.current(),
                 isAway: { [weak vault] in vault?.isInBackground ?? false },
-                onFinished: { [weak self] _ in
-                    guard let self else { return }
-                    Task {
-                        await self.vault?.didJoin()
-                        self.route()
-                    }
-                },
-                onCancel: { [weak self] in
-                    guard let self else { return }
-                    screen = beforeJoin
-                    if case .welcome = screen { route() }
-                    self.vault?.startSync()
-                }))
+                onFinished: { [weak self] _ in self?.finishAddVault() },
+                onCancel: { [weak self] in self?.cancelAddVault() }))
+    }
+
+    func addICloudVault() {
+        guard case .addVault = screen, let vault else { return }
+        screen = .iCloud(
+            ICloudVaultModel(
+                service: vault.service, passphraseStore: vault.passphraseStore, settings: settings,
+                biometry: vault.gate.biometry,
+                isAway: { [weak vault] in vault?.isInBackground ?? false },
+                onFinished: { [weak self] _ in self?.finishAddVault() },
+                onCancel: { [weak self] in self?.cancelAddVault() }))
+    }
+
+    private func finishAddVault() {
+        Task {
+            await vault?.didJoin()
+            route()
+        }
+    }
+
+    func cancelAddVault() {
+        Task {
+            if let id = vaultBeforeAdd { try? await vault?.service.select(vaultID: id) }
+            await vault?.didJoin()
+            screen = beforeJoin
+            if vault?.hasVault == true || companionIsPaired { route() }
+            vault?.startSync()
+        }
     }
 
     /// "Only approve agent runs" on the welcome.
@@ -110,8 +139,12 @@ final class RootModel {
     func scenePhaseChanged(_ phase: AppPhase) {
         guard let vault else { return }
         switch phase {
-        case .background: vault.enterBackground()
-        case .active: vault.enterForeground()
+        case .background:
+            if case .iCloud(let model) = screen { model.enterBackground() }
+            vault.enterBackground()
+        case .active:
+            if case .iCloud(let model) = screen { model.enterForeground() }
+            vault.enterForeground()
         case .inactive: break
         }
     }

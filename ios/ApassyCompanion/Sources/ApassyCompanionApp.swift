@@ -43,6 +43,10 @@ struct RootView: View {
                 }
             case .welcome:
                 AppWelcomeView()
+            case .addVault:
+                AddVaultChoiceView()
+            case .iCloud(let model):
+                ICloudVaultFlowView(model: model)
             case .join(let model):
                 JoinFlowView(model: model)
             case .companion:

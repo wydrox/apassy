@@ -11,14 +11,16 @@ public struct VaultEntry: Codable, Sendable, Hashable, Identifiable {
     public var teamID: String?
     public var deviceID: UInt64?
     public var addedAt: Int64
+    public var syncSource: String?
 
-    public init(id: String, name: String, relayURL: String?, teamID: String?, deviceID: UInt64?, addedAt: Int64) {
+    public init(id: String, name: String, relayURL: String?, teamID: String?, deviceID: UInt64?, addedAt: Int64, syncSource: String? = nil) {
         self.id = id
         self.name = name
         self.relayURL = relayURL
         self.teamID = teamID
         self.deviceID = deviceID
         self.addedAt = addedAt
+        self.syncSource = syncSource
     }
 
     enum CodingKeys: String, CodingKey {
@@ -27,10 +29,13 @@ public struct VaultEntry: Codable, Sendable, Hashable, Identifiable {
         case teamID = "team_id"
         case deviceID = "device_id"
         case addedAt = "added_at"
+        case syncSource = "sync_source"
     }
 
-    /// Whether the vault syncs through the relay.
-    public var syncs: Bool { relayURL != nil }
+    /// Whether the vault uses its encrypted file in iCloud Drive.
+    public var isICloud: Bool { syncSource == "icloud" }
+    public var isRelay: Bool { !isICloud && relayURL != nil }
+    public var syncs: Bool { isICloud || isRelay }
 }
 
 /// The answer of `info`.
@@ -428,10 +433,10 @@ public struct WatchtowerReport: Codable, Sendable, Equatable {
     }
 }
 
-/// The state of the relay sync of the selected vault (contract section 5.5).
+/// The state of sync for the selected vault (contract section 5.5).
 public struct SyncStatus: Codable, Sendable, Equatable {
     public enum State: String, Codable, Sendable {
-        case off, never, ok, offline
+        case off, never, ok, offline, pending
         case needsPassphrase = "needs_passphrase"
         case removed, damaged
         case staleCopy = "stale_copy"

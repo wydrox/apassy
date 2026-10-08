@@ -19,10 +19,19 @@ pub struct VaultEntry {
     /// The vault ID of the sync record: 32 lowercase hex characters.
     pub id: String,
     pub name: String,
+    /// Missing in older lists. Then `relay_url` determines relay or local storage.
+    #[serde(default)]
+    pub sync_source: Option<String>,
     pub relay_url: Option<String>,
     pub team_id: Option<String>,
     pub device_id: Option<u64>,
     pub added_at: i64,
+}
+
+impl VaultEntry {
+    pub fn is_icloud(&self) -> bool {
+        self.sync_source.as_deref() == Some("icloud")
+    }
 }
 
 /// The list of vaults and the selected one.
@@ -89,7 +98,10 @@ impl PhoneList {
         file.write_all(&text)
             .and_then(|()| file.sync_all())
             .map_err(|_| CoreError::io())?;
-        fs::rename(&temp, data_dir.join(LIST_FILE)).map_err(|_| CoreError::io())
+        fs::rename(&temp, data_dir.join(LIST_FILE)).map_err(|_| CoreError::io())?;
+        fs::File::open(data_dir)
+            .and_then(|dir| dir.sync_all())
+            .map_err(|_| CoreError::io())
     }
 
     pub fn get(&self, id: &str) -> Option<&VaultEntry> {
@@ -136,8 +148,15 @@ impl Paths {
             data_dir.clone(),
             data_dir.join("vaults"),
             data_dir.join("sync"),
+            data_dir.join("icloud-transfer"),
         ] {
             fs::create_dir_all(&dir).map_err(|_| CoreError::io())?;
+            let meta = fs::symlink_metadata(&dir).map_err(|_| CoreError::io())?;
+            if !meta.is_dir() || meta.file_type().is_symlink() {
+                return Err(CoreError::invalid(
+                    "Use a private data folder without links.",
+                ));
+            }
             fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
                 .map_err(|_| CoreError::io())?;
         }
@@ -176,6 +195,7 @@ mod tests {
         list.put(VaultEntry {
             id: "4f1c0a2b9d8e7f6a5b4c3d2e1f0a9b8c".into(),
             name: "Personal".into(),
+            sync_source: None,
             relay_url: None,
             team_id: None,
             device_id: None,

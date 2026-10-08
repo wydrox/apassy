@@ -18,6 +18,7 @@
 		142D89311379F85A2A898CEF /* ApassyVaultCore in Frameworks */ = {isa = PBXBuildFile; productRef = 492453E946A35E682FE6C4B4 /* ApassyVaultCore */; };
 		1A52B124D8933244BA388026 /* MacView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C707E9B88A62DDDE31571CE /* MacView.swift */; };
 		1CEEF50BFCB6D847B049A3D6 /* AutoFillModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A7B7089BA3A509093E8685 /* AutoFillModel.swift */; };
+		1E57AF690201D989941754AB /* ICloudVaultModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95CB97B8F03841A75DB19BE7 /* ICloudVaultModel.swift */; };
 		24E21F470E30106F0769BC1B /* SessionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6F302A1D75457EBBD7CBBF1 /* SessionModel.swift */; };
 		25B454F68E7F851382CB8CDD /* WelcomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28D931508D2F301CC10F79C0 /* WelcomeView.swift */; };
 		27224C6F6BF114EB760AF4BC /* ForgetMacButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61CD637566F0ED5A94FBD4BB /* ForgetMacButton.swift */; };
@@ -41,6 +42,7 @@
 		88D297705A24C7750135FFE6 /* JoinModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A24AC166DBA7F3F58D3F484 /* JoinModel.swift */; };
 		8978D6FB472BF35AC15B9BFE /* PairingFlowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2852EDCFD6A280976A327162 /* PairingFlowView.swift */; };
 		8D524F2EC39AF6DF75652AAB /* LicensesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3767CC017257A886D4694D81 /* LicensesView.swift */; };
+		904BCA91D44ADF8CE134333C /* ICloudVaultFlowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCDF2D0D076678612EDDA49F /* ICloudVaultFlowView.swift */; };
 		939B7B4EEFA0419E68FC61B3 /* ApassyVaultKit in Frameworks */ = {isa = PBXBuildFile; productRef = 353E83378BBC3FDA45A62FDC /* ApassyVaultKit */; };
 		96BFFFBB07804A2D3E07D4E3 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AF93D2413F24FB5B4F38F18 /* SettingsView.swift */; };
 		97A2E6135F036E9C6B224D8A /* ItemEditorModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C0D707D429BDDECB6D010D2 /* ItemEditorModel.swift */; };
@@ -51,7 +53,6 @@
 		BBF4A5AD64CFAD14F670286E /* GeneratorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38F3E0A15FE766FA331F02FD /* GeneratorView.swift */; };
 		BD37047CC6B15911AFA24AD5 /* AutoFillViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BC42EE11D63D65DD187A2A1 /* AutoFillViews.swift */; };
 		BDD9FABC86173D3F21C383A8 /* ItemEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D22401E12E72EAFD4F8B7F52 /* ItemEditorView.swift */; };
-		C2F00BA1D5A39FA070564E99 /* licenses in Resources */ = {isa = PBXBuildFile; fileRef = A39426ACDE89948C0EDB59C1 /* licenses */; };
 		C42C4BC25E83C2DFFE8F7810 /* CredentialProviderViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B210B98EF4836F5C25B4F8E9 /* CredentialProviderViewController.swift */; };
 		C75F905D2E169F09022BA2A5 /* CoverPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = F822347FA7AB2283110B8D02 /* CoverPolicy.swift */; };
 		CC7A69ACA7CEA7FCC99380BB /* ApassyAutoFill.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = D3E90CB21B3E02087D2ADE0F /* ApassyAutoFill.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -64,6 +65,7 @@
 		E449C2128DB03FD963CDF80D /* RunDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A81CC84B47B4D6261B3D739 /* RunDetailView.swift */; };
 		E92DDF171CBCAB2694A5C0DD /* PairingModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8A7940F84FC12C29393A036 /* PairingModel.swift */; };
 		EE66CB21B35E83A303A648E2 /* GeneratorModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C03D253B246ED503A21556A3 /* GeneratorModel.swift */; };
+		F04F4F1BEA84E2D259BB8C2B /* licenses in Resources */ = {isa = PBXBuildFile; fileRef = E8A87456D121CC2ED66668A6 /* licenses */; };
 		F076F449DEDCF35058629720 /* JoinFlowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF384FB7C7A9E213F181560D /* JoinFlowView.swift */; };
 		FD7A167D298AFB536B1E9D93 /* RunRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AD81109F0D7E34046EDDB9F /* RunRow.swift */; };
 /* End PBXBuildFile section */
@@ -127,16 +129,17 @@
 		8ADC1C45326B2A085857E93A /* PrivacyCover.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivacyCover.swift; sourceTree = "<group>"; };
 		8BBBE6D218E66D39BFFB94C7 /* ApassyCompanionKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = ApassyCompanionKit; path = ../ApassyCompanionKit; sourceTree = SOURCE_ROOT; };
 		8E4146357404F8C913371D3F /* OwnerGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OwnerGate.swift; sourceTree = "<group>"; };
+		95CB97B8F03841A75DB19BE7 /* ICloudVaultModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ICloudVaultModel.swift; sourceTree = "<group>"; };
 		9A81CC84B47B4D6261B3D739 /* RunDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunDetailView.swift; sourceTree = "<group>"; };
 		9AD81109F0D7E34046EDDB9F /* RunRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunRow.swift; sourceTree = "<group>"; };
 		A1A7B7089BA3A509093E8685 /* AutoFillModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoFillModel.swift; sourceTree = "<group>"; };
 		A30BE0E798882BAE6EEF527A /* ApassyVaultKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = ApassyVaultKit; path = ../ApassyVaultKit; sourceTree = SOURCE_ROOT; };
 		A37147DA2D368F8D09352F30 /* FlowLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlowLayout.swift; sourceTree = "<group>"; };
-		A39426ACDE89948C0EDB59C1 /* licenses */ = {isa = PBXFileReference; lastKnownFileType = folder; name = licenses; path = ../../licenses; sourceTree = SOURCE_ROOT; };
 		ACB44566CDBBB8C618ED0233 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B210B98EF4836F5C25B4F8E9 /* CredentialProviderViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialProviderViewController.swift; sourceTree = "<group>"; };
 		B8A7940F84FC12C29393A036 /* PairingModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingModel.swift; sourceTree = "<group>"; };
 		BA1978BE1A25B04CCD8F98DB /* LockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LockView.swift; sourceTree = "<group>"; };
+		BCDF2D0D076678612EDDA49F /* ICloudVaultFlowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ICloudVaultFlowView.swift; sourceTree = "<group>"; };
 		C03D253B246ED503A21556A3 /* GeneratorModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeneratorModel.swift; sourceTree = "<group>"; };
 		C367432632CB02AEBDD2CDF8 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		D22401E12E72EAFD4F8B7F52 /* ItemEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ItemEditorView.swift; sourceTree = "<group>"; };
@@ -145,6 +148,7 @@
 		DB347F790915A1B646346265 /* ApassyCompanionApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApassyCompanionApp.swift; sourceTree = "<group>"; };
 		E1233715B64E75B11C0EEA02 /* AuthenticationServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AuthenticationServices.framework; path = System/Library/Frameworks/AuthenticationServices.framework; sourceTree = SDKROOT; };
 		E147004528DE97B7F6F8E9BF /* MacConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacConnection.swift; sourceTree = "<group>"; };
+		E8A87456D121CC2ED66668A6 /* licenses */ = {isa = PBXFileReference; lastKnownFileType = folder; name = licenses; path = ../../licenses; sourceTree = SOURCE_ROOT; };
 		EEF0032D16E75A0003ECAA5C /* InboxView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxView.swift; sourceTree = "<group>"; };
 		F1E05AAEBDDF4BC4EF048A3C /* WatchtowerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchtowerView.swift; sourceTree = "<group>"; };
 		F3D12AC62CA251B3BDB3D870 /* ItemDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ItemDetailView.swift; sourceTree = "<group>"; };
@@ -178,6 +182,15 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		0123F69D512B6AADCEF22959 /* apassy-ios-icloud */ = {
+			isa = PBXGroup;
+			children = (
+				E8A87456D121CC2ED66668A6 /* licenses */,
+			);
+			name = "apassy-ios-icloud";
+			path = ../..;
+			sourceTree = "<group>";
+		};
 		05D858EF97BE4665D43E00AB /* Main */ = {
 			isa = PBXGroup;
 			children = (
@@ -224,7 +237,7 @@
 		72C2FA9447F32FFF3EF0552B = {
 			isa = PBXGroup;
 			children = (
-				DEA10FBA9B7470ADE5663B84 /* apassy-ios */,
+				0123F69D512B6AADCEF22959 /* apassy-ios-icloud */,
 				751942F1E044A6B3896124D2 /* AutoFill */,
 				869A26A7BA633E3F312E5677 /* Packages */,
 				47F184B0B0DAC0AB82A3563C /* Resources */,
@@ -251,6 +264,7 @@
 			children = (
 				F58D1C2BB6F8A7EB17A42568 /* AppWelcomeView.swift */,
 				38F3E0A15FE766FA331F02FD /* GeneratorView.swift */,
+				BCDF2D0D076678612EDDA49F /* ICloudVaultFlowView.swift */,
 				F3D12AC62CA251B3BDB3D870 /* ItemDetailView.swift */,
 				D22401E12E72EAFD4F8B7F52 /* ItemEditorView.swift */,
 				FF384FB7C7A9E213F181560D /* JoinFlowView.swift */,
@@ -331,6 +345,7 @@
 			isa = PBXGroup;
 			children = (
 				C03D253B246ED503A21556A3 /* GeneratorModel.swift */,
+				95CB97B8F03841A75DB19BE7 /* ICloudVaultModel.swift */,
 				85D80182C9A54AC9ACC88F5C /* ItemDetailModel.swift */,
 				1C0D707D429BDDECB6D010D2 /* ItemEditorModel.swift */,
 				5A24AC166DBA7F3F58D3F484 /* JoinModel.swift */,
@@ -341,15 +356,6 @@
 				6E55AB118DA00EE6D0529187 /* VaultText.swift */,
 			);
 			path = Vault;
-			sourceTree = "<group>";
-		};
-		DEA10FBA9B7470ADE5663B84 /* apassy-ios */ = {
-			isa = PBXGroup;
-			children = (
-				A39426ACDE89948C0EDB59C1 /* licenses */,
-			);
-			name = "apassy-ios";
-			path = ../..;
 			sourceTree = "<group>";
 		};
 		E409E008BFAF2CE02E8FC229 /* Sources */ = {
@@ -458,7 +464,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				691C57166953082B01AC26AB /* Assets.xcassets in Resources */,
-				C2F00BA1D5A39FA070564E99 /* licenses in Resources */,
+				F04F4F1BEA84E2D259BB8C2B /* licenses in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -492,6 +498,8 @@
 				27224C6F6BF114EB760AF4BC /* ForgetMacButton.swift in Sources */,
 				EE66CB21B35E83A303A648E2 /* GeneratorModel.swift in Sources */,
 				BBF4A5AD64CFAD14F670286E /* GeneratorView.swift in Sources */,
+				904BCA91D44ADF8CE134333C /* ICloudVaultFlowView.swift in Sources */,
+				1E57AF690201D989941754AB /* ICloudVaultModel.swift in Sources */,
 				00DA596667674069A3E69886 /* InboxView.swift in Sources */,
 				E1EC7ADCAEFFFD5336E65C8E /* ItemDetailModel.swift in Sources */,
 				32E26ABF44D434EC0B4A3556 /* ItemDetailView.swift in Sources */,

@@ -51,6 +51,8 @@ struct Failure<'a> {
 struct ErrorBody<'a> {
     code: &'a str,
     message: &'a str,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    rekeyed: bool,
 }
 
 /// `{"ok": true, "result": …}`.
@@ -66,6 +68,7 @@ pub fn error(error: &CoreError) -> String {
         error: ErrorBody {
             code: error.code,
             message: &error.message,
+            rekeyed: error.rekeyed,
         },
     })
     .unwrap_or_else(|_| {

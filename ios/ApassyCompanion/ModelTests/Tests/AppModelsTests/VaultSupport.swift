@@ -96,8 +96,19 @@ actor SpyVaultService: VaultService {
         var syncCount = 0
         var syncWaits: [Bool]
         var syncError: VaultError?
+        var syncDelay: Duration?
+        var syncMutationTitle: String?
+        var syncStatusOverride: SyncStatus?
         var resumeDelay: Duration?
         var unlockError: VaultError?
+        var iCloudOpenDelay: Duration?
+        var iCloudOpenCount = 0
+        var iCloudError: VaultError?
+        var removeError: VaultError?
+        var passphraseChangeDelay: Duration?
+        var passphraseChangeResult: PassphraseChange?
+        var passphraseChangeCount = 0
+        var reconnects: [(URL, String)] = []
     }
 
     private let inner: PreviewVaultService
@@ -113,6 +124,20 @@ actor SpyVaultService: VaultService {
 
     /// How many times `sync()` was called.
     nonisolated var syncCount: Int { state.withLock { $0.syncCount } }
+
+    nonisolated var syncDelay: Duration? {
+        get { state.withLock { $0.syncDelay } }
+        set { state.withLock { $0.syncDelay = newValue } }
+    }
+    nonisolated var syncMutationTitle: String? {
+        get { state.withLock { $0.syncMutationTitle } }
+        set { state.withLock { $0.syncMutationTitle = newValue } }
+    }
+
+    nonisolated var syncStatusOverride: SyncStatus? {
+        get { state.withLock { $0.syncStatusOverride } }
+        set { state.withLock { $0.syncStatusOverride = newValue } }
+    }
 
     /// How long `resume()` takes, to let a test go to the background meanwhile.
     nonisolated var resumeDelay: Duration? {
@@ -135,6 +160,48 @@ actor SpyVaultService: VaultService {
         set { state.withLock { $0.syncError = newValue } }
     }
 
+    nonisolated var iCloudOpenCount: Int { state.withLock { $0.iCloudOpenCount } }
+    nonisolated var iCloudOpenDelay: Duration? {
+        get { state.withLock { $0.iCloudOpenDelay } }
+        set { state.withLock { $0.iCloudOpenDelay = newValue } }
+    }
+    nonisolated var iCloudError: VaultError? {
+        get { state.withLock { $0.iCloudError } }
+        set { state.withLock { $0.iCloudError = newValue } }
+    }
+    nonisolated var removeError: VaultError? {
+        get { state.withLock { $0.removeError } }
+        set { state.withLock { $0.removeError = newValue } }
+    }
+    nonisolated var passphraseChangeDelay: Duration? {
+        get { state.withLock { $0.passphraseChangeDelay } }
+        set { state.withLock { $0.passphraseChangeDelay = newValue } }
+    }
+    nonisolated var passphraseChangeResult: PassphraseChange? {
+        get { state.withLock { $0.passphraseChangeResult } }
+        set { state.withLock { $0.passphraseChangeResult = newValue } }
+    }
+    nonisolated var passphraseChangeCount: Int { state.withLock { $0.passphraseChangeCount } }
+
+    nonisolated var reconnects: [(URL, String)] { state.withLock { $0.reconnects } }
+
+    func openICloudVault(url: URL, name: String, passphrase: String) async throws -> VaultEntry {
+        let delay = state.withLock { state in
+            state.iCloudOpenCount += 1
+            return state.iCloudOpenDelay
+        }
+        if let delay { try? await Task.sleep(for: delay) }
+        if let error = iCloudError { throw error }
+        guard passphrase == "passphrase" else { throw VaultError(.wrongPassphrase, "The passphrase does not open this vault.") }
+        var entry = try await inner.createLocalVault(name: name, passphrase: "test passphrase for local fixture")
+        entry.syncSource = "icloud"
+        return entry
+    }
+    func reconnectICloudVault(url: URL, vaultID: String) async throws {
+        if let error = iCloudError { throw error }
+        state.withLock { $0.reconnects.append((url, vaultID)) }
+    }
+
     // 5.1
     func info() async throws -> CoreInfo { try await inner.info() }
     func select(vaultID: String) async throws { try await inner.select(vaultID: vaultID) }
@@ -152,7 +219,10 @@ actor SpyVaultService: VaultService {
     func createLocalVault(name: String, passphrase: String) async throws -> VaultEntry {
         try await inner.createLocalVault(name: name, passphrase: passphrase)
     }
-    func removeVault(id: String, force: Bool) async throws -> Bool { try await inner.removeVault(id: id, force: force) }
+    func removeVault(id: String, force: Bool) async throws -> Bool {
+        if let error = removeError { throw error }
+        return try await inner.removeVault(id: id, force: force)
+    }
 
     // 5.2
     func joinStart(link: String, deviceName: String) async throws -> JoinInfo {
@@ -185,11 +255,20 @@ actor SpyVaultService: VaultService {
             state.syncCount += 1
             return state.syncError
         }
+        if let title = syncMutationTitle {
+            _ = try await inner.save(id: nil, revision: nil,
+                draft: ItemDraft(title: title, kind: .login, notes: "", tags: [],
+                    fields: [.named("username", "synced-user", secret: false)]))
+        }
+        if let delay = syncDelay { try? await Task.sleep(for: delay) }
         if let error { throw error }
         return try await inner.syncStatus()
     }
 
-    func syncStatus() async throws -> SyncStatus { try await inner.syncStatus() }
+    func syncStatus() async throws -> SyncStatus {
+        if let status = syncStatusOverride { return status }
+        return try await inner.syncStatus()
+    }
 
     func syncWait(timeout: Int) async throws -> Bool {
         let next: Bool? = state.withLock { state in
@@ -201,7 +280,13 @@ actor SpyVaultService: VaultService {
     }
 
     func takeNewPassphrase(_ passphrase: String) async throws -> PassphraseChange {
-        try await inner.takeNewPassphrase(passphrase)
+        let (delay, result) = state.withLock { state in
+            state.passphraseChangeCount += 1
+            return (state.passphraseChangeDelay, state.passphraseChangeResult)
+        }
+        if let delay { try? await Task.sleep(for: delay) }
+        if let result { return result }
+        return try await inner.takeNewPassphrase(passphrase)
     }
     func useRelayCopy() async throws -> SyncStatus { try await inner.useRelayCopy() }
     func devices() async throws -> [RelayDevice] { try await inner.devices() }

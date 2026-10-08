@@ -16,7 +16,9 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 use super::merge::{self, PUSH, SyncScope};
-use super::types::{SCHEMA_VERSION, VaultErrorKind, VaultResult, err, validate_unlock_passphrase};
+use super::types::{
+    SCHEMA_VERSION, VaultError, VaultErrorKind, VaultResult, err, validate_unlock_passphrase,
+};
 use super::{
     OPEN_READONLY, Vault, apply_key, canonical_new_target, close_conn, copy_into_new_file,
     exclusive_create, fresh_epoch, map_open_err, open_working_conn, refuse_sqlite_companions,
@@ -78,6 +80,23 @@ pub struct AdoptedCopy {
     pub identity: SyncIdentity,
     /// The synced-content digest of the new vault. It is the one of the copy.
     pub content: [u8; 32],
+}
+
+/// Failure while adopting a copy's passphrase. Once SQLCipher accepts the rekey,
+/// a later reopen failure must not leave callers with only the cached old key.
+#[derive(Debug)]
+pub struct CopyPassphraseError {
+    pub error: VaultError,
+    pub rekeyed: bool,
+}
+
+impl From<VaultError> for CopyPassphraseError {
+    fn from(error: VaultError) -> Self {
+        Self {
+            error,
+            rekeyed: false,
+        }
+    }
 }
 
 /// Add schema version 13 and the one sync row with a new vault id. Create and each
@@ -506,13 +525,32 @@ impl Vault {
     ///
     /// The owner proves the new passphrase with the copy, so the old one is not needed:
     /// the open connection has the key. The change ends the vault epoch, like a lock and
-    /// an unlock. After a failure the vault can be locked; the old passphrase then still
-    /// opens it.
+    /// an unlock. A reopen failure can leave the vault locked with the new passphrase.
+    /// Call `take_passphrase_of_copy_report` when the caller caches the passphrase.
     pub fn take_passphrase_of_copy(&mut self, copy: &Path, passphrase: &str) -> VaultResult<()> {
+        self.take_passphrase_of_copy_report(copy, passphrase)
+            .map_err(|failure| failure.error)
+    }
+
+    /// The same operation, with the rekey boundary preserved on a reopen error.
+    pub fn take_passphrase_of_copy_report(
+        &mut self,
+        copy: &Path,
+        passphrase: &str,
+    ) -> Result<(), CopyPassphraseError> {
+        self.take_passphrase_of_copy_with(copy, passphrase, open_working_conn)
+    }
+
+    fn take_passphrase_of_copy_with(
+        &mut self,
+        copy: &Path,
+        passphrase: &str,
+        reopen: impl FnOnce(&Path, &str) -> VaultResult<Connection>,
+    ) -> Result<(), CopyPassphraseError> {
         self.require_unlocked()?;
         let theirs = Self::inspect_sync_copy(copy, passphrase)?;
         if theirs.vault_id != self.sync_identity()?.vault_id {
-            return Err(err(VaultErrorKind::OtherVault));
+            return Err(err(VaultErrorKind::OtherVault).into());
         }
         let conn = self
             .conn
@@ -524,7 +562,12 @@ impl Vault {
         let rekeyed = rekey(&conn, &self.path, passphrase);
         let _ = close_conn(conn);
         rekeyed?;
-        self.conn = Some(open_working_conn(&self.path, passphrase)?);
+        self.conn = Some(
+            reopen(&self.path, passphrase).map_err(|error| CopyPassphraseError {
+                error,
+                rekeyed: true,
+            })?,
+        );
         Ok(())
     }
 }
@@ -556,6 +599,38 @@ fn inspect_open_copy(conn: &Connection, passphrase: &str) -> VaultResult<SyncIde
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_rekey_reports_a_new_key_even_when_reopen_fails() {
+        const OLD: &str = "synthetic-old-copy-passphrase";
+        const NEW: &str = "synthetic-new-copy-passphrase";
+        let root = tempfile::tempdir().unwrap();
+        let local_path = root.path().join("local.apassy");
+        let remote_path = root.path().join("remote.apassy");
+        let initial = root.path().join("initial.apassy");
+        let changed = root.path().join("changed.apassy");
+        let mut local = Vault::create(&local_path, OLD).unwrap();
+        local.unlock(OLD).unwrap();
+        local.write_sync_copy(&initial, "Local").unwrap();
+        let (mut remote, _) = Vault::adopt_sync_copy(&initial, &remote_path, OLD).unwrap();
+        remote.unlock(OLD).unwrap();
+        remote.change_passphrase(OLD, NEW).unwrap();
+        remote.unlock(NEW).unwrap();
+        remote.write_sync_copy(&changed, "Remote").unwrap();
+        let wrong = local
+            .take_passphrase_of_copy_report(&changed, "synthetic-wrong-passphrase")
+            .unwrap_err();
+        assert!(!wrong.rekeyed);
+        let failure = local
+            .take_passphrase_of_copy_with(&changed, NEW, |_, _| Err(err(VaultErrorKind::Io)))
+            .unwrap_err();
+        assert!(failure.rekeyed);
+        assert_eq!(failure.error.kind(), VaultErrorKind::Io);
+        assert!(local.is_locked());
+        Vault::verify_passphrase_at(&local_path, NEW).unwrap();
+        assert!(Vault::verify_passphrase_at(&local_path, OLD).is_err());
+        local.unlock(NEW).unwrap();
+    }
 
     #[test]
     fn vault_ids_are_version_4_uuids() {

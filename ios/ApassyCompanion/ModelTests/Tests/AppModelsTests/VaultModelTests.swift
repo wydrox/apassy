@@ -318,6 +318,125 @@ struct VaultModelTests {
 
     // MARK: Sync
 
+    private var rekeyStatus: SyncStatus {
+        SyncStatus(enabled: true, state: .error, message: "iCloud publication failed after rekey.",
+            version: 900, lastSyncAt: nil, pushed: false, merged: nil)
+    }
+
+    @Test("a delayed rekey stores the passphrase for its original vault after selection changes")
+    func rekeyAfterSelectionChange() async throws {
+        let spy = SpyVaultService()
+        let store = MemoryPassphraseStore()
+        let settings = makeSettings()
+        let second = try await spy.createLocalVault(name: "Second", passphrase: "a long fixture passphrase")
+        try await spy.select(vaultID: previewVaultID)
+        let (vault, recorder) = makeVault(service: spy, store: store, settings: settings)
+        await vault.start()
+        await vault.unlock(passphrase: PreviewVaultService.passphrase)
+        vault.stopSync()
+        settings.setFaceIDUnlock(true, vaultID: previewVaultID)
+        settings.setFaceIDUnlock(true, vaultID: second.id)
+        try store.save("first-old", vaultID: previewVaultID)
+        try store.save("second-stored", vaultID: second.id)
+        spy.passphraseChangeDelay = .milliseconds(600)
+        spy.passphraseChangeResult = PassphraseChange(status: rekeyStatus, rekeyed: true)
+        let rekey = Task { try await vault.takeNewPassphrase("first-new") }
+        #expect(await waitUntil { spy.passphraseChangeCount == 1 })
+        await vault.select(vaultID: second.id)
+        await vault.unlock(passphrase: PreviewVaultService.passphrase)
+        let secondStatus = vault.syncStatus
+        let publications = recorder.replacedIdentities
+        try await rekey.value
+        #expect(vault.vault?.id == second.id)
+        #expect(store.stored(vaultID: second.id) == "second-stored")
+        #expect(store.stored(vaultID: previewVaultID) == "first-new")
+        #expect(vault.syncStatus == secondStatus)
+        #expect(recorder.replacedIdentities == publications)
+        #expect(!vault.isSyncLoopRunning)
+    }
+
+    @Test("a delayed rekey does not recreate credentials after the original vault is removed")
+    func rekeyAfterRemoval() async throws {
+        let spy = SpyVaultService()
+        let store = MemoryPassphraseStore()
+        let settings = makeSettings()
+        let (vault, _) = await startedVault(service: spy, store: store, settings: settings)
+        vault.stopSync()
+        settings.setFaceIDUnlock(true, vaultID: previewVaultID)
+        try store.save("old-passphrase", vaultID: previewVaultID)
+        spy.passphraseChangeDelay = .milliseconds(100)
+        spy.passphraseChangeResult = PassphraseChange(status: rekeyStatus, rekeyed: true)
+        let rekey = Task { try await vault.takeNewPassphrase("new-passphrase") }
+        #expect(await waitUntil { spy.passphraseChangeCount == 1 })
+        try await vault.removeVault(force: true)
+        try await rekey.value
+        #expect(!store.hasPassphrase(vaultID: previewVaultID))
+        #expect(!vault.hasVault)
+        #expect(!vault.isSyncLoopRunning)
+    }
+
+    @Test("a passphrase that did not rekey does not replace the stored passphrase")
+    func openedCopyWithoutRekey() async throws {
+        let spy = SpyVaultService()
+        let store = MemoryPassphraseStore()
+        let settings = makeSettings()
+        let (vault, _) = await startedVault(service: spy, store: store, settings: settings)
+        vault.stopSync()
+        defer { vault.stopSync() }
+        settings.setFaceIDUnlock(true, vaultID: previewVaultID)
+        try store.save("old-passphrase", vaultID: previewVaultID)
+        spy.passphraseChangeResult = PassphraseChange(status: rekeyStatus, rekeyed: false)
+        try await vault.takeNewPassphrase("copy-passphrase")
+        #expect(store.stored(vaultID: previewVaultID) == "old-passphrase")
+    }
+
+    @Test("an iCloud publication error reloads a committed local merge and AutoFill identities")
+    func syncPublicationErrorReloadsLocalMerge() async throws {
+        let spy = SpyVaultService()
+        let (vault, recorder) = await startedVault(service: spy)
+        #expect(await waitUntil { spy.syncCount >= 1 })
+        vault.stopSync()
+        let publications = recorder.replacedIdentities.count
+        spy.syncMutationTitle = "Merged from iCloud"
+        spy.syncDelay = .milliseconds(40)
+        spy.syncError = VaultError(.io, "The iCloud provider could not publish the file.")
+        await vault.syncNow()
+        vault.stopSync()
+        #expect(vault.items.contains { $0.title == "Merged from iCloud" })
+        #expect(recorder.replacedIdentities.count > publications)
+        #expect(recorder.replacedIdentities.last == previewVaultID)
+    }
+
+    @Test("a delayed iCloud publication error cannot replace the next vault status or identities")
+    func syncPublicationErrorAfterSelectionChange() async throws {
+        let spy = SpyVaultService()
+        let second = try await spy.createLocalVault(name: "Second", passphrase: "a long fixture passphrase")
+        try await spy.select(vaultID: previewVaultID)
+        let (vault, recorder) = makeVault(service: spy)
+        await vault.start()
+        await vault.unlock(passphrase: PreviewVaultService.passphrase)
+        #expect(await waitUntil { spy.syncCount >= 1 })
+        vault.stopSync()
+        let before = spy.syncCount
+        spy.syncMutationTitle = "Merged before publication"
+        spy.syncDelay = .milliseconds(600)
+        spy.syncError = VaultError(.io, "The iCloud provider could not publish the file.")
+        let sync = Task { await vault.syncNow() }
+        #expect(await waitUntil { spy.syncCount > before })
+        await vault.select(vaultID: second.id)
+        await vault.unlock(passphrase: PreviewVaultService.passphrase)
+        let secondStatus = vault.syncStatus
+        let publications = recorder.replacedIdentities
+        let itemsVersion = vault.itemsVersion
+        spy.syncStatusOverride = rekeyStatus
+        await sync.value
+        #expect(vault.vault?.id == second.id)
+        #expect(vault.syncStatus == secondStatus)
+        #expect(recorder.replacedIdentities == publications)
+        #expect(vault.itemsVersion == itemsVersion)
+        #expect(!vault.isSyncLoopRunning)
+    }
+
     @Test("the sync loop syncs, waits, and syncs again when the relay has news, and stops on request")
     func syncLoop() async {
         let spy = SpyVaultService(syncWaits: [true, false])

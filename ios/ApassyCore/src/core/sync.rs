@@ -19,19 +19,20 @@ use super::{Core, guard, now};
 /// What the last sync of this process did.
 #[derive(Debug, Clone, Default)]
 pub struct Memory {
-    state: Option<&'static str>,
-    message: Option<String>,
-    last_sync_at: Option<u64>,
-    pushed: bool,
-    merged: Option<Merged>,
+    pub(super) version: u64,
+    pub(super) state: Option<&'static str>,
+    pub(super) message: Option<String>,
+    pub(super) last_sync_at: Option<u64>,
+    pub(super) pushed: bool,
+    pub(super) merged: Option<Merged>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Merged {
-    inserted: usize,
-    updated: usize,
-    deleted: usize,
-    conflicts: usize,
+    pub(super) inserted: usize,
+    pub(super) updated: usize,
+    pub(super) deleted: usize,
+    pub(super) conflicts: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -112,6 +113,20 @@ impl Core {
 
     pub(super) fn status(&self) -> Status {
         let selected = guard(&self.list).selected_entry().cloned();
+        if selected.as_ref().is_some_and(VaultEntry::is_icloud) {
+            let memory = guard(&self.status).clone();
+            return Status {
+                enabled: true,
+                state: memory.state.unwrap_or("never"),
+                message: memory.message.unwrap_or_else(|| {
+                    "Apassy syncs this vault through iCloud Drive when it is unlocked.".to_owned()
+                }),
+                version: memory.version,
+                last_sync_at: memory.last_sync_at,
+                pushed: memory.pushed,
+                merged: memory.merged,
+            };
+        }
         let Some(relay) = self.relay() else {
             return Status {
                 enabled: false,
@@ -192,6 +207,12 @@ impl Core {
     }
 
     pub(super) fn sync_call(&self, op: &str, request: &str) -> CoreResult<String> {
+        if self.selected().is_ok_and(|entry| entry.is_icloud()) {
+            return Err(CoreError::new(
+                "coordination_required",
+                "Use the iCloud Drive connection to sync this vault.",
+            ));
+        }
         let Some(relay) = self.relay() else {
             return match op {
                 "sync" | "use_relay_copy" => Ok(ok(&StatusAnswer {
