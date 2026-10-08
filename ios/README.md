@@ -202,6 +202,8 @@ APASSY_NOTARY_KEY_ID=<key id> APASSY_NOTARY_ISSUER=<issuer id> \
 scripts/ios-testflight.sh
 ```
 
+When the API key has no access to cloud-managed distribution certificates (the export says so), make App Store profiles with the "Apple Distribution" certificate of the Mac in App Store Connect (or through the API) for both bundle IDs, install them, and name them in `APASSY_IOS_PROFILE` and `APASSY_IOS_AUTOFILL_PROFILE`: the export then signs manually. In team 7S3F9767BM they are "Apassy iOS App Store" and "Apassy iOS AutoFill App Store".
+
 The build number is the minutes since 1970, so each run is higher than the last; the version is `MARKETING_VERSION` in `project.yml`. App Store Connect needs a few minutes to process a build. Internal testers of the team see it in TestFlight then. `--no-upload` writes the `.ipa` to `target/ios/export` instead.
 
 The app declares `ITSAppUsesNonExemptEncryption = NO` (ADR 0023, section 8), so a build needs no export compliance answer.

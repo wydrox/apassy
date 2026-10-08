@@ -81,8 +81,10 @@ targets:
           UIApplicationSupportsMultipleScenes: false
         UIRequiredDeviceCapabilities:
           - arm64
+        # App Store Connect refuses an app without all four (iPad multitasking).
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         NSLocalNetworkUsageDescription: Apassy connects to your Mac on this Wi-Fi network to show the runs that wait for you and to send your decision.
