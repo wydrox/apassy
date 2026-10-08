@@ -44,10 +44,10 @@ Done on 2026-10-08: the draft item is `bbnpgnjnfjlbgggmpnhejpmfjhmmhiih` of the 
 - **Language:** English.
 - **Homepage:** <https://apassy.wyderka.cc>. **Support:** <https://github.com/wydrox/apassy/issues>.
 - **Images:** the 128 × 128 icon, the 440 × 280 promotional tile, and the screenshots (1280 × 800) in `design/store/chrome-web-store/`.
-- **Description:**
+- **Description** (the first upload was rejected on 2026-10-08 for "excessive keywords" because the text listed six browsers; name no browsers in it):
 
   ```text
-  Apassy is a credential manager for you and your AI agents, on your Mac. This extension brings your Apassy logins to Chrome, Helium, Brave, Edge, Arc, and Vivaldi.
+  Apassy is a credential manager for you and your AI agents, on your Mac. This extension fills your Apassy logins into websites in your browser.
 
   • Fill: open the extension on a login page, choose a login, and confirm with Touch ID or your Apassy passphrase. Apassy asks every time, so nothing fills without you, not even an agent that drives your browser.
   • Save this login: type your username and password on a page, click Save this login, and confirm. The login goes into your Apassy vault with the address of the site.
