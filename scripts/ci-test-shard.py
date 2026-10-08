@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one of four serial Cargo test groups, or print their target lists."""
+"""Run one of three or four serial Cargo test groups, or print their target lists."""
 
 import argparse
 from dataclasses import dataclass
@@ -110,23 +110,25 @@ def discover_targets(metadata, root=ROOT):
     return sorted(targets)
 
 
-def assign_shards(targets):
+def assign_shards(targets, shard_count=SHARD_COUNT):
+    if shard_count not in (3, 4):
+        raise ValueError("The shard count must be 3 or 4")
     if len(set(targets)) != len(targets):
         raise ValueError("The target list contains duplicates")
     libraries = [target for target in targets if target.kind == "lib"]
     if len(libraries) != 1:
         raise ValueError("Group 0 requires exactly one library target")
-    groups = [libraries, [], [], []]
-    totals = [libraries[0].seconds, 0.0, 0.0, 0.0]
+    groups = [libraries] + [[] for _ in range(shard_count - 1)]
+    totals = [libraries[0].seconds] + [0.0] * (shard_count - 1)
     for target in sorted(
         (target for target in targets if target.kind != "lib"),
         key=lambda target: (-target.seconds, target.kind, target.name),
     ):
-        shard = min(range(1, SHARD_COUNT), key=lambda index: (totals[index], index))
+        shard = min(range(1, shard_count), key=lambda index: (totals[index], index))
         groups[shard].append(target)
         totals[shard] += target.seconds
     if any(not group for group in groups):
-        raise ValueError("Each of the four test groups must contain a target")
+        raise ValueError(f"Each of the {shard_count} test groups must contain a target")
     return [sorted(group) for group in groups]
 
 
@@ -142,10 +144,13 @@ def cargo_command(targets):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--shard", type=int, choices=range(SHARD_COUNT))
+    parser.add_argument("--shard-count", type=int, choices=(3, 4), default=SHARD_COUNT)
     parser.add_argument("--list", action="store_true", help="Print groups without Cargo tests")
     args = parser.parse_args(argv)
     if args.shard is None and not args.list:
         parser.error("--shard is required unless --list is specified")
+    if args.shard is not None and args.shard >= args.shard_count:
+        parser.error("--shard must be less than --shard-count")
     try:
         result = subprocess.run(
             ["cargo", "metadata", "--offline", "--locked", "--all-features", "--no-deps", "--format-version", "1"],
@@ -154,8 +159,8 @@ def main(argv=None):
             stdout=subprocess.PIPE,
             text=True,
         )
-        groups = assign_shards(discover_targets(json.loads(result.stdout)))
-        indices = range(SHARD_COUNT) if args.shard is None else [args.shard]
+        groups = assign_shards(discover_targets(json.loads(result.stdout)), args.shard_count)
+        indices = range(args.shard_count) if args.shard is None else [args.shard]
         for shard in indices:
             group = groups[shard]
             seconds = sum(target.seconds for target in group)

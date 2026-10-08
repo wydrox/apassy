@@ -162,6 +162,16 @@ jobs:
       matrix:
         os: [macos-15, ubuntu-24.04]
         shard: [0, 1, 2, 3]
+        # Three macOS test jobs plus quality and release jobs fit the standard
+        # five-runner macOS limit. Linux retains four test groups.
+        exclude:
+          - os: macos-15
+            shard: 3
+        include:
+          - os: macos-15
+            shard-count: 3
+          - os: ubuntu-24.04
+            shard-count: 4
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -171,7 +181,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: dev-tests-${{ matrix.shard }}
+          key: dev-tests-${{ matrix.shard-count }}-${{ matrix.shard }}
           cache-bin: false
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Fetch Cargo dependencies
@@ -179,7 +189,8 @@ jobs:
       - name: Run serial test group
         env:
           TEST_SHARD: ${{ matrix.shard }}
-        run: python3 scripts/ci-test-shard.py --shard "$TEST_SHARD"
+          TEST_SHARD_COUNT: ${{ matrix.shard-count }}
+        run: python3 scripts/ci-test-shard.py --shard "$TEST_SHARD" --shard-count "$TEST_SHARD_COUNT"
 
   release-binaries:
     # No signing credentials enter this job. Its artifact is eligible for Release

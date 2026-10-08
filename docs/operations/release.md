@@ -57,12 +57,16 @@ The bucket keeps only the latest build. The Worker serves only `Apassy.dmg` and 
 
 ## CI duration and binary artifacts
 
-CI runs the quality checks, advisory check, four test groups per OS, and the unsigned release build at the same time.
+CI runs the quality checks, advisory check, test groups, and the unsigned release build at the same time.
+macOS uses three test groups. Linux uses four.
+This keeps the total at five macOS jobs, within the [standard macOS concurrency limit](https://docs.github.com/en/actions/reference/limits#job-concurrency-limits-for-github-hosted-runners) for Free, Pro, and Team plans.
+Other workflows can still use these shared runner slots.
 The existing `macos` and `linux` checks remain. Release waits for the complete CI workflow to succeed.
 `scripts/ci-test-shard.py` reads Cargo metadata to include every target, including new targets.
-Group 0 runs the library tests. Groups 1–3 contain the other targets, balanced with measured test times.
+Group 0 runs the library tests. The other groups contain all remaining targets, balanced with measured test times.
 Each test process uses `--test-threads=1`.
-Use `python3 scripts/ci-test-shard.py --list` to see the groups.
+Use `python3 scripts/ci-test-shard.py --list --shard-count 3` to see the macOS groups.
+Use `--shard-count 4` for Linux.
 
 Rust dependency caches separate the OS, architecture, compiler, Cargo configuration, lockfile, and job group.
 The release build has its own cache. Only pushes to `main` save these caches; pull requests only restore them.
@@ -77,7 +81,10 @@ A manual Release run requires `ci_run_id` for a successful push to `main` at the
 If that attempt has no artifact, or the artifact expired, rerun all CI jobs for the current main commit first.
 The manual path does not bypass CI or build replacement binaries.
 
-The target is about ten minutes for a run with cached dependencies.
+The target is less than ten minutes from a push to public availability, with cached dependencies.
+CI run `37786303163` took 13 minutes 9 seconds with six macOS jobs and no saved caches from this configuration.
+The library test job waited 6 minutes 51 seconds, then ran for 6 minutes 17 seconds.
+The five-job configuration reduces competition for macOS slots. Its duration still requires measurement.
 The first run, a dependency change, runner queues, or notarization delays can take longer.
 Confirm the target with live CI and Release timings before treating it as a release time guarantee.
 The artifact tools require Python 3.11 or later; CI selects Python 3.12.

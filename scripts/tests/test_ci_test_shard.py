@@ -43,13 +43,25 @@ def fixture():
 class TestTargetPartition(unittest.TestCase):
     def test_all_target_kinds_form_a_disjoint_complete_partition(self):
         targets = SHARDS.discover_targets(fixture())
-        groups = SHARDS.assign_shards(targets)
-        flattened = [target for group in groups for target in group]
-        self.assertEqual(set(flattened), set(targets))
-        self.assertEqual(len(flattened), len(set(flattened)))
-        self.assertTrue(all(groups))
-        self.assertEqual(groups[0], [SHARDS.Target("lib", "apassy")])
+        for shard_count in (3, 4):
+            with self.subTest(shard_count=shard_count):
+                groups = SHARDS.assign_shards(targets, shard_count)
+                flattened = [target for group in groups for target in group]
+                self.assertEqual(len(groups), shard_count)
+                self.assertEqual(set(flattened), set(targets))
+                self.assertEqual(len(flattened), len(set(flattened)))
+                self.assertTrue(all(groups))
+                self.assertEqual(groups[0], [SHARDS.Target("lib", "apassy")])
         self.assertEqual({target.kind for target in targets}, {"lib", "bin", "test", "example", "bench"})
+
+    def test_default_shard_count_remains_four(self):
+        targets = SHARDS.discover_targets(fixture())
+        self.assertEqual(SHARDS.assign_shards(targets), SHARDS.assign_shards(targets, 4))
+
+    def test_unsupported_shard_counts_fail(self):
+        for shard_count in (0, 1, 2, 5):
+            with self.subTest(shard_count=shard_count), self.assertRaises(ValueError):
+                SHARDS.assign_shards(SHARDS.discover_targets(fixture()), shard_count)
 
     def test_future_targets_and_test_false_examples_are_included(self):
         targets = SHARDS.discover_targets(fixture())
@@ -60,13 +72,20 @@ class TestTargetPartition(unittest.TestCase):
 
     def test_assignment_is_independent_of_metadata_order(self):
         targets = SHARDS.discover_targets(fixture())
-        self.assertEqual(SHARDS.assign_shards(targets), SHARDS.assign_shards(list(reversed(targets))))
+        for shard_count in (3, 4):
+            with self.subTest(shard_count=shard_count):
+                self.assertEqual(
+                    SHARDS.assign_shards(targets, shard_count),
+                    SHARDS.assign_shards(list(reversed(targets)), shard_count),
+                )
 
     def test_known_heavy_targets_use_different_groups(self):
-        groups = SHARDS.assign_shards(SHARDS.discover_targets(fixture()))
-        companion = next(i for i, group in enumerate(groups) if SHARDS.Target("test", "companion") in group)
-        relay = next(i for i, group in enumerate(groups) if SHARDS.Target("test", "relay_sync") in group)
-        self.assertNotEqual(companion, relay)
+        for shard_count in (3, 4):
+            with self.subTest(shard_count=shard_count):
+                groups = SHARDS.assign_shards(SHARDS.discover_targets(fixture()), shard_count)
+                companion = next(i for i, group in enumerate(groups) if SHARDS.Target("test", "companion") in group)
+                relay = next(i for i, group in enumerate(groups) if SHARDS.Target("test", "relay_sync") in group)
+                self.assertNotEqual(companion, relay)
 
     def test_library_crate_types_use_one_library_selector(self):
         data = fixture()
@@ -121,13 +140,27 @@ class TestCommandLine(unittest.TestCase):
         self.assertEqual(run.call_count, 1)
         self.assertEqual(run.call_args.args[0], ["cargo", "metadata", "--offline", "--locked", "--all-features", "--no-deps", "--format-version", "1"])
 
+    def test_list_uses_selected_shard_count(self):
+        for shard_count in (3, 4):
+            with self.subTest(shard_count=shard_count), contextlib.redirect_stdout(io.StringIO()) as output:
+                with patch.object(SHARDS.subprocess, "run", return_value=self.metadata_result()) as run:
+                    code = SHARDS.main(["--list", "--shard-count", str(shard_count)])
+                self.assertEqual(code, 0)
+                self.assertEqual(run.call_count, 1)
+                self.assertEqual(output.getvalue().count("Group "), shard_count)
+
     def test_test_failure_exit_code_is_preserved(self):
-        code, run = self.run_main(["--shard", "2"], [self.metadata_result(), subprocess.CompletedProcess([], 101)])
-        self.assertEqual(code, 101)
-        self.assertEqual(run.call_count, 2)
-        expected = SHARDS.cargo_command(SHARDS.assign_shards(SHARDS.discover_targets(fixture()))[2])
-        self.assertEqual(run.call_args.args[0], expected)
-        self.assertEqual(run.call_args.kwargs["cwd"], SHARDS.ROOT)
+        for shard_count in (3, 4):
+            with self.subTest(shard_count=shard_count):
+                code, run = self.run_main(
+                    ["--shard", "2", "--shard-count", str(shard_count)],
+                    [self.metadata_result(), subprocess.CompletedProcess([], 101)],
+                )
+                self.assertEqual(code, 101)
+                self.assertEqual(run.call_count, 2)
+                expected = SHARDS.cargo_command(SHARDS.assign_shards(SHARDS.discover_targets(fixture()), shard_count)[2])
+                self.assertEqual(run.call_args.args[0], expected)
+                self.assertEqual(run.call_args.kwargs["cwd"], SHARDS.ROOT)
 
     def test_metadata_failure_exit_code_is_preserved(self):
         code, run = self.run_main(["--shard", "0"], [subprocess.CalledProcessError(42, ["cargo", "metadata"])])
@@ -140,7 +173,14 @@ class TestCommandLine(unittest.TestCase):
         self.assertEqual(run.call_count, 1)
 
     def test_invalid_shard_and_missing_shard_fail(self):
-        for args in [[], ["--shard", "-1"], ["--shard", "4"]]:
+        for args in [
+            [],
+            ["--shard", "-1"],
+            ["--shard", "4"],
+            ["--shard", "3", "--shard-count", "3"],
+            ["--list", "--shard-count", "2"],
+            ["--list", "--shard-count", "5"],
+        ]:
             with self.subTest(args=args), patch.object(SHARDS.subprocess, "run") as run:
                 with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
                     SHARDS.main(args)
