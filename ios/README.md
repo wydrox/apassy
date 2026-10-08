@@ -165,7 +165,7 @@ The Secure Enclave and Face ID exist only on a device, so an approval can only b
 
 ### Pair the iPhone
 
-1. On the Mac, unlock Apassy and open Settings > iPhone companion. Turn on "Allow the iPhone app on this network". The iPhone and the Mac must be on the same Wi-Fi network.
+1. On the Mac, unlock Apassy and open Settings > iPhone companion. Turn on "Allow the iPhone app on this network". The iPhone and the Mac must be on the same Wi-Fi network or connected through Tailscale. For Tailscale, connect the Mac before you make the QR code. Existing pairings need a new pairing to store this address.
 2. Select "Pair an iPhone". The Mac shows a QR code. It never puts the link on the pasteboard.
 3. On the iPhone, open Apassy. Check the name of the iPhone, then select "Scan the code" and point the camera at the QR code. Approve the Face ID prompt: the approval key signs once, to prove that this iPhone holds it.
 4. The iPhone shows a 6-digit code such as `348 942`. Type it in Apassy on the Mac and select Pair. The Mac then asks for Touch ID or your passphrase.

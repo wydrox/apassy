@@ -43,7 +43,7 @@ fn listener_section(app: &mut DesktopApp, ui: &mut Ui) {
         ui,
         Some("iPhone companion"),
         Some(
-            "The iPhone app shows the runs that wait for you and approves them with Face ID. It never shows a secret value, and it cannot change a grant, a rule, or a setting. It reaches this Mac only on the same network.",
+            "The iPhone app shows the runs that wait for you and approves them with Face ID. It never shows a secret value, and it cannot change a grant, a rule, or a setting. It reaches this Mac on the same local network or through Tailscale.",
         ),
         |s| {
             s.toggle(
