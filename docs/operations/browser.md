@@ -12,7 +12,7 @@ The Apassy extension fills a login on a website in Helium, Google Chrome, Chromi
 3. On the extensions page, turn on **Developer mode**. Drag the folder `browser-extension` from the Finder onto the page.
 4. Pin the Apassy button to the toolbar, open a login page, and click it. Settings shows "Last request just now" when the extension reached Apassy.
 
-Do steps 2 and 3 once for each browser. A browser takes an extension from another app only through the Chrome Web Store, so the Developer mode step stays until Apassy is in the store (ADR 0021, D5).
+Do steps 2 and 3 once for each browser. A browser takes an extension from another app only through the Chrome Web Store, so the Developer mode step stays until Apassy is in the store (ADR 0021, D5, and [chrome-web-store](chrome-web-store.md)).
 
 From a terminal, `apassy setup browser` does step 2 for every browser on this Mac and prints the folder. `--browser helium` selects one browser. `--remove` disconnects them. Settings and the command work only from Apassy.app: a source build is not protected from agents.
 

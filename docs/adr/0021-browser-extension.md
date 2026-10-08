@@ -110,7 +110,7 @@ Accepted by the owner on 2026-10-06 (D3). The wire is in [browser-v1](../contrac
 | D2 | An inline menu in the login fields of the page. It needs a content script on every site. | Later. |
 | D3 | A password generator and "save this login". | Decided on 2026-10-06: section 7. A change of the password of an existing login is later. |
 | D4 | Frames of another origin. | Later, with a host permission for the frame. |
-| D5 | Distribution in the Chrome Web Store. Its ID goes into `allowed_origins` next to the unpacked ID. It would make the install one click: "Connect" would open the store page. | A development build for the owner first. |
+| D5 | Distribution in the Chrome Web Store. Its ID goes into `allowed_origins` next to the unpacked ID. It would make the install one click: "Connect" would open the store page. | Accepted by the owner on 2026-10-08 ("opublikuj w Chrome Web Store"). The package, the listing, the images, and the privacy policy are ready; the owner makes the item: [chrome-web-store](../operations/chrome-web-store.md). |
 | D6 | One-time passwords (TOTP) of a login. | Later, with the same owner check. |
 
 ## Relation to other records
