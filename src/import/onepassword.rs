@@ -521,11 +521,11 @@ fn map_item(item: ItemJson, vault: &str) -> ImportItem {
             if parts.has(USERNAME, Some(false)) && parts.has(PASSWORD, Some(true)) {
                 let username = parts.take(USERNAME, Some(false)).expect("checked");
                 let password = parts.take(PASSWORD, Some(true)).expect("checked");
-                return builder.finish(
-                    CredentialKind::Login,
-                    vec![("username", username, false), ("password", password, true)],
-                    parts,
-                );
+                let mut builtin = vec![("username", username, false), ("password", password, true)];
+                if let Some(website) = parts.take_website() {
+                    builtin.push(("website", website, false));
+                }
+                return builder.finish(CredentialKind::Login, builtin, parts);
             }
             let why = (category != Category::Password).then_some(
                 "Apassy needs a username and a password for a login. It imports the item as a custom secret.",
@@ -824,11 +824,11 @@ fn map_row(columns: &[Column], labels: &[String], row: Record) -> ImportItem {
     if parts.has(USERNAME, Some(false)) && parts.has(PASSWORD, Some(true)) {
         let username = parts.take(USERNAME, Some(false)).expect("checked");
         let password = parts.take(PASSWORD, Some(true)).expect("checked");
-        return builder.finish(
-            CredentialKind::Login,
-            vec![("username", username, false), ("password", password, true)],
-            parts,
-        );
+        let mut builtin = vec![("username", username, false), ("password", password, true)];
+        if let Some(website) = parts.take_website() {
+            builtin.push(("website", website, false));
+        }
+        return builder.finish(CredentialKind::Login, builtin, parts);
     }
     if !parts.has_secret() {
         return builder.skip("The row has no password or other secret value.");

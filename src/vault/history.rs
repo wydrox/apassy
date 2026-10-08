@@ -48,6 +48,10 @@ pub(super) const SCHEMA_V10_COLUMNS: [&str; 3] = [
     "SELECT activity_id, item_id FROM activity_item LIMIT 0",
 ];
 
+/// The detail of a [`ItemEventKind::Revealed`] event of a fill in the browser starts
+/// with this text, then the origin of the page (ADR 0021).
+pub const FILL_DETAIL_PREFIX: &str = "browser ";
+
 /// The history keeps this many events for each item. Older events go. The stable
 /// conflict-origin metadata is retained separately from this limit.
 pub const MAX_ITEM_EVENTS: usize = 200;
@@ -365,13 +369,24 @@ impl Vault {
     /// Record that the owner showed the secret values of an item. The caller checked
     /// the owner first.
     pub fn record_reveal(&mut self, item_id: u64) -> VaultResult<()> {
+        self.record_revealed(item_id, "")
+    }
+
+    /// Record a fill in the browser (ADR 0021): a [`ItemEventKind::Revealed`] event with
+    /// the detail [`FILL_DETAIL_PREFIX`] and the origin of the page. An older Apassy
+    /// reads it as a reveal.
+    pub fn record_fill(&mut self, item_id: u64, origin: &str) -> VaultResult<()> {
+        self.record_revealed(item_id, &format!("{FILL_DETAIL_PREFIX}{origin}"))
+    }
+
+    fn record_revealed(&mut self, item_id: u64, detail: &str) -> VaultResult<()> {
         let item = to_sql_id(item_id)?;
         let conn = self.conn_mut()?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| err(VaultErrorKind::Storage))?;
         super::agents::require_item(&tx, item)?;
-        record(&tx, item, ItemEventKind::Revealed, "")?;
+        record(&tx, item, ItemEventKind::Revealed, detail)?;
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))
     }
 

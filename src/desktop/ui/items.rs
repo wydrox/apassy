@@ -765,6 +765,7 @@ fn details_section(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetai
     let id = details.id;
     let rows: Vec<(&str, &str)> = [
         ("Username", details.username.as_str()),
+        ("Website", details.website.as_str()),
         ("Host", details.host.as_str()),
         ("Database", details.database_name.as_str()),
         ("Public key", details.public_label.as_str()),
@@ -1721,6 +1722,7 @@ fn name_placeholder(kind: CredentialKind) -> &'static str {
 fn extra_value(form: &mut ItemDraft, field: ExtraField) -> (&mut String, &'static str) {
     match field {
         ExtraField::Username => (&mut form.username, "name@example.com"),
+        ExtraField::Website => (&mut form.website, "https://example.com/login"),
         ExtraField::Host => (&mut form.host, "db.example.com"),
         ExtraField::DatabaseName => (&mut form.database_name, "app"),
         ExtraField::FieldName => (&mut form.field_name, "webhook_secret"),

@@ -6,7 +6,7 @@ use eframe::egui::{self, Label};
 use super::kit::{self, Font, Tone};
 use crate::desktop::DesktopApp;
 use crate::desktop::owner_store::{AgentActivityRow, field_label, format_utc};
-use crate::vault::{ActivityDecision, EditChange, ItemEvent, ItemEventKind};
+use crate::vault::{ActivityDecision, EditChange, FILL_DETAIL_PREFIX, ItemEvent, ItemEventKind};
 
 /// Rows before "Show all".
 const FOLDED_ROWS: usize = 5;
@@ -52,7 +52,15 @@ fn event_text(event: &ItemEvent) -> (String, Option<String>, Tone) {
             Tone::Neutral,
         ),
         ItemEventKind::Edited => (edit_text(&event.detail), None, Tone::Neutral),
-        ItemEventKind::Revealed => ("You showed the secret".to_owned(), None, Tone::Warning),
+        ItemEventKind::Revealed => match event.detail.strip_prefix(FILL_DETAIL_PREFIX) {
+            // ADR 0021: a fill in the browser is a reveal to a page.
+            Some(origin) => (
+                "You filled it in your browser".to_owned(),
+                Some(origin.to_owned()),
+                Tone::Warning,
+            ),
+            None => ("You showed the secret".to_owned(), None, Tone::Warning),
+        },
         ItemEventKind::Archived => (
             "Archived".to_owned(),
             Some("Agents cannot use it.".to_owned()),

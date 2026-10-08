@@ -831,6 +831,75 @@ fn profile_denies_writes_to_autostart_locations() {
     assert!(out.contains("synthetic startup file"), "{out}");
 }
 
+/// ADR 0021: a browser starts the program of a native messaging host manifest outside
+/// the sandbox. The profile denies a write to each NativeMessagingHosts folder, also the
+/// creation of one and a rename into one, so a process in the profile cannot replace
+/// the host of the Apassy extension. A file with a similar name is the control.
+#[test]
+fn profile_denies_native_messaging_host_manifests() {
+    require_sandbox();
+    let fx = fixture();
+    let home = &fx.layout.home;
+    let support = home.join("Library/Application Support");
+    let helium = support.join("net.imput.helium/NativeMessagingHosts");
+    std::fs::create_dir_all(&helium).expect("helium hosts dir");
+    let chrome = support.join("Google/Chrome/NativeMessagingHosts");
+    std::fs::create_dir_all(&chrome).expect("chrome hosts dir");
+    let manifest = helium.join("com.wydrox.apassy.json");
+    std::fs::write(&manifest, "{\"name\":\"com.wydrox.apassy\"}\n").expect("manifest");
+
+    // Control: a write next to the folders works in the profile.
+    let control = support.join("NativeMessagingHostsNotes.txt");
+    let (ok, _o, err) = in_sandbox(
+        &fx,
+        &[
+            "/bin/sh",
+            "-c",
+            &format!("echo hello > '{}'", control.display()),
+        ],
+    );
+    assert!(ok, "a similar name must stay writable: {err}");
+
+    // A change of the existing manifest, a new manifest, and a new folder are denied.
+    for path in [
+        manifest.clone(),
+        helium.join("com.example.other.json"),
+        chrome.join("com.wydrox.apassy.json"),
+    ] {
+        assert!(
+            write_is_denied(&fx, &path),
+            "the profile must deny a write to {}",
+            path.display()
+        );
+    }
+    let fresh = support.join("BraveSoftware/Brave-Browser");
+    std::fs::create_dir_all(&fresh).expect("brave dir");
+    let (ok, _o, err) = in_sandbox(
+        &fx,
+        &[
+            "/bin/mkdir",
+            &fresh.join("NativeMessagingHosts").display().to_string(),
+        ],
+    );
+    assert!(!ok && err.contains("Operation not permitted"), "{err}");
+
+    // A folder with another name cannot become a NativeMessagingHosts folder.
+    let staged = fresh.join("staged");
+    let script = format!(
+        "mkdir '{staged}' && echo planted > '{staged}/com.wydrox.apassy.json' && mv '{staged}' '{target}'",
+        staged = staged.display(),
+        target = fresh.join("NativeMessagingHosts").display()
+    );
+    let (ok, _o, err) = in_sandbox(&fx, &["/bin/sh", "-c", &script]);
+    assert!(!ok && err.contains("Operation not permitted"), "{err}");
+    assert!(!fresh.join("NativeMessagingHosts").exists());
+    assert_eq!(
+        std::fs::read_to_string(&manifest).unwrap(),
+        "{\"name\":\"com.wydrox.apassy\"}\n",
+        "the manifest did not change"
+    );
+}
+
 /// A minimal headless application bundle in `dir`. Its executable reads the
 /// vault canary and appends the result to `marker`. `LSBackgroundOnly` means it
 /// shows no window. It exits at once, so it leaves no process. A build of this
@@ -1883,6 +1952,116 @@ fn profile_denies_the_owner_socket_and_keeps_the_broker_socket() {
         "the owner socket must be denied in the profile: {stderr}"
     );
     drop(listener);
+}
+
+/// ADR 0021: the browser socket lives in the denied data directory too. A process in
+/// the profile cannot ask it for the logins of a site or for a fill.
+#[test]
+fn profile_denies_the_browser_socket() {
+    require_sandbox();
+    let fx = fixture();
+    let browser = fx.layout.data_dir.join("browser.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&browser).expect("browser socket");
+    listener.set_nonblocking(true).expect("nonblocking");
+
+    // Control: a process outside the profile connects.
+    let outside = Command::new("/usr/bin/nc")
+        .args(["-U", "-w", "1"])
+        .arg(&browser)
+        .stdin(Stdio::null())
+        .output()
+        .expect("nc outside");
+    assert!(outside.status.success(), "control: {outside:?}");
+
+    let target = browser.display().to_string();
+    let (ok, _, stderr) = in_sandbox(&fx, &["/usr/bin/nc", "-U", "-w", "1", target.as_str()]);
+    assert!(
+        !ok,
+        "the browser socket must be denied in the profile: {stderr}"
+    );
+    drop(listener);
+}
+
+/// ADR 0021: a Chromium profile keeps the folder of each unpacked extension in
+/// Preferences and Secure Preferences. The profile denies a change of these files and of
+/// Local State, and a new, renamed, or deleted profile folder, so a process in the
+/// profile cannot point the Apassy extension at its own code. Other files in a profile
+/// and the Preferences of another app are the controls.
+#[test]
+fn profile_denies_changes_to_browser_profiles() {
+    require_sandbox();
+    let fx = fixture();
+    let support = fx.layout.home.join("Library/Application Support");
+    let helium = support.join("net.imput.helium");
+    let profile = helium.join("Default");
+    std::fs::create_dir_all(&profile).expect("profile dir");
+    std::fs::create_dir_all(support.join("Code")).expect("other app dir");
+    for file in ["Preferences", "Secure Preferences"] {
+        std::fs::write(profile.join(file), "{}\n").expect("prefs");
+    }
+    std::fs::write(helium.join("Local State"), "{}\n").expect("local state");
+    let crafted = fx.layout.home.join("crafted");
+    std::fs::create_dir_all(&crafted).expect("crafted dir");
+    std::fs::write(crafted.join("Preferences"), "planted\n").expect("crafted prefs");
+
+    let sh = |script: String| in_sandbox(&fx, &["/bin/sh", "-c", &script]);
+    let q = |path: &Path| format!("'{}'", path.display());
+
+    // Controls: another file in the profile, and the Preferences of another app.
+    let (ok, _, err) = sh(format!("echo x > {}", q(&profile.join("History"))));
+    assert!(ok, "a file inside a profile stays writable: {err}");
+    let (ok, _, err) = sh(format!("echo x > {}", q(&support.join("Code/Preferences"))));
+    assert!(ok, "the Preferences of another app stay writable: {err}");
+
+    for path in [
+        profile.join("Preferences"),
+        profile.join("Secure Preferences"),
+        helium.join("Local State"),
+    ] {
+        assert!(
+            write_is_denied(&fx, &path),
+            "the profile must deny a write to {}",
+            path.display()
+        );
+    }
+    let staged = profile.join("staged.json");
+    for (label, script) in [
+        (
+            "a rename onto Preferences",
+            format!(
+                "echo planted > {s} && mv {s} {p}",
+                s = q(&staged),
+                p = q(&profile.join("Preferences"))
+            ),
+        ),
+        (
+            "a rename of the profile folder",
+            format!("mv {} {}", q(&profile), q(&helium.join("Old"))),
+        ),
+        (
+            "a prepared folder moved in",
+            format!("mv {} {}", q(&crafted), q(&helium.join("New"))),
+        ),
+        (
+            "a new profile folder",
+            format!("mkdir {}", q(&helium.join("Profile 9"))),
+        ),
+        (
+            "a rename of the browser folder",
+            format!("mv {} {}", q(&helium), q(&support.join("moved"))),
+        ),
+    ] {
+        let (ok, _, err) = sh(script);
+        assert!(
+            !ok && err.contains("Operation not permitted"),
+            "the profile must deny {label}: {err}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(profile.join("Preferences")).unwrap(),
+        "{}\n"
+    );
+    assert!(!helium.join("New").exists() && !helium.join("Old").exists());
 }
 
 /// ADR 0017: the launcher removes APASSY_SESSION from the host environment.

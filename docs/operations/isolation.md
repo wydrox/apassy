@@ -50,9 +50,10 @@ from the environment of the host.
 The profile also denies each measured route to start a program OUTSIDE the
 sandbox as the same user, because such a program is not confined and can read
 the vault: LaunchServices (`open`/`lsopen`), Apple Events, the Shortcuts and
-Automator services, and a write to an autostart location (LaunchAgents,
-LaunchDaemons, login items, application scripts, and shell startup files).
-Section 7 has the routes and the measurements.
+Automator services, a write to an autostart location (LaunchAgents,
+LaunchDaemons, login items, application scripts, and shell startup files), and
+a write to a `NativeMessagingHosts` folder of a browser, and a change of the
+settings of a browser profile. Section 7 has the routes and the measurements.
 
 The profile starts from `(allow default)`. So normal development stays usable:
 git, cargo, npm, the network, and the host's own configuration and credentials.
@@ -612,6 +613,8 @@ off.
 | `automator <workflow>` | starts; a real run needs the Automator app | through `lsopen` or a runner | `(deny lsopen)` and the mach-lookup deny | manual (needs an authored workflow) |
 | write `~/Library/LaunchAgents/<x>.plist` (persistence) | yes | yes: launchd ran the plist outside the sandbox and read the canary | `(deny file-write* …/Library/LaunchAgents)` | `profile_denies_writes_to_autostart_locations` |
 | write `~/.zshrc` and other shell startup files (persistence) | yes | runs outside the sandbox at the next terminal | `(deny file-write* ~/.zshrc …)` | `profile_denies_writes_to_autostart_locations` |
+| write a native messaging host manifest, e.g. `…/net.imput.helium/NativeMessagingHosts/com.wydrox.apassy.json` (ADR 0021) | yes | the browser starts the program of the manifest when an extension connects. The browser runs outside the sandbox, so the program does too. A planted manifest can replace the Apassy host and read the password of a fill. The real-host test of `extension-tests/` shows that Helium starts the program that a manifest names | `(deny file-write* (regex "/NativeMessagingHosts(/\|$)"))`: every browser and profile folder, also a new folder and a rename into one | `profile_denies_native_messaging_host_manifests` |
+| write `Preferences` or `Secure Preferences` of a Chromium profile, or `Local State`, or move a prepared profile folder in (ADR 0021) | yes | not measured with a live browser: the files name the folder of each unpacked extension, and a Chromium build has no secret seed for their check, so the browser could run an agent's code as the Apassy extension | `(deny file-write* …(Secure )?Preferences\|Local State)` and `(deny file-write-create file-write-unlink …)` of the browser folders and their direct children | `profile_denies_changes_to_browser_profiles` |
 | `launchctl submit …` | no (exit 1) | no | already blocked by launchd | manual |
 | `launchctl bootstrap gui/$UID <plist>` | no (`Input/output error`) | no | already blocked by launchd | manual |
 | `at` / `at -f` | no (`at` is setuid; it cannot start; `atrun` is off) | no | already blocked | manual |

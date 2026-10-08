@@ -44,7 +44,7 @@ pub(super) fn actions(group: &str) -> &'static [&'static str] {
         "pattern" => &["list", "remove"],
         "decisions" => &["export"],
         "vault" => &["backup", "change-passphrase", "restore", "lock", "unlock"],
-        "setup" => &["claude", "codex"],
+        "setup" => &["claude", "codex", "browser"],
         "completions" => &["zsh", "bash", "fish"],
         _ => &[],
     }
@@ -124,6 +124,9 @@ pub(super) fn text(path: &[String]) -> Result<String, Usage> {
     }
     if path.len() > 2 {
         return Err(unknown(path, choices));
+    }
+    if group == "setup" && action == "browser" {
+        return Ok(super::browser::HELP.to_owned());
     }
     if group == "setup" {
         return Ok(setup::HELP.replace("setup claude|codex", &format!("setup {action}")));

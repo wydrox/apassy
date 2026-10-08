@@ -58,7 +58,9 @@ pub use companion::{
     AddDeviceError, CompanionCertificate, CompanionDevice, CompanionDeviceKeys, CompanionSetting,
     DEFAULT_COMPANION_PORT, MAX_COMPANION_DEVICES, MIN_COMPANION_PORT,
 };
-pub use history::{EditChange, ItemEvent, ItemEventKind, ItemTimes, MAX_ITEM_EVENTS};
+pub use history::{
+    EditChange, FILL_DETAIL_PREFIX, ItemEvent, ItemEventKind, ItemTimes, MAX_ITEM_EVENTS,
+};
 pub use learning::{
     CALIBRATION_CEILING, CALIBRATION_FLOOR, CalibrationRecord, CandidateAgreement, DayRate,
     DecidedBy, DecisionEntry, DecisionRecord, LoggedDecision, MAX_BLOCKED_PATTERNS,

@@ -8,6 +8,10 @@
 mod activity;
 #[cfg(feature = "vault")]
 mod agents;
+#[cfg(feature = "vault")]
+mod browser_settings;
+#[cfg(all(test, feature = "vault"))]
+mod browser_tests;
 #[cfg(all(test, feature = "vault"))]
 mod cli_tests;
 #[cfg(feature = "vault")]

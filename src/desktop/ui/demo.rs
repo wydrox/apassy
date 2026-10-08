@@ -201,6 +201,7 @@ pub(super) fn draw_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
             project: details.project.clone(),
             notes: details.notes.clone(),
             username: details.username.clone(),
+            website: String::new(),
             host: details.host.clone(),
             database_name: details.database_name.clone(),
             field_name: details.field_name.clone(),
@@ -261,6 +262,7 @@ fn item_form(ui: &mut egui::Ui, form: &mut ItemDraft, salt: &str) {
         for field in DesktopModel::extra_fields(kind) {
             let value = match field {
                 ExtraField::Username => &mut form.username,
+                ExtraField::Website => &mut form.website,
                 ExtraField::Host => &mut form.host,
                 ExtraField::DatabaseName => &mut form.database_name,
                 ExtraField::FieldName => &mut form.field_name,

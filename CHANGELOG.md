@@ -4,6 +4,20 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Added
+
+- A browser extension for Helium, Chrome, Chromium, Brave, Edge, Arc, and Vivaldi. It fills the username and the password of a login on its website. Each fill asks for Touch ID or the passphrase in Apassy. Agents never get the password ([ADR 0021](docs/adr/0021-browser-extension.md), [browser](docs/operations/browser.md)).
+- "Save this login" in the extension saves the login that you typed on a page, after Touch ID or the passphrase.
+- "New password" in the extension makes a login with a new password from Apassy and fills it into a sign-up form. The password is in the vault before the page gets it, and never on the pasteboard.
+- Settings > General > Browser extension connects a browser with one click: it writes the host manifest, opens the extensions page, and shows the extension folder. `apassy setup browser` does the same from a terminal.
+- Logins have a Website field. The 1Password import puts the first address of a login there.
+- The item history shows each fill in the browser, with the site.
+
+### Security
+
+- The agent profile denies a write to every `NativeMessagingHosts` folder. A browser starts the program of such a manifest outside the sandbox, so a planted manifest could replace the host of an installed extension.
+- The agent profile denies a change of `Preferences`, `Secure Preferences`, and `Local State` of the Chromium browsers, and a new or renamed profile folder, so an agent cannot point an installed extension at its own code.
+
 ## [0.3.4] - 2026-10-07
 
 Vault sync through the Apassy relay, a background sync worker, bouncer start modes in Settings, and fixes in the window and the owner command line.

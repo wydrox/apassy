@@ -526,6 +526,26 @@ impl Parts {
     fn has_secret(&self) -> bool {
         self.parts.iter().any(|part| part.hidden)
     }
+
+    /// The first website, for the `website` field of a login (ADR 0021). The other
+    /// websites stay custom details "Website 2", "Website 3", and so on.
+    /// A website that the field takes is a web address ([`crate::browser::site`]); another
+    /// value, for example an app link, stays a detail, so the form can save the item.
+    /// Only a part whose label is a website gets the label "Website N".
+    fn take_website(&mut self) -> Option<Part> {
+        let index = self.parts.iter().position(|part| {
+            part.matches(&["website"])
+                && !part.hidden
+                && crate::browser::site::Website::parse(&part.value).is_some()
+        })?;
+        let first = self.parts.remove(index);
+        for (number, part) in (2..).zip(self.parts.iter_mut().filter(|part| {
+            part.matches(&["website"]) && part.label.trim().to_lowercase().starts_with("website")
+        })) {
+            part.label = format!("Website {number}");
+        }
+        Some(first)
+    }
 }
 
 /// The key of a one-time password part.
@@ -774,6 +794,50 @@ fn unique_label(raw: &str, used: &mut BTreeSet<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_first_web_address_is_the_website_of_a_login() {
+        let value = |text: &str| Zeroizing::new(text.to_owned());
+        let mut parts = Parts::new();
+        parts.push(Part::new(
+            &["website"],
+            "Website",
+            value("android://com.example.app"),
+            false,
+        ));
+        parts.push(Part::new(
+            &["website"],
+            "Website",
+            value("https://example.com/login"),
+            false,
+        ));
+        parts.push(Part::new(
+            &["website"],
+            "website",
+            value("https://example.org"),
+            false,
+        ));
+        parts.push(Part::new(
+            &["website"],
+            "Login page",
+            value("https://example.net"),
+            false,
+        ));
+        let first = parts.take_website().expect("a web address");
+        assert_eq!(first.value.as_str(), "https://example.com/login");
+        let labels: Vec<&str> = parts.parts.iter().map(|part| part.label.as_str()).collect();
+        // An app link stays a detail. A part that is not labeled as a website keeps its
+        // label.
+        assert_eq!(labels, vec!["Website 2", "Website 3", "Login page"]);
+        let mut none = Parts::new();
+        none.push(Part::new(
+            &["website"],
+            "Website",
+            value("android://x"),
+            false,
+        ));
+        assert!(none.take_website().is_none());
+    }
 
     #[test]
     fn detail_names_match_the_vault_rule() {

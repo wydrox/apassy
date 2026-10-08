@@ -1,0 +1,174 @@
+<!doctype html>
+<!-- One store screenshot, 1280x800: a caption, a browser window with the
+     screenshot of the real page, and the screenshot of the real popup under
+     the toolbar button. make-assets.mjs calls render() with the images. The
+     page and the popup are taken at 1.5x, so they show here at 150 %. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light">
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 1280px; height: 800px; overflow: hidden; }
+  body {
+    position: relative;
+    font-family: -apple-system, BlinkMacSystemFont, "DM Sans", "Segoe UI", system-ui, sans-serif;
+    color: #0e1820;
+    background:
+      radial-gradient(900px 420px at 50% -120px, rgba(10, 119, 254, 0.16), transparent 70%),
+      linear-gradient(180deg, #eef4fb 0%, #f6f8fb 100%);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .caption {
+    position: absolute; left: 0; right: 0; top: 0; height: 132px;
+    display: flex; align-items: center; justify-content: center; gap: 18px;
+    font-size: 44px; font-weight: 700; letter-spacing: -0.02em;
+  }
+  .caption .tile {
+    display: grid; place-items: center; width: 52px; height: 52px; border-radius: 13px; background: #0e1820;
+    box-shadow: 0 6px 16px rgba(14, 24, 32, 0.22);
+  }
+  .caption .tile svg { width: 30px; height: auto; }
+
+  /* The window bleeds off the bottom edge. */
+  .window {
+    position: absolute; left: 64px; top: 132px; width: 1152px; height: 700px;
+    border-radius: 14px 14px 0 0; overflow: hidden; background: #ffffff;
+    box-shadow: 0 0 0 1px rgba(14, 24, 32, 0.10), 0 24px 70px rgba(14, 24, 32, 0.20);
+  }
+  .bar {
+    display: flex; align-items: center; gap: 14px; height: 56px; padding: 0 16px;
+    background: #eef1f4; border-bottom: 1px solid #dde2e7;
+  }
+  .lights { display: flex; gap: 8px; margin-right: 6px; }
+  .lights i { width: 13px; height: 13px; border-radius: 50%; }
+  .lights i:nth-child(1) { background: #ff5f57; }
+  .lights i:nth-child(2) { background: #febc2e; }
+  .lights i:nth-child(3) { background: #28c840; }
+  .nav { display: flex; gap: 10px; color: #8a949e; }
+  .nav svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .url {
+    flex: 1; display: flex; align-items: center; gap: 9px; height: 36px; padding: 0 16px; border-radius: 18px;
+    background: #ffffff; box-shadow: inset 0 0 0 1px #d5dbe1; font-size: 16px; color: #5b6670; white-space: nowrap;
+  }
+  .url svg { width: 15px; height: 15px; fill: none; stroke: #5b6670; stroke-width: 1.6; }
+  .url b { font-weight: 500; color: #0e1820; }
+  .ext {
+    display: grid; place-items: center; width: 38px; height: 38px; border-radius: 10px;
+  }
+  .ext.open { background: #d8e6f8; }
+  .ext img { width: 24px; height: 24px; }
+  .menu { width: 4px; height: 20px; background: radial-gradient(circle, #6b7680 1.8px, transparent 2.2px) 0 0 / 4px 7px; }
+
+  .content { position: relative; width: 1152px; height: 644px; }
+  .content > img.page { display: block; }
+
+  /* A toolbar popup: under the button, at the right edge. */
+  .popup {
+    position: absolute; top: 2px; right: 10px; border-radius: 12px; overflow: hidden; background: #ffffff;
+    box-shadow: 0 0 0 1px rgba(14, 24, 32, 0.14), 0 18px 50px rgba(14, 24, 32, 0.24), 0 4px 12px rgba(14, 24, 32, 0.10);
+  }
+  .popup img { display: block; }
+
+  /* A macOS-style Touch ID prompt (a drawing, not a screenshot). */
+  .touch {
+    position: absolute; width: 420px; padding: 26px 28px 22px; border-radius: 22px; text-align: center;
+    background: rgba(246, 246, 248, 0.97);
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.10), 0 30px 80px rgba(14, 24, 32, 0.30), 0 8px 20px rgba(14, 24, 32, 0.12);
+  }
+  .touch .icon { width: 68px; height: 68px; margin: 0 auto 10px; display: block; }
+  .touch .app { font-size: 19px; font-weight: 700; }
+  .touch .why { margin: 6px 0 0; font-size: 18px; line-height: 1.4; }
+  .touch .print { width: 62px; height: 62px; margin: 18px auto 8px; display: block; fill: none; stroke: #ff375f; stroke-width: 1.4; stroke-linecap: round; }
+  .touch .how { margin: 0 0 18px; font-size: 15px; color: #5b6670; }
+  .touch .buttons { display: grid; grid-template-columns: 1.5fr 1fr; gap: 10px; }
+  .touch .buttons span {
+    height: 36px; display: grid; place-items: center; padding: 0 10px; border-radius: 8px; font-size: 15px; font-weight: 500; white-space: nowrap;
+    background: #ffffff; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.12), 0 1px 1px rgba(0, 0, 0, 0.06);
+  }
+</style>
+</head>
+<body>
+  <div class="caption"><span class="tile" id="caption-mark"></span><span id="caption-text"></span></div>
+  <div class="window">
+    <div class="bar">
+      <span class="lights"><i></i><i></i><i></i></span>
+      <span class="nav">
+        <svg viewBox="0 0 20 20"><path d="M12.5 4.5 7 10l5.5 5.5" /></svg>
+        <svg viewBox="0 0 20 20"><path d="M7.5 4.5 13 10l-5.5 5.5" /></svg>
+        <svg viewBox="0 0 20 20"><path d="M15.5 10a5.5 5.5 0 1 1-1.6-3.9M15.5 3.8v3.4h-3.4" /></svg>
+      </span>
+      <span class="url">
+        <svg viewBox="0 0 12 12"><rect x="2.5" y="5.5" width="7" height="5" rx="1.2" /><path d="M4 5.5V4a2 2 0 0 1 4 0v1.5" /></svg>
+        <span><b id="url-host"></b><span id="url-path"></span></span>
+      </span>
+      <span class="ext open" id="ext"><img id="ext-icon" alt=""></span>
+      <span class="menu"></span>
+    </div>
+    <div class="content" id="content">
+      <img class="page" id="page" alt="">
+    </div>
+  </div>
+
+<script>
+  const MARK = '<svg viewBox="0 0 229 206.2" aria-hidden="true"><path fill="#ffffff" d="M0,114.5A114.5,114.5 0 0 1 229,114.5L229,204.2A2,2 0 0 1 227,206.2L190.5,206.2A21,21 0 0 1 169.5,185.2L169.5,114.5A55,55 0 0 0 59.5,114.5L59.5,204.2A2,2 0 0 1 57.5,206.2L2,206.2A2,2 0 0 1 0,204.2Z"/><path fill="#0a77fe" d="M75,97.76A2.5,2.5 0 0 1 78.47,95.45L105.54,106.78A26,26 0 0 1 121.5,130.76L121.5,178.76A3,3 0 0 1 119.95,181.39L76.48,205.38A1,1 0 0 1 75,204.51Z"/></svg>';
+  const PRINT = '<svg viewBox="0 0 24 24" class="print"><path d="M12 3.5a8.5 8.5 0 0 0-8.5 8.5M12 3.5a8.5 8.5 0 0 1 8.5 8.5v1M7 8.6A5.9 5.9 0 0 1 17.9 12v2.2M6.1 12a5.9 5.9 0 0 0 .6 2.6M12 8.6a3.4 3.4 0 0 0-3.4 3.4c0 3 1 5.3 2.6 7.4M12 8.6a3.4 3.4 0 0 1 3.4 3.4v1.2c0 2 .4 3.6 1.2 5M12 12v1.3c0 2.6.8 4.8 2.2 6.6" /></svg>';
+
+  const loaded = (img) => (img.complete ? Promise.resolve() : img.decode());
+
+  // scene: { caption, url, page, popup, extIcon, appIcon, touch: { app, why, left, top } | null }
+  window.render = async (scene) => {
+    document.getElementById("caption-mark").innerHTML = MARK;
+    document.getElementById("caption-text").textContent = scene.caption;
+    const url = new URL(scene.url);
+    document.getElementById("url-host").textContent = url.host;
+    document.getElementById("url-path").textContent = url.pathname;
+    const ext = document.getElementById("ext-icon");
+    ext.src = scene.extIcon;
+    const page = document.getElementById("page");
+    page.src = scene.page;
+    const images = [ext, page];
+
+    const content = document.getElementById("content");
+    if (scene.popup) {
+      const box = document.createElement("div");
+      box.className = "popup";
+      const img = document.createElement("img");
+      img.src = scene.popup;
+      box.append(img);
+      content.append(box);
+      images.push(img);
+    }
+    if (scene.touch) {
+      const card = document.createElement("div");
+      card.className = "touch";
+      card.style.left = `${scene.touch.left}px`;
+      card.style.top = `${scene.touch.top}px`;
+      const icon = document.createElement("img");
+      icon.className = "icon";
+      icon.src = scene.appIcon;
+      const app = document.createElement("div");
+      app.className = "app";
+      app.textContent = scene.touch.app;
+      const why = document.createElement("p");
+      why.className = "why";
+      why.textContent = scene.touch.why;
+      const how = document.createElement("p");
+      how.className = "how";
+      how.textContent = "Touch ID to allow this.";
+      const buttons = document.createElement("div");
+      buttons.className = "buttons";
+      buttons.innerHTML = "<span>Use Apassy Passphrase</span><span>Cancel</span>";
+      card.append(icon, app, why);
+      card.insertAdjacentHTML("beforeend", PRINT);
+      card.append(how, buttons);
+      content.append(card);
+      images.push(icon);
+    }
+    await Promise.all(images.map(loaded));
+    await document.fonts.ready;
+  };
+</script>
+</body>
+</html>

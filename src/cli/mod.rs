@@ -6,6 +6,7 @@
 //! never takes a secret as a program argument.
 
 pub mod args;
+mod browser;
 mod commands;
 mod completions;
 mod doctor;
@@ -273,6 +274,7 @@ Credentials:
 Agents and access:
   agent list|show|add|revoke|rotate|see-all|lifetime
   setup claude|codex          Register an agent and write the MCP server and the prompt hook.
+  setup browser               Connect the browser extension. Each fill asks for Touch ID.
   grant set|remove|rule|operation
   request list|grant|deny     Access requests of agents.
   runs list|approve|deny      Runs that wait for you.

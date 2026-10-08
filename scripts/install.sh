@@ -344,7 +344,7 @@ install_app() {
 finish() {
   printf '\n%sApassy %s is installed.%s\n\n' "$BOLD" "$TAG" "$RESET"
   printf '  Open it:   open -a Apassy\n'
-  printf '  CLI tools: %s/Contents/MacOS/{apassy,apassy-mcp,apassy-hook,apassy-sandbox}\n' "$APP"
+  printf '  CLI tools: %s/Contents/MacOS/{apassy,apassy-mcp,apassy-hook,apassy-sandbox,apassy-browser-host}\n' "$APP"
   printf '  CLI setup: %s/blob/main/docs/operations/cli.md#1-install\n' "$REPO_URL"
   printf '  The installer does not change your PATH or shell files.\n'
   printf '  Next:      %s\n' "$DOCS_URL"

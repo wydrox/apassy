@@ -1,8 +1,8 @@
 //! Owner authorization for sensitive owner actions (goal item A4, ADR 0010).
 //!
-//! Reveal, approval of a run, "Approve and remember", changes to grants and rules, token
-//! rotation, and a new Mac for relay sync need a fresh owner check: Touch ID now, the
-//! master passphrase now, or,
+//! Reveal, a fill, a save, or a new login in the browser (ADR 0021), approval of a run,
+//! "Approve and remember", changes to grants and rules, token rotation, and a new Mac for
+//! relay sync need a fresh owner check: Touch ID now, the master passphrase now, or,
 //! for the approval of a run only, the Face ID signature of a paired iPhone (ADR 0020).
 //! [`OwnerGate::authorize`] is the only function that does this check. It is also the
 //! only way to make an [`OwnerProof`]. Each guarded action takes a proof by value:
@@ -54,6 +54,30 @@ const COMPANION_FUTURE_SLACK: u64 = 60;
 pub enum OwnerAction {
     /// Show the secret values of one item.
     Reveal { item_id: u64 },
+    /// Give the username and the password of one login to the browser, for one site
+    /// (ADR 0021). `login` is the title of the login as the owner saw it, and `origin` is
+    /// the origin of the page, for example `https://github.com`.
+    FillLogin {
+        item_id: u64,
+        login: String,
+        origin: String,
+    },
+    /// Add a login that the owner typed on a page (ADR 0021). The password is not in the
+    /// action: it waits in the app while the dialog is open.
+    SaveLogin {
+        title: String,
+        username: String,
+        origin: String,
+    },
+    /// Add a login with a new password that the app makes, and give it to the browser
+    /// (ADR 0021).
+    CreateLogin {
+        title: String,
+        username: String,
+        origin: String,
+        length: u32,
+        symbols: bool,
+    },
     /// Approve one waiting run, exactly as the owner saw it.
     ApproveRun(PendingRun),
     /// Approve one waiting run and remember a narrow pattern for later runs (ADR 0010).
@@ -114,6 +138,21 @@ impl OwnerAction {
     pub fn reason(&self) -> String {
         match self {
             Self::Reveal { .. } => "show the secret values of an item".to_owned(),
+            Self::FillLogin { login, origin, .. } => format!(
+                "fill \"{}\" on {}",
+                short_device_name(login),
+                short_site(origin)
+            ),
+            Self::SaveLogin { title, origin, .. } => format!(
+                "save the login \"{}\" for {}",
+                short_device_name(title),
+                short_site(origin)
+            ),
+            Self::CreateLogin { title, origin, .. } => format!(
+                "create the login \"{}\" on {}",
+                short_device_name(title),
+                short_site(origin)
+            ),
             Self::ApproveRun(run) => format!("approve a run of agent \"{}\"", short_name(run)),
             Self::ApproveAndRemember(run) => {
                 format!(
@@ -176,11 +215,31 @@ fn short_name(run: &PendingRun) -> String {
     }
 }
 
-/// Device name for the prompt: printable characters only, at most 40 characters.
+/// The site of a fill for the prompt: the origin without the scheme, printable ASCII
+/// only, at most 64 characters.
+fn short_site(origin: &str) -> String {
+    let site = origin
+        .strip_prefix("https://")
+        .or_else(|| origin.strip_prefix("http://"))
+        .unwrap_or(origin);
+    let site: String = site
+        .chars()
+        .filter(|c| c.is_ascii_graphic() && *c != '"')
+        .take(64)
+        .collect();
+    if site.is_empty() {
+        "a website".to_owned()
+    } else {
+        site
+    }
+}
+
+/// Device name or login title for the prompt: printable characters only, at most 40
+/// characters.
 fn short_device_name(name: &str) -> String {
     let name: String = name
         .chars()
-        .filter(|c| !c.is_control() && *c != '"')
+        .filter(|c| !crate::browser::wire::hides_text(*c) && *c != '"')
         .take(MAX_AGENT_NAME_CHARS)
         .collect();
     if name.trim().is_empty() {

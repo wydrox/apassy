@@ -284,10 +284,8 @@ fn every_category_maps_to_its_kind() {
     assert_eq!(login.kind(), Some(CredentialKind::Login));
     assert_eq!(value(login, "username"), ("octo", false));
     assert_eq!(value(login, "password"), ("SYNTH-OP-login-pass", true));
-    assert_eq!(
-        detail(login, "Website"),
-        ("https://github.com/login", false)
-    );
+    // ADR 0021: the first website is the website of the login, for the browser.
+    assert_eq!(value(login, "website"), ("https://github.com/login", false));
     assert_eq!(
         detail(login, "Website 2"),
         ("https://api.github.com", false)
@@ -659,10 +657,7 @@ fn csv_rows_map_with_quoting_line_breaks_and_unknown_columns() {
     assert_eq!(mail.kind(), Some(CredentialKind::Login));
     assert_eq!(value(mail, "username"), ("me@example.test", false));
     assert_eq!(value(mail, "password"), ("SYNTH-OP-pa\"ss,word", true));
-    assert_eq!(
-        detail(mail, "Website"),
-        ("https://mail.example.test", false)
-    );
+    assert_eq!(value(mail, "website"), ("https://mail.example.test", false));
     assert_eq!(
         detail(mail, "One-time password"),
         ("otpauth://totp/m?secret=SYNTH-OP-OTP", true)

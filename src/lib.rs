@@ -3,6 +3,8 @@
 #![forbid(unsafe_code)]
 
 pub mod agent;
+/// The browser extension (ADR 0021): wire, site match, and the native messaging host.
+pub mod browser;
 /// The `apassy` owner command line (ADR 0017).
 #[cfg(feature = "desktop")]
 pub mod cli;
