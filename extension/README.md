@@ -28,4 +28,4 @@ To sign up with a new password, click "New password". Choose the length and whet
 
 The extension has no access to a site until you click its button. It sends nothing to the internet, keeps no password, and does not use the clipboard.
 
-Each extension with this folder has the ID `clopaaapnilhoeplaenolhdmjpompeeh`. Apassy answers only this ID.
+Each extension with this folder has the ID `bbnpgnjnfjlbgggmpnhejpmfjhmmhiih`. Apassy answers only this ID.

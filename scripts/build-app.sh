@@ -548,7 +548,7 @@ if bh_status | "$BH_EXE" "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/" 
 fi
 echo "ok: apassy-browser-host refuses another extension"
 check_output "apassy-browser-host without the app" \
-  "$(bh_status | APASSY_BROWSER_SOCKET="$TMP/none.sock" "$BH_EXE" "chrome-extension://clopaaapnilhoeplaenolhdmjpompeeh/" | tail -c +5)" \
+  "$(bh_status | APASSY_BROWSER_SOCKET="$TMP/none.sock" "$BH_EXE" "chrome-extension://bbnpgnjnfjlbgggmpnhejpmfjhmmhiih/" | tail -c +5)" \
   '"code":"not_running"'
 
 H_EXE="$APP/Contents/MacOS/apassy-helper"

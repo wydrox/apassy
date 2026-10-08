@@ -11,7 +11,7 @@ import { startServer } from "./pages.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const EXTENSION_DIR = path.resolve(HERE, "../../extension");
-export const EXTENSION_ID = "clopaaapnilhoeplaenolhdmjpompeeh";
+export const EXTENSION_ID = "bbnpgnjnfjlbgggmpnhejpmfjhmmhiih";
 export const EXTENSION_ORIGIN = `chrome-extension://${EXTENSION_ID}/`;
 const HELIUM = "/Applications/Helium.app/Contents/MacOS/Helium";
 const MOCK_HOST = path.resolve(HERE, "../mock-host/mock-host.mjs");

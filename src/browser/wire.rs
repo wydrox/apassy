@@ -15,9 +15,9 @@ pub const BROWSER_WIRE_VERSION: u32 = 1;
 /// The name of the native messaging host in its manifest.
 pub const HOST_NAME: &str = "com.wydrox.apassy";
 /// The ID of the extension. The manifest of the extension has the public key of this ID.
-pub const EXTENSION_ID: &str = "clopaaapnilhoeplaenolhdmjpompeeh";
+pub const EXTENSION_ID: &str = "bbnpgnjnfjlbgggmpnhejpmfjhmmhiih";
 /// The origin of the extension. The browser gives it to the host as the first argument.
-pub const EXTENSION_ORIGIN: &str = "chrome-extension://clopaaapnilhoeplaenolhdmjpompeeh/";
+pub const EXTENSION_ORIGIN: &str = "chrome-extension://bbnpgnjnfjlbgggmpnhejpmfjhmmhiih/";
 /// Environment variable that overrides the browser socket path.
 pub const SOCKET_ENV: &str = "APASSY_BROWSER_SOCKET";
 /// Largest request, in both hops.

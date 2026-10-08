@@ -295,7 +295,7 @@ mod tests {
         );
         assert_eq!(
             value["allowed_origins"],
-            serde_json::json!(["chrome-extension://clopaaapnilhoeplaenolhdmjpompeeh/"])
+            serde_json::json!(["chrome-extension://bbnpgnjnfjlbgggmpnhejpmfjhmmhiih/"])
         );
     }
 

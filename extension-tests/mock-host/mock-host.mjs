@@ -19,7 +19,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const EXTENSION_ORIGIN = "chrome-extension://clopaaapnilhoeplaenolhdmjpompeeh/";
+const EXTENSION_ORIGIN = "chrome-extension://bbnpgnjnfjlbgggmpnhejpmfjhmmhiih/";
 const dir = process.env.APASSY_MOCK_DIR;
 
 if (process.argv[2] !== EXTENSION_ORIGIN || !dir) {

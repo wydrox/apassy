@@ -33,13 +33,13 @@ Version 1 fills the top frame of the active tab only. It has no inline menu in t
 | Part | Where | What it does |
 | --- | --- | --- |
 | Extension | `extension/` in the repository, `Contents/Resources/browser-extension` in Apassy.app | Manifest V3. The popup, the background service worker, and the fill function. Permissions: `nativeMessaging`, `activeTab`, `scripting`. No content script and no host permission. |
-| Native messaging host | `Contents/MacOS/apassy-browser-host` (`src/bin/apassy-browser-host.rs`) | The browser starts it. It accepts only the extension ID `clopaaapnilhoeplaenolhdmjpompeeh`, checks the size of each message, and passes it to the browser socket. It keeps nothing. |
+| Native messaging host | `Contents/MacOS/apassy-browser-host` (`src/bin/apassy-browser-host.rs`) | The browser starts it. It accepts only the extension ID `bbnpgnjnfjlbgggmpnhejpmfjhmmhiih`, checks the size of each message, and passes it to the browser socket. It keeps nothing. |
 | Browser socket | `browser.sock` in the data directory (`src/desktop/browser.rs`) | The app answers `status`, `show`, `logins`, `fill`, `save`, and `create`. A fill, a save, and a create open the owner check dialog. |
 | Host manifest | `NativeMessagingHosts/com.wydrox.apassy.json` of each browser | "Connect" in Settings > General > Browser extension, or `apassy setup browser`, writes it (`src/browser/install.rs`). |
 
 The wire is in [browser-v1](../contracts/browser-v1.md).
 
-The extension has a fixed public key in its manifest, so its ID is the same in every browser and every profile. The private key is not kept: an unpacked extension does not need it. A Chrome Web Store build gets another ID (D5).
+The key in the manifest is the public key of the Chrome Web Store item (made on 2026-10-08, D5), so the folder in Apassy.app and the store install have one ID, `bbnpgnjnfjlbgggmpnhejpmfjhmmhiih`, in every browser and every profile. The store keeps the private key.
 
 ### 4. A fill
 

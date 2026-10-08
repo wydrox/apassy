@@ -8,7 +8,7 @@ Two hops carry the same JSON messages.
 
 **Extension to host: Chrome native messaging.**
 
-- The service worker calls `chrome.runtime.connectNative("com.wydrox.apassy")`. The browser starts `apassy-browser-host` with the origin of the extension as its first argument: `chrome-extension://clopaaapnilhoeplaenolhdmjpompeeh/`. The host exits with status 2 for another origin.
+- The service worker calls `chrome.runtime.connectNative("com.wydrox.apassy")`. The browser starts `apassy-browser-host` with the origin of the extension as its first argument: `chrome-extension://bbnpgnjnfjlbgggmpnhejpmfjhmmhiih/`. The host exits with status 2 for another origin.
 - Each message is a 32-bit length in the byte order of the Mac (little-endian), then that many bytes of UTF-8 JSON.
 - A request is at most 64 KiB. A response is at most 1 MiB (the limit of the browser). The host closes at a longer message.
 - The host answers each request in order. It exits when the browser closes its input.
@@ -118,7 +118,7 @@ The extension makes these codes itself. They never cross the wire.
   "description": "Apassy: fill logins from your Apassy vault",
   "path": "/Applications/Apassy.app/Contents/MacOS/apassy-browser-host",
   "type": "stdio",
-  "allowed_origins": ["chrome-extension://clopaaapnilhoeplaenolhdmjpompeeh/"]
+  "allowed_origins": ["chrome-extension://bbnpgnjnfjlbgggmpnhejpmfjhmmhiih/"]
 }
 ```
 

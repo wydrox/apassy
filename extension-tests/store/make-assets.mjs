@@ -28,7 +28,7 @@ const APP_ICON_SVG = path.join(ROOT, "packaging/AppIcon.svg");
 const MOCK_HOST = path.resolve(HERE, "../mock-host/mock-host.mjs");
 const HELIUM = "/Applications/Helium.app/Contents/MacOS/Helium";
 // The same as in support/fixtures.mjs: the key in the manifest fixes the id.
-const EXTENSION_ID = "clopaaapnilhoeplaenolhdmjpompeeh";
+const EXTENSION_ID = "bbnpgnjnfjlbgggmpnhejpmfjhmmhiih";
 const EXTENSION_ORIGIN = `chrome-extension://${EXTENSION_ID}/`;
 const HEADLESS = process.env.HEADED !== "1";
 

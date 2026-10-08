@@ -21,6 +21,8 @@ Only the owner can do the steps marked **Owner**: they need the owner's Google a
 
 ## 2. Make the item and take its ID
 
+Done on 2026-10-08: the draft item is `bbnpgnjnfjlbgggmpnhejpmfjhmmhiih` of the publisher `wyderkarafal@gmail.com`. The repository has its key and its ID.
+
 1. **Owner.** In the developer dashboard, click "Add new item" and upload the ZIP. Do not submit it yet.
 2. **Owner.** Open the Package tab, click "View public key", and copy the text between `-----BEGIN PUBLIC KEY-----` and `-----END PUBLIC KEY-----`. Copy the item ID from the dashboard address too.
 3. Change the ID in the repository to the ID of the store item, in one commit:
@@ -29,7 +31,7 @@ Only the owner can do the steps marked **Owner**: they need the owner's Google a
    - `extension-tests/support/fixtures.mjs`: `EXTENSION_ID`;
    - this guide, [browser-v1](../contracts/browser-v1.md), [ADR 0021](../adr/0021-browser-extension.md), and `extension/README.md`.
 
-   Then the folder in Apassy.app and the store item have one ID, and the host manifest (`allowed_origins`) allows both.
+   Then the folder in Apassy.app and the store item have one ID, and the host manifest (`allowed_origins`) allows it. Check that the key gives the ID: `base64 -D` of the key, SHA-256, the first 32 hexadecimal digits with 0–f mapped to a–p.
 4. Release the app with the new ID (a merge to `main` publishes it), **before** the store item is public. An extension from the store needs an Apassy that allows its ID.
 
 ## 3. Store listing
