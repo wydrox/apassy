@@ -17,8 +17,8 @@ on:
 permissions:
   contents: read
 
-# A newer push to a pull request cancels its older run. Each run of main has its
-# own group and finishes: the release workflow publishes after a green run.
+# A newer pull request commit cancels its older run. Main runs finish in order
+# of completion; Release checks the current main commit before publication.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
@@ -35,18 +35,17 @@ jobs:
       - name: Install Rust 1.97.0
         run: rustup toolchain install 1.97.0 --profile minimal --component rustfmt --component clippy
 
+      # The action keys dependencies by OS, architecture, compiler, lockfile,
+      # and Cargo configuration. PRs can restore caches but cannot save them.
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: dev-quality
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
       - name: Fetch Cargo dependencies
         run: cargo fetch --locked
-
-      - name: Install cargo-audit 0.22.2
-        run: cargo install cargo-audit --version 0.22.2 --locked
-
-      # RustSec has no recent advisories for the bundled C code (OpenSSL in
-      # openssl-src, SQLCipher and SQLite in libsqlite3-sys). A clean result does
-      # not cover it. The update policy in docs/reviews/storage-dependencies.md §8
-      # adds the upstream advisory sources for that code.
-      - name: Check RustSec advisories
-        run: cargo audit
 
       - name: Check Rust format
         run: cargo fmt --all -- --check
@@ -59,9 +58,6 @@ jobs:
       - name: Check the demo build without the vault
         run: cargo check --offline --locked --features desktop --bin apassy
 
-      - name: Run Cargo tests
-        run: cargo test --offline --locked --all-features --all-targets -- --test-threads=1
-
       - name: Check vault API compile failures
         run: cargo test --offline --locked --features vault --doc
 
@@ -71,11 +67,19 @@ jobs:
       - name: Run Python fixture boundary tests
         run: python3 tests/isolation/test_fixture_boundary.py
 
+      - name: Install Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Test CI helpers
+        run: python3 -m unittest discover -s scripts/tests -p 'test_ci_*.py'
+
       - name: Check git diff whitespace
         run: git diff --check
 
-  # The same build and tests on Linux. Format, advisories, the Node model tests
-  # and whitespace do not depend on the system, so only the macOS job runs them.
+  # Keep the existing macos/linux check names. Full Rust test coverage runs in
+  # the separate matrix below. Release waits for the entire CI workflow.
   linux:
     runs-on: ubuntu-24.04
     steps:
@@ -87,14 +91,20 @@ jobs:
       - name: Install Rust 1.97.0
         run: rustup toolchain install 1.97.0 --profile minimal --component clippy
 
+      # The action keys dependencies by OS, architecture, compiler, lockfile,
+      # and Cargo configuration. PRs can restore caches but cannot save them.
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: dev-quality
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
       - name: Fetch Cargo dependencies
         run: cargo fetch --locked
 
       - name: Run Clippy
         run: cargo clippy --offline --locked --all-features --all-targets -- -D warnings
-
-      - name: Run Cargo tests
-        run: cargo test --offline --locked --all-features --all-targets -- --test-threads=1
 
       - name: Check vault API compile failures
         run: cargo test --offline --locked --features vault --doc
@@ -113,3 +123,102 @@ jobs:
       # The loaders are the authority. The same check that CONTRIBUTING.md asks for.
       - name: Check the rule packs and provider files with the loaders
         run: cargo run --offline --locked --features vault --bin apassy-packs -- validate packs/*.json packs/providers/*.json
+
+  audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust 1.97.0
+        run: rustup toolchain install 1.97.0 --profile minimal
+      - name: Restore cargo-audit
+        id: audit-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-${{ runner.arch }}-rust-1.97.0-v0.22.2
+      - name: Install cargo-audit 0.22.2
+        if: steps.audit-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Check RustSec advisories
+        run: |
+          cargo audit --version | grep -Fx 'cargo-audit 0.22.2'
+          cargo audit
+      # The advisory database is refreshed on every run. Only the tool is cached.
+      # Bundled C code still needs the policy in docs/reviews/storage-dependencies.md.
+      - name: Save cargo-audit
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.audit-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: ${{ steps.audit-cache.outputs.cache-primary-key }}
+
+  tests:
+    name: tests (${{ matrix.os }}, ${{ matrix.shard }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-24.04]
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust 1.97.0
+        run: rustup toolchain install 1.97.0 --profile minimal
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: dev-tests-${{ matrix.shard }}
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Fetch Cargo dependencies
+        run: cargo fetch --locked
+      - name: Run serial test group
+        env:
+          TEST_SHARD: ${{ matrix.shard }}
+        run: python3 scripts/ci-test-shard.py --shard "$TEST_SHARD"
+
+  release-binaries:
+    # No signing credentials enter this job. Its artifact is eligible for Release
+    # only after all CI jobs pass for a push to main in this repository.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust 1.97.0
+        run: rustup toolchain install 1.97.0 --profile minimal
+      - name: Cache release dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: release-desktop-vault
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Set the build identity
+        run: |
+          echo "APASSY_BUILD_COMMIT=$GITHUB_SHA" >> "$GITHUB_ENV"
+          echo "APASSY_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+      - name: Build the release binaries
+        run: cargo build --release --locked --features desktop,vault --bin apassy --bin apassy-mcp --bin apassy-hook --bin apassy-sandbox --bin apassy-browser-host
+      - name: Install Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Record the artifact identity and hashes
+        run: |
+          python3 scripts/ci-release-artifact.py create \
+            --directory "$RUNNER_TEMP/apassy-release" \
+            --commit "$APASSY_BUILD_COMMIT" --date "$APASSY_BUILD_DATE" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
+      - name: Save the unsigned release binaries
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apassy-release-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/apassy-release/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
