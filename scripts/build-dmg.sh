@@ -45,14 +45,36 @@ step() { printf '\n==> %s\n' "$*"; }
 fail() { printf '\nbuild-dmg: FAILED: %s\n' "$*" >&2; exit 1; }
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/apassy-dmg.XXXXXX")"
-trap 'rm -rf "$TMP"' EXIT
+MOUNT="$TMP/mount"
+MOUNTED=0
+cleanup() {
+  if [ "$MOUNTED" = "1" ]; then
+    if ! hdiutil detach "$MOUNT" >/dev/null 2>&1; then
+      if ! hdiutil detach -force "$MOUNT" >/dev/null 2>&1; then
+        printf '\nbuild-dmg: Could not detach %s. Temporary files remain in %s.\n' "$MOUNT" "$TMP" >&2
+        return
+      fi
+    fi
+  fi
+  rm -rf "$TMP"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ---------------------------------------------------------------- checks
 step "Check the app"
 [ "$(uname -s)" = "Darwin" ] || fail "this script runs on macOS only"
-for tool in codesign ditto git hdiutil openssl plutil security shasum xcrun; do
+for tool in codesign ditto git hdiutil openssl plutil security shasum sips xcrun; do
   command -v "$tool" >/dev/null 2>&1 || fail "missing tool: $tool"
 done
+[ -s "$ROOT/packaging/dmg-background.png" ] || fail "missing packaging/dmg-background.png"
+[ -s "$ROOT/packaging/dmg-background.tiff" ] || fail "missing packaging/dmg-background.tiff. Run swift scripts/render-dmg-background.swift."
+BACKGROUND_SIZE="$(sips -g pixelWidth -g pixelHeight "$ROOT/packaging/dmg-background.png")"
+echo "$BACKGROUND_SIZE" | grep -q 'pixelWidth: 720$' \
+  && echo "$BACKGROUND_SIZE" | grep -q 'pixelHeight: 480$' \
+  || fail "packaging/dmg-background.png must be 720 by 480 pixels"
+bash "$ROOT/scripts/layout-dmg.sh" --check
 [ -d "$APP" ] || fail "missing $APP. Run scripts/build-app.sh first."
 for tool in apassy apassy-mcp apassy-hook apassy-sandbox apassy-browser-host; do
   [ -x "$APP/Contents/MacOS/$tool" ] || fail "missing $tool in $APP. Run scripts/build-app.sh again."
@@ -135,17 +157,40 @@ fi
 # ---------------------------------------------------------------- image
 step "Make the disk image"
 ln -s /Applications "$STAGE/Applications"
-rm -rf "$OUT"
-mkdir -p "$OUT"
+mkdir -p "$STAGE/.background"
+ditto "$ROOT/packaging/dmg-background.tiff" "$STAGE/.background/background.tiff"
+WRITABLE="$TMP/Apassy-layout.dmg"
 # hdiutil sometimes fails with "Resource busy" on a busy host. Try again.
 for attempt in 1 2 3; do
-  if hdiutil create -volname Apassy -srcfolder "$STAGE" -fs HFS+ -format UDZO -ov "$DMG" >"$TMP/hdiutil.log" 2>&1; then
+  if hdiutil create -volname Apassy -srcfolder "$STAGE" -fs HFS+ -format UDRW -ov "$WRITABLE" >"$TMP/hdiutil.log" 2>&1; then
     break
   fi
   cat "$TMP/hdiutil.log" >&2
   [ "$attempt" != "3" ] || fail "hdiutil create failed"
   sleep 5
 done
+mkdir -p "$MOUNT"
+# Mark the attach attempt before the command, so cleanup also handles an
+# interrupted attach. A failed detach never causes removal of mounted files.
+MOUNTED=1
+hdiutil attach "$WRITABLE" -mountpoint "$MOUNT" -nobrowse -noautoopen -readwrite \
+  || fail "could not mount the writable disk image"
+step "Save the Finder install window"
+bash "$ROOT/scripts/layout-dmg.sh" "$MOUNT"
+# Verify the exact copy after Finder writes its metadata.
+codesign --verify --deep --strict "$MOUNT/Apassy.app" \
+  || fail "the packaged app signature is not valid"
+if [ "$NOTARIZE" = "1" ]; then
+  xcrun stapler validate "$MOUNT/Apassy.app"
+  spctl --assess --type exec --verbose=2 "$MOUNT/Apassy.app"
+fi
+sync
+hdiutil detach "$MOUNT" || fail "could not detach the disk image"
+MOUNTED=0
+rm -rf "$OUT"
+mkdir -p "$OUT"
+hdiutil convert "$WRITABLE" -format UDZO -imagekey zlib-level=9 -ov -o "$DMG" \
+  || fail "could not compress the disk image"
 hdiutil verify "$DMG" >/dev/null || fail "hdiutil verify failed"
 # The same timestamp rule as scripts/build-app.sh.
 case "$SIGN_NAME" in
