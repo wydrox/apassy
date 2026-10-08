@@ -143,7 +143,7 @@ jobs:
         run: cargo install cargo-audit --version 0.22.2 --locked
       - name: Check RustSec advisories
         run: |
-          cargo audit --version | grep -Fx 'cargo-audit 0.22.2'
+          cargo-audit --version | grep -Fx 'cargo-audit 0.22.2'
           cargo audit
       # The advisory database is refreshed on every run. Only the tool is cached.
       # Bundled C code still needs the policy in docs/reviews/storage-dependencies.md.
