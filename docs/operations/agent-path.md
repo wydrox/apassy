@@ -30,13 +30,26 @@ It adds one extra field to each response. The broker must drop that field.
 2. Create and unlock a vault.
 3. In Credentials, click "Add" and select "API key". Put `FAKE-ALPHA-TOKEN-7731` in the Token field.
 4. Open the credential. Under "Agent access", click "Connector". Type `http://127.0.0.1:8787` and click "Save". A real service uses `https://HOST`.
-5. In Agents, click "Register". Type a name and click "Register".
-6. Copy the token. Apassy shows it one time. Click "I saved the token". The token works for 30 days. "Token lifetime" in Settings changes this time for all tokens (1 to 365 days). "Rotate token…" on the page of the agent gives a new token and stops the old token at once. Put the new token in the MCP configuration.
+5. In Agents, click "Connect agent". Select the host, enter a name, and click "Continue".
+6. For this manual demo, open "Advanced setup" and copy the token. Click "I saved the token". The token works for 30 days. "Token lifetime" in Settings changes this time for all tokens (1 to 365 days). Under "Token and manual setup", "Rotate token…" gives a new token and stops the old token at once. Put the new token in the MCP configuration.
 7. On the page of the agent, under "API operations", turn on `get_sales_summary`.
 
 ## 4. Connect an agent host
 
-The token sheet after "Register" shows an MCP configuration with the full adapter path. Example:
+For Claude Code or Codex, use the guided setup:
+
+1. Click "Connect agent", select the host, and click "Continue".
+2. Click "Connect Claude Code" or "Connect Codex" to save its settings.
+3. Click "Choose credentials". Select the credentials that the agent needs.
+4. Use "Set variable" for each credential without an environment variable. Confirm each change.
+5. Click "Set access…". Select the project folder and access decision. Confirm the change.
+6. Click "Continue". Use the command in "Start host" from the project folder.
+7. In Codex, use `/hooks` to trust the hook. Use `/mcp` to check the connection.
+8. Send the test prompt from the guide. Check the response in the host.
+
+The guide stays on the agent page while you set variables and access. Detailed rules remain under each credential's process access. Saved settings do not prove a connection. The test prompt lists permitted credentials without secret values; it does not test a command that uses a secret. An Allowed activity entry does not prove that a command succeeded.
+
+For another host, open "Advanced setup" and "Other hosts: manual MCP configuration" in the token sheet. Example:
 
 ```json
 {

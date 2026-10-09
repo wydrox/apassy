@@ -42,7 +42,7 @@ fn status(agent: &AgentSummary, now: u64) -> (&'static str, Tone) {
     } else if agent.token_expired_at(now) {
         ("Token expired", Tone::Critical)
     } else {
-        ("Active", Tone::Good)
+        ("Token valid", Tone::Good)
     }
 }
 
@@ -227,7 +227,7 @@ fn draw_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 register = kit::button_with(
                     ui,
                     Some(Icon::Plus),
-                    "Register",
+                    "Connect agent",
                     Style::Prominent,
                     Size::Regular,
                 )
@@ -243,7 +243,7 @@ fn draw_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
         let (title, message) = if revoked.is_empty() {
             (
                 "No agents yet",
-                "Register each agent host, such as Claude Code or Codex. Apassy gives it a token for the Apassy MCP server.",
+                "Connect Claude Code or Codex. Then select the credentials it can use.",
             )
         } else {
             (
@@ -251,7 +251,7 @@ fn draw_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 "Every agent of this vault is revoked, for example after a restore. Register each agent host again; it gets a new token.",
             )
         };
-        register |= kit::empty_state(ui, Icon::Person, title, message, Some("Register agent"));
+        register |= kit::empty_state(ui, Icon::Person, title, message, Some("Connect agent"));
     }
     let mut open = None;
     if !active.is_empty() {
@@ -311,7 +311,9 @@ fn draw_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
         app.owner_ui.selected_agent = Some(agent_id);
     }
     if register {
-        app.owner_ui.new_agent_name.clear();
+        app.owner_ui.new_agent_name = super::agent_setup::Host::from_index(app.ui.setup_host)
+            .name()
+            .to_owned();
         app.ui.sheet = Some(Sheet::RegisterAgent);
     }
 }
@@ -362,12 +364,17 @@ fn draw_agent(app: &mut DesktopApp, ui: &mut egui::Ui, agent_id: u64) {
         );
         return;
     }
-    token_section(app, ui, &agent, now);
-    connection_progress(app, ui, false);
-    setup_guidance(&mut app.ui, ui, false);
+    super::agent_onboarding::draw(app, ui, &agent);
     visibility_section(app, ui, &agent);
     process_access_section(app, ui, &agent);
     operations_section(app, ui, agent_id);
+    let mut advanced = app.ui.is_expanded("agent-advanced-details");
+    kit::disclosure(ui, &mut advanced, "Token and manual setup");
+    app.ui.set_expanded("agent-advanced-details", advanced);
+    if advanced {
+        token_section(app, ui, &agent, now);
+        setup_guidance(&mut app.ui, ui, false);
+    }
     let requests = app
         .owner_ui
         .session
@@ -628,12 +635,30 @@ pub(super) fn register_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool 
     let response = kit::sheet(ctx, "register-agent", 440.0, |ui| {
         kit::sheet_title(
             ui,
-            "Register an agent",
+            "Connect an agent",
             Some(
-                "Give each agent host its own name, for example Claude Code or Codex. Apassy then shows its token one time.",
+                "Select your agent. Next, save its connection settings and choose its credentials.",
             ),
         );
         kit::section(ui, None, None, |s| {
+            s.field("Agent", |ui| {
+                let before = super::agent_setup::Host::from_index(app.ui.setup_host);
+                let response = kit::picker(
+                    ui,
+                    "register-host",
+                    &mut app.ui.setup_host,
+                    &[(0, "Claude Code".to_owned()), (1, "Codex".to_owned())],
+                    before.name(),
+                    220.0,
+                );
+                let selected = super::agent_setup::Host::from_index(app.ui.setup_host);
+                if app.owner_ui.new_agent_name.is_empty()
+                    || app.owner_ui.new_agent_name == before.name()
+                {
+                    app.owner_ui.new_agent_name = selected.name().to_owned();
+                }
+                response
+            });
             let field = s.field("Name", |ui| {
                 kit::text_input(
                     ui,
@@ -650,7 +675,7 @@ pub(super) fn register_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool 
             ui,
             |_| {},
             |ui| {
-                register |= kit::button(ui, "Register", Style::Prominent)
+                register |= kit::button(ui, "Continue", Style::Prominent)
                     .on_hover_text("⌘S")
                     .clicked();
                 cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
@@ -664,6 +689,10 @@ pub(super) fn register_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool 
             Ok((agent, token)) => {
                 app.owner_ui.new_agent_name.clear();
                 app.owner_ui.selected_agent = Some(agent.id);
+                // The explicit host choice takes precedence over a custom agent name.
+                app.ui
+                    .agent_setup
+                    .prepare(token.expose(), "", &mut app.ui.setup_host);
                 app.owner_ui.fresh_token = Some(FreshToken {
                     agent_name: agent.name.clone(),
                     token,
@@ -671,10 +700,7 @@ pub(super) fn register_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool 
                 });
                 app.ui.sheet = None;
                 app.view = OwnerView::Agents;
-                app.set_ok(format!(
-                    "{} is registered. Connect the agent host.",
-                    agent.name
-                ));
+                app.set_ok(format!("{} is ready for connection settings.", agent.name));
             }
             Err(err) => app.set_err(err.message),
         }
@@ -803,7 +829,7 @@ pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
     };
     app.ui.agent_setup.prepare(
         fresh.token.expose(),
-        &fresh.agent_name,
+        if fresh.rotated { "" } else { &fresh.agent_name },
         &mut app.ui.setup_host,
     );
     app.ui.agent_setup.poll(ctx);
@@ -824,7 +850,9 @@ pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
         kit::sheet_title(
             ui,
             &title,
-            Some("Let this agent use credentials through Apassy."),
+            Some(
+                "Step 1 of 3: save the connection settings. Next, select credentials and check a request.",
+            ),
         );
         kit::sheet_body(ui, |ui| {
             if rotated {
@@ -834,7 +862,7 @@ pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
                 );
             }
             if let Some(host) = saved {
-                kit::tone_note(ui, "Setup saved.", Tone::Good);
+                kit::tone_note(ui, "Connection settings saved.", Tone::Good);
                 kit::note(
                     ui,
                     format!(
@@ -851,13 +879,10 @@ pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
                     },
                 );
                 kit::note(ui, "The connection and first request are not checked.");
+                kit::note(ui, "Next, choose credentials and set access in Apassy.");
                 kit::note(
                     ui,
-                    "Next, open a credential and set its Environment variable. Give this agent access to the credential and project.",
-                );
-                kit::note(
-                    ui,
-                    "Open Advanced setup for the sandbox command and test steps.",
+                    "The final step shows how to start the agent and check a request.",
                 );
             } else {
                 let host = super::agent_setup::Host::from_index(app.ui.setup_host);
@@ -922,7 +947,7 @@ pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
             |_| {},
             |ui| {
                 if saved.is_some() {
-                    dismiss = kit::button(ui, "Done", Style::Prominent).clicked();
+                    dismiss = kit::button(ui, "Choose credentials", Style::Prominent).clicked();
                 } else {
                     let host = super::agent_setup::Host::from_index(app.ui.setup_host);
                     ui.add_enabled_ui(!busy, |ui| {
@@ -942,9 +967,16 @@ pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
         );
     }
     if dismiss {
+        if let (Some(host), Some(agent_id)) = (saved, app.owner_ui.selected_agent) {
+            super::agent_onboarding::connected(app, agent_id, host);
+        }
         app.owner_ui.fresh_token = None;
         app.ui.agent_setup = Default::default();
-        app.set_ok("The token is hidden. Apassy cannot show it again.");
+        app.set_ok(if saved.is_some() {
+            "Connection settings are saved. Select the credentials for this agent."
+        } else {
+            "The token is hidden. Apassy cannot show it again."
+        });
     }
 }
 
@@ -1495,6 +1527,34 @@ fn rule_form(ui: &mut egui::Ui, form: &mut RuleForm) -> bool {
 #[cfg(test)]
 mod onboarding_tests {
     use super::*;
+
+    #[test]
+    fn rotation_and_background_guide_preserve_the_explicit_host_choice() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut app, _) = super::super::owner_tests::unlocked_app_with_item(&dir);
+        let (agent, token) = app.owner_ui.session.register_agent("Codex").unwrap();
+        app.view = OwnerView::Agents;
+        app.owner_ui.selected_agent = Some(agent.id);
+        app.ui.setup_host = super::super::agent_setup::Host::Claude.index();
+        app.owner_ui.fresh_token = Some(FreshToken {
+            agent_name: agent.name,
+            token,
+            rotated: true,
+        });
+        let ctx = egui::Context::default();
+        super::super::owner_tests::app_frame(&ctx, &mut app);
+        assert_eq!(
+            app.ui.setup_host,
+            super::super::agent_setup::Host::Claude.index()
+        );
+        app.ui.setup_host = super::super::agent_setup::Host::Codex.index();
+        super::super::owner_tests::app_frame(&ctx, &mut app);
+        assert_eq!(
+            app.ui.setup_host,
+            super::super::agent_setup::Host::Codex.index()
+        );
+        assert!(app.owner_ui.fresh_token.is_some());
+    }
 
     #[test]
     fn setup_result_does_not_consume_the_fresh_token() {

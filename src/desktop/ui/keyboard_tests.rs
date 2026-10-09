@@ -646,11 +646,13 @@ fn return_in_a_field_does_the_default_action() {
     window.press(&mut app, Key::ArrowUp, Modifiers::NONE);
     assert_eq!(window.focused_layer(), Some(in_sheet));
 
-    // The name field is the first control. Type and press Return.
+    // The host picker is first. Move to Name and replace the suggested name.
+    window.tab_to_text_field(&mut app, 10);
     assert!(
         window.ctx.text_edit_focused(),
         "the name field has the focus"
     );
+    window.press(&mut app, Key::A, Modifiers::COMMAND);
     window.frame(&mut app, vec![Event::Text("Keyboard agent".to_owned())]);
     window.press(&mut app, Key::Enter, Modifiers::NONE);
     let agents = app.owner_ui.session.agents().expect("agents");
@@ -958,12 +960,15 @@ fn a_sheet_opened_with_the_pointer_focuses_its_first_text_field() {
         window.ctx.text_edit_focused(),
         "the Name field of the new sheet takes the focus"
     );
+    window.press(&mut app, Key::A, Modifiers::COMMAND);
     window.frame(&mut app, vec![Event::Text("Pointer agent".to_owned())]);
     assert_eq!(app.owner_ui.new_agent_name, "Pointer agent");
 
     // After the pick of a kind, the Name field of the credential form takes the focus.
     app.ui.sheet = None;
     window.idle(&mut app);
+    // The pointer opens the next sheet after the keyboard replaced the suggested name.
+    window.click_at(&mut app, Pos2::new(400.0, 100.0));
     app.view = OwnerView::Vault;
     app.ui.sheet = Some(Sheet::AddItem { kind_chosen: true });
     app.ui.focus_form_name = true;
@@ -1287,4 +1292,81 @@ fn wrong_synced_passphrase_shows_clear_error_and_allows_keyboard_retry() {
         app.current_vault_name().as_deref(),
         Some("Team on this Mac")
     );
+}
+
+/// The guide returns from variable and access confirmations to the same agent.
+/// A canceled owner check must not silently bind a secret or grant access.
+#[test]
+fn agent_setup_guides_credentials_without_leaving_the_agent() {
+    use crate::broker::approvals::OwnerCheck;
+    use crate::desktop::owner_store::FreshToken;
+
+    let dir = TempDir::new().unwrap();
+    let (mut app, item_id) = unlocked_app_with_item(&dir);
+    let item_name = app.owner_ui.session.details(item_id).unwrap().name;
+    let (agent, token) = app.owner_ui.session.register_agent("Codex").unwrap();
+    app.owner_ui.selected_agent = Some(agent.id);
+    app.view = OwnerView::Agents;
+    app.owner_ui.fresh_token = Some(FreshToken {
+        agent_name: agent.name.clone(),
+        token,
+        rotated: false,
+    });
+    let mut window = Window::new();
+    window.size = Vec2::new(1180.0, 1200.0);
+    window.idle(&mut app);
+    app.ui.agent_setup.result = Some(Ok(super::agent_setup::Host::Codex));
+    window.idle(&mut app);
+    let next = window
+        .texts
+        .iter()
+        .rev()
+        .find(|(text, _)| text == "Choose credentials")
+        .unwrap()
+        .1;
+    window.click_at(&mut app, next + Vec2::new(4.0, 4.0));
+    assert!(app.owner_ui.fresh_token.is_none());
+    assert!(window.text.contains("Set an environment variable first"));
+    window.tab_to(&mut app, &item_name, 30);
+    window.press(&mut app, Key::Space, Modifiers::NONE);
+    window.click(&mut app, &format!("Set variable for {item_name}…"));
+    assert!(matches!(app.ui.sheet, Some(Sheet::Variable)));
+    assert_eq!(app.view, OwnerView::Agents);
+    app.owner_ui.env_name_input = "SETUP_TEST_KEY".to_owned();
+    app.owner_ui.env_placeholder_input = false;
+    window.click(&mut app, "Save");
+    assert!(app.owner.check.is_some());
+    assert!(app.owner_ui.session.env_binding(item_id).unwrap().is_none());
+    app.close_owner_check(Some(&window.ctx));
+    window.idle(&mut app);
+    assert!(matches!(app.ui.sheet, Some(Sheet::Variable)));
+    assert!(app.owner_ui.session.env_binding(item_id).unwrap().is_none());
+    window.click(&mut app, "Save");
+    app.confirm_owner_now(OwnerCheck::passphrase(super::owner_tests::PASS))
+        .unwrap();
+    window.idle(&mut app);
+    assert!(app.ui.sheet.is_none());
+    assert_eq!(app.view, OwnerView::Agents);
+    assert!(window.text.contains("SETUP_TEST_KEY"));
+    window.click(&mut app, "Set access…");
+    assert!(matches!(app.ui.sheet, Some(Sheet::GrantMany { agent_id }) if agent_id == agent.id));
+    assert!(app.ui.grant.selection.contains(&item_id));
+    app.ui.grant.dir = dir.path().to_str().unwrap().to_owned();
+    window.click(&mut app, "Give access to 1 credential");
+    assert!(app.owner.check.is_some());
+    assert!(
+        app.owner_ui
+            .session
+            .exec_grants(agent.id)
+            .unwrap()
+            .is_empty()
+    );
+    app.confirm_owner_now(OwnerCheck::passphrase(super::owner_tests::PASS))
+        .unwrap();
+    window.idle(&mut app);
+    assert!(app.ui.sheet.is_none());
+    window.click(&mut app, "Continue");
+    assert!(window.text.contains("Start the host and check a request"));
+    assert!(window.text.contains("/hooks"));
+    assert!(window.text.contains("Do not read or print secret values."));
 }
