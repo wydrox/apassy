@@ -16,7 +16,7 @@ The site is a static Astro page in `site/`, served by a Cloudflare Worker on the
 | Worker | `site/worker/index.ts` | Serves the files of the site. Adds `/download` (302), `/download/Apassy.dmg`, and `/latest.json` from the R2 bucket `apassy-downloads`. |
 | Site workflow | `.github/workflows/site.yml` | On a change in `site/` or in a file that the site builds from (`scripts/install.sh`, `Cargo.toml`, `CHANGELOG.md`, `docs/images/`): type check and build. On `main`: `wrangler deploy`. Makes the bucket on the first deploy. |
 | Release workflow | `.github/workflows/release.yml` | After each green CI run of a push to `main`: build, sign, notarize, and upload. |
-| Disk image | `scripts/build-dmg.sh` | Packages `target/Apassy.app` into `target/dist/Apassy.dmg` and writes `target/dist/latest.json`. |
+| Disk image | `scripts/build-dmg.sh`, `scripts/layout-dmg.sh` | Packages `target/Apassy.app` into `target/dist/Apassy.dmg`, saves the Finder install window, and writes `target/dist/latest.json`. |
 
 Before the owner adds the Apple secrets, the release workflow publishes nothing and shows a warning. Without `CLOUDFLARE_API_TOKEN`, the site workflow builds the site and skips the deploy with a warning. The site then says "Coming soon for macOS", because `/latest.json` does not exist.
 
@@ -143,6 +143,22 @@ A disk image with the development certificate. Gatekeeper on another Mac blocks 
 scripts/build-app.sh
 scripts/build-dmg.sh
 ```
+
+The disk image contains a 720 × 480 install window with the Apassy background.
+Finder shows the app and the Applications link as 96-pixel icons.
+The native labels stay below the icons.
+`swift scripts/render-dmg-background.swift` creates the PNG and the TIFF with two image sizes for Retina displays.
+The build copies `packaging/dmg-background.tiff` into the hidden `.background` folder.
+It saves the layout in a writable image, then compresses the image before it signs it.
+The app signature, notarization steps, and download manifest use the same release checks.
+
+The build needs Finder and a macOS desktop session.
+If macOS asks for Automation access, permit the terminal or runner to control Finder.
+A CI runner without a desktop session cannot save the layout.
+The build stops with an error and gives instructions.
+It does not publish an image without the layout.
+Use `scripts/layout-dmg.sh --check` to check Finder access before a build.
+After a change to the background, open a new image and check both icon positions and the native labels.
 
 A notarized image, with a Developer ID certificate in the login keychain. Save the notary credentials once with `xcrun notarytool store-credentials apassy`:
 

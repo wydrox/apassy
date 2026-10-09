@@ -671,7 +671,10 @@ pub(super) fn register_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool 
                 });
                 app.ui.sheet = None;
                 app.view = OwnerView::Agents;
-                app.set_ok(format!("{} is registered. Save its token now.", agent.name));
+                app.set_ok(format!(
+                    "{} is registered. Connect the agent host.",
+                    agent.name
+                ));
             }
             Err(err) => app.set_err(err.message),
         }
@@ -791,62 +794,156 @@ fn setup_guidance(state: &mut super::UiState, ui: &mut egui::Ui, fresh: bool) {
     }
 }
 
-/// A new token after a registration or a rotation. Apassy shows it one time. Escape
-/// does not close this sheet: only "I saved the token" does.
+/// A new token after registration or rotation. The main action saves host
+/// settings. The token and manual commands stay in a closed disclosure group.
+/// Escape does not discard the one-time token.
 pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
     let Some(fresh) = &app.owner_ui.fresh_token else {
         return;
     };
-    let (title, intro) = if fresh.rotated {
-        (
-            format!("New token for {}", fresh.agent_name),
-            "The old token does not work now. Apassy shows the new token one time. Select the text and copy it.",
-        )
-    } else {
-        (
-            format!("Token for {}", fresh.agent_name),
-            "Apassy shows this token one time. Select the text and copy it.",
-        )
-    };
+    app.ui.agent_setup.prepare(
+        fresh.token.expose(),
+        &fresh.agent_name,
+        &mut app.ui.setup_host,
+    );
+    app.ui.agent_setup.poll(ctx);
     let token = fresh.token.expose();
+    let rotated = fresh.rotated;
+    let title = format!("Connect {}", fresh.agent_name);
     let mut dismiss = false;
-    kit::sheet(ctx, "fresh-token", 580.0, |ui| {
-        kit::sheet_title(ui, &title, Some(intro));
+    let mut connect = false;
+    let busy = app.ui.agent_setup.busy();
+    let saved = app
+        .ui
+        .agent_setup
+        .result
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .copied();
+    kit::sheet(ctx, "fresh-token", 480.0, |ui| {
+        kit::sheet_title(
+            ui,
+            &title,
+            Some("Let this agent use credentials through Apassy."),
+        );
         kit::sheet_body(ui, |ui| {
-            let heading = ui.label(kit::text("Token", Font::Headline).color(kit::LABEL));
-            kit::code_block(ui, token, 1).labelled_by(heading.id);
-            ui.add_space(12.0);
-            setup_guidance(&mut app.ui, ui, true);
-            let mut manual = app.ui.is_expanded("manual-mcp-config");
-            kit::disclosure(ui, &mut manual, "Other hosts: manual MCP configuration");
-            app.ui.set_expanded("manual-mcp-config", manual);
-            if manual {
-                let adapter = std::env::current_exe()
-                    .ok()
-                    .and_then(|p| p.parent().map(|p| p.join("apassy-mcp")))
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "apassy-mcp".to_owned());
-                let config = zeroize::Zeroizing::new(serde_json::to_string_pretty(&serde_json::json!({
-                    "mcpServers": { "apassy": { "command": adapter, "env": { "APASSY_AGENT_TOKEN": token } } }
-                })).unwrap_or_default());
-                kit::code_block(ui, &config, 7);
+            if rotated {
                 kit::note(
                     ui,
-                    "Add this server to your host. Keep the token private. Manual MCP setup does not install the prompt hook.",
+                    "The old token does not work. Save the new settings for your host.",
                 );
             }
+            if let Some(host) = saved {
+                kit::tone_note(ui, "Setup saved.", Tone::Good);
+                kit::note(
+                    ui,
+                    format!(
+                        "Restart {}. Keep Apassy open and the vault unlocked.",
+                        host.name()
+                    ),
+                );
+                kit::note(
+                    ui,
+                    if host == super::agent_setup::Host::Codex {
+                        "Use /hooks to trust the Apassy hook. Use /mcp to check the Apassy connection."
+                    } else {
+                        "Use /mcp to check the Apassy connection."
+                    },
+                );
+                kit::note(ui, "The connection and first request are not checked.");
+                kit::note(
+                    ui,
+                    "Next, open a credential and set its Environment variable. Give this agent access to the credential and project.",
+                );
+                kit::note(
+                    ui,
+                    "Open Advanced setup for the sandbox command and test steps.",
+                );
+            } else {
+                let host = super::agent_setup::Host::from_index(app.ui.setup_host);
+                ui.add_enabled_ui(!busy, |ui| {
+                    kit::picker(
+                        ui,
+                        "fresh-setup-host",
+                        &mut app.ui.setup_host,
+                        &[(0, "Claude Code".to_owned()), (1, "Codex".to_owned())],
+                        host.name(),
+                        200.0,
+                    );
+                });
+                kit::note(
+                    ui,
+                    "Apassy keeps a copy of changed host settings. This step does not check the connection.",
+                );
+                if busy {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        kit::note(ui, "Please wait. Apassy will save the host settings.");
+                    });
+                }
+                if let Some(Err(error)) = &app.ui.agent_setup.result {
+                    kit::tone_note(ui, error, Tone::Critical);
+                }
+            }
+            ui.add_space(12.0);
+            kit::disclosure(ui, &mut app.ui.agent_setup.advanced, "Advanced setup");
+            if app.ui.agent_setup.advanced {
+                kit::note(ui, "Apassy shows this token one time. Keep it private.");
+                let heading = ui.label(kit::text("Token", Font::Headline).color(kit::LABEL));
+                kit::code_block(ui, token, 1).labelled_by(heading.id);
+                ui.add_enabled_ui(!busy, |ui| setup_guidance(&mut app.ui, ui, true));
+                let mut manual = app.ui.is_expanded("manual-mcp-config");
+                kit::disclosure(ui, &mut manual, "Other hosts: manual MCP configuration");
+                app.ui.set_expanded("manual-mcp-config", manual);
+                if manual {
+                    let adapter = std::env::current_exe()
+                        .ok()
+                        .and_then(|p| p.parent().map(|p| p.join("apassy-mcp")))
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "apassy-mcp".to_owned());
+                    let config = zeroize::Zeroizing::new(serde_json::to_string_pretty(&serde_json::json!({
+                        "mcpServers": { "apassy": { "command": adapter, "env": { "APASSY_AGENT_TOKEN": token } } }
+                    })).unwrap_or_default());
+                    kit::code_block(ui, &config, 7);
+                    kit::note(
+                        ui,
+                        "Add this server to your host. Keep the token private. Manual MCP setup does not install the prompt hook.",
+                    );
+                }
+                if saved.is_none() {
+                    ui.add_enabled_ui(!busy, |ui| {
+                        dismiss = kit::button(ui, "I saved the token", Style::Link).clicked();
+                    });
+                }
+            }
         });
-        ui.add_space(8.0);
         kit::sheet_buttons(
             ui,
             |_| {},
             |ui| {
-                dismiss = kit::button(ui, "I saved the token", Style::Prominent).clicked();
+                if saved.is_some() {
+                    dismiss = kit::button(ui, "Done", Style::Prominent).clicked();
+                } else {
+                    let host = super::agent_setup::Host::from_index(app.ui.setup_host);
+                    ui.add_enabled_ui(!busy, |ui| {
+                        connect =
+                            kit::button(ui, &format!("Connect {}", host.name()), Style::Prominent)
+                                .clicked();
+                    });
+                }
             },
         );
     });
+    if connect {
+        app.ui.agent_setup.start(
+            super::agent_setup::Host::from_index(app.ui.setup_host),
+            token,
+            ctx,
+        );
+    }
     if dismiss {
         app.owner_ui.fresh_token = None;
+        app.ui.agent_setup = Default::default();
         app.set_ok("The token is hidden. Apassy cannot show it again.");
     }
 }
@@ -1398,6 +1495,34 @@ fn rule_form(ui: &mut egui::Ui, form: &mut RuleForm) -> bool {
 #[cfg(test)]
 mod onboarding_tests {
     use super::*;
+
+    #[test]
+    fn setup_result_does_not_consume_the_fresh_token() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut app, _) = super::super::owner_tests::unlocked_app_with_item(&dir);
+        let (agent, token) = app.owner_ui.session.register_agent("Codex").unwrap();
+        app.owner_ui.fresh_token = Some(FreshToken {
+            agent_name: agent.name,
+            token,
+            rotated: false,
+        });
+        let ctx = egui::Context::default();
+        let draw = |app: &mut DesktopApp| {
+            ctx.run_ui(egui::RawInput::default(), |ui| {
+                draw_fresh_token(app, ui.ctx())
+            })
+            .drop_without_applying_deltas();
+        };
+        draw(&mut app);
+        assert_eq!(app.ui.setup_host, 1);
+        assert!(!app.ui.agent_setup.advanced);
+        app.ui.agent_setup.result = Some(Err("Test failure".to_owned()));
+        draw(&mut app);
+        assert!(app.owner_ui.fresh_token.is_some());
+        app.ui.agent_setup.result = Some(Ok(super::super::agent_setup::Host::Codex));
+        draw(&mut app);
+        assert!(app.owner_ui.fresh_token.is_some());
+    }
 
     #[test]
     fn host_choice_prepares_registration_and_reuses_an_existing_agent() {

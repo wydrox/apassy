@@ -34,7 +34,7 @@ With an unlocked vault, the sidebar has these views:
 | View | What it has |
 | --- | --- |
 | Credentials | "Get started" on top until each step is done: add a credential, let agents use it (variable and declaration), register an agent, give it access, and connect the host for a first request. Each step reads the vault; only the next open step has a button, and "Hide" hides the list for this vault, also after a restart (`ui.json` in the data folder keeps it per vault). With no credential, the list replaces the empty state. A vault from another Mac shows "Use this vault on this Mac" there instead (Claude Code, Codex, CLI, or Skip), because its agents stay on the other Mac. Then the list with search, a filter, and an order. By name, the list groups by kind. Each row shows its agent state: "Needs review", "No declaration", the variable name, or the environment. A recency order shows the time instead. "Add" opens a sheet: first the kind, then the name, the secret, the service, the project, and optional custom details. |
-| Credential page | The secret (masked, "Show" needs the owner check), the details, the custom details, and "Agent access": Declaration, Environment variable, and Connector (API keys). Then "History" (the changes) and "Agent requests" (the access log). "Edit", "Archive credential…", and "Delete credential…" are here too. |
+| Credential page | Back, the credential name, its kind, and Edit stay above the scrolling body. Each field has its label above a left-aligned value. The secret is masked; Show needs the owner check. Agent access, History and requests, More actions, and Import data open on demand. Each credential keeps its own scroll position. |
 | Agents | The list with the token state. "Register" opens a sheet, then the token sheet shows the token and the MCP configuration one time. The agent page has the token expiry, "Rotate token…", "What it can see" (switch "All credentials, without values"), "Process access" for each credential with a variable and "Give access to several credentials…", "API operations" as switches, "Recent requests" (the access log of the agent), and "Revoke agent…". A process grant works in "This folder" or "Any folder" ([ADR 0012](../adr/0012-agent-visibility-and-access-requests.md)). |
 | Activity | "Access requests" of agents with "Give access…" and "Deny", then "Waiting for you" with an approval card for each waiting run, then "Inbox" and "All requests". The sidebar count has the waiting runs and the open requests. |
 | Learning | Three figures for the last 7 days, the ask rate chart for 14 days with the 10% goal line, the remembered patterns, and the automatic decisions (8, then "Show all"). "Advanced" has the calibration and the candidate model. Before the first decision, the view shows one empty state instead. |
@@ -62,6 +62,14 @@ The "Environment variable" sheet has "What the program gets": "Placeholder" or "
 ### Custom details
 
 A credential can have up to 10 custom details: a label (31 bytes or fewer, any language) and a value. A hidden detail is masked like the secret. "Show" needs the owner check, and a hidden detail can back an environment variable. In the edit sheet, a blank hidden value keeps the stored value, also after a rename. The switch "Hidden" moves a typed value between the visible field and the secret field.
+
+### Credential navigation and values
+
+The header stays visible when the body scrolls. A long credential name wraps within the header, with room for Edit. Back returns to the credential list. Opening a different credential starts its body at the top.
+
+Field values use dark monospaced text below their labels. Show and Hide stay beside the label. A long revealed value has its own scroll area, at most 180 points high. The owner check and the clipboard rules stay the same.
+
+Agent access, History and requests, More actions, and Import data start closed. More actions contains Archive and Delete. Import data contains the source item ID and source JSON from a 1Password transfer. Review, archive, and sync conflict notices stay visible.
 
 ### Timelines
 

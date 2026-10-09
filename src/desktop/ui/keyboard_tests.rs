@@ -17,11 +17,13 @@ const SIZE: Vec2 = Vec2::new(1180.0, 760.0);
 /// names of the last frame.
 struct Window {
     ctx: egui::Context,
+    size: Vec2,
     time: f64,
     names: HashMap<accesskit::NodeId, String>,
     text: String,
     /// Each painted text and its position.
     texts: Vec<(String, Pos2)>,
+    text_bounds: Vec<(String, Rect, Rect)>,
     focus_strokes: usize,
 }
 
@@ -31,10 +33,12 @@ impl Window {
         ctx.enable_accesskit();
         Self {
             ctx,
+            size: SIZE,
             time: 0.0,
             names: HashMap::new(),
             text: String::new(),
             texts: Vec::new(),
+            text_bounds: Vec::new(),
             focus_strokes: 0,
         }
     }
@@ -43,7 +47,7 @@ impl Window {
         // A scroll to the focus is animated. A tenth of a second per frame lets it end.
         self.time += 0.1;
         let input = RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SIZE)),
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)),
             time: Some(self.time),
             events,
             ..Default::default()
@@ -58,10 +62,12 @@ impl Window {
         }
         self.text.clear();
         self.texts.clear();
+        self.text_bounds.clear();
         self.focus_strokes = 0;
         for clipped in &output.shapes {
             super::owner_tests::collect(&clipped.shape, &mut self.text);
             collect_positions(&clipped.shape, &mut self.texts);
+            collect_text_bounds(&clipped.shape, clipped.clip_rect, &mut self.text_bounds);
             count_focus_strokes(&clipped.shape, &mut self.focus_strokes);
         }
         output.drop_without_applying_deltas();
@@ -99,6 +105,10 @@ impl Window {
             .find(|(text, _)| text == needle)
             .map(|(_, pos)| *pos + Vec2::new(4.0, 4.0))
             .unwrap_or_else(|| panic!("\"{needle}\" is not on the screen: {}", self.text));
+        self.click_at(app, at);
+    }
+
+    fn click_at(&mut self, app: &mut DesktopApp, at: Pos2) {
         let button = |pressed| Event::PointerButton {
             pos: at,
             button: egui::PointerButton::Primary,
@@ -113,7 +123,7 @@ impl Window {
 
     /// Scroll the page to its end with the mouse wheel.
     fn wheel_to_end(&mut self, app: &mut DesktopApp) {
-        let at = Pos2::new(SIZE.x * 0.6, SIZE.y * 0.5);
+        let at = Pos2::new(self.size.x * 0.6, self.size.y * 0.5);
         self.frame(app, vec![Event::PointerMoved(at)]);
         let wheel = Event::MouseWheel {
             unit: egui::MouseWheelUnit::Page,
@@ -169,6 +179,26 @@ impl Window {
         let id = self.focused()?;
         self.ctx.read_response(id).map(|response| response.rect)
     }
+
+    /// The rightmost exact text match separates the Back control from the sidebar.
+    fn visible_text_rect(&self, needle: &str) -> Rect {
+        let (_, rect, clip) = self
+            .text_bounds
+            .iter()
+            .filter(|(text, _, _)| text == needle)
+            .max_by(|(_, a, _), (_, b, _)| a.left().total_cmp(&b.left()))
+            .unwrap_or_else(|| panic!("\"{needle}\" is not painted: {}", self.text));
+        let screen = Rect::from_min_size(Pos2::ZERO, self.size);
+        assert!(
+            screen.contains_rect(*rect),
+            "{needle} is outside the window: {rect:?}"
+        );
+        assert!(
+            clip.contains_rect(*rect),
+            "{needle} is clipped: {rect:?}, {clip:?}"
+        );
+        *rect
+    }
 }
 
 /// The top of the first painted text that is `needle`. egui does not paint a label
@@ -191,6 +221,20 @@ fn collect_positions(shape: &egui::Shape, out: &mut Vec<(String, Pos2)>) {
     }
 }
 
+fn collect_text_bounds(shape: &egui::Shape, clip: Rect, out: &mut Vec<(String, Rect, Rect)>) {
+    match shape {
+        egui::Shape::Text(text) => out.push((
+            text.galley.text().to_owned(),
+            Rect::from_min_size(text.pos, text.galley.size()),
+            clip,
+        )),
+        egui::Shape::Vec(nested) => nested
+            .iter()
+            .for_each(|inner| collect_text_bounds(inner, clip, out)),
+        _ => {}
+    }
+}
+
 fn count_focus_strokes(shape: &egui::Shape, count: &mut usize) {
     match shape {
         egui::Shape::Rect(rect) if rect.stroke == kit::FOCUS_STROKE => *count += 1,
@@ -206,6 +250,106 @@ fn open_item(dir: &TempDir) -> (DesktopApp, u64) {
     app.select_item(id.to_string());
     app.view = OwnerView::Item;
     (app, id)
+}
+
+fn add_long_credential(app: &mut DesktopApp, name: &str) -> u64 {
+    let notes = (0..80)
+        .map(|index| format!("Synthetic note {index:02}: Check the test account before use."))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let details = (0..10)
+        .map(|index| crate::desktop::model::DetailDraft {
+            label: format!("Test field {index}"),
+            value: format!("synthetic-value-{index}"),
+            ..Default::default()
+        })
+        .collect();
+    let mut secrets = crate::desktop::owner_store::SecretForm::default();
+    secrets.token = "synthetic-header-test-token".to_owned();
+    app.owner_ui
+        .session
+        .add(
+            &crate::desktop::ItemDraft {
+                name: name.to_owned(),
+                notes,
+                details,
+                ..Default::default()
+            },
+            &secrets,
+        )
+        .expect("add synthetic credential")
+        .id
+}
+
+#[test]
+fn credential_header_stays_visible_after_body_scroll_and_back_returns_to_list() {
+    for size in [SIZE, Vec2::new(900.0, 600.0)] {
+        let dir = TempDir::new().expect("temp dir");
+        let (mut app, _) = unlocked_app_with_item(&dir);
+        let name = "Long synthetic credential for the fixed header";
+        let id = add_long_credential(&mut app, name);
+        app.select_item(id.to_string());
+        let mut window = Window::new();
+        window.size = size;
+        window.idle(&mut app);
+        let header = ["Credentials", name, "Edit"].map(|label| window.visible_text_rect(label));
+        assert!(header[0].left() > 216.0, "Credentials is the Back control");
+        assert!(header.iter().all(|rect| rect.top() >= kit::TITLE_BAR));
+        let secret_top = text_top(&window, "Secret").expect("the body starts at Secret");
+        assert!(text_top(&window, "More actions").is_none());
+
+        window.wheel_to_end(&mut app);
+        assert!(
+            text_top(&window, "Secret").is_none_or(|top| top < secret_top - 100.0),
+            "the wheel must move the body at {size:?}"
+        );
+        window.visible_text_rect("More actions");
+        for (label, before) in ["Credentials", name, "Edit"].into_iter().zip(header) {
+            let after = window.visible_text_rect(label);
+            assert_eq!(
+                before, after,
+                "{label} moved after the body scrolled at {size:?}"
+            );
+        }
+        let back = window.visible_text_rect("Credentials");
+        window.click_at(&mut app, back.center());
+        assert_eq!(
+            app.view,
+            OwnerView::Vault,
+            "Back returns to the credential list"
+        );
+    }
+}
+
+#[test]
+fn a_different_credential_starts_with_its_body_at_the_top() {
+    for size in [SIZE, Vec2::new(900.0, 600.0)] {
+        let dir = TempDir::new().expect("temp dir");
+        let (mut app, _) = unlocked_app_with_item(&dir);
+        let first = add_long_credential(&mut app, "First synthetic credential");
+        let second = add_long_credential(&mut app, "Second synthetic credential");
+        app.select_item(first.to_string());
+        let mut window = Window::new();
+        window.size = size;
+        window.idle(&mut app);
+        let first_top = text_top(&window, "Secret").expect("the first body starts at Secret");
+        window.wheel_to_end(&mut app);
+        assert!(
+            text_top(&window, "Secret").is_none(),
+            "the first body scrolled"
+        );
+        window.visible_text_rect("More actions");
+
+        app.select_item(second.to_string());
+        window.idle(&mut app);
+        window.visible_text_rect("Second synthetic credential");
+        let second_top = text_top(&window, "Secret").expect("the second body starts at Secret");
+        assert!(
+            (first_top - second_top).abs() < 1.0,
+            "the new item inherited a scroll offset"
+        );
+        assert!(text_top(&window, "More actions").is_none());
+    }
 }
 
 #[test]
@@ -521,6 +665,7 @@ fn a_delete_alert_starts_on_cancel() {
     let (mut app, id) = open_item(&dir);
     let mut window = Window::new();
     window.idle(&mut app);
+    window.click(&mut app, "More actions");
     window.tab_to(&mut app, "Delete credential…", 60);
     window.press(&mut app, Key::Enter, Modifiers::NONE);
     assert!(app.pending_delete, "the alert is open");
@@ -539,6 +684,7 @@ fn return_on_a_delete_alert_opened_with_the_pointer_cancels() {
     let (mut app, id) = open_item(&dir);
     let mut window = Window::new();
     window.idle(&mut app);
+    window.click(&mut app, "More actions");
     for key in [Key::Enter, Key::Space] {
         window.wheel_to_end(&mut app);
         window.click(&mut app, "Delete credential…");
@@ -778,6 +924,7 @@ fn the_focus_survives_a_control_that_goes_away() {
     let (mut app, _) = open_item(&dir);
     let mut window = Window::new();
     window.idle(&mut app);
+    window.click(&mut app, "More actions");
     window.tab_to(&mut app, "Archive credential…", 60);
     window.press(&mut app, Key::Enter, Modifiers::NONE);
     assert_eq!(app.ui.sheet, Some(Sheet::ArchiveItem));

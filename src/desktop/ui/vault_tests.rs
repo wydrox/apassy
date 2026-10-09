@@ -758,6 +758,8 @@ fn a_switch_ends_waiting_runs_and_clears_the_state_of_the_vault() {
         .register_agent("Beta agent")
         .expect("register");
     let beta_secret = beta_token.expose().to_owned();
+    app.ui.agent_setup.advanced = true;
+    app.ui.agent_setup.result = Some(Err("Previous setup error".to_owned()));
     app.owner_ui.fresh_token = Some(FreshToken {
         agent_name: agent.name.clone(),
         token: beta_token,
@@ -846,6 +848,8 @@ fn a_switch_ends_waiting_runs_and_clears_the_state_of_the_vault() {
     );
 
     // Nothing of Beta stays.
+    assert!(!app.ui.agent_setup.advanced);
+    assert!(app.ui.agent_setup.result.is_none());
     assert_eq!(app.view, OwnerView::Vault);
     assert!(app.selected_item_id.is_none());
     assert!(app.search.is_empty());

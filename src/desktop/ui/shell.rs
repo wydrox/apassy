@@ -349,11 +349,30 @@ fn content(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
     );
     ui.add_space(kit::TITLE_BAR + 6.0);
     let ctx = ui.ctx().clone();
+    #[cfg(feature = "vault")]
+    if app.view == OwnerView::Item {
+        kit::column_with_bottom_space(ui, PAGE_WIDTH, 12.0, |ui| {
+            super::focus::page_start(&mut app.ui.focus, &ctx);
+            super::items::draw_detail_header(app, ui);
+        });
+        ui.separator();
+        ui.add_space(12.0);
+    }
+    // A credential has its own scroll position. Opening a different credential
+    // must not start at the bottom of the previous one's details.
+    let item_scroll = (app.view == OwnerView::Item)
+        .then(|| app.selected_item_id.clone())
+        .flatten();
     ScrollArea::vertical()
-        .id_salt(("page", app.view))
+        .id_salt(("page", app.view, item_scroll))
         .auto_shrink([false, false])
         .show(ui, |ui| {
             kit::column(ui, PAGE_WIDTH, |ui| {
+                #[cfg(feature = "vault")]
+                if app.view != OwnerView::Item {
+                    super::focus::page_start(&mut app.ui.focus, &ctx);
+                }
+                #[cfg(not(feature = "vault"))]
                 super::focus::page_start(&mut app.ui.focus, &ctx);
                 // The scope keeps the IDs of the page the same when the banner comes
                 // or goes, so the focus stays on its control.
@@ -378,7 +397,7 @@ fn content(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
 fn page(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {
     match app.view {
         OwnerView::Vault => super::items::draw_list(app, ui),
-        OwnerView::Item => super::items::draw_detail(app, ui),
+        OwnerView::Item => super::items::draw_detail_body(app, ui),
         OwnerView::Agents => super::agents::draw(app, ui),
         OwnerView::Activity => super::activity::draw(app, ui, pending),
         OwnerView::Learning => crate::desktop::learning_ui::draw(app, ui),

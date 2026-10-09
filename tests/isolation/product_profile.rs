@@ -261,15 +261,17 @@ fn dev_helper() -> &'static Path {
         } else {
             "x86_64"
         };
+        let building = building_path(&out);
         let status = Command::new("xcrun")
             .args(["--sdk", "macosx", "swiftc", "-Onone", "-swift-version", "5"])
             .args(["-D", "APASSY_HELPER_DEV"])
             .args(["-target", &format!("{arch}-apple-macos15.0"), "-o"])
-            .arg(&out)
+            .arg(&building)
             .args(&sources)
             .status()
             .expect("run xcrun: the helper checks need Xcode. This is a failure, not a skip.");
         assert!(status.success(), "swiftc failed to build the helper");
+        std::fs::rename(&building, &out).expect("put the helper in place");
         out
     })
 }
@@ -297,17 +299,28 @@ fn dev_notifier() -> &'static Path {
         } else {
             "x86_64"
         };
+        let building = building_path(&out);
         let status = Command::new("xcrun")
             .args(["--sdk", "macosx", "swiftc", "-Onone", "-swift-version", "5"])
             .args(["-D", "APASSY_HELPER_DEV"])
             .args(["-target", &format!("{arch}-apple-macos15.0"), "-o"])
-            .arg(&out)
+            .arg(&building)
             .args(&sources)
             .status()
             .expect("run xcrun: the notifier checks need Xcode. This is a failure, not a skip.");
         assert!(status.success(), "swiftc failed to build the notifier");
+        std::fs::rename(&building, &out).expect("put the notifier in place");
         out
     })
+}
+
+/// A name next to `out` for this process to build into. A test runner that runs each
+/// test in its own process (cargo-nextest) builds the helpers in several processes at
+/// once: each one writes its own file and renames it over `out`, so a test that copies
+/// `out` always reads a whole program.
+fn building_path(out: &Path) -> PathBuf {
+    let name = out.file_name().expect("file name").to_string_lossy();
+    out.with_file_name(format!(".{name}.{}.building", std::process::id()))
 }
 
 /// The programs of the app bundle, relative to `Apassy.app`.
