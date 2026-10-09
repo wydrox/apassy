@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Apassy",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "Fill, save, and create logins from the Apassy app on your Mac. Each fill asks for Touch ID or your passphrase.",
   "minimum_chrome_version": "120",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwsxDLdkV5maKRgt5CTPTeTJqV5KhIgW/h8pBjOjjJFKXQAGKzmU0IgYkcoeqV367XiUKpFu7u4D/YYV4UajQIMVMHDtSMT7FPlFkLNVURrOl5xhSGqTcVcfyZFsAoj42H6t4yHOvbMQF6ozyD8fN1xOYkGZArcJ/nuU6D5uXVP/nNnigxF92ziJGxmw8r1LKCFcvPg2o8VspfOGaMoTFnjFjrgANMW8wIWw0F3ECokvxqkMrnbisT44NQxuy9XSBDVNcPVlCyMET5SlNXt28VpzYGwE6tnBZWvJZkoiaArnrmXSdwjJMcFieMLGOnd3zZKAui26H/8QI+m6Ic9hstQIDAQAB",

@@ -47,6 +47,15 @@ jobs:
       - name: Fetch Cargo dependencies
         run: cargo fetch --locked
 
+      - name: Check the browser extension version
+        run: |
+          app_version="$(awk -F'"' '/^version = / {print $2; exit}' Cargo.toml)"
+          extension_version="$(plutil -extract version raw -o - extension/manifest.json)"
+          if [ "$app_version" != "$extension_version" ]; then
+            echo "::error::The browser extension version must match Cargo.toml."
+            exit 1
+          fi
+
       - name: Check Rust format
         run: cargo fmt --all -- --check
 
