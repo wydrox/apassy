@@ -6,11 +6,10 @@ It works in Helium, Google Chrome, Chromium, Brave, Microsoft Edge, Arc, and Viv
 
 ## Load it
 
-1. In Apassy, open Settings > General > Browser extension and click Connect next to the browser. Apassy opens the extensions page of the browser and shows this folder in the Finder. (`apassy setup browser` in Terminal connects every browser at once.)
-2. On the extensions page, turn on Developer mode.
-3. Drag the folder `browser-extension` from the Finder onto the page, or click "Load unpacked" and choose `/Applications/Apassy.app/Contents/Resources/browser-extension`.
+1. In Apassy, open Settings > General > Browser extension and click Connect next to the browser. (`apassy setup browser` in Terminal connects every browser at once.)
+2. Apassy opens the extension in the Chrome Web Store: <https://chromewebstore.google.com/detail/apassy/bbnpgnjnfjlbgggmpnhejpmfjhmmhiih>. Click Add to Chrome.
 
-An update of Apassy updates the folder. The browser loads the new version at its next start.
+Without the store: turn on Developer mode on the extensions page of the browser, and drag this folder (`/Applications/Apassy.app/Contents/Resources/browser-extension`) onto the page. An update of Apassy updates the folder. The browser loads the new version at its next start.
 
 To fill a login, click the Apassy button in the toolbar, or press Command-Shift-L. Choose a login, then confirm with Touch ID or your passphrase in Apassy.
 

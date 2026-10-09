@@ -1,12 +1,10 @@
 ---
 import AppleIcon from "./AppleIcon.astro";
 import Mark from "./Mark.astro";
-import { DOWNLOAD, REPO } from "../lib/site";
-// ADR 0021 and docs/operations/browser.md. The extension ships inside Apassy.app and
-// loads from there, where the agent profile denies every change. There is no separate
-// download of the extension: a copy in a folder that agents can write to would let an
-// agent change the code that receives a password. A browser takes an extension from
-// another app only through the Chrome Web Store, so the first load needs Developer mode.
+import { DOWNLOAD, EXTENSION_STORE, REPO } from "../lib/site";
+// ADR 0021 and docs/operations/browser.md. The extension is in the Chrome Web Store
+// (D5). It works only with the Apassy app, which keeps the logins and asks for Touch ID,
+// so the steps start with the app.
 const GUIDE = `${REPO}/blob/main/docs/operations/browser.md`;
 const SOURCE = `${REPO}/tree/main/extension`;
 ---
@@ -68,33 +66,35 @@ const SOURCE = `${REPO}/tree/main/extension`;
         <ol>
           <li>
             <p class="step-head">Download Apassy for macOS</p>
-            <p class="step-text">The extension comes with the app. It does nothing on its own: Apassy keeps the logins and asks for Touch ID.</p>
+            <p class="step-text">The extension works with the app: Apassy keeps the logins and asks for Touch ID.</p>
             <a class="btn btn-primary step-btn" href={DOWNLOAD} data-download>
               <AppleIcon />
               <span data-soon="Coming soon for macOS">Download for macOS</span>
             </a>
           </li>
           <li>
+            <p class="step-head">Add the extension</p>
+            <p class="step-text">Get Apassy from the Chrome Web Store, in each browser that you use.</p>
+            <a class="btn btn-secondary step-btn" href={EXTENSION_STORE}>
+              <Mark class="store-mark" />
+              <span>Add to Chrome</span>
+            </a>
+          </li>
+          <li>
             <p class="step-head">Connect your browser</p>
             <p class="step-text">
               In Apassy, open <b>Settings › General › Browser extension</b> and click <b>Connect</b> next to your browser.
-              Apassy opens its extensions page and shows the extension folder in the Finder.
-            </p>
-          </li>
-          <li>
-            <p class="step-head">Add the extension</p>
-            <p class="step-text">
-              On the extensions page, turn on <b>Developer mode</b>, then drag the folder <code>browser-extension</code> onto
-              the page. Pin the Apassy button, and open a login page.
+              Pin the Apassy button, and open a login page.
             </p>
           </li>
         </ol>
         <p class="why">
-          Why Developer mode? A browser adds an extension from another app only through the Chrome Web Store. Until
-          Apassy is there, the extension loads from inside Apassy.app, where agents can't change it. An update of the
-          app updates the extension.
+          The extension talks only to the Apassy app on your Mac. It has no servers, makes no network requests, and keeps
+          nothing in the browser.
         </p>
         <p class="links">
+          <a href={EXTENSION_STORE}>Chrome Web Store</a>
+          <span aria-hidden="true">·</span>
           <a href={GUIDE}>Read the install guide</a>
           <span aria-hidden="true">·</span>
           <a href={SOURCE}>Read the source</a>
@@ -200,8 +200,10 @@ const SOURCE = `${REPO}/tree/main/extension`;
   .step-text b { color: var(--ink); font-weight: 600; }
   .step-text code { font-size: 13.5px; }
   .step-btn { margin-top: 12px; }
+  .step-btn :global(.store-mark) { width: 16px; height: auto; }
   .why { margin-top: 26px; font-size: 13.5px; color: var(--faint); text-wrap: pretty; }
-  .links { margin-top: 14px; display: flex; gap: 8px; font-size: 14px; font-weight: 500; }
+  .links { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 6px 8px; font-size: 14px; font-weight: 500; }
+  .links a { white-space: nowrap; }
   .links a { color: var(--blue); }
   .links a:hover { text-decoration: underline; }
 

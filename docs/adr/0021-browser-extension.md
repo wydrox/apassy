@@ -86,10 +86,11 @@ Accepted by the owner on 2026-10-06 (D3). The wire is in [browser-v1](../contrac
 
 ### 8. Install
 
-- Settings > General > Browser extension lists the Chromium browsers on this Mac. "Connect" writes the host manifest of one browser, opens its extensions page, and shows the extension folder in the Finder. The owner turns on Developer mode and drags the folder onto the page, once for each browser. The section shows when the extension last sent a request, so the owner sees that it works.
+- Settings > General > Browser extension lists the Chromium browsers on this Mac. "Connect" writes the host manifest of one browser and opens the page of the extension in the Chrome Web Store in it, where the owner clicks "Add to Chrome", once for each browser. The section shows when the extension last sent a request, so the owner sees that it works.
 - `apassy setup browser` writes the same manifests from a terminal: Helium, Google Chrome, Chromium, Brave, Microsoft Edge, Arc, and Vivaldi. `--browser NAME` selects one.
 - Both refuse a source build. The manifest names `apassy-browser-host` of the running Apassy.app and allows only the fixed extension ID.
-- A browser installs an extension from another app only through the Chrome Web Store or an enterprise policy, so the Developer mode step stays until D5. An update of Apassy.app updates the folder, and the browser loads it at its next start.
+- The folder in Apassy.app has the same extension with the same ID, for a load with Developer mode. A browser installs an extension from another app only through the Chrome Web Store or an enterprise policy. An update of Apassy.app updates the folder, and the browser loads it at its next start.
+- A store install is checked by the browser: a changed file of the extension on disk disables it.
 
 ## What this does not protect
 
@@ -110,7 +111,7 @@ Accepted by the owner on 2026-10-06 (D3). The wire is in [browser-v1](../contrac
 | D2 | An inline menu in the login fields of the page. It needs a content script on every site. | Later. |
 | D3 | A password generator and "save this login". | Decided on 2026-10-06: section 7. A change of the password of an existing login is later. |
 | D4 | Frames of another origin. | Later, with a host permission for the frame. |
-| D5 | Distribution in the Chrome Web Store. Its ID goes into `allowed_origins` next to the unpacked ID. It would make the install one click: "Connect" would open the store page. | Accepted by the owner on 2026-10-08 ("opublikuj w Chrome Web Store"). The package, the listing, the images, and the privacy policy are ready; the owner makes the item: [chrome-web-store](../operations/chrome-web-store.md). |
+| D5 | Distribution in the Chrome Web Store. Its ID goes into `allowed_origins` next to the unpacked ID. It would make the install one click: "Connect" would open the store page. | Accepted by the owner on 2026-10-08 ("opublikuj w Chrome Web Store"). Published on 2026-10-09 after one rejection for keywords in the description: <https://chromewebstore.google.com/detail/apassy/bbnpgnjnfjlbgggmpnhejpmfjhmmhiih>. "Connect" opens it. [chrome-web-store](../operations/chrome-web-store.md). |
 | D6 | One-time passwords (TOTP) of a login. | Later, with the same owner check. |
 
 ## Relation to other records

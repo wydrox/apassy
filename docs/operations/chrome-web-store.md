@@ -44,10 +44,10 @@ Done on 2026-10-08: the draft item is `bbnpgnjnfjlbgggmpnhejpmfjhmmhiih` of the 
 - **Language:** English.
 - **Homepage:** <https://apassy.wyderka.cc>. **Support:** <https://github.com/wydrox/apassy/issues>.
 - **Images:** the 128 × 128 icon, the 440 × 280 promotional tile, and the screenshots (1280 × 800) in `design/store/chrome-web-store/`.
-- **Description:**
+- **Description** (the first upload was rejected on 2026-10-08 for "excessive keywords" because the text listed six browsers; name no browsers in it):
 
   ```text
-  Apassy is a credential manager for you and your AI agents, on your Mac. This extension brings your Apassy logins to Chrome, Helium, Brave, Edge, Arc, and Vivaldi.
+  Apassy is a credential manager for you and your AI agents, on your Mac. This extension fills your Apassy logins into websites in your browser.
 
   • Fill: open the extension on a login page, choose a login, and confirm with Touch ID or your Apassy passphrase. Apassy asks every time, so nothing fills without you, not even an agent that drives your browser.
   • Save this login: type your username and password on a page, click Save this login, and confirm. The login goes into your Apassy vault with the address of the site.
@@ -89,5 +89,7 @@ Done on 2026-10-08: the draft item is `bbnpgnjnfjlbgggmpnhejpmfjhmmhiih` of the 
 
 ## 6. After the approval
 
-- Put the store address in Settings > General > Browser extension and on the site, so "Connect" and the site offer "Add to Chrome" in place of Developer mode. Update ADR 0021, D5, and [browser](browser.md), section 1.
+Published on 2026-10-09: <https://chromewebstore.google.com/detail/apassy/bbnpgnjnfjlbgggmpnhejpmfjhmmhiih>. The first submission was rejected for "excessive keywords" (section 3); the second passed.
+
+- Done: "Connect" in Settings > General > Browser extension, `apassy setup browser`, and the site open the store page and offer "Add to Chrome" (`install::STORE_URL`, `EXTENSION_STORE` in `site/src/lib/site.ts`).
 - New versions: build the package with the new version of `Cargo.toml` and upload it. The store needs a higher version for each upload. The Chrome Web Store API v2 can upload and publish with a service account. CI can do it after the owner gives the service account access to the publisher and stores its key as a GitHub secret.

@@ -4,6 +4,10 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Changed
+
+- The browser extension is in the Chrome Web Store: <https://chromewebstore.google.com/detail/apassy/bbnpgnjnfjlbgggmpnhejpmfjhmmhiih>. "Connect" in Settings > General > Browser extension opens its page in the browser, so the install is "Add to Chrome" in place of Developer mode. `apassy setup browser` and the site point there too. The folder in Apassy.app still works with Developer mode.
+
 ## [0.3.5] - 2026-10-09
 
 ### Added

@@ -1,10 +1,9 @@
 //! Settings > General > Browser extension (ADR 0021): connect a browser with one click.
 //!
-//! "Connect" writes the host manifest of the browser ([`crate::browser::install`]),
-//! opens the extensions page of the browser, and shows the extension folder in the
-//! Finder. The owner then turns on Developer mode and drags the folder onto the page,
-//! once for each browser. A browser takes an extension from another app only through
-//! the Chrome Web Store (ADR 0021, D5).
+//! "Connect" writes the host manifest of the browser ([`crate::browser::install`]) and
+//! opens the page of the extension in the Chrome Web Store in that browser, where the
+//! owner clicks "Add to Chrome" (ADR 0021, D5). The folder in Apassy.app stays for a
+//! load with Developer mode.
 
 use std::time::{Duration, Instant};
 
@@ -21,7 +20,7 @@ pub(super) const SOURCE_BUILD_NOTE: &str = "The browser extension works with Apa
 enum Action {
     Connect,
     Disconnect,
-    OpenPage,
+    OpenStore,
 }
 
 /// When the extension last talked to the app.
@@ -82,10 +81,10 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                                 if kit::small_button(ui, "Disconnect", Style::Bordered).clicked() {
                                     action = Some((Action::Disconnect, browser));
                                 }
-                                if kit::small_button(ui, "Extensions page", Style::Bordered)
+                                if kit::small_button(ui, "Get the extension", Style::Bordered)
                                     .clicked()
                                 {
-                                    action = Some((Action::OpenPage, browser));
+                                    action = Some((Action::OpenStore, browser));
                                 }
                             } else if kit::button(ui, "Connect", Style::Prominent).clicked() {
                                 action = Some((Action::Connect, browser));
@@ -100,7 +99,11 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             s.row(|ui| {
                 kit::note(
                     ui,
-                    "Connect opens the extensions page of the browser and the extension folder in the Finder. On the page, turn on Developer mode, then drag the folder browser-extension onto the page. Do it once for each browser.",
+                    "Connect opens the Apassy page of the Chrome Web Store in the browser. Click Add to Chrome there. Do it once for each browser.",
+                );
+                kit::note(
+                    ui,
+                    "To load the extension from Apassy.app instead, turn on Developer mode on the extensions page of the browser and drag the folder browser-extension onto it.",
                 );
                 show_folder =
                     kit::small_button(ui, "Show the extension folder", Style::Bordered).clicked();
@@ -136,17 +139,17 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 app.set_err(format!("{} is not connected: {err}", browser.name));
                 return;
             }
-            let opened = install::open_extensions_page(browser).is_ok();
-            reveal_folder(app, &bundle);
+            let opened = install::open_store_page(browser).is_ok();
             app.set_ok(if opened {
                 format!(
-                    "{} is connected. On its extensions page, turn on Developer mode, then drag the folder browser-extension onto the page.",
+                    "{} is connected. Click Add to Chrome on the page that opened in it.",
                     browser.name
                 )
             } else {
                 format!(
-                    "{} is connected. Open chrome://extensions in it, turn on Developer mode, then drag the folder browser-extension onto the page.",
-                    browser.name
+                    "{} is connected. Open {} in it and click Add to Chrome.",
+                    browser.name,
+                    install::STORE_URL
                 )
             });
         }
@@ -157,13 +160,14 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             )),
             Err(err) => app.set_err(format!("{} is still connected: {err}", browser.name)),
         },
-        Some((Action::OpenPage, browser)) if install::open_extensions_page(browser).is_err() => {
+        Some((Action::OpenStore, browser)) if install::open_store_page(browser).is_err() => {
             app.set_err(format!(
-                "{} did not open. Open chrome://extensions in it.",
-                browser.name
+                "{} did not open. Open {} in it.",
+                browser.name,
+                install::STORE_URL
             ));
         }
-        Some((Action::OpenPage, _)) | None => {}
+        Some((Action::OpenStore, _)) | None => {}
     }
 }
 

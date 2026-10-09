@@ -2,6 +2,8 @@ import cargo from "../../../Cargo.toml?raw";
 
 export const REPO = "https://github.com/wydrox/apassy";
 export const DOWNLOAD = "/download/Apassy.dmg";
+/** The browser extension in the Chrome Web Store (ADR 0021, D5). */
+export const EXTENSION_STORE = "https://chromewebstore.google.com/detail/apassy/bbnpgnjnfjlbgggmpnhejpmfjhmmhiih";
 /** The version of the app, from Cargo.toml at build time. */
 export const VERSION = cargo.match(/^version = "([^"]+)"/m)?.[1] ?? "";
 /** The installer (scripts/install.sh, served by src/pages/install.sh.ts). */
