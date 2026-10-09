@@ -1,7 +1,7 @@
 //! The fresh-token sheet saves host settings on a worker. A saved configuration
 //! is not evidence of an MCP connection. Child output never reaches the UI/logs.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -219,15 +219,35 @@ fn run_command(
     cancel: &AtomicBool,
     timeout: Duration,
 ) -> Result<(), String> {
+    use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::process::CommandExt;
     // Tokens are small. Keep the pipe write below its capacity, even if a
     // broken executable never reads stdin, so the timeout remains effective.
     if token.len() > 1024 || !token.starts_with("apassy_agt_") {
         return Err("The token is not valid. Use Advanced setup.".to_owned());
     }
+    // This file contains only fixed status codes. It holds no child output.
+    // The temporary directory and file stay private to this setup run.
+    let status_directory = tempfile::tempdir()
+        .map_err(|_| "Cannot prepare the setup result. Try again.".to_owned())?;
+    let status_path = status_directory.path().join("status");
+    let status_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&status_path)
+        .map_err(|_| "Cannot prepare the setup result. Try again.".to_owned())?;
+    drop(status_file);
     // Never put the token in arguments, the environment, or child output.
     command
-        .args(["setup", host.id(), "--token-stdin", "--write"])
+        .args([
+            "setup",
+            host.id(),
+            "--token-stdin",
+            "--write",
+            "--desktop-status",
+        ])
+        .arg(&status_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -259,12 +279,76 @@ fn run_command(
         }
         match child.try_wait() {
             Ok(Some(status)) if status.success() => return Ok(()),
-            Ok(Some(_)) => return Err("Setup failed. Some settings can be saved. Check the host installation, then try again or use Advanced setup.".to_owned()),
+            Ok(Some(_)) => return Err(read_failure_status(&status_path).to_owned()),
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
             Err(_) => {
                 stop(&mut child);
                 return Err("Cannot check the setup result. Use Advanced setup.".to_owned());
             }
+        }
+    }
+}
+
+/// Read a small allowlisted code. Never display file contents, even if a host
+/// executable writes a token or an arbitrary diagnostic into this file.
+fn read_failure_status(path: &Path) -> &'static str {
+    let mut code = Zeroizing::new(Vec::new());
+    let read = std::fs::File::open(path).and_then(|file| file.take(65).read_to_end(&mut code));
+    if read.is_err() {
+        return failure_message(b"");
+    }
+    failure_message(&code)
+}
+
+fn failure_message(code: &[u8]) -> &'static str {
+    match code {
+        b"missing_mcp" => {
+            "The app package needs apassy-mcp. Reinstall the complete Apassy.app package."
+        }
+        b"missing_hook" => {
+            "The app package needs apassy-hook. Reinstall the complete Apassy.app package."
+        }
+        b"home_missing" => "Cannot find your home folder. Use Advanced setup.",
+        b"config_read" => {
+            "Cannot read the host configuration. Check file permissions in Advanced setup."
+        }
+        b"config_invalid" => {
+            "The host configuration is not valid. Correct it in Advanced setup, then try again."
+        }
+        b"config_conflict" => {
+            "The host has different Apassy settings. Check the existing server in Advanced setup before you try again."
+        }
+        b"config_write" => {
+            "Cannot save the host configuration. Some settings can be saved. Check file permissions in Advanced setup."
+        }
+        b"wrapper_write" => {
+            "Cannot save the Apassy scripts. Check file permissions for ~/.config/apassy, then try again."
+        }
+        b"hooks_read" => {
+            "Cannot read the host hook settings. Some settings can be saved. Check file permissions in Advanced setup."
+        }
+        b"hooks_invalid" => {
+            "The host hook settings are not valid JSON. Some settings can be saved. Correct the hook settings in Advanced setup."
+        }
+        b"hooks_disabled" => {
+            "The host settings disable all hooks. Enable hooks in the host settings, then try again."
+        }
+        b"hooks_write" => {
+            "Cannot save the host hook settings. Some settings can be saved. Check file permissions in Advanced setup."
+        }
+        b"host_start" => {
+            "Cannot start Claude Code. Check the installation with claude --version, then try again."
+        }
+        b"host_failed" => {
+            "Claude Code did not add the Apassy server. Check claude mcp list and the existing server in Advanced setup."
+        }
+        b"host_verify" => {
+            "Claude Code did not save the expected Apassy server. Check the existing server in Advanced setup."
+        }
+        b"token_read" => "Cannot read the agent token. Try again or use Advanced setup.",
+        b"token_invalid" => "The agent token is not valid. Create a new token, then try again.",
+        _ => {
+            "Setup failed. Some settings can be saved. Check the host installation, then try again or use Advanced setup."
         }
     }
 }
@@ -299,10 +383,22 @@ mod tests {
             Duration::from_secs(2),
         )
         .unwrap();
+        let args = std::fs::read_to_string(home.path().join("args")).unwrap();
+        let args: Vec<_> = args.lines().collect();
         assert_eq!(
-            std::fs::read_to_string(home.path().join("args")).unwrap(),
-            "setup\nclaude\n--token-stdin\n--write\n"
+            &args[..5],
+            &[
+                "setup",
+                "claude",
+                "--token-stdin",
+                "--write",
+                "--desktop-status"
+            ]
         );
+        assert_eq!(args.len(), 6);
+        assert!(Path::new(args[5]).is_absolute());
+        assert!(!Path::new(args[5]).exists());
+        assert!(!args[5].contains("test-secret"));
         assert_eq!(
             std::fs::read_to_string(home.path().join("token")).unwrap(),
             "apassy_agt_test-secret"
@@ -327,6 +423,57 @@ mod tests {
         assert!(error.contains("Setup failed"));
         assert!(error.contains("Advanced setup"));
         assert!(!error.contains("test-secret"));
+    }
+
+    #[test]
+    fn runner_reports_only_allowlisted_failure_status() {
+        for code in [
+            "config_conflict",
+            "config_write",
+            "hooks_invalid",
+            "hooks_disabled",
+            "host_failed",
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let command = fake_cli(
+                home.path(),
+                &format!(
+                    "token=$(cat)\nprintf '%s' \"$token\" >&2\nprintf '%s' '{code}' > \"$6\"\nexit 1"
+                ),
+            );
+            let error = run_command(
+                command,
+                Host::Codex,
+                Zeroizing::new("apassy_agt_test-secret".to_owned()),
+                &AtomicBool::new(false),
+                Duration::from_secs(2),
+            )
+            .unwrap_err();
+            assert_eq!(error, failure_message(code.as_bytes()));
+            assert!(!error.contains("test-secret"));
+        }
+    }
+
+    #[test]
+    fn runner_discards_sensitive_and_oversized_status_contents() {
+        let home = tempfile::tempdir().unwrap();
+        for body in [
+            "token=$(cat)\nprintf '%s' \"$token\" > \"$6\"\nexit 1",
+            "cat > /dev/null\nprintf '%s' 'config_conflict\napassy_agt_secret' > \"$6\"\nexit 1",
+            "cat > /dev/null\ni=0; while [ $i -lt 200 ]; do printf 'x' >> \"$6\"; i=$((i + 1)); done\nexit 1",
+        ] {
+            let command = fake_cli(home.path(), body);
+            let error = run_command(
+                command,
+                Host::Codex,
+                Zeroizing::new("apassy_agt_test-secret".to_owned()),
+                &AtomicBool::new(false),
+                Duration::from_secs(2),
+            )
+            .unwrap_err();
+            assert_eq!(error, failure_message(b""));
+            assert!(!error.contains("test-secret"));
+        }
     }
 
     #[test]

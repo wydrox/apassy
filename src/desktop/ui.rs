@@ -7,6 +7,8 @@
 #[cfg(feature = "vault")]
 mod activity;
 #[cfg(feature = "vault")]
+mod agent_onboarding;
+#[cfg(feature = "vault")]
 mod agent_setup;
 #[cfg(feature = "vault")]
 mod agents;
@@ -264,6 +266,8 @@ pub(crate) struct UiState {
     pub(crate) setup_host: usize,
     #[cfg(feature = "vault")]
     agent_setup: agent_setup::SetupState,
+    #[cfg(feature = "vault")]
+    agent_onboarding: agent_onboarding::State,
     /// The newly adopted vault whose local agent setup is still offered.
     #[cfg(feature = "vault")]
     pub(crate) setup_vault: Option<String>,
@@ -404,6 +408,7 @@ pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
             // A lock also hides a token that the owner did not dismiss.
             app.owner_ui.fresh_token = None;
             app.ui.agent_setup = Default::default();
+            app.ui.agent_onboarding = Default::default();
             app.ui.sheet = None;
             app.import.forget();
             start::draw(app, ui);
@@ -899,8 +904,9 @@ mod tests {
         app.view = OwnerView::Agents;
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
         assert!(text.contains("UI agent"), "{text}");
-        assert!(text.contains("Active"), "{text}");
+        assert!(text.contains("Token valid"), "{text}");
         app.owner_ui.selected_agent = Some(agent.id);
+        app.ui.set_expanded("agent-advanced-details", true);
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
         assert!(text.contains("Expires"), "{text}");
         assert!(

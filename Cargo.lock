@@ -179,6 +179,7 @@ dependencies = [
  "socket2",
  "tempfile",
  "time",
+ "toml_edit",
  "zeroize",
 ]
 

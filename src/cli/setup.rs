@@ -69,7 +69,10 @@ fn home() -> Result<PathBuf, Failure> {
     std::env::var_os("HOME")
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
-        .ok_or_else(|| Failure::Other("HOME is not set.".to_owned()))
+        .ok_or_else(|| Failure::App {
+            code: "home_missing".to_owned(),
+            message: "HOME is not set.".to_owned(),
+        })
 }
 
 /// The directory of this program. `apassy-mcp` and `apassy-hook` are next to it in
@@ -118,7 +121,87 @@ fn write_wrapper(path: &Path, program: &Path, token: &SecretText) -> Result<(), 
     Ok(())
 }
 
+/// Fixed status codes let the desktop explain errors without reading child output.
+/// The private status file is created by the desktop, never by this command.
 pub fn run(cli: &Cli, mut args: Args) -> Outcome {
+    let status_path = args.value(&["--desktop-status"])?;
+    let mut status = status_path
+        .map(|path| open_desktop_status(Path::new(&path)))
+        .transpose()?;
+    let result = run_host(cli, args);
+    if let Some(status) = status.as_mut() {
+        status.write_all(status_code(&result).as_bytes())?;
+    }
+    // Keep the existing public CLI error format and exit behavior.
+    let code = status_code(&result);
+    result.map_err(|failure| match failure {
+        Failure::App { message, .. } if code != "failed" => Failure::Other(message),
+        failure => failure,
+    })
+}
+
+/// Accept only an existing empty private file. Do not create or truncate a path
+/// supplied as an argument, and reject symlinks before any write.
+fn open_desktop_status(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::MetadataExt;
+    let before = fs::symlink_metadata(path)?;
+    if !before.is_file() || before.len() != 0 || before.permissions().mode() & 0o777 != 0o600 {
+        return Err(std::io::Error::other(
+            "The desktop status file is not an empty private file.",
+        ));
+    }
+    let file = fs::OpenOptions::new().write(true).open(path)?;
+    let after = file.metadata()?;
+    if before.dev() != after.dev() || before.ino() != after.ino() || after.len() != 0 {
+        return Err(std::io::Error::other("The desktop status file changed."));
+    }
+    Ok(file)
+}
+
+fn status_code(result: &Outcome) -> &'static str {
+    match result {
+        Ok(()) => "ok",
+        Err(Failure::App { code, .. }) => match code.as_str() {
+            "missing_mcp" => "missing_mcp",
+            "missing_hook" => "missing_hook",
+            "home_missing" => "home_missing",
+            "config_read" => "config_read",
+            "config_invalid" => "config_invalid",
+            "config_conflict" => "config_conflict",
+            "config_write" => "config_write",
+            "wrapper_write" => "wrapper_write",
+            "hooks_read" => "hooks_read",
+            "hooks_invalid" => "hooks_invalid",
+            "hooks_disabled" => "hooks_disabled",
+            "hooks_write" => "hooks_write",
+            "host_start" => "host_start",
+            "host_failed" => "host_failed",
+            "host_verify" => "host_verify",
+            "token_read" => "token_read",
+            "token_invalid" => "token_invalid",
+            _ => "failed",
+        },
+        Err(Failure::Usage(usage))
+            if usage.0 == "The token on stdin does not start with apassy_agt_." =>
+        {
+            "token_invalid"
+        }
+        Err(_) => "failed",
+    }
+}
+
+/// Add an allowlisted stage to an existing failure while keeping CLI messages.
+fn at_stage(failure: Failure, code: &str) -> Failure {
+    match failure {
+        Failure::Other(message) => Failure::App {
+            code: code.to_owned(),
+            message,
+        },
+        failure => failure,
+    }
+}
+
+fn run_host(cli: &Cli, mut args: Args) -> Outcome {
     let host = match args.required("host: claude, codex, or browser")?.as_str() {
         "claude" | "claude-code" => Host::Claude,
         "codex" => Host::Codex,
@@ -138,12 +221,14 @@ pub fn run(cli: &Cli, mut args: Args) -> Outcome {
     let hook_path = args.value(&["--hook"])?;
     args.finish()?;
 
-    let mcp = sibling("apassy-mcp").ok_or_else(|| {
-        Failure::Other(
-            "apassy-mcp is not next to this program. Use the apassy program inside Apassy.app."
-                .to_owned(),
-        )
-    })?;
+    let mcp = sibling("apassy-mcp")
+        .ok_or_else(|| {
+            Failure::Other(
+                "apassy-mcp is not next to this program. Use the apassy program inside Apassy.app."
+                    .to_owned(),
+            )
+        })
+        .map_err(|failure| at_stage(failure, "missing_mcp"))?;
     // The release app and source build keep the hook next to apassy.
     let hook = match hook_path {
         Some(path) => {
@@ -159,10 +244,10 @@ pub fn run(cli: &Cli, mut args: Args) -> Outcome {
         None => sibling("apassy-hook"),
     };
     if write && hook.is_none() {
-        return Err(Failure::Other(
+        return Err(at_stage(Failure::Other(
             "The prompt hook is missing. Reinstall the complete Apassy.app package, then try setup again."
                 .to_owned(),
-        ));
+        ), "missing_hook"));
     }
     let dir = home()?.join(".config").join("apassy");
     let mcp_wrapper = dir.join(format!("apassy-mcp-{}.sh", host.id()));
@@ -179,7 +264,8 @@ pub fn run(cli: &Cli, mut args: Args) -> Outcome {
     }
 
     let token = if token_stdin {
-        let token = terminal::read_stdin_secret()?;
+        let token =
+            terminal::read_stdin_secret().map_err(|error| at_stage(error.into(), "token_read"))?;
         if !token
             .expose()
             .starts_with(crate::owner::wire::AGENT_TOKEN_PREFIX)
@@ -200,12 +286,14 @@ pub fn run(cli: &Cli, mut args: Args) -> Outcome {
         }
     };
 
-    write_wrapper(&mcp_wrapper, &mcp, &token)?;
+    write_wrapper(&mcp_wrapper, &mcp, &token)
+        .map_err(|failure| at_stage(failure, "wrapper_write"))?;
     println!("Wrote {} (mode 0700).", mcp_wrapper.display());
     let hook_wrapper = match &hook {
         Some(hook) => {
             let wrapper = dir.join(format!("apassy-hook-{}.sh", host.id()));
-            write_wrapper(&wrapper, hook, &token)?;
+            write_wrapper(&wrapper, hook, &token)
+                .map_err(|failure| at_stage(failure, "wrapper_write"))?;
             println!("Wrote {} (mode 0700).", wrapper.display());
             Some(wrapper)
         }
@@ -221,7 +309,8 @@ pub fn run(cli: &Cli, mut args: Args) -> Outcome {
     match host {
         Host::Claude => claude(&mcp_wrapper, hook_wrapper.as_deref(), write),
         Host::Codex => codex(&mcp_wrapper, hook_wrapper.as_deref(), write),
-    }?;
+    }
+    .map_err(|failure| at_stage(failure, "config_write"))?;
     println!(
         "{}. The host connection and first request are not checked.",
         if write {
@@ -269,44 +358,59 @@ fn hook_entry(hook_wrapper: &Path) -> serde_json::Value {
 fn merge_hook(file: &Path, hook_wrapper: &Path) -> Result<bool, Failure> {
     let mut root: serde_json::Value = match fs::read_to_string(file) {
         Ok(text) if !text.trim().is_empty() => serde_json::from_str(&text).map_err(|err| {
-            Failure::Other(format!(
-                "{} is not valid JSON ({err}). Nothing was changed.",
-                file.display()
-            ))
+            at_stage(
+                Failure::Other(format!(
+                    "{} is not valid JSON ({err}). Nothing was changed.",
+                    file.display()
+                )),
+                "hooks_invalid",
+            )
         })?,
         Ok(_) => serde_json::json!({}),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
-        Err(err) => return Err(err.into()),
+        Err(err) => return Err(at_stage(err.into(), "hooks_read")),
     };
     if root
         .get("disableAllHooks")
         .and_then(serde_json::Value::as_bool)
         == Some(true)
     {
-        return Err(Failure::Other(
-            "The host settings disable all hooks. Check Advanced setup before you try again."
-                .to_owned(),
+        return Err(at_stage(
+            Failure::Other(
+                "The host settings disable all hooks. Check Advanced setup before you try again."
+                    .to_owned(),
+            ),
+            "hooks_disabled",
         ));
     }
-    let object = root
-        .as_object_mut()
-        .ok_or_else(|| Failure::Other(format!("{} is not a JSON object.", file.display())))?;
+    let object = root.as_object_mut().ok_or_else(|| {
+        at_stage(
+            Failure::Other(format!("{} is not a JSON object.", file.display())),
+            "hooks_invalid",
+        )
+    })?;
     let hooks = object
         .entry("hooks")
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
         .ok_or_else(|| {
-            Failure::Other(format!("\"hooks\" in {} is not an object.", file.display()))
+            at_stage(
+                Failure::Other(format!("\"hooks\" in {} is not an object.", file.display())),
+                "hooks_invalid",
+            )
         })?;
     let list = hooks
         .entry("UserPromptSubmit")
         .or_insert_with(|| serde_json::json!([]))
         .as_array_mut()
         .ok_or_else(|| {
-            Failure::Other(format!(
-                "\"UserPromptSubmit\" in {} is not a list.",
-                file.display()
-            ))
+            at_stage(
+                Failure::Other(format!(
+                    "\"UserPromptSubmit\" in {} is not a list.",
+                    file.display()
+                )),
+                "hooks_invalid",
+            )
         })?;
     let command = hook_wrapper.display().to_string();
     if list.iter().any(|entry| {
@@ -326,19 +430,19 @@ fn merge_hook(file: &Path, hook_wrapper: &Path) -> Result<bool, Failure> {
     list.push(hook_entry(hook_wrapper));
     if file.exists() {
         let backup = file.with_extension("json.before-apassy");
-        fs::copy(file, &backup)?;
+        fs::copy(file, &backup).map_err(|error| at_stage(error.into(), "hooks_write"))?;
         println!(
             "Saved a copy of {} as {}.",
             file.display(),
             backup.display()
         );
     } else if let Some(parent) = file.parent() {
-        fs::create_dir_all(parent)?;
+        fs::create_dir_all(parent).map_err(|error| at_stage(error.into(), "hooks_write"))?;
     }
     let mut pretty =
         serde_json::to_string_pretty(&root).map_err(|err| Failure::Other(err.to_string()))?;
     pretty.push('\n');
-    fs::write(file, pretty)?;
+    fs::write(file, pretty).map_err(|error| at_stage(error.into(), "hooks_write"))?;
     Ok(true)
 }
 
@@ -363,21 +467,32 @@ fn claude_server_present(config: &Path, mcp_wrapper: &Path) -> Result<bool, Fail
         return Ok(false);
     }
     let root: serde_json::Value = serde_json::from_str(&text).map_err(|_| {
-        Failure::Other(
-            "The Claude Code configuration is not valid JSON. Check Advanced setup.".to_owned(),
+        at_stage(
+            Failure::Other(
+                "The Claude Code configuration is not valid JSON. Check Advanced setup.".to_owned(),
+            ),
+            "config_invalid",
         )
     })?;
     let object = root.as_object().ok_or_else(|| {
-        Failure::Other(
-            "The Claude Code configuration is not a JSON object. Check Advanced setup.".to_owned(),
+        at_stage(
+            Failure::Other(
+                "The Claude Code configuration is not a JSON object. Check Advanced setup."
+                    .to_owned(),
+            ),
+            "config_invalid",
         )
     })?;
     let Some(servers) = object.get("mcpServers") else {
         return Ok(false);
     };
     let servers = servers.as_object().ok_or_else(|| {
-        Failure::Other(
-            "The Claude Code MCP configuration is not an object. Check Advanced setup.".to_owned(),
+        at_stage(
+            Failure::Other(
+                "The Claude Code MCP configuration is not an object. Check Advanced setup."
+                    .to_owned(),
+            ),
+            "config_invalid",
         )
     })?;
     let Some(server) = servers.get("apassy") else {
@@ -387,9 +502,9 @@ fn claude_server_present(config: &Path, mcp_wrapper: &Path) -> Result<bool, Fail
         "type": "stdio", "command": mcp_wrapper.display().to_string(), "args": [], "env": {}
     });
     if server != &expected {
-        return Err(Failure::Other(
+        return Err(at_stage(Failure::Other(
             "The existing Apassy server in Claude Code has different settings. Check Advanced setup before you try again.".to_owned(),
-        ));
+        ), "config_conflict"));
     }
     Ok(true)
 }
@@ -433,21 +548,27 @@ fn claude(mcp_wrapper: &Path, hook_wrapper: Option<&Path>, write: bool) -> Outco
                     println!("Added the MCP server apassy to Claude Code (user scope).")
                 }
                 Ok(status) => {
-                    return Err(Failure::Other(format!(
-                        "Claude Code setup failed ({status}). Check `claude mcp list`. If an old apassy server exists, remove it with `claude mcp remove apassy --scope user`, then run setup again."
-                    )));
+                    return Err(at_stage(
+                        Failure::Other(format!(
+                            "Claude Code setup failed ({status}). Check `claude mcp list`. If an old apassy server exists, remove it with `claude mcp remove apassy --scope user`, then run setup again."
+                        )),
+                        "host_failed",
+                    ));
                 }
                 Err(error) => {
-                    return Err(Failure::Other(format!(
-                        "Cannot start Claude Code: {error}. Make sure `claude --version` works in this terminal, then run setup again."
-                    )));
+                    return Err(at_stage(
+                        Failure::Other(format!(
+                            "Cannot start Claude Code: {error}. Make sure `claude --version` works in this terminal, then run setup again."
+                        )),
+                        "host_start",
+                    ));
                 }
             }
             if !claude_server_present(&config, mcp_wrapper)? {
-                return Err(Failure::Other(
+                return Err(at_stage(Failure::Other(
                     "Claude Code did not save the expected Apassy server. Check Advanced setup."
                         .to_owned(),
-                ));
+                ), "host_verify"));
             }
         }
         if let Some(hook_wrapper) = hook_wrapper {
@@ -486,7 +607,7 @@ fn read_optional_config(config: &Path) -> Result<String, Failure> {
     match fs::read_to_string(config) {
         Ok(text) => Ok(text),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(error) => Err(error.into()),
+        Err(error) => Err(at_stage(error.into(), "config_read")),
     }
 }
 
@@ -558,20 +679,60 @@ fn codex(mcp_wrapper: &Path, hook_wrapper: Option<&Path>, write: bool) -> Outcom
 /// for an existing server that points elsewhere or disables Apassy. Leave custom
 /// configuration for manual setup rather than silently replacing it.
 fn codex_section_present(current: &str, expected: &str) -> Result<bool, Failure> {
+    let document = current.parse::<toml_edit::DocumentMut>().map_err(|_| {
+        at_stage(
+            Failure::Other(
+                "The Codex configuration is not valid TOML. Check Advanced setup.".to_owned(),
+            ),
+            "config_invalid",
+        )
+    })?;
+    let Some(servers) = document.get("mcp_servers") else {
+        return codex_append_is_valid(current, expected);
+    };
+    let servers = servers.as_table_like().ok_or_else(|| {
+        at_stage(
+            Failure::Other(
+                "The Codex MCP configuration is not a table. Check Advanced setup.".to_owned(),
+            ),
+            "config_invalid",
+        )
+    })?;
+    let Some(server) = servers.get("apassy") else {
+        // Project paths, comments, and other values can contain "apassy".
+        // Only an actual server definition needs conflict checks.
+        return codex_append_is_valid(current, expected);
+    };
+    let conflict = || {
+        at_stage(Failure::Other(
+        "The existing Apassy server in Codex has different settings. Check it in Advanced setup before you try again."
+            .to_owned(),
+    ), "config_conflict")
+    };
+    let expected_document = expected
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|_| conflict())?;
+    let expected_server = &expected_document["mcp_servers"]["apassy"];
+    let Some(server) = server.as_table() else {
+        return Err(conflict());
+    };
+    if server.len() != 2
+        || server.get("command").and_then(toml_edit::Item::as_str)
+            != expected_server["command"].as_str()
+        || server
+            .get("tool_timeout_sec")
+            .and_then(toml_edit::Item::as_integer)
+            != expected_server["tool_timeout_sec"].as_integer()
+    {
+        return Err(conflict());
+    }
+    // Reuse only the managed block. Quoted, dotted, or inline definitions
+    // remain manual work, even if their values happen to match.
     let lines: Vec<_> = current.lines().map(str::trim).collect();
-    let Some(start) = lines
+    let start = lines
         .iter()
         .position(|line| *line == "[mcp_servers.apassy]")
-    else {
-        // A quoted/dotted/inline definition needs a TOML-aware manual merge.
-        if current.contains("apassy") {
-            return Err(Failure::Other(
-                "The Codex configuration already refers to Apassy. Check it in Advanced setup before you try again."
-                    .to_owned(),
-            ));
-        }
-        return Ok(false);
-    };
+        .ok_or_else(conflict)?;
     let end = lines[start + 1..]
         .iter()
         .position(|line| line.starts_with('['))
@@ -582,16 +743,25 @@ fn codex_section_present(current: &str, expected: &str) -> Result<bool, Failure>
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .collect();
     let expected: Vec<_> = expected.lines().map(str::trim).collect();
-    let other_apassy_section = lines[end..]
-        .iter()
-        .any(|line| line.starts_with('[') && line.contains("apassy"));
-    if actual != expected || other_apassy_section {
-        return Err(Failure::Other(
-            "The existing Apassy server in Codex has different settings. Check it in Advanced setup before you try again."
-                .to_owned(),
-        ));
+    if actual != expected {
+        return Err(conflict());
     }
     Ok(true)
+}
+
+/// A valid input can still reject an appended table, for example when
+/// `mcp_servers` is an inline table. Check the complete result before a config write.
+fn codex_append_is_valid(current: &str, expected: &str) -> Result<bool, Failure> {
+    let appended = zeroize::Zeroizing::new(format!("{current}\n\n{expected}"));
+    appended.parse::<toml_edit::DocumentMut>().map_err(|_| {
+        at_stage(
+            Failure::Other(
+                "The existing Codex settings cannot accept the Apassy server table. Check Advanced setup before you try again.".to_owned(),
+            ),
+            "config_conflict",
+        )
+    })?;
+    Ok(false)
 }
 
 #[cfg(all(test, feature = "vault"))]
@@ -689,6 +859,168 @@ mod tests {
         ] {
             assert!(codex_section_present(&different, expected).is_err());
         }
+    }
+
+    #[test]
+    fn codex_setup_allows_unrelated_apassy_references() {
+        let expected = codex_section(Path::new("/fixture/apassy-mcp-codex.sh"));
+        for unrelated in [
+            "# apassy server is not installed\nmodel = \"test\"\n",
+            "[projects.\"/Users/fixture/Dev/apassy\"]\ntrust_level = \"trusted\"\n",
+            "[mcp_servers.other]\ncommand = \"/fixture/apassy-helper\"\n",
+        ] {
+            assert!(!codex_section_present(&unrelated, &expected).unwrap());
+            let current = format!("{unrelated}\n{expected}");
+            assert!(codex_section_present(&current, &expected).unwrap());
+            if unrelated.starts_with('[') {
+                let current = format!("{expected}\n{unrelated}");
+                assert!(codex_section_present(&current, &expected).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn codex_setup_rejects_noncanonical_servers_and_invalid_toml() {
+        let expected = codex_section(Path::new("/fixture/apassy-mcp-codex.sh"));
+        for custom in [
+            "[mcp_servers.\"apassy\"]\ncommand = \"other\"\n",
+            "mcp_servers.apassy.command = \"other\"\n",
+            "mcp_servers = { apassy = { command = \"other\" } }\n",
+            "[mcp_servers.apassy.env]\nSECRET = \"canary-secret\"\n",
+            "[mcp_servers.apassy]\ncommand = \"unterminated\n",
+            "mcp_servers = 7\n",
+        ] {
+            assert!(codex_section_present(&custom, &expected).is_err());
+        }
+    }
+
+    #[test]
+    fn codex_setup_rejects_inline_parent_tables_before_an_invalid_append() {
+        let expected = codex_section(Path::new("/fixture/apassy-mcp-codex.sh"));
+        for original in [
+            "mcp_servers = {}\n",
+            "mcp_servers = { other = { command = \"/fixture/apassy-helper\" } }\n",
+        ] {
+            assert!(original.parse::<toml_edit::DocumentMut>().is_ok());
+            let failure = codex_section_present(original, &expected).unwrap_err();
+            assert_eq!(status_code(&Err(failure)), "config_conflict");
+        }
+    }
+
+    #[test]
+    fn codex_setup_allows_appendable_dotted_and_normal_parent_tables() {
+        let expected = codex_section(Path::new("/fixture/apassy-mcp-codex.sh"));
+        for original in [
+            "mcp_servers.other.command = \"/fixture/other\"\n",
+            "mcp_servers.other = { command = \"/fixture/other\" }\n",
+            "[mcp_servers]\n[mcp_servers.other]\ncommand = \"/fixture/other\"\n",
+        ] {
+            assert!(!codex_section_present(original, &expected).unwrap());
+            let appended = format!("{original}\n\n{expected}");
+            let document = appended.parse::<toml_edit::DocumentMut>().unwrap();
+            assert_eq!(
+                document["mcp_servers"]["other"]["command"].as_str(),
+                Some("/fixture/other")
+            );
+            assert_eq!(
+                document["mcp_servers"]["apassy"]["command"].as_str(),
+                Some("/fixture/apassy-mcp-codex.sh")
+            );
+        }
+    }
+
+    #[test]
+    fn desktop_status_refuses_to_replace_existing_data_or_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let status = dir.path().join("status");
+        fs::write(&status, "apassy_agt_canary-secret").unwrap();
+        fs::set_permissions(&status, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(open_desktop_status(&status).is_err());
+        assert_eq!(
+            fs::read_to_string(&status).unwrap(),
+            "apassy_agt_canary-secret"
+        );
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&status, &link).unwrap();
+        assert!(open_desktop_status(&link).is_err());
+        fs::write(&status, "").unwrap();
+        open_desktop_status(&status)
+            .unwrap()
+            .write_all(b"config_conflict")
+            .unwrap();
+        assert_eq!(fs::read_to_string(&status).unwrap(), "config_conflict");
+        assert!(open_desktop_status(&dir.path().join("missing")).is_err());
+    }
+
+    #[test]
+    fn cli_writes_only_a_fixed_status_for_a_private_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let status = dir.path().join("status");
+        fs::write(&status, "").unwrap();
+        fs::set_permissions(&status, fs::Permissions::from_mode(0o600)).unwrap();
+        let cli = Cli {
+            socket: dir.path().join("owner.sock"),
+            json: false,
+            session: None,
+        };
+        let result = run(
+            &cli,
+            Args::new([
+                "apassy_agt_canary-secret".to_owned(),
+                "--desktop-status".to_owned(),
+                status.to_str().unwrap().to_owned(),
+            ]),
+        );
+        assert!(matches!(result, Err(Failure::Usage(_))));
+        assert_eq!(fs::read_to_string(&status).unwrap(), "failed");
+    }
+
+    #[test]
+    fn status_codes_discard_error_details_and_unknown_codes() {
+        assert_eq!(status_code(&Ok(())), "ok");
+        let failure = at_stage(
+            Failure::Other("apassy_agt_canary-secret".to_owned()),
+            "config_write",
+        );
+        assert_eq!(status_code(&Err(failure)), "config_write");
+        assert_eq!(
+            status_code(&Err(Failure::App {
+                code: "apassy_agt_canary-secret".to_owned(),
+                message: "private configuration".to_owned(),
+            })),
+            "failed"
+        );
+        assert_eq!(
+            status_code(&Err(Failure::Other("private configuration".to_owned()))),
+            "failed"
+        );
+    }
+
+    #[test]
+    fn hook_failures_have_fixed_status_codes_and_preserve_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks = dir.path().join("hooks.json");
+        let wrapper = Path::new("/fixture/apassy-hook.sh");
+        for (original, code) in [
+            ("not JSON apassy_agt_canary-secret", "hooks_invalid"),
+            ("[]", "hooks_invalid"),
+            (r#"{"hooks": []}"#, "hooks_invalid"),
+            (r#"{"hooks": {"UserPromptSubmit": {}}}"#, "hooks_invalid"),
+            (r#"{"disableAllHooks": true}"#, "hooks_disabled"),
+        ] {
+            fs::write(&hooks, original).unwrap();
+            let failure = merge_hook(&hooks, wrapper).unwrap_err();
+            assert_eq!(status_code(&Err(failure)), code);
+            assert_eq!(fs::read_to_string(&hooks).unwrap(), original);
+        }
+        assert_eq!(
+            status_code(&Err(merge_hook(dir.path(), wrapper).unwrap_err())),
+            "hooks_read"
+        );
+        assert_eq!(
+            status_code(&Err(read_optional_config(dir.path()).unwrap_err())),
+            "config_read"
+        );
     }
 
     #[test]

@@ -227,6 +227,7 @@ impl DesktopApp {
         ui.focus_search = false;
         ui.grant = Default::default();
         ui.agent_setup = Default::default();
+        ui.agent_onboarding = Default::default();
 
         let fields = &mut self.owner_ui;
         fields.edit_revision = 0;
