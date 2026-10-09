@@ -8,8 +8,33 @@ import Observation
 enum AutoFillOutcome {
     case password(ASPasswordCredential)
     case oneTimeCode(ASOneTimeCodeCredential)
+    case passkeyAssertion(ASPasskeyAssertionCredential)
+    case passkeyRegistration(ASPasskeyRegistrationCredential)
     case cancelled
+    /// The request cannot be done: a typed error of AuthenticationServices for iOS.
+    case failed(ASExtensionError)
     case configured
+}
+
+/// A passkey sign-in that iOS asked for: the website, the hash to sign, and the passkeys it
+/// accepts (all of the website when empty).
+struct PasskeyAssertionContext {
+    var rpID: String
+    var clientDataHash: Data
+    var allowed: [Data]
+    var extensions: PasskeyExtensionRequest
+}
+
+/// A new passkey that a website asked for.
+struct PasskeyRegistrationContext {
+    var rpID: String
+    var userName: String
+    var userDisplayName: String
+    var userHandle: Data
+    var clientDataHash: Data
+    var algorithms: [Int]
+    var excluded: [Data]
+    var extensions: PasskeyExtensionRequest
 }
 
 /// The vault of the extension: one per process, as `CoreVaultService` asks. iOS may
@@ -48,7 +73,15 @@ enum VaultSource {
 @Observable
 final class AutoFillModel {
     /// What iOS asked for.
-    enum Kind { case password, oneTimeCode }
+    enum Kind {
+        /// A login, from the list; with `assertion`, the passkeys of the website too.
+        case password
+        case oneTimeCode
+        /// A passkey that the owner picked in the passkey sheet of iOS.
+        case passkey
+        /// A new passkey for a website.
+        case registration
+    }
 
     enum Screen: Equatable {
         case loading
@@ -56,6 +89,8 @@ final class AutoFillModel {
         case message(String)
         case unlock
         case list
+        /// Where to save a new passkey.
+        case register
         case configuration
     }
 
@@ -80,6 +115,18 @@ final class AutoFillModel {
     private(set) var listMessage: String?
     var search = ""
 
+    // Passkeys.
+    /// The passkeys of the website that the request accepts.
+    private(set) var passkeyMatches: [PasskeyCandidate] = []
+    /// Why the passkeys of the website are not offered.
+    private(set) var passkeyMessage: String?
+    /// The new passkey: the website and the account.
+    private(set) var registrationSummary: (rpID: String, userName: String)?
+    /// Logins of the website without a passkey, which can take the new one.
+    private(set) var attachCandidates: [ItemRow] = []
+    /// The name of a new login for the passkey.
+    var newPasskeyTitle = ""
+
     private let finish: @MainActor (AutoFillOutcome) -> Void
     private var service: (any VaultService)?
     private var vaultID: String?
@@ -88,6 +135,12 @@ final class AutoFillModel {
     private var record: String?
     /// The username that the QuickType suggestion showed.
     private var recordUser: String?
+    private var assertion: PasskeyAssertionContext?
+    private var assertionAnswer = PasskeyExtensionRequest.Answer()
+    private var registration: PasskeyRegistrationContext?
+    private var registrationAnswer = PasskeyExtensionRequest.Answer()
+    /// The passkey of a direct request.
+    private var credentialID: Data?
     private var triedBiometry = false
     /// The request ended: no second fill, no second answer to iOS.
     private var done = false
@@ -113,6 +166,68 @@ final class AutoFillModel {
         recordUser = user
         use([serviceIdentifier])
         Task { await open() }
+    }
+
+    /// The passkey sheet of a website: its passkeys, then its logins. A request that fails a
+    /// check offers the logins only.
+    func startPasskeyList(for serviceIdentifiers: [ASCredentialServiceIdentifier], request: PasskeyAssertionContext) {
+        kind = .password
+        do {
+            assertionAnswer = try PasskeyRequestCheck.assertion(
+                rpID: request.rpID, credentialID: nil, clientDataHash: request.clientDataHash,
+                extensions: request.extensions)
+            assertion = request
+        } catch {
+            passkeyMessage = error.message
+        }
+        use(serviceIdentifiers.isEmpty ? [ASCredentialServiceIdentifier(identifier: request.rpID, type: .domain)] : serviceIdentifiers)
+        Task { await open() }
+    }
+
+    /// A passkey that the owner picked in the sheet of iOS: sign with it after the owner check.
+    func startPasskey(record: String?, credentialID: Data, request: PasskeyAssertionContext) {
+        kind = .passkey
+        self.record = record
+        do {
+            assertionAnswer = try PasskeyRequestCheck.assertion(
+                rpID: request.rpID, credentialID: credentialID, clientDataHash: request.clientDataHash,
+                extensions: request.extensions)
+        } catch {
+            fail(request: error)
+            return
+        }
+        self.credentialID = credentialID
+        assertion = PasskeyAssertionContext(
+            rpID: request.rpID, clientDataHash: request.clientDataHash, allowed: [credentialID],
+            extensions: request.extensions)
+        host = request.rpID
+        Task { await open() }
+    }
+
+    /// A website asks for a new passkey. A request that Apassy cannot answer fails at once,
+    /// before the vault opens.
+    func startRegistration(_ request: PasskeyRegistrationContext) {
+        kind = .registration
+        do {
+            registrationAnswer = try PasskeyRequestCheck.registration(
+                rpID: request.rpID, userHandle: request.userHandle, clientDataHash: request.clientDataHash,
+                algorithms: request.algorithms, extensions: request.extensions)
+        } catch {
+            fail(request: error)
+            return
+        }
+        registration = request
+        registrationSummary = (request.rpID, request.userName.isEmpty ? request.userDisplayName : request.userName)
+        newPasskeyTitle = request.rpID
+        host = request.rpID
+        Task { await open() }
+    }
+
+    /// The request fails a check: tell iOS why, with no vault opened.
+    private func fail(request error: PasskeyRequestError) {
+        guard !done else { return }
+        done = true
+        finish(.failed(ASExtensionError(.failed, userInfo: [ASExtensionLocalizedFailureReasonErrorKey: error.message])))
     }
 
     /// The owner turned Apassy on in Settings.
@@ -204,9 +319,13 @@ final class AutoFillModel {
         busy = true
         defer { busy = false }
         unlockMessage = nil
-        let reason =
-            kind == .oneTimeCode
-            ? "Unlock “\(vaultName)” to fill a one-time code." : "Unlock “\(vaultName)” to fill a login."
+        let reason: String
+        switch kind {
+        case .password: reason = "Unlock “\(vaultName)” to fill a login."
+        case .oneTimeCode: reason = "Unlock “\(vaultName)” to fill a one-time code."
+        case .passkey: reason = "Unlock “\(vaultName)” to sign in with a passkey."
+        case .registration: reason = "Unlock “\(vaultName)” to save a passkey."
+        }
         let stored: String
         do {
             stored = try await KeychainPassphraseStore().read(vaultID: vaultID, reason: reason)
@@ -256,16 +375,31 @@ final class AutoFillModel {
         await unlocked()
     }
 
-    /// After the owner check: fill the suggestion, or show the list.
+    /// After the owner check: fill the suggestion, sign, prepare a new passkey, or show the list.
+    /// The unlock of this request is the owner check of the passkey: Face ID reads the
+    /// passphrase with a new context, or the owner types it; nothing of an earlier request counts.
     private func unlocked() async {
         if await closeIfDone() { return }
+        switch kind {
+        case .passkey:
+            await signDirect()
+            return
+        case .registration:
+            await prepareRegistration()
+            return
+        case .password, .oneTimeCode: break
+        }
         if let service, let vaultID, let id = CredentialIdentitySync.itemID(of: record, vaultID: vaultID) {
             do {
                 // The suggestion names an item by its ID, which is local and may now be another
                 // login: fill only when the item has the username that the suggestion showed.
                 let item = try await service.item(id: id)
                 if await closeIfDone() { return }
-                if let user = recordUser, item.field(.username)?.value == user {
+                // A one-time code suggestion shows the username, or the title of a login without one.
+                let username = item.field(.username)?.value ?? ""
+                if let user = recordUser,
+                    username == user || (kind == .oneTimeCode && username.isEmpty && item.row.title == user)
+                {
                     try await fill(id)
                     return
                 }
@@ -285,6 +419,9 @@ final class AutoFillModel {
         guard let service else { return }
         do {
             let list = try await service.autofillList(domains: domains)
+            if let assertion {
+                passkeyMatches = try await service.passkeys(rpID: assertion.rpID, allowed: assertion.allowed)
+            }
             if await closeIfDone() { return }
             switch kind {
             case .password:
@@ -293,6 +430,9 @@ final class AutoFillModel {
             case .oneTimeCode:
                 matches = list.matches.filter(\.hasTotp)
                 others = list.others.filter(\.hasTotp)
+            case .passkey, .registration:
+                matches = []
+                others = []
             }
             screen = .list
         } catch {
@@ -322,6 +462,145 @@ final class AutoFillModel {
         }
     }
 
+    // MARK: - Passkeys
+
+    /// Sign with a passkey of the list.
+    func choose(_ passkey: PasskeyCandidate) async {
+        guard !busy, !done else { return }
+        busy = true
+        defer { busy = false }
+        listMessage = nil
+        do {
+            try await sign(passkey)
+        } catch {
+            listMessage = Self.text(of: error)
+        }
+    }
+
+    /// The passkey that the owner picked in the sheet of iOS. Its credential ID is the key: the
+    /// record identifier only names the item that had it when the app published it.
+    private func signDirect() async {
+        guard let service, let assertion, let credentialID else { return }
+        do {
+            let found = try await service.passkeys(rpID: assertion.rpID, allowed: [credentialID])
+            if await closeIfDone() { return }
+            guard let passkey = found.first(where: { $0.credentialID == credentialID }) else {
+                await close(.failed(ASExtensionError(.credentialIdentityNotFound)))
+                return
+            }
+            try await sign(passkey)
+        } catch {
+            await fail(error)
+        }
+    }
+
+    /// Sign the request's hash and hand the assertion to iOS. The vault is locked first.
+    private func sign(_ passkey: PasskeyCandidate) async throws {
+        guard let service, let assertion, !done else { return }
+        let signed = try await service.passkeyAssert(
+            PasskeyAssertionRequest(
+                id: passkey.id, rpID: assertion.rpID, credentialID: passkey.credentialID,
+                clientDataHash: assertion.clientDataHash))
+        await close(
+            .passkeyAssertion(
+                ASPasskeyAssertionCredential(
+                    userHandle: signed.userHandle, relyingParty: assertion.rpID, signature: signed.signature,
+                    clientDataHash: assertion.clientDataHash, authenticatorData: signed.authenticatorData,
+                    credentialID: signed.credentialID, extensionOutput: Self.output(assertionAnswer))))
+    }
+
+    /// Refuse a registration whose exclude list names a passkey of the vault, then offer where to
+    /// save the new one.
+    private func prepareRegistration() async {
+        guard let service, let registration else { return }
+        do {
+            if !registration.excluded.isEmpty,
+                !(try await service.passkeys(rpID: registration.rpID, allowed: registration.excluded)).isEmpty
+            {
+                await close(.failed(ASExtensionError(.matchedExcludedCredential)))
+                return
+            }
+            let rows = try await service.items(archived: .no)
+            if await closeIfDone() { return }
+            attachCandidates = rows.filter {
+                $0.kind == .login && !$0.hasPasskey && $0.conflictOf == nil
+                    && $0.websites.contains { Self.belongs($0, to: registration.rpID) }
+            }
+            screen = .register
+        } catch {
+            await fail(error)
+        }
+    }
+
+    /// Whether a website of a login is on the relying party or under it.
+    static func belongs(_ website: String, to rpID: String) -> Bool {
+        let text = website.contains("://") ? website : "https://\(website)"
+        guard var host = URL(string: text)?.host()?.lowercased() else { return false }
+        if host.hasSuffix(".") { host.removeLast() }
+        let rp = rpID.lowercased()
+        return host == rp || host.hasSuffix("." + rp)
+    }
+
+    /// Save the new passkey: in a new login, or in `login`.
+    func register(into login: ItemRow? = nil) async {
+        guard let service, let registration, let vaultID, !busy, !done else { return }
+        busy = true
+        defer { busy = false }
+        listMessage = nil
+        let title = newPasskeyTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            let created = try await service.passkeyRegister(
+                PasskeyRegistration(
+                    rpID: registration.rpID, userName: registration.userName,
+                    userDisplayName: registration.userDisplayName, userHandle: registration.userHandle,
+                    clientDataHash: registration.clientDataHash, algorithms: registration.algorithms,
+                    excluded: registration.excluded,
+                    attach: login.map { PasskeyRegistration.Attach(id: $0.id, revision: $0.revision) },
+                    title: title.isEmpty ? registration.rpID : title))
+            let identity = PasskeyIdentity(
+                id: created.id, rpID: registration.rpID,
+                userName: registration.userName.isEmpty ? registration.userDisplayName : registration.userName,
+                credentialID: created.credentialID, userHandle: registration.userHandle)
+            await Self.publish(identity, vaultID: vaultID)
+            await close(
+                .passkeyRegistration(
+                    ASPasskeyRegistrationCredential(
+                        relyingParty: registration.rpID, clientDataHash: registration.clientDataHash,
+                        credentialID: created.credentialID, attestationObject: created.attestationObject,
+                        extensionOutput: Self.output(registrationAnswer))))
+        } catch let error as VaultError where error.code == .excluded {
+            await close(.failed(ASExtensionError(.matchedExcludedCredential)))
+        } catch let error as VaultError where error.code == .unsupportedAlgorithm {
+            await close(.failed(ASExtensionError(.failed, userInfo: [ASExtensionLocalizedFailureReasonErrorKey: error.message])))
+        } catch {
+            listMessage = Self.text(of: error)
+        }
+    }
+
+    /// Tell iOS about the new passkey at once; the app replaces the whole list at its next unlock.
+    /// The identity store can be slow, so this waits 2 s at most.
+    private static func publish(_ identity: PasskeyIdentity, vaultID: String) async {
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await CredentialIdentitySync.add(identity, vaultID: vaultID) }
+            group.addTask { try? await Task.sleep(for: .seconds(2)) }
+            await group.next()
+            group.cancelAll()
+        }
+    }
+
+    /// The extension outputs: only "not supported" answers, or none.
+    private static func output(_ answer: PasskeyExtensionRequest.Answer) -> ASPasskeyAssertionCredentialExtensionOutput? {
+        if answer.largeBlobReadEmpty { return ASPasskeyAssertionCredentialExtensionOutput(largeBlob: .read(data: nil)) }
+        if answer.largeBlobWriteFailed { return ASPasskeyAssertionCredentialExtensionOutput(largeBlob: .write(success: false)) }
+        return nil
+    }
+
+    private static func output(_ answer: PasskeyExtensionRequest.Answer) -> ASPasskeyRegistrationCredentialExtensionOutput? {
+        guard answer.largeBlobUnsupported || answer.prfUnsupported else { return nil }
+        return ASPasskeyRegistrationCredentialExtensionOutput(
+            largeBlob: answer.largeBlobUnsupported ? .unsupported : nil, prf: answer.prfUnsupported ? .unsupported : nil)
+    }
+
     /// Read one credential and hand it to iOS. The vault is locked before iOS gets it.
     private func fill(_ id: UInt64) async throws {
         guard let service, !done else { return }
@@ -336,6 +615,8 @@ final class AutoFillModel {
             }
             let code = try await service.totp(id: id, field: field.name)
             await close(.oneTimeCode(ASOneTimeCodeCredential(code: code.code)))
+        case .passkey, .registration:
+            throw VaultError(.invalidInput, "This request needs a passkey.")
         }
     }
 

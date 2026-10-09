@@ -7,6 +7,7 @@ use apassy::vault::Vault;
 
 use super::errors::CoreResult;
 use super::items::{self, Archived, Row};
+use super::passkey;
 
 /// A host and a port, from a website value or a service identifier of iOS.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +99,11 @@ fn logins(vault: &Vault) -> CoreResult<Vec<Row>> {
         .collect())
 }
 
+/// A login that holds only a passkey has no password to fill.
+fn fills_password(row: &Row) -> bool {
+    row.has_password || !row.has_passkey
+}
+
 fn fill(row: &Row) -> Fill {
     Fill {
         id: row.id,
@@ -115,7 +121,7 @@ pub fn list(vault: &Vault, domains: &[String]) -> CoreResult<FillList> {
         .collect();
     let mut matches = Vec::new();
     let mut others = Vec::new();
-    for row in logins(vault)? {
+    for row in logins(vault)?.into_iter().filter(fills_password) {
         let hit = row
             .websites
             .iter()
@@ -138,27 +144,85 @@ pub struct Identity {
     pub host: String,
 }
 
-pub fn identities(vault: &Vault) -> CoreResult<Vec<Identity>> {
-    let mut out = Vec::new();
+/// A login with a one-time password for the QuickType bar: no code, no seed.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct CodeIdentity {
+    pub id: u64,
+    pub title: String,
+    pub username: String,
+    pub host: String,
+}
+
+/// The identities of the vault (contract section 8): the logins with a password, the
+/// passkeys, and the logins with a one-time password. None holds a secret.
+///
+/// The wire shape of `credential_identities`, one entry per host of a login:
+///
+/// ```json
+/// {"identities": [{"id": 1, "username": "u", "host": "example.com"}],
+///  "passkeys":   [{"id": 2, "title": "t", "rp_id": "example.com", "user_name": "u",
+///                  "user_display_name": "U", "credential_id": "<b64>", "user_handle": "<b64>"}],
+///  "totp":       [{"id": 1, "title": "t", "username": "u", "host": "example.com"}]}
+/// ```
+///
+/// `totp` lists each login whose row has a code (`has_totp`: a one-time password field by
+/// its label, including a custom label with an explicit `otpauth://totp/` URI), once per
+/// host, and a login without a website gives no entry. `identities` leaves out a login
+/// that holds only a passkey, and `identities` and `totp` leave out archived logins. The
+/// vault lists `passkeys` (a credential once, whatever the copies).
+#[derive(Debug, Serialize)]
+pub struct Identities {
+    pub identities: Vec<Identity>,
+    pub passkeys: Vec<passkey::Entry>,
+    pub totp: Vec<CodeIdentity>,
+}
+
+fn hosts(row: &Row) -> Vec<String> {
+    let mut hosts: Vec<String> = Vec::new();
+    for site in row.websites.iter().filter_map(|site| Site::parse(site)) {
+        let host = match site.port {
+            Some(port) => format!("{}:{port}", site.host),
+            None => site.host,
+        };
+        if !hosts.contains(&host) {
+            hosts.push(host);
+        }
+    }
+    hosts
+}
+
+pub fn identities(vault: &Vault) -> CoreResult<Identities> {
+    let mut identities = Vec::new();
+    let mut totp = Vec::new();
     for row in logins(vault)? {
-        for site in row.websites.iter().filter_map(|site| Site::parse(site)) {
-            let host = match site.port {
-                Some(port) => format!("{}:{port}", site.host),
-                None => site.host,
-            };
-            if !out
-                .iter()
-                .any(|known: &Identity| known.id == row.id && known.host == host)
-            {
-                out.push(Identity {
+        for host in hosts(&row) {
+            if fills_password(&row) {
+                identities.push(Identity {
                     id: row.id,
+                    username: row.subtitle.clone(),
+                    host: host.clone(),
+                });
+            }
+            // `has_totp` comes from the recognizers of the core, as the app's rows.
+            if row.has_totp {
+                totp.push(CodeIdentity {
+                    id: row.id,
+                    title: row.title.clone(),
                     username: row.subtitle.clone(),
                     host,
                 });
             }
         }
     }
-    Ok(out)
+    let passkeys = passkey::all(vault)?
+        .iter()
+        .map(passkey::Entry::from)
+        .collect();
+    Ok(Identities {
+        identities,
+        passkeys,
+        totp,
+    })
 }
 
 #[cfg(test)]

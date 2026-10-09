@@ -81,4 +81,16 @@ enum VaultText {
     static func date(_ seconds: Int64?) -> Date? {
         seconds.map { Date(timeIntervalSince1970: TimeInterval($0)) }
     }
+
+    /// The start of a passkey ID in hex, in groups of four, to tell two passkeys apart.
+    static func shortID(_ id: Data) -> String {
+        let hex = id.prefix(6).map { String(format: "%02x", $0) }.joined()
+        var groups: [String] = []
+        var rest = Substring(hex)
+        while !rest.isEmpty {
+            groups.append(String(rest.prefix(4)))
+            rest = rest.dropFirst(4)
+        }
+        return groups.joined(separator: " ") + (id.count > 6 ? "…" : "")
+    }
 }

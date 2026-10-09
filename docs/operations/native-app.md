@@ -18,9 +18,12 @@ The protocol is one JSON line in and one JSON line out.
 
 | Path in `Apassy.app/Contents` | Program | Bundle ID or signing ID | Entitlements |
 | --- | --- | --- | --- |
-| `MacOS/apassy` | Rust desktop app, main executable | `com.wydrox.apassy` | none |
+| `MacOS/apassy` | Rust desktop app, main executable | `com.wydrox.apassy` | none. With the provider: AutoFill, and the profile in `embedded.provisionprofile` |
 | `MacOS/apassy-mcp` | Rust MCP adapter for agents | `com.wydrox.apassy.mcp` | none |
+| `MacOS/apassy-browser-guard` | Swift caller check of the browser host (`native/ApassyBrowserGuard`) | `com.wydrox.apassy.browser-guard` | none |
 | `MacOS/apassy-helper` | Swift helper: `authenticate` | `com.wydrox.apassy.helper` | none |
+| `MacOS/apassy-credential-bridge` | Swift bridge of the AutoFill extension. Only with the provider | `com.wydrox.apassy.credential-bridge` | app group only |
+| `PlugIns/ApassyAutoFill.appex` | Mac AutoFill credential provider. Only with the provider | `com.wydrox.apassy.autofill` | sandbox, AutoFill, app group. Needs a profile |
 | `Helpers/ApassyKeychain.app` | the same Swift helper, in its own bundle: keychain commands | `com.wydrox.apassy.keychain` | keychain entitlements, only with a profile |
 | `Helpers/ApassyNotify.app` | Swift notifier (`native/ApassyNotify`), in its own bundle, display name "Apassy": notification commands | `com.wydrox.apassy.notify` (signing ID = bundle ID) | none |
 
@@ -37,7 +40,7 @@ Why separate bundles:
 - AMFI permits the keychain entitlements only for the main executable of a bundle that has a matching `embedded.provisionprofile`. A second executable in `Contents/MacOS` does not get the profile of the app (evidence C1 below).
 - usernotificationsd accepts a notification client only when the signing identifier of the process is the bundle ID of its bundle. `apassy-helper` has the signing ID `com.wydrox.apassy.helper` in the bundle `com.wydrox.apassy`, so macOS refuses all its notification requests. The notifier is the main program of its own bundle, with the signing ID `com.wydrox.apassy.notify`. See [Notification research](#notification-research-n1).
 
-The `apassy` program does not need a restricted entitlement. So the main app does not need a profile.
+Without the provider, the `apassy` program has no restricted entitlement. So the main app needs no profile. With the provider, the main app has the AutoFill entitlement and needs its own profile. See [Credential provider variants](#credential-provider-variants).
 
 ## Build
 
@@ -49,13 +52,14 @@ The script:
 
 1. Selects the only valid "Apple Development" identity, or `APASSY_SIGN_IDENTITY`. It refuses ad hoc signing.
 2. Finds a profile for the keychain helper: `APASSY_KEYCHAIN_PROFILE`, or a valid profile in the Xcode profile folders. It checks the platform, team, App ID, expiry, keychain group, this Mac, and the signing certificate.
-3. Runs `cargo build --release --locked --features desktop,vault --bin apassy --bin apassy-mcp --bin apassy-sandbox`. `apassy-sandbox` does not go into the bundle. Step 8 uses it.
-4. Builds the helper with `xcrun --sdk macosx swiftc -O -swift-version 5 -warnings-as-errors -target arm64-apple-macos15.0`, without `-D APASSY_HELPER_DEV`. It builds the notifier the same way from `native/ApassyNotify/*.swift` and the shared `Protocol.swift` and `Caller.swift`. It fails when the helper or the notifier contains the development override `APASSY_HELPER_DEV_ANY_CALLER`. It builds the caller probe (`native/ApassyCallerProbe/main.swift`) in a temporary directory. The probe never goes into the bundle.
-5. Assembles the bundle in `target/app-stage`, signs from the inside out, and verifies with `codesign --verify --deep --strict`. The notifier gets `packaging/ApassyNotify-Info.plist` and a bundle-level signature, so its signing identifier is its bundle ID.
-6. Checks the hardened runtime flag, the team, and the entitlements of each of the 5 programs. `apassy`, `apassy-mcp`, `apassy-helper`, and the notifier must have no entitlements. The signing identifier of the notifier must be `com.wydrox.apassy.notify`.
-7. Runs the signed programs: `apassy --smoke-test`, `apassy-mcp --version`, and the caller checks of the helpers and the notifier (see [Caller check](#caller-check)). The notifier requests of the script never ask for permission and never post.
-8. Runs the agent profile with the signed bundle: the helpers, the notifier, and the main program do not start, `open` of the notifier bundle fails, `apassy-mcp` starts, a copy of the keychain helper fails, and a copy that exists outside the bundle refuses the caller.
-9. Moves the bundle to `target/Apassy.app`.
+3. Builds the credential provider. It runs `scripts/build-credential-provider.sh --sign <identity> --with-passwords-and-codes`, with the two provider profiles when they are set. It reads `target/credential-provider/provider-status.txt`. The result is `included` or `not included`. See [Credential provider variants](#credential-provider-variants).
+4. Runs `cargo build --release --locked --features desktop,vault --bin apassy --bin apassy-mcp --bin apassy-hook --bin apassy-sandbox --bin apassy-browser-host`. With `APASSY_PREBUILT_DIR`, it checks the CI artifact and skips this build.
+5. Builds the helper with `xcrun --sdk macosx swiftc -O -swift-version 5 -warnings-as-errors -target arm64-apple-macos15.0`, without `-D APASSY_HELPER_DEV`. It builds the notifier the same way from `native/ApassyNotify/*.swift` and the shared `Protocol.swift` and `Caller.swift`. It builds the browser guard with Swift 6. It fails when the helper or the notifier contains the development override `APASSY_HELPER_DEV_ANY_CALLER`. It builds the caller probe (`native/ApassyCallerProbe/main.swift`) in a temporary directory. The probe never goes into the bundle.
+6. Assembles the bundle in `target/app-stage`. With the provider, it copies the bridge to `Contents/MacOS`, the extension to `Contents/PlugIns`, and the profile of the main app to `Contents/embedded.provisionprofile`. It signs from the inside out and verifies with `codesign --verify --deep --strict`. The bridge and the extension keep the signatures that the provider script made. The notifier gets `packaging/ApassyNotify-Info.plist` and a bundle-level signature, so its signing identifier is its bundle ID. The main app gets the empty `packaging/Apassy.entitlements`, or with the provider the generated `Apassy-provider.entitlements`.
+7. Checks the hardened runtime flag, the team, the strict signature, and the entitlements of each program. The notifier and the programs in `Contents/MacOS`, except the main app and the bridge, must have no entitlements. The main app, and with the provider the bridge and the extension, must have exactly the entitlements of their variant. The script fails when a program has `get-task-allow`, `disable-library-validation`, `allow-dyld-environment-variables`, `allow-unsigned-executable-memory`, or `allow-jit`. The bundle must have 9 programs without the provider and 11 with it.
+8. Runs the signed programs: `apassy --smoke-test`, `apassy-mcp --version`, the browser host, and the caller checks of the helpers and the notifier (see [Caller check](#caller-check)). With the provider, it also runs the bridge from the shell and from signed probe parents. The notifier requests of the script never ask for permission and never post.
+9. Runs the agent profile with the signed bundle: the helpers, the notifier, the browser host, the browser guard, the bridge, the extension, and the main program do not start, `open` of the notifier bundle fails, `apassy-mcp` starts, a copy of the keychain helper fails, and a copy that exists outside the bundle refuses the caller.
+10. Moves the bundle to `target/Apassy.app`.
 
 Each run starts from an empty bundle. A failed step stops the script with `build-app: FAILED:` and a non-zero exit.
 
@@ -76,9 +80,48 @@ The script uses `xcrun --sdk macosx`, which selects the Xcode MacOSX26.2 SDK.
 | `APASSY_TEAM_ID` | Team for `--provision`. Default: the team (OU) of the certificate. |
 | `APASSY_KEYCHAIN_BUNDLE_ID` | Bundle ID and App ID of the keychain helper. Default: `com.wydrox.apassy.keychain`. |
 | `APASSY_REQUIRE_KEYCHAIN=1` | Fails when no valid profile is found. |
+| `APASSY_AUTOFILL_PROFILE` | Path to the profile for `com.wydrox.apassy.autofill`. The script does not search for it. |
+| `APASSY_PROVIDER_APP_PROFILE` | Path to the profile for `com.wydrox.apassy` with the AutoFill capability. The script does not search for it. |
+| `APASSY_REQUIRE_PROVIDER=1` | Fails unless the provider is included. A release gate. |
 
 XcodeGen 2.46.0 made the Xcode project from `native/ApassyKeychain/project.yml`.
 The script uses the project only to get the profile. `swiftc` builds the helper that goes into the bundle.
+
+### Credential provider variants
+
+The Mac AutoFill extension ([mac-passkeys.md](mac-passkeys.md)) has a restricted entitlement. A program with a restricted entitlement and no matching profile does not start (AMFI error `-413`, evidence B and B2). The extension needs a profile for `com.wydrox.apassy.autofill`. The main app also needs a profile for `com.wydrox.apassy`. Only `scripts/build-credential-provider.sh` checks these profiles. `scripts/build-app.sh` reads the result in `provider-status.txt` and checks the files.
+
+| | Provider not included | Provider included |
+| --- | --- | --- |
+| When | A profile is missing or not valid, or the certificate is not in team `7S3F9767BM` | Both profiles are valid |
+| `Contents/PlugIns` | not in the app | `ApassyAutoFill.appex`, signed, with its profile |
+| `MacOS/apassy-credential-bridge` | not in the app | signed, app group only |
+| `Contents/embedded.provisionprofile` | not in the app | the profile of the main app |
+| Entitlements of `apassy` | none | `com.apple.application-identifier`, `com.apple.developer.team-identifier`, AutoFill |
+| Programs in the bundle | 9 | 11 |
+| Extension offers | not applicable | passkeys, passwords, one-time codes |
+
+The default build is the variant without the provider. It is a signed app with the browser host and the browser guard. It has no extension and no bridge. So macOS cannot offer Apassy as a provider for passkeys, passwords, or codes in other apps.
+The script prints `build-app: WARNING: PROVIDER NOT INCLUDED: <reason>` when the provider is not in the app. The last lines of the output say `Provider: NOT INCLUDED (<reason>)` or `Provider: included`.
+
+`APASSY_REQUIRE_PROVIDER=1` makes the variant without the provider a failure. Use it for a release build.
+The script passes `--with-passwords-and-codes` always, because the app answers `autofill_list`, `autofill_credential`, `autofill_code`, and `credential_identities`. The script fails when the status of an included provider does not say that the extension offers all three.
+
+Command with both profiles:
+
+```
+APASSY_AUTOFILL_PROFILE=<path> APASSY_PROVIDER_APP_PROFILE=<path> APASSY_REQUIRE_PROVIDER=1 scripts/build-app.sh
+```
+
+The script checks these facts for an included provider, and fails if one is wrong:
+
+- The bridge has the identifier `com.wydrox.apassy.credential-bridge`. The extension has `com.wydrox.apassy.autofill`.
+- Both have the team of the certificate, the hardened runtime, and a valid strict signature.
+- The main app, the extension, and the bridge have exactly the entitlements that the script builds itself. The script does not read the template files for this check. No other key is in the signature.
+- The embedded profiles are the same files that the provider script checked.
+- The extension has the version of the app, and the bridge has no development override.
+
+The caller probe copies of the bundle contain only `MacOS`, `Helpers`, `Resources`, `Info.plist`, and `PkgInfo`. They have no `PlugIns` and no profile of the main app. So a probe copy registers no second extension with LaunchServices, has no `NSExtension` key, and has the empty entitlements. The script checks each of these facts. The bridge in a probe copy accepts its signed parent and stops with `no_extension` before it opens a socket.
 
 ## Signing and provisioning finding
 
@@ -568,6 +611,37 @@ Earlier failures in this work, not counted as passes:
 - The first `scripts/n1-check.sh` run: `notify_authorize` answered after 124 ms with `not_determined` and no prompt (research R9). The notifier now does the check-in before its first use of the notification center, and a refusal without a prompt is the error `failed`.
 - The first version of `notifier_bundle_cannot_be_opened_in_profile` expected a LaunchServices error. `open` of the path failed earlier: "The file … does not exist", because the profile denies each read in the bundle. The test now also runs `open -b` of a registered bundle ID, which needs no read and fails at the `lsopen` denial.
 
+### Checks for the provider integration in `scripts/build-app.sh`
+
+Date: 2026-10-09. Worktree `apassy-passkeys-totp`. The agent did not run the real `scripts/build-credential-provider.sh` and did not run the full `scripts/build-app.sh`. Other workers owned both at that time. No profile for the provider exists on this Mac.
+
+| Check | Result |
+| --- | --- |
+| `bash -n scripts/build-app.sh` | PASS |
+| `scripts/build-app.sh --help` | PASS. Prints the complete header. |
+| `shellcheck` | NOT RUN. The tool is not installed. |
+| Harness in `/private/tmp/apassy-build-app-harness`: a copy of the script with a stub provider script, a fake `cargo`, and fake profiles. The stub uses the real bridge source, the real helpers, and the real `codesign`. The copy stops after the verification, or after the probe checks. | See below. |
+
+Harness results. The signed bundle in each case is a scratch bundle. Fake programs replace the Rust binaries and the extension, and the profiles are random bytes. So these runs prove the logic of the script, not the real provider build, and no AMFI start of a provider app.
+
+| Case | Expected | Result |
+| --- | --- | --- |
+| Status `not included` | 9 programs, no `PlugIns`, no bridge, no profile, empty entitlements, warning printed | PASS |
+| Status `included` | 11 programs, exact entitlements of the main app, extension, and bridge, same profiles | PASS |
+| `included`, then the probe checks | Bridge refuses the shell, a signed parent of another bundle, and a parent with another identifier. In the probe copy it stops with `no_extension`. The probe copy has no extension, no profile, and no entitlements. | PASS |
+| Bridge signed with `get-task-allow` | build fails | PASS (failed as expected) |
+| Extension signed with an extra entitlement | build fails | PASS (failed as expected) |
+| Status `included`, profile of the main app missing | build fails | PASS (failed as expected) |
+| Status `included`, offers `passkeys only` | build fails | PASS (failed as expected) |
+| Extension with another version | build fails | PASS (failed as expected) |
+| No status file, or an unreadable one | build fails | PASS (failed as expected) |
+| `APASSY_REQUIRE_PROVIDER=1` with `not included`, and with a certificate in another team | build fails | PASS (failed as expected) |
+| `APASSY_REQUIRE_PROVIDER=1` with `included` | build passes | PASS |
+| `APASSY_REQUIRE_PROVIDER=2` | exit status 2 | PASS |
+| Certificate in another team, no require | provider not included, 9 programs | PASS |
+
+Not run: the agent profile section with the bridge and the extension, the real browser host checks with the new guard, and the whole script end to end.
+
 ## Not verified by the agent
 
 - A real Touch ID prompt. The keyboard is not paired, and a real prompt needs a finger.
@@ -578,6 +652,7 @@ Earlier failures in this work, not counted as passes:
 - A click on an Apassy notification. The notifier then starts through LaunchServices and opens Apassy. The agent did not click a notification.
 - A prompt from the "Allow notifications" button in the real desktop window. `apassy --notify-check authorize` uses the same client call and the same notifier.
 - Whether the four scratch bundle IDs of the research (`com.wydrox.apassy.n1lab`, `.n1lab.notify`, `.n1lab.x1`, `.n1lab.x2`, all with a provisional permission) still show in System Settings > Notifications. The bundles are unregistered and deleted. The usernoted store is protected, so the agent cannot read it.
+- The credential provider in a real build: a valid pair of profiles, the AMFI start of the main app with the AutoFill entitlement, the registration of the extension (`pluginkit -m -p com.apple.authentication-services-credential-provider-ui`), and a passkey, password, or code request from Safari. macOS lists the provider only for an app in `/Applications`.
 - The desktop flows with the real helper: Touch ID unlock, the owner check with a real finger, and a real banner from the app. The tests use a fake helper with the same protocol. Section 3 of the owner steps has the checks.
 
 ## Owner steps
@@ -599,6 +674,17 @@ Earlier failures in this work, not counted as passes:
 5. Later builds find the profile in the Xcode profile folder. Use `APASSY_REQUIRE_KEYCHAIN=1 scripts/build-app.sh` so that a missing profile stops the build.
 
 Alternative without Xcode sign-in: in the developer portal, register the macOS App ID `com.wydrox.apassy.keychain`, make a "macOS App Development" profile with this Mac and the certificate, download it, and run `APASSY_KEYCHAIN_PROFILE=<path> scripts/build-app.sh`.
+
+### 1b. Get the provider profiles
+
+The extension needs two profiles. Make them in the developer portal or with Xcode. [mac-passkeys.md](mac-passkeys.md) has the prerequisites.
+
+1. A macOS profile for the exact App ID `com.wydrox.apassy.autofill` with the AutoFill Credential Provider capability.
+2. A macOS profile for the exact App ID `com.wydrox.apassy` with the same capability.
+3. Each profile must include the signing certificate. For a development certificate, it must also include this Mac.
+4. Run the command in [Credential provider variants](#credential-provider-variants). The output must say `Provider: included`.
+
+Without both profiles, the build still succeeds and says `PROVIDER NOT INCLUDED`.
 
 ### 2. Manual checks
 

@@ -16,12 +16,14 @@
 		1060F80970E18A341F6D0669 /* PreviewData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BF79E9789093F95CA5C3233 /* PreviewData.swift */; };
 		11E32DAE9B618713C2D006E7 /* ScanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35FEB27DAC4943C23B689CEA /* ScanView.swift */; };
 		142D89311379F85A2A898CEF /* ApassyVaultCore in Frameworks */ = {isa = PBXBuildFile; productRef = 492453E946A35E682FE6C4B4 /* ApassyVaultCore */; };
+		142FD425EE8AE3FDADFDA131 /* CredentialExchangeModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EFF914663017A172F14134C /* CredentialExchangeModel.swift */; };
 		1A52B124D8933244BA388026 /* MacView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C707E9B88A62DDDE31571CE /* MacView.swift */; };
 		1CEEF50BFCB6D847B049A3D6 /* AutoFillModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A7B7089BA3A509093E8685 /* AutoFillModel.swift */; };
 		1E57AF690201D989941754AB /* ICloudVaultModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95CB97B8F03841A75DB19BE7 /* ICloudVaultModel.swift */; };
 		24E21F470E30106F0769BC1B /* SessionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6F302A1D75457EBBD7CBBF1 /* SessionModel.swift */; };
 		25B454F68E7F851382CB8CDD /* WelcomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28D931508D2F301CC10F79C0 /* WelcomeView.swift */; };
 		27224C6F6BF114EB760AF4BC /* ForgetMacButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61CD637566F0ED5A94FBD4BB /* ForgetMacButton.swift */; };
+		2E32DF09D768D97DC6730172 /* CredentialExchangeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DF7DFEA48D20D1D42CD9980 /* CredentialExchangeView.swift */; };
 		32E26ABF44D434EC0B4A3556 /* ItemDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3D12AC62CA251B3BDB3D870 /* ItemDetailView.swift */; };
 		3C9D4C120707FEF65A02F1B3 /* OwnerGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E4146357404F8C913371D3F /* OwnerGate.swift */; };
 		3EB151FA4F3F4C95FDA98FE8 /* ApassyCompanionApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB347F790915A1B646346265 /* ApassyCompanionApp.swift */; };
@@ -97,6 +99,7 @@
 /* Begin PBXFileReference section */
 		09431E87D7B3F006155FFB5D /* RunSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunSnapshot.swift; sourceTree = "<group>"; };
 		0BC42EE11D63D65DD187A2A1 /* AutoFillViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoFillViews.swift; sourceTree = "<group>"; };
+		0DF7DFEA48D20D1D42CD9980 /* CredentialExchangeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialExchangeView.swift; sourceTree = "<group>"; };
 		11EB13920306DFE4830B5187 /* DeviceName.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceName.swift; sourceTree = "<group>"; };
 		169E52DFC915C8BFD6A8EBCB /* ActivityView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityView.swift; sourceTree = "<group>"; };
 		1BF79E9789093F95CA5C3233 /* PreviewData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewData.swift; sourceTree = "<group>"; };
@@ -123,6 +126,7 @@
 		7817EDC4D472A14E4FC7E630 /* CodeViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeViews.swift; sourceTree = "<group>"; };
 		7B4C217EDB49F26B587027C8 /* VaultPrompts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaultPrompts.swift; sourceTree = "<group>"; };
 		7EABE51DFD3F87A3C292A656 /* ApassyCompanion.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = ApassyCompanion.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		7EFF914663017A172F14134C /* CredentialExchangeModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialExchangeModel.swift; sourceTree = "<group>"; };
 		801D958711CB9104B029DFE7 /* VaultComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaultComponents.swift; sourceTree = "<group>"; };
 		85D80182C9A54AC9ACC88F5C /* ItemDetailModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ItemDetailModel.swift; sourceTree = "<group>"; };
 		8A053A5569796E7D6C02E46D /* VaultModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaultModel.swift; sourceTree = "<group>"; };
@@ -263,6 +267,7 @@
 			isa = PBXGroup;
 			children = (
 				F58D1C2BB6F8A7EB17A42568 /* AppWelcomeView.swift */,
+				0DF7DFEA48D20D1D42CD9980 /* CredentialExchangeView.swift */,
 				38F3E0A15FE766FA331F02FD /* GeneratorView.swift */,
 				BCDF2D0D076678612EDDA49F /* ICloudVaultFlowView.swift */,
 				F3D12AC62CA251B3BDB3D870 /* ItemDetailView.swift */,
@@ -344,6 +349,7 @@
 		C6D4DCAB8F9AAEA2E851694F /* Vault */ = {
 			isa = PBXGroup;
 			children = (
+				7EFF914663017A172F14134C /* CredentialExchangeModel.swift */,
 				C03D253B246ED503A21556A3 /* GeneratorModel.swift */,
 				95CB97B8F03841A75DB19BE7 /* ICloudVaultModel.swift */,
 				85D80182C9A54AC9ACC88F5C /* ItemDetailModel.swift */,
@@ -493,6 +499,8 @@
 				6B2670298B8143D54CCD9E3E /* CodeScannerPanel.swift in Sources */,
 				609072B00CF0B945807B0E6A /* CodeViews.swift in Sources */,
 				C75F905D2E169F09022BA2A5 /* CoverPolicy.swift in Sources */,
+				142FD425EE8AE3FDADFDA131 /* CredentialExchangeModel.swift in Sources */,
+				2E32DF09D768D97DC6730172 /* CredentialExchangeView.swift in Sources */,
 				73FBB0FDD0BC645CA75F5C8B /* DeviceName.swift in Sources */,
 				866E0C2F76BB1C522007252B /* FlowLayout.swift in Sources */,
 				27224C6F6BF114EB760AF4BC /* ForgetMacButton.swift in Sources */,

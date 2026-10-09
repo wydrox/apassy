@@ -10,10 +10,28 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 - The Apassy app for the iPhone holds your vault, like a second Mac ([ADR 0023](docs/adr/0023-iphone-vault.md)). Add the iPhone with "Add a device…" on the Mac: scan the QR code, compare the two safety words, confirm on the Mac with Touch ID, and type the passphrase on the iPhone. The vault syncs both ways through the Apassy relay. The app has Home (favorites, recently changed, kinds), Items, Search, item details, new and edited items, the password generator (random, memorable, PIN), Watchtower (weak, reused, and old passwords, conflict copies), Face ID unlock, auto-lock, and Settings. Each reveal, copy, one-time code, or large type of a secret needs Face ID or the passphrase; a copy stays on the iPhone and expires after 60 seconds. Password AutoFill fills logins and one-time codes in Safari and apps after Face ID. The companion of ADR 0020 is the Approvals tab. The app is in TestFlight.
 - The vault core of the iPhone app (`ios/ApassyCore`) runs the same vault and relay sync code as the Mac (contract `docs/contracts/ios-core-v1.md`). `scripts/build-ios-core.sh` builds it, and `scripts/ios-testflight.sh` archives and uploads the app.
+- Passkeys (WebAuthn, ES256) and one-time codes (RFC 6238 TOTP) in the vault, the iPhone core, the Mac app, and the browser extension. The sources are in the branch `feat/passkeys-totp`. Integration, signed builds, and acceptance on real devices are not done, and nothing here is released ([guide](docs/operations/passkeys-and-codes.md), [iPhone core contract](docs/contracts/ios-core-v1.md)).
+  - A login can hold one passkey. The iPhone core has the calls `passkey_list`, `passkey_assert`, `passkey_register`, `passkey_import`, and `passkey_remove`. Sign-in and registration need a fresh owner check. The key never appears in an item, a reveal, a list, or an agent read.
+  - Codes accept SHA-1, SHA-256, and SHA-512, 6 to 8 digits, and a period of 15 to 120 seconds. HOTP and Steam codes are not supported. A field with a custom title counts as a code when its value is an `otpauth://totp` link.
+  - The iPhone AutoFill suggests passkeys and codes beside passwords. A login that has only a passkey offers no password.
+  - Credential Exchange on iOS 26 moves logins, TOTP, and ES256 passkeys to and from other apps. Each import and export needs its own owner check. A paused export continues only in the vault where it started. The history says "prepared", which does not prove that the other app finished.
+  - The Mac item page shows the passkey without its key and offers "Remove passkey". The browser extension can sign in with a passkey and fill a code after a separate permission. The browser guard verifies Helium and Google Chrome stable. It refuses extension-loader and remote-debugging switches. Signed app acceptance remains open.
+  - `docs/operations/passkeys-and-codes.md` has an acceptance checklist that keeps local tests, signed builds, and real devices apart.
 
 ### Changed
 
 - "Add a Mac…" in Settings > General > Sync is "Add a device…". It shows the device link as a QR code for the iPhone, and as text for another Mac.
+- The vault schema is 17 (it was 16). Update every Mac and iPhone that shares a vault. A build of schema 17 migrates a vault of schema 16 and reads a copy of schema 16. A build of schema 16 cannot open a vault of schema 17 or read a copy of it. Make a backup before you upgrade. Local tests cover schema 17 uploads over a copy of schema 16 on the relay, in the iCloud core, and in a folder. Device acceptance remains open.
+- A login with a passkey needs no password. Removing the passkey keeps the login only when it has a non-empty password. Otherwise it deletes the whole login, and the screen says so first.
+- A Mac build without both provisioning profiles has no AutoFill extension. With both valid profiles and `APASSY_REQUIRE_PROVIDER=1`, the build script can include passwords, codes, and passkeys. No such Mac build is confirmed yet.
+- The Mac editor hides a visible detail that has an OTP label or looks like a setup key, also when you save it without a change.
+
+### Security
+
+- A passkey key stays in the encrypted vault. Generic reads, item details, and agent reads do not return it. Only the owner-approved Credential Exchange export returns it, straight to the system.
+- Each passkey sign-in, registration, import, removal, and export asks for a fresh owner check. The seed of a one-time code never appears in a row, a list, an identity, or an error.
+- The agent catalog hides legacy visible TOTP setup keys, and the decision log masks their stored values. An explicit setup-key variable grant names the field and warns that programs can make codes. Its owner proof names the field, variable, delivery mode, and setup-key status. Automatic batch binding refuses setup keys.
+- The iPhone core writes each answer into one buffer of exact size and erases it when it is freed. A serializer that changes size gives an error and no grown copy of a secret.
 
 ## [0.3.6] - 2026-10-09
 

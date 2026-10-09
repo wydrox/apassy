@@ -28,6 +28,10 @@ pub mod desktop;
 #[cfg(feature = "vault")]
 pub mod import;
 
+/// Time-based one-time passwords shared by the desktop and iPhone vaults.
+#[cfg(feature = "vault")]
+pub mod otp;
+
 pub mod native;
 /// The owner command line channel (ADR 0017): wire and client.
 pub mod owner;

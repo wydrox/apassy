@@ -1,5 +1,6 @@
 import ApassyVaultCore
 import ApassyVaultKit
+import AuthenticationServices
 import Foundation
 import Observation
 import UIKit
@@ -28,6 +29,10 @@ final class RootModel {
     let companion = AppModel()
     let settings = VaultSettings(defaults: SharedContainer.defaults)
     private(set) var vault: VaultModel?
+    /// Imports from and exports to another app (Apple's credential exchange).
+    private(set) var exchange: CredentialExchangeModel?
+    /// An import token that arrived before the vault model existed (a cold start).
+    @ObservationIgnored private var earlyImportToken: UUID?
     /// Where Cancel of the join flow goes back to.
     @ObservationIgnored private var beforeJoin: Screen = .welcome
     @ObservationIgnored private var vaultBeforeAdd: String?
@@ -43,7 +48,13 @@ final class RootModel {
         if case .starting = companion.phase { companion.start() }
         if vault == nil {
             do {
-                vault = try makeVault()
+                let made = try makeVault()
+                vault = made
+                exchange = CredentialExchangeModel(vault: made, system: Self.exchangeSystem())
+                if let token = earlyImportToken {
+                    earlyImportToken = nil
+                    exchange?.receive(token: token)
+                }
             } catch {
                 screen = .failed(error.localizedDescription)
                 return
@@ -149,6 +160,30 @@ final class RootModel {
         }
     }
 
+    // MARK: Credential exchange
+
+    /// iOS opened Apassy to import what another app exports. The import waits for the unlock and
+    /// the owner check; the token alone reads nothing.
+    func receiveCredentialExchange(_ activity: NSUserActivity) {
+        guard activity.activityType == ASCredentialExchangeActivity,
+            let token = activity.userInfo?[ASCredentialImportToken] as? UUID
+        else { return }
+        if let exchange {
+            exchange.receive(token: token)
+        } else {
+            earlyImportToken = token
+        }
+    }
+
+    /// The managers of the system. The export keeps one manager from the sheet to the hand-off.
+    private static func exchangeSystem() -> CredentialExchangeModel.System {
+        let session = ExportSession()
+        return CredentialExchangeModel.System(
+            importCredentials: { token in try await ASCredentialImportManager().importCredentials(token: token) },
+            requestExport: { try await session.request() },
+            exportCredentials: { data in try await session.send(data) })
+    }
+
     // MARK: The service
 
     private func makeVault() throws -> VaultModel {
@@ -191,7 +226,7 @@ final class RootModel {
     }
 }
 
-/// Gives iOS the logins for the QuickType bar without holding up the vault: the identity store
+/// Gives iOS the logins, passkeys, and one-time passwords for AutoFill without holding up the vault: the identity store
 /// of iOS can take long to answer (in the Simulator it sometimes never does), and the list is only
 /// a hint. The latest request wins: a request that a newer one overtook while it waited is
 /// skipped, a call that does not end holds up the next one for 10 s at most, and a removal never
@@ -202,7 +237,7 @@ private final class IdentityPublisher {
     /// The request whose call to iOS runs now.
     private var running: Int?
 
-    func replace(_ identities: [CredentialIdentity], vaultID: String) {
+    func replace(_ identities: IdentitySet, vaultID: String) {
         submit(waits: true) { await CredentialIdentitySync.replace(with: identities, vaultID: vaultID) }
     }
 
@@ -225,5 +260,47 @@ private final class IdentityPublisher {
             await work()
             if running == mine { running = nil }
         }
+    }
+}
+
+/// One export of the credential exchange: the sheet of the system, then the hand-off with the same
+/// manager. Apassy has one AutoFill extension, so the manager exports for it.
+@MainActor
+private final class ExportSession {
+    /// The manager is not Sendable, and its calls are not isolated. One export uses it from one
+    /// task, one call after the other, so it never runs two calls at once.
+    private struct Manager: @unchecked Sendable {
+        let manager: ASCredentialExportManager
+    }
+
+    private var current: Manager?
+
+    func request() async throws -> ASExportedCredentialData.FormatVersion {
+        guard let window = Self.window() else { throw VaultError(.internal, "Apassy has no window to show the export in.") }
+        let manager = Manager(manager: ASCredentialExportManager(presentationAnchor: window))
+        current = manager
+        return try await Self.request(manager, extensionID: Bundle.main.bundleIdentifier.map { $0 + ".autofill" })
+    }
+
+    func send(_ data: ASExportedCredentialData) async throws {
+        guard let manager = current else { throw VaultError(.internal, "The export was not started.") }
+        defer { current = nil }
+        try await Self.send(manager, data)
+    }
+
+    private nonisolated static func request(_ box: Manager, extensionID: String?) async throws
+        -> ASExportedCredentialData.FormatVersion
+    {
+        try await box.manager.requestExport(for: extensionID).formatVersion
+    }
+
+    private nonisolated static func send(_ box: Manager, _ data: ASExportedCredentialData) async throws {
+        try await box.manager.exportCredentials(data)
+    }
+
+    private static func window() -> UIWindow? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let windows = scenes.flatMap(\.windows)
+        return windows.first(where: \.isKeyWindow) ?? windows.first
     }
 }

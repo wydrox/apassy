@@ -78,7 +78,9 @@ If file access expires, use the file selection control in Sync settings to selec
 | Generator | Random, memorable (the EFF word list), or a PIN, with the strength. |
 | Watchtower | Weak, reused, and old passwords, and conflict copies. |
 | Settings | Sync (state, "Sync now", devices, the new passphrase of the vault, "Use the relay copy"), removing the vault from this iPhone, another vault, Face ID unlock, lock and clipboard times, AutoFill, the companion, the version, and the licenses. |
-| AutoFill | Logins and one-time codes in Safari and apps, after Face ID or the passphrase for each fill. The QuickType bar shows usernames and hosts only. |
+| AutoFill | Logins, one-time codes, and passkeys in Safari and apps, after Face ID or the passphrase for each fill or sign-in. New passkeys are saved in a new login or in a login of the website. The QuickType bar shows usernames, hosts, and passkey accounts only. |
+| Passkeys | A login holds at most one passkey (ES256). The item shows its website, account, and the start of its ID. The ordinary screens never show or copy the key: it is not a field, so no reveal, copy, or large type shows it. After Face ID, the system export can move it to another app. A login with a password and a passkey offers "Remove passkey": Face ID, then the login keeps its fields. A login with a passkey and no password offers "Delete login" instead: removing the passkey of such a login deletes the entire item (notes, tags, websites, one-time passwords, custom details, history, and agent access) on this iPhone and, at the next sync, on the other devices. The dialog says this. To keep the data, add a password with Edit first, or archive the login. |
+| Import and export | Apple's credential exchange (iOS 26): Settings > Move to another app exports logins, one-time passwords, and passkeys to an app that the owner picks in the sheet of iOS. To import, start the export in the other app (Passwords, 1Password) and pick Apassy. Both ask for Face ID first; the data goes app to app in memory, never to a file. |
 
 What the app does with the vault:
 
@@ -126,6 +128,17 @@ xcrun simctl launch booted com.wydrox.apassy.companion \
   -ApassyJoinLink '<the link>' -ApassyJoinPassphrase synthetic-sim-pass
 ```
 
+### Passkeys and credential exchange
+
+The AutoFill extension declares `ProvidesPasskeys`, `SupportsCredentialExchange`, and `SupportedCredentialExchangeVersions` (`1.0`); the app declares the activity `ASCredentialExchangeActivity` in `NSUserActivityTypes`, which iOS uses to open Apassy for an import.
+
+- **Sign in.** The passkey sheet of iOS lists Apassy's passkeys for the website (`ASPasskeyCredentialIdentity`, published by the app at each unlock, save, and sync). The extension unlocks the vault for the request (Face ID with a new context, or the passphrase), finds the passkey by its credential ID, and the core signs. Without the sheet, iOS gets `userInteractionRequired`.
+- **New passkey.** The extension checks the request before the vault opens: a 32-byte client data hash, a relying party, a user handle of 1 to 64 bytes, and ES256 in the algorithms (an empty list is the WebAuthn default). An exclude list that names a passkey of the vault answers `matchedExcludedCredential`. Large blob storage that the website requires fails with a reason; a preferred large blob and PRF are answered as not supported. A conditional registration is refused.
+- **Import.** iOS opens the app with the import token. After the unlock and Face ID, the app reads the data with `ASCredentialImportManager`, keeps logins with a password or a passkey and their one-time passwords, normalizes each passkey key to PKCS#8 with CryptoKit, and refuses a passkey with PRF or large blob data (it would lose them). The result is counts only.
+- **Export.** After Face ID, the export sheet of iOS (`ASCredentialExportManager`) picks the app; then the core's `credential_export` gives the logins with their passkey keys, and the app hands them to the system at once. If the vault locks while the owner picks the app (the sheet can send Apassy to the background), the export waits with nothing read: after the unlock, "Continue export" asks for Face ID again and uses the same pick. If iOS ended the pick in the meantime, the export fails with a message and the owner starts again.
+
+Check on a device with synthetic accounts: a passkey on a test website (for example webauthn.io) in Safari, sign-in from the QuickType bar and from the passkey sheet, a second registration with the same account (refused), an import with two websites that share a credential ID (both appear in the QuickType bar), the removal of a passkey from a login with and without a password (the second deletes the login), an export to Passwords with a lock during the pick, and an import back.
+
 ### Check personal iCloud sync
 
 Use a synthetic vault for these checks.
@@ -164,7 +177,7 @@ xcodebuild -project ApassyCompanion.xcodeproj -scheme ApassyCompanion \
   -destination 'generic/platform=iOS' -derivedDataPath /tmp/apassy-dd-app CODE_SIGNING_ALLOWED=NO build
 ```
 
-The tests of the models (the pairing flow, the session with the Mac, and the vault models: unlock and auto-lock, join, item details, the editor, the generator, the owner check) run on macOS, without a Simulator, against the in-memory vault. They compile the same source files as the app:
+The tests of the models (the pairing flow, the session with the Mac, and the vault models: unlock and auto-lock, join, item details, the editor, the generator, the owner check, passkeys, and the credential exchange) run on macOS, without a Simulator, against the in-memory vault. They compile the same source files as the app:
 
 ```
 cd ios/ApassyCompanion/ModelTests

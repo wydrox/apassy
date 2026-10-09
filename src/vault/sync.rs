@@ -80,6 +80,16 @@ pub struct AdoptedCopy {
     pub identity: SyncIdentity,
     /// The synced-content digest of the new vault. It is the one of the copy.
     pub content: [u8; 32],
+    /// The schema version of the copy. The new vault has the current schema.
+    pub schema: i64,
+}
+
+impl AdoptedCopy {
+    /// The copy has an earlier schema than this app: the next sync must replace it with
+    /// a copy of the current schema, also when the content is the same.
+    pub fn outdated(&self) -> bool {
+        self.schema < SCHEMA_VERSION
+    }
 }
 
 /// Failure while adopting a copy's passphrase. Once SQLCipher accepts the rekey,
@@ -441,10 +451,17 @@ impl Vault {
     /// The check is the check of a restore (cipher settings, schema, columns, integrity)
     /// plus the content digest of the last push. A wrong passphrase, a damaged file, or
     /// a file that mixes pages of different copies returns `WrongKeyOrCorrupt`. A copy
-    /// from another schema version returns `UnsupportedSchema`. A schema 14 vault file
-    /// that was never pushed (generation 0) has no digest; it passes, so an owner can
-    /// adopt a vault file that they put in a synced folder by hand.
+    /// of the current schema or of the schema before it (`merge::UPGRADABLE_SCHEMA`)
+    /// passes; the digest check is on the content of the copy as it is. A copy from
+    /// another schema version returns `UnsupportedSchema`. A vault file that was never
+    /// pushed (generation 0) has no digest; it passes, so an owner can adopt a vault
+    /// file that they put in a synced folder by hand.
     pub fn inspect_sync_copy(path: &Path, passphrase: &str) -> VaultResult<SyncIdentity> {
+        Self::inspect_sync_copy_schema(path, passphrase).map(|(identity, _)| identity)
+    }
+
+    /// [`Self::inspect_sync_copy`], with the schema version of the copy.
+    fn inspect_sync_copy_schema(path: &Path, passphrase: &str) -> VaultResult<(SyncIdentity, i64)> {
         validate_unlock_passphrase(passphrase)?;
         let meta = match fs::symlink_metadata(path) {
             Ok(meta) => meta,
@@ -469,6 +486,10 @@ impl Vault {
     /// The checks are those of `inspect_sync_copy`. The copy has no agents, grants, or
     /// rules: each Mac registers its own. The new vault gets its own device ID, and its
     /// credentials count as stamped: they are the copy, not changes of this device.
+    ///
+    /// A copy of the schema before the current one is copied first; only the new file
+    /// gets the migration (at its first open). The source file does not change.
+    /// [`AdoptedCopy::outdated`] tells the caller to push a copy of the current schema.
     pub fn adopt_sync_copy(
         source: &Path,
         destination: &Path,
@@ -476,7 +497,7 @@ impl Vault {
     ) -> VaultResult<(Self, AdoptedCopy)> {
         let dest = canonical_new_target(destination)?;
         let dest_lock = super::acquire_sidecar_lock(&dest)?;
-        let identity = Self::inspect_sync_copy(source, passphrase)?;
+        let (identity, schema) = Self::inspect_sync_copy_schema(source, passphrase)?;
         copy_into_new_file(source, &dest)?;
         let prepared = open_working_conn(&dest, passphrase).and_then(|mut conn| {
             let result = (|| {
@@ -514,7 +535,11 @@ impl Vault {
                 conn: None,
                 epoch,
             },
-            AdoptedCopy { identity, content },
+            AdoptedCopy {
+                identity,
+                content,
+                schema,
+            },
         ))
     }
 
@@ -579,19 +604,22 @@ fn companion(path: &Path, suffix: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(name)
 }
 
-fn inspect_open_copy(conn: &Connection, passphrase: &str) -> VaultResult<SyncIdentity> {
+/// The checks of a copy that `conn` opened read-only. Returns the sync record and the
+/// schema version. `verify_readable_schema` checks the columns of that version. The
+/// digest is of the content as it is, so a schema 16 copy keeps the digest of its push.
+fn inspect_open_copy(conn: &Connection, passphrase: &str) -> VaultResult<(SyncIdentity, i64)> {
     apply_key(conn, passphrase)?;
     verify_cipher_defaults(conn)?;
     let version = verify_readable_schema(conn)?;
-    if version != SCHEMA_VERSION {
+    if version != SCHEMA_VERSION && version != merge::UPGRADABLE_SCHEMA {
         return Err(err(VaultErrorKind::UnsupportedSchema));
     }
     let (identity, stored) = read_sync_row(conn, "main")?;
     match stored {
         Some(stored) if stored.as_slice() == content_digest(conn, "main")?.as_slice() => {
-            Ok(identity)
+            Ok((identity, version))
         }
-        None if identity.generation == 0 => Ok(identity),
+        None if identity.generation == 0 => Ok((identity, version)),
         _ => Err(err(VaultErrorKind::WrongKeyOrCorrupt)),
     }
 }

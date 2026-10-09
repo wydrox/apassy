@@ -1,0 +1,12 @@
+body { font: 16px/1.5 system-ui, sans-serif; margin: 0; background: #fafafa; color: #1a1a1a; }
+main { max-width: 36rem; margin: 3rem auto; padding: 0 1rem; }
+.note { color: #555; font-size: 0.9rem; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; }
+dt { font-weight: 600; }
+dd { margin: 0; word-break: break-all; }
+.actions { display: flex; gap: 0.75rem; margin: 1.5rem 0; }
+button { font: inherit; padding: 0.6rem 1rem; border: 1px solid #333; border-radius: 6px; background: #fff; cursor: pointer; }
+button:disabled { opacity: 0.5; cursor: progress; }
+#status { padding: 0.75rem 1rem; border-radius: 6px; border: 1px solid #ccc; background: #fff; }
+#status[data-state="registered"], #status[data-state="signed-in"] { border-color: #1b7f3b; background: #eaf7ee; }
+#status[data-state="error"] { border-color: #b3261e; background: #fdecea; }

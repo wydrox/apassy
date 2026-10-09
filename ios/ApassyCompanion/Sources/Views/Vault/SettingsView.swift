@@ -13,6 +13,19 @@ struct SettingsView: View {
             Form {
                 if let vault = root.vault, vault.hasVault, vault.isUnlocked {
                     VaultSettingsSections(vault: vault)
+                    if let exchange = root.exchange {
+                        Section {
+                            NavigationLink {
+                                CredentialExchangeView(model: exchange, mode: .exporting)
+                            } label: {
+                                Label("Move to another app", systemImage: "arrow.left.arrow.right")
+                            }
+                        } header: {
+                            Text("Import and export")
+                        } footer: {
+                            Text("Logins, one-time passwords, and passkeys move between Apassy and another app through iOS, after Face ID. To import, start the export in the other app and pick Apassy.")
+                        }
+                    }
                 } else {
                     Section {
                         Text("No vault is on this iPhone. Add the vault of your Mac to see your logins and keys here.")
@@ -332,7 +345,7 @@ private struct VaultSettingsSections: View {
     private var autoFill: some View {
         Section {
             Text(
-                "Apassy can fill your passwords in Safari and in apps. Turn on Apassy in Settings > General > AutoFill & Passwords. Each fill asks for Face ID."
+                "Apassy can fill your passwords and one-time codes, sign in with passkeys, and save new passkeys in Safari and in apps. Turn on Apassy in Settings > General > AutoFill & Passwords. Each one asks for Face ID."
             )
             LabeledContent("AutoFill", value: autoFillOn == nil ? "Checking" : (autoFillOn == true ? "On" : "Off"))
             Button("Open AutoFill settings", systemImage: "gear") {

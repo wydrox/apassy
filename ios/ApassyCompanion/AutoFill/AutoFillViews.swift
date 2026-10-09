@@ -31,6 +31,8 @@ struct AutoFillRootView: View {
             UnlockView(model: model)
         case .list:
             CandidateListView(model: model)
+        case .register:
+            RegisterPasskeyView(model: model)
         case .configuration:
             ConfigurationView { model.configured() }
         }
@@ -116,6 +118,15 @@ private struct CandidateListView: View {
                 Text(message)
                     .foregroundStyle(.red)
             }
+            if !model.passkeyMatches.isEmpty || model.passkeyMessage != nil {
+                Section("Passkeys for \(model.host ?? "this website")") {
+                    if let message = model.passkeyMessage {
+                        Text(message)
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(model.passkeyMatches) { passkeyRow($0) }
+                }
+            }
             if let host = model.host {
                 Section("Logins for \(host)") {
                     if matches.isEmpty {
@@ -139,9 +150,28 @@ private struct CandidateListView: View {
 
     private var emptyText: String {
         switch model.kind {
-        case .password: "No other login in “\(model.vaultName)”."
+        case .password, .passkey, .registration: "No other login in “\(model.vaultName)”."
         case .oneTimeCode: "No other login with a one-time password in “\(model.vaultName)”."
         }
+    }
+
+    private func passkeyRow(_ passkey: PasskeyCandidate) -> some View {
+        Button {
+            Task { await model.choose(passkey) }
+        } label: {
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(passkey.title)
+                        .foregroundStyle(.primary)
+                    Text(passkey.userName.isEmpty ? passkey.userDisplayName : passkey.userName)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+            } icon: {
+                Image(systemName: "person.badge.key")
+            }
+        }
+        .accessibilityHint("Signs in with this passkey.")
     }
 
     private func row(_ candidate: FillCandidate) -> some View {
@@ -167,13 +197,75 @@ private struct CandidateListView: View {
     }
 }
 
+/// Where a new passkey goes: a new login, or a login of the website without a passkey.
+private struct RegisterPasskeyView: View {
+    @Bindable var model: AutoFillModel
+
+    var body: some View {
+        Form {
+            if let summary = model.registrationSummary {
+                Section {
+                    LabeledContent("Website", value: summary.rpID)
+                    if !summary.userName.isEmpty {
+                        LabeledContent("Account", value: summary.userName)
+                    }
+                } header: {
+                    Text("Save a passkey in “\(model.vaultName)”")
+                        .textCase(nil)
+                } footer: {
+                    Text("Apassy keeps the key of the passkey in the vault and never shows it. It syncs with the vault.")
+                }
+            }
+            Section {
+                TextField("Name", text: $model.newPasskeyTitle)
+                Button {
+                    Task { await model.register() }
+                } label: {
+                    HStack {
+                        Label("Save as a new login", systemImage: "plus")
+                        if model.busy {
+                            Spacer()
+                            ProgressView()
+                        }
+                    }
+                }
+                .disabled(model.busy)
+            }
+            if !model.attachCandidates.isEmpty {
+                Section("Add to a login of this website") {
+                    ForEach(model.attachCandidates) { login in
+                        Button {
+                            Task { await model.register(into: login) }
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(login.title)
+                                    .foregroundStyle(.primary)
+                                if !login.subtitle.isEmpty {
+                                    Text(login.subtitle)
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .disabled(model.busy)
+                    }
+                }
+            }
+            if let message = model.listMessage {
+                Text(message)
+                    .foregroundStyle(.red)
+            }
+        }
+    }
+}
+
 /// After the owner turns Apassy on in Settings.
 private struct ConfigurationView: View {
     let done: () -> Void
 
     var body: some View {
         VStack(spacing: 24) {
-            Text("Apassy can now fill your logins. Open Apassy and unlock your vault once, so iPhone can suggest them.")
+            Text("Apassy can now fill your logins and sign in with your passkeys. Open Apassy and unlock your vault once, so iPhone can suggest them.")
                 .multilineTextAlignment(.center)
             Button("Done", action: done)
                 .buttonStyle(.glassProminent)

@@ -18,6 +18,8 @@ struct ItemDetailView: View {
     @Environment(VaultUI.self) private var ui
     @Environment(\.dismiss) private var dismiss
     @State private var confirmingDelete = false
+    /// The removal that the owner asked for, as it was said to them.
+    @State private var pendingPasskeyRemoval: PasskeyRemovalPlan?
     @State private var showsHistory = false
 
     init(model: ItemDetailModel) {
@@ -48,6 +50,20 @@ struct ItemDetailView: View {
             } message: {
                 Text("The item is deleted on this iPhone and, at the next sync, on your Macs. To keep it out of the way instead, archive it.")
             }
+            .confirmationDialog(
+                pendingPasskeyRemoval?.dialogTitle ?? "",
+                isPresented: Binding(
+                    get: { pendingPasskeyRemoval != nil }, set: { if !$0 { pendingPasskeyRemoval = nil } }),
+                titleVisibility: .visible, presenting: pendingPasskeyRemoval
+            ) { plan in
+                Button(plan.actionTitle, role: .destructive) {
+                    Task {
+                        if await model.removePasskey(plan), plan.deletesLogin, model.isGone { dismiss() }
+                    }
+                }
+            } message: { plan in
+                Text(plan.message)
+            }
             #if targetEnvironment(simulator)
                 .task(id: model.detail?.id) { await demoReveal() }
             #endif
@@ -73,6 +89,7 @@ struct ItemDetailView: View {
                         }
                     }
                 }
+                if let passkey = detail.passkey { passkeySection(passkey) }
                 if !detail.notes.isEmpty {
                     Section("Notes") {
                         Text(detail.notes)
@@ -118,6 +135,7 @@ struct ItemDetailView: View {
             }
             HStack(spacing: 6) {
                 Text(row.kind.label)
+                if row.hasPasskey || model.detail?.passkey != nil { Text("· Passkey") }
                 if row.archived { Text("· Archived") }
                 if model.isFavorite { Text("· Favorite") }
             }
@@ -126,6 +144,32 @@ struct ItemDetailView: View {
         }
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .combine)
+    }
+
+    /// The passkey: what it signs in to, never its key. The key has no reveal, copy, or large
+    /// type; it leaves the vault as a signature, or through the system export to another app
+    /// after the owner check.
+    private func passkeySection(_ passkey: PasskeySummary) -> some View {
+        Section {
+            LabeledContent("Website", value: passkey.rpID)
+            if !passkey.userName.isEmpty {
+                LabeledContent("Account", value: passkey.userName)
+            }
+            if !passkey.userDisplayName.isEmpty, passkey.userDisplayName != passkey.userName {
+                LabeledContent("Display name", value: passkey.userDisplayName)
+            }
+            LabeledContent("Passkey ID", value: VaultText.shortID(passkey.credentialID))
+                .accessibilityHint("The first characters of the ID of the passkey, to tell it apart.")
+            if let plan = model.passkeyRemovalPlan {
+                Button(plan.actionTitle, systemImage: plan.systemImage, role: .destructive) {
+                    pendingPasskeyRemoval = plan
+                }
+            }
+        } header: {
+            Label("Passkey", systemImage: "person.badge.key")
+        } footer: {
+            Text(PasskeyRemovalPlan.footer(website: passkey.rpID))
+        }
     }
 
     private func conflictBanner(_ row: ItemRow) -> some View {
@@ -212,6 +256,11 @@ struct ItemDetailView: View {
                         Task { await model.setArchived(!detail.row.archived) }
                     }
                     Divider()
+                    if let plan = model.passkeyRemovalPlan {
+                        Button(plan.actionTitle, systemImage: plan.systemImage, role: .destructive) {
+                            pendingPasskeyRemoval = plan
+                        }
+                    }
                     Button("Delete", systemImage: "trash", role: .destructive) { confirmingDelete = true }
                 } label: {
                     Label("More", systemImage: "ellipsis")

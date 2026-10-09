@@ -12,7 +12,7 @@ import Testing
         let core = try CoreVaultService(dataDirectory: dir, deviceName: "Test iPhone", role: .app)
         let empty = try await core.info()
         #expect(empty.vaults.isEmpty)
-        #expect(empty.schema == 16)
+        #expect(empty.schema == 17)
 
         let vault = try await core.createLocalVault(name: "Personal", passphrase: "synthetic-swift-pass")
         #expect(try await core.info().selectedVault == vault)

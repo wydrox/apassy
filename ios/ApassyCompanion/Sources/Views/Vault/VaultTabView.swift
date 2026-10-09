@@ -43,6 +43,10 @@ struct VaultTabView: View {
                     ItemEditorView(model: ItemEditorModel(detail: detail))
                 case .generator:
                     GeneratorView(model: GeneratorModel(service: vault.service), onUse: nil)
+                case .exchange:
+                    if let exchange = root.exchange {
+                        NavigationStack { CredentialExchangeView(model: exchange, mode: .importing) }
+                    }
                 }
             }
             .environment(vault)
@@ -58,6 +62,10 @@ struct VaultTabView: View {
             Text(vault.alert ?? "")
         }
         .companionPolling(root.companion)
+        // Another app sent its logins: offer the import once the vault is open (it is, here).
+        .onChange(of: root.exchange?.state, initial: true) { _, state in
+            if state == .importWaiting, ui.sheet?.id != VaultSheet.exchange.id { ui.sheet = .exchange }
+        }
         #if targetEnvironment(simulator)
             .task { openFromLaunchArgument() }
         #endif

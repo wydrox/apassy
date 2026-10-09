@@ -155,6 +155,11 @@ public final class CoreVaultService: VaultService, @unchecked Sendable {
         guard role == .app else { throw VaultError(.notAllowed, "AutoFill cannot sync an iCloud vault.") }
     }
 
+    /// Calls of the app only: the import, the export, and the removal of a passkey.
+    private func requireAppOwner() throws {
+        guard role == .app else { throw VaultError(.notAllowed, "Open Apassy to do this.") }
+    }
+
     public func openICloudVault(url: URL, name: String, passphrase: String) async throws -> VaultEntry {
         try requireApp()
         cloudSession.invalidate()
@@ -348,9 +353,67 @@ public final class CoreVaultService: VaultService, @unchecked Sendable {
         try await call("autofill_credential", ["id": id])
     }
 
-    private struct Identities: Decodable, Sendable { var identities: [CredentialIdentity] }
-
     public func credentialIdentities() async throws -> [CredentialIdentity] {
-        try await call("credential_identities", as: Identities.self).identities
+        try await identitySet().passwords
+    }
+
+    public func identitySet() async throws -> IdentitySet {
+        try await call("credential_identities")
+    }
+
+    // MARK: - Passkeys
+
+    private struct Passkeys: Decodable, Sendable { var passkeys: [PasskeyCandidate] }
+
+    public func passkeys(rpID: String, allowed: [Data]) async throws -> [PasskeyCandidate] {
+        try await call(
+            "passkey_list", ["rp_id": rpID, "allowed": allowed.map { $0.base64EncodedString() }], as: Passkeys.self
+        ).passkeys
+    }
+
+    public func passkeyAssert(_ request: PasskeyAssertionRequest) async throws -> PasskeyAssertion {
+        try await call(
+            "passkey_assert",
+            [
+                "id": request.id, "rp_id": request.rpID,
+                "credential_id": request.credentialID.base64EncodedString(),
+                "client_data_hash": request.clientDataHash.base64EncodedString(),
+            ])
+    }
+
+    public func passkeyRegister(_ request: PasskeyRegistration) async throws -> PasskeyCreated {
+        var params: [String: Any] = [
+            "rp_id": request.rpID, "user_name": request.userName, "user_display_name": request.userDisplayName,
+            "user_handle": request.userHandle.base64EncodedString(),
+            "client_data_hash": request.clientDataHash.base64EncodedString(), "algorithms": request.algorithms,
+            "excluded": request.excluded.map { $0.base64EncodedString() }, "title": request.title,
+        ]
+        if let attach = request.attach {
+            params["attach_id"] = attach.id
+            params["attach_revision"] = attach.revision
+        }
+        return try await call("passkey_register", params)
+    }
+
+    public func passkeyImport(_ accounts: [PasskeyImportAccount]) async throws -> PasskeyImportResult {
+        try requireAppOwner()
+        let wire: [[String: Any]] = accounts.map {
+            [
+                "rp_id": $0.rpID, "credential_id": $0.credentialID.base64EncodedString(),
+                "user_handle": $0.userHandle.base64EncodedString(), "user_name": $0.userName,
+                "user_display_name": $0.userDisplayName, "key": $0.key.base64EncodedString(), "title": $0.title,
+            ]
+        }
+        return try await call("passkey_import", ["accounts": wire])
+    }
+
+    public func passkeyRemove(id: UInt64, revision: UInt64) async throws {
+        try requireAppOwner()
+        try await call("passkey_remove", ["id": id, "revision": revision])
+    }
+
+    public func credentialExport() async throws -> CredentialExport {
+        try requireAppOwner()
+        return try await call("credential_export")
     }
 }

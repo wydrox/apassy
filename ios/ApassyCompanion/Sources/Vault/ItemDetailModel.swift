@@ -257,6 +257,25 @@ final class ItemDetailModel {
         await load()
     }
 
+    // MARK: The passkey
+
+    /// What removing the passkey does to this item, with the revision on the screen. nil without
+    /// a passkey.
+    var passkeyRemovalPlan: PasskeyRemovalPlan? { detail.flatMap(PasskeyRemovalPlan.init(detail:)) }
+
+    /// A login that signs in with its passkey only: removing the passkey deletes the item.
+    var isPasskeyOnly: Bool { passkeyRemovalPlan?.deletesLogin == true }
+
+    /// Remove the passkey after the owner check, as `plan` said it to the owner. The key is never
+    /// read: the core drops it. True when the call succeeded; then `isGone` tells whether the
+    /// whole login went.
+    func removePasskey(_ plan: PasskeyRemovalPlan) async -> Bool {
+        guard plan.itemID == id else { return false }
+        let removed = await vault.removePasskey(plan)
+        await load()
+        return removed
+    }
+
     /// Delete with the revision on the screen. True when it is gone.
     func delete() async -> Bool {
         guard let row = detail?.row else { return false }

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// A vault in memory with synthetic items, for `#Preview`, the model tests, and the UI
@@ -12,6 +13,13 @@ public actor PreviewVaultService: VaultService {
         var notes: String
         var fields: [FieldView]
         var secrets: [String: String]
+        var passkey: Passkey? = nil
+    }
+
+    /// A synthetic passkey with a key made here.
+    private struct Passkey {
+        var summary: PasskeySummary
+        var key: P256.Signing.PrivateKey
     }
 
     private var vaults: [VaultEntry]
@@ -132,12 +140,6 @@ public actor PreviewVaultService: VaultService {
             sample.fields.first { $0.role == .username }?.value
             ?? sample.fields.first { $0.role == .host || $0.role == .publicKey || $0.role == .service }?.value
             ?? ""
-        let row = ItemRow(
-            id: id, revision: 1, title: sample.title, kind: sample.kind, subtitle: subtitle,
-            websites: sample.fields.filter { $0.role == .website }.map(\.value), tags: sample.tags,
-            archived: sample.archived, hasTotp: sample.fields.contains { $0.role == .totp },
-            conflictOf: sample.conflictOf, addedAt: now - 86_400 * 400, changedAt: now - 86_400 * sample.daysOld,
-            usedAt: nil)
         var secrets: [String: String] = [:]
         let fields = sample.fields.map { field -> FieldView in
             if field.secret { secrets[field.name] = field.value }
@@ -145,10 +147,34 @@ public actor PreviewVaultService: VaultService {
                 name: field.name, label: field.label, secret: field.secret, value: field.secret ? nil : field.value,
                 role: field.role, custom: field.custom)
         }
+        let row = ItemRow(
+            id: id, revision: 1, title: sample.title, kind: sample.kind, subtitle: subtitle,
+            websites: sample.fields.filter { $0.role == .website }.map(\.value), tags: sample.tags,
+            archived: sample.archived, hasTotp: sample.fields.contains { $0.role == .totp },
+            conflictOf: sample.conflictOf, addedAt: now - 86_400 * 400, changedAt: now - 86_400 * sample.daysOld,
+            usedAt: nil, hasPassword: Self.storesPassword(secrets))
         return Stored(row: row, notes: sample.notes, fields: fields, secrets: secrets)
     }
 
     // MARK: - Helpers
+
+    /// As the core: a password counts when its value is not empty. The row says so without the value.
+    private static func storesPassword(_ secrets: [String: String]) -> Bool {
+        secrets["password"].map { !$0.isEmpty } == true
+    }
+
+    /// Test support: a stored secret password with no value. The ordinary calls refuse it, but
+    /// the core can hold one (an older import). The row follows the stored value.
+    func storeEmptyPasswordForTesting(id: UInt64) throws {
+        var item = try stored(id)
+        item.secrets["password"] = ""
+        if !item.fields.contains(where: { $0.name == "password" }) {
+            item.fields.append(
+                FieldView(name: "password", label: "Password", secret: true, value: nil, role: .password, custom: false))
+        }
+        item.row.hasPassword = Self.storesPassword(item.secrets)
+        items[id] = item
+    }
 
     private func requireVault() throws {
         guard selected != nil else { throw VaultError(.noVault, "No vault is open on this iPhone.") }
@@ -338,7 +364,7 @@ public actor PreviewVaultService: VaultService {
 
     public func item(id: UInt64) async throws -> ItemDetail {
         let item = try stored(id)
-        return ItemDetail(row: item.row, notes: item.notes, fields: item.fields)
+        return ItemDetail(row: item.row, notes: item.notes, fields: item.fields, passkey: item.passkey?.summary)
     }
 
     public func reveal(id: UInt64, field: String) async throws -> String {
@@ -395,6 +421,9 @@ public actor PreviewVaultService: VaultService {
                 name = field.name ?? ""
                 (label, role) = Self.label(for: name)
             }
+            if name.hasPrefix("passkey_") {
+                throw VaultError(.invalidInput, "This field name is reserved.")
+            }
             if field.secret {
                 guard let value = field.value ?? old?.secrets[name], !value.isEmpty else {
                     throw VaultError(.invalidInput, "Enter a value for \(label).")
@@ -415,8 +444,9 @@ public actor PreviewVaultService: VaultService {
             subtitle: fields.first { $0.role == .username }?.value ?? fields.first { $0.role == .host }?.value ?? "",
             websites: fields.filter { $0.role == .website }.compactMap(\.value), tags: draft.tags,
             archived: old?.row.archived ?? false, hasTotp: fields.contains { $0.role == .totp },
-            conflictOf: old?.row.conflictOf, addedAt: old?.row.addedAt ?? now, changedAt: now, usedAt: nil)
-        items[newID] = Stored(row: row, notes: draft.notes, fields: fields, secrets: secrets)
+            conflictOf: old?.row.conflictOf, addedAt: old?.row.addedAt ?? now, changedAt: now, usedAt: nil,
+            hasPasskey: old?.passkey != nil, hasPassword: Self.storesPassword(secrets))
+        items[newID] = Stored(row: row, notes: draft.notes, fields: fields, secrets: secrets, passkey: old?.passkey)
         return SavedItem(id: newID, revision: row.revision)
     }
 
@@ -566,6 +596,190 @@ public actor PreviewVaultService: VaultService {
     public func autofillCredential(id: UInt64) async throws -> FillCredential {
         let item = try stored(id)
         return FillCredential(username: item.row.subtitle, password: item.secrets["password"] ?? "")
+    }
+
+    public func identitySet() async throws -> IdentitySet {
+        let passwords = try await credentialIdentities()
+        let passkeys = activePasskeys().map {
+            PasskeyIdentity(
+                id: $0.row.id, rpID: $0.passkey!.summary.rpID, userName: $0.passkey!.summary.accountName,
+                credentialID: $0.passkey!.summary.credentialID, userHandle: $0.passkey!.summary.userHandle)
+        }
+        let codes = items.values.filter { $0.row.kind == .login && !$0.row.archived && $0.row.hasTotp }
+            .sorted { $0.row.id < $1.row.id }
+            .flatMap { item in
+                item.row.websites.compactMap { site -> CodeIdentity? in
+                    guard let host = URL(string: site.contains("://") ? site : "https://\(site)")?.host() else { return nil }
+                    return CodeIdentity(id: item.row.id, title: item.row.title, username: item.row.subtitle, host: host)
+                }
+            }
+        return IdentitySet(passwords: passwords, passkeys: passkeys, codes: codes)
+    }
+
+    // MARK: - Passkeys
+
+    private func activePasskeys() -> [Stored] {
+        items.values.filter { $0.passkey != nil && !$0.row.archived && $0.row.conflictOf == nil }
+            .sorted { $0.row.id < $1.row.id }
+    }
+
+    public func passkeys(rpID: String, allowed: [Data]) async throws -> [PasskeyCandidate] {
+        try requireUnlocked()
+        return activePasskeys().compactMap { item in
+            guard let summary = item.passkey?.summary, summary.rpID == rpID,
+                allowed.isEmpty || allowed.contains(summary.credentialID)
+            else { return nil }
+            return PasskeyCandidate(
+                id: item.row.id, title: item.row.title, rpID: summary.rpID, userName: summary.userName,
+                userDisplayName: summary.userDisplayName, credentialID: summary.credentialID,
+                userHandle: summary.userHandle)
+        }
+    }
+
+    public func passkeyAssert(_ request: PasskeyAssertionRequest) async throws -> PasskeyAssertion {
+        try PasskeyRequestCheck.clientDataHash(request.clientDataHash)
+        let item = try stored(request.id)
+        guard let passkey = item.passkey, passkey.summary.rpID == request.rpID,
+            passkey.summary.credentialID == request.credentialID
+        else { throw VaultError(.notFound, "This passkey is not in the vault.") }
+        let authenticator = PreviewAuthenticator(rpID: passkey.summary.rpID, key: passkey.key)
+        let data = authenticator.assertionData()
+        return PasskeyAssertion(
+            credentialID: passkey.summary.credentialID, userHandle: passkey.summary.userHandle, authenticatorData: data,
+            signature: try authenticator.sign(data, clientDataHash: request.clientDataHash))
+    }
+
+    public func passkeyRegister(_ request: PasskeyRegistration) async throws -> PasskeyCreated {
+        try requireUnlocked()
+        try PasskeyRequestCheck.clientDataHash(request.clientDataHash)
+        guard request.algorithms.isEmpty || request.algorithms.contains(PasskeyAlgorithm.es256) else {
+            throw VaultError(.unsupportedAlgorithm, "The website accepts no passkey algorithm of Apassy.")
+        }
+        if !request.excluded.isEmpty, !(try await passkeys(rpID: request.rpID, allowed: request.excluded)).isEmpty {
+            throw VaultError(.excluded, "This account has a passkey in the vault already.")
+        }
+        let credentialID = Data(SymmetricKey(size: .bits256).withUnsafeBytes { Array($0) })
+        let key = P256.Signing.PrivateKey()
+        let summary = PasskeySummary(
+            rpID: request.rpID, userName: request.userName, userDisplayName: request.userDisplayName,
+            credentialID: credentialID, userHandle: request.userHandle)
+        let id: UInt64
+        if let attach = request.attach {
+            var item = try stored(attach.id)
+            guard item.row.revision == attach.revision else {
+                throw VaultError(.conflict, "This item changed. Open it again to see the new version.")
+            }
+            guard item.row.kind == .login, item.passkey == nil else {
+                throw VaultError(.invalidInput, "Only a login without a passkey can take one.")
+            }
+            item.passkey = Passkey(summary: summary, key: key)
+            item.row.hasPasskey = true
+            item.row.revision += 1
+            items[attach.id] = item
+            id = attach.id
+        } else {
+            id = insertPasskeyLogin(title: request.title, summary: summary, key: key)
+        }
+        return PasskeyCreated(
+            id: id, credentialID: credentialID,
+            attestationObject: PreviewAuthenticator(rpID: request.rpID, key: key).attestationObject(credentialID: credentialID))
+    }
+
+    private func insertPasskeyLogin(title: String, summary: PasskeySummary, key: P256.Signing.PrivateKey) -> UInt64 {
+        let id = nextID
+        nextID += 1
+        let now = Int64(Date().timeIntervalSince1970)
+        var fields: [FieldView] = []
+        if !summary.userName.isEmpty {
+            fields.append(
+                FieldView(name: "username", label: "Username", secret: false, value: summary.userName, role: .username,
+                    custom: false))
+        }
+        fields.append(
+            FieldView(name: "x_57656273697465", label: "Website", secret: false, value: "https://\(summary.rpID)",
+                role: .website, custom: true))
+        let row = ItemRow(
+            id: id, revision: 1, title: title.isEmpty ? summary.rpID : title, kind: .login, subtitle: summary.userName,
+            websites: ["https://\(summary.rpID)"], tags: [], archived: false, hasTotp: false, conflictOf: nil,
+            addedAt: now, changedAt: now, usedAt: nil, hasPasskey: true, hasPassword: false)
+        items[id] = Stored(row: row, notes: "", fields: fields, secrets: [:], passkey: Passkey(summary: summary, key: key))
+        return id
+    }
+
+    public func passkeyImport(_ accounts: [PasskeyImportAccount]) async throws -> PasskeyImportResult {
+        try requireUnlocked()
+        var result = PasskeyImportResult(imported: 0, skippedExisting: 0, failed: 0)
+        for account in accounts {
+            if items.values.contains(where: {
+                $0.passkey?.summary.rpID == account.rpID && $0.passkey?.summary.credentialID == account.credentialID
+            }) {
+                result.skippedExisting += 1
+                continue
+            }
+            guard let key = try? P256.Signing.PrivateKey(derRepresentation: account.key),
+                PasskeyRequestCheck.importable(
+                    rpID: account.rpID, credentialID: account.credentialID, userHandle: account.userHandle)
+            else {
+                result.failed += 1
+                continue
+            }
+            let summary = PasskeySummary(
+                rpID: account.rpID, userName: account.userName, userDisplayName: account.userDisplayName,
+                credentialID: account.credentialID, userHandle: account.userHandle)
+            _ = insertPasskeyLogin(title: account.title, summary: summary, key: key)
+            result.imported += 1
+        }
+        return result
+    }
+
+    public func passkeyRemove(id: UInt64, revision: UInt64) async throws {
+        var item = try stored(id)
+        guard item.row.revision == revision else {
+            throw VaultError(.conflict, "This item changed. Open it again to see the new version.")
+        }
+        guard item.passkey != nil else { throw VaultError(.notFound, "This login has no passkey.") }
+        // As the core does: a login without a password has no other way in, so it goes whole.
+        guard Self.storesPassword(item.secrets) else {
+            items[id] = nil
+            return
+        }
+        item.passkey = nil
+        item.row.hasPasskey = false
+        item.row.revision += 1
+        items[id] = item
+    }
+
+    public func credentialExport() async throws -> CredentialExport {
+        try requireUnlocked()
+        var exported: [ExportedItem] = []
+        var skipped = 0
+        for item in items.values.sorted(by: { $0.row.id < $1.row.id }) {
+            guard item.row.kind == .login, !item.row.archived, item.row.conflictOf == nil else {
+                skipped += 1
+                continue
+            }
+            var totp: ExportedTotp?
+            if let field = item.fields.first(where: { $0.role == .totp }), let uri = item.secrets[field.name],
+                let components = URLComponents(string: uri),
+                let secret = components.queryItems?.first(where: { $0.name == "secret" })?.value,
+                let bytes = OTPAuthURI.decodeBase32(secret)
+            {
+                totp = ExportedTotp(secret: bytes, period: 30, digits: 6, algorithm: "sha1", issuer: item.row.title, user: item.row.subtitle)
+            }
+            exported.append(
+                ExportedItem(
+                    id: item.row.id, title: item.row.title, notes: item.notes, tags: item.row.tags,
+                    createdAt: item.row.addedAt, changedAt: item.row.changedAt,
+                    username: item.row.subtitle.isEmpty ? nil : item.row.subtitle, password: item.secrets["password"],
+                    websites: item.row.websites, totp: totp,
+                    passkey: item.passkey.map {
+                        ExportedPasskey(
+                            rpID: $0.summary.rpID, credentialID: $0.summary.credentialID, userHandle: $0.summary.userHandle,
+                            userName: $0.summary.userName, userDisplayName: $0.summary.userDisplayName,
+                            key: $0.key.derRepresentation)
+                    }))
+        }
+        return CredentialExport(items: exported, skipped: skipped)
     }
 
     public func credentialIdentities() async throws -> [CredentialIdentity] {

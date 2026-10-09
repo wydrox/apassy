@@ -6,6 +6,7 @@
   "minimum_chrome_version": "120",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwsxDLdkV5maKRgt5CTPTeTJqV5KhIgW/h8pBjOjjJFKXQAGKzmU0IgYkcoeqV367XiUKpFu7u4D/YYV4UajQIMVMHDtSMT7FPlFkLNVURrOl5xhSGqTcVcfyZFsAoj42H6t4yHOvbMQF6ozyD8fN1xOYkGZArcJ/nuU6D5uXVP/nNnigxF92ziJGxmw8r1LKCFcvPg2o8VspfOGaMoTFnjFjrgANMW8wIWw0F3ECokvxqkMrnbisT44NQxuy9XSBDVNcPVlCyMET5SlNXt28VpzYGwE6tnBZWvJZkoiaArnrmXSdwjJMcFieMLGOnd3zZKAui26H/8QI+m6Ic9hstQIDAQAB",
   "permissions": ["nativeMessaging", "activeTab", "scripting"],
+  "optional_host_permissions": ["https://*/*", "http://localhost/*"],
   "background": {
     "service_worker": "background.js"
   },

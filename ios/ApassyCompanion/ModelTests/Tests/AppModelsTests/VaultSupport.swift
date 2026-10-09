@@ -295,6 +295,23 @@ actor SpyVaultService: VaultService {
     func autofillList(domains: [String]) async throws -> AutofillList { try await inner.autofillList(domains: domains) }
     func autofillCredential(id: UInt64) async throws -> FillCredential { try await inner.autofillCredential(id: id) }
     func credentialIdentities() async throws -> [CredentialIdentity] { try await inner.credentialIdentities() }
+    func identitySet() async throws -> IdentitySet { try await inner.identitySet() }
+
+    // Passkeys
+    func passkeys(rpID: String, allowed: [Data]) async throws -> [PasskeyCandidate] {
+        try await inner.passkeys(rpID: rpID, allowed: allowed)
+    }
+    func passkeyAssert(_ request: PasskeyAssertionRequest) async throws -> PasskeyAssertion {
+        try await inner.passkeyAssert(request)
+    }
+    func passkeyRegister(_ request: PasskeyRegistration) async throws -> PasskeyCreated {
+        try await inner.passkeyRegister(request)
+    }
+    func passkeyImport(_ accounts: [PasskeyImportAccount]) async throws -> PasskeyImportResult {
+        try await inner.passkeyImport(accounts)
+    }
+    func passkeyRemove(id: UInt64, revision: UInt64) async throws { try await inner.passkeyRemove(id: id, revision: revision) }
+    func credentialExport() async throws -> CredentialExport { try await inner.credentialExport() }
 }
 
 // MARK: Settings

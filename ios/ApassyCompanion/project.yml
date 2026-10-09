@@ -104,9 +104,13 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         NSLocalNetworkUsageDescription: Apassy connects to your Mac on this Wi-Fi network to show the runs that wait for you and to send your decision.
         NSCameraUsageDescription: Apassy uses the camera only to scan a code that your Mac shows, to add this iPhone. It saves no picture.
-        NSFaceIDUsageDescription: Apassy uses Face ID to unlock your vault, and before it shows, copies, or fills a secret, or approves a run.
+        NSFaceIDUsageDescription: Apassy uses Face ID to unlock your vault, and before it shows, copies, or fills a secret, moves your passwords and passkeys to or from another app, or approves a run.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+        # Apple's credential exchange opens the app with this activity to import from another app
+        # (the value of ASCredentialExchangeActivity).
+        NSUserActivityTypes:
+          - ASCredentialExchangeActivity
     settings:
       base:
         PRODUCT_NAME: ApassyCompanion
@@ -142,7 +146,7 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         ApassyAppIdentifierPrefix: $(AppIdentifierPrefix)
-        NSFaceIDUsageDescription: Apassy uses Face ID before it fills a password.
+        NSFaceIDUsageDescription: Apassy uses Face ID before it fills a password or a code, signs in with a passkey, or saves a passkey.
         NSExtension:
           NSExtensionPointIdentifier: com.apple.authentication-services-credential-provider-ui
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).CredentialProviderViewController
@@ -152,6 +156,12 @@ targets:
             ASCredentialProviderExtensionCapabilities:
               ProvidesPasswords: true
               ProvidesOneTimeCodes: true
+              ProvidesPasskeys: true
+              # Apple's credential exchange (iOS 26): Apassy can import from and export to
+              # another credential manager through the system.
+              SupportsCredentialExchange: true
+              SupportedCredentialExchangeVersions:
+                - "1.0"
     settings:
       base:
         PRODUCT_NAME: ApassyAutoFill

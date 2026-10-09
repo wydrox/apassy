@@ -1,6 +1,6 @@
 #![cfg(feature = "vault")]
 
-//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 15) to
+//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 16) to
 //! the current version, with data at each version. Synthetic values only.
 //!
 //! The schema SQL below is a frozen copy of the statements that each earlier version ran
@@ -22,7 +22,7 @@ use apassy::vault::{
 use tempfile::TempDir;
 
 const PASS: &str = "synthetic-migration-passphrase";
-const CURRENT_VERSION: i64 = 16;
+const CURRENT_VERSION: i64 = 17;
 /// The vault ID of the frozen version 13 file.
 const V13_VAULT_ID: &str = "6f1c2d3e-4a5b-4c6d-8e7f-0123456789ab";
 
@@ -1783,7 +1783,7 @@ fn version_15_migration_adds_the_relay_device_table_and_is_atomic() {
     conn.close().map_err(|(_, e)| e).unwrap();
 
     let mut vault = Vault::open(&path).expect("open");
-    vault.unlock(PASS).expect("schema 15 to 16");
+    vault.unlock(PASS).expect("schema 15 to current");
     assert_version_data(&mut vault, 14);
     assert_eq!(vault.sync_identity().unwrap().vault_id, V13_VAULT_ID);
     assert_eq!(
@@ -1797,6 +1797,92 @@ fn version_15_migration_adds_the_relay_device_table_and_is_atomic() {
     assert!(vault.relay_device().unwrap().is_none());
     assert_eq!(sync_columns(&path), before, "record IDs and clocks stay");
     drop(vault);
-    assert_eq!(raw_versions(&path), (16, 16));
+    assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
     assert!(apassy::vault::LOCAL_TABLES.contains(&"relay_device"));
+}
+
+/// The table of schema version 16 (ADR 0022), as the app made it on 2026-10-06.
+const V16_SQL: &str = "
+CREATE TABLE relay_device (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    relay_url TEXT NOT NULL,
+    team_id TEXT NOT NULL,
+    device_id INTEGER NOT NULL,
+    public_key BLOB NOT NULL,
+    key_pkcs8 BLOB NOT NULL,
+    created_at INTEGER NOT NULL
+);
+UPDATE vault_meta SET schema_version = 16 WHERE id = 1;
+PRAGMA user_version = 16;
+";
+
+/// Schema 17 reserves the `passkey_` field names. The migration gives an ordinary field
+/// of schema 16 with such a name a free name, and the environment binding of the field
+/// follows it, so an agent run still reads the value. The revision and the sync columns
+/// stay. The test compares values and does not print them.
+#[test]
+fn version_17_migration_renames_reserved_fields_and_their_binding() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("v16.db");
+    build_legacy(&path, 13);
+    let conn = rusqlite::Connection::open(&path).expect("open");
+    conn.pragma_update(None, "key", PASS).expect("key");
+    conn.execute_batch(V14_SQL).expect("frozen schema 14");
+    conn.execute_batch(V15_SQL).expect("frozen schema 15");
+    conn.execute_batch(V16_SQL).expect("frozen schema 16");
+    // Item 1 has the secret field `token` and the binding MIG_API_KEY to it. In schema 16
+    // the owner could name that field `passkey_key`.
+    conn.execute_batch(
+        "UPDATE sync_device SET applying = 1 WHERE id = 1;
+         UPDATE item_field SET name = 'passkey_key' WHERE item_id = 1 AND name = 'token';
+         UPDATE env_binding SET field = 'passkey_key' WHERE item_id = 1;
+         UPDATE sync_device SET applying = 0 WHERE id = 1;",
+    )
+    .expect("reserved name");
+    let revision: i64 = conn
+        .query_row("SELECT revision FROM item WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .expect("revision");
+    conn.close().map_err(|(_, e)| e).unwrap();
+    assert_eq!(raw_versions(&path), (16, 16));
+    let before = sync_columns(&path);
+
+    let mut vault = Vault::open(&path).expect("open");
+    vault.unlock(PASS).expect("schema 16 to current");
+    let renamed: String = "passkey_key"
+        .bytes()
+        .fold(String::from("x_"), |mut text, byte| {
+            text.push_str(&format!("{byte:02x}"));
+            text
+        });
+    // The binding has the new name, and the path of an agent run reads the value.
+    let binding = vault.env_binding(1).expect("binding").expect("some");
+    assert_eq!(binding.env_name, "MIG_API_KEY");
+    assert_eq!(binding.field, renamed);
+    assert_eq!(binding.delivery, EnvDelivery::Value);
+    let value = vault
+        .reveal(1, &binding.field)
+        .expect("reveal of the binding");
+    assert!(
+        value.expose() == "MIG-SECRET-api-token",
+        "the bound field keeps its value"
+    );
+    let details = vault.details(1).expect("details");
+    let names: Vec<&str> = details.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, [renamed.as_str(), "service"]);
+    assert!(details.fields[0].secret);
+    assert_eq!(details.summary.revision, u64::try_from(revision).unwrap());
+    assert!(
+        vault.reveal(1, "service").expect("plain field").expose() == "mig-service",
+        "an ordinary field keeps its value"
+    );
+    // The other binding does not change.
+    assert_eq!(
+        vault.env_binding(2).expect("binding").expect("some").field,
+        "password"
+    );
+    drop(vault);
+    assert_eq!(sync_columns(&path), before, "record IDs and clocks stay");
+    assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
 }

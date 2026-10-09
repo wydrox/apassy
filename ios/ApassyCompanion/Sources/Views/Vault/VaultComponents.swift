@@ -21,6 +21,8 @@ enum VaultSheet: Identifiable {
     case new(ItemKind)
     case edit(ItemDetail)
     case generator
+    /// An import from another app (Apple's credential exchange).
+    case exchange
 
     var id: String {
         switch self {
@@ -28,6 +30,7 @@ enum VaultSheet: Identifiable {
         case .new(let kind): "new-\(kind.rawValue)"
         case .edit(let detail): "edit-\(detail.id)"
         case .generator: "generator"
+        case .exchange: "exchange"
         }
     }
 }

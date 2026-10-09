@@ -51,9 +51,13 @@
 	<key>NSCameraUsageDescription</key>
 	<string>Apassy uses the camera only to scan a code that your Mac shows, to add this iPhone. It saves no picture.</string>
 	<key>NSFaceIDUsageDescription</key>
-	<string>Apassy uses Face ID to unlock your vault, and before it shows, copies, or fills a secret, or approves a run.</string>
+	<string>Apassy uses Face ID to unlock your vault, and before it shows, copies, or fills a secret, moves your passwords and passkeys to or from another app, or approves a run.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Apassy connects to your Mac on this Wi-Fi network to show the runs that wait for you and to send your decision.</string>
+	<key>NSUserActivityTypes</key>
+	<array>
+		<string>ASCredentialExchangeActivity</string>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

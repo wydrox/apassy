@@ -1587,7 +1587,8 @@ impl RelaySync {
     }
 
     /// Sync the unlocked vault (contract section 10): check and merge a newer copy,
-    /// then push when the vault has content that the copy lacks, with `If-Match`. A
+    /// then push when the vault has content that the copy lacks, or when the copy has
+    /// an earlier schema ([`MergeReport::remote_outdated`]), with `If-Match`. A
     /// `412` starts another round; after three the change stays for the next sync.
     /// `Running` when another sync of this vault runs.
     pub fn sync(&self, vault: &mut Vault) -> Result<SyncOutcome, SyncError> {
@@ -1688,7 +1689,11 @@ impl RelaySync {
                     })
                 });
                 let report = report.inspect_err(|error| self.remember_refusal(&hash, *error))?;
-                remote_content = Some(to_hex(&report.remote_content));
+                // A copy of an earlier schema gets a copy of the current schema, also with
+                // the same content. No remote content forces the push, here and in a
+                // later sync when this push fails.
+                remote_content =
+                    (!report.remote_outdated()).then(|| to_hex(&report.remote_content));
                 state.last_remote_version = head.version;
                 state.last_head_sha256 = Some(hash.clone());
                 state.last_content = remote_content.clone();
@@ -1707,6 +1712,7 @@ impl RelaySync {
                         total.skipped_variables.extend(report.skipped_variables);
                         total.remote = report.remote;
                         total.remote_content = report.remote_content;
+                        total.remote_schema = report.remote_schema;
                         total
                     }
                 });
@@ -2344,7 +2350,8 @@ impl RelaySync {
         );
         state.last_remote_version = download.head.fields.version;
         state.last_head_sha256 = Some(download.head.hash());
-        state.last_content = Some(to_hex(&adopted.content));
+        // A copy of an earlier schema: the first sync pushes the current schema.
+        state.last_content = (!adopted.outdated()).then(|| to_hex(&adopted.content));
         if let Err(error) = self.write_state(&state) {
             return fail(vault, error);
         }

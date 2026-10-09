@@ -55,6 +55,9 @@ final class ItemEditorModel {
     let kind: ItemKind
     /// The item that is edited, or nil for a new one.
     let existing: ItemRow?
+    /// The passkey of the login. The form never shows its key and does not send it: the core
+    /// keeps the passkey through the edit, and its password becomes optional.
+    let passkey: PasskeySummary?
 
     var title: String
     var notes: String
@@ -87,6 +90,7 @@ final class ItemEditorModel {
     init(kind: ItemKind) {
         self.kind = kind
         existing = nil
+        passkey = nil
         title = ""
         notes = ""
         tags = []
@@ -96,6 +100,7 @@ final class ItemEditorModel {
     init(detail: ItemDetail) {
         kind = detail.row.kind
         existing = detail.row
+        passkey = detail.passkey
         title = detail.row.title
         notes = detail.notes
         tags = detail.row.tags
@@ -168,7 +173,16 @@ final class ItemEditorModel {
         }
     }
 
-    var specs: [FieldSpec] { Self.specs(kind) }
+    /// The fields of the form. A login with a passkey signs in without a password, so its
+    /// username and password are optional.
+    var specs: [FieldSpec] {
+        guard passkey != nil, kind == .login else { return Self.specs(kind) }
+        return Self.specs(kind).map {
+            FieldSpec(
+                name: $0.name, label: $0.label, secret: $0.secret, required: false, multiline: $0.multiline,
+                role: $0.role)
+        }
+    }
 
     /// A secret field of the stored item that keeps its value while it is empty.
     func isUnchanged(_ name: String) -> Bool {

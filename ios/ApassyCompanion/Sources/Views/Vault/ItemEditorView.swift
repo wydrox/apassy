@@ -31,6 +31,16 @@ struct ItemEditorView: View {
                     Text("Title")
                 }
                 mainFields
+                if let passkey = model.passkey {
+                    Section {
+                        LabeledContent("Website", value: passkey.rpID)
+                        if !passkey.accountName.isEmpty { LabeledContent("Account", value: passkey.accountName) }
+                    } header: {
+                        Label("Passkey", systemImage: "person.badge.key")
+                    } footer: {
+                        Text("The passkey stays as it is, and the password is optional. Remove the passkey on the item screen.")
+                    }
+                }
                 if model.kind == .login { loginExtras }
                 detailsSection
                 tagsSection

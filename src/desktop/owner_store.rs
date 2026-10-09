@@ -30,14 +30,14 @@ use crate::vault::providers::{self, Suggestion};
 use crate::vault::{
     AccessRequest, ActivityDecision, ActivityRecord, AgentSummary, AgentToken, CompanionDevice,
     CompanionSetting, Declaration, Destination, EnvBinding, EnvDelivery, Environment, ExecGrant,
-    ExecMode, ExecRule, Field, GrantPlace, ItemDraft as VaultDraft, ItemEvent, ItemTimes,
-    MAX_PASSPHRASE_BYTES, MAX_PLACEHOLDER_HOSTS, MAX_TOKEN_LIFETIME_DAYS, MIN_PASSPHRASE_BYTES,
-    Reversibility, RiskLevel, Scope, SecretValue, SuggestionStats, Vault, VaultError,
-    VaultErrorKind, checked_env_name, parse_placeholder_host,
+    ExecMode, ExecRule, Field, FieldSummary, GrantPlace, ItemDraft as VaultDraft, ItemEvent,
+    ItemTimes, MAX_PASSPHRASE_BYTES, MAX_PLACEHOLDER_HOSTS, MAX_TOKEN_LIFETIME_DAYS,
+    MIN_PASSPHRASE_BYTES, Reversibility, RiskLevel, Scope, SecretValue, SuggestionStats, Vault,
+    VaultError, VaultErrorKind, checked_env_name, parse_placeholder_host,
 };
 
 mod browser;
-pub use browser::{FillValues, PageLogin};
+pub use browser::{FillValues, PageCode, PageLogin, PasskeyItem, SYSTEM_FILL_ORIGIN, SystemLogin};
 
 const MAX_TAG_BYTES: usize = 64;
 /// The most tags on one item (`MAX_TAG_COUNT` in `src/vault/types.rs`).
@@ -64,6 +64,39 @@ pub fn detail_field_name(label: &str) -> String {
 /// The label of a custom detail field. `None` for another field.
 pub fn detail_label(name: &str) -> Option<String> {
     crate::vault::custom_detail_label(name)
+}
+
+/// Whether a custom detail with `label` and `value` holds the setup key of a one-time
+/// password: its label is the label of a one-time password, or its value is an explicit
+/// `otpauth://totp` link. Such a detail is always hidden, and its value never shows.
+pub fn is_setup_key(label: &str, value: &str) -> bool {
+    crate::otp::is_otp_label(label) || crate::otp::is_totp_uri(value)
+}
+
+/// Whether the custom detail `field` of item `id` holds a setup key ([`is_setup_key`]),
+/// hidden or (as an older Apassy stored it) visible. A value is read only to look at
+/// its start, and is erased at once. Any other field is never a setup key.
+fn is_code_field(vault: &Vault, id: u64, field: &FieldSummary) -> ModelResult<bool> {
+    let Some(label) = detail_label(&field.name) else {
+        return Ok(false);
+    };
+    if crate::otp::is_otp_label(&label) {
+        return Ok(true);
+    }
+    let value = vault.reveal(id, &field.name).map_err(map_err)?;
+    Ok(crate::otp::is_totp_uri(value.expose()))
+}
+
+/// Whether the field `field` of item `id` holds the setup key of a one-time password: a
+/// custom detail with the label of a one-time password, or any field with an explicit
+/// `otpauth://totp` link. This is the rule of the agent catalog
+/// (`vault::access::is_setup_key_field`). A value is read only to look at its start, and
+/// is erased at once. A field that the vault cannot read is not a setup key.
+fn holds_setup_key(vault: &Vault, id: u64, field: &str) -> bool {
+    crate::vault::is_setup_key_field(field, "")
+        || vault
+            .reveal(id, field)
+            .is_ok_and(|value| crate::vault::is_setup_key_field(field, value.expose()))
 }
 
 /// The owner-facing name of a field: a built-in name, or the label of a custom detail.
@@ -449,6 +482,10 @@ pub struct OwnerSession {
     vault: SharedVault,
     path: Option<PathBuf>,
     revealed: BTreeMap<(u64, String), RevealedValue>,
+    /// Seeds of one-time passwords that one owner check for [`OwnerAction::ShowCode`]
+    /// opened, one field each. The view makes the code from it. Kept apart from
+    /// `revealed`, so a shown code is not a reveal of the item.
+    code_seeds: BTreeMap<(u64, String), RevealedValue>,
     before_lock: LockHook,
 }
 
@@ -475,6 +512,7 @@ impl OwnerSession {
             vault: Arc::new(Mutex::new(None)),
             path: None,
             revealed: BTreeMap::new(),
+            code_seeds: BTreeMap::new(),
             before_lock: LockHook::default(),
         }
     }
@@ -546,7 +584,7 @@ impl OwnerSession {
     }
 
     pub fn unlock(&mut self, passphrase: &str) -> ModelResult<()> {
-        self.revealed.clear();
+        self.forget_all_reveals();
         require_passphrase(passphrase)?;
         let mut slot = self.slot();
         let vault = slot
@@ -574,7 +612,7 @@ impl OwnerSession {
                 "The new passphrase is the same as the current passphrase.",
             ));
         }
-        self.revealed.clear();
+        self.forget_all_reveals();
         let result = self.unlocked()?.change_passphrase(current, new);
         let Err(err) = result else {
             return Ok(());
@@ -615,7 +653,7 @@ impl OwnerSession {
         approvals: Option<&ApprovalQueue>,
         why: &str,
     ) -> ModelResult<()> {
-        self.revealed.clear();
+        self.forget_all_reveals();
         let mut slot = self.vault.lock().unwrap_or_else(PoisonError::into_inner);
         let result = match slot.as_mut() {
             None => Ok(()),
@@ -728,7 +766,7 @@ impl OwnerSession {
             .unlocked()?
             .update(id, expected_revision, vault_draft)
             .map_err(map_err)?;
-        self.revealed.retain(|key, _| key.0 != id);
+        self.forget_item_reveals(id);
         self.row_from(summary)
     }
 
@@ -742,6 +780,16 @@ impl OwnerSession {
         if !secrets.is_blank() {
             return Ok(false);
         }
+        // A save repairs an older visible setup key, even when the form's
+        // protected view has the same values as the stored item.
+        {
+            let vault = self.unlocked()?;
+            for field in &vault.details(id).map_err(map_err)?.fields {
+                if !field.secret && is_code_field(&vault, id, field)? {
+                    return Ok(false);
+                }
+            }
+        }
         let current = self.details(id)?;
         Ok(!current.hidden && current.to_draft() == *draft)
     }
@@ -750,7 +798,7 @@ impl OwnerSession {
         self.unlocked()?
             .delete(id, expected_revision)
             .map_err(map_err)?;
-        self.revealed.retain(|key, _| key.0 != id);
+        self.forget_item_reveals(id);
         Ok(())
     }
 
@@ -764,7 +812,8 @@ impl OwnerSession {
             let meta = vault.details(id).map_err(map_err)?;
             let mut pairs = Vec::new();
             for field in &meta.fields {
-                if !field.secret {
+                // A setup key opens only with its own check (`ShowCode`), never here.
+                if !field.secret || is_code_field(&vault, id, field)? {
                     continue;
                 }
                 // Move the value into the erasing buffer without a copy (F10).
@@ -787,17 +836,100 @@ impl OwnerSession {
     }
 
     pub fn hide(&mut self, id: u64) -> ModelResult<OwnerDetails> {
-        self.revealed.retain(|key, _| key.0 != id);
+        self.forget_item_reveals(id);
         self.details(id)
     }
 
     /// The revealed value of one field. The view borrows it. There is no copy in
     /// [`OwnerDetails`] (key-memory review F10). `None` after [`REVEAL_TIME`].
+    ///
+    /// A setup key is never here: a seed that [`Self::reveal_one_code_seed`] opened is
+    /// only in [`Self::code_seed`], so a generic secret row never shows it.
     pub fn revealed_value(&self, id: u64, field: &str) -> Option<&str> {
         self.revealed
             .get(&(id, field.to_owned()))
             .filter(|value| value.shown_at.elapsed() < REVEAL_TIME)
             .map(|value| value.value.as_str())
+    }
+
+    /// Open the seed of one one-time password for [`REVEAL_TIME`], so the view can show
+    /// its code. Needs a fresh owner check for [`OwnerAction::ShowCode`] of this item and
+    /// this field. Only this field is read: the password and the other secret values stay
+    /// in the vault. The view borrows the seed with [`Self::code_seed`] and never shows it.
+    pub fn reveal_one_code_seed(
+        &mut self,
+        id: u64,
+        field: &str,
+        proof: OwnerProof,
+    ) -> ModelResult<()> {
+        let expected = OwnerAction::ShowCode {
+            item_id: id,
+            field: field.to_owned(),
+        };
+        let seed = {
+            let mut vault = self.unlocked_for(proof, &expected)?;
+            let seed = otp_seed(&vault, id, field)?;
+            // The history says when the owner saw a value of the item (schema 10).
+            vault.record_reveal(id).map_err(map_err)?;
+            seed
+        };
+        self.code_seeds.insert(
+            (id, field.to_owned()),
+            RevealedValue {
+                value: seed,
+                shown_at: Instant::now(),
+            },
+        );
+        Ok(())
+    }
+
+    /// The seed of one one-time password that [`Self::reveal_one_code_seed`] opened, for
+    /// the code of this frame. `None` after [`REVEAL_TIME`].
+    pub fn code_seed(&self, id: u64, field: &str) -> Option<&str> {
+        self.code_seeds
+            .get(&(id, field.to_owned()))
+            .filter(|value| value.shown_at.elapsed() < REVEAL_TIME)
+            .map(|value| value.value.as_str())
+    }
+
+    /// Hide the code of one one-time password. The seed is erased.
+    pub fn hide_code(&mut self, id: u64, field: &str) {
+        self.code_seeds.remove(&(id, field.to_owned()));
+    }
+
+    /// The current code of one one-time password, for a copy. Needs a fresh owner check
+    /// for [`OwnerAction::CopyCode`] of this item and this field. The seed stays in this
+    /// call and is erased before it returns. The proof is used up, also on a failure.
+    pub fn copy_code(&mut self, id: u64, field: &str, proof: OwnerProof) -> ModelResult<OtpCode> {
+        self.copy_code_at(id, field, proof, unix_now())
+    }
+
+    /// [`Self::copy_code`] at `unix` seconds.
+    pub(crate) fn copy_code_at(
+        &mut self,
+        id: u64,
+        field: &str,
+        proof: OwnerProof,
+        unix: u64,
+    ) -> ModelResult<OtpCode> {
+        let expected = OwnerAction::CopyCode {
+            item_id: id,
+            field: field.to_owned(),
+        };
+        let seed = {
+            let mut vault = self.unlocked_for(proof, &expected)?;
+            let seed = otp_seed(&vault, id, field)?;
+            vault.record_reveal(id).map_err(map_err)?;
+            seed
+        };
+        let totp =
+            crate::otp::Totp::parse(&seed).map_err(|err| fail("invalid_input", err.to_string()))?;
+        drop(seed);
+        let (digits, left) = totp.code_at(unix);
+        Ok(OtpCode {
+            digits: Zeroizing::new(digits),
+            left,
+        })
     }
 
     /// Hide values that are older than [`REVEAL_TIME`]. The app calls this each frame.
@@ -807,16 +939,31 @@ impl OwnerSession {
 
     /// Hide values that are older than [`REVEAL_TIME`] at `now`.
     pub fn expire_reveals_at(&mut self, now: Instant) {
-        self.revealed
-            .retain(|_, value| now.saturating_duration_since(value.shown_at) < REVEAL_TIME);
+        let fresh =
+            |value: &RevealedValue| now.saturating_duration_since(value.shown_at) < REVEAL_TIME;
+        self.revealed.retain(|_, value| fresh(value));
+        self.code_seeds.retain(|_, value| fresh(value));
     }
 
     /// Time until the next revealed value hides itself.
     pub fn next_reveal_expiry(&self) -> Option<Duration> {
         self.revealed
             .values()
+            .chain(self.code_seeds.values())
             .map(|value| REVEAL_TIME.saturating_sub(value.shown_at.elapsed()))
             .min()
+    }
+
+    /// Erase every revealed value and every opened seed.
+    fn forget_all_reveals(&mut self) {
+        self.revealed.clear();
+        self.code_seeds.clear();
+    }
+
+    /// Erase the revealed values and the opened seeds of one item.
+    fn forget_item_reveals(&mut self, id: u64) {
+        self.revealed.retain(|key, _| key.0 != id);
+        self.code_seeds.retain(|key, _| key.0 != id);
     }
 
     pub fn backup(&mut self, destination: &Path) -> ModelResult<()> {
@@ -832,7 +979,7 @@ impl OwnerSession {
             vault.backup(destination)
         };
         if self.is_locked() {
-            self.revealed.clear();
+            self.forget_all_reveals();
         }
         result.map_err(map_err)
     }
@@ -1059,8 +1206,17 @@ impl OwnerSession {
             .collect())
     }
 
+    /// Whether the secret field `field` of the item holds the setup key of a one-time
+    /// password ([`holds_setup_key`]). The dialog of a variable says so.
+    pub fn holds_setup_key(&self, item_id: u64, field: &str) -> ModelResult<bool> {
+        let vault = self.unlocked()?;
+        Ok(holds_setup_key(&vault, item_id, field))
+    }
+
     /// Bind a secret field of the item to an environment variable for agent processes.
-    /// Needs a fresh owner check (goal item A4). A placeholder variable (ADR 0011)
+    /// Needs a fresh owner check (goal item A4) for exactly this binding
+    /// ([`OwnerAction::BindVariable`]): the item, the field, the variable, the delivery,
+    /// and whether the field holds a setup key now. A placeholder variable (ADR 0011)
     /// needs valid hosts and a value that is long enough for a placeholder.
     pub fn set_env_binding(
         &mut self,
@@ -1088,7 +1244,19 @@ impl OwnerSession {
                 "Name 1 to 16 hosts, such as api.stripe.com or api.example.com:8443.",
             ));
         }
-        let mut vault = self.unlocked_for(proof, &OwnerAction::ChangeItemRules { item_id })?;
+        let mut vault = self.unlocked()?;
+        // The field is read again here: a value that became a setup key after the
+        // dialog does not match the proof.
+        let expected = OwnerAction::BindVariable {
+            item_id,
+            field: field.to_owned(),
+            env_name: env_name.trim().to_owned(),
+            delivery: delivery.clone(),
+            setup_key: holds_setup_key(&vault, item_id, field),
+        };
+        proof
+            .check(&expected, &vault.epoch())
+            .map_err(|refusal| fail("owner_check_required", refusal.message()))?;
         if matches!(delivery, EnvDelivery::Placeholder(_)) {
             let value = vault.reveal(item_id, field).map_err(map_err)?;
             if crate::broker::proxy::mint_placeholder(value.expose()).is_none() {
@@ -1362,7 +1530,7 @@ impl OwnerSession {
     /// authority away, so it needs no owner check. Revealed values hide.
     pub fn archive(&mut self, id: u64) -> ModelResult<()> {
         self.unlocked()?.set_archived(id, true).map_err(map_err)?;
-        self.revealed.retain(|key, _| key.0 != id);
+        self.forget_item_reveals(id);
         Ok(())
     }
 
@@ -1418,7 +1586,7 @@ impl OwnerSession {
     }
 
     fn install(&mut self, vault: Vault, path: PathBuf) {
-        self.revealed.clear();
+        self.forget_all_reveals();
         let replaced = self.slot().replace(vault);
         HeldVault {
             vault: replaced,
@@ -1429,7 +1597,7 @@ impl OwnerSession {
     }
 
     fn detach(&mut self) -> HeldVault {
-        self.revealed.clear();
+        self.forget_all_reveals();
         let vault = self.slot().take();
         HeldVault {
             vault,
@@ -1512,7 +1680,9 @@ impl OwnerSession {
                 let Some(label) = detail_label(&field.name) else {
                     continue;
                 };
-                let value = if field.secret {
+                // A setup key is hidden, also one that an older Apassy stored visible.
+                let totp = is_code_field(&vault, id, field)?;
+                let value = if field.secret || totp {
                     None
                 } else {
                     Some(plain_value(&vault, id, &field.name)?)
@@ -1521,7 +1691,8 @@ impl OwnerSession {
                     name: field.name.clone(),
                     label,
                     value,
-                    hidden: field.secret,
+                    hidden: field.secret || totp,
+                    totp,
                 });
             }
             (details, vault.is_archived(id).map_err(map_err)?)
@@ -1534,7 +1705,7 @@ impl OwnerSession {
             .filter(|field| field.secret)
             .map(|field| SecretLine {
                 name: field.name.clone(),
-                revealed: self.revealed_value(id, &field.name).is_some(),
+                revealed: self.revealed.contains_key(&(id, field.name.clone())),
             })
             .collect();
         Ok(OwnerDetails {
@@ -1624,6 +1795,20 @@ impl fmt::Debug for RevealedValue {
     }
 }
 
+/// The current code of a one-time password, for a copy. `Debug` hides the digits.
+/// The buffer is erased on drop. There is no `Clone`.
+pub struct OtpCode {
+    pub digits: Zeroizing<String>,
+    /// Seconds until the code changes.
+    pub left: u64,
+}
+
+impl fmt::Debug for OtpCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "OtpCode {{ digits: [redacted], left: {} }}", self.left)
+    }
+}
+
 /// A connector row for the Agents view. It has no secret value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectorRow {
@@ -1699,6 +1884,9 @@ pub struct DetailLine {
     /// The value of a visible detail. `None` for a hidden detail.
     pub value: Option<String>,
     pub hidden: bool,
+    /// The detail holds the setup key of a one-time password ([`is_setup_key`]). It is
+    /// hidden, its value is `None`, and only `ShowCode` and `CopyCode` use it.
+    pub totp: bool,
 }
 
 impl OwnerDetails {
@@ -1932,6 +2120,32 @@ pub(crate) fn checked_place(place: &GrantPlace) -> ModelResult<GrantPlace> {
     Ok(GrantPlace::Folder(canonical.display().to_string()))
 }
 
+/// The seed of the one-time password in `field` of item `id`, in an erasing buffer.
+/// `field` must be a hidden custom detail with the label of a one-time password, so a
+/// proof for a code can never read the password or another secret value.
+fn otp_seed(vault: &Vault, id: u64, field: &str) -> ModelResult<Zeroizing<String>> {
+    let not_otp = || {
+        fail(
+            "invalid_input",
+            "This field is not a one-time password. Apassy did nothing.",
+        )
+    };
+    let meta = vault.details(id).map_err(map_err)?;
+    let Some(summary) = meta.fields.iter().find(|meta| meta.name == field) else {
+        return Err(not_otp());
+    };
+    if !is_code_field(vault, id, summary)? {
+        return Err(not_otp());
+    }
+    Ok(vault.reveal(id, field).map_err(map_err)?.into_zeroizing())
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
 fn plain_value(vault: &Vault, id: u64, name: &str) -> ModelResult<String> {
     match vault.reveal(id, name) {
         Ok(value) => Ok(value.expose().to_owned()),
@@ -1979,12 +2193,17 @@ fn build_vault_draft(
             )?;
         }
         CredentialKind::Login => {
-            push_required_plain(
-                &mut fields,
-                "username",
-                &draft.username,
-                "Enter the username.",
-            )?;
+            let has_passkey = existing.is_some_and(|id| vault.passkey_info(id).is_ok());
+            if has_passkey {
+                push_plain(&mut fields, "username", &draft.username);
+            } else {
+                push_required_plain(
+                    &mut fields,
+                    "username",
+                    &draft.username,
+                    "Enter the username.",
+                )?;
+            }
             let website = draft.website.trim();
             if !website.is_empty() && crate::browser::site::Website::parse(website).is_none() {
                 return Err(fail(
@@ -1993,13 +2212,14 @@ fn build_vault_draft(
                 ));
             }
             push_plain(&mut fields, "website", website);
+            // A login with a passkey needs no password. The vault keeps the passkey.
             push_secret(
                 &mut fields,
                 vault,
                 existing,
                 "password",
                 &secrets.password,
-                true,
+                !has_passkey,
                 "Enter the password.",
             )?;
         }
@@ -2202,7 +2422,11 @@ fn push_details(
         }
         let name = detail_field_name(label);
         let missing = format!("Type the value of “{label}”.");
-        if !detail.hidden {
+        // A setup key is always stored hidden, whatever the form says.
+        let hidden = detail.hidden
+            || is_setup_key(label, detail.value.trim())
+            || is_setup_key(label, &secrets.details[index]);
+        if !hidden {
             push_required_plain(fields, &name, &detail.value, &missing)?;
             continue;
         }

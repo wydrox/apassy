@@ -5,6 +5,8 @@
 //! request text belongs to the caller.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::io::{self, Write};
+use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
 use super::errors::CoreError;
@@ -57,8 +59,61 @@ struct ErrorBody<'a> {
 
 /// `{"ok": true, "result": …}`.
 pub fn ok<T: Serialize>(result: &T) -> String {
-    serde_json::to_string(&Ok { ok: true, result })
-        .unwrap_or_else(|_| error(&CoreError::internal("The answer cannot be written.")))
+    exact_json(&Ok { ok: true, result })
+        .unwrap_or_else(|| error(&CoreError::internal("The answer cannot be written.")))
+}
+
+/// Count first, then write into one allocation with room for the FFI NUL byte.
+/// A serializer whose second pass changes length fails instead of growing a
+/// buffer that contains secrets. On failure, the buffer is erased.
+fn exact_json<T: Serialize>(value: &T) -> Option<String> {
+    struct Count(usize);
+    impl Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .ok_or_else(|| io::Error::other("The answer is too large."))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    struct Fixed {
+        bytes: Zeroizing<Vec<u8>>,
+        limit: usize,
+    }
+    impl Write for Fixed {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if bytes.len() > self.limit - self.bytes.len() {
+                return Err(io::Error::other("The answer changed during serialization."));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, value).ok()?;
+    let mut writer = Fixed {
+        bytes: Zeroizing::new(Vec::with_capacity(count.0.checked_add(1)?)),
+        limit: count.0,
+    };
+    serde_json::to_writer(&mut writer, value).ok()?;
+    if writer.bytes.len() != count.0 {
+        return None;
+    }
+    match String::from_utf8(std::mem::take(&mut *writer.bytes)) {
+        Ok(text) => Some(text),
+        Err(error) => {
+            let mut bytes = error.into_bytes();
+            bytes.zeroize();
+            None
+        }
+    }
 }
 
 /// `{"ok": false, "error": {…}}`.
@@ -101,4 +156,39 @@ pub fn zeroizing<S: Serializer>(
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     serializer.serialize_str(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn secret_answer_keeps_exact_room_for_ffi_termination() {
+        let value = "synthetic \"escaped\" \\ text\nzażółć";
+        let answer = ok(&value);
+        assert_eq!(answer.capacity(), answer.len() + 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&answer).unwrap()["result"],
+            value
+        );
+    }
+
+    #[test]
+    fn a_changed_serializer_cannot_grow_a_secret_buffer() {
+        struct Changed(Cell<bool>);
+        impl Serialize for Changed {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let second = self.0.replace(true);
+                serializer.serialize_str(if second {
+                    "a longer synthetic answer"
+                } else {
+                    "a"
+                })
+            }
+        }
+        let answer = ok(&Changed(Cell::new(false)));
+        assert!(answer.contains("internal"));
+        assert!(!answer.contains("synthetic"));
+    }
 }

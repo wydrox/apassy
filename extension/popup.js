@@ -1,6 +1,11 @@
 // The popup: shows the logins of the page and asks the service worker to fill
 // one, to save the login typed on the page, or to make a new one. It never
-// receives a password.
+// receives a password, and never a one-time code: "Fill code" only names the
+// login; the service worker puts the code into the page.
+//
+// The footer turns Apassy passkeys on or off for this browser. On asks the
+// browser for site access (https sites, and localhost for a local test site),
+// which only a click of the owner can do.
 
 const main = document.getElementById("main");
 const site = document.getElementById("site");
@@ -89,6 +94,15 @@ function renderList(message, isError) {
     button.addEventListener("click", () => fill(login));
     const row = element("li");
     row.append(button);
+    if (login.hasTotp === true) {
+      const code = element("button", "code", "Fill code");
+      code.type = "button";
+      code.dataset.item = String(login.item);
+      code.setAttribute("aria-label", `Fill the one-time code of ${login.title || "Login"}`);
+      code.addEventListener("click", () => fillCode(login));
+      row.classList.add("with-code");
+      row.append(code);
+    }
     list.append(row);
   }
   list.addEventListener("keydown", moveFocus);
@@ -119,6 +133,21 @@ async function fill(login) {
     show(note(result.message || "Filled."));
   } else {
     renderList((result && result.message) || "Apassy could not fill this page.", true);
+  }
+}
+
+// The service worker asks Apassy for the code and fills it into the page. The
+// popup gets a code and a message, never the one-time code.
+async function fillCode(login) {
+  if (!current || main.dataset.busy === "1") return;
+  main.dataset.busy = "1";
+  show(note("Confirm with Touch ID or your passphrase in Apassy."));
+  const result = await send({ type: "fill_code", tabId: current.tabId, url: current.url, item: login.item });
+  delete main.dataset.busy;
+  if (result && result.ok) {
+    show(note(result.message || "Code filled."));
+  } else {
+    renderList((result && result.message) || "Apassy could not fill the code.", true);
   }
 }
 
@@ -363,5 +392,52 @@ async function submitNew(page, values) {
     renderNew(page, values, (result && result.message) || "Apassy could not make the login.", true);
   }
 }
+
+// The origins of the passkey scripts: optional_host_permissions of the manifest.
+const PASSKEY_ORIGINS = chrome.runtime.getManifest().optional_host_permissions || [];
+const passkeysRow = document.getElementById("passkeys-row");
+const passkeysBox = document.getElementById("passkeys");
+const passkeysNote = document.getElementById("passkeys-note");
+
+function drawPasskeys(reply) {
+  const on = Boolean(reply && reply.on === true);
+  passkeysBox.checked = on;
+  passkeysBox.disabled = false;
+  passkeysNote.textContent = reply && reply.ok === false
+    ? reply.message
+    : on
+      ? "Sites ask Apassy for passkeys. Each use asks for Touch ID or your passphrase."
+      : "Off: sites use the passkeys of the browser.";
+  passkeysNote.classList.toggle("error", Boolean(reply && reply.ok === false));
+}
+
+passkeysBox.addEventListener("change", async () => {
+  passkeysBox.disabled = true;
+  if (passkeysBox.checked) {
+    // The browser shows its prompt only for a click of the owner, so ask
+    // first; then tell the service worker, which waits for the grant even
+    // when the prompt closes this popup.
+    const asking = chrome.permissions.request({ origins: PASSKEY_ORIGINS });
+    send({ type: "passkeys", on: true });
+    let granted = false;
+    try {
+      granted = await asking;
+    } catch (_) {
+      granted = false;
+    }
+    drawPasskeys(await send(granted ? { type: "passkeys", on: true } : { type: "passkeys_state" }));
+  } else {
+    const reply = await send({ type: "passkeys", on: false });
+    try {
+      await chrome.permissions.remove({ origins: PASSKEY_ORIGINS });
+    } catch (_) { /* already removed */ }
+    drawPasskeys(reply);
+  }
+});
+
+send({ type: "passkeys_state" }).then((reply) => {
+  drawPasskeys(reply);
+  passkeysRow.hidden = false;
+});
 
 send({ type: "state" }).then(renderState);

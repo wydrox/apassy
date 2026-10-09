@@ -98,15 +98,51 @@ pub unsafe extern "C" fn apassy_core_free(core: *mut Core) {
 /// The answer as a C string. JSON from `serde_json` has no NUL byte; one in a value
 /// would be escaped as `\u0000`.
 fn into_c(mut answer: String) -> *mut c_char {
-    let bytes = std::mem::take(&mut answer).into_bytes();
-    match CString::new(bytes) {
+    let mut bytes = std::mem::take(&mut answer).into_bytes();
+    // Normal answers reserve this byte before any secret is serialized. For
+    // another caller's String, copy once and erase the old allocation before
+    // its release. Exact capacity also avoids CString's boxed-slice shrink.
+    if bytes.capacity() != bytes.len() + 1 {
+        let mut exact = Vec::with_capacity(bytes.len() + 1);
+        exact.extend_from_slice(&bytes);
+        bytes.zeroize();
+        bytes = exact;
+    }
+    bytes.push(0);
+    match CString::from_vec_with_nul(bytes) {
         Ok(text) => text.into_raw(),
         Err(error) => {
-            let mut bytes = error.into_vec();
+            let mut bytes = error.into_bytes();
             bytes.zeroize();
             CString::new(error_answer("internal", "The answer has a NUL byte."))
                 .unwrap_or_default()
                 .into_raw()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reserved_answer_moves_to_c_without_a_copy() {
+        let mut answer = String::with_capacity(3);
+        answer.push_str("{}");
+        let pointer = answer.as_ptr();
+        let c = into_c(answer);
+        assert_eq!(c.cast::<u8>().cast_const(), pointer);
+        // SAFETY: into_c returned this owned, terminated string.
+        assert_eq!(unsafe { CStr::from_ptr(c) }.to_bytes(), b"{}");
+        unsafe { apassy_core_free_string(c) };
+    }
+
+    #[test]
+    fn unexpected_nul_returns_a_safe_error() {
+        let c = into_c("synthetic\0value".to_owned());
+        let text = unsafe { CStr::from_ptr(c) }.to_str().unwrap();
+        assert!(text.contains("internal"));
+        assert!(!text.contains("synthetic"));
+        unsafe { apassy_core_free_string(c) };
     }
 }

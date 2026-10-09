@@ -29,6 +29,14 @@ public struct VaultError: Error, Sendable, Equatable, LocalizedError {
         case `internal`
         /// The owner cancelled Face ID or the passphrase sheet (app side, not the core).
         case cancelled
+        /// A passkey of the request's exclude list is in the vault (registration).
+        case excluded
+        /// The relying party accepts no algorithm that Apassy has (ES256).
+        case unsupportedAlgorithm = "unsupported_algorithm"
+        /// The passkey is in the vault already (import).
+        case exists
+        /// A passkey key that is not a P-256 PKCS#8 key.
+        case badKey = "bad_key"
     }
 
     public var code: Code
@@ -110,6 +118,23 @@ public protocol VaultService: Sendable {
     func autofillList(domains: [String]) async throws -> AutofillList
     func autofillCredential(id: UInt64) async throws -> FillCredential
     func credentialIdentities() async throws -> [CredentialIdentity]
+    /// The logins and the passkeys for the QuickType bar and the passkey sheet of iOS.
+    func identitySet() async throws -> IdentitySet
+
+    // Passkeys (contract: passkey_*). The core signs only after the caller checked the owner
+    // for this request: AutoFill unlocks the vault for each request, the app asks `OwnerGate`.
+    /// The passkeys of `rpID`; only those in `allowed` when it is not empty.
+    func passkeys(rpID: String, allowed: [Data]) async throws -> [PasskeyCandidate]
+    func passkeyAssert(_ request: PasskeyAssertionRequest) async throws -> PasskeyAssertion
+    func passkeyRegister(_ request: PasskeyRegistration) async throws -> PasskeyCreated
+    /// The app only, after the owner check.
+    func passkeyImport(_ accounts: [PasskeyImportAccount]) async throws -> PasskeyImportResult
+    /// The app only, after the owner check. A login with a password stays, without its passkey. A
+    /// login without a password is deleted whole (`PasskeyRemovalPlan` says which).
+    func passkeyRemove(id: UInt64, revision: UInt64) async throws
+    /// The app only, after the owner check: what Apple's credential exchange hands to another
+    /// app, passkey keys included. Never written to a file.
+    func credentialExport() async throws -> CredentialExport
 }
 
 public extension VaultService {
@@ -119,5 +144,31 @@ public extension VaultService {
 
     func reconnectICloudVault(url: URL, vaultID: String) async throws {
         throw VaultError(.notAllowed, "This service cannot connect an iCloud vault.")
+    }
+
+    func identitySet() async throws -> IdentitySet {
+        IdentitySet(passwords: try await credentialIdentities(), passkeys: [], codes: [])
+    }
+
+    func passkeys(rpID: String, allowed: [Data]) async throws -> [PasskeyCandidate] { [] }
+
+    func passkeyAssert(_ request: PasskeyAssertionRequest) async throws -> PasskeyAssertion {
+        throw VaultError(.notAllowed, "This vault has no passkeys.")
+    }
+
+    func passkeyRegister(_ request: PasskeyRegistration) async throws -> PasskeyCreated {
+        throw VaultError(.notAllowed, "This vault cannot save passkeys.")
+    }
+
+    func passkeyImport(_ accounts: [PasskeyImportAccount]) async throws -> PasskeyImportResult {
+        throw VaultError(.notAllowed, "This vault cannot import passkeys.")
+    }
+
+    func passkeyRemove(id: UInt64, revision: UInt64) async throws {
+        throw VaultError(.notAllowed, "This vault has no passkeys.")
+    }
+
+    func credentialExport() async throws -> CredentialExport {
+        throw VaultError(.notAllowed, "This vault cannot export.")
     }
 }

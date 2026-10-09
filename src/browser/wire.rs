@@ -106,6 +106,94 @@ pub enum Command {
         length: u32,
         symbols: bool,
     },
+    /// Sign in with a passkey of the vault (contract section 9).
+    PasskeyGet(PasskeyGetRequest),
+    /// Make a passkey in the vault (contract section 9).
+    PasskeyCreate(PasskeyCreateRequest),
+    /// The current one-time code of a login, for a visible `one-time-code` field.
+    FillCode {
+        url: String,
+        item: u64,
+        /// The label of the one-time code detail, when the login has more than one.
+        field: Option<String>,
+    },
+}
+
+/// The commands that the host passes to the app only after the caller check
+/// ([`super::caller::check_browser_parent`]).
+pub const GUARDED_COMMANDS: &[&str] = &["passkey_get", "passkey_create", "fill_code"];
+
+/// True for a command of [`GUARDED_COMMANDS`].
+pub fn is_guarded_command(cmd: &str) -> bool {
+    GUARDED_COMMANDS.contains(&cmd)
+}
+
+/// The longest user name and display name of a new passkey, in bytes.
+pub const MAX_PASSKEY_NAME_BYTES: usize = 256;
+/// The most algorithms in a `passkey_create`.
+pub const MAX_ALGORITHMS: usize = 16;
+/// The longest label of a one-time code detail, in bytes.
+pub const MAX_FIELD_BYTES: usize = 128;
+
+/// A checked `passkey_get`. The strings are as the extension sent them, after strict
+/// syntax checks; the app checks the client data with
+/// [`super::webauthn::client_data`]. `Debug` shows no client data and no IDs.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PasskeyGetRequest {
+    /// The random request ID of the extension (a lowercase UUID).
+    pub rid: String,
+    /// The origin of the page, from the browser.
+    pub origin: String,
+    pub rp_id: String,
+    /// Standard base64 of `clientDataJSON`.
+    pub client_data_json: String,
+    /// Standard base64 credential IDs that the page allows. Empty: any passkey of
+    /// `rp_id`.
+    pub allowed: Vec<String>,
+}
+
+/// A checked `passkey_create`. `Debug` shows no client data, no user handle, and no
+/// IDs.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PasskeyCreateRequest {
+    pub rid: String,
+    pub origin: String,
+    pub rp_id: String,
+    pub client_data_json: String,
+    /// Standard base64 of the user handle of the page: 1 to 64 bytes.
+    pub user_handle: String,
+    /// From the page: untrusted text without control or bidirectional characters.
+    pub user_name: String,
+    pub user_display_name: String,
+    /// COSE algorithms in the order of the page.
+    pub algorithms: Vec<i64>,
+    /// Standard base64 credential IDs that the page already has.
+    pub excluded: Vec<String>,
+    /// The title of the new login: 1 to 128 bytes after trim.
+    pub title: String,
+}
+
+impl std::fmt::Debug for PasskeyGetRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PasskeyGetRequest")
+            .field("rid", &self.rid)
+            .field("origin", &self.origin)
+            .field("rp_id", &self.rp_id)
+            .field("allowed", &self.allowed.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for PasskeyCreateRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PasskeyCreateRequest")
+            .field("rid", &self.rid)
+            .field("origin", &self.origin)
+            .field("rp_id", &self.rp_id)
+            .field("algorithms", &self.algorithms)
+            .field("excluded", &self.excluded.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// An error answer before it becomes a [`Response`]. It is small, so a `Result` with
@@ -135,9 +223,31 @@ impl From<WireError> for Response {
 impl Request {
     /// Parse one request line. An error is the answer to send.
     pub fn parse(line: &[u8]) -> Result<Command, WireError> {
-        let request: Self = serde_json::from_slice(line).map_err(|_| {
-            WireError::new("bad_request", "The request is not valid browser wire JSON.")
-        })?;
+        let invalid =
+            || WireError::new("bad_request", "The request is not valid browser wire JSON.");
+        // The commands of section 9 have their own strict packets. The legacy
+        // `Request` keeps its fields, so the old commands parse as before.
+        if let Ok(Peek { cmd: Some(cmd) }) = serde_json::from_slice::<Peek>(line) {
+            match cmd.as_str() {
+                "passkey_get" => {
+                    let packet: PasskeyGetPacket =
+                        serde_json::from_slice(line).map_err(|_| invalid())?;
+                    return packet.command();
+                }
+                "passkey_create" => {
+                    let packet: PasskeyCreatePacket =
+                        serde_json::from_slice(line).map_err(|_| invalid())?;
+                    return packet.command();
+                }
+                "fill_code" => {
+                    let packet: FillCodePacket =
+                        serde_json::from_slice(line).map_err(|_| invalid())?;
+                    return packet.command();
+                }
+                _ => {}
+            }
+        }
+        let request: Self = serde_json::from_slice(line).map_err(|_| invalid())?;
         request.command()
     }
 
@@ -229,6 +339,197 @@ pub fn hides_text(c: char) -> bool {
         )
 }
 
+/// The command of a request line, and nothing else. Other fields are skipped without
+/// a copy of their values.
+#[derive(Deserialize)]
+pub(crate) struct Peek {
+    #[serde(default)]
+    pub(crate) cmd: Option<String>,
+}
+
+/// True for a request ID of the extension: a lowercase UUID from
+/// `crypto.randomUUID()`, `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`.
+pub fn is_request_id(rid: &str) -> bool {
+    rid.len() == 36
+        && rid.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
+        })
+}
+
+fn check_version(v: u32) -> Result<(), WireError> {
+    if v == BROWSER_WIRE_VERSION {
+        Ok(())
+    } else {
+        Err(WireError::new(
+            "bad_version",
+            "This Apassy extension does not match the app. Load the extension from the same Apassy.app.",
+        ))
+    }
+}
+
+/// The fields that every passkey request has.
+fn check_passkey_common(
+    rid: &str,
+    origin: &str,
+    rp_id: &str,
+    client_data_json: &str,
+) -> Result<(), WireError> {
+    if !is_request_id(rid) {
+        return Err(WireError::new(
+            "bad_request",
+            "A passkey request needs a request ID.",
+        ));
+    }
+    super::webauthn::parse_origin(origin)?;
+    super::webauthn::check_rp_id(rp_id)?;
+    super::webauthn::decode_bytes(client_data_json, 1, super::webauthn::MAX_CLIENT_DATA_BYTES)?;
+    Ok(())
+}
+
+/// Untrusted text of a page: at most `max` bytes, without a control or a
+/// bidirectional format character (they could hide the site in the owner dialog).
+fn page_text(text: &str, max: usize) -> Result<(), WireError> {
+    if text.len() > max || text.chars().any(hides_text) {
+        return Err(WireError::new(
+            "bad_request",
+            "A name from the page is too long or has a control character.",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PasskeyGetPacket {
+    v: u32,
+    #[allow(dead_code)]
+    cmd: String,
+    rid: String,
+    origin: String,
+    rp_id: String,
+    client_data_json: String,
+    allowed: Vec<String>,
+}
+
+impl PasskeyGetPacket {
+    fn command(self) -> Result<Command, WireError> {
+        check_version(self.v)?;
+        check_passkey_common(&self.rid, &self.origin, &self.rp_id, &self.client_data_json)?;
+        super::webauthn::decode_ids(&self.allowed)?;
+        Ok(Command::PasskeyGet(PasskeyGetRequest {
+            rid: self.rid,
+            origin: self.origin,
+            rp_id: self.rp_id,
+            client_data_json: self.client_data_json,
+            allowed: self.allowed,
+        }))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PasskeyCreatePacket {
+    v: u32,
+    #[allow(dead_code)]
+    cmd: String,
+    rid: String,
+    origin: String,
+    rp_id: String,
+    client_data_json: String,
+    user_handle: String,
+    user_name: String,
+    user_display_name: String,
+    algorithms: Vec<i64>,
+    excluded: Vec<String>,
+    title: String,
+}
+
+impl PasskeyCreatePacket {
+    fn command(self) -> Result<Command, WireError> {
+        check_version(self.v)?;
+        check_passkey_common(&self.rid, &self.origin, &self.rp_id, &self.client_data_json)?;
+        super::webauthn::decode_bytes(
+            &self.user_handle,
+            1,
+            super::webauthn::MAX_USER_HANDLE_BYTES,
+        )?;
+        page_text(&self.user_name, MAX_PASSKEY_NAME_BYTES)?;
+        page_text(&self.user_display_name, MAX_PASSKEY_NAME_BYTES)?;
+        if self.algorithms.is_empty() || self.algorithms.len() > MAX_ALGORITHMS {
+            return Err(WireError::new(
+                "bad_request",
+                "A new passkey needs 1 to 16 algorithms.",
+            ));
+        }
+        super::webauthn::decode_ids(&self.excluded)?;
+        let title = self.title.trim();
+        if title.is_empty() || title.len() > MAX_TITLE_BYTES || title.chars().any(hides_text) {
+            return Err(WireError::new(
+                "bad_request",
+                "A new passkey needs a title of 1 to 128 bytes without a control character.",
+            ));
+        }
+        Ok(Command::PasskeyCreate(PasskeyCreateRequest {
+            rid: self.rid,
+            origin: self.origin,
+            rp_id: self.rp_id,
+            client_data_json: self.client_data_json,
+            user_handle: self.user_handle,
+            user_name: self.user_name,
+            user_display_name: self.user_display_name,
+            algorithms: self.algorithms,
+            excluded: self.excluded,
+            title: title.to_owned(),
+        }))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FillCodePacket {
+    v: u32,
+    #[allow(dead_code)]
+    cmd: String,
+    url: String,
+    item: u64,
+    #[serde(default)]
+    field: Option<String>,
+}
+
+impl FillCodePacket {
+    fn command(self) -> Result<Command, WireError> {
+        check_version(self.v)?;
+        if self.url.is_empty() || self.url.len() > MAX_URL_BYTES {
+            return Err(WireError::new(
+                "bad_request",
+                "The request needs the address of the page.",
+            ));
+        }
+        if self.item == 0 {
+            return Err(WireError::new(
+                "bad_request",
+                "The request needs the ID of a login.",
+            ));
+        }
+        if let Some(field) = &self.field
+            && (field.trim().is_empty()
+                || field.len() > MAX_FIELD_BYTES
+                || field.chars().any(hides_text))
+        {
+            return Err(WireError::new(
+                "bad_request",
+                "The label of a one-time code is empty, too long, or has a control character.",
+            ));
+        }
+        Ok(Command::FillCode {
+            url: self.url,
+            item: self.item,
+            field: self.field,
+        })
+    }
+}
+
 /// The trimmed title and username of a new login. They come from the browser and show
 /// in the owner check dialog, so a line break or a bidirectional format character is
 /// refused: it could hide the site of the request.
@@ -291,8 +592,9 @@ impl Response {
     }
 }
 
-/// The data of a response.
-#[derive(Debug, Default, Serialize, Deserialize)]
+/// The data of a response. `Debug` shows no secret value, no signature, and no byte
+/// field of a passkey.
+#[derive(Default, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Data {
     #[default]
@@ -320,6 +622,101 @@ pub enum Data {
     Saved {
         item: u64,
     },
+    /// The answer of `passkey_get`. Byte fields are standard base64 with padding.
+    Passkey {
+        rid: String,
+        credential_id: String,
+        user_handle: String,
+        authenticator_data: String,
+        signature: String,
+        /// The same bytes as the request.
+        client_data_json: String,
+    },
+    /// The answer of `passkey_create`. Byte fields are standard base64 with padding.
+    PasskeyCreated {
+        rid: String,
+        item: u64,
+        credential_id: String,
+        attestation_object: String,
+        authenticator_data: String,
+        /// DER SubjectPublicKeyInfo of the new key.
+        public_key_spki: String,
+        /// The COSE algorithm: -7 (ES256).
+        algorithm: i64,
+        client_data_json: String,
+    },
+    /// The answer of `fill_code`: a secret value.
+    Code {
+        item: u64,
+        /// The extension fills only a frame with this `location.origin`.
+        origin: String,
+        /// 6 to 8 digits.
+        code: SecretText,
+        /// Seconds until the code changes.
+        remaining: u64,
+    },
+}
+
+impl std::fmt::Debug for Data {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => f.write_str("None"),
+            Self::Status { vault, version } => f
+                .debug_struct("Status")
+                .field("vault", vault)
+                .field("version", version)
+                .finish(),
+            Self::Logins {
+                origin,
+                host,
+                logins,
+            } => f
+                .debug_struct("Logins")
+                .field("origin", origin)
+                .field("host", host)
+                .field("logins", logins)
+                .finish(),
+            Self::Fill {
+                item,
+                origin,
+                username,
+                password,
+            } => f
+                .debug_struct("Fill")
+                .field("item", item)
+                .field("origin", origin)
+                .field("username", username)
+                .field("password", password)
+                .finish(),
+            Self::Saved { item } => f.debug_struct("Saved").field("item", item).finish(),
+            Self::Passkey { rid, .. } => f
+                .debug_struct("Passkey")
+                .field("rid", rid)
+                .finish_non_exhaustive(),
+            Self::PasskeyCreated {
+                rid,
+                item,
+                algorithm,
+                ..
+            } => f
+                .debug_struct("PasskeyCreated")
+                .field("rid", rid)
+                .field("item", item)
+                .field("algorithm", algorithm)
+                .finish_non_exhaustive(),
+            Self::Code {
+                item,
+                origin,
+                remaining,
+                ..
+            } => f
+                .debug_struct("Code")
+                .field("item", item)
+                .field("origin", origin)
+                .field("remaining", remaining)
+                .finish_non_exhaustive(),
+        }
+    }
 }
 
 /// The state of the vault for the extension.
@@ -338,6 +735,9 @@ pub struct LoginRow {
     pub item: u64,
     pub title: String,
     pub username: String,
+    /// The login has a one-time code (`fill_code`). Never the code or the seed.
+    #[serde(default)]
+    pub has_totp: bool,
 }
 
 #[cfg(test)]
@@ -504,11 +904,16 @@ mod tests {
                     item: 7,
                     title: "GitHub".to_owned(),
                     username: "rafal".to_owned(),
+                    has_totp: true,
                 }],
             },
         );
         let json = serde_json::to_value(&logins).unwrap();
         assert_eq!(json["data"]["logins"][0]["item"], 7);
         assert_eq!(json["data"]["logins"][0]["username"], "rafal");
+        assert_eq!(json["data"]["logins"][0]["has_totp"], true);
+        let old: LoginRow =
+            serde_json::from_str(r#"{"item":7,"title":"GitHub","username":"rafal"}"#).unwrap();
+        assert!(!old.has_totp);
     }
 }

@@ -523,7 +523,9 @@ impl Core {
                 memory.version = memory.version.saturating_add(1);
             }
             let mut content = vault.sync_content(&scope)?;
-            let write_required = content != merge.remote_content;
+            // A snapshot of an earlier schema gets a copy of the current schema, also
+            // with the same content. The input snapshot itself never changes.
+            let write_required = content != merge.remote_content || merge.remote_outdated();
             let output_sha256 = if write_required {
                 // Recheck the absent destination after the merge and key derivation.
                 self.transfer_path(&input.output_path, false)?;

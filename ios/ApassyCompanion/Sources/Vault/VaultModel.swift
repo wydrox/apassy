@@ -12,8 +12,9 @@ final class VaultModel {
     struct Hooks {
         /// Put a value on the pasteboard: `SecureClipboard.copy` with the setting.
         var copy: @MainActor (_ value: String, _ secret: Bool) -> Void = { _, _ in }
-        /// Replace the QuickType identities of a vault (`CredentialIdentitySync.replace`).
-        var replaceIdentities: @MainActor ([CredentialIdentity], String) async -> Void = { _, _ in }
+        /// Replace the AutoFill identities of a vault: logins, passkeys, and one-time passwords
+        /// (`CredentialIdentitySync.replace`).
+        var replaceIdentities: @MainActor (IdentitySet, String) async -> Void = { _, _ in }
         /// Remove every QuickType identity (`CredentialIdentitySync.removeAll`).
         var removeAllIdentities: @MainActor () async -> Void = {}
         /// Ask iOS for time to finish a vault write in the background; returns the end of it.
@@ -399,7 +400,7 @@ final class VaultModel {
 
     private func publishIdentities() async {
         guard isUnlocked, let vault else { return }
-        if let identities = try? await service.credentialIdentities() {
+        if let identities = try? await service.identitySet() {
             await hooks.replaceIdentities(identities, vault.id)
         }
     }
@@ -453,6 +454,33 @@ final class VaultModel {
     private func didChangeItems() async {
         await reloadAndPublish()
         scheduleSync()
+    }
+
+    /// Remove the passkey of a login after the owner check, on the revision that `plan` was made
+    /// for. With a password the login stays with its other fields. Without one, the core deletes
+    /// the whole item (`plan.deletesLogin`), so the owner check names that. True when the call
+    /// succeeded.
+    func removePasskey(_ plan: PasskeyRemovalPlan) async -> Bool {
+        guard await gate.confirm(reason: plan.ownerReason) else { return false }
+        let end = hooks.beginBackgroundWork(plan.deletesLogin ? "Delete the login" : "Remove the passkey")
+        defer { end() }
+        do {
+            try await service.passkeyRemove(id: plan.itemID, revision: plan.revision)
+        } catch {
+            report(error)
+            await reload()
+            return false
+        }
+        if plan.deletesLogin, let vault, settings.isFavorite(plan.itemID, vaultID: vault.id) {
+            settings.toggleFavorite(plan.itemID, vaultID: vault.id)
+        }
+        await didChangeItems()
+        return true
+    }
+
+    /// After an import from another app: reload, publish, and sync.
+    func didImport() async {
+        await didChangeItems()
     }
 
     // MARK: Favorites
@@ -713,7 +741,7 @@ final class VaultModel {
         let report = try? await service.watchtower()
         guard isCurrentSession(vaultID: vaultID, epoch: epoch) else { return }
         if let report { watchtower = report }
-        let identities = try? await service.credentialIdentities()
+        let identities = try? await service.identitySet()
         guard isCurrentSession(vaultID: vaultID, epoch: epoch) else { return }
         if let identities { await hooks.replaceIdentities(identities, vaultID) }
     }

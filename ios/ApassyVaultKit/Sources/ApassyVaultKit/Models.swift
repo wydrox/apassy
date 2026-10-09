@@ -139,6 +139,12 @@ public struct ItemRow: Codable, Sendable, Hashable, Identifiable {
     public var tags: [String]
     public var archived: Bool
     public var hasTotp: Bool
+    /// A login with a passkey (contract: `Row.has_passkey`). False from an older core.
+    public var hasPasskey: Bool
+    /// Whether the item stores a secret password with a value (contract: `Row.has_password`). The
+    /// value itself is never in a row. nil from an older core: then nothing is known, and the
+    /// removal of a passkey must not promise that the login stays.
+    public var hasPassword: Bool?
     public var conflictOf: UInt64?
     public var addedAt: Int64?
     public var changedAt: Int64?
@@ -147,7 +153,7 @@ public struct ItemRow: Codable, Sendable, Hashable, Identifiable {
     public init(
         id: UInt64, revision: UInt64, title: String, kind: ItemKind, subtitle: String, websites: [String],
         tags: [String], archived: Bool, hasTotp: Bool, conflictOf: UInt64?, addedAt: Int64?,
-        changedAt: Int64?, usedAt: Int64?
+        changedAt: Int64?, usedAt: Int64?, hasPasskey: Bool = false, hasPassword: Bool? = nil
     ) {
         self.id = id
         self.revision = revision
@@ -158,6 +164,8 @@ public struct ItemRow: Codable, Sendable, Hashable, Identifiable {
         self.tags = tags
         self.archived = archived
         self.hasTotp = hasTotp
+        self.hasPasskey = hasPasskey
+        self.hasPassword = hasPassword
         self.conflictOf = conflictOf
         self.addedAt = addedAt
         self.changedAt = changedAt
@@ -167,10 +175,31 @@ public struct ItemRow: Codable, Sendable, Hashable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case id, revision, title, kind, subtitle, websites, tags, archived
         case hasTotp = "has_totp"
+        case hasPasskey = "has_passkey"
+        case hasPassword = "has_password"
         case conflictOf = "conflict_of"
         case addedAt = "added_at"
         case changedAt = "changed_at"
         case usedAt = "used_at"
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UInt64.self, forKey: .id)
+        revision = try container.decode(UInt64.self, forKey: .revision)
+        title = try container.decode(String.self, forKey: .title)
+        kind = try container.decode(ItemKind.self, forKey: .kind)
+        subtitle = try container.decode(String.self, forKey: .subtitle)
+        websites = try container.decode([String].self, forKey: .websites)
+        tags = try container.decode([String].self, forKey: .tags)
+        archived = try container.decode(Bool.self, forKey: .archived)
+        hasTotp = try container.decode(Bool.self, forKey: .hasTotp)
+        hasPasskey = try container.decodeIfPresent(Bool.self, forKey: .hasPasskey) ?? false
+        hasPassword = try container.decodeIfPresent(Bool.self, forKey: .hasPassword)
+        conflictOf = try container.decodeIfPresent(UInt64.self, forKey: .conflictOf)
+        addedAt = try container.decodeIfPresent(Int64.self, forKey: .addedAt)
+        changedAt = try container.decodeIfPresent(Int64.self, forKey: .changedAt)
+        usedAt = try container.decodeIfPresent(Int64.self, forKey: .usedAt)
     }
 }
 
@@ -221,22 +250,27 @@ public struct ItemDetail: Codable, Sendable, Hashable, Identifiable {
     public var row: ItemRow
     public var notes: String
     public var fields: [FieldView]
+    /// The passkey of a login: what it is for, never its key. The key is not a field, so no
+    /// reveal, copy, or large type can show it.
+    public var passkey: PasskeySummary?
 
     public var id: UInt64 { row.id }
 
-    public init(row: ItemRow, notes: String, fields: [FieldView]) {
+    public init(row: ItemRow, notes: String, fields: [FieldView], passkey: PasskeySummary? = nil) {
         self.row = row
         self.notes = notes
         self.fields = fields
+        self.passkey = passkey
     }
 
-    enum CodingKeys: String, CodingKey { case notes, fields }
+    enum CodingKeys: String, CodingKey { case notes, fields, passkey }
 
     public init(from decoder: any Decoder) throws {
         row = try ItemRow(from: decoder)
         let container = try decoder.container(keyedBy: CodingKeys.self)
         notes = try container.decode(String.self, forKey: .notes)
         fields = try container.decode([FieldView].self, forKey: .fields)
+        passkey = try container.decodeIfPresent(PasskeySummary.self, forKey: .passkey)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -244,6 +278,7 @@ public struct ItemDetail: Codable, Sendable, Hashable, Identifiable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(notes, forKey: .notes)
         try container.encode(fields, forKey: .fields)
+        try container.encodeIfPresent(passkey, forKey: .passkey)
     }
 
     /// The first field with `role`.

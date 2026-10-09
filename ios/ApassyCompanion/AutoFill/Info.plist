@@ -30,7 +30,15 @@
 			<dict>
 				<key>ProvidesOneTimeCodes</key>
 				<true/>
+				<key>ProvidesPasskeys</key>
+				<true/>
 				<key>ProvidesPasswords</key>
+				<true/>
+				<key>SupportedCredentialExchangeVersions</key>
+				<array>
+					<string>1.0</string>
+				</array>
+				<key>SupportsCredentialExchange</key>
 				<true/>
 			</dict>
 			<key>ASCredentialProviderExtensionShowsConfigurationUI</key>
@@ -42,6 +50,6 @@
 		<string>$(PRODUCT_MODULE_NAME).CredentialProviderViewController</string>
 	</dict>
 	<key>NSFaceIDUsageDescription</key>
-	<string>Apassy uses Face ID before it fills a password.</string>
+	<string>Apassy uses Face ID before it fills a password or a code, signs in with a passkey, or saves a passkey.</string>
 </dict>
 </plist>

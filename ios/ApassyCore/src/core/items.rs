@@ -6,13 +6,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use apassy::contracts::CredentialKind;
 use apassy::vault::{
-    Field, ItemDetails, ItemDraft, ItemEventKind, SecretValue, Vault, VaultErrorKind,
+    Field, FieldSummary, ItemDetails, ItemDraft, ItemEventKind, SecretValue, Vault, VaultErrorKind,
     custom_detail_label,
 };
 use serde::{Deserialize, Serialize};
 
 use super::errors::{CoreError, CoreResult};
-use super::otp::is_otp_label;
+use super::otp::{is_otp_label, is_totp_uri};
+use super::passkey;
 use super::wire::Secret;
 
 /// The prefix of a custom detail field (`x_<hex label>`).
@@ -122,6 +123,31 @@ pub fn field_role(name: &str, secret: bool) -> &'static str {
     }
 }
 
+/// An imported field can keep a custom title. An explicit TOTP URI still gives it
+/// the code role. The setup value stays in the core's erasing buffer.
+fn stored_field_role(vault: &Vault, id: u64, field: &FieldSummary) -> CoreResult<&'static str> {
+    let role = field_role(&field.name, field.secret);
+    if field.secret && role == "other" {
+        let value = vault.reveal(id, &field.name)?;
+        if is_totp_uri(value.expose()) {
+            return Ok("totp");
+        }
+    }
+    Ok(role)
+}
+
+/// The stored names of the fields of an item that hold a one-time password, in the order
+/// of the app. The same recognizers as the rows and the identities.
+pub fn totp_fields(vault: &Vault, details: &ItemDetails) -> CoreResult<Vec<String>> {
+    let mut names = Vec::new();
+    for field in ordered(details) {
+        if stored_field_role(vault, details.summary.id, field)? == "totp" {
+            names.push(field.name.clone());
+        }
+    }
+    Ok(names)
+}
+
 /// The order of the fields of a kind, before service, project, and the details.
 fn kind_order(kind: CredentialKind) -> &'static [&'static str] {
     match kind {
@@ -164,6 +190,11 @@ pub struct Row {
     pub tags: Vec<String>,
     pub archived: bool,
     pub has_totp: bool,
+    pub has_passkey: bool,
+    /// Whether the item stores a secret password with a value. This is the same test as
+    /// the removal of a passkey: it keeps the login only for a non-empty password. The
+    /// answer never holds the value.
+    pub has_password: bool,
     pub conflict_of: Option<u64>,
     pub added_at: Option<u64>,
     pub changed_at: Option<u64>,
@@ -188,6 +219,9 @@ pub struct Detail {
     pub row: Row,
     pub notes: String,
     pub fields: Vec<FieldOut>,
+    /// The passkey of the item, without its key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub passkey: Option<passkey::Summary>,
 }
 
 /// The metadata of the vault that each row needs, read once for a list.
@@ -195,6 +229,7 @@ pub struct Context {
     archived: BTreeMap<u64, u64>,
     times: BTreeMap<u64, apassy::vault::ItemTimes>,
     conflicts: BTreeMap<u64, Option<u64>>,
+    passkeys: BTreeMap<u64, apassy::vault::passkey::PasskeyInfo>,
 }
 
 impl Context {
@@ -203,6 +238,10 @@ impl Context {
             archived: vault.archived_items()?,
             times: vault.item_times()?,
             conflicts: vault.conflict_copies()?,
+            passkeys: passkey::all(vault)?
+                .into_iter()
+                .map(|info| (info.item_id, info))
+                .collect(),
         })
     }
 }
@@ -223,6 +262,24 @@ fn ordered(details: &ItemDetails) -> Vec<&apassy::vault::FieldSummary> {
     // A stable sort keeps the stored order inside each rank (the order of the details).
     fields.sort_by_key(|field| rank(kind, &field.name, field.secret));
     fields
+}
+
+/// Whether a secret field "password" holds a value. The value stays in the core's erasing
+/// buffer. A missing field is "no"; any other failure goes up, so a damaged vault never
+/// reads as "no password".
+fn has_password(vault: &Vault, details: &ItemDetails) -> CoreResult<bool> {
+    if !details
+        .fields
+        .iter()
+        .any(|field| field.name == "password" && field.secret)
+    {
+        return Ok(false);
+    }
+    match vault.reveal(details.summary.id, "password") {
+        Ok(value) => Ok(!value.expose().is_empty()),
+        Err(error) if error.kind() == VaultErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn row_of(vault: &Vault, context: &Context, details: &ItemDetails) -> CoreResult<Row> {
@@ -252,6 +309,13 @@ fn row_of(vault: &Vault, context: &Context, details: &ItemDetails) -> CoreResult
             }
         }
     }
+    let mut has_totp = false;
+    for field in &details.fields {
+        if stored_field_role(vault, id, field)? == "totp" {
+            has_totp = true;
+            break;
+        }
+    }
     let times = context.times.get(&id);
     Ok(Row {
         id,
@@ -262,10 +326,9 @@ fn row_of(vault: &Vault, context: &Context, details: &ItemDetails) -> CoreResult
         websites,
         tags: details.tags.clone(),
         archived: context.archived.contains_key(&id),
-        has_totp: details
-            .fields
-            .iter()
-            .any(|field| field_role(&field.name, field.secret) == "totp"),
+        has_totp,
+        has_passkey: context.passkeys.contains_key(&id),
+        has_password: has_password(vault, details)?,
         conflict_of: context.conflicts.get(&id).copied().flatten(),
         added_at: times.and_then(|times| times.added),
         changed_at: times.and_then(|times| times.changed),
@@ -313,6 +376,7 @@ pub fn detail(vault: &Vault, id: u64) -> CoreResult<Detail> {
     let context = Context::read(vault)?;
     let details = vault.details(id)?;
     let row = row_of(vault, &context, &details)?;
+    let passkey = context.passkeys.get(&id).map(passkey::Summary::from);
     let mut fields = Vec::new();
     for field in ordered(&details) {
         fields.push(FieldOut {
@@ -324,7 +388,7 @@ pub fn detail(vault: &Vault, id: u64) -> CoreResult<Detail> {
             } else {
                 Some(plain(vault, id, &field.name)?)
             },
-            role: field_role(&field.name, field.secret),
+            role: stored_field_role(vault, id, field)?,
             custom: custom_detail_label(&field.name).is_some(),
         });
     }
@@ -332,6 +396,7 @@ pub fn detail(vault: &Vault, id: u64) -> CoreResult<Detail> {
         row,
         notes: details.notes,
         fields,
+        passkey,
     })
 }
 
@@ -355,6 +420,11 @@ pub fn history(vault: &Vault, id: u64) -> CoreResult<Vec<Event>> {
                 ItemEventKind::Tracked => "The history starts here".to_owned(),
                 ItemEventKind::Edited if detail.is_empty() => "Changed".to_owned(),
                 ItemEventKind::Edited => format!("Changed: {detail}"),
+                ItemEventKind::Revealed
+                    if event.detail == apassy::vault::passkey::EXPORT_DETAIL =>
+                {
+                    "Prepared for a Credential Exchange transfer".to_owned()
+                }
                 ItemEventKind::Revealed => "Secret values shown".to_owned(),
                 ItemEventKind::Archived => "Archived".to_owned(),
                 ItemEventKind::Unarchived => "Restored from the archive".to_owned(),
@@ -426,6 +496,11 @@ fn kind_field(kind: CredentialKind, name: &str) -> Option<bool> {
     }
 }
 
+/// The names of the fields of a passkey. Only the passkey calls write them.
+fn is_reserved(name: &str) -> bool {
+    name.starts_with("passkey_")
+}
+
 fn name_ok(name: &str) -> bool {
     (1..=64).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
@@ -480,6 +555,9 @@ pub fn build_draft(vault: &Vault, existing: Option<u64>, draft: DraftIn) -> Core
             "The item category cannot change. Delete the item and add a new one.",
         ));
     }
+    // A login with a genuine passkey needs no password or account name.
+    let passwordless =
+        kind == CredentialKind::Login && existing.is_some_and(|id| passkey::is_genuine(vault, id));
     let notes = draft.notes.trim();
     if notes.len() > MAX_NOTES_BYTES {
         return Err(CoreError::invalid("The notes are too long."));
@@ -522,6 +600,9 @@ pub fn build_draft(vault: &Vault, existing: Option<u64>, draft: DraftIn) -> Core
                 )
             }
             (None, Some(name)) => {
+                if is_reserved(name) {
+                    return Err(CoreError::invalid("This field name is reserved."));
+                }
                 if !name_ok(name) || name.starts_with(DETAIL_PREFIX) {
                     return Err(CoreError::invalid(
                         "A field name can have only letters, digits, and _, and cannot start with x_.",
@@ -564,7 +645,7 @@ pub fn build_draft(vault: &Vault, existing: Option<u64>, draft: DraftIn) -> Core
         };
         let required_message = required(kind)
             .iter()
-            .find(|(n, _)| *n == name)
+            .find(|(n, _)| *n == name && !(passwordless && name == "username"))
             .map(|(_, m)| *m);
         let missing = || {
             CoreError::invalid(
@@ -584,6 +665,7 @@ pub fn build_draft(vault: &Vault, existing: Option<u64>, draft: DraftIn) -> Core
                     Some(value) if !value.expose().is_empty() => value,
                     // An optional secret without a value is left out, as on the Mac.
                     _ if !detail && required_message.is_none() && name == "passphrase" => continue,
+                    _ if passwordless && !detail && name == "password" => continue,
                     _ => return Err(missing()),
                 },
             };
@@ -609,6 +691,9 @@ pub fn build_draft(vault: &Vault, existing: Option<u64>, draft: DraftIn) -> Core
         }
     }
     for (name, message) in required(kind) {
+        if passwordless && matches!(*name, "username" | "password") {
+            continue;
+        }
         if !fields.iter().any(|field| field.name == *name) {
             return Err(CoreError::invalid(*message));
         }

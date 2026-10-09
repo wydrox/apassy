@@ -9,12 +9,14 @@
 
 mod autofill;
 mod config;
+mod credential_export;
 mod errors;
 mod generate;
 mod icloud;
 mod items;
 mod join;
 mod otp;
+mod passkey;
 mod sync;
 mod watchtower;
 mod wire;
@@ -165,11 +167,6 @@ struct List<T: Serialize> {
 #[derive(Serialize)]
 struct Events {
     events: Vec<items::Event>,
-}
-
-#[derive(Serialize)]
-struct Identities {
-    identities: Vec<autofill::Identity>,
 }
 
 #[derive(Serialize)]
@@ -472,7 +469,16 @@ impl Core {
                         return Err(CoreError::invalid("AutoFill fills logins only."));
                     }
                     let username = vault.reveal(id, "username")?;
-                    let password = vault.reveal(id, "password")?;
+                    // A login that holds only a passkey has no password to fill.
+                    let password = match vault.reveal(id, "password") {
+                        Err(error)
+                            if error.kind() == apassy::vault::VaultErrorKind::NotFound
+                                && passkey::is_genuine(vault, id) =>
+                        {
+                            return Err(CoreError::invalid("This login has a passkey only."));
+                        }
+                        other => other?,
+                    };
                     vault.record_reveal(id)?;
                     Ok(ok(&Credential {
                         username: username.expose(),
@@ -480,12 +486,54 @@ impl Core {
                     }))
                 })
             }
-            "credential_identities" => self.with_vault(|vault| {
-                Ok(ok(&Identities {
-                    identities: autofill::identities(vault)?,
-                }))
-            }),
+            // The Credential Exchange export: the app only, after its owner check. It
+            // records one event without values per exported item.
+            "credential_export" => {
+                self.require_app()?;
+                self.with_vault_mut(|vault| Ok(ok(&credential_export::export(vault)?)))
+            }
+            "credential_identities" => {
+                self.with_vault(|vault| Ok(ok(&autofill::identities(vault)?)))
+            }
+            // Passkeys: the app and the extension use, add, and sign; only the app
+            // imports and removes.
+            "passkey_list" | "passkey_assert" | "passkey_register" | "passkey_import"
+            | "passkey_remove" => self.passkey_call(&op, request),
             _ => Err(CoreError::invalid("This call is not known.")),
+        }
+    }
+
+    fn passkey_call(&self, op: &str, request: &str) -> CoreResult<String> {
+        if matches!(op, "passkey_import" | "passkey_remove") {
+            self.require_app()?;
+        }
+        if request.len() > passkey::MAX_REQUEST_BYTES {
+            return Err(CoreError::invalid("The request is too large."));
+        }
+        match op {
+            "passkey_list" => {
+                let request: passkey::ListIn = params(request)?;
+                self.with_vault(|vault| Ok(ok(&passkey::list(vault, request)?)))
+            }
+            "passkey_assert" => {
+                let request: passkey::AssertIn = params(request)?;
+                self.with_vault_mut(|vault| Ok(ok(&passkey::sign(vault, request)?)))
+            }
+            "passkey_register" => {
+                let request: passkey::RegisterIn = params(request)?;
+                self.with_vault_mut(|vault| Ok(ok(&passkey::register(vault, request)?)))
+            }
+            "passkey_import" => {
+                let request: passkey::ImportIn = params(request)?;
+                self.with_vault_mut(|vault| Ok(ok(&passkey::import(vault, request)?)))
+            }
+            _ => {
+                let request: passkey::RemoveIn = params(request)?;
+                self.with_vault_mut(|vault| {
+                    passkey::remove(vault, request)?;
+                    Ok(ok(&Empty {}))
+                })
+            }
         }
     }
 

@@ -6,6 +6,7 @@
 // revealed values when it leaves the screen, and covers its content whenever it is not active
 // (except behind its own system prompts), so the app switcher shows nothing of it.
 
+import AuthenticationServices
 import SwiftUI
 
 @main
@@ -65,6 +66,10 @@ struct RootView: View {
             }
         }
         .environment(root)
+        // Another app exports to Apassy (Apple's credential exchange).
+        .onContinueUserActivity(ASCredentialExchangeActivity) { activity in
+            root.receiveCredentialExchange(activity)
+        }
         .onChange(of: scenePhase, initial: true) { _, phase in
             PrivacyCover.shared.setPhase(AppPhase(phase))
             root.scenePhaseChanged(AppPhase(phase))
