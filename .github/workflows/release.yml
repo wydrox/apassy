@@ -4,6 +4,7 @@ name: Release
 # sign and notarize Apassy.dmg, then upload the image and
 # latest.json to the R2 bucket of apassy.wyderka.cc. The site serves them at
 # /download/Apassy.dmg and /latest.json. See docs/operations/release.md.
+# The job provider-check is a manual test build of a branch. It never publishes.
 
 on:
   workflow_run:
@@ -13,7 +14,10 @@ on:
   workflow_dispatch:
     inputs:
       ci_run_id:
-        description: Successful main CI run for this commit with a matching build artifact
+        description: >-
+          Successful main CI run for this commit with a matching build artifact.
+          The value provider-check starts a signed test build of a branch other than main
+          and publishes nothing.
         required: true
         type: string
 
@@ -72,6 +76,8 @@ jobs:
 
       # Before the owner adds the Apple secrets (docs/operations/release.md), the run
       # publishes nothing and says so. A part of the secrets is a mistake: it fails.
+      # The two provider profiles are required: a release always has the AutoFill
+      # extension (passkeys, passwords, one-time codes).
       - name: Check the secrets
         id: secrets
         env:
@@ -80,11 +86,14 @@ jobs:
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          MACOS_AUTOFILL_PROFILE: ${{ secrets.MACOS_AUTOFILL_PROFILE }}
+          MACOS_PROVIDER_APP_PROFILE: ${{ secrets.MACOS_PROVIDER_APP_PROFILE }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           apple=0
-          for name in MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD APPLE_API_KEY_P8 APPLE_API_KEY_ID APPLE_API_ISSUER_ID; do
+          for name in MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD APPLE_API_KEY_P8 APPLE_API_KEY_ID APPLE_API_ISSUER_ID \
+                      MACOS_AUTOFILL_PROFILE MACOS_PROVIDER_APP_PROFILE; do
             [ -z "${!name}" ] || apple=$((apple + 1))
           done
           if [ "$apple" = "0" ]; then
@@ -94,7 +103,8 @@ jobs:
           fi
           missing=""
           for name in MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD APPLE_API_KEY_P8 APPLE_API_KEY_ID \
-                      APPLE_API_ISSUER_ID CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
+                      APPLE_API_ISSUER_ID MACOS_AUTOFILL_PROFILE MACOS_PROVIDER_APP_PROFILE \
+                      CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
             [ -n "${!name}" ] || missing="$missing $name"
           done
           if [ -n "$missing" ]; then
@@ -119,6 +129,28 @@ jobs:
             echo "publish=false" >>"$GITHUB_OUTPUT"
             echo "::notice::$COMMIT is not the head of main ($head). The run for the head publishes."
           fi
+
+      # The AutoFill extension uses macOS 26 APIs behind availability checks. They
+      # compile only with the macOS 26 SDK or later. The default Xcode of macos-15 is
+      # 16.4 (SDK 15.5), so select Xcode 26.3 (SDK 26.2) and stop early if it is gone.
+      # Image list: github.com/actions/runner-images, images/macos/macos-15-Readme.md.
+      - name: Select Xcode 26
+        if: steps.head.outputs.publish == 'true'
+        env:
+          XCODE_APP: /Applications/Xcode_26.3.app
+        run: |
+          if [ ! -d "$XCODE_APP" ]; then
+            echo "::error::$XCODE_APP is not on this runner image. The provider needs the macOS 26 SDK. Installed Xcode: $(ls -d /Applications/Xcode*.app | tr '\n' ' ')"
+            exit 1
+          fi
+          export DEVELOPER_DIR="$XCODE_APP/Contents/Developer"
+          sdk="$(xcrun --sdk macosx --show-sdk-version)"
+          case "$sdk" in
+            2[6-9].*|[3-9][0-9].*) ;;
+            *) echo "::error::The macOS SDK of $XCODE_APP is $sdk. The provider needs 26 or later."; exit 1 ;;
+          esac
+          echo "DEVELOPER_DIR=$DEVELOPER_DIR" >>"$GITHUB_ENV"
+          echo "macOS SDK $sdk, $(xcodebuild -version | tr '\n' ' ')"
 
       - name: Install Node.js 22
         if: steps.head.outputs.publish == 'true'
@@ -181,6 +213,7 @@ jobs:
           keychain="$RUNNER_TEMP/signing.keychain-db"
           password="$(openssl rand -base64 32)"
           security create-keychain -p "$password" "$keychain"
+          echo "KEYCHAIN=$keychain" >>"$GITHUB_ENV"
           security set-keychain-settings -lut 7200 "$keychain"
           security unlock-keychain -p "$password" "$keychain"
           umask 077
@@ -222,6 +255,39 @@ jobs:
           {
             echo "APASSY_KEYCHAIN_PROFILE=$profile"
             echo "APASSY_REQUIRE_KEYCHAIN=1"
+          } >>"$GITHUB_ENV"
+
+      # The AutoFill extension and the main app need two Developer ID profiles
+      # (docs/operations/release.md). Both secrets are required, so APASSY_REQUIRE_PROVIDER=1
+      # stops the build when the provider is missing. The profile bytes stay out of the log.
+      - name: Get the provider profiles
+        if: steps.head.outputs.publish == 'true'
+        env:
+          MACOS_AUTOFILL_PROFILE: ${{ secrets.MACOS_AUTOFILL_PROFILE }}
+          MACOS_PROVIDER_APP_PROFILE: ${{ secrets.MACOS_PROVIDER_APP_PROFILE }}
+        run: |
+          umask 077
+          decode() {
+            local value="$1" file="$2" name="$3"
+            if ! printf '%s' "$value" | base64 --decode >"$file" 2>/dev/null || [ ! -s "$file" ]; then
+              rm -f "$file"
+              echo "::error::$name is not a base64 provisioning profile."
+              exit 1
+            fi
+            if ! security cms -D -i "$file" >/dev/null 2>&1; then
+              rm -f "$file"
+              echo "::error::$name is not a signed provisioning profile."
+              exit 1
+            fi
+          }
+          appex="$RUNNER_TEMP/ApassyAutoFill.provisionprofile"
+          app="$RUNNER_TEMP/ApassyProviderApp.provisionprofile"
+          decode "$MACOS_AUTOFILL_PROFILE" "$appex" MACOS_AUTOFILL_PROFILE
+          decode "$MACOS_PROVIDER_APP_PROFILE" "$app" MACOS_PROVIDER_APP_PROFILE
+          {
+            echo "APASSY_AUTOFILL_PROFILE=$appex"
+            echo "APASSY_PROVIDER_APP_PROFILE=$app"
+            echo "APASSY_REQUIRE_PROVIDER=1"
           } >>"$GITHUB_ENV"
 
       - name: Build and sign Apassy.app
@@ -282,4 +348,220 @@ jobs:
         if: always()
         run: |
           [ -z "${KEYCHAIN:-}" ] || security delete-keychain "$KEYCHAIN" || true
-          rm -f "$RUNNER_TEMP/AuthKey.p8" "$RUNNER_TEMP/certificate.p12" "$RUNNER_TEMP/ApassyKeychain.provisionprofile"
+          rm -f "$RUNNER_TEMP/AuthKey.p8" "$RUNNER_TEMP/certificate.p12" "$RUNNER_TEMP/ApassyKeychain.provisionprofile" \
+            "$RUNNER_TEMP/ApassyAutoFill.provisionprofile" "$RUNNER_TEMP/ApassyProviderApp.provisionprofile"
+
+  # A TEST build of a branch, started by hand: gh workflow run release.yml --ref BRANCH
+  # -f ci_run_id=provider-check. It builds, signs, and notarizes Apassy.dmg with the
+  # AutoFill credential provider, and keeps it as a GitHub Actions artifact for 3 days.
+  # It does not use the CI artifact, R2, the site, or the macos job. The artifact is
+  # test output, not a release. See docs/operations/release.md.
+  provider-check:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.ci_run_id == 'provider-check' &&
+      github.ref_type == 'branch' &&
+      github.ref != 'refs/heads/main' &&
+      github.event.repository.fork == false
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_STRIP: "none"
+    steps:
+      - name: Check out the commit of this run
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Check the commit
+        run: |
+          if [ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]; then
+            echo "::error::The checked-out commit is not $GITHUB_SHA."
+            exit 1
+          fi
+
+      # A missing secret is a mistake in this job: it fails.
+      - name: Check the secrets
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_AUTOFILL_PROFILE: ${{ secrets.MACOS_AUTOFILL_PROFILE }}
+          MACOS_PROVIDER_APP_PROFILE: ${{ secrets.MACOS_PROVIDER_APP_PROFILE }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          names="MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD MACOS_AUTOFILL_PROFILE MACOS_PROVIDER_APP_PROFILE APPLE_API_KEY_P8 APPLE_API_KEY_ID APPLE_API_ISSUER_ID"
+          missing=""
+          for name in $names; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secrets:$missing. See docs/operations/release.md."
+            exit 1
+          fi
+
+      - name: Install Rust 1.97.0
+        run: rustup toolchain install 1.97.0 --profile minimal
+
+      # The same Xcode as release.yml. The provider uses macOS 26 APIs behind
+      # availability checks, so it needs the macOS 26 SDK. A runner image without
+      # this Xcode fails here, and the app features stay as they are.
+      - name: Select Xcode 26
+        env:
+          XCODE_APP: /Applications/Xcode_26.3.app
+        run: |
+          if [ ! -d "$XCODE_APP" ]; then
+            echo "::error::$XCODE_APP is not on this runner image. The provider needs the macOS 26 SDK. Installed Xcode: $(ls -d /Applications/Xcode*.app | tr '\n' ' ')"
+            exit 1
+          fi
+          export DEVELOPER_DIR="$XCODE_APP/Contents/Developer"
+          sdk="$(xcrun --sdk macosx --show-sdk-version)"
+          case "$sdk" in
+            2[6-9].*|[3-9][0-9].*) ;;
+            *) echo "::error::The macOS SDK of $XCODE_APP is $sdk. The provider needs 26 or later."; exit 1 ;;
+          esac
+          echo "DEVELOPER_DIR=$DEVELOPER_DIR" >>"$GITHUB_ENV"
+          echo "macOS SDK $sdk, $(xcodebuild -version | tr '\n' ' ')"
+
+      # The keychain is private to this run and is deleted at the end.
+      - name: Import the Developer ID certificate
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password="$(openssl rand -base64 32)"
+          security create-keychain -p "$password" "$keychain"
+          echo "KEYCHAIN=$keychain" >>"$GITHUB_ENV"
+          security set-keychain-settings -lut 7200 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          umask 077
+          printf '%s' "$MACOS_CERTIFICATE_P12" | base64 --decode >"$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -f pkcs12 \
+            -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          # The intermediate of Developer ID certificates, in case the runner lacks it.
+          curl -fsSL https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer -o "$RUNNER_TEMP/DeveloperIDG2CA.cer"
+          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$keychain" || true
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
+          keychains=("$keychain")
+          while IFS= read -r line; do
+            keychains+=("$(sed -E 's/^[[:space:]]*"(.*)"$/\1/' <<<"$line")")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "${keychains[@]}"
+          identity="$(security find-identity -v -p codesigning "$keychain" | awk '/"Developer ID Application: / {print $2; exit}')"
+          if [ -z "$identity" ]; then
+            echo "::error::MACOS_CERTIFICATE_P12 has no Developer ID Application identity."
+            exit 1
+          fi
+          echo "APASSY_SIGN_IDENTITY=$identity" >>"$GITHUB_ENV"
+          echo "KEYCHAIN=$keychain" >>"$GITHUB_ENV"
+
+      # The profile bytes stay out of the log. Like release.yml, the keychain
+      # profile is optional, and the provider profiles are required.
+      - name: Get the provisioning profiles
+        env:
+          MACOS_KEYCHAIN_PROFILE: ${{ secrets.MACOS_KEYCHAIN_PROFILE }}
+          MACOS_AUTOFILL_PROFILE: ${{ secrets.MACOS_AUTOFILL_PROFILE }}
+          MACOS_PROVIDER_APP_PROFILE: ${{ secrets.MACOS_PROVIDER_APP_PROFILE }}
+        run: |
+          umask 077
+          decode() {
+            local value="$1" file="$2" name="$3"
+            if ! printf '%s' "$value" | base64 --decode >"$file" 2>/dev/null || [ ! -s "$file" ]; then
+              rm -f "$file"
+              echo "::error::$name is not a base64 provisioning profile."
+              exit 1
+            fi
+            if ! security cms -D -i "$file" >/dev/null 2>&1; then
+              rm -f "$file"
+              echo "::error::$name is not a signed provisioning profile."
+              exit 1
+            fi
+          }
+          appex="$RUNNER_TEMP/ApassyAutoFill.provisionprofile"
+          app="$RUNNER_TEMP/ApassyProviderApp.provisionprofile"
+          decode "$MACOS_AUTOFILL_PROFILE" "$appex" MACOS_AUTOFILL_PROFILE
+          decode "$MACOS_PROVIDER_APP_PROFILE" "$app" MACOS_PROVIDER_APP_PROFILE
+          {
+            echo "APASSY_AUTOFILL_PROFILE=$appex"
+            echo "APASSY_PROVIDER_APP_PROFILE=$app"
+            echo "APASSY_REQUIRE_PROVIDER=1"
+          } >>"$GITHUB_ENV"
+          if [ -z "$MACOS_KEYCHAIN_PROFILE" ]; then
+            echo "::notice::No MACOS_KEYCHAIN_PROFILE secret. This test app has no Touch ID vault unlock."
+            exit 0
+          fi
+          keychain_profile="$RUNNER_TEMP/ApassyKeychain.provisionprofile"
+          printf '%s' "$MACOS_KEYCHAIN_PROFILE" | base64 --decode >"$keychain_profile"
+          {
+            echo "APASSY_KEYCHAIN_PROFILE=$keychain_profile"
+            echo "APASSY_REQUIRE_KEYCHAIN=1"
+          } >>"$GITHUB_ENV"
+
+      - name: Test the signed credential provider
+        run: scripts/build-credential-provider.sh --test --require-provider --with-passwords-and-codes
+
+      # build-app.sh builds the Rust binaries itself (no CI artifact) and stops
+      # when the provider is not in the app (APASSY_REQUIRE_PROVIDER=1).
+      # No base model: this test build does not read the download bucket.
+      - name: Build and sign Apassy.app
+        run: scripts/build-app.sh
+
+      - name: Notarize and package Apassy.dmg
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APASSY_NOTARY_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APASSY_NOTARY_ISSUER: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          umask 077
+          export APASSY_NOTARY_KEY="$RUNNER_TEMP/AuthKey.p8"
+          printf '%s\n' "$APPLE_API_KEY_P8" >"$APASSY_NOTARY_KEY"
+          scripts/build-dmg.sh --notarize
+
+      - name: Write the test metadata
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          dmg = pathlib.Path("target/dist/Apassy.dmg")
+          data = {
+              "purpose": "test build, not a release",
+              "commit": os.environ["GITHUB_SHA"],
+              "ref": os.environ["GITHUB_REF_NAME"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "dmg_sha256": hashlib.file_digest(dmg.open("rb"), "sha256").hexdigest(),
+              "notarized": True,
+              "macos_sdk": subprocess.check_output(["xcrun", "--sdk", "macosx", "--show-sdk-version"], text=True).strip(),
+              "provider_required": True,
+          }
+          pathlib.Path("target/dist/test-build.json").write_text(json.dumps(data, indent=2) + "\n")
+          PY
+          {
+            echo "### Credential provider test build"
+            echo
+            echo "Test artifact for \`$GITHUB_SHA\`. It is not a release."
+            echo
+            echo '```json'
+            cat target/dist/test-build.json
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the test artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apassy-provider-test-${{ github.sha }}-${{ github.run_attempt }}
+          path: target/dist/
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+      - name: Remove the keychain and the keys
+        if: always()
+        run: |
+          [ -z "${KEYCHAIN:-}" ] || security delete-keychain "$KEYCHAIN" || true
+          rm -f "$RUNNER_TEMP/AuthKey.p8" "$RUNNER_TEMP/certificate.p12" "$RUNNER_TEMP/ApassyKeychain.provisionprofile" \
+            "$RUNNER_TEMP/ApassyAutoFill.provisionprofile" "$RUNNER_TEMP/ApassyProviderApp.provisionprofile"

@@ -10,6 +10,12 @@
 # certificate that signed the app. target/Apassy.app does not change: the
 # script staples a copy.
 #
+# The AutoFill credential provider (Contents/PlugIns/ApassyAutoFill.appex and
+# Contents/MacOS/apassy-credential-bridge) is in the app only with valid profiles.
+# With APASSY_REQUIRE_PROVIDER=1 (the release workflow), the script stops unless the
+# app and the mounted copy have the complete signed provider. Without the flag, an
+# app with no provider part packages as before, and a partial provider always fails.
+#
 # Usage: scripts/build-dmg.sh [--notarize]
 #   --notarize   Send the app, then the disk image, to the Apple notary service,
 #                and staple both tickets. Needs a "Developer ID Application"
@@ -36,7 +42,7 @@ NOTARIZE=0
 for arg in "$@"; do
   case "$arg" in
     --notarize) NOTARIZE=1 ;;
-    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,31p' "$0"; exit 0 ;;
     *) echo "build-dmg: unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -76,7 +82,7 @@ echo "$BACKGROUND_SIZE" | grep -q 'pixelWidth: 720$' \
   || fail "packaging/dmg-background.png must be 720 by 480 pixels"
 bash "$ROOT/scripts/layout-dmg.sh" --check
 [ -d "$APP" ] || fail "missing $APP. Run scripts/build-app.sh first."
-for tool in apassy apassy-mcp apassy-hook apassy-sandbox apassy-browser-host; do
+for tool in apassy apassy-mcp apassy-hook apassy-sandbox apassy-browser-host apassy-browser-guard; do
   [ -x "$APP/Contents/MacOS/$tool" ] || fail "missing $tool in $APP. Run scripts/build-app.sh again."
 done
 [ -s "$APP/Contents/Resources/apassy-agent-host.sb" ] \
@@ -94,6 +100,84 @@ SIGN_SHA1="$(openssl x509 -inform DER -in "$TMP/cert0" -noout -fingerprint -sha1
 security find-identity -v -p codesigning | grep -q "$SIGN_SHA1" \
   || fail "the keychain has no private key for \"$SIGN_NAME\" ($SIGN_SHA1)"
 echo "Signed by: $SIGN_NAME ($SIGN_SHA1)"
+
+# ---------------------------------------------------------------- provider
+case "${APASSY_REQUIRE_PROVIDER:-0}" in
+  0|1) ;;
+  *) fail "APASSY_REQUIRE_PROVIDER must be 0 or 1" ;;
+esac
+AUTOFILL_KEY="com.apple.developer.authentication-services.autofill-credential-provider"
+PROVIDER_TEAM="7S3F9767BM"
+BRIDGE_REL="Contents/MacOS/apassy-credential-bridge"
+APPEX_REL="Contents/PlugIns/ApassyAutoFill.appex"
+
+# plist_true FILE PATH: succeed when the value at PATH (PlistBuddy syntax, with ":") is true.
+# The entitlement keys have dots, so plutil -extract cannot read them.
+plist_true() {
+  [ "$(/usr/libexec/PlistBuddy -c "Print $2" "$1" 2>/dev/null)" = "true" ]
+}
+# entitlement_true CODE KEY: succeed when CODE is signed with KEY set to true.
+entitlement_true() {
+  codesign -d --entitlements - --xml "$1" >"$TMP/provider-ent.plist" 2>/dev/null || return 1
+  plist_true "$TMP/provider-ent.plist" ":$2"
+}
+# profile_check FILE LABEL: FILE is a signed profile for the team that carries the
+# AutoFill entitlement and has not expired. The bytes are not printed. scripts/build-app.sh
+# did the full check (certificate, App ID). This is the check of the packaged file.
+profile_check() {
+  local file="$1" label="$2" expiry
+  [ -s "$file" ] || fail "provider: $label has no embedded profile"
+  security cms -D -i "$file" >"$TMP/profile.plist" 2>/dev/null || fail "provider: the profile of $label cannot be decoded"
+  plist_true "$TMP/profile.plist" ":Entitlements:$AUTOFILL_KEY" \
+    || fail "provider: the profile of $label does not allow the AutoFill entitlement"
+  plutil -extract "TeamIdentifier.0" raw -o - "$TMP/profile.plist" 2>/dev/null | grep -qx "$PROVIDER_TEAM" \
+    || fail "provider: the profile of $label is not for team $PROVIDER_TEAM"
+  expiry="$(plutil -extract ExpirationDate raw -o - "$TMP/profile.plist" 2>/dev/null || true)"
+  [[ "$expiry" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+    || fail "provider: the profile of $label has no valid expiry date"
+  [[ "$expiry" > "$(date -u +%Y-%m-%dT%H:%M:%SZ)" ]] || fail "provider: the profile of $label expired on $expiry"
+}
+# check_signed CODE ID: a valid strict signature with the signing identifier ID, the
+# hardened runtime, and the team of the provider.
+check_signed() {
+  codesign --verify --strict "$1" || fail "provider: the signature of $1 is not valid"
+  codesign -d --verbose=2 "$1" >"$TMP/provider-info.txt" 2>&1
+  grep -qx "Identifier=$2" "$TMP/provider-info.txt" || fail "provider: the signing identifier of $1 is not $2"
+  grep -qx "TeamIdentifier=$PROVIDER_TEAM" "$TMP/provider-info.txt" || fail "provider: the team of $1 is not $PROVIDER_TEAM"
+  grep -q "flags=.*(runtime)" "$TMP/provider-info.txt" || fail "provider: hardened runtime is off for $1"
+}
+# check_provider APP LABEL: with APASSY_REQUIRE_PROVIDER=1, the complete signed provider.
+# Without the flag, no provider part, or the complete provider. Never a part of it.
+check_provider() {
+  local app="$1" label="$2" present=0 missing="" part
+  for part in "$BRIDGE_REL" "$APPEX_REL" "Contents/embedded.provisionprofile"; do
+    if [ -e "$app/$part" ]; then present=$((present + 1)); else missing="$missing $part"; fi
+  done
+  if [ "$present" = "0" ] && [ "${APASSY_REQUIRE_PROVIDER:-0}" != "1" ]; then
+    echo "Provider: not in $label (development image; macOS cannot offer Apassy as a credential provider)"
+    ! entitlement_true "$app" "$AUTOFILL_KEY" || fail "provider: $label has the AutoFill entitlement without the extension"
+    return
+  fi
+  [ -z "$missing" ] || fail "provider: $label lacks$missing. Run scripts/build-app.sh again with both profiles."
+  [ -x "$app/$BRIDGE_REL" ] || fail "provider: the bridge in $label is not executable"
+  [ -s "$app/$APPEX_REL/Contents/Info.plist" ] || fail "provider: the extension in $label has no Info.plist"
+  local exe
+  exe="$(plutil -extract CFBundleExecutable raw -o - "$app/$APPEX_REL/Contents/Info.plist")"
+  [ -x "$app/$APPEX_REL/Contents/MacOS/$exe" ] || fail "provider: the extension in $label has no executable"
+  for key in ProvidesPasskeys ProvidesPasswords ProvidesOneTimeCodes; do
+    plist_true "$app/$APPEX_REL/Contents/Info.plist" ":NSExtension:NSExtensionAttributes:ASCredentialProviderExtensionCapabilities:$key" \
+      || fail "provider: the extension in $label does not declare $key"
+  done
+  entitlement_true "$app" "$AUTOFILL_KEY" || fail "provider: the main app in $label has no AutoFill entitlement"
+  entitlement_true "$app/$APPEX_REL" "$AUTOFILL_KEY" || fail "provider: the extension in $label has no AutoFill entitlement"
+  profile_check "$app/Contents/embedded.provisionprofile" "the main app in $label"
+  profile_check "$app/$APPEX_REL/Contents/embedded.provisionprofile" "the extension in $label"
+  check_signed "$app/$BRIDGE_REL" com.wydrox.apassy.credential-bridge
+  check_signed "$app/$APPEX_REL" com.wydrox.apassy.autofill
+  echo "Provider: complete and signed in $label (extension: passkeys, passwords, one-time codes)"
+}
+
+check_provider "$APP" "target/Apassy.app"
 
 VERSION="$(plutil -extract CFBundleShortVersionString raw -o - "$APP/Contents/Info.plist")"
 MIN_MACOS="$(plutil -extract LSMinimumSystemVersion raw -o - "$APP/Contents/Info.plist")"
@@ -180,6 +264,7 @@ bash "$ROOT/scripts/layout-dmg.sh" "$MOUNT"
 # Verify the exact copy after Finder writes its metadata.
 codesign --verify --deep --strict "$MOUNT/Apassy.app" \
   || fail "the packaged app signature is not valid"
+check_provider "$MOUNT/Apassy.app" "the mounted image"
 if [ "$NOTARIZE" = "1" ]; then
   xcrun stapler validate "$MOUNT/Apassy.app"
   spctl --assess --type exec --verbose=2 "$MOUNT/Apassy.app"
