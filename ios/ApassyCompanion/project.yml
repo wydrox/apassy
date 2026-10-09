@@ -27,7 +27,7 @@ settings:
     SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
     # The app has no App Intents. This stops the note "Metadata extraction skipped".
     LM_SKIP_METADATA_EXTRACTION: YES
-    MARKETING_VERSION: 0.4.0
+    MARKETING_VERSION: 0.4.1
     CURRENT_PROJECT_VERSION: 1
     CODE_SIGN_STYLE: Automatic
     TARGETED_DEVICE_FAMILY: "1"

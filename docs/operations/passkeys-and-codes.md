@@ -6,7 +6,14 @@ Use only synthetic values for tests. This document does not open the real-secret
 
 ## 1. Status
 
-The sources for passkeys and one-time codes are in the branch. Integration, signed builds, and acceptance on a real iPhone and a real Mac are pending. This is not a release. No version in this document is published. The [acceptance checklist](#9-acceptance-checklist) lists what a person must still do. Until the checklist is complete, do not tell users that these features work on their devices.
+The sources for passkeys and one-time codes are in the branch. The target release is 0.4.1 (Mac app, browser extension, iPhone core, and iPhone app). Only the preparation is done: the package versions are 0.4.1 and the changelog has the target note under "Unreleased". Nothing is published, tagged, or uploaded, and the release stays a draft. Do not tell users that these features work on their devices until the [acceptance checklist](#9-acceptance-checklist) is complete.
+
+Evidence at source commit `2d93004`, by level:
+
+- **Source and CI:** all 12 pull request checks passed. The Rust suite passed 1,435 tests, with 19 ignored and no failures. The Swift tests (247) and the native tests (131) passed.
+- **Signed Mac build:** CI run `37956053234` built the app from this source, ran the provider tests, and notarized it. Release checks of the signed DMG and app passed (Gatekeeper, hash, strict provisioning profiles), and so did the signed host refusal test.
+- **iPhone test package:** a 0.4.0 IPA with Distribution signing exists (SHA-256 `97de55885c031e269f29428defa23a9bc7e7d4f0cb5f5afccb6e8bd7129c726a`). It uses unoptimized Rust and the old build number 1. It is a test package, not the production build. A production build must use optimized Rust. It is not uploaded.
+- **Not run:** checks on a real iPhone, checks on a real Mac, a passkey sign-in and registration in a normal browser, and Credential Exchange with other apps. Public availability on Mac and iPhone is open.
 
 ## 2. What Apassy supports
 
@@ -64,6 +71,8 @@ Passkeys need vault schema 17. Earlier builds use schema 16.
 3. Unlock the vault on one device. The build migrates the file. You cannot undo this with a build of schema 16: it cannot open a vault of schema 17. Restore the backup if you must go back.
 4. Sync the other devices. A device of schema 17 reads a copy of schema 16 and uploads a copy of schema 17.
 
+For release 0.4.1, do not do these steps on a real vault until the open checks in section 9 pass. The backup must be encrypted. An older client cannot sync or read a vault of schema 17, so update all clients before you upgrade the vault.
+
 After the first schema 17 upload, a device of schema 16 cannot sync that vault. It shows that the schema is not supported. Update it. Local tests cover schema 17 publication over a schema 16 copy on the relay, in the iCloud core, and in a folder. Device acceptance remains open (check D9).
 
 ## 6. Move to or from another app (iOS 26)
@@ -78,11 +87,11 @@ The iPhone app uses the Apple Credential Exchange. The data goes from app to app
 
 ## 7. Mac AutoFill extension and the profile gate
 
-The Mac extension needs two provisioning profiles. A build without both profiles has no AutoFill extension and no bridge. It cannot offer Apassy as a provider of passkeys, passwords, or codes in other apps. `scripts/build-app.sh` prints `PROVIDER NOT INCLUDED` for such a build. With `APASSY_REQUIRE_PROVIDER=1`, the script fails instead. A build with both valid profiles can include passwords, codes, and passkeys. See [native-app](native-app.md#credential-provider-variants) and [mac-passkeys](mac-passkeys.md). Acceptance of the signed provider remains open.
+The Mac extension needs two provisioning profiles. A build without both profiles has no AutoFill extension and no bridge. It cannot offer Apassy as a provider of passkeys, passwords, or codes in other apps. `scripts/build-app.sh` prints `PROVIDER NOT INCLUDED` for such a build. With `APASSY_REQUIRE_PROVIDER=1`, the script fails instead. A build with both valid profiles can include passwords, codes, and passkeys. See [native-app](native-app.md#credential-provider-variants) and [mac-passkeys](mac-passkeys.md). The signed Mac CI build passed its provider tests. Acceptance of the provider on a real Mac remains open.
 
 ## 8. Browser
 
-The browser extension asks for site access to https pages and `localhost` as an optional permission. The browser asks for it only after you turn on passkeys in the extension popup. Code filling is a separate command of the extension that uses the same Apassy owner check. The caller check ([browser-v1](../contracts/browser-v1.md) section 9.4) accepts signed Helium and Google Chrome stable. It refuses extension-loader and remote-debugging switches. Chrome Beta, Dev, Canary, and other browsers keep their own passkeys. A signature check does not prove a completed passkey sign-in. The signed app and browser acceptance checks below remain open.
+The browser extension asks for site access to https pages and `localhost` as an optional permission. The browser asks for it only after you turn on passkeys in the extension popup. Code filling is a separate command of the extension that uses the same Apassy owner check. The caller check ([browser-v1](../contracts/browser-v1.md) section 9.4) accepts signed Helium and Google Chrome stable. It refuses extension-loader and remote-debugging switches. Chrome Beta, Dev, Canary, and other browsers keep their own passkeys. A signature check does not prove a completed passkey sign-in. The acceptance checks with the signed app in a normal browser remain open.
 
 ## 9. Acceptance checklist
 
@@ -91,7 +100,7 @@ Rules for this list:
 - A local test is not a signed-build test. A signed browser or native test is not a real-device test. Mark each item at its own level only.
 - "Prepared" is not "completed". The history of an export says "prepared". Only the receiving app can show that it finished.
 - Use synthetic data and a test vault. Do not use a real vault or a real account.
-- No result is recorded here. Write the date, the build, the device, and the outcome in a new dated section, or in the review file, when you run an item.
+- Section 1 records the source and signed-package checks at commit `2d93004`. The normal-browser and real-device checks remain open. Write the date, the build, the device, and the outcome in a new dated section, or in the review file, when you run an item.
 
 ### Local tests (source level, no signed build)
 
