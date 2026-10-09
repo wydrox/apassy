@@ -144,7 +144,14 @@ step "Check the extension bundle"
 PLIST="$APPEX/Contents/Info.plist"
 plutil -lint "$PLIST" >/dev/null
 if grep -q '\$(' "$PLIST"; then fail "unfilled variable in $PLIST"; fi
-plist_raw() { plutil -extract "$2" raw -o - "$1" 2>/dev/null || true; }
+plist_raw() {
+  local value
+  # Some macOS versions print missing-key errors to stdout. Only return a value
+  # when extraction succeeds, so an absent capability stays absent.
+  if value="$(plutil -extract "$2" raw -o - "$1" 2>/dev/null)"; then
+    printf '%s\n' "$value"
+  fi
+}
 check_value() { # file, key path, expected
   local got
   got="$(plist_raw "$1" "$2")"
