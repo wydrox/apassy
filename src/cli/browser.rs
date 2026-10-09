@@ -21,8 +21,8 @@ same with one click for each browser.
      --browser NAME selects one, also when its folder does not exist yet.
      The manifest names apassy-browser-host of this Apassy.app, and it allows only the
      Apassy extension.
-  2. Print the folder of the extension. Load it once in each browser:
-     open chrome://extensions, turn on Developer mode, and drag the folder onto the page.
+  2. Print the page of the extension in the Chrome Web Store. Open it in each browser
+     and click Add to Chrome. The folder in Apassy.app also works with Developer mode.
 
 --remove deletes the manifests.
 
@@ -140,8 +140,10 @@ pub fn run(mut args: Args) -> Outcome {
         );
     }
     println!(
-        "Load it once in each browser: open chrome://extensions, turn on Developer mode, and drag the folder onto the page."
+        "Add the extension in each browser: open {} and click Add to Chrome.",
+        install::STORE_URL
     );
+    println!("Or load the folder above with Developer mode on the extensions page of the browser.");
     println!("Each fill asks for Touch ID or the passphrase in Apassy.");
     Ok(())
 }

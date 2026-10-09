@@ -1,6 +1,8 @@
 //! Connect a browser to Apassy (ADR 0021, contract section 7).
 //!
-//! A browser finds the native messaging host through the manifest
+//! The extension comes from the Chrome Web Store ([`STORE_URL`]), or from the folder in
+//! Apassy.app with Developer mode. A browser finds the native messaging host through the
+//! manifest
 //! `com.wydrox.apassy.json` in its `NativeMessagingHosts` folder. Settings > General >
 //! Browser extension in the app and `apassy setup browser` write it. The manifest names
 //! `apassy-browser-host` of the running Apassy.app and allows only the Apassy extension.
@@ -227,9 +229,15 @@ pub fn disconnect(home: &Path, browser: &Browser) -> io::Result<bool> {
     }
 }
 
-/// Open the extensions page in `browser`. The browser starts when it does not run.
-pub fn open_extensions_page(browser: &Browser) -> io::Result<()> {
-    run_open(&["-b", browser.bundle_id, "chrome://extensions"])
+/// The page of the extension in the Chrome Web Store (ADR 0021, D5). Its item ID is
+/// [`super::wire::EXTENSION_ID`].
+pub const STORE_URL: &str =
+    "https://chromewebstore.google.com/detail/apassy/bbnpgnjnfjlbgggmpnhejpmfjhmmhiih";
+
+/// Open the page of the extension in the Chrome Web Store in `browser`, for "Add to
+/// Chrome". The browser starts when it does not run.
+pub fn open_store_page(browser: &Browser) -> io::Result<()> {
+    run_open(&["-b", browser.bundle_id, STORE_URL])
 }
 
 /// Show `path` in the Finder, selected.
@@ -279,6 +287,12 @@ mod tests {
             None,
             "a Contents/MacOS folder outside a bundle"
         );
+    }
+
+    #[test]
+    fn the_store_page_is_the_page_of_the_extension_id() {
+        assert!(STORE_URL.starts_with("https://chromewebstore.google.com/detail/"));
+        assert!(STORE_URL.ends_with(super::super::wire::EXTENSION_ID));
     }
 
     #[test]

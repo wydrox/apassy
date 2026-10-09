@@ -8,15 +8,15 @@ The Apassy extension fills a login on a website in Helium, Google Chrome, Chromi
 ## 1. Set up
 
 1. Open Apassy.app and go to Settings > General > Browser extension.
-2. Click **Connect** next to your browser. Apassy connects the browser, opens its extensions page, and shows the folder `browser-extension` in the Finder.
-3. On the extensions page, turn on **Developer mode**. Drag the folder `browser-extension` from the Finder onto the page.
+2. Click **Connect** next to your browser. Apassy connects the browser and opens the Apassy page of the Chrome Web Store in it: <https://chromewebstore.google.com/detail/apassy/bbnpgnjnfjlbgggmpnhejpmfjhmmhiih>.
+3. Click **Add to Chrome**.
 4. Pin the Apassy button to the toolbar, open a login page, and click it. Settings shows "Last request just now" when the extension reached Apassy.
 
-Do steps 2 and 3 once for each browser. A browser takes an extension from another app only through the Chrome Web Store, so the Developer mode step stays until Apassy is in the store (ADR 0021, D5, and [chrome-web-store](chrome-web-store.md)).
+Do steps 2 and 3 once for each browser. The store updates the extension by itself.
 
-From a terminal, `apassy setup browser` does step 2 for every browser on this Mac and prints the folder. `--browser helium` selects one browser. `--remove` disconnects them. Settings and the command work only from Apassy.app: a source build is not protected from agents.
+From a terminal, `apassy setup browser` does step 2 for every browser on this Mac and prints the store address. `--browser helium` selects one browser. `--remove` disconnects them. Settings and the command work only from Apassy.app: a source build is not protected from agents.
 
-An update of Apassy.app updates the extension folder. The browser loads the new version at its next start.
+Without the store, the folder `Contents/Resources/browser-extension` of Apassy.app has the same extension with the same ID: turn on **Developer mode** on the extensions page of the browser, and drag the folder onto the page ("Show the extension folder" in Settings). An update of Apassy.app updates that folder, and the browser loads it at its next start.
 
 ## 2. Make a login fillable
 
