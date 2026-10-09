@@ -844,7 +844,7 @@ impl DesktopApp {
                         rotated: true,
                     });
                     self.set_ok(format!(
-                        "{agent_name} has a new token. Copy it now. The old token does not work."
+                        "{agent_name} has a new token. Connect your host to save it. The old token does not work."
                     ));
                 }
                 Err(err) => self.set_err(err.message),

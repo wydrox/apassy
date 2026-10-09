@@ -1,9 +1,9 @@
 ---
-// What 0.3.0 to 0.3.4 add: sync between Macs (a folder, or the Apassy relay since 0.3.4),
-// several vaults, import from 1Password and Bitwarden, and automatic updates. The facts:
-// CHANGELOG.md, docs/operations/sync.md, multiple-vaults.md, import-1password.md, cli.md,
-// and updates.md. The small views are drawings of the app,
-// not screenshots; the text of each card says the same.
+import { VERSION } from "../lib/site";
+
+// Current credential view, agent connection, and browser extension changes.
+// The cards describe established vault, sync, import, and update features.
+// Their small views are drawings of the app, not screenshots.
 const vaults = [
   { name: "Personal", color: "var(--blue)", open: true },
   { name: "Client A", color: "var(--orange)", open: false },
@@ -20,12 +20,14 @@ const items = [
 <section class="section" id="new">
   <div class="container">
     <header class="center">
-      <p class="eyebrow" data-reveal>New in 0.3.4</p>
-      <h2 class="h2" data-reveal style="--i:1">Your Macs stay in step, even when one is asleep.</h2>
+      <p class="eyebrow" data-reveal>Apassy {VERSION}</p>
+      <h2 class="h2" data-reveal style="--i:1">Credential controls stay in view.</h2>
       <p class="lead" data-reveal style="--i:2">
-        Sync a vault through the Apassy relay: each Mac sends an encrypted copy, and the others pick up the change
-        when they open. Keep clients in separate vaults, bring your keys over from 1Password or Bitwarden, and let
-        the app update itself.
+        Back, the title, and Edit stay visible when you scroll through a credential.
+        Dark values use a monospaced font below their labels.
+        The groups for Agent access, history, actions, and imported 1Password data stay closed until you open them.
+        Agent setup offers host connection first.
+        The browser extension installs from the Chrome Web Store.
       </p>
     </header>
 

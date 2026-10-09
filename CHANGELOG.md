@@ -4,9 +4,19 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-10-09
+
 ### Changed
 
+- The credential header keeps Back, the name, and Edit visible when the page scrolls. Each credential keeps its own scroll position.
+- Field labels are above dark monospaced values. Long secret values have a separate scroll area after the owner confirms Show.
+- Agent access, History and requests, More actions, and 1Password import data open on demand.
+- The agent token page offers host connection first. Advanced setup shows the token and manual configuration.
 - The browser extension is in the Chrome Web Store: <https://chromewebstore.google.com/detail/apassy/bbnpgnjnfjlbgggmpnhejpmfjhmmhiih>. "Connect" in Settings > General > Browser extension opens its page in the browser, so the install is "Add to Chrome" in place of Developer mode. `apassy setup browser` and the site point there too. Settings no longer shows the extension folder: the folder in Apassy.app still works with Developer mode, and `apassy setup browser` prints its path.
+
+### Security
+
+- Updated the website build dependencies. The dependency audit reports no known vulnerabilities.
 
 ## [0.3.5] - 2026-10-09
 
@@ -225,7 +235,8 @@ The alpha. It was not published.
 - Secrets for agent processes with owner approval: the socket never returns a secret value ([ADR 0006](docs/adr/0006-process-secrets.md)).
 - Plain-language rules and a local bouncer on Laya ([ADR 0007](docs/adr/0007-rules-and-local-bouncer.md)).
 
-[Unreleased]: https://github.com/wydrox/apassy/compare/v0.3.5...HEAD
+[Unreleased]: https://github.com/wydrox/apassy/compare/v0.3.6...HEAD
+[0.3.6]: https://github.com/wydrox/apassy/releases/tag/v0.3.6
 [0.3.5]: https://github.com/wydrox/apassy/releases/tag/v0.3.5
 [0.3.4]: https://github.com/wydrox/apassy/releases/tag/v0.3.4
 [0.3.2]: https://github.com/wydrox/apassy/releases/tag/0.3.2

@@ -368,6 +368,16 @@ const COLUMN_MIN_SIDE: f32 = 28.0;
 /// `i8`, so a side margin over 127 points would saturate and let the column grow
 /// past `max_width` in a wide window.
 pub(crate) fn column<R>(ui: &mut Ui, max_width: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
+    column_with_bottom_space(ui, max_width, 36.0, add)
+}
+
+/// A reading column with an explicit bottom inset, also used by fixed page headers.
+pub(crate) fn column_with_bottom_space<R>(
+    ui: &mut Ui,
+    max_width: f32,
+    bottom_space: f32,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> R {
     let available = ui.available_rect_before_wrap();
     let width = (available.width() - 2.0 * COLUMN_MIN_SIDE)
         .min(max_width)
@@ -385,7 +395,7 @@ pub(crate) fn column<R>(ui: &mut Ui, max_width: f32, add: impl FnOnce(&mut Ui) -
         |ui| {
             ui.set_width(width);
             let inner = add(ui);
-            ui.add_space(36.0);
+            ui.add_space(bottom_space);
             inner
         },
     )

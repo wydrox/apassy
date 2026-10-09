@@ -226,6 +226,7 @@ impl DesktopApp {
         ui.credential_filter = Default::default();
         ui.focus_search = false;
         ui.grant = Default::default();
+        ui.agent_setup = Default::default();
 
         let fields = &mut self.owner_ui;
         fields.edit_revision = 0;

@@ -23,8 +23,8 @@ use crate::contracts::CredentialKind;
 use crate::desktop::model::{DesktopModel, DetailDraft, ExtraField, ItemDraft, MASKED_VALUE};
 use crate::desktop::owner_check::OwnerRequest;
 use crate::desktop::owner_store::{
-    DETAIL_PREFIX, DeclarationForm, MAX_DETAILS, OwnerDetails, OwnerSummary, SecretForm,
-    field_label,
+    DETAIL_PREFIX, DeclarationForm, DetailLine, MAX_DETAILS, OwnerDetails, OwnerSummary,
+    SecretForm, field_label,
 };
 use crate::desktop::{DesktopApp, OwnerView};
 use crate::vault::providers::{self, Suggested};
@@ -552,7 +552,8 @@ fn selected_id(app: &DesktopApp) -> Option<u64> {
     app.selected_item_id.as_deref()?.parse().ok()
 }
 
-pub(super) fn draw_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
+/// Navigation stays outside the scrolling detail body.
+pub(super) fn draw_detail_header(app: &mut DesktopApp, ui: &mut egui::Ui) {
     if kit::back_link(ui, "Credentials") {
         app.view = OwnerView::Vault;
         return;
@@ -573,29 +574,56 @@ pub(super) fn draw_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
         return;
     }
     let mut edit = false;
-    ui.horizontal(|ui| {
-        let (icon, color) = kind_icon(details.kind);
-        kit::icon_tile_sized(ui, icon, color, 40.0);
-        ui.add_space(4.0);
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            ui.label(kit::text(&details.name, Font::Title).color(kit::LABEL));
-            let meta = meta_line(&details.project, &details.service);
-            let subtitle = if meta.is_empty() {
-                details.kind.label().to_owned()
-            } else {
-                format!("{} · {meta}", details.kind.label())
-            };
-            ui.label(kit::text(subtitle, Font::Callout).color(kit::SECONDARY));
-        });
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            edit = kit::button(ui, "Edit", Style::Bordered).clicked();
-            if details.archived {
-                kit::tag(ui, "Archived", Tone::Neutral);
-            }
-        });
-    });
-    ui.add_space(20.0);
+    let title_width = (ui.available_width() - 100.0).max(100.0);
+    egui::Sides::new().show(
+        ui,
+        |ui| {
+            ui.set_max_width(title_width);
+            ui.horizontal(|ui| {
+                let (icon, color) = kind_icon(details.kind);
+                kit::icon_tile_sized(ui, icon, color, 40.0);
+                ui.add_space(4.0);
+                ui.vertical(|ui| {
+                    ui.set_max_width((title_width - 56.0).max(40.0));
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.add(
+                        Label::new(kit::text(&details.name, Font::Title).color(kit::LABEL)).wrap(),
+                    );
+                    let meta = meta_line(&details.project, &details.service);
+                    let subtitle = if meta.is_empty() {
+                        details.kind.label().to_owned()
+                    } else {
+                        format!("{} · {meta}", details.kind.label())
+                    };
+                    ui.add(
+                        Label::new(kit::text(subtitle, Font::Callout).color(kit::SECONDARY)).wrap(),
+                    );
+                });
+            });
+        },
+        |ui| edit = kit::button(ui, "Edit", Style::Bordered).clicked(),
+    );
+    if edit {
+        open_edit(app, &details, false);
+    }
+}
+
+#[cfg(test)]
+fn draw_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    draw_detail_header(app, ui);
+    if app.view == OwnerView::Item {
+        draw_detail_body(app, ui);
+    }
+}
+
+pub(super) fn draw_detail_body(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    let Some(id) = selected_id(app) else {
+        return;
+    };
+    let details = match app.owner_ui.session.details(id) {
+        Ok(details) if !details.hidden => details,
+        _ => return,
+    };
     conflict_detail(app, ui, id, details.archived);
     if details.archived {
         let restore = kit::notice(
@@ -622,48 +650,73 @@ pub(super) fn draw_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
     review_card(app, ui, id);
     secret_section(app, ui, &details);
     details_section(app, ui, &details);
-    access_section(app, ui, id, details.kind);
-    timeline::change_timeline(app, ui, id);
-    let requests = app
-        .owner_ui
-        .session
-        .item_activity(id, crate::vault::MAX_ACTIVITY_ROWS)
-        .unwrap_or_default();
-    timeline::access_timeline(
-        app,
-        ui,
-        &requests,
-        &format!("access-{id}"),
-        "Agent requests",
-        "No agent asked for this credential yet.",
-        false,
-    );
+    detail_disclosure(app, ui, id, "access", "Agent access", |app, ui| {
+        access_section(app, ui, id, details.kind);
+    });
+    detail_disclosure(app, ui, id, "history", "History and requests", |app, ui| {
+        timeline::change_timeline(app, ui, id);
+        let requests = app
+            .owner_ui
+            .session
+            .item_activity(id, crate::vault::MAX_ACTIVITY_ROWS)
+            .unwrap_or_default();
+        timeline::access_timeline(
+            app,
+            ui,
+            &requests,
+            &format!("access-{id}"),
+            "Agent requests",
+            "No agent asked for this credential yet.",
+            false,
+        );
+    });
     let mut archive = false;
     let mut delete = false;
-    kit::section(ui, None, None, |s| {
-        if !details.archived {
-            archive = s
-                .clickable_row("Archive credential…", |ui| {
-                    ui.label(kit::text("Archive credential…", Font::Body).color(kit::LABEL));
-                    kit::note(ui, "Agents cannot use it. Search still finds it.");
+    detail_disclosure(app, ui, id, "actions", "More actions", |_app, ui| {
+        kit::section(ui, None, None, |s| {
+            if !details.archived {
+                archive = s
+                    .clickable_row("Archive credential…", |ui| {
+                        ui.label(kit::text("Archive credential…", Font::Body).color(kit::LABEL));
+                        kit::note(ui, "Agents cannot use it. Search still finds it.");
+                    })
+                    .clicked();
+            }
+            delete = s
+                .clickable_row("Delete credential…", |ui| {
+                    ui.label(
+                        kit::text("Delete credential…", Font::Body).color(Tone::Critical.text()),
+                    );
                 })
                 .clicked();
-        }
-        delete = s
-            .clickable_row("Delete credential…", |ui| {
-                ui.label(kit::text("Delete credential…", Font::Body).color(Tone::Critical.text()));
-            })
-            .clicked();
+        });
     });
-    if edit {
-        open_edit(app, &details, false);
-    }
     if archive {
         app.ui.sheet = Some(Sheet::ArchiveItem);
     }
     if delete {
         app.pending_delete = true;
     }
+}
+
+fn detail_disclosure(
+    app: &mut DesktopApp,
+    ui: &mut egui::Ui,
+    id: u64,
+    section: &str,
+    label: &str,
+    add: impl FnOnce(&mut DesktopApp, &mut egui::Ui),
+) {
+    let key = format!("credential-{section}-{id}");
+    let mut open = app.ui.is_expanded(&key);
+    if kit::disclosure(ui, &mut open, label).changed() {
+        app.ui.set_expanded(&key, open);
+    }
+    if open {
+        ui.add_space(8.0);
+        add(app, ui);
+    }
+    ui.add_space(14.0);
 }
 
 /// Open the edit sheet with the stored values. With `add_detail`, the form gets a new
@@ -702,14 +755,30 @@ pub(super) fn toggle_masking(app: &mut DesktopApp, ctx: &egui::Context) {
 /// egui still copies it for the layout (key-memory review F10, §5).
 fn secret_value(ui: &mut egui::Ui, app: &DesktopApp, id: u64, name: &str) {
     if let Some(value) = app.owner_ui.session.revealed_value(id, name) {
-        ui.add(Label::new(kit::text(value, Font::Mono).color(kit::LABEL)).wrap());
+        // A key, recovery list, or imported source record must not stretch the
+        // complete page when revealed. Its own value area remains scrollable.
+        egui::ScrollArea::vertical()
+            .id_salt(("secret-value", id, name))
+            .max_height(180.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.add(
+                    Label::new(kit::text(value, Font::Mono).size(14.0).color(kit::LABEL)).wrap(),
+                );
+            });
+    } else {
+        ui.label(
+            kit::text(MASKED_VALUE, Font::Mono)
+                .size(17.0)
+                .color(kit::LABEL),
+        );
     }
 }
 
-/// "Show" or "Hide" for the secret values, with the masked value while hidden.
-fn mask_button(ui: &mut egui::Ui, revealed: bool, masked: bool) -> bool {
+/// "Show" or "Hide" for the secret values. The value sits below its field label.
+fn mask_button(ui: &mut egui::Ui, revealed: bool) -> bool {
     let label = if revealed { "Hide" } else { "Show" };
-    let button = kit::button_with(ui, Some(Icon::Eye), label, Style::Link, Size::Small)
+    let button = kit::button_with(ui, Some(Icon::Eye), label, Style::Bordered, Size::Small)
         .on_hover_text("Show or hide secret values  ⌘⇧H");
     let name = if revealed {
         "Hide the secret values"
@@ -718,11 +787,7 @@ fn mask_button(ui: &mut egui::Ui, revealed: bool, masked: bool) -> bool {
     };
     ui.ctx()
         .accesskit_node_builder(button.id, |node| node.set_label(name));
-    let clicked = button.clicked();
-    if masked {
-        ui.label(kit::text(MASKED_VALUE, Font::Mono).color(kit::SECONDARY));
-    }
-    clicked
+    button.clicked()
 }
 
 fn secret_section(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) {
@@ -747,8 +812,12 @@ fn secret_section(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetail
             s.row(|ui| {
                 egui::Sides::new().show(
                     ui,
-                    |ui| ui.label(kit::text(field_label(&line.name), Font::Body).color(kit::LABEL)),
-                    |ui| toggle |= mask_button(ui, revealed, !line.revealed),
+                    |ui| {
+                        ui.label(
+                            kit::text(field_label(&line.name), Font::Callout).color(kit::SECONDARY),
+                        )
+                    },
+                    |ui| toggle |= mask_button(ui, revealed),
                 );
                 secret_value(ui, app, id, &line.name);
             });
@@ -786,30 +855,14 @@ fn details_section(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetai
         ),
         |s| {
             for (label, value) in rows {
-                s.labeled(label, kit::text(value, Font::Body).color(kit::SECONDARY));
+                value_row(s, label, value);
             }
-            for detail in &details.details {
-                match &detail.value {
-                    Some(value) => {
-                        s.labeled(
-                            &detail.label,
-                            kit::text(value, Font::Body).color(kit::SECONDARY),
-                        );
-                    }
-                    None => s.row(|ui| {
-                        let shown = app
-                            .owner_ui
-                            .session
-                            .revealed_value(id, &detail.name)
-                            .is_some();
-                        egui::Sides::new().show(
-                            ui,
-                            |ui| ui.label(kit::text(&detail.label, Font::Body).color(kit::LABEL)),
-                            |ui| toggle |= mask_button(ui, revealed, !shown),
-                        );
-                        secret_value(ui, app, id, &detail.name);
-                    }),
-                }
+            for detail in details
+                .details
+                .iter()
+                .filter(|detail| !is_import_data(detail))
+            {
+                toggle |= custom_value_row(app, s, id, detail, revealed);
             }
             if details.details.len() < MAX_DETAILS {
                 add_detail = s
@@ -825,6 +878,19 @@ fn details_section(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetai
             }
         },
     );
+    if details.details.iter().any(is_import_data) {
+        detail_disclosure(app, ui, id, "import", "Import data", |app, ui| {
+            kit::section(ui, None, None, |s| {
+                for detail in details
+                    .details
+                    .iter()
+                    .filter(|detail| is_import_data(detail))
+                {
+                    toggle |= custom_value_row(app, s, id, detail, revealed);
+                }
+            });
+        });
+    }
     if !details.notes.is_empty() {
         kit::section(ui, Some("Notes"), None, |s| {
             s.row(|ui| kit::paragraph(ui, &details.notes, Font::Body, kit::LABEL));
@@ -835,6 +901,46 @@ fn details_section(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetai
     }
     if add_detail {
         open_edit(app, details, true);
+    }
+}
+
+/// Labels and values share one reading edge, including paths and long identifiers.
+fn value_row(section: &mut Section<'_>, label: &str, value: &str) {
+    section.row(|ui| {
+        ui.label(kit::text(label, Font::Callout).color(kit::SECONDARY));
+        ui.add(Label::new(kit::text(value, Font::Mono).size(14.0).color(kit::LABEL)).wrap());
+    });
+}
+
+fn is_import_data(detail: &DetailLine) -> bool {
+    matches!(
+        detail.label.as_str(),
+        "1Password item ID" | "1Password source JSON"
+    )
+}
+
+fn custom_value_row(
+    app: &DesktopApp,
+    section: &mut Section<'_>,
+    id: u64,
+    detail: &DetailLine,
+    revealed: bool,
+) -> bool {
+    match &detail.value {
+        Some(value) => {
+            value_row(section, &detail.label, value);
+            false
+        }
+        None => section.row(|ui| {
+            let mut toggle = false;
+            egui::Sides::new().show(
+                ui,
+                |ui| ui.label(kit::text(&detail.label, Font::Callout).color(kit::SECONDARY)),
+                |ui| toggle = mask_button(ui, revealed),
+            );
+            secret_value(ui, app, id, &detail.name);
+            toggle
+        }),
     }
 }
 
@@ -858,7 +964,7 @@ fn access_section(app: &mut DesktopApp, ui: &mut egui::Ui, id: u64, kind: Creden
     let mut open = None;
     kit::section(
         ui,
-        Some("Agent access"),
+        None,
         Some(
             "Agents never receive a secret value. They ask Apassy to run a command or to call an API, and Apassy decides.",
         ),

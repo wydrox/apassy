@@ -156,7 +156,7 @@ More limits are in [isolation](docs/operations/isolation.md) sections 4 and 7, a
 
 ## Status
 
-Version 0.3.4 ([changelog](CHANGELOG.md)). The goal and its definition of done are in [goal.md](docs/goal.md); the decisions are in [ADR 0010](docs/adr/0010-closing-open-decisions.md). The real-secret gate is **open**: the owner uses Apassy with real credentials.
+Version 0.3.6 ([changelog](CHANGELOG.md)). The goal and its definition of done are in [goal.md](docs/goal.md); the decisions are in [ADR 0010](docs/adr/0010-closing-open-decisions.md). The real-secret gate is **open**: the owner uses Apassy with real credentials.
 
 Open items:
 

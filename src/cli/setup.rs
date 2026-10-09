@@ -158,6 +158,25 @@ pub fn run(cli: &Cli, mut args: Args) -> Outcome {
         }
         None => sibling("apassy-hook"),
     };
+    if write && hook.is_none() {
+        return Err(Failure::Other(
+            "The prompt hook is missing. Reinstall the complete Apassy.app package, then try setup again."
+                .to_owned(),
+        ));
+    }
+    let dir = home()?.join(".config").join("apassy");
+    let mcp_wrapper = dir.join(format!("apassy-mcp-{}.sh", host.id()));
+    if write && host == Host::Codex {
+        // Detect an incompatible server before replacing a saved token.
+        let config = codex_home()?.join("config.toml");
+        codex_section_present(
+            &read_optional_config(&config)?,
+            &codex_section(&mcp_wrapper),
+        )?;
+    } else if write && host == Host::Claude {
+        let (config, _) = claude_paths(&home()?, std::env::var_os("CLAUDE_CONFIG_DIR"));
+        claude_server_present(&config, &mcp_wrapper)?;
+    }
 
     let token = if token_stdin {
         let token = terminal::read_stdin_secret()?;
@@ -181,8 +200,6 @@ pub fn run(cli: &Cli, mut args: Args) -> Outcome {
         }
     };
 
-    let dir = home()?.join(".config").join("apassy");
-    let mcp_wrapper = dir.join(format!("apassy-mcp-{}.sh", host.id()));
     write_wrapper(&mcp_wrapper, &mcp, &token)?;
     println!("Wrote {} (mode 0700).", mcp_wrapper.display());
     let hook_wrapper = match &hook {
@@ -261,9 +278,15 @@ fn merge_hook(file: &Path, hook_wrapper: &Path) -> Result<bool, Failure> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
         Err(err) => return Err(err.into()),
     };
-    let text = root.to_string();
-    if text.contains(&hook_wrapper.display().to_string()) {
-        return Ok(false);
+    if root
+        .get("disableAllHooks")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return Err(Failure::Other(
+            "The host settings disable all hooks. Check Advanced setup before you try again."
+                .to_owned(),
+        ));
     }
     let object = root
         .as_object_mut()
@@ -285,6 +308,21 @@ fn merge_hook(file: &Path, hook_wrapper: &Path) -> Result<bool, Failure> {
                 file.display()
             ))
         })?;
+    let command = hook_wrapper.display().to_string();
+    if list.iter().any(|entry| {
+        entry
+            .get("hooks")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|hooks| {
+                hooks.iter().any(|hook| {
+                    hook.get("type").and_then(serde_json::Value::as_str) == Some("command")
+                        && hook.get("command").and_then(serde_json::Value::as_str)
+                            == Some(command.as_str())
+                })
+            })
+    }) {
+        return Ok(false);
+    }
     list.push(hook_entry(hook_wrapper));
     if file.exists() {
         let backup = file.with_extension("json.before-apassy");
@@ -304,8 +342,60 @@ fn merge_hook(file: &Path, hook_wrapper: &Path) -> Result<bool, Failure> {
     Ok(true)
 }
 
+fn claude_paths(home: &Path, config_dir: Option<std::ffi::OsString>) -> (PathBuf, PathBuf) {
+    match config_dir.filter(|dir| !dir.is_empty()) {
+        Some(dir) => {
+            let dir = PathBuf::from(dir);
+            (dir.join(".claude.json"), dir.join("settings.json"))
+        }
+        None => (
+            home.join(".claude.json"),
+            home.join(".claude/settings.json"),
+        ),
+    }
+}
+
+/// Only reuse the user-scoped server created by `claude mcp add`. A custom
+/// command, argument, or environment needs manual setup before token replacement.
+fn claude_server_present(config: &Path, mcp_wrapper: &Path) -> Result<bool, Failure> {
+    let text = read_optional_config(config)?;
+    if text.trim().is_empty() {
+        return Ok(false);
+    }
+    let root: serde_json::Value = serde_json::from_str(&text).map_err(|_| {
+        Failure::Other(
+            "The Claude Code configuration is not valid JSON. Check Advanced setup.".to_owned(),
+        )
+    })?;
+    let object = root.as_object().ok_or_else(|| {
+        Failure::Other(
+            "The Claude Code configuration is not a JSON object. Check Advanced setup.".to_owned(),
+        )
+    })?;
+    let Some(servers) = object.get("mcpServers") else {
+        return Ok(false);
+    };
+    let servers = servers.as_object().ok_or_else(|| {
+        Failure::Other(
+            "The Claude Code MCP configuration is not an object. Check Advanced setup.".to_owned(),
+        )
+    })?;
+    let Some(server) = servers.get("apassy") else {
+        return Ok(false);
+    };
+    let expected = serde_json::json!({
+        "type": "stdio", "command": mcp_wrapper.display().to_string(), "args": [], "env": {}
+    });
+    if server != &expected {
+        return Err(Failure::Other(
+            "The existing Apassy server in Claude Code has different settings. Check Advanced setup before you try again.".to_owned(),
+        ));
+    }
+    Ok(true)
+}
+
 fn claude(mcp_wrapper: &Path, hook_wrapper: Option<&Path>, write: bool) -> Outcome {
-    let settings = home()?.join(".claude").join("settings.json");
+    let (config, settings) = claude_paths(&home()?, std::env::var_os("CLAUDE_CONFIG_DIR"));
     let mcp_json = serde_json::json!({ "mcpServers": { "apassy": { "command": mcp_wrapper.display().to_string() } } });
     if !write {
         println!(
@@ -328,23 +418,36 @@ fn claude(mcp_wrapper: &Path, hook_wrapper: Option<&Path>, write: bool) -> Outco
         }
         println!("\nOr run this command again with --write.");
     } else {
-        let added = std::process::Command::new("claude")
-            .args(["mcp", "add", "--scope", "user", "apassy", "--"])
-            .arg(mcp_wrapper)
-            .status();
-        match added {
-            Ok(status) if status.success() => {
-                println!("Added the MCP server apassy to Claude Code (user scope).")
+        if claude_server_present(&config, mcp_wrapper)? {
+            println!("Claude Code has the Apassy settings already (user scope).");
+        } else {
+            if config.exists() {
+                fs::copy(&config, config.with_extension("json.before-apassy"))?;
             }
-            Ok(status) => {
-                return Err(Failure::Other(format!(
-                    "Claude Code setup failed ({status}). Check `claude mcp list`. If an old apassy server exists, remove it with `claude mcp remove apassy --scope user`, then run setup again."
-                )));
+            let added = std::process::Command::new("claude")
+                .args(["mcp", "add", "--scope", "user", "apassy", "--"])
+                .arg(mcp_wrapper)
+                .status();
+            match added {
+                Ok(status) if status.success() => {
+                    println!("Added the MCP server apassy to Claude Code (user scope).")
+                }
+                Ok(status) => {
+                    return Err(Failure::Other(format!(
+                        "Claude Code setup failed ({status}). Check `claude mcp list`. If an old apassy server exists, remove it with `claude mcp remove apassy --scope user`, then run setup again."
+                    )));
+                }
+                Err(error) => {
+                    return Err(Failure::Other(format!(
+                        "Cannot start Claude Code: {error}. Make sure `claude --version` works in this terminal, then run setup again."
+                    )));
+                }
             }
-            Err(error) => {
-                return Err(Failure::Other(format!(
-                    "Cannot start Claude Code: {error}. Make sure `claude --version` works in this terminal, then run setup again."
-                )));
+            if !claude_server_present(&config, mcp_wrapper)? {
+                return Err(Failure::Other(
+                    "Claude Code did not save the expected Apassy server. Check Advanced setup."
+                        .to_owned(),
+                ));
             }
         }
         if let Some(hook_wrapper) = hook_wrapper {
@@ -361,21 +464,37 @@ fn claude(mcp_wrapper: &Path, hook_wrapper: Option<&Path>, write: bool) -> Outco
     Ok(())
 }
 
-fn codex(mcp_wrapper: &Path, hook_wrapper: Option<&Path>, write: bool) -> Outcome {
-    let codex_home = std::env::var_os("CODEX_HOME")
+fn codex_home() -> Result<PathBuf, Failure> {
+    std::env::var_os("CODEX_HOME")
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
-        .map_or_else(|| home().map(|home| home.join(".codex")), Ok)?;
-    let config = codex_home.join("config.toml");
-    let hooks = codex_home.join("hooks.json");
-    let section = format!(
+        .map_or_else(|| home().map(|home| home.join(".codex")), Ok)
+}
+
+fn codex_section(mcp_wrapper: &Path) -> String {
+    format!(
         "[mcp_servers.apassy]\ncommand = \"{}\"\ntool_timeout_sec = 180\n",
         mcp_wrapper
             .display()
             .to_string()
             .replace('\\', "\\\\")
             .replace('"', "\\\"")
-    );
+    )
+}
+
+fn read_optional_config(config: &Path) -> Result<String, Failure> {
+    match fs::read_to_string(config) {
+        Ok(text) => Ok(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn codex(mcp_wrapper: &Path, hook_wrapper: Option<&Path>, write: bool) -> Outcome {
+    let codex_home = codex_home()?;
+    let config = codex_home.join("config.toml");
+    let hooks = codex_home.join("hooks.json");
+    let section = codex_section(mcp_wrapper);
     if !write {
         println!("\nAdd to {}:\n\n{section}", config.display());
         if let Some(hook_wrapper) = hook_wrapper {
@@ -390,16 +509,9 @@ fn codex(mcp_wrapper: &Path, hook_wrapper: Option<&Path>, write: bool) -> Outcom
         }
         println!("\nOr run this command again with --write.");
     } else {
-        let current = fs::read_to_string(&config).unwrap_or_default();
-        if current
-            .lines()
-            .any(|line| line.trim() == "[mcp_servers.apassy]")
-        {
-            println!(
-                "{} has [mcp_servers.apassy] already. Set its command to {} by hand.",
-                config.display(),
-                mcp_wrapper.display()
-            );
+        let current = read_optional_config(&config)?;
+        if codex_section_present(&current, &section)? {
+            println!("{} has the Apassy settings already.", config.display());
         } else {
             if config.exists() {
                 let backup = config.with_extension("toml.before-apassy");
@@ -442,9 +554,142 @@ fn codex(mcp_wrapper: &Path, hook_wrapper: Option<&Path>, write: bool) -> Outcom
     Ok(())
 }
 
+/// Recognize only the block that this setup command writes. Do not report success
+/// for an existing server that points elsewhere or disables Apassy. Leave custom
+/// configuration for manual setup rather than silently replacing it.
+fn codex_section_present(current: &str, expected: &str) -> Result<bool, Failure> {
+    let lines: Vec<_> = current.lines().map(str::trim).collect();
+    let Some(start) = lines
+        .iter()
+        .position(|line| *line == "[mcp_servers.apassy]")
+    else {
+        // A quoted/dotted/inline definition needs a TOML-aware manual merge.
+        if current.contains("apassy") {
+            return Err(Failure::Other(
+                "The Codex configuration already refers to Apassy. Check it in Advanced setup before you try again."
+                    .to_owned(),
+            ));
+        }
+        return Ok(false);
+    };
+    let end = lines[start + 1..]
+        .iter()
+        .position(|line| line.starts_with('['))
+        .map_or(lines.len(), |offset| start + 1 + offset);
+    let actual: Vec<_> = lines[start..end]
+        .iter()
+        .copied()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    let expected: Vec<_> = expected.lines().map(str::trim).collect();
+    let other_apassy_section = lines[end..]
+        .iter()
+        .any(|line| line.starts_with('[') && line.contains("apassy"));
+    if actual != expected || other_apassy_section {
+        return Err(Failure::Other(
+            "The existing Apassy server in Codex has different settings. Check it in Advanced setup before you try again."
+                .to_owned(),
+        ));
+    }
+    Ok(true)
+}
+
 #[cfg(all(test, feature = "vault"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_setup_reuses_only_its_managed_user_server() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = dir.path().join(".claude.json");
+        let wrapper = dir.path().join("apassy-mcp-claude.sh");
+        assert!(!claude_server_present(&config, &wrapper).unwrap());
+        let expected = serde_json::json!({
+            "type": "stdio", "command": wrapper.display().to_string(), "args": [], "env": {}
+        });
+        let root = serde_json::json!({
+            "mcpServers": { "apassy": expected }, "projects": { "/example": { "trusted": true } }
+        });
+        fs::write(&config, root.to_string()).unwrap();
+        assert!(claude_server_present(&config, &wrapper).unwrap());
+        for field in ["command", "args", "env", "type", "enabled"] {
+            let mut custom = root.clone();
+            custom["mcpServers"]["apassy"][field] = serde_json::json!("custom");
+            let text = custom.to_string();
+            fs::write(&config, &text).unwrap();
+            assert!(claude_server_present(&config, &wrapper).is_err(), "{field}");
+            assert_eq!(fs::read_to_string(&config).unwrap(), text);
+        }
+        fs::write(&config, "not JSON").unwrap();
+        assert!(claude_server_present(&config, &wrapper).is_err());
+    }
+
+    #[test]
+    fn claude_paths_use_the_cli_configuration_directory() {
+        let home = Path::new("/fixture/home");
+        assert_eq!(
+            claude_paths(home, None),
+            (
+                home.join(".claude.json"),
+                home.join(".claude/settings.json")
+            )
+        );
+        assert_eq!(
+            claude_paths(home, Some("/fixture/custom".into())),
+            (
+                PathBuf::from("/fixture/custom/.claude.json"),
+                PathBuf::from("/fixture/custom/settings.json")
+            )
+        );
+    }
+
+    #[test]
+    fn the_hook_merge_requires_a_prompt_command_hook() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let settings = dir.path().join("settings.json");
+        let wrapper = Path::new("/fixture/apassy-hook-claude.sh");
+        let root = serde_json::json!({
+            "note": wrapper.display().to_string(),
+            "hooks": {
+                "Stop": [hook_entry(wrapper)],
+                "UserPromptSubmit": [{"hooks": [{"type": "prompt", "command": wrapper.display().to_string()}]}]
+            }
+        });
+        fs::write(&settings, root.to_string()).unwrap();
+        assert!(merge_hook(&settings, wrapper).unwrap());
+        assert!(!merge_hook(&settings, wrapper).unwrap());
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(value["hooks"]["Stop"], root["hooks"]["Stop"]);
+        assert_eq!(
+            value["hooks"]["UserPromptSubmit"].as_array().unwrap().len(),
+            2
+        );
+
+        let disabled = serde_json::json!({ "disableAllHooks": true, "hooks": { "UserPromptSubmit": [hook_entry(wrapper)] } }).to_string();
+        fs::write(&settings, &disabled).unwrap();
+        assert!(merge_hook(&settings, wrapper).is_err());
+        assert_eq!(fs::read_to_string(&settings).unwrap(), disabled);
+    }
+
+    #[test]
+    fn codex_setup_accepts_only_its_existing_configuration() {
+        let expected = "[mcp_servers.apassy]\ncommand = \"/tmp/apassy-mcp-codex.sh\"\ntool_timeout_sec = 180\n";
+        assert!(!codex_section_present("model = \"test\"\n", expected).unwrap());
+        let current = format!(
+            "model = \"test\"\n{expected}\n# user note\n[mcp_servers.other]\ncommand = \"other\"\n"
+        );
+        assert!(codex_section_present(&current, expected).unwrap());
+        for different in [
+            expected.replace("/tmp/", "/old/"),
+            format!("{expected}enabled = false\n"),
+            format!("{expected}[mcp_servers.apassy.env]\nOTHER = \"value\"\n"),
+            format!("{expected}{expected}"),
+            expected.replace("mcp_servers.apassy", "mcp_servers.\"apassy\""),
+        ] {
+            assert!(codex_section_present(&different, expected).is_err());
+        }
+    }
 
     #[test]
     fn wrappers_quote_the_token_and_have_mode_0700() {

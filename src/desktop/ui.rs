@@ -7,6 +7,8 @@
 #[cfg(feature = "vault")]
 mod activity;
 #[cfg(feature = "vault")]
+mod agent_setup;
+#[cfg(feature = "vault")]
 mod agents;
 #[cfg(feature = "vault")]
 mod browser_settings;
@@ -260,6 +262,8 @@ pub(crate) struct UiState {
     pub(crate) discard_item_kind_change: bool,
     #[cfg(feature = "vault")]
     pub(crate) setup_host: usize,
+    #[cfg(feature = "vault")]
+    agent_setup: agent_setup::SetupState,
     /// The newly adopted vault whose local agent setup is still offered.
     #[cfg(feature = "vault")]
     pub(crate) setup_vault: Option<String>,
@@ -399,6 +403,7 @@ pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
         if !session.has_file() || session.is_locked() {
             // A lock also hides a token that the owner did not dismiss.
             app.owner_ui.fresh_token = None;
+            app.ui.agent_setup = Default::default();
             app.ui.sheet = None;
             app.import.forget();
             start::draw(app, ui);
@@ -936,8 +941,13 @@ mod tests {
             .map(|fresh: &FreshToken| fresh.token.expose().to_owned())
             .expect("rotated");
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
-        assert!(text.contains("The old token does not work now"), "{text}");
-        assert!(text.contains(&shown), "the new token shows one time");
+        assert!(text.contains("The old token does not work"), "{text}");
+        assert!(text.contains("Connect Claude Code"), "{text}");
+        assert!(text.contains("Advanced setup"), "{text}");
+        assert!(!text.contains(&shown), "the token is hidden by default");
+        app.ui.agent_setup.advanced = true;
+        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(text.contains(&shown), "Advanced setup shows the new token");
 
         // A lock hides the token for good.
         app.lock_vault(None);
@@ -1068,6 +1078,8 @@ mod tests {
             )
             .expect("add");
         app.select_item(item.id.to_string());
+        app.ui
+            .set_expanded(&format!("credential-access-{}", item.id), true);
         let form = &app.owner_ui.declaration_form;
         assert!(!form.stored);
         assert_eq!(form.provider.as_deref(), Some("stripe"));
@@ -1347,6 +1359,8 @@ mod tests {
         );
         app.ui.sheet = None;
         app.select_item(item_id.to_string());
+        app.ui
+            .set_expanded(&format!("credential-access-{}", item_id), true);
         let (text, _) = draw_frames(&mut app, DEFAULT_SIZE, 2);
         assert!(text.contains("DRAWN_KEY · placeholder"), "{text}");
         items::prepare_sheet(&mut app, item_id, &Sheet::Variable);
@@ -1786,6 +1800,10 @@ mod tests {
             )
             .expect("add");
         app.select_item(item.id.to_string());
+        app.ui
+            .set_expanded(&format!("credential-history-{}", item.id), true);
+        app.ui
+            .set_expanded(&format!("credential-actions-{}", item.id), true);
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
         for expected in [
             "Account ID",
