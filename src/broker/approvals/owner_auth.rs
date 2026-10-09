@@ -122,9 +122,10 @@ pub enum OwnerAction {
         request_key: Vec<u8>,
         approval_key: Vec<u8>,
     },
-    /// Add a Mac to the relay sync of the open vault (ADR 0022, contract relay-sync-v1
-    /// section 7.1). The proof names the link exactly as the owner confirmed it: its
-    /// number on the relay, the name of the Mac, and its public key (X9.63, 65 bytes).
+    /// Add a device (a Mac or an iPhone) to the relay sync of the open vault (ADR 0022,
+    /// contract relay-sync-v1 section 7.1). The proof names the link exactly as the owner
+    /// confirmed it: its number on the relay, the name of the device, and its public key
+    /// (X9.63, 65 bytes).
     ConfirmSyncDevice {
         link_id: u64,
         device_name: String,
@@ -185,7 +186,7 @@ impl OwnerAction {
                 format!("pair the iPhone \"{}\"", short_device_name(device_name))
             }
             Self::ConfirmSyncDevice { device_name, .. } => format!(
-                "add the Mac \"{}\" to the sync of this vault",
+                "add the device \"{}\" to the sync of this vault",
                 short_device_name(device_name)
             ),
         }

@@ -108,11 +108,22 @@ pub fn try_detect_folders() -> Result<Vec<SyncFolder>, SyncError> {
     )
 }
 
+static DEVICE_NAME: OnceLock<String> = OnceLock::new();
+
 /// The name of this computer for the sync record: `scutil --get ComputerName` on macOS,
-/// else the host name, else "Unknown device". Read once for each process.
+/// else the host name, else "Unknown device". Read once for each process, unless
+/// [`set_device_name`] gave it first.
 pub fn device_name() -> String {
-    static NAME: OnceLock<String> = OnceLock::new();
-    NAME.get_or_init(read_device_name).clone()
+    DEVICE_NAME.get_or_init(read_device_name).clone()
+}
+
+/// Give the name of this device for the sync record, before the first sync of the
+/// process: a device that has no host name to read, such as an iPhone (ADR 0023). The
+/// name is trimmed and loses its control characters; an empty name changes nothing.
+/// Returns false when the name was read or given already.
+pub fn set_device_name(name: &str) -> bool {
+    let name: String = name.trim().chars().filter(|ch| !ch.is_control()).collect();
+    !name.is_empty() && DEVICE_NAME.set(name).is_ok()
 }
 
 fn read_device_name() -> String {

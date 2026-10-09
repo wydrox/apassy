@@ -8,6 +8,10 @@ license = "Apache-2.0"
 repository = "https://github.com/wydrox/apassy"
 description = "A personal credential manager with controlled agent access"
 
+[workspace]
+members = [".", "ios/ApassyCore"]
+default-members = ["."]
+
 [features]
 default = []
 desktop = ["dep:eframe", "dep:rustix", "dep:rfd", "dep:qrcode"]

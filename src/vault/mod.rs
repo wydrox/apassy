@@ -73,15 +73,15 @@ pub use merge::{
 };
 pub use relay_device::RelayDevice;
 pub use suggestions::{DeclarationField, SuggestedDeclaration, SuggestionOutcome, SuggestionStats};
-pub use sync::{AdoptedCopy, MAX_DEVICE_NAME_BYTES, SyncCopy, SyncIdentity};
+pub use sync::{AdoptedCopy, CopyPassphraseError, MAX_DEVICE_NAME_BYTES, SyncCopy, SyncIdentity};
 pub(crate) use sync::{copy_hashing, hash_open_file, sync_dir, to_hex};
 pub use types::{
     Field, FieldSummary, ItemDetails, ItemDraft, ItemSummary, MAX_PASSPHRASE_BYTES,
-    MIN_PASSPHRASE_BYTES, SecretValue, VaultError, VaultErrorKind, VaultResult,
+    MIN_PASSPHRASE_BYTES, SCHEMA_VERSION, SecretValue, VaultError, VaultErrorKind, VaultResult,
 };
 use types::{
-    MAX_SEARCH_RESULTS, SCHEMA_VERSION, err, kind_as_str, kind_from_str,
-    validate_create_passphrase, validate_draft, validate_unlock_passphrase,
+    MAX_SEARCH_RESULTS, err, kind_as_str, kind_from_str, validate_create_passphrase,
+    validate_draft, validate_unlock_passphrase,
 };
 pub use waiting::{ENDED_BY_RESTART, WaitTicket};
 
