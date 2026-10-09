@@ -4,6 +4,8 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-10-09
+
 ### Added
 
 - A browser extension for Helium, Chrome, Chromium, Brave, Edge, Arc, and Vivaldi. It fills the username and the password of a login on its website. Each fill asks for Touch ID or the passphrase in Apassy. Agents never get the password ([ADR 0021](docs/adr/0021-browser-extension.md), [browser](docs/operations/browser.md)).
@@ -17,6 +19,10 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 - The agent profile denies a write to every `NativeMessagingHosts` folder. A browser starts the program of such a manifest outside the sandbox, so a planted manifest could replace the host of an installed extension.
 - The agent profile denies a change of `Preferences`, `Secure Preferences`, and `Local State` of the Chromium browsers, and a new or renamed profile folder, so an agent cannot point an installed extension at its own code.
+
+### Changed
+
+- CI runs test groups and release builds in parallel. Release uses the verified binaries from the same successful CI run.
 
 ## [0.3.4] - 2026-10-07
 
@@ -215,7 +221,8 @@ The alpha. It was not published.
 - Secrets for agent processes with owner approval: the socket never returns a secret value ([ADR 0006](docs/adr/0006-process-secrets.md)).
 - Plain-language rules and a local bouncer on Laya ([ADR 0007](docs/adr/0007-rules-and-local-bouncer.md)).
 
-[Unreleased]: https://github.com/wydrox/apassy/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/wydrox/apassy/compare/v0.3.5...HEAD
+[0.3.5]: https://github.com/wydrox/apassy/releases/tag/v0.3.5
 [0.3.4]: https://github.com/wydrox/apassy/releases/tag/v0.3.4
 [0.3.2]: https://github.com/wydrox/apassy/releases/tag/0.3.2
 [0.3.1]: https://github.com/wydrox/apassy/releases/tag/v0.3.1
