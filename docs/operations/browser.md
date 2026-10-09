@@ -16,7 +16,7 @@ Do steps 2 and 3 once for each browser. The store updates the extension by itsel
 
 From a terminal, `apassy setup browser` does step 2 for every browser on this Mac and prints the store address. `--browser helium` selects one browser. `--remove` disconnects them. Settings and the command work only from Apassy.app: a source build is not protected from agents.
 
-Without the store, the folder `Contents/Resources/browser-extension` of Apassy.app has the same extension with the same ID: turn on **Developer mode** on the extensions page of the browser, and drag the folder onto the page ("Show the extension folder" in Settings). An update of Apassy.app updates that folder, and the browser loads it at its next start.
+Without the store, the folder `Contents/Resources/browser-extension` of Apassy.app has the same extension with the same ID: turn on **Developer mode** on the extensions page of the browser, and drag the folder onto the page. `apassy setup browser` prints its path. An update of Apassy.app updates that folder, and the browser loads it at its next start.
 
 ## 2. Make a login fillable
 
