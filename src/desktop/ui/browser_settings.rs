@@ -2,8 +2,7 @@
 //!
 //! "Connect" writes the host manifest of the browser ([`crate::browser::install`]) and
 //! opens the page of the extension in the Chrome Web Store in that browser, where the
-//! owner clicks "Add to Chrome" (ADR 0021, D5). The folder in Apassy.app stays for a
-//! load with Developer mode.
+//! owner clicks "Add to Chrome" (ADR 0021, D5).
 
 use std::time::{Duration, Instant};
 
@@ -42,7 +41,6 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let bundle = Install::current();
     let home = install::home();
     let mut action: Option<(Action, &'static Browser)> = None;
-    let mut show_folder = false;
     kit::section(
         ui,
         Some("Browser extension"),
@@ -101,12 +99,6 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     ui,
                     "Connect opens the Apassy page of the Chrome Web Store in the browser. Click Add to Chrome there. Do it once for each browser.",
                 );
-                kit::note(
-                    ui,
-                    "To load the extension from Apassy.app instead, turn on Developer mode on the extensions page of the browser and drag the folder browser-extension onto it.",
-                );
-                show_folder =
-                    kit::small_button(ui, "Show the extension folder", Style::Bordered).clicked();
             });
             s.labeled(
                 "Extension",
@@ -130,9 +122,6 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let (Some(bundle), Some(home)) = (bundle, home) else {
         return;
     };
-    if show_folder {
-        reveal_folder(app, &bundle);
-    }
     match action {
         Some((Action::Connect, browser)) => {
             if let Err(err) = install::connect(&home, browser, &bundle.host()) {
@@ -168,22 +157,6 @@ pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             ));
         }
         Some((Action::OpenStore, _)) | None => {}
-    }
-}
-
-fn reveal_folder(app: &mut DesktopApp, bundle: &Install) {
-    let folder = bundle.extension_dir();
-    if !folder.join("manifest.json").is_file() {
-        app.set_err(
-            "The extension folder is missing in this Apassy.app. Install the current Apassy.app.",
-        );
-        return;
-    }
-    if let Err(err) = install::reveal(&folder) {
-        app.set_err(format!(
-            "The Finder did not show the extension folder ({err}). It is {}.",
-            folder.display()
-        ));
     }
 }
 

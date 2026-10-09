@@ -240,14 +240,6 @@ pub fn open_store_page(browser: &Browser) -> io::Result<()> {
     run_open(&["-b", browser.bundle_id, STORE_URL])
 }
 
-/// Show `path` in the Finder, selected.
-pub fn reveal(path: &Path) -> io::Result<()> {
-    let path = path
-        .to_str()
-        .ok_or_else(|| io::Error::other("the path is not UTF-8"))?;
-    run_open(&["-R", path])
-}
-
 fn run_open(args: &[&str]) -> io::Result<()> {
     let status = Command::new("/usr/bin/open").args(args).status()?;
     if status.success() {
