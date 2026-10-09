@@ -66,7 +66,11 @@
 #                            ~/Library/Application Support/Apassy/laya.
 #   APASSY_BUILD_DATE        build time for the build identity,
 #                            YYYY-MM-DDTHH:MM:SSZ (UTC). Default: now. The
-#                            release workflow sets it once for its two builds.
+#                            CI workflow sets it before the release build.
+#   APASSY_PREBUILT_DIR      directory of the verified CI release artifact.
+#                            Skips only the Rust build. Requires Python 3.11+,
+#                            APASSY_BUILD_DATE, APASSY_BUILD_COMMIT, and
+#                            APASSY_PREBUILT_RUN_ID / APASSY_PREBUILT_RUN_ATTEMPT.
 #
 # The build identity: the release build gets APASSY_BUILD_COMMIT (git HEAD) and
 # APASSY_BUILD_DATE. The app compares them with latest.json for updates
@@ -112,9 +116,14 @@ trap 'rm -rf "$TMP"' EXIT
 step "Check the host and tools"
 [ "$(uname -s)" = "Darwin" ] || fail "this script runs on macOS only"
 [ "$(uname -m)" = "arm64" ] || fail "this script builds for arm64 only"
-for tool in cargo xcrun codesign security plutil openssl file /usr/libexec/PlistBuddy; do
+for tool in xcrun codesign security plutil openssl file /usr/libexec/PlistBuddy; do
   command -v "$tool" >/dev/null 2>&1 || fail "missing tool: $tool"
 done
+if [ -n "${APASSY_PREBUILT_DIR:-}" ]; then
+  command -v python3 >/dev/null 2>&1 || fail "missing tool: python3 (3.11 or later)"
+else
+  command -v cargo >/dev/null 2>&1 || fail "missing tool: cargo"
+fi
 # Use the SDK of the selected Xcode. A bare `xcrun` can select a Command
 # Line Tools SDK that the Xcode linker cannot read.
 SDK="$(xcrun --sdk macosx --show-sdk-path)" || fail "xcrun cannot find the macOS SDK"
@@ -248,7 +257,7 @@ else
 fi
 
 # ---------------------------------------------------------------- build
-step "Build the Rust binaries (release)"
+step "Select the Rust release binaries"
 # The build identity (docs/operations/updates.md). The app reads both values
 # with option_env!. Cargo builds again when a value changes, so the release
 # workflow sets the same values for its own first build.
@@ -266,8 +275,26 @@ else
   BUILD_DATE=""
   warn "git cannot name the commit. The app has no build identity and updates only to a higher version."
 fi
-APASSY_BUILD_COMMIT="$BUILD_COMMIT" APASSY_BUILD_DATE="$BUILD_DATE" \
-  cargo build --release --locked --features desktop,vault --bin apassy --bin apassy-mcp --bin apassy-hook --bin apassy-sandbox --bin apassy-browser-host
+RUST_BIN_DIR="$ROOT/target/release"
+verify_prebuilt() {
+  [ -n "$BUILD_COMMIT" ] || fail "the prebuilt artifact requires a git commit"
+  [ "${APASSY_BUILD_COMMIT:-}" = "$BUILD_COMMIT" ] || fail "APASSY_BUILD_COMMIT does not match git HEAD"
+  [ -n "${APASSY_BUILD_DATE:-}" ] || fail "the prebuilt artifact requires APASSY_BUILD_DATE"
+  [ -n "${APASSY_PREBUILT_RUN_ID:-}" ] || fail "the prebuilt artifact requires APASSY_PREBUILT_RUN_ID"
+  [ -n "${APASSY_PREBUILT_RUN_ATTEMPT:-}" ] || fail "the prebuilt artifact requires APASSY_PREBUILT_RUN_ATTEMPT"
+  python3 "$ROOT/scripts/ci-release-artifact.py" verify \
+    --directory "$APASSY_PREBUILT_DIR" --commit "$BUILD_COMMIT" --date "$BUILD_DATE" \
+    --run-id "$APASSY_PREBUILT_RUN_ID" --run-attempt "$APASSY_PREBUILT_RUN_ATTEMPT" \
+    || fail "the prebuilt release artifact did not pass verification"
+}
+if [ -n "${APASSY_PREBUILT_DIR:-}" ]; then
+  verify_prebuilt
+  RUST_BIN_DIR="$APASSY_PREBUILT_DIR"
+else
+  step "Build the Rust binaries (release)"
+  APASSY_BUILD_COMMIT="$BUILD_COMMIT" APASSY_BUILD_DATE="$BUILD_DATE" \
+    cargo build --release --locked --features desktop,vault --bin apassy --bin apassy-mcp --bin apassy-hook --bin apassy-sandbox --bin apassy-browser-host
+fi
 
 step "Build the Swift helper"
 mkdir -p "$NATIVE_OUT"
@@ -329,8 +356,11 @@ fill_plist packaging/ApassyNotify-Info.plist "$NT_APP/Contents/Info.plist"
 printf 'APPL????' >"$APP/Contents/PkgInfo"
 printf 'APPL????' >"$KC_APP/Contents/PkgInfo"
 printf 'APPL????' >"$NT_APP/Contents/PkgInfo"
-cp target/release/apassy target/release/apassy-mcp target/release/apassy-hook \
-  target/release/apassy-sandbox target/release/apassy-browser-host "$APP/Contents/MacOS/"
+if [ -n "${APASSY_PREBUILT_DIR:-}" ]; then
+  verify_prebuilt
+fi
+cp "$RUST_BIN_DIR/apassy" "$RUST_BIN_DIR/apassy-mcp" "$RUST_BIN_DIR/apassy-hook" \
+  "$RUST_BIN_DIR/apassy-sandbox" "$RUST_BIN_DIR/apassy-browser-host" "$APP/Contents/MacOS/"
 # The launcher reads the profile from Resources without the repository or a
 # profile flag. The app signature seals this resource.
 mkdir -p "$APP/Contents/Resources"

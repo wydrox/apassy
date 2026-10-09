@@ -15,7 +15,7 @@ The site is a static Astro page in `site/`, served by a Cloudflare Worker on the
 | Screenshots | `scripts/screenshots.sh` | Takes `docs/images/app-*.png` from the real app with synthetic data (`examples/screenshots.rs`). The README and the site use them. |
 | Worker | `site/worker/index.ts` | Serves the files of the site. Adds `/download` (302), `/download/Apassy.dmg`, and `/latest.json` from the R2 bucket `apassy-downloads`. |
 | Site workflow | `.github/workflows/site.yml` | On a change in `site/` or in a file that the site builds from (`scripts/install.sh`, `Cargo.toml`, `CHANGELOG.md`, `docs/images/`): type check and build. On `main`: `wrangler deploy`. Makes the bucket on the first deploy. |
-| Release workflow | `.github/workflows/release.yml` | After each green CI run of a push to `main`: build, sign, notarize, and upload. |
+| Release workflow | `.github/workflows/release.yml` | After each green CI run of a push to `main`: verify the CI binaries, sign, notarize, and upload. |
 | Disk image | `scripts/build-dmg.sh`, `scripts/layout-dmg.sh` | Packages `target/Apassy.app` into `target/dist/Apassy.dmg`, saves the Finder install window, and writes `target/dist/latest.json`. |
 
 Before the owner adds the Apple secrets, the release workflow publishes nothing and shows a warning. Without `CLOUDFLARE_API_TOKEN`, the site workflow builds the site and skips the deploy with a warning. The site then says "Coming soon for macOS", because `/latest.json` does not exist.
@@ -29,12 +29,12 @@ Before a source release, push the release commit to `main` and check CI on that 
 The release workflow runs on `macos-15`:
 
 1. It checks that the commit is still the head of `main`. CI runs finish in any order, and an older commit must not replace a newer image.
-2. It builds the Rust binaries. Then it imports the Developer ID certificate into a temporary keychain, so the build scripts of the dependencies never run while the signing key is in a keychain.
+2. It verifies the successful CI run through the GitHub API. The run must be a push to `main` in this repository for the same commit. It downloads that run's unsigned binary artifact and checks its commit, build date, run ID, attempt, version, architecture, and file hashes. Only then can it import the Developer ID certificate into a temporary keychain. The signing job does not compile Rust.
 3. If the bucket has `models/apassy-base-v1.safetensors`, it downloads the checkpoint. `scripts/build-app.sh` checks it against `tools/basemodel/manifest.json`. Without it, the app ships without the base model, and the run shows a warning.
 4. If the secret `MACOS_KEYCHAIN_PROFILE` is set, it embeds the keychain profile for Touch ID unlock. See [Touch ID unlock](#touch-id-unlock).
-5. `scripts/build-app.sh` builds and signs the app with the hardened runtime and a secure timestamp, and runs all of its checks. The app gets its build identity: the commit and the build time, in the program and in the signed `Info.plist` ([updates](updates.md)).
+5. `scripts/build-app.sh` checks the binary artifact again, builds the native helpers, and signs the app with the hardened runtime and a secure timestamp. It runs all existing bundle and signature checks. The program and the signed `Info.plist` use the commit and build date from CI ([updates](updates.md)).
 6. `scripts/build-dmg.sh --notarize` notarizes the app, staples it, makes the disk image, signs it, notarizes it, and staples it. `spctl` must accept both.
-7. It uploads `Apassy.dmg`, then `latest.json`, to the bucket. The run summary shows `latest.json`.
+7. It checks the head of `main` again. If the commit still matches, it uploads `Apassy.dmg`, then `latest.json`, to the bucket. The run summary shows `latest.json`.
 
 The bucket keeps only the latest build. The Worker serves only `Apassy.dmg` and `latest.json`. Other keys, such as `models/`, stay private. The upload sets `Cache-Control: no-cache` on both, and the Worker passes it on, so the app and the site get a new `latest.json` at once.
 
@@ -54,6 +54,40 @@ The bucket keeps only the latest build. The Worker serves only `Apassy.dmg` and 
   "arch": "arm64"
 }
 ```
+
+## CI duration and binary artifacts
+
+CI runs the quality checks, advisory check, test groups, and the unsigned release build at the same time.
+macOS uses three test groups. Linux uses four.
+This keeps the total at five macOS jobs, within the [standard macOS concurrency limit](https://docs.github.com/en/actions/reference/limits#job-concurrency-limits-for-github-hosted-runners) for Free, Pro, and Team plans.
+Other workflows can still use these shared runner slots.
+The existing `macos` and `linux` checks remain. Release waits for the complete CI workflow to succeed.
+`scripts/ci-test-shard.py` reads Cargo metadata to include every target, including new targets.
+Group 0 runs the library tests. The other groups contain all remaining targets, balanced with measured test times.
+Each test process uses `--test-threads=1`.
+Use `python3 scripts/ci-test-shard.py --list --shard-count 3` to see the macOS groups.
+Use `--shard-count 4` for Linux.
+
+Rust dependency caches separate the OS, architecture, compiler, Cargo configuration, lockfile, and job group.
+The release build has its own cache. Only pushes to `main` save these caches; pull requests only restore them.
+The advisory job caches the pinned `cargo-audit` executable and refreshes the advisory database on each run.
+No test or advisory check is removed.
+
+The binary artifact contains five executables and `manifest.json`.
+Its name is `apassy-release-COMMIT-ATTEMPT`, and GitHub retains it for seven days.
+Release selects it from a specific successful CI run; it never selects the newest artifact by name alone.
+Pull request artifacts cannot enter the release process.
+A manual Release run requires `ci_run_id` for a successful push to `main` at the selected commit.
+If that attempt has no artifact, or the artifact expired, rerun all CI jobs for the current main commit first.
+The manual path does not bypass CI or build replacement binaries.
+
+The target is less than ten minutes from a push to public availability, with cached dependencies.
+CI run `37786303163` took 13 minutes 9 seconds with six macOS jobs and no saved caches from this configuration.
+The library test job waited 6 minutes 51 seconds, then ran for 6 minutes 17 seconds.
+The five-job configuration reduces competition for macOS slots. Its duration still requires measurement.
+The first run, a dependency change, runner queues, or notarization delays can take longer.
+Confirm the target with live CI and Release timings before treating it as a release time guarantee.
+The artifact tools require Python 3.11 or later; CI selects Python 3.12.
 
 ## Relay first
 
