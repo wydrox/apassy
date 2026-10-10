@@ -67,7 +67,8 @@ impl Listener {
 }
 
 /// The modules of a QR code, dark or light, without the quiet zone. They carry the
-/// pairing secret, so they are erased on drop.
+/// pairing secret or the link code of "Add a device…", so they are erased on drop.
+#[derive(Clone)]
 pub(crate) struct QrModules {
     width: usize,
     dark: Zeroizing<Vec<bool>>,

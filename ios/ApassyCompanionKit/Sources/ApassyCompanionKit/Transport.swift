@@ -85,6 +85,7 @@ public final class PinnedURLSessionTransport: CompanionTransport {
 
         var urlRequest = URLRequest(
             url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 5)
+        urlRequest.allowsCellularAccess = Self.isTailscaleIPv4(request.host)
         urlRequest.httpMethod = request.method
         urlRequest.httpShouldHandleCookies = false
         for (name, value) in request.headers {
@@ -102,6 +103,23 @@ public final class PinnedURLSessionTransport: CompanionTransport {
         case .failure(let failure):
             throw failure
         }
+    }
+
+    /// Only canonical dotted-decimal IPv4 in 100.64.0.0/10 can use cellular.
+    /// Names, abbreviated addresses, and octal forms retain the local-network restriction.
+    private static func isTailscaleIPv4(_ host: String) -> Bool {
+        let parts = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else { return false }
+        var octets: [UInt8] = []
+        for part in parts {
+            guard !part.isEmpty, part.utf8.count <= 3,
+                part.utf8.allSatisfy({ $0 >= 0x30 && $0 <= 0x39 }),
+                part.count == 1 || part.first != "0",
+                let octet = UInt8(part)
+            else { return false }
+            octets.append(octet)
+        }
+        return octets[0] == 100 && (64...127).contains(octets[1])
     }
 
     /// Run one data task and tell why it failed. The task is made here, not by the async URL

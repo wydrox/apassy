@@ -8,22 +8,19 @@ struct MacView: View {
     @Environment(\.openURL) private var openURL
 
     var body: some View {
-        NavigationStack {
-            List {
-                connection
-                macSection
-                iPhoneSection
-                unpairSection
-                if session.state == .pinMismatch { forgetSection }
-            }
-            .scrollEdgeEffectStyle(.soft, for: .top)
-            .navigationTitle("Mac")
-            .refreshable {
-                await session.refresh()
-                await session.refreshStatus()
-            }
-            .task { await session.refreshStatus() }
+        List {
+            connection
+            macSection
+            iPhoneSection
+            unpairSection
+            if session.state == .pinMismatch { forgetSection }
         }
+        .scrollEdgeEffectStyle(.soft, for: .top)
+        .refreshable {
+            await session.refresh()
+            await session.refreshStatus()
+        }
+        .task { await session.refreshStatus() }
     }
 
     // MARK: Sections
@@ -143,10 +140,10 @@ struct MacView: View {
 
 #if DEBUG
     #Preview("Mac") {
-        MacView(session: .preview())
+        NavigationStack { MacView(session: .preview()) }
     }
 
     #Preview("Mac, not the paired one") {
-        MacView(session: .preview(state: .pinMismatch))
+        NavigationStack { MacView(session: .preview(state: .pinMismatch)) }
     }
 #endif

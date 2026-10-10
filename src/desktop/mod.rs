@@ -6,6 +6,9 @@
 /// The browser socket (ADR 0021).
 #[cfg(feature = "vault")]
 pub(crate) mod browser;
+/// The copy of a one-time code and its clear.
+#[cfg(feature = "vault")]
+pub(crate) mod clipboard;
 #[cfg(feature = "vault")]
 mod companion;
 #[cfg(feature = "vault")]
@@ -15,6 +18,9 @@ mod learning_ui;
 pub mod model;
 #[cfg(feature = "vault")]
 pub mod notify;
+/// Tests of the guarded show and copy of one-time codes.
+#[cfg(all(test, feature = "vault"))]
+mod otp_guard_tests;
 #[cfg(feature = "vault")]
 pub mod owner_check;
 #[cfg(feature = "vault")]
@@ -23,6 +29,12 @@ pub(crate) mod owner_cli;
 pub(crate) mod owner_socket;
 #[cfg(feature = "vault")]
 pub mod owner_store;
+/// Tests of the browser passkeys, the browser one-time codes, and the macOS passkey sheet.
+#[cfg(all(test, feature = "vault"))]
+mod passkey_controller_tests;
+/// Passkeys for the macOS passkey sheet, through the signed credential bridge.
+#[cfg(feature = "vault")]
+pub(crate) mod passkey_socket;
 /// Folder sync in the background (ADR 0014).
 #[cfg(feature = "vault")]
 pub(crate) mod sync_worker;
@@ -163,6 +175,9 @@ pub struct DesktopApp {
     /// The browser socket and the fill on its way to the extension (ADR 0021).
     #[cfg(feature = "vault")]
     pub(crate) browser: browser::BrowserHost,
+    /// The credential bridge of the macOS passkey sheet. Idle until the window finds it.
+    #[cfg(feature = "vault")]
+    pub(crate) platform: passkey_socket::PlatformHost,
     /// The iPhone listener and the pairing state of Settings > iPhone companion (ADR 0020).
     #[cfg(feature = "vault")]
     pub(crate) companion: companion::CompanionFlows,
@@ -232,6 +247,8 @@ impl DesktopApp {
             #[cfg(feature = "vault")]
             browser: browser::BrowserHost::default(),
             #[cfg(feature = "vault")]
+            platform: passkey_socket::PlatformHost::default(),
+            #[cfg(feature = "vault")]
             companion: companion::CompanionFlows::default(),
             #[cfg(feature = "vault")]
             model_server: None,
@@ -262,6 +279,8 @@ impl DesktopApp {
             app.start_updates(&cc.egui_ctx);
             app.start_cli(&crate::owner::client::default_socket_path(), &cc.egui_ctx);
             app.start_browser(&crate::browser::wire::default_socket_path(), &cc.egui_ctx);
+            // The bridge starts with each unlocked vault session.
+            app.find_credential_bridge();
         }
         app
     }
@@ -444,6 +463,7 @@ impl eframe::App for DesktopApp {
         {
             self.poll_cli(ctx);
             self.poll_browser(ctx);
+            self.poll_platform(ctx);
         }
         #[cfg(not(feature = "vault"))]
         let _ = ctx;

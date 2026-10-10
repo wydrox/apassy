@@ -856,18 +856,29 @@ impl Vault {
 
     // ---- Internal ----
 
+    /// The values to mask: each secret field, and each setup key of a one-time password
+    /// that an older Apassy stored as a plain field.
     fn secret_values(&self, items: &[u64]) -> VaultResult<Vec<String>> {
         let conn = self.conn_ref()?;
         let mut stmt = conn
-            .prepare("SELECT value FROM item_field WHERE item_id = ?1 AND secret = 1")
+            .prepare("SELECT name, value, secret FROM item_field WHERE item_id = ?1")
             .map_err(|_| err(VaultErrorKind::Storage))?;
         let mut values = Vec::new();
         for item in items {
             let rows = stmt
-                .query_map([to_sql_id(*item)?], |row| row.get::<_, String>(0))
+                .query_map([to_sql_id(*item)?], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })
                 .map_err(|_| err(VaultErrorKind::Storage))?;
             for row in rows {
-                let value = row.map_err(|_| err(VaultErrorKind::Storage))?;
+                let (name, value, secret) = row.map_err(|_| err(VaultErrorKind::Storage))?;
+                if secret != 1 && !super::is_setup_key_field(&name, &value) {
+                    continue;
+                }
                 if value.len() >= MIN_MASK_BYTES {
                     values.push(value);
                 }

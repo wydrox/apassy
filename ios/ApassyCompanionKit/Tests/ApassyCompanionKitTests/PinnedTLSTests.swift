@@ -44,7 +44,8 @@ struct PinnedTLSTests {
         #expect(configuration.tlsMinimumSupportedProtocolVersion == .TLSv13)
         #expect(configuration.timeoutIntervalForRequest == 5)
         #expect(configuration.waitsForConnectivity == false)
-        #expect(configuration.allowsCellularAccess == false)
+        // Each transport request limits this permission to a numeric Tailscale IPv4 host.
+        #expect(configuration.allowsCellularAccess == true)
         // An ephemeral configuration has no disk cache and no persistent storage.
         #expect(configuration.identifier == nil)
     }

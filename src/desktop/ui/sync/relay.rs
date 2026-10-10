@@ -1,11 +1,11 @@
 //! Sync through the Apassy relay in the app (ADR 0022 section 5, contract relay-sync-v1
-//! sections 6 and 7): the "Apassy relay" sheet that turns it on, "Add a Mac…" with the
+//! sections 6 and 7): the "Apassy relay" sheet that turns it on, "Add a device…" with the
 //! safety words and the owner check, "Devices…", the relay source of "Use a vault from
 //! another Mac", "Turn off" with "Delete the copy on the relay", "Replace with this Mac's
 //! vault…", and the status words.
 //!
 //! The engine is [`crate::sync::RelaySync`]. Every relay call that the owner starts runs
-//! on its own thread ([`Task`]): turning sync on with the first upload, "Add a Mac…" and
+//! on its own thread ([`Task`]): turning sync on with the first upload, "Add a device…" and
 //! its question every 5 seconds, "Devices…", "Sync now", the receipts of the other Macs,
 //! "Turn off", the replace of a damaged copy, a new passphrase, and the link, the wait,
 //! the download, and the adoption of a Mac that joins. The window shows what runs
@@ -24,7 +24,7 @@
 //! answered: a folder sync of the vault goes on until then, and stays when the relay
 //! refuses.
 //!
-//! The link of "Add a Mac…", a typed team code, and a pasted link for a vault of this
+//! The link of "Add a device…", a typed team code, and a pasted link for a vault of this
 //! Mac stay in memory only while their sheet is open. A lock drops them. The team code
 //! field is masked, and its text goes after each try, as a passphrase does.
 //!
@@ -41,6 +41,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Label};
 use zeroize::{Zeroize, Zeroizing};
 
+use super::super::companion::draw_qr;
 use super::super::kit::{self, Font, Style, Tone};
 use super::super::vaults::VaultSheet;
 use super::super::{
@@ -50,6 +51,7 @@ use super::super::{
 use super::{SyncSheet, UiStatus, ago};
 use crate::broker::SharedVault;
 use crate::broker::approvals::{OwnerAction, OwnerProof};
+use crate::desktop::companion::QrModules;
 use crate::desktop::owner_check::{OwnerRequest, Task, TaskPoll};
 use crate::desktop::owner_store::Ephemeral;
 use crate::desktop::{DesktopApp, OwnerView};
@@ -112,9 +114,9 @@ pub(crate) enum Job {
     /// "Turn on" with a team code and the first upload, or "Join from another Mac" for a
     /// vault of the list.
     TurnOn,
-    /// The link of "Add a Mac…".
+    /// The link of "Add a device…".
     NewLink,
-    /// The Macs that wait in "Add a Mac…".
+    /// The devices that wait in "Add a device…".
     Links,
     /// "Confirm…" after the owner check.
     Confirm,
@@ -253,12 +255,14 @@ struct Running {
     relay: Option<RelaySync>,
 }
 
-/// "Add a Mac…" while its sheet is open.
+/// "Add a device…" while its sheet is open.
 struct AddMac {
     /// The vault (list ID).
     id: String,
     /// The link code. It works once, for 10 minutes.
     code: Option<LinkCode>,
+    /// The QR code of the link of `code`, for the iPhone app. It goes with `code`.
+    qr: Option<QrModules>,
     /// The Macs that wait for a confirmation.
     links: Vec<PendingLink>,
     next_poll: Instant,
@@ -672,7 +676,7 @@ impl DesktopApp {
     /// Whether another Mac removed this one from the relay team of the vault `id`
     /// ([`RelaySync::is_removed`]). Until the worker asks the relay again, every relay
     /// call of the vault fails at once, so the window offers only turning relay sync
-    /// off: no "Sync now", "Add a Mac…", "Devices…", "Check again", or "Refresh".
+    /// off: no "Sync now", "Add a device…", "Devices…", "Check again", or "Refresh".
     pub(crate) fn relay_removed(&self, id: &str) -> bool {
         lock(&self.sync.relay.cache)
             .get(id)
@@ -850,7 +854,10 @@ impl DesktopApp {
             Reply::Link(result) => {
                 if let Some(add) = self.sync.relay.add.as_mut().filter(|add| add.id == id) {
                     match result {
-                        Ok(code) => add.code = Some(code),
+                        Ok(code) => {
+                            add.qr = link_qr(&code);
+                            add.code = Some(code);
+                        }
                         Err(error) => add.error = Some(call_error(error)),
                     }
                 }
@@ -1154,7 +1161,7 @@ impl DesktopApp {
                     format!("“{name}” syncs through the Apassy relay and merged with the relay copy.")
                 } else {
                     format!(
-                        "“{name}” syncs through the Apassy relay. To add your other Mac, select “Add a Mac…”."
+                        "“{name}” syncs through the Apassy relay. To add another Mac or an iPhone, select “Add a device…”."
                     )
                 });
             }
@@ -1210,7 +1217,7 @@ impl DesktopApp {
         }
     }
 
-    /// Erase the team code and a pasted link, and drop the link of "Add a Mac…". A Mac
+    /// Erase the team code and a pasted link, and drop the link of "Add a device…". A Mac
     /// that joins for a vault of this list stops.
     pub(crate) fn relay_forget_codes(&mut self) {
         let relay = &mut self.sync.relay;
@@ -1227,7 +1234,7 @@ impl DesktopApp {
         }
     }
 
-    /// A relay sheet closed: "Add a Mac…" refuses the Macs that wait for its link
+    /// A relay sheet closed: "Add a device…" refuses the Macs that wait for its link
     /// (contract section 7.1 step 4), and a join for a vault of this list stops.
     pub(crate) fn relay_sheet_closed(&mut self) {
         if let Some(add) = self.sync.relay.add.take() {
@@ -1847,14 +1854,15 @@ impl DesktopApp {
             .is_some_and(|relay| relay.keeps_passphrase())
     }
 
-    // ---- "Add a Mac…". ----
+    // ---- "Add a device…". ----
 
-    /// A new link for another Mac.
+    /// A new link for another Mac or an iPhone.
     fn relay_add_mac_start(&mut self, id: &str) {
         let ready = self.relay_ready(id);
         self.sync.relay.add = Some(AddMac {
             id: id.to_owned(),
             code: None,
+            qr: None,
             links: Vec::new(),
             next_poll: Instant::now() + POLL_EVERY,
             error: ready.as_ref().err().map(|error| call_error(*error)),
@@ -1928,7 +1936,7 @@ impl DesktopApp {
             .and_then(|add| add.links.iter().find(|link| link.id == link_id))
             .cloned();
         let Some(link) = link else {
-            self.set_err("The “Add a Mac” sheet is closed. Nothing was added.");
+            self.set_err("The “Add a device” sheet is closed. Nothing was added.");
             return;
         };
         let expected = OwnerAction::ConfirmSyncDevice {
@@ -1979,6 +1987,7 @@ impl DesktopApp {
                     // The code is used: the sheet shows the result only, and asks no more.
                     add.added = Some(text.clone());
                     add.code = None;
+                    add.qr = None;
                 }
                 self.set_ok(text);
             }
@@ -2566,19 +2575,24 @@ impl DesktopApp {
         self.relay_settle_for_test();
     }
 
-    /// "Add a Mac…" asks the relay now, and takes the answer.
+    /// "Add a device…" asks the relay now, and takes the answer.
     pub(crate) fn relay_add_mac_poll_for_test(&mut self) {
         self.relay_add_mac_poll();
         self.relay_settle_for_test();
     }
 
-    /// The link of the open "Add a Mac…" sheet.
+    /// The link of the open "Add a device…" sheet.
     pub(crate) fn relay_add_mac_link_for_test(&self) -> Option<String> {
         let add = self.sync.relay.add.as_ref()?;
         add.code.as_ref().map(|code| code.link.to_string())
     }
 
-    /// The Macs that wait in the open "Add a Mac…" sheet.
+    /// The QR code of the open "Add a device…" sheet.
+    pub(crate) fn relay_add_mac_qr_for_test(&self) -> Option<&QrModules> {
+        self.sync.relay.add.as_ref()?.qr.as_ref()
+    }
+
+    /// The devices that wait in the open "Add a device…" sheet.
     pub(crate) fn relay_add_mac_links_for_test(&self) -> Vec<PendingLink> {
         self.sync
             .relay
@@ -2588,7 +2602,7 @@ impl DesktopApp {
             .unwrap_or_default()
     }
 
-    /// "Confirm…" in the open "Add a Mac…" sheet.
+    /// "Confirm…" in the open "Add a device…" sheet.
     pub(crate) fn relay_ask_confirm_for_test(&mut self, link_id: u64) {
         self.relay_ask_confirm(link_id, None);
     }
@@ -2801,7 +2815,7 @@ pub(super) fn setup_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vau
                     ui,
                     None,
                     Some(
-                        "For a vault that is on the relay already. On the Mac that syncs it, select “Add a Mac…” and copy the link. Apassy merges the relay copy with this vault.",
+                        "For a vault that is on the relay already. On the Mac that syncs it, select “Add a device…” and copy the link. Apassy merges the relay copy with this vault.",
                     ),
                     |s| {
                         s.field("Relay address", |ui| {
@@ -2877,8 +2891,18 @@ pub(super) fn setup_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vau
     response.escape
 }
 
-/// "Add a Mac…": the link for the other Mac, then each Mac that asks, with the safety
-/// words, "Confirm…", and "Refuse" (contract section 7.1).
+/// The width of the QR code of "Add a device…" in points, about.
+const LINK_QR_POINTS: f32 = 180.0;
+
+/// The QR code of a link of "Add a device…" for the iPhone app: exactly the text of the
+/// link, `<relay URL>/link#apassy_lnk_…`, as "Copy link" copies it.
+fn link_qr(code: &LinkCode) -> Option<QrModules> {
+    QrModules::new(&code.link)
+}
+
+/// "Add a device…": the link for another Mac, as text and as a QR code for an iPhone, then
+/// each device that asks, with the safety words, "Confirm…", and "Refuse" (contract
+/// section 7.1).
 pub(super) fn add_mac_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &VaultEntry) -> bool {
     if app
         .sync
@@ -2911,6 +2935,8 @@ pub(super) fn add_mac_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &V
         .code
         .as_ref()
         .is_some_and(|code| kit::now() >= code.expires_at);
+    // An expired link gives nothing to scan; "New link" makes a new code.
+    let qr = add.qr.clone().filter(|_| !expired);
     let links = add.links.clone();
     let error = add.error.clone();
     let added = add.added.clone();
@@ -2925,12 +2951,18 @@ pub(super) fn add_mac_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &V
     let response = kit::sheet(ctx, "sync-relay-add-mac", 520.0, |ui| {
         kit::sheet_title(
             ui,
-            &format!("Add a Mac to “{}”", entry.name),
+            &format!("Add a device to “{}”", entry.name),
             added.is_none().then_some(
-                "On the other Mac, open Apassy, select “Use a vault from another Mac”, then Apassy relay, and paste this link. The link works once, for 10 minutes. It gives nothing until you confirm the other Mac here.",
+                "On an iPhone, open Apassy, select “Add your vault”, and scan this code. On another Mac, open Apassy, select “Use a vault from another Mac”, then Apassy relay, and paste the link. The link works once, for 10 minutes. It gives nothing until you confirm the device here.",
             ),
         );
         if let Some(link) = &link {
+            if let Some(qr) = &qr {
+                ui.vertical_centered(|ui| {
+                    draw_qr(ui, qr, LINK_QR_POINTS, "Device link QR code");
+                });
+                ui.add_space(10.0);
+            }
             let heading = ui.label(kit::text("Link", Font::Headline).color(kit::LABEL));
             kit::code_block(ui, link, 1).labelled_by(heading.id);
             ui.horizontal(|ui| {
@@ -2969,9 +3001,12 @@ pub(super) fn add_mac_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &V
                 });
             }
         } else if expired {
-            kit::note(ui, "The link expired. Make a new link for the other Mac.");
+            kit::note(
+                ui,
+                "The link expired. Make a new link for the other device.",
+            );
         } else if links.is_empty() && link.is_some() {
-            kit::tone_note(ui, "Waiting for the other Mac…", Tone::Accent);
+            kit::tone_note(ui, "Waiting for the other device…", Tone::Accent);
         }
         let deciding =
             app.relay_busy(&entry.id, Job::Confirm) || app.relay_busy(&entry.id, Job::Refuse);
@@ -2982,11 +3017,11 @@ pub(super) fn add_mac_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &V
                     safety_lines(
                         ui,
                         &format!(
-                            "“{}” asks to sync “{}”. Both Macs show:",
+                            "“{}” asks to sync “{}”. Both devices show:",
                             pending.device_name, entry.name
                         ),
                         words,
-                        "Confirm only if the other Mac shows the same words.",
+                        "Confirm only if the other device shows the same words.",
                     );
                     ui.add_enabled_ui(!deciding, |ui| {
                         ui.horizontal(|ui| {
@@ -3296,7 +3331,7 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let view = app.sync.relay.join_view(None);
     kit::paragraph(
         ui,
-        "On the Mac that has the vault, open Settings > General > Sync, select “Add a Mac…”, and copy the link. Paste it here. Both Macs then show the same two words.",
+        "On the Mac that has the vault, open Settings > General > Sync, select “Add a device…”, and copy the link. Paste it here. Both Macs then show the same two words.",
         Font::Callout,
         kit::SECONDARY,
     );

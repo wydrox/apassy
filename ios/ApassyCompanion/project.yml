@@ -1,12 +1,15 @@
-# XcodeGen spec for the iPhone companion app (ADR 0020).
+# XcodeGen spec for the Apassy iPhone app (ADR 0020, ADR 0023) and its AutoFill extension.
 #
 # Regenerate the project after a change to this file:
 #
 #   cd ios/ApassyCompanion && xcodegen generate --spec project.yml
 #
+# The app links the vault core (ios/ApassyCore) through the package ios/ApassyVaultKit. Build
+# the core first: scripts/build-ios-core.sh (the XCFramework is not committed).
+#
 # The project is committed, as native/ApassyKeychain/ApassyKeychain.xcodeproj is. It sets no
 # DEVELOPMENT_TEAM: the owner selects a team in Xcode (Signing & Capabilities) or passes
-# DEVELOPMENT_TEAM=<id> to xcodebuild. Info.plist is written from the properties below.
+# DEVELOPMENT_TEAM=<id> to xcodebuild. Info.plist files are written from the properties below.
 name: ApassyCompanion
 options:
   bundleIdPrefix: com.wydrox.apassy
@@ -24,9 +27,17 @@ settings:
     SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
     # The app has no App Intents. This stops the note "Metadata extraction skipped".
     LM_SKIP_METADATA_EXTRACTION: YES
+    MARKETING_VERSION: 0.4.1
+    CURRENT_PROJECT_VERSION: 1
+    CODE_SIGN_STYLE: Automatic
+    TARGETED_DEVICE_FAMILY: "1"
+    # The vault core has an arm64 Simulator slice only (Apple silicon).
+    EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
 packages:
   ApassyCompanionKit:
     path: ../ApassyCompanionKit
+  ApassyVaultKit:
+    path: ../ApassyVaultKit
 targets:
   ApassyCompanion:
     type: application
@@ -34,8 +45,28 @@ targets:
     sources:
       - path: Sources
       - path: Resources
+      # The notices and license texts of the code and data in the app (Settings > Licenses).
+      - path: ../../licenses
+        type: folder
+        buildPhase: resources
     dependencies:
       - package: ApassyCompanionKit
+      - package: ApassyVaultKit
+        product: ApassyVaultKit
+      - package: ApassyVaultKit
+        product: ApassyVaultCore
+      - target: ApassyAutoFill
+        embed: true
+    entitlements:
+      path: Apassy.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.wydrox.apassy.companion
+        # The first group is the default: the companion keys stay where they were.
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.wydrox.apassy.companion
+          - $(AppIdentifierPrefix)com.wydrox.apassy.shared
+        com.apple.developer.authentication-services.autofill-credential-provider: true
     info:
       path: Info.plist
       properties:
@@ -43,20 +74,43 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSRequiresIPhoneOS: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: com.wydrox.apassy.vault
+            UTTypeDescription: Apassy Vault
+            UTTypeConformsTo:
+              - public.data
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - apassy
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Apassy Vault
+            CFBundleTypeRole: Editor
+            LSHandlerRank: Owner
+            LSItemContentTypes:
+              - com.wydrox.apassy.vault
+        ITSAppUsesNonExemptEncryption: false
+        ApassyAppIdentifierPrefix: $(AppIdentifierPrefix)
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
         UIRequiredDeviceCapabilities:
           - arm64
+        # App Store Connect refuses an app without all four (iPad multitasking).
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         NSLocalNetworkUsageDescription: Apassy connects to your Mac on this Wi-Fi network to show the runs that wait for you and to send your decision.
-        NSCameraUsageDescription: Apassy uses the camera only to scan the pairing code that your Mac shows. It saves no picture.
-        NSFaceIDUsageDescription: Apassy asks for Face ID each time you approve a run, so that only you can approve.
+        NSCameraUsageDescription: Apassy uses the camera only to scan a code that your Mac shows, to add this iPhone. It saves no picture.
+        NSFaceIDUsageDescription: Apassy uses Face ID to unlock your vault, and before it shows, copies, or fills a secret, moves your passwords and passkeys to or from another app, or approves a run.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+        # Apple's credential exchange opens the app with this activity to import from another app
+        # (the value of ASCredentialExchangeActivity).
+        NSUserActivityTypes:
+          - ASCredentialExchangeActivity
     settings:
       base:
         PRODUCT_NAME: ApassyCompanion
@@ -65,8 +119,53 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
-        TARGETED_DEVICE_FAMILY: "1"
-        CODE_SIGN_STYLE: Automatic
-        MARKETING_VERSION: 0.1.0
-        CURRENT_PROJECT_VERSION: 1
     scheme: {}
+  ApassyAutoFill:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: AutoFill
+    dependencies:
+      - package: ApassyVaultKit
+        product: ApassyVaultKit
+      - package: ApassyVaultKit
+        product: ApassyVaultCore
+      - sdk: AuthenticationServices.framework
+    entitlements:
+      path: AutoFill/ApassyAutoFill.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.wydrox.apassy.companion
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.wydrox.apassy.shared
+        com.apple.developer.authentication-services.autofill-credential-provider: true
+    info:
+      path: AutoFill/Info.plist
+      properties:
+        CFBundleDisplayName: Apassy
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        ApassyAppIdentifierPrefix: $(AppIdentifierPrefix)
+        NSFaceIDUsageDescription: Apassy uses Face ID before it fills a password or a code, signs in with a passkey, or saves a passkey.
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.authentication-services-credential-provider-ui
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).CredentialProviderViewController
+          NSExtensionAttributes:
+            # iOS calls prepareInterfaceForExtensionConfiguration only with this key.
+            ASCredentialProviderExtensionShowsConfigurationUI: true
+            ASCredentialProviderExtensionCapabilities:
+              ProvidesPasswords: true
+              ProvidesOneTimeCodes: true
+              ProvidesPasskeys: true
+              # Apple's credential exchange (iOS 26): Apassy can import from and export to
+              # another credential manager through the system.
+              SupportsCredentialExchange: true
+              SupportedCredentialExchangeVersions:
+                - "1.0"
+    settings:
+      base:
+        PRODUCT_NAME: ApassyAutoFill
+        PRODUCT_BUNDLE_IDENTIFIER: com.wydrox.apassy.companion.autofill
+        INFOPLIST_FILE: AutoFill/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        APPLICATION_EXTENSION_API_ONLY: YES

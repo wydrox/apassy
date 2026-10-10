@@ -1,6 +1,6 @@
 # Release and download site
 
-Date: 2026-09-28.
+Date: 2026-10-09.
 
 Each push to `main` that passes CI publishes a signed and notarized `Apassy.dmg` at <https://apassy.wyderka.cc/download/Apassy.dmg>. A push that changes only `site/` or `design/` runs no CI, so it publishes no new build.
 The site is a static Astro page in `site/`, served by a Cloudflare Worker on the same domain.
@@ -18,7 +18,7 @@ The site is a static Astro page in `site/`, served by a Cloudflare Worker on the
 | Release workflow | `.github/workflows/release.yml` | After each green CI run of a push to `main`: verify the CI binaries, sign, notarize, and upload. |
 | Disk image | `scripts/build-dmg.sh`, `scripts/layout-dmg.sh` | Packages `target/Apassy.app` into `target/dist/Apassy.dmg`, saves the Finder install window, and writes `target/dist/latest.json`. |
 
-Before the owner adds the Apple secrets, the release workflow publishes nothing and shows a warning. Without `CLOUDFLARE_API_TOKEN`, the site workflow builds the site and skips the deploy with a warning. The site then says "Coming soon for macOS", because `/latest.json` does not exist.
+Before the owner adds the Apple secrets, the release workflow publishes nothing and shows a warning. If only some of the Apple secrets exist, the workflow fails. Without `CLOUDFLARE_API_TOKEN`, the site workflow builds the site and skips the deploy with a warning. The site then says "Coming soon for macOS", because `/latest.json` does not exist.
 
 ### Source releases
 
@@ -31,10 +31,12 @@ The release workflow runs on `macos-15`:
 1. It checks that the commit is still the head of `main`. CI runs finish in any order, and an older commit must not replace a newer image.
 2. It verifies the successful CI run through the GitHub API. The run must be a push to `main` in this repository for the same commit. It downloads that run's unsigned binary artifact and checks its commit, build date, run ID, attempt, version, architecture, and file hashes. Only then can it import the Developer ID certificate into a temporary keychain. The signing job does not compile Rust.
 3. If the bucket has `models/apassy-base-v1.safetensors`, it downloads the checkpoint. `scripts/build-app.sh` checks it against `tools/basemodel/manifest.json`. Without it, the app ships without the base model, and the run shows a warning.
-4. If the secret `MACOS_KEYCHAIN_PROFILE` is set, it embeds the keychain profile for Touch ID unlock. See [Touch ID unlock](#touch-id-unlock).
-5. `scripts/build-app.sh` checks the binary artifact again, builds the native helpers, and signs the app with the hardened runtime and a secure timestamp. It runs all existing bundle and signature checks. The program and the signed `Info.plist` use the commit and build date from CI ([updates](updates.md)).
-6. `scripts/build-dmg.sh --notarize` notarizes the app, staples it, makes the disk image, signs it, notarizes it, and staples it. `spctl` must accept both.
-7. It checks the head of `main` again. If the commit still matches, it uploads `Apassy.dmg`, then `latest.json`, to the bucket. The run summary shows `latest.json`.
+4. It selects Xcode 26.3 (`/Applications/Xcode_26.3.app`, macOS SDK 26.2). See [Xcode and SDK](#xcode-and-sdk).
+5. If the secret `MACOS_KEYCHAIN_PROFILE` is set, it embeds the keychain profile for Touch ID unlock. See [Touch ID unlock](#touch-id-unlock).
+6. It decodes the two provider profiles `MACOS_AUTOFILL_PROFILE` and `MACOS_PROVIDER_APP_PROFILE` into private files, and sets `APASSY_REQUIRE_PROVIDER=1`. See [AutoFill provider profiles](#autofill-provider-profiles).
+7. `scripts/build-app.sh` checks the binary artifact again, builds the native helpers and the AutoFill provider, and signs the app with the hardened runtime and a secure timestamp. It runs all existing bundle and signature checks. With `APASSY_REQUIRE_PROVIDER=1`, the build stops if the provider is not in the app. The program and the signed `Info.plist` use the commit and build date from CI ([updates](updates.md)).
+8. `scripts/build-dmg.sh --notarize` checks the provider in the app and in the mounted image, notarizes the app, staples it, makes the disk image, signs it, notarizes it, and staples it. `spctl` must accept both.
+9. It checks the head of `main` again. If the commit still matches, it uploads `Apassy.dmg`, then `latest.json`, to the bucket. The run summary shows `latest.json`.
 
 The bucket keeps only the latest build. The Worker serves only `Apassy.dmg` and `latest.json`. Other keys, such as `models/`, stay private. The upload sets `Cache-Control: no-cache` on both, and the Worker passes it on, so the app and the site get a new `latest.json` at once.
 
@@ -129,9 +131,11 @@ gh secret set APPLE_API_KEY_ID
 gh secret set APPLE_API_ISSUER_ID
 gh secret set CLOUDFLARE_API_TOKEN
 gh secret set CLOUDFLARE_ACCOUNT_ID
+base64 -i Apassy_AutoFill_Developer_ID.provisionprofile | gh secret set MACOS_AUTOFILL_PROFILE
+base64 -i Apassy_App_Developer_ID.provisionprofile | gh secret set MACOS_PROVIDER_APP_PROFILE
 ```
 
-The release workflow stops with a list of the missing secrets. `MACOS_KEYCHAIN_PROFILE` is optional: see [Touch ID unlock](#touch-id-unlock).
+The release workflow stops with a list of the missing secrets. `MACOS_AUTOFILL_PROFILE` and `MACOS_PROVIDER_APP_PROFILE` are required: see [AutoFill provider profiles](#autofill-provider-profiles). `MACOS_KEYCHAIN_PROFILE` is optional: see [Touch ID unlock](#touch-id-unlock).
 
 ### 4. First run
 
@@ -164,6 +168,44 @@ The code is ready. Touch ID unlock is paused by the owner (ADR 0010, fourth roun
 5. In the app: Settings > Security > type the passphrase > "Turn on Touch ID unlock", and touch the sensor.
 
 A Developer ID profile is valid on every Mac. For a local build on this Mac only, `scripts/build-app.sh --provision` gets a development profile through Xcode ([native app](native-app.md), owner steps).
+
+## AutoFill provider profiles
+
+The AutoFill extension offers Apassy for passkeys, passwords, and one-time codes ([Mac passkeys](mac-passkeys.md)). Its entitlement is restricted. macOS stops a program that has the entitlement without a matching profile. So the release needs two Developer ID profiles. Both secrets are required. The release workflow never publishes an app without the provider.
+
+| Secret | App ID | Capability |
+| --- | --- | --- |
+| `MACOS_AUTOFILL_PROFILE` | `com.wydrox.apassy.autofill` | AutoFill Credential Provider |
+| `MACOS_PROVIDER_APP_PROFILE` | `com.wydrox.apassy` | AutoFill Credential Provider |
+
+1. In the team of the Developer ID certificate (`7S3F9767BM`): developer.apple.com > Identifiers. Add the App ID `com.wydrox.apassy.autofill` (explicit). Add the capability "AutoFill Credential Provider" to it. Add the same capability to the App ID `com.wydrox.apassy`.
+2. Profiles > "+" > Distribution > "Developer ID". Make one profile for each App ID. Select the Developer ID Application certificate that signs the release. Download both `.provisionprofile` files.
+3. Add each file as a secret with `base64 -i FILE | gh secret set NAME`, as in [GitHub secrets](#3-github-secrets).
+4. Run the release workflow. The workflow decodes each secret into a private file in `RUNNER_TEMP`, checks that the file is a signed profile, and removes it at the end. It does not print the bytes.
+
+What checks the profiles:
+
+- `scripts/build-credential-provider.sh` checks team, App ID, expiry, AutoFill capability, and certificate. `scripts/build-app.sh` calls it.
+- With `APASSY_REQUIRE_PROVIDER=1`, `scripts/build-app.sh` stops unless the app has `PlugIns/ApassyAutoFill.appex`, `MacOS/apassy-credential-bridge`, and the profile of the main app. Without a valid profile and without the flag, the build leaves the provider out and shows a warning. This is for a local build only.
+- `scripts/build-dmg.sh` checks the provider again in `target/Apassy.app` and in the mounted copy. It checks the layout, the signatures, the AutoFill entitlement of the main app and of the extension, the declared capabilities, and the embedded profiles (team, AutoFill entitlement, expiry). With the flag, a missing part is an error. Without the flag, an app with no provider part is packaged as a development image, and an app with only a part of the provider is an error.
+
+A profile expires. Make a new profile before the expiry date and replace the secret. After expiry, the release fails.
+
+## Xcode and SDK
+
+The provider uses macOS 26 APIs (`ASOneTimeCode…`) behind availability checks. The deployment target stays macOS 15, but the code needs the macOS 26 SDK to compile. The `macos-15` runner image has Xcode 16.4 (SDK 15.5) as default. Xcode 26.0.1, 26.1.1, 26.2, and 26.3 are installed too. SDK 26.2 is in Xcode 26.2 and 26.3 ([image list](https://github.com/actions/runner-images/blob/main/images/macos/macos-15-Readme.md), image `20260907.0337.1`).
+
+The release workflow selects `/Applications/Xcode_26.3.app` with `DEVELOPER_DIR`, and checks that the SDK is 26 or later. If the runner image no longer has this Xcode, the workflow fails early with the list of installed Xcode versions. Change `XCODE_APP` in the step "Select Xcode 26" then. CI keeps the default Xcode. It does not run `scripts/build-app.sh`, so it does not compile the Swift provider.
+
+## Test build of a branch
+
+To test the signed provider without a release, start the job `provider-check` of the release workflow by hand:
+
+```
+gh workflow run release.yml --ref BRANCH -f ci_run_id=provider-check
+```
+
+The value `provider-check` of `ci_run_id` is a switch. It only works for a branch of this repository that is not `main`. The job builds the exact commit of the branch (Rust included), signs it with a private, temporary keychain, embeds the profiles, notarizes the app and the image, and keeps `Apassy.dmg` and `test-build.json` (commit, SHA-256, SDK, run) as a GitHub Actions artifact for 3 days. It does not use R2, the site, or the CI artifact, and the job `macos` does not run. The artifact is test output. It is not a release, and it does not prove that macOS lists Apassy as a provider. That needs a manual check on a Mac.
 
 ## App icon
 
@@ -214,6 +256,8 @@ For `npm run preview`, put test files in the local bucket with `npx wrangler r2 
 
 ## Limits
 
+- Without `MACOS_AUTOFILL_PROFILE` and `MACOS_PROVIDER_APP_PROFILE`, the release workflow fails. A local build without the profiles has no AutoFill extension. See [AutoFill provider profiles](#autofill-provider-profiles).
+- The workflow checks files, signatures, and notarization. It cannot show that macOS registers the extension. A release needs a manual check on a Mac: System Settings > General > AutoFill & Passwords must list Apassy.
 - Without `MACOS_KEYCHAIN_PROFILE`, the published app cannot unlock with Touch ID. See [Touch ID unlock](#touch-id-unlock).
 - The app runs on Apple silicon with macOS 15 or later only. The Linux button of the site opens a note with the team CLI `apassy-team` for Linux (x86-64), which the relay serves at `/dl/` with `SHA256SUMS` (relay OPERATIONS section 18); the note says that the app needs macOS, because the isolation of agents uses macOS Seatbelt.
 - From 0.3.0, the app reads `latest.json`, downloads a newer build, and installs it at "Restart now" or at the next quit ([updates](updates.md), [ADR 0015](../adr/0015-automatic-updates.md)). An app before 0.3.0 does not update itself: install 0.3.0 from the site once. A copy without a Developer ID signature (an ad hoc build, or a build from source signed with Apple Development), or one outside an app bundle, only shows the new version and the download page. A build from source updates when its owner runs `scripts/install.sh` again.

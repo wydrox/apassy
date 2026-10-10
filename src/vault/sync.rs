@@ -16,7 +16,9 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 use super::merge::{self, PUSH, SyncScope};
-use super::types::{SCHEMA_VERSION, VaultErrorKind, VaultResult, err, validate_unlock_passphrase};
+use super::types::{
+    SCHEMA_VERSION, VaultError, VaultErrorKind, VaultResult, err, validate_unlock_passphrase,
+};
 use super::{
     OPEN_READONLY, Vault, apply_key, canonical_new_target, close_conn, copy_into_new_file,
     exclusive_create, fresh_epoch, map_open_err, open_working_conn, refuse_sqlite_companions,
@@ -78,6 +80,33 @@ pub struct AdoptedCopy {
     pub identity: SyncIdentity,
     /// The synced-content digest of the new vault. It is the one of the copy.
     pub content: [u8; 32],
+    /// The schema version of the copy. The new vault has the current schema.
+    pub schema: i64,
+}
+
+impl AdoptedCopy {
+    /// The copy has an earlier schema than this app: the next sync must replace it with
+    /// a copy of the current schema, also when the content is the same.
+    pub fn outdated(&self) -> bool {
+        self.schema < SCHEMA_VERSION
+    }
+}
+
+/// Failure while adopting a copy's passphrase. Once SQLCipher accepts the rekey,
+/// a later reopen failure must not leave callers with only the cached old key.
+#[derive(Debug)]
+pub struct CopyPassphraseError {
+    pub error: VaultError,
+    pub rekeyed: bool,
+}
+
+impl From<VaultError> for CopyPassphraseError {
+    fn from(error: VaultError) -> Self {
+        Self {
+            error,
+            rekeyed: false,
+        }
+    }
 }
 
 /// Add schema version 13 and the one sync row with a new vault id. Create and each
@@ -422,10 +451,17 @@ impl Vault {
     /// The check is the check of a restore (cipher settings, schema, columns, integrity)
     /// plus the content digest of the last push. A wrong passphrase, a damaged file, or
     /// a file that mixes pages of different copies returns `WrongKeyOrCorrupt`. A copy
-    /// from another schema version returns `UnsupportedSchema`. A schema 14 vault file
-    /// that was never pushed (generation 0) has no digest; it passes, so an owner can
-    /// adopt a vault file that they put in a synced folder by hand.
+    /// of the current schema or of the schema before it (`merge::UPGRADABLE_SCHEMA`)
+    /// passes; the digest check is on the content of the copy as it is. A copy from
+    /// another schema version returns `UnsupportedSchema`. A vault file that was never
+    /// pushed (generation 0) has no digest; it passes, so an owner can adopt a vault
+    /// file that they put in a synced folder by hand.
     pub fn inspect_sync_copy(path: &Path, passphrase: &str) -> VaultResult<SyncIdentity> {
+        Self::inspect_sync_copy_schema(path, passphrase).map(|(identity, _)| identity)
+    }
+
+    /// [`Self::inspect_sync_copy`], with the schema version of the copy.
+    fn inspect_sync_copy_schema(path: &Path, passphrase: &str) -> VaultResult<(SyncIdentity, i64)> {
         validate_unlock_passphrase(passphrase)?;
         let meta = match fs::symlink_metadata(path) {
             Ok(meta) => meta,
@@ -450,6 +486,10 @@ impl Vault {
     /// The checks are those of `inspect_sync_copy`. The copy has no agents, grants, or
     /// rules: each Mac registers its own. The new vault gets its own device ID, and its
     /// credentials count as stamped: they are the copy, not changes of this device.
+    ///
+    /// A copy of the schema before the current one is copied first; only the new file
+    /// gets the migration (at its first open). The source file does not change.
+    /// [`AdoptedCopy::outdated`] tells the caller to push a copy of the current schema.
     pub fn adopt_sync_copy(
         source: &Path,
         destination: &Path,
@@ -457,7 +497,7 @@ impl Vault {
     ) -> VaultResult<(Self, AdoptedCopy)> {
         let dest = canonical_new_target(destination)?;
         let dest_lock = super::acquire_sidecar_lock(&dest)?;
-        let identity = Self::inspect_sync_copy(source, passphrase)?;
+        let (identity, schema) = Self::inspect_sync_copy_schema(source, passphrase)?;
         copy_into_new_file(source, &dest)?;
         let prepared = open_working_conn(&dest, passphrase).and_then(|mut conn| {
             let result = (|| {
@@ -495,7 +535,11 @@ impl Vault {
                 conn: None,
                 epoch,
             },
-            AdoptedCopy { identity, content },
+            AdoptedCopy {
+                identity,
+                content,
+                schema,
+            },
         ))
     }
 
@@ -506,13 +550,32 @@ impl Vault {
     ///
     /// The owner proves the new passphrase with the copy, so the old one is not needed:
     /// the open connection has the key. The change ends the vault epoch, like a lock and
-    /// an unlock. After a failure the vault can be locked; the old passphrase then still
-    /// opens it.
+    /// an unlock. A reopen failure can leave the vault locked with the new passphrase.
+    /// Call `take_passphrase_of_copy_report` when the caller caches the passphrase.
     pub fn take_passphrase_of_copy(&mut self, copy: &Path, passphrase: &str) -> VaultResult<()> {
+        self.take_passphrase_of_copy_report(copy, passphrase)
+            .map_err(|failure| failure.error)
+    }
+
+    /// The same operation, with the rekey boundary preserved on a reopen error.
+    pub fn take_passphrase_of_copy_report(
+        &mut self,
+        copy: &Path,
+        passphrase: &str,
+    ) -> Result<(), CopyPassphraseError> {
+        self.take_passphrase_of_copy_with(copy, passphrase, open_working_conn)
+    }
+
+    fn take_passphrase_of_copy_with(
+        &mut self,
+        copy: &Path,
+        passphrase: &str,
+        reopen: impl FnOnce(&Path, &str) -> VaultResult<Connection>,
+    ) -> Result<(), CopyPassphraseError> {
         self.require_unlocked()?;
         let theirs = Self::inspect_sync_copy(copy, passphrase)?;
         if theirs.vault_id != self.sync_identity()?.vault_id {
-            return Err(err(VaultErrorKind::OtherVault));
+            return Err(err(VaultErrorKind::OtherVault).into());
         }
         let conn = self
             .conn
@@ -524,7 +587,12 @@ impl Vault {
         let rekeyed = rekey(&conn, &self.path, passphrase);
         let _ = close_conn(conn);
         rekeyed?;
-        self.conn = Some(open_working_conn(&self.path, passphrase)?);
+        self.conn = Some(
+            reopen(&self.path, passphrase).map_err(|error| CopyPassphraseError {
+                error,
+                rekeyed: true,
+            })?,
+        );
         Ok(())
     }
 }
@@ -536,19 +604,22 @@ fn companion(path: &Path, suffix: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(name)
 }
 
-fn inspect_open_copy(conn: &Connection, passphrase: &str) -> VaultResult<SyncIdentity> {
+/// The checks of a copy that `conn` opened read-only. Returns the sync record and the
+/// schema version. `verify_readable_schema` checks the columns of that version. The
+/// digest is of the content as it is, so a schema 16 copy keeps the digest of its push.
+fn inspect_open_copy(conn: &Connection, passphrase: &str) -> VaultResult<(SyncIdentity, i64)> {
     apply_key(conn, passphrase)?;
     verify_cipher_defaults(conn)?;
     let version = verify_readable_schema(conn)?;
-    if version != SCHEMA_VERSION {
+    if version != SCHEMA_VERSION && version != merge::UPGRADABLE_SCHEMA {
         return Err(err(VaultErrorKind::UnsupportedSchema));
     }
     let (identity, stored) = read_sync_row(conn, "main")?;
     match stored {
         Some(stored) if stored.as_slice() == content_digest(conn, "main")?.as_slice() => {
-            Ok(identity)
+            Ok((identity, version))
         }
-        None if identity.generation == 0 => Ok(identity),
+        None if identity.generation == 0 => Ok((identity, version)),
         _ => Err(err(VaultErrorKind::WrongKeyOrCorrupt)),
     }
 }
@@ -556,6 +627,38 @@ fn inspect_open_copy(conn: &Connection, passphrase: &str) -> VaultResult<SyncIde
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_rekey_reports_a_new_key_even_when_reopen_fails() {
+        const OLD: &str = "synthetic-old-copy-passphrase";
+        const NEW: &str = "synthetic-new-copy-passphrase";
+        let root = tempfile::tempdir().unwrap();
+        let local_path = root.path().join("local.apassy");
+        let remote_path = root.path().join("remote.apassy");
+        let initial = root.path().join("initial.apassy");
+        let changed = root.path().join("changed.apassy");
+        let mut local = Vault::create(&local_path, OLD).unwrap();
+        local.unlock(OLD).unwrap();
+        local.write_sync_copy(&initial, "Local").unwrap();
+        let (mut remote, _) = Vault::adopt_sync_copy(&initial, &remote_path, OLD).unwrap();
+        remote.unlock(OLD).unwrap();
+        remote.change_passphrase(OLD, NEW).unwrap();
+        remote.unlock(NEW).unwrap();
+        remote.write_sync_copy(&changed, "Remote").unwrap();
+        let wrong = local
+            .take_passphrase_of_copy_report(&changed, "synthetic-wrong-passphrase")
+            .unwrap_err();
+        assert!(!wrong.rekeyed);
+        let failure = local
+            .take_passphrase_of_copy_with(&changed, NEW, |_, _| Err(err(VaultErrorKind::Io)))
+            .unwrap_err();
+        assert!(failure.rekeyed);
+        assert_eq!(failure.error.kind(), VaultErrorKind::Io);
+        assert!(local.is_locked());
+        Vault::verify_passphrase_at(&local_path, NEW).unwrap();
+        assert!(Vault::verify_passphrase_at(&local_path, OLD).is_err());
+        local.unlock(NEW).unwrap();
+    }
 
     #[test]
     fn vault_ids_are_version_4_uuids() {

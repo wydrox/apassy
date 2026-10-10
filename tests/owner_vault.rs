@@ -37,6 +37,17 @@ fn unlock(session: &mut OwnerSession) {
 }
 
 /// A proof after a passed passphrase check (goal item A4).
+/// The action that binds the main token of an item to `env_name` with the real value.
+fn bind_token(item_id: u64, env_name: &str) -> OwnerAction {
+    OwnerAction::BindVariable {
+        item_id,
+        field: "token".to_owned(),
+        env_name: env_name.to_owned(),
+        delivery: EnvDelivery::Value,
+        setup_key: false,
+    }
+}
+
 fn owner_ok(session: &OwnerSession, action: OwnerAction) -> OwnerProof {
     OwnerGate::new(session.shared_vault(), None)
         .authorize(action, OwnerCheck::passphrase(PASS))
@@ -376,7 +387,7 @@ fn restore_lists_items_for_review_until_the_owner_confirms() {
     session
         .set_declaration(used.id, &form, proof)
         .expect("declaration");
-    let proof = owner_ok(&session, OwnerAction::ChangeItemRules { item_id: used.id });
+    let proof = owner_ok(&session, bind_token(used.id, "USED_KEY"));
     session
         .set_env_binding(used.id, "USED_KEY", "token", &EnvDelivery::Value, proof)
         .expect("binding");
@@ -603,7 +614,11 @@ fn owner_actions_refuse_without_a_matching_check() {
     session
         .set_connector(item.id, "reporting-api-v0", "http://127.0.0.1:8787", proof)
         .expect("connector");
+    // A proof for the agent settings of the item does not bind a variable.
     let proof = item_rules(&session);
+    refused(session.set_env_binding(item.id, "GUARDED_KEY", "token", &EnvDelivery::Value, proof));
+    assert_eq!(session.env_binding(item.id).expect("binding"), None);
+    let proof = owner_ok(&session, bind_token(item.id, "GUARDED_KEY"));
     session
         .set_env_binding(item.id, "GUARDED_KEY", "token", &EnvDelivery::Value, proof)
         .expect("binding");

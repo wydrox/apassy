@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements of Apassy.app/Contents/PlugIns/ApassyAutoFill.appex
+  (com.wydrox.apassy.autofill). scripts/build-credential-provider.sh replaces
+  __TEAM_ID__ and signs with these only when a provisioning profile for
+  __TEAM_ID__.com.wydrox.apassy.autofill with the AutoFill Credential Provider
+  capability is present. The AutoFill entitlement is restricted: without the profile,
+  AMFI stops the extension.
+
+  The extension is sandboxed, like every credential provider. It needs no network and
+  no files: it talks only to the bridge socket in the app group container. The app
+  group carries the team prefix, so it needs no portal registration on macOS.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.application-identifier</key>
+	<string>__TEAM_ID__.com.wydrox.apassy.autofill</string>
+	<key>com.apple.developer.authentication-services.autofill-credential-provider</key>
+	<true/>
+	<key>com.apple.developer.team-identifier</key>
+	<string>__TEAM_ID__</string>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>__TEAM_ID__.com.wydrox.apassy</string>
+	</array>
+</dict>
+</plist>
