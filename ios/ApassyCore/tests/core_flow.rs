@@ -319,11 +319,22 @@ fn a_local_vault_lists_shows_reveals_and_saves_like_the_mac() {
     );
 
     // Generator and strength.
+    // The EFF list holds hyphenated words ("drop-down", "felt-tip", "t-shirt",
+    // "yo-yo"), so "-" cannot count words; no word holds ".".
     let generated = call(
         &phone,
-        json!({"op": "generate", "style": "memorable", "words": 4, "separator": "-"}),
+        json!({"op": "generate", "style": "memorable", "words": 4, "separator": "."}),
     );
-    assert_eq!(generated["value"].as_str().unwrap().split('-').count(), 4);
+    let words: Vec<&str> = generated["value"].as_str().unwrap().split('.').collect();
+    assert_eq!(words.len(), 4);
+    assert!(
+        words
+            .iter()
+            .all(|word| word.chars().next().is_some_and(char::is_uppercase)
+                && word.chars().all(|c| c.is_ascii_alphabetic() || c == '-')),
+        "four capitalized words"
+    );
+    assert!((generated["bits"].as_f64().unwrap() - 4.0 * 7776f64.log2()).abs() < 0.1);
     assert_eq!(
         call(&phone, json!({"op": "strength", "value": "short1"}))["score"],
         0
