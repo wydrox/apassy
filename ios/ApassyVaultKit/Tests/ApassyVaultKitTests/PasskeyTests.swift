@@ -160,7 +160,7 @@ private let hash = Data(repeating: 7, count: 32)
             PasskeyAssertionRequest(id: created.id, rpID: "example.com", credentialID: created.credentialID, clientDataHash: hash))
         #expect(assertion.userHandle == Data([1, 2]))
         #expect(assertion.authenticatorData.prefix(32) == Data(SHA256.hash(data: Data("example.com".utf8))))
-        #expect(assertion.authenticatorData[32] == 0x05)
+        #expect(assertion.authenticatorData[32] == 0x1D)
 
         let export = try await service.credentialExport()
         let key = try #require(export.items.first { $0.id == created.id }?.passkey?.key)

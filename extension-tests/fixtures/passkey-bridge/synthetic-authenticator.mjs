@@ -13,6 +13,7 @@ import { isoCBOR } from "@simplewebauthn/server/helpers";
 const FLAG_UP = 0x01;
 const FLAG_UV = 0x04;
 const FLAG_BE = 0x08;
+const FLAG_BS = 0x10;
 const FLAG_AT = 0x40;
 
 const sha256 = (data) => createHash("sha256").update(data).digest();
@@ -62,7 +63,7 @@ export function createSyntheticAuthenticator({ file } = {}) {
       ]));
       const data = authData({
         rpId: request.rp_id,
-        flags: FLAG_UP | FLAG_UV | FLAG_BE | FLAG_AT,
+        flags: FLAG_UP | FLAG_UV | FLAG_BE | FLAG_BS | FLAG_AT,
         signCount: 0,
         attested: { credentialId, coseKey },
       });
@@ -96,7 +97,7 @@ export function createSyntheticAuthenticator({ file } = {}) {
       const credential = credentials.get(id);
       credential.counter += 1;
       save();
-      const data = authData({ rpId: request.rp_id, flags: FLAG_UP | FLAG_UV | FLAG_BE, signCount: credential.counter });
+      const data = authData({ rpId: request.rp_id, flags: FLAG_UP | FLAG_UV | FLAG_BE | FLAG_BS, signCount: credential.counter });
       const signer = createSign("sha256");
       signer.update(Buffer.concat([data, sha256(unb64(request.client_data_json))]));
       return {

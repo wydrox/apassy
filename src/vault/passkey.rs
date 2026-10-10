@@ -17,9 +17,20 @@
 //! The raw functions are for the owner only. The platform layer (the iPhone credential
 //! provider, the browser bridge) does a fresh owner verification before each create and
 //! each assertion, so the authenticator data sets user presence and user verification.
-//! The credential is in a vault that syncs, so it is backup eligible (BE). This module
-//! cannot see if a copy with the credential is on another device, so backup state (BS)
-//! stays clear. The signature counter is always zero, as for each synced credential.
+//! The signature counter is always zero, as for each synced credential.
+//!
+//! Backup flags. The credential is in an encrypted vault that syncs and that the owner
+//! can export, so it is backup eligible (BE). Each registration and each assertion also
+//! sets backup state (BS), on each route: the macOS and iPhone credential providers and
+//! the browser extension. BS is a provider policy, not a proof: this module cannot see
+//! if a copy with the credential is on another device. The system credential provider
+//! API requires BE and BS together; macOS refuses a new passkey without BS ("AuthData is
+//! missing a required flag"). One value on each route keeps the flags of a credential
+//! the same for a relying party.
+//!
+//! A passkey made before this policy (BE without BS) now signs with BS. WebAuthn lets
+//! BS change while BE stays, and a relying party updates its stored BS. The flags are
+//! not stored, so nothing in the vault changes.
 //!
 //! A sync conflict can keep a passkey only in a conflict copy: device A adds a passkey
 //! to a login, and a later edit of device B without it wins. A merge archives each
@@ -83,9 +94,10 @@ const DETAIL_PREFIX: &str = "x_";
 const FLAG_UP: u8 = 0x01;
 const FLAG_UV: u8 = 0x04;
 const FLAG_BE: u8 = 0x08;
+const FLAG_BS: u8 = 0x10;
 const FLAG_AT: u8 = 0x40;
-/// UP, UV, BE. BS stays clear (see the module documentation).
-const ASSERTION_FLAGS: u8 = FLAG_UP | FLAG_UV | FLAG_BE;
+/// UP, UV, BE, BS (see the module documentation). A registration adds AT.
+const ASSERTION_FLAGS: u8 = FLAG_UP | FLAG_UV | FLAG_BE | FLAG_BS;
 
 /// PKCS #8 v1 of a P-256 key, up to the private scalar: the form that `ring` makes, with
 /// no `parameters` in `ECPrivateKey` (RFC 5958, RFC 5915).

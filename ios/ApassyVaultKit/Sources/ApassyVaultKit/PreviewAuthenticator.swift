@@ -5,8 +5,9 @@ import Foundation
 /// "none" attestation, a zero AAGUID, and a sign count of 0. Only for synthetic data in previews
 /// and tests; the vault core does this for real vaults.
 struct PreviewAuthenticator {
-    /// User present and user verified: AutoFill unlocked the vault for this request.
-    static let flagsUPUV: UInt8 = 0x05
+    /// UP, UV, BE, BS: the same provider policy as the vault core.
+    /// The backup flags do not prove that a remote copy of a vault exists.
+    static let assertionFlags: UInt8 = 0x1D
     /// And attested credential data.
     static let flagAT: UInt8 = 0x40
 
@@ -16,7 +17,7 @@ struct PreviewAuthenticator {
     var rpIDHash: Data { Data(SHA256.hash(data: Data(rpID.utf8))) }
 
     func assertionData() -> Data {
-        rpIDHash + [Self.flagsUPUV, 0, 0, 0, 0]
+        rpIDHash + [Self.assertionFlags, 0, 0, 0, 0]
     }
 
     func sign(_ authenticatorData: Data, clientDataHash: Data) throws -> Data {
@@ -26,7 +27,7 @@ struct PreviewAuthenticator {
     /// The authenticator data of a registration, with the credential and its COSE key.
     func registrationData(credentialID: Data) -> Data {
         var data = rpIDHash
-        data.append(Self.flagsUPUV | Self.flagAT)
+        data.append(Self.assertionFlags | Self.flagAT)
         data += [0, 0, 0, 0]
         data += Data(count: 16)
         data += [UInt8(credentialID.count >> 8), UInt8(credentialID.count & 0xff)]

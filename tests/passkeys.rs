@@ -22,6 +22,10 @@ use zeroize::Zeroizing;
 const PASS: &str = "synthetic-passkey-pass";
 const RP: &str = "example.com";
 const HASH: [u8; 32] = [0x5a; 32];
+/// UP, UV, BE, BS: the flags that the system credential provider API requires.
+const ASSERTION_FLAGS: u8 = 0x01 | 0x04 | 0x08 | 0x10;
+/// The assertion flags and AT.
+const REGISTRATION_FLAGS: u8 = ASSERTION_FLAGS | 0x40;
 const RESERVED: [&str; 7] = [
     "passkey_format",
     "passkey_rp_id",
@@ -136,9 +140,10 @@ fn verify_registration(rp_id: &str, created: &PasskeyCreated) -> Vec<u8> {
     assert_eq!(flags & 0x01, 0x01, "UP");
     assert_eq!(flags & 0x04, 0x04, "UV");
     assert_eq!(flags & 0x08, 0x08, "BE");
-    assert_eq!(flags & 0x10, 0, "BS is not claimed");
+    assert_eq!(flags & 0x10, 0x10, "BS: the credential provider policy");
     assert_eq!(flags & 0x40, 0x40, "AT");
     assert_eq!(flags & 0x80, 0, "no extensions");
+    assert_eq!(flags, REGISTRATION_FLAGS, "no other flag");
     assert_eq!(&auth[33..37], &[0, 0, 0, 0], "counter");
     assert_eq!(&auth[37..53], &[0u8; 16], "AAGUID");
     let len = usize::from(u16::from_be_bytes([auth[53], auth[54]]));
@@ -181,7 +186,7 @@ fn verify_assertion(rp_id: &str, point: &[u8], hash: &[u8; 32], a: &PasskeyAsser
     if auth[..32] != *sha256(rp_id.as_bytes()) {
         return false;
     }
-    assert_eq!(auth[32], 0x01 | 0x04 | 0x08, "UP, UV, BE");
+    assert_eq!(auth[32], ASSERTION_FLAGS, "UP, UV, BE, BS");
     assert_eq!(&auth[33..37], &[0, 0, 0, 0]);
     let mut message = auth.clone();
     message.extend_from_slice(hash);
@@ -248,6 +253,30 @@ fn registration_and_assertion_verify_and_wrong_inputs_fail() {
     );
     assert!(vault.passkeys(RP, &[vec![9; 32]]).unwrap().is_empty());
     assert_eq!(vault.all_passkeys().unwrap().len(), 2);
+}
+
+#[test]
+fn backup_flags_are_the_provider_set_and_backup_eligibility_never_changes() {
+    let dir = TempDir::new().unwrap();
+    let mut vault = vault(&dir, "v.db");
+    let created = create(&mut vault, RP, "Example");
+    let point = verify_registration(RP, &created);
+    // macOS refused 0x4d (UP, UV, BE, AT) from the credential provider: "AuthData is
+    // missing a required flag". The registration now has BS too.
+    assert_eq!(created.authenticator_data[32], 0x5d);
+    assert_ne!(created.authenticator_data[32], 0x4d);
+    for _ in 0..3 {
+        let assertion = vault
+            .sign_passkey(created.item_id, RP, &created.credential_id, &HASH)
+            .unwrap();
+        assert_eq!(assertion.authenticator_data[32], 0x1d);
+        // A relying party fails an assertion whose BE differs from the registration.
+        assert_eq!(
+            assertion.authenticator_data[32] & 0x08,
+            created.authenticator_data[32] & 0x08
+        );
+        assert!(verify_assertion(RP, &point, &HASH, &assertion));
+    }
 }
 
 #[test]

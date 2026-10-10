@@ -238,13 +238,22 @@ struct CheckedAssertion: Equatable {
     let signature: Data
 }
 
-/// Authenticator data flags (WebAuthn): user present, user verified.
+/// Authenticator data flags (WebAuthn).
 let flagUserPresent: UInt8 = 0x01
 let flagUserVerified: UInt8 = 0x04
+let flagBackupEligible: UInt8 = 0x08
+let flagBackupState: UInt8 = 0x10
+let flagAttestedData: UInt8 = 0x40
+/// The flags of each assertion: user presence and verification (the owner check of the
+/// app), and backup eligibility and state, which the credential provider API requires
+/// (macOS refuses a new passkey without BS: "AuthData is missing a required flag").
+let assertionFlags: UInt8 = flagUserPresent | flagUserVerified | flagBackupEligible | flagBackupState
+/// The flags of each registration: the assertion flags and attested credential data.
+let registrationFlags: UInt8 = assertionFlags | flagAttestedData
 
 /// Check an assertion before it goes to macOS: the same credential, the hash of the
-/// relying party, user presence and verification (the owner check of the app), and
-/// sane sizes. A wrong answer is never handed on.
+/// relying party, exactly the assertion flags, no extension data, and sane sizes. A wrong
+/// answer is never handed on.
 func checkAssertion(_ answer: PasskeyAssertAnswer, rpID: String, credentialID: Data) throws -> CheckedAssertion {
     guard let credential = wireBytes(answer.credentialId, max: 1023), credential == credentialID,
           let handle = wireBytes(answer.userHandle, max: 64),
@@ -258,6 +267,9 @@ func checkAssertion(_ answer: PasskeyAssertAnswer, rpID: String, credentialID: D
     guard data.prefix(32) == rpHash, flags & flagUserPresent != 0, flags & flagUserVerified != 0 else {
         throw ProviderFailure.failed("Apassy sent a passkey answer for another website or without the owner check.")
     }
+    guard flags == assertionFlags, data.count == 37 else {
+        throw ProviderFailure.failed("Apassy sent a passkey answer that macOS would refuse.")
+    }
     return CheckedAssertion(credentialID: credential, userHandle: handle, authenticatorData: data, signature: signature)
 }
 
@@ -266,16 +278,111 @@ struct CheckedRegistration: Equatable {
     let attestationObject: Data
 }
 
-/// Check a new passkey: sizes, and the attestation holds the hash of the relying party.
+/// Definite-length CBOR, enough for the attestation object of the app. Each read fails
+/// on an indefinite length, a reserved value, a longer head than needed, or a length past
+/// the end.
+struct CBORReader {
+    let bytes: [UInt8]
+    private(set) var at = 0
+
+    init(_ data: Data) {
+        bytes = [UInt8](data)
+    }
+
+    var atEnd: Bool { at == bytes.count }
+
+    /// The major type and the argument of the next item.
+    mutating func head() -> (major: UInt8, argument: UInt64)? {
+        guard at < bytes.count else { return nil }
+        let initial = bytes[at]
+        at += 1
+        let info = initial & 0x1F
+        let size: Int
+        switch info {
+        case 0..<24: return (initial >> 5, UInt64(info))
+        case 24: size = 1
+        case 25: size = 2
+        case 26: size = 4
+        case 27: size = 8
+        default: return nil
+        }
+        guard bytes.count - at >= size else { return nil }
+        let argument = bytes[at..<at + size].reduce(UInt64(0)) { $0 << 8 | UInt64($1) }
+        guard argument >= (size == 1 ? 24 : UInt64(1) << (size * 4)) else { return nil }
+        at += size
+        return (initial >> 5, argument)
+    }
+
+    /// The next head is exactly this major type and argument.
+    mutating func head(_ major: UInt8, _ argument: UInt64) -> Bool {
+        guard let next = head() else { return false }
+        return next.major == major && next.argument == argument
+    }
+
+    /// The content of a byte string (major 2) or a text string (major 3).
+    mutating func string(major: UInt8) -> [UInt8]? {
+        guard let next = head(), next.major == major, next.argument <= UInt64(bytes.count - at) else { return nil }
+        let start = at
+        at += Int(next.argument)
+        return Array(bytes[start..<at])
+    }
+
+    mutating func text(_ expected: String) -> Bool {
+        string(major: 3) == Array(expected.utf8)
+    }
+
+    /// Skip one item: integers, strings, arrays, and maps only, at most `depth` deep.
+    mutating func skip(depth: Int = 4) -> Bool {
+        guard depth > 0, let next = head() else { return false }
+        switch next.major {
+        case 0, 1:
+            return true
+        case 2, 3:
+            guard next.argument <= UInt64(bytes.count - at) else { return false }
+            at += Int(next.argument)
+            return true
+        case 4, 5:
+            // Each item takes at least one byte.
+            guard next.argument <= UInt64(bytes.count - at) else { return false }
+            var items = next.major == 5 ? next.argument * 2 : next.argument
+            while items > 0 {
+                guard skip(depth: depth - 1) else { return false }
+                items -= 1
+            }
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+/// Check a new passkey before it goes to macOS. The attestation object must be exactly
+/// {"fmt": "none", "attStmt": {}, "authData": bytes} with nothing after it. Its
+/// authenticator data must have the hash of the relying party, exactly the registration
+/// flags, and the attested credential data of this credential ID with one COSE key that
+/// ends the data.
 func checkRegistration(_ answer: PasskeyRegisterAnswer, rpID: String) throws -> CheckedRegistration {
     guard let credential = wireBytes(answer.credentialId, max: 1023),
           let attestation = wireBytes(answer.attestationObject, max: 64 * 1024)
     else {
         throw ProviderFailure.failed("Apassy sent a new passkey that AutoFill cannot use.")
     }
-    let rpHash = Data(SHA256.hash(data: Data(rpID.utf8)))
-    guard attestation.range(of: rpHash) != nil, attestation.range(of: credential) != nil else {
+    var object = CBORReader(attestation)
+    guard object.head(5, 3), object.text("fmt"), object.text("none"), object.text("attStmt"), object.head(5, 0),
+          object.text("authData"), let auth = object.string(major: 2), object.atEnd, auth.count >= 55
+    else {
+        throw ProviderFailure.failed("Apassy sent a new passkey that AutoFill cannot use.")
+    }
+    let rpHash = [UInt8](SHA256.hash(data: Data(rpID.utf8)))
+    let length = Int(auth[53]) << 8 | Int(auth[54])
+    guard Array(auth[0..<32]) == rpHash, auth.count >= 55 + length,
+          Array(auth[55..<55 + length]) == [UInt8](credential)
+    else {
         throw ProviderFailure.failed("Apassy sent a new passkey for another website.")
+    }
+    var key = CBORReader(Data(auth[(55 + length)...]))
+    guard auth[32] == registrationFlags, key.bytes.first.map({ $0 >> 5 }) == 5, key.skip(), key.atEnd else {
+        throw ProviderFailure.failed("Apassy sent a new passkey that macOS would refuse.")
     }
     return CheckedRegistration(credentialID: credential, attestationObject: attestation)
 }
