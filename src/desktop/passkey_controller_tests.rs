@@ -1289,6 +1289,83 @@ fn the_sheet_registers_a_passkey_after_the_check() {
     );
 }
 
+/// The registration of the sheet waits for the owner, who never answers. The frame hook
+/// that eframe runs also for a hidden or covered window closes the dialog at the
+/// deadline or at a cancel line, with no owner input. A proof that comes in after the
+/// request ended saves no passkey and makes no login.
+#[test]
+fn an_ended_sheet_registration_closes_without_the_owner_and_saves_nothing() {
+    let dir = TempDir::new().unwrap();
+    let mut app = unlocked_app(&dir);
+    let ctx = egui::Context::default();
+    let args = json!({
+        "rp_id": RP,
+        "user_name": "ada@example.com",
+        "user_display_name": "Ada",
+        "user_handle": encode_bytes(b"uh"),
+        "client_data_hash": encode_bytes(&[5u8; 32]),
+        "algorithms": [-7],
+        "excluded": [],
+        "title": "Example",
+    });
+    let saved_nothing = |app: &DesktopApp| {
+        assert!(
+            app.owner_ui
+                .session
+                .passkeys_for(RP, &[])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            app.owner_ui.session.search("").unwrap().is_empty(),
+            "no login was made"
+        );
+    };
+    let age = |app: &mut DesktopApp| {
+        app.owner
+            .check
+            .as_mut()
+            .and_then(|dialog| dialog.platform.as_mut())
+            .expect("a sheet request")
+            .age();
+    };
+
+    // The deadline passes: the next frame closes the dialog.
+    let (lines, _) = platform(&mut app, &ctx, 21, "passkey_register", args.clone());
+    app.poll_platform(&ctx);
+    assert!(app.owner.check.is_some(), "a live request keeps its dialog");
+    assert!(lines.try_recv().is_err(), "no answer before the deadline");
+    age(&mut app);
+    app.poll_platform(&ctx);
+    assert!(app.owner.check.is_none());
+    assert_eq!(line(&lines)["result"]["error"]["code"], "cancelled");
+    saved_nothing(&app);
+
+    // macOS cancels (the browser gave up): the next frame closes the dialog.
+    let (lines, cancel) = platform(&mut app, &ctx, 22, "passkey_register", args.clone());
+    cancel.set();
+    app.poll_platform(&ctx);
+    assert!(app.owner.check.is_none());
+    assert_eq!(line(&lines)["result"]["error"]["code"], "cancelled");
+    saved_nothing(&app);
+
+    // A proof for a request whose deadline passed before any frame ran saves nothing.
+    let (lines, _) = platform(&mut app, &ctx, 23, "passkey_register", args.clone());
+    age(&mut app);
+    confirm(&mut app);
+    assert!(app.owner.check.is_none());
+    assert_eq!(line(&lines)["result"]["error"]["code"], "cancelled");
+    saved_nothing(&app);
+
+    // The same after a cancel line.
+    let (lines, cancel) = platform(&mut app, &ctx, 24, "passkey_register", args);
+    cancel.set();
+    confirm(&mut app);
+    assert!(app.owner.check.is_none());
+    assert_eq!(line(&lines)["result"]["error"]["code"], "cancelled");
+    saved_nothing(&app);
+}
+
 fn peer(check: &str, identifier: &str, path: &str) -> Value {
     json!({
         "source": "macos_autofill_extension",
