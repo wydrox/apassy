@@ -1032,7 +1032,7 @@ fi
 case "$PROVIDER_MODE" in
   included)
     echo "Provider: included. AutoFill extension and bridge are signed and in the app; the main app embeds its profile. Offers: $PROVIDER_OFFERS."
-    echo "          Not checked by this script: macOS lists the provider only for an app in /Applications (pluginkit), and no sign-in ran."
+    echo "          Not checked by this script: native AutoFill activation and sign-in. Install under /Applications for the sandboxed bridge check."
     ;;
   none)
     echo "Provider: NOT INCLUDED ($PROVIDER_REASON)."

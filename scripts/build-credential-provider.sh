@@ -29,7 +29,12 @@
 #   --test                 build and run the synthetic tests. With --sign, also the
 #                          signed probe of the code-signing checks (a fake Apassy.app in
 #                          target/credential-provider-test, removed at the end; it has no
-#                          NSExtension keys, so nothing is registered)
+#                          NSExtension keys, so nothing is registered), and the client
+#                          check in the App Sandbox: copies of it in a new hidden folder of
+#                          /Applications (accepted) and of /private/tmp (refused), with the
+#                          socket in a new folder of the app group container. What the
+#                          probe makes is removed at the end, also on failure or SIGTERM
+#                          (not on SIGKILL or power loss: see the sandbox step)
 #
 # Environment: APASSY_SIGN_IDENTITY, APASSY_AUTOFILL_PROFILE, and
 # APASSY_PROVIDER_APP_PROFILE stand for --sign, --appex-profile, and --app-profile.
@@ -71,7 +76,7 @@ while [ $# -gt 0 ]; do
     --require-provider) REQUIRE_PROVIDER=1; shift ;;
     --test) RUN_TESTS=1; shift ;;
     --with-passwords-and-codes) PASSWORDS_AND_CODES=1; shift ;;
-    -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,46p' "$0"; exit 0 ;;
     *) echo "build-credential-provider: unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -82,12 +87,80 @@ warn() { printf 'build-credential-provider: WARNING: %s\n' "$*" >&2; }
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/apassy-provider.XXXXXX")"
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
-# The fake Apassy.app of the signed probe never stays on disk or in LaunchServices.
+# The fake Apassy.app copies of the signed probe never stay on disk or in LaunchServices.
+# PROBE_APPS and PROBE_OUTSIDE are the new folders in /Applications and /private/tmp.
+# PROBE_REMOVE lists the folders of this run in the containers (one per line): its
+# socket folder in the app group container, and the data container and Application
+# Scripts folder of its own sandbox identifier. Never the app group container itself.
+# macOS container protection lets the team-signed PROBE_CLEANER remove them, not the
+# shell, and the cleaner refuses any other path.
+PROBE_APPS=""
+PROBE_OUTSIDE=""
+PROBE_REMOVE=""
+PROBE_CLEANER=""
+# BOUNDED_PID: the child of run_bounded. macOS has no timeout(1).
+BOUNDED_PID=""
+# stop_bounded: SIGTERM to the child of run_bounded, 5 seconds, then SIGKILL.
+stop_bounded() {
+  local ticks=0
+  [ -n "$BOUNDED_PID" ] || return 0
+  kill -TERM "$BOUNDED_PID" 2>/dev/null || true
+  while kill -0 "$BOUNDED_PID" 2>/dev/null && [ "$ticks" -lt 50 ]; do
+    sleep 0.1
+    ticks=$((ticks + 1))
+  done
+  kill -KILL "$BOUNDED_PID" 2>/dev/null || true
+  wait "$BOUNDED_PID" 2>/dev/null || true
+  BOUNDED_PID=""
+}
+# run_bounded SECONDS COMMAND...: run COMMAND as a child for at most SECONDS, then stop
+# it (stop_bounded) with status 124. A signal to the script stops it the same way.
+run_bounded() {
+  local limit=$(($1 * 10)) ticks=0 status=0
+  shift
+  "$@" &
+  BOUNDED_PID=$!
+  while kill -0 "$BOUNDED_PID" 2>/dev/null; do
+    if [ "$ticks" -ge "$limit" ]; then
+      warn "stopped after $((limit / 10)) seconds: $*"
+      stop_bounded
+      return 124
+    fi
+    sleep 0.1
+    ticks=$((ticks + 1))
+  done
+  wait "$BOUNDED_PID" || status=$?
+  BOUNDED_PID=""
+  return "$status"
+}
+# cleanup: bounded (about 80 seconds at worst), and a second signal does not cut it short.
 cleanup() {
-  if [ -d "$TEST_OUT/Apassy.app" ] && [ -x "$LSREGISTER" ]; then "$LSREGISTER" -u "$TEST_OUT/Apassy.app" >/dev/null 2>&1 || true; fi
-  rm -rf "$TMP" "$TEST_OUT"
+  local app paths=()
+  trap '' HUP INT TERM
+  stop_bounded
+  if [ -n "$PROBE_REMOVE" ]; then
+    while IFS= read -r app; do [ -z "$app" ] || paths+=("$app"); done <<<"$PROBE_REMOVE"
+    if [ -n "$PROBE_CLEANER" ] && [ -x "$PROBE_CLEANER" ]; then
+      run_bounded 20 "$PROBE_CLEANER" remove "${paths[@]}" || warn "the signed probe may have left: ${paths[*]}"
+    else
+      warn "the signed probe left: ${paths[*]}"
+    fi
+    PROBE_REMOVE=""
+  fi
+  for app in "$TEST_OUT" ${PROBE_APPS:+"$PROBE_APPS"} ${PROBE_OUTSIDE:+"$PROBE_OUTSIDE"}; do
+    if [ -d "$app/Apassy.app" ] && [ -x "$LSREGISTER" ]; then run_bounded 10 "$LSREGISTER" -u "$app/Apassy.app" >/dev/null 2>&1 || true; fi
+  done
+  rm -rf "$TMP" "$TEST_OUT" ${PROBE_APPS:+"$PROBE_APPS"} ${PROBE_OUTSIDE:+"$PROBE_OUTSIDE"}
+  PROBE_APPS=""
+  PROBE_OUTSIDE=""
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 }
 trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ---------------------------------------------------------------- checks
 step "Check the host and tools"
@@ -444,6 +517,82 @@ if [ "$RUN_TESTS" = "1" ]; then
       cat "$TMP/elsewhere.txt"; echo "FAIL: unexpected result of the parent outside the bundle"; PROBE_STATUS=1
     fi
     rm -rf "$CONTAINER"
+
+    step "Run the signed probe in the App Sandbox (client check of the bridge)"
+    # The real extension runs in the App Sandbox (application.sb), which lets it read
+    # /Applications but not /private/tmp or a home folder, and the client check must
+    # read the bridge on disk. The probe as the extension gets only the App Sandbox and
+    # the app group of ApassyAutoFill.entitlements: the restricted keys only add a
+    # mach-lookup, no file rule, so no profile is needed. It is no real extension (no
+    # NSExtension keys, no PlugInKit). Its own identifier, new for each run, keeps it
+    # out of the data container of the real extension and of other runs; the bridge
+    # therefore accepts any peer, and only the client check decides.
+    #
+    # Removed at the end, also on failure or SIGTERM: the copies in /Applications and
+    # /private/tmp, the socket folder ap-<pid>-<random> in the app group container,
+    # and the data container and Application Scripts folder of the identifier of this
+    # run. None of them may exist before. The app group container itself stays, also
+    # when this run made it: the real app and other runs share it, and macOS keeps its
+    # own records there. SIGKILL or a power loss leaves these folders; they carry the
+    # run in their names, and nothing here removes the folders of another run.
+    RUN_TAG="$$-$RANDOM"
+    SANDBOX_ID="$APP_ID.probe-sandbox-$RUN_TAG"
+    SANDBOX_ENT="$TMP/test/sandbox.entitlements"
+    SANDBOXED_EXE="Contents/PlugIns/ApassyAutoFill.appex/Contents/MacOS/$APPEX_EXE"
+    BRIDGE_ENT="$ENT_DIR/ApassyCredentialBridge.entitlements"
+    cp "$ENT_DIR/ApassyAutoFill.entitlements" "$SANDBOX_ENT"
+    /usr/libexec/PlistBuddy -c "Delete :com.apple.application-identifier" -c "Delete :$AUTOFILL_KEY" \
+      -c "Delete :com.apple.developer.team-identifier" "$SANDBOX_ENT" >/dev/null
+    check_ent "$SANDBOX_ENT" com.apple.security.app-sandbox true
+    check_ent "$SANDBOX_ENT" com.apple.security.application-groups "$TEAM_ID.$APP_ID" 0
+    plutil -convert xml1 -o "$TMP/sandbox-want.xml" "$SANDBOX_ENT"
+    [ "$(grep -c '<key>' "$TMP/sandbox-want.xml")" = "2" ] || fail "the sandbox entitlements have other keys"
+    plutil -convert xml1 -o "$TMP/bridge-want.xml" "$BRIDGE_ENT"
+    [ "$(grep -c '<key>' "$TMP/bridge-want.xml")" = "1" ] || fail "the bridge entitlements have other keys"
+    # signed_with CODE WANT_XML: the entitlements of CODE are exactly WANT_XML.
+    signed_with() {
+      entitlements_xml "$1" >"$TMP/signed-got.xml"
+      diff -q "$TMP/signed-got.xml" "$2" >/dev/null || fail "$1 is not signed with the entitlements of $2"
+    }
+    /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $SANDBOX_ID" "$FAKE_APPEX/Contents/Info.plist"
+    TESTSIGN --identifier "$SANDBOX_ID" --entitlements "$SANDBOX_ENT" "$FAKE_APPEX"
+    # The bridge and the cleaner use the app group container as the release bridge
+    # does: with its app group entitlement. Signed CI checks first launch on macOS 15.
+    TESTSIGN --identifier "$BRIDGE_ID" --entitlements "$BRIDGE_ENT" "$FAKE/Contents/MacOS/$BRIDGE_EXE"
+    TESTSIGN --identifier "$APP_ID" "$FAKE"
+    signed_with "$FAKE_APPEX" "$TMP/sandbox-want.xml"
+    signed_with "$FAKE/Contents/MacOS/$BRIDGE_EXE" "$TMP/bridge-want.xml"
+    cp "$TMP/test/probe" "$TMP/test/probe-cleaner"
+    TESTSIGN --identifier "$APP_ID.probe-cleanup" --entitlements "$BRIDGE_ENT" "$TMP/test/probe-cleaner"
+    signed_with "$TMP/test/probe-cleaner" "$TMP/bridge-want.xml"
+    GROUP="$HOME/Library/Group Containers/$TEAM_ID.$APP_ID"
+    SANDBOX_SOCKETS="$GROUP/ap-$RUN_TAG"
+    for path in "$SANDBOX_SOCKETS" "$HOME/Library/Containers/$SANDBOX_ID" "$HOME/Library/Application Scripts/$SANDBOX_ID"; do
+      [ ! -e "$path" ] || fail "$path exists before this run: not removing it, not using it"
+    done
+    PROBE_CLEANER="$TMP/test/probe-cleaner"
+    PROBE_REMOVE="$SANDBOX_SOCKETS"$'\n'"$HOME/Library/Containers/$SANDBOX_ID"$'\n'"$HOME/Library/Application Scripts/$SANDBOX_ID"
+    PROBE_APPS="$(mktemp -d /Applications/.apassy-probe.XXXXXX)" || fail "cannot make a folder in /Applications"
+    PROBE_OUTSIDE="$(mktemp -d /private/tmp/apassy-probe.XXXXXX)" || fail "cannot make a folder in /private/tmp"
+    # A file of this run outside the sandbox: the parent reads it, the client must not.
+    DENIED="$PROBE_OUTSIDE/denied.txt"
+    printf 'apassy signed probe: the App Sandbox must deny this file\n' >"$DENIED"
+    ditto "$FAKE" "$PROBE_APPS/Apassy.app"
+    ditto "$FAKE" "$PROBE_OUTSIDE/Apassy.app"
+    run_bounded 20 "$PROBE_APPS/Apassy.app/$SANDBOXED_EXE" group >"$TMP/group.txt" \
+      || fail "the sandboxed probe has no app group container"
+    GOT_GROUP="$(cat "$TMP/group.txt")"
+    [ "$GOT_GROUP" = "$GROUP" ] || fail "the app group container is $GOT_GROUP, not $GROUP"
+    SANDBOX_ENV=(APASSY_BRIDGE_DEV_ANY_PEER=1 APASSY_BRIDGE_DEV_TIMEOUT=10
+      APASSY_PROBE_SANDBOX_ID="$SANDBOX_ID" APASSY_PROBE_DENIED="$DENIED")
+    run_bounded 90 env "${SANDBOX_ENV[@]}" "$PROBE_APPS/Apassy.app/Contents/MacOS/apassy" parent "$SANDBOX_SOCKETS" \
+      "$PROBE_APPS/Apassy.app/Contents/MacOS/$BRIDGE_EXE" "answered:sandboxed:$PROBE_APPS/Apassy.app/$SANDBOXED_EXE" || PROBE_STATUS=1
+    # The same bundle outside /Applications: the sandbox denies the bridge file, so the
+    # client fails closed (bridgeRefused), as the real extension did in /private/tmp.
+    for outside in "$PROBE_OUTSIDE/Apassy.app" "$FAKE"; do
+      run_bounded 90 env "${SANDBOX_ENV[@]}" "$outside/Contents/MacOS/apassy" parent "$SANDBOX_SOCKETS" \
+        "$outside/Contents/MacOS/$BRIDGE_EXE" "refused:sandboxed:$outside/$SANDBOXED_EXE" || PROBE_STATUS=1
+    done
     cleanup
     [ "$PROBE_STATUS" = "0" ] || fail "the signed probe failed"
     echo "ok: signed probe"

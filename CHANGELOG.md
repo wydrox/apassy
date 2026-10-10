@@ -4,7 +4,7 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
-Target release 0.4.1 for the Mac app, iPhone app, and browser extension. This version is not published. Signed build checks passed for the earlier source commit. Browser sign-in and device checks remain open ([status and checks](docs/operations/passkeys-and-codes.md#1-status)).
+Target release 0.4.1 for the Mac app, iPhone app, and browser extension. This version is not published. Earlier signed Mac and optimized iPhone package checks passed at `11ca5b6`. The native passkey flag correction passed source CI at `1ad43fb`; corrected signed packages, browser sign-in, and device checks remain open ([status and checks](docs/operations/passkeys-and-codes.md#1-status)).
 
 Before you upgrade a shared vault, make an encrypted backup and update all its devices. The new apps migrate schema 16 to schema 17 when you unlock the vault. Older apps cannot open or sync the upgraded vault.
 
@@ -29,6 +29,10 @@ Before you upgrade a shared vault, make an encrypted backup and update all its d
 - A login with a passkey needs no password. Removing the passkey keeps the login only when it has a non-empty password. Otherwise it deletes the whole login, and the screen says so first.
 - A Mac build without both provisioning profiles has no AutoFill extension. With both valid profiles and `APASSY_REQUIRE_PROVIDER=1`, the build script can include passwords, codes, and passkeys. The signed Mac CI build of source `2d93004` passed its provider tests and notarization. AutoFill acceptance on a real Mac is open.
 - The Mac editor hides a visible detail that has an OTP label or looks like a setup key, also when you save it without a change.
+
+### Fixed
+
+- Passkey registration and sign-in set both backup flags required by Apple's credential provider API. The Mac provider validates the attestation data and required flags before returning a credential to macOS. These flags do not confirm that a backup of the vault exists.
 
 ### Security
 

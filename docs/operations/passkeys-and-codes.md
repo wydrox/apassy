@@ -8,12 +8,13 @@ Use only synthetic values for tests. This document does not open the real-secret
 
 The sources for passkeys and one-time codes are in the branch. The target release is 0.4.1 (Mac app, browser extension, iPhone core, and iPhone app). Only the preparation is done: the package versions are 0.4.1 and the changelog has the target note under "Unreleased". Nothing is published, tagged, or uploaded, and the release stays a draft. Do not tell users that these features work on their devices until the [acceptance checklist](#9-acceptance-checklist) is complete.
 
-Evidence at source commit `2d93004`, by level:
+Evidence at source commit `11ca5b6410aa24c072b6f283cccd6b924d598d4e` (version 0.4.1), by level:
 
-- **Source and CI:** all 12 pull request checks passed. The Rust suite passed 1,435 tests, with 19 ignored and no failures. The Swift tests (247) and the native tests (131) passed.
-- **Signed Mac build:** CI run `37956053234` built the app from this source, ran the provider tests, and notarized it. Release checks of the signed DMG and app passed (Gatekeeper, hash, strict provisioning profiles), and so did the signed host refusal test.
-- **iPhone test package:** a 0.4.0 IPA with Distribution signing exists (SHA-256 `97de55885c031e269f29428defa23a9bc7e7d4f0cb5f5afccb6e8bd7129c726a`). It uses unoptimized Rust and the old build number 1. It is a test package, not the production build. A production build must use optimized Rust. It is not uploaded.
-- **Not run:** checks on a real iPhone, checks on a real Mac, a passkey sign-in and registration in a normal browser, and Credential Exchange with other apps. Public availability on Mac and iPhone is open.
+- **Source and CI:** all 12 required pull request checks passed (GitHub lists 13, with a redundant site check). The full Rust suite at `2d93004` passed 1,435 tests, with 19 ignored and no failures. The Swift tests (247) also passed before the version-only update to `11ca5b6`. The native tests (131) passed again in the signed Mac CI run at `11ca5b6`.
+- **Signed Mac build:** CI run `37959199289` on the branch passed. It is a test build, not a release: the DMG is notarized (SHA-256 `e6c998f27a21766c45f3cbb07aebc4d1e83fd3b6cdc1615fddbba9a210278d4f`). An independent check of the artifact confirmed the version and the commit, the signatures of the app, the AutoFill extension, the credential bridge, and the browser guard, the AutoFill provisioning profiles, the staple, and Gatekeeper. It is not published, and no real Mac has installed it.
+- **iPhone package:** an IPA of version 0.4.1, build `29859389`, was built from `11ca5b6` with the optimized Rust release profile and exported with a manual Apple Distribution profile (SHA-256 `418dcb2949f5931b965eeb02461a13ef66ae551aa0d58090fc8f229627dc21fc`). An independent check confirmed the signatures and profiles of the app and the AutoFill extension, the AutoFill entitlement, the extension capabilities (passkeys, passwords, one-time codes, Credential Exchange 1.0), and the versions. It supersedes the earlier unoptimized 0.4.0 test IPA. It is not uploaded, and no device has installed it.
+- **Mac, synthetic acceptance (DEBUG build, not the signed DMG):** on a synthetic vault, a real unlock, a fresh owner passphrase check, and a one-time code reveal passed. The code `419702` matched an independent RFC 6238 calculation (counter `59718791`), and the passkey metadata screen passed. The DEBUG build is version 0.4.1 with native parts from the older commit `2d93004` (native version 0.3.6). Native AutoFill activation failed from `/tmp` (`bridgeRefused`), because the sandbox of the extension cannot read the bridge there. From a separate folder under `/Applications`, activation passed: macOS showed "Apassy AutoFill is on. Apassy suggests 3 sign-ins." The system "Save passkey" sheet in Helium offered Apassy and led to the Apassy "Save passkey" screen. **No passkey registration or sign-in has completed.** Details: [mac-passkeys](mac-passkeys.md#checks-on-a-mac-2026-10-09).
+- **Not run:** checks on a real iPhone (no physical iPhone is available), a completed passkey registration or sign-in on a Mac, a password or code fill through macOS AutoFill, a passkey sign-in and registration in a normal browser with the extension, the positive check of the browser guard (a normal Helium or Chrome stable launch), and Credential Exchange with other apps. A report that Face ID unlocked the vault on an iPhone exists. It names no build, and it is not a passkey Face ID check (D1). Real passkeys, migration, import, sync, and end-to-end runs stay unrun. Public availability on Mac and iPhone is open.
 
 ## 2. What Apassy supports
 
@@ -23,7 +24,7 @@ Evidence at source commit `2d93004`, by level:
 | Limits | One passkey for each login. No other algorithm. | SHA-1, SHA-256, or SHA-512. 6 to 8 digits. A period of 15 to 120 seconds. |
 | Not supported | PRF, large blob, attestation other than "none" | HOTP (counter-based), Steam codes |
 | iPhone | Sign in, register, remove, Credential Exchange import and export | Show a code, AutoFill a code, Credential Exchange import and export |
-| Mac | Item page (metadata and remove), AutoFill extension (see section 7) | Codes on the item page |
+| Mac | Item page (metadata and remove), AutoFill extension (see section 7) | Codes on the item page, AutoFill extension fills a code (see section 7) |
 | Browser | Extension, two verified browsers (see section 8) | Extension fills a code |
 
 A website that needs an unsupported feature gets an answer that says "not supported". Apassy never makes up a PRF value or a blob. When the website can fall back, the system or the browser handles the request with its own passkey provider.
@@ -34,6 +35,8 @@ A website that needs an unsupported feature gets an answer that says "not suppor
 - No screen shows or copies the key. An agent cannot read it. A generic read of the item hides it.
 - Each sign-in and each registration needs a fresh owner check. Use Face ID or the passphrase on the iPhone. Use Touch ID or the passphrase on the Mac.
 - A passkey that is in a vault that syncs counts as a backup-eligible credential. The signature counter is always zero.
+
+Apple's credential provider API requires backup eligibility (BE) and backup state (BS) together. Apassy sets both on registration and sign-in on every route. These flags describe its provider policy; they do not confirm that another copy of your vault exists. Enable vault sync and verify it on another device, or keep an encrypted backup, before relying on a passkey as your only way to access an account. A credential registered by an earlier build with BS clear now signs with BS set; BE stays unchanged, and no vault migration is needed for this flag change.
 
 ### Conflict copies
 
@@ -87,11 +90,15 @@ The iPhone app uses the Apple Credential Exchange. The data goes from app to app
 
 ## 7. Mac AutoFill extension and the profile gate
 
-The Mac extension needs two provisioning profiles. A build without both profiles has no AutoFill extension and no bridge. It cannot offer Apassy as a provider of passkeys, passwords, or codes in other apps. `scripts/build-app.sh` prints `PROVIDER NOT INCLUDED` for such a build. With `APASSY_REQUIRE_PROVIDER=1`, the script fails instead. A build with both valid profiles can include passwords, codes, and passkeys. See [native-app](native-app.md#credential-provider-variants) and [mac-passkeys](mac-passkeys.md). The signed Mac CI build passed its provider tests. Acceptance of the provider on a real Mac remains open.
+The Mac extension needs two provisioning profiles. A build without both profiles has no AutoFill extension and no bridge. It cannot offer Apassy as a provider of passkeys, passwords, or codes in other apps. `scripts/build-app.sh` prints `PROVIDER NOT INCLUDED` for such a build. With `APASSY_REQUIRE_PROVIDER=1`, the script fails instead.
+
+A build with both valid profiles offers passkeys, passwords, and one-time codes. The app routes all seven calls of the credential bridge (`autofill_list`, `autofill_credential`, `autofill_code`, and `credential_identities` as well as the three passkey calls), and `scripts/build-app.sh` fails unless the provider status says that all three are offered. The extension has no `SupportsConditionalPasskeyRegistration` and no `SupportsCredentialExchange`: a Mac passkey is saved only after the owner check, and Mac Credential Exchange is not implemented. See [native-app](native-app.md#credential-provider-variants) and [mac-passkeys](mac-passkeys.md).
+
+Install the app under `/Applications` for the native check. macOS also registers a provider from other places (it registered a copy in `/tmp`), but the sandboxed extension cannot read the bridge file there, so the peer check fails closed with `bridgeRefused`. The signed Mac CI build passed its provider tests. Acceptance of the provider on a real Mac remains open: the DEBUG build activated AutoFill from `/Applications` on a synthetic vault, and no passkey, password, or code request has completed through macOS yet ([checks on a Mac](mac-passkeys.md#checks-on-a-mac-2026-10-09)).
 
 ## 8. Browser
 
-The browser extension asks for site access to https pages and `localhost` as an optional permission. The browser asks for it only after you turn on passkeys in the extension popup. Code filling is a separate command of the extension that uses the same Apassy owner check. The caller check ([browser-v1](../contracts/browser-v1.md) section 9.4) accepts signed Helium and Google Chrome stable. It refuses extension-loader and remote-debugging switches. Chrome Beta, Dev, Canary, and other browsers keep their own passkeys. A signature check does not prove a completed passkey sign-in. The acceptance checks with the signed app in a normal browser remain open.
+The browser extension asks for site access to https pages and `localhost` as an optional permission. The browser asks for it only after you turn on passkeys in the extension popup. Code filling is a separate command of the extension that uses the same Apassy owner check. The caller check ([browser-v1](../contracts/browser-v1.md) section 9.4) accepts signed Helium and Google Chrome stable. It refuses extension-loader and remote-debugging switches. Chrome Beta, Dev, Canary, and other browsers keep their own passkeys. A signature check does not prove a completed passkey sign-in. The acceptance checks with the signed app in a normal browser remain open, and so does the positive check of the guard: the real Helium used for the Mac checks was running with a remote-debugging port, which the guard refuses. The browser preview of T3 rejects resident credentials before any provider runs, so it cannot test Apassy.
 
 ## 9. Acceptance checklist
 
@@ -100,7 +107,7 @@ Rules for this list:
 - A local test is not a signed-build test. A signed browser or native test is not a real-device test. Mark each item at its own level only.
 - "Prepared" is not "completed". The history of an export says "prepared". Only the receiving app can show that it finished.
 - Use synthetic data and a test vault. Do not use a real vault or a real account.
-- Section 1 records the source and signed-package checks at commit `2d93004`. The normal-browser and real-device checks remain open. Write the date, the build, the device, and the outcome in a new dated section, or in the review file, when you run an item.
+- Section 1 records the source, signed-package, and synthetic Mac checks at commit `11ca5b6`. The normal-browser and real-device checks remain open. Write the date, the build, the device, and the outcome in a new dated section, or in the review file, when you run an item.
 
 ### Local tests (source level, no signed build)
 
@@ -139,6 +146,31 @@ Rules for this list:
 | D9 | Schema upgrade: a copy of schema 16 on the relay and in iCloud Drive upgrades to schema 17 with an equal content. A device of schema 16 shows the unsupported-schema message. |
 | D10 | Browser: a passkey sign-in and a code fill in Helium and Chrome stable on the synthetic site. An unsupported browser keeps its own passkeys. |
 
+### Status on 2026-10-09 (source `11ca5b6`)
+
+Only the checks with a recorded result are listed. Every item not listed has no result in this document and counts as open.
+
+| # | Status |
+| --- | --- |
+| L1, L7 | Rust suite at `2d93004` passed: 1,435 tests, 19 ignored, 0 failures. |
+| L3, L4 | Swift tests passed (247 in all). The 131 native provider tests (`scripts/build-credential-provider.sh --test`) passed. |
+| S2 | Done for the 0.4.1 optimized IPA (build `29859389`): the app and the AutoFill extension are signed with Distribution profiles, and the capabilities are set. The IPA is not uploaded. Not run on a device. |
+| S3 | Done by CI run `37959199289` (signed, notarized test build with both profiles). Not installed on a real Mac. |
+| S4 | Partly. The signed host refusal test passed in the earlier CI run (`2d93004`) and is not re-recorded for `11ca5b6`. The positive check (normal Helium or Chrome stable accepted) is unrun. |
+| S5 | Failed on the DEBUG build: two owner-confirmed local key saves were rejected by macOS (missing required authData flag). The relying party has zero registrations and sign-ins. The flag correction and repeat test are open. |
+| D1 | Open. No physical iPhone is available. The Face ID report was a vault unlock only. |
+| D8 | Open. AutoFill activation passed on the DEBUG build under `/Applications`. No passkey request completed with Touch ID. |
+| D10 | Open. |
+| D2–D7, D9 | Open. |
+
+Real-device passkeys, vault migration, import, sync, and end-to-end runs stay unrun.
+
+### Flag correction checks on 2026-10-10 (source `1ad43fb`)
+
+Commit `1ad43fb` changes the shared Rust builder. It now sets `0x5d` for registration and `0x1d` for sign-in. The Mac wire checks reject missing flags before the OS handoff and parse the actual `none` attestation object. Independent review found no defect in the four changed source/test files. Checks passed: 9 Rust passkey integration tests, 8 Rust module tests, 157 native tests, and 48 private integration checks using real Rust output in the Swift validator. The parent also ran the RP core check: 9 checks passed with `@simplewebauthn/server`, covering registration, sign-in, encrypted persistence, and refusal of bad inputs. After matching the synthetic browser and iPhone preview generators to the new policy, 159 browser unit tests and 30 Swift preview/model tests also passed. The latter used an isolated package containing only `ApassyVaultKit` and its tests; it did not use the Rust XCFramework or test the device adapter.
+
+These checks do not prove acceptance by the native system sheet. A corrected signed Mac build, native registration and sign-in in Helium, and iPhone device acceptance remain open. All 12 PR checks passed at `1ad43fb` (CI run `38041218759`). The packages at `11ca5b6` above predate this correction and must be rebuilt before release.
+
 ## 10. Sources
 
 | Part | Place |
@@ -150,3 +182,9 @@ Rules for this list:
 | App | `ios/ApassyCompanion/Sources/Vault/CredentialExchangeModel.swift` |
 | Mac | `src/desktop/passkey_socket.rs`, `src/desktop/ui/otp.rs`, `native/ApassyAutoFill/` |
 | Browser | `src/browser/`, `extension/passkey-bridge.js`, `extension/passkey-page.js` |
+
+### Sandboxed probe checks on 2026-10-10
+
+The corrected signed probe passed locally: 157 native tests, 61 signed-probe checks, no failures or warnings. Its sandboxed client accepted the bridge under `/Applications` and refused the same bundle under `/private/tmp` and `target/`. It independently proved sandbox denial of an existing synthetic file in all three cases. Normal cleanup preserved the shared container and real bridge socket and left no test folders. The cleanup race is fixed: the shared group container can never be deleted, and each run has unique socket and probe-container paths.
+
+This is a synthetic executable test, not a real ExtensionKit launch with restricted AutoFill entitlements. The separate SIGTERM test stopped at signing, before reaching the sandbox; interruption of the sandbox stage is untested. Signed CI on a clean macOS 15 runner remains open.

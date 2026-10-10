@@ -109,6 +109,7 @@ export async function createPasskeyRp(options = {}) {
   async function registerOptions() {
     const challenge = randomBytes(32);
     const optionsJSON = await generateRegistrationOptions({
+      timeout: challengeTtlMs,
       rpName,
       rpID,
       userName: SYNTHETIC_USER.name,
@@ -158,6 +159,7 @@ export async function createPasskeyRp(options = {}) {
   async function authenticateOptions({ discoverable = true } = {}) {
     const challenge = randomBytes(32);
     const optionsJSON = await generateAuthenticationOptions({
+      timeout: challengeTtlMs,
       rpID,
       challenge,
       userVerification: "required",
