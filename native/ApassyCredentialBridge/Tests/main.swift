@@ -473,6 +473,7 @@ requestTests()
 appLineTests()
 pathTests()
 appexWireTests()
+await identityPublishTests()
 if CommandLine.arguments.count > 1 {
     integrationTests(binary: CommandLine.arguments[1])
 } else {

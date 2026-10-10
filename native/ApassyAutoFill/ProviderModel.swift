@@ -106,6 +106,8 @@ final class ProviderModel: ObservableObject {
     @Published var attachTarget: UInt64?
 
     private let finish: (ProviderOutcome) -> Void
+    private let send: (Data) async throws -> Data
+    private let identities: IdentityCoordinator
     private var work: Task<Void, Never>?
     private var done = false
     private var configuring = false
@@ -114,8 +116,14 @@ final class ProviderModel: ObservableObject {
     private var attachable: [AttachChoice] = []
     private var openedApassy = false
 
-    init(finish: @escaping (ProviderOutcome) -> Void) {
+    init(
+        finish: @escaping (ProviderOutcome) -> Void,
+        send: @escaping (Data) async throws -> Data = { try await BridgeClient.send($0) },
+        identities: IdentityCoordinator = .system
+    ) {
         self.finish = finish
+        self.send = send
+        self.identities = identities
     }
 
     // MARK: - Requests of macOS
@@ -208,7 +216,7 @@ final class ProviderModel: ObservableObject {
         configuring = true
         run {
             do {
-                let count = try await IdentitySync.refresh { body in try await self.exchange(body, confirm: nil) }
+                let count = try await IdentitySync.refresh({ body in try await self.exchange(body, confirm: nil) }, coordinator: self.identities)
                 self.screen = .configured(count == 0
                     ? "Apassy AutoFill is on. Your vault has nothing to suggest yet."
                     : "Apassy AutoFill is on. Apassy suggests \(count) sign-ins.")
@@ -244,6 +252,13 @@ final class ProviderModel: ObservableObject {
                 as: PasskeyRegisterAnswer.self,
                 confirm: "Save a passkey for \(visibleText(request.userName, max: 60)) on \(request.rpID).")
             let checked = try checkRegistration(answer, rpID: request.rpID)
+            // Before macOS hears that the passkey exists: its next sign-in sheet reads the
+            // system list, and that list was made before this passkey.
+            await IdentitySync.publish(
+                PasskeyEntry(
+                    id: answer.id, title: title, rpId: request.rpID, userName: request.userName, userDisplayName: request.userName,
+                    credentialId: answer.credentialId, userHandle: request.userHandle.base64EncodedString()),
+                send: self.send, coordinator: self.identities)
             self.complete(.passkeyRegistration(ASPasskeyRegistrationCredential(
                 relyingParty: request.rpID, clientDataHash: request.clientDataHash,
                 credentialID: checked.credentialID, attestationObject: checked.attestationObject)))
@@ -340,7 +355,7 @@ final class ProviderModel: ObservableObject {
     }
 
     private func callData(_ body: Data) async throws -> Data {
-        try await BridgeClient.send(body)
+        try await send(body)
     }
 
     private func openApassyOnce() {
@@ -353,7 +368,7 @@ final class ProviderModel: ObservableObject {
     /// Update the system list of identities in the background. A failure changes nothing.
     private func refreshIdentitiesQuietly() {
         Task {
-            _ = try? await IdentitySync.refresh { body in try await BridgeClient.send(body) }
+            _ = try? await IdentitySync.refresh({ body in try await self.send(body) }, coordinator: self.identities)
         }
     }
 

@@ -435,7 +435,8 @@ if [ "$RUN_TESTS" = "1" ]; then
   "${SWIFTC[@]}" -D APASSY_BRIDGE_DEV -o "$TMP/test/bridge-dev" "${BRIDGE_SOURCES[@]}"
   "${SWIFTC[@]}" -D APASSY_BRIDGE_DEV -o "$TMP/test/bridge-tests" \
     native/ApassyCredentialBridge/Tests/*.swift native/ApassyCredentialBridge/BridgeWire.swift \
-    native/ApassyCredentialBridge/BridgeServer.swift "${SHARED[@]}" native/ApassyAutoFill/ProviderWire.swift
+    native/ApassyCredentialBridge/BridgeServer.swift "${SHARED[@]}" native/ApassyAutoFill/ProviderWire.swift \
+    native/ApassyAutoFill/ProviderModel.swift native/ApassyAutoFill/IdentitySync.swift native/ApassyAutoFill/BridgeClient.swift
   "$TMP/test/bridge-tests" "$TMP/test/bridge-dev"
 
   if [ -n "$SIGN_ID" ]; then
