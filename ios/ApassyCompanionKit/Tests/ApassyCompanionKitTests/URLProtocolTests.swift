@@ -12,6 +12,7 @@ struct CapturedRequest: Sendable {
     var url: URL
     var headers: [String: String]
     var body: Data
+    var allowsCellularAccess: Bool
 }
 
 final class CaptureURLProtocol: URLProtocol, @unchecked Sendable {
@@ -41,7 +42,8 @@ final class CaptureURLProtocol: URLProtocol, @unchecked Sendable {
             stream.close()
         }
         let seen = CapturedRequest(
-            method: request.httpMethod ?? "", url: request.url!, headers: request.allHTTPHeaderFields ?? [:], body: body)
+            method: request.httpMethod ?? "", url: request.url!, headers: request.allHTTPHeaderFields ?? [:], body: body,
+            allowsCellularAccess: request.allowsCellularAccess)
         Self.captured.withLock { $0.append(seen) }
         switch Self.responder.withLock({ $0 })(seen) {
         case .success(let (status, data)):
@@ -115,6 +117,25 @@ struct URLProtocolTests {
         #expect(request.headers["Content-Type"] == "application/json")
         #expect(!request.body.isEmpty)
         try Self.verify(request, publicKey: Vectors.requestPublicKey)
+    }
+
+    @Test("only numeric Tailscale IPv4 hosts permit cellular access")
+    func cellularAccess() async throws {
+        let transport = PinnedURLSessionTransport(pin: Self.endpoint.pin, protocolClasses: [CaptureURLProtocol.self])
+        let cases: [(String, Bool)] = [
+            ("100.64.0.0", true), ("100.64.0.7", true), ("100.127.255.255", true),
+            ("192.168.1.20", false), ("10.0.0.2", false), ("mac.local", false),
+            ("100.63.255.255", false), ("100.128.0.0", false),
+            ("100.064.0.7", false), ("100.64.0.256", false), ("100.64.7", false),
+            ("100.64.0.7.example", false), ("100.64.0.7.", false),
+        ]
+        for (host, permitted) in cases {
+            CaptureURLProtocol.reset { _ in .success((200, Data("{}".utf8))) }
+            _ = try await transport.send(
+                TransportRequest(host: host, port: 48620, method: "GET", path: "/v1/inbox", headers: [:], body: Data()))
+            let request = try #require(CaptureURLProtocol.captured.withLock { $0.first })
+            #expect(request.allowsCellularAccess == permitted, "host: \(host)")
+        }
     }
 
     @Test("a DELETE without a body signs the hash of the empty body")

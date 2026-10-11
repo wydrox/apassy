@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Info.plist of Apassy.app/Contents/PlugIns/ApassyAutoFill.appex, the AutoFill
+  credential provider (docs/operations/mac-passkeys.md). scripts/build-credential-provider.sh
+  fills the build-setting values (version, bundle ID, executable).
+
+  ProvidesPasskeys, ProvidesPasswords, ProvidesOneTimeCodes: all three need the owner
+  check in Apassy for each use. SupportsConditionalPasskeyRegistration is absent on
+  purpose: a conditional registration would save a passkey without the owner check.
+  SupportsCredentialExchange is absent: on the Mac the system starts the containing
+  app for an exchange, and the Rust app has no handler for it yet.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Apassy</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>ApassyAutoFill</string>
+	<key>CFBundlePackageType</key>
+	<string>XPC!</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Apassy</string>
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionAttributes</key>
+		<dict>
+			<key>ASCredentialProviderExtensionCapabilities</key>
+			<dict>
+				<key>ProvidesOneTimeCodes</key>
+				<true/>
+				<key>ProvidesPasskeys</key>
+				<true/>
+				<key>ProvidesPasswords</key>
+				<true/>
+				<key>ShowsConfigurationUI</key>
+				<true/>
+			</dict>
+			<key>ASCredentialProviderExtensionShowsConfigurationUI</key>
+			<true/>
+		</dict>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.authentication-services-credential-provider-ui</string>
+		<key>NSExtensionPrincipalClass</key>
+		<string>ApassyCredentialProviderViewController</string>
+	</dict>
+</dict>
+</plist>

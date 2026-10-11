@@ -12,7 +12,7 @@ use apassy::agent::client;
 use apassy::agent::wire::{Action, WireResponse};
 use apassy::broker::approvals::{
     ApprovalQueue, ApprovalRefusal, FirstUseDeclaration, FirstUseOffer, OwnerAction,
-    OwnerAuthError, OwnerCheck, OwnerGate, PendingRun,
+    OwnerAuthError, OwnerCheck, OwnerGate, PendingRun, folder_is_broad, shown_path,
 };
 use apassy::broker::bouncer::BouncerClient;
 use apassy::broker::http::TlsClient;
@@ -114,10 +114,15 @@ fn run_in(fx: &Fixture, cwd: &Path) -> WireResponse {
 
 /// A run in the `sub` folder of the project, on another thread.
 fn run_later(fx: &Fixture) -> std::thread::JoinHandle<WireResponse> {
+    run_at_later(fx, &fx.project.join("sub"))
+}
+
+/// A run in `cwd`, on another thread.
+fn run_at_later(fx: &Fixture, cwd: &Path) -> std::thread::JoinHandle<WireResponse> {
     let socket = fx.socket.clone();
     let token = fx.token.clone();
     let item_id = fx.item_id;
-    let cwd = fx.project.join("sub").display().to_string();
+    let cwd = cwd.display().to_string();
     std::thread::spawn(move || {
         client::send(
             &socket,
@@ -285,9 +290,9 @@ fn allow_in_folder_saves_the_grant_and_declaration_and_later_runs_use_the_bounce
     assert!(!stdout(&response).contains(SECRET));
     let data = response.result.as_ref().expect("result");
     assert!(
-        data["access"]
-            .as_str()
-            .is_some_and(|text| text.contains("gave this agent access")),
+        data["access"].as_str().is_some_and(
+            |text| text.contains("gave this agent access") && !text.contains("production")
+        ),
         "{data}"
     );
     with_vault(&fx, |vault| {
@@ -331,9 +336,94 @@ fn a_production_declaration_still_asks_at_each_later_run() {
     let handle = run_later(&fx);
     let (run, offer) = waiting(fx.broker.approvals());
     allow_in_folder(&fx, run, offer, Environment::Production);
-    assert!(handle.join().expect("run thread").ok);
+    let response = handle.join().expect("run thread");
+    assert!(response.ok, "{response:?}");
+    // The answer to the agent does not promise a production credential a free run.
+    assert!(
+        response.result.as_ref().expect("result")["access"]
+            .as_str()
+            .is_some_and(|text| text.contains("production credential still waits")),
+        "{response:?}"
+    );
     // ADR 0010: production waits for the owner, also with a grant.
     let handle = run_later(&fx);
+    let run = loop {
+        if let Some(run) = fx.broker.approvals().pending().into_iter().next() {
+            break run;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert!(fx.broker.approvals().first_use(run.id).is_none());
+    assert!(fx.broker.approvals().deny(run.id));
+    assert_eq!(code(&handle.join().expect("run thread")), "approval_denied");
+}
+
+#[test]
+fn new_development_access_keeps_the_warning_for_existing_production_access() {
+    let fx = fixture(true);
+    let production_id = with_vault(&fx, |vault| {
+        let item = vault
+            .add(ItemDraft {
+                title: "Synthetic production key".into(),
+                kind: CredentialKind::ApiKey,
+                notes: String::new(),
+                tags: Vec::new(),
+                fields: vec![Field {
+                    name: "token".into(),
+                    value: SecretValue::new("FAKE-existing-production-key".into()),
+                    secret: true,
+                }],
+            })
+            .expect("production item");
+        vault
+            .set_declaration(item.id, &declaration(Environment::Production))
+            .expect("production declaration");
+        vault
+            .set_exec_grant(
+                fx.agent_id,
+                item.id,
+                &fx.project.display().to_string(),
+                ExecMode::Bouncer,
+            )
+            .expect("existing production grant");
+        item.id
+    });
+    let start = || {
+        let socket = fx.socket.clone();
+        let token = fx.token.clone();
+        let cwd = fx.project.join("sub").display().to_string();
+        let items = vec![fx.item_id, production_id];
+        std::thread::spawn(move || {
+            client::send(
+                &socket,
+                &token,
+                Action::Run {
+                    items,
+                    command: vec!["/bin/sh".into(), "-c".into(), "echo synthetic".into()],
+                    cwd,
+                    purpose: "Use synthetic development and production keys.".into(),
+                    path: Some("/usr/bin:/bin".into()),
+                    user_request: Some("Use the synthetic keys.".into()),
+                },
+            )
+            .expect("broker answer")
+        })
+    };
+    let handle = start();
+    let (run, offer) = waiting(fx.broker.approvals());
+    assert_eq!(offer.items.len(), 1);
+    assert_eq!(offer.items[0].item_id, fx.item_id);
+    allow_in_folder(&fx, run, offer, Environment::Development);
+    let response = handle.join().expect("run thread");
+    assert!(response.ok, "{response:?}");
+    assert!(
+        response.result.as_ref().expect("result")["access"]
+            .as_str()
+            .is_some_and(|text| text.contains("production credential still waits")),
+        "{response:?}"
+    );
+    // Both items now have grants, but their combined run must still ask for production.
+    let handle = start();
     let run = loop {
         if let Some(run) = fx.broker.approvals().pending().into_iter().next() {
             break run;
@@ -464,4 +554,172 @@ fn the_catalog_names_the_variable_of_each_usable_credential() {
     assert_eq!(entry["access"], "can_request");
     assert_eq!(entry["env_name"], format!("APASSY_ITEM_{}", fx.item_id));
     assert!(!data.to_string().contains(SECRET));
+}
+
+/// The root, HOME, and any available macOS aliases of HOME and its ancestors.
+fn broad_folders() -> Vec<PathBuf> {
+    let mut folders = vec![PathBuf::from("/")];
+    if let Some(home) = std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .and_then(|home| std::fs::canonicalize(home).ok())
+    {
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            let home_metadata = std::fs::metadata(&home).expect("home metadata");
+            let relative_home = home.strip_prefix("/").expect("absolute home");
+            for prefix in [Path::new("/.nofollow"), Path::new("/System/Volumes/Data")] {
+                // Metadata identifies a real alias without reading HOME's contents.
+                if std::fs::metadata(prefix.join(relative_home)).is_ok_and(|metadata| {
+                    metadata.dev() == home_metadata.dev() && metadata.ino() == home_metadata.ino()
+                }) {
+                    for ancestor in home.ancestors() {
+                        folders.push(
+                            prefix.join(ancestor.strip_prefix("/").expect("absolute ancestor")),
+                        );
+                    }
+                }
+            }
+        }
+        folders.push(home);
+    }
+    folders
+}
+
+#[test]
+fn a_root_home_or_alias_folder_gets_allow_once_only_and_the_broker_refuses_a_crafted_grant() {
+    for cwd in broad_folders() {
+        let fx = fixture(true);
+        let handle = run_at_later(&fx, &cwd);
+        let (run, offer) = waiting(fx.broker.approvals());
+        assert!(folder_is_broad(&offer.folder), "{}", offer.folder);
+        assert_eq!(Path::new(&offer.folder), cwd);
+        // A crafted "Allow in this folder" for the broad folder, with a valid owner check.
+        let declarations = vec![FirstUseDeclaration {
+            item_id: fx.item_id,
+            declaration: declaration(Environment::Development),
+            provider: None,
+            suggested: None,
+        }];
+        let proof = OwnerGate::new(Arc::clone(&fx.vault), None)
+            .authorize(
+                OwnerAction::ApproveAndGrant {
+                    run: run.clone(),
+                    offer,
+                    declarations,
+                },
+                OwnerCheck::passphrase(PASS),
+            )
+            .expect("owner check");
+        assert_eq!(
+            fx.broker.approvals().approve(proof),
+            Err(ApprovalRefusal::NothingToGrant)
+        );
+        // The run still waits, and "Allow once" still works. It saves nothing.
+        assert_eq!(fx.broker.approvals().pending().len(), 1);
+        let proof = OwnerGate::new(Arc::clone(&fx.vault), None)
+            .authorize(OwnerAction::ApproveRun(run), OwnerCheck::passphrase(PASS))
+            .expect("owner check");
+        fx.broker.approvals().approve(proof).expect("approved once");
+        let response = handle.join().expect("run thread");
+        assert!(response.ok, "{response:?}");
+        let out = stdout(&response);
+        assert!(!out.contains(SECRET), "{out}");
+        assert!(out.contains("key=[apassy:"), "{out}");
+        with_vault(&fx, |vault| {
+            assert!(
+                vault
+                    .exec_grants_for_agent(fx.agent_id)
+                    .expect("grants")
+                    .is_empty()
+            );
+            assert_eq!(vault.declaration(fx.item_id).expect("declaration"), None);
+        });
+    }
+}
+
+#[test]
+fn a_project_folder_is_not_broad_and_a_path_shown_has_no_control_or_direction_characters() {
+    let fx = fixture(true);
+    assert!(!folder_is_broad(&fx.project.display().to_string()));
+    assert!(!folder_is_broad(
+        &fx.project.join("sub").display().to_string()
+    ));
+    let linked_project = fx._dir.path().join("linked-project");
+    std::os::unix::fs::symlink(&fx.project, &linked_project).expect("project symlink");
+    assert!(!folder_is_broad(&linked_project.display().to_string()));
+    let long = format!("/a/{}/end\u{202e}\n", "x".repeat(300));
+    let shown = shown_path(&long, 60);
+    assert_eq!(shown.chars().count(), 60);
+    assert!(shown.starts_with("/a/") && shown.contains('…'), "{shown}");
+    assert!(shown.ends_with("end??"), "{shown}");
+    assert_eq!(shown_path("/short", 60), "/short");
+}
+
+/// OTP setup keys require an explicit owner-selected field before the first-use flow.
+#[test]
+fn otp_only_items_are_needs_field_in_the_broker_catalog_and_cannot_start_a_first_use() {
+    for (kind, name, value) in [
+        (
+            CredentialKind::Custom,
+            "x_4f6e652d74696d652070617373776f7264",
+            "GEZDGNBVGY3TQOJQ",
+        ),
+        (
+            CredentialKind::Custom,
+            "api_secret",
+            "otpauth://totp/fixture?secret=GEZDGNBVGY3TQOJQ",
+        ),
+        (
+            CredentialKind::ApiKey,
+            "token",
+            "otpauth://totp/fixture?secret=GEZDGNBVGY3TQOJQ",
+        ),
+    ] {
+        let mut fx = fixture(true);
+        fx.item_id = with_vault(&fx, |vault| {
+            vault
+                .add(ItemDraft {
+                    title: "Synthetic OTP-only credential".to_owned(),
+                    kind,
+                    notes: String::new(),
+                    tags: Vec::new(),
+                    fields: vec![Field {
+                        name: name.to_owned(),
+                        value: SecretValue::new(value.to_owned()),
+                        secret: true,
+                    }],
+                })
+                .expect("synthetic OTP item")
+                .id
+        });
+        let response = client::send(&fx.socket, &fx.token, Action::ListAccess).expect("catalog");
+        assert!(response.ok, "{response:?}");
+        let data = response.result.expect("catalog result");
+        let entry = data["catalog"]
+            .as_array()
+            .expect("catalog entries")
+            .iter()
+            .find(|entry| entry["item_id"] == fx.item_id)
+            .expect("OTP catalog entry");
+        assert_eq!(entry["access"], "needs_field", "{entry}");
+        assert!(!data.to_string().contains(value), "setup key in catalog");
+        assert_eq!(code(&run_in(&fx, &fx.project)), "needs_field");
+        assert!(fx.broker.approvals().pending().is_empty());
+        with_vault(&fx, |vault| {
+            assert!(
+                vault
+                    .exec_grants_for_agent(fx.agent_id)
+                    .expect("grants")
+                    .is_empty()
+            );
+            assert!(
+                vault
+                    .declaration(fx.item_id)
+                    .expect("declaration")
+                    .is_none()
+            );
+        });
+    }
 }

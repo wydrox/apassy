@@ -1,6 +1,7 @@
 //! Owner authorization for sensitive owner actions (goal item A4, ADR 0010).
 //!
-//! Reveal, a fill, a save, or a new login in the browser (ADR 0021), approval of a run,
+//! Reveal, a fill, a save, a new login, a one-time code, or a passkey in the browser
+//! (ADR 0021), a passkey for the macOS passkey sheet, approval of a run,
 //! "Approve and remember", changes to grants and rules, token rotation, and a new Mac for
 //! relay sync need a fresh owner check: Touch ID now, the master passphrase now, or,
 //! for the approval of a run only, the Face ID signature of a paired iPhone (ADR 0020).
@@ -27,6 +28,10 @@
 //!
 //! A notification, an inbox acknowledgment, or an agent request cannot make a proof
 //! (goal item N4).
+//!
+//! [`OwnerGate::authorize_cancellable`] is the same check with an [`AuthCancel`]
+//! handle. When the request of the check goes away, a cancel kills the Touch ID helper
+//! at once, and the gate gives no proof, also for an answer that came just before.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -40,8 +45,10 @@ use crate::broker::SharedVault;
 use crate::companion::crypto::{ApproveAction, approve_string, verify_ecdsa};
 use crate::companion::digest::run_digest_hex;
 use crate::companion::wire::valid_device_id;
-use crate::native::{HelperErrorCode, MAX_AGENT_NAME_CHARS, NativeError, NativeHelper};
-use crate::vault::{Vault, VaultErrorKind};
+use crate::native::{
+    AuthCancel, HelperErrorCode, MAX_AGENT_NAME_CHARS, MAX_REASON_CHARS, NativeError, NativeHelper,
+};
+use crate::vault::{Declaration, Vault, VaultErrorKind};
 
 /// How long a proof stays valid after the owner check.
 pub const PROOF_LIFETIME: Duration = Duration::from_secs(60);
@@ -54,6 +61,12 @@ const COMPANION_FUTURE_SLACK: u64 = 60;
 pub enum OwnerAction {
     /// Show the secret values of one item.
     Reveal { item_id: u64 },
+    /// Show the code of one one-time password (TOTP) of one item. `field` is the field of
+    /// the seed. The proof opens that field only: no password and no other secret value.
+    ShowCode { item_id: u64, field: String },
+    /// Copy the current code of one one-time password of one item. The app computes the
+    /// code itself. The seed never leaves the session.
+    CopyCode { item_id: u64, field: String },
     /// Give the username and the password of one login to the browser, for one site
     /// (ADR 0021). `login` is the title of the login as the owner saw it, and `origin` is
     /// the origin of the page, for example `https://github.com`.
@@ -77,6 +90,60 @@ pub enum OwnerAction {
         origin: String,
         length: u32,
         symbols: bool,
+    },
+    /// Give the current code of one one-time password of one login to the browser, for
+    /// one site. `field` is the field of the seed. The seed never leaves the app.
+    FillCode {
+        item_id: u64,
+        field: String,
+        origin: String,
+    },
+    /// Sign one WebAuthn assertion with the passkey of one login, for one request exactly
+    /// as the owner saw it. `origin` is the origin in the client data that the app checked
+    /// and hashed for a request of the extension. `None` is a request of the macOS
+    /// passkey sheet: macOS checked the relying party, and there is no web origin. So a
+    /// check for the browser never signs a request of macOS, and the other way around.
+    /// `rid` is the ID of the request.
+    SignPasskey {
+        origin: Option<String>,
+        rid: String,
+        rp_id: String,
+        item_id: u64,
+        credential_id: Vec<u8>,
+        client_data_hash: [u8; 32],
+    },
+    /// Give the username and the password of one login to macOS AutoFill, for one request
+    /// of the macOS AutoFill sheet (`rid`). `login` is the title as the owner saw it. A
+    /// proof for the browser never fills the sheet, and the other way around.
+    FillSystemLogin {
+        rid: String,
+        item_id: u64,
+        login: String,
+    },
+    /// Give the current code of one one-time password of one login to macOS AutoFill, for
+    /// one request of the sheet. `field` is the field of the seed. The seed never leaves.
+    FillSystemCode {
+        rid: String,
+        item_id: u64,
+        field: String,
+    },
+    /// Remove the passkey of one login at one revision. A login without a password is
+    /// deleted with it: the dialog says so.
+    RemovePasskey { item_id: u64, revision: u64 },
+    /// Make one passkey, for one registration request exactly as the owner saw it: the
+    /// account, the algorithms, the excluded credentials, and where it goes. `origin` and
+    /// `rid` as in [`OwnerAction::SignPasskey`].
+    CreatePasskey {
+        origin: Option<String>,
+        rid: String,
+        rp_id: String,
+        client_data_hash: [u8; 32],
+        user_handle: Vec<u8>,
+        user_name: String,
+        user_display_name: String,
+        algorithms: Vec<i64>,
+        excluded: Vec<Vec<u8>>,
+        target: crate::vault::PasskeyTarget,
     },
     /// Approve one waiting run, exactly as the owner saw it.
     ApproveRun(PendingRun),
@@ -125,6 +192,17 @@ pub enum OwnerAction {
     /// Bind the environment variables of several items with one check (ADR 0017, D1).
     /// The proof names each item and its variable, in the order of the dialog.
     BindVariables { variables: Vec<(u64, String)> },
+    /// Bind one secret field of one item to one environment variable (ADR 0006, 0011).
+    /// The proof names the field, the variable, how a process gets the value, and
+    /// whether the field holds the setup key of a one-time password, exactly as the
+    /// dialog showed them. A proof for the agent settings of the item cannot bind.
+    BindVariable {
+        item_id: u64,
+        field: String,
+        env_name: String,
+        delivery: crate::vault::EnvDelivery,
+        setup_key: bool,
+    },
     /// Pair an iPhone (ADR 0020). The proof names the device exactly as the owner
     /// confirmed it: its ID, its name, and both public keys (X9.63, 65 bytes each).
     PairCompanion {
@@ -133,14 +211,24 @@ pub enum OwnerAction {
         request_key: Vec<u8>,
         approval_key: Vec<u8>,
     },
-    /// Add a Mac to the relay sync of the open vault (ADR 0022, contract relay-sync-v1
-    /// section 7.1). The proof names the link exactly as the owner confirmed it: its
-    /// number on the relay, the name of the Mac, and its public key (X9.63, 65 bytes).
+    /// Add a device (a Mac or an iPhone) to the relay sync of the open vault (ADR 0022,
+    /// contract relay-sync-v1 section 7.1). The proof names the link exactly as the owner
+    /// confirmed it: its number on the relay, the name of the device, and its public key
+    /// (X9.63, 65 bytes).
     ConfirmSyncDevice {
         link_id: u64,
         device_name: String,
         public_key: Vec<u8>,
     },
+}
+
+/// The words for the Touch ID prompt after the relying party of a passkey. `None` is
+/// the macOS passkey sheet.
+fn passkey_caller(origin: Option<&String>) -> &'static str {
+    match origin {
+        Some(_) => " in your browser",
+        None => " for a macOS request",
+    }
 }
 
 impl OwnerAction {
@@ -149,6 +237,8 @@ impl OwnerAction {
     pub fn reason(&self) -> String {
         match self {
             Self::Reveal { .. } => "show the secret values of an item".to_owned(),
+            Self::ShowCode { .. } => "show a one-time code".to_owned(),
+            Self::CopyCode { .. } => "copy a one-time code".to_owned(),
             Self::FillLogin { login, origin, .. } => format!(
                 "fill \"{}\" on {}",
                 short_device_name(login),
@@ -164,6 +254,24 @@ impl OwnerAction {
                 short_device_name(title),
                 short_site(origin)
             ),
+            Self::RemovePasskey { .. } => "remove a passkey".to_owned(),
+            Self::FillSystemLogin { login, .. } => {
+                format!("fill \"{}\" with macOS AutoFill", short_device_name(login))
+            }
+            Self::FillSystemCode { .. } => "fill a one-time code with macOS AutoFill".to_owned(),
+            Self::FillCode { origin, .. } => {
+                format!("fill a one-time code on {}", short_site(origin))
+            }
+            Self::SignPasskey { origin, rp_id, .. } => format!(
+                "sign in to {} with a passkey{}",
+                short_site(rp_id),
+                passkey_caller(origin.as_ref())
+            ),
+            Self::CreatePasskey { origin, rp_id, .. } => format!(
+                "create a passkey for {}{}",
+                short_site(rp_id),
+                passkey_caller(origin.as_ref())
+            ),
             Self::ApproveRun(run) => format!("approve a run of agent \"{}\"", short_name(run)),
             Self::ApproveAndRemember(run) => {
                 format!(
@@ -171,11 +279,11 @@ impl OwnerAction {
                     short_name(run)
                 )
             }
-            Self::ApproveAndGrant { run, offer, .. } => format!(
-                "give agent \"{}\" access in \"{}\" and approve its run",
-                short_name(run),
-                short_folder(&offer.folder)
-            ),
+            Self::ApproveAndGrant {
+                run,
+                offer,
+                declarations,
+            } => grant_reason(run, offer, declarations),
             Self::ChangeGrant { .. } => "change the access of an agent".to_owned(),
             Self::ChangeGrants { item_ids, .. } => {
                 format!("give an agent access to {} credentials", item_ids.len())
@@ -203,11 +311,23 @@ impl OwnerAction {
                 1 => "bind 1 environment variable".to_owned(),
                 count => format!("bind {count} environment variables"),
             },
+            Self::BindVariable {
+                env_name,
+                setup_key: true,
+                ..
+            } => format!(
+                "let programs make one-time codes with the variable {}",
+                short_device_name(env_name)
+            ),
+            Self::BindVariable { env_name, .. } => format!(
+                "bind the environment variable {}",
+                short_device_name(env_name)
+            ),
             Self::PairCompanion { device_name, .. } => {
                 format!("pair the iPhone \"{}\"", short_device_name(device_name))
             }
             Self::ConfirmSyncDevice { device_name, .. } => format!(
-                "add the Mac \"{}\" to the sync of this vault",
+                "add the device \"{}\" to the sync of this vault",
                 short_device_name(device_name)
             ),
         }
@@ -224,6 +344,47 @@ impl OwnerAction {
     }
 }
 
+/// Keep the declaration summary and future effect intact; only displayed names use
+/// the remaining native prompt budget. The action still holds the exact names/path.
+fn grant_reason(
+    run: &PendingRun,
+    offer: &FirstUseOffer,
+    declarations: &[FirstUseDeclaration],
+) -> String {
+    let environments = grant_declarations(offer, declarations)
+        .filter_map(|(_, declaration)| declaration)
+        .map(|declaration| declaration.environment.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let production = environments.contains("production");
+    let non_production = environments
+        .iter()
+        .any(|environment| *environment != "production");
+    let future = match (production, non_production) {
+        (true, true) => {
+            "; later clean non-production runs may skip asking; production asks each run"
+        }
+        (true, false) => "; production asks each run",
+        (false, _) => "; later clean runs may start without asking",
+    };
+    let environments = environments.into_iter().collect::<Vec<_>>().join(", ");
+    let describe = |agent: &str, folder: &str| {
+        format!(
+            "approve run of \"{agent}\"; grant \"{folder}\" + subfolders; save declarations: {environments}{future}"
+        )
+    };
+    let budget = MAX_REASON_CHARS.saturating_sub(describe("", "").chars().count());
+    let agent = super::shown_path(&short_name(run), MAX_AGENT_NAME_CHARS);
+    let folder = short_folder(&offer.folder);
+    let agent_budget = agent.chars().count().min(budget / 2);
+    let folder_budget = folder.chars().count().min(budget - agent_budget);
+    // Give a short component's spare space to the other one.
+    let agent_budget = agent.chars().count().min(budget - folder_budget);
+    describe(
+        &super::shown_path(&agent, agent_budget),
+        &super::shown_path(&folder, folder_budget),
+    )
+}
+
 /// The last part of a folder for the prompt, printable characters only, at most 40
 /// characters.
 fn short_folder(folder: &str) -> String {
@@ -231,9 +392,9 @@ fn short_folder(folder: &str) -> String {
         || folder.to_owned(),
         |name| name.to_string_lossy().into_owned(),
     );
-    let name: String = last
+    let name: String = super::shown_path(&last, usize::MAX)
         .chars()
-        .filter(|c| !c.is_control() && *c != '"')
+        .filter(|c| *c != '"')
         .take(MAX_AGENT_NAME_CHARS)
         .collect();
     if name.trim().is_empty() {
@@ -241,6 +402,29 @@ fn short_folder(folder: &str) -> String {
     } else {
         name
     }
+}
+
+/// The declaration that "Allow in this folder" leaves for each new item: the one the
+/// owner accepted on the card, else the one that the item already has. `None`: neither.
+pub fn grant_declarations<'a>(
+    offer: &'a FirstUseOffer,
+    chosen: &'a [FirstUseDeclaration],
+) -> impl Iterator<Item = (&'a str, Option<&'a Declaration>)> {
+    offer.items.iter().map(move |item| {
+        let declaration = chosen
+            .iter()
+            .find(|declaration| declaration.item_id == item.item_id)
+            .map(|declaration| &declaration.declaration)
+            .or(item.declaration.as_ref());
+        (item.name.as_str(), declaration)
+    })
+}
+
+/// True when one of the declarations that "Allow in this folder" leaves is production.
+/// Such an item still waits for the owner at each run, also after the access is saved.
+pub fn grant_has_production(offer: &FirstUseOffer, chosen: &[FirstUseDeclaration]) -> bool {
+    grant_declarations(offer, chosen)
+        .any(|(_, declaration)| declaration.is_some_and(Declaration::is_production))
 }
 
 /// Agent name for the prompt: printable characters only, at most 40 characters.
@@ -373,6 +557,8 @@ pub enum OwnerAuthError {
     CompanionRejected,
     /// An iPhone can confirm the approval of a run only.
     CompanionUnsupported,
+    /// The app cancelled the check, because its request went away. Apassy did nothing.
+    Cancelled,
     /// Another failure. The text has no secret value.
     Other(String),
 }
@@ -408,6 +594,7 @@ impl OwnerAuthError {
             Self::CompanionUnsupported => {
                 "An iPhone can confirm the approval of a run only. Apassy did nothing.".to_owned()
             }
+            Self::Cancelled => "The check was cancelled. Apassy did nothing.".to_owned(),
             Self::Other(text) => format!("The owner check failed: {text}"),
         }
     }
@@ -458,6 +645,7 @@ fn from_native(err: NativeError) -> OwnerAuthError {
                         .to_owned(),
             },
             NativeError::Timeout(_) => OwnerAuthError::TouchIdCancelled,
+            NativeError::Cancelled => OwnerAuthError::Cancelled,
             other => OwnerAuthError::Other(other.to_string()),
         },
     }
@@ -506,13 +694,10 @@ impl OwnerProof {
         }
     }
 
-    /// A proof with a chosen issue time, for the unit tests of the approval queue.
+    /// A proof with a chosen issue time, for the unit tests of the approval queue and of
+    /// the guarded desktop calls.
     #[cfg(test)]
-    pub(in crate::broker::approvals) fn issue_for_test(
-        action: OwnerAction,
-        epoch: [u8; 32],
-        issued: Instant,
-    ) -> Self {
+    pub(crate) fn issue_for_test(action: OwnerAction, epoch: [u8; 32], issued: Instant) -> Self {
         Self {
             action,
             method: CheckMethod::Passphrase,
@@ -576,6 +761,36 @@ impl OwnerGate {
         action: OwnerAction,
         check: OwnerCheck,
     ) -> Result<OwnerProof, OwnerAuthError> {
+        self.authorize_with(action, check, None)
+    }
+
+    /// [`OwnerGate::authorize`] that `cancel` can stop. Use a new handle for each check.
+    ///
+    /// A cancel during a Touch ID check kills the helper of this check and reaps it, so
+    /// its prompt closes, and this call returns [`OwnerAuthError::Cancelled`] at once.
+    /// A cancel cannot stop the passphrase check or the iPhone check, but the gate gives
+    /// no proof after a cancel, also when the owner passed just before it. A cancel
+    /// after this call returned does nothing: the caller drops a proof that it does not
+    /// want.
+    pub fn authorize_cancellable(
+        &self,
+        action: OwnerAction,
+        check: OwnerCheck,
+        cancel: &AuthCancel,
+    ) -> Result<OwnerProof, OwnerAuthError> {
+        self.authorize_with(action, check, Some(cancel))
+    }
+
+    fn authorize_with(
+        &self,
+        action: OwnerAction,
+        check: OwnerCheck,
+        cancel: Option<&AuthCancel>,
+    ) -> Result<OwnerProof, OwnerAuthError> {
+        let cancelled = || cancel.is_some_and(AuthCancel::is_cancelled);
+        if cancelled() {
+            return Err(OwnerAuthError::Cancelled);
+        }
         let (path, epoch) = self.session()?;
         let method = check.method();
         match check {
@@ -585,7 +800,12 @@ impl OwnerGate {
                         detail: "this build has no Touch ID helper.".to_owned(),
                     });
                 };
-                helper.authenticate(&action.reason()).map_err(from_native)?;
+                let reason = action.reason();
+                match cancel {
+                    Some(cancel) => helper.authenticate_cancellable(&reason, cancel),
+                    None => helper.authenticate(&reason),
+                }
+                .map_err(from_native)?;
             }
             OwnerCheck::Companion {
                 device_id,
@@ -610,6 +830,9 @@ impl OwnerGate {
                 }
                 // `passphrase` drops here and erases its buffer.
             }
+        }
+        if cancelled() {
+            return Err(OwnerAuthError::Cancelled);
         }
         // A lock, an unlock, or another vault during the check ends the session.
         match self.session() {

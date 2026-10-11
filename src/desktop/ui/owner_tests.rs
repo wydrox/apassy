@@ -331,7 +331,13 @@ fn automatic_command_settings_require_the_owner_check() {
         let proof = app
             .owner_gate()
             .authorize(
-                OwnerAction::ChangeItemRules { item_id },
+                OwnerAction::BindVariable {
+                    item_id,
+                    field: "token".to_owned(),
+                    env_name: name.clone(),
+                    delivery: EnvDelivery::Value,
+                    setup_key: false,
+                },
                 OwnerCheck::passphrase(PASS),
             )
             .expect("owner check");
@@ -700,6 +706,8 @@ fn a_first_use_card_allows_in_the_folder_with_one_owner_check() {
         "Allow in synthetic-shop",
         "Allow once",
         "Declaration:",
+        // M2: the card says what the process gets, here the automatic real value.
+        "Guarded key: the process gets the real value in APASSY_ITEM_",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
@@ -730,12 +738,33 @@ fn a_first_use_card_allows_in_the_folder_with_one_owner_check() {
     );
     let text = app_frame(&ctx, &mut app);
     assert!(text.contains("Give agent \"UI agent\" access to"), "{text}");
+    // L3: the dialog names the declaration that it saves and what later runs do.
+    for expected in [
+        "Apassy saves the declaration of \"Guarded key\": development,",
+        "Later runs there that the bouncer finds clean may start without asking.",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
     assert_eq!(
         approvals.pending(),
         vec![run.clone()],
         "no access before the check"
     );
     confirm_with(&mut app, &ctx, PASS);
+    // M1: the queue took the answer. The broker saves the access when the run starts, so
+    // the toast does not claim a saved access.
+    assert!(
+        app.status_text.contains(
+            "Apassy saves the access to Guarded key in /tmp/synthetic-shop when the run starts"
+        ),
+        "{}",
+        app.status_text
+    );
+    assert!(
+        !app.status_text.contains("need no new approval"),
+        "{}",
+        app.status_text
+    );
     let settled = waiter.join().expect("waiter").expect("no other first use");
     assert_eq!(settled.outcome, ApprovalOutcome::ApprovedAndGranted);
     let grant = settled.grant.expect("a grant");
@@ -744,6 +773,426 @@ fn a_first_use_card_allows_in_the_folder_with_one_owner_check() {
     // The form goes with the run.
     app_frame(&ctx, &mut app);
     assert!(app.ui.first_use_forms.is_empty());
+}
+
+/// A first use waits in the queue of the running broker. Returns the waiting thread and
+/// the run.
+fn wait_first_use(
+    approvals: &Arc<crate::broker::approvals::ApprovalQueue>,
+    run: PendingRun,
+    offer: crate::broker::approvals::FirstUseOffer,
+) -> (
+    std::thread::JoinHandle<
+        Result<crate::broker::approvals::Settled, crate::broker::approvals::FirstUseBusy>,
+    >,
+    PendingRun,
+) {
+    let waiter = {
+        let approvals = Arc::clone(approvals);
+        std::thread::spawn(move || {
+            approvals.wait_for_first_use(run, offer, Duration::from_secs(20), || true)
+        })
+    };
+    let run = loop {
+        if let Some(run) = approvals.pending().into_iter().next() {
+            break run;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    (waiter, run)
+}
+
+/// ADR 0024, F2: the card for the root folder offers "Allow once" only, and a path with
+/// control or direction characters is shown without them. The request keeps the real path.
+#[test]
+fn a_first_use_card_for_a_broad_folder_offers_allow_once_only() {
+    use crate::broker::approvals::{FirstUseItem, FirstUseOffer, OwnerAction, OwnerCheck};
+
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, item_id) = unlocked_app_with_item(&dir);
+    app.start_broker(&socket_dir(&dir));
+    let BrokerState::Running(handle) = &app.broker else {
+        panic!("the broker did not start");
+    };
+    let approvals = Arc::clone(handle.approvals());
+    let offer = FirstUseOffer {
+        agent_id: 1,
+        folder: "/".to_owned(),
+        items: vec![FirstUseItem {
+            item_id,
+            name: "Guarded key".to_owned(),
+            declaration: None,
+        }],
+    };
+    let (waiter, run) = wait_first_use(&approvals, waiting_run("UI agent"), offer.clone());
+    let ctx = egui::Context::default();
+    app.view = OwnerView::Activity;
+    let text = app_frame(&ctx, &mut app);
+    for expected in [
+        "UI agent wants to use \"Guarded key\" for the first time",
+        "Allow once",
+        "offers \"Allow once\" only",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    assert!(!text.contains("Allow in "), "{text}");
+    assert!(!text.contains("Declaration:"), "{text}");
+    assert!(app.ui.first_use_forms.is_empty());
+    // A crafted grant request is refused by the queue, and the run still waits.
+    let proof = crate::broker::approvals::OwnerGate::new(app.owner_ui.session.shared_vault(), None)
+        .authorize(
+            OwnerAction::ApproveAndGrant {
+                run: run.clone(),
+                offer,
+                declarations: Vec::new(),
+            },
+            OwnerCheck::passphrase(PASS),
+        )
+        .expect("owner check");
+    assert!(approvals.approve(proof).is_err());
+    assert_eq!(approvals.pending(), vec![run.clone()]);
+    assert!(approvals.deny(run.id));
+    waiter.join().expect("waiter").expect("no other first use");
+
+    // A folder that is not broad, with characters that must not reach the screen.
+    let folder = format!("/tmp/shop\u{202e}\u{7}evil{}", "x".repeat(300));
+    let offer = FirstUseOffer {
+        agent_id: 1,
+        folder: folder.clone(),
+        items: vec![FirstUseItem {
+            item_id,
+            name: "Guarded key".to_owned(),
+            declaration: None,
+        }],
+    };
+    let hostile = PendingRun {
+        cwd: folder,
+        ..waiting_run("UI agent")
+    };
+    let (waiter, run) = wait_first_use(&approvals, hostile, offer);
+    let text = app_frame(&ctx, &mut app);
+    assert!(text.contains("Allow in "), "{text}");
+    assert!(
+        !text.contains('\u{202e}') && !text.contains('\u{7}'),
+        "{text}"
+    );
+    assert!(text.contains("shop??evil"), "{text}");
+    assert!(!text.contains(&"x".repeat(300)), "{text}");
+    assert!(approvals.deny(run.id));
+    waiter.join().expect("waiter").expect("no other first use");
+}
+
+/// ADR 0024, M2: an automatic binding delivers the real value, also for a known
+/// provider. The Command settings sheet opens with that, and the card says so.
+#[test]
+fn a_known_provider_with_automatic_settings_opens_the_sheet_with_the_real_value() {
+    use super::Sheet;
+    use crate::broker::approvals::{FirstUseItem, FirstUseOffer};
+    use crate::vault::EnvDelivery;
+
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    let mut secrets = SecretForm::default();
+    secrets.token = format!("sk_test_{}", "EXAMPLE0".repeat(3));
+    let item_id = app
+        .owner_ui
+        .session
+        .add(
+            &ItemDraft {
+                name: "Stripe test key".to_owned(),
+                kind: CredentialKind::ApiKey,
+                ..ItemDraft::default()
+            },
+            &secrets,
+        )
+        .expect("add")
+        .id;
+    let hosts = app.owner_ui.session.suggested_placeholder_hosts(item_id);
+    assert!(hosts.contains(&"api.stripe.com".to_owned()), "{hosts:?}");
+    assert!(app.owner_ui.session.env_binding(item_id).unwrap().is_none());
+    let effective = app
+        .owner_ui
+        .session
+        .process_binding(item_id)
+        .unwrap()
+        .expect("automatic");
+    assert_eq!(effective.delivery, EnvDelivery::Value);
+
+    super::items::prepare_sheet(&mut app, item_id, &Sheet::Variable);
+    assert_eq!(
+        app.owner_ui.env_placeholder_input,
+        matches!(effective.delivery, EnvDelivery::Placeholder(_))
+    );
+    assert!(!app.owner_ui.env_placeholder_input);
+    assert_eq!(app.owner_ui.env_hosts_input, hosts.join(", "));
+    assert_eq!(app.owner_ui.env_field_input, effective.field);
+
+    app.start_broker(&socket_dir(&dir));
+    let BrokerState::Running(handle) = &app.broker else {
+        panic!("the broker did not start");
+    };
+    let approvals = Arc::clone(handle.approvals());
+    let offer = FirstUseOffer {
+        agent_id: 1,
+        folder: "/tmp/synthetic-shop".to_owned(),
+        items: vec![FirstUseItem {
+            item_id,
+            name: "Stripe test key".to_owned(),
+            declaration: None,
+        }],
+    };
+    let (waiter, run) = wait_first_use(&approvals, waiting_run("UI agent"), offer);
+    let ctx = egui::Context::default();
+    app.view = OwnerView::Activity;
+    let text = app_frame(&ctx, &mut app);
+    assert!(
+        text.contains(&format!(
+            "Stripe test key: the process gets the real value in {}",
+            effective.env_name
+        )),
+        "{text}"
+    );
+    assert!(approvals.deny(run.id));
+    waiter.join().expect("waiter").expect("no other first use");
+}
+
+/// ADR 0024, L3: for a production declaration the owner check says that the item still
+/// asks at each run. An access in the root folder cannot be described as lasting.
+#[test]
+fn the_owner_check_text_of_a_grant_names_production_and_the_saved_declaration() {
+    use crate::broker::approvals::{FirstUseDeclaration, FirstUseItem, FirstUseOffer};
+    use crate::vault::{Declaration, Environment, Reversibility, RiskLevel, Scope};
+
+    let production = Declaration {
+        project: "shop".to_owned(),
+        environment: Environment::Production,
+        risk: RiskLevel::High,
+        scope: Scope::Admin,
+        reversibility: Reversibility::Irreversible,
+    };
+    let offer = FirstUseOffer {
+        agent_id: 1,
+        folder: "/tmp/synthetic-shop".to_owned(),
+        items: vec![FirstUseItem {
+            item_id: 7,
+            name: "Live key".to_owned(),
+            declaration: None,
+        }],
+    };
+    let request = OwnerRequest::ApproveAndGrant {
+        run: waiting_run("UI agent"),
+        offer: offer.clone(),
+        declarations: vec![FirstUseDeclaration {
+            item_id: 7,
+            declaration: production,
+            provider: None,
+            suggested: None,
+        }],
+    };
+    let text = request.describe();
+    for expected in [
+        "the declaration of \"Live key\": production, high risk, admin, irreversible",
+        "A production credential still waits for you at each run",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    assert!(
+        !text.contains("Later runs there that the bouncer finds clean"),
+        "{text}"
+    );
+    let OwnerRequest::ApproveAndGrant {
+        run,
+        offer,
+        declarations,
+    } = request
+    else {
+        unreachable!()
+    };
+    let reason = crate::broker::approvals::OwnerAction::ApproveAndGrant {
+        run,
+        offer,
+        declarations,
+    }
+    .reason();
+    assert!(reason.contains("production asks each run"), "{reason}");
+    assert!(reason.contains("save declarations: production"), "{reason}");
+    assert!(
+        reason.chars().count() <= crate::native::MAX_REASON_CHARS,
+        "{reason}"
+    );
+    assert!(!reason.chars().any(char::is_control), "{reason}");
+    assert!(
+        !reason.contains("without asking") && !reason.contains("skip asking"),
+        "{reason}"
+    );
+}
+
+/// D2: native Touch ID accepts at most 200 Unicode characters. Full environment
+/// labels and both future effects survive even when both display names are long.
+#[test]
+fn grant_touch_id_reason_budgets_long_names_without_truncating_the_consent() {
+    use crate::broker::approvals::{FirstUseDeclaration, FirstUseItem, FirstUseOffer, OwnerAction};
+    use crate::vault::{Declaration, Environment, Reversibility, RiskLevel, Scope};
+
+    for (agent, folder) in [
+        ("a".repeat(64), format!("/tmp/{}", "f".repeat(255))),
+        (
+            format!("\"\n\u{00AD}{}", "界é🦀".repeat(60)),
+            format!(
+                "/tmp/\"\u{202e}\u{7}a\u{00AD}b\u{E0041}\u{206A}\u{0891}{}",
+                "目ó🦀".repeat(85)
+            ),
+        ),
+    ] {
+        let mut items = Vec::new();
+        let mut chosen = Vec::new();
+        for (index, environment) in [
+            Environment::Local,
+            Environment::Development,
+            Environment::Staging,
+            Environment::Production,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let item_id = index as u64 + 1;
+            let declaration = Declaration {
+                project: "synthetic".to_owned(),
+                environment,
+                risk: RiskLevel::High,
+                scope: Scope::Admin,
+                reversibility: Reversibility::Irreversible,
+            };
+            // Exercise both the saved declaration fallback and the card's choices.
+            items.push(FirstUseItem {
+                item_id,
+                name: format!("Synthetic credential {item_id}"),
+                declaration: (index % 2 == 0).then(|| declaration.clone()),
+            });
+            if index % 2 != 0 {
+                chosen.push(FirstUseDeclaration {
+                    item_id,
+                    declaration,
+                    provider: None,
+                    suggested: None,
+                });
+            }
+        }
+        let action = OwnerAction::ApproveAndGrant {
+            run: waiting_run(&agent),
+            offer: FirstUseOffer {
+                agent_id: 1,
+                folder,
+                items,
+            },
+            declarations: chosen,
+        };
+        let exact_action = action.clone();
+        let reason = action.reason();
+        assert_eq!(
+            action, exact_action,
+            "display shortening must not alter proof scope"
+        );
+        if !agent.is_ascii() {
+            assert!(
+                reason.len() > crate::native::MAX_REASON_CHARS,
+                "Unicode is budgeted as characters: {reason}"
+            );
+        }
+        assert!(
+            reason.chars().count() <= crate::native::MAX_REASON_CHARS,
+            "{reason}"
+        );
+        assert!(!reason.chars().any(char::is_control), "{reason}");
+        assert!(!reason.contains('\u{202e}'), "{reason}");
+        for hidden in ['\u{00AD}', '\u{E0041}', '\u{206A}', '\u{0891}'] {
+            assert!(!reason.contains(hidden), "{reason}");
+        }
+        for expected in [
+            "approve run of \"",
+            "grant \"",
+            "+ subfolders",
+            "save declarations: development, local, production, staging",
+            "later clean non-production runs may skip asking",
+            "production asks each run",
+            "…",
+        ] {
+            assert!(reason.contains(expected), "{expected}: {reason}");
+        }
+    }
+}
+
+/// D2: saved development can avoid a later prompt while saved production still
+/// asks, and the chosen declaration overrides the previously stored environment.
+#[test]
+fn grant_touch_id_reason_keeps_both_mixed_future_effects_and_chosen_environments() {
+    use crate::broker::approvals::{FirstUseDeclaration, FirstUseItem, FirstUseOffer, OwnerAction};
+    use crate::vault::{Declaration, Environment, Reversibility, RiskLevel, Scope};
+
+    let declaration = |environment| Declaration {
+        project: "synthetic".to_owned(),
+        environment,
+        risk: RiskLevel::High,
+        scope: Scope::Admin,
+        reversibility: Reversibility::Irreversible,
+    };
+    let mut action = OwnerAction::ApproveAndGrant {
+        run: waiting_run("UI agent"),
+        offer: FirstUseOffer {
+            agent_id: 1,
+            folder: "/tmp/synthetic-shop".to_owned(),
+            items: vec![
+                FirstUseItem {
+                    item_id: 1,
+                    name: "Development key".to_owned(),
+                    declaration: Some(declaration(Environment::Staging)),
+                },
+                FirstUseItem {
+                    item_id: 2,
+                    name: "Production key".to_owned(),
+                    declaration: Some(declaration(Environment::Production)),
+                },
+            ],
+        },
+        declarations: vec![FirstUseDeclaration {
+            item_id: 1,
+            declaration: declaration(Environment::Development),
+            provider: None,
+            suggested: None,
+        }],
+    };
+    let reason = action.reason();
+    for expected in [
+        "save declarations: development, production",
+        "later clean non-production runs may skip asking",
+        "production asks each run",
+    ] {
+        assert!(reason.contains(expected), "{expected}: {reason}");
+    }
+    assert!(!reason.contains("staging"), "{reason}");
+    assert!(
+        reason.chars().count() <= crate::native::MAX_REASON_CHARS,
+        "{reason}"
+    );
+
+    let OwnerAction::ApproveAndGrant { offer, .. } = &mut action else {
+        unreachable!()
+    };
+    offer.items.pop();
+    let reason = action.reason();
+    assert!(
+        reason.contains("save declarations: development"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("later clean runs may start without asking"),
+        "{reason}"
+    );
+    assert!(!reason.contains("production"), "{reason}");
+    assert!(
+        reason.chars().count() <= crate::native::MAX_REASON_CHARS,
+        "{reason}"
+    );
 }
 
 /// Type `text` in the open owner check and wait for the result.
@@ -881,4 +1330,325 @@ fn approve_and_remember_and_calibration_need_the_owner_check() {
     assert_eq!(level(), None, "a wrong passphrase changes nothing");
     confirm_with(&mut app, &ctx, PASS);
     assert_eq!(level(), Some(0.7));
+}
+
+/// One variable binds one exact field (security review, MEDIUM): the dialog names the
+/// field, and says when it is the setup key of a one-time password. Only a fresh proof
+/// for that field, variable, delivery, and setup key state binds it. Synthetic values
+/// only: the seed is the SHA-1 seed of RFC 6238 appendix B.
+mod variable_binding {
+    use std::sync::mpsc::{self, Receiver};
+
+    use eframe::egui;
+    use tempfile::TempDir;
+
+    use super::{PASS, TOKEN, app_frame, unlocked_app_with_item};
+    use crate::broker::approvals::{OwnerAction, OwnerCheck, OwnerProof};
+    use crate::contracts::CredentialKind;
+    use crate::desktop::DesktopApp;
+    use crate::desktop::model::{DetailDraft, ItemDraft};
+    use crate::desktop::owner_check::OwnerRequest;
+    use crate::desktop::owner_socket::Envelope;
+    use crate::desktop::owner_store::{SecretForm, detail_field_name};
+    use crate::owner::wire::{Command, Data, OWNER_WIRE_VERSION, Request, Response, SecretText};
+    use crate::vault::EnvDelivery;
+
+    const SEED: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+    const PASSWORD: &str = "variable-password-canary";
+    const OTP: &str = "One-time password";
+    const BACKUP: &str = "Backup";
+
+    fn ask(
+        app: &mut DesktopApp,
+        ctx: &egui::Context,
+        session: Option<&str>,
+        command: Command,
+    ) -> Receiver<Response> {
+        let (reply, answer) = mpsc::channel();
+        app.handle_cli(
+            Envelope {
+                request: Request {
+                    v: OWNER_WIRE_VERSION,
+                    session: session.map(|token| SecretText::new(token.to_owned())),
+                    command,
+                },
+                reply,
+            },
+            ctx,
+        );
+        answer
+    }
+
+    fn login(app: &mut DesktopApp, ctx: &egui::Context) -> String {
+        let answer = ask(app, ctx, None, Command::Login);
+        app.confirm_owner_now(OwnerCheck::passphrase(PASS))
+            .expect("owner check");
+        let Data::Session { token, .. } = answer.try_recv().expect("login answer").data else {
+            panic!("no session");
+        };
+        token.expose().to_owned()
+    }
+
+    fn hidden(label: &str) -> DetailDraft {
+        DetailDraft {
+            label: label.to_owned(),
+            value: String::new(),
+            hidden: true,
+            stored: None,
+        }
+    }
+
+    /// A login with a password, a hidden one-time password, and a hidden detail with a
+    /// neutral label that holds an `otpauth://totp` link.
+    fn add_login(app: &mut DesktopApp) -> u64 {
+        let mut secrets = SecretForm::default();
+        secrets.password = PASSWORD.to_owned();
+        secrets.details[0] = SEED.to_owned();
+        secrets.details[1] = format!("otpauth://totp/Example?secret={SEED}");
+        app.owner_ui
+            .session
+            .add(
+                &ItemDraft {
+                    name: "Example login".to_owned(),
+                    kind: CredentialKind::Login,
+                    username: "user@example.test".to_owned(),
+                    details: vec![hidden(OTP), hidden(BACKUP)],
+                    ..ItemDraft::default()
+                },
+                &secrets,
+            )
+            .expect("add")
+            .id
+    }
+
+    fn set_variable(item_id: u64, name: &str, field: Option<&str>) -> Command {
+        Command::ItemSetVariable {
+            item: item_id.to_string(),
+            name: name.to_owned(),
+            field: field.map(str::to_owned),
+            hosts: Vec::new(),
+        }
+    }
+
+    fn bind(item_id: u64, field: &str, env_name: &str, setup_key: bool) -> OwnerAction {
+        OwnerAction::BindVariable {
+            item_id,
+            field: field.to_owned(),
+            env_name: env_name.to_owned(),
+            delivery: EnvDelivery::Value,
+            setup_key,
+        }
+    }
+
+    fn proof(app: &DesktopApp, action: OwnerAction) -> OwnerProof {
+        app.owner_gate()
+            .authorize(action, OwnerCheck::passphrase(PASS))
+            .expect("owner check")
+    }
+
+    fn no_value(text: &str) {
+        for value in [SEED, PASSWORD, TOKEN, "otpauth", "x_"] {
+            assert!(!text.contains(value), "{value} in {text}");
+        }
+    }
+
+    /// The open dialog: its text in the request and on the screen.
+    fn dialog_text(app: &mut DesktopApp, ctx: &egui::Context) -> String {
+        let described = app.owner.check.as_ref().expect("dialog").request.describe();
+        let painted = app_frame(ctx, app);
+        assert!(painted.contains(&described), "{painted}");
+        no_value(&painted);
+        described
+    }
+
+    #[test]
+    fn a_hidden_setup_key_binds_only_with_a_proof_for_that_field() {
+        let dir = TempDir::new().expect("temp dir");
+        let (mut app, _) = unlocked_app_with_item(&dir);
+        let ctx = egui::Context::default();
+        let item = add_login(&mut app);
+        let seed_field = detail_field_name(OTP);
+        let token = login(&mut app, &ctx);
+
+        let request = || set_variable(item, "SEED_VAR", Some(OTP));
+        let answer = ask(&mut app, &ctx, Some(&token), request());
+        let text = dialog_text(&mut app, &ctx);
+        assert!(
+            text.contains("Bind the one-time password setup key \"One-time password\" of this item to the environment variable SEED_VAR."),
+            "{text}"
+        );
+        assert!(text.contains("can make one-time codes"), "{text}");
+        assert!(text.contains("not a password"), "{text}");
+        assert!(
+            matches!(
+                app.owner.check.as_ref().expect("dialog").request,
+                OwnerRequest::ConfirmVariable { setup_key: true, ref field, .. } if *field == seed_field
+            ),
+            "the request names the hidden field"
+        );
+
+        // Proofs for another field, for the agent settings of the item, or for a
+        // password (no setup key) bind nothing.
+        let mut proofs = vec![
+            proof(&app, bind(item, "password", "SEED_VAR", false)),
+            proof(&app, OwnerAction::ChangeItemRules { item_id: item }),
+            proof(&app, bind(item, &seed_field, "SEED_VAR", false)),
+            proof(&app, bind(item, &seed_field, "OTHER_VAR", true)),
+        ]
+        .into_iter();
+        app.finish_owner_check_with(proofs.next().expect("proof"));
+        let mut answers = vec![answer];
+        for proof in proofs {
+            answers.push(ask(&mut app, &ctx, Some(&token), request()));
+            app.finish_owner_check_with(proof);
+        }
+        for answer in answers {
+            let refused = answer.try_recv().expect("answer");
+            assert!(!refused.ok, "{refused:?}");
+            no_value(&serde_json::to_string(&refused).expect("json"));
+        }
+        assert_eq!(
+            app.owner_ui.session.env_binding(item).expect("binding"),
+            None
+        );
+        assert!(
+            app.owner_ui
+                .session
+                .env_bound_items()
+                .expect("bound")
+                .iter()
+                .all(|(id, _, _)| *id != item),
+            "no partial binding"
+        );
+
+        // The fresh proof for this field binds it.
+        let answer = ask(&mut app, &ctx, Some(&token), request());
+        app.confirm_owner_now(OwnerCheck::passphrase(PASS))
+            .expect("owner check");
+        let bound = answer.try_recv().expect("answer");
+        assert!(bound.ok, "{bound:?}");
+        no_value(&serde_json::to_string(&bound).expect("json"));
+        let binding = app
+            .owner_ui
+            .session
+            .env_binding(item)
+            .expect("binding")
+            .expect("bound");
+        assert_eq!(binding.field, seed_field);
+        assert_eq!(binding.env_name, "SEED_VAR");
+    }
+
+    #[test]
+    fn a_setup_key_link_under_another_label_is_named_and_ordinary_secrets_still_bind() {
+        let dir = TempDir::new().expect("temp dir");
+        let (mut app, guarded) = unlocked_app_with_item(&dir);
+        let ctx = egui::Context::default();
+        let item = add_login(&mut app);
+        let backup_field = detail_field_name(BACKUP);
+        let token = login(&mut app, &ctx);
+
+        // Only the value shows the setup key here. The dialog still says so, and a
+        // proof that does not name it binds nothing.
+        let answer = ask(
+            &mut app,
+            &ctx,
+            Some(&token),
+            set_variable(item, "BACKUP_VAR", Some(BACKUP)),
+        );
+        let text = dialog_text(&mut app, &ctx);
+        assert!(
+            text.contains("the one-time password setup key \"Backup\""),
+            "{text}"
+        );
+        app.finish_owner_check_with(proof(&app, bind(item, &backup_field, "BACKUP_VAR", false)));
+        assert!(!answer.try_recv().expect("answer").ok);
+        assert_eq!(
+            app.owner_ui.session.env_binding(item).expect("binding"),
+            None
+        );
+
+        // The password of the same login is an ordinary variable.
+        let answer = ask(
+            &mut app,
+            &ctx,
+            Some(&token),
+            set_variable(item, "LOGIN_PASSWORD", Some("password")),
+        );
+        let text = dialog_text(&mut app, &ctx);
+        assert!(
+            text.contains("Bind the field \"Password\" of this item to the environment variable LOGIN_PASSWORD. Programs get the real value."),
+            "{text}"
+        );
+        assert!(!text.contains("one-time"), "{text}");
+        app.confirm_owner_now(OwnerCheck::passphrase(PASS))
+            .expect("owner check");
+        assert!(answer.try_recv().expect("answer").ok);
+        let binding = app.owner_ui.session.env_binding(item).expect("binding");
+        assert_eq!(binding.map(|b| b.field), Some("password".to_owned()));
+
+        // An API key with the default field, and a stale proof for the old generic
+        // action, as before this change.
+        let answer = ask(
+            &mut app,
+            &ctx,
+            Some(&token),
+            set_variable(guarded, "GUARDED_KEY", None),
+        );
+        let text = dialog_text(&mut app, &ctx);
+        assert!(text.contains("the field \"Token\""), "{text}");
+        app.finish_owner_check_with(proof(
+            &app,
+            OwnerAction::ChangeItemRules { item_id: guarded },
+        ));
+        assert!(!answer.try_recv().expect("answer").ok);
+        assert_eq!(
+            app.owner_ui.session.env_binding(guarded).expect("binding"),
+            None
+        );
+        let fresh = proof(&app, bind(guarded, "token", "GUARDED_KEY", false));
+        app.owner_ui
+            .session
+            .set_env_binding(guarded, "GUARDED_KEY", "token", &EnvDelivery::Value, fresh)
+            .expect("bind");
+        assert!(
+            app.owner_ui
+                .session
+                .env_binding(guarded)
+                .expect("binding")
+                .is_some()
+        );
+
+        // A deliberate proof for the setup key in the link binds it.
+        let answer = ask(
+            &mut app,
+            &ctx,
+            Some(&token),
+            set_variable(item, "BACKUP_VAR", Some(BACKUP)),
+        );
+        app.confirm_owner_now(OwnerCheck::passphrase(PASS))
+            .expect("owner check");
+        assert!(answer.try_recv().expect("answer").ok);
+        let binding = app.owner_ui.session.env_binding(item).expect("binding");
+        assert_eq!(binding.map(|b| b.field), Some(backup_field));
+    }
+
+    /// A proof from before a lock does not bind after the next unlock.
+    #[test]
+    fn a_proof_from_another_vault_session_binds_nothing() {
+        let dir = TempDir::new().expect("temp dir");
+        let (mut app, item) = unlocked_app_with_item(&dir);
+        let old = proof(&app, bind(item, "token", "GUARDED_KEY", false));
+        app.owner_ui.session.lock().expect("lock");
+        app.owner_ui.session.unlock(PASS).expect("unlock");
+        let refused = app
+            .owner_ui
+            .session
+            .set_env_binding(item, "GUARDED_KEY", "token", &EnvDelivery::Value, old)
+            .expect_err("old session");
+        assert_eq!(refused.code, "owner_check_required");
+        assert_eq!(
+            app.owner_ui.session.env_binding(item).expect("binding"),
+            None
+        );
+    }
 }

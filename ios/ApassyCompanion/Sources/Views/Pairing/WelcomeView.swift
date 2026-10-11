@@ -1,7 +1,7 @@
 import ApassyCompanionKit
 import SwiftUI
 
-/// What the app does, that it never receives a secret, and the name of this iPhone.
+/// What the approval of runs does, that it never carries a secret, and the name of this iPhone.
 struct WelcomeView: View {
     @Bindable var model: PairingModel
 
@@ -15,10 +15,11 @@ struct WelcomeView: View {
                     .clipShape(.rect(cornerRadius: 22, style: .continuous))
                     .accessibilityHidden(true)
                 VStack(spacing: 12) {
-                    Text("Apassy")
+                    Text("Approve agent runs")
                         .font(.largeTitle.bold())
+                        .multilineTextAlignment(.center)
                     Text(
-                        "Approve the runs that wait for you on your Mac, with Face ID, from your iPhone. Apassy on your iPhone never receives a secret: it shows what an agent wants to run and sends your decision."
+                        "Approve the runs that wait for you on your Mac, with Face ID, from your iPhone. An approval never carries a secret: the iPhone shows what an agent wants to run and sends your decision."
                     )
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)

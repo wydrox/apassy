@@ -9,6 +9,19 @@
 #   Apassy.app/Contents/MacOS/apassy-browser-host
 #                                             Rust native messaging host of
 #                                             the browser extension (ADR 0021)
+#   Apassy.app/Contents/MacOS/apassy-browser-guard
+#                                             Swift caller check of the browser
+#                                             host and its signed browser parent
+#   Apassy.app/Contents/MacOS/apassy-credential-bridge
+#                                             Swift bridge between the AutoFill
+#                                             extension and the app (signed, app
+#                                             group only). ONLY with the extension
+#   Apassy.app/Contents/PlugIns/ApassyAutoFill.appex
+#                                             Mac AutoFill credential provider
+#                                             (passkeys, passwords, one-time codes).
+#                                             ONLY with both provider profiles.
+#                                             Both are built by
+#                                             scripts/build-credential-provider.sh
 #   Apassy.app/Contents/Resources/browser-extension
 #                                             The browser extension, for
 #                                             "Load unpacked" (extension/)
@@ -31,6 +44,15 @@
 # The helpers and the notifier answer only the signed Apassy app that contains
 # them (native/ApassyHelper/Caller.swift). The checks at the end start them through
 # a signed probe parent, and check the agent profile with the signed bundle.
+#
+# The AutoFill extension is a restricted entitlement. It needs a profile for
+# com.wydrox.apassy.autofill AND a profile for the main app com.wydrox.apassy
+# (the app embeds it as Contents/embedded.provisionprofile). With both valid
+# profiles, the app has the extension and signs with the AutoFill entitlement.
+# With a missing or invalid profile, the app has NO extension, NO bridge, and the
+# empty entitlements, because AMFI stops a program that has a restricted
+# entitlement without its profile, and a bridge without the extension does
+# nothing. The profile checks are in scripts/build-credential-provider.sh, not here.
 #
 # Usage: scripts/build-app.sh [--provision]
 #   --provision   Before the build, run Xcode automatic signing
@@ -67,6 +89,13 @@
 #   APASSY_BUILD_DATE        build time for the build identity,
 #                            YYYY-MM-DDTHH:MM:SSZ (UTC). Default: now. The
 #                            CI workflow sets it before the release build.
+#   APASSY_AUTOFILL_PROFILE  path to the profile for the AutoFill extension
+#                            (com.wydrox.apassy.autofill). No default search.
+#   APASSY_PROVIDER_APP_PROFILE
+#                            path to the profile for the main app
+#                            (com.wydrox.apassy) with the AutoFill capability.
+#   APASSY_REQUIRE_PROVIDER  set to 1 to fail unless the build includes the
+#                            extension, signed with both valid profiles.
 #   APASSY_PREBUILT_DIR      directory of the verified CI release artifact.
 #                            Skips only the Rust build. Requires Python 3.11+,
 #                            APASSY_BUILD_DATE, APASSY_BUILD_COMMIT, and
@@ -98,12 +127,16 @@ PROVISION=0
 for arg in "$@"; do
   case "$arg" in
     --provision) PROVISION=1 ;;
-    -h|--help) sed -n '2,63p' "$0"; exit 0 ;;
+    -h|--help) awk 'NR > 1 && /^#/ {print; next} NR > 1 {exit}' "$0"; exit 0 ;;
     *) echo "build-app: unknown option: $arg" >&2; exit 2 ;;
   esac
 done
 
 [[ "$KEYCHAIN_APP_ID" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "build-app: invalid APASSY_KEYCHAIN_BUNDLE_ID" >&2; exit 2; }
+case "${APASSY_REQUIRE_PROVIDER:-0}" in
+  0|1) ;;
+  *) echo "build-app: APASSY_REQUIRE_PROVIDER must be 0 or 1" >&2; exit 2 ;;
+esac
 
 step() { printf '\n==> %s\n' "$*"; }
 fail() { printf '\nbuild-app: FAILED: %s\n' "$*" >&2; exit 1; }
@@ -116,7 +149,7 @@ trap 'rm -rf "$TMP"' EXIT
 step "Check the host and tools"
 [ "$(uname -s)" = "Darwin" ] || fail "this script runs on macOS only"
 [ "$(uname -m)" = "arm64" ] || fail "this script builds for arm64 only"
-for tool in xcrun codesign security plutil openssl file /usr/libexec/PlistBuddy; do
+for tool in xcrun codesign security plutil openssl file python3 /usr/libexec/PlistBuddy; do
   command -v "$tool" >/dev/null 2>&1 || fail "missing tool: $tool"
 done
 if [ -n "${APASSY_PREBUILT_DIR:-}" ]; then
@@ -256,6 +289,70 @@ else
   warn "Touch ID can confirm actions but cannot unlock the vault. See docs/operations/native-app.md."
 fi
 
+# ---------------------------------------------------------------- provider
+# The Mac AutoFill credential provider (docs/operations/mac-passkeys.md).
+# scripts/build-credential-provider.sh builds and signs the bridge, checks both
+# profiles, and signs the extension only when both are valid. This script does not
+# check a profile itself. It reads provider-status.txt and checks the files.
+#   included  bridge and extension in the app, main app signed with the AutoFill
+#             entitlement and its profile
+#   none      no bridge, no extension, main app has no entitlements (no valid
+#             profiles, or the team cannot use the provider)
+step "Build the Mac AutoFill credential provider"
+PROVIDER_TEAM="7S3F9767BM"
+PROVIDER_OUT="$ROOT/target/credential-provider"
+BRIDGE_ID="$APP_ID.credential-bridge"
+APPEX_ID="$APP_ID.autofill"
+BRIDGE_EXE="apassy-credential-bridge"
+APPEX_NAME="ApassyAutoFill.appex"
+PROVIDER_MODE="none"
+PROVIDER_REASON=""
+PROVIDER_OFFERS=""
+if [ "${CERT_TEAM:-}" != "$PROVIDER_TEAM" ]; then
+  # The app group, the App IDs, and the code checks of the provider name this team.
+  PROVIDER_REASON="the signing certificate is in team ${CERT_TEAM:-unknown}, the provider needs team $PROVIDER_TEAM"
+  [ "${APASSY_REQUIRE_PROVIDER:-0}" != "1" ] || fail "APASSY_REQUIRE_PROVIDER=1, but $PROVIDER_REASON"
+else
+  # The app routes passkeys, passwords, and one-time codes, so the extension offers all three.
+  PROVIDER_ARGS=(--sign "$SIGN_SHA1" --with-passwords-and-codes)
+  [ -z "${APASSY_AUTOFILL_PROFILE:-}" ] || PROVIDER_ARGS+=(--appex-profile "$APASSY_AUTOFILL_PROFILE")
+  [ -z "${APASSY_PROVIDER_APP_PROFILE:-}" ] || PROVIDER_ARGS+=(--app-profile "$APASSY_PROVIDER_APP_PROFILE")
+  [ "${APASSY_REQUIRE_PROVIDER:-0}" != "1" ] || PROVIDER_ARGS+=(--require-provider)
+  /bin/bash "$ROOT/scripts/build-credential-provider.sh" "${PROVIDER_ARGS[@]}" \
+    || fail "scripts/build-credential-provider.sh failed"
+  PROVIDER_STATUS="$PROVIDER_OUT/provider-status.txt"
+  [ -s "$PROVIDER_STATUS" ] || fail "the provider build wrote no $PROVIDER_STATUS"
+  status_get() { sed -n "s/^$1: //p" "$PROVIDER_STATUS" | head -n 1; }
+  PROVIDER_OFFERS="$(status_get offers)"
+  case "$(status_get provider)" in
+    included)
+      PROVIDER_MODE="included"
+      [ "$PROVIDER_OFFERS" = "passkeys, passwords, one-time codes" ] \
+        || fail "provider: included, but it offers \"$PROVIDER_OFFERS\", not passkeys, passwords, and one-time codes"
+      for file in "$PROVIDER_OUT/$BRIDGE_EXE" \
+          "$PROVIDER_OUT/$APPEX_NAME/Contents/Info.plist" \
+          "$PROVIDER_OUT/$APPEX_NAME/Contents/embedded.provisionprofile" \
+          "$PROVIDER_OUT/Apassy-provider.provisionprofile" \
+          "$PROVIDER_OUT/entitlements/Apassy-provider.entitlements"; do
+        [ -s "$file" ] || fail "provider: included, but $file is missing"
+      done
+      ;;
+    "not included")
+      PROVIDER_MODE="none"
+      PROVIDER_REASON="$(status_get reason)"
+      ;;
+    *) fail "unreadable provider status in $PROVIDER_STATUS" ;;
+  esac
+  [ "${APASSY_REQUIRE_PROVIDER:-0}" != "1" ] || [ "$PROVIDER_MODE" = "included" ] \
+    || fail "APASSY_REQUIRE_PROVIDER=1, but the provider is not included: $PROVIDER_REASON"
+fi
+if [ "$PROVIDER_MODE" = "included" ]; then
+  echo "Provider: included (AutoFill extension signed with both profiles; offers: $PROVIDER_OFFERS)"
+else
+  warn "PROVIDER NOT INCLUDED: ${PROVIDER_REASON:-unknown}"
+  warn "The app has no AutoFill extension and no credential bridge, so macOS cannot offer Apassy as a passkey, password, or code provider. The main app has no AutoFill entitlement."
+fi
+
 # ---------------------------------------------------------------- build
 step "Select the Rust release binaries"
 # The build identity (docs/operations/updates.md). The app reads both values
@@ -316,6 +413,14 @@ if LC_ALL=C grep -aq "APASSY_HELPER_DEV_ANY_CALLER" "$NATIVE_OUT/$NOTIFY_EXE"; t
   fail "the notifier contains the development caller override"
 fi
 echo "ok: the notifier has no development caller override"
+# The browser host and the app use this guard to check operating-system audit
+# tokens and code signatures. A native-host argument is not a caller proof.
+xcrun --sdk macosx swiftc -sdk "$SDK" -O -swift-version 6 -warnings-as-errors \
+  -target "arm64-apple-macos$DEPLOYMENT_TARGET" \
+  -o "$NATIVE_OUT/apassy-browser-guard" native/ApassyBrowserGuard/*.swift
+if LC_ALL=C grep -aq "selftest-" "$NATIVE_OUT/apassy-browser-guard"; then
+  fail "the browser guard contains self-test code; build it without APASSY_BROWSER_GUARD_SELFTEST"
+fi
 # The caller probe starts a helper as its child. It never goes into the bundle.
 xcrun --sdk macosx swiftc -sdk "$SDK" -O -swift-version 5 -warnings-as-errors \
   -target "arm64-apple-macos$DEPLOYMENT_TARGET" \
@@ -376,6 +481,23 @@ find "$APP/Contents/Resources/browser-extension" -name .DS_Store -delete
 [ -z "$(find "$APP/Contents/Resources/browser-extension" -name '_*')" ] \
   || fail "the browser extension has a file whose name starts with _"
 cp "$NATIVE_OUT/apassy-helper" "$APP/Contents/MacOS/apassy-helper"
+cp "$NATIVE_OUT/apassy-browser-guard" "$APP/Contents/MacOS/apassy-browser-guard"
+# The provider (already signed by scripts/build-credential-provider.sh, so the nested
+# code is signed before the app). ditto keeps the signature, the resources, and the
+# embedded profile of the extension. The bridge, the extension, and the profile of the main
+# app go in only when the builder validated both profiles.
+if [ "$PROVIDER_MODE" = "included" ]; then
+  if LC_ALL=C grep -aq "APASSY_BRIDGE_DEV" "$PROVIDER_OUT/$BRIDGE_EXE"; then
+    fail "the bridge contains a development override"
+  fi
+  ditto "$PROVIDER_OUT/$BRIDGE_EXE" "$APP/Contents/MacOS/$BRIDGE_EXE" || fail "cannot copy the bridge"
+  [ "$(plutil -extract CFBundleShortVersionString raw -o - "$PROVIDER_OUT/$APPEX_NAME/Contents/Info.plist")" = "$VERSION" ] \
+    || fail "the extension has another version than $VERSION"
+  mkdir -p "$APP/Contents/PlugIns"
+  ditto "$PROVIDER_OUT/$APPEX_NAME" "$APP/Contents/PlugIns/$APPEX_NAME" || fail "cannot copy the extension"
+  ditto "$PROVIDER_OUT/Apassy-provider.provisionprofile" "$APP/Contents/embedded.provisionprofile" \
+    || fail "cannot copy the profile of the main app"
+fi
 cp "$NATIVE_OUT/apassy-helper" "$KC_APP/Contents/MacOS/$KEYCHAIN_EXE"
 cp "$NATIVE_OUT/$NOTIFY_EXE" "$NT_APP/Contents/MacOS/$NOTIFY_EXE"
 # The app icon (scripts/make-icon.sh). macOS shows the icon of the notifier on
@@ -485,38 +607,128 @@ sign --identifier "$APP_ID.helper" --entitlements packaging/Apassy.entitlements 
 for tool in mcp hook sandbox browser-host; do
   sign --identifier "$APP_ID.$tool" --entitlements packaging/Apassy.entitlements "$APP/Contents/MacOS/apassy-$tool"
 done
-sign --entitlements packaging/Apassy.entitlements "$APP"
+sign --identifier "$APP_ID.browser-guard" --entitlements packaging/Apassy.entitlements "$APP/Contents/MacOS/apassy-browser-guard"
+# The bridge and the extension are already signed by scripts/build-credential-provider.sh,
+# and their signatures stay. They are checked below. The main app seals them last.
+# The AutoFill entitlement of the main app is valid only with its profile: without both
+# profiles, AMFI stops the app at launch. So that branch ships no extension and signs
+# with no entitlements.
+APP_ENTITLEMENTS="packaging/Apassy.entitlements"
+if [ "$PROVIDER_MODE" = "included" ]; then
+  APP_ENTITLEMENTS="$PROVIDER_OUT/entitlements/Apassy-provider.entitlements"
+fi
+sign --entitlements "$APP_ENTITLEMENTS" "$APP"
 
 # ---------------------------------------------------------------- verify
 step "Verify the signatures"
 codesign --verify --deep --strict --verbose=2 "$APP"
-for code in "$APP" "$APP/Contents/MacOS/apassy-mcp" "$APP/Contents/MacOS/apassy-hook" "$APP/Contents/MacOS/apassy-sandbox" "$APP/Contents/MacOS/apassy-browser-host" "$APP/Contents/MacOS/apassy-helper" "$KC_APP" "$NT_APP"; do
+SIGNED_CODE=("$APP" "$APP/Contents/MacOS/apassy-mcp" "$APP/Contents/MacOS/apassy-hook" "$APP/Contents/MacOS/apassy-sandbox" "$APP/Contents/MacOS/apassy-browser-host" "$APP/Contents/MacOS/apassy-browser-guard" "$APP/Contents/MacOS/apassy-helper" "$KC_APP" "$NT_APP")
+BRIDGE="$APP/Contents/MacOS/$BRIDGE_EXE"
+APPEX="$APP/Contents/PlugIns/$APPEX_NAME"
+[ "$PROVIDER_MODE" != "included" ] || SIGNED_CODE+=("$BRIDGE" "$APPEX")
+for code in "${SIGNED_CODE[@]}"; do
+  codesign --verify --strict "$code" 2>"$TMP/verify.txt" || { cat "$TMP/verify.txt" >&2; fail "$code does not verify (strict)"; }
   codesign -d --verbose=2 "$code" >"$TMP/info.txt" 2>&1
   grep -q "flags=.*(runtime)" "$TMP/info.txt" || fail "hardened runtime is off for $code"
   grep -q "TeamIdentifier=${CERT_TEAM:-}" "$TMP/info.txt" || fail "unexpected team for $code"
   echo "$(grep '^Identifier=' "$TMP/info.txt") $(grep '^CodeDirectory' "$TMP/info.txt" | grep -o 'flags=[^ ]*')"
 done
-codesign -d --verbose=2 "$NT_APP" >"$TMP/info.txt" 2>&1
-grep -qx "Identifier=$NOTIFY_APP_ID" "$TMP/info.txt" \
-  || fail "the signing identifier of the notifier is not its bundle ID $NOTIFY_APP_ID. macOS refuses such a notification client."
+# check_identifier CODE IDENTIFIER: the signing identifier and the exact team.
+check_identifier() {
+  codesign -d --verbose=2 "$1" >"$TMP/info.txt" 2>&1
+  grep -qx "Identifier=$2" "$TMP/info.txt" || fail "the signing identifier of $1 is not $2"
+  grep -qx "TeamIdentifier=${CERT_TEAM:-}" "$TMP/info.txt" || fail "the team of $1 is not ${CERT_TEAM:-unknown}"
+}
+check_identifier "$APP" "$APP_ID"
+check_identifier "$NT_APP" "$NOTIFY_APP_ID"
 echo "ok: the signing identifier of the notifier is its bundle ID"
+if [ "$PROVIDER_MODE" = "included" ]; then
+  check_identifier "$BRIDGE" "$BRIDGE_ID"
+  echo "ok: the bridge is signed as $BRIDGE_ID"
+  check_identifier "$APPEX" "$APPEX_ID"
+  echo "ok: the extension is signed as $APPEX_ID"
+  cmp -s "$APP/Contents/embedded.provisionprofile" "$PROVIDER_OUT/Apassy-provider.provisionprofile" \
+    || fail "the profile of the main app is not the profile that the provider build checked"
+  cmp -s "$APPEX/Contents/embedded.provisionprofile" "$PROVIDER_OUT/$APPEX_NAME/Contents/embedded.provisionprofile" \
+    || fail "the profile of the extension is not the profile that the provider build checked"
+  echo "ok: the profiles of the main app and the extension are the profiles that the provider build checked"
+else
+  [ ! -e "$APP/Contents/PlugIns" ] || fail "provider: not included, but the app has Contents/PlugIns"
+  [ ! -e "$BRIDGE" ] || fail "provider: not included, but the app has the credential bridge"
+  [ ! -e "$APP/Contents/embedded.provisionprofile" ] || fail "provider: not included, but the main app embeds a profile"
+  echo "ok: provider not included: no extension, no bridge, no profile in the main app"
+fi
 # Print the entitlements of CODE as JSON. No entitlements blob prints {}.
 entitlements_json() {
   local xml
   xml="$(codesign -d --entitlements - --xml "$1" 2>/dev/null || true)"
   if [ -z "$xml" ]; then echo "{}"; else printf '%s' "$xml" | plutil -convert json -o - -; echo; fi
 }
+# Print the entitlements of CODE as XML with sorted keys. None prints nothing.
+entitlements_xml() {
+  local xml
+  xml="$(codesign -d --entitlements - --xml "$1" 2>/dev/null || true)"
+  [ -z "$xml" ] || printf '%s' "$xml" | plutil -convert xml1 -o - -
+}
+# expected_entitlements FILE PLISTBUDDY-COMMAND...: write the entitlements that the
+# code must have, built here and not read from the template, so a wrong template fails.
+expected_entitlements() {
+  local file="$1" command
+  shift
+  printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict/>\n</plist>\n' >"$file"
+  for command in "$@"; do
+    /usr/libexec/PlistBuddy -c "$command" "$file" >/dev/null || fail "cannot build the expected entitlements: $command"
+  done
+}
+# check_exact_entitlements CODE EXPECTED-FILE: the same keys and values, no more.
+check_exact_entitlements() {
+  entitlements_xml "$1" >"$TMP/got.xml"
+  plutil -convert xml1 -o "$TMP/want.xml" "$2"
+  diff -q "$TMP/got.xml" "$TMP/want.xml" >/dev/null \
+    || { diff "$TMP/got.xml" "$TMP/want.xml" >&2 || true; fail "$1 has other entitlements than expected"; }
+}
 echo "Entitlements of ApassyKeychain.app: $(entitlements_json "$KC_APP")"
-for code in "$APP" "$APP/Contents/MacOS/apassy-mcp" "$APP/Contents/MacOS/apassy-hook" "$APP/Contents/MacOS/apassy-sandbox" "$APP/Contents/MacOS/apassy-browser-host" "$APP/Contents/MacOS/apassy-helper" "$NT_APP"; do
+for code in "$APP/Contents/MacOS/apassy-mcp" "$APP/Contents/MacOS/apassy-hook" "$APP/Contents/MacOS/apassy-sandbox" "$APP/Contents/MacOS/apassy-browser-host" "$APP/Contents/MacOS/apassy-browser-guard" "$APP/Contents/MacOS/apassy-helper" "$NT_APP"; do
   ENT="$(entitlements_json "$code")"
   [ "$ENT" = "{}" ] || fail "$code has unexpected entitlements: $ENT"
 done
-echo "Entitlements of apassy, apassy-mcp, apassy-hook, apassy-sandbox, apassy-browser-host, apassy-helper, ApassyNotify.app: {}"
+echo "Entitlements of apassy-mcp, apassy-hook, apassy-sandbox, apassy-browser-host, apassy-browser-guard, apassy-helper, ApassyNotify.app: {}"
+AUTOFILL_KEY="com.apple.developer.authentication-services.autofill-credential-provider"
+GROUP="$PROVIDER_TEAM.$APP_ID"
+if [ "$PROVIDER_MODE" = "included" ]; then
+  # The main app: the AutoFill entitlement and its identity, and nothing else.
+  expected_entitlements "$TMP/expect-app.plist" \
+    "Add :com.apple.application-identifier string $PROVIDER_TEAM.$APP_ID" \
+    "Add :$AUTOFILL_KEY bool true" \
+    "Add :com.apple.developer.team-identifier string $PROVIDER_TEAM"
+  check_exact_entitlements "$APP" "$TMP/expect-app.plist"
+  echo "Entitlements of apassy (provider included): application-identifier, team-identifier, AutoFill. No others."
+  expected_entitlements "$TMP/expect-appex.plist" \
+    "Add :com.apple.application-identifier string $PROVIDER_TEAM.$APPEX_ID" \
+    "Add :$AUTOFILL_KEY bool true" \
+    "Add :com.apple.developer.team-identifier string $PROVIDER_TEAM" \
+    "Add :com.apple.security.app-sandbox bool true" \
+    "Add :com.apple.security.application-groups array" \
+    "Add :com.apple.security.application-groups:0 string $GROUP"
+  check_exact_entitlements "$APPEX" "$TMP/expect-appex.plist"
+  echo "Entitlements of ApassyAutoFill.appex: application-identifier, team-identifier, AutoFill, sandbox, app group $GROUP. No others."
+else
+  ENT="$(entitlements_json "$APP")"
+  [ "$ENT" = "{}" ] || fail "$APP has unexpected entitlements: $ENT"
+  echo "Entitlements of apassy: {} (no AutoFill entitlement without the extension and both profiles)"
+fi
+if [ "$PROVIDER_MODE" = "included" ]; then
+  expected_entitlements "$TMP/expect-bridge.plist" \
+    "Add :com.apple.security.application-groups array" \
+    "Add :com.apple.security.application-groups:0 string $GROUP"
+  check_exact_entitlements "$BRIDGE" "$TMP/expect-bridge.plist"
+  echo "Entitlements of apassy-credential-bridge: app group $GROUP only. No AutoFill entitlement, no sandbox."
+fi
 
 # Key-memory review F7: each program in the bundle has the hardened runtime,
 # and no program has an entitlement that lets a debugger read its memory or
 # lets injected code run in it.
-FORBIDDEN_ENTITLEMENTS="com.apple.security.get-task-allow com.apple.security.cs.disable-library-validation com.apple.security.cs.allow-dyld-environment-variables"
+FORBIDDEN_ENTITLEMENTS="com.apple.security.get-task-allow com.apple.security.cs.disable-library-validation com.apple.security.cs.allow-dyld-environment-variables com.apple.security.cs.allow-unsigned-executable-memory com.apple.security.cs.allow-jit"
 # Print each forbidden entitlement of CODE, one per line.
 forbidden_entitlements() {
   local json key
@@ -547,8 +759,13 @@ while IFS= read -r -d '' code; do
   FOUND="$(forbidden_entitlements "$code" | tr '\n' ' ')"
   [ -z "$FOUND" ] || fail "$code has forbidden entitlements: $FOUND"
 done < <(find "$APP" -type f -print0)
-[ "$PROGRAMS" = "8" ] || fail "expected 8 programs in the bundle, found $PROGRAMS"
-echo "Hardened runtime on all $PROGRAMS programs. None has get-task-allow, disable-library-validation, or allow-dyld-environment-variables."
+# 9 programs of the app and its helpers. The provider adds the bridge and the extension (11).
+case "$PROVIDER_MODE" in
+  none) EXPECTED_PROGRAMS=9 ;;
+  included) EXPECTED_PROGRAMS=11 ;;
+esac
+[ "$PROGRAMS" = "$EXPECTED_PROGRAMS" ] || fail "expected $EXPECTED_PROGRAMS programs in the bundle (provider $PROVIDER_MODE), found $PROGRAMS"
+echo "Hardened runtime on all $PROGRAMS programs. None has get-task-allow, disable-library-validation, allow-dyld-environment-variables, allow-unsigned-executable-memory, or allow-jit."
 
 # ---------------------------------------------------------------- self-check
 step "Run the signed programs"
@@ -569,7 +786,7 @@ done
 "$APP/Contents/MacOS/apassy-sandbox" --help >"$TMP/sandbox-help.txt"
 check_output "apassy-sandbox --help" "$(cat "$TMP/sandbox-help.txt")" "^apassy-sandbox"
 # The browser host (ADR 0021): another caller gets exit status 2. The extension
-# gets not_running when no app listens. A message is a 4-byte length, then JSON.
+# must also have a signed browser parent. A message is a 4-byte length, then JSON.
 BH_EXE="$APP/Contents/MacOS/apassy-browser-host"
 # A shell variable cannot hold the NUL bytes of the length, so a function writes it.
 bh_status() { printf '\x16\x00\x00\x00{"v":1,"cmd":"status"}'; }
@@ -577,9 +794,48 @@ if bh_status | "$BH_EXE" "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/" 
   fail "apassy-browser-host answered another extension"
 fi
 echo "ok: apassy-browser-host refuses another extension"
-check_output "apassy-browser-host without the app" \
-  "$(bh_status | APASSY_BROWSER_SOCKET="$TMP/none.sock" "$BH_EXE" "chrome-extension://bbnpgnjnfjlbgggmpnhejpmfjhmmhiih/" | tail -c +5)" \
-  '"code":"not_running"'
+# Keep stdin open until the answer arrives. EOF cancels requests by design.
+bh_answer() {
+  python3 - "$BH_EXE" "$TMP/none.sock" "$1" <<'PY'
+import json, os, selectors, struct, subprocess, sys, time
+environment = dict(os.environ, APASSY_BROWSER_SOCKET=sys.argv[2])
+process = subprocess.Popen([sys.argv[1], 'chrome-extension://bbnpgnjnfjlbgggmpnhejpmfjhmmhiih/'],
+                           stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           env=environment)
+selector = selectors.DefaultSelector()
+selector.register(process.stdout, selectors.EVENT_READ)
+deadline = time.monotonic() + 10
+def read_exact(count):
+    data = bytearray()
+    while len(data) < count:
+        if not selector.select(max(0, deadline - time.monotonic())):
+            raise RuntimeError('The browser host did not answer.')
+        part = os.read(process.stdout.fileno(), count - len(data))
+        if not part:
+            raise RuntimeError('The browser host ended before its answer.')
+        data.extend(part)
+    return bytes(data)
+try:
+    request = json.dumps({'v': 1, 'cmd': sys.argv[3]}).encode()
+    process.stdin.write(struct.pack('<I', len(request)) + request)
+    process.stdin.flush()
+    length, = struct.unpack('<I', read_exact(4))
+    if not 0 < length <= 1024 * 1024:
+        raise RuntimeError('The browser host sent an invalid length.')
+    print(read_exact(length).decode())
+finally:
+    selector.close()
+    process.stdin.close()
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+PY
+}
+check_output "apassy-browser-host without the app" "$(bh_answer status)" '"code":"not_running"'
+check_output "apassy-browser-host refuses a shell passkey request" \
+  "$(bh_answer passkey_get)" '"code":"unsupported"'
 
 H_EXE="$APP/Contents/MacOS/apassy-helper"
 KC_EXE="$KC_APP/Contents/MacOS/$KEYCHAIN_EXE"
@@ -616,21 +872,47 @@ check_lines "notifier refuses the shell" "$NT_OUT" "$REFUSED" "$REFUSED" "$REFUS
 check_output "notifier ignores APASSY_HELPER_DEV_ANY_CALLER" \
   "$(printf '%s\n' '{"cmd":"ping"}' | APASSY_HELPER_DEV_ANY_CALLER=1 "$NT_EXE")" "$REFUSED"
 
+# The bridge (docs/operations/mac-passkeys.md) checks its parent before it opens a
+# socket. A shell is not the signed Apassy app, so the bridge exits with status 1.
+BR_REFUSED='"code":"caller_not_allowed"'
+if [ "$PROVIDER_MODE" = "included" ]; then
+  BR_STATUS=0
+  BR_OUT="$("$BRIDGE" </dev/null 2>/dev/null)" || BR_STATUS=$?
+  [ "$BR_STATUS" = "1" ] || fail "the bridge did not refuse the shell (status $BR_STATUS): $BR_OUT"
+  check_output "the bridge refuses the shell" "$BR_OUT" "$BR_REFUSED"
+fi
+
 # probe_app DIR IDENTIFIER: a scratch copy of the bundle in DIR. The caller
 # probe replaces the main program, and the copy is signed with IDENTIFIER. The
-# helpers in the copy keep their signatures. Print the path of the copy.
+# helpers and the bridge in the copy keep their signatures. Print the path of the copy.
+# The copy gets only MacOS, Helpers, Resources, Info.plist, and PkgInfo. It has no
+# PlugIns and no profile of the main app: a copy with the real extension would
+# register a second ApassyAutoFill with LaunchServices, and a fake app with the
+# AutoFill entitlement and no valid profile would stop at launch. The copy is signed
+# with the empty entitlements.
 probe_app() {
-  local copy="$1/Apassy.app"
-  mkdir -p "$1" || fail "cannot make $1"
-  cp -R "$APP" "$copy" || fail "cannot copy the bundle to $1"
+  local copy="$1/Apassy.app" ent
+  mkdir -p "$copy/Contents" || fail "cannot make $1"
+  cp -R "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources" "$copy/Contents/" \
+    || fail "cannot copy the bundle to $1"
+  cp "$APP/Contents/Info.plist" "$APP/Contents/PkgInfo" "$copy/Contents/" || fail "cannot copy the bundle to $1"
   cp "$TMP/caller-probe" "$copy/Contents/MacOS/apassy" || fail "cannot copy the probe to $1"
   sign --identifier "$2" --entitlements packaging/Apassy.entitlements "$copy" 2>/dev/null \
     || fail "cannot sign the scratch copy in $1"
   codesign --verify --deep --strict "$copy" 2>/dev/null || fail "the scratch copy in $1 is not valid"
+  [ ! -e "$copy/Contents/PlugIns" ] || fail "the scratch copy in $1 has PlugIns"
+  [ -z "$(find "$copy" -name '*.appex' -print -quit)" ] || fail "the scratch copy in $1 has an extension"
+  [ ! -e "$copy/Contents/embedded.provisionprofile" ] || fail "the scratch copy in $1 has a profile for the main app"
+  if plutil -extract NSExtension raw -o - "$copy/Contents/Info.plist" >/dev/null 2>&1; then
+    fail "the scratch copy in $1 declares an extension"
+  fi
+  ent="$(entitlements_json "$copy")"
+  [ "$ent" = "{}" ] || fail "the scratch copy in $1 has entitlements: $ent"
   echo "$copy"
 }
 PROBE_APP="$(probe_app "$TMP/probe-apassy" "$APP_ID")"
 PROBE="$PROBE_APP/Contents/MacOS/apassy"
+echo "ok: the signed probe copy has no extension, no profile for the main app, and no entitlements"
 
 # The signed parent: the helpers of the copy answer.
 HELPER_OUT="$(printf '%s\n' '{"cmd":"ping"}' '{"cmd":"notify_status"}' '{"cmd":"bogus"}' \
@@ -676,6 +958,23 @@ check_output "keychain helper refuses a parent with another identifier" \
 check_output "notifier refuses a parent with another identifier" \
   "$(printf '%s\n' '{"cmd":"ping"}' | "$OTHER_APP/Contents/MacOS/apassy" "$OTHER_APP/Contents/Helpers/ApassyNotify.app/Contents/MacOS/$NOTIFY_EXE")" "$REFUSED"
 
+if [ "$PROVIDER_MODE" = "included" ]; then
+  # Each run ends before the bridge opens a socket: the parent is refused, or the copy has
+  # no extension. The group container of this Mac stays untouched.
+  bridge_under() { # parent probe, bridge: print the answer, ignore the exit status
+    "$1" "$2" </dev/null 2>/dev/null || true
+  }
+  check_output "the bridge refuses the signed parent of another bundle" \
+    "$(bridge_under "$PROBE" "$BRIDGE")" "$BR_REFUSED"
+  check_output "the bridge refuses a parent with another identifier" \
+    "$(bridge_under "$OTHER_APP/Contents/MacOS/apassy" "$OTHER_APP/Contents/MacOS/$BRIDGE_EXE")" "$BR_REFUSED"
+  # The signed parent of the copy that contains the bridge passes the parent check. The
+  # copy has no extension, so the bridge stops with no_extension. This also shows that the
+  # copy has no extension to register.
+  check_output "the bridge accepts its signed parent and finds no extension in the probe copy" \
+    "$(bridge_under "$PROBE" "$PROBE_APP/Contents/MacOS/$BRIDGE_EXE")" '"code":"no_extension"'
+fi
+
 step "Check the agent profile with the signed bundle"
 SANDBOX_BIN="$APP/Contents/MacOS/apassy-sandbox"
 PROFILE_DIR="$TMP/agent-profile"
@@ -684,7 +983,9 @@ chmod 700 "$PROFILE_DIR/d"
 in_profile() {
   "$SANDBOX_BIN" --data-dir "$PROFILE_DIR/d" -- "$@"
 }
-for program in "$KC_EXE" "$NT_EXE" "$H_EXE" "$APP/Contents/MacOS/apassy" "$APP/Contents/MacOS/apassy-browser-host"; do
+PROFILE_DENIED=("$KC_EXE" "$NT_EXE" "$H_EXE" "$APP/Contents/MacOS/apassy" "$APP/Contents/MacOS/apassy-browser-host" "$APP/Contents/MacOS/apassy-browser-guard")
+[ "$PROVIDER_MODE" != "included" ] || PROFILE_DENIED+=("$BRIDGE" "$APPEX/Contents/MacOS/ApassyAutoFill")
+for program in "${PROFILE_DENIED[@]}"; do
   if PROFILE_OUT="$(printf '%s\n' '{"cmd":"ping"}' | in_profile "$program" 2>&1)"; then
     fail "${program#"$APP"/} started in the agent profile: $PROFILE_OUT"
   fi
@@ -728,6 +1029,16 @@ if [ "$MODEL_MODE" = "none" ]; then
 else
   echo "Model:    $MODEL_MODE in Contents/Resources/models, from $MODEL_SOURCE"
 fi
+case "$PROVIDER_MODE" in
+  included)
+    echo "Provider: included. AutoFill extension and bridge are signed and in the app; the main app embeds its profile. Offers: $PROVIDER_OFFERS."
+    echo "          Not checked by this script: native AutoFill activation and sign-in. Install under /Applications for the sandboxed bridge check."
+    ;;
+  none)
+    echo "Provider: NOT INCLUDED ($PROVIDER_REASON)."
+    echo "          The app has no AutoFill extension and no credential bridge: macOS cannot offer Apassy as a passkey, password, or code provider."
+    ;;
+esac
 if [ "$KEYCHAIN_MODE" = "enabled" ]; then
   echo "Keychain: enabled (team $TEAM_ID, group $TEAM_ID.$APP_ID)"
 else

@@ -22,6 +22,10 @@
 //! The app starts each program as its child. Each program checks that its
 //! parent is the signed Apassy app that contains it.
 //!
+//! An owner check with Touch ID can stop early: [`NativeHelper::authenticate_cancellable`]
+//! takes an [`AuthCancel`] handle. A cancel kills the helper of that one check and
+//! waits for its exit, so the Touch ID prompt of the helper closes with it.
+//!
 //! Secret handling: [`KeychainSecret`] has a redacted `Debug` and no
 //! `Clone`. The client overwrites its own request and response buffers after
 //! use. This is best effort. It does not erase copies in the helper, in the
@@ -34,7 +38,7 @@ use std::fmt;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value};
@@ -173,6 +177,10 @@ pub enum NativeError {
     Io(String),
     /// No response within the time limit. The client stopped the helper.
     Timeout(Duration),
+    /// The caller cancelled the call through its [`AuthCancel`]. The client stopped
+    /// the helper, or did not start it. A response that came before the cancel is
+    /// dropped.
+    Cancelled,
     /// The response broke the protocol, or the helper exited without one.
     Protocol(String),
     /// The helper answered with an error code.
@@ -205,6 +213,7 @@ impl fmt::Display for NativeError {
                 "the native helper did not answer within {} s",
                 limit.as_secs()
             ),
+            Self::Cancelled => f.write_str("the native helper call was cancelled"),
             Self::Protocol(err) => write!(f, "the native helper broke the protocol: {err}"),
             Self::Helper { code, message } => write!(f, "{code}: {message}"),
         }
@@ -439,6 +448,88 @@ impl Notification {
     }
 }
 
+/// A handle that stops one owner check with Touch ID
+/// ([`NativeHelper::authenticate_cancellable`]).
+///
+/// The clones share one state: the dialog keeps one, and the worker thread of the
+/// check uses another. During the check the handle holds the helper process, so
+/// [`AuthCancel::cancel`] kills it from any thread. It kills that one child only.
+/// A cancelled handle stays cancelled. Make a new handle for each check.
+#[derive(Clone, Default)]
+pub struct AuthCancel(Arc<Mutex<CancelState>>);
+
+#[derive(Default)]
+struct CancelState {
+    cancelled: bool,
+    /// The helper of the running check. `None` before it starts, after it ends, and
+    /// after a cancel stopped it.
+    child: Option<Child>,
+    /// Wakes the worker thread of the running check.
+    wake: Option<mpsc::Sender<Wake>>,
+}
+
+/// What ends the wait of one exchange.
+enum Wake {
+    Response(Result<Vec<u8>, NativeError>),
+    Cancel,
+}
+
+impl AuthCancel {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Stop the check. When a helper runs, it is killed and reaped before this
+    /// returns, and its worker thread returns [`NativeError::Cancelled`] at once. The
+    /// call never waits for the owner. A cancel after the check ended does nothing.
+    pub fn cancel(&self) {
+        let (child, wake) = {
+            let mut state = self.lock();
+            state.cancelled = true;
+            (state.child.take(), state.wake.take())
+        };
+        if let Some(mut child) = child {
+            stop(&mut child);
+        }
+        if let Some(wake) = wake {
+            let _ = wake.send(Wake::Cancel);
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.lock().cancelled
+    }
+
+    /// A guard that cancels this handle when it is dropped. Keep it with the task of
+    /// the check: the end of the task, a closed dialog, or a quit then stops the
+    /// helper. A drop after the check ended does nothing.
+    pub fn cancel_on_drop(&self) -> CancelOnDrop {
+        CancelOnDrop(self.clone())
+    }
+
+    fn lock(&self) -> MutexGuard<'_, CancelState> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl fmt::Debug for AuthCancel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthCancel")
+            .field("cancelled", &self.is_cancelled())
+            .finish()
+    }
+}
+
+/// Cancels its [`AuthCancel`] on drop. See [`AuthCancel::cancel_on_drop`].
+#[derive(Debug)]
+pub struct CancelOnDrop(AuthCancel);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 /// Time limits for helper calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Timeouts {
@@ -570,10 +661,30 @@ impl NativeHelper {
     /// passed Touch ID now. `Fallback` and `Cancelled` mean: ask for the
     /// Apassy passphrase.
     pub fn authenticate(&self, reason: &str) -> Result<(), NativeError> {
+        self.authenticate_with(reason, None)
+    }
+
+    /// [`NativeHelper::authenticate`] that `cancel` can stop. After
+    /// [`AuthCancel::cancel`] the helper is dead and reaped, and this call returns
+    /// [`NativeError::Cancelled`], also when the owner passed Touch ID just before the
+    /// cancel. A handle that is already cancelled starts no helper.
+    pub fn authenticate_cancellable(
+        &self,
+        reason: &str,
+        cancel: &AuthCancel,
+    ) -> Result<(), NativeError> {
+        self.authenticate_with(reason, Some(cancel))
+    }
+
+    fn authenticate_with(
+        &self,
+        reason: &str,
+        cancel: Option<&AuthCancel>,
+    ) -> Result<(), NativeError> {
         check_reason(reason)?;
         let mut req = request("authenticate");
         req.insert("reason".into(), Value::String(reason.to_owned()));
-        self.call(&self.helper, req, self.timeouts.interactive)
+        self.call_with(&self.helper, req, self.timeouts.interactive, cancel)
             .map(drop)
     }
 
@@ -687,8 +798,18 @@ impl NativeHelper {
     fn call(
         &self,
         program: &Path,
+        req: Map<String, Value>,
+        timeout: Duration,
+    ) -> Result<Map<String, Value>, NativeError> {
+        self.call_with(program, req, timeout, None)
+    }
+
+    fn call_with(
+        &self,
+        program: &Path,
         mut req: Map<String, Value>,
         timeout: Duration,
+        cancel: Option<&AuthCancel>,
     ) -> Result<Map<String, Value>, NativeError> {
         let line = serde_json::to_vec(&req);
         if let Some(Value::String(secret)) = req.remove("secret_b64") {
@@ -697,7 +818,7 @@ impl NativeHelper {
         let mut line =
             line.map_err(|err| NativeError::Protocol(format!("cannot encode: {err}")))?;
         line.push(b'\n');
-        let mut raw = exchange(program, line, timeout)?;
+        let mut raw = exchange(program, line, timeout, cancel)?;
         let parsed = serde_json::from_slice::<Value>(&raw);
         wipe(&mut raw);
         let Ok(Value::Object(mut fields)) = parsed else {
@@ -874,11 +995,24 @@ fn parse_status(fields: &Map<String, Value>) -> Result<NotificationStatus, Nativ
 }
 
 /// Start `program`, write `line`, and read one response line. The helper
-/// stops after the time limit.
-fn exchange(program: &Path, mut line: Vec<u8>, timeout: Duration) -> Result<Vec<u8>, NativeError> {
+/// stops after the time limit, or at once when `cancel` is cancelled.
+fn exchange(
+    program: &Path,
+    mut line: Vec<u8>,
+    timeout: Duration,
+    cancel: Option<&AuthCancel>,
+) -> Result<Vec<u8>, NativeError> {
     if !program.is_file() {
         wipe(&mut line);
         return Err(NativeError::HelperMissing(program.to_path_buf()));
+    }
+    // The handle stays locked from the cancel check until it holds the helper. So a
+    // cancel comes either before the start, and nothing starts, or after it, and
+    // finds the helper to stop.
+    let mut state = cancel.map(AuthCancel::lock);
+    if state.as_ref().is_some_and(|state| state.cancelled) {
+        wipe(&mut line);
+        return Err(NativeError::Cancelled);
     }
     let spawned = Command::new(program)
         .stdin(Stdio::piped())
@@ -901,6 +1035,7 @@ fn exchange(program: &Path, mut line: Vec<u8>, timeout: Duration) -> Result<Vec<
         return Err(NativeError::Io("the helper pipes are missing".into()));
     };
     let (sender, receiver) = mpsc::channel();
+    let reader = sender.clone();
     std::thread::spawn(move || {
         let written = stdin.write_all(&line).and_then(|()| stdin.flush());
         wipe(&mut line);
@@ -909,20 +1044,100 @@ fn exchange(program: &Path, mut line: Vec<u8>, timeout: Duration) -> Result<Vec<
             Ok(()) => read_line(stdout),
             Err(err) => Err(NativeError::Io(format!("cannot write the request: {err}"))),
         };
-        let _ = sender.send(result);
+        let _ = reader.send(Wake::Response(result));
     });
-    match receiver.recv_timeout(timeout) {
-        Ok(Ok(response)) => {
-            reap(&mut child);
+    let mut helper = match (state.as_mut(), cancel) {
+        (Some(state), Some(cancel)) => {
+            state.child = Some(child);
+            state.wake = Some(sender);
+            RunningHelper::Shared(cancel)
+        }
+        _ => RunningHelper::Own(Some(child)),
+    };
+    drop(state);
+    let result = match receiver.recv_timeout(timeout) {
+        Ok(Wake::Response(Ok(response))) => {
+            helper.reap();
             Ok(response)
         }
-        Ok(Err(err)) => {
-            stop(&mut child);
+        Ok(Wake::Response(Err(err))) => {
+            helper.stop();
             Err(err)
         }
+        Ok(Wake::Cancel) => {
+            helper.stop();
+            Err(NativeError::Cancelled)
+        }
         Err(_) => {
-            stop(&mut child);
+            helper.stop();
             Err(NativeError::Timeout(timeout))
+        }
+    };
+    drop(helper);
+    // A cancel during the exchange wins over its result, so a late answer counts for
+    // nothing.
+    if cancel.is_some_and(AuthCancel::is_cancelled) {
+        if let Ok(mut response) = result {
+            wipe(&mut response);
+        }
+        return Err(NativeError::Cancelled);
+    }
+    result
+}
+
+/// The helper process of one exchange. With a cancel handle, the handle holds the
+/// process, so that [`AuthCancel::cancel`] can stop it from another thread.
+enum RunningHelper<'a> {
+    Own(Option<Child>),
+    Shared(&'a AuthCancel),
+}
+
+impl RunningHelper<'_> {
+    /// Kill and reap the helper. Does nothing when a cancel stopped it already.
+    fn stop(&mut self) {
+        let child = match self {
+            Self::Own(child) => child.take(),
+            Self::Shared(cancel) => cancel.lock().child.take(),
+        };
+        if let Some(mut child) = child {
+            stop(&mut child);
+        }
+    }
+
+    /// True when the helper exited and is reaped, or a cancel stopped it.
+    fn exited(&mut self) -> bool {
+        let gone = |child: &mut Option<Child>| match child.as_mut().map(Child::try_wait) {
+            None => true,
+            Some(Ok(None)) => false,
+            Some(_) => {
+                *child = None;
+                true
+            }
+        };
+        match self {
+            Self::Own(child) => gone(child),
+            Self::Shared(cancel) => gone(&mut cancel.lock().child),
+        }
+    }
+
+    /// Wait for the helper to exit after its response. Stop it after a grace time.
+    fn reap(&mut self) {
+        let start = Instant::now();
+        while start.elapsed() < EXIT_GRACE {
+            if self.exited() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.stop();
+    }
+}
+
+impl Drop for RunningHelper<'_> {
+    fn drop(&mut self) {
+        self.stop();
+        if let Self::Shared(cancel) = self {
+            cancel.lock().wake = None;
         }
     }
 }
@@ -944,18 +1159,6 @@ fn read_line(stdout: impl Read) -> Result<Vec<u8>, NativeError> {
     }
     buffer.pop();
     Ok(buffer)
-}
-
-/// Wait for the helper to exit after its response. Stop it after a grace time.
-fn reap(child: &mut Child) {
-    let start = Instant::now();
-    while start.elapsed() < EXIT_GRACE {
-        match child.try_wait() {
-            Ok(Some(_)) | Err(_) => return,
-            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-        }
-    }
-    stop(child);
 }
 
 fn stop(child: &mut Child) {

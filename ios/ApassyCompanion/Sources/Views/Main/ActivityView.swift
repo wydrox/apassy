@@ -6,24 +6,18 @@ struct ActivityView: View {
     let session: SessionModel
 
     var body: some View {
-        NavigationStack {
-            Group {
-                if session.showsConnectionScreen(rows: session.activity.count) {
-                    ConnectionUnavailableView(session: session)
-                } else if session.activity.isEmpty {
-                    ContentUnavailableView(
-                        "No activity yet", systemImage: "clock",
-                        description: Text("Decisions of the bouncer and of you show here."))
-                } else {
-                    List(session.activity) { entry in
-                        ActivityRow(entry: entry)
-                    }
-                    .scrollEdgeEffectStyle(.soft, for: .top)
-                    .refreshable { await session.refresh() }
-                }
+        if session.showsConnectionScreen(rows: session.activity.count) {
+            ConnectionUnavailableView(session: session)
+        } else if session.activity.isEmpty {
+            ContentUnavailableView(
+                "No activity yet", systemImage: "clock",
+                description: Text("Decisions of the bouncer and of you show here."))
+        } else {
+            List(session.activity) { entry in
+                ActivityRow(entry: entry)
             }
-            .navigationTitle("Activity")
-            .connectionCapsule(session)
+            .scrollEdgeEffectStyle(.soft, for: .top)
+            .refreshable { await session.refresh() }
         }
     }
 }
@@ -104,10 +98,10 @@ struct DecisionBadge: View {
 
 #if DEBUG
     #Preview("Activity") {
-        ActivityView(session: .preview())
+        NavigationStack { ActivityView(session: .preview()) }
     }
 
     #Preview("No activity") {
-        ActivityView(session: .preview(inbox: Inbox(runs: [], accessRequests: [], activity: [])))
+        NavigationStack { ActivityView(session: .preview(inbox: Inbox(runs: [], accessRequests: [], activity: []))) }
     }
 #endif

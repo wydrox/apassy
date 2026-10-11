@@ -32,6 +32,8 @@ When an agent that sees all credentials (ADR 0012) runs a command with an item t
 - The item must be in the catalog: not archived, with a usable process field (`needs_field` still refuses), and reviewed after a restore.
 - The waiting run names each item of the first use, the folder of the offer, and the declaration that the grant saves.
 - The folder of the offer is the nearest parent of the working directory that has `.git`, up to the home folder. Without one, it is the working directory.
+- A folder that is the root, the home folder, or a parent of the home folder gets "Allow once" only, including filesystem aliases such as macOS `/.nofollow` and `/System/Volumes/Data`. The card does not show "Allow in FOLDER". The queue refuses a crafted `ApproveAndGrant` for such a folder (`NothingToGrant`), and the broker checks the folder again before it saves (`grant_failed`). "Allow once" still works.
+- The card shows what the process gets for each new item, as `process_binding` delivers it now: the real value or a placeholder with its hosts. An automatic binding delivers the real value, and a grant in the folder keeps delivering it. Paths and names on the card, the folder in the owner-check dialog, and the names in the Touch ID prompt lose control and format characters and are shortened. The proof still names the exact path.
 - The bouncer model is not asked. A first use always waits for the owner. A model must never give new access.
 - An agent has at most one waiting first-use run. A second one gets `first_use_waiting`. This limits prompts from a prompt injection.
 - An agent that does not see all credentials still gets `not_granted`. It cannot learn which items exist.
@@ -44,7 +46,7 @@ The approval card has three answers:
 | Allow once | The run starts. Nothing is saved. | Yes |
 | Deny | The run does not start. | No |
 
-The broker saves the grant and the declaration after it checks the vault again, in the same vault session, before it reads the secrets. This is the same order as "Approve and remember" (ADR 0010). One owner check covers the run, the grant, and the declaration (`OwnerAction::ApproveAndGrant`).
+The broker saves the grant and the declaration after it checks the vault again, in the same vault session, before it reads the secrets. This is the same order as "Approve and remember" (ADR 0010). One owner check covers the run, the grant, and the declaration (`OwnerAction::ApproveAndGrant`). The check text names the declaration that it saves, and says that later clean runs in the folder may start without asking. For a production declaration it says that the item still waits at each run. After the check the app says only that the run is approved and that Apassy saves the access when the run starts: the queue took the answer, and the broker saves after its second check.
 
 The iPhone can approve a first use only once. It never makes a grant (ADR 0020: a phone approves a run only). The digest of a run does not change.
 

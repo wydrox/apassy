@@ -269,3 +269,53 @@ ul {
 .username {
   color: var(--muted);
 }
+
+/* A login with a one-time code: the login button, then "Fill code". */
+li.with-code {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+li.with-code .login {
+  flex: 1;
+  min-width: 0;
+}
+
+.code {
+  flex: none;
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.code:hover {
+  background: var(--hover);
+}
+
+.code:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+footer {
+  padding: 10px 14px 12px;
+  border-top: 1px solid var(--line);
+}
+
+footer .toggle {
+  margin: 0;
+  padding-bottom: 0;
+}
+
+footer .hint {
+  margin: 4px 0 0;
+}
+
+footer .hint.error {
+  color: var(--error);
+}

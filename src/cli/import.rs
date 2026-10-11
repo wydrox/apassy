@@ -13,6 +13,11 @@ const MAX_DETAILS: usize = 10;
 const MAX_DETAIL_LABEL_BYTES: usize = 31;
 /// The vault limit of a title.
 const MAX_NAME_CHARS: usize = 200;
+/// The label of an imported one-time password. It is `apassy::otp::LABEL`, which needs
+/// the vault feature; the command line builds without it. A test below keeps them equal.
+/// Items that an earlier version imported are labeled "One-time code"; the app reads
+/// that label too.
+const OTP_LABEL: &str = "One-time password";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -424,7 +429,7 @@ fn parse_csv_items(text: &str) -> (Vec<Entry>, Vec<Skipped>) {
         let otp = otp.trim().to_owned();
         if !otp.is_empty() {
             item.details.push(DetailInput {
-                label: "One-time code".to_owned(),
+                label: OTP_LABEL.to_owned(),
                 value: SecretText::new(otp),
                 hidden: true,
             });
@@ -590,13 +595,38 @@ Empty,,,,,false,false,,\n";
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].item.kind, Some(CredentialKind::Login));
         assert_eq!(entries[0].item.service.as_deref(), Some("github.com"));
-        assert_eq!(entries[0].item.details[0].label, "One-time code");
+        assert_eq!(entries[0].item.details[0].label, "One-time password");
         assert!(entries[0].item.details[0].hidden);
         assert_eq!(entries[1].item.kind, Some(CredentialKind::ApiKey));
         assert_eq!(entries[1].item.notes.as_deref(), Some("test key"));
         assert_eq!(entries[2].item.kind, Some(CredentialKind::Custom));
         assert_eq!(secret(&entries[2]), "network: home");
         assert_eq!(skipped.len(), 1);
+        assert!(!format!("{entries:?}").contains("canary"));
+    }
+
+    #[test]
+    fn the_imported_one_time_label_is_the_canonical_one_and_the_app_reads_it() {
+        assert_eq!(OTP_LABEL.len(), "One-time password".len());
+        assert!(OTP_LABEL.len() <= MAX_DETAIL_LABEL_BYTES);
+        #[cfg(feature = "vault")]
+        {
+            assert_eq!(OTP_LABEL, crate::otp::LABEL);
+            assert!(crate::otp::is_otp_label(OTP_LABEL));
+            // The label of items that an earlier version imported.
+            assert!(crate::otp::is_otp_label("One-time code"));
+        }
+    }
+
+    #[test]
+    fn bitwarden_totp_column_gets_the_same_label() {
+        let text = "folder,favorite,type,name,notes,fields,reprompt,login_uri,login_username,login_password,login_totp\n\
+,,login,Mail,,,0,https://mail.example.test,me,mail-pass-canary,otpauth://totp/m?secret=ABC\n";
+        let (entries, skipped) = parse(Format::Bitwarden, text, &Options::default());
+        assert!(skipped.is_empty(), "{skipped:?}");
+        let detail = &entries[0].item.details[0];
+        assert_eq!(detail.label, OTP_LABEL);
+        assert!(detail.hidden);
         assert!(!format!("{entries:?}").contains("canary"));
     }
 

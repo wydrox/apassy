@@ -6,7 +6,7 @@ Use only synthetic values for tests. This document does not open the real-secret
 
 ## 1. What it does
 
-The iPhone app shows the runs that wait for you, and lets you approve or deny them with Face ID. Use it when you are away from the Mac but on the same network, and an agent waits for a decision (120 s).
+The iPhone app shows the runs that wait for you, and lets you approve or deny them with Face ID. Use it when an agent waits for a decision (120 s). The iPhone must reach the Mac through the local network or Tailscale.
 
 | The iPhone can | The iPhone cannot |
 | --- | --- |
@@ -14,7 +14,7 @@ The iPhone app shows the runs that wait for you, and lets you approve or deny th
 | Approve a run, or approve and remember its pattern, with Face ID | Unlock the vault, or approve anything while the vault is locked |
 | Deny a run or an access request | Give access, or change a grant, a rule, a declaration, or a setting |
 | See the newest 50 entries of the activity log | Pair another iPhone, or remove another iPhone |
-| Remove its own pairing | Reach the Mac outside the local network |
+| Remove its own pairing | Reach the Mac without a local network or Tailscale connection |
 
 An approval on the iPhone is as strong as Touch ID on the Mac: your Face ID, now, for this run. It goes through the same owner check as every other approval. A notification is never an approval.
 
@@ -32,7 +32,11 @@ The first start makes a self-signed certificate and keeps it in the vault. The i
 
 ## 3. Pair an iPhone
 
-Pair on the same Wi-Fi as the Mac. Have the iPhone app open.
+Connect the iPhone and Mac to the same Wi-Fi network, or connect both to Tailscale. Have the iPhone app open.
+
+For Tailscale, connect the Mac before you select "Pair an iPhone". The new QR code includes its Tailscale IPv4 address. An old pairing code does not gain this address when Tailscale starts. If you paired before this update, remove the old pairing. Then pair again to store the Tailscale address on the iPhone. Tailscale must permit the iPhone to connect to the Mac on TCP port 48620, or the port shown in Settings. Apassy does not change Tailscale access rules.
+
+Install the updated Mac app to include Tailscale in new QR codes. For mobile data, install the updated iPhone app too. The iPhone permits cellular connections to Tailscale IPv4 addresses from the pairing link. Certificate pin checks still apply to each connection. Apassy reads Tailscale status from its standard installation paths. If Tailscale is absent, stopped, or has no locally assigned IPv4 address, the QR code contains only the available local network hosts.
 
 1. In Settings > Pair an iPhone, select "Pair an iPhone". The Mac shows a QR code, its name, and a countdown. The code works for 5 minutes and for one pairing.
 2. In the iPhone app, select "Scan the code" and scan the QR code. Give the iPhone a name if the app asks. The app asks for Face ID once, and then shows a 6-digit code.
@@ -79,7 +83,7 @@ It never gets a secret value, a placeholder, an agent token, a note, or a hidden
 
 | Symptom | What to check |
 | --- | --- |
-| The iPhone says the Mac is not reachable | The Mac and the iPhone are on the same Wi-Fi. The vault is unlocked (a lock stops the listener). Settings > Notifications > iPhone companion says "Listening on port …". Some guest and hotel networks stop devices from talking to each other. |
+| The iPhone says the Mac is not reachable | The Mac and the iPhone are on the same Wi-Fi, or both are connected to Tailscale. For Tailscale, make a new pairing code after the Mac connects and check that the network permits the listener port. The vault is unlocked (a lock stops the listener). Settings > Notifications > iPhone companion says "Listening on port …". Some guest and hotel networks stop devices from talking to each other. |
 | The iPhone app says to allow local network access | In the iPhone Settings > Privacy & Security > Local Network, turn on Apassy. iOS asks the first time the app connects. If you refused, turn it on there. |
 | The Mac asks "Do you want the application Apassy to accept incoming network connections?" | Select "Allow". macOS asks once, the first time the listener starts. If the firewall is on and you refused, open System Settings > Network > Firewall, and allow incoming connections for Apassy. |
 | "Nothing listens on the network", or "another program already uses port 48620" | Another program uses the port. Close it, then select "Try again". |
@@ -98,12 +102,12 @@ It never gets a secret value, a placeholder, an agent token, a note, or a hidden
 These come from [ADR 0020](../adr/0020-iphone-companion.md), "What this does not protect".
 
 - **The iPhone shows commands.** A run can show a folder path, a host, a command line, and the user request. The iPhone does not store them on disk. Whoever holds the unlocked iPhone can read them.
-- **Local network only.** It does not work away from home. A relay ([ADR 0016](../adr/0016-team-alpha-relay.md)) is a later decision.
+- **Local network or Tailscale.** A paired iPhone can reach the Mac away from home through Tailscale. Both devices must be connected, and Tailscale access rules must permit the listener port. Apassy does not publish the listener on the Internet.
 - **No push notifications.** The iPhone sees a new run only while its app is open. The Mac notifications stay the only push.
 - **A compromised Mac.** The Mac is the trust root. A Mac under an attacker's control can show the iPhone a false run. It can already run anything.
 - **A stolen, unlocked iPhone can deny.** The request key needs no biometry, so whoever holds the unlocked iPhone can deny runs and access requests, and a denial blocks a remembered pattern. It cannot approve without Face ID. Remove the device on the Mac.
 - **Every network of the Mac.** While the setting is on and the vault is unlocked, the listener answers on each network the Mac joins, also a hotel Wi-Fi. Without a paired key it answers nothing useful. Turn the setting off when you do not want this.
-- **A new network surface.** A bug in the HTTP parser or the TLS stack is reachable from the local network while the setting is on. The listener reuses `rustls`, limits the size and the time of a request, the connections, and the rate, and refuses each connection from the Mac itself, from any of its addresses, so an agent on the Mac cannot use it.
+- **A new network surface.** A bug in the HTTP parser or the TLS stack is reachable from the local network or Tailscale while the setting is on. The listener reuses `rustls`, limits the size and the time of a request, the connections, and the rate, and refuses each connection from the Mac itself, from any of its addresses, so an agent on the Mac cannot use it.
 - **The key of the listener in memory.** `rustls` keeps a copy of the private key in its configuration and does not erase it when the listener stops. A lock drops the configuration, but the memory is not overwritten. Apassy makes no other copy of the key and erases the vault copy, but the parsed key inside `rustls` and `ring` is out of its reach, so "Reset pairing" is how to retire a key.
 - **Production credentials.** The owner can approve a run with a production credential on the iPhone, with Face ID, as on the Mac.
 - **Give access is not on the iPhone.** It needs the place and the decision of [ADR 0012](../adr/0012-agent-visibility-and-access-requests.md).

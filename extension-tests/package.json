@@ -3,9 +3,13 @@
   "private": true,
   "description": "End-to-end tests of the Apassy browser extension in Helium, against a mock native messaging host.",
   "scripts": {
-    "test": "playwright test"
+    "test": "playwright test",
+    "passkey-rp:start": "node fixtures/passkey-rp/rp-server.mjs",
+    "passkey-rp:check": "node --test fixtures/passkey-rp/unit-checks.mjs",
+    "passkey-rp:core-check": "cargo build --locked --features vault --example passkey-rp-core && node fixtures/passkey-rp/core-checks.mjs"
   },
   "devDependencies": {
-    "@playwright/test": "1.63.0"
+    "@playwright/test": "1.63.0",
+    "@simplewebauthn/server": "14.0.3"
   }
 }

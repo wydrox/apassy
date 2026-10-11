@@ -25,6 +25,8 @@
 mod owner_auth;
 
 use std::collections::BTreeMap;
+use std::os::unix::fs::MetadataExt;
+use std::path::Path;
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -32,7 +34,7 @@ use crate::vault::{Declaration, SuggestedDeclaration};
 
 pub use owner_auth::{
     CheckMethod, OwnerAction, OwnerAuthError, OwnerCheck, OwnerGate, OwnerProof, PROOF_LIFETIME,
-    ProofRefusal, touch_id_detail,
+    ProofRefusal, grant_declarations, grant_has_production, touch_id_detail,
 };
 
 /// How often a waiting run checks that its vault session is still valid.
@@ -70,6 +72,95 @@ pub struct RememberOffer {
     pub approvals: u32,
     /// Approvals that the pattern needs to run without a prompt.
     pub needed: u32,
+}
+
+/// True when `folder` is too wide for a lasting grant (ADR 0024): the root, the home
+/// folder, a parent of the home folder, or a filesystem alias of one of them. Such
+/// a folder gets "Allow once" only. The
+/// card, the queue, and the broker all ask this one function. Without a usable `HOME`,
+/// only the root is known to be broad.
+pub fn folder_is_broad(folder: &str) -> bool {
+    let home = std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .and_then(|home| std::fs::canonicalize(home).ok());
+    folder_is_broad_with(Path::new(folder), home.as_deref())
+}
+
+/// A path for a card or a dialog: control and direction characters become `?`, and a
+/// path longer than `max` characters keeps its start and its end around `…`. Only the
+/// text on screen changes. A proof always names the exact path.
+pub fn shown_path(path: &str, max: usize) -> String {
+    let clean: Vec<char> = path
+        .chars()
+        .map(|c| {
+            // Foundation's controlCharacters also contains Unicode format (Cf)
+            // scalars. Keep display text acceptable to the native owner prompt.
+            // Unicode 17: ucd/extracted/DerivedGeneralCategory.txt, category Cf.
+            let hidden = c.is_control()
+                || matches!(
+                    c,
+                    '\u{00AD}'
+                        | '\u{0600}'..='\u{0605}'
+                        | '\u{061C}'
+                        | '\u{06DD}'
+                        | '\u{070F}'
+                        | '\u{0890}'..='\u{0891}'
+                        | '\u{08E2}'
+                        | '\u{180E}'
+                        | '\u{200B}'..='\u{200F}'
+                        | '\u{202A}'..='\u{202E}'
+                        | '\u{2060}'..='\u{206F}'
+                        | '\u{FEFF}'
+                        | '\u{FFF9}'..='\u{FFFB}'
+                        | '\u{110BD}'
+                        | '\u{110CD}'
+                        | '\u{13430}'..='\u{1343F}'
+                        | '\u{1BCA0}'..='\u{1BCA3}'
+                        | '\u{1D173}'..='\u{1D17A}'
+                        | '\u{E0001}'
+                        | '\u{E0020}'..='\u{E007F}'
+                );
+            if hidden { '?' } else { c }
+        })
+        .collect();
+    if clean.len() <= max {
+        return clean.into_iter().collect();
+    }
+    let keep = max.saturating_sub(1);
+    let (head, tail) = (keep / 2, keep - keep / 2);
+    let mut out: String = clean[..head].iter().collect();
+    out.push('…');
+    out.extend(&clean[clean.len() - tail..]);
+    out
+}
+
+fn folder_is_broad_with(folder: &Path, home: Option<&Path>) -> bool {
+    let canonical = std::fs::canonicalize(folder).ok();
+    if [Some(folder), canonical.as_deref()]
+        .into_iter()
+        .flatten()
+        .any(|folder| {
+            folder.parent().is_none() || home.is_some_and(|home| home.starts_with(folder))
+        })
+    {
+        return true;
+    }
+    let Some((home, home_metadata)) = home.and_then(|home| {
+        std::fs::metadata(home)
+            .ok()
+            .map(|metadata| (home, metadata))
+    }) else {
+        return false;
+    };
+    // realpath does not resolve all filesystem aliases (for example macOS firmlinks
+    // and /.nofollow). A folder aliases HOME or an ancestor if appending that
+    // ancestor's relative path to HOME reaches the same directory identity.
+    home.ancestors().any(|ancestor| {
+        let relative_home = home.strip_prefix(ancestor).expect("ancestor of home");
+        std::fs::metadata(folder.join(relative_home)).is_ok_and(|metadata| {
+            metadata.dev() == home_metadata.dev() && metadata.ino() == home_metadata.ino()
+        })
+    })
 }
 
 /// A first use (ADR 0024): the items of a waiting run that the agent has no process
@@ -172,7 +263,8 @@ pub enum ApprovalRefusal {
     Changed,
     /// "Approve and remember" for a run that cannot teach a pattern.
     NothingToRemember,
-    /// "Allow in this folder" for a run without a first use.
+    /// "Allow in this folder" for a run without a first use, or for a folder that is too
+    /// wide for a lasting grant (the root, the home folder, or a parent of it).
     NothingToGrant,
     /// The declarations of "Allow in this folder" do not match the first use: each
     /// item without a declaration needs exactly one.
@@ -192,7 +284,7 @@ impl ApprovalRefusal {
                 "This run cannot teach a pattern. Nothing was approved. Use \"Approve once\"."
             }
             Self::NothingToGrant => {
-                "This run has no first use. Nothing was approved. Use \"Approve once\"."
+                "This run cannot get access in a folder. Nothing was approved. Use \"Allow once\"."
             }
             Self::DeclarationsDoNotMatch => {
                 "Each new credential needs one declaration. Nothing was approved. Review the request again."
@@ -372,6 +464,10 @@ impl ApprovalQueue {
         };
         if waiting != confirmed {
             return Err(ApprovalRefusal::Changed);
+        }
+        // A crafted request cannot save a lasting grant for the root or the home folder.
+        if folder_is_broad(&waiting.folder) {
+            return Err(ApprovalRefusal::NothingToGrant);
         }
         let undeclared: Vec<u64> = waiting
             .items
@@ -621,6 +717,73 @@ mod tests {
     fn start_waiter(queue: &Arc<ApprovalQueue>) -> std::thread::JoinHandle<ApprovalOutcome> {
         let queue = Arc::clone(queue);
         std::thread::spawn(move || queue.wait_for(run(), Duration::from_secs(5), || true))
+    }
+
+    /// ADR 0024: the root, the home folder, and its parents are broad. A project below
+    /// the home folder, a sibling, and a folder elsewhere are not.
+    #[test]
+    fn a_lasting_grant_is_refused_for_the_root_the_home_folder_and_its_parents() {
+        let home = Path::new("/Users/synthetic");
+        for broad in ["/", "/Users", "/Users/synthetic"] {
+            assert!(
+                folder_is_broad_with(Path::new(broad), Some(home)),
+                "{broad}"
+            );
+        }
+        for narrow in [
+            "/Users/synthetic/shop",
+            "/Users/synthetic/shop/api",
+            "/Users/other",
+            "/tmp/shop",
+        ] {
+            assert!(
+                !folder_is_broad_with(Path::new(narrow), Some(home)),
+                "{narrow}"
+            );
+        }
+        // Without a home folder only the root is known to be broad.
+        assert!(folder_is_broad_with(Path::new("/"), None));
+        assert!(!folder_is_broad_with(Path::new("/Users"), None));
+        assert!(!folder_is_broad("/tmp/synthetic-not-the-home-folder"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_filesystem_aliases_of_home_and_its_ancestors_are_broad() {
+        let Some(home) = std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .and_then(|home| std::fs::canonicalize(home).ok())
+        else {
+            return;
+        };
+        let home_metadata = std::fs::metadata(&home).expect("home metadata");
+        let relative_home = home.strip_prefix("/").expect("absolute home");
+        for prefix in [Path::new("/.nofollow"), Path::new("/System/Volumes/Data")] {
+            // Only exercise aliases present on this host. Read metadata alone; never
+            // read or modify the real home directory's contents.
+            let aliases_home =
+                std::fs::metadata(prefix.join(relative_home)).is_ok_and(|metadata| {
+                    metadata.dev() == home_metadata.dev() && metadata.ino() == home_metadata.ino()
+                });
+            if !aliases_home {
+                continue;
+            }
+            for ancestor in home.ancestors() {
+                let alias = prefix.join(ancestor.strip_prefix("/").expect("absolute ancestor"));
+                assert!(
+                    folder_is_broad_with(&alias, Some(&home)),
+                    "{}",
+                    alias.display()
+                );
+            }
+        }
+        let dir = tempfile::tempdir().expect("temp dir");
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).expect("project dir");
+        let linked_project = dir.path().join("linked-project");
+        std::os::unix::fs::symlink(&project, &linked_project).expect("project symlink");
+        assert!(!folder_is_broad_with(&project, Some(&home)));
+        assert!(!folder_is_broad_with(&linked_project, Some(&home)));
     }
 
     /// Goal item A4: an approval needs a fresh proof for exactly the waiting run.
@@ -925,4 +1088,15 @@ mod tests {
         };
         assert_ne!(old, new, "run IDs start at a random value");
     }
+}
+#[test]
+fn shown_paths_hide_format_characters_and_keep_printable_unicode() {
+    assert_eq!(
+        shown_path("/tmp/a\u{00AD}b\u{E0041}\u{206A}/界é🦀", usize::MAX),
+        "/tmp/a?b??/界é🦀"
+    );
+    assert_eq!(
+        shown_path("\u{0600}\u{0891}\u{180E}\u{1343F}\u{FFF9}", usize::MAX),
+        "?????"
+    );
 }

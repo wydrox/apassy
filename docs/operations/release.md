@@ -1,8 +1,8 @@
 # Release and download site
 
-Date: 2026-09-28.
+Date: 2026-10-09.
 
-Each push to `main` that passes CI publishes a signed and notarized `Apassy.dmg` at <https://apassy.wyderka.cc/download/Apassy.dmg>. A push that changes only `site/` or `design/` runs no CI, so it publishes no new build.
+Each push to `main` that passes CI and names a released version (see [Release eligibility](#release-eligibility)) publishes a signed and notarized `Apassy.dmg` at <https://apassy.wyderka.cc/download/Apassy.dmg>. A push that changes only `site/` or `design/` runs no CI, so it publishes no new build.
 The site is a static Astro page in `site/`, served by a Cloudflare Worker on the same domain.
 
 ## How it works
@@ -11,14 +11,16 @@ The site is a static Astro page in `site/`, served by a Cloudflare Worker on the
 | --- | --- | --- |
 | Site | `site/src/pages/index.astro` | The home page, one component per section in `site/src/components`. Light or dark from the system setting. The design follows [t3.codes](https://t3.codes), as the footer says. |
 | Changelog page | `site/src/pages/changelog.astro` | Renders `CHANGELOG.md` at `/changelog`. Links to `docs/...` go to GitHub. |
+| Site version | `site/src/lib/site.ts` | `VERSION` is the first dated release section of `CHANGELOG.md`, not the version of `Cargo.toml`. The site never advertises a version that is not released. |
 | Installer | `scripts/install.sh`, served at `/install.sh` (`site/src/pages/install.sh.ts`, `site/public/_headers`) | Builds the newest release from source, signs it with the Apple Development identity of the person who runs it, and installs it in `/Applications`. Until `/latest.json` exists, the "Coming soon for macOS" button opens a note with its command. |
 | Screenshots | `scripts/screenshots.sh` | Takes `docs/images/app-*.png` from the real app with synthetic data (`examples/screenshots.rs`). The README and the site use them. |
 | Worker | `site/worker/index.ts` | Serves the files of the site. Adds `/download` (302), `/download/Apassy.dmg`, and `/latest.json` from the R2 bucket `apassy-downloads`. |
-| Site workflow | `.github/workflows/site.yml` | On a change in `site/` or in a file that the site builds from (`scripts/install.sh`, `Cargo.toml`, `CHANGELOG.md`, `docs/images/`): type check and build. On `main`: `wrangler deploy`. Makes the bucket on the first deploy. |
-| Release workflow | `.github/workflows/release.yml` | After each green CI run of a push to `main`: verify the CI binaries, sign, notarize, and upload. |
+| Site workflow | `.github/workflows/site.yml` | On a change in `site/` or in a file that the site builds from (`scripts/install.sh`, `Cargo.toml`, `CHANGELOG.md`, `docs/images/`): type check and build. On `main`, for an eligible released version: `wrangler deploy`. Makes the bucket on the first deploy. |
+| Release workflow | `.github/workflows/release.yml` | After each green CI run of a push to `main`: check that the version is released, verify the CI binaries, sign, notarize, and upload. |
+| Release eligibility | `scripts/ci-release-ready.py` | Decides whether `Cargo.toml` names a released version of `CHANGELOG.md`. Runs in the job `ready`, before any signing. |
 | Disk image | `scripts/build-dmg.sh`, `scripts/layout-dmg.sh` | Packages `target/Apassy.app` into `target/dist/Apassy.dmg`, saves the Finder install window, and writes `target/dist/latest.json`. |
 
-Before the owner adds the Apple secrets, the release workflow publishes nothing and shows a warning. Without `CLOUDFLARE_API_TOKEN`, the site workflow builds the site and skips the deploy with a warning. The site then says "Coming soon for macOS", because `/latest.json` does not exist.
+Before the owner adds the Apple secrets, the release workflow publishes nothing and shows a warning. If only some of the Apple secrets exist, the workflow fails. Without `CLOUDFLARE_API_TOKEN`, the site workflow builds the site and skips the deploy with a warning. The site then says "Coming soon for macOS", because `/latest.json` does not exist.
 
 ### Source releases
 
@@ -26,15 +28,17 @@ A GitHub source release does not prove that an installer is available. For 0.3.2
 
 Before a source release, push the release commit to `main` and check CI on that exact commit. Then create both tags and the GitHub release. A tag push does not start app CI or publish a disk image. If release credentials are absent, the release notes must state that the release contains source code only. Do not attach an Apple Development build as a public installer.
 
-The release workflow runs on `macos-15`:
+The release workflow first runs the job `ready` on `ubuntu-24.04`, then the job `macos` on `macos-15`. See [Release eligibility](#release-eligibility) for `ready`. The job `macos` does these steps:
 
 1. It checks that the commit is still the head of `main`. CI runs finish in any order, and an older commit must not replace a newer image.
 2. It verifies the successful CI run through the GitHub API. The run must be a push to `main` in this repository for the same commit. It downloads that run's unsigned binary artifact and checks its commit, build date, run ID, attempt, version, architecture, and file hashes. Only then can it import the Developer ID certificate into a temporary keychain. The signing job does not compile Rust.
 3. If the bucket has `models/apassy-base-v1.safetensors`, it downloads the checkpoint. `scripts/build-app.sh` checks it against `tools/basemodel/manifest.json`. Without it, the app ships without the base model, and the run shows a warning.
-4. If the secret `MACOS_KEYCHAIN_PROFILE` is set, it embeds the keychain profile for Touch ID unlock. See [Touch ID unlock](#touch-id-unlock).
-5. `scripts/build-app.sh` checks the binary artifact again, builds the native helpers, and signs the app with the hardened runtime and a secure timestamp. It runs all existing bundle and signature checks. The program and the signed `Info.plist` use the commit and build date from CI ([updates](updates.md)).
-6. `scripts/build-dmg.sh --notarize` notarizes the app, staples it, makes the disk image, signs it, notarizes it, and staples it. `spctl` must accept both.
-7. It checks the head of `main` again. If the commit still matches, it uploads `Apassy.dmg`, then `latest.json`, to the bucket. The run summary shows `latest.json`.
+4. It selects Xcode 26.3 (`/Applications/Xcode_26.3.app`, macOS SDK 26.2). See [Xcode and SDK](#xcode-and-sdk).
+5. If the secret `MACOS_KEYCHAIN_PROFILE` is set, it embeds the keychain profile for Touch ID unlock. See [Touch ID unlock](#touch-id-unlock).
+6. It decodes the two provider profiles `MACOS_AUTOFILL_PROFILE` and `MACOS_PROVIDER_APP_PROFILE` into private files, and sets `APASSY_REQUIRE_PROVIDER=1`. See [AutoFill provider profiles](#autofill-provider-profiles).
+7. `scripts/build-app.sh` checks the binary artifact again, builds the native helpers and the AutoFill provider, and signs the app with the hardened runtime and a secure timestamp. It runs all existing bundle and signature checks. With `APASSY_REQUIRE_PROVIDER=1`, the build stops if the provider is not in the app. The program and the signed `Info.plist` use the commit and build date from CI ([updates](updates.md)).
+8. `scripts/build-dmg.sh --notarize` checks the provider in the app and in the mounted image, notarizes the app, staples it, makes the disk image, signs it, notarizes it, and staples it. `spctl` must accept both.
+9. It checks the head of `main` again. If the commit still matches, it uploads `Apassy.dmg`, then `latest.json`, to the bucket. The run summary shows `latest.json`.
 
 The bucket keeps only the latest build. The Worker serves only `Apassy.dmg` and `latest.json`. Other keys, such as `models/`, stay private. The upload sets `Cache-Control: no-cache` on both, and the Worker passes it on, so the app and the site get a new `latest.json` at once.
 
@@ -89,6 +93,24 @@ The first run, a dependency change, runner queues, or notarization delays can ta
 Confirm the target with live CI and Release timings before treating it as a release time guarantee.
 The artifact tools require Python 3.11 or later; CI selects Python 3.12.
 
+## Release eligibility
+
+Every green CI run of a push to `main` starts the release workflow, and the site derives its version from the repository. So a version in `Cargo.toml` that is not ready to ship must not reach the signing job. The job `ready` runs `scripts/ci-release-ready.py` on `Cargo.toml` and `CHANGELOG.md` of the commit that passed CI, before the job `macos` starts. The job `macos` needs `ready` and runs only when it answers `production=true`.
+
+A version is eligible only when all of these hold:
+
+- `Cargo.toml` has a plain package version, such as `0.3.6`.
+- The first section of `CHANGELOG.md` below the intro that is not `## [Unreleased]` is `## [VERSION] - YYYY-MM-DD` for exactly that version, with a real date. A newer release section, a missing date, a different version, a yanked marker, or any other `##` heading there makes the version ineligible.
+- Every `## [Unreleased]` section above that release is empty. A standard empty heading is allowed. A single line of text, list item, or subsection under it is not.
+
+Any other state, including a file that cannot be parsed, skips the production release. A skip is not an error: the job `ready` ends green, the job `macos` is skipped, and the run shows a notice with the reason. No secret is read, nothing is signed, and nothing is uploaded. This applies to a manual run with `ci_run_id` as well. To release a version, move its entries from `Unreleased` into a dated section, and set the same version in `Cargo.toml`, in one commit.
+
+A skipped run is still a green CI on `main`. The existing checks for the exact head of `main`, the same CI run, and the artifact stay as they are.
+
+The job `provider-check` does not depend on `ready`. It is a test build of a branch and never publishes.
+
+The site workflow also runs the eligibility helper before deployment. An ineligible version still gets a site check and build, but no Cloudflare deployment, including a manual run on `main`. The existing public site stays unchanged. `VERSION` in `site/src/lib/site.ts` is the first dated release section of `CHANGELOG.md`. While `Cargo.toml` names a version that has no dated section, the site still shows the last released version and `/latest.json` is unchanged.
+
 ## Relay first
 
 A release that uses relay sync needs the relay in step with the app, so deploy in this order. The relay code is in the separate repository `apassy-relay` (the branch that holds SPEC section 24); its deploy commands are in its `docs/OPERATIONS.md`, section 16. Stop at the first step that fails.
@@ -102,7 +124,7 @@ A release that uses relay sync needs the relay in step with the app, so deploy i
 6. Verify a `PUT /v1/sync/snapshot` of a few MiB through the real edge and the tunnel, with a test team and its device (or the app against a scratch vault). The relay must see the `Content-Length` header: the Worker refuses `Transfer-Encoding`, and the relay refuses a chunked body. Check that an oversized declared length gets 413 at the edge, and that the 64 MiB limit of the Cloudflare plan holds (ADR 0022, open question 3). Delete the test team with `admin delete`.
 7. Only then publish the app: the source release and tags of [Source releases](#source-releases), or the push to `main` that runs the release workflow.
 
-Vault schema 16. A vault that the new app opened no longer opens in an app before this release (`verify_user_version`), and a merge refuses a copy of another schema (`src/vault/merge.rs`). So Macs that sync one vault through a folder or the relay must all update. Say this in the release notes: the "Upgrade notes" of the changelog do.
+Vault schema 17 (it was 16). A build of schema 17 migrates a vault of schema 16 when the owner unlocks it, and it reads a copy of schema 16. A build of schema 16 cannot open a vault of schema 17 (`verify_user_version`) or read a copy of it, and a merge refuses a copy of a newer schema (`src/vault/merge.rs`). So every Mac and iPhone that shares one vault through a folder, iCloud Drive, or the relay must update, and the owner must make an encrypted backup first. Say this in the release notes: the "Upgrade notes" of the changelog do.
 
 ## One-time setup
 
@@ -129,9 +151,11 @@ gh secret set APPLE_API_KEY_ID
 gh secret set APPLE_API_ISSUER_ID
 gh secret set CLOUDFLARE_API_TOKEN
 gh secret set CLOUDFLARE_ACCOUNT_ID
+base64 -i Apassy_AutoFill_Developer_ID.provisionprofile | gh secret set MACOS_AUTOFILL_PROFILE
+base64 -i Apassy_App_Developer_ID.provisionprofile | gh secret set MACOS_PROVIDER_APP_PROFILE
 ```
 
-The release workflow stops with a list of the missing secrets. `MACOS_KEYCHAIN_PROFILE` is optional: see [Touch ID unlock](#touch-id-unlock).
+The release workflow stops with a list of the missing secrets. `MACOS_AUTOFILL_PROFILE` and `MACOS_PROVIDER_APP_PROFILE` are required: see [AutoFill provider profiles](#autofill-provider-profiles). `MACOS_KEYCHAIN_PROFILE` is optional: see [Touch ID unlock](#touch-id-unlock).
 
 ### 4. First run
 
@@ -164,6 +188,44 @@ The code is ready. Touch ID unlock is paused by the owner (ADR 0010, fourth roun
 5. In the app: Settings > Security > type the passphrase > "Turn on Touch ID unlock", and touch the sensor.
 
 A Developer ID profile is valid on every Mac. For a local build on this Mac only, `scripts/build-app.sh --provision` gets a development profile through Xcode ([native app](native-app.md), owner steps).
+
+## AutoFill provider profiles
+
+The AutoFill extension offers Apassy for passkeys, passwords, and one-time codes ([Mac passkeys](mac-passkeys.md)). Its entitlement is restricted. macOS stops a program that has the entitlement without a matching profile. So the release needs two Developer ID profiles. Both secrets are required. The release workflow never publishes an app without the provider.
+
+| Secret | App ID | Capability |
+| --- | --- | --- |
+| `MACOS_AUTOFILL_PROFILE` | `com.wydrox.apassy.autofill` | AutoFill Credential Provider |
+| `MACOS_PROVIDER_APP_PROFILE` | `com.wydrox.apassy` | AutoFill Credential Provider |
+
+1. In the team of the Developer ID certificate (`7S3F9767BM`): developer.apple.com > Identifiers. Add the App ID `com.wydrox.apassy.autofill` (explicit). Add the capability "AutoFill Credential Provider" to it. Add the same capability to the App ID `com.wydrox.apassy`.
+2. Profiles > "+" > Distribution > "Developer ID". Make one profile for each App ID. Select the Developer ID Application certificate that signs the release. Download both `.provisionprofile` files.
+3. Add each file as a secret with `base64 -i FILE | gh secret set NAME`, as in [GitHub secrets](#3-github-secrets).
+4. Run the release workflow. The workflow decodes each secret into a private file in `RUNNER_TEMP`, checks that the file is a signed profile, and removes it at the end. It does not print the bytes.
+
+What checks the profiles:
+
+- `scripts/build-credential-provider.sh` checks team, App ID, expiry, AutoFill capability, and certificate. `scripts/build-app.sh` calls it.
+- With `APASSY_REQUIRE_PROVIDER=1`, `scripts/build-app.sh` stops unless the app has `PlugIns/ApassyAutoFill.appex`, `MacOS/apassy-credential-bridge`, and the profile of the main app. Without a valid profile and without the flag, the build leaves the provider out and shows a warning. This is for a local build only.
+- `scripts/build-dmg.sh` checks the provider again in `target/Apassy.app` and in the mounted copy. It checks the layout, the signatures, the AutoFill entitlement of the main app and of the extension, the declared capabilities, and the embedded profiles (team, AutoFill entitlement, expiry). With the flag, a missing part is an error. Without the flag, an app with no provider part is packaged as a development image, and an app with only a part of the provider is an error.
+
+A profile expires. Make a new profile before the expiry date and replace the secret. After expiry, the release fails.
+
+## Xcode and SDK
+
+The provider uses macOS 26 APIs (`ASOneTimeCode…`) behind availability checks. The deployment target stays macOS 15, but the code needs the macOS 26 SDK to compile. The `macos-15` runner image has Xcode 16.4 (SDK 15.5) as default. Xcode 26.0.1, 26.1.1, 26.2, and 26.3 are installed too. SDK 26.2 is in Xcode 26.2 and 26.3 ([image list](https://github.com/actions/runner-images/blob/main/images/macos/macos-15-Readme.md), image `20260907.0337.1`).
+
+The release workflow selects `/Applications/Xcode_26.3.app` with `DEVELOPER_DIR`, and checks that the SDK is 26 or later. If the runner image no longer has this Xcode, the workflow fails early with the list of installed Xcode versions. Change `XCODE_APP` in the step "Select Xcode 26" then. CI keeps the default Xcode. It does not run `scripts/build-app.sh`, so it does not compile the Swift provider.
+
+## Test build of a branch
+
+To test the signed provider without a release, start the job `provider-check` of the release workflow by hand:
+
+```
+gh workflow run release.yml --ref BRANCH -f ci_run_id=provider-check
+```
+
+The value `provider-check` of `ci_run_id` is a switch. It only works for a branch of this repository that is not `main`. The job builds the exact commit of the branch (Rust included), signs it with a private, temporary keychain, embeds the profiles, notarizes the app and the image, and keeps `Apassy.dmg` and `test-build.json` (commit, SHA-256, SDK, run) as a GitHub Actions artifact for 3 days. It does not use R2, the site, or the CI artifact, and the job `macos` does not run. The artifact is test output. It is not a release, and it does not prove that macOS lists Apassy as a provider. That needs a manual check on a Mac.
 
 ## App icon
 
@@ -214,7 +276,9 @@ For `npm run preview`, put test files in the local bucket with `npx wrangler r2 
 
 ## Limits
 
+- Without `MACOS_AUTOFILL_PROFILE` and `MACOS_PROVIDER_APP_PROFILE`, the release workflow fails. A local build without the profiles has no AutoFill extension. See [AutoFill provider profiles](#autofill-provider-profiles).
+- The workflow checks files, signatures, and notarization. It cannot show that macOS registers the extension. A release needs a manual check on a Mac: System Settings > General > AutoFill & Passwords must list Apassy.
 - Without `MACOS_KEYCHAIN_PROFILE`, the published app cannot unlock with Touch ID. See [Touch ID unlock](#touch-id-unlock).
 - The app runs on Apple silicon with macOS 15 or later only. The Linux button of the site opens a note with the team CLI `apassy-team` for Linux (x86-64), which the relay serves at `/dl/` with `SHA256SUMS` (relay OPERATIONS section 18); the note says that the app needs macOS, because the isolation of agents uses macOS Seatbelt.
 - From 0.3.0, the app reads `latest.json`, downloads a newer build, and installs it at "Restart now" or at the next quit ([updates](updates.md), [ADR 0015](../adr/0015-automatic-updates.md)). An app before 0.3.0 does not update itself: install 0.3.0 from the site once. A copy without a Developer ID signature (an ad hoc build, or a build from source signed with Apple Development), or one outside an app bundle, only shows the new version and the download page. A build from source updates when its owner runs `scripts/install.sh` again.
-- The updater trusts the Developer ID team and Apple notarization, not the site. Each green CI run on `main` publishes a new image on the site, but installed apps install only a higher version: raise the version in `Cargo.toml`, `Cargo.lock`, and `extension/manifest.json`, and update `CHANGELOG.md`, to release. Each installed app with automatic install on then gets it within about 6 hours.
+- The updater trusts the Developer ID team and Apple notarization, not the site. Each green CI run on `main` that names a released version publishes a new image on the site, but installed apps install only a higher version: raise the version in `Cargo.toml`, `Cargo.lock`, and `extension/manifest.json`, and update `CHANGELOG.md`, to release. Each installed app with automatic install on then gets it within about 6 hours.

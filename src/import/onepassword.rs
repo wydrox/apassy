@@ -16,9 +16,10 @@ use zeroize::Zeroizing;
 use super::csv::{self, Record};
 use super::{
     Category, Format, ImportError, ImportItem, ImportPreview, ItemBuilder, NOTE_FIELD, Part, Parts,
-    TOTP_KEY, TOTP_LABEL,
+    TOTP_KEY, TOTP_LABEL, detail_label,
 };
 use crate::contracts::CredentialKind;
+use crate::otp::is_otp_label;
 
 // ---- Lenient JSON values. ----
 
@@ -611,6 +612,20 @@ fn custom(mut builder: ItemBuilder, mut parts: Parts, why: Option<&str>) -> Impo
     )
 }
 
+/// The label of a field of the 1Password type `totp`. The type says it is a one-time
+/// password, so the label must say it too, or the app shows a plain secret. A title that
+/// the app does not read as a one-time password stays in the label:
+/// "One-time password (Authenticator key)".
+fn totp_label(title: &str) -> String {
+    if title.trim().is_empty() {
+        TOTP_LABEL.to_owned()
+    } else if is_otp_label(title) {
+        detail_label(title)
+    } else {
+        detail_label(&format!("{TOTP_LABEL} ({})", title.trim()))
+    }
+}
+
 fn push_section_field(builder: &mut ItemBuilder, parts: &mut Parts, field: FieldJson) {
     let FieldJson { title, id, value } = field;
     let id = id.as_str().trim();
@@ -629,8 +644,15 @@ fn push_section_field(builder: &mut ItemBuilder, parts: &mut Parts, field: Field
                 _ => false,
             };
             if kind == "totp" {
-                let label = if label.is_empty() { TOTP_LABEL } else { label };
-                parts.push(Part::new(&[TOTP_KEY, id, title], label, value.0, true));
+                // The ID is a random name, so only the title can name the field.
+                let named = totp_label(title);
+                if !title.is_empty() && !is_otp_label(title) {
+                    builder.warn(format!(
+                        "“{}” is a one-time password. Apassy names it “{named}”.",
+                        detail_label(title)
+                    ));
+                }
+                parts.push(Part::new(&[TOTP_KEY, id, title], &named, value.0, true));
             } else {
                 parts.push(Part::new(&keys, label, value.0, hidden));
             }
@@ -837,4 +859,181 @@ fn map_row(columns: &[Column], labels: &[String], row: Record) -> ImportItem {
         .has(PASSWORD, Some(true))
         .then_some("The row has no username. Apassy imports it as a custom secret.");
     custom(builder, parts, why)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::*;
+    use crate::otp::{Totp, is_otp_label};
+
+    // The RFC 6238 SHA-1 seed. It is a public test value, not a real secret.
+    const SEED: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+
+    fn uri() -> String {
+        format!("otpauth://totp/Synthetic?secret={SEED}&digits=8")
+    }
+
+    fn field(id: &str, title: &str, value: Value) -> Value {
+        json!({ "id": id, "title": title, "value": value })
+    }
+
+    fn login(fields: Vec<Value>) -> ImportPreview {
+        let item = json!({
+            "categoryUuid": "001",
+            "state": "active",
+            "overview": { "title": "Synthetic login", "tags": [] },
+            "details": {
+                "loginFields": [
+                    { "value": "octo", "name": "username", "designation": "username" },
+                    { "value": "SYNTH-OP-login-pass", "name": "password", "designation": "password" },
+                ],
+                "sections": [{ "title": "", "fields": fields }],
+            },
+        });
+        let export =
+            json!({ "accounts": [{ "vaults": [{ "attrs": { "name": "V" }, "items": [item] }] }] });
+        parse_1pux_json(export.to_string().as_bytes()).expect("parse")
+    }
+
+    fn draft(preview: &ImportPreview) -> &super::super::ImportDraft {
+        preview.items[0].draft().expect("ready")
+    }
+
+    #[test]
+    fn a_totp_field_keeps_its_value_and_a_recognized_title() {
+        let preview = login(vec![field(
+            "totp1",
+            "one-time password",
+            json!({ "totp": uri() }),
+        )]);
+        let draft = draft(&preview);
+        let totp = draft.detail("One-time password").expect("detail");
+        assert!(totp.secret);
+        assert_eq!(totp.value.expose(), uri());
+        assert!(preview.items[0].warnings.is_empty());
+    }
+
+    #[test]
+    fn a_totp_field_with_a_custom_title_is_still_a_one_time_password() {
+        for title in ["Authenticator key", "Password", "2FA", "Secret"] {
+            let preview = login(vec![field("x1", title, json!({ "totp": uri() }))]);
+            let draft = draft(&preview);
+            let labels = draft.detail_labels();
+            assert_eq!(labels.len(), 1, "{title}");
+            assert!(is_otp_label(&labels[0]), "{title}: {}", labels[0]);
+            // The title stays in the label, as far as the label limit allows.
+            assert!(labels[0].starts_with("One-time password ("), "{labels:?}");
+            assert!(labels[0].len() <= 31);
+            let field = draft.detail(&labels[0]).expect("detail");
+            assert!(field.secret);
+            assert_eq!(field.value.expose(), uri());
+            assert_eq!(preview.items[0].warnings.len(), 1);
+            // The login password keeps its own place.
+            assert_eq!(
+                draft.field("password").expect("password").value.expose(),
+                "SYNTH-OP-login-pass"
+            );
+        }
+    }
+
+    #[test]
+    fn a_totp_field_without_a_title_gets_the_canonical_label() {
+        let preview = login(vec![field("totp_abc123", "", json!({ "totp": SEED }))]);
+        let draft = draft(&preview);
+        assert_eq!(draft.detail_labels(), ["One-time password"]);
+        assert!(draft.detail("One-time password").expect("detail").secret);
+        assert!(preview.items[0].warnings.is_empty());
+    }
+
+    #[test]
+    fn several_totp_fields_get_unique_labels_that_are_all_recognized() {
+        let preview = login(vec![
+            field("a", "", json!({ "totp": uri() })),
+            field("b", "One-time password", json!({ "totp": uri() })),
+            field("c", "Backup", json!({ "totp": uri() })),
+            field("d", "OTP", json!({ "totp": uri() })),
+            field("e", "otp", json!({ "totp": uri() })),
+        ]);
+        let labels = draft(&preview).detail_labels();
+        assert_eq!(labels.len(), 5, "{labels:?}");
+        assert!(labels.iter().all(|label| is_otp_label(label)), "{labels:?}");
+        let mut lower: Vec<_> = labels.iter().map(|label| label.to_lowercase()).collect();
+        lower.sort();
+        lower.dedup();
+        assert_eq!(lower.len(), 5, "labels are unique: {labels:?}");
+    }
+
+    #[test]
+    fn only_the_totp_type_is_forced_to_an_otp_label() {
+        let preview = login(vec![
+            field(
+                "n",
+                "Account number",
+                json!({ "concealed": "SYNTH-OP-num" }),
+            ),
+            field("t", "Token", json!({ "totp": uri() })),
+        ]);
+        let labels = draft(&preview).detail_labels();
+        assert_eq!(labels.len(), 2);
+        assert!(!is_otp_label(&labels[0]), "{labels:?}");
+        assert!(is_otp_label(&labels[1]), "{labels:?}");
+    }
+
+    #[test]
+    fn an_imported_value_can_make_a_code() {
+        let preview = login(vec![field("t", "Auth", json!({ "totp": uri() }))]);
+        let draft = draft(&preview);
+        let label = &draft.detail_labels()[0];
+        let totp = Totp::parse(draft.detail(label).unwrap().value.expose()).expect("totp");
+        assert_eq!(totp.code_at(59).0, "94287082");
+    }
+
+    #[test]
+    fn a_totp_field_of_another_category_stays_a_hidden_one_time_detail() {
+        let item = json!({
+            "categoryUuid": "112",
+            "state": "active",
+            "overview": { "title": "Synthetic key", "tags": [] },
+            "details": { "sections": [{ "title": "", "fields": [
+                field("credential", "credential", json!({ "concealed": "SYNTH-OP-token" })),
+                field("t", "Seed", json!({ "totp": uri() })),
+            ] }] },
+        });
+        let export =
+            json!({ "accounts": [{ "vaults": [{ "attrs": { "name": "V" }, "items": [item] }] }] });
+        let preview = parse_1pux_json(export.to_string().as_bytes()).expect("parse");
+        let draft = preview.items[0].draft().expect("ready");
+        assert_eq!(
+            draft.field("token").expect("token").value.expose(),
+            "SYNTH-OP-token"
+        );
+        let labels = draft.detail_labels();
+        assert_eq!(labels.len(), 1);
+        assert!(is_otp_label(&labels[0]));
+        assert!(draft.detail(&labels[0]).unwrap().secret);
+    }
+
+    #[test]
+    fn the_csv_one_time_column_gets_the_canonical_label() {
+        for header in ["OTPAuth", "otp", "TOTP", "One-Time Password", "login_totp"] {
+            let text = format!(
+                "Title,Username,Password,{header}\nSite,me,SYNTH-OP-pw,{}\n",
+                uri()
+            );
+            let preview = super::parse_csv(&text).expect("parse");
+            let draft = preview.items[0].draft().expect("ready");
+            assert_eq!(draft.detail_labels(), ["One-time password"], "{header}");
+            assert!(draft.detail("One-time password").unwrap().secret);
+        }
+    }
+
+    #[test]
+    fn warnings_and_debug_do_not_show_the_seed() {
+        let preview = login(vec![field("t", "Auth", json!({ "totp": uri() }))]);
+        let text = format!("{preview:?} {:?}", preview.items[0].warnings);
+        assert!(!text.contains(SEED), "{text}");
+        assert!(!text.contains("SYNTH-OP-login-pass"), "{text}");
+    }
 }

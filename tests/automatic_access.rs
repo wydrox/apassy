@@ -9,6 +9,299 @@ use tempfile::TempDir;
 
 const PASS: &str = "automatic-access-synthetic-pass";
 
+#[test]
+fn automatic_process_binding_does_not_choose_an_otp_setup_key() {
+    let (_dir, mut vault) = fixture();
+    for (name, value) in [
+        ("x_4f6e652d74696d652070617373776f7264", "GEZDGNBVGY3TQOJQ"),
+        (
+            "x_526567696f6e",
+            "otpauth://totp/fixture?secret=GEZDGNBVGY3TQOJQ",
+        ),
+    ] {
+        let item = add(
+            &mut vault,
+            CredentialKind::Custom,
+            vec![field(name, value, true)],
+        );
+        assert!(
+            vault.process_binding(item).unwrap().is_none(),
+            "An OTP setup key requires an explicit owner-approved field binding"
+        );
+    }
+}
+
+#[test]
+fn automatic_process_binding_ignores_otp_labels_uris_case_and_leading_whitespace() {
+    let (_dir, mut vault) = fixture();
+    let uri = "otpauth://totp/fixture?secret=GEZDGNBVGY3TQOJQ";
+    for (name, value) in [
+        // Labels of a one-time password, in any case and spacing.
+        ("x_4f5450", "GEZDGNBVGY3TQOJQ"),
+        ("x_544f5450203220", "GEZDGNBVGY3TQOJQ"),
+        ("x_6f747020283229", "GEZDGNBVGY3TQOJQ"),
+        // An explicit TOTP link in any other custom detail.
+        ("x_546f6b656e", uri),
+        ("x_546f6b656e", "  OTPAUTH://TOTP?secret=GEZDGNBVGY3TQOJQ"),
+        ("x_546f6b656e", "\n\t otpauth://totp/x"),
+    ] {
+        let item = add(
+            &mut vault,
+            CredentialKind::Custom,
+            vec![field(name, value, true)],
+        );
+        assert!(
+            vault.process_binding(item).unwrap().is_none(),
+            "{name} {value}"
+        );
+    }
+}
+
+#[test]
+fn builtin_default_field_with_a_totp_uri_is_not_chosen() {
+    let (_dir, mut vault) = fixture();
+    let uri = " otpauth://totp/fixture?secret=GEZDGNBVGY3TQOJQ";
+    for (index, (kind, name)) in [
+        (CredentialKind::ApiKey, "token"),
+        (CredentialKind::Login, "password"),
+        (CredentialKind::Database, "password"),
+        (CredentialKind::SshKey, "private_key"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Login and Database drafts must carry their required plain details; the
+        // synthetic TOTP link is the only secret, so it is the only candidate.
+        let mut fields = match kind {
+            CredentialKind::Login => vec![field("username", "synthetic-user", false)],
+            CredentialKind::Database => vec![
+                field("host", "db.example.invalid", false),
+                field("database", "synthetic", false),
+                field("username", "synthetic-user", false),
+            ],
+            _ => Vec::new(),
+        };
+        fields.push(field(name, uri, true));
+        let item = add(&mut vault, kind, fields);
+        assert!(vault.process_binding(item).unwrap().is_none(), "{name}");
+        vault
+            .set_env_binding(item, &format!("FIXTURE_TOTP_URI_{index}"), name)
+            .unwrap();
+        assert!(
+            vault.process_binding(item).unwrap().is_some(),
+            "{name} explicit"
+        );
+    }
+}
+
+#[test]
+fn one_ordinary_secret_is_chosen_beside_an_otp_setup_key() {
+    let (_dir, mut vault) = fixture();
+    let item = add(
+        &mut vault,
+        CredentialKind::Custom,
+        vec![
+            field(
+                "x_4f6e652d74696d652070617373776f7264",
+                "GEZDGNBVGY3TQOJQ",
+                true,
+            ),
+            field("api_secret", "FAKE-ordinary-secret", true),
+            field(
+                "x_526567696f6e",
+                "otpauth://totp/fixture?secret=GEZDGNBVGY3TQOJQ",
+                true,
+            ),
+        ],
+    );
+    assert_eq!(
+        vault.process_binding(item).unwrap().unwrap().field,
+        "api_secret"
+    );
+    // Two ordinary secrets stay ambiguous, with or without the OTP field.
+    let two = add(
+        &mut vault,
+        CredentialKind::Custom,
+        vec![
+            field("first", "FAKE-first", true),
+            field("x_4f5450", "GEZDGNBVGY3TQOJQ", true),
+            field("second", "FAKE-second", true),
+        ],
+    );
+    assert!(vault.process_binding(two).unwrap().is_none());
+}
+
+#[test]
+fn an_ordinary_base32_secret_is_not_taken_for_a_setup_key() {
+    let (_dir, mut vault) = fixture();
+    let item = add(
+        &mut vault,
+        CredentialKind::Custom,
+        vec![field("x_53656372657420", "GEZDGNBVGY3TQOJQ", true)],
+    );
+    assert_eq!(
+        vault.process_binding(item).unwrap().unwrap().field,
+        "x_53656372657420"
+    );
+    let hotp = add(
+        &mut vault,
+        CredentialKind::Custom,
+        vec![field(
+            "api_secret",
+            "otpauth://hotp/x?secret=GEZDGNBVGY3TQOJQ",
+            true,
+        )],
+    );
+    assert!(vault.process_binding(hotp).unwrap().is_some());
+}
+
+#[test]
+fn a_passkey_field_never_goes_to_a_process() {
+    let (_dir, mut vault) = fixture();
+    let item = add(
+        &mut vault,
+        CredentialKind::Custom,
+        vec![field("api_secret", "FAKE-ordinary-secret", true)],
+    );
+    for name in ["passkey_key", "passkey_rp_id"] {
+        assert_eq!(
+            vault
+                .set_env_binding(item, "FIXTURE_PASSKEY", name)
+                .unwrap_err()
+                .kind(),
+            VaultErrorKind::InvalidInput
+        );
+    }
+    assert_eq!(
+        vault.process_binding(item).unwrap().unwrap().field,
+        "api_secret"
+    );
+}
+
+#[test]
+fn an_explicit_otp_field_binding_remains_available() {
+    let (_dir, mut vault) = fixture();
+    let name = "x_4f6e652d74696d652070617373776f7264";
+    let item = add(
+        &mut vault,
+        CredentialKind::Custom,
+        vec![field(name, "GEZDGNBVGY3TQOJQ", true)],
+    );
+    vault
+        .set_env_binding(item, "FIXTURE_OTP_SETUP", name)
+        .unwrap();
+    let binding = vault.process_binding(item).unwrap().unwrap();
+    assert_eq!(binding.field, name);
+    assert_eq!(binding.env_name, "FIXTURE_OTP_SETUP");
+}
+
+#[test]
+fn an_otp_only_item_needs_a_field_in_the_catalog_and_for_access_requests() {
+    let (_dir, mut vault) = fixture();
+    let name = "x_4f6e652d74696d652070617373776f7264";
+    let otp = add(
+        &mut vault,
+        CredentialKind::Custom,
+        vec![field(name, "GEZDGNBVGY3TQOJQ", true)],
+    );
+    let token = add(
+        &mut vault,
+        CredentialKind::ApiKey,
+        vec![field(
+            "token",
+            "otpauth://totp/fixture?secret=GEZDGNBVGY3TQOJQ",
+            true,
+        )],
+    );
+    let (agent, _) = vault.register_agent("Synthetic agent").unwrap();
+    vault.set_agent_sees_all(agent.id, true).unwrap();
+    for item in [otp, token] {
+        assert!(vault.process_binding(item).unwrap().is_none());
+        let entry = vault
+            .catalog()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.item_id == item)
+            .unwrap();
+        assert!(!entry.can_use_in_process);
+        // The setup key itself is never listed as a visible detail.
+        assert!(
+            entry
+                .details
+                .iter()
+                .all(|(_, value)| !value.contains("otpauth"))
+        );
+        assert_eq!(
+            vault
+                .request_access(agent.id, item, "Use the test service", "/tmp")
+                .unwrap_err()
+                .kind(),
+            VaultErrorKind::InvalidInput
+        );
+        assert_eq!(
+            vault
+                .set_exec_grant(agent.id, item, "/tmp", ExecMode::Ask)
+                .unwrap_err()
+                .kind(),
+            VaultErrorKind::InvalidInput
+        );
+    }
+    // The owner still sees the item, so a field can be selected.
+    assert!(
+        vault
+            .agent_credentials()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.0 == otp)
+    );
+    // The owner can still choose the field. Then the item is usable like any other.
+    vault.set_env_binding(otp, "", name).unwrap();
+    let entry = vault
+        .catalog()
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.item_id == otp)
+        .unwrap();
+    assert!(entry.can_use_in_process);
+    vault
+        .request_access(agent.id, otp, "Use the test service", "/tmp")
+        .unwrap();
+    vault
+        .set_exec_grant(agent.id, otp, "/tmp", ExecMode::Ask)
+        .unwrap();
+    // Clearing the explicit choice returns the item to "needs a field".
+    vault.clear_env_binding(otp).unwrap();
+    assert!(vault.process_binding(otp).unwrap().is_none());
+}
+
+#[test]
+fn ordinary_tokens_and_ssh_private_keys_stay_automatic() {
+    let (_dir, mut vault) = fixture();
+    for (kind, name, value) in [
+        (CredentialKind::ApiKey, "token", "FAKE-primary-token"),
+        (CredentialKind::ApiKey, "token", "GEZDGNBVGY3TQOJQ"),
+        (
+            CredentialKind::ApiKey,
+            "token",
+            "https://example.test/otpauth://totp",
+        ),
+        (
+            CredentialKind::SshKey,
+            "private_key",
+            "-----BEGIN FAKE PRIVATE KEY-----\nFAKE\n-----END FAKE PRIVATE KEY-----",
+        ),
+        (CredentialKind::Custom, "x_546f6b656e", "FAKE-custom-token"),
+        (CredentialKind::Custom, "x_546f6b656e", "totp-is-not-a-uri"),
+    ] {
+        let item = add(&mut vault, kind, vec![field(name, value, true)]);
+        assert_eq!(
+            vault.process_binding(item).unwrap().unwrap().field,
+            name,
+            "{name} {value}"
+        );
+    }
+}
+
 fn fixture() -> (TempDir, Vault) {
     let dir = TempDir::new().unwrap();
     let mut vault = Vault::create(&dir.path().join("vault.db"), PASS).unwrap();

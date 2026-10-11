@@ -10,7 +10,8 @@ use super::agents::{GrantForm, place_section};
 use super::kit::{self, Font, Icon, Style, Tone};
 use super::{Sheet, ask_owner_from_sheet, close_sheet};
 use crate::broker::approvals::{
-    ApprovalQueue, FirstUseDeclaration, FirstUseOffer, PendingRun, RememberOffer,
+    ApprovalQueue, FirstUseDeclaration, FirstUseItem, FirstUseOffer, PendingRun, RememberOffer,
+    folder_is_broad, shown_path,
 };
 use crate::desktop::inbox::{self, InboxKind};
 use crate::desktop::notify::Delivery;
@@ -20,6 +21,10 @@ use crate::vault::providers::{self, Suggestion};
 use crate::vault::{
     AccessRequest, ActivityDecision, Declaration, EnvDelivery, Environment, ExecMode, GrantPlace,
 };
+
+/// The longest folder path and the longest name that a first-use card shows.
+const MAX_SHOWN_PATH: usize = 100;
+const MAX_SHOWN_NAME: usize = 40;
 
 /// How many inbox events the view shows.
 const SHOWN_EVENTS: usize = 40;
@@ -373,7 +378,7 @@ fn approval_details(app: &mut DesktopApp, ui: &mut egui::Ui, run: &PendingRun) {
         .show(ui, |ui| {
             let rows = [
                 ("Purpose", run.purpose.clone()),
-                ("Folder", run.cwd.clone()),
+                ("Folder", shown_path(&run.cwd, MAX_SHOWN_PATH)),
                 ("Secrets", run.env_names.join(", ")),
             ];
             for (term, value) in rows {
@@ -401,6 +406,11 @@ fn approval_details(app: &mut DesktopApp, ui: &mut egui::Ui, run: &PendingRun) {
     let mut approve = false;
     let mut remember = false;
     let mut grant = false;
+    // A lasting access for the root or the home folder is not offered (the queue and the
+    // broker refuse it too).
+    let broad = offer
+        .as_ref()
+        .is_some_and(|offer| folder_is_broad(&offer.folder));
     egui::Sides::new().show(
         ui,
         |ui| {
@@ -408,6 +418,10 @@ fn approval_details(app: &mut DesktopApp, ui: &mut egui::Ui, run: &PendingRun) {
         },
         |ui| {
             if let Some(offer) = &offer {
+                if broad {
+                    approve = kit::button(ui, "Allow once", Style::Prominent).clicked();
+                    return;
+                }
                 grant = kit::button(
                     ui,
                     &format!("Allow in {}", folder_name(&offer.folder)),
@@ -492,18 +506,34 @@ fn first_use_section(
     offer: &FirstUseOffer,
 ) -> Vec<FirstUseDeclaration> {
     let mut chosen = Vec::new();
-    kit::paragraph(
-        ui,
-        format!(
-            "\"Allow in {}\" lets this agent use {} in {} and its subfolders. Later runs there that the bouncer finds clean start without a prompt. You can remove the access in Agents.",
-            folder_name(&offer.folder),
-            item_names(offer),
-            offer.folder
-        ),
-        Font::Callout,
-        kit::SECONDARY,
-    );
+    let broad = folder_is_broad(&offer.folder);
+    if broad {
+        kit::tone_note(
+            ui,
+            format!(
+                "This folder is the root, your home folder, or a parent of it: {}. A lasting access here would cover too much, so Apassy offers \"Allow once\" only.",
+                shown_path(&offer.folder, MAX_SHOWN_PATH)
+            ),
+            Tone::Warning,
+        );
+    } else {
+        kit::paragraph(
+            ui,
+            format!(
+                "\"Allow in {}\" lets this agent use {} in {} and its subfolders. Later runs there that the bouncer finds clean start without a prompt. You can remove the access in Agents.",
+                folder_name(&offer.folder),
+                item_names(offer),
+                shown_path(&offer.folder, MAX_SHOWN_PATH)
+            ),
+            Font::Callout,
+            kit::SECONDARY,
+        );
+    }
     for item in &offer.items {
+        delivery_note(app, ui, item);
+        if broad {
+            continue;
+        }
         let production = match &item.declaration {
             Some(declaration) => {
                 kit::paragraph(
@@ -576,22 +606,57 @@ fn first_use_section(
     chosen
 }
 
+/// What the process gets for a new item, as a run delivers it now (`process_binding`,
+/// ADR 0011). The real value stays in the process for every later run in the folder.
+fn delivery_note(app: &DesktopApp, ui: &mut egui::Ui, item: &FirstUseItem) {
+    match app.owner_ui.session.process_binding(item.item_id) {
+        Ok(Some(binding)) => match &binding.delivery {
+            EnvDelivery::Value => kit::tone_note(
+                ui,
+                format!(
+                    "{}: the process gets the real value in {}.",
+                    shown_path(&item.name, MAX_SHOWN_NAME),
+                    binding.env_name
+                ),
+                Tone::Warning,
+            ),
+            EnvDelivery::Placeholder(hosts) => kit::note(
+                ui,
+                format!(
+                    "{}: the process gets a placeholder in {}. Apassy adds the real value only to requests to {}.",
+                    shown_path(&item.name, MAX_SHOWN_NAME),
+                    binding.env_name,
+                    hosts.join(", ")
+                ),
+            ),
+        },
+        _ => kit::note(
+            ui,
+            format!(
+                "{}: Apassy found no secret field for the process.",
+                shown_path(&item.name, MAX_SHOWN_NAME)
+            ),
+        ),
+    }
+}
+
 /// The names of the new items of a first use, in quotes.
 fn item_names(offer: &FirstUseOffer) -> String {
     offer
         .items
         .iter()
-        .map(|item| format!("\"{}\"", item.name))
+        .map(|item| format!("\"{}\"", shown_path(&item.name, MAX_SHOWN_NAME)))
         .collect::<Vec<_>>()
         .join(", ")
 }
 
-/// The last part of a folder path, for a button.
+/// The last part of a folder path, for a button: printable, at most 40 characters.
 fn folder_name(folder: &str) -> String {
-    std::path::Path::new(folder).file_name().map_or_else(
+    let last = std::path::Path::new(folder).file_name().map_or_else(
         || folder.to_owned(),
         |name| name.to_string_lossy().into_owned(),
-    )
+    );
+    shown_path(&last, MAX_SHOWN_NAME)
 }
 
 /// A declaration in one line: the provider, the environment, the risk, the scope, and

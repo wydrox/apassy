@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Passkey test relying party</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main>
+    <h1>Passkey test relying party</h1>
+    <p class="note">Local test page. Synthetic account only. The server checks every passkey response.</p>
+    <dl id="rp-info">
+      <dt>Origin</dt><dd id="rp-origin">…</dd>
+      <dt>RP ID</dt><dd id="rp-id">…</dd>
+      <dt>Passkeys on server</dt><dd id="rp-count">…</dd>
+    </dl>
+    <div class="actions">
+      <button type="button" id="create-passkey">Create passkey</button>
+      <button type="button" id="sign-in">Sign in with passkey</button>
+    </div>
+    <p id="status" role="status" aria-live="polite" data-state="idle">Ready.</p>
+    <p id="transform" class="note" data-transform="">&nbsp;</p>
+  </main>
+  <script src="/client.js" type="module"></script>
+</body>
+</html>

@@ -25,8 +25,8 @@ public enum PinnedTLS {
         matches(pinText: B64U.encode(pin), certificate: der)
     }
 
-    /// The session configuration: nothing on disk, no cache, no cookies, no proxy, no cellular,
-    /// a short timeout, and TLS 1.3 at least.
+    /// The session configuration: nothing on disk, no cache, no cookies, no proxy,
+    /// a short timeout, and TLS 1.3 at least. Each request controls cellular access.
     public static func makeConfiguration() -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.urlCache = nil
@@ -39,9 +39,9 @@ public enum PinnedTLS {
         configuration.timeoutIntervalForResource = 15
         configuration.tlsMinimumSupportedProtocolVersion = .TLSv13
         configuration.waitsForConnectivity = false
-        // The Mac is on the local network. A proxy or the mobile network would only leak the request.
+        // The transport permits cellular access only for a numeric Tailscale IPv4 host.
         configuration.connectionProxyDictionary = [:]
-        configuration.allowsCellularAccess = false
+        configuration.allowsCellularAccess = true
         return configuration
     }
 }

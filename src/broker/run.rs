@@ -49,7 +49,7 @@ use serde_json::json;
 
 use super::approvals::{
     ApprovalOutcome, CheckMethod, FirstUseBusy, FirstUseItem, FirstUseOffer, GrantChoice,
-    PendingRun, Settled,
+    PendingRun, Settled, folder_is_broad,
 };
 use super::bouncer::{
     BouncerRequest, BouncerVerdict, DecisionContext, before_model, decide_learned, owner_required,
@@ -738,9 +738,27 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                 "note": "Secret values in the output are replaced with [apassy:NAME].",
             });
             if let Some(choice) = &grant_choice {
+                let production = choice
+                    .declarations
+                    .iter()
+                    .map(|chosen| Some(&chosen.declaration))
+                    .chain(
+                        checked
+                            .first_use
+                            .iter()
+                            .map(|item| item.declaration.as_ref()),
+                    )
+                    .flatten()
+                    .chain(checked.declarations.iter().flatten())
+                    .any(|declaration| declaration.is_production());
                 answer["access"] = json!(format!(
-                    "The owner gave this agent access to these credentials in {}. Later runs there need no new approval, unless the bouncer asks the owner.",
-                    choice.folder
+                    "The owner gave this agent access to these credentials in {}. Later clean runs there may start without asking.{}",
+                    choice.folder,
+                    if production {
+                        " A production credential still waits for the owner at each run."
+                    } else {
+                        ""
+                    }
                 ));
             }
             if !checked.placeholder_names.is_empty() {
@@ -1115,6 +1133,14 @@ fn save_first_use(
     if folder.as_deref() != Some(choice.folder.as_str()) {
         return Err(
             "The folder of the access changed while Apassy checked this run. Nothing was saved. Send the request again."
+                .to_owned(),
+        );
+    }
+    // The queue refused a broad folder already. Save checks it again, with the HOME of
+    // this moment, so a lasting grant for the root or the home folder never reaches the vault.
+    if folder_is_broad(&choice.folder) {
+        return Err(
+            "This folder is too wide for a lasting access. Nothing was saved. The command did not run. Use \"Allow once\"."
                 .to_owned(),
         );
     }

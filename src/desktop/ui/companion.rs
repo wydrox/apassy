@@ -43,7 +43,7 @@ fn listener_section(app: &mut DesktopApp, ui: &mut Ui) {
         ui,
         Some("iPhone companion"),
         Some(
-            "The iPhone app shows the runs that wait for you and approves them with Face ID. It never shows a secret value, and it cannot change a grant, a rule, or a setting. It reaches this Mac only on the same network.",
+            "The iPhone app shows the runs that wait for you and approves them with Face ID. It never shows a secret value, and it cannot change a grant, a rule, or a setting. It reaches this Mac on the same local network or through Tailscale.",
         ),
         |s| {
             s.toggle(
@@ -145,7 +145,7 @@ fn pairing_section(app: &mut DesktopApp, ui: &mut Ui) {
             s.row(|ui| match &app.companion.invite {
                 Some(qr) => {
                     ui.vertical_centered(|ui| {
-                        draw_qr(ui, qr, QR_POINTS);
+                        draw_qr(ui, qr, QR_POINTS, "Pairing QR code");
                     });
                 }
                 None => kit::note(ui, "Apassy is making the pairing code."),
@@ -267,13 +267,15 @@ pub(super) fn keep_code_characters(code: &mut String) {
 
 /// Draw the QR code black on white with a quiet zone of 4 modules. The modules are whole
 /// points, so the code is about `size` points wide and stays sharp. A run of dark
-/// modules in a row is one rectangle, so no seam shows between two modules.
-pub(super) fn draw_qr(ui: &mut Ui, qr: &QrModules, size: f32) -> Response {
+/// modules in a row is one rectangle, so no seam shows between two modules. `label` names
+/// the image for VoiceOver. The pairing QR code here and the link of "Add a device…" in
+/// Settings > General > Sync use it.
+pub(super) fn draw_qr(ui: &mut Ui, qr: &QrModules, size: f32, label: &str) -> Response {
     let total = qr.width() + 2 * QUIET_ZONE;
     let unit = (size / total as f32).floor().max(1.0);
     let side = unit * total as f32;
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(side), Sense::hover());
-    response.widget_info(|| WidgetInfo::labeled(WidgetType::Image, true, "Pairing QR code"));
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Image, true, label));
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         painter.rect_filled(rect, 0, Color32::WHITE);

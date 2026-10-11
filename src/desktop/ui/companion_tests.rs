@@ -561,7 +561,7 @@ fn qr_modules_have_the_finder_patterns_and_a_quiet_zone() {
     let ctx = egui::Context::default();
     let mut side = 0.0;
     let output = ctx.run_ui(input(0.0, Vec::new()), |ui| {
-        side = draw_qr(ui, &qr, 200.0).rect.width();
+        side = draw_qr(ui, &qr, 200.0, "Pairing QR code").rect.width();
     });
     let total = (width + 2 * QUIET_ZONE) as f32;
     assert!(side <= 200.0 && side > 200.0 - total, "{side}");
