@@ -185,7 +185,8 @@ Each stage is useful alone and has its own PR. There is no release until the own
 1. Two steps to add (§4). It does not change the security model.
 2. Usage log, corrections and the interaction count (§1, §5).
 3. Agent tools (§6), first `ask_owner`, `capture` and `generate`.
-4. The bouncer decides from the first use (§2, §3). This stage changes the security model and gets its own security review.
+4. The bouncer decides from the first use (§2, §3, §3a to §3c, §3f), with the upgrade of grants to exceptions. This stage changes the security model and gets its own security review.
+5. Questions on every device through the relay, with APNs, and answers on the iPhone (§3d, §3e). It changes the relay (`apassy-relay`) and the iPhone app, and gets its own security review.
 
 ## What this does not protect
 
