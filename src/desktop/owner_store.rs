@@ -1042,6 +1042,31 @@ impl OwnerSession {
         }
     }
 
+    /// Connect a host from the agent guide (ADR 0024): a new token and, with `show_all`,
+    /// the catalog of all credentials without values. One fresh owner check covers both.
+    pub fn connect_agent(
+        &mut self,
+        agent_id: u64,
+        show_all: bool,
+        proof: OwnerProof,
+    ) -> ModelResult<AgentToken> {
+        let mut vault =
+            self.unlocked_for(proof, &OwnerAction::ConnectAgent { agent_id, show_all })?;
+        let token = match vault.rotate_agent_token(agent_id) {
+            Err(err) if err.kind() == VaultErrorKind::InvalidInput => {
+                return Err(fail(
+                    "invalid_input",
+                    "A revoked agent cannot get a new token. Register the agent again.",
+                ));
+            }
+            other => other.map_err(map_err)?,
+        };
+        if show_all {
+            vault.set_agent_sees_all(agent_id, true).map_err(map_err)?;
+        }
+        Ok(token)
+    }
+
     pub fn token_lifetime_days(&self) -> ModelResult<u32> {
         self.unlocked()?.token_lifetime_days().map_err(map_err)
     }
@@ -1195,6 +1220,16 @@ impl OwnerSession {
         self.unlocked()?.env_binding(item_id).map_err(map_err)
     }
 
+    /// Effective command settings, including automatic delivery for a secret field.
+    pub fn process_binding(&self, item_id: u64) -> ModelResult<Option<EnvBinding>> {
+        self.unlocked()?.process_binding(item_id).map_err(map_err)
+    }
+
+    /// Unarchived credentials with a nonempty secret field. Returns metadata only.
+    pub fn agent_credentials(&self) -> ModelResult<Vec<(u64, String)>> {
+        self.unlocked()?.agent_credentials().map_err(map_err)
+    }
+
     /// Secret field names of an item, in stored order.
     pub fn secret_fields(&self, item_id: u64) -> ModelResult<Vec<String>> {
         let details = self.unlocked()?.details(item_id).map_err(map_err)?;
@@ -1226,12 +1261,16 @@ impl OwnerSession {
         delivery: &EnvDelivery,
         proof: OwnerProof,
     ) -> ModelResult<()> {
-        checked_env_name(env_name.trim()).map_err(|_| {
+        let env_name = env_name.trim();
+        let automatic_name = format!("APASSY_ITEM_{item_id}");
+        if !env_name.is_empty() && env_name != automatic_name {
+            checked_env_name(env_name).map_err(|_| {
             fail(
                 "invalid_input",
                 "Use A-Z, 0-9, and _ and start with a letter or _. System names such as PATH or DYLD_* are not permitted.",
             )
-        })?;
+            })?;
+        }
         if let EnvDelivery::Placeholder(hosts) = delivery
             && (hosts.is_empty()
                 || hosts.len() > MAX_PLACEHOLDER_HOSTS
@@ -1321,7 +1360,7 @@ impl OwnerSession {
         let place = checked_place(place)?;
         self.unlocked_for(proof, &OwnerAction::ChangeGrant { agent_id, item_id })?
             .set_exec_grants(agent_id, &[item_id], &place, mode)
-            .map_err(map_err)
+            .map_err(map_exec_grant_err)
     }
 
     /// Give an agent process access to several items with one owner check (ADR 0012).
@@ -1341,13 +1380,7 @@ impl OwnerSession {
         };
         self.unlocked_for(proof, &action)?
             .set_exec_grants(agent_id, item_ids, &place, mode)
-            .map_err(|err| match err.kind() {
-                VaultErrorKind::InvalidInput => fail(
-                    "invalid_input",
-                    "Select 1 to 64 credentials. Each needs an environment variable.",
-                ),
-                _ => map_err(err),
-            })
+            .map_err(map_exec_grant_err)
     }
 
     /// The agent sees all credentials without values (ADR 0012).
@@ -1407,7 +1440,7 @@ impl OwnerSession {
             .map_err(|_| fail("not_found", "The request is not open any more."))?;
         self.unlocked_for(proof, &OwnerAction::ChangeGrant { agent_id, item_id })?
             .set_exec_grants(agent_id, &[item_id], &place, mode)
-            .map_err(map_err)
+            .map_err(map_exec_grant_err)
     }
 
     pub fn declaration(&self, item_id: u64) -> ModelResult<Option<Declaration>> {
@@ -1986,6 +2019,17 @@ fn fail(code: &'static str, message: impl Into<String>) -> ModelError {
     ModelError {
         code,
         message: message.into(),
+    }
+}
+
+fn map_exec_grant_err(err: VaultError) -> ModelError {
+    if err.kind() == VaultErrorKind::InvalidInput {
+        fail(
+            "invalid_input",
+            "Select 1 to 64 credentials with secret values. If a credential has more than one secret field, select the field in Command settings.",
+        )
+    } else {
+        map_err(err)
     }
 }
 

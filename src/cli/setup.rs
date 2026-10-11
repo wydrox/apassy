@@ -325,7 +325,7 @@ fn run_host(cli: &Cli, mut args: Args) -> Outcome {
     if host == Host::Codex {
         println!("Use /hooks to trust the Apassy hook before the first request.");
     }
-    println!("Next: set an Environment variable for the credential in Apassy.");
+    println!("Next: select credentials and give the agent access. Variable names are optional.");
     println!(
         "Give {name} access: apassy grant set {} ITEM --folder DIR",
         quote(&name)

@@ -1,5 +1,7 @@
 //! A guide for host settings, credential access, and a first host request.
 //! Saved settings never count as a host connection or a successful request.
+//! Access before the first use is optional (ADR 0024): an agent that sees the names of
+//! the credentials uses one, and the owner approves the first use.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -29,6 +31,9 @@ pub(super) struct State {
     step: Step,
     settings_saved: bool,
     selection: BTreeSet<u64>,
+    /// The owner turned off "see credential names" for the connection (ADR 0024). The
+    /// default is on.
+    hide_names: bool,
 }
 
 impl State {
@@ -83,6 +88,11 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary
     state.prepare(agent.id, &agent.name);
     state.vault_path = vault_path;
     let mut host = state.host.unwrap_or(Host::Claude);
+    let sees_all = app
+        .owner_ui
+        .session
+        .agent_sees_all(agent.id)
+        .unwrap_or(false);
     if token_expired(agent) {
         kit::tone_note(
             ui,
@@ -95,7 +105,7 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary
             ui.horizontal_wrapped(|ui| {
                 for (step, label) in [
                     (Step::Connect, "1. Connect"),
-                    (Step::Credentials, "2. Credentials"),
+                    (Step::Credentials, "2. Access (optional)"),
                     (Step::Start, "3. Start host"),
                 ] {
                     let style = if state.step == step {
@@ -131,13 +141,25 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary
                     kit::note(ui, if state.settings_saved {
                         "Host settings are saved. Check the connection in the host with /mcp."
                     } else {
-                        "Save the Apassy settings for your host. Then select the credentials that this agent can use."
+                        "Save the Apassy settings for your host. The agent can then use a credential when it needs one. You approve the first use in Apassy."
                     });
+                    if sees_all {
+                        kit::note(ui, "This agent sees the names of your credentials, without values.");
+                    } else {
+                        let mut show = !state.hide_names;
+                        kit::toggle(ui, &mut show, "Let the agent see credential names, without values");
+                        state.hide_names = !show;
+                        kit::note(ui, if show {
+                            "The agent and the provider of its model see names, usernames, and hosts. Never a secret value. The agent can use a credential after you approve its first use."
+                        } else {
+                            "The agent sees only the credentials that you give it in step 2."
+                        });
+                    }
                     kit::note(ui, "To save new settings, get a new token. The new token stops the old token immediately.");
                     ui.add_enabled_ui(app.owner.check.is_none() && app.owner_ui.fresh_token.is_none(), |ui| {
                         rotate = kit::button(ui, &format!("Connect {}…", host.name()), Style::Bordered).clicked();
                     });
-                    if kit::button(ui, "Choose credentials", Style::Prominent).clicked() {
+                    if kit::button(ui, "Continue", Style::Prominent).clicked() {
                         state.step = Step::Credentials;
                     }
                 });
@@ -152,13 +174,20 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary
                         .selection
                         .retain(|id| rows.iter().any(|row| row.0 == *id));
                     let grants = app.owner_ui.session.exec_grants(agent.id);
-                    let all_bound = !state.selection.is_empty()
+                    let all_ready = !state.selection.is_empty()
                         && rows
                             .iter()
                             .filter(|row| state.selection.contains(&row.0))
                             .all(|row| row.2.is_some());
                     let all_granted = can_continue(app, agent, &state.selection);
-                    kit::section(ui, Some("Choose credentials"), None, |s| {
+                    kit::section(ui, Some("Give access before the first use"), None, |s| {
+                        s.row(|ui| {
+                            kit::note(ui, if sees_all {
+                                "You can skip this step. When the agent needs a credential, Apassy asks you once, and you can allow it for the project folder."
+                            } else {
+                                "This agent does not see credential names, so it can use only what you select here."
+                            });
+                        });
                         if rows.is_empty() {
                             s.row(|ui| {
                                 kit::note(ui, "Add a credential with a secret value in Credentials. Then return to this guide.");
@@ -169,9 +198,11 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary
                         }
                         for (id, name, env_name) in &rows {
                             let mut selected = state.selection.contains(id);
-                            let subtitle = env_name
-                                .as_deref()
-                                .unwrap_or("Set an environment variable first");
+                            let subtitle = if env_name.is_some() {
+                                "Ready for agent access"
+                            } else {
+                                "Choose the secret field to use"
+                            };
                             if s.toggle(name, Some(subtitle), &mut selected).changed() {
                                 if selected {
                                     state.selection.insert(*id);
@@ -183,7 +214,7 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary
                                 s.row(|ui| {
                                     if kit::small_button(
                                         ui,
-                                        &format!("Set variable for {name}…"),
+                                        &format!("Command settings for {name}…"),
                                         Style::Link,
                                     )
                                     .clicked()
@@ -194,26 +225,24 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary
                             }
                         }
                         s.row(|ui| {
-                            kit::note(ui, "Set a variable for each selected credential. Then set the project folder and access decision.");
+                            kit::note(ui, "Select credentials, then set the project folder and access decision. Command settings are optional.");
                             if let Err(error) = &grants {
                                 kit::tone_note(ui, &error.message, Tone::Critical);
                             }
-                            ui.add_enabled_ui(all_bound, |ui| {
+                            ui.add_enabled_ui(all_ready, |ui| {
                                 grant = kit::button(ui, "Set access…", Style::Prominent).clicked();
                             });
-                            kit::note(ui, "You confirm each variable change and each access change. Adjust rules from the credential access rows below.");
-                            if !all_granted {
-                                kit::note(ui, "Give this agent access to all selected credentials before you continue.");
+                            kit::note(ui, "You confirm access once for the selected credentials. Adjust rules from the credential access rows below.");
+                            if !state.selection.is_empty() && !all_granted {
+                                kit::note(ui, "The selected credentials have no access yet. Click \"Set access…\", or continue without it.");
                             }
                             ui.horizontal_wrapped(|ui| {
                                 if kit::button(ui, "Back", Style::Bordered).clicked() {
                                     state.step = Step::Connect;
                                 }
-                                ui.add_enabled_ui(all_granted, |ui| {
-                                    if kit::button(ui, "Continue", Style::Prominent).clicked() {
-                                        state.step = Step::Start;
-                                    }
-                                });
+                                if kit::button(ui, "Continue", Style::Prominent).clicked() {
+                                    state.step = Step::Start;
+                                }
                             });
                         });
                     });
@@ -223,9 +252,18 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary
         Step::Start => {
             kit::section(ui, Some("Start the host and check a request"), None, |s| {
                 s.row(|ui| {
-                    kit::note(ui, format!("Close {}. In your project folder, run this command. Keep Apassy open and the vault unlocked.", host.name()));
+                    kit::note(ui, format!("Close {} and start it again, so that it loads the Apassy settings. In a terminal, use this command in your project folder. Keep Apassy open and the vault unlocked.", host.name()));
                     kit::code_block(ui, &launch_command(host), 2);
-                    kit::note(ui, "This command uses the Apassy sandbox. The host approval prompts stay active.");
+                    if host == Host::Claude {
+                        kit::note(ui, "MCP_TOOL_TIMEOUT gives you time to approve a first use: a run can wait 2 minutes for you.");
+                    }
+                    let mut open = app.ui.is_expanded("onboarding-sandbox");
+                    kit::disclosure(ui, &mut open, "More protection: the Apassy sandbox (optional)");
+                    app.ui.set_expanded("onboarding-sandbox", open);
+                    if open {
+                        kit::note(ui, "The sandbox stops the host process from reading the vault file. The host approval prompts stay active.");
+                        kit::code_block(ui, &sandbox_command(host), 2);
+                    }
                     if host == Host::Codex {
                         kit::note(ui, "Use /hooks to trust the Apassy hook. Then use /mcp to check the Apassy connection.");
                     } else {
@@ -257,10 +295,12 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary
     if rotate {
         app.ui.setup_host = host.index();
         let ctx = ui.ctx().clone();
+        // One owner check for the new token and the credential names (ADR 0024).
         app.ask_owner(
-            OwnerRequest::RotateToken {
+            OwnerRequest::ConnectAgent {
                 agent_id: agent.id,
                 agent_name: agent.name.clone(),
+                show_all: !sees_all && !app.ui.agent_onboarding.hide_names,
             },
             Some(&ctx),
         );
@@ -312,27 +352,26 @@ fn open_variable(app: &mut DesktopApp, item_id: u64) {
 
 fn credential_rows(app: &DesktopApp) -> Result<Vec<(u64, String, Option<String>)>, String> {
     let session = &app.owner_ui.session;
-    let archived = session.archived().map_err(|error| error.message)?;
     let mut rows = Vec::new();
-    for item in session.search("").map_err(|error| error.message)? {
-        if archived.contains_key(&item.id)
-            || session
-                .secret_fields(item.id)
-                .map_err(|error| error.message)?
-                .is_empty()
-        {
-            continue;
-        }
+    for (item_id, name) in session.agent_credentials().map_err(|error| error.message)? {
         let variable = session
-            .env_binding(item.id)
+            .process_binding(item_id)
             .map_err(|error| error.message)?
             .map(|binding| binding.env_name);
-        rows.push((item.id, item.name, variable));
+        rows.push((item_id, name, variable));
     }
     Ok(rows)
 }
 
+/// The normal start of the host (ADR 0024). The sandbox is optional.
 fn launch_command(host: Host) -> String {
+    match host {
+        Host::Claude => "MCP_TOOL_TIMEOUT=180000 claude".to_owned(),
+        Host::Codex => "codex".to_owned(),
+    }
+}
+
+fn sandbox_command(host: Host) -> String {
     let sandbox = std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(|parent| parent.join("apassy-sandbox")))
@@ -409,23 +448,13 @@ mod tests {
     }
 
     #[test]
-    fn continue_needs_a_bound_credential_and_confirmed_grant_and_valid_token() {
+    fn continue_needs_a_confirmed_grant_and_valid_token_but_no_named_variable() {
         let dir = tempfile::TempDir::new().unwrap();
         let (mut app, item_id) = unlocked_app_with_item(&dir);
         let (mut agent, _) = app.owner_ui.session.register_agent("Codex").unwrap();
         let selection = [item_id].into_iter().collect();
         assert!(!can_continue(&app, &agent, &selection));
-        app.ask_owner(
-            OwnerRequest::SaveVariable {
-                item_id,
-                env_name: "GUIDE_TEST_KEY".to_owned(),
-                field: "token".to_owned(),
-                delivery: EnvDelivery::Value,
-            },
-            None,
-        );
-        app.confirm_owner_now(OwnerCheck::passphrase(PASS)).unwrap();
-        assert!(!can_continue(&app, &agent, &selection));
+        assert!(app.owner_ui.session.env_binding(item_id).unwrap().is_none());
         app.ask_owner(
             OwnerRequest::GrantMany {
                 agent_id: agent.id,
@@ -447,6 +476,47 @@ mod tests {
         agent.revoked = false;
         app.owner_ui.session.archive(item_id).unwrap();
         assert!(!can_continue(&app, &agent, &selection));
+    }
+
+    /// ADR 0024: "Connect" gives a new token and lets the agent see credential names,
+    /// with one owner check. A wrong passphrase changes nothing.
+    #[test]
+    fn connect_gives_a_token_and_the_credential_names_with_one_owner_check() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut app, _) = unlocked_app_with_item(&dir);
+        let (agent, _) = app.owner_ui.session.register_agent("Claude Code").unwrap();
+        assert!(!app.owner_ui.session.agent_sees_all(agent.id).unwrap());
+        let request = OwnerRequest::ConnectAgent {
+            agent_id: agent.id,
+            agent_name: agent.name.clone(),
+            show_all: true,
+        };
+        app.ask_owner(request.clone(), None);
+        assert!(
+            app.confirm_owner_now(OwnerCheck::passphrase(WRONG))
+                .is_err()
+        );
+        assert!(!app.owner_ui.session.agent_sees_all(agent.id).unwrap());
+        assert!(app.owner_ui.fresh_token.is_none());
+        app.ask_owner(request, None);
+        app.confirm_owner_now(OwnerCheck::passphrase(PASS)).unwrap();
+        assert!(app.owner_ui.session.agent_sees_all(agent.id).unwrap());
+        assert!(app.owner_ui.fresh_token.is_some());
+
+        // Without the setting, only the token changes.
+        let (other, _) = app.owner_ui.session.register_agent("Codex").unwrap();
+        app.owner_ui.fresh_token = None;
+        app.ask_owner(
+            OwnerRequest::ConnectAgent {
+                agent_id: other.id,
+                agent_name: other.name.clone(),
+                show_all: false,
+            },
+            None,
+        );
+        app.confirm_owner_now(OwnerCheck::passphrase(PASS)).unwrap();
+        assert!(!app.owner_ui.session.agent_sees_all(other.id).unwrap());
+        assert!(app.owner_ui.fresh_token.is_some());
     }
 
     #[test]

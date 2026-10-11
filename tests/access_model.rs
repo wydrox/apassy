@@ -33,6 +33,8 @@ struct Fixture {
     bound: u64,
     /// Without a variable.
     plain: u64,
+    /// Two secret fields with no owner selection.
+    unsuitable: u64,
     /// Archived, with a variable.
     archived: u64,
     _broker: BrokerHandle,
@@ -89,6 +91,12 @@ fn fixture() -> Fixture {
         .add(draft("Old key", vec![field("token", SECRET, true)]))
         .expect("add")
         .id;
+    let mut custom = draft(
+        "Unselected fields",
+        vec![field("first", SECRET, true), field("second", HIDDEN, true)],
+    );
+    custom.kind = CredentialKind::Custom;
+    let unsuitable = vault.add(custom).expect("custom item").id;
     vault
         .set_env_binding(archived, "OLD_KEY", "token")
         .expect("binding");
@@ -110,6 +118,7 @@ fn fixture() -> Fixture {
         agent_id: agent.id,
         bound,
         plain,
+        unsuitable,
         archived,
         _broker: broker,
     }
@@ -170,7 +179,7 @@ fn an_agent_sees_only_what_it_can_use_until_the_owner_lets_it_see_all() {
         .collect();
     assert_eq!(
         names,
-        vec!["Database", "Stripe staging"],
+        vec!["Database", "Stripe staging", "Unselected fields"],
         "no archived item"
     );
     let stripe = &catalog[1];
@@ -183,7 +192,8 @@ fn an_agent_sees_only_what_it_can_use_until_the_owner_lets_it_see_all() {
         Some(2),
         "no secret field and no hidden detail"
     );
-    assert_eq!(catalog[0]["access"], "no_variable");
+    assert_eq!(catalog[0]["access"], "can_request");
+    assert_eq!(catalog[2]["access"], "needs_field");
 }
 
 #[test]
@@ -198,7 +208,15 @@ fn an_access_request_waits_for_the_owner_and_a_grant_answers_it() {
     let again = ask(&fx, fx.bound, "Again.").result.expect("result");
     assert_eq!(again["request_id"], first["request_id"]);
     assert_eq!(again["new"], false);
-    assert_eq!(code(&ask(&fx, fx.plain, "No variable.")), "invalid_request");
+    let unsuitable = ask(&fx, fx.unsuitable, "Select a secret field.");
+    assert_eq!(code(&unsuitable), "invalid_request");
+    assert!(
+        unsuitable
+            .error
+            .unwrap()
+            .message
+            .contains("select one secret field")
+    );
     assert_eq!(code(&ask(&fx, fx.archived, "Archived.")), "not_visible");
     assert_eq!(code(&ask(&fx, fx.bound, " ")), "invalid_request");
     assert_eq!(list(&fx)["catalog"][1]["access"], "requested");
@@ -232,6 +250,74 @@ fn an_access_request_waits_for_the_owner_and_a_grant_answers_it() {
     assert_eq!(history[1].kind, ItemEventKind::AccessRequested);
     let log = with_vault(&fx, |v| v.recent_activity(10)).expect("activity");
     assert!(log.iter().any(|entry| entry.operation == "request access"));
+}
+
+#[test]
+fn an_unbound_access_request_gets_process_access_without_a_saved_variable() {
+    let fx = fixture();
+    with_vault(&fx, |v| v.set_agent_sees_all(fx.agent_id, true)).expect("see all");
+    let response = ask(&fx, fx.plain, "The user asked to use the database key.");
+    assert!(response.ok, "{response:?}");
+    no_secret(&format!("{response:?}"));
+    with_vault(&fx, |v| {
+        v.set_exec_grants(
+            fx.agent_id,
+            &[fx.plain],
+            &GrantPlace::AnyFolder,
+            ExecMode::Ask,
+        )
+        .expect("grant");
+        assert!(v.env_binding(fx.plain).expect("saved binding").is_none());
+    });
+    let after = list(&fx);
+    no_secret(&after.to_string());
+    assert_eq!(after["catalog"][0]["access"], "can_use");
+    assert_eq!(
+        after["process_access"][0]["env_name"],
+        format!("APASSY_ITEM_{}", fx.plain)
+    );
+    assert_eq!(after["access_requests"][0]["state"], "granted");
+}
+
+#[test]
+fn a_granted_custom_item_still_needs_one_selected_secret_field() {
+    let fx = fixture();
+    let item_id = with_vault(&fx, |v| {
+        v.set_agent_sees_all(fx.agent_id, true).expect("see all");
+        let mut custom = draft("Custom field", vec![field("key", SECRET, true)]);
+        custom.kind = CredentialKind::Custom;
+        let item = v.add(custom).expect("custom item");
+        v.set_exec_grants(
+            fx.agent_id,
+            &[item.id],
+            &GrantPlace::AnyFolder,
+            ExecMode::Ask,
+        )
+        .expect("grant");
+        let mut changed = draft(
+            "Custom field",
+            vec![field("key", SECRET, true), field("recovery", HIDDEN, true)],
+        );
+        changed.kind = CredentialKind::Custom;
+        v.update(item.id, item.revision, changed)
+            .expect("add second secret");
+        item.id
+    });
+    let changed = list(&fx);
+    no_secret(&changed.to_string());
+    let entry = changed["catalog"]
+        .as_array()
+        .expect("catalog")
+        .iter()
+        .find(|entry| entry["item_id"] == item_id)
+        .expect("custom catalog item");
+    assert_eq!(entry["access"], "needs_field");
+    assert!(
+        changed["process_access"]
+            .as_array()
+            .expect("process access")
+            .is_empty()
+    );
 }
 
 #[test]
@@ -292,11 +378,11 @@ fn a_grant_for_several_items_changes_all_or_nothing() {
             .expect("binding");
         item
     });
-    // `plain` has no variable, so nothing changes.
+    // One item has no selected field, so nothing changes.
     let refused = with_vault(&fx, |v| {
         v.set_exec_grants(
             fx.agent_id,
-            &[fx.bound, fx.plain],
+            &[fx.bound, fx.unsuitable],
             &GrantPlace::AnyFolder,
             ExecMode::Bouncer,
         )

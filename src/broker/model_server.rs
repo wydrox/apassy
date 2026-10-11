@@ -2,7 +2,7 @@
 //!
 //! - [`BouncerSettings`] is `bouncer.json` in the data directory: how Apassy starts the
 //!   model server on this Mac. It is not in the vault. The default is
-//!   [`StartMode::External`]: Apassy starts nothing, as before this setting.
+//!   [`StartMode::WhenNeeded`] (ADR 0024): Apassy is the program that starts the bouncer.
 //! - [`ModelServer`] starts and stops `tools/basemodel/start.sh` by that setting. It runs
 //!   the slow work (start, health checks, the idle stop) on its own thread.
 //! - [`ModelGate`] is the hook of the broker. The broker calls it just before it asks
@@ -102,9 +102,9 @@ pub enum StartMode {
     /// Start when Apassy starts, stop when Apassy quits.
     WithApassy,
     /// Start on the first run that needs the model, stop after the idle time.
+    #[default]
     WhenNeeded,
     /// Apassy starts and stops nothing. It only uses the address.
-    #[default]
     External,
     /// The broker asks no model. Every run that needs it waits for the owner.
     Off,
@@ -150,7 +150,7 @@ pub struct BouncerSettings {
 impl Default for BouncerSettings {
     fn default() -> Self {
         Self {
-            start: StartMode::External,
+            start: StartMode::WhenNeeded,
             idle_minutes: DEFAULT_IDLE_MINUTES,
             url: None,
         }
@@ -1164,7 +1164,13 @@ impl ModelServer {
                 }
             }
             ServerState::Running { outside: true, .. } if !up => {
-                inner.state = ServerState::Stopped;
+                // ADR 0024: Apassy is the program that starts the bouncer. In "With
+                // Apassy", it replaces a server of another program that stopped.
+                if inner.settings.start == StartMode::WithApassy {
+                    Self::request_launch(&mut inner);
+                } else {
+                    inner.state = ServerState::Stopped;
+                }
             }
             _ => {}
         }
@@ -2060,10 +2066,10 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_or_damaged_file_gives_external_and_30_minutes() {
+    fn a_missing_or_damaged_file_gives_when_needed_and_30_minutes() {
         let dir = TempDir::new().expect("temp dir");
         let defaults = BouncerSettings::default();
-        assert_eq!(defaults.start, StartMode::External);
+        assert_eq!(defaults.start, StartMode::WhenNeeded);
         assert_eq!(defaults.idle_minutes, 30);
         assert_eq!(defaults.url, None);
         let path = dir.path().join(SETTINGS_FILE);
@@ -2268,17 +2274,17 @@ mod tests {
         ));
     }
 
+    /// ADR 0024: without `bouncer.json`, Apassy starts the server for the first run
+    /// that needs it, and not before.
     #[test]
-    fn the_default_mode_starts_nothing() {
+    fn the_default_mode_waits_for_a_run() {
         let dir = TempDir::new().expect("temp dir");
         let server = ModelServer::start(Some(dir.path().join(SETTINGS_FILE)), layout(dir.path()));
-        assert_eq!(server.settings().start, StartMode::External);
-        assert!(matches!(server.state(), ServerState::External { .. }));
-        assert_eq!(server.before_model(), Ok(()));
-        server.start_now();
+        assert_eq!(server.settings().start, StartMode::WhenNeeded);
+        assert_eq!(server.state(), ServerState::Stopped);
         thread::sleep(Duration::from_millis(100));
         let status = server.status();
-        assert!(matches!(status.state, ServerState::External { .. }));
+        assert_eq!(status.state, ServerState::Stopped);
         assert!(!status.owned);
         assert!(
             !dir.path().join(SETTINGS_FILE).exists(),
@@ -3196,6 +3202,46 @@ mod tests {
         stop.store(true, std::sync::atomic::Ordering::SeqCst);
         fake.join().expect("fake server");
         server.shutdown();
+    }
+
+    /// ADR 0024: Apassy is the program that starts the bouncer. In "With Apassy", when a
+    /// server of another program stops, Apassy starts its own.
+    #[test]
+    fn with_apassy_replaces_an_outside_server_that_stops() {
+        let dir = TempDir::new().expect("temp dir");
+        let pids = dir.path().join("pids");
+        let port = free_port();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let listener = std::net::TcpListener::bind(("127.0.0.1", port)).expect("bind");
+        let outside = serve_fake_model(listener, Arc::clone(&stop));
+        let server = ModelServer::start_for_test(
+            BouncerSettings {
+                start: StartMode::WithApassy,
+                idle_minutes: 10,
+                url: Some(format!("http://127.0.0.1:{port}")),
+            },
+            fake_server_layout(dir.path(), &pids),
+            Host::none(),
+            None,
+            FIRST_START_WAIT,
+        );
+        wait_until(
+            Duration::from_secs(10),
+            "the outside server is used",
+            || matches!(server.state(), ServerState::Running { outside: true, .. }),
+        );
+        assert!(!pids.is_file(), "Apassy starts no second server");
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        outside.join().expect("outside server");
+        wait_until(Duration::from_secs(30), "Apassy starts its own", || {
+            pids.is_file()
+        });
+        let pgid = first_pid(&pids);
+        assert!(server.status().owned);
+        server.shutdown();
+        wait_until(Duration::from_secs(10), "the process group ends", || {
+            !group_alive(pgid)
+        });
     }
 
     /// Without the base weights in the Hugging Face cache, a start downloads them. The

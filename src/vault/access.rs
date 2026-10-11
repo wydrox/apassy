@@ -9,8 +9,8 @@
 use rusqlite::{OptionalExtension, TransactionBehavior};
 
 use super::agents::{
-    MAX_PROJECT_DIR_BYTES, checked_text, from_sql_time, now_unix, require_active_agent,
-    require_item, to_sql_time,
+    MAX_PROJECT_DIR_BYTES, checked_text, from_sql_time, now_unix, process_binding_in,
+    require_active_agent, require_item, to_sql_time,
 };
 use super::history::{self, ItemEventKind};
 use super::types::{VaultErrorKind, VaultResult, err, kind_from_str};
@@ -56,8 +56,8 @@ pub struct CatalogEntry {
     pub kind: CredentialKind,
     /// Plain fields and visible custom details: (name or label, value).
     pub details: Vec<(String, String)>,
-    /// The item has an environment variable, so an agent can ask for process access.
-    pub has_variable: bool,
+    /// The item has a usable process field, so an agent can ask for process access.
+    pub can_use_in_process: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,8 +165,7 @@ impl Vault {
         let conn = self.conn_ref()?;
         let mut items = conn
             .prepare(
-                "SELECT item.id, item.title, item.kind,
-                     EXISTS (SELECT 1 FROM env_binding WHERE env_binding.item_id = item.id)
+                "SELECT item.id, item.title, item.kind
                  FROM item
                  WHERE item.id NOT IN (SELECT item_id FROM item_archive)
                  ORDER BY item.title COLLATE NOCASE, item.id
@@ -180,7 +179,6 @@ impl Vault {
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
                 ))
             })
             .map_err(|_| err(VaultErrorKind::Storage))?;
@@ -193,7 +191,7 @@ impl Vault {
             .map_err(|_| err(VaultErrorKind::Storage))?;
         let mut catalog = Vec::new();
         for row in rows {
-            let (id, name, kind, bound) = row.map_err(|_| err(VaultErrorKind::Storage))?;
+            let (id, name, kind) = row.map_err(|_| err(VaultErrorKind::Storage))?;
             let plain = fields
                 .query_map([id], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -214,7 +212,7 @@ impl Vault {
                 name,
                 kind: kind_from_str(&kind)?,
                 details,
-                has_variable: bound == 1,
+                can_use_in_process: process_binding_in(conn, id)?.is_some(),
             });
         }
         Ok(catalog)
@@ -224,7 +222,7 @@ impl Vault {
     /// whether the request is new. An open request for the same item is returned again.
     ///
     /// - `NotFound`: the agent does not see all items, or the item is archived or gone.
-    /// - `InvalidInput`: the item has no environment variable, or the reason is empty.
+    /// - `InvalidInput`: the item has no usable process field, or the reason is empty.
     /// - `AlreadyExists`: the agent has process access to the item.
     /// - `Busy`: the agent has [`MAX_OPEN_REQUESTS`] open requests.
     pub fn request_access(
@@ -273,15 +271,7 @@ impl Vault {
         if sees_all != 1 || archived.is_some() {
             return Err(err(VaultErrorKind::NotFound));
         }
-        let bound: Option<i64> = tx
-            .query_row(
-                "SELECT item_id FROM env_binding WHERE item_id = ?1",
-                [item],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|_| err(VaultErrorKind::Storage))?;
-        if bound.is_none() {
+        if process_binding_in(&tx, item)?.is_none() {
             return Err(err(VaultErrorKind::InvalidInput));
         }
         let granted: Option<i64> = tx

@@ -6,9 +6,9 @@
 //! 2. The token belongs to an active agent, and the token has not expired.
 //! 3. The request has a valid form: items, command, working directory, purpose, and `PATH`.
 //! 4. The working directory exists.
-//! 5. For each item: the agent has process access, the owner reviewed the item after a
-//!    restore, the working directory is in the granted project directory (a grant for
-//!    any folder skips this, ADR 0012), the item has an environment binding, and the
+//! 5. For each item: the agent has process access, or it sees all credentials and this
+//!    is a first use (ADR 0024), the owner reviewed the item after a restore, the working directory is in the granted project directory (a grant for
+//!    any folder skips this, ADR 0012), the item has a process binding, and the
 //!    hard rule passes (expiry, command prefixes, forbidden words, hourly limit). A grant
 //!    for any folder with a variable that holds the real value asks the owner.
 //! 6. A production declaration needs the owner (ADR 0010). The model is not asked.
@@ -23,12 +23,16 @@
 //!    that the owner promoted, pinned to its version. When the model step decides, a
 //!    candidate in shadow mode answers in parallel on its own thread (goal item B9,
 //!    [`super::shadow`]). Its answer goes only to the vault and has no effect.
-//! 8. A grant in "ask" mode, a high risk, or an unavailable bouncer needs the owner.
+//! 8. A first use, a grant in "ask" mode, a high risk, or an unavailable bouncer needs
+//!    the owner. A first use does not ask the model: a model never gives new access.
+//!    "Allow in this folder" saves the grant and the declaration after step 9.
 //!    A clean request with only "bouncer" grants runs without a prompt. Each decision
 //!    goes to the decision log. An owner denial blocks the pattern of the request.
 //! 9. After a decision, the broker checks the vault, the agent, and the rules again.
 //!    The vault epoch must be the same as in step 1. A lock, an unlock, or a restore
 //!    in between makes the decision invalid (goal item V3).
+//!    The credential revision, process binding, grant, declaration, provider, and
+//!    canonical directories must also be the same as in the original check.
 //! 10. The broker reads the secrets, releases the vault lock, and starts the process.
 //!     A variable in placeholder mode (ADR 0011) gets a placeholder. The broker then
 //!     starts a run proxy that puts the real value into HTTPS requests to the hosts of
@@ -43,7 +47,10 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use super::approvals::{ApprovalOutcome, CheckMethod, PendingRun};
+use super::approvals::{
+    ApprovalOutcome, CheckMethod, FirstUseBusy, FirstUseItem, FirstUseOffer, GrantChoice,
+    PendingRun, Settled, folder_is_broad,
+};
 use super::bouncer::{
     BouncerRequest, BouncerVerdict, DecisionContext, before_model, decide_learned, owner_required,
 };
@@ -59,8 +66,8 @@ use super::shell_risk::{ProviderHosts, analyze_run, injection_flag};
 use crate::agent::wire::WireResponse;
 use crate::vault::providers;
 use crate::vault::{
-    ActivityDecision, AgentSummary, DecisionEntry, Declaration, EnvDelivery, ExecMode, GrantPlace,
-    NewActivity, OwnerLabel, RealOutcome, Vault,
+    ActivityDecision, AgentSummary, DecisionEntry, Declaration, EnvBinding, EnvDelivery, ExecGrant,
+    ExecMode, GrantPlace, NewActivity, OwnerLabel, RealOutcome, Vault,
 };
 
 /// A shadow thread waits this long after the owner time limit for the real outcome.
@@ -76,6 +83,10 @@ const MAX_PATH_BYTES: usize = 4096;
 /// starts with "Owner approved", so the desktop inbox classifies it as before.
 const OWNER_APPROVED_ON_IPHONE: &str = "Owner approved on the iPhone";
 const INVALIDATED: &str = "The vault was locked, or Apassy stopped, before the run started. The approval is not valid. Send the request again after the owner unlocks the vault.";
+const FIRST_USE_WAITING: &str = "Another first use of this agent waits for the owner in Apassy. Wait for that answer, then send this request again.";
+/// The start of the activity text of a first use that the owner allowed in a folder. It
+/// starts with "Owner approved", so the desktop inbox classifies it as before.
+const OWNER_GRANTED: &str = "Owner approved at first use and gave access";
 const RELOCKED: &str =
     "The vault was locked while Apassy checked this request. Send the request again.";
 
@@ -170,6 +181,24 @@ struct Checked {
     declarations: Vec<Option<Declaration>>,
     /// The known hosts of the provider of each item with a provider (goal item B4).
     provider_hosts: Vec<ProviderHosts>,
+    /// Exact item and permission state used by the owner or model. A later check
+    /// must match this state before the broker reads any secret.
+    authorization: Vec<ItemAuthorization>,
+    /// The items without a process grant (ADR 0024). Empty for a run with grants only.
+    first_use: Vec<FirstUseItem>,
+    /// The folder of a first-use grant. Set when `first_use` has an item.
+    first_use_folder: Option<PathBuf>,
+}
+
+#[derive(PartialEq, Eq)]
+struct ItemAuthorization {
+    binding: EnvBinding,
+    /// `None` for a first use.
+    grant: Option<ExecGrant>,
+    revision: u64,
+    declaration: Option<Declaration>,
+    provider: Option<String>,
+    project: PathBuf,
 }
 
 pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) -> WireResponse {
@@ -283,7 +312,9 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
     // Shadow mode (ADR 0010): for a request that reaches the model step, the candidate
     // answers on its own thread. Its answer goes only to the vault. The decision below
     // uses the active model only, and the broker does not wait for the candidate.
-    let model_step = before_model(&context).is_none() && learned.learned.pattern.is_none();
+    let first_use = !checked.first_use.is_empty();
+    let model_step =
+        before_model(&context).is_none() && learned.learned.pattern.is_none() && !first_use;
     let mut shadow_call = if model_step {
         models.candidate.clone().and_then(|candidate| {
             shadow::begin(
@@ -306,6 +337,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
     let verdict = if !analysis.flags.is_empty()
         || owner_required(&context).is_some()
         || learned.learned.pattern.is_some()
+        || first_use
     {
         BouncerVerdict::Unavailable("not asked".to_owned())
     } else {
@@ -324,10 +356,15 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         }
     };
     let decision = decide_learned(&verdict, &context, &learned.learned);
-    let risk_note = decision.note.clone();
+    // ADR 0024: a first use always waits for the owner. The note names the new items.
+    let risk_note = if first_use {
+        first_use_note(&checked.first_use, &analysis.flags)
+    } else {
+        decision.note.clone()
+    };
     let log_note = format!("{} {risk_note}", resolved.log_note());
-    let needs_approval = checked.any_ask || decision.ask_owner;
-    let by_pattern = !decision.ask_owner && learned.learned.pattern.is_some();
+    let needs_approval = checked.any_ask || first_use || decision.ask_owner;
+    let by_pattern = !decision.ask_owner && learned.learned.pattern.is_some() && !first_use;
     let decided_by = if needs_approval {
         "Owner approved"
     } else if by_pattern {
@@ -356,6 +393,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         thresholds: learned.learned.thresholds,
     };
     let mut remembered = false;
+    let mut grant_choice: Option<GrantChoice> = None;
 
     if !needs_approval {
         let entry = logged.entry(Outcome::Automatic { by_pattern }, &risk_note);
@@ -388,23 +426,74 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                 .as_ref()
                 .is_some_and(|vault| !vault.is_locked() && vault.epoch() == checked.epoch)
         };
-        let (outcome, checked_with) = ctx.approvals.wait_for_decision(
-            PendingRun {
-                id: 0,
-                agent: checked.agent.name.clone(),
-                command: request.command.to_vec(),
-                cwd: checked.cwd.display().to_string(),
-                env_names: checked.env_names.clone(),
-                purpose: request.purpose.trim().to_owned(),
-                risk: risk_note.clone(),
-                user_request: user_request.to_owned(),
-                request_source: resolved.source.clone(),
-                agent_request: resolved.agent_text.clone().unwrap_or_default(),
-                remember: learned.offer(pattern.as_ref(), &context, checked.any_ask),
+        let pending = PendingRun {
+            id: 0,
+            agent: checked.agent.name.clone(),
+            command: request.command.to_vec(),
+            cwd: checked.cwd.display().to_string(),
+            env_names: checked.env_names.clone(),
+            purpose: request.purpose.trim().to_owned(),
+            risk: risk_note.clone(),
+            user_request: user_request.to_owned(),
+            request_source: resolved.source.clone(),
+            agent_request: resolved.agent_text.clone().unwrap_or_default(),
+            // A first use teaches no pattern: the owner gives access instead.
+            remember: if first_use {
+                None
+            } else {
+                learned.offer(pattern.as_ref(), &context, checked.any_ask)
             },
-            ctx.approval_timeout,
-            same_session,
-        );
+        };
+        let settled = match (&checked.first_use_folder, first_use) {
+            (Some(folder), true) => ctx.approvals.wait_for_first_use(
+                pending,
+                FirstUseOffer {
+                    agent_id: checked.agent.id,
+                    folder: folder.display().to_string(),
+                    items: checked.first_use.clone(),
+                },
+                ctx.approval_timeout,
+                same_session,
+            ),
+            _ => {
+                let (outcome, method) =
+                    ctx.approvals
+                        .wait_for_decision(pending, ctx.approval_timeout, same_session);
+                Ok(Settled {
+                    outcome,
+                    method,
+                    grant: None,
+                })
+            }
+        };
+        let Settled {
+            outcome,
+            method: checked_with,
+            grant: chosen,
+        } = match settled {
+            Ok(settled) => settled,
+            Err(FirstUseBusy) => {
+                let mut guard = lock(&ctx.vault);
+                if let Some(vault) = guard
+                    .as_mut()
+                    .filter(|vault| !vault.is_locked() && vault.path() == checked.vault_file)
+                    && wait
+                        .as_ref()
+                        .is_none_or(|ticket| vault.end_wait(ticket).unwrap_or(true))
+                {
+                    record(
+                        vault,
+                        &checked.agent,
+                        request,
+                        &label,
+                        ActivityDecision::Deny,
+                        FIRST_USE_WAITING,
+                    );
+                }
+                return WireResponse::failure("first_use_waiting", FIRST_USE_WAITING);
+            }
+        };
+        grant_choice = chosen;
         if checked_with == Some(CheckMethod::Companion) {
             logged_decided_by = OWNER_APPROVED_ON_IPHONE;
         }
@@ -428,9 +517,9 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         record_decision_locked(ctx, &checked, &entry, pattern.as_ref());
         if let Some(call) = shadow_call.take() {
             let owner = match outcome {
-                ApprovalOutcome::Approved | ApprovalOutcome::ApprovedAndRemembered => {
-                    OwnerLabel::Allow
-                }
+                ApprovalOutcome::Approved
+                | ApprovalOutcome::ApprovedAndRemembered
+                | ApprovalOutcome::ApprovedAndGranted => OwnerLabel::Allow,
                 ApprovalOutcome::Denied => OwnerLabel::Deny,
                 ApprovalOutcome::TimedOut | ApprovalOutcome::Invalidated => OwnerLabel::None,
             };
@@ -438,7 +527,9 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         }
         remembered = outcome == ApprovalOutcome::ApprovedAndRemembered;
         let refusal = match outcome {
-            ApprovalOutcome::Approved | ApprovalOutcome::ApprovedAndRemembered => None,
+            ApprovalOutcome::Approved
+            | ApprovalOutcome::ApprovedAndRemembered
+            | ApprovalOutcome::ApprovedAndGranted => None,
             ApprovalOutcome::Denied => {
                 Some(("approval_denied", "The owner denied this run.".to_owned()))
             }
@@ -499,16 +590,50 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
             );
             return WireResponse::failure(code, reason);
         }
-        if let Err((code, reason)) = check(vault, &agent, request) {
+        let rechecked = match check(vault, &agent, request) {
+            Ok(rechecked) => rechecked,
+            Err((code, reason)) => {
+                record(
+                    vault,
+                    &agent,
+                    request,
+                    &label,
+                    ActivityDecision::Deny,
+                    &reason,
+                );
+                return WireResponse::failure(code, reason);
+            }
+        };
+        if rechecked.authorization != checked.authorization
+            || rechecked.cwd != checked.cwd
+            || rechecked.provider_hosts != checked.provider_hosts
+        {
+            let reason = "The credential or its process access changed while Apassy checked this run. Send the request again.";
             record(
                 vault,
                 &agent,
                 request,
                 &label,
                 ActivityDecision::Deny,
-                &reason,
+                reason,
             );
-            return WireResponse::failure(code, reason);
+            return WireResponse::failure("authorization_changed", reason);
+        }
+        // ADR 0024: "Allow in this folder" saves the grant and the declarations now, in
+        // the session of the decision and after the second check.
+        if let Some(choice) = &grant_choice {
+            if let Err(reason) = save_first_use(vault, &agent, &checked, choice) {
+                record(
+                    vault,
+                    &agent,
+                    request,
+                    &label,
+                    ActivityDecision::Deny,
+                    &reason,
+                );
+                return WireResponse::failure("grant_failed", reason);
+            }
+            logged_decided_by = OWNER_GRANTED;
         }
         // The run starts in the session of the decision. Now learning can count it.
         if remembered && let Some(pattern) = &pattern {
@@ -612,6 +737,30 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                 "decided_by": decided_by,
                 "note": "Secret values in the output are replaced with [apassy:NAME].",
             });
+            if let Some(choice) = &grant_choice {
+                let production = choice
+                    .declarations
+                    .iter()
+                    .map(|chosen| Some(&chosen.declaration))
+                    .chain(
+                        checked
+                            .first_use
+                            .iter()
+                            .map(|item| item.declaration.as_ref()),
+                    )
+                    .flatten()
+                    .chain(checked.declarations.iter().flatten())
+                    .any(|declaration| declaration.is_production());
+                answer["access"] = json!(format!(
+                    "The owner gave this agent access to these credentials in {}. Later clean runs there may start without asking.{}",
+                    choice.folder,
+                    if production {
+                        " A production credential still waits for the owner at each run."
+                    } else {
+                        ""
+                    }
+                ));
+            }
             if !checked.placeholder_names.is_empty() {
                 answer["placeholders"] = json!(checked.placeholder_names);
                 answer["network"] = json!({
@@ -656,11 +805,23 @@ fn check(
             "The broker cannot read the grants.".to_owned(),
         )
     })?;
+    // ADR 0024: an agent that sees all credentials can use one without a grant. The
+    // owner decides at the first use.
+    let sees_all = vault.agent_sees_all(agent.id).map_err(|_| {
+        (
+            "broker_error",
+            "The broker cannot read the agent settings.".to_owned(),
+        )
+    })?;
+    let mut first_use = Vec::new();
+    let mut first_use_folder = None;
     let mut env_names = Vec::new();
+    let mut unique_env_names = BTreeSet::new();
     let mut placeholder_names = Vec::new();
     let mut any_ask = false;
     let mut declarations = Vec::new();
     let mut provider_hosts = Vec::new();
+    let mut authorization = Vec::new();
     let mut instructions: Vec<String> = Vec::new();
     let mut relative_dir = None;
     let mut project_dir = None;
@@ -670,12 +831,13 @@ fn check(
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
     for item_id in request.items {
-        let Some(grant) = grants.iter().find(|grant| grant.item_id == *item_id) else {
+        let grant = grants.iter().find(|grant| grant.item_id == *item_id);
+        if grant.is_none() && !sees_all {
             return Err((
                 "not_granted",
                 format!("The owner did not give process access to item {item_id}."),
             ));
-        };
+        }
         // Goal item V4: settings from a restored backup wait for the owner review.
         if vault.needs_review(*item_id).unwrap_or(true) {
             return Err(("review_required", review_reason(*item_id)));
@@ -685,9 +847,15 @@ fn check(
             return Err(("item_archived", archived_reason(*item_id)));
         }
         // ADR 0012: a grant for any folder takes the working directory as its project.
-        let project = match &grant.place {
-            GrantPlace::Folder(dir) => canonical_dir(Path::new(dir)),
-            GrantPlace::AnyFolder => Some(cwd.clone()),
+        // ADR 0024: a first use takes the folder of its offer.
+        let project = match grant.map(|grant| &grant.place) {
+            Some(GrantPlace::Folder(dir)) => canonical_dir(Path::new(dir)),
+            Some(GrantPlace::AnyFolder) => Some(cwd.clone()),
+            None => Some(
+                first_use_folder
+                    .get_or_insert_with(|| offer_folder(&cwd))
+                    .clone(),
+            ),
         };
         let inside = project
             .as_ref()
@@ -712,10 +880,59 @@ fn check(
                 ),
             ));
         }
-        let binding = vault.env_binding(*item_id).ok().flatten().ok_or((
-            "no_env_binding",
-            format!("Item {item_id} has no environment variable."),
+        let binding = vault.process_binding(*item_id).map_err(|_| {
+            ("broker_error", "The broker cannot read the process field.".to_owned())
+        })?.ok_or((
+            "needs_field",
+            format!("The owner must select one secret field for item {item_id} in Apassy before a process can use it."),
         ))?;
+        // Old synced records can have a name that belongs to another local item.
+        // Never let one item replace another item's value in the process environment.
+        if !unique_env_names.insert(binding.env_name.clone()) {
+            return Err((
+                "duplicate_env_name",
+                format!(
+                    "Two requested credentials use the process variable {}. The owner must select different variable names in Apassy before this run.",
+                    binding.env_name
+                ),
+            ));
+        }
+        let declaration = vault.declaration(*item_id).map_err(|_| {
+            (
+                "broker_error",
+                "The broker cannot read the owner declaration.".to_owned(),
+            )
+        })?;
+        let details = vault.details(*item_id).map_err(|_| {
+            (
+                "broker_error",
+                "The broker cannot read the credential revision.".to_owned(),
+            )
+        })?;
+        let Some(grant) = grant else {
+            first_use.push(FirstUseItem {
+                item_id: *item_id,
+                name: details.summary.title.clone(),
+                declaration: declaration.clone(),
+            });
+            push_item(
+                vault,
+                *item_id,
+                binding,
+                None,
+                details.summary.revision,
+                declaration,
+                project.expect("the offer folder contains cwd"),
+                &mut Collected {
+                    env_names: &mut env_names,
+                    placeholder_names: &mut placeholder_names,
+                    declarations: &mut declarations,
+                    provider_hosts: &mut provider_hosts,
+                    authorization: &mut authorization,
+                },
+            )?;
+            continue;
+        };
         let rule = &grant.rule;
         if rule.expires_at.is_some_and(|at| now >= at) {
             return Err((
@@ -768,34 +985,22 @@ fn check(
         any_ask |= grant.mode == ExecMode::Ask;
         // ADR 0012: in any folder, a process with the real value waits for the owner.
         any_ask |= grant.place == GrantPlace::AnyFolder && binding.delivery == EnvDelivery::Value;
-        declarations.push(vault.declaration(*item_id).ok().flatten());
-        // Goal item B4: only the stored provider name. The broker does not run the
-        // detection. An unknown provider has no hosts, as an item without a provider.
-        let mut hosts = vault
-            .declaration_provider(*item_id)
-            .ok()
-            .flatten()
-            .map(|provider| providers::known_hosts(&provider).to_vec())
-            .unwrap_or_default();
-        // A placeholder can go only to the hosts of the variable, so they are its
-        // known hosts too.
-        if let EnvDelivery::Placeholder(rules) = &binding.delivery {
-            for rule in rules {
-                if let Ok(rule) = HostRule::parse(rule)
-                    && !hosts.iter().any(|host| host == rule.host())
-                {
-                    hosts.push(rule.host().to_owned());
-                }
-            }
-            placeholder_names.push(binding.env_name.clone());
-        }
-        if !hosts.is_empty() {
-            provider_hosts.push(ProviderHosts {
-                env_name: binding.env_name.clone(),
-                hosts,
-            });
-        }
-        env_names.push(binding.env_name);
+        push_item(
+            vault,
+            *item_id,
+            binding,
+            Some(grant.clone()),
+            details.summary.revision,
+            declaration,
+            project.expect("the granted project contains cwd"),
+            &mut Collected {
+                env_names: &mut env_names,
+                placeholder_names: &mut placeholder_names,
+                declarations: &mut declarations,
+                provider_hosts: &mut provider_hosts,
+                authorization: &mut authorization,
+            },
+        )?;
     }
     Ok(Checked {
         agent: agent.clone(),
@@ -810,7 +1015,170 @@ fn check(
         instruction: instructions.join(" "),
         declarations,
         provider_hosts,
+        authorization,
+        first_use,
+        first_use_folder,
     })
+}
+
+/// The lists that [`check`] collects for each item.
+struct Collected<'a> {
+    env_names: &'a mut Vec<String>,
+    placeholder_names: &'a mut Vec<String>,
+    declarations: &'a mut Vec<Option<Declaration>>,
+    provider_hosts: &'a mut Vec<ProviderHosts>,
+    authorization: &'a mut Vec<ItemAuthorization>,
+}
+
+/// Add the variable, the declaration, the provider hosts, and the authorization of one
+/// item, with a grant or at first use.
+#[allow(clippy::too_many_arguments)]
+fn push_item(
+    vault: &Vault,
+    item_id: u64,
+    binding: EnvBinding,
+    grant: Option<ExecGrant>,
+    revision: u64,
+    declaration: Option<Declaration>,
+    project: PathBuf,
+    out: &mut Collected<'_>,
+) -> Result<(), (&'static str, String)> {
+    out.declarations.push(declaration.clone());
+    // Goal item B4: only the stored provider name. The broker does not run the
+    // detection. An unknown provider has no hosts, as an item without a provider.
+    let provider = vault.declaration_provider(item_id).map_err(|_| {
+        (
+            "broker_error",
+            "The broker cannot read the credential provider.".to_owned(),
+        )
+    })?;
+    let mut hosts = provider
+        .as_deref()
+        .map(|provider| providers::known_hosts(provider).to_vec())
+        .unwrap_or_default();
+    // A placeholder can go only to the hosts of the variable, so they are its
+    // known hosts too.
+    if let EnvDelivery::Placeholder(rules) = &binding.delivery {
+        for rule in rules {
+            if let Ok(rule) = HostRule::parse(rule)
+                && !hosts.iter().any(|host| host == rule.host())
+            {
+                hosts.push(rule.host().to_owned());
+            }
+        }
+        out.placeholder_names.push(binding.env_name.clone());
+    }
+    if !hosts.is_empty() {
+        out.provider_hosts.push(ProviderHosts {
+            env_name: binding.env_name.clone(),
+            hosts,
+        });
+    }
+    out.env_names.push(binding.env_name.clone());
+    out.authorization.push(ItemAuthorization {
+        binding,
+        grant,
+        revision,
+        declaration,
+        provider,
+        project,
+    });
+    Ok(())
+}
+
+/// The folder of a first-use grant (ADR 0024): the nearest parent of `cwd` with
+/// `.git`, below the home folder. Without one, `cwd`. `cwd` is canonical.
+fn offer_folder(cwd: &Path) -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .and_then(|home| canonical_dir(Path::new(&home)));
+    for dir in cwd.ancestors() {
+        if home.as_deref() == Some(dir) || dir.parent().is_none() {
+            break;
+        }
+        if dir.join(".git").exists() {
+            return dir.to_path_buf();
+        }
+    }
+    cwd.to_path_buf()
+}
+
+/// The risk note of a first use: the new items and the rule flags.
+fn first_use_note(items: &[FirstUseItem], flags: &[String]) -> String {
+    let names = items
+        .iter()
+        .map(|item| format!("\"{}\"", item.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut note = format!("First use: this agent has no access to {names} yet. You decide.");
+    if !flags.is_empty() {
+        note.push_str(&format!(" Rule flags: {}.", flags.join(", ")));
+    }
+    note
+}
+
+/// Save "Allow in this folder" (ADR 0024): the declarations that the owner accepted,
+/// then one grant in "Bouncer decides" for each first-use item. The run passed the
+/// second check, so the items, their declarations, and the folder are as the owner saw.
+fn save_first_use(
+    vault: &mut Vault,
+    agent: &AgentSummary,
+    checked: &Checked,
+    choice: &GrantChoice,
+) -> Result<(), String> {
+    let folder = checked
+        .first_use_folder
+        .as_ref()
+        .map(|folder| folder.display().to_string());
+    if folder.as_deref() != Some(choice.folder.as_str()) {
+        return Err(
+            "The folder of the access changed while Apassy checked this run. Nothing was saved. Send the request again."
+                .to_owned(),
+        );
+    }
+    // The queue refused a broad folder already. Save checks it again, with the HOME of
+    // this moment, so a lasting grant for the root or the home folder never reaches the vault.
+    if folder_is_broad(&choice.folder) {
+        return Err(
+            "This folder is too wide for a lasting access. Nothing was saved. The command did not run. Use \"Allow once\"."
+                .to_owned(),
+        );
+    }
+    for chosen in &choice.declarations {
+        let undeclared = checked
+            .first_use
+            .iter()
+            .any(|item| item.item_id == chosen.item_id && item.declaration.is_none());
+        if !undeclared {
+            return Err(
+                "A declaration does not belong to a new credential of this run. Nothing was saved."
+                    .to_owned(),
+            );
+        }
+        vault
+            .save_declaration(
+                chosen.item_id,
+                &chosen.declaration,
+                chosen.provider.as_deref(),
+                chosen.suggested.as_ref(),
+            )
+            .map_err(|_| {
+                "Apassy could not save the declaration. Nothing more was saved. The command did not run."
+                    .to_owned()
+            })?;
+    }
+    let items: Vec<u64> = checked.first_use.iter().map(|item| item.item_id).collect();
+    vault
+        .set_exec_grants(
+            agent.id,
+            &items,
+            &GrantPlace::Folder(choice.folder.clone()),
+            ExecMode::Bouncer,
+        )
+        .map_err(|_| {
+            "Apassy could not save the access. The command did not run. Send the request again."
+                .to_owned()
+        })
 }
 
 /// Refusal text for an item from a restored backup that the owner did not review yet.
@@ -847,10 +1215,11 @@ fn read_secrets(vault: &Vault, items: &[u64]) -> Result<RunSecrets, String> {
     };
     for item_id in items {
         let binding = vault
-            .env_binding(*item_id)
-            .ok()
-            .flatten()
-            .ok_or_else(|| format!("Item {item_id} has no environment variable."))?;
+            .process_binding(*item_id)
+            .map_err(|_| format!("The broker cannot read the process field of item {item_id}."))?
+            .ok_or_else(|| {
+                format!("The owner must select one secret field for item {item_id} in Apassy.")
+            })?;
         let value = vault
             .reveal(*item_id, &binding.field)
             .map_err(|_| format!("Item {item_id} has no value in field {}.", binding.field))?

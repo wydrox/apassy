@@ -28,8 +28,9 @@ use super::unlock::{
 };
 use super::{BrokerState, DesktopApp};
 use crate::broker::approvals::{
-    ApprovalQueue, CheckMethod, OwnerAction, OwnerAuthError, OwnerCheck, OwnerGate, OwnerProof,
-    PendingRun, touch_id_detail,
+    ApprovalQueue, CheckMethod, FirstUseDeclaration, FirstUseOffer, OwnerAction, OwnerAuthError,
+    OwnerCheck, OwnerGate, OwnerProof, PendingRun, grant_declarations, grant_has_production,
+    shown_path, touch_id_detail,
 };
 use crate::broker::profile::REPORTING_API_V0;
 use crate::native::{AuthCancel, Biometry, CancelOnDrop, NativeHelper};
@@ -126,21 +127,33 @@ fn bind_action(
     }
 }
 
-/// The dialog text that binds one variable. It names the field by its label and never
-/// shows a value.
+/// The dialog text that binds one variable, or saves the automatic command settings
+/// (an empty name, or the name Apassy derives from the item ID). It names the field by
+/// its label and never shows a value.
 fn describe_variable(
+    item_id: u64,
     env_name: &str,
     field: &str,
     delivery: &EnvDelivery,
     setup_key: bool,
 ) -> String {
     let label = page_text(&super::owner_store::field_label(field));
-    let what = if setup_key {
-        format!("the one-time password setup key \"{label}\"")
-    } else {
-        format!("the field \"{label}\"")
+    let automatic =
+        env_name.trim().is_empty() || env_name.trim() == format!("APASSY_ITEM_{item_id}");
+    let bind = match (automatic, setup_key) {
+        (true, false) => {
+            format!("Save automatic command settings with the {label} field of this item.")
+        }
+        (true, true) => format!(
+            "Save automatic command settings with the one-time password setup key \"{label}\" of this item."
+        ),
+        (false, false) => format!(
+            "Bind the field \"{label}\" of this item to the environment variable {env_name}."
+        ),
+        (false, true) => format!(
+            "Bind the one-time password setup key \"{label}\" of this item to the environment variable {env_name}."
+        ),
     };
-    let bind = format!("Bind {what} of this item to the environment variable {env_name}.");
     match (delivery, setup_key) {
         (EnvDelivery::Value, false) => format!("{bind} Programs get the real value."),
         (EnvDelivery::Value, true) => format!(
@@ -290,6 +303,13 @@ pub enum OwnerRequest {
     ApproveRun(PendingRun),
     /// Approve one run and add one approval to its pattern (ADR 0010).
     ApproveAndRemember(PendingRun),
+    /// Approve a first use and give the agent access in the folder of the offer, with
+    /// the declarations of the card (ADR 0024).
+    ApproveAndGrant {
+        run: PendingRun,
+        offer: FirstUseOffer,
+        declarations: Vec<FirstUseDeclaration>,
+    },
     /// Apply a calibrated `task_match` level, in hundredths (ADR 0009 step 3).
     ApplyCalibration {
         level: u32,
@@ -378,6 +398,13 @@ pub enum OwnerRequest {
     RotateToken {
         agent_id: u64,
         agent_name: String,
+    },
+    /// "Connect" in the agent guide: a new token and, with `show_all`, the catalog of
+    /// all credentials without values (ADR 0024).
+    ConnectAgent {
+        agent_id: u64,
+        agent_name: String,
+        show_all: bool,
     },
     SetTokenLifetime {
         days: String,
@@ -563,6 +590,15 @@ impl OwnerRequest {
             },
             Self::ApproveRun(run) => OwnerAction::ApproveRun(run.clone()),
             Self::ApproveAndRemember(run) => OwnerAction::ApproveAndRemember(run.clone()),
+            Self::ApproveAndGrant {
+                run,
+                offer,
+                declarations,
+            } => OwnerAction::ApproveAndGrant {
+                run: run.clone(),
+                offer: offer.clone(),
+                declarations: declarations.clone(),
+            },
             Self::ApplyCalibration { level } => OwnerAction::ChangeCalibration { level: *level },
             Self::PromoteModel {
                 candidate_id,
@@ -624,6 +660,12 @@ impl OwnerRequest {
             | Self::SaveConnector { item_id, .. }
             | Self::ConfirmReview { item_id }
             | Self::Unarchive { item_id, .. } => OwnerAction::ChangeItemRules { item_id: *item_id },
+            Self::ConnectAgent {
+                agent_id, show_all, ..
+            } => OwnerAction::ConnectAgent {
+                agent_id: *agent_id,
+                show_all: *show_all,
+            },
             Self::RotateToken { agent_id, .. } => OwnerAction::RotateToken {
                 agent_id: *agent_id,
             },
@@ -771,6 +813,40 @@ impl OwnerRequest {
                 run.agent,
                 run.command.join(" ")
             ),
+            Self::ApproveAndGrant {
+                run,
+                offer,
+                declarations,
+            } => format!(
+                "Give agent \"{}\" access to {} in {} and its subfolders, and approve this run: {}. Apassy saves {}. {}",
+                run.agent,
+                offer
+                    .items
+                    .iter()
+                    .map(|item| format!("\"{}\"", item.name))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                shown_path(&offer.folder, 120),
+                run.command.join(" "),
+                grant_declarations(offer, declarations)
+                    .map(|(name, declaration)| match declaration {
+                        Some(declaration) => format!(
+                            "the declaration of \"{name}\": {}, {} risk, {}, {}",
+                            declaration.environment.as_str(),
+                            declaration.risk.as_str(),
+                            declaration.scope.as_str(),
+                            declaration.reversibility.as_str()
+                        ),
+                        None => format!("no declaration for \"{name}\""),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; "),
+                if grant_has_production(offer, declarations) {
+                    "A production credential still waits for you at each run; the access saves no approval for it. Other runs there that the bouncer finds clean may start without asking."
+                } else {
+                    "Later runs there that the bouncer finds clean may start without asking."
+                }
+            ),
             Self::ApproveAndRemember(run) => format!(
                 "Approve one run of agent \"{}\" and remember its pattern{}: {}",
                 run.agent,
@@ -837,18 +913,24 @@ impl OwnerRequest {
                     .map_or("none", |provider| provider.label.as_str())
             ),
             Self::SaveVariable {
+                item_id,
                 env_name,
                 field,
                 delivery,
-                ..
-            } => describe_variable(env_name, field, delivery, labelled_setup_key(field)),
+            } => describe_variable(
+                *item_id,
+                env_name,
+                field,
+                delivery,
+                labelled_setup_key(field),
+            ),
             Self::ConfirmVariable {
+                item_id,
                 env_name,
                 field,
                 delivery,
                 setup_key,
-                ..
-            } => describe_variable(env_name, field, delivery, *setup_key),
+            } => describe_variable(*item_id, env_name, field, delivery, *setup_key),
             Self::SaveConnector { base_url, .. } => {
                 format!("Send the token of this item to {base_url}.")
             }
@@ -859,6 +941,16 @@ impl OwnerRequest {
                 "Bring \"{name}\" back from the archive. Agents with a grant can use it again."
             ),
             Self::RotateToken { agent_name, .. } => {
+                format!("Give {agent_name} a new token. The old token stops working.")
+            }
+            Self::ConnectAgent {
+                agent_name,
+                show_all: true,
+                ..
+            } => format!(
+                "Give {agent_name} a new token, and let it see the names of your credentials without values. The old token stops working."
+            ),
+            Self::ConnectAgent { agent_name, .. } => {
                 format!("Give {agent_name} a new token. The old token stops working.")
             }
             Self::SetTokenLifetime { days } => {
@@ -1266,6 +1358,38 @@ impl DesktopApp {
                     Err(message) => self.set_err(message),
                 }
             }
+            OwnerRequest::ApproveAndGrant {
+                run,
+                offer,
+                declarations,
+            } => {
+                // The same queue path as "Approve once". The broker saves the access after
+                // its second check (ADR 0024). Here the queue only took the answer: the
+                // access is saved when the run starts, and not if that step fails.
+                let result = match self.approvals() {
+                    Some(approvals) => approvals.approve(proof).map_err(|r| r.message()),
+                    None => Err("The broker is not running. Nothing was approved."),
+                };
+                match result {
+                    Ok(()) => self.set_ok(format!(
+                        "The run of {} is approved. Apassy saves the access to {} in {} when the run starts; check Agents. {}",
+                        run.agent,
+                        offer
+                            .items
+                            .iter()
+                            .map(|item| item.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        shown_path(&offer.folder, 80),
+                        if grant_has_production(&offer, &declarations) {
+                            "A production credential still asks you at each run."
+                        } else {
+                            "Later clean runs there may start without asking."
+                        }
+                    )),
+                    Err(message) => self.set_err(message),
+                }
+            }
             OwnerRequest::ApproveAndRemember(run) => {
                 // The same queue path as "Approve once". The proof names this action.
                 let result = match self.approvals() {
@@ -1372,7 +1496,14 @@ impl DesktopApp {
                 // The session reads the field again and refuses a proof for another
                 // field, variable, delivery, or setup key state.
                 let result = session.set_env_binding(item_id, &env_name, &field, &delivery, proof);
-                let _ = self.apply(result, &format!("The item is bound to {env_name}."));
+                let message = if env_name.trim().is_empty()
+                    || env_name.trim() == format!("APASSY_ITEM_{item_id}")
+                {
+                    "The automatic command settings are saved.".to_owned()
+                } else {
+                    format!("The item is bound to {env_name}.")
+                };
+                let _ = self.apply(result, &message);
             }
             OwnerRequest::SaveConnector { item_id, base_url } => {
                 let result = session.set_connector(item_id, REPORTING_API_V0.id, &base_url, proof);
@@ -1394,6 +1525,23 @@ impl DesktopApp {
                     "The agent settings are confirmed. Agents with a grant can use the item again.",
                 );
             }
+            OwnerRequest::ConnectAgent {
+                agent_id,
+                agent_name,
+                show_all,
+            } => match session.connect_agent(agent_id, show_all, proof) {
+                Ok(token) => {
+                    self.owner_ui.fresh_token = Some(FreshToken {
+                        agent_name: agent_name.clone(),
+                        token,
+                        rotated: true,
+                    });
+                    self.set_ok(format!(
+                        "{agent_name} has a new token. Connect your host to save it. The old token does not work."
+                    ));
+                }
+                Err(err) => self.set_err(err.message),
+            },
             OwnerRequest::RotateToken {
                 agent_id,
                 agent_name,

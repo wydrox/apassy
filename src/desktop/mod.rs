@@ -384,6 +384,7 @@ impl DesktopApp {
             self.owner_ui.env_name_input = binding
                 .as_ref()
                 .map(|binding| binding.env_name.clone())
+                .filter(|name| name != &format!("APASSY_ITEM_{parsed}"))
                 .unwrap_or_default();
             self.owner_ui.env_placeholder_input = matches!(
                 binding.as_ref().map(|binding| &binding.delivery),

@@ -36,18 +36,18 @@ It adds one extra field to each response. The broker must drop that field.
 
 ## 4. Connect an agent host
 
-For Claude Code or Codex, use the guided setup:
+For Claude Code or Codex, use the guided setup ([ADR 0024](../adr/0024-access-at-first-use.md)):
 
 1. Click "Connect agent", select the host, and click "Continue".
-2. Click "Connect Claude Code" or "Connect Codex" to save its settings.
-3. Click "Choose credentials". Select the credentials that the agent needs.
-4. Use "Set variable" for each credential without an environment variable. Confirm each change.
-5. Click "Set access…". Select the project folder and access decision. Confirm the change.
-6. Click "Continue". Use the command in "Start host" from the project folder.
-7. In Codex, use `/hooks` to trust the hook. Use `/mcp` to check the connection.
-8. Send the test prompt from the guide. Check the response in the host.
+2. Keep "Let the agent see credential names, without values" on. Click "Connect Claude Code…" or "Connect Codex…". One owner check gives the new token and the names. Then click "Connect Claude Code" or "Connect Codex" in the token sheet to save the host settings.
+3. Optional: in "2. Access (optional)", select credentials and click "Set access…" to give access before the first use.
+4. Start the host from the project folder: `MCP_TOOL_TIMEOUT=180000 claude` or `codex`. The Apassy sandbox is optional ("More protection").
+5. In Codex, use `/hooks` to trust the hook. Use `/mcp` to check the connection.
+6. Ask the agent for a task that needs a credential. Apassy shows the first-use card in Activity: "Allow in FOLDER", "Allow once", or "Deny".
 
-The guide stays on the agent page while you set variables and access. Detailed rules remain under each credential's process access. Saved settings do not prove a connection. The test prompt lists permitted credentials without secret values; it does not test a command that uses a secret. An Allowed activity entry does not prove that a command succeeded.
+At a first use, the card shows the declaration that Apassy suggests for each new credential, and you can change its environment. "Allow in FOLDER" saves the declaration and a grant in "Bouncer decides" for the folder with `.git` (or the working directory), and starts the run. One owner check covers all of it. Later runs in the folder that the bouncer finds clean start without a prompt. A production credential waits for you at each run. A model never approves a first use. An agent has at most one waiting first use (`first_use_waiting`).
+
+The guide stays on the agent page while you select credentials and set access. Detailed rules remain under each credential's process access. Saved settings do not prove a connection. The test prompt lists permitted credentials without secret values; it does not test a command that uses a secret. An Allowed activity entry does not prove that a command succeeded.
 
 For another host, open "Advanced setup" and "Other hosts: manual MCP configuration" in the token sheet. Example:
 
@@ -69,7 +69,8 @@ The agent can then call `apassy_list_access` and `apassy_use_credential`.
 
 | Action | Result |
 | --- | --- |
-| Call before the grant | `not_granted` |
+| Call before the grant, agent sees only its grants | `not_granted` |
+| Call before the grant, agent sees all credentials | The run waits for the first-use card (ADR 0024) |
 | Call after the grant | Six output fields. No token. No `internal_debug_note`. |
 | Call with `project_id` `echo-token-canary` | `output_blocked` |
 | Call with a locked vault | `vault_locked` |
@@ -130,13 +131,19 @@ Findings from this run:
 
 An agent can run a command with vault items in the process environment. The agent does not receive the values.
 
-Setup in the desktop app:
+Access belongs to the credential. A variable name is an optional command setting. Without a saved binding, Apassy uses an internal name and tells the agent that name in `apassy_list_access`. The agent does not ask the owner to configure it. The default secret field is `token` for API keys, `password` for logins and databases, and `private_key` for SSH keys. A custom credential must have one nonempty secret field, or the owner must select a field. Other hidden fields, such as recovery codes, are not included automatically. Existing explicit names and placeholder restrictions stay in effect.
 
-1. Open the credential. Under "Agent access", click "Environment variable". Type a name, for example `SUPABASE_SERVICE_KEY`. Select the secret field if the item has more than one. Click "Save".
+The broker checks access again after a pending decision. A changed secret field, delivery mode, credential revision, or access rule invalidates the earlier decision. Removing explicit command settings also removes existing process grants.
+
+Without setup, an agent that sees all credentials can name a catalog credential in `apassy_run_with_secrets`. The owner decides at the first use (section 4, ADR 0024).
+
+Setup in the desktop app, to give access before the first use:
+
+1. Select the credential in Agents. A saved environment variable is not required. For a custom credential with several secret fields, select the field under "Command settings". Leave the variable name empty for automatic use.
 2. In Agents, open the agent. Under "Process access", click the credential. Type the project folder.
 3. Under "Decision", select "Ask me each time" or "Bouncer decides". Click "Save".
 
-The agent must send `user_request`: the user's own words that led to the command. Each item needs a declaration: open the credential, and under "Agent access" click "Declaration" (ADR 0008).
+The agent must send `user_request`: the user's own words that led to the command. For a decision of the bouncer, each item needs a declaration (ADR 0008). The first-use card saves one. To change it, open the credential, and under "Agent access" click "Declaration".
 
 When an agent calls `apassy_run_with_secrets` in "ask" mode, a banner shows on every view, and the Activity view shows the approval card. "Review" in the banner opens the same card. The card shows the agent, the purpose, the command, the directory, and the variable names. Click "Approve once" or "Deny". The request waits a maximum of 120 seconds. A lock, a backup, a restore, or a stop of the app ends every waiting run with `approval_invalidated`. An approval that the broker did not use before a lock is not valid after the unlock. The agent must send the request again.
 

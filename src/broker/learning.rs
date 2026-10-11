@@ -207,7 +207,7 @@ impl LoggedRequest<'_> {
                 },
                 false,
             ),
-            Outcome::Owner(ApprovalOutcome::Approved) => {
+            Outcome::Owner(ApprovalOutcome::Approved | ApprovalOutcome::ApprovedAndGranted) => {
                 (true, LoggedDecision::Allow, DecidedBy::Owner, false)
             }
             Outcome::Owner(ApprovalOutcome::ApprovedAndRemembered) => {

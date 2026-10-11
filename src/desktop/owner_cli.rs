@@ -925,9 +925,14 @@ impl DesktopApp {
                     .into_iter()
                     .find(|row| row.id == request)
                     .ok_or_else(|| refuse("not_found", "The request is not open any more."))?;
-                if self.owner_ui.session.env_binding(open.item_id)?.is_none() {
+                if self
+                    .owner_ui
+                    .session
+                    .process_binding(open.item_id)?
+                    .is_none()
+                {
                     return Err(invalid(format!(
-                        "{} has no environment variable. Bind one first: apassy item env.",
+                        "Select a secret field for {} in Command settings.",
                         open.item_name
                     )));
                 }
@@ -1643,10 +1648,10 @@ impl DesktopApp {
         let mut seen = BTreeSet::new();
         for item in items {
             let found = self.find_item(item)?;
-            if self.owner_ui.session.env_binding(found.id)?.is_none() {
+            if self.owner_ui.session.process_binding(found.id)?.is_none() {
                 return Err(invalid(format!(
-                    "{} has no environment variable. Bind one first: apassy item env \"{}\" NAME.",
-                    found.name, found.name
+                    "Select a secret field for {} in Command settings.",
+                    found.name
                 )));
             }
             if seen.insert(found.id) {

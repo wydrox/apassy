@@ -17,6 +17,7 @@ use apassy::broker::approvals::{
 };
 use apassy::broker::bouncer::BouncerClient;
 use apassy::broker::http::TlsClient;
+use apassy::broker::model_server::ModelGate;
 use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault};
 use apassy::contracts::CredentialKind;
 use apassy::vault::{
@@ -44,10 +45,15 @@ struct Fixture {
 /// A fixture with a fake bouncer that finds no risk.
 fn fixture(mode: ExecMode, approval_timeout: Duration) -> Fixture {
     let bouncer = common::fake_bouncer(&[]);
-    fixture_with(mode, approval_timeout, Some(&bouncer.url))
+    fixture_with(mode, approval_timeout, Some(&bouncer.url), None)
 }
 
-fn fixture_with(mode: ExecMode, approval_timeout: Duration, bouncer: Option<&str>) -> Fixture {
+fn fixture_with(
+    mode: ExecMode,
+    approval_timeout: Duration,
+    bouncer: Option<&str>,
+    model_gate: Option<Arc<dyn ModelGate>>,
+) -> Fixture {
     let dir = TempDir::new().expect("temp dir");
     let project = dir.path().join("project");
     std::fs::create_dir_all(project.join("sub")).expect("project dir");
@@ -80,6 +86,7 @@ fn fixture_with(mode: ExecMode, approval_timeout: Duration, bouncer: Option<&str
     options.approval_timeout = approval_timeout;
     options.run_timeout = Duration::from_secs(20);
     options.bouncer = bouncer.map(|url| BouncerClient::new(url).expect("bouncer url"));
+    options.model_gate = model_gate;
     let broker = broker::start_with(Arc::clone(&shared), &socket, options).expect("broker");
     Fixture {
         vault: shared,
@@ -134,6 +141,15 @@ fn owner_check(vault: &SharedVault, run: PendingRun) -> OwnerProof {
 /// Wait for one pending run, then decide it on another thread. An approval passes the
 /// owner check before `before` runs, so `before` can change the vault after the check.
 fn decide_later(fx: &Fixture, approve: bool, before: impl FnOnce() + Send + 'static) {
+    decide_later_with_name(fx, approve, ENV_NAME.to_owned(), before);
+}
+
+fn decide_later_with_name(
+    fx: &Fixture,
+    approve: bool,
+    env_name: String,
+    before: impl FnOnce() + Send + 'static,
+) {
     let approvals = Arc::clone(fx.broker.approvals());
     let vault = Arc::clone(&fx.vault);
     std::thread::spawn(move || {
@@ -143,7 +159,7 @@ fn decide_later(fx: &Fixture, approve: bool, before: impl FnOnce() + Send + 'sta
             }
             std::thread::sleep(Duration::from_millis(10));
         };
-        assert_eq!(pending.env_names, vec![ENV_NAME.to_owned()]);
+        assert_eq!(pending.env_names, vec![env_name]);
         assert!(!format!("{pending:?}").contains(SECRET));
         let proof = approve.then(|| owner_check(&vault, pending.clone()));
         before();
@@ -156,6 +172,179 @@ fn decide_later(fx: &Fixture, approve: bool, before: impl FnOnce() + Send + 'sta
             }
         }
     });
+}
+
+#[test]
+fn an_unbound_credential_uses_a_runtime_name_and_masks_output() {
+    let fx = fixture(ExecMode::Ask, Duration::from_secs(5));
+    with_vault(&fx, |vault| {
+        vault.clear_env_binding(fx.item_id).expect("clear binding");
+        assert!(
+            vault
+                .exec_grants_for_agent(fx.agent_id)
+                .expect("grants")
+                .is_empty()
+        );
+        vault
+            .set_exec_grant(
+                fx.agent_id,
+                fx.item_id,
+                &fx.project.display().to_string(),
+                ExecMode::Ask,
+            )
+            .expect("grant without an owner variable");
+        assert!(
+            vault
+                .env_binding(fx.item_id)
+                .expect("stored binding")
+                .is_none()
+        );
+    });
+    let listed = client::send(&fx.socket, &fx.token, Action::ListAccess).expect("list");
+    assert!(listed.ok, "{listed:?}");
+    no_secret(&listed);
+    let env_name = listed.result.expect("result")["process_access"][0]["env_name"]
+        .as_str()
+        .expect("runtime name")
+        .to_owned();
+    assert_eq!(env_name, format!("APASSY_ITEM_{}", fx.item_id));
+    decide_later_with_name(&fx, true, env_name.clone(), || {});
+    let response = run(
+        &fx,
+        &fx.project,
+        &format!("echo len=${{#{env_name}}}; echo \"${env_name}\"; echo \"${env_name}\" >&2"),
+    );
+    assert!(response.ok, "{response:?}");
+    no_secret(&response);
+    let result = response.result.expect("result");
+    assert_eq!(result["exit_code"], 0);
+    let stdout = result["stdout"].as_str().expect("stdout");
+    assert!(stdout.contains(&format!("len={}", SECRET.len())));
+    let mask = format!("[apassy:{env_name}]");
+    assert!(stdout.contains(&mask));
+    assert!(result["stderr"].as_str().expect("stderr").contains(&mask));
+    assert_eq!(result["secrets_in_environment"], json!([env_name]));
+    with_vault(&fx, |vault| {
+        assert!(
+            vault
+                .env_binding(fx.item_id)
+                .expect("stored binding")
+                .is_none()
+        );
+    });
+}
+
+#[test]
+fn duplicate_runtime_variable_names_stop_the_run_before_secret_use() {
+    for automatic in [false, true] {
+        let fx = fixture(ExecMode::Ask, Duration::from_secs(2));
+        let collision_name = if automatic {
+            format!("APASSY_ITEM_{}", fx.item_id)
+        } else {
+            ENV_NAME.to_owned()
+        };
+        let second = with_vault(&fx, |vault| {
+            if automatic {
+                vault.clear_env_binding(fx.item_id).expect("clear binding");
+                vault
+                    .set_exec_grant(
+                        fx.agent_id,
+                        fx.item_id,
+                        &fx.project.display().to_string(),
+                        ExecMode::Ask,
+                    )
+                    .expect("automatic grant");
+            }
+            let second = vault
+                .add(ItemDraft {
+                    title: "Second synthetic key".into(),
+                    kind: CredentialKind::ApiKey,
+                    notes: String::new(),
+                    tags: Vec::new(),
+                    fields: vec![Field {
+                        name: "token".into(),
+                        value: SecretValue::new("FAKE-second-collision-canary".into()),
+                        secret: true,
+                    }],
+                })
+                .expect("second item");
+            vault
+                .set_env_binding(second.id, "SECOND_KEY", "token")
+                .expect("second binding");
+            vault
+                .set_exec_grant(
+                    fx.agent_id,
+                    second.id,
+                    &fx.project.display().to_string(),
+                    ExecMode::Ask,
+                )
+                .expect("second grant");
+            // Simulate an old synced binding. This database and passphrase belong
+            // only to the synthetic temporary fixture, never to a live vault.
+            let database = rusqlite::Connection::open(vault.path()).expect("synthetic database");
+            database
+                .pragma_update(None, "key", PASS)
+                .expect("synthetic key");
+            database
+                .execute(
+                    "UPDATE env_binding SET env_name = ?1 WHERE item_id = ?2",
+                    (
+                        &collision_name,
+                        i64::try_from(second.id).expect("SQL item ID"),
+                    ),
+                )
+                .expect("legacy duplicate binding");
+            assert_eq!(
+                vault
+                    .process_binding(fx.item_id)
+                    .expect("first binding")
+                    .expect("first")
+                    .env_name,
+                collision_name
+            );
+            assert_eq!(
+                vault
+                    .process_binding(second.id)
+                    .expect("second binding")
+                    .expect("second")
+                    .env_name,
+                collision_name
+            );
+            second.id
+        });
+        let response = client::send(
+            &fx.socket,
+            &fx.token,
+            Action::Run {
+                items: vec![fx.item_id, second],
+                command: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "touch command-started".into(),
+                ],
+                cwd: fx.project.display().to_string(),
+                purpose: "Use both synthetic credentials.".into(),
+                path: Some("/usr/bin:/bin".into()),
+                user_request: Some("Use both synthetic credentials.".into()),
+            },
+        )
+        .expect("broker answer");
+        assert_eq!(code(&response), "duplicate_env_name", "{response:?}");
+        no_secret(&response);
+        assert!(!format!("{response:?}").contains("FAKE-second-collision-canary"));
+        assert!(!fx.project.join("command-started").exists());
+        assert!(fx.broker.approvals().pending().is_empty());
+        with_vault(&fx, |vault| {
+            for item in [fx.item_id, second] {
+                assert_eq!(
+                    vault
+                        .runs_in_last_hour(fx.agent_id, item)
+                        .expect("run count"),
+                    0
+                );
+            }
+        });
+    }
 }
 
 #[test]
@@ -382,6 +571,302 @@ fn revoke_or_lock_during_approval_stops_the_run() {
         code(&run(&fx, &fx.project, "echo x")),
         "approval_invalidated"
     );
+}
+
+#[test]
+fn a_changed_process_binding_invalidates_a_pending_approval() {
+    for change in ["name", "field", "delivery", "hosts", "automatic"] {
+        let fx = fixture(ExecMode::Ask, Duration::from_secs(5));
+        with_vault(&fx, |vault| {
+            if change == "field" {
+                let revision = vault.details(fx.item_id).expect("item").summary.revision;
+                vault
+                    .update(
+                        fx.item_id,
+                        revision,
+                        ItemDraft {
+                            title: "Demo API key".to_owned(),
+                            kind: CredentialKind::ApiKey,
+                            notes: String::new(),
+                            tags: Vec::new(),
+                            fields: vec![
+                                Field {
+                                    name: "token".into(),
+                                    value: SecretValue::new(SECRET.into()),
+                                    secret: true,
+                                },
+                                Field {
+                                    name: "selected_key".into(),
+                                    value: SecretValue::new("FAKE-selected-key-canary".into()),
+                                    secret: true,
+                                },
+                            ],
+                        },
+                    )
+                    .expect("add another field");
+            }
+            if matches!(change, "delivery" | "hosts") {
+                vault
+                    .set_env_binding_with(
+                        fx.item_id,
+                        ENV_NAME,
+                        "token",
+                        &EnvDelivery::Placeholder(vec!["api.example.invalid".into()]),
+                    )
+                    .expect("placeholder");
+            }
+        });
+        let vault = Arc::clone(&fx.vault);
+        let item_id = fx.item_id;
+        let agent_id = fx.agent_id;
+        let project = fx.project.clone();
+        decide_later(&fx, true, move || {
+            let mut guard = vault.lock().expect("vault");
+            let vault = guard.as_mut().expect("open");
+            match change {
+                "name" => vault
+                    .set_env_binding(item_id, "CHANGED_KEY", "token")
+                    .expect("name"),
+                "field" => vault
+                    .set_env_binding(item_id, ENV_NAME, "selected_key")
+                    .expect("field"),
+                "delivery" => vault
+                    .set_env_binding(item_id, ENV_NAME, "token")
+                    .expect("real value"),
+                "hosts" => vault
+                    .set_env_binding_with(
+                        item_id,
+                        ENV_NAME,
+                        "token",
+                        &EnvDelivery::Placeholder(vec!["different.example.invalid".into()]),
+                    )
+                    .expect("hosts"),
+                "automatic" => {
+                    vault.clear_env_binding(item_id).expect("clear");
+                    vault
+                        .set_exec_grant(
+                            agent_id,
+                            item_id,
+                            &project.display().to_string(),
+                            ExecMode::Ask,
+                        )
+                        .expect("grant with automatic name");
+                }
+                _ => unreachable!(),
+            }
+        });
+        let response = run(
+            &fx,
+            &fx.project,
+            "touch command-started; echo \"$DEMO_API_KEY\"",
+        );
+        assert_eq!(
+            code(&response),
+            "authorization_changed",
+            "{change}: {response:?}"
+        );
+        no_secret(&response);
+        assert!(!fx.project.join("command-started").exists(), "{change}");
+        assert_eq!(
+            with_vault(&fx, |v| v.runs_in_last_hour(agent_id, item_id)).expect("run count"),
+            0
+        );
+    }
+}
+
+#[test]
+fn a_changed_grant_declaration_or_item_invalidates_a_pending_approval() {
+    for change in [
+        "mode",
+        "place",
+        "rule",
+        "declaration",
+        "provider",
+        "revision",
+    ] {
+        let fx = fixture(ExecMode::Ask, Duration::from_secs(5));
+        if change == "provider" {
+            with_vault(&fx, |vault| {
+                vault
+                    .save_declaration(
+                        fx.item_id,
+                        &Declaration {
+                            project: "Demo project".into(),
+                            environment: Environment::Development,
+                            risk: RiskLevel::Low,
+                            scope: Scope::ReadOnly,
+                            reversibility: Reversibility::Reversible,
+                        },
+                        Some("github"),
+                        None,
+                    )
+                    .expect("initial provider");
+            });
+        }
+        let vault = Arc::clone(&fx.vault);
+        let item_id = fx.item_id;
+        let agent_id = fx.agent_id;
+        let project = fx.project.clone();
+        decide_later(&fx, true, move || {
+            let mut guard = vault.lock().expect("vault");
+            let vault = guard.as_mut().expect("open");
+            match change {
+                "mode" => vault
+                    .set_exec_grant(
+                        agent_id,
+                        item_id,
+                        &project.display().to_string(),
+                        ExecMode::Bouncer,
+                    )
+                    .expect("mode"),
+                "place" => vault
+                    .set_exec_grants(
+                        agent_id,
+                        &[item_id],
+                        &apassy::vault::GrantPlace::AnyFolder,
+                        ExecMode::Ask,
+                    )
+                    .expect("place"),
+                "rule" => vault
+                    .set_exec_rule(
+                        agent_id,
+                        item_id,
+                        ExecRule {
+                            instruction: "Use this credential only for the revised task.".into(),
+                            ..ExecRule::default()
+                        },
+                    )
+                    .expect("rule"),
+                "declaration" => vault
+                    .set_declaration(
+                        item_id,
+                        &Declaration {
+                            project: "Changed project".into(),
+                            environment: Environment::Production,
+                            risk: RiskLevel::High,
+                            scope: Scope::Admin,
+                            reversibility: Reversibility::Irreversible,
+                        },
+                    )
+                    .expect("declaration"),
+                "provider" => {
+                    let declaration = vault
+                        .declaration(item_id)
+                        .expect("declaration")
+                        .expect("present");
+                    vault
+                        .save_declaration(item_id, &declaration, Some("openai"), None)
+                        .expect("change provider only");
+                }
+                "revision" => {
+                    let revision = vault.details(item_id).expect("item").summary.revision;
+                    vault
+                        .update(
+                            item_id,
+                            revision,
+                            ItemDraft {
+                                title: "Changed API key".into(),
+                                kind: CredentialKind::ApiKey,
+                                notes: String::new(),
+                                tags: Vec::new(),
+                                fields: vec![Field {
+                                    name: "token".into(),
+                                    value: SecretValue::new("FAKE-replaced-key-canary".into()),
+                                    secret: true,
+                                }],
+                            },
+                        )
+                        .expect("replace secret");
+                }
+                _ => unreachable!(),
+            }
+        });
+        let response = run(
+            &fx,
+            &fx.project,
+            "touch command-started; echo \"$DEMO_API_KEY\"",
+        );
+        assert_eq!(
+            code(&response),
+            "authorization_changed",
+            "{change}: {response:?}"
+        );
+        no_secret(&response);
+        assert!(!fx.project.join("command-started").exists(), "{change}");
+        assert_eq!(
+            with_vault(&fx, |v| v.runs_in_last_hour(agent_id, item_id)).expect("run count"),
+            0
+        );
+    }
+}
+
+struct ChangedBindingGate {
+    target: Mutex<Option<(SharedVault, u64)>>,
+}
+
+impl std::fmt::Debug for ChangedBindingGate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ChangedBindingGate")
+    }
+}
+
+impl ModelGate for ChangedBindingGate {
+    fn before_model(&self) -> Result<(), String> {
+        let (vault, item_id) = self
+            .target
+            .lock()
+            .expect("target")
+            .take()
+            .expect("set target");
+        vault
+            .lock()
+            .expect("vault")
+            .as_mut()
+            .expect("open")
+            .set_env_binding(item_id, "CHANGED_KEY", "token")
+            .expect("change during model phase");
+        Ok(())
+    }
+}
+
+#[test]
+fn a_changed_binding_invalidates_a_model_decision_without_an_owner_prompt() {
+    let bouncer = common::fake_bouncer(&[]);
+    let gate = Arc::new(ChangedBindingGate {
+        target: Mutex::new(None),
+    });
+    let fx = fixture_with(
+        ExecMode::Bouncer,
+        Duration::from_secs(2),
+        Some(&bouncer.url),
+        Some(gate.clone()),
+    );
+    *gate.target.lock().expect("target") = Some((Arc::clone(&fx.vault), fx.item_id));
+    with_vault(&fx, |vault| {
+        vault
+            .set_declaration(
+                fx.item_id,
+                &Declaration {
+                    project: "Demo project".into(),
+                    environment: Environment::Development,
+                    risk: RiskLevel::Low,
+                    scope: Scope::ReadOnly,
+                    reversibility: Reversibility::Reversible,
+                },
+            )
+            .expect("declaration");
+    });
+    let response = run(&fx, &fx.project, "echo done; node -e 0");
+    assert_eq!(code(&response), "authorization_changed", "{response:?}");
+    assert!(fx.broker.approvals().pending().is_empty());
+    assert_eq!(bouncer.bodies.lock().expect("model requests").len(), 1);
+    assert_eq!(
+        with_vault(&fx, |vault| vault
+            .runs_in_last_hour(fx.agent_id, fx.item_id))
+        .expect("run count"),
+        0
+    );
+    no_secret(&response);
 }
 
 fn first_pending(approvals: &broker::approvals::ApprovalQueue) -> PendingRun {

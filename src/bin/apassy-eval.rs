@@ -489,6 +489,9 @@ fn classify(response: &apassy::agent::wire::WireResponse, model_hit: bool) -> Ou
         | "rule_rate_limit"
         | "outside_project"
         | "no_env_binding"
+        | "needs_field"
+        | "authorization_changed"
+        | "duplicate_env_name"
         | "invalid_request" => Outcome::Deny,
         _ => Outcome::HarnessError,
     }

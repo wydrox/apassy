@@ -10,6 +10,8 @@ Before you upgrade a shared vault, make an encrypted backup and update all its d
 
 ### Added
 
+- An agent that can see credentials can ask for process access at its first use ([ADR 0024](docs/adr/0024-access-at-first-use.md)). The owner sees the folder, effective secret delivery, and declaration, then chooses "Allow once" or access in that folder and its subfolders. Production credentials still ask at each run.
+
 - The iPhone app adds the free personal iCloud Drive sync path beside team relay sync. It opens the Mac's encrypted `.apassy` file, keeps an offline local vault, and merges changes in both directions through coordinated snapshots. Sync settings identify the source and can restore file access. Companion approval pairing remains separate.
 
 - The Apassy app for the iPhone holds your vault, like a second Mac ([ADR 0023](docs/adr/0023-iphone-vault.md)). Add the iPhone with "Add a device…" on the Mac: scan the QR code, compare the two safety words, confirm on the Mac with Touch ID, and type the passphrase on the iPhone. The vault syncs both ways through the Apassy relay. The app has Home (favorites, recently changed, kinds), Items, Search, item details, new and edited items, the password generator (random, memorable, PIN), Watchtower (weak, reused, and old passwords, conflict copies), Face ID unlock, auto-lock, and Settings. Each reveal, copy, one-time code, or large type of a secret needs Face ID or the passphrase; a copy stays on the iPhone and expires after 60 seconds. Password AutoFill fills logins and one-time codes in Safari and apps after Face ID. The companion of ADR 0020 is the Approvals tab. The app is in TestFlight.
@@ -36,6 +38,8 @@ Before you upgrade a shared vault, make an encrypted backup and update all its d
 
 ### Security
 
+- Automatic process bindings refuse OTP setup-key labels and `otpauth://totp` values. An owner can explicitly bind a setup key after the field-specific warning and check.
+- First-use access cannot be saved for the filesystem root, HOME, its ancestors, or their filesystem aliases. These folders offer "Allow once" only. Displayed paths remove invisible format characters, and the Touch ID consent fits the native prompt limit.
 - A passkey key stays in the encrypted vault. Generic reads, item details, and agent reads do not return it. Only the owner-approved Credential Exchange export returns it, straight to the system.
 - Each passkey sign-in, registration, import, removal, and export asks for a fresh owner check. The seed of a one-time code never appears in a row, a list, an identity, or an error.
 - The agent catalog hides legacy visible TOTP setup keys, and the decision log masks their stored values. An explicit setup-key variable grant names the field and warns that programs can make codes. Its owner proof names the field, variable, delivery mode, and setup-key status. Automatic batch binding refuses setup keys.

@@ -40,13 +40,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use zeroize::Zeroizing;
 
-use super::PendingRun;
+use super::{FirstUseDeclaration, FirstUseOffer, PendingRun};
 use crate::broker::SharedVault;
 use crate::companion::crypto::{ApproveAction, approve_string, verify_ecdsa};
 use crate::companion::digest::run_digest_hex;
 use crate::companion::wire::valid_device_id;
-use crate::native::{AuthCancel, HelperErrorCode, MAX_AGENT_NAME_CHARS, NativeError, NativeHelper};
-use crate::vault::{Vault, VaultErrorKind};
+use crate::native::{
+    AuthCancel, HelperErrorCode, MAX_AGENT_NAME_CHARS, MAX_REASON_CHARS, NativeError, NativeHelper,
+};
+use crate::vault::{Declaration, Vault, VaultErrorKind};
 
 /// How long a proof stays valid after the owner check.
 pub const PROOF_LIFETIME: Duration = Duration::from_secs(60);
@@ -147,6 +149,14 @@ pub enum OwnerAction {
     ApproveRun(PendingRun),
     /// Approve one waiting run and remember a narrow pattern for later runs (ADR 0010).
     ApproveAndRemember(PendingRun),
+    /// Approve one waiting run with a first use and give the agent process access to its
+    /// new items in the folder of the offer (ADR 0024). The proof names the run, the
+    /// offer, and each declaration exactly as the owner saw them. A phone cannot make it.
+    ApproveAndGrant {
+        run: PendingRun,
+        offer: FirstUseOffer,
+        declarations: Vec<FirstUseDeclaration>,
+    },
     /// Give an agent access to an item or change that access: a connector operation
     /// or process access.
     ChangeGrant { agent_id: u64, item_id: u64 },
@@ -162,6 +172,9 @@ pub enum OwnerAction {
     ChangeItemRules { item_id: u64 },
     /// Give an agent a new token.
     RotateToken { agent_id: u64 },
+    /// Connect a host in the agent guide (ADR 0024): give the agent a new token and, with
+    /// `show_all`, let it see all credentials without values. One check for both.
+    ConnectAgent { agent_id: u64, show_all: bool },
     /// Change the token lifetime of all agents.
     ChangeTokenLifetime,
     /// Apply a calibrated `task_match` level of the bouncer, in hundredths (ADR 0009
@@ -266,6 +279,11 @@ impl OwnerAction {
                     short_name(run)
                 )
             }
+            Self::ApproveAndGrant {
+                run,
+                offer,
+                declarations,
+            } => grant_reason(run, offer, declarations),
             Self::ChangeGrant { .. } => "change the access of an agent".to_owned(),
             Self::ChangeGrants { item_ids, .. } => {
                 format!("give an agent access to {} credentials", item_ids.len())
@@ -276,6 +294,12 @@ impl OwnerAction {
             Self::ChangeRule { .. } => "change an agent rule".to_owned(),
             Self::ChangeItemRules { .. } => "change the agent settings of an item".to_owned(),
             Self::RotateToken { .. } => "give an agent a new token".to_owned(),
+            Self::ConnectAgent {
+                show_all: false, ..
+            } => "give an agent a new token".to_owned(),
+            Self::ConnectAgent { show_all: true, .. } => {
+                "connect an agent and let it see credential names without values".to_owned()
+            }
             Self::ChangeTokenLifetime => "change the agent token lifetime".to_owned(),
             Self::ChangeCalibration { .. } => {
                 "change the task_match level of the bouncer".to_owned()
@@ -312,10 +336,95 @@ impl OwnerAction {
     /// The waiting run of an approval action.
     pub fn run(&self) -> Option<&PendingRun> {
         match self {
-            Self::ApproveRun(run) | Self::ApproveAndRemember(run) => Some(run),
+            Self::ApproveRun(run)
+            | Self::ApproveAndRemember(run)
+            | Self::ApproveAndGrant { run, .. } => Some(run),
             _ => None,
         }
     }
+}
+
+/// Keep the declaration summary and future effect intact; only displayed names use
+/// the remaining native prompt budget. The action still holds the exact names/path.
+fn grant_reason(
+    run: &PendingRun,
+    offer: &FirstUseOffer,
+    declarations: &[FirstUseDeclaration],
+) -> String {
+    let environments = grant_declarations(offer, declarations)
+        .filter_map(|(_, declaration)| declaration)
+        .map(|declaration| declaration.environment.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let production = environments.contains("production");
+    let non_production = environments
+        .iter()
+        .any(|environment| *environment != "production");
+    let future = match (production, non_production) {
+        (true, true) => {
+            "; later clean non-production runs may skip asking; production asks each run"
+        }
+        (true, false) => "; production asks each run",
+        (false, _) => "; later clean runs may start without asking",
+    };
+    let environments = environments.into_iter().collect::<Vec<_>>().join(", ");
+    let describe = |agent: &str, folder: &str| {
+        format!(
+            "approve run of \"{agent}\"; grant \"{folder}\" + subfolders; save declarations: {environments}{future}"
+        )
+    };
+    let budget = MAX_REASON_CHARS.saturating_sub(describe("", "").chars().count());
+    let agent = super::shown_path(&short_name(run), MAX_AGENT_NAME_CHARS);
+    let folder = short_folder(&offer.folder);
+    let agent_budget = agent.chars().count().min(budget / 2);
+    let folder_budget = folder.chars().count().min(budget - agent_budget);
+    // Give a short component's spare space to the other one.
+    let agent_budget = agent.chars().count().min(budget - folder_budget);
+    describe(
+        &super::shown_path(&agent, agent_budget),
+        &super::shown_path(&folder, folder_budget),
+    )
+}
+
+/// The last part of a folder for the prompt, printable characters only, at most 40
+/// characters.
+fn short_folder(folder: &str) -> String {
+    let last = std::path::Path::new(folder).file_name().map_or_else(
+        || folder.to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let name: String = super::shown_path(&last, usize::MAX)
+        .chars()
+        .filter(|c| *c != '"')
+        .take(MAX_AGENT_NAME_CHARS)
+        .collect();
+    if name.trim().is_empty() {
+        "/".to_owned()
+    } else {
+        name
+    }
+}
+
+/// The declaration that "Allow in this folder" leaves for each new item: the one the
+/// owner accepted on the card, else the one that the item already has. `None`: neither.
+pub fn grant_declarations<'a>(
+    offer: &'a FirstUseOffer,
+    chosen: &'a [FirstUseDeclaration],
+) -> impl Iterator<Item = (&'a str, Option<&'a Declaration>)> {
+    offer.items.iter().map(move |item| {
+        let declaration = chosen
+            .iter()
+            .find(|declaration| declaration.item_id == item.item_id)
+            .map(|declaration| &declaration.declaration)
+            .or(item.declaration.as_ref());
+        (item.name.as_str(), declaration)
+    })
+}
+
+/// True when one of the declarations that "Allow in this folder" leaves is production.
+/// Such an item still waits for the owner at each run, also after the access is saved.
+pub fn grant_has_production(offer: &FirstUseOffer, chosen: &[FirstUseDeclaration]) -> bool {
+    grant_declarations(offer, chosen)
+        .any(|(_, declaration)| declaration.is_some_and(Declaration::is_production))
 }
 
 /// Agent name for the prompt: printable characters only, at most 40 characters.

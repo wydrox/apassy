@@ -15,16 +15,26 @@
 //! takes an [`OwnerProof`] from [`OwnerGate::authorize`] for exactly the run that
 //! waits. Each approval path, also "Approve and remember", goes through it. A denial
 //! needs no check, because it only takes authority away.
+//!
+//! A run with a first use (ADR 0024) also has a [`FirstUseOffer`] in the queue. The
+//! offer stays out of [`PendingRun`], so the digest that an iPhone signs does not
+//! change, and a phone can approve such a run only once. "Allow in this folder"
+//! ([`OwnerAction::ApproveAndGrant`]) names the run and the offer exactly as the owner
+//! saw them. The broker saves the grant after its second check.
 
 mod owner_auth;
 
 use std::collections::BTreeMap;
+use std::os::unix::fs::MetadataExt;
+use std::path::Path;
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use crate::vault::{Declaration, SuggestedDeclaration};
+
 pub use owner_auth::{
     CheckMethod, OwnerAction, OwnerAuthError, OwnerCheck, OwnerGate, OwnerProof, PROOF_LIFETIME,
-    ProofRefusal, touch_id_detail,
+    ProofRefusal, grant_declarations, grant_has_production, touch_id_detail,
 };
 
 /// How often a waiting run checks that its vault session is still valid.
@@ -64,12 +74,165 @@ pub struct RememberOffer {
     pub needed: u32,
 }
 
+/// True when `folder` is too wide for a lasting grant (ADR 0024): the root, the home
+/// folder, a parent of the home folder, or a filesystem alias of one of them. Such
+/// a folder gets "Allow once" only. The
+/// card, the queue, and the broker all ask this one function. Without a usable `HOME`,
+/// only the root is known to be broad.
+pub fn folder_is_broad(folder: &str) -> bool {
+    let home = std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .and_then(|home| std::fs::canonicalize(home).ok());
+    folder_is_broad_with(Path::new(folder), home.as_deref())
+}
+
+/// A path for a card or a dialog: control and direction characters become `?`, and a
+/// path longer than `max` characters keeps its start and its end around `…`. Only the
+/// text on screen changes. A proof always names the exact path.
+pub fn shown_path(path: &str, max: usize) -> String {
+    let clean: Vec<char> = path
+        .chars()
+        .map(|c| {
+            // Foundation's controlCharacters also contains Unicode format (Cf)
+            // scalars. Keep display text acceptable to the native owner prompt.
+            // Unicode 17: ucd/extracted/DerivedGeneralCategory.txt, category Cf.
+            let hidden = c.is_control()
+                || matches!(
+                    c,
+                    '\u{00AD}'
+                        | '\u{0600}'..='\u{0605}'
+                        | '\u{061C}'
+                        | '\u{06DD}'
+                        | '\u{070F}'
+                        | '\u{0890}'..='\u{0891}'
+                        | '\u{08E2}'
+                        | '\u{180E}'
+                        | '\u{200B}'..='\u{200F}'
+                        | '\u{202A}'..='\u{202E}'
+                        | '\u{2060}'..='\u{206F}'
+                        | '\u{FEFF}'
+                        | '\u{FFF9}'..='\u{FFFB}'
+                        | '\u{110BD}'
+                        | '\u{110CD}'
+                        | '\u{13430}'..='\u{1343F}'
+                        | '\u{1BCA0}'..='\u{1BCA3}'
+                        | '\u{1D173}'..='\u{1D17A}'
+                        | '\u{E0001}'
+                        | '\u{E0020}'..='\u{E007F}'
+                );
+            if hidden { '?' } else { c }
+        })
+        .collect();
+    if clean.len() <= max {
+        return clean.into_iter().collect();
+    }
+    let keep = max.saturating_sub(1);
+    let (head, tail) = (keep / 2, keep - keep / 2);
+    let mut out: String = clean[..head].iter().collect();
+    out.push('…');
+    out.extend(&clean[clean.len() - tail..]);
+    out
+}
+
+fn folder_is_broad_with(folder: &Path, home: Option<&Path>) -> bool {
+    let canonical = std::fs::canonicalize(folder).ok();
+    if [Some(folder), canonical.as_deref()]
+        .into_iter()
+        .flatten()
+        .any(|folder| {
+            folder.parent().is_none() || home.is_some_and(|home| home.starts_with(folder))
+        })
+    {
+        return true;
+    }
+    let Some((home, home_metadata)) = home.and_then(|home| {
+        std::fs::metadata(home)
+            .ok()
+            .map(|metadata| (home, metadata))
+    }) else {
+        return false;
+    };
+    // realpath does not resolve all filesystem aliases (for example macOS firmlinks
+    // and /.nofollow). A folder aliases HOME or an ancestor if appending that
+    // ancestor's relative path to HOME reaches the same directory identity.
+    home.ancestors().any(|ancestor| {
+        let relative_home = home.strip_prefix(ancestor).expect("ancestor of home");
+        std::fs::metadata(folder.join(relative_home)).is_ok_and(|metadata| {
+            metadata.dev() == home_metadata.dev() && metadata.ino() == home_metadata.ino()
+        })
+    })
+}
+
+/// A first use (ADR 0024): the items of a waiting run that the agent has no process
+/// grant for. "Allow in this folder" gives a grant for each of them in `folder`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstUseOffer {
+    pub agent_id: u64,
+    /// The folder of the grant: the nearest parent of the working directory with
+    /// `.git`, or the working directory.
+    pub folder: String,
+    pub items: Vec<FirstUseItem>,
+}
+
+/// One item of a first use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstUseItem {
+    pub item_id: u64,
+    pub name: String,
+    /// The declaration of the item. `None`: the grant saves the declaration that the
+    /// owner accepts on the card.
+    pub declaration: Option<Declaration>,
+}
+
+/// A declaration that the owner accepted on the first-use card, for an item without one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstUseDeclaration {
+    pub item_id: u64,
+    pub declaration: Declaration,
+    pub provider: Option<String>,
+    /// The form that Apassy suggested. The vault records whether the owner changed it.
+    pub suggested: Option<SuggestedDeclaration>,
+}
+
+/// What "Allow in this folder" saves after the broker checks the run again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantChoice {
+    pub folder: String,
+    pub declarations: Vec<FirstUseDeclaration>,
+}
+
+/// The end of a wait: the outcome, the check that the owner did for an approval, and
+/// for "Allow in this folder" what the broker saves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Settled {
+    pub outcome: ApprovalOutcome,
+    pub method: Option<CheckMethod>,
+    pub grant: Option<GrantChoice>,
+}
+
+impl Settled {
+    fn ended(outcome: ApprovalOutcome) -> Self {
+        Self {
+            outcome,
+            method: None,
+            grant: None,
+        }
+    }
+}
+
+/// [`ApprovalQueue::wait_for_first_use`] refused the wait: a first use of the same
+/// agent already waits (ADR 0024).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirstUseBusy;
+
 /// The owner answer that a waiting run gets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Answer {
     Approve,
     /// Approve the run and add one approval to its pattern.
     ApproveAndRemember,
+    /// Approve the run and give the agent access at first use (ADR 0024).
+    ApproveAndGrant,
     Deny,
 }
 
@@ -78,6 +241,8 @@ pub enum ApprovalOutcome {
     Approved,
     /// The owner approved with "Approve and remember".
     ApprovedAndRemembered,
+    /// The owner approved a first use with "Allow in this folder" (ADR 0024).
+    ApprovedAndGranted,
     Denied,
     TimedOut,
     /// The vault was locked or replaced, or the broker stopped, before the run used a
@@ -98,6 +263,12 @@ pub enum ApprovalRefusal {
     Changed,
     /// "Approve and remember" for a run that cannot teach a pattern.
     NothingToRemember,
+    /// "Allow in this folder" for a run without a first use, or for a folder that is too
+    /// wide for a lasting grant (the root, the home folder, or a parent of it).
+    NothingToGrant,
+    /// The declarations of "Allow in this folder" do not match the first use: each
+    /// item without a declaration needs exactly one.
+    DeclarationsDoNotMatch,
 }
 
 impl ApprovalRefusal {
@@ -112,15 +283,22 @@ impl ApprovalRefusal {
             Self::NothingToRemember => {
                 "This run cannot teach a pattern. Nothing was approved. Use \"Approve once\"."
             }
+            Self::NothingToGrant => {
+                "This run cannot get access in a folder. Nothing was approved. Use \"Allow once\"."
+            }
+            Self::DeclarationsDoNotMatch => {
+                "Each new credential needs one declaration. Nothing was approved. Review the request again."
+            }
         }
     }
 }
 
 /// An answer with the check that the owner did for it. A denial has no check.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Decision {
     answer: Answer,
     method: Option<CheckMethod>,
+    grant: Option<GrantChoice>,
 }
 
 #[derive(Debug, Default)]
@@ -132,6 +310,8 @@ struct QueueState {
     /// The broker stopped. A new run does not wait.
     closed: bool,
     pending: Vec<PendingRun>,
+    /// The first-use offer of a waiting run (ADR 0024).
+    offers: BTreeMap<u64, FirstUseOffer>,
     decisions: BTreeMap<u64, Decision>,
     /// When each waiting run started to wait. It is not part of the run, so the
     /// equality of two runs (and an owner proof for one) does not depend on it.
@@ -241,6 +421,7 @@ impl ApprovalQueue {
         }
         let answer = match proof.action() {
             OwnerAction::ApproveAndRemember(_) => Answer::ApproveAndRemember,
+            OwnerAction::ApproveAndGrant { .. } => Answer::ApproveAndGrant,
             _ => Answer::Approve,
         };
         let method = proof.method();
@@ -252,11 +433,64 @@ impl ApprovalQueue {
                 Err(ApprovalRefusal::NothingToRemember)
             }
             Some(_) => {
-                Self::settle(&mut state, confirmed.id, answer, Some(method));
+                let grant = match proof.action() {
+                    OwnerAction::ApproveAndGrant {
+                        offer,
+                        declarations,
+                        ..
+                    } => Some(Self::grant_choice(
+                        state.offers.get(&confirmed.id),
+                        offer,
+                        declarations,
+                    )?),
+                    _ => None,
+                };
+                Self::settle(&mut state, confirmed.id, answer, Some(method), grant);
                 self.changed.notify_all();
                 Ok(())
             }
         }
+    }
+
+    /// The grant of "Allow in this folder": the offer must be the waiting offer, and each
+    /// item without a declaration needs exactly one declaration (ADR 0024).
+    fn grant_choice(
+        waiting: Option<&FirstUseOffer>,
+        confirmed: &FirstUseOffer,
+        declarations: &[FirstUseDeclaration],
+    ) -> Result<GrantChoice, ApprovalRefusal> {
+        let Some(waiting) = waiting else {
+            return Err(ApprovalRefusal::NothingToGrant);
+        };
+        if waiting != confirmed {
+            return Err(ApprovalRefusal::Changed);
+        }
+        // A crafted request cannot save a lasting grant for the root or the home folder.
+        if folder_is_broad(&waiting.folder) {
+            return Err(ApprovalRefusal::NothingToGrant);
+        }
+        let undeclared: Vec<u64> = waiting
+            .items
+            .iter()
+            .filter(|item| item.declaration.is_none())
+            .map(|item| item.item_id)
+            .collect();
+        let mut named: Vec<u64> = declarations.iter().map(|d| d.item_id).collect();
+        named.sort_unstable();
+        let mut expected = undeclared;
+        expected.sort_unstable();
+        if named != expected {
+            return Err(ApprovalRefusal::DeclarationsDoNotMatch);
+        }
+        Ok(GrantChoice {
+            folder: waiting.folder.clone(),
+            declarations: declarations.to_vec(),
+        })
+    }
+
+    /// The first-use offer of a waiting run, or `None` (ADR 0024).
+    pub fn first_use(&self, id: u64) -> Option<FirstUseOffer> {
+        self.state().offers.get(&id).cloned()
     }
 
     /// Deny a waiting run. A denial needs no owner check. Returns false when the run
@@ -266,21 +500,36 @@ impl ApprovalQueue {
         if !state.pending.iter().any(|run| run.id == id) {
             return false;
         }
-        Self::settle(&mut state, id, Answer::Deny, None);
+        Self::settle(&mut state, id, Answer::Deny, None, None);
         self.changed.notify_all();
         true
     }
 
-    fn settle(state: &mut QueueState, id: u64, answer: Answer, method: Option<CheckMethod>) {
+    fn settle(
+        state: &mut QueueState,
+        id: u64,
+        answer: Answer,
+        method: Option<CheckMethod>,
+        grant: Option<GrantChoice>,
+    ) {
         state.pending.retain(|run| run.id != id);
         state.waiting_since.remove(&id);
-        state.decisions.insert(id, Decision { answer, method });
+        state.offers.remove(&id);
+        state.decisions.insert(
+            id,
+            Decision {
+                answer,
+                method,
+                grant,
+            },
+        );
     }
 
     /// Remove a run that ended without a decision: a timeout, or an invalid session.
     fn forget(state: &mut QueueState, id: u64) {
         state.pending.retain(|pending| pending.id != id);
         state.waiting_since.remove(&id);
+        state.offers.remove(&id);
     }
 
     /// End every waiting run and every decision that a run did not use yet. The
@@ -291,6 +540,7 @@ impl ApprovalQueue {
         state.generation = state.generation.wrapping_add(1);
         state.pending.clear();
         state.waiting_since.clear();
+        state.offers.clear();
         state.decisions.clear();
         self.changed.notify_all();
     }
@@ -320,14 +570,50 @@ impl ApprovalQueue {
     /// outcome. The activity log names it.
     pub fn wait_for_decision(
         &self,
-        mut run: PendingRun,
+        run: PendingRun,
         timeout: Duration,
         still_valid: impl Fn() -> bool,
     ) -> (ApprovalOutcome, Option<CheckMethod>) {
+        let settled = match self.wait(run, None, timeout, still_valid) {
+            Ok(settled) => settled,
+            Err(FirstUseBusy) => Settled::ended(ApprovalOutcome::Invalidated),
+        };
+        (settled.outcome, settled.method)
+    }
+
+    /// Like [`Self::wait_for_decision`], for a run with a first use (ADR 0024). The
+    /// owner can answer with "Allow in this folder"; then [`Settled::grant`] has what
+    /// the broker saves. A first use of the same agent that already waits refuses the
+    /// wait, so one agent cannot fill the queue with first uses.
+    pub fn wait_for_first_use(
+        &self,
+        run: PendingRun,
+        offer: FirstUseOffer,
+        timeout: Duration,
+        still_valid: impl Fn() -> bool,
+    ) -> Result<Settled, FirstUseBusy> {
+        self.wait(run, Some(offer), timeout, still_valid)
+    }
+
+    fn wait(
+        &self,
+        mut run: PendingRun,
+        offer: Option<FirstUseOffer>,
+        timeout: Duration,
+        still_valid: impl Fn() -> bool,
+    ) -> Result<Settled, FirstUseBusy> {
         let deadline = Instant::now() + timeout;
         let mut state = self.state();
         if state.closed {
-            return (ApprovalOutcome::Invalidated, None);
+            return Ok(Settled::ended(ApprovalOutcome::Invalidated));
+        }
+        if let Some(offer) = &offer
+            && state
+                .offers
+                .values()
+                .any(|waiting| waiting.agent_id == offer.agent_id)
+        {
+            return Err(FirstUseBusy);
         }
         state.next_id = state.next_id.wrapping_add(1);
         let id = state.next_id;
@@ -335,6 +621,9 @@ impl ApprovalQueue {
         run.id = id;
         state.pending.push(run);
         state.waiting_since.insert(id, Instant::now());
+        if let Some(offer) = offer {
+            state.offers.insert(id, offer);
+        }
         self.changed.notify_all();
         drop(state);
         self.notify_owner();
@@ -343,20 +632,25 @@ impl ApprovalQueue {
             if state.generation != generation {
                 Self::forget(&mut state, id);
                 state.decisions.remove(&id);
-                return (ApprovalOutcome::Invalidated, None);
+                return Ok(Settled::ended(ApprovalOutcome::Invalidated));
             }
             if let Some(decision) = state.decisions.remove(&id) {
                 let outcome = match decision.answer {
                     Answer::Approve => ApprovalOutcome::Approved,
                     Answer::ApproveAndRemember => ApprovalOutcome::ApprovedAndRemembered,
+                    Answer::ApproveAndGrant => ApprovalOutcome::ApprovedAndGranted,
                     Answer::Deny => ApprovalOutcome::Denied,
                 };
-                return (outcome, decision.method);
+                return Ok(Settled {
+                    outcome,
+                    method: decision.method,
+                    grant: decision.grant,
+                });
             }
             let now = Instant::now();
             if now >= deadline {
                 Self::forget(&mut state, id);
-                return (ApprovalOutcome::TimedOut, None);
+                return Ok(Settled::ended(ApprovalOutcome::TimedOut));
             }
             let wait = (deadline - now).min(WATCH_INTERVAL);
             drop(
@@ -371,7 +665,7 @@ impl ApprovalQueue {
                 let mut state = self.state();
                 Self::forget(&mut state, id);
                 state.decisions.remove(&id);
-                return (ApprovalOutcome::Invalidated, None);
+                return Ok(Settled::ended(ApprovalOutcome::Invalidated));
             }
         }
     }
@@ -423,6 +717,73 @@ mod tests {
     fn start_waiter(queue: &Arc<ApprovalQueue>) -> std::thread::JoinHandle<ApprovalOutcome> {
         let queue = Arc::clone(queue);
         std::thread::spawn(move || queue.wait_for(run(), Duration::from_secs(5), || true))
+    }
+
+    /// ADR 0024: the root, the home folder, and its parents are broad. A project below
+    /// the home folder, a sibling, and a folder elsewhere are not.
+    #[test]
+    fn a_lasting_grant_is_refused_for_the_root_the_home_folder_and_its_parents() {
+        let home = Path::new("/Users/synthetic");
+        for broad in ["/", "/Users", "/Users/synthetic"] {
+            assert!(
+                folder_is_broad_with(Path::new(broad), Some(home)),
+                "{broad}"
+            );
+        }
+        for narrow in [
+            "/Users/synthetic/shop",
+            "/Users/synthetic/shop/api",
+            "/Users/other",
+            "/tmp/shop",
+        ] {
+            assert!(
+                !folder_is_broad_with(Path::new(narrow), Some(home)),
+                "{narrow}"
+            );
+        }
+        // Without a home folder only the root is known to be broad.
+        assert!(folder_is_broad_with(Path::new("/"), None));
+        assert!(!folder_is_broad_with(Path::new("/Users"), None));
+        assert!(!folder_is_broad("/tmp/synthetic-not-the-home-folder"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_filesystem_aliases_of_home_and_its_ancestors_are_broad() {
+        let Some(home) = std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .and_then(|home| std::fs::canonicalize(home).ok())
+        else {
+            return;
+        };
+        let home_metadata = std::fs::metadata(&home).expect("home metadata");
+        let relative_home = home.strip_prefix("/").expect("absolute home");
+        for prefix in [Path::new("/.nofollow"), Path::new("/System/Volumes/Data")] {
+            // Only exercise aliases present on this host. Read metadata alone; never
+            // read or modify the real home directory's contents.
+            let aliases_home =
+                std::fs::metadata(prefix.join(relative_home)).is_ok_and(|metadata| {
+                    metadata.dev() == home_metadata.dev() && metadata.ino() == home_metadata.ino()
+                });
+            if !aliases_home {
+                continue;
+            }
+            for ancestor in home.ancestors() {
+                let alias = prefix.join(ancestor.strip_prefix("/").expect("absolute ancestor"));
+                assert!(
+                    folder_is_broad_with(&alias, Some(&home)),
+                    "{}",
+                    alias.display()
+                );
+            }
+        }
+        let dir = tempfile::tempdir().expect("temp dir");
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).expect("project dir");
+        let linked_project = dir.path().join("linked-project");
+        std::os::unix::fs::symlink(&project, &linked_project).expect("project symlink");
+        assert!(!folder_is_broad_with(&project, Some(&home)));
+        assert!(!folder_is_broad_with(&linked_project, Some(&home)));
     }
 
     /// Goal item A4: an approval needs a fresh proof for exactly the waiting run.
@@ -727,4 +1088,15 @@ mod tests {
         };
         assert_ne!(old, new, "run IDs start at a random value");
     }
+}
+#[test]
+fn shown_paths_hide_format_characters_and_keep_printable_unicode() {
+    assert_eq!(
+        shown_path("/tmp/a\u{00AD}b\u{E0041}\u{206A}/界é🦀", usize::MAX),
+        "/tmp/a?b??/界é🦀"
+    );
+    assert_eq!(
+        shown_path("\u{0600}\u{0891}\u{180E}\u{1343F}\u{FFF9}", usize::MAX),
+        "?????"
+    );
 }
