@@ -153,9 +153,9 @@ Each stage is useful alone and has its own PR. There is no release until the own
 - An agent can store a credential of an attacker under a plausible name, for example a token for another account. Other agents can then use it. The catalog and Activity show which agent added the item.
 - The catalog shows the names, usernames, hosts and visible details of the credentials to the agent and to the provider of its model (ADR 0012).
 
-## Open questions
+### 3c. Who an answer covers
 
-- Is an owner answer remembered for one agent or for all agents in the project? The recommendation is all agents in the project: connecting an agent is already the trust step, and a limit to one agent repeats each question for each new agent. A limit to one agent helps only when agents have different trust, for example a remote agent or a test agent; for those, an "Ask me again for this agent" setting on the agent is enough.
+The owner decided on 2026-10-12 ("tak, zostajemy") that an answer covers all agents in the project. Connecting an agent is already the trust step. A limit to one agent would repeat each question for each new agent. An agent with the setting "Ask me again for this agent" does not use the answers of other agents, for example a remote agent or a test agent.
 
 ## Relation to other records
 
