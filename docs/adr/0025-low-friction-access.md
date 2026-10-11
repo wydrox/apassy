@@ -64,7 +64,7 @@ It asks the owner when:
 
 The rules that the model cannot change stay:
 
-- A production declaration waits for the owner at each run (ADR 0010), unless the owner allowed production for the project and the kind of action (§3a). The model and the usage log never make such an allowance.
+- A production declaration waits for the owner at each run (ADR 0010), unless the owner allowed production for the project and the kind of action (§3b). The model and the usage log never make such an allowance.
 - A one-time-code setup key is never chosen automatically (the OTP fix in PR #13).
 - A placeholder goes only to its hosts (ADR 0011).
 - Without a running bouncer, each run waits for the owner.
@@ -73,14 +73,14 @@ The rules that the model cannot change stay:
 
 Each answer of the owner is remembered for the item, the project and the kind of action, so the same question does not come again. The question card says what Apassy remembers.
 
-### 3-0. Project and kind of action
+### 3a. Project and kind of action
 
 The owner accepted both on 2026-10-12.
 
 - **Project.** A project is one git repository with all its worktrees: the folders that share the git common directory. A folder without git is its own project. ADR 0024 keeps the root, the home folder and its parents out: they are never a project.
 - **Kind of action.** A fixed list: *read*, *change*, *deploy*, *delete or irreversible*. Hard rules classify first (for example `DELETE`, `drop`, `--force`, `rm`, `destroy` are always *delete or irreversible*). The model only fills in what the rules do not cover. When the class is not clear, the more dangerous class counts.
 
-### 3a. Production allowed by the owner
+### 3b. Production allowed by the owner
 
 The owner decided on 2026-10-12 that the owner can allow production ("mogę zezwolić").
 
@@ -89,9 +89,23 @@ The owner decided on 2026-10-12 that the owner can allow production ("mogę zezw
 - Only an answer of the owner makes an allowance. The bouncer, a remembered pattern and the usage log cannot.
 - The item screen lists the allowances. The owner removes one with one click; the removal needs no owner check.
 
-### 3b. Answers on the iPhone
+### 3c. Who an answer covers
 
-The owner decided on 2026-10-12 that the iPhone answers the questions of §3, §3a and §5 ("tak"). This changes ADR 0020: the phone can now make a remembered answer, a production allowance and a correction of a declaration. Each such answer is signed with the approval key and Face ID, as a run approval is (ADR 0020 §4). The phone still cannot unlock the vault, connect an agent or change a setting.
+The owner decided on 2026-10-12 ("tak, zostajemy") that an answer covers all agents in the project. Connecting an agent is already the trust step. A limit to one agent would repeat each question for each new agent. An agent with the setting "Ask me again for this agent" does not use the answers of other agents, for example a remote agent or a test agent.
+
+### 3d. Answers on the iPhone
+
+The owner decided on 2026-10-12 that the iPhone answers the questions of §3, §3b and §5 ("tak"). This changes ADR 0020: the phone can now make a remembered answer, a production allowance and a correction of a declaration. Each such answer is signed with the approval key and Face ID, as a run approval is (ADR 0020 §4). The phone still cannot unlock the vault, connect an agent or change a setting.
+
+### 3e. Waiting and notifications
+
+The owner decided on 2026-10-12:
+
+- A question waits **5 minutes**. When the host of the agent ends the call earlier (its own tool timeout), the agent gets "waiting for the owner, call again", and the question stays open until the 5 minutes end.
+- Each question goes as a notification to **every device** connected to the vault: each Mac with the vault, each iPhone, the app. The first valid answer counts. The other devices show who answered and where.
+- **Teams.** A question about an item of a team collection goes to the member that the agent acts for (ADR 0019). A production allowance for a team item needs an owner or a manager of the team. Other members get no notification.
+- **The relay carries the notifications** ("relay jako kanał powiadomień"), also for a personal vault. The relay keeps no vault data of a personal vault, which still syncs through iCloud Drive (ADR 0023). It routes end-to-end encrypted questions and answers, and sends Apple push notifications (APNs) to the iPhones. The relay sees the routing only. This closes D1 and D2 of ADR 0020.
+- Without the relay, notifications work on the Mac and on the local network only.
 
 ### 4. Two steps to add
 
@@ -160,26 +174,12 @@ Each stage is useful alone and has its own PR. There is no release until the own
 - An agent can store a credential of an attacker under a plausible name, for example a token for another account. Other agents can then use it. The catalog and Activity show which agent added the item.
 - The catalog shows the names, usernames, hosts and visible details of the credentials to the agent and to the provider of its model (ADR 0012).
 
-### 3d. Waiting and notifications
-
-The owner decided on 2026-10-12:
-
-- A question waits **5 minutes**. When the host of the agent ends the call earlier (its own tool timeout), the agent gets "waiting for the owner, call again", and the question stays open until the 5 minutes end.
-- Each question goes as a notification to **every device** connected to the vault: each Mac with the vault, each iPhone, the app. The first valid answer counts. The other devices show who answered and where.
-- **Teams.** A question about an item of a team collection goes to the member that the agent acts for (ADR 0019). A production allowance for a team item needs an owner or a manager of the team. Other members get no notification.
-- **The relay carries the notifications** ("relay jako kanał powiadomień"), also for a personal vault. The relay keeps no vault data of a personal vault, which still syncs through iCloud Drive (ADR 0023). It routes end-to-end encrypted questions and answers, and sends Apple push notifications (APNs) to the iPhones. The relay sees the routing only. This closes D1 and D2 of ADR 0020.
-- Without the relay, notifications work on the Mac and on the local network only.
-
-### 3c. Who an answer covers
-
-The owner decided on 2026-10-12 ("tak, zostajemy") that an answer covers all agents in the project. Connecting an agent is already the trust step. A limit to one agent would repeat each question for each new agent. An agent with the setting "Ask me again for this agent" does not use the answers of other agents, for example a remote agent or a test agent.
-
 ## Relation to other records
 
 - ADR 0008: a declaration stays required for a decision of the model. Apassy makes it at the save (§4).
-- ADR 0010: the production rule stays, with one exception: an allowance of the owner for a project and a kind of action (§3a).
+- ADR 0010: the production rule stays, with one exception: an allowance of the owner for a project and a kind of action (§3b).
 - ADR 0011: placeholders stay the safe way to send a value only to its hosts.
 - ADR 0012: a grant is no longer needed. Grants stay as optional settings.
-- ADR 0019: the relay also carries notifications and answers, for teams and for personal vaults (§3d).
-- ADR 0020: the phone answers the questions of the bouncer and the corrections, and can allow production (§3b). Access away from the local network and push notifications come through the relay (§3d).
+- ADR 0019: the relay also carries notifications and answers, for teams and for personal vaults (§3e).
+- ADR 0020: the phone answers the questions of the bouncer and the corrections, and can allow production (§3d). Access away from the local network and push notifications come through the relay (§3e).
 - ADR 0024: first use goes to the bouncer, not always to the owner. The limit of one waiting question stays.
