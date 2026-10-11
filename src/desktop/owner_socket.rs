@@ -3,8 +3,11 @@
 //! A thread accepts connections on the socket. Each connection has one request. The
 //! thread hands the request to the UI thread and waits for the response: the UI thread
 //! owns the vault session, the owner check dialog, and the command-line sessions. The
-//! socket directory has mode `0700`, and the socket has mode `0600`. There is no
-//! peer-credential check (ADR 0010).
+//! socket directory has mode `0700`, and the socket has mode `0600`. The owner socket has
+//! no peer-credential check (ADR 0010). A wire can check the peer of some requests
+//! ([`LineWire::check_peer`]), and watch the connection while the UI thread works on
+//! them ([`LineWire::watch`]): when the peer hangs up, the request is cancelled
+//! ([`PeerGone`]), and the UI thread closes its dialog.
 //!
 //! [`LineWire`] names the request and the response of one socket. Both sockets have one
 //! line of JSON in each direction.
@@ -45,7 +48,37 @@ pub(crate) trait LineWire: 'static {
     /// Parse one request line. An error is the response to send.
     fn parse(line: &[u8]) -> Result<Self::Request, Self::Response>;
     fn error(code: &'static str, message: &'static str) -> Self::Response;
+
+    /// Check the program at the other end of the connection before the UI thread sees
+    /// the request. An error is the response to send. The default accepts every peer.
+    fn check_peer(_stream: &UnixStream, _request: &Self::Request) -> Result<(), Self::Response> {
+        Ok(())
+    }
+
+    /// The hang-up state of a request that ends when its peer hangs up. The socket
+    /// thread sets it, and wakes the UI thread, when the peer closes the connection or
+    /// sends more bytes while the request waits. `None`: the request is not watched.
+    fn watch(_request: &Self::Request) -> Option<PeerGone> {
+        None
+    }
 }
+
+/// Set when the peer of a watched request hung up. The UI thread reads it.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PeerGone(Arc<AtomicBool>);
+
+impl PeerGone {
+    pub(crate) fn set(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn is_set(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// How often the socket thread looks at the connection of a watched request.
+const WATCH_POLL: Duration = Duration::from_millis(100);
 
 /// The owner wire (ADR 0017).
 pub(crate) struct OwnerWire;
@@ -216,8 +249,83 @@ fn serve<W: LineWire>(
         Ok(request) => request,
         Err(response) => return write_response(&mut writer, &response),
     };
-    let response = ask_ui::<W>(sender, wake, request);
+    if let Err(response) = W::check_peer(&writer, &request) {
+        return write_response(&mut writer, &response);
+    }
+    let response = match W::watch(&request) {
+        None => ask_ui::<W>(sender, wake, request),
+        Some(gone) => match ask_ui_watching::<W>(sender, wake, request, &reader, &gone) {
+            Some(response) => response,
+            // The peer is gone: nobody reads an answer.
+            None => return Ok(()),
+        },
+    };
     write_response(&mut writer, &response)
+}
+
+/// [`ask_ui`] for a watched request. While the UI thread works, the connection is read
+/// without blocking: an end of input, an error, or any byte after the request line
+/// sets `gone`, wakes the UI thread, and returns `None`.
+fn ask_ui_watching<W: LineWire>(
+    sender: &Sender<WireEnvelope<W>>,
+    wake: &dyn Fn(),
+    request: W::Request,
+    reader: &BufReader<UnixStream>,
+    gone: &PeerGone,
+) -> Option<W::Response> {
+    let (reply, answer) = mpsc::channel();
+    if sender.send(Envelope { request, reply }).is_err() {
+        return Some(W::error("stopped", "Apassy is stopping. Nothing changed."));
+    }
+    wake();
+    let started = std::time::Instant::now();
+    loop {
+        match answer.recv_timeout(WATCH_POLL) {
+            Ok(response) => return Some(response),
+            Err(RecvTimeoutError::Disconnected) => {
+                return Some(W::error(
+                    "stopped",
+                    "Apassy stopped before it answered. Nothing changed.",
+                ));
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+        if peer_left(reader) {
+            gone.set();
+            wake();
+            return None;
+        }
+        if started.elapsed() >= REPLY_TIMEOUT {
+            gone.set();
+            wake();
+            return Some(W::error(
+                "timeout",
+                "Apassy did not answer in time. Nothing was signed or filled.",
+            ));
+        }
+    }
+}
+
+/// True when the peer closed the connection, or sent bytes after its one request line.
+/// The read does not block. The stream is blocking again after the call.
+fn peer_left(reader: &BufReader<UnixStream>) -> bool {
+    if !reader.buffer().is_empty() {
+        return true;
+    }
+    let stream = reader.get_ref();
+    if stream.set_nonblocking(true).is_err() {
+        return true;
+    }
+    let mut byte = [0u8; 1];
+    let left = match (&*stream).read(&mut byte) {
+        Ok(_) => true,
+        Err(err) => !matches!(
+            err.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+        ),
+    };
+    byte.zeroize();
+    stream.set_nonblocking(false).is_err() || left
 }
 
 /// Hand the request to the UI thread and wait for its response.

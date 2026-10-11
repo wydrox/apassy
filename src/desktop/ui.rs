@@ -39,6 +39,11 @@ mod items;
 #[cfg(all(test, feature = "vault"))]
 mod keyboard_tests;
 pub(crate) mod kit;
+/// One-time passwords (TOTP) on the credential pages.
+#[cfg(feature = "vault")]
+mod otp;
+#[cfg(all(test, feature = "vault"))]
+mod otp_tests;
 #[cfg(feature = "vault")]
 mod owner_check_view;
 #[cfg(all(test, feature = "vault"))]
@@ -1390,17 +1395,21 @@ mod tests {
                 &secrets,
             )
             .expect("add");
+        let delivery = EnvDelivery::Placeholder(vec!["api.example.com".to_owned()]);
         let proof = owner_ok(
             &app,
-            crate::broker::approvals::OwnerAction::ChangeItemRules { item_id: short.id },
+            crate::broker::approvals::OwnerAction::BindVariable {
+                item_id: short.id,
+                field: "token".to_owned(),
+                env_name: "SHORT_KEY".to_owned(),
+                delivery: delivery.clone(),
+                setup_key: false,
+            },
         );
-        let refused = app.owner_ui.session.set_env_binding(
-            short.id,
-            "SHORT_KEY",
-            "token",
-            &EnvDelivery::Placeholder(vec!["api.example.com".to_owned()]),
-            proof,
-        );
+        let refused =
+            app.owner_ui
+                .session
+                .set_env_binding(short.id, "SHORT_KEY", "token", &delivery, proof);
         assert!(
             refused.is_err_and(|err| err.message.contains("too short")),
             "a short value"
@@ -1434,7 +1443,16 @@ mod tests {
             .expect("add")
             .id;
         for (item_id, name) in [(first, "FIRST_KEY"), (second, "SECOND_KEY")] {
-            let proof = owner_ok(&app, OwnerAction::ChangeItemRules { item_id });
+            let proof = owner_ok(
+                &app,
+                OwnerAction::BindVariable {
+                    item_id,
+                    field: "token".to_owned(),
+                    env_name: name.to_owned(),
+                    delivery: EnvDelivery::Value,
+                    setup_key: false,
+                },
+            );
             app.owner_ui
                 .session
                 .set_env_binding(item_id, name, "token", &EnvDelivery::Value, proof)

@@ -1,0 +1,4 @@
+module ApassyCoreFFI {
+    header "apassy_core.h"
+    export *
+}

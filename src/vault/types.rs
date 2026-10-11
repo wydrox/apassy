@@ -19,7 +19,10 @@ pub const MAX_FIELD_NAME_BYTES: usize = 64;
 pub const MAX_FIELD_VALUE_BYTES: usize = 65_536;
 pub const MAX_PAYLOAD_BYTES: usize = 1_048_576;
 pub const MAX_SEARCH_RESULTS: usize = 1000;
-pub const SCHEMA_VERSION: i64 = 16;
+pub const SCHEMA_VERSION: i64 = 17;
+/// Field names that only the passkey path writes (schema 17). Generic paths refuse,
+/// hide, and keep them.
+pub const PASSKEY_FIELD_PREFIX: &str = "passkey_";
 
 /// Owned secret text. Debug is redacted. There is no public `Serialize` impl.
 /// Drop erases the text with `zeroize`. A clone is a second copy with its own erase.
@@ -265,7 +268,26 @@ pub(crate) fn validate_unlock_passphrase(passphrase: &str) -> VaultResult<()> {
     }
 }
 
+/// True for a field name that only the passkey path writes. The match is exact (case
+/// sensitive), like the field names.
+pub(crate) fn is_passkey_field(name: &str) -> bool {
+    name.starts_with(PASSKEY_FIELD_PREFIX)
+}
+
 pub(crate) fn validate_draft(draft: ItemDraft) -> VaultResult<ItemDraft> {
+    validate_draft_with(draft, &[], false)
+}
+
+/// Validate a generic draft. `kept` are the stored passkey fields that the item keeps.
+/// They count in the field and size limits. A draft never names a passkey field. A login
+/// with a valid passkey (`has_passkey`) needs no username and no password; a password
+/// that it has must be secret. Only the passkey path and an update of an item with a
+/// valid stored passkey set `has_passkey`.
+pub(crate) fn validate_draft_with(
+    draft: ItemDraft,
+    kept: &[Field],
+    has_passkey: bool,
+) -> VaultResult<ItemDraft> {
     let title = draft.title.trim();
     if title.is_empty() || title.len() > MAX_TITLE_BYTES {
         return Err(err(VaultErrorKind::InvalidInput));
@@ -281,12 +303,12 @@ pub(crate) fn validate_draft(draft: ItemDraft) -> VaultResult<ItemDraft> {
             return Err(err(VaultErrorKind::InvalidInput));
         }
     }
-    if draft.fields.len() > MAX_FIELD_COUNT {
+    if draft.fields.len() + kept.len() > MAX_FIELD_COUNT {
         return Err(err(VaultErrorKind::InvalidInput));
     }
     let mut names = BTreeSet::new();
     for field in &draft.fields {
-        if !field_name_ok(&field.name) {
+        if !field_name_ok(&field.name) || is_passkey_field(&field.name) {
             return Err(err(VaultErrorKind::InvalidInput));
         }
         if field.value.expose().len() > MAX_FIELD_VALUE_BYTES {
@@ -296,9 +318,16 @@ pub(crate) fn validate_draft(draft: ItemDraft) -> VaultResult<ItemDraft> {
             return Err(err(VaultErrorKind::InvalidInput));
         }
     }
-    validate_kind_fields(draft.kind, &draft.fields)?;
+    if !has_passkey {
+        validate_kind_fields(draft.kind, &draft.fields)?;
+    } else if draft.kind != CredentialKind::Login
+        || find_field(&draft.fields, "password").is_some_and(|field| !field.secret)
+    {
+        return Err(err(VaultErrorKind::InvalidInput));
+    }
     let title = title.to_owned();
-    reject_oversized_payload(&title, draft.kind, &draft.notes, &draft.tags, &draft.fields)?;
+    let all: Vec<&Field> = draft.fields.iter().chain(kept).collect();
+    reject_oversized_payload(&title, draft.kind, &draft.notes, &draft.tags, &all)?;
     Ok(ItemDraft {
         title,
         kind: draft.kind,
@@ -388,7 +417,7 @@ fn reject_oversized_payload(
     kind: CredentialKind,
     notes: &str,
     tags: &[String],
-    fields: &[Field],
+    fields: &[&Field],
 ) -> VaultResult<()> {
     let payload = StoredPayload {
         title,

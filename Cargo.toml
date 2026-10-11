@@ -1,6 +1,6 @@
 [package]
 name = "apassy"
-version = "0.3.6"
+version = "0.4.1"
 edition = "2024"
 rust-version = "1.97"
 publish = false
@@ -8,11 +8,15 @@ license = "Apache-2.0"
 repository = "https://github.com/wydrox/apassy"
 description = "A personal credential manager with controlled agent access"
 
+[workspace]
+members = [".", "ios/ApassyCore"]
+default-members = ["."]
+
 [features]
 default = []
-desktop = ["dep:eframe", "dep:rustix", "dep:rfd", "dep:qrcode", "dep:toml_edit"]
+desktop = ["dep:eframe", "dep:rustix", "dep:rfd", "dep:qrcode", "dep:arboard", "dep:toml_edit"]
 storage-probe = ["dep:rusqlite", "dep:tempfile"]
-vault = ["dep:rusqlite", "dep:tempfile", "dep:getrandom", "dep:rustls", "dep:rustls-platform-verifier", "dep:rcgen", "dep:time", "dep:ring", "dep:flate2"]
+vault = ["dep:rusqlite", "dep:tempfile", "dep:getrandom", "dep:rustls", "dep:rustls-platform-verifier", "dep:rcgen", "dep:time", "dep:ring", "dep:flate2", "dep:ciborium", "dep:psl"]
 
 [dependencies]
 toml_edit = { version = "=0.25.15", optional = true, default-features = false, features = ["parse"] }
@@ -20,6 +24,8 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 zeroize = "=1.9.0"
 eframe = { version = "=0.36.2", optional = true, default-features = false, features = ["accesskit", "default_fonts", "glow"] }
+# A guarded, concealed clipboard copy for one-time codes.
+arboard = { version = "=3.6.1", optional = true, default-features = false }
 # Native open/save panels. The async API keeps the desktop event loop free.
 rfd = { version = "=0.17.2", optional = true, default-features = false, features = ["xdg-portal"] }
 rusqlite = { version = "=0.40.2", optional = true, default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }
@@ -33,6 +39,10 @@ rcgen = { version = "=0.14.10", optional = true, default-features = false, featu
 # ADR 0020: ECDSA P-256 verification, HMAC-SHA256, and SHA-256 for the iPhone companion.
 # The version and the features are the ones that rustls and rcgen already build.
 ring = { version = "=0.17.14", optional = true, default-features = false, features = ["alloc"] }
+# Passkeys (schema 17): the CBOR of the attestation object and the COSE public key.
+ciborium = { version = "=0.2.2", optional = true, default-features = false, features = ["std"] }
+# WebAuthn RP validation includes ICANN and private public suffixes.
+psl = { version = "=2.1.238", optional = true }
 # ADR 0020: the pairing QR code of the desktop app. No default features, so no `image`
 # and no other dependency. The app draws the modules with egui.
 qrcode = { version = "=0.14.1", optional = true, default-features = false }

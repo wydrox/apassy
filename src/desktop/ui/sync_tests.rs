@@ -1000,7 +1000,7 @@ fn settled_frames(app: &mut DesktopApp) -> String {
     frames(app)
 }
 
-/// The words of the open "Add a Mac…" sheet of Mac A, after Mac B sent `link`.
+/// The words of the open "Add a device…" sheet of Mac A, after Mac B sent `link`.
 fn send_link(b: &mut DesktopApp, link: &str) -> String {
     b.sync.relay.link_input = link.to_owned();
     b.sync.relay.device_input = "Synthetic Mac mini".to_owned();
@@ -1010,6 +1010,89 @@ fn send_link(b: &mut DesktopApp, link: &str) -> String {
         Some(super::sync::relay::JoinView::Waiting { safety }) => safety,
         other => panic!("{other:?}: {:?}", b.sync.relay.join_error),
     }
+}
+
+/// `qr` holds exactly the modules of a QR code of the text `link` (error correction M),
+/// so the iPhone app reads the link as "Copy link" copies it.
+fn assert_qr_encodes(qr: &crate::desktop::companion::QrModules, link: &str) {
+    use qrcode::{Color, EcLevel, QrCode};
+    let expected =
+        QrCode::with_error_correction_level(link.as_bytes(), EcLevel::M).expect("a QR code");
+    let width = expected.width();
+    assert_eq!(qr.width(), width);
+    for y in 0..width {
+        for x in 0..width {
+            assert_eq!(
+                qr.is_dark(x, y),
+                expected[(x, y)] == Color::Dark,
+                "module {x},{y}"
+            );
+        }
+    }
+}
+
+#[test]
+fn add_a_device_shows_the_link_as_a_qr_code_for_the_iphone() {
+    let folders = folders();
+    let relay = fake_relay::FakeRelay::start();
+    let (mut a, id) = relay_mac_a(&folders, &relay);
+    a.view = OwnerView::Settings;
+    a.sync_open_sheet(SyncSheet::AddMac { id: id.clone() }, None);
+    let text = settled_frames(&mut a);
+    let link = a.relay_add_mac_link_for_test().expect("a link");
+    assert!(
+        link.starts_with(&format!("{}/link#apassy_lnk_", relay.url)),
+        "{link}"
+    );
+    assert!(text.contains(&link), "the link as text: {text}");
+    let qr = a.relay_add_mac_qr_for_test().expect("a QR code");
+    assert_qr_encodes(qr, &link);
+
+    // The sheet draws it on white, about 180 points wide, with the quiet zone.
+    let total = (qr.width() + 2 * crate::desktop::companion::QUIET_ZONE) as f32;
+    let ctx = egui::Context::default();
+    let mut sides = Vec::new();
+    for _ in 0..3 {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SIZE)),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| draw(&mut a, ui));
+        sides.clear();
+        fn white(shape: &egui::Shape, sides: &mut Vec<f32>) {
+            match shape {
+                // White, maybe faded in with the sheet (premultiplied alpha).
+                egui::Shape::Rect(rect)
+                    if rect.fill.a() > 0
+                        && rect.fill.to_array() == [rect.fill.a(); 4]
+                        && rect.rect.width() == rect.rect.height() =>
+                {
+                    sides.push(rect.rect.width());
+                }
+                egui::Shape::Vec(nested) => nested.iter().for_each(|inner| white(inner, sides)),
+                _ => {}
+            }
+        }
+        for clipped in &output.shapes {
+            white(&clipped.shape, &mut sides);
+        }
+        output.drop_without_applying_deltas();
+    }
+    assert!(
+        sides
+            .iter()
+            .any(|side| *side <= 180.0 && *side > 180.0 - total && side % total == 0.0),
+        "{sides:?} for {total} modules"
+    );
+
+    // A new link makes a new QR code of the new link.
+    a.sync_open_sheet(SyncSheet::Devices { id: id.clone() }, None);
+    let _ = settled_frames(&mut a);
+    a.sync_open_sheet(SyncSheet::AddMac { id: id.clone() }, None);
+    let _ = settled_frames(&mut a);
+    let second = a.relay_add_mac_link_for_test().expect("a new link");
+    assert_ne!(second, link);
+    assert_qr_encodes(a.relay_add_mac_qr_for_test().expect("a QR code"), &second);
 }
 
 #[test]
@@ -1145,7 +1228,7 @@ fn add_a_mac_shows_a_link_then_the_safety_words_and_confirm_needs_the_owner_chec
         "Saved to the relay",
         "Apassy relay",
         "Sync now",
-        "Add a Mac…",
+        "Add a device…",
         "Devices…",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
@@ -1163,10 +1246,16 @@ fn add_a_mac_shows_a_link_then_the_safety_words_and_confirm_needs_the_owner_chec
         link.starts_with(&format!("{}/link#apassy_lnk_", relay.url)),
         "{link}"
     );
-    for expected in ["Add a Mac to “Personal”", "/link#apassy_lnk_", "Copy link"] {
+    for expected in [
+        "Add a device to “Personal”",
+        "On an iPhone, open Apassy, select “Add your vault”, and scan this code.",
+        "/link#apassy_lnk_",
+        "Copy link",
+    ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
-    assert!(text.contains("Waiting for the other Mac…"), "{text}");
+    assert!(text.contains("Waiting for the other device…"), "{text}");
+    assert_qr_encodes(a.relay_add_mac_qr_for_test().expect("a QR code"), &link);
 
     // Mac B pastes the link and shows its words.
     let mut b = folders.mac("mac-b");
@@ -1191,7 +1280,7 @@ fn add_a_mac_shows_a_link_then_the_safety_words_and_confirm_needs_the_owner_chec
     assert_eq!(links[0].safety.as_deref(), Some(words.as_str()));
     let text = frames(&mut a);
     assert!(
-        text.contains("“Synthetic Mac mini” asks to sync “Personal”"),
+        text.contains("“Synthetic Mac mini” asks to sync “Personal”. Both devices show:"),
         "{text}"
     );
     assert!(text.contains(&words) && text.contains("Confirm…"), "{text}");
@@ -1207,13 +1296,13 @@ fn add_a_mac_shows_a_link_then_the_safety_words_and_confirm_needs_the_owner_chec
     assert_eq!(request.action(), expected);
     assert_eq!(
         expected.reason(),
-        "add the Mac \"Synthetic Mac mini\" to the sync of this vault"
+        "add the device \"Synthetic Mac mini\" to the sync of this vault"
     );
     assert!(matches!(request, OwnerRequest::ConfirmSyncDevice { ref vault, .. } if *vault == id));
     assert!(
         request
             .describe()
-            .starts_with("Add the Mac \"Synthetic Mac mini\" to the sync of this vault")
+            .starts_with("Add the device \"Synthetic Mac mini\" to the sync of this vault")
     );
     assert_eq!(
         a.confirm_owner_now(OwnerCheck::passphrase(OTHER_PASS)),
@@ -1241,11 +1330,12 @@ fn add_a_mac_shows_a_link_then_the_safety_words_and_confirm_needs_the_owner_chec
     assert!(text.contains("Added. Synthetic Mac mini"), "{text}");
     // Only the result and Done: the used link and the wait are gone.
     for gone in [
-        "Waiting for the other Mac…",
+        "Waiting for the other device…",
         "/link#apassy_lnk_",
         "Copy link",
         "asks to sync",
-        "paste this link",
+        "scan this code",
+        "paste the link",
     ] {
         assert!(!text.contains(gone), "{gone}: {text}");
     }
@@ -1253,6 +1343,10 @@ fn add_a_mac_shows_a_link_then_the_safety_words_and_confirm_needs_the_owner_chec
     assert!(
         a.relay_add_mac_link_for_test().is_none(),
         "the code is gone"
+    );
+    assert!(
+        a.relay_add_mac_qr_for_test().is_none(),
+        "the QR code is gone"
     );
 
     // "Devices…" lists both Macs.
@@ -1486,7 +1580,7 @@ fn a_removed_mac_offers_only_turning_relay_sync_off() {
     let (mut b, id_b) = join_b(&folders, &mut a, &id);
     b.view = OwnerView::Settings;
     let text = settled_frames(&mut b);
-    for expected in ["Sync now", "Add a Mac…", "Devices…"] {
+    for expected in ["Sync now", "Add a device…", "Devices…"] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
     let device_b = b
@@ -1508,7 +1602,7 @@ fn a_removed_mac_offers_only_turning_relay_sync_off() {
         text.contains("Turn relay sync off, then join again"),
         "{text}"
     );
-    for gone in ["Sync now", "Add a Mac…", "Devices…"] {
+    for gone in ["Sync now", "Add a device…", "Devices…"] {
         assert!(!text.contains(gone), "{gone}: {text}");
     }
     // The sync menu stays: "Off" is the way back.
@@ -1517,7 +1611,7 @@ fn a_removed_mac_offers_only_turning_relay_sync_off() {
     let calls = relay.log().len();
     b.sync_open_sheet(SyncSheet::AddMac { id: id_b.clone() }, None);
     let text = settled_frames(&mut b);
-    assert!(text.contains("Add a Mac to “Personal”"), "{text}");
+    assert!(text.contains("Add a device to “Personal”"), "{text}");
     assert!(text.contains("Removed from the relay."), "{text}");
     for gone in ["Check again", "New link", "Copy link", "/link#apassy_lnk_"] {
         assert!(!text.contains(gone), "{gone}: {text}");
@@ -1605,7 +1699,7 @@ fn turning_relay_sync_off_keeps_the_copy_and_the_last_mac_can_delete_it() {
     assert_eq!(names(&a), vec!["Alpha"], "the vault on this Mac stays");
 }
 
-/// Mac A confirms the one Mac that waits in its "Add a Mac…" sheet.
+/// Mac A confirms the one Mac that waits in its "Add a device…" sheet.
 fn confirm_waiting_mac(a: &mut DesktopApp) {
     a.relay_add_mac_poll_for_test();
     let links = a.relay_add_mac_links_for_test();
@@ -1949,7 +2043,7 @@ fn frame_texts(
 }
 
 /// A quick click (press and release in one frame, as a tap on a trackpad) on
-/// "Confirm…" opens the owner check above "Add a Mac…", also the second time, and its
+/// "Confirm…" opens the owner check above "Add a device…", also the second time, and its
 /// passphrase field takes the typed passphrase.
 #[test]
 fn a_quick_click_on_confirm_opens_the_owner_check_on_top_each_time() {
@@ -2021,11 +2115,11 @@ fn a_quick_click_on_confirm_opens_the_owner_check_on_top_each_time() {
             "round {round}: the passphrase field has the focus"
         );
         if round == 1 {
-            // Escape closes the check; a click in "Add a Mac…" brings it to the front.
+            // Escape closes the check; a click in "Add a device…" brings it to the front.
             let _ = frame(&mut a, vec![key(egui::Key::Escape)]);
             texts = frame(&mut a, Vec::new());
             assert!(a.owner.check.is_none());
-            let title = at(&texts, "Add a Mac to “Personal”");
+            let title = at(&texts, "Add a device to “Personal”");
             let _ = frame(&mut a, vec![egui::Event::PointerMoved(title)]);
             let _ = frame(&mut a, quick_click(title));
             for _ in 0..4 {
@@ -2158,7 +2252,7 @@ fn relay_calls_of_the_owner_leave_the_window_responsive() {
     assert_eq!(a.status_text, "Saved to the relay.");
     assert_eq!(relay.version(), 2, "the change made during the upload");
 
-    // "Add a Mac…" and "Devices…" with a slow relay.
+    // "Add a device…" and "Devices…" with a slow relay.
     relay.delay("POST /v1/devices/links", SLOW);
     relay.delay("GET /v1/devices", SLOW);
     let started = Instant::now();

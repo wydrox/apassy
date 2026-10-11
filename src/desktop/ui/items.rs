@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use eframe::egui::{self, Align, Label, Layout, Pos2, Rect, RichText, Sense, Vec2};
 
 use super::kit::{self, Font, Icon, Section, Size, Style, Tone};
+use super::otp;
 use super::timeline::{self, relative_time};
 use super::{
     SECRET_VALUE_CAPACITY, Sheet, UiState, ask_owner_from_sheet, close_sheet, extra_label,
@@ -21,10 +22,10 @@ use super::{
 use crate::broker::profile::REPORTING_API_V0;
 use crate::contracts::CredentialKind;
 use crate::desktop::model::{DesktopModel, DetailDraft, ExtraField, ItemDraft, MASKED_VALUE};
-use crate::desktop::owner_check::OwnerRequest;
+use crate::desktop::owner_check::{OwnerRequest, page_text};
 use crate::desktop::owner_store::{
     DETAIL_PREFIX, DeclarationForm, DetailLine, MAX_DETAILS, OwnerDetails, OwnerSummary,
-    SecretForm, field_label,
+    PasskeyItem, SecretForm, field_label,
 };
 use crate::desktop::{DesktopApp, OwnerView};
 use crate::vault::providers::{self, Suggested};
@@ -130,6 +131,8 @@ impl Sort {
 }
 
 pub(super) fn draw_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    // A passkey removal that waits for the owner does not outlive its credential page.
+    forget_removal(ui.ctx());
     let all = app.owner_ui.session.search("").unwrap_or_default();
     let mut add = false;
     // With no credential, the empty state has the one main action (⌘N still works).
@@ -564,6 +567,13 @@ pub(super) fn draw_detail_header(app: &mut DesktopApp, ui: &mut egui::Ui) {
     };
     let details = match app.owner_ui.session.details(id) {
         Ok(details) => details,
+        Err(err) if err.code == "not_found" => {
+            // The credential is gone, for example after "Delete login" for a passkey
+            // without a password, or after a delete on another device.
+            app.selected_item_id = None;
+            app.view = OwnerView::Vault;
+            return;
+        }
         Err(err) => {
             kit::tone_note(ui, err.message, Tone::Critical);
             return;
@@ -648,8 +658,13 @@ pub(super) fn draw_detail_body(app: &mut DesktopApp, ui: &mut egui::Ui) {
         }
     }
     review_card(app, ui, id);
+    let passkey = passkey_of(app, &details);
     secret_section(app, ui, &details);
-    details_section(app, ui, &details);
+    otp::code_section(app, ui, &details);
+    if let Some(passkey) = &passkey {
+        passkey_section(ui, &details, passkey);
+    }
+    details_section(app, ui, &details, passkey.is_some());
     detail_disclosure(app, ui, id, "access", "Agent access", |app, ui| {
         access_section(app, ui, id, details.kind);
     });
@@ -697,6 +712,7 @@ pub(super) fn draw_detail_body(app: &mut DesktopApp, ui: &mut egui::Ui) {
     if delete {
         app.pending_delete = true;
     }
+    removal_sheet(app, ui.ctx(), &details, passkey.as_ref());
 }
 
 fn detail_disclosure(
@@ -734,6 +750,18 @@ fn open_edit(app: &mut DesktopApp, details: &OwnerDetails, add_detail: bool) {
 /// Show or hide the secret values of the selected credential. Showing needs the owner
 /// check (goal item A4). ⌘⇧H does the same.
 pub(super) fn toggle_masking(app: &mut DesktopApp, ctx: &egui::Context) {
+    toggle_with(app, ctx, true);
+}
+
+/// The Show and Hide of the secret and the details. A shown one-time password does not
+/// change them: its Show and Hide are on its own row. Hide still hides every value of the
+/// item, and Show asks for the check of the generic Reveal.
+fn toggle_values(app: &mut DesktopApp, ctx: &egui::Context) {
+    toggle_with(app, ctx, false);
+}
+
+/// `with_codes`: a shown code counts as a shown value, so the shortcut hides it.
+fn toggle_with(app: &mut DesktopApp, ctx: &egui::Context, with_codes: bool) {
     let Some(id) = selected_id(app) else {
         return;
     };
@@ -743,7 +771,11 @@ pub(super) fn toggle_masking(app: &mut DesktopApp, ctx: &egui::Context) {
     if details.hidden || details.secret_lines.is_empty() {
         return;
     }
-    if details.any_revealed() {
+    let code_shown = with_codes
+        && details.details.iter().any(|detail| {
+            otp::is_otp_detail(detail) && app.owner_ui.session.code_seed(id, &detail.name).is_some()
+        });
+    if details.any_revealed() || code_shown {
         let result = app.owner_ui.session.hide(id);
         let _ = app.apply(result, "The values are hidden.");
     } else {
@@ -804,7 +836,7 @@ fn secret_section(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetail
     let footer = if revealed {
         details.reveal_warning()
     } else {
-        "Show asks for your passphrase. Apassy never copies a value to the clipboard."
+        "Show asks for your passphrase. Apassy never copies a secret value to the clipboard."
     };
     let mut toggle = false;
     kit::section(ui, Some("Secret"), Some(footer), |s| {
@@ -824,16 +856,29 @@ fn secret_section(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetail
         }
     });
     if toggle {
-        toggle_masking(app, ui.ctx());
+        toggle_values(app, ui.ctx());
     }
 }
 
 /// The details that are set, and the custom details. A hidden custom detail is masked
 /// like the secret, and "Show" shows it with the secret.
-fn details_section(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) {
+///
+/// `from_page`: the login has a passkey. A website or macOS gave its account name, and the
+/// vault copied it to the username. The page cleans it like the passkey rows.
+fn details_section(
+    app: &mut DesktopApp,
+    ui: &mut egui::Ui,
+    details: &OwnerDetails,
+    from_page: bool,
+) {
     let id = details.id;
+    let username = if from_page {
+        page_text(&details.username)
+    } else {
+        details.username.clone()
+    };
     let rows: Vec<(&str, &str)> = [
-        ("Username", details.username.as_str()),
+        ("Username", username.as_str()),
         ("Website", details.website.as_str()),
         ("Host", details.host.as_str()),
         ("Database", details.database_name.as_str()),
@@ -857,12 +902,18 @@ fn details_section(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetai
             for (label, value) in rows {
                 value_row(s, label, value);
             }
+            // A one-time password has its own section. Its seed is never a detail row. A
+            // visible setup key is not drawn.
             for detail in details
                 .details
                 .iter()
-                .filter(|detail| !is_import_data(detail))
+                .filter(|detail| !is_import_data(detail) && !otp::is_otp_detail(detail))
             {
-                toggle |= custom_value_row(app, s, id, detail, revealed);
+                if otp::exposes_setup_key(detail) {
+                    otp::exposed_row(s, detail);
+                } else {
+                    toggle |= custom_value_row(app, s, id, detail, revealed);
+                }
             }
             if details.details.len() < MAX_DETAILS {
                 add_detail = s
@@ -897,7 +948,7 @@ fn details_section(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetai
         });
     }
     if toggle {
-        toggle_masking(app, ui.ctx());
+        toggle_values(app, ui.ctx());
     }
     if add_detail {
         open_edit(app, details, true);
@@ -1375,6 +1426,7 @@ pub(super) fn add_sheet(app: &mut DesktopApp, ctx: &egui::Context, kind_chosen: 
                 &mut app.ui,
                 "add",
                 false,
+                false,
             );
         });
         kit::sheet_buttons(
@@ -1422,6 +1474,10 @@ pub(super) fn add_sheet(app: &mut DesktopApp, ctx: &egui::Context, kind_chosen: 
         }
         FormAction::Save => {
             let draft = app.add_form.clone();
+            if let Err(message) = otp::check_form(&draft, &app.owner_ui.add_secrets) {
+                app.set_err(message);
+                return response.escape;
+            }
             // Borrow the form. A clone would be one more copy of each secret (F3).
             match app.owner_ui.session.add(&draft, &app.owner_ui.add_secrets) {
                 Ok(item) => {
@@ -1503,6 +1559,15 @@ pub(super) fn edit_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
     };
     let mut action = FormAction::None;
     let kind = app.edit_form.kind;
+    // A login that signs in with a passkey and has no password needs no password.
+    let passkey_only = kind == CredentialKind::Login
+        && app
+            .owner_ui
+            .session
+            .passkey_item(id)
+            .ok()
+            .flatten()
+            .is_some_and(|passkey| !passkey.has_password);
     let response = kit::sheet(ctx, "edit-item", 500.0, |ui| {
         kit::sheet_title(ui, "Edit credential", Some(kind.label()));
         kit::sheet_body(ui, |ui| {
@@ -1513,6 +1578,7 @@ pub(super) fn edit_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
                 &mut app.ui,
                 "edit",
                 true,
+                passkey_only,
             );
         });
         kit::sheet_buttons(
@@ -1547,6 +1613,10 @@ pub(super) fn edit_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
 
 fn save_edit(app: &mut DesktopApp, ctx: &egui::Context, id: u64) {
     let draft = app.edit_form.clone();
+    if let Err(message) = otp::check_form(&draft, &app.owner_ui.edit_secrets) {
+        app.set_err(message);
+        return;
+    }
     let revision = app.owner_ui.edit_revision;
     let unchanged = app
         .owner_ui
@@ -1582,7 +1652,8 @@ fn save_edit(app: &mut DesktopApp, ctx: &egui::Context, id: u64) {
 }
 
 /// The fields of the add and edit sheets. The add sheet asks for the secret with the
-/// name. The edit sheet keeps a blank secret.
+/// name. The edit sheet keeps a blank secret. `passkey_only`: the stored login signs in
+/// with a passkey and has no password, so a blank password is valid.
 fn item_form(
     ui: &mut egui::Ui,
     form: &mut ItemDraft,
@@ -1590,9 +1661,12 @@ fn item_form(
     state: &mut UiState,
     salt: &str,
     editing: bool,
+    passkey_only: bool,
 ) {
     let kind = form.kind;
     let focus_name = std::mem::take(&mut state.focus_form_name);
+    // A setup key is never a plain detail: hide it before the first draw.
+    otp::protect_form(ui.ctx(), salt, form, secrets);
     kit::section(ui, None, None, |s| {
         s.field("Name", |ui| {
             let field = kit::text_input(
@@ -1616,15 +1690,22 @@ fn item_form(
         }
         if !editing {
             secret_rows(s, salt, kind, secrets, "Required");
+            otp::form_row(s, salt, form, secrets);
         }
     });
     if editing {
-        kit::section(
-            ui,
-            Some("Secret"),
-            Some("Leave a field blank to keep the stored value."),
-            |s| secret_rows(s, salt, kind, secrets, "Unchanged"),
-        );
+        let (footer, placeholder) = if passkey_only {
+            (
+                "This login signs in with a passkey. A password is optional. Apassy keeps the passkey when you save.",
+                "Optional",
+            )
+        } else {
+            ("Leave a field blank to keep the stored value.", "Unchanged")
+        };
+        kit::section(ui, Some("Secret"), Some(footer), |s| {
+            secret_rows(s, salt, kind, secrets, placeholder);
+            otp::form_row(s, salt, form, secrets);
+        });
     }
     kit::section(
         ui,
@@ -1667,7 +1748,9 @@ fn item_form(
 fn detail_rows(ui: &mut egui::Ui, form: &mut ItemDraft, secrets: &mut SecretForm, salt: &str) {
     let ctx = ui.ctx().clone();
     let mut remove = None;
-    if !form.details.is_empty() {
+    // The login form edits its one-time password in the secret rows.
+    let dedicated = otp::dedicated_slot(form);
+    if form.details.len() > usize::from(dedicated.is_some()) {
         kit::section(
             ui,
             Some("Custom details"),
@@ -1692,6 +1775,9 @@ fn detail_rows(ui: &mut egui::Ui, form: &mut ItemDraft, secrets: &mut SecretForm
                     });
                 });
                 for (index, detail) in form.details.iter_mut().enumerate() {
+                    if dedicated == Some(index) {
+                        continue;
+                    }
                     // VoiceOver names each field of the row, as the captions above do.
                     let row_name = if detail.label.trim().is_empty() {
                         format!("detail {}", index + 1)
@@ -1722,6 +1808,14 @@ fn detail_rows(ui: &mut egui::Ui, form: &mut ItemDraft, secrets: &mut SecretForm
                                 name_field.inner.id,
                                 format!("Name of {row_name}"),
                             );
+                            // A label like "OTP" makes the detail hidden before its value is drawn.
+                            let mut protected = otp::hide_setup_key(
+                                ui.ctx(),
+                                salt,
+                                index,
+                                detail,
+                                &mut secrets.details[index],
+                            );
                             let width = (ui.available_width() - 92.0).max(120.0);
                             let value_field = ui.allocate_ui(Vec2::new(width, 26.0), |ui| {
                                 if detail.hidden {
@@ -1751,13 +1845,32 @@ fn detail_rows(ui: &mut egui::Ui, form: &mut ItemDraft, secrets: &mut SecretForm
                                 value_field.inner.id,
                                 format!("Value of {row_name}"),
                             );
+                            // A pasted otpauth link hides the detail. The frame is drawn
+                            // again, so the link is never painted.
+                            protected |= otp::hide_setup_key(
+                                ui.ctx(),
+                                salt,
+                                index,
+                                detail,
+                                &mut secrets.details[index],
+                            );
+                            if protected {
+                                ui.ctx().request_discard("A setup key is hidden");
+                                ui.ctx().request_repaint();
+                            }
                             let mut hidden = detail.hidden;
-                            if kit::toggle(ui, &mut hidden, &format!("Hidden: {row_name}"))
-                                .on_hover_text(
-                                    "Hidden: masked, and showing it needs your passphrase",
-                                )
-                                .changed()
-                            {
+                            let locked = otp::is_locked_hidden(detail);
+                            let switch = ui
+                                .add_enabled_ui(!locked, |ui| {
+                                    kit::toggle(ui, &mut hidden, &format!("Hidden: {row_name}"))
+                                        .on_hover_text(if locked {
+                                            "A one-time password is always hidden"
+                                        } else {
+                                            "Hidden: masked, and showing it needs your passphrase"
+                                        })
+                                })
+                                .inner;
+                            if switch.changed() && !locked {
                                 set_hidden(detail, &mut secrets.details[index], hidden);
                             }
                             if kit::icon_button(
@@ -1801,7 +1914,7 @@ fn detail_rows(ui: &mut egui::Ui, form: &mut ItemDraft, secrets: &mut SecretForm
 
 /// Make a detail hidden or visible. A typed value moves with it, so the owner does not
 /// type it again. A value that moves out of the secret buffer is erased there.
-fn set_hidden(detail: &mut DetailDraft, secret: &mut String, hidden: bool) {
+pub(super) fn set_hidden(detail: &mut DetailDraft, secret: &mut String, hidden: bool) {
     use zeroize::Zeroize;
 
     detail.hidden = hidden;
@@ -1891,6 +2004,218 @@ pub(super) fn secret_rows(
                 placeholder,
             );
         }
+    }
+}
+
+// ---- The passkey. ----
+
+/// The label of the removal action. Without a password the vault deletes the whole login,
+/// and the action says so.
+const REMOVE_PASSKEY: &str = "Remove passkey";
+const DELETE_LOGIN: &str = "Delete login";
+
+/// The passkey of a login, for the page. `None` for another kind and for a login
+/// without a passkey. It has no key: the vault gives only the metadata.
+fn passkey_of(app: &DesktopApp, details: &OwnerDetails) -> Option<PasskeyItem> {
+    if details.kind != CredentialKind::Login {
+        return None;
+    }
+    app.owner_ui.session.passkey_item(details.id).ok().flatten()
+}
+
+/// The credential ID for the screen: the first characters of its base64url text.
+fn short_credential_id(id: &[u8]) -> String {
+    let text = crate::vault::passkey::b64url_encode(id);
+    if text.chars().count() <= 16 {
+        return text;
+    }
+    let head: String = text.chars().take(10).collect();
+    let tail: String = text.chars().skip(text.chars().count() - 4).collect();
+    format!("{head}…{tail}")
+}
+
+/// The metadata of the passkey and the one action. The page never shows the private key.
+/// The generic Show and Hide of the credential do not touch it. The relying party, the
+/// account, and the display name come from a website or from macOS, so the page cleans
+/// them like the owner check dialog does.
+fn passkey_section(ui: &mut egui::Ui, details: &OwnerDetails, passkey: &PasskeyItem) {
+    let info = &passkey.info;
+    let account = page_text(&info.user_name);
+    let display = page_text(&info.user_display_name);
+    let mut remove = false;
+    kit::section(
+        ui,
+        Some("Passkey"),
+        Some(
+            "The private key stays in the vault. This page cannot show it, copy it, or set it up again.",
+        ),
+        |s| {
+            value_row(s, "Website", &page_text(&info.rp_id));
+            if !account.is_empty() {
+                value_row(s, "Account", &account);
+            }
+            if !display.is_empty() && display != account {
+                value_row(s, "Display name", &display);
+            }
+            value_row(
+                s,
+                "Credential ID",
+                &short_credential_id(&info.credential_id),
+            );
+            let (label, note, color) = if passkey.has_password {
+                (
+                    format!("{REMOVE_PASSKEY}…"),
+                    "Apassy keeps the password and the other fields.",
+                    kit::LABEL,
+                )
+            } else {
+                (
+                    format!("{DELETE_LOGIN}…"),
+                    "This login has no password. Apassy deletes the whole login.",
+                    Tone::Critical.text(),
+                )
+            };
+            remove = s
+                .clickable_row(&label, |ui| {
+                    ui.label(kit::text(&label, Font::Body).color(color));
+                    kit::note(ui, note);
+                })
+                .clicked();
+        },
+    );
+    if remove {
+        remember_removal(
+            ui.ctx(),
+            Removal {
+                item_id: details.id,
+                revision: details.revision,
+                name: details.name.clone(),
+                delete_login: !passkey.has_password,
+            },
+        );
+    }
+}
+
+/// What the owner saw when the removal sheet opened. The owner check asks for exactly this.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Removal {
+    item_id: u64,
+    revision: u64,
+    name: String,
+    /// The vault deletes the whole login: the login has no password.
+    delete_login: bool,
+}
+
+fn removal_key() -> egui::Id {
+    egui::Id::new("apassy-passkey-removal")
+}
+
+fn remember_removal(ctx: &egui::Context, removal: Removal) {
+    ctx.data_mut(|data| data.insert_temp(removal_key(), removal));
+}
+
+fn forget_removal(ctx: &egui::Context) {
+    ctx.data_mut(|data| data.remove::<Removal>(removal_key()));
+}
+
+/// The confirmation before the owner check. The sheet shows what the vault will do. A
+/// change of the login while the sheet is open closes it: the owner must read the warning
+/// again. The confirmation asks for the owner check with the revision and the name that
+/// the sheet showed; the vault checks the revision again.
+fn removal_sheet(
+    app: &mut DesktopApp,
+    ctx: &egui::Context,
+    details: &OwnerDetails,
+    passkey: Option<&PasskeyItem>,
+) {
+    let Some(removal) = ctx.data(|data| data.get_temp::<Removal>(removal_key())) else {
+        return;
+    };
+    let now = passkey.map(|passkey| (details.revision, !passkey.has_password));
+    if removal.item_id != details.id {
+        forget_removal(ctx);
+        return;
+    }
+    if now != Some((removal.revision, removal.delete_login)) {
+        forget_removal(ctx);
+        app.set_err("The login changed. Select the action again and read the warning.");
+        return;
+    }
+    let shown = page_text(&removal.name);
+    let mut confirm = false;
+    let mut cancel = false;
+    let response = kit::sheet(ctx, "remove-passkey", 420.0, |ui| {
+        if removal.delete_login {
+            kit::sheet_title(ui, "Delete this login?", None);
+            kit::paragraph(
+                ui,
+                format!(
+                    "The login “{shown}” has a passkey and no password. Apassy cannot keep a login with neither. So Apassy deletes the whole login."
+                ),
+                Font::Callout,
+                kit::LABEL,
+            );
+            ui.add_space(8.0);
+            kit::paragraph(
+                ui,
+                "You lose the passkey and all other fields: notes, tags, website, one-time passwords, custom details, agent access, and history. Your other devices lose them too after sync. You cannot undo this.",
+                Font::Callout,
+                kit::SECONDARY,
+            );
+            ui.add_space(8.0);
+            kit::paragraph(
+                ui,
+                "To keep the fields, press Cancel. Then add a password to the login, or archive the login.",
+                Font::Callout,
+                kit::SECONDARY,
+            );
+        } else {
+            kit::sheet_title(ui, "Remove this passkey?", None);
+            kit::paragraph(
+                ui,
+                format!(
+                    "Apassy deletes the passkey of the login “{shown}”. The password and the other fields stay. You cannot undo this."
+                ),
+                Font::Callout,
+                kit::LABEL,
+            );
+            ui.add_space(8.0);
+            kit::paragraph(
+                ui,
+                "The website can still list the passkey. Remove it on the website too.",
+                Font::Callout,
+                kit::SECONDARY,
+            );
+        }
+        kit::sheet_buttons(
+            ui,
+            |_| {},
+            |ui| {
+                let label = if removal.delete_login {
+                    DELETE_LOGIN
+                } else {
+                    REMOVE_PASSKEY
+                };
+                confirm = kit::button(ui, label, Style::DestructiveProminent).clicked();
+                cancel = kit::alert_cancel(ui).clicked();
+            },
+        );
+    });
+    if cancel || response.escape {
+        forget_removal(ctx);
+    } else if confirm {
+        forget_removal(ctx);
+        // The owner check names this item, this revision, and this branch. No vault call
+        // happens here.
+        app.ask_owner(
+            OwnerRequest::RemovePasskey {
+                item_id: removal.item_id,
+                revision: removal.revision,
+                name: removal.name,
+                delete_login: removal.delete_login,
+            },
+            Some(ctx),
+        );
     }
 }
 
@@ -2770,3 +3095,7 @@ mod conflict_tests {
         assert!(list.contains("Current credential (conflict copy"), "{list}");
     }
 }
+
+#[cfg(test)]
+#[path = "passkey_tests.rs"]
+mod passkey_tests;

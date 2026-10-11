@@ -11,7 +11,8 @@
 //!   merges it record by record into the vault with the key of the open connection
 //!   ([`crate::vault::Vault::merge_from`]). A credential that both sides changed stays
 //!   twice: the older version becomes an archived conflict copy. Then, when the vault
-//!   has content that the file does not have, the sync pushes: it writes a stripped copy
+//!   has content that the file does not have, or the file has an earlier schema
+//!   ([`MergeReport::remote_outdated`]), the sync pushes: it writes a stripped copy
 //!   in the data folder, copies it to `<name>.apassy.push.nosync` in the synced folder,
 //!   syncs it, and renames it to `<name>.apassy`.
 //! - A status needs no key: it compares the hash of the file with the hash after the
@@ -108,11 +109,22 @@ pub fn try_detect_folders() -> Result<Vec<SyncFolder>, SyncError> {
     )
 }
 
+static DEVICE_NAME: OnceLock<String> = OnceLock::new();
+
 /// The name of this computer for the sync record: `scutil --get ComputerName` on macOS,
-/// else the host name, else "Unknown device". Read once for each process.
+/// else the host name, else "Unknown device". Read once for each process, unless
+/// [`set_device_name`] gave it first.
 pub fn device_name() -> String {
-    static NAME: OnceLock<String> = OnceLock::new();
-    NAME.get_or_init(read_device_name).clone()
+    DEVICE_NAME.get_or_init(read_device_name).clone()
+}
+
+/// Give the name of this device for the sync record, before the first sync of the
+/// process: a device that has no host name to read, such as an iPhone (ADR 0023). The
+/// name is trimmed and loses its control characters; an empty name changes nothing.
+/// Returns false when the name was read or given already.
+pub fn set_device_name(name: &str) -> bool {
+    let name: String = name.trim().chars().filter(|ch| !ch.is_control()).collect();
+    !name.is_empty() && DEVICE_NAME.set(name).is_ok()
 }
 
 fn read_device_name() -> String {
@@ -587,6 +599,7 @@ impl FolderSync {
         };
         let mut merge = None;
         let mut file_content = state.last_content.clone();
+        let mut outdated = false;
         if Some(to_hex(&head.sha256)) != state.last_file_sha256 {
             let work = TempFile::new(self.work_path(&name, "merge")?)?;
             let (_held, hash) = transport.fetch(&head, &work.path)?;
@@ -594,11 +607,14 @@ impl FolderSync {
                 .merge_from(&work.path, &self.scope)
                 .map_err(copy_error)?;
             file_content = Some(to_hex(&report.remote_content));
+            outdated = report.remote_outdated();
             state.last_file_sha256 = Some(hash);
             merge = Some(report);
         }
         let content = to_hex(&vault.sync_content(&self.scope)?);
-        let pushed = file_content.as_deref() != Some(content.as_str());
+        // A file of an earlier schema gets a copy of the current schema, also with the
+        // same content.
+        let pushed = outdated || file_content.as_deref() != Some(content.as_str());
         if pushed {
             self.push(vault, state)?;
         } else {
@@ -814,7 +830,8 @@ impl FolderSync {
             Vault::adopt_sync_copy(&work.path, &self.config.vault_path, passphrase)?;
         let mut state = SyncState::new(file_name, &adopted.identity.vault_id);
         state.last_file_sha256 = Some(hash);
-        state.last_content = Some(to_hex(&adopted.content));
+        // Persist the pending format upgrade, also across a failed first push.
+        state.last_content = (!adopted.outdated()).then(|| to_hex(&adopted.content));
         if let Err(state_err) = self.write_state(&state) {
             let new_file = vault.path().to_owned();
             drop(vault);

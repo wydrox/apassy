@@ -19,6 +19,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use eframe::egui;
 use zeroize::{Zeroize, Zeroizing};
 
+use super::clipboard::CodeClipboard;
 use super::inbox::EventKey;
 use super::notify::NotificationCenter;
 use super::owner_store::{DeclarationForm, ENDED_BY_LOCK, ENDED_BY_QUIT, Ephemeral, FreshToken};
@@ -31,7 +32,7 @@ use crate::broker::approvals::{
     PendingRun, touch_id_detail,
 };
 use crate::broker::profile::REPORTING_API_V0;
-use crate::native::{Biometry, NativeHelper};
+use crate::native::{AuthCancel, Biometry, CancelOnDrop, NativeHelper};
 use crate::vault::{EnvDelivery, ExecMode, ExecRule, GrantPlace};
 
 /// The result of a poll of a [`Task`].
@@ -74,6 +75,17 @@ impl<T: Send + 'static> Task<T> {
     }
 }
 
+/// Text from a page or another program for the dialog and the vault: no control
+/// character and no bidirectional format character (they could hide the site), trimmed,
+/// at most 64 characters.
+pub(crate) fn page_text(text: &str) -> String {
+    let clean: String = text
+        .chars()
+        .filter(|c| !crate::browser::wire::hides_text(*c))
+        .collect();
+    dialog_cut(clean.trim())
+}
+
 /// At most 64 characters of a username from the browser, for the dialog.
 fn dialog_cut(text: &str) -> String {
     let mut cut: String = text.chars().take(64).collect();
@@ -91,6 +103,60 @@ fn decides(mode: ExecMode) -> &'static str {
     }
 }
 
+/// Whether `field` is a custom detail with the label of a one-time password. The value
+/// can also show a setup key: [`DesktopApp::ask_owner`] reads it before the dialog.
+fn labelled_setup_key(field: &str) -> bool {
+    super::owner_store::detail_label(field).is_some_and(|label| crate::otp::is_otp_label(&label))
+}
+
+/// The action that binds one variable. It names the exact field and the variable.
+fn bind_action(
+    item_id: u64,
+    env_name: &str,
+    field: &str,
+    delivery: &EnvDelivery,
+    setup_key: bool,
+) -> OwnerAction {
+    OwnerAction::BindVariable {
+        item_id,
+        field: field.to_owned(),
+        env_name: env_name.trim().to_owned(),
+        delivery: delivery.clone(),
+        setup_key,
+    }
+}
+
+/// The dialog text that binds one variable. It names the field by its label and never
+/// shows a value.
+fn describe_variable(
+    env_name: &str,
+    field: &str,
+    delivery: &EnvDelivery,
+    setup_key: bool,
+) -> String {
+    let label = page_text(&super::owner_store::field_label(field));
+    let what = if setup_key {
+        format!("the one-time password setup key \"{label}\"")
+    } else {
+        format!("the field \"{label}\"")
+    };
+    let bind = format!("Bind {what} of this item to the environment variable {env_name}.");
+    match (delivery, setup_key) {
+        (EnvDelivery::Value, false) => format!("{bind} Programs get the real value."),
+        (EnvDelivery::Value, true) => format!(
+            "{bind} Programs get the setup key, not a password. They can make one-time codes for this account at any time."
+        ),
+        (EnvDelivery::Placeholder(hosts), false) => format!(
+            "{bind} Programs get a placeholder, and Apassy sends the real value only to {}.",
+            hosts.join(", ")
+        ),
+        (EnvDelivery::Placeholder(hosts), true) => format!(
+            "{bind} Programs get a placeholder, and Apassy sends the real setup key only to {}. These hosts can make one-time codes for this account at any time.",
+            hosts.join(", ")
+        ),
+    }
+}
+
 /// One variable of [`OwnerRequest::BindVariables`]. `field` is the main secret field of
 /// the item. The dialog shows the item name and the variable.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,12 +167,51 @@ pub struct VariableBinding {
     pub field: String,
 }
 
+/// One passkey that an assertion can use, without its key. The names come from the
+/// vault (the page gave them when the passkey was made).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasskeyAccount {
+    pub item_id: u64,
+    pub item_name: String,
+    pub user_name: String,
+    pub user_display_name: String,
+    pub credential_id: Vec<u8>,
+}
+
+/// The `chosen` value of a passkey request with several accounts that the owner has not
+/// chosen from yet. It is no index of the list: the request has no account, no action
+/// that a proof can name, and no check starts.
+pub(crate) const NO_ACCOUNT: usize = usize::MAX;
+
+/// The part of a passkey request that every proof for it names. `origin` is the origin
+/// in the client data that the app checked and hashed; `None` for the macOS passkey
+/// sheet, where macOS checked the relying party.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasskeyRequest {
+    pub origin: Option<String>,
+    pub rid: String,
+    pub rp_id: String,
+    pub client_data_hash: [u8; 32],
+}
+
 /// An owner action that waits for the owner check. It has the parameters of the
 /// action, so the app does exactly what the owner confirmed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnerRequest {
     Reveal {
         item_id: u64,
+    },
+    /// Show the code of one one-time password. `field` is the field of its seed. Only
+    /// that field is read: the password and the other secret values stay hidden.
+    ShowCode {
+        item_id: u64,
+        field: String,
+    },
+    /// Copy the current code of one one-time password. The app computes the code, writes
+    /// it to the clipboard, and clears the clipboard soon after if it still holds it.
+    CopyCode {
+        item_id: u64,
+        field: String,
     },
     /// Fill one login in the browser (ADR 0021). Only the browser socket asks for it.
     /// The name and the username are for the dialog.
@@ -130,6 +235,57 @@ pub enum OwnerRequest {
         origin: String,
         length: u32,
         symbols: bool,
+    },
+    /// Fill the current code of one one-time password in the browser. Only the browser
+    /// socket asks for it. The name is for the dialog.
+    FillCode {
+        item_id: u64,
+        item_name: String,
+        field: String,
+        origin: String,
+    },
+    /// Sign in with a passkey: one assertion for the account `accounts[chosen]`. With
+    /// several accounts `chosen` is [`NO_ACCOUNT`] until the owner chooses one, and the
+    /// owner can choose another account of the list before the check.
+    SignPasskey {
+        request: PasskeyRequest,
+        accounts: Vec<PasskeyAccount>,
+        chosen: usize,
+    },
+    /// Make a passkey. The names come from the page or from macOS. `attach_name` is the
+    /// title of the login that gets it, `None` for a new login.
+    CreatePasskey {
+        request: PasskeyRequest,
+        user_handle: Vec<u8>,
+        user_name: String,
+        user_display_name: String,
+        algorithms: Vec<i64>,
+        excluded: Vec<Vec<u8>>,
+        target: crate::vault::PasskeyTarget,
+        attach_name: Option<String>,
+    },
+    /// Fill the username and the password of one login for one request of macOS AutoFill.
+    /// Only the credential bridge asks for it.
+    SystemFillLogin {
+        rid: String,
+        item_id: u64,
+        item_name: String,
+        username: String,
+    },
+    /// Fill the current code of one one-time password for one request of macOS AutoFill.
+    SystemFillCode {
+        rid: String,
+        item_id: u64,
+        item_name: String,
+        field: String,
+    },
+    /// Remove the passkey of a login at `revision`. `delete_login`: the login has no
+    /// password, so the whole login goes with the passkey. `name` is for the dialog.
+    RemovePasskey {
+        item_id: u64,
+        revision: u64,
+        name: String,
+        delete_login: bool,
     },
     ApproveRun(PendingRun),
     /// Approve one run and add one approval to its pattern (ADR 0010).
@@ -197,6 +353,16 @@ pub enum OwnerRequest {
         field: String,
         delivery: EnvDelivery,
     },
+    /// A [`OwnerRequest::SaveVariable`] after the app read the chosen field:
+    /// [`DesktopApp::ask_owner`] makes it. `setup_key` is true when the field holds the
+    /// setup key of a one-time password, by its label or by its value. The dialog says so.
+    ConfirmVariable {
+        item_id: u64,
+        env_name: String,
+        field: String,
+        delivery: EnvDelivery,
+        setup_key: bool,
+    },
     SaveConnector {
         item_id: u64,
         base_url: String,
@@ -231,8 +397,9 @@ pub enum OwnerRequest {
         request_key: Vec<u8>,
         approval_key: Vec<u8>,
     },
-    /// Add a Mac to the relay sync of the vault `vault` (a list ID; ADR 0022). The values
-    /// are the link exactly as the "Add a Mac…" sheet showed it with its safety words.
+    /// Add a device to the relay sync of the vault `vault` (a list ID; ADR 0022). The
+    /// values are the link exactly as the "Add a device…" sheet showed it with its safety
+    /// words.
     ConfirmSyncDevice {
         vault: String,
         link_id: u64,
@@ -242,10 +409,126 @@ pub enum OwnerRequest {
 }
 
 impl OwnerRequest {
+    /// True for a request whose result goes only to a request that still waits: a code or
+    /// a passkey. Without a live ticket nothing signs and no code is made.
+    pub fn needs_live_ticket(&self) -> bool {
+        matches!(
+            self,
+            Self::FillCode { .. }
+                | Self::SignPasskey { .. }
+                | Self::CreatePasskey { .. }
+                | Self::SystemFillLogin { .. }
+                | Self::SystemFillCode { .. }
+        )
+    }
+
+    /// True when Touch ID may start as the dialog opens. With several accounts the owner
+    /// reads the dialog first, so a touch never confirms an account that they did not see.
+    pub fn starts_touch_id(&self) -> bool {
+        self.is_ready()
+    }
+
+    /// True when the request names everything that a proof must name. A passkey request
+    /// is not ready until it has an account: no check starts and no proof is used.
+    pub fn is_ready(&self) -> bool {
+        !matches!(self, Self::SignPasskey { .. }) || self.passkey_account().is_some()
+    }
+
+    /// The account of an assertion.
+    pub fn passkey_account(&self) -> Option<&PasskeyAccount> {
+        match self {
+            Self::SignPasskey {
+                accounts, chosen, ..
+            } => accounts.get(*chosen),
+            _ => None,
+        }
+    }
+
     /// The action that the proof must name.
     pub fn action(&self) -> OwnerAction {
         match self {
+            Self::SystemFillLogin {
+                rid,
+                item_id,
+                item_name,
+                ..
+            } => OwnerAction::FillSystemLogin {
+                rid: rid.clone(),
+                item_id: *item_id,
+                login: item_name.clone(),
+            },
+            Self::SystemFillCode {
+                rid,
+                item_id,
+                field,
+                ..
+            } => OwnerAction::FillSystemCode {
+                rid: rid.clone(),
+                item_id: *item_id,
+                field: field.clone(),
+            },
+            Self::RemovePasskey {
+                item_id, revision, ..
+            } => OwnerAction::RemovePasskey {
+                item_id: *item_id,
+                revision: *revision,
+            },
+            Self::FillCode {
+                item_id,
+                field,
+                origin,
+                ..
+            } => OwnerAction::FillCode {
+                item_id: *item_id,
+                field: field.clone(),
+                origin: origin.clone(),
+            },
+            Self::SignPasskey { request, .. } => {
+                // A request that is ready has an account. Without one the action names
+                // none, and no check starts for it ([`OwnerRequest::is_ready`]).
+                let (item_id, credential_id) =
+                    self.passkey_account().map_or((0, Vec::new()), |account| {
+                        (account.item_id, account.credential_id.clone())
+                    });
+                OwnerAction::SignPasskey {
+                    origin: request.origin.clone(),
+                    rid: request.rid.clone(),
+                    rp_id: request.rp_id.clone(),
+                    item_id,
+                    credential_id,
+                    client_data_hash: request.client_data_hash,
+                }
+            }
+            Self::CreatePasskey {
+                request,
+                user_handle,
+                user_name,
+                user_display_name,
+                algorithms,
+                excluded,
+                target,
+                ..
+            } => OwnerAction::CreatePasskey {
+                origin: request.origin.clone(),
+                rid: request.rid.clone(),
+                rp_id: request.rp_id.clone(),
+                client_data_hash: request.client_data_hash,
+                user_handle: user_handle.clone(),
+                user_name: user_name.clone(),
+                user_display_name: user_display_name.clone(),
+                algorithms: algorithms.clone(),
+                excluded: excluded.clone(),
+                target: target.clone(),
+            },
             Self::Reveal { item_id } => OwnerAction::Reveal { item_id: *item_id },
+            Self::ShowCode { item_id, field } => OwnerAction::ShowCode {
+                item_id: *item_id,
+                field: field.clone(),
+            },
+            Self::CopyCode { item_id, field } => OwnerAction::CopyCode {
+                item_id: *item_id,
+                field: field.clone(),
+            },
             Self::FillLogin {
                 item_id,
                 item_name,
@@ -318,8 +601,26 @@ impl OwnerRequest {
                 agent_id: *agent_id,
                 item_id: *item_id,
             },
+            Self::SaveVariable {
+                item_id,
+                env_name,
+                field,
+                delivery,
+            } => bind_action(
+                *item_id,
+                env_name,
+                field,
+                delivery,
+                labelled_setup_key(field),
+            ),
+            Self::ConfirmVariable {
+                item_id,
+                env_name,
+                field,
+                delivery,
+                setup_key,
+            } => bind_action(*item_id, env_name, field, delivery, *setup_key),
             Self::SaveDeclaration { item_id, .. }
-            | Self::SaveVariable { item_id, .. }
             | Self::SaveConnector { item_id, .. }
             | Self::ConfirmReview { item_id }
             | Self::Unarchive { item_id, .. } => OwnerAction::ChangeItemRules { item_id: *item_id },
@@ -362,6 +663,14 @@ impl OwnerRequest {
     pub fn describe(&self) -> String {
         match self {
             Self::Reveal { .. } => "Show the secret values of this item for 30 seconds.".to_owned(),
+            Self::ShowCode { field, .. } => format!(
+                "Show the code of \"{}\" for 30 seconds. The other secret values stay hidden.",
+                super::owner_store::field_label(field)
+            ),
+            Self::CopyCode { field, .. } => format!(
+                "Copy the current code of \"{}\". Apassy clears the clipboard when the code changes, if the clipboard still holds it.",
+                super::owner_store::field_label(field)
+            ),
             Self::FillLogin {
                 item_name,
                 username,
@@ -390,6 +699,73 @@ impl OwnerRequest {
                 dialog_cut(username),
                 if *symbols { " with symbols" } else { " of letters and digits" }
             ),
+            Self::SystemFillLogin {
+                item_name,
+                username,
+                ..
+            } => format!(
+                "macOS AutoFill asks for the username and the password of the login \"{}\" ({}). macOS fills them in the app or on the website where you chose this login. If you did not just choose it in the AutoFill list, click Cancel.",
+                page_text(item_name),
+                page_text(username)
+            ),
+            Self::SystemFillCode {
+                item_name, field, ..
+            } => format!(
+                "macOS AutoFill asks for the current code of \"{}\" of the login \"{}\". macOS fills this one code where you chose it. The setup key stays in Apassy. If you did not just choose it in the AutoFill list, click Cancel.",
+                super::owner_store::field_label(field),
+                page_text(item_name)
+            ),
+            Self::RemovePasskey {
+                name,
+                delete_login: true,
+                ..
+            } => format!(
+                "Delete the login \"{name}\". It has a passkey and no password, so removing the passkey deletes the whole login: the username, the websites, the one-time codes, the notes, and every other field. The delete syncs to your other devices. This cannot be undone. Sign in on the site another way first."
+            ),
+            Self::RemovePasskey { name, .. } => format!(
+                "Remove the passkey from the login \"{name}\". The login keeps its password and its other fields. The site still has the passkey in its list: remove it there too."
+            ),
+            Self::FillCode {
+                item_name,
+                field,
+                origin,
+                ..
+            } => format!(
+                "For {origin}: fill the current code of \"{}\" from the login \"{item_name}\" in your browser. The page gets this one code. The setup key stays in Apassy.",
+                super::owner_store::field_label(field)
+            ),
+            Self::SignPasskey {
+                request, accounts, ..
+            } => describe_sign(request, accounts, self.passkey_account()),
+            Self::CreatePasskey {
+                request,
+                user_name,
+                user_display_name,
+                attach_name,
+                target,
+                ..
+            } => {
+                let account = account_text(user_name, user_display_name);
+                let place = match (attach_name, target) {
+                    (Some(name), _) => format!("into the login \"{}\"", page_text(name)),
+                    (None, crate::vault::PasskeyTarget::NewItem { title }) => {
+                        format!("as the new login \"{}\"", page_text(title))
+                    }
+                    (None, crate::vault::PasskeyTarget::Attach { .. }) => {
+                        "into a login".to_owned()
+                    }
+                };
+                match &request.origin {
+                    Some(origin) => format!(
+                        "For {origin}: create a passkey for {} with the account {account}, and save it {place}. The page names the account; check it. The page gets the new public key.",
+                        request.rp_id
+                    ),
+                    None => format!(
+                        "macOS asks to create a passkey for {} with the account {account}, and save it {place}. The request comes from an app or a website through the macOS passkey sheet; macOS checked that it is for {}. If you did not ask for it just now, click Cancel.",
+                        request.rp_id, request.rp_id
+                    ),
+                }
+            }
             Self::ApproveRun(run) => format!(
                 "Approve one run of agent \"{}\": {}",
                 run.agent,
@@ -461,16 +837,18 @@ impl OwnerRequest {
                     .map_or("none", |provider| provider.label.as_str())
             ),
             Self::SaveVariable {
-                env_name, delivery, ..
-            } => match delivery {
-                EnvDelivery::Value => format!(
-                    "Bind the item to the environment variable {env_name}. Programs get the real value."
-                ),
-                EnvDelivery::Placeholder(hosts) => format!(
-                    "Bind the item to the environment variable {env_name}. Programs get a placeholder, and Apassy sends the real value only to {}.",
-                    hosts.join(", ")
-                ),
-            },
+                env_name,
+                field,
+                delivery,
+                ..
+            } => describe_variable(env_name, field, delivery, labelled_setup_key(field)),
+            Self::ConfirmVariable {
+                env_name,
+                field,
+                delivery,
+                setup_key,
+                ..
+            } => describe_variable(env_name, field, delivery, *setup_key),
             Self::SaveConnector { base_url, .. } => {
                 format!("Send the token of this item to {base_url}.")
             }
@@ -497,10 +875,67 @@ impl OwnerRequest {
                 "Pair the iPhone \"{device_name}\". It can see the runs that wait for you and approve them with Face ID. It can never see a secret value."
             ),
             Self::ConfirmSyncDevice { device_name, .. } => format!(
-                "Add the Mac \"{device_name}\" to the sync of this vault through the Apassy relay. It gets the encrypted copy and can send changes. It still needs the passphrase to open the vault."
+                "Add the device \"{device_name}\" to the sync of this vault through the Apassy relay. It gets the encrypted copy and can send changes. It still needs the passphrase to open the vault."
             ),
         }
     }
+}
+
+/// `"name" (display name)` of an account, cleaned for the dialog.
+fn account_text(user_name: &str, display_name: &str) -> String {
+    let name = page_text(user_name);
+    let display = page_text(display_name);
+    if display.is_empty() || display == name {
+        format!("\"{name}\"")
+    } else {
+        format!("\"{name}\" ({display})")
+    }
+}
+
+/// The dialog text of an assertion. The origin comes first: it is the origin in the
+/// signed client data. The other accounts of the site are named, so the owner knows
+/// that the check is for one of them.
+fn describe_sign(
+    request: &PasskeyRequest,
+    accounts: &[PasskeyAccount],
+    chosen: Option<&PasskeyAccount>,
+) -> String {
+    let Some(account) = chosen else {
+        return match &request.origin {
+            Some(origin) => format!(
+                "For {origin}: sign in to {} with a passkey. The page gets one signature. Choose the account before you confirm.",
+                request.rp_id
+            ),
+            None => format!(
+                "macOS asks to sign in to {} with a passkey. The request comes from an app or a website through the macOS passkey sheet; macOS checked that it is for {}. Choose the account before you confirm. If you did not just sign in, click Cancel.",
+                request.rp_id, request.rp_id
+            ),
+        };
+    };
+    let who = account_text(&account.user_name, &account.user_display_name);
+    let login = page_text(&account.item_name);
+    let mut text = match &request.origin {
+        Some(origin) => format!(
+            "For {origin}: sign in to {} as {who} with the passkey of the login \"{login}\". The page gets one signature.",
+            request.rp_id
+        ),
+        None => format!(
+            "macOS asks to sign in to {} as {who} with the passkey of the login \"{login}\". The request comes from an app or a website through the macOS passkey sheet; macOS checked that it is for {}. If you did not just sign in, click Cancel.",
+            request.rp_id, request.rp_id
+        ),
+    };
+    let others: Vec<String> = accounts
+        .iter()
+        .filter(|other| other.credential_id != account.credential_id)
+        .map(|other| account_text(&other.user_name, &other.user_display_name))
+        .collect();
+    if !others.is_empty() {
+        text.push_str(&format!(
+            " Other accounts for this site: {}. Choose the account before you confirm.",
+            others.join(", ")
+        ));
+    }
+    text
 }
 
 /// Touch ID and keychain state from `ping`.
@@ -512,12 +947,19 @@ pub struct NativeState {
     pub problem: Option<String>,
 }
 
+/// Dropping this state cancels the native helper that belongs to the check.
+type RunningCheck = (
+    CheckMethod,
+    Task<Result<OwnerProof, OwnerAuthError>>,
+    CancelOnDrop,
+);
+
 /// The owner check dialog.
 pub(crate) struct CheckDialog {
     pub(crate) request: OwnerRequest,
     /// The passphrase field. The app erases it after each try.
     pub(crate) passphrase: String,
-    pub(crate) running: Option<(CheckMethod, Task<Result<OwnerProof, OwnerAuthError>>)>,
+    pub(crate) running: Option<RunningCheck>,
     /// The result of the last try.
     pub(crate) message: Option<String>,
     /// The command-line request that asked for this check (ADR 0017). It gets the
@@ -525,6 +967,9 @@ pub(crate) struct CheckDialog {
     pub(crate) origin: Option<super::owner_cli::CliTicket>,
     /// The browser request that asked for this check (ADR 0021). It gets the answer.
     pub(crate) browser: Option<super::browser::BrowserTicket>,
+    /// The request of the macOS passkey sheet that asked for this check. It gets the
+    /// answer.
+    pub(crate) platform: Option<super::passkey_socket::PlatformTicket>,
 }
 
 /// Touch ID unlock state for the open vault file.
@@ -553,6 +998,8 @@ pub struct OwnerFlows {
     pub(crate) notifications: Option<NotificationCenter>,
     /// Inbox events that the owner marked as seen. This is not an approval (N4).
     pub(crate) acknowledged: BTreeSet<EventKey>,
+    /// A copied one-time code and its clear.
+    pub(crate) clipboard: CodeClipboard,
 }
 
 impl OwnerFlows {
@@ -630,6 +1077,26 @@ impl DesktopApp {
     /// check passes. Touch ID starts at once when it is available.
     pub(crate) fn ask_owner(&mut self, request: OwnerRequest, ctx: Option<&egui::Context>) {
         self.close_owner_check(ctx);
+        // The dialog of a variable names a setup key also when only its value shows it.
+        let request = match request {
+            OwnerRequest::SaveVariable {
+                item_id,
+                env_name,
+                field,
+                delivery,
+            } => OwnerRequest::ConfirmVariable {
+                setup_key: self
+                    .owner_ui
+                    .session
+                    .holds_setup_key(item_id, &field)
+                    .unwrap_or_else(|_| labelled_setup_key(&field)),
+                item_id,
+                env_name,
+                field,
+                delivery,
+            },
+            other => other,
+        };
         self.owner.check = Some(CheckDialog {
             request,
             passphrase: String::with_capacity(super::ui::PASSPHRASE_CAPACITY),
@@ -637,10 +1104,38 @@ impl DesktopApp {
             message: None,
             origin: None,
             browser: None,
+            platform: None,
         });
-        if self.owner.touch_id_ready() {
+        let starts = self
+            .owner
+            .check
+            .as_ref()
+            .is_some_and(|dialog| dialog.request.starts_touch_id());
+        if starts && self.owner.touch_id_ready() {
             self.start_owner_check(OwnerCheck::TouchId, ctx.cloned());
         }
+    }
+
+    /// Choose account `index` of an open passkey dialog. A check that runs is for the
+    /// account before: it is dropped, and its proof never signs. The owner confirms again.
+    /// The first choice has no account before it, so no check runs and nothing drops.
+    /// The account list of the dialog view calls it.
+    pub(crate) fn choose_passkey(&mut self, index: usize) {
+        let Some(dialog) = self.owner.check.as_mut() else {
+            return;
+        };
+        let OwnerRequest::SignPasskey {
+            accounts, chosen, ..
+        } = &mut dialog.request
+        else {
+            return;
+        };
+        if index >= accounts.len() || index == *chosen {
+            return;
+        }
+        *chosen = index;
+        dialog.running = None;
+        dialog.message = None;
     }
 
     /// Run the gate on a worker thread for the open dialog.
@@ -649,12 +1144,24 @@ impl DesktopApp {
         let Some(dialog) = self.owner.check.as_mut() else {
             return;
         };
+        // A request without an account has no action to name: nothing starts.
+        if !dialog.request.is_ready() {
+            dialog.message = Some("Choose an account first. Nothing was checked.".to_owned());
+            return;
+        }
         let action = dialog.request.action();
         let method = check.method();
+        // Stop a previous helper before a retry starts another prompt.
+        dialog.running = None;
+        let cancel = AuthCancel::new();
+        let cancel_on_drop = cancel.cancel_on_drop();
         dialog.message = None;
         dialog.running = Some((
             method,
-            Task::spawn(ctx, move || gate.authorize(action, check)),
+            Task::spawn(ctx, move || {
+                gate.authorize_cancellable(action, check, &cancel)
+            }),
+            cancel_on_drop,
         ));
     }
 
@@ -680,12 +1187,57 @@ impl DesktopApp {
 
     /// Do `request` with `proof`. Each branch passes the proof to the guarded call.
     pub(crate) fn complete_owner_request(&mut self, request: OwnerRequest, proof: OwnerProof) {
+        if matches!(
+            request,
+            OwnerRequest::SignPasskey { .. } | OwnerRequest::CreatePasskey { .. }
+        ) {
+            return self.complete_passkey(&request.action(), proof);
+        }
         let session = &mut self.owner_ui.session;
         match request {
+            OwnerRequest::RemovePasskey {
+                item_id,
+                revision,
+                name,
+                delete_login,
+            } => self.complete_remove_passkey(item_id, revision, &name, delete_login, proof),
+            OwnerRequest::SystemFillLogin {
+                rid,
+                item_id,
+                item_name,
+                ..
+            } => self.complete_system_fill(&rid, item_id, &item_name, proof),
+            OwnerRequest::SystemFillCode {
+                rid,
+                item_id,
+                field,
+                ..
+            } => self.complete_system_code(&rid, item_id, &field, proof),
+            OwnerRequest::FillCode {
+                item_id,
+                field,
+                origin,
+                ..
+            } => self.complete_fill_code(item_id, &field, &origin, proof),
+            // Handled above.
+            OwnerRequest::SignPasskey { .. } | OwnerRequest::CreatePasskey { .. } => {
+                drop(proof);
+            }
             OwnerRequest::Reveal { item_id } => match session.reveal(item_id, proof) {
                 Ok(details) => self.set_ok(details.reveal_warning()),
                 Err(err) => self.set_err(err.message),
             },
+            OwnerRequest::ShowCode { item_id, field } => {
+                match session.reveal_one_code_seed(item_id, &field, proof) {
+                    Ok(()) => self.set_ok(
+                        "The code is visible for 30 seconds, or until you hide it or lock the vault.",
+                    ),
+                    Err(err) => self.set_err(err.message),
+                }
+            }
+            OwnerRequest::CopyCode { item_id, field } => {
+                self.complete_copy_code(item_id, &field, proof)
+            }
             OwnerRequest::FillLogin {
                 item_id, origin, ..
             } => self.complete_fill(item_id, &origin, proof),
@@ -809,7 +1361,16 @@ impl DesktopApp {
                 env_name,
                 field,
                 delivery,
+            }
+            | OwnerRequest::ConfirmVariable {
+                item_id,
+                env_name,
+                field,
+                delivery,
+                ..
             } => {
+                // The session reads the field again and refuses a proof for another
+                // field, variable, delivery, or setup key state.
                 let result = session.set_env_binding(item_id, &env_name, &field, &delivery, proof);
                 let _ = self.apply(result, &format!("The item is bound to {env_name}."));
             }
@@ -867,6 +1428,77 @@ impl DesktopApp {
         }
     }
 
+    /// Remove a passkey with `proof`. The dialog said whether the login goes too: that
+    /// must still be so, else nothing is removed. A deleted login leaves the page.
+    fn complete_remove_passkey(
+        &mut self,
+        item_id: u64,
+        revision: u64,
+        name: &str,
+        delete_login: bool,
+        proof: OwnerProof,
+    ) {
+        let session = &mut self.owner_ui.session;
+        match session.passkey_item(item_id) {
+            Ok(Some(item)) if item.has_password != delete_login => {}
+            Ok(_) | Err(_) => {
+                drop(proof);
+                return self.set_err(
+                    "The login changed after you opened it. Nothing was removed. Open it again.",
+                );
+            }
+        }
+        if let Err(err) = session.remove_passkey(item_id, revision, proof) {
+            return self.set_err(err.message);
+        }
+        let selected = self.selected_item_id == Some(item_id.to_string());
+        if delete_login {
+            if selected {
+                self.selected_item_id = None;
+                self.view = super::OwnerView::Vault;
+            }
+            self.pending_delete = false;
+            self.set_ok(format!("The login \"{name}\" is deleted with its passkey."));
+        } else {
+            // The form gets the new revision of the login.
+            if selected {
+                self.select_item(item_id.to_string());
+            }
+            self.set_ok(format!(
+                "The passkey is removed from \"{name}\". The login keeps its password."
+            ));
+        }
+    }
+
+    /// Copy the current code of one one-time password with `proof`. The seed stays in the
+    /// session call. The clipboard gets the code only.
+    fn complete_copy_code(&mut self, item_id: u64, field: &str, proof: OwnerProof) {
+        let session = &mut self.owner_ui.session;
+        let Some(epoch) = session.epoch() else {
+            self.set_err("The vault is locked. Nothing was copied.");
+            return;
+        };
+        let code = match session.copy_code(item_id, field, proof) {
+            Ok(code) => code,
+            Err(err) => {
+                self.set_err(err.message);
+                return;
+            }
+        };
+        let left = code.left;
+        match self
+            .owner
+            .clipboard
+            .copy(code.digits, left, epoch, std::time::Instant::now())
+        {
+            Ok(after) => self.set_ok(format!(
+                "The code is copied. Apassy clears the clipboard in {} seconds if it still holds the code.",
+                after.as_secs()
+            )),
+            Err(err) => self.set_err(err.message()),
+        }
+    }
+
     /// Do the request of a passed check, and answer the command line or the browser when
     /// it asked.
     fn finish_owner_check(&mut self, dialog: CheckDialog, proof: OwnerProof) {
@@ -874,8 +1506,35 @@ impl DesktopApp {
             request,
             origin,
             mut browser,
+            platform,
             ..
         } = dialog;
+        // A request without an account signs nothing, whatever proof it gets.
+        if !request.is_ready() {
+            drop(proof);
+            self.set_note("Choose an account first. Nothing was signed.");
+            return;
+        }
+        // A code or a passkey goes only to a request that still waits. The check is just
+        // before the vault call, on this thread: a request that hung up signs nothing.
+        if request.needs_live_ticket() {
+            let live = browser
+                .as_ref()
+                .map(super::browser::BrowserTicket::is_live)
+                .or_else(|| {
+                    platform
+                        .as_ref()
+                        .map(super::passkey_socket::PlatformTicket::is_live)
+                })
+                .unwrap_or(false);
+            if !live {
+                drop(proof);
+                self.set_note(
+                    "The request ended before the owner check finished. Nothing was signed or filled.",
+                );
+                return;
+            }
+        }
         if let Some(ticket) = browser.as_mut() {
             self.hold_browser_secret(ticket);
         }
@@ -886,6 +1545,9 @@ impl DesktopApp {
         }
         if let Some(ticket) = browser {
             self.answer_browser_ticket(ticket, before);
+        }
+        if let Some(ticket) = platform {
+            self.answer_platform_ticket(ticket);
         }
     }
 
@@ -901,6 +1563,14 @@ impl DesktopApp {
         Ok(())
     }
 
+    /// Finish the open dialog with `proof`, as a passed check does. Tests use this with
+    /// a proof of their own, also a proof for another action.
+    #[cfg(test)]
+    pub(crate) fn finish_owner_check_with(&mut self, proof: OwnerProof) {
+        let dialog = self.owner.check.take().expect("an owner check is open");
+        self.finish_owner_check(dialog, proof);
+    }
+
     /// Poll the worker threads. The UI calls this at the start of each frame.
     pub(crate) fn poll_owner_flows(&mut self, ctx: &egui::Context) {
         if let Some(probe) = &self.owner.native_probe
@@ -911,10 +1581,16 @@ impl DesktopApp {
         }
         self.poll_owner_check(ctx);
         self.expire_browser_check(ctx);
+        self.expire_platform_check(ctx);
         self.poll_unlock(ctx);
         self.poll_companion(ctx);
         self.owner_ui.session.expire_reveals();
         if let Some(left) = self.owner_ui.session.next_reveal_expiry() {
+            ctx.request_repaint_after(left);
+        }
+        // A copied code clears at its time, or at once in another vault session.
+        let epoch = self.owner_ui.session.epoch();
+        if let Some(left) = self.owner.clipboard.tick(std::time::Instant::now(), epoch) {
             ctx.request_repaint_after(left);
         }
         if self
@@ -934,7 +1610,7 @@ impl DesktopApp {
         let Some(dialog) = self.owner.check.as_mut() else {
             return;
         };
-        let Some((_, task)) = &dialog.running else {
+        let Some((_, task, _)) = &dialog.running else {
             return;
         };
         let result = match task.poll() {
@@ -962,7 +1638,9 @@ impl DesktopApp {
             {
                 dialog.message = Some(err.message());
                 // A fill waits in the background. The passphrase field is in the window.
-                if dialog.browser.is_some() && err.passphrase_fallback() {
+                if (dialog.browser.is_some() || dialog.platform.is_some())
+                    && err.passphrase_fallback()
+                {
                     super::owner_cli::bring_to_front(ctx);
                 }
             }
@@ -979,6 +1657,9 @@ impl DesktopApp {
                             "owner_check_failed",
                             err.message(),
                         ));
+                    }
+                    if let Some(ticket) = dialog.platform.take() {
+                        ticket.fail("owner_check_failed", &err.message());
                     }
                 }
                 self.set_err(err.message());
@@ -1198,6 +1879,8 @@ impl DesktopApp {
         ui_state.edit_secrets.clear();
         // The parsed 1Password export holds secrets.
         self.import.forget();
+        // A copied code leaves the clipboard if it is still there, and its buffer goes.
+        self.owner.clipboard.end_session();
         self.sync_forget_secrets(ctx);
         self.close_owner_check(ctx);
         if let Some(ctx) = ctx {
@@ -1212,6 +1895,8 @@ impl DesktopApp {
         self.cli.stop();
         // A fill that waits gets "stopped" or "cancelled" (ADR 0021).
         self.browser.stop();
+        // The macOS passkey sheet gets "cancelled" for each request that waits.
+        self.platform.stop();
         let approvals = self.approvals();
         let _ = self
             .owner_ui

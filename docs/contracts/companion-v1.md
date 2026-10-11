@@ -86,7 +86,7 @@ apassy://pair?v=1&h=Mac-mini.local,192.168.1.20&p=48620&c=<pin b64u>&s=<secret b
 | Parameter | Meaning |
 | --- | --- |
 | `v` | Contract version, `1`. |
-| `h` | Hosts to try, comma-separated, in this order: the `.local` name of the Mac (`scutil --get LocalHostName` + `.local`), then its primary IPv4 address on the local network. Never a loopback address, a link-local address (`169.254.0.0/16`), or a VPN (`utun`) address. At most 4. |
+| `h` | Hosts to try, comma-separated: the active, locally assigned Tailscale IPv4 address first, then the `.local` name of the Mac (`scutil --get LocalHostName` + `.local`), then its primary IPv4 address on the local network. The Tailscale CLI must report `Running` and identify the address in `Self.TailscaleIPs`. Other tunnel addresses, loopback addresses, and link-local addresses (`169.254.0.0/16`) are excluded. Duplicate hosts are removed. At most 4. The phone tries Tailscale first to avoid a Bonjour timeout when it is away from the local network. |
 | `p` | Port. |
 | `c` | Certificate pin (section 3). |
 | `s` | Pairing secret. |
@@ -286,6 +286,7 @@ The phone removes its own pairing. Answer: `{"outcome":"unpaired"}`. The phone t
 
 - It stores in the keychain, this device only, never synchronized: the device ID, the Mac name, the hosts, the port, the pin, the pairing time, and the two key references (Secure Enclave `dataRepresentation`). It stores no inbox, no activity, and no command on disk; its URL session is ephemeral with no cache.
 - It needs `NSLocalNetworkUsageDescription`, `NSCameraUsageDescription`, and `NSFaceIDUsageDescription`. When iOS refuses local network access, it says: "Allow local network access for Apassy in Settings > Privacy & Security > Local Network."
+- The URL session permits cellular access, but each request permits it only for a numeric Tailscale IPv4 destination in `100.64.0.0/10`. Bonjour and other destinations retain the cellular restriction. The certificate pin check remains mandatory.
 - It tries the hosts in order. After a connection error, a TLS error, or a pin mismatch it tries the next host. It remembers the last host that answered. When every host fails with a pin mismatch, it offers "Forget this Mac": the Mac was reset, or another device answers.
 - It asks `GET /v1/inbox` every 2 s while the app is in the foreground and stops in the background. The app hides its content in the app switcher.
 

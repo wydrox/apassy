@@ -2,9 +2,9 @@
 //!
 //! An agent sees the items that it can use. When the owner lets it see all items, it
 //! also gets a catalog: the name, the kind, and the plain fields of each item that is
-//! not archived. The catalog never has a secret field, a hidden custom detail, or the
-//! notes, which often hold a pasted secret. An agent that sees an item can ask for
-//! process access to it. The owner decides in the app.
+//! not archived. The catalog never has a secret field, a hidden custom detail, the setup
+//! key of a one-time password, or the notes, which often hold a pasted secret. An agent
+//! that sees an item can ask for process access to it. The owner decides in the app.
 
 use rusqlite::{OptionalExtension, TransactionBehavior};
 
@@ -37,6 +37,15 @@ pub fn custom_detail_label(name: &str) -> Option<String> {
         .map(|index| u8::from_str_radix(hex.get(index..index + 2)?, 16).ok())
         .collect();
     String::from_utf8(bytes?).ok()
+}
+
+/// Whether a stored field holds the setup key of a one-time password, hidden or (as an
+/// older Apassy stored it) visible: it is a custom detail with the label of a one-time
+/// password, or its value is an explicit `otpauth://totp` link. This is the rule of the
+/// owner app. The agent catalog never gets such a value, even from a plain field.
+pub(crate) fn is_setup_key_field(name: &str, value: &str) -> bool {
+    custom_detail_label(name).is_some_and(|label| crate::otp::is_otp_label(&label))
+        || crate::otp::is_totp_uri(value)
 }
 
 /// One item as an agent that sees all items gets it. It has no secret value.
@@ -150,7 +159,8 @@ impl Vault {
     }
 
     /// Each item that is not archived, by name, with its plain fields. No secret field,
-    /// no hidden custom detail (it is a secret field), and no notes.
+    /// no hidden custom detail (it is a secret field), no passkey field, no setup key of
+    /// a one-time password (a visible one too), and no notes.
     pub fn catalog(&self) -> VaultResult<Vec<CatalogEntry>> {
         let conn = self.conn_ref()?;
         let mut items = conn
@@ -177,7 +187,8 @@ impl Vault {
         let mut fields = conn
             .prepare(
                 "SELECT name, value FROM item_field
-                 WHERE item_id = ?1 AND secret = 0 ORDER BY position",
+                 WHERE item_id = ?1 AND secret = 0 AND substr(name, 1, 8) <> 'passkey_'
+                 ORDER BY position",
             )
             .map_err(|_| err(VaultErrorKind::Storage))?;
         let mut catalog = Vec::new();
@@ -191,7 +202,7 @@ impl Vault {
             let mut details = Vec::new();
             for field in plain {
                 let (field_name, value) = field.map_err(|_| err(VaultErrorKind::Storage))?;
-                if value.trim().is_empty() {
+                if value.trim().is_empty() || is_setup_key_field(&field_name, &value) {
                     continue;
                 }
                 let label = custom_detail_label(&field_name).unwrap_or(field_name);
@@ -452,6 +463,25 @@ mod tests {
         assert_eq!(custom_detail_label("username"), None);
         assert_eq!(custom_detail_label("x_5"), None);
         assert_eq!(custom_detail_label("x_zz"), None);
+    }
+
+    #[test]
+    fn setup_keys_by_label_or_link() {
+        const OTP: &str = "x_4f5450"; // "OTP"
+        const CODE: &str = "x_4f6e652d74696d6520636f6465"; // "One-time code"
+        const REGION: &str = "x_526567696f6e"; // "Region"
+        assert!(is_setup_key_field(OTP, "GEZDGNBVGY3TQOJQ"));
+        assert!(is_setup_key_field(CODE, "GEZDGNBVGY3TQOJQ"));
+        assert!(is_setup_key_field(REGION, " OTPAUTH://TOTP/x?secret=ABC"));
+        assert!(is_setup_key_field("website", "otpauth://totp?secret=ABC"));
+        assert!(!is_setup_key_field(REGION, "eu-west"));
+        assert!(!is_setup_key_field(
+            REGION,
+            "https://example.test/otpauth-guide"
+        ));
+        assert!(!is_setup_key_field(REGION, "otpauth://hotp/x?secret=ABC"));
+        // Only a custom detail has a label. A field named "otp" is an ordinary field.
+        assert!(!is_setup_key_field("otp", "GEZDGNBVGY3TQOJQ"));
     }
 
     #[test]

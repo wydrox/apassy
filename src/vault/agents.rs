@@ -982,6 +982,10 @@ impl Vault {
         delivery: &EnvDelivery,
     ) -> VaultResult<()> {
         let item = to_sql_id(item_id)?;
+        // A passkey field never goes to a process.
+        if super::types::is_passkey_field(field) {
+            return Err(err(VaultErrorKind::InvalidInput));
+        }
         let env_name = checked_env_name(env_name.trim())?;
         let hosts = match delivery {
             EnvDelivery::Value => None,

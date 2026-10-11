@@ -1305,6 +1305,86 @@ fn a_cancelled_batch_binding_binds_nothing() {
     assert!(bound_variables(&app).is_empty());
 }
 
+mod batch_setup_keys {
+    use super::*;
+    use crate::vault::{Field, ItemDraft as StoredDraft, SecretValue};
+
+    const SEED: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+
+    fn replace_token(app: &DesktopApp, item_id: u64) {
+        let shared = app.owner_ui.session.shared_vault();
+        let mut slot = shared.lock().unwrap();
+        let vault = slot.as_mut().unwrap();
+        let details = vault.details(item_id).unwrap();
+        vault
+            .update(
+                item_id,
+                details.summary.revision,
+                StoredDraft {
+                    title: details.summary.title,
+                    kind: details.summary.kind,
+                    notes: details.notes,
+                    tags: details.tags,
+                    fields: vec![Field {
+                        name: "token".to_owned(),
+                        secret: true,
+                        value: SecretValue::new(format!("otpauth://totp/Synthetic?secret={SEED}")),
+                    }],
+                },
+            )
+            .unwrap();
+    }
+
+    fn refused(after_dialog: bool) {
+        let dir = TempDir::new().unwrap();
+        let (mut app, _) = unlocked_app_with_item(&dir);
+        let ctx = egui::Context::default();
+        let token = login(&mut app, &ctx);
+        let item_id = add_key(&mut app, &ctx, &token, "Synthetic batch key");
+        if !after_dialog {
+            replace_token(&app, item_id);
+        }
+        let answer = ask(
+            &mut app,
+            &ctx,
+            Some(&token),
+            Command::ItemBindVariables {
+                variables: vec![bind(item_id, "SYNTHETIC_BATCH_KEY")],
+            },
+        );
+        if after_dialog {
+            assert!(answer.try_recv().is_err());
+            assert!(app.owner.check.is_some());
+            replace_token(&app, item_id);
+            app.confirm_owner_now(OwnerCheck::passphrase(PASS)).unwrap();
+        } else {
+            assert!(app.owner.check.is_none());
+        }
+        let response = now(&answer);
+        let json = as_json(&response);
+        assert!(!json.contains(SEED));
+        assert!(!json.contains("otpauth://"));
+        let Data::Bindings { results } = response.data else {
+            panic!("no binding report");
+        };
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].bound);
+        assert!(results[0].reason.contains("explicitly"));
+        assert!(results[0].reason.contains("make one-time codes"));
+        assert!(bound_variables(&app).is_empty());
+    }
+
+    #[test]
+    fn a_batch_does_not_choose_a_setup_key() {
+        refused(false);
+    }
+
+    #[test]
+    fn a_batch_rechecks_a_value_that_changed_to_a_setup_key() {
+        refused(true);
+    }
+}
+
 /// Run the `apassy` program, and confirm or cancel each owner check that it opens.
 /// Returns the exit code and the number of owner checks.
 fn program_with_checks(

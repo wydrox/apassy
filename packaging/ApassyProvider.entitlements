@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements of the main executable of Apassy.app (com.wydrox.apassy) when the app
+  ships the AutoFill extension. Apple requires the AutoFill Credential Provider
+  capability on the containing app too. scripts/build-credential-provider.sh replaces
+  __TEAM_ID__ and writes the filled copy to
+  target/credential-provider/entitlements/Apassy-provider.entitlements, only after it
+  checked a provisioning profile for __TEAM_ID__.com.wydrox.apassy with the capability.
+  The app must embed that profile as Contents/embedded.provisionprofile. Without it,
+  AMFI stops the app at launch, so a build without both profiles signs the app with
+  the empty packaging/Apassy.entitlements and ships no extension.
+
+  The main app has no app group: the bridge, not the app, opens the socket.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.application-identifier</key>
+	<string>__TEAM_ID__.com.wydrox.apassy</string>
+	<key>com.apple.developer.authentication-services.autofill-credential-provider</key>
+	<true/>
+	<key>com.apple.developer.team-identifier</key>
+	<string>__TEAM_ID__</string>
+</dict>
+</plist>

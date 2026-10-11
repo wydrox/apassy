@@ -1,7 +1,7 @@
 //! Sync of the vaults through a folder (ADR 0014) or through the Apassy relay (ADR 0022)
 //! in the app (docs/operations/sync.md): the Sync setting of each vault, the status in
 //! plain words, "Sync now", the prompt for a passphrase that changed on another Mac, and
-//! "Use a vault from another Mac". The relay sheets ("Apassy relay", "Add a Mac…",
+//! "Use a vault from another Mac". The relay sheets ("Apassy relay", "Add a device…",
 //! "Devices…") and the relay source of "Use a vault from another Mac" are in [`relay`].
 //!
 //! The engine is [`crate::sync`]. The vault list keeps the setting of each vault
@@ -107,7 +107,7 @@ pub(crate) struct SyncUiState {
     open_error_from_adopt: bool,
     open_waiting: bool,
     open_next_download: Option<Instant>,
-    /// Sync through the Apassy relay: the sheets, "Add a Mac…", and a Mac that joins.
+    /// Sync through the Apassy relay: the sheets, "Add a device…", and a Mac that joins.
     pub(crate) relay: RelayUi,
 }
 
@@ -190,7 +190,8 @@ pub(crate) enum SyncSheet {
     /// "Apassy relay": the relay address, the team code, and the name of this Mac; or a
     /// link from another Mac for a vault that is on the relay already.
     RelaySetup { id: String },
-    /// "Add a Mac…": the link for the other Mac, and its safety words to confirm.
+    /// "Add a device…": the link for another Mac or an iPhone, and its safety words to
+    /// confirm.
     AddMac { id: String },
     /// "Devices…": the Macs of the relay team.
     Devices { id: String },
@@ -598,7 +599,7 @@ impl DesktopApp {
 
     /// Erase the passphrase field of the sync sheets and its undo history, and the codes
     /// of the relay sheets: the team code, a pasted link of a vault on this Mac, and the
-    /// link of "Add a Mac…". The relay keys in memory go, except the one of the open,
+    /// link of "Add a device…". The relay keys in memory go, except the one of the open,
     /// unlocked vault.
     pub(crate) fn sync_forget_secrets(&mut self, ctx: Option<&egui::Context>) {
         self.sync.passphrase.zeroize();
@@ -1529,7 +1530,7 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                                 sync_now = true;
                             }
                             if on_relay && !removed {
-                                if kit::small_button(ui, "Add a Mac…", Style::Bordered).clicked()
+                                if kit::small_button(ui, "Add a device…", Style::Bordered).clicked()
                                 {
                                     sheet = Some(SyncSheet::AddMac {
                                         id: entry.id.clone(),

@@ -52,6 +52,7 @@ const MAX_LIMIT: u32 = 1000;
 const MAX_BIND_VARIABLES: usize = 200;
 /// The text for a variable name that the vault does not take.
 const INVALID_VARIABLE: &str = "The name is not valid: use A-Z, 0-9, and _, start with a letter or _, and no system name such as PATH.";
+const EXPLICIT_SETUP_KEY: &str = "Bind this setup key separately with apassy item env. Select the setup-key field explicitly. Programs can make one-time codes for this account.";
 
 /// The note in the owner check dialog for a request from the command line.
 pub(crate) const CLI_ORIGIN_NOTE: &str = "The command line asked for this (apassy). If you did not run an apassy command just now, click Cancel.";
@@ -1460,6 +1461,15 @@ impl DesktopApp {
                 });
                 continue;
             };
+            if session.holds_setup_key(item_id, &field)? {
+                refused.push(BindingRow {
+                    item_id,
+                    name: env_name,
+                    bound: false,
+                    reason: EXPLICIT_SETUP_KEY.to_owned(),
+                });
+                continue;
+            }
             accepted.push(VariableBinding {
                 item_id,
                 item_name: names[&item_id].clone(),
@@ -1500,12 +1510,24 @@ impl DesktopApp {
                     Ok(()) => Ok(variables
                         .into_iter()
                         .map(|binding| {
-                            let result = vault.set_env_binding_with(
-                                binding.item_id,
-                                &binding.env_name,
-                                &binding.field,
-                                &EnvDelivery::Value,
-                            );
+                            // A sync or another owner action can change the value
+                            // while the batch dialog is open. A setup key always
+                            // needs its own field-specific owner check.
+                            let setup_key = vault
+                                .reveal(binding.item_id, &binding.field)
+                                .is_ok_and(|value| {
+                                    crate::vault::is_setup_key_field(&binding.field, value.expose())
+                                });
+                            let result = if setup_key {
+                                Err(crate::vault::VaultError::new(VaultErrorKind::InvalidInput))
+                            } else {
+                                vault.set_env_binding_with(
+                                    binding.item_id,
+                                    &binding.env_name,
+                                    &binding.field,
+                                    &EnvDelivery::Value,
+                                )
+                            };
                             BindingRow {
                                 item_id: binding.item_id,
                                 name: binding.env_name,
@@ -1518,6 +1540,9 @@ impl DesktopApp {
                                         }
                                         VaultErrorKind::NotFound => {
                                             "The credential or its secret is gone.".to_owned()
+                                        }
+                                        VaultErrorKind::InvalidInput if setup_key => {
+                                            EXPLICIT_SETUP_KEY.to_owned()
                                         }
                                         VaultErrorKind::InvalidInput => INVALID_VARIABLE.to_owned(),
                                         _ => format!("The vault did not save it ({err})."),
