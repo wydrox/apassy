@@ -160,6 +160,16 @@ Each stage is useful alone and has its own PR. There is no release until the own
 - An agent can store a credential of an attacker under a plausible name, for example a token for another account. Other agents can then use it. The catalog and Activity show which agent added the item.
 - The catalog shows the names, usernames, hosts and visible details of the credentials to the agent and to the provider of its model (ADR 0012).
 
+### 3d. Waiting and notifications
+
+The owner decided on 2026-10-12:
+
+- A question waits **5 minutes**. When the host of the agent ends the call earlier (its own tool timeout), the agent gets "waiting for the owner, call again", and the question stays open until the 5 minutes end.
+- Each question goes as a notification to **every device** connected to the vault: each Mac with the vault, each iPhone, the app. The first valid answer counts. The other devices show who answered and where.
+- **Teams.** A question about an item of a team collection goes to the member that the agent acts for (ADR 0019). A production allowance for a team item needs an owner or a manager of the team. Other members get no notification.
+- **The relay carries the notifications** ("relay jako kanał powiadomień"), also for a personal vault. The relay keeps no vault data of a personal vault, which still syncs through iCloud Drive (ADR 0023). It routes end-to-end encrypted questions and answers, and sends Apple push notifications (APNs) to the iPhones. The relay sees the routing only. This closes D1 and D2 of ADR 0020.
+- Without the relay, notifications work on the Mac and on the local network only.
+
 ### 3c. Who an answer covers
 
 The owner decided on 2026-10-12 ("tak, zostajemy") that an answer covers all agents in the project. Connecting an agent is already the trust step. A limit to one agent would repeat each question for each new agent. An agent with the setting "Ask me again for this agent" does not use the answers of other agents, for example a remote agent or a test agent.
@@ -170,5 +180,6 @@ The owner decided on 2026-10-12 ("tak, zostajemy") that an answer covers all age
 - ADR 0010: the production rule stays, with one exception: an allowance of the owner for a project and a kind of action (§3a).
 - ADR 0011: placeholders stay the safe way to send a value only to its hosts.
 - ADR 0012: a grant is no longer needed. Grants stay as optional settings.
-- ADR 0020: the phone answers the questions of the bouncer and the corrections, and can allow production (§3b).
+- ADR 0019: the relay also carries notifications and answers, for teams and for personal vaults (§3d).
+- ADR 0020: the phone answers the questions of the bouncer and the corrections, and can allow production (§3b). Access away from the local network and push notifications come through the relay (§3d).
 - ADR 0024: first use goes to the bouncer, not always to the owner. The limit of one waiting question stays.
