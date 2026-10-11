@@ -10,7 +10,7 @@ The sources for passkeys and one-time codes are in the branch `feat/passkeys-tot
 
 Source integration and release validation are different things:
 
-- **Source integration.** The owner has authorized a merge of the sources to `main`. A merge is a source decision. It is not a release, and it does not accept any build.
+- **Source integration.** The source merge to `main` requires the owner's final approval. A merge is a source decision. It is not a release, and it does not accept any build.
 - **Release validation.** The checks below, and the open ones in section 9. The release workflow now holds production until `Cargo.toml` names a version that has a dated section in `CHANGELOG.md` and the `Unreleased` section is empty ([release](release.md#release-eligibility)). While 0.4.1 is under "Unreleased", a green CI run on `main` signs and publishes nothing. The site derives its version from the dated sections, so it still shows 0.3.6.
 
 Current evidence, at source commit `82c641d11aa186c73def49e47a6ce22aabc6291c` (version 0.4.1), by level. The results for `11ca5b6` and `29ea550` that follow are historical and are kept with their own labels.
