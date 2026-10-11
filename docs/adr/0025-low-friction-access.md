@@ -64,7 +64,7 @@ It asks the owner when:
 
 The rules that the model cannot change stay:
 
-- A production declaration waits for the owner at each run (ADR 0010).
+- A production declaration waits for the owner at each run (ADR 0010), unless the owner allowed production for the project and the kind of action (§3a). The model and the usage log never make such an allowance.
 - A one-time-code setup key is never chosen automatically (the OTP fix in PR #13).
 - A placeholder goes only to its hosts (ADR 0011).
 - Without a running bouncer, each run waits for the owner.
@@ -72,6 +72,19 @@ The rules that the model cannot change stay:
 - An item marked "Always ask me" waits at each run.
 
 Each answer of the owner is remembered for the item, the project and the kind of action, so the same question does not come again. The question card says what Apassy remembers.
+
+### 3a. Production allowed by the owner
+
+The owner decided on 2026-10-12 that the owner can allow production ("mogę zezwolić").
+
+- A question about a production item has the answer "Allow production for PROJECT: ACTION". ACTION is a kind of action, for example reading data, a deploy, or a change of data. The card names it.
+- The allowance needs an owner check. It is valid only for the item, the project and the kind of action. A command of another kind still waits.
+- Only an answer of the owner makes an allowance. The bouncer, a remembered pattern and the usage log cannot.
+- The item screen lists the allowances. The owner removes one with one click; the removal needs no owner check.
+
+### 3b. Answers on the iPhone
+
+The owner decided on 2026-10-12 that the iPhone answers the questions of §3, §3a and §5 ("tak"). This changes ADR 0020: the phone can now make a remembered answer, a production allowance and a correction of a declaration. Each such answer is signed with the approval key and Face ID, as a run approval is (ADR 0020 §4). The phone still cannot unlock the vault, connect an agent or change a setting.
 
 ### 4. Two steps to add
 
@@ -142,14 +155,13 @@ Each stage is useful alone and has its own PR. There is no release until the own
 
 ## Open questions
 
-- Is an owner answer remembered for one agent or for all agents in the project?
-- Does a production item keep a question at each run, or can the owner allow production for one project and one kind of action?
-- Can the iPhone answer the questions of §3 and §5?
+- Is an owner answer remembered for one agent or for all agents in the project? The recommendation is all agents in the project: connecting an agent is already the trust step, and a limit to one agent repeats each question for each new agent. A limit to one agent helps only when agents have different trust, for example a remote agent or a test agent; for those, an "Ask me again for this agent" setting on the agent is enough.
 
 ## Relation to other records
 
 - ADR 0008: a declaration stays required for a decision of the model. Apassy makes it at the save (§4).
-- ADR 0010: the production rule stays.
+- ADR 0010: the production rule stays, with one exception: an allowance of the owner for a project and a kind of action (§3a).
 - ADR 0011: placeholders stay the safe way to send a value only to its hosts.
 - ADR 0012: a grant is no longer needed. Grants stay as optional settings.
+- ADR 0020: the phone answers the questions of the bouncer and the corrections, and can allow production (§3b).
 - ADR 0024: first use goes to the bouncer, not always to the owner. The limit of one waiting question stays.
