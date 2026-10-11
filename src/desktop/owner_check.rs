@@ -27,8 +27,8 @@ use super::unlock::{
 };
 use super::{BrokerState, DesktopApp};
 use crate::broker::approvals::{
-    ApprovalQueue, CheckMethod, OwnerAction, OwnerAuthError, OwnerCheck, OwnerGate, OwnerProof,
-    PendingRun, touch_id_detail,
+    ApprovalQueue, CheckMethod, FirstUseDeclaration, FirstUseOffer, OwnerAction, OwnerAuthError,
+    OwnerCheck, OwnerGate, OwnerProof, PendingRun, touch_id_detail,
 };
 use crate::broker::profile::REPORTING_API_V0;
 use crate::native::{Biometry, NativeHelper};
@@ -134,6 +134,13 @@ pub enum OwnerRequest {
     ApproveRun(PendingRun),
     /// Approve one run and add one approval to its pattern (ADR 0010).
     ApproveAndRemember(PendingRun),
+    /// Approve a first use and give the agent access in the folder of the offer, with
+    /// the declarations of the card (ADR 0024).
+    ApproveAndGrant {
+        run: PendingRun,
+        offer: FirstUseOffer,
+        declarations: Vec<FirstUseDeclaration>,
+    },
     /// Apply a calibrated `task_match` level, in hundredths (ADR 0009 step 3).
     ApplyCalibration {
         level: u32,
@@ -213,6 +220,13 @@ pub enum OwnerRequest {
         agent_id: u64,
         agent_name: String,
     },
+    /// "Connect" in the agent guide: a new token and, with `show_all`, the catalog of
+    /// all credentials without values (ADR 0024).
+    ConnectAgent {
+        agent_id: u64,
+        agent_name: String,
+        show_all: bool,
+    },
     SetTokenLifetime {
         days: String,
     },
@@ -280,6 +294,15 @@ impl OwnerRequest {
             },
             Self::ApproveRun(run) => OwnerAction::ApproveRun(run.clone()),
             Self::ApproveAndRemember(run) => OwnerAction::ApproveAndRemember(run.clone()),
+            Self::ApproveAndGrant {
+                run,
+                offer,
+                declarations,
+            } => OwnerAction::ApproveAndGrant {
+                run: run.clone(),
+                offer: offer.clone(),
+                declarations: declarations.clone(),
+            },
             Self::ApplyCalibration { level } => OwnerAction::ChangeCalibration { level: *level },
             Self::PromoteModel {
                 candidate_id,
@@ -323,6 +346,12 @@ impl OwnerRequest {
             | Self::SaveConnector { item_id, .. }
             | Self::ConfirmReview { item_id }
             | Self::Unarchive { item_id, .. } => OwnerAction::ChangeItemRules { item_id: *item_id },
+            Self::ConnectAgent {
+                agent_id, show_all, ..
+            } => OwnerAction::ConnectAgent {
+                agent_id: *agent_id,
+                show_all: *show_all,
+            },
             Self::RotateToken { agent_id, .. } => OwnerAction::RotateToken {
                 agent_id: *agent_id,
             },
@@ -395,6 +424,18 @@ impl OwnerRequest {
                 run.agent,
                 run.command.join(" ")
             ),
+            Self::ApproveAndGrant { run, offer, .. } => format!(
+                "Give agent \"{}\" access to {} in {}, and approve this run: {}",
+                run.agent,
+                offer
+                    .items
+                    .iter()
+                    .map(|item| format!("\"{}\"", item.name))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                offer.folder,
+                run.command.join(" ")
+            ),
             Self::ApproveAndRemember(run) => format!(
                 "Approve one run of agent \"{}\" and remember its pattern{}: {}",
                 run.agent,
@@ -461,16 +502,29 @@ impl OwnerRequest {
                     .map_or("none", |provider| provider.label.as_str())
             ),
             Self::SaveVariable {
-                env_name, delivery, ..
-            } => match delivery {
-                EnvDelivery::Value => format!(
-                    "Bind the item to the environment variable {env_name}. Programs get the real value."
-                ),
-                EnvDelivery::Placeholder(hosts) => format!(
-                    "Bind the item to the environment variable {env_name}. Programs get a placeholder, and Apassy sends the real value only to {}.",
-                    hosts.join(", ")
-                ),
-            },
+                item_id,
+                env_name,
+                field,
+                delivery,
+            } => {
+                let settings = if env_name.trim().is_empty()
+                    || env_name.trim() == format!("APASSY_ITEM_{item_id}")
+                {
+                    format!(
+                        "Save automatic command settings with the {} field.",
+                        super::owner_store::field_label(field)
+                    )
+                } else {
+                    format!("Bind the item to the environment variable {env_name}.")
+                };
+                match delivery {
+                    EnvDelivery::Value => format!("{settings} Programs get the real value."),
+                    EnvDelivery::Placeholder(hosts) => format!(
+                        "{settings} Programs get a placeholder. Apassy sends the real value only to {}.",
+                        hosts.join(", ")
+                    ),
+                }
+            }
             Self::SaveConnector { base_url, .. } => {
                 format!("Send the token of this item to {base_url}.")
             }
@@ -481,6 +535,16 @@ impl OwnerRequest {
                 "Bring \"{name}\" back from the archive. Agents with a grant can use it again."
             ),
             Self::RotateToken { agent_name, .. } => {
+                format!("Give {agent_name} a new token. The old token stops working.")
+            }
+            Self::ConnectAgent {
+                agent_name,
+                show_all: true,
+                ..
+            } => format!(
+                "Give {agent_name} a new token, and let it see the names of your credentials without values. The old token stops working."
+            ),
+            Self::ConnectAgent { agent_name, .. } => {
                 format!("Give {agent_name} a new token. The old token stops working.")
             }
             Self::SetTokenLifetime { days } => {
@@ -714,6 +778,28 @@ impl DesktopApp {
                     Err(message) => self.set_err(message),
                 }
             }
+            OwnerRequest::ApproveAndGrant { run, offer, .. } => {
+                // The same queue path as "Approve once". The broker saves the access after
+                // its second check (ADR 0024).
+                let result = match self.approvals() {
+                    Some(approvals) => approvals.approve(proof).map_err(|r| r.message()),
+                    None => Err("The broker is not running. Nothing was approved."),
+                };
+                match result {
+                    Ok(()) => self.set_ok(format!(
+                        "{} can use {} in {}. Later runs there need no new approval, unless the bouncer asks you.",
+                        run.agent,
+                        offer
+                            .items
+                            .iter()
+                            .map(|item| item.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        offer.folder
+                    )),
+                    Err(message) => self.set_err(message),
+                }
+            }
             OwnerRequest::ApproveAndRemember(run) => {
                 // The same queue path as "Approve once". The proof names this action.
                 let result = match self.approvals() {
@@ -811,7 +897,14 @@ impl DesktopApp {
                 delivery,
             } => {
                 let result = session.set_env_binding(item_id, &env_name, &field, &delivery, proof);
-                let _ = self.apply(result, &format!("The item is bound to {env_name}."));
+                let message = if env_name.trim().is_empty()
+                    || env_name.trim() == format!("APASSY_ITEM_{item_id}")
+                {
+                    "The automatic command settings are saved.".to_owned()
+                } else {
+                    format!("The item is bound to {env_name}.")
+                };
+                let _ = self.apply(result, &message);
             }
             OwnerRequest::SaveConnector { item_id, base_url } => {
                 let result = session.set_connector(item_id, REPORTING_API_V0.id, &base_url, proof);
@@ -833,6 +926,23 @@ impl DesktopApp {
                     "The agent settings are confirmed. Agents with a grant can use the item again.",
                 );
             }
+            OwnerRequest::ConnectAgent {
+                agent_id,
+                agent_name,
+                show_all,
+            } => match session.connect_agent(agent_id, show_all, proof) {
+                Ok(token) => {
+                    self.owner_ui.fresh_token = Some(FreshToken {
+                        agent_name: agent_name.clone(),
+                        token,
+                        rotated: true,
+                    });
+                    self.set_ok(format!(
+                        "{agent_name} has a new token. Connect your host to save it. The old token does not work."
+                    ));
+                }
+                Err(err) => self.set_err(err.message),
+            },
             OwnerRequest::RotateToken {
                 agent_id,
                 agent_name,

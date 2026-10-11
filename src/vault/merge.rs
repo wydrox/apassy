@@ -1001,7 +1001,10 @@ fn write_children(
     if let Some((name, field, hosts)) = &record.env {
         let taken: Option<i64> = tx
             .query_row(
-                "SELECT item_id FROM env_binding WHERE env_name = ?1 AND item_id != ?2",
+                // Empty names are automatic settings. Each device derives their
+                // runtime name from its local item ID, so they do not conflict.
+                "SELECT item_id FROM env_binding
+                 WHERE ?1 != '' AND env_name = ?1 AND item_id != ?2",
                 (name, id),
                 |row| row.get(0),
             )

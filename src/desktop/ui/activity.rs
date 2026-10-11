@@ -9,12 +9,17 @@ use eframe::egui::{self, CornerRadius, Frame, Label, Margin, Stroke};
 use super::agents::{GrantForm, place_section};
 use super::kit::{self, Font, Icon, Style, Tone};
 use super::{Sheet, ask_owner_from_sheet, close_sheet};
-use crate::broker::approvals::{ApprovalQueue, PendingRun, RememberOffer};
+use crate::broker::approvals::{
+    ApprovalQueue, FirstUseDeclaration, FirstUseOffer, PendingRun, RememberOffer,
+};
 use crate::desktop::inbox::{self, InboxKind};
 use crate::desktop::notify::Delivery;
 use crate::desktop::owner_check::OwnerRequest;
 use crate::desktop::{BrokerState, DesktopApp, OwnerView};
-use crate::vault::{AccessRequest, ActivityDecision, EnvDelivery, ExecMode, GrantPlace};
+use crate::vault::providers::{self, Suggestion};
+use crate::vault::{
+    AccessRequest, ActivityDecision, Declaration, EnvDelivery, Environment, ExecMode, GrantPlace,
+};
 
 /// How many inbox events the view shows.
 const SHOWN_EVENTS: usize = 40;
@@ -45,6 +50,10 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[PendingRu
     // same, so the keyboard focus stays on its control.
     ui.scope(|ui| notifications_notice(app, ui));
     ui.scope(|ui| access_requests(app, ui));
+    // A first-use form lives as long as its run waits.
+    app.ui
+        .first_use_forms
+        .retain(|(run_id, _), _| pending.iter().any(|run| run.id == *run_id));
     ui.scope(|ui| {
         if !pending.is_empty() {
             ui.label(kit::text("Waiting for you", Font::Headline).color(kit::LABEL));
@@ -204,7 +213,7 @@ pub(super) fn access_request_sheet(
     let real_value = app
         .owner_ui
         .session
-        .env_binding(request.item_id)
+        .process_binding(request.item_id)
         .ok()
         .flatten()
         .is_some_and(|binding| binding.delivery == EnvDelivery::Value);
@@ -310,18 +319,22 @@ pub(super) fn approval_card(app: &mut DesktopApp, ui: &mut egui::Ui, run: &Pendi
 }
 
 fn approval_details(app: &mut DesktopApp, ui: &mut egui::Ui, run: &PendingRun) {
+    // ADR 0024: a run with a first use has an offer in the queue.
+    let offer = approvals(app).and_then(|queue| queue.first_use(run.id));
+    let headline = match &offer {
+        Some(offer) => format!(
+            "{} wants to use {} for the first time",
+            run.agent,
+            item_names(offer)
+        ),
+        None => format!("{} asks to run a command with secrets", run.agent),
+    };
     ui.spacing_mut().item_spacing.y = 6.0;
     egui::Sides::new().shrink_left().wrap().show(
         ui,
         |ui| {
             kit::dot(ui, Tone::Warning);
-            ui.label(
-                kit::text(
-                    format!("{} asks to run a command with secrets", run.agent),
-                    Font::Headline,
-                )
-                .color(kit::LABEL),
-            );
+            ui.label(kit::text(headline, Font::Headline).color(kit::LABEL));
         },
         |ui| {
             kit::tag(ui, "Waiting", Tone::Warning);
@@ -369,12 +382,16 @@ fn approval_details(app: &mut DesktopApp, ui: &mut egui::Ui, run: &PendingRun) {
                 ui.end_row();
             }
         });
-    if !run.risk.is_empty() {
+    // A first use names its new items in the headline. Rule flags still show.
+    if !run.risk.is_empty() && (offer.is_none() || run.risk.contains("Rule flags")) {
         kit::tone_note(ui, &run.risk, Tone::Warning);
     }
     if let Some(offer) = &run.remember {
         kit::note(ui, remember_text(offer));
     }
+    let declarations = offer
+        .as_ref()
+        .map(|offer| first_use_section(app, ui, run.id, offer));
     kit::note(
         ui,
         "The process can read these secrets. Approve only a command that you trust. An approval needs Touch ID or the passphrase now. A notification is not an approval.",
@@ -383,12 +400,23 @@ fn approval_details(app: &mut DesktopApp, ui: &mut egui::Ui, run: &PendingRun) {
     let mut deny = false;
     let mut approve = false;
     let mut remember = false;
+    let mut grant = false;
     egui::Sides::new().show(
         ui,
         |ui| {
             deny = kit::button(ui, "Deny", Style::Destructive).clicked();
         },
         |ui| {
+            if let Some(offer) = &offer {
+                grant = kit::button(
+                    ui,
+                    &format!("Allow in {}", folder_name(&offer.folder)),
+                    Style::Prominent,
+                )
+                .clicked();
+                approve = kit::button(ui, "Allow once", Style::Bordered).clicked();
+                return;
+            }
             approve = kit::button(ui, "Approve once", Style::Prominent).clicked();
             // "Approve and remember" is an approval: the owner check and the queue path
             // of "Approve once" (ADR 0010, goal item A4).
@@ -398,6 +426,17 @@ fn approval_details(app: &mut DesktopApp, ui: &mut egui::Ui, run: &PendingRun) {
         },
     );
     let ctx = ui.ctx().clone();
+    if grant && let (Some(offer), Some(declarations)) = (offer, declarations) {
+        // One owner check for the run, the access, and the declarations (ADR 0024).
+        app.ask_owner(
+            OwnerRequest::ApproveAndGrant {
+                run: run.clone(),
+                offer,
+                declarations,
+            },
+            Some(&ctx),
+        );
+    }
     if approve {
         // The proof names this run exactly as shown (goal items A4, N4).
         app.ask_owner(OwnerRequest::ApproveRun(run.clone()), Some(&ctx));
@@ -440,6 +479,133 @@ pub(super) fn approval_sheet(app: &mut DesktopApp, ctx: &egui::Context, run_id: 
         app.ui.sheet = None;
     }
     response.escape
+}
+
+/// The access part of a first-use card (ADR 0024): where "Allow in FOLDER" gives
+/// access, and the declaration of each new credential. An item without a declaration
+/// gets the suggested form, and the owner can change its environment here. Returns the
+/// declarations that "Allow in FOLDER" saves.
+fn first_use_section(
+    app: &mut DesktopApp,
+    ui: &mut egui::Ui,
+    run_id: u64,
+    offer: &FirstUseOffer,
+) -> Vec<FirstUseDeclaration> {
+    let mut chosen = Vec::new();
+    kit::paragraph(
+        ui,
+        format!(
+            "\"Allow in {}\" lets this agent use {} in {} and its subfolders. Later runs there that the bouncer finds clean start without a prompt. You can remove the access in Agents.",
+            folder_name(&offer.folder),
+            item_names(offer),
+            offer.folder
+        ),
+        Font::Callout,
+        kit::SECONDARY,
+    );
+    for item in &offer.items {
+        let production = match &item.declaration {
+            Some(declaration) => {
+                kit::paragraph(
+                    ui,
+                    format!("{}: {}", item.name, declaration_text(declaration, None)),
+                    Font::Callout,
+                    kit::LABEL,
+                );
+                declaration.is_production()
+            }
+            None => {
+                let key = (run_id, item.item_id);
+                if !app.ui.first_use_forms.contains_key(&key) {
+                    let mut form = app
+                        .owner_ui
+                        .session
+                        .declaration_form(item.item_id)
+                        .unwrap_or_default();
+                    if form.project.trim().is_empty() {
+                        form.project = folder_name(&offer.folder);
+                    }
+                    app.ui.first_use_forms.insert(key, form);
+                }
+                let Some(form) = app.ui.first_use_forms.get_mut(&key) else {
+                    continue;
+                };
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(kit::text(format!("{}:", item.name), Font::Callout).color(kit::LABEL));
+                    let options: Vec<(Environment, String)> = Environment::ALL
+                        .iter()
+                        .map(|environment| (*environment, environment.as_str().to_owned()))
+                        .collect();
+                    let selected = form.environment.as_str();
+                    kit::picker(
+                        ui,
+                        ("first-use-environment", run_id, item.item_id),
+                        &mut form.environment,
+                        &options,
+                        selected,
+                        140.0,
+                    );
+                });
+                kit::note(
+                    ui,
+                    format!(
+                        "Declaration: {}. Apassy suggests it from the credential; a value that it does not find is the strictest one.",
+                        declaration_text(&form.to_declaration(), form.provider.as_deref())
+                    ),
+                );
+                chosen.push(FirstUseDeclaration {
+                    item_id: item.item_id,
+                    declaration: form.to_declaration(),
+                    provider: form.provider.clone(),
+                    suggested: form.suggestion.as_ref().map(Suggestion::prefilled),
+                });
+                form.to_declaration().is_production()
+            }
+        };
+        if production {
+            kit::tone_note(
+                ui,
+                format!(
+                    "{} is a production credential. Each run with it waits for you, also after you allow access.",
+                    item.name
+                ),
+                Tone::Warning,
+            );
+        }
+    }
+    chosen
+}
+
+/// The names of the new items of a first use, in quotes.
+fn item_names(offer: &FirstUseOffer) -> String {
+    offer
+        .items
+        .iter()
+        .map(|item| format!("\"{}\"", item.name))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The last part of a folder path, for a button.
+fn folder_name(folder: &str) -> String {
+    std::path::Path::new(folder).file_name().map_or_else(
+        || folder.to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+/// A declaration in one line: the provider, the environment, the risk, the scope, and
+/// the reversibility.
+fn declaration_text(declaration: &Declaration, provider: Option<&str>) -> String {
+    let mut parts = Vec::new();
+    if let Some(provider) = provider.and_then(providers::find) {
+        parts.push(provider.label.clone());
+    }
+    parts.push(declaration.environment.as_str().to_owned());
+    parts.push(format!("{} risk", declaration.risk.as_str()));
+    parts.push(declaration.scope.as_str().to_owned());
+    parts.push(declaration.reversibility.as_str().to_owned());
+    parts.join(", ")
 }
 
 /// The pattern that "Approve and remember" teaches, and its approvals.

@@ -238,7 +238,7 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
         let Ok(details) = vault.details(grant.item_id) else {
             continue;
         };
-        let Ok(Some(binding)) = vault.env_binding(grant.item_id) else {
+        let Ok(Some(binding)) = vault.process_binding(grant.item_id) else {
             continue;
         };
         let production = vault
@@ -281,7 +281,7 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
     if sees_all {
         answer["catalog"] = catalog(vault, agent.id);
         answer["note"] = json!(
-            "Secret values are never returned. `catalog` lists every credential of the owner without secret values. For a credential with access \"can_request\", call apassy_request_access with the reason in the user's own words. The owner decides in the Apassy app; the call does not wait. When the owner gives access, the credential shows in process_access."
+            "Secret values are never returned. `catalog` lists every credential of the owner without secret values. A credential with access \"can_request\" works in apassy_run_with_secrets with its env_name: the owner approves its first use in the Apassy app while the call waits, and can give access for the project folder. apassy_request_access asks for access without a run; it does not wait."
         );
     }
     let requests: Vec<Value> = vault
@@ -323,27 +323,34 @@ fn catalog(vault: &Vault, agent_id: u64) -> Value {
         .unwrap_or_default()
         .into_iter()
         .map(|entry| {
-            let access = if granted.contains(&entry.item_id) {
+            let access = if !entry.can_use_in_process {
+                "needs_field"
+            } else if granted.contains(&entry.item_id) {
                 "can_use"
             } else if open.contains(&entry.item_id) {
                 "requested"
-            } else if entry.has_variable {
-                "can_request"
             } else {
-                "no_variable"
+                "can_request"
             };
             let details: serde_json::Map<String, Value> = entry
                 .details
                 .into_iter()
                 .map(|(name, value)| (name, Value::String(value)))
                 .collect();
-            json!({
+            let mut entry_json = json!({
                 "item_id": entry.item_id,
                 "item_name": entry.name,
                 "kind": entry.kind,
                 "details": details,
                 "access": access,
-            })
+            });
+            // ADR 0024: the agent can use the item at once, so it needs the name now.
+            if entry.can_use_in_process
+                && let Ok(Some(binding)) = vault.process_binding(entry.item_id)
+            {
+                entry_json["env_name"] = json!(binding.env_name);
+            }
+            entry_json
         })
         .collect();
     json!(entries)
@@ -385,7 +392,7 @@ fn request_access(
                 ),
                 VaultErrorKind::InvalidInput => (
                     "invalid_request",
-                    "State the reason in 1 to 500 characters, use an absolute cwd, and ask only for a credential whose access is \"can_request\". A credential without an environment variable needs the owner first.",
+                    "State the reason in 1 to 500 characters, use an absolute cwd, and ask only for a credential whose access is \"can_request\". For access \"needs_field\", the owner must select one secret field in Apassy first.",
                 ),
                 VaultErrorKind::AlreadyExists => (
                     "already_granted",

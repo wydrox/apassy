@@ -277,6 +277,10 @@ pub(crate) struct UiState {
     /// The form of a grant for several credentials or of an access request.
     #[cfg(feature = "vault")]
     pub(crate) grant: agents::GrantForm,
+    /// The declaration forms of first-use cards, by waiting run and item (ADR 0024).
+    #[cfg(feature = "vault")]
+    pub(crate) first_use_forms:
+        std::collections::BTreeMap<(u64, u64), crate::desktop::owner_store::DeclarationForm>,
 }
 
 #[cfg_attr(not(feature = "vault"), allow(dead_code))]
@@ -409,6 +413,7 @@ pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
             app.owner_ui.fresh_token = None;
             app.ui.agent_setup = Default::default();
             app.ui.agent_onboarding = Default::default();
+            app.ui.grant = Default::default();
             app.ui.sheet = None;
             app.import.forget();
             start::draw(app, ui);

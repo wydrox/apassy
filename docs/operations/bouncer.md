@@ -43,8 +43,8 @@ You do not need Terminal for these commands. In Settings > Agents > Broker and b
 Settings > Agents > Broker and bouncer > "Start the model" sets how Apassy starts the model server on this Mac:
 
 - **With Apassy**: Apassy starts it when the app starts and stops it when the app quits. The vault does not need to be unlocked.
-- **When a run needs it**: the first run that needs the model starts it. The run waits up to 25 seconds for the first answer. "Stop after" (10, 30, or 60 minutes without a run, default 30) stops it again. Apassy stops only a server that it started.
-- **Managed outside Apassy**: Apassy starts and stops nothing. It only uses the address. This is the default.
+- **When a run needs it** (the default, [ADR 0024](../adr/0024-access-at-first-use.md)): the first run that needs the model starts it. The run waits up to 25 seconds for the first answer. "Stop after" (10, 30, or 60 minutes without a run, default 30) stops it again. Apassy stops only a server that it started.
+- **Managed outside Apassy**: Apassy starts and stops nothing. It only uses the address.
 - **Off**: the broker asks no model. Every run that needs it waits for you. The log and the approval card say "The bouncer is off in Settings."
 
 Apassy runs `/bin/bash tools/basemodel/start.sh` from `Apassy.app/Contents/Resources`, or from the repository when it runs from `target/`. It sets `LAYA_HOST=127.0.0.1`, `LAYA_PORT` from the address, `APASSY_LAYA_DIR`, and `APASSY_BASE_MODEL` only when it finds a checkpoint. Without a checkpoint the model is zero-shot. The server gets its own process group. Stop sends SIGTERM, then SIGKILL after 5 seconds. The output goes to `~/Library/Logs/Apassy/bouncer.log`. "Open log" opens it.
@@ -57,7 +57,7 @@ Without the base weights in the Hugging Face cache, the first start downloads th
 
 "Start now" shows only when the server can start. While the start script or the Laya environment is missing ("Cannot start"), the section has no "Start now", and the rows below the status name what is missing.
 
-If a healthy server already answers on the port, for example from a LaunchAgent, Apassy does not start a second one. The status says "Running (started outside Apassy)". If another program uses the port, the status says so.
+If a healthy server already answers on the port, for example from a LaunchAgent, Apassy does not start a second one. The status says "Running (started outside Apassy)". In "With Apassy", when that server stops, Apassy starts its own (ADR 0024: Apassy is the program that starts the bouncer). If another program uses the port, the status says so.
 
 Apassy reads `~/Library/LaunchAgents` when it starts and then each minute. It reads each `.plist` with `plutil -convert json`. A LaunchAgent counts when its `ProgramArguments` name `tools/basemodel/start.sh`, for example `com.wydrox.apassy.bouncer.plist`. The section shows a note for it in two cases:
 
@@ -68,7 +68,7 @@ The note has the commands that remove it, for example `launchctl bootout gui/$(i
 
 The status row shows what is missing: the start script, the Laya environment, or a free port. For a missing environment it shows "Install the model" (see "Install from Apassy") and the install commands above with the paths of this Mac. Until the server runs, every run waits for you.
 
-The setting is in `bouncer.json` in the Apassy data directory, mode `0600`. It is not in the vault, so each Mac has its own. The fields are `start` (`with_apassy`, `when_needed`, `external`, or `off`), `idle_minutes`, and an optional `url`. The `url` must be a loopback `http://` address. `APASSY_BOUNCER_URL` wins over the file. A missing or damaged file gives `external` and 30 minutes. A change in Settings needs no owner check: a model that does not run only makes runs wait for you.
+The setting is in `bouncer.json` in the Apassy data directory, mode `0600`. It is not in the vault, so each Mac has its own. The fields are `start` (`with_apassy`, `when_needed`, `external`, or `off`), `idle_minutes`, and an optional `url`. The `url` must be a loopback `http://` address. `APASSY_BOUNCER_URL` wins over the file. A missing or damaged file gives `when_needed` and 30 minutes (ADR 0024; before, `external`). A change in Settings needs no owner check: a model that does not run only makes runs wait for you.
 
 ### Start command with the base model (goal B8)
 

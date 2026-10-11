@@ -131,7 +131,7 @@ fn initialize_result(params: &Value) -> Value {
         "protocolVersion": version,
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": { "name": "apassy", "version": env!("CARGO_PKG_VERSION") },
-        "instructions": "Apassy lets you use credentials that the owner permits. You never receive secret values. Call apassy_list_access first. To run a command that needs secrets, use apassy_run_with_secrets: Apassy starts the command with the secrets in its environment and returns masked output. When apassy_list_access has a catalog, you can ask the owner for a credential there with apassy_request_access. Do not ask for secret values, and do not try to print them.",
+        "instructions": "Apassy lets you use credentials that the owner permits. You never receive secret values. Call apassy_list_access first. The owner does not need to set environment variable names. Use the env_name from process_access for each credential in your command. To run a command that needs secrets, use apassy_run_with_secrets: Apassy starts the command with the secrets in its environment and returns masked output. When apassy_list_access has a catalog, you can also use a credential there with access \"can_request\": put its item_id in apassy_run_with_secrets and use its env_name. The owner approves the first use in the Apassy app while the call waits. Do not ask for secret values, and do not try to print them.",
     })
 }
 
@@ -140,7 +140,7 @@ pub fn tool_list() -> Value {
         {
             "name": TOOL_LIST_ACCESS,
             "title": "List permitted credentials",
-            "description": "List the credentials and named operations that the owner permits for this agent. The result has item IDs, item names, operations, parameter formats, and where each process grant works (a project folder or any folder). When the owner lets this agent see all credentials, it also has a catalog: each credential without secret values, and whether you can use it or ask for it. It never has secret values.",
+            "description": "List the credentials and named operations that the owner permits for this agent. The result has item IDs, item names, operations, parameter formats, and the env_name to use in a command, and where each process grant works (a project folder or any folder). When the owner lets this agent see all credentials, it also has a catalog: each credential without secret values, its env_name, and whether you can use it now (\"can_use\") or after the owner approves its first use (\"can_request\"). A credential with access \"needs_field\" needs the owner to select one secret field first. It never has secret values.",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -169,13 +169,13 @@ pub fn tool_list() -> Value {
         {
             "name": TOOL_RUN_WITH_SECRETS,
             "title": "Run a command with secrets in its environment",
-            "description": "Run one command in a project directory. Apassy puts the named vault items into the process environment under the variable names that the owner set (see process_access in apassy_list_access). You never receive the values. Secret values in the output are replaced with [apassy:NAME]. A variable whose env_holds is \"a placeholder\" has a placeholder: Apassy puts the real value into HTTPS requests to its hosts (Authorization header, API key header, or key parameter), so use it there as you would use the key. Do not put it into a request body or a file. The answer lists each request in network.requests. The owner can need to approve the run in the Apassy app, so this call can wait up to 2 minutes. The command is an argument list, not a shell string. Use [\"sh\", \"-c\", \"...\"] only if you need a shell.",
+            "description": "Run one command in a project directory. Apassy puts the named vault items into the process environment under the env_name in process_access of apassy_list_access. Use that name in your command. Apassy selects a runtime name when the owner did not set one. You never receive the values. Secret values in the output are replaced with [apassy:NAME]. A variable whose env_holds is \"a placeholder\" has a placeholder: Apassy puts the real value into HTTPS requests to its hosts (Authorization header, API key header, or key parameter), so use it there as you would use the key. Do not put it into a request body or a file. The answer lists each request in network.requests. You can also name a catalog credential with access \"can_request\": the owner approves its first use and can give access for the project folder. The owner can need to approve the run in the Apassy app, so this call can wait up to 2 minutes. When the call fails with first_use_waiting, wait for the owner's answer to the other first use. The command is an argument list, not a shell string. Use [\"sh\", \"-c\", \"...\"] only if you need a shell.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "items": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "minItems": 1, "description": "Item IDs from process_access." },
+                    "items": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "minItems": 1, "description": "Item IDs from process_access, or from the catalog (access \"can_request\")." },
                     "command": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Program and arguments, for example [\"npm\", \"run\", \"migrate\"]." },
-                    "cwd": { "type": "string", "description": "Absolute working directory inside the granted project directory." },
+                    "cwd": { "type": "string", "description": "Absolute working directory: inside the granted project directory, or the project folder for a first use." },
                     "purpose": { "type": "string", "description": "Why you need to run this command. The owner sees it." },
                     "user_request": { "type": "string", "description": "The user's own words from the conversation that led to this command. Quote them. Do not summarize or add words. The bouncer compares the command with this request, and the owner sees it." }
                 },

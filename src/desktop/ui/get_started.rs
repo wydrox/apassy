@@ -44,7 +44,7 @@ fn hide_hint(app: &DesktopApp) -> &'static str {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Progress {
     pub credential: bool,
-    pub variable: bool,
+    pub command_ready: bool,
     pub agent: bool,
     pub grant: bool,
     pub request: bool,
@@ -61,9 +61,13 @@ impl Progress {
             .collect();
         Self {
             credential: session.search("").is_ok_and(|items| !items.is_empty()),
-            variable: session
-                .env_bound_items()
-                .is_ok_and(|items| !items.is_empty()),
+            command_ready: session.agent_credentials().is_ok_and(|items| {
+                items.into_iter().any(|(id, _)| {
+                    session
+                        .process_binding(id)
+                        .is_ok_and(|binding| binding.is_some())
+                })
+            }),
             agent: !agents.is_empty(),
             grant: agents.iter().any(|agent| {
                 session
@@ -83,10 +87,10 @@ impl Progress {
     fn steps(self) -> [bool; 5] {
         [
             self.credential,
-            self.variable,
+            self.command_ready,
             self.agent,
-            self.grant,
             self.request,
+            self.grant,
         ]
     }
 
@@ -138,9 +142,9 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool {
                     Go::AddCredential,
                 ),
                 (
-                    progress.variable,
+                    progress.command_ready,
                     "Let agents use it",
-                    "Under Agent access, set its environment variable and its declaration.",
+                    "If the credential has more than one secret field, select the field in Command settings.",
                     "Open",
                     Go::OpenCredential,
                 ),
@@ -152,18 +156,18 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool {
                     Go::RegisterAgent,
                 ),
                 (
-                    progress.grant,
-                    "Give the agent access",
-                    "Choose the credentials that it can use, and the project folder.",
-                    "Open",
-                    Go::OpenAgent,
-                ),
-                (
                     progress.request,
                     "Connect the host and try a request",
-                    "Add Apassy to the MCP servers of the host. The first request shows in Activity.",
+                    "Use the agent guide. Then ask the agent for a task that needs the credential.",
                     "Show steps",
                     Go::ShowConnect,
+                ),
+                (
+                    progress.grant,
+                    "Allow the first use",
+                    "Apassy asks you once in Activity. \"Allow in FOLDER\" lets the agent use the credential in that project.",
+                    "Open",
+                    Go::OpenAgent,
                 ),
             ];
             // Only the first open step has a button: one next action at a time.
@@ -240,20 +244,18 @@ fn act(app: &mut DesktopApp, go: Go) {
     match go {
         Go::AddCredential => super::items::open_add(app),
         Go::OpenCredential => {
-            // The first credential without a variable: that is where the step happens.
-            let bound: Vec<u64> = session
-                .env_bound_items()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(id, ..)| id)
-                .collect();
+            // The first credential that needs a selected field.
             let first = session
-                .search("")
+                .agent_credentials()
                 .unwrap_or_default()
                 .into_iter()
-                .find(|item| !bound.contains(&item.id));
-            if let Some(item) = first {
-                app.select_item(item.id.to_string());
+                .find(|(id, _)| {
+                    session
+                        .process_binding(*id)
+                        .is_ok_and(|binding| binding.is_none())
+                });
+            if let Some((id, _)) = first {
+                app.select_item(id.to_string());
                 app.view = OwnerView::Item;
             }
         }
@@ -296,11 +298,10 @@ mod tests {
         app.view = OwnerView::Vault;
         let ctx = egui::Context::default();
         let text = app_frame(&ctx, &mut app);
-        assert!(text.contains("Get started · 1 of 5"), "{text}");
+        assert!(text.contains("Get started · 2 of 5"), "{text}");
         // The next open step has the button; the later ones do not.
         assert!(text.contains("Let agents use it"), "{text}");
-        assert!(text.contains("Open"), "{text}");
-        assert!(!text.contains("Register…"), "{text}");
+        assert!(text.contains("Register…"), "{text}");
         // The list does not hide the credentials.
         assert!(text.contains("Guarded key"), "{text}");
 
@@ -310,8 +311,9 @@ mod tests {
             .expect("register");
         let progress = Progress::read(&app);
         assert!(progress.credential && progress.agent);
-        assert!(!progress.variable && !progress.grant && !progress.request);
-        assert_eq!(progress.done(), 2);
+        assert!(progress.command_ready);
+        assert!(!progress.grant && !progress.request);
+        assert_eq!(progress.done(), 3);
 
         // "Hide" hides the list. This vault has no list ID, so only for the session.
         assert_eq!(

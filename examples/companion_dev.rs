@@ -130,6 +130,7 @@ fn outcome_name(outcome: ApprovalOutcome) -> &'static str {
     match outcome {
         ApprovalOutcome::Approved => "approved",
         ApprovalOutcome::ApprovedAndRemembered => "approved_and_remembered",
+        ApprovalOutcome::ApprovedAndGranted => "approved_and_granted",
         ApprovalOutcome::Denied => "denied",
         ApprovalOutcome::TimedOut => "timed_out",
         ApprovalOutcome::Invalidated => "invalidated",

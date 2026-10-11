@@ -511,7 +511,12 @@ fn approve(shared: &Shared, device_id: &str, id: &str, request: &Request) -> Res
         Err(ApprovalRefusal::Changed) => error(ErrorCode::Changed),
         Err(ApprovalRefusal::NothingToRemember) => error(ErrorCode::NothingToRemember),
         Err(ApprovalRefusal::Stale) => error(ErrorCode::Stale),
-        Err(ApprovalRefusal::NotAnApproval) => error(ErrorCode::Internal),
+        // A phone approves a run only once. It cannot give access (ADR 0024).
+        Err(
+            ApprovalRefusal::NotAnApproval
+            | ApprovalRefusal::NothingToGrant
+            | ApprovalRefusal::DeclarationsDoNotMatch,
+        ) => error(ErrorCode::Internal),
     }
 }
 

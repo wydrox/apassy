@@ -955,6 +955,7 @@ fn access_section(app: &mut DesktopApp, ui: &mut egui::Ui, id: u64, kind: Creden
         .and_then(|provider| providers::find(&provider))
         .map(|provider| provider.label.clone());
     let binding = session.env_binding(id).ok().flatten();
+    let automatic_ready = session.process_binding(id).ok().flatten().is_some();
     let has_fields = !session.secret_fields(id).unwrap_or_default().is_empty();
     let connector = if kind == CredentialKind::ApiKey {
         session.connector(id).ok().flatten()
@@ -1003,16 +1004,28 @@ fn access_section(app: &mut DesktopApp, ui: &mut egui::Ui, id: u64, kind: Creden
                             EnvDelivery::Value => "",
                             EnvDelivery::Placeholder(_) => " · placeholder",
                         };
-                        kit::text(format!("{}{mode}", binding.env_name), Font::Mono)
-                            .color(kit::SECONDARY)
+                        let name = if binding.env_name == format!("APASSY_ITEM_{id}") {
+                            "Automatic"
+                        } else {
+                            &binding.env_name
+                        };
+                        kit::text(format!("{name}{mode}"), Font::Mono).color(kit::SECONDARY)
                     }
-                    None => kit::text("Not set", Font::Callout).color(kit::SECONDARY),
+                    None => kit::text(
+                        if automatic_ready {
+                            "Automatic"
+                        } else {
+                            "Choose field"
+                        },
+                        Font::Callout,
+                    )
+                    .color(kit::SECONDARY),
                 };
                 let terminal = (Icon::Terminal, egui::Color32::from_rgb(88, 86, 214));
                 if s.nav(
                     Some(terminal),
-                    "Environment variable",
-                    Some("Agents can run a command with this secret in its environment."),
+                    "Command settings",
+                    Some("Optional variable name, secret field, and delivery settings."),
                     Some(detail),
                 )
                 .clicked()
@@ -1059,6 +1072,7 @@ pub(super) fn prepare_sheet(app: &mut DesktopApp, id: u64, sheet: &Sheet) {
             state.env_name_input = binding
                 .as_ref()
                 .map(|binding| binding.env_name.clone())
+                .filter(|name| name != &format!("APASSY_ITEM_{id}"))
                 .unwrap_or_default();
             let suggested = state.session.suggested_placeholder_hosts(id);
             // A new variable starts in placeholder mode when the provider hosts are known.
@@ -1068,7 +1082,10 @@ pub(super) fn prepare_sheet(app: &mut DesktopApp, id: u64, sheet: &Sheet) {
                     Some(EnvDelivery::Value) => (false, suggested.join(", ")),
                     None => (!suggested.is_empty(), suggested.join(", ")),
                 };
-            state.env_field_input = binding.map(|binding| binding.field).unwrap_or_default();
+            state.env_field_input = binding
+                .or_else(|| state.session.process_binding(id).ok().flatten())
+                .map(|binding| binding.field)
+                .unwrap_or_default();
         }
         Sheet::Connector => {
             state.connector_url = state
@@ -2226,24 +2243,24 @@ pub(super) fn variable_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool 
     let response = kit::sheet(ctx, "variable", 480.0, |ui| {
         kit::sheet_title(
             ui,
-            "Environment variable",
+            "Command settings",
             Some(
-                "An agent can ask Apassy to run a command with this secret in its environment. The agent never receives the value.",
+                "Choose the secret field and how commands use it. A variable name is optional. The agent never receives the value.",
             ),
         );
         kit::section(
             ui,
             None,
             Some(
-                "Use A-Z, 0-9, and _, and start with a letter or _. System names such as PATH or DYLD_* are not permitted. You give each agent process access in Agents.",
+                "Leave the variable name empty for automatic use. Set a name only when a command needs a specific one.",
             ),
             |s| {
-                s.field("Name", |ui| {
+                s.field("Variable name (optional)", |ui| {
                     kit::mono_input(
                         ui,
                         &mut app.owner_ui.env_name_input,
                         "env-name",
-                        "SUPABASE_SERVICE_KEY",
+                        "Automatic",
                     )
                 });
                 if fields.len() > 1 {
@@ -2329,7 +2346,7 @@ pub(super) fn variable_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool 
                         .all(|host| crate::vault::parse_placeholder_host(host).is_some())
             }
         };
-        if crate::vault::checked_env_name(&env_name).is_err() {
+        if !env_name.is_empty() && crate::vault::checked_env_name(&env_name).is_err() {
             app.set_err("Use A-Z, 0-9, and _ and start with a letter or _. System names such as PATH or DYLD_* are not permitted.");
         } else if !hosts_ok {
             app.set_err("Name 1 to 16 hosts, such as api.stripe.com or api.example.com:8443, separated by commas.");

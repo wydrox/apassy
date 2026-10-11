@@ -268,9 +268,9 @@ fn settings_show_the_sections_of_the_selected_tab_only() {
     }
 }
 
-/// Settings > Agents: how the bouncer model starts. "Managed outside Apassy" is the
-/// default and starts nothing. Each mode shows its label, its status, and its actions,
-/// and a missing start script shows the install commands.
+/// Settings > Agents: how the bouncer model starts. "When a run needs it" is the
+/// default (ADR 0024) and starts nothing before a run. Each mode shows its label, its
+/// status, and its actions, and a missing start script shows the install commands.
 #[test]
 fn settings_show_how_the_bouncer_model_starts() {
     use crate::broker::model_server::{
@@ -300,20 +300,13 @@ fn settings_show_how_the_bouncer_model_starts() {
     for expected in [
         "Broker and bouncer",
         "Start the model",
-        "Managed outside Apassy",
+        "When a run needs it",
         "Status",
         "Open log",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
-    for hidden in [
-        "Stop after",
-        "Start now",
-        "Install the Laya environment",
-        "Install the model",
-    ] {
-        assert!(!text.contains(hidden), "{hidden}: {text}");
-    }
+    assert!(!text.contains("Start now"), "{text}");
     assert!(!settings_path.exists(), "the default is not written");
 
     let set = |mode| {
@@ -324,6 +317,17 @@ fn settings_show_how_the_bouncer_model_starts() {
             })
             .expect("save");
     };
+    set(StartMode::External);
+    let text = frames(&mut app);
+    assert!(text.contains("Managed outside Apassy"), "{text}");
+    for hidden in [
+        "Stop after",
+        "Start now",
+        "Install the Laya environment",
+        "Install the model",
+    ] {
+        assert!(!text.contains(hidden), "{hidden}: {text}");
+    }
     set(StartMode::WhenNeeded);
     let text = frames(&mut app);
     for expected in [
@@ -466,7 +470,10 @@ fn settings_offer_the_model_install_and_name_a_launch_agent() {
 
     // "Managed outside Apassy" offers no install. The missing model still shows.
     server
-        .set_settings(BouncerSettings::default())
+        .set_settings(BouncerSettings {
+            start: StartMode::External,
+            ..BouncerSettings::default()
+        })
         .expect("settings");
     let text = frames(&mut app);
     assert!(!text.contains("Install the model"), "{text}");
