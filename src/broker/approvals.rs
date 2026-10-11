@@ -15,12 +15,20 @@
 //! takes an [`OwnerProof`] from [`OwnerGate::authorize`] for exactly the run that
 //! waits. Each approval path, also "Approve and remember", goes through it. A denial
 //! needs no check, because it only takes authority away.
+//!
+//! A run with a first use (ADR 0024) also has a [`FirstUseOffer`] in the queue. The
+//! offer stays out of [`PendingRun`], so the digest that an iPhone signs does not
+//! change, and a phone can approve such a run only once. "Allow in this folder"
+//! ([`OwnerAction::ApproveAndGrant`]) names the run and the offer exactly as the owner
+//! saw them. The broker saves the grant after its second check.
 
 mod owner_auth;
 
 use std::collections::BTreeMap;
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
+
+use crate::vault::{Declaration, SuggestedDeclaration};
 
 pub use owner_auth::{
     CheckMethod, OwnerAction, OwnerAuthError, OwnerCheck, OwnerGate, OwnerProof, PROOF_LIFETIME,
@@ -64,12 +72,76 @@ pub struct RememberOffer {
     pub needed: u32,
 }
 
+/// A first use (ADR 0024): the items of a waiting run that the agent has no process
+/// grant for. "Allow in this folder" gives a grant for each of them in `folder`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstUseOffer {
+    pub agent_id: u64,
+    /// The folder of the grant: the nearest parent of the working directory with
+    /// `.git`, or the working directory.
+    pub folder: String,
+    pub items: Vec<FirstUseItem>,
+}
+
+/// One item of a first use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstUseItem {
+    pub item_id: u64,
+    pub name: String,
+    /// The declaration of the item. `None`: the grant saves the declaration that the
+    /// owner accepts on the card.
+    pub declaration: Option<Declaration>,
+}
+
+/// A declaration that the owner accepted on the first-use card, for an item without one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstUseDeclaration {
+    pub item_id: u64,
+    pub declaration: Declaration,
+    pub provider: Option<String>,
+    /// The form that Apassy suggested. The vault records whether the owner changed it.
+    pub suggested: Option<SuggestedDeclaration>,
+}
+
+/// What "Allow in this folder" saves after the broker checks the run again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantChoice {
+    pub folder: String,
+    pub declarations: Vec<FirstUseDeclaration>,
+}
+
+/// The end of a wait: the outcome, the check that the owner did for an approval, and
+/// for "Allow in this folder" what the broker saves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Settled {
+    pub outcome: ApprovalOutcome,
+    pub method: Option<CheckMethod>,
+    pub grant: Option<GrantChoice>,
+}
+
+impl Settled {
+    fn ended(outcome: ApprovalOutcome) -> Self {
+        Self {
+            outcome,
+            method: None,
+            grant: None,
+        }
+    }
+}
+
+/// [`ApprovalQueue::wait_for_first_use`] refused the wait: a first use of the same
+/// agent already waits (ADR 0024).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirstUseBusy;
+
 /// The owner answer that a waiting run gets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Answer {
     Approve,
     /// Approve the run and add one approval to its pattern.
     ApproveAndRemember,
+    /// Approve the run and give the agent access at first use (ADR 0024).
+    ApproveAndGrant,
     Deny,
 }
 
@@ -78,6 +150,8 @@ pub enum ApprovalOutcome {
     Approved,
     /// The owner approved with "Approve and remember".
     ApprovedAndRemembered,
+    /// The owner approved a first use with "Allow in this folder" (ADR 0024).
+    ApprovedAndGranted,
     Denied,
     TimedOut,
     /// The vault was locked or replaced, or the broker stopped, before the run used a
@@ -98,6 +172,11 @@ pub enum ApprovalRefusal {
     Changed,
     /// "Approve and remember" for a run that cannot teach a pattern.
     NothingToRemember,
+    /// "Allow in this folder" for a run without a first use.
+    NothingToGrant,
+    /// The declarations of "Allow in this folder" do not match the first use: each
+    /// item without a declaration needs exactly one.
+    DeclarationsDoNotMatch,
 }
 
 impl ApprovalRefusal {
@@ -112,15 +191,22 @@ impl ApprovalRefusal {
             Self::NothingToRemember => {
                 "This run cannot teach a pattern. Nothing was approved. Use \"Approve once\"."
             }
+            Self::NothingToGrant => {
+                "This run has no first use. Nothing was approved. Use \"Approve once\"."
+            }
+            Self::DeclarationsDoNotMatch => {
+                "Each new credential needs one declaration. Nothing was approved. Review the request again."
+            }
         }
     }
 }
 
 /// An answer with the check that the owner did for it. A denial has no check.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Decision {
     answer: Answer,
     method: Option<CheckMethod>,
+    grant: Option<GrantChoice>,
 }
 
 #[derive(Debug, Default)]
@@ -132,6 +218,8 @@ struct QueueState {
     /// The broker stopped. A new run does not wait.
     closed: bool,
     pending: Vec<PendingRun>,
+    /// The first-use offer of a waiting run (ADR 0024).
+    offers: BTreeMap<u64, FirstUseOffer>,
     decisions: BTreeMap<u64, Decision>,
     /// When each waiting run started to wait. It is not part of the run, so the
     /// equality of two runs (and an owner proof for one) does not depend on it.
@@ -241,6 +329,7 @@ impl ApprovalQueue {
         }
         let answer = match proof.action() {
             OwnerAction::ApproveAndRemember(_) => Answer::ApproveAndRemember,
+            OwnerAction::ApproveAndGrant { .. } => Answer::ApproveAndGrant,
             _ => Answer::Approve,
         };
         let method = proof.method();
@@ -252,11 +341,60 @@ impl ApprovalQueue {
                 Err(ApprovalRefusal::NothingToRemember)
             }
             Some(_) => {
-                Self::settle(&mut state, confirmed.id, answer, Some(method));
+                let grant = match proof.action() {
+                    OwnerAction::ApproveAndGrant {
+                        offer,
+                        declarations,
+                        ..
+                    } => Some(Self::grant_choice(
+                        state.offers.get(&confirmed.id),
+                        offer,
+                        declarations,
+                    )?),
+                    _ => None,
+                };
+                Self::settle(&mut state, confirmed.id, answer, Some(method), grant);
                 self.changed.notify_all();
                 Ok(())
             }
         }
+    }
+
+    /// The grant of "Allow in this folder": the offer must be the waiting offer, and each
+    /// item without a declaration needs exactly one declaration (ADR 0024).
+    fn grant_choice(
+        waiting: Option<&FirstUseOffer>,
+        confirmed: &FirstUseOffer,
+        declarations: &[FirstUseDeclaration],
+    ) -> Result<GrantChoice, ApprovalRefusal> {
+        let Some(waiting) = waiting else {
+            return Err(ApprovalRefusal::NothingToGrant);
+        };
+        if waiting != confirmed {
+            return Err(ApprovalRefusal::Changed);
+        }
+        let undeclared: Vec<u64> = waiting
+            .items
+            .iter()
+            .filter(|item| item.declaration.is_none())
+            .map(|item| item.item_id)
+            .collect();
+        let mut named: Vec<u64> = declarations.iter().map(|d| d.item_id).collect();
+        named.sort_unstable();
+        let mut expected = undeclared;
+        expected.sort_unstable();
+        if named != expected {
+            return Err(ApprovalRefusal::DeclarationsDoNotMatch);
+        }
+        Ok(GrantChoice {
+            folder: waiting.folder.clone(),
+            declarations: declarations.to_vec(),
+        })
+    }
+
+    /// The first-use offer of a waiting run, or `None` (ADR 0024).
+    pub fn first_use(&self, id: u64) -> Option<FirstUseOffer> {
+        self.state().offers.get(&id).cloned()
     }
 
     /// Deny a waiting run. A denial needs no owner check. Returns false when the run
@@ -266,21 +404,36 @@ impl ApprovalQueue {
         if !state.pending.iter().any(|run| run.id == id) {
             return false;
         }
-        Self::settle(&mut state, id, Answer::Deny, None);
+        Self::settle(&mut state, id, Answer::Deny, None, None);
         self.changed.notify_all();
         true
     }
 
-    fn settle(state: &mut QueueState, id: u64, answer: Answer, method: Option<CheckMethod>) {
+    fn settle(
+        state: &mut QueueState,
+        id: u64,
+        answer: Answer,
+        method: Option<CheckMethod>,
+        grant: Option<GrantChoice>,
+    ) {
         state.pending.retain(|run| run.id != id);
         state.waiting_since.remove(&id);
-        state.decisions.insert(id, Decision { answer, method });
+        state.offers.remove(&id);
+        state.decisions.insert(
+            id,
+            Decision {
+                answer,
+                method,
+                grant,
+            },
+        );
     }
 
     /// Remove a run that ended without a decision: a timeout, or an invalid session.
     fn forget(state: &mut QueueState, id: u64) {
         state.pending.retain(|pending| pending.id != id);
         state.waiting_since.remove(&id);
+        state.offers.remove(&id);
     }
 
     /// End every waiting run and every decision that a run did not use yet. The
@@ -291,6 +444,7 @@ impl ApprovalQueue {
         state.generation = state.generation.wrapping_add(1);
         state.pending.clear();
         state.waiting_since.clear();
+        state.offers.clear();
         state.decisions.clear();
         self.changed.notify_all();
     }
@@ -320,14 +474,50 @@ impl ApprovalQueue {
     /// outcome. The activity log names it.
     pub fn wait_for_decision(
         &self,
-        mut run: PendingRun,
+        run: PendingRun,
         timeout: Duration,
         still_valid: impl Fn() -> bool,
     ) -> (ApprovalOutcome, Option<CheckMethod>) {
+        let settled = match self.wait(run, None, timeout, still_valid) {
+            Ok(settled) => settled,
+            Err(FirstUseBusy) => Settled::ended(ApprovalOutcome::Invalidated),
+        };
+        (settled.outcome, settled.method)
+    }
+
+    /// Like [`Self::wait_for_decision`], for a run with a first use (ADR 0024). The
+    /// owner can answer with "Allow in this folder"; then [`Settled::grant`] has what
+    /// the broker saves. A first use of the same agent that already waits refuses the
+    /// wait, so one agent cannot fill the queue with first uses.
+    pub fn wait_for_first_use(
+        &self,
+        run: PendingRun,
+        offer: FirstUseOffer,
+        timeout: Duration,
+        still_valid: impl Fn() -> bool,
+    ) -> Result<Settled, FirstUseBusy> {
+        self.wait(run, Some(offer), timeout, still_valid)
+    }
+
+    fn wait(
+        &self,
+        mut run: PendingRun,
+        offer: Option<FirstUseOffer>,
+        timeout: Duration,
+        still_valid: impl Fn() -> bool,
+    ) -> Result<Settled, FirstUseBusy> {
         let deadline = Instant::now() + timeout;
         let mut state = self.state();
         if state.closed {
-            return (ApprovalOutcome::Invalidated, None);
+            return Ok(Settled::ended(ApprovalOutcome::Invalidated));
+        }
+        if let Some(offer) = &offer
+            && state
+                .offers
+                .values()
+                .any(|waiting| waiting.agent_id == offer.agent_id)
+        {
+            return Err(FirstUseBusy);
         }
         state.next_id = state.next_id.wrapping_add(1);
         let id = state.next_id;
@@ -335,6 +525,9 @@ impl ApprovalQueue {
         run.id = id;
         state.pending.push(run);
         state.waiting_since.insert(id, Instant::now());
+        if let Some(offer) = offer {
+            state.offers.insert(id, offer);
+        }
         self.changed.notify_all();
         drop(state);
         self.notify_owner();
@@ -343,20 +536,25 @@ impl ApprovalQueue {
             if state.generation != generation {
                 Self::forget(&mut state, id);
                 state.decisions.remove(&id);
-                return (ApprovalOutcome::Invalidated, None);
+                return Ok(Settled::ended(ApprovalOutcome::Invalidated));
             }
             if let Some(decision) = state.decisions.remove(&id) {
                 let outcome = match decision.answer {
                     Answer::Approve => ApprovalOutcome::Approved,
                     Answer::ApproveAndRemember => ApprovalOutcome::ApprovedAndRemembered,
+                    Answer::ApproveAndGrant => ApprovalOutcome::ApprovedAndGranted,
                     Answer::Deny => ApprovalOutcome::Denied,
                 };
-                return (outcome, decision.method);
+                return Ok(Settled {
+                    outcome,
+                    method: decision.method,
+                    grant: decision.grant,
+                });
             }
             let now = Instant::now();
             if now >= deadline {
                 Self::forget(&mut state, id);
-                return (ApprovalOutcome::TimedOut, None);
+                return Ok(Settled::ended(ApprovalOutcome::TimedOut));
             }
             let wait = (deadline - now).min(WATCH_INTERVAL);
             drop(
@@ -371,7 +569,7 @@ impl ApprovalQueue {
                 let mut state = self.state();
                 Self::forget(&mut state, id);
                 state.decisions.remove(&id);
-                return (ApprovalOutcome::Invalidated, None);
+                return Ok(Settled::ended(ApprovalOutcome::Invalidated));
             }
         }
     }

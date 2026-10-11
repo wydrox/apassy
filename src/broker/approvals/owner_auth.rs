@@ -35,7 +35,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use zeroize::Zeroizing;
 
-use super::PendingRun;
+use super::{FirstUseDeclaration, FirstUseOffer, PendingRun};
 use crate::broker::SharedVault;
 use crate::companion::crypto::{ApproveAction, approve_string, verify_ecdsa};
 use crate::companion::digest::run_digest_hex;
@@ -82,6 +82,14 @@ pub enum OwnerAction {
     ApproveRun(PendingRun),
     /// Approve one waiting run and remember a narrow pattern for later runs (ADR 0010).
     ApproveAndRemember(PendingRun),
+    /// Approve one waiting run with a first use and give the agent process access to its
+    /// new items in the folder of the offer (ADR 0024). The proof names the run, the
+    /// offer, and each declaration exactly as the owner saw them. A phone cannot make it.
+    ApproveAndGrant {
+        run: PendingRun,
+        offer: FirstUseOffer,
+        declarations: Vec<FirstUseDeclaration>,
+    },
     /// Give an agent access to an item or change that access: a connector operation
     /// or process access.
     ChangeGrant { agent_id: u64, item_id: u64 },
@@ -97,6 +105,9 @@ pub enum OwnerAction {
     ChangeItemRules { item_id: u64 },
     /// Give an agent a new token.
     RotateToken { agent_id: u64 },
+    /// Connect a host in the agent guide (ADR 0024): give the agent a new token and, with
+    /// `show_all`, let it see all credentials without values. One check for both.
+    ConnectAgent { agent_id: u64, show_all: bool },
     /// Change the token lifetime of all agents.
     ChangeTokenLifetime,
     /// Apply a calibrated `task_match` level of the bouncer, in hundredths (ADR 0009
@@ -160,6 +171,11 @@ impl OwnerAction {
                     short_name(run)
                 )
             }
+            Self::ApproveAndGrant { run, offer, .. } => format!(
+                "give agent \"{}\" access in \"{}\" and approve its run",
+                short_name(run),
+                short_folder(&offer.folder)
+            ),
             Self::ChangeGrant { .. } => "change the access of an agent".to_owned(),
             Self::ChangeGrants { item_ids, .. } => {
                 format!("give an agent access to {} credentials", item_ids.len())
@@ -170,6 +186,12 @@ impl OwnerAction {
             Self::ChangeRule { .. } => "change an agent rule".to_owned(),
             Self::ChangeItemRules { .. } => "change the agent settings of an item".to_owned(),
             Self::RotateToken { .. } => "give an agent a new token".to_owned(),
+            Self::ConnectAgent {
+                show_all: false, ..
+            } => "give an agent a new token".to_owned(),
+            Self::ConnectAgent { show_all: true, .. } => {
+                "connect an agent and let it see credential names without values".to_owned()
+            }
             Self::ChangeTokenLifetime => "change the agent token lifetime".to_owned(),
             Self::ChangeCalibration { .. } => {
                 "change the task_match level of the bouncer".to_owned()
@@ -194,9 +216,30 @@ impl OwnerAction {
     /// The waiting run of an approval action.
     pub fn run(&self) -> Option<&PendingRun> {
         match self {
-            Self::ApproveRun(run) | Self::ApproveAndRemember(run) => Some(run),
+            Self::ApproveRun(run)
+            | Self::ApproveAndRemember(run)
+            | Self::ApproveAndGrant { run, .. } => Some(run),
             _ => None,
         }
+    }
+}
+
+/// The last part of a folder for the prompt, printable characters only, at most 40
+/// characters.
+fn short_folder(folder: &str) -> String {
+    let last = std::path::Path::new(folder).file_name().map_or_else(
+        || folder.to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let name: String = last
+        .chars()
+        .filter(|c| !c.is_control() && *c != '"')
+        .take(MAX_AGENT_NAME_CHARS)
+        .collect();
+    if name.trim().is_empty() {
+        "/".to_owned()
+    } else {
+        name
     }
 }
 

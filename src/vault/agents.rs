@@ -982,7 +982,15 @@ impl Vault {
         delivery: &EnvDelivery,
     ) -> VaultResult<()> {
         let item = to_sql_id(item_id)?;
-        let env_name = checked_env_name(env_name.trim())?;
+        let automatic_name = format!("APASSY_ITEM_{item_id}");
+        let env_name = env_name.trim();
+        let env_name = if env_name.is_empty() || env_name == automatic_name {
+            // An empty stored name means automatic delivery. Item IDs are local
+            // to each device, so a synced setting must not store a derived name.
+            ""
+        } else {
+            checked_env_name(env_name)?
+        };
         let hosts = match delivery {
             EnvDelivery::Value => None,
             EnvDelivery::Placeholder(hosts) => Some(checked_placeholder_hosts(hosts)?),
@@ -1005,7 +1013,8 @@ impl Vault {
         }
         let taken: Option<i64> = tx
             .query_row(
-                "SELECT item_id FROM env_binding WHERE env_name = ?1 AND item_id != ?2",
+                "SELECT item_id FROM env_binding
+                 WHERE ?1 != '' AND env_name = ?1 AND item_id != ?2",
                 (env_name, item),
                 |row| row.get(0),
             )
@@ -1022,10 +1031,15 @@ impl Vault {
             (item, env_name, field, hosts.as_deref()),
         )
         .map_err(|_| err(VaultErrorKind::Storage))?;
+        let display_name = if env_name.is_empty() {
+            "Automatic"
+        } else {
+            env_name
+        };
         let detail = match &hosts {
-            None => env_name.to_owned(),
+            None => display_name.to_owned(),
             Some(hosts) => format!(
-                "{env_name}, placeholder for {}",
+                "{display_name}, placeholder for {}",
                 hosts.split('\n').collect::<Vec<_>>().join(", ")
             ),
         };
@@ -1070,13 +1084,42 @@ impl Vault {
             .map_err(|_| err(VaultErrorKind::Storage))?;
         Ok(row.map(|(env_name, field, hosts)| EnvBinding {
             item_id,
-            env_name,
+            env_name: process_env_name(item_id, env_name),
             field,
             delivery: match hosts {
                 None => EnvDelivery::Value,
                 Some(hosts) => EnvDelivery::Placeholder(hosts.lines().map(str::to_owned).collect()),
             },
         }))
+    }
+
+    /// Resolve process delivery without reading secret values. A stored binding
+    /// takes precedence. Otherwise a supported secret field gets an automatic name.
+    pub fn process_binding(&self, item_id: u64) -> VaultResult<Option<EnvBinding>> {
+        process_binding_in(self.conn_ref()?, to_sql_id(item_id)?)
+    }
+
+    /// Active credentials with at least one nonempty secret field. The owner can
+    /// select a process field for an item that has several possible fields.
+    pub fn agent_credentials(&self) -> VaultResult<Vec<(u64, String)>> {
+        let mut statement = self
+            .conn_ref()?
+            .prepare(
+                "SELECT id, title FROM item
+                 WHERE id NOT IN (SELECT item_id FROM item_archive)
+                 AND EXISTS (SELECT 1 FROM item_field
+                     WHERE item_id = item.id AND secret = 1 AND length(value) > 0)
+                 ORDER BY title COLLATE NOCASE, id",
+            )
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get(1)?)))
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        rows.map(|row| {
+            let (id, title) = row.map_err(|_| err(VaultErrorKind::Storage))?;
+            Ok((to_public_id(id)?, title))
+        })
+        .collect()
     }
 
     /// Give or change process access. `project_dir` must be an absolute path.
@@ -1096,7 +1139,7 @@ impl Vault {
     }
 
     /// Give or change process access to several items in one transaction (ADR 0012).
-    /// Each item needs an environment variable. When one item fails, no grant changes.
+    /// Each item needs a usable secret field. When one item fails, no grant changes.
     /// An open access request of the agent for an item is granted with it.
     pub fn set_exec_grants(
         &mut self,
@@ -1142,15 +1185,7 @@ impl Vault {
         );
         for item in items {
             require_item(&tx, item)?;
-            let bound: Option<i64> = tx
-                .query_row(
-                    "SELECT item_id FROM env_binding WHERE item_id = ?1",
-                    [item],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(|_| err(VaultErrorKind::Storage))?;
-            if bound.is_none() {
+            if process_binding_in(&tx, item)?.is_none() {
                 return Err(err(VaultErrorKind::InvalidInput));
             }
             tx.execute(
@@ -1525,6 +1560,14 @@ pub(super) fn prepare_restored(conn: &mut Connection) -> VaultResult<()> {
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| err(VaultErrorKind::Storage))?;
+    // Automatic delivery has no env_binding row. Preserve the review requirement
+    // before the restored process grants are removed.
+    tx.execute(
+        "INSERT OR REPLACE INTO restore_review (item_id, restored_at)
+         SELECT item_id, ?1 FROM exec_grant",
+        [at],
+    )
+    .map_err(|_| err(VaultErrorKind::Storage))?;
     tx.execute(
         "UPDATE agent SET revoked_at = ?1 WHERE revoked_at IS NULL",
         [at],
@@ -1601,6 +1644,94 @@ pub(super) fn require_item(tx: &rusqlite::Transaction<'_>, item: i64) -> VaultRe
     found
         .map(|_| ())
         .ok_or_else(|| err(VaultErrorKind::NotFound))
+}
+
+/// Shared metadata resolver for reads and grant/request transactions. SQL tests
+/// whether a secret has a value, but never returns that value to Rust.
+pub(super) fn process_binding_in(conn: &Connection, item: i64) -> VaultResult<Option<EnvBinding>> {
+    let kind: Option<String> = conn
+        .query_row(
+            "SELECT kind FROM item WHERE id = ?1
+             AND id NOT IN (SELECT item_id FROM item_archive)",
+            [item],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    let Some(kind) = kind else { return Ok(None) };
+    let item_id = to_public_id(item)?;
+    let stored = conn
+        .query_row(
+            "SELECT env_name, field, placeholder_hosts FROM env_binding WHERE item_id = ?1",
+            [item],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    let binding = if let Some((env_name, field, hosts)) = stored {
+        EnvBinding {
+            item_id,
+            env_name: process_env_name(item_id, env_name),
+            field,
+            delivery: hosts.map_or(EnvDelivery::Value, |hosts| {
+                EnvDelivery::Placeholder(hosts.lines().map(str::to_owned).collect())
+            }),
+        }
+    } else {
+        let field = match super::types::kind_from_str(&kind)? {
+            crate::contracts::CredentialKind::ApiKey => "token".to_owned(),
+            crate::contracts::CredentialKind::Login
+            | crate::contracts::CredentialKind::Database => "password".to_owned(),
+            crate::contracts::CredentialKind::SshKey => "private_key".to_owned(),
+            crate::contracts::CredentialKind::Custom => {
+                let mut statement = conn
+                    .prepare(
+                        "SELECT name FROM item_field
+                         WHERE item_id = ?1 AND secret = 1 AND length(value) > 0
+                         ORDER BY position LIMIT 2",
+                    )
+                    .map_err(|_| err(VaultErrorKind::Storage))?;
+                let fields = statement
+                    .query_map([item], |row| row.get::<_, String>(0))
+                    .map_err(|_| err(VaultErrorKind::Storage))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| err(VaultErrorKind::Storage))?;
+                let [field] = fields.as_slice() else {
+                    return Ok(None);
+                };
+                field.clone()
+            }
+        };
+        EnvBinding {
+            item_id,
+            env_name: format!("APASSY_ITEM_{item_id}"),
+            field,
+            delivery: EnvDelivery::Value,
+        }
+    };
+    let usable: bool = conn
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM item_field
+             WHERE item_id = ?1 AND name = ?2 AND secret = 1 AND length(value) > 0)",
+            (item, binding.field.as_str()),
+            |row| row.get(0),
+        )
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    Ok(usable.then_some(binding))
+}
+
+fn process_env_name(item_id: u64, stored_name: String) -> String {
+    if stored_name.is_empty() {
+        format!("APASSY_ITEM_{item_id}")
+    } else {
+        stored_name
+    }
 }
 
 pub(super) fn checked_text(text: &str, max: usize) -> VaultResult<&str> {

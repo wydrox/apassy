@@ -325,7 +325,7 @@ fn run_host(cli: &Cli, mut args: Args) -> Outcome {
     if host == Host::Codex {
         println!("Use /hooks to trust the Apassy hook before the first request.");
     }
-    println!("Next: set an Environment variable for the credential in Apassy.");
+    println!("Next: select credentials and give the agent access. Variable names are optional.");
     println!(
         "Give {name} access: apassy grant set {} ITEM --folder DIR",
         quote(&name)
@@ -869,7 +869,7 @@ mod tests {
             "[projects.\"/Users/fixture/Dev/apassy\"]\ntrust_level = \"trusted\"\n",
             "[mcp_servers.other]\ncommand = \"/fixture/apassy-helper\"\n",
         ] {
-            assert!(!codex_section_present(&unrelated, &expected).unwrap());
+            assert!(!codex_section_present(unrelated, &expected).unwrap());
             let current = format!("{unrelated}\n{expected}");
             assert!(codex_section_present(&current, &expected).unwrap());
             if unrelated.starts_with('[') {
@@ -890,7 +890,7 @@ mod tests {
             "[mcp_servers.apassy]\ncommand = \"unterminated\n",
             "mcp_servers = 7\n",
         ] {
-            assert!(codex_section_present(&custom, &expected).is_err());
+            assert!(codex_section_present(custom, &expected).is_err());
         }
     }
 

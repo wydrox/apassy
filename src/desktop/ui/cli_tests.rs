@@ -622,20 +622,33 @@ fn agents_variables_and_grants_ask_the_owner_for_each_change() {
         "the window does not show the token"
     );
 
-    // A grant needs a variable first. The app says so before it asks the owner.
-    let early = run(
+    // Automatic command settings still need the owner check for a grant.
+    let early = ask(
         &mut app,
         &ctx,
-        &token,
+        Some(&token),
         Command::GrantSet {
             agent: "claude code".to_owned(),
             items: vec![item_id.to_string()],
-            folder: Some("/tmp/project".to_owned()),
+            folder: Some(dir.path().display().to_string()),
             mode: GrantMode::Ask,
         },
     );
-    assert_eq!(early.code, "invalid_input");
-    assert!(app.owner.check.is_none());
+    assert!(
+        early.try_recv().is_err(),
+        "the grant waits for the owner check"
+    );
+    assert!(
+        app.owner_ui
+            .session
+            .exec_grants(agent_id)
+            .unwrap()
+            .is_empty()
+    );
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("owner check");
+    assert!(early.try_recv().expect("grant answer").ok);
+    assert!(app.owner_ui.session.env_binding(item_id).unwrap().is_none());
 
     let bad_name = run(
         &mut app,

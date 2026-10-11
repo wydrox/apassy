@@ -1,7 +1,7 @@
 # ADR 0012 — What an agent sees, where it uses a credential, and access requests
 
 Date: 2026-09-27.
-Status: ACCEPTED by the owner on 2026-09-27 ("Start with updated proposal"). In the code.
+Status: ACCEPTED by the owner on 2026-09-27 ("Start with updated proposal"). In the code. Changed by [ADR 0024](0024-access-at-first-use.md): an agent that sees all credentials can use one at once, and the owner decides at the first use. The agent guide turns "All credentials, without values" on by default.
 
 ## Context
 

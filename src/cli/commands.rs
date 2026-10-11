@@ -99,7 +99,7 @@ Grant commands. Each change that gives access asks for the owner check in the wi
   apassy grant set AGENT ITEM... [--folder DIR | --any-folder] [--mode ask|bouncer]
                               Process access. The default folder is the current one, and
                               the default mode is ask (you approve each run). Each ITEM
-                              needs a variable: apassy item env.
+                              variable names are optional.
   apassy grant remove AGENT ITEM      No owner check.
   apassy grant rule AGENT ITEM [--allow PREFIX]... [--forbid WORD]... [--expires HOURS]
                               [--max-runs N] [--instruction TEXT]

@@ -319,6 +319,13 @@ fn draw_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
 }
 
 fn draw_agent(app: &mut DesktopApp, ui: &mut egui::Ui, agent_id: u64) {
+    if app.ui.grant.resume_agent == Some(agent_id)
+        && app.ui.sheet.is_none()
+        && app.owner.check.is_none()
+    {
+        app.ui.grant.resume_agent = None;
+        app.ui.sheet = Some(Sheet::GrantMany { agent_id });
+    }
     if kit::back_link(ui, "Agents") {
         app.owner_ui.selected_agent = None;
         return;
@@ -451,9 +458,9 @@ fn token_section(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary, 
     }
 }
 
-/// Process access for one agent: one row per credential with a variable.
+/// Process access belongs to credentials, independently of named variables.
 fn process_access_section(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary) {
-    let items = match app.owner_ui.session.env_bound_items() {
+    let items = match app.owner_ui.session.agent_credentials() {
         Ok(items) => items,
         Err(err) => {
             kit::tone_note(ui, err.message, Tone::Critical);
@@ -480,21 +487,21 @@ fn process_access_section(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &Agent
         ui,
         Some("Process access"),
         Some(
-            "The agent can ask Apassy to run a command with the secret in its environment, in one project folder or in any folder.",
+            "Choose which credentials this agent can use and where it can use them. Variable names are optional.",
         ),
         |s| {
             if items.is_empty() {
                 s.row(|ui| {
                     kit::note(
                         ui,
-                        "No credential has an environment variable yet. Open a credential and set one under Agent access.",
+                        "Add a credential with a secret value, then give this agent access.",
                     );
                     go_to_credentials =
                         kit::small_button(ui, "Go to Credentials", Style::Link).clicked();
                 });
                 return;
             }
-            for (item_id, item_name, env_name) in &items {
+            for (item_id, item_name) in &items {
                 let grant = grants.iter().find(|grant| grant.item_id == *item_id);
                 let (detail, tone) = match grant.map(|grant| grant.mode) {
                     Some(ExecMode::Ask) => ("Asks you each time", Tone::Accent),
@@ -502,8 +509,8 @@ fn process_access_section(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &Agent
                     None => ("Off", Tone::Neutral),
                 };
                 let subtitle = match grant {
-                    Some(grant) => format!("{env_name} · {}", grant.place.describe()),
-                    None => env_name.clone(),
+                    Some(grant) => grant.place.describe(),
+                    None => "No access yet",
                 };
                 // The icon of the credential kind, as in the credential list.
                 let icon = kinds
@@ -514,7 +521,7 @@ fn process_access_section(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &Agent
                 if s.nav(
                     Some(icon),
                     item_name,
-                    Some(&subtitle),
+                    Some(subtitle),
                     Some(kit::text(detail, Font::Callout).color(tone.text())),
                 )
                 .clicked()
@@ -546,6 +553,17 @@ fn process_access_section(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &Agent
         app.ui.sheet = Some(Sheet::GrantMany { agent_id: agent.id });
     }
     if let Some((item_id, mode, grant)) = open {
+        if app
+            .owner_ui
+            .session
+            .process_binding(item_id)
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            open_command_settings(app, item_id);
+            return;
+        }
         let key = (agent.id, item_id);
         let any_folder = grant
             .as_ref()
@@ -782,17 +800,23 @@ fn setup_guidance(state: &mut super::UiState, ui: &mut egui::Ui, fresh: bool) {
     }
     kit::note(
         ui,
-        "3. Open a credential and set its Environment variable. Return here to give this agent access to that credential and project.",
+        "3. When the agent sees credential names, it uses a credential when it needs one, and you approve the first use in Apassy (ADR 0024). To give access before the first use, select credentials in the agent guide.",
     );
     kit::note(
         ui,
-        "4. In your project folder, run this command. Ask the agent to use the test credential. Check its request in Activity.",
+        "4. In your project folder, start the host with this command. Ask the agent to use a credential. Approve the first use in Apassy.",
     );
+    let launch = if host == "claude" {
+        "MCP_TOOL_TIMEOUT=180000 claude".to_owned()
+    } else {
+        "codex".to_owned()
+    };
+    kit::code_block(ui, &launch, 2);
     let sandbox = std::path::Path::new(&cli_path())
         .parent()
         .map(|p| p.join("apassy-sandbox").display().to_string())
         .unwrap_or_else(|| "apassy-sandbox".to_owned());
-    let launch = if host == "claude" {
+    let protected = if host == "claude" {
         format!(
             "MCP_TOOL_TIMEOUT=180000 {} -- claude --settings '{{\"sandbox\":{{\"enabled\":false}}}}'",
             shell_word(&sandbox)
@@ -803,11 +827,11 @@ fn setup_guidance(state: &mut super::UiState, ui: &mut egui::Ui, fresh: bool) {
             shell_word(&sandbox)
         )
     };
-    kit::code_block(ui, &launch, 2);
     kit::note(
         ui,
-        "This uses the Apassy sandbox instead of the host's inner sandbox. Your host approval prompts stay active.",
+        "Optional, more protection: start the host in the Apassy sandbox. It uses the Apassy sandbox instead of the host's inner sandbox. Your host approval prompts stay active.",
     );
+    kit::code_block(ui, &protected, 2);
     kit::note(
         ui,
         "Check the result of the test request. Then check its entry in Activity. An Allowed entry alone does not prove success.",
@@ -1034,10 +1058,10 @@ pub(super) fn access_sheet(
         .and_then(|agents| agents.into_iter().find(|agent| agent.id == agent_id))
         .map(|agent| agent.name)
         .unwrap_or_default();
-    let Some((_, item_name, env_name)) = session
-        .env_bound_items()
+    let Some((_, item_name)) = session
+        .agent_credentials()
         .ok()
-        .and_then(|items| items.into_iter().find(|(id, _, _)| *id == item_id))
+        .and_then(|items| items.into_iter().find(|(id, _)| *id == item_id))
     else {
         app.ui.sheet = None;
         return false;
@@ -1048,7 +1072,7 @@ pub(super) fn access_sheet(
         .and_then(|grants| grants.into_iter().find(|grant| grant.item_id == item_id));
     let key = (agent_id, item_id);
     let real_value = session
-        .env_binding(item_id)
+        .process_binding(item_id)
         .ok()
         .flatten()
         .is_some_and(|binding| binding.delivery == EnvDelivery::Value);
@@ -1062,9 +1086,7 @@ pub(super) fn access_sheet(
         kit::sheet_title(
             ui,
             &format!("{item_name} for {agent_name}"),
-            Some(&format!(
-                "The agent can run a command with {env_name} in its environment."
-            )),
+            Some("Set where this agent can use the credential and when it needs your approval."),
         );
         kit::sheet_body(ui, |ui| {
             let dir = app.owner_ui.exec_dir_inputs.entry(key).or_default();
@@ -1175,6 +1197,8 @@ pub(crate) struct GrantForm {
     pub(crate) dir: String,
     pub(crate) any_folder: bool,
     pub(crate) mode: Decision,
+    /// Return to the same batch selection after the optional field/settings sheet.
+    pub(crate) resume_agent: Option<u64>,
 }
 
 /// The decision of a grant in a form. `Ask` is the default.
@@ -1289,19 +1313,16 @@ pub(super) fn grant_many_sheet(app: &mut DesktopApp, ctx: &egui::Context, agent_
         .and_then(|agents| agents.into_iter().find(|agent| agent.id == agent_id))
         .map(|agent| agent.name)
         .unwrap_or_default();
-    let archived = session.archived().unwrap_or_default();
-    let items: Vec<(u64, String, String, bool)> = session
-        .env_bound_items()
+    let items: Vec<(u64, String, bool, bool)> = session
+        .agent_credentials()
         .unwrap_or_default()
         .into_iter()
-        .filter(|(id, _, _)| !archived.contains_key(id))
-        .map(|(id, name, env_name)| {
-            let real = session
-                .env_binding(id)
-                .ok()
-                .flatten()
+        .map(|(id, name)| {
+            let binding = session.process_binding(id).ok().flatten();
+            let real = binding
+                .as_ref()
                 .is_some_and(|binding| binding.delivery == EnvDelivery::Value);
-            (id, name, env_name, real)
+            (id, name, binding.is_some(), real)
         })
         .collect();
     let granted: Vec<u64> = session
@@ -1312,14 +1333,13 @@ pub(super) fn grant_many_sheet(app: &mut DesktopApp, ctx: &egui::Context, agent_
         .collect();
     let mut save = false;
     let mut cancel = false;
+    let mut configure = None;
     let mut mode = app.ui.grant.mode.mode();
     let response = kit::sheet(ctx, "grant-many", 560.0, |ui| {
         kit::sheet_title(
             ui,
             &format!("Give {agent_name} access"),
-            Some(
-                "Select the credentials. The agent can run a command with each of them in its environment. You confirm once.",
-            ),
+            Some("Select the credentials this agent can use. You confirm access once."),
         );
         kit::sheet_body(ui, |ui| {
             let form = &mut app.ui.grant;
@@ -1327,17 +1347,17 @@ pub(super) fn grant_many_sheet(app: &mut DesktopApp, ctx: &egui::Context, agent_
                 ui,
                 Some("Credentials"),
                 Some(
-                    "A credential needs an environment variable. A selected credential that the agent can use already gets the new place and decision.",
+                    "Variable names are optional. Existing access gets the new folder and decision.",
                 ),
                 |s| {
-                    for (id, name, env_name, real) in &items {
+                    for (id, name, ready, _) in &items {
                         let mut on = form.selection.contains(id);
-                        let mut subtitle = env_name.clone();
-                        if *real {
-                            subtitle.push_str(" · real value");
+                        let mut subtitle = if *ready {
+                            "Ready for agent access"
                         } else {
-                            subtitle.push_str(" · placeholder");
+                            "Choose the secret field to use"
                         }
+                        .to_owned();
                         if granted.contains(id) {
                             subtitle.push_str(" · has access");
                         }
@@ -1347,6 +1367,19 @@ pub(super) fn grant_many_sheet(app: &mut DesktopApp, ctx: &egui::Context, agent_
                             } else {
                                 form.selection.remove(id);
                             }
+                        }
+                        if on && !ready {
+                            s.row(|ui| {
+                                if kit::small_button(
+                                    ui,
+                                    &format!("Choose field for {name}…"),
+                                    Style::Link,
+                                )
+                                .clicked()
+                                {
+                                    configure = Some(*id);
+                                }
+                            });
                         }
                     }
                 },
@@ -1374,7 +1407,13 @@ pub(super) fn grant_many_sheet(app: &mut DesktopApp, ctx: &egui::Context, agent_
                 } else {
                     format!("Give access to {count} credentials")
                 };
-                ui.add_enabled_ui(count > 0, |ui| {
+                let ready = count > 0
+                    && app.ui.grant.selection.iter().all(|selected| {
+                        items
+                            .iter()
+                            .any(|(id, _, ready, _)| id == selected && *ready)
+                    });
+                ui.add_enabled_ui(ready, |ui| {
                     save = kit::button(ui, &label, Style::Prominent)
                         .on_hover_text("⌘S")
                         .clicked();
@@ -1387,7 +1426,13 @@ pub(super) fn grant_many_sheet(app: &mut DesktopApp, ctx: &egui::Context, agent_
         ExecMode::Ask => Decision::Ask,
         ExecMode::Bouncer => Decision::Bouncer,
     };
-    save |= super::save_pressed(app, ctx) && !app.ui.grant.selection.is_empty();
+    let ready = !app.ui.grant.selection.is_empty()
+        && app.ui.grant.selection.iter().all(|selected| {
+            items
+                .iter()
+                .any(|(id, _, ready, _)| id == selected && *ready)
+        });
+    save |= super::save_pressed(app, ctx) && ready;
     if save {
         let form = app.ui.grant.clone();
         let item_ids: Vec<u64> = form.selection.iter().copied().collect();
@@ -1410,7 +1455,18 @@ pub(super) fn grant_many_sheet(app: &mut DesktopApp, ctx: &egui::Context, agent_
     if cancel {
         close_sheet(app, ctx);
     }
+    if let Some(item_id) = configure {
+        app.ui.grant.resume_agent = Some(agent_id);
+        open_command_settings(app, item_id);
+    }
     response.escape
+}
+
+fn open_command_settings(app: &mut DesktopApp, item_id: u64) {
+    app.select_item(item_id.to_string());
+    super::items::prepare_sheet(app, item_id, &Sheet::Variable);
+    app.ui.sheet = Some(Sheet::Variable);
+    app.view = OwnerView::Agents;
 }
 
 /// What the agent can see (ADR 0012). "All credentials" needs the owner check; turning

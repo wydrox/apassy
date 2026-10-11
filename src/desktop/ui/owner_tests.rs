@@ -259,6 +259,139 @@ pub(super) fn unlocked_app_with_item(dir: &TempDir) -> (DesktopApp, u64) {
     (app, item.id)
 }
 
+#[test]
+fn automatic_command_settings_require_the_owner_check() {
+    use crate::broker::approvals::{OwnerAction, OwnerCheck};
+    use crate::vault::EnvDelivery;
+
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, item_id) = unlocked_app_with_item(&dir);
+    let request = OwnerRequest::SaveVariable {
+        item_id,
+        env_name: String::new(),
+        field: "token".to_owned(),
+        delivery: EnvDelivery::Value,
+    };
+    let description = request.describe();
+    assert!(
+        description.contains("automatic command settings"),
+        "{description}"
+    );
+    assert!(description.contains("Token field"), "{description}");
+    assert!(
+        !description.contains("environment variable"),
+        "{description}"
+    );
+    assert!(app.owner_ui.session.env_binding(item_id).unwrap().is_none());
+    assert!(
+        app.owner_ui
+            .session
+            .process_binding(item_id)
+            .unwrap()
+            .is_some()
+    );
+
+    // A valid owner proof for another action cannot change these settings.
+    let wrong_action = app
+        .owner_gate()
+        .authorize(
+            OwnerAction::Reveal { item_id },
+            OwnerCheck::passphrase(PASS),
+        )
+        .expect("owner check");
+    assert!(
+        app.owner_ui
+            .session
+            .set_env_binding(item_id, "", "token", &EnvDelivery::Value, wrong_action)
+            .is_err()
+    );
+    assert!(app.owner_ui.session.env_binding(item_id).unwrap().is_none());
+
+    app.ask_owner(request.clone(), None);
+    assert!(
+        app.confirm_owner_now(OwnerCheck::passphrase(WRONG))
+            .is_err()
+    );
+    assert!(app.owner_ui.session.env_binding(item_id).unwrap().is_none());
+    app.ask_owner(request, None);
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("owner check");
+    assert_eq!(app.status_text, "The automatic command settings are saved.");
+    let binding = app.owner_ui.session.env_binding(item_id).unwrap().unwrap();
+    assert_eq!(binding.env_name, format!("APASSY_ITEM_{item_id}"));
+    assert_eq!(binding.field, "token");
+
+    // The generated name can be saved again, but another reserved name cannot.
+    for (name, permitted) in [
+        (format!("APASSY_ITEM_{item_id}"), true),
+        (format!("APASSY_ITEM_{}", item_id + 1), false),
+        ("APASSY_OTHER".to_owned(), false),
+        ("PATH".to_owned(), false),
+    ] {
+        let proof = app
+            .owner_gate()
+            .authorize(
+                OwnerAction::ChangeItemRules { item_id },
+                OwnerCheck::passphrase(PASS),
+            )
+            .expect("owner check");
+        assert_eq!(
+            app.owner_ui
+                .session
+                .set_env_binding(item_id, &name, "token", &EnvDelivery::Value, proof)
+                .is_ok(),
+            permitted,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn automatic_access_request_in_any_folder_requires_each_run_approval() {
+    use crate::broker::approvals::{OwnerAction, OwnerCheck};
+
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, item_id) = unlocked_app_with_item(&dir);
+    let (agent, _token) = app
+        .owner_ui
+        .session
+        .register_agent("Automatic agent")
+        .unwrap();
+    let proof = app
+        .owner_gate()
+        .authorize(
+            OwnerAction::ShowAllCredentials { agent_id: agent.id },
+            OwnerCheck::passphrase(PASS),
+        )
+        .unwrap();
+    app.owner_ui
+        .session
+        .set_agent_sees_all(agent.id, true, Some(proof))
+        .unwrap();
+    let request_id = {
+        let shared = app.owner_ui.session.shared_vault();
+        let mut guard = shared.lock().unwrap();
+        guard
+            .as_mut()
+            .unwrap()
+            .request_access(agent.id, item_id, "Run the command.", "")
+            .unwrap()
+            .0
+    };
+    assert!(app.owner_ui.session.env_binding(item_id).unwrap().is_none());
+    app.view = OwnerView::Activity;
+    app.ui.grant = super::agents::GrantForm {
+        any_folder: true,
+        mode: super::agents::Decision::Bouncer,
+        ..super::agents::GrantForm::default()
+    };
+    app.ui.sheet = Some(super::Sheet::AccessRequest { request_id });
+    let text = app_frame(&egui::Context::default(), &mut app);
+    assert!(text.contains("you approve each run with it"), "{text}");
+    assert_eq!(app.ui.grant.mode, super::agents::Decision::Ask);
+    assert!(!text.contains(TOKEN), "{text}");
+}
+
 /// A4: "Show" shows the owner check. Touch ID answers `not_available`, and
 /// the dialog says so. A wrong passphrase reveals nothing. The right one reveals.
 #[test]
@@ -516,6 +649,101 @@ fn approval_needs_the_owner_check_and_seen_is_not_an_approval() {
     app.start_passphrase_check(&ctx);
     finish_check(&mut app, &ctx);
     assert_eq!(waiter.join().expect("waiter"), ApprovalOutcome::Approved);
+}
+
+/// ADR 0024: a first use shows its card. "Allow in FOLDER" needs one owner check for the
+/// run, the access, and the declaration from the card.
+#[test]
+fn a_first_use_card_allows_in_the_folder_with_one_owner_check() {
+    use crate::broker::approvals::{FirstUseDeclaration, FirstUseItem, FirstUseOffer};
+    use crate::vault::Environment;
+
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, item_id) = unlocked_app_with_item(&dir);
+    app.start_broker(&socket_dir(&dir));
+    let BrokerState::Running(handle) = &app.broker else {
+        panic!("the broker did not start");
+    };
+    let approvals = Arc::clone(handle.approvals());
+    let offer = FirstUseOffer {
+        agent_id: 1,
+        folder: "/tmp/synthetic-shop".to_owned(),
+        items: vec![FirstUseItem {
+            item_id,
+            name: "Guarded key".to_owned(),
+            declaration: None,
+        }],
+    };
+    let waiter = {
+        let approvals = Arc::clone(&approvals);
+        let offer = offer.clone();
+        std::thread::spawn(move || {
+            approvals.wait_for_first_use(
+                waiting_run("UI agent"),
+                offer,
+                Duration::from_secs(20),
+                || true,
+            )
+        })
+    };
+    let run = loop {
+        if let Some(run) = approvals.pending().into_iter().next() {
+            break run;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let ctx = egui::Context::default();
+    app.view = OwnerView::Activity;
+    let text = app_frame(&ctx, &mut app);
+    for expected in [
+        "UI agent wants to use \"Guarded key\" for the first time",
+        "Allow in synthetic-shop",
+        "Allow once",
+        "Declaration:",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    assert!(!text.contains("Approve and remember"), "{text}");
+    // The card made the declaration form. A field without a suggestion is strict.
+    let form = app
+        .ui
+        .first_use_forms
+        .get_mut(&(run.id, item_id))
+        .expect("a form")
+        .clone();
+    assert!(!form.project.trim().is_empty());
+    let mut declaration = form.to_declaration();
+    declaration.environment = Environment::Development;
+    let declarations = vec![FirstUseDeclaration {
+        item_id,
+        declaration: declaration.clone(),
+        provider: form.provider.clone(),
+        suggested: None,
+    }];
+    app.ask_owner(
+        OwnerRequest::ApproveAndGrant {
+            run: run.clone(),
+            offer,
+            declarations,
+        },
+        Some(&ctx),
+    );
+    let text = app_frame(&ctx, &mut app);
+    assert!(text.contains("Give agent \"UI agent\" access to"), "{text}");
+    assert_eq!(
+        approvals.pending(),
+        vec![run.clone()],
+        "no access before the check"
+    );
+    confirm_with(&mut app, &ctx, PASS);
+    let settled = waiter.join().expect("waiter").expect("no other first use");
+    assert_eq!(settled.outcome, ApprovalOutcome::ApprovedAndGranted);
+    let grant = settled.grant.expect("a grant");
+    assert_eq!(grant.folder, "/tmp/synthetic-shop");
+    assert_eq!(grant.declarations[0].declaration, declaration);
+    // The form goes with the run.
+    app_frame(&ctx, &mut app);
+    assert!(app.ui.first_use_forms.is_empty());
 }
 
 /// Type `text` in the open owner check and wait for the result.
