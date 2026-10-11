@@ -35,7 +35,7 @@ A bouncer that asks too often is acceptable. A required setting before use is no
 2. The agent picks an item and uses it with `apassy_run_with_secrets` or `apassy_use_credential`.
 3. The bouncer decides with the context (§3). It starts the run or asks the owner.
 
-The agent needs no grant. Connecting the agent is the only setup and needs one owner check. Grants stay as optional settings of the owner: "always allow", "always ask", "never" for one agent and one item.
+The agent needs no grant. Connecting the agent is the only setup and needs one owner check. The owner manages no permissions of agents (§3f).
 
 ### 3. The bouncer decides from the first use
 
@@ -91,7 +91,7 @@ The owner decided on 2026-10-12 that the owner can allow production ("mogę zezw
 
 ### 3c. Who an answer covers
 
-The owner decided on 2026-10-12 ("tak, zostajemy") that an answer covers all agents in the project. Connecting an agent is already the trust step. A limit to one agent would repeat each question for each new agent. An agent with the setting "Ask me again for this agent" does not use the answers of other agents, for example a remote agent or a test agent.
+The owner decided on 2026-10-12 ("tak, zostajemy") that an answer covers all agents in the project. Connecting an agent is already the trust step. A limit to one agent would repeat each question for each new agent. An exception for one agent (§3f) is stronger than an answer for the project.
 
 ### 3d. Answers on the iPhone
 
@@ -106,6 +106,26 @@ The owner decided on 2026-10-12:
 - **Teams.** A question about an item of a team collection goes to the member that the agent acts for (ADR 0019). A production allowance for a team item needs an owner or a manager of the team. Other members get no notification.
 - **The relay carries the notifications** ("relay jako kanał powiadomień"), also for a personal vault. The relay keeps no vault data of a personal vault, which still syncs through iCloud Drive (ADR 0023). It routes end-to-end encrypted questions and answers, and sends Apple push notifications (APNs) to the iPhones. The relay sees the routing only. This closes D1 and D2 of ADR 0020.
 - Without the relay, notifications work on the Mac and on the local network only.
+
+### 3f. Agents: nothing to manage
+
+The owner accepted on 2026-10-12 ("pasuje"). The owner did not like levels of trust for agents.
+
+- **All agents are equal.** Connecting an agent is the only step. There are no levels and no permissions to set.
+- **The context makes the difference.** The bouncer is more careful with an agent that it does not know: a new agent, a remote agent, or an agent outside its usual projects. It asks more often. The answers of the owner build the trust.
+- **An exception comes from a question, not from a setting.** The question card has three more answers:
+  - "Not for this agent": the agent never gets this item.
+  - "Always ask for this agent": each use of this item by the agent waits for the owner.
+  - "Disconnect the agent".
+- **The agent screen shows, it does not configure.** It lists what the agent used lately and its exceptions. The owner removes an exception with one click. "Disconnect" is the only other action.
+- **An optional sentence about the agent**, for example "CI agent for client X, only the Stripe test key". The bouncer reads it as context. It is a hint, not a hard limit.
+- Making an exception stricter needs no owner check. Removing one needs an owner check.
+
+**Upgrade.** The settings of ADR 0012 become exceptions, so nothing gets looser without the owner:
+
+- An agent that saw only the items of its grants gets the exception "only these items". The bouncer treats the other items as "Not for this agent". The agent does not see them in the catalog.
+- A grant in "Ask me each time" becomes "Always ask for this agent".
+- A grant in "Bouncer decides" becomes nothing: it is the default now. Its rule and its remembered patterns stay as history.
 
 ### 4. Two steps to add
 
@@ -179,7 +199,7 @@ Each stage is useful alone and has its own PR. There is no release until the own
 - ADR 0008: a declaration stays required for a decision of the model. Apassy makes it at the save (§4).
 - ADR 0010: the production rule stays, with one exception: an allowance of the owner for a project and a kind of action (§3b).
 - ADR 0011: placeholders stay the safe way to send a value only to its hosts.
-- ADR 0012: a grant is no longer needed. Grants stay as optional settings.
+- ADR 0012: a grant is no longer needed. Grants and "see all" become exceptions at the upgrade (§3f).
 - ADR 0019: the relay also carries notifications and answers, for teams and for personal vaults (§3e).
 - ADR 0020: the phone answers the questions of the bouncer and the corrections, and can allow production (§3d). Access away from the local network and push notifications come through the relay (§3e).
 - ADR 0024: first use goes to the bouncer, not always to the owner. The limit of one waiting question stays.
