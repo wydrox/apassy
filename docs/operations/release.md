@@ -15,7 +15,7 @@ The site is a static Astro page in `site/`, served by a Cloudflare Worker on the
 | Installer | `scripts/install.sh`, served at `/install.sh` (`site/src/pages/install.sh.ts`, `site/public/_headers`) | Builds the newest release from source, signs it with the Apple Development identity of the person who runs it, and installs it in `/Applications`. Until `/latest.json` exists, the "Coming soon for macOS" button opens a note with its command. |
 | Screenshots | `scripts/screenshots.sh` | Takes `docs/images/app-*.png` from the real app with synthetic data (`examples/screenshots.rs`). The README and the site use them. |
 | Worker | `site/worker/index.ts` | Serves the files of the site. Adds `/download` (302), `/download/Apassy.dmg`, and `/latest.json` from the R2 bucket `apassy-downloads`. |
-| Site workflow | `.github/workflows/site.yml` | On a change in `site/` or in a file that the site builds from (`scripts/install.sh`, `Cargo.toml`, `CHANGELOG.md`, `docs/images/`): type check and build. On `main`: `wrangler deploy`. Makes the bucket on the first deploy. |
+| Site workflow | `.github/workflows/site.yml` | On a change in `site/` or in a file that the site builds from (`scripts/install.sh`, `Cargo.toml`, `CHANGELOG.md`, `docs/images/`): type check and build. On `main`, for an eligible released version: `wrangler deploy`. Makes the bucket on the first deploy. |
 | Release workflow | `.github/workflows/release.yml` | After each green CI run of a push to `main`: check that the version is released, verify the CI binaries, sign, notarize, and upload. |
 | Release eligibility | `scripts/ci-release-ready.py` | Decides whether `Cargo.toml` names a released version of `CHANGELOG.md`. Runs in the job `ready`, before any signing. |
 | Disk image | `scripts/build-dmg.sh`, `scripts/layout-dmg.sh` | Packages `target/Apassy.app` into `target/dist/Apassy.dmg`, saves the Finder install window, and writes `target/dist/latest.json`. |
@@ -109,7 +109,7 @@ A skipped run is still a green CI on `main`. The existing checks for the exact h
 
 The job `provider-check` does not depend on `ready`. It is a test build of a branch and never publishes.
 
-The site follows the same rule. `VERSION` in `site/src/lib/site.ts` is the first dated release section of `CHANGELOG.md`. While `Cargo.toml` names a version that has no dated section, the site still shows the last released version and `/latest.json` is unchanged.
+The site workflow also runs the eligibility helper before deployment. An ineligible version still gets a site check and build, but no Cloudflare deployment, including a manual run on `main`. The existing public site stays unchanged. `VERSION` in `site/src/lib/site.ts` is the first dated release section of `CHANGELOG.md`. While `Cargo.toml` names a version that has no dated section, the site still shows the last released version and `/latest.json` is unchanged.
 
 ## Relay first
 
