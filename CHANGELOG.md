@@ -4,7 +4,7 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
-Target release 0.4.1 for the Mac app, iPhone app, and browser extension. This version is not published. Earlier signed Mac and optimized iPhone package checks passed at `11ca5b6`. The native passkey flag correction passed source CI at `1ad43fb`; corrected signed packages, browser sign-in, and device checks remain open ([status and checks](docs/operations/passkeys-and-codes.md#1-status)).
+Target release 0.4.1 for the Mac app, iPhone app, and browser extension. This version is not published. Signed and notarized Mac packaging, optimized iPhone packaging, and native Mac passkey registration and sign-in have passed. Newly created Mac passkeys are immediately available to sign in without an AutoFill refresh. The official browser extension and physical iPhone passkey checks remain open ([status and checks](docs/operations/passkeys-and-codes.md#1-status)).
 
 Before you upgrade a shared vault, make an encrypted backup and update all its devices. The new apps migrate schema 16 to schema 17 when you unlock the vault. Older apps cannot open or sync the upgraded vault.
 
@@ -27,7 +27,7 @@ Before you upgrade a shared vault, make an encrypted backup and update all its d
 - "Add a Mac…" in Settings > General > Sync is "Add a device…". It shows the device link as a QR code for the iPhone, and as text for another Mac.
 - The vault schema is 17 (it was 16). Update every Mac and iPhone that shares a vault. A build of schema 17 migrates a vault of schema 16 and reads a copy of schema 16. A build of schema 16 cannot open a vault of schema 17 or read a copy of it. Make a backup before you upgrade. Local tests cover schema 17 uploads over a copy of schema 16 on the relay, in the iCloud core, and in a folder. Device acceptance remains open.
 - A login with a passkey needs no password. Removing the passkey keeps the login only when it has a non-empty password. Otherwise it deletes the whole login, and the screen says so first.
-- A Mac build without both provisioning profiles has no AutoFill extension. With both valid profiles and `APASSY_REQUIRE_PROVIDER=1`, the build script can include passwords, codes, and passkeys. The signed Mac CI build of source `2d93004` passed its provider tests and notarization. AutoFill acceptance on a real Mac is open.
+- A Mac build without both provisioning profiles has no AutoFill extension. With both valid profiles and `APASSY_REQUIRE_PROVIDER=1`, the build script can include passwords, codes, and passkeys. The signed Mac CI build of source `82c641d` passed its provider tests and notarization. Native Helium registration and sign-in passed with the same provider in an isolated signed test app.
 - The Mac editor hides a visible detail that has an OTP label or looks like a setup key, also when you save it without a change.
 
 ### Fixed

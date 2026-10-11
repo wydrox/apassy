@@ -1,11 +1,14 @@
-import cargo from "../../../Cargo.toml?raw";
+import changelog from "../../../CHANGELOG.md?raw";
 
 export const REPO = "https://github.com/wydrox/apassy";
 export const DOWNLOAD = "/download/Apassy.dmg";
 /** The browser extension in the Chrome Web Store (ADR 0021, D5). */
 export const EXTENSION_STORE = "https://chromewebstore.google.com/detail/apassy/bbnpgnjnfjlbgggmpnhejpmfjhmmhiih";
-/** The version of the app, from Cargo.toml at build time. */
-export const VERSION = cargo.match(/^version = "([^"]+)"/m)?.[1] ?? "";
+/**
+ * The newest released version of the app: the first dated section of CHANGELOG.md at
+ * build time. Cargo.toml can name a version that is not published yet, so it is not used.
+ */
+export const VERSION = changelog.match(/^## \[(\d+\.\d+\.\d+[^\]\s]*)\] - \d{4}-\d{2}-\d{2}[ \t]*$/m)?.[1] ?? "";
 /** The installer (scripts/install.sh, served by src/pages/install.sh.ts). */
 export const INSTALL_URL = "https://apassy.wyderka.cc/install.sh";
 export const INSTALL_COMMAND = `/bin/bash -c "$(curl -fsSL ${INSTALL_URL})"`;

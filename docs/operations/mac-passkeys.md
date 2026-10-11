@@ -1,9 +1,9 @@
 # Mac passkeys: the AutoFill credential provider
 
-Date: 2026-10-09.
+Date: 2026-10-09. Updated 2026-10-11.
 Host: macOS 27.0, Xcode 27.0 (27A266a), MacOSX27.0.sdk, Swift 6.4. Deployment target macOS 15.0.
 Scope: the native side of the Mac credential provider (passkeys, passwords, one-time codes). The app side is `src/desktop/passkey_socket.rs`.
-Branch: `feat/passkeys-totp`, version 0.4.1, not released. Package checks below are at `11ca5b6`; the passkey flag correction is at `1ad43fb`. Status of the checks: [Checks on a Mac](#checks-on-a-mac-2026-10-09).
+Branch: `feat/passkeys-totp`, version 0.4.1, not released (the target stays under "Unreleased"). Current evidence is at `82c641d`: [native registration and sign-in](#native-registration-and-sign-in-on-82c641d-2026-10-11). The checks at `11ca5b6` are history ([Checks on a Mac](#checks-on-a-mac-2026-10-09)), and the passkey flag correction is at `1ad43fb`. A source merge to `main` is authorized, but it is not a release: the release workflow holds production until the version is dated in the changelog ([release](release.md#release-eligibility)).
 This document does not open the real-secret gate.
 
 ## What this is
@@ -100,7 +100,7 @@ The app routes `credential_identities`, so the store is filled at those two mome
 
 ```
 scripts/build-credential-provider.sh                   # unsigned; checks the bundle layout
-scripts/build-credential-provider.sh --test            # + synthetic tests (157)
+scripts/build-credential-provider.sh --test            # + synthetic tests (208 at 82c641d)
 scripts/build-credential-provider.sh --sign "Apple Development" --test
                                                        # + signed probe of the code checks
 scripts/build-credential-provider.sh --sign "Developer ID Application" \
@@ -161,35 +161,67 @@ None of this needs an App Store step. The app group needs no portal work.
 
 The original signed probe signs its fake extension without entitlements, so it cannot detect the `/tmp` sandbox read denial. A separate sandbox stage uses only the App Sandbox and shared app-group entitlements. It gives each run a unique probe identity and uses a test-only bridge peer override; the production client check stays intact. Each sandbox client must also fail to open an existing synthetic file outside its sandbox. This tests the sandboxed client's bridge check, not a real ExtensionKit launch with restricted AutoFill entitlements.
 
-The corrected stage passed locally on 2026-10-10: 157 native tests and 61 signed-probe checks, no failures or warnings. The client accepted the bridge under `/Applications` and refused it under `/private/tmp` and `target/` with EPERM and code-check error 100001. Normal cleanup left no test files; the shared container, its contents, and the real bridge socket stayed intact. Cleanup can remove only the run's uniquely named folders; it never removes the whole shared group container. Waits in the probe and cleanup have deadlines. SIGKILL or power loss can leave test folders behind.
+The corrected stage passed locally on 2026-10-10: 157 native tests and 61 signed-probe checks, no failures or warnings. At `82c641d` the signed CI run `38076031420` passed 208 native tests and 61 signed-probe checks. The client accepted the bridge under `/Applications` and refused it under `/private/tmp` and `target/` with EPERM and code-check error 100001. Normal cleanup left no test files; the shared container, its contents, and the real bridge socket stayed intact. Cleanup can remove only the run's uniquely named folders; it never removes the whole shared group container. Waits in the probe and cleanup have deadlines. SIGKILL or power loss can leave test folders behind, and neither has been tested.
 
-The separate interruption test stopped during signing at a possible keychain prompt, before reaching the sandbox stage. Cleanup of that signing interruption passed; SIGTERM cleanup of the sandbox stage is still untested. That interrupted build left the local provider output incomplete, so rebuild it before use. A clean macOS 15 signed CI run remains open.
+An earlier interruption test stopped during signing at a possible keychain prompt, before the sandbox stage. A SIGTERM test at `82c641d` (2026-10-11) reached the sandbox stage and passed cleanup: the script exited with status 143 one second after the signal. The shared group container and the real bridge socket kept their inodes. The unique probe folders, the probe container and application scripts, the probe app under `/Applications`, and the temporary folders were gone, and no probe process remained. Timing caveat: the signal arrived after the first probe (under `/Applications`) had finished its checks, so it hit the second probe (under `/private/tmp`). That probe ended with a trace trap (SIGTRAP) rather than through its own SIGTERM handler; the cause is not investigated. A signal during the first probe, a blocked `codesign`, SIGKILL, power loss, and a real ExtensionKit launch are untested. A clean macOS 15 signed CI run remains open.
+
+## Native registration and sign-in on 82c641d (2026-10-11)
+
+This is the current Mac evidence. It uses only synthetic data: an isolated synthetic vault (`APASSY_DEBUG_DATA_DIR`), and a synthetic relying party on `http://localhost:4187`. No real vault, account, or secret.
+
+**Signed CI build, source `82c641d`.** CI run `38076031420` (a manual run of the provider check on the branch) passed all steps, and its production job was skipped. It ran 208 native tests with no failures and the signed probe with 61 checks. It built the Mac app with both provider profiles and `APASSY_REQUIRE_PROVIDER=1` and notarized the DMG (SHA-256 `3487ee357ab50c8ba248d7da96186b59d530c9c2289c9ce322524f63647a1045`, test build, not a release). A read-only check of the artifact, made independently, confirmed:
+
+- the integrity of the DMG, the notarization, the staple, and Gatekeeper ("Notarized Developer ID")
+- version 0.4.1 in the app and the extension, and `ApassyBuildCommit` equal to `82c641d`
+- strict signatures with team `7S3F9767BM` and the hardened runtime for the main program, every helper in `Contents/MacOS`, and the extension
+- the embedded provisioning profiles: the team, the validity, the app IDs, and the AutoFill provider entitlement in the profile and in the signature. The extension has the sandbox and the app group `7S3F9767BM.com.wydrox.apassy`.
+
+That check did not launch or install the app, so it does not show that macOS makes the identities visible. It did not assert Touch ID or the app-group keychain capability.
+
+**Isolated signed DEBUG test app.** The test app is a private copy of the verified CI app with a DEBUG main program of `82c641d` in place of the signed main program, so the copy is not notarized as a whole. Its extension, bridge, and helpers are the exact signed parts of the CI artifact. It ran from `/Applications/Apassy Synthetic Acceptance 041 Identity/Apassy.app`, with the isolated vault. It did not replace or modify the installed `/Applications/Apassy.app` (version 0.3.6), and it is not the release DMG. The release DMG was not launched.
+
+Results, in Helium:
+
+- **Registration passed.** The system sheet offered Apassy, and the owner confirmed the creation of the key. The synthetic relying party verified the registration.
+- **Sign-in passed immediately after.** The allow-list sign-in used the credential that had just been created. The relying party verified the assertion. The owner check for the assertion was the routine check with the public fixture passphrase, not Touch ID.
+- **No AutoFill refresh was needed.** The new identity was offered right after the registration; nobody refreshed AutoFill between the two steps.
+- **The relying party's final state:** one credential, one registration, one sign-in, for `localhost`.
+- The private wrapper of the relying party used a challenge deadline of 240 s for this run. The production deadlines are unchanged.
+- **Cleanup:** AutoFill was turned off with the owner's permission, and the system readback says off. The provider was unregistered, the processes that the run owned were stopped, and none remain. The synthetic vault was kept, and the installed app was not changed.
+
+Not shown by this run:
+
+- The release DMG on a Mac. A DMG has been verified as an artifact only.
+- A passkey request completed with Touch ID.
+- A password fill and a one-time code fill through macOS AutoFill.
+- The browser extension. The native OS provider flow does not use it. The official Chrome Web Store listing is version 0.3.4, so the positive acceptance of the 0.4.1 extension is open. A debug launch with a remote-debugging port or an extension loader is refused by the guard, so it is an expected negative check only.
+- A physical iPhone. None is available.
 
 ## Checks on a Mac (2026-10-09)
 
-Only synthetic data: a synthetic vault, a private fixture folder (`APASSY_DEBUG_DATA_DIR`), and a synthetic relying party on `http://localhost:4173`. No real vault, account, or secret.
+These are the checks at `11ca5b6`. They are history: the native registration that failed here passed at `82c641d` (see the section above). Only synthetic data: a synthetic vault, a private fixture folder (`APASSY_DEBUG_DATA_DIR`), and a synthetic relying party on `http://localhost:4173`. No real vault, account, or secret.
 
-**Signed build, source `11ca5b6`.** CI run `37959199289` on the branch passed. It built the Mac app with both provider profiles and `APASSY_REQUIRE_PROVIDER=1`, and it notarized the DMG (SHA-256 `e6c998f27a21766c45f3cbb07aebc4d1e83fd3b6cdc1615fddbba9a210278d4f`, test build, not a release). The parent verified the version, the commit, the signatures of the app, the extension, the bridge, and the browser guard, the AutoFill provisioning profiles, the staple, and Gatekeeper. This build was not installed, and it was not published.
+**Signed build, source `11ca5b6` (superseded by `82c641d`).** CI run `37959199289` on the branch passed. It built the Mac app with both provider profiles and `APASSY_REQUIRE_PROVIDER=1`, and it notarized the DMG (SHA-256 `e6c998f27a21766c45f3cbb07aebc4d1e83fd3b6cdc1615fddbba9a210278d4f`, test build, not a release). The parent verified the version, the commit, the signatures of the app, the extension, the bridge, and the browser guard, the AutoFill provisioning profiles, the staple, and Gatekeeper. This build was not installed, and it was not published. It predates the flag correction and must not be released.
 
 **DEBUG build of version 0.4.1 with the native parts of commit `2d93004`.** The extension and the bridge in it still report the native version 0.3.6. It is not the signed DMG. Results:
 
 - A real unlock of a synthetic vault, a fresh owner check with the passphrase, and a one-time code reveal passed. The code `419702` matched an independent RFC 6238 calculation (counter `59718791`). The passkey metadata screen passed.
 - **In `/tmp`, AutoFill activation failed with `bridgeRefused`.** A read-only diagnosis found the cause: the sandbox of the extension denies `file-read-data` on the bridge, so `SecCodeCopyGuestWithAttributes` fails with 100001 (`EPERM`). The exact signed peer identity is valid without the sandbox. The notes are in a private file (`native-activation-diagnosis-v1/SUMMARY.md`), not in the repository.
 - **Under `/Applications`, AutoFill activation passed.** The same DEBUG app ran from a separate folder, `/Applications/Apassy Synthetic Acceptance 041/Apassy.app`, with the isolated fixture. It did not replace the installed `/Applications/Apassy.app` (version 0.3.6). The stale registration of the `/tmp` copy was removed first. macOS showed "Apassy AutoFill is on. Apassy suggests 3 sign-ins." AutoFill was enabled with the owner's permission and restored to off after the test.
-- **Save passkey in Helium failed at the OS handoff.** The system sheet offered Apassy, and the owner completed two fresh passphrase checks. Both saved a synthetic localhost key in the vault. macOS then rejected the returned credential with `AuthorizationError Code=14`, "AuthData is missing a required flag." The relying party still has zero credentials, registrations, and sign-ins. The first request also expired before completion; the second reached OS validation within 60 seconds. That build sets BE but clears BS. [Apple requires both flags for the provider API](https://developer.apple.com/forums/thread/742209). The flag correction is committed at `1ad43fb` and passed source checks. A new signed build and registration/sign-in test remain open. These local vault saves are not completed registrations.
+- **Save passkey in Helium failed at the OS handoff.** The system sheet offered Apassy, and the owner completed two fresh passphrase checks. Both saved a synthetic localhost key in the vault. macOS then rejected the returned credential with `AuthorizationError Code=14`, "AuthData is missing a required flag." The relying party still has zero credentials, registrations, and sign-ins. The first request also expired before completion; the second reached OS validation within 60 seconds. That build sets BE but clears BS. [Apple requires both flags for the provider API](https://developer.apple.com/forums/thread/742209). The flag correction is committed at `1ad43fb` and passed source checks. The repeat test passed at `82c641d`. These local vault saves at `11ca5b6` were not completed registrations.
 - The browser preview of T3 rejects resident credentials with `NotSupportedError` before it reaches any provider. This is not a defect of Apassy.
 
-Not shown by these results:
+Not shown by these results (some are still open after `82c641d`):
 
 - Any check of the signed DMG on a Mac. The release build in `/Applications` has not been tried.
-- A completed passkey registration or sign-in through the system sheet, with Touch ID or the passphrase.
+- A completed passkey registration or sign-in through the system sheet. (Done at `82c641d`, with the fixture passphrase.)
 - A password fill and a one-time code fill through macOS AutoFill. (The code reveal above is the item page of the app, not the fill.)
-- The browser extension. The real Helium in use at the time had a remote-debugging port, and the guard of the extension refuses that switch. So the positive guard check, a normal launch of Helium or Chrome stable, was not run. The native OS provider flow does not use the browser extension.
+- The browser extension. The real Helium in use at the time had a remote-debugging port, and the guard of the extension refuses that switch. So the positive guard check, a normal launch of Helium or Chrome stable, was not run, and it is still open. The native OS provider flow does not use the browser extension.
 
 ## Still to verify on a device (needs the profiles)
 
-- The sandboxed extension calls `SecCodeCheckValidity` on the bridge of the **signed** app under `/Applications`. Seen so far: the DEBUG build passes in `/Applications` and fails closed in `/tmp`. The signed DMG has not been tried.
-- A passkey registration and a sign-in complete through the sheet, in Safari and in Chrome, with the owner check.
-- The sheet stays open while Apassy is in front for the owner check (the Save passkey screen was reached, but the creation did not finish).
+- The sandboxed extension calls `SecCodeCheckValidity` on the bridge of the **signed** app under `/Applications`. Seen so far: the DEBUG builds pass in `/Applications` and fail closed in `/tmp`, and the isolated signed DEBUG test app with the exact `82c641d` native parts passed a registration and sign-in. The release DMG has not been tried.
+- A passkey registration and a sign-in complete through the sheet in Safari and in Chrome, with Touch ID as the owner check. (Helium with the fixture passphrase passed at `82c641d`.)
+- The sheet stays open while Apassy is in front for the owner check. (Confirmed in Helium at `82c641d`; Safari and Chrome are untried.)
 - How Safari and Chrome list the identities that the app now sends (passkeys, logins, one-time-code logins), and whether QuickType offers a password fill or a code fill and completes it.
 - Mac credential exchange: macOS starts the containing app with `NSUserActivity`, so it needs native app work, and the extension does not declare `SupportsCredentialExchange`. Import on the iPhone instead, and let sync bring the passkeys to the Mac.

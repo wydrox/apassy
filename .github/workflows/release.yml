@@ -4,7 +4,9 @@ name: Release
 # sign and notarize Apassy.dmg, then upload the image and
 # latest.json to the R2 bucket of apassy.wyderka.cc. The site serves them at
 # /download/Apassy.dmg and /latest.json. See docs/operations/release.md.
-# The job provider-check is a manual test build of a branch. It never publishes.
+# The job ready first decides whether the version in Cargo.toml is a released
+# version of CHANGELOG.md. An unreleased version signs and uploads nothing, even for
+# a manual run. The job provider-check is a manual test build of a branch. It never publishes.
 
 on:
   workflow_run:
@@ -26,18 +28,53 @@ permissions:
   actions: read
 
 jobs:
-  macos:
-    # A test build must not replace a pending production release.
-    concurrency:
-      group: release
-      cancel-in-progress: false
-    # workflow_run also fires for pull requests from a fork branch named main.
-    # Only a push to this repository publishes.
+  # A version that the changelog has not released is never signed or uploaded.
+  # The check reads only Cargo.toml and CHANGELOG.md of the commit. A skip is not a
+  # failure: the run ends green with a notice. See docs/operations/release.md.
+  ready:
+    # The same events as the job macos.
     if: >-
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      production: ${{ steps.ready.outputs.production }}
+      version: ${{ steps.ready.outputs.version }}
+    steps:
+      - name: Check out the version files of the commit that passed CI
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            Cargo.toml
+            CHANGELOG.md
+            scripts/ci-release-ready.py
+          sparse-checkout-cone-mode: false
+
+      - name: Check that the version is released
+        id: ready
+        run: >-
+          python3 scripts/ci-release-ready.py --cargo Cargo.toml
+          --changelog CHANGELOG.md --github-output "$GITHUB_OUTPUT"
+
+  macos:
+    needs: ready
+    # A test build must not replace a pending production release.
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    # workflow_run also fires for pull requests from a fork branch named main.
+    # Only a push to this repository publishes, and only a released version.
+    if: >-
+      needs.ready.outputs.production == 'true' &&
+      ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
     runs-on: macos-15
     timeout-minutes: 120
     env:
