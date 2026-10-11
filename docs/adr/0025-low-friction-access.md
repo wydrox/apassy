@@ -73,6 +73,13 @@ The rules that the model cannot change stay:
 
 Each answer of the owner is remembered for the item, the project and the kind of action, so the same question does not come again. The question card says what Apassy remembers.
 
+### 3-0. Project and kind of action
+
+The owner accepted both on 2026-10-12.
+
+- **Project.** A project is one git repository with all its worktrees: the folders that share the git common directory. A folder without git is its own project. ADR 0024 keeps the root, the home folder and its parents out: they are never a project.
+- **Kind of action.** A fixed list: *read*, *change*, *deploy*, *delete or irreversible*. Hard rules classify first (for example `DELETE`, `drop`, `--force`, `rm`, `destroy` are always *delete or irreversible*). The model only fills in what the rules do not cover. When the class is not clear, the more dangerous class counts.
+
 ### 3a. Production allowed by the owner
 
 The owner decided on 2026-10-12 that the owner can allow production ("mogę zezwolić").
