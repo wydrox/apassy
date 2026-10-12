@@ -412,7 +412,7 @@ impl OwnerAction {
             }
             Self::ConfirmSyncDevice { device_name, .. } => format!(
                 "add the device \"{}\" to the sync of this vault",
-                short_device_name(device_name)
+                short_device_name(&crate::questions::device_link::shown_link_name(device_name))
             ),
             Self::AnswerRemoteQuestion { asker, answer, .. } => {
                 format!("{} on {}", answer.reason(), short_device_name(asker))

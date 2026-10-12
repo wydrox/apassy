@@ -1582,3 +1582,558 @@ fn a_notifications_only_team_carries_the_questions_and_goes_with_off() {
         "the key goes"
     );
 }
+
+// ---- Gate 3: removal, replays, binding, a second Mac, an old relay. ----
+
+/// Mac B as the judge probed it: the owner removes B on Mac A, the vault syncs, and B
+/// tries to register again. The vault refuses its key, B's waiter writes no row and says
+/// that B was removed, and after the next syncs Mac A still has no live row of B.
+#[test]
+fn a_removed_mac_does_not_register_again() {
+    let world = world(true);
+    let (b_uuid, b_key) = world.with_b(|vault| {
+        let membership = questions_membership(vault).unwrap().unwrap();
+        let me = vault
+            .trusted_devices()
+            .unwrap()
+            .into_iter()
+            .find(|device| device.sign_key == membership.public_key)
+            .unwrap();
+        (me.uuid, membership.public_key)
+    });
+    assert!(world.with_a(|vault| vault.remove_trusted_device_and_rotate(&b_uuid).unwrap()));
+    world
+        .a
+        .sync
+        .sync_shared(&world.shared_a, |_| true)
+        .expect("push A");
+    world
+        .b
+        .sync
+        .sync_shared(&world.shared_b, |_| true)
+        .expect("pull on B");
+    world.with_b(|vault| {
+        assert!(vault.trusted_device(&b_uuid).unwrap().is_none());
+        assert!(vault.trusted_key_removed(&b_key).unwrap());
+        assert_eq!(
+            questions_availability(vault).unwrap(),
+            QuestionsAvailability::Removed {
+                team_id: world.team.clone(),
+                sync: true
+            }
+        );
+        // Turning the questions on again with the same key is refused, and so is any
+        // registration of the key under a new UUID.
+        assert!(matches!(
+            enable_questions(vault, "Synthetic Mac mini"),
+            Err(apassy::sync::SyncError::Vault(
+                apassy::vault::VaultErrorKind::AlreadyExists
+            ))
+        ));
+        assert_eq!(
+            vault
+                .register_trusted_device(
+                    "3c1f4b2a-6d5e-4f70-8a9b-0c1d2e3f4a5b",
+                    "Synthetic Mac mini",
+                    TrustedDeviceKind::Mac,
+                    &b_key,
+                    None,
+                )
+                .unwrap_err()
+                .kind(),
+            apassy::vault::VaultErrorKind::AlreadyExists
+        );
+    });
+    // B's waiter runs: it says that B was removed and writes nothing.
+    let queue_b = Arc::new(ApprovalQueue::new());
+    let worker_b = QuestionsWorker::start(
+        Arc::clone(&queue_b),
+        Arc::clone(&world.shared_b),
+        OwnerGate::new(Arc::clone(&world.shared_b), None),
+        QuestionsConfig {
+            question_wait: Duration::from_secs(300),
+            tick: Duration::from_millis(20),
+            device_name: "Synthetic Mac mini".to_owned(),
+        },
+    );
+    let start = Instant::now();
+    loop {
+        let view = worker_b.view();
+        if view.removed {
+            assert!(!view.on);
+            assert_eq!(
+                view.problem.as_deref(),
+                Some(apassy::questions::worker::REMOVED)
+            );
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(10), "{view:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    drop(worker_b);
+    world
+        .b
+        .sync
+        .sync_shared(&world.shared_b, |_| true)
+        .expect("push B");
+    world
+        .a
+        .sync
+        .sync_shared(&world.shared_a, |_| true)
+        .expect("pull on A");
+    let live_b = world.with_a(|vault| {
+        vault
+            .trusted_devices()
+            .unwrap()
+            .into_iter()
+            .filter(|device| device.sign_key == b_key)
+            .count()
+    });
+    assert_eq!(live_b, 0, "Mac A has no live row of B");
+}
+
+/// "Remove" revokes the device on the relay too: its calls fail from then on.
+#[test]
+fn a_removed_device_is_revoked_on_the_relay() {
+    let world = world(true);
+    let phone = world.iphone();
+    let (membership, phone_id) = world.with_a(|vault| {
+        let membership = questions_membership(vault).unwrap().unwrap();
+        let id = vault
+            .trusted_device(PHONE_UUID)
+            .unwrap()
+            .unwrap()
+            .relay_devices[&world.team];
+        assert!(vault.remove_trusted_device_and_rotate(PHONE_UUID).unwrap());
+        (membership, id)
+    });
+    assert!(phone.client.list(0, Duration::ZERO).is_ok());
+    QuestionsClient::from_membership(&membership)
+        .unwrap()
+        .remove_device(phone_id)
+        .expect("revoked");
+    assert!(!world.relay.devices().contains(&phone_id));
+    assert!(matches!(
+        phone.client.list(0, Duration::ZERO),
+        Err(QuestionsError::Removed)
+    ));
+}
+
+/// The asking Mac's settled environment of `item`, as the declaration says.
+fn environment_of(world: &World, item: u64) -> Option<apassy::vault::Environment> {
+    world.with_a(|vault| {
+        vault
+            .declaration(item)
+            .unwrap()
+            .map(|declaration| declaration.environment)
+    })
+}
+
+fn wait_environment(world: &World, item: u64, wanted: apassy::vault::Environment) {
+    let start = Instant::now();
+    while environment_of(world, item) != Some(wanted) {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "no correction to {wanted:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The judge's probe of a replayed correction: "Development", then "Production", then
+/// the first envelope again. The replay does not count, and the credential stays
+/// production.
+#[test]
+fn a_replayed_correction_does_not_undo_a_newer_one() {
+    use apassy::vault::Environment;
+    let world = world(true);
+    let waiting = world.ask(world.run(contract_answers()), Duration::from_secs(60));
+    let b = world.mac_b();
+    let opened = b.next(&[]);
+    let item = world.items[1];
+    let seal = |environment, time| {
+        let choice = Choice::CorrectEnvironment {
+            item_id: item,
+            environment,
+        };
+        let qid = &opened.record.qid;
+        let text =
+            answer_string(&b.uuid, &b.team, qid, &choice, &opened.card.digest, time).unwrap();
+        let body = AnswerBody::new(
+            qid,
+            &b.uuid,
+            &choice,
+            &opened.card.digest,
+            time,
+            &b.sign(text.as_bytes()),
+        );
+        Sealed::new(
+            &b.keys[0],
+            &answer_aad(
+                &b.team,
+                qid,
+                &b.keys[0].key_id(),
+                b.client.device_id().unwrap(),
+            ),
+            &body.to_plaintext().unwrap(),
+        )
+        .unwrap()
+    };
+    let at = now();
+    let development = seal(RemoteEnvironment::Development, at - 2);
+    let production = seal(RemoteEnvironment::Production, at - 1);
+    b.client
+        .post_answer(&opened.record.qid, &development)
+        .unwrap();
+    wait_environment(&world, item, Environment::Development);
+    b.client
+        .post_answer(&opened.record.qid, &production)
+        .unwrap();
+    wait_environment(&world, item, Environment::Production);
+    // The relay delivers the first envelope again.
+    b.client
+        .post_answer(&opened.record.qid, &development)
+        .unwrap();
+    let lines = world.wait_refused(1);
+    assert!(
+        lines[0].contains("Synthetic Mac mini")
+            && lines[0].contains("not newer than an answer of this device that counted"),
+        "{lines:?}"
+    );
+    assert_eq!(environment_of(&world, item), Some(Environment::Production));
+    assert_eq!(
+        world.queue.pending().len(),
+        1,
+        "a correction does not settle"
+    );
+    assert!(world.queue.deny(world.queue.pending()[0].id));
+    assert_eq!(settled(waiting).outcome, ApprovalOutcome::Denied);
+}
+
+/// A correction of another device that the relay delivers after a newer one does not
+/// count either: it is older than the last change of the credential.
+#[test]
+fn a_reordered_correction_of_another_device_does_not_count() {
+    use apassy::vault::Environment;
+    let world = world(true);
+    let phone = world.iphone();
+    let waiting = world.ask(world.run(contract_answers()), Duration::from_secs(60));
+    let b = world.mac_b();
+    let opened = b.next(&[]);
+    let opened_phone = phone.next(&[]);
+    let item = world.items[1];
+    let at = now();
+    // B answered "Production" after the iPhone answered "Development", but the relay
+    // delivers B's answer first.
+    let production = Choice::CorrectEnvironment {
+        item_id: item,
+        environment: RemoteEnvironment::Production,
+    };
+    let late = prepare_answer(&opened, &b.uuid, production, at - 1).unwrap();
+    send_answer(
+        &b.client,
+        &opened,
+        &late,
+        &b.sign(late.text.as_bytes()),
+        &b.keys,
+    )
+    .unwrap();
+    wait_environment(&world, item, Environment::Production);
+    let development = Choice::CorrectEnvironment {
+        item_id: item,
+        environment: RemoteEnvironment::Development,
+    };
+    let early = prepare_answer(&opened_phone, PHONE_UUID, development, at - 5).unwrap();
+    let signature = answer_key().sign(early.text.as_bytes()).unwrap();
+    send_answer(
+        &phone.client,
+        &opened_phone,
+        &early,
+        &signature,
+        &phone.keys,
+    )
+    .unwrap();
+    let lines = world.wait_refused(1);
+    assert!(
+        lines[0].contains("Test iPhone")
+            && lines[0].contains("the environment of the credential changed after this answer"),
+        "{lines:?}"
+    );
+    assert_eq!(environment_of(&world, item), Some(Environment::Production));
+    assert!(world.queue.deny(world.queue.pending()[0].id));
+    assert_eq!(settled(waiting).outcome, ApprovalOutcome::Denied);
+}
+
+/// A relay without the questions routes answers `404`: the questions stay on this Mac,
+/// the waiter says "update the relay" once in Activity, and asks the relay no more for
+/// minutes.
+#[test]
+fn an_old_relay_without_questions_keeps_them_on_this_mac() {
+    use apassy::questions::worker::UNSUPPORTED;
+    let world = world(true);
+    world.relay.fail_next("POST /v1/questions", 1000, 404);
+    world.relay.fail_next("GET /v1/questions?", 1000, 404);
+    let first = world.ask(world.run(contract_answers()), Duration::from_secs(60));
+    let start = Instant::now();
+    let view = loop {
+        let view = world.worker.view();
+        if view.unsupported && !view.local_only.is_empty() {
+            break view;
+        }
+        assert!(start.elapsed() < Duration::from_secs(10), "{view:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(view.problem.as_deref(), Some(UNSUPPORTED));
+    assert_eq!(
+        view.local_only.values().next().map(String::as_str),
+        Some(UNSUPPORTED)
+    );
+    assert!(world.queue.deny(world.queue.pending()[0].id));
+    assert_eq!(settled(first).outcome, ApprovalOutcome::Denied);
+    // A second question stays here, with no post: the loops wait.
+    let bodies = world.relay.request_bodies().len();
+    let second = world.ask(world.run(contract_answers()), Duration::from_secs(60));
+    while world.worker.view().local_only.is_empty() {
+        assert!(start.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        world.relay.request_bodies().len(),
+        bodies,
+        "no new post during the wait"
+    );
+    let lines: Vec<String> = world
+        .refused_lines()
+        .into_iter()
+        .filter(|line| line == UNSUPPORTED)
+        .collect();
+    assert_eq!(lines.len(), 1, "once in Activity");
+    assert_eq!(world.relay.questions_posted(), 0);
+    assert!(world.queue.deny(world.queue.pending()[0].id));
+    assert_eq!(settled(second).outcome, ApprovalOutcome::Denied);
+}
+
+/// A vault in iCloud Drive with a notifications-only team of Mac A, and the path of a
+/// copy of the vault for Mac B.
+struct Cloud {
+    _root: TempDir,
+    relay: FakeRelay,
+    shared_a: SharedVault,
+    membership: apassy::vault::RelayMembership,
+    path_b: PathBuf,
+}
+
+fn cloud() -> Cloud {
+    let root = TempDir::new().expect("temp dir");
+    let relay = FakeRelay::start();
+    let path_a = root.path().join("a.db");
+    let mut vault = Vault::create(&path_a, PASS).expect("create");
+    vault.unlock(PASS).expect("unlock");
+    let membership = new_questions_team(
+        &relay.url,
+        &relay.team_code(),
+        "Personal",
+        "Synthetic MacBook",
+    )
+    .expect("team");
+    adopt_questions_team(&mut vault, &membership, "Synthetic MacBook").expect("adopt");
+    assert_eq!(
+        vault.questions_team().unwrap().as_deref(),
+        Some(membership.team_id.as_str())
+    );
+    // Mac B gets the vault through iCloud Drive: a copy of the file.
+    vault.lock().expect("lock");
+    let path_b = root.path().join("b.db");
+    fs::copy(&path_a, &path_b).expect("copy");
+    vault.unlock(PASS).expect("unlock");
+    Cloud {
+        _root: root,
+        relay,
+        shared_a: Arc::new(Mutex::new(Some(vault))),
+        membership,
+        path_b,
+    }
+}
+
+/// An iPhone sends its answer key with its link; the Mac writes its row from the link
+/// after the confirmation, and its Face ID answer then counts.
+#[test]
+fn an_iphone_link_carries_its_answer_key_and_the_mac_writes_its_row() {
+    use apassy::questions::device_link::link_device_name;
+    use apassy::relay::membership::register_linked_device;
+    let cloud = cloud();
+    let client_a = QuestionsClient::from_membership(&cloud.membership).unwrap();
+    let code = client_a.create_link().expect("link");
+    let relay_key = DeviceKey::generate().unwrap();
+    let relay_public = relay_key.public_key().to_vec();
+    let answer_public = decode_b64u(ANSWER_PUBLIC).unwrap();
+    let name = link_device_name("Test iPhone", &answer_public).unwrap();
+    let pending = PendingJoin::request_with_key(&code.link, "", &name, relay_key).expect("join");
+    let links = client_a.pending_links(Some(&code)).expect("links");
+    assert_eq!(
+        links[0].device_name, name,
+        "the relay keeps the name with the key"
+    );
+    let device = client_a.confirm_link(&links[0]).expect("confirm");
+    let joined = pending.poll().expect("poll").expect("confirmed");
+    let row = {
+        let mut guard = cloud.shared_a.lock().unwrap();
+        let vault = guard.as_mut().unwrap();
+        register_linked_device(
+            vault,
+            &cloud.membership.team_id,
+            device.id,
+            &links[0].device_name,
+            &links[0].public_key,
+        )
+        .expect("row")
+        .expect("an iPhone")
+    };
+    assert_eq!(row.kind, TrustedDeviceKind::Iphone);
+    assert_eq!(row.name, "Test iPhone");
+    assert_eq!(row.sign_key, relay_public);
+    assert_eq!(row.answer_key.as_deref(), Some(answer_public.as_slice()));
+    assert_eq!(row.relay_devices[&cloud.membership.team_id], device.id);
+    // A Mac's link carries no answer key: the confirming Mac writes no row for it.
+    {
+        let mut guard = cloud.shared_a.lock().unwrap();
+        let vault = guard.as_mut().unwrap();
+        assert_eq!(
+            register_linked_device(vault, &cloud.membership.team_id, 9, "Mac mini", &[4u8; 65])
+                .unwrap(),
+            None
+        );
+    }
+
+    // Mac A asks; the iPhone approves with Face ID (its answer key) and it counts.
+    let queue = Arc::new(ApprovalQueue::new());
+    let _worker = QuestionsWorker::start(
+        Arc::clone(&queue),
+        Arc::clone(&cloud.shared_a),
+        OwnerGate::new(Arc::clone(&cloud.shared_a), None),
+        QuestionsConfig {
+            question_wait: Duration::from_secs(300),
+            tick: Duration::from_millis(50),
+            device_name: "Synthetic MacBook".to_owned(),
+        },
+    );
+    let (agent, items, epoch) = {
+        let mut guard = cloud.shared_a.lock().unwrap();
+        let vault = guard.as_mut().unwrap();
+        let shop = vault
+            .add(secret_item("Shop database", SHOP_SECRET))
+            .unwrap()
+            .id;
+        let api = vault.add(secret_item("API token", API_SECRET)).unwrap().id;
+        let agent = vault.register_agent("claude-code").unwrap().0.id;
+        (agent, [shop, api], vault.epoch())
+    };
+    let run = contract_run(0, items, contract_answers());
+    let waiting = {
+        let queue = Arc::clone(&queue);
+        std::thread::spawn(move || {
+            queue.wait_for_question(run, agent, epoch, Duration::from_secs(60), || true)
+        })
+    };
+    let phone = {
+        let guard = cloud.shared_a.lock().unwrap();
+        let vault = guard.as_ref().unwrap();
+        Answerer {
+            client: QuestionsClient::from_member(joined.member()),
+            keys: vec![vault.question_key().unwrap().unwrap()],
+            devices: vault.trusted_devices().unwrap(),
+            uuid: row.uuid.clone(),
+            team: cloud.membership.team_id.clone(),
+        }
+    };
+    let opened = phone.next(&[]);
+    let approve = prepare_answer(&opened, &phone.uuid, Choice::ApproveOnce, now()).unwrap();
+    let signature = answer_key().sign(approve.text.as_bytes()).unwrap();
+    send_answer(&phone.client, &opened, &approve, &signature, &phone.keys).unwrap();
+    let ended = settled(waiting);
+    assert_eq!(ended.outcome, ApprovalOutcome::Approved);
+    assert_eq!(ended.method, Some(CheckMethod::Remote));
+}
+
+/// A second Mac of a vault in iCloud Drive never makes a second questions team: it joins
+/// the team of the vault with a link that Mac A confirms.
+#[test]
+fn a_second_mac_joins_the_questions_team_of_the_vault() {
+    use apassy::relay::membership::{
+        create_questions_team, existing_questions_team, join_questions_team,
+    };
+    use apassy::vault::{MembershipPurpose, RelayMembership};
+    let cloud = cloud();
+    let team = cloud.membership.team_id.clone();
+    let mut vault_b = Vault::open(&cloud.path_b).expect("open");
+    vault_b.unlock(PASS).expect("unlock");
+    // The sync of a vault never carries the local table of the memberships: the copy of
+    // the file does, so B drops A's key first.
+    assert!(vault_b.remove_relay_membership(&team).unwrap());
+    assert_eq!(
+        questions_availability(&vault_b).unwrap(),
+        QuestionsAvailability::JoinTeam {
+            team_id: team.clone()
+        }
+    );
+    assert_eq!(
+        existing_questions_team(&vault_b).unwrap(),
+        Some(team.clone())
+    );
+    // No second team: refused before the relay is asked.
+    assert!(matches!(
+        create_questions_team(
+            &mut vault_b,
+            &cloud.relay.url,
+            &cloud.relay.team_code(),
+            "Personal",
+            "Synthetic Mac mini",
+        ),
+        Err(apassy::sync::SyncError::AlreadyEnabled)
+    ));
+    let other = new_questions_team(
+        &cloud.relay.url,
+        &cloud.relay.team_code(),
+        "Personal",
+        "Synthetic Mac mini",
+    )
+    .expect("a team on the relay");
+    assert!(matches!(
+        adopt_questions_team(&mut vault_b, &other, "Synthetic Mac mini"),
+        Err(apassy::sync::SyncError::AlreadyEnabled)
+    ));
+    assert!(matches!(
+        join_questions_team(&mut vault_b, &other, "Synthetic Mac mini"),
+        Err(apassy::sync::SyncError::AlreadyEnabled)
+    ));
+    assert!(questions_membership(&vault_b).unwrap().is_none());
+
+    // B joins with a link of A; A confirms (after its owner check in the app).
+    let client_a = QuestionsClient::from_membership(&cloud.membership).unwrap();
+    let code = client_a.create_link().expect("link");
+    let pending = PendingJoin::request(&code.link, "", "Synthetic Mac mini").expect("join");
+    let links = client_a.pending_links(Some(&code)).expect("links");
+    client_a.confirm_link(&links[0]).expect("confirm");
+    let joined = pending.poll().expect("poll").expect("confirmed");
+    let member = joined.member();
+    let membership = RelayMembership {
+        team_id: member.team_id().to_owned(),
+        relay_url: member.relay_url().to_owned(),
+        device_id: member.device_id().unwrap(),
+        public_key: member.public_key().to_vec(),
+        key_pkcs8: joined.key_pkcs8().unwrap(),
+        purposes: BTreeSet::from([MembershipPurpose::Questions]),
+        created_at: 0,
+    };
+    let me = join_questions_team(&mut vault_b, &membership, "Synthetic Mac mini").expect("join");
+    assert_eq!(me.kind, TrustedDeviceKind::Mac);
+    assert_eq!(me.relay_devices[&team], membership.device_id);
+    assert_eq!(
+        questions_availability(&vault_b).unwrap(),
+        QuestionsAvailability::On {
+            team_id: team.clone()
+        }
+    );
+    assert_eq!(client_a.devices().unwrap().len(), 2, "one team, two Macs");
+}

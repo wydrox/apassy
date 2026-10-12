@@ -72,6 +72,10 @@ struct Start {
     link: Secret,
     #[serde(default)]
     device_name: Option<String>,
+    /// The answer key of this iPhone (b64u, X9.63): it goes with the link, so the Mac
+    /// that confirms writes the row of this iPhone (relay-questions-v1 section 5.2).
+    #[serde(default)]
+    answer_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -95,11 +99,19 @@ impl Core {
     pub(super) fn join_call(&self, op: &str, request: &str) -> CoreResult<String> {
         match op {
             "join_start" => {
-                let Start { link, device_name } = params(request)?;
+                let Start {
+                    link,
+                    device_name,
+                    answer_key,
+                } = params(request)?;
                 let name = device_name
                     .map(|name| name.trim().to_owned())
                     .filter(|name| !name.is_empty())
                     .unwrap_or_else(|| self.device_name.clone());
+                let name = match answer_key {
+                    Some(key) => super::questions::link_name_with_key(&name, &key)?,
+                    None => name,
+                };
                 Ok(ok(&self.join_start(link.expose(), &name)?))
             }
             "join_poll" => Ok(ok(&self.join_poll()?)),

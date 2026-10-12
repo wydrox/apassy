@@ -156,6 +156,9 @@ pub enum AnswerError {
     Expired,
     /// `403 not_routed`: "This device cannot answer this question".
     NotRouted,
+    /// `403 too_many_answers`: the relay counts the answers of a device and of a
+    /// question, and the bytes of the team.
+    TooManyAnswers,
     /// The question is not in the list of this Mac any more, or the questions through
     /// the relay are off or locked.
     Gone,
@@ -173,6 +176,7 @@ impl AnswerError {
             Self::AlreadyAnswered => "Already answered.".to_owned(),
             Self::Expired => "Expired.".to_owned(),
             Self::NotRouted => "This device cannot answer this question.".to_owned(),
+            Self::TooManyAnswers => "The relay refused the answer: too many answers.".to_owned(),
             Self::Gone => "This question no longer waits on this Mac.".to_owned(),
             Self::Relay(QuestionsError::Unreachable) => {
                 "The relay did not answer. Try again.".to_owned()
@@ -271,6 +275,7 @@ pub fn send_answer(
             (_, Some("question_settled")) => AnswerError::AlreadyAnswered,
             (_, Some("question_expired")) => AnswerError::Expired,
             (_, Some("not_routed")) => AnswerError::NotRouted,
+            (_, Some("too_many_answers")) => AnswerError::TooManyAnswers,
             _ => AnswerError::Relay(error),
         })
 }

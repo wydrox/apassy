@@ -32,7 +32,7 @@ import Testing
             #expect(error.code == .noQuestions)
         }
         do {
-            _ = try await core.joinAttach(link: "not a link", deviceName: "Test iPhone")
+            _ = try await core.joinAttach(link: "not a link", deviceName: "Test iPhone", answerKey: key)
             Issue.record("a text that is not a link started a connection")
         } catch let error as VaultError {
             #expect(error.code == .linkInvalid)

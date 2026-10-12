@@ -202,6 +202,8 @@ pub(crate) enum SyncSheet {
     /// "Add an iPhone…" of a notifications-only team: the link as a QR code, then the
     /// safety words and the owner check, as "Add a device…".
     AddIphone { id: String },
+    /// "Remove…" of a device of the questions in Devices: its confirmation.
+    RemoveQuestionsDevice { id: String, uuid: String },
 }
 
 impl SyncSheet {
@@ -216,7 +218,8 @@ impl SyncSheet {
         | Self::AddMac { id }
         | Self::Devices { id }
         | Self::QuestionsTeam { id }
-        | Self::AddIphone { id }) = self;
+        | Self::AddIphone { id }
+        | Self::RemoveQuestionsDevice { id, .. }) = self;
         id
     }
 }
@@ -1736,7 +1739,8 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context, sheet: &SyncSheet
     | SyncSheet::AddMac { id }
     | SyncSheet::Devices { id }
     | SyncSheet::QuestionsTeam { id }
-    | SyncSheet::AddIphone { id }) = sheet;
+    | SyncSheet::AddIphone { id }
+    | SyncSheet::RemoveQuestionsDevice { id, .. }) = sheet;
     let Some(entry) = app.vault_list.registry.get(id).cloned() else {
         close_sheet(app, ctx);
         return false;
@@ -1754,6 +1758,9 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context, sheet: &SyncSheet
         SyncSheet::AddMac { .. } => relay::add_mac_sheet(app, ctx, &entry, false),
         SyncSheet::AddIphone { .. } => relay::add_mac_sheet(app, ctx, &entry, true),
         SyncSheet::QuestionsTeam { .. } => questions::team_sheet(app, ctx, &entry),
+        SyncSheet::RemoveQuestionsDevice { uuid, .. } => {
+            questions::remove_device_sheet(app, ctx, &entry, uuid)
+        }
         SyncSheet::Devices { .. } => relay::devices_sheet(app, ctx, &entry),
     };
     if escape {

@@ -43,8 +43,10 @@ extension CoreVaultService {
 
     public func pushTokenClear() async throws { try await call("push_token_clear") }
 
-    public func joinAttach(link: String, deviceName: String) async throws -> AttachInfo {
-        try await call("join_attach", ["link": link, "device_name": deviceName])
+    public func joinAttach(link: String, deviceName: String, answerKey: Data) async throws -> AttachInfo {
+        try await call(
+            "join_attach",
+            ["link": link, "device_name": deviceName, "answer_key": Base64URL.encode(answerKey)])
     }
 
     public func joinAttachPoll() async throws -> AttachInfo { try await call("join_attach_poll") }

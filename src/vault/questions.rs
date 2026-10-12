@@ -22,6 +22,9 @@ use super::types::{VaultErrorKind, VaultResult, err};
 
 /// The `vault_secret` row of the question key.
 pub const QUESTION_KEY_NAME: &str = "question-key-v1";
+/// The `vault_secret` row that names the questions team of the vault (its team ID), so a
+/// second Mac joins that team instead of making another one.
+pub const QUESTIONS_TEAM_NAME: &str = "questions-team-v1";
 /// The length of the question key.
 pub const QUESTION_KEY_BYTES: usize = 32;
 
@@ -95,6 +98,16 @@ fn read_key(conn: &Connection) -> VaultResult<Option<(QuestionKey, i64)>> {
 
 /// Write `key` as a new version of the row after `previous`, by this device.
 fn write_key(conn: &Connection, key: &QuestionKey, previous: Option<i64>) -> VaultResult<()> {
+    write_secret(conn, QUESTION_KEY_NAME, key.bytes().as_slice(), previous)
+}
+
+/// Write the `vault_secret` row `name` as a new version after `previous`, by this device.
+fn write_secret(
+    conn: &Connection,
+    name: &str,
+    value: &[u8],
+    previous: Option<i64>,
+) -> VaultResult<()> {
     let device: Option<String> = conn
         .query_row(
             "SELECT device_id FROM sync_device WHERE id = 1",
@@ -111,12 +124,7 @@ fn write_key(conn: &Connection, key: &QuestionKey, previous: Option<i64>) -> Vau
         "INSERT INTO vault_secret (name, value, updated_at, updated_by) VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(name) DO UPDATE SET value = excluded.value,
              updated_at = excluded.updated_at, updated_by = excluded.updated_by",
-        rusqlite::params![
-            QUESTION_KEY_NAME,
-            key.bytes().as_slice(),
-            at,
-            device.unwrap_or_default()
-        ],
+        rusqlite::params![name, value, at, device.unwrap_or_default()],
     )
     .map_err(storage)?;
     Ok(())
@@ -161,6 +169,48 @@ impl Vault {
         write_key(&tx, &key, previous)?;
         tx.commit().map_err(storage)?;
         Ok(key)
+    }
+
+    /// The team ID of the questions team of the vault, when a Mac made or joined one
+    /// (`vault_secret` row [`QUESTIONS_TEAM_NAME`]). A row of a bad shape is no team.
+    pub fn questions_team(&self) -> VaultResult<Option<String>> {
+        let value: Option<Vec<u8>> = self
+            .conn_ref()?
+            .query_row(
+                "SELECT value FROM vault_secret WHERE name = ?1",
+                [QUESTIONS_TEAM_NAME],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        Ok(value
+            .and_then(|value| String::from_utf8(value).ok())
+            .filter(|team| super::relay_device::valid_team_id(team)))
+    }
+
+    /// Name `team_id` as the questions team of the vault. The same team changes nothing.
+    /// `InvalidInput`: a team ID of a bad shape.
+    pub fn set_questions_team(&mut self, team_id: &str) -> VaultResult<()> {
+        if !super::relay_device::valid_team_id(team_id) {
+            return Err(err(VaultErrorKind::InvalidInput));
+        }
+        if self.questions_team()?.as_deref() == Some(team_id) {
+            return Ok(());
+        }
+        let conn = self.conn_mut()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        let previous: Option<i64> = tx
+            .query_row(
+                "SELECT updated_at FROM vault_secret WHERE name = ?1",
+                [QUESTIONS_TEAM_NAME],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        write_secret(&tx, QUESTIONS_TEAM_NAME, team_id.as_bytes(), previous)?;
+        tx.commit().map_err(storage)
     }
 
     /// Remove a trusted device (Settings > Devices) and, when it was live and the vault
@@ -232,6 +282,28 @@ mod tests {
     }
 
     #[test]
+    fn the_questions_team_is_named_in_the_vault() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut vault = unlocked(&dir);
+        assert_eq!(vault.questions_team().unwrap(), None);
+        vault.set_questions_team("t_7k2m5q4x3c").unwrap();
+        assert_eq!(
+            vault.questions_team().unwrap().as_deref(),
+            Some("t_7k2m5q4x3c")
+        );
+        vault.set_questions_team("t_7k2m5q4x3c").unwrap();
+        assert_eq!(
+            vault.set_questions_team("team").unwrap_err().kind(),
+            VaultErrorKind::InvalidInput
+        );
+        vault.set_questions_team("t_aaaaaaaaaa").unwrap();
+        assert_eq!(
+            vault.questions_team().unwrap().as_deref(),
+            Some("t_aaaaaaaaaa")
+        );
+    }
+
+    #[test]
     fn removing_a_device_rotates_the_key() {
         let dir = tempfile::TempDir::new().unwrap();
         let mut vault = unlocked(&dir);
@@ -243,6 +315,8 @@ mod tests {
         // No key yet: a removal makes none.
         assert!(vault.remove_trusted_device_and_rotate("phone-1").unwrap());
         assert!(vault.question_key().unwrap().is_none());
+        // The removed key never registers again: the next phone has its own.
+        point[1] = 6;
         vault
             .register_trusted_device("phone-2", "Phone", TrustedDeviceKind::Iphone, &point, None)
             .unwrap();

@@ -34,6 +34,7 @@ enum LinkState {
 #[derive(Clone)]
 struct Link {
     code: String,
+    device_name: String,
     public_key: Vec<u8>,
     state: LinkState,
 }
@@ -190,6 +191,32 @@ impl QuestionsRelay {
             added.push(id);
         }
         added
+    }
+
+    /// The device name and the key of each confirmed link, with the device number of the
+    /// device it made, as the confirming Mac sees them.
+    pub fn confirmed(&self) -> Vec<(u64, String, Vec<u8>)> {
+        let relay = lock(&self.shared.0);
+        relay
+            .links
+            .iter()
+            .filter(|link| link.state == LinkState::Confirmed)
+            .filter_map(|link| {
+                let device = relay
+                    .devices
+                    .iter()
+                    .find(|device| device.public_key == link.public_key)?;
+                Some((device.id, link.device_name.clone(), link.public_key.clone()))
+            })
+            .collect()
+    }
+
+    /// The relay revokes device `id`.
+    pub fn revoke(&self, id: u64) {
+        let mut relay = lock(&self.shared.0);
+        for device in relay.devices.iter_mut().filter(|device| device.id == id) {
+            device.live = false;
+        }
     }
 
     /// The asking Mac (device 1) posts a sealed card.
@@ -437,11 +464,24 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> (u16, Val
             let Some(at) = relay.codes.iter().position(|known| *known == code) else {
                 return fail(403, "forbidden");
             };
+            // The relay takes a device name of 1 to 64 bytes with no control character.
+            let device_name = body["device_name"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .to_owned();
+            if device_name.is_empty()
+                || device_name.len() > 64
+                || device_name.chars().any(char::is_control)
+            {
+                return fail(400, "invalid_request");
+            }
             relay.codes.remove(at);
             let team_id = relay.team_id.clone();
             let safety = safety_words(&team_id, &code, &public_key);
             relay.links.push(Link {
                 code,
+                device_name,
                 public_key,
                 state: LinkState::Pending,
             });

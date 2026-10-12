@@ -1,7 +1,7 @@
 # Relay questions wire contract v1
 
-Date: 2026-10-12.
-Status: DRAFT, for stage 5 of [ADR 0025](../adr/0025-low-friction-access.md) (§3d, §3e) and section A of the [stage 5 plan](../design/stage5-plan.md). Not in the code. The app side (stream N3: `src/questions/`, `src/vault/questions.rs`, `src/relay/membership.rs`, `src/companion/digest.rs`, `src/broker/approvals/owner_auth.rs`), the iPhone side (stream M3: `ios/ApassyCore`, contract [ios-core-v1](ios-core-v1.md)), and the relay side (stream R4: `apassy-relay`, `docs/SPEC.md` section 25) implement it. A change to this document changes every side, one pull request on each; a change to a tag, to the AAD, to the answer string, to the digest, or to a check bumps its version. The app implements the client itself and does not depend on the relay crate (FSL license): everything the app needs is in this document.
+Date: 2026-10-12. Gate 3 fixes (device removal, registration by the confirming Mac, answer ordering, a second Mac, an old relay, the relay limits of feat/questions 9851d33) 2026-10-12.
+Status: implemented, for stage 5 of [ADR 0025](../adr/0025-low-friction-access.md) (§3d, §3e) and section A of the [stage 5 plan](../design/stage5-plan.md). The app side (stream N3: `src/questions/`, `src/vault/questions.rs`, `src/relay/membership.rs`, `src/companion/digest.rs`, `src/broker/approvals/owner_auth.rs`), the iPhone side (stream M3: `ios/ApassyCore`, contract [ios-core-v1](ios-core-v1.md)), and the relay side (stream R4: `apassy-relay`, `docs/SPEC.md` section 25) implement it. A change to this document changes every side, one pull request on each; a change to a tag, to the AAD, to the answer string, to the digest, or to a check bumps its version. The app implements the client itself and does not depend on the relay crate (FSL license): everything the app needs is in this document.
 
 ## 1. Purpose
 
@@ -19,7 +19,8 @@ The local paths stay as they are: the card on the asking Mac and the local-netwo
 | Part | Location | Stream |
 | --- | --- | --- |
 | The question key, `Vault::ensure_question_key` | `src/vault/questions.rs` | N3 |
-| `trusted_device`, `relay_membership` (schema 19) | `src/vault/relay_device.rs`, `schema19.rs` | F19 |
+| `trusted_device`, `relay_membership` (schema 19) | `src/vault/trusted_device.rs`, `schema19.rs` | F19 |
+| The answer key of an iPhone in its device link | `src/questions/device_link.rs` | N3 |
 | Envelope, card, answer, settle, the asker and answerer procedures, the waiter thread | `src/questions/` | N3 |
 | Relay client for questions, membership per team with purposes | `src/relay/membership.rs`, `src/sync/relay_http.rs` (reused) | N3 |
 | Question digest v2 | `src/companion/digest.rs` | N3 |
@@ -63,25 +64,31 @@ The encodings of [relay-sync-v1](relay-sync-v1.md) section 2 apply: b64u without
 
 ### 5.1 The question key
 
-- `vault_secret` row `question-key-v1`: 32 bytes from the CSPRNG. The first Mac that turns "Notifications through the relay" on makes it (`Vault::ensure_question_key`) when the row is absent. Every device that holds the vault gets it through its sync (iCloud Drive or the relay snapshot); `vault_secret` merges last-writer-wins by `(updated_at, updated_by)`.
+- `vault_secret` row `question-key-v1`: 32 bytes from the CSPRNG. The first Mac that turns "Send questions through the relay" on makes it (`Vault::ensure_question_key`) when the row is absent. Every device that holds the vault gets it through its sync (iCloud Drive or the relay snapshot); `vault_secret` merges last-writer-wins by `(updated_at, updated_by)`.
 - `key_id` names the key on the wire. A device that has no key with the `key_id` of an envelope cannot read it: it shows "Sync this vault to read this question" and does not answer.
-- **Rotation.** When the owner removes a device from the vault (Settings > Devices), the Mac that removes it writes a new key. Questions already posted keep their `key_id`: the asker keeps the key of each open question in memory (a `Zeroizing` buffer) until the question settles or expires, so answers to it still open. A new question always uses the current key.
+- **Rotation.** When the owner removes a device (Settings > Devices > "Remove…", or "Remove" in "Devices…" of relay sync, which also removes the trusted device with that device number in the sync team), the Mac that removes it writes a new key (`Vault::remove_trusted_device_and_rotate`). Questions already posted keep their `key_id`: the asker keeps the key of each open question in memory (a `Zeroizing` buffer) until the question settles or expires, so answers to it still open. A new question always uses the current key.
 - Two Macs that make a key at the same time: last-writer-wins keeps one. A question sealed with the other key can be read only by devices that still hold it, and expires; the next question uses the kept key. No other action.
 - The key never leaves the vault in clear, never goes to the relay, the Worker, or Apple, and is never logged.
 
 ### 5.2 Device keys (`trusted_device`, schema 19)
 
-Each device registers its own row (plan A1). The relay's device list is never the source of an answer key.
+The relay's device list is never the source of an answer key. Who writes a row (plan A1, changed by Gate 3):
+
+- **A Mac writes its own row**, and only after the owner check for `OwnerAction::EnableRelayQuestions` on that Mac (turning the questions on, creating a team, or joining one). The questions waiter never writes or rewrites a row.
+- **The row of an iPhone is written by the Mac that confirms its device link**, during the owner check of the confirmation (`OwnerRequest::ConfirmQuestionsDevice`, or `ConfirmSyncDevice` in "Add a device…" of relay sync), from the keys that the iPhone sent with the link (`register_linked_device`). The iPhone never writes its own row: `answer_key_register` only checks that the row holds its answer key. `POST /v1/devices/link` takes only `code`, `device_name`, and `public_key`, so the iPhone sends its answer key at the end of `device_name`: `<name> ~<b64u of the compressed P-256 point, 44 characters>`, with the name cut so that the whole is at most 64 bytes (`src/questions/device_link.rs`). The confirming Mac decompresses the point and shows the name without it. The proof of the confirmation names the whole `device_name`, so the owner check covers the answer key. A relay that changes the name gains nothing: an answer still needs the question key; the iPhone checks that its row holds its own answer key once the row reaches it (`answer_key_changed` otherwise).
+- **A removal is final.** A row with `deleted_at` set is not live, and its `sign_key` and `answer_key` never register again, under any UUID (`Vault::trusted_key_removed`; the vault answers `AlreadyExists`). A removed device says "This device was removed from questions" and asks nothing through the relay. To answer again it needs a new relay key and a new confirmation: a Mac turns the questions on again (the owner check and a new membership key; a Mac whose key is its relay sync key joins relay sync again first), an iPhone makes a new answer key and a new `join_attach` confirmed on a Mac.
+- A holder of the vault passphrase can still write rows directly into the vault: the same class of risk as holding the vault (section 18).
 
 | Column | Mac | iPhone |
 | --- | --- | --- |
-| `uuid` | random, made once per device per vault | same |
+| `uuid` | random, made once per device per vault | random, made by the confirming Mac |
+| `name` | the name of the Mac | the name of the link without the key |
 | `kind` | `mac` | `iphone` |
-| `relay_device_id` | its device id in the questions team | same |
-| `sign_key` | the public key of its relay device key (`relay_membership.key_pkcs8`, local) | the public key of its relay device key (Secure Enclave, no biometry) |
-| `answer_key` | NULL | the public key of a Secure Enclave key with `.privateKeyUsage` + `.biometryCurrentSet`, no passcode fallback, `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` (as the companion approval key, companion-v1 section 5.2). Registered with `answer_key_register`. |
+| `relay_devices` | a JSON object: the device number of the device in each relay team, by team ID (integrator decision 3); for the questions, its number in the questions team | same |
+| `sign_key` | the public key of its relay device key (`relay_membership.key_pkcs8`, local) | the public key of its relay device key, the `public_key` of its link |
+| `answer_key` | NULL | the public key of a Secure Enclave key with `.privateKeyUsage` + `.biometryCurrentSet`, no passcode fallback, `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` (as the companion approval key, companion-v1 section 5.2), from the name of its link |
 
-A row with `deleted_at` set is not live. A new Face ID enrollment makes the `answer_key` unusable: the iPhone makes a new one and registers it again, which needs the vault to sync once before its approvals count.
+A new Face ID enrollment makes the `answer_key` unusable: the iPhone makes a new one, and the owner removes the iPhone on a Mac and connects it again. The vault names its questions team in the `vault_secret` row `questions-team-v1` (the team ID), so a second Mac joins that team instead of making another one (section 12.6).
 
 ### 5.3 Which key signs which answer
 
@@ -207,7 +214,7 @@ In this order; the first failure shows "This question could not be read" and off
 2. The JSON parses with exactly the fields above, within the limits.
 3. `v` is 1 and `qid` equals the relay's `qid`.
 4. It computes the digest v2 from the card's fields itself and gets `digest`.
-5. `asker.device` is a live `trusted_device` of its vault whose `relay_device_id`, when set, equals the relay's `from_device_id`.
+5. `asker.device` is a live `trusted_device` of its vault whose device number in the questions team (`relay_devices[team id]`), when set, equals the relay's `from_device_id`.
 6. The relay's `expires_at` is in the future on its clock.
 
 The card shows each text with control and format characters replaced by `?`, and long paths shortened, by the rules of `shown_path` (`src/broker/approvals.rs`). Only the display changes; the digest covers the exact bytes. The card offers only the answers of `valid_answers`, plus `deny` (section 9.1).
@@ -352,11 +359,13 @@ The other devices show "Answered on Test iPhone", "Expired", or the new question
 | 400 | `invalid_request` | Malformed JSON, an unknown field, `v` not 1; a `qid`, `key_id`, `nonce`, or `ciphertext` out of its form; an empty ciphertext; `to` not `member` or `approvers`; `expires_at` not in `(now + 10, now + 600]` on the relay clock; an answer or settle whose `key_id` differs from the question's; `since`, `after`, or `wait` not a number, `wait` over 25; a push token, environment, or bundle id out of its form. |
 | 401 | `unauthenticated` / `token_expired` | As relay-sync-v1 section 4. |
 | 403 | `not_routed` | An answer from a device outside the routing set (section 11), or from the asking device itself. |
-| 403 | `too_many_questions` | The team has `open_questions` (20) open questions, or posted `questions_per_hour` (300) in the last hour. The message names which. Not `429`, so the app's other calls to the relay go on. |
-| 403 | `too_many_answers` | The device already posted 3 answers to this question. |
-| 404 | `not_found` | An unknown `qid` in this team (also after the 24-hour deletion); `GET …/answers` or `POST …/settle` by a device that is not the asker. |
+| 403 | `not_routed` | `POST /v1/questions` with `to: "approvers"`: refused by default until shared vaults (V3). The app always sends `to: "member"`. |
+| 403 | `too_many_questions` | The team has `open_questions` (20) open questions, the asking device 10, or the asking member 15, or the team posted `questions_per_hour` (300) in the last hour. The message names the limit. Not `429`, so the app's other calls to the relay go on. The asker keeps the question on this Mac and says so. |
+| 403 | `too_many_answers` | The device already posted 3 answers to this question, the question has 20 answers, or the team used its byte budget for answers. The answering device shows "The relay refused the answer: too many answers." |
+| 404 | (any) | `POST /v1/questions` or `GET /v1/questions` on a relay that predates the questions. The app stops the question loops, asks again some minutes later, keeps each question on the asking Mac, and shows "The relay does not support questions yet — update the relay." in Settings > Devices and once in Activity. |
+| 404 | `not_found` | An unknown `qid` in this team (also after the deletion, section 15); `GET …/answers` or `POST …/settle` by a device that is not the asker. The asker treats it as the end of the question. |
 | 409 | `conflict` | `POST /v1/questions` with a `qid` that exists in the team. |
-| 409 | `question_settled` | An answer to a settled question; a settle of a settled question with another envelope. |
+| 409 | `question_settled` | An answer to a settled question; a settle of a settled question with another envelope, or a repeated settle after the question left the list. The asker treats it as a normal end. |
 | 409 | `question_expired` | An answer or a settle after `expires_at`. |
 | 409 | `push_unavailable` | `PUT /v1/push/token` on a relay without push (section 14). |
 | 413 | `payload_too_large` | A body over 64 KiB, or a ciphertext over section 6.3. |
@@ -426,17 +435,17 @@ The routing set of a question is computed by the relay when it lists, accepts an
 - every live device (not revoked, member not revoked) of the **asking member**, except the asking device;
 - when `to` is `approvers`, also every live device of every live member with the role `owner` or `manager`.
 
-Other members' devices never see the question, its existence, or a push. The routing bit `to` is one bit in clear: the relay knows whether a question is about production for a team (accepted leak, plan A3). The asker chooses `to`: `approvers` when the question is about a team item with `question.production` (section 5.4), else `member`.
+Other members' devices never see the question, its existence, or a push. The routing bit `to` is one bit in clear: the relay knows whether a question is about production for a team (accepted leak, plan A3). Until shared vaults (V3) the relay refuses `to: "approvers"` with `403 not_routed` by default, and the app always sends `to: "member"` (section 5.4).
 
 ## 12. The asker
 
 ### 12.1 Posting
 
-When a run starts to wait and "Notifications through the relay" is on for the vault, the waiter thread of the questions membership (not the sync waiter) posts it:
+When a run starts to wait and "Send questions through the relay" is on for the vault, the waiter thread of the questions membership (not the sync waiter) posts it:
 
 1. Build the card, check section 6.3 and 7.2, and compute the digest v2.
 2. `qid` = 16 random bytes; nonce = 12 random bytes; `expires_at` = the time the local question ends (`QUESTION_WAIT`, 300 s, after it started to wait).
-3. `POST /v1/questions`. A failure that can pass (no network, `500`, `503`, a non-JSON answer) retries after 2, 4, 8, 16, 30, 30… seconds while the question waits. `403 too_many_questions` and `413` do not retry: the question stays local, and Activity says why.
+3. `POST /v1/questions`. A failure that can pass (no network, `500`, `503`, a non-JSON answer) retries after 2, 4, 8, 16, 30, 30… seconds while the question waits. `403 too_many_questions` and `413` do not retry: the question stays local, and Activity says why. A `404` means a relay without the questions routes (section 10.2): the question stays local, and the loops wait some minutes (5 in the app) before they ask the relay again.
 4. A call of the same agent that joins the waiting question (`QuestionRefusal::Superseded`) posts nothing new.
 
 The local card shows at once; it does not wait for the relay.
@@ -451,11 +460,12 @@ For each answer, in order, the asker checks; the first failure skips the answer 
 
 1. It opens with the question's key and the AAD with the stamped `device_id` (section 6.1).
 2. The JSON has the fields of its kind, `v` is 1, `qid` is this question's.
-3. `by` is a live `trusted_device`; its `relay_device_id`, when set, equals the stamped `device_id`.
+3. `by` is a live `trusted_device`; its device number in the questions team (`relay_devices[team id]`), when set, equals the stamped `device_id`.
 4. `kind` is valid for the question (section 9.1) and its extra fields match the question.
 5. `digest` equals the digest v2 of the run **as it waits now**. Else the reason is "the request changed".
 6. For `to: "approvers"`: an approving kind (`approve_once`, `approve_in_project`, `allow_production`) counts only with a stamped `role` of `owner` or `manager`.
 7. The owner check of section 12.4 passes, for the approving kinds and `correct_environment` to `development`; for the other kinds, the `sign_key` signature verifies over the rebuilt answer string and `time` is in the window of 12.4.
+7a. `time` is later than the `time` of every answer of the same device to this question that took effect: the asker keeps, per question, the answers that took effect (by device, `time`, and kind). A replayed or reordered answer of a device never applies twice ("it is not newer than an answer of this device that counted").
 8. The queue takes it (`ApprovalQueue::approve` or `deny` / `deny_stricter`). A refusal (`NotWaiting`: an answer on this Mac or through the companion came first; `Changed`) ends the processing: the question is already settled locally.
 
 The first answer that passes every check takes effect. Then the asker posts the settle (section 9.4) with the outcome. When the question ends any other way (a local answer, the timeout, a lock, the broker stopping), the asker posts the settle with that outcome, best effort, while it still has a token: a lock never waits for the network, and a question that gets no settle expires on the relay.
@@ -474,13 +484,17 @@ A remote check can make a proof only for `ApproveRun`, `ApproveInProject`, `Allo
 
 ### 12.5 A correction, and a changed question
 
-`correct_environment` does not settle: the question still waits, and the device may answer again (at most 3 answers per device per question). When the waiting run changes after a correction or a new evaluation, so that its digest v2 differs from the posted card, the asker settles the old `qid` with `outcome: "replaced"` and `replaced_by`, and posts a new question with a new `qid` and the rest of the old expiry. The devices show the new one.
+`correct_environment` does not settle: the question still waits, and the device may answer again (at most 3 answers per device per question). A correction applies only when it is newer than the last change of the environment of the credential: after a correction through the relay, its `time` must be later than the `time` of the answer that made that change; after any other change (the newest declaration event of the credential is not the one of that correction), later than the change on the asker's clock. Else it is refused and logged ("the environment of the credential changed after this answer"). So "Development", "Production", and a replayed or late "Development" leave the credential production. When the waiting run changes after a correction or a new evaluation, so that its digest v2 differs from the posted card, the asker settles the old `qid` with `outcome: "replaced"` and `replaced_by`, and posts a new question with a new `qid` and the rest of the old expiry. The devices show the new one.
+
+### 12.6 One questions team per vault
+
+A vault has at most one questions team. A Mac that makes one names it in the vault (`vault_secret` `questions-team-v1`). A second Mac of a vault that syncs another way (iCloud Drive) never makes another: when the vault names a team, or live trusted devices have a device number in a team that this Mac is not in, "Send questions through the relay" joins that team. The owner pastes a device link made on a Mac in the team ("Add an iPhone or a Mac…"); the owner check on the joining Mac names the relay and the team of the link (`EnableRelayQuestions`); both Macs show the safety words; the Mac in the team confirms with its own owner check. The joining Mac then keeps a membership with the purpose `questions` and writes its own row.
 
 ## 13. The answering device
 
 1. **Find.** It long-polls `GET /v1/questions?since=<last seq>&wait=25` while it runs in the foreground (an iPhone), or always while the vault is unlocked (a Mac with the feature on). A push wakes the iPhone app only when the owner opens the notification; the app then reads the list.
 2. **Show.** It opens and checks each open card (section 7.3), and shows it as on the asking Mac, with "Asked on <asker.name>". A Mac shows a remote question in Decisions next to its own, marked with the asking Mac. A settled or expired question leaves the list; the device shows "Answered on <device_name>" or "Expired" when it was open on the screen.
-3. **Answer.** The owner selects an answer. The device sets `time`, builds the answer string, asks for Face ID (iPhone, `answer_key`) or Touch ID (Mac, `OwnerAction::AnswerRemoteQuestion`) for the approving kinds of section 5.3, signs, seals, and posts. It shows "Sent. Waiting for <asker.name>…" until the settle arrives.
+3. **Answer.** The owner selects an answer. The device sets `time`, builds the answer string, asks for Face ID (iPhone, `answer_key`) or Touch ID (Mac, `OwnerAction::AnswerRemoteQuestion`) for the approving kinds of section 5.3, signs, seals, and posts. Until the protocol has receipts it shows "Sent. The Mac checks it; if the run does not continue within a minute, the answer was refused." until the settle arrives; the asking Mac logs each refused answer in Activity with the device and the reason (section 12.3).
 4. **Retries.** After a network error or a `500`/`503`, it posts the same answer again (a new nonce and envelope, the same signature) while `time` is less than 55 s old; after that it asks again. A `409 question_settled` or `question_expired` shows "Already answered" or "Expired", with the settle text when it has it. A `403 not_routed` shows "This device cannot answer this question".
 5. The relay accepting an answer does not mean that it counted: only the settle says what happened.
 
@@ -509,15 +523,16 @@ The relay side of the push (`POST /internal/push` on the Worker with the edge se
 | Limit | Value | Where |
 | --- | --- | --- |
 | Question lifetime | `expires_at` in `(now + 10, now + 600]`; the app uses 300 s | relay; app |
-| Open questions | 20 per team (`open_questions`) | relay: `403 too_many_questions` |
+| Open questions | 20 per team (`open_questions`), 10 per asking device, 15 per asking member | relay: `403 too_many_questions` |
 | Questions per hour | 300 per team (`questions_per_hour`) | relay: `403 too_many_questions` |
 | Waiting questions per agent | 1 (ADR 0024, ADR 0025 §3) | app |
 | Answers per device per question | 3 | relay: `403 too_many_answers` |
+| Answers per question | 20, and a byte budget of the team for answers | relay: `403 too_many_answers` |
 | Card / answer / settle ciphertext | 32784 / 8208 / 1040 bytes | relay: `413` |
 | Question long polls | 1 per device for the list, 1 per device for answers; `wait` 0 to 25 s | relay |
 | Questions in one list answer | 100 | relay |
 | Push tokens | 1 per device | relay |
-| Retention | questions and answers are deleted 24 hours after `created_at` | relay |
+| Retention | a question leaves the list 10 minutes after it ended (settled or expired); questions and answers are deleted 24 hours after `created_at` | relay |
 | Proof window | `time` within 60 s of the asker's clock, both ways | app |
 
 ## 16. Expiry, replay, offline, and late answers
@@ -528,6 +543,8 @@ The relay side of the push (`POST /internal/push` on the Worker with the edge se
 - **Offline asker.** The local card and the local-network companion are unchanged. Posts retry within the 5 minutes (section 12.1). A question posted while the asker was online keeps its answers on the relay until it expires; the asker reads them when it is back, and an answer older than 60 s by then does not count.
 - **Offline answering device.** It sees open questions at its next list. Pushes expire with the question.
 - **Late answers.** After the settle or the expiry the relay answers `409`; the device shows "Already answered on <device>" or "Expired".
+- **After the list.** 10 minutes after a question ended it leaves the list. Then the asker gets `answers: []` (or `404`) for it, and a repeated settle gets `409 question_settled`; both are normal end states, not failures.
+- **Replay into the same question.** The relay can deliver an answer envelope again, or out of order. The asker applies the answers of a device in the order of their signed `time`, each once (section 12.3 step 7a), and an environment correction only when it is newer than the last change of the credential (section 12.5).
 - **Lock.** A lock of the asker's vault ends the waiting runs (`invalidate_all`), drops the relay token, and stops the waiter. Its open questions expire on the relay. A lock of an answering Mac drops its questions view; an iPhone needs the vault unlocked to read the key.
 
 ## 17. Versioning
@@ -539,7 +556,7 @@ The relay side of the push (`POST /internal/push` on the Worker with the edge se
 
 ## 18. What this does not protect
 
-- **The vault is the trust root.** Any device that holds the vault holds the question key and can write `trusted_device` rows. A device removed from the vault but still holding a copy of it (for example through iCloud Drive) gets the next key by its sync, until it no longer syncs. Removing a device for questions also needs it out of the vault's sync.
+- **The vault is the trust root.** Any device that holds the vault holds the question key and can write `trusted_device` rows. Apassy itself writes the row of an iPhone only on the Mac that confirms its link, and the row of a Mac only after that Mac's owner check (section 5.2), but a holder of the vault passphrase can write rows directly: the same class of risk as holding the vault. A device removed from the questions but still holding a copy of the vault (for example through iCloud Drive) gets the next key by its sync, until it no longer syncs; its removed keys never register again, and the relay revokes it when the removing Mac can (`DELETE /v1/devices/{id}`), so it gets no question and no push. The relay has no call to clear the push token of another device; a token of a revoked device stays unused. Removing a device for good also needs it out of the vault's sync (remove the vault from it, or from iCloud Drive).
 - **A Mac's `sign_key` is not biometric.** It is in the vault (local table) and usable while the vault is unlocked. The local Touch ID before a Mac signs an approving answer is enforced by the answering Mac's app, not by the key: malware on another Mac with the vault unlocked can sign an approval. An iPhone's `answer_key` needs Face ID in the Secure Enclave.
 - **Metadata.** The relay and its operator see which devices of which team post and answer, when, how large the envelopes are, and the routing bit. Cloudflare sees the same. Apple sees which devices get a push and when.
 - **Roles from the relay.** For `to: "approvers"`, the role that counts is the relay's stamp (section 12.3 step 6). A relay that lies can make a member's valid answer count as an approver's. With V3 the roles should come from the shared vault (section 19).
@@ -550,7 +567,7 @@ The relay side of the push (`POST /internal/push` on the Worker with the edge se
 
 1. **Approvers' keys and trust (V3).** Devices of other members need the question key (proposed: `device_wrapped_key`, section 5.4) and their `trusted_device` rows from the shared vault, and roles that do not come from the relay. Which P-256 key of the device takes the ECDH wrap (the relay device key is a signing key; the Secure Enclave separates signing and key agreement)?
 2. **An approving answer for a production team item by the member.** This contract counts `approve_once` on a `to: "approvers"` question only from an owner or a manager (section 12.3 step 6). ADR 0025 §3e names only the production allowance.
-3. **More than one questions team.** `trusted_device.relay_device_id` holds one id. A vault whose devices are in two teams (sync and notifications) needs one id per team, or the rule "the questions team is the sync team when there is one".
+3. **More than one questions team.** Resolved by integrator decision 3: `trusted_device.relay_devices` holds one device number per team, and a vault has one questions team (section 12.6). The original question: A vault whose devices are in two teams (sync and notifications) needs one id per team, or the rule "the questions team is the sync team when there is one".
 4. **The notification after a settle.** The pushed notification stays in Notification Center after another device answers. A background push to remove it would need `apns-push-type: background` and a second request; not in v1.
 5. **Member lane capacity on the relay.** Question long polls, like sync long polls, run in the member lane of 32 requests of the whole relay (SPEC section 9). See SPEC section 25.
 6. **The device uuid form.** Section 4 fixes a 36-character UUID for `trusted_device.uuid`; stream F19 must use it.

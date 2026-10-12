@@ -55,6 +55,7 @@ use crate::desktop::companion::QrModules;
 use crate::desktop::owner_check::{OwnerRequest, Task, TaskPoll};
 use crate::desktop::owner_store::Ephemeral;
 use crate::desktop::{DesktopApp, Place};
+use crate::questions::device_link::{shown_link_name, split_link_device_name};
 use crate::questions::{QuestionsClient, TeamDevice};
 use crate::sync::{
     DEFAULT_RELAY_URL, DeviceKey, DeviceView, JoinedDevice, KeySource, LinkCode, PendingJoin,
@@ -209,7 +210,7 @@ enum Reply {
     Link(Result<LinkCode, SyncError>),
     Links(Result<Vec<PendingLink>, SyncError>),
     Confirmed {
-        link_id: u64,
+        link: PendingLink,
         result: Result<DeviceView, SyncError>,
     },
     Refused {
@@ -910,7 +911,7 @@ impl DesktopApp {
                     }
                 }
             }
-            Reply::Confirmed { link_id, result } => self.relay_confirmed(id, link_id, result),
+            Reply::Confirmed { link, result } => self.relay_confirmed(id, &link, result),
             Reply::Refused {
                 link_id,
                 name,
@@ -2059,18 +2060,24 @@ impl DesktopApp {
                 return;
             }
         }
-        self.relay_spawn(id, Job::Confirm, move || Reply::Confirmed {
-            link_id,
-            result: match (relay, via) {
+        self.relay_spawn(id, Job::Confirm, move || {
+            let result = match (relay, via) {
                 (Some(relay), _) => relay.confirm_link(KeySource::Memory, &link),
                 (None, Some(client)) => client.confirm_link(&link).map(team_device_view),
                 (None, None) => Err(SyncError::NotEnabled),
-            },
+            };
+            Reply::Confirmed { link, result }
         });
     }
 
     /// The answer of a confirmation.
-    fn relay_confirmed(&mut self, id: &str, link_id: u64, result: Result<DeviceView, SyncError>) {
+    fn relay_confirmed(
+        &mut self,
+        id: &str,
+        link: &PendingLink,
+        result: Result<DeviceView, SyncError>,
+    ) {
+        let link_id = link.id;
         let forget_link = |app: &mut Self| {
             if let Some(add) = app.sync.relay.add.as_mut().filter(|add| add.id == id) {
                 add.links.retain(|link| link.id != link_id);
@@ -2084,13 +2091,23 @@ impl DesktopApp {
                     .add
                     .as_ref()
                     .is_some_and(|add| add.id == id && add.via.is_some());
-                let text = if questions {
-                    format!(
-                        "Added. {} gets the questions of this vault now.",
-                        device.name
-                    )
-                } else {
-                    format!("Added. {} receives the vault now.", device.name)
+                let name = shown_link_name(&device.name);
+                // The owner check of this confirmation covers the keys of the link: the
+                // row of an iPhone is written here, from them (relay-questions-v1
+                // section 5.2). A Mac writes its own row after its own owner check.
+                let iphone = self.relay_register_linked(id, link, device.id);
+                let text = match iphone {
+                    Some(Err(error)) => format!(
+                        "Added {name} to the relay, but the vault did not keep its keys: {}",
+                        call_error(error)
+                    ),
+                    Some(Ok(())) => format!(
+                        "Added. {name} gets the questions of this vault and answers with Face ID once this vault syncs to it."
+                    ),
+                    None if questions => {
+                        format!("Added. {name} gets the questions of this vault now.")
+                    }
+                    None => format!("Added. {name} receives the vault now."),
                 };
                 forget_link(self);
                 if let Some(add) = self.sync.relay.add.as_mut().filter(|add| add.id == id) {
@@ -2109,6 +2126,46 @@ impl DesktopApp {
         }
     }
 
+    /// The row of a device that this Mac confirmed: an iPhone whose link carries its
+    /// answer key, in the questions team (the team of "Add an iPhone or a Mac…", or the
+    /// sync team). `None` for a link without an answer key (a Mac) or a vault that is not
+    /// open here.
+    fn relay_register_linked(
+        &mut self,
+        id: &str,
+        link: &PendingLink,
+        device_id: u64,
+    ) -> Option<Result<(), SyncError>> {
+        split_link_device_name(&link.device_name).1?;
+        let via_team = self
+            .sync
+            .relay
+            .add
+            .as_ref()
+            .filter(|add| add.id == id)
+            .and_then(|add| add.via.as_ref())
+            .map(|client| client.team_id().to_owned());
+        if !self.relay_open(id) {
+            return Some(Err(SyncError::Vault(VaultErrorKind::Locked)));
+        }
+        let written = self.owner_ui.session.with_vault(|vault| {
+            let team = match via_team {
+                Some(team) => team,
+                None => vault.relay_device()?.ok_or(SyncError::NotEnabled)?.team_id,
+            };
+            crate::relay::membership::register_linked_device(
+                vault,
+                &team,
+                device_id,
+                &link.device_name,
+                &link.public_key,
+            )?;
+            Ok(())
+        });
+        self.wake_questions();
+        Some(written.unwrap_or(Err(SyncError::Vault(VaultErrorKind::Locked))))
+    }
+
     /// "Refuse" for the Mac of `link_id`.
     fn relay_refuse_link(&mut self, link_id: u64) {
         let Some(add) = self.sync.relay.add.as_ref() else {
@@ -2119,7 +2176,7 @@ impl DesktopApp {
             .links
             .iter()
             .find(|link| link.id == link_id)
-            .map(|link| link.device_name.clone())
+            .map(|link| shown_link_name(&link.device_name))
             .unwrap_or_default();
         if let Some(client) = add.via.clone() {
             self.relay_spawn(&id, Job::Refuse, move || Reply::Refused {
@@ -2159,6 +2216,11 @@ impl DesktopApp {
     /// needs no owner check: it only takes authority away (contract section 9).
     fn relay_remove_device(&mut self, id: &str, device_id: u64, name: &str) {
         let name = name.to_owned();
+        // The device leaves the questions too, whatever the relay answers: its trusted
+        // device of the sync team is removed, and the vault gets a new question key.
+        if self.relay_open(id) && self.questions_forget_relay_device(device_id).is_some() {
+            self.wake_questions();
+        }
         match self.relay_ready(id) {
             Ok(relay) => self.relay_spawn(id, Job::Remove, move || Reply::Removed {
                 name,
@@ -2751,7 +2813,7 @@ impl DesktopApp {
 // ---- Drawing. ----
 
 /// The safety words in a large font, with the sentence of the screen.
-fn safety_lines(ui: &mut egui::Ui, before: &str, words: &str, after: &str) {
+pub(super) fn safety_lines(ui: &mut egui::Ui, before: &str, words: &str, after: &str) {
     kit::paragraph(ui, before, Font::Body, kit::LABEL);
     ui.add_space(4.0);
     ui.label(kit::text(words, Font::Title).color(kit::LABEL));
@@ -2808,7 +2870,7 @@ fn progress(app: &DesktopApp, ui: &mut egui::Ui, id: &str, job: Job) -> bool {
 
 /// The relay address, the link, and the name of this Mac, for a Mac that joins. Returns
 /// true when the owner pressed Return in the link field.
-fn link_fields(app: &mut DesktopApp, s: &mut kit::Section<'_>, focus: bool) -> bool {
+pub(super) fn link_fields(app: &mut DesktopApp, s: &mut kit::Section<'_>, focus: bool) -> bool {
     let link = s.field("Link", |ui| {
         kit::mono_input(
             ui,
@@ -3074,8 +3136,8 @@ pub(super) fn add_mac_sheet(
     let link = link.filter(|_| added.is_none() && !removed);
     let (title, intro, asks) = if iphone {
         (
-            format!("Add an iPhone to the questions of “{}”", entry.name),
-            "On the iPhone, open Apassy, select Questions, and scan this code. The iPhone gets the questions of your agents through the relay and answers them with Face ID. It gets no vault and no secret value. The link works once, for 10 minutes. It gives nothing until you confirm the iPhone here.",
+            format!("Add a device to the questions of “{}”", entry.name),
+            "On the iPhone, open Apassy, select Questions, and scan this code: it answers with Face ID. On another Mac with this vault, turn on “Send questions through the relay” in Settings > Devices and paste the link: it answers after Touch ID. The device gets no vault and no secret value through the relay. The link works once, for 10 minutes. It gives nothing until you confirm the device here.",
             "asks for the questions of",
         )
     } else {
@@ -3150,11 +3212,17 @@ pub(super) fn add_mac_sheet(
             ui.add_space(8.0);
             match &pending.safety {
                 Some(words) => {
+                    let (shown, answer_key) = split_link_device_name(&pending.device_name);
+                    let kind = if answer_key.is_some() {
+                        " (an iPhone that answers with Face ID)"
+                    } else {
+                        ""
+                    };
                     safety_lines(
                         ui,
                         &format!(
-                            "“{}” {asks} “{}”. Both devices show:",
-                            pending.device_name, entry.name
+                            "“{shown}”{kind} {asks} “{}”. Both devices show:",
+                            entry.name
                         ),
                         words,
                         "Confirm only if the other device shows the same words.",
@@ -3175,7 +3243,7 @@ pub(super) fn add_mac_sheet(
                         ui,
                         format!(
                             "“{}” asks to join with an older link. Refuse it, and make a new link.",
-                            pending.device_name
+                            shown_link_name(&pending.device_name)
                         ),
                         Font::Body,
                         kit::LABEL,
@@ -3258,7 +3326,8 @@ pub(super) fn devices_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &V
                             ui.horizontal_wrapped(|ui| {
                                 ui.add(
                                     Label::new(
-                                        kit::text(&device.name, Font::Body).color(kit::LABEL),
+                                        kit::text(shown_link_name(&device.name), Font::Body)
+                                            .color(kit::LABEL),
                                     )
                                     .wrap(),
                                 );
@@ -3283,7 +3352,7 @@ pub(super) fn devices_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &V
                                     .inner
                                     .clicked()
                             {
-                                ask = Some((device.id, device.name.clone()));
+                                ask = Some((device.id, shown_link_name(&device.name)));
                             }
                         });
                     }
@@ -3317,7 +3386,7 @@ pub(super) fn devices_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &V
                 ui,
                 &format!("Remove “{name}” from the relay?"),
                 Some(
-                    "It keeps its vault but stops syncing. To add it again you need a new link and the owner check.",
+                    "It keeps its vault but stops syncing, and it can no longer answer the questions of this vault: Apassy makes a new question key. To add it again you need a new link and the owner check.",
                 ),
             );
             kit::sheet_buttons(

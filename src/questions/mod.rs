@@ -14,6 +14,8 @@
 //! - [`client`]: the relay endpoints of the contract (section 10), and the device links
 //!   of a notifications-only team ("Add an iPhone…").
 //! - [`answer`]: the answering device (section 13).
+//! - [`device_link`]: the answer key of an iPhone in its device link, for the row that
+//!   the confirming Mac writes.
 //! - [`worker`]: the asker, a waiter of its own next to the sync waiter (section 12), and
 //!   the lister of the questions of the other devices (section 13).
 //!
@@ -22,6 +24,7 @@
 
 pub mod answer;
 pub mod client;
+pub mod device_link;
 pub mod envelope;
 pub mod worker;
 

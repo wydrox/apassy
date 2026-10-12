@@ -42,6 +42,8 @@ public struct VaultError: Error, Sendable, Equatable, LocalizedError {
         case noQuestions = "no_questions"
         /// This iPhone has no `trusted_device` row or answer key in the vault yet, or its key changed.
         case notRegistered = "not_registered"
+        /// The vault row of this iPhone has another answer key (for example after a Face ID change).
+        case answerKeyChanged = "answer_key_changed"
         /// The card did not pass a check; the message says what to do.
         case unreadable
         case alreadyAnswered = "already_answered"
@@ -98,7 +100,8 @@ public protocol VaultService: Sendable {
 
     // 5.2 Joining a vault
     /// `deviceName`: the name that the Mac shows for this iPhone.
-    func joinStart(link: String, deviceName: String) async throws -> JoinInfo
+    /// `answerKey`: the Secure Enclave answer key of this iPhone (X9.63) for the Mac that confirms.
+    func joinStart(link: String, deviceName: String, answerKey: Data?) async throws -> JoinInfo
     func joinPoll() async throws -> JoinInfo
     func joinCancel() async throws
     func joinFinish(passphrase: String) async throws -> VaultEntry
@@ -160,12 +163,14 @@ public protocol VaultService: Sendable {
     /// Seal and post an answer. `signature` (DER, by the answer key) for an answer that needs Face
     /// ID; nil for the others, which the core signs with the relay key of this iPhone.
     func questionAnswer(qid: String, answer: RemoteAnswer, time: Int64, signature: Data?) async throws -> SentAnswer
-    /// Register this iPhone in the vault with its Secure Enclave answer key (X9.63).
+    /// Check that the vault row of this iPhone has this Secure Enclave answer key (X9.63). It writes
+    /// nothing: the Mac that confirmed the join writes the row.
     func answerKeyRegister(publicKey: Data) async throws -> AnswerKeyRegistration
     func pushTokenSet(token: Data, environment: PushEnvironment) async throws
     func pushTokenClear() async throws
     /// Join the notifications-only team of the selected vault with the device link of the Mac.
-    func joinAttach(link: String, deviceName: String) async throws -> AttachInfo
+    /// `answerKey`: the answer key of this iPhone (X9.63), which goes to the Mac that confirms.
+    func joinAttach(link: String, deviceName: String, answerKey: Data) async throws -> AttachInfo
     func joinAttachPoll() async throws -> AttachInfo
     func joinAttachCancel() async throws
 }

@@ -11,16 +11,28 @@
 //! - a vault that syncs another way (iCloud Drive) can ask through a notifications-only
 //!   team: an ordinary team that never gets a snapshot ([`create_questions_team`]).
 //!
-//! Turning the questions on also makes the question key of the vault when it has none
-//! (`Vault::ensure_question_key`) and registers this Mac as a trusted device with the
-//! public key of the membership and its device number in the team. The row syncs to the
-//! other devices, which then accept its answers. Turning them off takes the purpose away
-//! and never touches relay sync ([`disable_questions`]).
+//! - a second Mac of a vault that already has a questions team joins that team with a
+//!   device link from a Mac in it ([`join_questions_team`]); a vault never gets a second
+//!   questions team ([`existing_questions_team`]).
+//!
+//! Turning the questions on (after the owner check for
+//! `OwnerAction::EnableRelayQuestions`) also makes the question key of the vault when it
+//! has none (`Vault::ensure_question_key`) and registers this Mac as a trusted device with
+//! the public key of the membership and its device number in the team. Only these calls
+//! write the row of a Mac; the questions waiter never does. The row of an iPhone is
+//! written by the Mac that confirms its link ([`register_linked_device`]), from the keys
+//! of the link. The rows sync to the other devices, which then accept their answers.
+//! Turning them off takes the purpose away and never touches relay sync
+//! ([`disable_questions`]).
+//!
+//! A device that the owner removed (its row has `deleted_at`) never registers its keys
+//! again (`Vault::trusted_key_removed`): this Mac then shows "removed" until the owner
+//! turns the questions on again with a new key.
 //!
 //! The creation of a team (`POST /v1/teams`, contract relay-sync-v1 section 6) is shared
 //! with relay sync ([`create_team_on_relay`]).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -95,8 +107,17 @@ pub enum QuestionsAvailability {
     On { team_id: String },
     /// Off; the relay sync team of the vault can carry them, with no relay call.
     CanTurnOn { team_id: String },
-    /// Off; the vault is not on the relay. A notifications-only team needs a team code.
+    /// Off; the vault is not on the relay and has no questions team. A
+    /// notifications-only team needs a team code.
     NeedsTeam,
+    /// Off; the vault has a questions team that this Mac is not in: it joins with a
+    /// device link from a Mac in it ([`join_questions_team`]), never with a new team.
+    JoinTeam { team_id: String },
+    /// The owner removed this Mac from the questions: the key of its membership is the
+    /// key of a removed device. `sync`: the key is the relay sync key of the vault, so
+    /// only a new join of relay sync gives a new key; else turning the questions on
+    /// drops the old key and joins the team again.
+    Removed { team_id: String, sync: bool },
 }
 
 /// The membership with the purpose `questions`, or `None`. At most one is used: the
@@ -112,16 +133,63 @@ pub fn questions_membership(vault: &Vault) -> VaultResult<Option<RelayMembership
 /// only a membership with the purpose `questions` turns it on.
 pub fn questions_availability(vault: &Vault) -> VaultResult<QuestionsAvailability> {
     if let Some(membership) = questions_membership(vault)? {
+        if vault.trusted_key_removed(&membership.public_key)? {
+            return Ok(QuestionsAvailability::Removed {
+                sync: membership.purposes.contains(&MembershipPurpose::Sync),
+                team_id: membership.team_id,
+            });
+        }
         return Ok(QuestionsAvailability::On {
             team_id: membership.team_id,
         });
     }
-    Ok(match vault.relay_device()? {
-        Some(device) => QuestionsAvailability::CanTurnOn {
+    if let Some(device) = vault.relay_device()? {
+        if vault.trusted_key_removed(&device.public_key)? {
+            return Ok(QuestionsAvailability::Removed {
+                team_id: device.team_id,
+                sync: true,
+            });
+        }
+        return Ok(QuestionsAvailability::CanTurnOn {
             team_id: device.team_id,
-        },
+        });
+    }
+    Ok(match existing_questions_team(vault)? {
+        Some(team_id) => QuestionsAvailability::JoinTeam { team_id },
         None => QuestionsAvailability::NeedsTeam,
     })
+}
+
+/// The questions team of the vault that this Mac has no membership in: the team that the
+/// vault names (`Vault::questions_team`), else the team in which the most live trusted
+/// devices have a device number. `None`: the vault has no questions team yet, or this
+/// Mac is in it.
+pub fn existing_questions_team(vault: &Vault) -> VaultResult<Option<String>> {
+    let mine: BTreeSet<String> = vault
+        .relay_memberships()?
+        .into_iter()
+        .map(|membership| membership.team_id)
+        .collect();
+    if let Some(team) = vault.questions_team()? {
+        return Ok((!mine.contains(&team)).then_some(team));
+    }
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for device in vault.trusted_devices()? {
+        for team in device.relay_devices.keys() {
+            *counts.entry(team.clone()).or_default() += 1;
+        }
+    }
+    Ok(counts
+        .into_iter()
+        .filter(|(team, _)| !mine.contains(team))
+        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
+        .map(|(team, _)| team))
+}
+
+/// Whether the key of this Mac in `membership` is the key of a removed device: the owner
+/// removed this Mac from the questions.
+pub fn this_device_removed(vault: &Vault, membership: &RelayMembership) -> VaultResult<bool> {
+    vault.trusted_key_removed(&membership.public_key)
 }
 
 /// Turn the questions on through the relay sync team of the vault: the sync membership
@@ -134,6 +202,9 @@ pub fn enable_questions(vault: &mut Vault, device_name: &str) -> Result<TrustedD
         return Ok(register_this_device(vault, &membership, device_name)?);
     }
     let sync = vault.relay_device()?.ok_or(SyncError::NotEnabled)?;
+    if vault.trusted_key_removed(&sync.public_key)? {
+        return Err(SyncError::Vault(VaultErrorKind::AlreadyExists));
+    }
     let mut membership = vault
         .relay_membership(&sync.team_id)?
         .ok_or(SyncError::NotEnabled)?;
@@ -159,7 +230,7 @@ pub fn create_questions_team(
     if vault.is_locked() {
         return Err(SyncError::Vault(VaultErrorKind::Locked));
     }
-    if questions_membership(vault)?.is_some() {
+    if questions_membership(vault)?.is_some() || existing_questions_team(vault)?.is_some() {
         return Err(SyncError::AlreadyEnabled);
     }
     let membership = new_questions_team(relay_url, team_code, vault_name, device_name)?;
@@ -198,9 +269,10 @@ pub fn new_questions_team(
 }
 
 /// The vault part of [`create_questions_team`], with no relay call: keep `membership`
-/// (from [`new_questions_team`]), make the question key when the vault has none, and
-/// register this Mac. `AlreadyEnabled` when the vault got a questions membership in the
-/// meantime: the new team then stays unused on the relay.
+/// (from [`new_questions_team`]), name its team as the questions team of the vault, make
+/// the question key when the vault has none, and register this Mac. `AlreadyEnabled` when
+/// the vault got a questions membership or a questions team in the meantime: the new team
+/// then stays unused on the relay, and the vault keeps one team.
 pub fn adopt_questions_team(
     vault: &mut Vault,
     membership: &RelayMembership,
@@ -209,12 +281,101 @@ pub fn adopt_questions_team(
     if vault.is_locked() {
         return Err(SyncError::Vault(VaultErrorKind::Locked));
     }
-    if questions_membership(vault)?.is_some() {
+    if questions_membership(vault)?.is_some()
+        || existing_questions_team(vault)?.is_some_and(|team| team != membership.team_id)
+    {
         return Err(SyncError::AlreadyEnabled);
     }
+    keep_questions_membership(vault, membership, device_name)
+}
+
+/// A Mac joins the questions team of the vault (a second Mac of an iCloud Drive vault):
+/// `membership` is its new key in that team, from a device link that a Mac in the team
+/// confirmed after its owner check. The caller checked the owner on this Mac for
+/// `OwnerAction::EnableRelayQuestions` naming the team. Then as [`adopt_questions_team`].
+/// `AlreadyEnabled`: the vault has a questions membership on this Mac, or names another
+/// questions team.
+pub fn join_questions_team(
+    vault: &mut Vault,
+    membership: &RelayMembership,
+    device_name: &str,
+) -> Result<TrustedDevice, SyncError> {
+    if vault.is_locked() {
+        return Err(SyncError::Vault(VaultErrorKind::Locked));
+    }
+    if questions_membership(vault)?.is_some()
+        || vault
+            .questions_team()?
+            .is_some_and(|team| team != membership.team_id)
+    {
+        return Err(SyncError::AlreadyEnabled);
+    }
+    keep_questions_membership(vault, membership, device_name)
+}
+
+fn keep_questions_membership(
+    vault: &mut Vault,
+    membership: &RelayMembership,
+    device_name: &str,
+) -> Result<TrustedDevice, SyncError> {
+    if vault.trusted_key_removed(&membership.public_key)? {
+        return Err(SyncError::Vault(VaultErrorKind::AlreadyExists));
+    }
     vault.add_relay_membership(membership)?;
-    vault.ensure_question_key()?;
-    Ok(register_this_device(vault, membership, device_name)?)
+    let kept = (|| -> VaultResult<TrustedDevice> {
+        vault.set_questions_team(&membership.team_id)?;
+        vault.ensure_question_key()?;
+        register_this_device(vault, membership, device_name)
+    })();
+    if kept.is_err() {
+        // The vault does not keep half a membership.
+        let _ = vault.remove_relay_membership(&membership.team_id);
+    }
+    Ok(kept?)
+}
+
+/// Write the row of a device that this Mac confirmed through a device link of the team
+/// `team_id` (relay-questions-v1 section 5.2). The caller passed the owner check for
+/// `OwnerAction::ConfirmSyncDevice` of exactly this link. An iPhone sends its answer key
+/// with the link (`crate::questions::device_link`); its row gets a new UUID, the name of
+/// the link, the relay key of the link as `sign_key`, the answer key, and its device
+/// number. A link without an answer key (a Mac) writes nothing: a Mac writes its own row
+/// after its own owner check. `AlreadyExists`: a key of the link is a key of a removed
+/// device.
+pub fn register_linked_device(
+    vault: &mut Vault,
+    team_id: &str,
+    relay_device_id: u64,
+    link_device_name: &str,
+    sign_key: &[u8],
+) -> VaultResult<Option<TrustedDevice>> {
+    let (name, answer_key) =
+        crate::questions::device_link::split_link_device_name(link_device_name);
+    let Some(answer_key) = answer_key else {
+        return Ok(None);
+    };
+    let name = clean_name(&name, "iPhone");
+    // The number is checked first: a removal would make the new keys unusable.
+    if !valid_team_id(team_id) || relay_device_id == 0 {
+        return Err(crate::vault::VaultError::new(VaultErrorKind::InvalidInput));
+    }
+    if vault
+        .trusted_devices()?
+        .iter()
+        .any(|device| device.relay_devices.get(team_id) == Some(&relay_device_id))
+    {
+        return Err(crate::vault::VaultError::new(VaultErrorKind::AlreadyExists));
+    }
+    let uuid = new_device_uuid()?;
+    vault.register_trusted_device(
+        &uuid,
+        &name,
+        TrustedDeviceKind::Iphone,
+        sign_key,
+        Some(&answer_key),
+    )?;
+    vault.set_trusted_device_relay_id(&uuid, team_id, relay_device_id)?;
+    vault.trusted_device(&uuid)
 }
 
 /// Whether the questions membership of the vault is a notifications-only team: it has
@@ -257,7 +418,9 @@ pub fn this_device(
 
 /// Register this Mac as a trusted device for `membership`, or bring its row up to date:
 /// the name, the public key of the membership (`sign_key`), and its device number in the
-/// team. A new row gets a new random UUID.
+/// team. A new row gets a new random UUID. Only the calls that turn the questions on
+/// after the owner check use it. `AlreadyExists`: the owner removed this Mac (its key is
+/// the key of a removed device).
 pub fn register_this_device(
     vault: &mut Vault,
     membership: &RelayMembership,

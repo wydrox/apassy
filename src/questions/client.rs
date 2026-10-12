@@ -56,6 +56,14 @@ impl QuestionsError {
         }
     }
 
+    /// The HTTP status of the relay, when it answered with an error envelope.
+    pub fn status(&self) -> Option<u16> {
+        match self {
+            Self::Relay { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+
     /// The error code of the relay, when it answered with one.
     pub fn code(&self) -> Option<&str> {
         match self {
@@ -456,6 +464,17 @@ impl QuestionsClient {
     /// `GET /v1/devices`: the live devices of the team.
     pub fn devices(&self) -> Result<Vec<TeamDevice>, SyncError> {
         self.device_call("GET", "/v1/devices", None)
+    }
+
+    /// `DELETE /v1/devices/{id}`: revoke a device of the team (relay-sync-v1 section 9),
+    /// after Settings > Devices removed its trusted device. The relay then routes it no
+    /// question and sends it no push: a revoked device is out of every routing set. The
+    /// relay has no call to clear the push token of another device (`DELETE
+    /// /v1/push/token` clears the caller's own); a token of a revoked device stays unused.
+    pub fn remove_device(&self, device_id: u64) -> Result<(), SyncError> {
+        let path = format!("/v1/devices/{device_id}");
+        self.device_call::<serde::de::IgnoredAny>("DELETE", &path, None)
+            .map(|_| ())
     }
 
     /// One device call, with the errors of relay sync.

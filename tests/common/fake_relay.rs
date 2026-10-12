@@ -1183,7 +1183,12 @@ const ANSWER_BYTES: usize = 8_208;
 const SETTLE_BYTES: usize = 1_040;
 /// Open questions of a team (`open_questions`) and answers of a device to a question.
 const OPEN_QUESTIONS: usize = 20;
+/// The open questions of one device and of one member (relay feat/questions 9851d33).
+const OPEN_PER_DEVICE: usize = 10;
+const OPEN_PER_MEMBER: usize = 15;
 const ANSWERS_PER_DEVICE: usize = 3;
+/// The answers of one question, of all devices.
+const ANSWERS_PER_QUESTION: usize = 20;
 
 type Fields = serde_json::Map<String, Value>;
 
@@ -1321,6 +1326,10 @@ fn post_question(
     if card.size > CARD_BYTES {
         return fail(413, "payload_too_large");
     }
+    // Questions to the approvers wait for shared vaults: the relay refuses them.
+    if to == "approvers" {
+        return fail(403, "not_routed");
+    }
     let team = relay.teams.get_mut(team_id).expect("team");
     expire_due(team);
     if team.questions.iter().any(|question| question.qid == qid) {
@@ -1331,7 +1340,13 @@ fn post_question(
         .iter()
         .filter(|question| question.state == "open")
         .count();
-    if open >= OPEN_QUESTIONS {
+    let of_device = team
+        .questions
+        .iter()
+        .filter(|question| question.state == "open" && question.device_id == device_id)
+        .count();
+    // One member (the owner) holds every device of the fake.
+    if open >= OPEN_QUESTIONS || open >= OPEN_PER_MEMBER || of_device >= OPEN_PER_DEVICE {
         return fail(403, "too_many_questions");
     }
     team.question_seq += 1;
@@ -1455,7 +1470,7 @@ fn post_answer(
         .iter()
         .filter(|stored| stored.device_id == device_id)
         .count();
-    if given >= ANSWERS_PER_DEVICE {
+    if given >= ANSWERS_PER_DEVICE || question.answers.len() >= ANSWERS_PER_QUESTION {
         return fail(403, "too_many_answers");
     }
     let at = now();

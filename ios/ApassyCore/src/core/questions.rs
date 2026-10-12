@@ -17,6 +17,14 @@
 //! `join_attach`: the iPhone joins a notifications-only team that a Mac made (plan §A7),
 //! confirmed with the safety words and Touch ID on the Mac, and downloads nothing.
 //!
+//! The iPhone never writes its own `trusted_device` row. It sends its answer key with the
+//! link (in the device name, `apassy::questions::device_link`), and the Mac that confirms
+//! the link writes the row during its owner check. The row reaches the iPhone with the
+//! sync of the vault; until then the iPhone reads questions but cannot answer, and
+//! `answer_key_register` only checks that the row holds this answer key. A removed row
+//! (the owner removed this iPhone on a Mac) is final: the iPhone says so and needs a new
+//! `join_attach` with a new relay key, confirmed on a Mac.
+//!
 //! The relay calls run without the vault mutex. A lock ends them ([`Core::close`]).
 
 mod envelope;
@@ -33,9 +41,7 @@ use apassy::sync::{
     DEFAULT_RELAY_URL, PendingJoin, RelayCallError, RelayMember, SyncError, decode_b64u,
     encode_b64u, verify_signature,
 };
-use apassy::vault::{
-    MembershipPurpose, RelayMembership, TrustedDevice, TrustedDeviceKind, Vault, VaultErrorKind,
-};
+use apassy::vault::{MembershipPurpose, RelayMembership, TrustedDevice, Vault};
 
 use envelope::{CardRefusal, Choice};
 
@@ -115,6 +121,8 @@ struct ListAnswer {
 /// A join of a notifications-only team.
 struct Attaching {
     pending: PendingJoin,
+    /// The team of a removed membership of this iPhone that the new key replaces.
+    replaces: Option<String>,
     vault_id: String,
     team: String,
     words: Vec<String>,
@@ -155,6 +163,26 @@ struct StatusOut {
     answer_key: Option<String>,
     /// Whether the vault holds a question key.
     has_key: bool,
+    /// Whether the vault holds the row of this iPhone (written by the Mac that confirmed
+    /// it). Without it the iPhone cannot answer yet.
+    registered: bool,
+    /// The owner removed this iPhone on a Mac: it needs a new `join_attach`.
+    removed: bool,
+}
+
+impl StatusOut {
+    fn off() -> Self {
+        Self {
+            enabled: false,
+            team_id: None,
+            relay_device_id: None,
+            device_uuid: None,
+            answer_key: None,
+            has_key: false,
+            registered: false,
+            removed: false,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -317,8 +345,30 @@ fn no_questions() -> CoreError {
 fn not_registered() -> CoreError {
     CoreError::new(
         "not_registered",
-        "Turn on answers on this iPhone first: Apassy needs its answer key in the vault.",
+        "This iPhone cannot answer yet: the Mac that confirmed it writes its keys into the vault, and the vault must sync to this iPhone first.",
     )
+}
+
+fn removed() -> CoreError {
+    CoreError::new(
+        "removed",
+        "This device was removed from questions. To answer again, connect it again with a new link from a Mac.",
+    )
+}
+
+fn answer_key_changed() -> CoreError {
+    CoreError::new(
+        "answer_key_changed",
+        "The answer key of this iPhone changed. On a Mac, remove this iPhone in Settings > Devices, then connect it again.",
+    )
+}
+
+/// The `device_name` of a link that carries the answer key `answer_key` (b64u, X9.63):
+/// the confirming Mac writes the row of this iPhone from it.
+pub(super) fn link_name_with_key(name: &str, answer_key: &str) -> CoreResult<String> {
+    decode_b64u(answer_key)
+        .and_then(|key| apassy::questions::device_link::link_device_name(name, &key))
+        .ok_or_else(|| CoreError::invalid("The answer key is not a P-256 public key."))
 }
 
 fn unreadable(message: &'static str) -> CoreError {
@@ -358,23 +408,6 @@ fn call_error(error: RelayCallError) -> CoreError {
             _ => CoreError::internal("The relay refused the request."),
         },
     }
-}
-
-/// A random UUID (version 4), 36 lowercase characters.
-fn new_uuid() -> CoreResult<String> {
-    let mut bytes = [0u8; 16];
-    getrandom::fill(&mut bytes).map_err(|_| CoreError::io())?;
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-    Ok(format!(
-        "{}-{}-{}-{}-{}",
-        &hex[0..8],
-        &hex[8..12],
-        &hex[12..16],
-        &hex[16..20],
-        &hex[20..32]
-    ))
 }
 
 /// The membership that carries the questions of `vault`: the one with the purpose
@@ -418,6 +451,19 @@ struct Keys {
     key: Option<(String, Zeroizing<Vec<u8>>)>,
     devices: Vec<TrustedDevice>,
     own: Option<TrustedDevice>,
+    /// The key of the membership is the key of a removed device.
+    removed: bool,
+}
+
+impl Keys {
+    /// This iPhone's row, or why it cannot answer.
+    fn own_row(&self) -> CoreResult<TrustedDevice> {
+        match &self.own {
+            Some(own) => Ok(own.clone()),
+            None if self.removed => Err(removed()),
+            None => Err(not_registered()),
+        }
+    }
 }
 
 /// A card that passed every check of section 7.3, with its record.
@@ -611,12 +657,24 @@ impl Core {
                     link: Secret,
                     #[serde(default)]
                     device_name: Option<String>,
+                    /// The answer key (b64u, X9.63). It goes with the link: the Mac
+                    /// that confirms writes the row of this iPhone from it.
+                    #[serde(default)]
+                    answer_key: Option<String>,
                 }
-                let Start { link, device_name } = params(request)?;
+                let Start {
+                    link,
+                    device_name,
+                    answer_key,
+                } = params(request)?;
                 let name = device_name
                     .map(|name| name.trim().to_owned())
                     .filter(|name| !name.is_empty())
                     .unwrap_or_else(|| self.device_name.clone());
+                let answer_key = answer_key.ok_or_else(|| {
+                    CoreError::invalid("Connecting this iPhone needs its answer key.")
+                })?;
+                let name = link_name_with_key(&name, &answer_key)?;
                 Ok(ok(&self.attach_start(link.expose(), &name)?))
             }
             "join_attach_poll" => Ok(ok(&self.attach_poll()?)),
@@ -678,6 +736,7 @@ impl Core {
             };
             Ok(Some(Keys {
                 own: own_device(vault, &membership.public_key)?,
+                removed: vault.trusted_key_removed(&membership.public_key)?,
                 devices: vault.trusted_devices()?,
                 key: question_key(vault)?,
                 team_id: membership.team_id,
@@ -753,17 +812,31 @@ impl Core {
     fn questions_list(&self) -> CoreResult<ListOut> {
         let Some(keys) = self.question_keys()? else {
             return Ok(ListOut {
-                status: StatusOut {
-                    enabled: false,
-                    team_id: None,
-                    relay_device_id: None,
-                    device_uuid: None,
-                    answer_key: None,
-                    has_key: false,
-                },
+                status: StatusOut::off(),
                 questions: Vec::new(),
             });
         };
+        let status = StatusOut {
+            enabled: true,
+            team_id: Some(keys.team_id.clone()),
+            relay_device_id: Some(keys.device_id),
+            device_uuid: keys.own.as_ref().map(|own| own.uuid.clone()),
+            answer_key: keys
+                .own
+                .as_ref()
+                .and_then(|own| own.answer_key.as_deref())
+                .map(encode_b64u),
+            has_key: keys.key.is_some(),
+            registered: keys.own.is_some(),
+            removed: keys.own.is_none() && keys.removed,
+        };
+        // A removed iPhone asks the relay nothing: the owner took it out.
+        if status.removed {
+            return Ok(ListOut {
+                status,
+                questions: Vec::new(),
+            });
+        }
         self.questions_fetch(Duration::ZERO)?;
         let records: Vec<Record> = guard(&self.questions).records.values().cloned().collect();
         let at = now();
@@ -803,21 +876,7 @@ impl Core {
             })
             .collect();
         questions.sort_by(|a, b| (b.created_at, &b.qid).cmp(&(a.created_at, &a.qid)));
-        Ok(ListOut {
-            status: StatusOut {
-                enabled: true,
-                team_id: Some(keys.team_id.clone()),
-                relay_device_id: Some(keys.device_id),
-                device_uuid: keys.own.as_ref().map(|own| own.uuid.clone()),
-                answer_key: keys
-                    .own
-                    .as_ref()
-                    .and_then(|own| own.answer_key.as_deref())
-                    .map(encode_b64u),
-                has_key: keys.key.is_some(),
-            },
-            questions,
-        })
+        Ok(ListOut { status, questions })
     }
 
     /// An open question that passed every check of section 7.3, from the records, or
@@ -865,7 +924,7 @@ impl Core {
     /// The answer string of `answer` at `time`, checked against the card.
     fn prepare_answer(&self, answer: &AnswerIn, time: u64) -> CoreResult<(Prepared, Ready)> {
         let keys = self.question_keys()?.ok_or_else(no_questions)?;
-        let own = keys.own.clone().ok_or_else(not_registered)?;
+        let own = keys.own_row()?;
         let Opened { record, card } = self.opened(&answer.qid, &keys)?;
         let choice = Choice::for_card(
             &answer.kind,
@@ -1001,18 +1060,26 @@ impl Core {
         })
     }
 
-    /// Register this iPhone in the vault with its answer key (section 5.2): its own
-    /// `trusted_device` row, kind `iphone`, with the relay key of the questions team as
-    /// `sign_key` and the device number in that team. The row syncs to the Macs.
+    /// Check that the vault holds this iPhone's row with the answer key `public_key`
+    /// (section 5.2). It writes nothing: the Mac that confirmed the link of this iPhone
+    /// wrote the row from the keys of the link. `not_registered`: the row has not synced
+    /// here yet. `removed`: the owner removed this iPhone. `answer_key_changed`: the row
+    /// holds another answer key (a new Face ID enrollment made a new one, or the relay
+    /// changed the link): the owner removes this iPhone and connects it again.
     fn answer_key_register(&self, public_key: &str) -> CoreResult<Registered> {
         self.require_app()?;
         let answer_key = decode_b64u(public_key)
             .filter(|key| key.len() == 65 && key[0] == 0x04)
             .ok_or_else(|| CoreError::invalid("The answer key is not a P-256 public key."))?;
-        let name = self.device_name.clone();
-        self.with_vault_mut(|vault| {
-            let membership = questions_membership(vault)?.ok_or_else(no_questions)?;
-            register_own(vault, &membership, &name, Some(&answer_key))
+        let keys = self.question_keys()?.ok_or_else(no_questions)?;
+        let own = keys.own_row()?;
+        if own.answer_key.as_deref() != Some(answer_key.as_slice()) {
+            return Err(answer_key_changed());
+        }
+        Ok(Registered {
+            device_uuid: own.uuid,
+            team_id: keys.team_id,
+            relay_device_id: keys.device_id,
         })
     }
 
@@ -1050,12 +1117,27 @@ impl Core {
     fn attach_start(&self, link: &str, device_name: &str) -> CoreResult<AttachOut> {
         self.require_app()?;
         let entry = self.selected()?;
-        let has_team = self.with_vault(|vault| Ok(questions_membership(vault)?.is_some()))?;
-        if has_team {
-            return Err(CoreError::invalid(
-                "This vault gets questions through the relay already.",
-            ));
-        }
+        // A vault with a questions team on this iPhone joins again only after the owner
+        // removed this iPhone: the new key replaces the removed one.
+        let replaces = self.with_vault(|vault| {
+            let Some(membership) = questions_membership(vault)? else {
+                return Ok(None);
+            };
+            let removed = vault.trusted_key_removed(&membership.public_key)?;
+            let questions_only = membership
+                .purposes
+                .iter()
+                .all(|purpose| *purpose == MembershipPurpose::Questions);
+            match (removed, questions_only) {
+                (true, true) => Ok(Some(membership.team_id)),
+                (true, false) => Err(CoreError::invalid(
+                    "This iPhone was removed, and it syncs the vault through the relay: to answer again, turn sync through the relay off on this iPhone and join the vault again from a Mac.",
+                )),
+                (false, _) => Err(CoreError::invalid(
+                    "This vault gets questions through the relay already.",
+                )),
+            }
+        })?;
         let previous = guard(&self.questions).attach.take();
         if let Some(previous) = previous {
             let _ = previous.pending.cancel();
@@ -1070,6 +1152,7 @@ impl Core {
             },
         )?;
         let attaching = Attaching {
+            replaces,
             vault_id: entry.id,
             team: pending.team.clone(),
             words: pending
@@ -1125,8 +1208,13 @@ impl Core {
             let device_id = member
                 .device_id()
                 .ok_or_else(|| CoreError::internal("The relay gave no device number."))?;
-            let name = self.device_name.clone();
+            let replaces = attaching.replaces.clone();
             self.with_vault_mut(|vault| {
+                // The removed key goes; the row of this iPhone comes from the Mac that
+                // confirmed it, through the sync of the vault.
+                if let Some(team) = &replaces {
+                    vault.remove_relay_membership(team)?;
+                }
                 let membership = RelayMembership {
                     team_id: member.team_id().to_owned(),
                     relay_url: member.relay_url().to_owned(),
@@ -1137,7 +1225,7 @@ impl Core {
                     created_at: 0,
                 };
                 vault.add_relay_membership(&membership)?;
-                register_own(vault, &membership, &name, None).map(|_| ())
+                Ok(())
             })
         })();
         if let Err(error) = stored {
@@ -1168,64 +1256,9 @@ struct Ready {
     choice: Choice,
 }
 
-/// Register or update this iPhone's own `trusted_device` row for `membership`, and its
-/// device number in the team. A row of this key keeps its UUID; a new one gets a new
-/// UUID. An earlier answer key stays when `answer_key` is `None`.
-fn register_own(
-    vault: &mut Vault,
-    membership: &RelayMembership,
-    name: &str,
-    answer_key: Option<&[u8]>,
-) -> CoreResult<Registered> {
-    let existing = own_device(vault, &membership.public_key)?;
-    let uuid = match &existing {
-        Some(device) => device.uuid.clone(),
-        None => new_uuid()?,
-    };
-    let answer_key = answer_key.or_else(|| {
-        existing
-            .as_ref()
-            .and_then(|device| device.answer_key.as_deref())
-    });
-    vault
-        .register_trusted_device(
-            &uuid,
-            name,
-            TrustedDeviceKind::Iphone,
-            &membership.public_key,
-            answer_key,
-        )
-        .map_err(|error| match error.kind() {
-            VaultErrorKind::InvalidInput => {
-                CoreError::invalid("The name of this iPhone or its key cannot be saved.")
-            }
-            _ => error.into(),
-        })?;
-    vault
-        .set_trusted_device_relay_id(&uuid, &membership.team_id, membership.device_id)
-        .map_err(|error| match error.kind() {
-            VaultErrorKind::AlreadyExists => {
-                CoreError::invalid("Another device of this vault has the same number on the relay.")
-            }
-            _ => error.into(),
-        })?;
-    Ok(Registered {
-        device_uuid: uuid,
-        team_id: membership.team_id.clone(),
-        relay_device_id: membership.device_id,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn new_uuids_have_the_device_form() {
-        let one = new_uuid().unwrap();
-        assert!(envelope::valid_device_uuid(&one), "{one}");
-        assert_ne!(one, new_uuid().unwrap());
-    }
 
     #[test]
     fn relay_refusals_have_their_codes() {

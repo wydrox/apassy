@@ -205,8 +205,12 @@ pub(super) const RELAY_QUESTIONS_OFF: &str =
     "Off. Turn it on to answer on your other Macs and iPhones away from this network.";
 pub(super) const RELAY_QUESTIONS_NEW_TEAM: &str = "Off. This vault does not sync through the relay: turning it on makes a team on the relay for its questions only, with a team code from the operator.";
 pub(super) const RELAY_QUESTIONS_LOCKED: &str = "Unlock the vault to change it.";
-/// The button that links an iPhone to the questions team.
-pub(super) const ADD_IPHONE: &str = "Add an iPhone…";
+pub(super) const RELAY_QUESTIONS_JOIN: &str = "Off. This vault already has a questions team on the relay: turning it on joins that team with a link from a Mac that has it on.";
+pub(super) const RELAY_QUESTIONS_REMOVED: &str = "Off. This Mac was removed from the questions of this vault. Turning it on again needs a new key: a link from a Mac that has it on, and your confirmation there.";
+/// The button that removes a device from the questions, after its confirmation.
+pub(super) const REMOVE_DEVICE: &str = "Remove…";
+/// The button that links an iPhone or another Mac to the questions team.
+pub(super) const ADD_IPHONE: &str = "Add an iPhone or a Mac…";
 
 /// What the relay row shows: the availability of the open, unlocked vault, or `None`.
 fn relay_questions_state(app: &DesktopApp) -> Option<QuestionsAvailability> {
@@ -253,8 +257,18 @@ fn devices_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     } else {
         Vec::new()
     };
+    // The problem of the questions waiter: a relay without the questions, or this Mac
+    // removed from them.
+    let relay_problem = app
+        .owner
+        .questions
+        .as_ref()
+        .map(|questions| questions.view())
+        .filter(|view| view.unsupported)
+        .and_then(|view| view.problem);
     let mut switch_relay = None;
     let mut add_relay_iphone = false;
+    let mut remove_device = None;
     kit::section(
         ui,
         Some("Questions go to every device"),
@@ -294,6 +308,13 @@ fn devices_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 Some(QuestionsAvailability::On { .. }) => (true, true, RELAY_QUESTIONS_ON),
                 Some(QuestionsAvailability::CanTurnOn { .. }) => (false, true, RELAY_QUESTIONS_OFF),
                 Some(QuestionsAvailability::NeedsTeam) => (false, true, RELAY_QUESTIONS_NEW_TEAM),
+                Some(QuestionsAvailability::JoinTeam { .. }) => (false, true, RELAY_QUESTIONS_JOIN),
+                Some(QuestionsAvailability::Removed { sync: false, .. }) => {
+                    (false, true, RELAY_QUESTIONS_REMOVED)
+                }
+                Some(QuestionsAvailability::Removed { sync: true, .. }) => {
+                    (false, false, super::sync::questions::REMOVED_SYNC)
+                }
                 None => (false, false, RELAY_QUESTIONS_LOCKED),
             };
             let was = on;
@@ -319,12 +340,32 @@ fn devices_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             if on != was {
                 switch_relay = Some(on);
             }
-            // The devices that get the questions through the relay, and a new iPhone.
+            // A relay that predates the questions, and other problems of the relay.
+            if let Some(problem) = &relay_problem {
+                s.row(|ui| kit::tone_note(ui, problem, Tone::Critical));
+            }
+            // The devices that get the questions through the relay, "Remove…" for each
+            // other device, and a new device.
             for device in &relay_devices {
-                s.labeled(
-                    &device.name,
-                    kit::text(&device.words, Font::Body).color(kit::SECONDARY),
-                );
+                s.row(|ui| {
+                    egui::Sides::new().shrink_left().truncate().show(
+                        ui,
+                        |ui| {
+                            ui.vertical(|ui| {
+                                ui.label(kit::text(&device.name, Font::Body).color(kit::LABEL));
+                                kit::note(ui, &device.words);
+                            });
+                        },
+                        |ui| {
+                            if device.removable
+                                && kit::small_button(ui, REMOVE_DEVICE, Style::Destructive)
+                                    .clicked()
+                            {
+                                remove_device = Some(device.uuid.clone());
+                            }
+                        },
+                    );
+                });
             }
             if was {
                 s.row(|ui| {
@@ -368,7 +409,9 @@ fn devices_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     if let Some(on) = switch_relay {
         set_relay_questions(app, on, Some(&ctx));
     }
-    if add_relay_iphone {
+    if let Some(uuid) = remove_device {
+        app.questions_ask_remove(&uuid, Some(&ctx));
+    } else if add_relay_iphone {
         app.questions_add_iphone(Some(&ctx));
     } else if let Some(id) = list {
         app.sync_open_sheet(super::sync::SyncSheet::Devices { id }, Some(&ctx));

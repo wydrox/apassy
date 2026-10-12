@@ -90,6 +90,18 @@ import Testing
         #expect(Base64URL.decode("a+b/") == nil)
     }
 
+    @Test func theStatusReadsRegisteredAndRemovedAndDefaultsToFalse() throws {
+        let old = try JSONDecoder().decode(
+            QuestionsStatus.self, from: Data(#"{"enabled":true,"has_key":true}"#.utf8))
+        #expect(!old.registered && !old.removed)
+        let gone = try JSONDecoder().decode(
+            QuestionsStatus.self,
+            from: Data(#"{"enabled":true,"has_key":true,"registered":true,"removed":true}"#.utf8))
+        #expect(gone.registered && gone.removed)
+        let again = try JSONDecoder().decode(QuestionsStatus.self, from: JSONEncoder().encode(gone))
+        #expect(again == gone)
+    }
+
     @Test func thePreviewServiceTakesAnAnswerOnlyWithItsSignature() async throws {
         let service = PreviewVaultService()
         #expect(try await service.questionsList() == .off)

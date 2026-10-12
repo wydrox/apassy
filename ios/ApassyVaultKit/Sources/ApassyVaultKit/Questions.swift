@@ -29,10 +29,14 @@ public struct QuestionsStatus: Codable, Sendable, Equatable {
     public var answerKey: Data?
     /// Whether the vault holds a question key. Without it no card opens: the vault needs a sync.
     public var hasKey: Bool
+    /// Whether the row of this iPhone is in the vault (the Mac that confirmed it wrote the row).
+    public var registered: Bool
+    /// Whether the owner removed this iPhone on a Mac. Then the list has no questions.
+    public var removed: Bool
 
     public init(
         enabled: Bool, teamID: String? = nil, relayDeviceID: UInt64? = nil, deviceUUID: String? = nil,
-        answerKey: Data? = nil, hasKey: Bool = false
+        answerKey: Data? = nil, hasKey: Bool = false, registered: Bool = false, removed: Bool = false
     ) {
         self.enabled = enabled
         self.teamID = teamID
@@ -40,6 +44,8 @@ public struct QuestionsStatus: Codable, Sendable, Equatable {
         self.deviceUUID = deviceUUID
         self.answerKey = answerKey
         self.hasKey = hasKey
+        self.registered = registered
+        self.removed = removed
     }
 
     public static let off = QuestionsStatus(enabled: false)
@@ -51,6 +57,8 @@ public struct QuestionsStatus: Codable, Sendable, Equatable {
         case deviceUUID = "device_uuid"
         case answerKey = "answer_key"
         case hasKey = "has_key"
+        case registered
+        case removed
     }
 
     public init(from decoder: any Decoder) throws {
@@ -61,6 +69,8 @@ public struct QuestionsStatus: Codable, Sendable, Equatable {
         deviceUUID = try container.decodeIfPresent(String.self, forKey: .deviceUUID)
         answerKey = try container.decodeIfPresent(String.self, forKey: .answerKey).flatMap(Base64URL.decode)
         hasKey = try container.decode(Bool.self, forKey: .hasKey)
+        registered = try container.decodeIfPresent(Bool.self, forKey: .registered) ?? false
+        removed = try container.decodeIfPresent(Bool.self, forKey: .removed) ?? false
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -71,6 +81,8 @@ public struct QuestionsStatus: Codable, Sendable, Equatable {
         try container.encodeIfPresent(deviceUUID, forKey: .deviceUUID)
         try container.encodeIfPresent(answerKey.map(Base64URL.encode), forKey: .answerKey)
         try container.encode(hasKey, forKey: .hasKey)
+        try container.encode(registered, forKey: .registered)
+        try container.encode(removed, forKey: .removed)
     }
 }
 
@@ -470,7 +482,7 @@ public extension VaultService {
 
     func pushTokenClear() async throws {}
 
-    func joinAttach(link: String, deviceName: String) async throws -> AttachInfo {
+    func joinAttach(link: String, deviceName: String, answerKey: Data) async throws -> AttachInfo {
         throw VaultError(.notAllowed, "This service cannot connect to the relay.")
     }
 

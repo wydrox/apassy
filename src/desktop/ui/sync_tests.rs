@@ -1957,6 +1957,35 @@ fn removing_a_mac_asks_first_and_return_keeps_it() {
         .and_then(|entry| entry.sync_relay())
         .expect("relay link")
         .device_id;
+    // Mac B answers the questions of the vault: its trusted device has its number in the
+    // sync team.
+    let team = a
+        .vault_list
+        .registry
+        .get(&id)
+        .and_then(|entry| entry.sync_relay())
+        .expect("relay link")
+        .team_id
+        .clone();
+    const B_UUID: &str = "2a7d9c41-8e3b-4f6a-9d2c-1b0e5f4a3c2d";
+    let key_before = {
+        let shared = a.owner_ui.session.shared_vault();
+        let mut guard = shared.lock().unwrap();
+        let vault = guard.as_mut().expect("open vault");
+        vault
+            .register_trusted_device(
+                B_UUID,
+                "Synthetic Mac mini",
+                crate::vault::TrustedDeviceKind::Mac,
+                &[4u8; 65],
+                None,
+            )
+            .expect("row of B");
+        vault
+            .set_trusted_device_relay_id(B_UUID, &team, device_b)
+            .expect("number of B");
+        vault.ensure_question_key().expect("key").key_id()
+    };
     a.settings_open = true;
     a.ui.settings_tab = super::SettingsTab::Devices;
     a.sync_open_sheet(SyncSheet::Devices { id: id.clone() }, None);
@@ -1968,7 +1997,7 @@ fn removing_a_mac_asks_first_and_return_keeps_it() {
     let text = frames_in(&ctx, &mut a, Vec::new());
     for expected in [
         "Remove “Synthetic Mac mini” from the relay?",
-        "It keeps its vault but stops syncing. To add it again you need a new link and the owner check.",
+        "It keeps its vault but stops syncing, and it can no longer answer the questions of this vault: Apassy makes a new question key. To add it again you need a new link and the owner check.",
         "Cancel",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
@@ -2024,6 +2053,16 @@ fn removing_a_mac_asks_first_and_return_keeps_it() {
         a.status_text.contains("is removed from the relay"),
         "{}",
         a.status_text
+    );
+    // It left the questions too: its row is removed and the question key is new.
+    let shared = a.owner_ui.session.shared_vault();
+    let guard = shared.lock().unwrap();
+    let vault = guard.as_ref().expect("open vault");
+    assert_eq!(vault.trusted_device(B_UUID).unwrap(), None);
+    assert!(vault.trusted_key_removed(&[4u8; 65]).unwrap());
+    assert_ne!(
+        vault.question_key().unwrap().expect("key").key_id(),
+        key_before
     );
 }
 
@@ -2951,7 +2990,7 @@ fn questions_through_a_notifications_only_team_need_the_owner_check() {
         Some(&membership.device_id)
     );
     let text = frames(&mut a);
-    assert!(text.contains("Add an iPhone…"), "{text}");
+    assert!(text.contains("Add an iPhone or a Mac…"), "{text}");
 
     // Off: no check; the membership and its key go, and the vault keeps its sync.
     a.questions_turn_off();
@@ -3017,8 +3056,8 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
         "{link}"
     );
     for expected in [
-        "Add an iPhone to the questions of “Personal”",
-        "On the iPhone, open Apassy, select Questions, and scan this code.",
+        "Add a device to the questions of “Personal”",
+        "On the iPhone, open Apassy, select Questions, and scan this code",
         "Copy link",
         "Waiting for the other device…",
     ] {
@@ -3026,18 +3065,24 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
     }
     assert_qr_encodes(a.relay_add_mac_qr_for_test().expect("a QR code"), &link);
 
-    // The iPhone scans the code and asks, as `join_attach` does.
-    let pending = PendingJoin::request(&link, "", "Test iPhone").expect("join");
+    // The iPhone scans the code and asks, as `join_attach` does: its link carries its
+    // answer key.
+    let phone_key = crate::sync::DeviceKey::generate().expect("key");
+    let link_name =
+        crate::questions::device_link::link_device_name("Test iPhone", phone_key.public_key())
+            .expect("name");
+    let pending = PendingJoin::request(&link, "", &link_name).expect("join");
     a.relay_add_mac_poll_for_test();
     let links = a.relay_add_mac_links_for_test();
     assert_eq!(links.len(), 1);
-    assert_eq!(links[0].device_name, "Test iPhone");
+    assert_eq!(links[0].device_name, link_name);
     assert_eq!(links[0].safety.as_deref(), Some(pending.safety.as_str()));
     let text = frames(&mut a);
     assert!(
-        text.contains("“Test iPhone” asks for the questions of “Personal”. Both devices show:"),
+        text.contains("“Test iPhone” (an iPhone that answers with Face ID) asks for the questions of “Personal”. Both devices show:"),
         "{text}"
     );
+    assert!(!text.contains(&link_name), "the key is not shown: {text}");
     assert!(text.contains(&pending.safety), "{text}");
 
     // "Confirm…" opens the owner check for exactly this iPhone.
@@ -3051,9 +3096,14 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
         request.action(),
         OwnerAction::ConfirmSyncDevice {
             link_id: links[0].id,
-            device_name: "Test iPhone".to_owned(),
+            // The proof covers the answer key in the name.
+            device_name: link_name.clone(),
             public_key: links[0].public_key.clone(),
         }
+    );
+    assert_eq!(
+        request.action().reason(),
+        "add the device \"Test iPhone\" to the sync of this vault"
     );
     assert!(
         request
@@ -3068,40 +3118,54 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
     );
     a.relay_settle_for_test();
     assert!(pending.poll().expect("poll").is_none(), "not confirmed");
+    let no_iphone = |a: &DesktopApp| {
+        a.owner_ui
+            .session
+            .with_vault(|vault| {
+                vault
+                    .trusted_devices()
+                    .expect("read")
+                    .iter()
+                    .all(|device| device.kind == TrustedDeviceKind::Mac)
+            })
+            .expect("open")
+    };
+    assert!(no_iphone(&a), "no row before the confirmation");
 
     a.relay_ask_confirm_for_test(links[0].id);
     a.confirm_owner_now(OwnerCheck::passphrase(PASS))
         .expect("owner check");
     a.relay_settle_for_test();
     assert_eq!(
-        a.status_text, "Added. Test iPhone gets the questions of this vault now.",
+        a.status_text,
+        "Added. Test iPhone gets the questions of this vault and answers with Face ID once this vault syncs to it.",
         "{}",
         a.status_text
     );
     let joined = pending.poll().expect("poll").expect("confirmed");
     assert_eq!(joined.member().team_id(), membership.team_id);
 
-    // The iPhone registers its own row with its answer key (`answer_key_register`); the
-    // row reaches this Mac through the sync. Devices lists it.
-    let phone_key = crate::sync::DeviceKey::generate().expect("key");
-    a.owner_ui
+    // The confirmation wrote the row of the iPhone from the keys of its link; it reaches
+    // the iPhone with the sync of the vault. Devices lists it, with "Remove…".
+    let row = a
+        .owner_ui
         .session
         .with_vault(|vault| {
-            let uuid = "6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b";
             vault
-                .register_trusted_device(
-                    uuid,
-                    "Test iPhone",
-                    TrustedDeviceKind::Iphone,
-                    joined.member().public_key(),
-                    Some(phone_key.public_key()),
-                )
-                .expect("register");
-            vault
-                .set_trusted_device_relay_id(uuid, &membership.team_id, joined.device_id())
-                .expect("relay id");
+                .trusted_devices()
+                .expect("read")
+                .into_iter()
+                .find(|device| device.kind == TrustedDeviceKind::Iphone)
         })
-        .expect("open");
+        .expect("open")
+        .expect("the row of the iPhone");
+    assert_eq!(row.name, "Test iPhone");
+    assert_eq!(row.sign_key, joined.member().public_key());
+    assert_eq!(row.answer_key.as_deref(), Some(phone_key.public_key()));
+    assert_eq!(
+        row.relay_devices.get(&membership.team_id),
+        Some(&joined.device_id())
+    );
     a.ui.sheet = None;
     let text = frames(&mut a);
     a.questions_settle_for_test();
@@ -3110,7 +3174,241 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
         "This Mac",
         "Test iPhone",
         "iPhone · answers with Face ID",
+        "Remove…",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
+    let rows = a.questions_devices();
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.name.as_str(), row.removable))
+            .collect::<Vec<_>>(),
+        [("Synthetic MacBook", false), ("Test iPhone", true)]
+    );
+
+    // "Remove…": a confirmation that says what removal means for an iCloud vault, then
+    // no owner check. The row is removed, the question key is new, and the relay
+    // revokes the iPhone.
+    let key_before = a
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.question_key().expect("read").expect("key").key_id())
+        .expect("open");
+    a.questions_ask_remove(&row.uuid, None);
+    assert!(
+        matches!(
+            &a.ui.sheet,
+            Some(Sheet::Vault(VaultSheet::Sync(
+                SyncSheet::RemoveQuestionsDevice { .. }
+            )))
+        ),
+        "{:?}",
+        a.ui.sheet
+    );
+    let text = frames(&mut a);
+    for expected in [
+        "Remove “Test iPhone” from the questions of “Personal”?",
+        "It can no longer answer the questions of this vault",
+        "the device keeps its copy of the vault until you remove the vault from it or from iCloud Drive",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    assert!(relay.devices().contains(&joined.device_id()));
+    a.questions_remove_device(&row.uuid);
+    assert!(a.owner.check.is_none(), "removal needs no owner check");
+    a.questions_settle_for_test();
+    assert!(
+        a.status_text.contains(
+            "“Test iPhone” is removed. It can no longer answer, and the relay removed its device."
+        ),
+        "{}",
+        a.status_text
+    );
+    assert!(!relay.devices().contains(&joined.device_id()), "revoked");
+    let (gone, removed, key_after) = a
+        .owner_ui
+        .session
+        .with_vault(|vault| {
+            (
+                vault.trusted_device(&row.uuid).expect("read").is_none(),
+                vault.trusted_key_removed(&row.sign_key).expect("read"),
+                vault.question_key().expect("read").expect("key").key_id(),
+            )
+        })
+        .expect("open");
+    assert!(gone && removed);
+    assert_ne!(key_after, key_before, "a new question key");
+    assert!(no_iphone(&a));
+}
+
+/// A second Mac of a vault in iCloud Drive that has a questions team: "Send questions
+/// through the relay" joins that team, never makes another one. Its owner check names
+/// the team of the link; Mac A confirms with the safety words and its own check; then
+/// Mac B has a membership for the questions and its own row, and Mac A wrote no row.
+#[test]
+fn a_second_mac_joins_the_questions_team_with_a_link() {
+    use crate::broker::approvals::{OwnerAction, OwnerCheck};
+    use crate::relay::membership::{QuestionsAvailability, questions_availability};
+    use crate::vault::TrustedDeviceKind;
+    let folders = folders();
+    let relay = fake_relay::FakeRelay::start();
+    let (mut a, mut b) = two_macs(&folders);
+    let id_a = current_id(&a);
+    let entry_a = a.vault_list.registry.get(&id_a).cloned().expect("entry");
+    a.questions_ask_new_team(
+        &entry_a,
+        &relay.url,
+        Zeroizing::new(relay.team_code()),
+        "Synthetic MacBook",
+        None,
+    )
+    .expect("fields");
+    a.confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("owner check");
+    a.questions_settle_for_test();
+    let team = questions_of(&a).expect("on").team_id;
+    // The vault names its team; B gets it with the sync.
+    lock(&mut a);
+    unlock(&mut a, PASS);
+    lock(&mut b);
+    unlock(&mut b, PASS);
+    let availability = |app: &DesktopApp| {
+        app.owner_ui
+            .session
+            .with_vault(|vault| questions_availability(vault).expect("read"))
+            .expect("open")
+    };
+    assert_eq!(
+        availability(&b),
+        QuestionsAvailability::JoinTeam {
+            team_id: team.clone()
+        }
+    );
+    b.settings_open = true;
+    b.ui.settings_tab = super::SettingsTab::Devices;
+    let text = frames(&mut b);
+    assert!(
+        text.contains(super::settings::RELAY_QUESTIONS_JOIN),
+        "{text}"
+    );
+    super::settings::set_relay_questions(&mut b, true, None);
+    let text = frames(&mut b);
+    for expected in ["Join the questions of “Personal”", "Join…"] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+
+    // Mac A makes a link; B pastes it. A link of another team is refused at once.
+    a.settings_open = true;
+    a.ui.settings_tab = super::SettingsTab::Devices;
+    a.questions_add_iphone(None);
+    let _ = settled_frames(&mut a);
+    let link = a.relay_add_mac_link_for_test().expect("a link");
+    let id_b = current_id(&b);
+    let entry_b = b.vault_list.registry.get(&id_b).cloned().expect("entry");
+    assert!(
+        b.questions_ask_join(
+            &entry_b,
+            "t_0000000000",
+            Zeroizing::new(link.to_string()),
+            "Synthetic Mac mini",
+            None
+        )
+        .unwrap_err()
+        .contains("another team")
+    );
+    assert!(b.owner.check.is_none());
+    b.questions_ask_join(
+        &entry_b,
+        &team,
+        Zeroizing::new(link.to_string()),
+        "Synthetic Mac mini",
+        None,
+    )
+    .expect("fields");
+    let request = b.owner.check.as_ref().expect("owner check").request.clone();
+    assert_eq!(
+        request.action(),
+        OwnerAction::EnableRelayQuestions {
+            relay_url: relay.url.clone(),
+            team_id: Some(team.clone()),
+        }
+    );
+    b.confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("owner check");
+    // B sends the link and shows the words.
+    let start = std::time::Instant::now();
+    while b.sync.relay.questions.join_words.is_none() {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "{}",
+            b.status_text
+        );
+        let _ = frames(&mut b);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let words = b.sync.relay.questions.join_words.clone().expect("words");
+    // A sees B with the same words; its confirmation needs A's owner check.
+    a.relay_add_mac_poll_for_test();
+    let links = a.relay_add_mac_links_for_test();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].device_name, "Synthetic Mac mini");
+    assert_eq!(links[0].safety.as_deref(), Some(words.as_str()));
+    a.relay_ask_confirm_for_test(links[0].id);
+    let request = a.owner.check.as_ref().expect("owner check").request.clone();
+    assert!(
+        request
+            .describe()
+            .starts_with("Add the Mac \"Synthetic Mac mini\" to the questions of this vault"),
+        "{}",
+        request.describe()
+    );
+    a.confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("owner check");
+    a.relay_settle_for_test();
+    assert_eq!(
+        a.status_text, "Added. Synthetic Mac mini gets the questions of this vault now.",
+        "{}",
+        a.status_text
+    );
+    // B keeps its new key and writes its own row.
+    while availability(&b)
+        != (QuestionsAvailability::On {
+            team_id: team.clone(),
+        })
+    {
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "{}",
+            b.status_text
+        );
+        let _ = frames(&mut b);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        b.status_text
+            .starts_with("Questions now also go to your other devices through the relay."),
+        "{}",
+        b.status_text
+    );
+    let membership = questions_of(&b).expect("B's membership");
+    assert_eq!(membership.team_id, team);
+    let rows_b = b
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.trusted_devices().expect("read"))
+        .expect("open");
+    assert!(
+        rows_b
+            .iter()
+            .any(|device| device.kind == TrustedDeviceKind::Mac
+                && device.sign_key == membership.public_key
+                && device.relay_devices.get(&team) == Some(&membership.device_id))
+    );
+    let rows_a = a
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.trusted_devices().expect("read"))
+        .expect("open");
+    assert_eq!(rows_a.len(), 1, "A wrote no row for B");
+    assert_eq!(relay.devices().len(), 2, "one team");
 }

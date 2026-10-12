@@ -13,6 +13,7 @@ final class ScriptedSigner: AnswerSigner {
         var reasons: [String] = []
         var failure: CompanionKeyError?
         var renewals = 0
+        let renewedKey = Data([4] + [UInt8](repeating: 2, count: 64))
     }
 
     private let state = Mutex(State())
@@ -36,7 +37,7 @@ final class ScriptedSigner: AnswerSigner {
     func renew() throws -> Data {
         state.withLock { state in
             state.renewals += 1
-            state.key = Data([4] + [UInt8](repeating: 2, count: 64))
+            state.key = state.renewedKey
             state.failure = nil
             return state.key
         }
@@ -167,7 +168,8 @@ struct QuestionsModelTests {
         #expect(sent.map(\.answer.kind) == [.allowProduction])
         #expect(sent[0].signature == Data("signature".utf8))
         #expect(fixture.model.deliveries[question.qid] == .sent(.allowProduction))
-        #expect(fixture.model.deliveryText(for: fixture.model.questions[0]) == "Sent. Waiting for MacBook Pro…")
+        #expect(fixture.model.deliveryText(for: fixture.model.questions[0]) 
+            == "Sent. The Mac checks it; if the run does not continue within a minute, the answer was refused.")
     }
 
     @Test("Deny and the stricter answers go without Face ID")
@@ -196,7 +198,7 @@ struct QuestionsModelTests {
         #expect(fixture.model.deliveries[question.qid] == nil)
     }
 
-    @Test("a new Face ID enrollment makes a new answer key and registers it")
+    @Test("a new Face ID enrollment makes a new answer key but does not register it")
     func biometryChanged() async {
         let fixture = Fixture()
         let question = await fixture.withQuestion()
@@ -204,12 +206,14 @@ struct QuestionsModelTests {
         await fixture.model.send(AnswerBar.make(for: question.card!).allowOnce!, for: fixture.model.questions[0])
         #expect(await fixture.service.sentAnswers().isEmpty)
         #expect(fixture.signer.renewals == 1)
-        #expect(await fixture.service.registeredAnswerKey() == fixture.signer.key)
+        #expect(await fixture.service.answerKeyRegistrations() == 1)
+        #expect(await fixture.service.registeredAnswerKey() != fixture.signer.key)
         guard case .failed(let message) = fixture.model.deliveries[question.qid] else {
             Issue.record("no failure shown")
             return
         }
         #expect(message.contains("Face ID changed"))
+        #expect(message.contains("remove this iPhone in Settings"))
     }
 
     @Test("a network failure sends the same answer again; a settled question says so")
@@ -229,6 +233,42 @@ struct QuestionsModelTests {
         await fixture.model.refresh()
         #expect(fixture.model.waitingCount == 0)
         #expect(fixture.model.deliveryText(for: fixture.model.questions[0]) == "Answered on Test iPhone")
+    }
+
+    @Test("a removed device gets a notice and no registration")
+    func removedDevice() async {
+        let fixture = Fixture()
+        await fixture.service.setQuestions(
+            enabled: true, questions: [PreviewVaultService.sampleQuestion()], removed: true)
+        await fixture.model.refresh()
+        #expect(fixture.model.status.removed)
+        #expect(fixture.model.questions.isEmpty)
+        #expect(fixture.model.notice?.contains("removed from questions") == true)
+        #expect(await fixture.service.answerKeyRegistrations() == 0)
+    }
+
+    @Test("a row that has not synced yet gets a notice and no registration")
+    func notRegisteredYet() async {
+        let fixture = Fixture()
+        await fixture.service.setQuestions(
+            enabled: true, questions: [PreviewVaultService.sampleQuestion()], registered: false)
+        await fixture.model.refresh()
+        #expect(!fixture.model.status.registered)
+        #expect(fixture.model.notice?.contains("Waiting for the Mac") == true)
+        #expect(await fixture.service.answerKeyRegistrations() == 0)
+    }
+
+    @Test("a row with this key needs no registration and clears the notice")
+    func sameKeyNeedsNothing() async {
+        let fixture = Fixture()
+        await fixture.service.setQuestions(enabled: true, registered: false)
+        await fixture.model.refresh()
+        #expect(fixture.model.notice != nil)
+        await fixture.service.setQuestions(
+            enabled: true, questions: [PreviewVaultService.sampleQuestion()], answerKey: fixture.signer.key)
+        await fixture.model.refresh()
+        #expect(fixture.model.notice == nil)
+        #expect(await fixture.service.answerKeyRegistrations() == 0)
     }
 
     // MARK: Notifications
@@ -281,5 +321,21 @@ struct QuestionsModelTests {
         #expect(fixture.model.attach == .attached)
         #expect(fixture.model.phase == .ready)
         #expect(await fixture.service.registeredAnswerKey() == fixture.signer.key)
+        #expect(await fixture.service.attachedAnswerKey() == fixture.signer.key)
+    }
+
+    @Test("a removed device connects again with a new answer key")
+    func attachAfterRemoval() async {
+        let fixture = Fixture()
+        await fixture.service.setQuestions(enabled: true, removed: true)
+        await fixture.model.refresh()
+        #expect(fixture.model.status.removed)
+        let oldKey = fixture.signer.key
+        await fixture.model.startAttach(
+            link: "https://apassy-relay.example/link#apassy_lnk_t_7k2m5q4x3c_00", pollInterval: .milliseconds(10))
+        #expect(fixture.signer.renewals == 1)
+        #expect(fixture.signer.key != oldKey)
+        #expect(await fixture.service.attachedAnswerKey() == fixture.signer.key)
+        fixture.model.cancelAttach()
     }
 }

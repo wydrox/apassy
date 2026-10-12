@@ -202,8 +202,10 @@ public final class CoreVaultService: VaultService, @unchecked Sendable {
 
     // MARK: - 5.2
 
-    public func joinStart(link: String, deviceName: String) async throws -> JoinInfo {
-        try await call("join_start", ["link": link, "device_name": deviceName])
+    public func joinStart(link: String, deviceName: String, answerKey: Data?) async throws -> JoinInfo {
+        var params = ["link": link, "device_name": deviceName]
+        if let answerKey { params["answer_key"] = Base64URL.encode(answerKey) }
+        return try await call("join_start", params)
     }
 
     public func joinPoll() async throws -> JoinInfo { try await call("join_poll") }

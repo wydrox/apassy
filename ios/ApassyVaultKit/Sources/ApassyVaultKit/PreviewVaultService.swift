@@ -306,11 +306,12 @@ public actor PreviewVaultService: VaultService {
 
     // MARK: - 5.2
 
-    public func joinStart(link: String, deviceName: String) async throws -> JoinInfo {
+    public func joinStart(link: String, deviceName: String, answerKey: Data?) async throws -> JoinInfo {
         guard link.contains("apassy_lnk_") else {
             throw VaultError(.linkInvalid, "This is not a device link of the Apassy relay.")
         }
         joinPolls = 0
+        questionsState.attachAnswerKey = answerKey
         let info = JoinInfo(
             state: .waiting, team: "Personal", words: ["amber", "marble"],
             expiresAt: Int64(Date().timeIntervalSince1970) + 600)

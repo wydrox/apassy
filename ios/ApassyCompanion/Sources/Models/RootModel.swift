@@ -108,6 +108,7 @@ final class RootModel {
                 service: vault.service, passphraseStore: vault.passphraseStore, settings: settings,
                 biometry: vault.gate.biometry, deviceName: settings.deviceName ?? DeviceName.current(),
                 isAway: { [weak vault] in vault?.isInBackground ?? false },
+                answerKey: { try EnclaveAnswerSigner().publicKey() },
                 onFinished: { [weak self] _ in self?.finishAddVault() },
                 onCancel: { [weak self] in self?.cancelAddVault() }))
     }

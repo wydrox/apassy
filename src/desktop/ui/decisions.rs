@@ -37,7 +37,8 @@
 //! detail and bar. An answer that gives authority passes the owner check on this Mac for
 //! `OwnerAction::AnswerRemoteQuestion`; a stricter one needs none. This Mac signs the
 //! answer with its relay key and sends it on a thread of its own; the asking Mac checks
-//! it and decides. The question shows "Sent. Waiting for MAC…" until it settles.
+//! it and decides. The question shows "Sent. The Mac checks it; …" until it settles: the
+//! protocol has no receipts yet, so a refused answer shows as a run that does not go on.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -1747,9 +1748,7 @@ impl DesktopApp {
         }
         for result in done {
             match result {
-                Some((asker, Ok(_))) => {
-                    self.set_ok(format!("Sent. Waiting for {}…", shown_path(&asker, 40)));
-                }
+                Some((_, Ok(_))) => self.set_ok(crate::questions::worker::SENT),
                 Some((_, Err(error))) => self.set_err(error.message()),
                 None => self.set_err("The answer did not go to the relay. Try again."),
             }

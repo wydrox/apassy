@@ -504,10 +504,12 @@ pub enum OwnerRequest {
         device_name: String,
         public_key: Vec<u8>,
     },
-    /// Add an iPhone to the notifications-only questions team of the vault `vault` (plan
-    /// §A7): the same proof as [`OwnerRequest::ConfirmSyncDevice`] for the link exactly as
-    /// the "Add an iPhone…" sheet showed it with its safety words. The iPhone gets the
-    /// questions and can answer them; it gets no vault.
+    /// Add an iPhone or a Mac to the notifications-only questions team of the vault
+    /// `vault` (plan §A7): the same proof as [`OwnerRequest::ConfirmSyncDevice`] for the
+    /// link exactly as the sheet showed it with its safety words. The `device_name` of an
+    /// iPhone carries its answer key (`questions::device_link`), so the proof covers it,
+    /// and the confirmation writes the row of the iPhone from the keys of the link. The
+    /// device gets the questions and can answer them; it gets no vault.
     ConfirmQuestionsDevice {
         vault: String,
         link_id: u64,
@@ -1142,9 +1144,19 @@ impl OwnerRequest {
             Self::ConfirmSyncDevice { device_name, .. } => format!(
                 "Add the device \"{device_name}\" to the sync of this vault through the Apassy relay. It gets the encrypted copy and can send changes. It still needs the passphrase to open the vault."
             ),
-            Self::ConfirmQuestionsDevice { device_name, .. } => format!(
-                "Add the iPhone \"{device_name}\" to the questions of this vault through the Apassy relay. It can then see the questions of your agents and answer them with Face ID. It gets no vault and no secret value."
-            ),
+            Self::ConfirmQuestionsDevice { device_name, .. } => {
+                let (name, answer_key) =
+                    crate::questions::device_link::split_link_device_name(device_name);
+                if answer_key.is_some() {
+                    format!(
+                        "Add the iPhone \"{name}\" to the questions of this vault through the Apassy relay. It can then see the questions of your agents and answer them with Face ID; Apassy keeps its keys in the vault. It gets no vault and no secret value through the relay."
+                    )
+                } else {
+                    format!(
+                        "Add the Mac \"{name}\" to the questions of this vault through the Apassy relay. It can then see the questions of your agents and answer them after Touch ID on it. It gets no vault and no secret value through the relay."
+                    )
+                }
+            }
             Self::EnableRelayQuestions {
                 relay_url,
                 team_id: Some(_),

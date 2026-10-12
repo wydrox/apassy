@@ -6,8 +6,9 @@
 //!   answer key; the relay's device list is never the source of these keys. The rows
 //!   sync (`merge::SYNCED_TABLES`): the later `(updated_at, updated_by)` wins, and a
 //!   removed device keeps its row with `deleted_at`. A removal wins over any edit, so
-//!   a revoked device never comes back through a sync, and its UUID cannot register
-//!   again (`AlreadyExists`): a device that joins again gets a new UUID.
+//!   a revoked device never comes back through a sync, and neither its UUID nor its
+//!   keys can register again (`AlreadyExists`): a device that joins again gets a new
+//!   UUID and a new relay key, and needs a new confirmation.
 //!
 //!   A device can be in more than one relay team (a notifications team and a shared
 //!   vault team), with a device number in each. The numbers are a JSON object in the
@@ -384,6 +385,20 @@ fn live_device(conn: &Connection, uuid: &str) -> VaultResult<Option<TrustedDevic
     .transpose()
 }
 
+/// Whether `key` is the `sign_key` or the `answer_key` of a removed device.
+fn key_removed(conn: &Connection, key: &[u8]) -> VaultResult<bool> {
+    let found: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM trusted_device WHERE deleted_at IS NOT NULL
+                 AND (sign_key = ?1 OR answer_key = ?1) LIMIT 1",
+            [key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    Ok(found.is_some())
+}
+
 fn require_item(conn: &Connection, item: i64) -> VaultResult<()> {
     let found: Option<i64> = conn
         .query_row("SELECT id FROM item WHERE id = ?1", [item], |row| {
@@ -421,6 +436,12 @@ impl Vault {
         live_device(self.conn_ref()?, uuid)
     }
 
+    /// Whether `key` (a relay key or an answer key) belongs to a removed device. Such a
+    /// device was taken out of the questions; its keys never register again.
+    pub fn trusted_key_removed(&self, key: &[u8]) -> VaultResult<bool> {
+        key_removed(self.conn_ref()?, key)
+    }
+
     /// The live device with the device number `relay_device_id` in the relay team
     /// `team_id`, or `None`. Two live devices with the same number (two Macs can make
     /// that state) match no device, so an answer never goes to the wrong one.
@@ -447,7 +468,9 @@ impl Vault {
     ///   other than an ASCII letter, a digit, or a hyphen; the name is empty, longer than
     ///   [`MAX_TRUSTED_DEVICE_NAME_BYTES`], or has a control character; a key is not a
     ///   P-256 point in X9.63 form.
-    /// - `AlreadyExists`: the device was removed. A removal is final.
+    /// - `AlreadyExists`: the device was removed, or `sign_key` or `answer_key` is a key
+    ///   of a removed device. A removal is final: a removed device cannot come back under
+    ///   a new UUID with the same keys; it needs a new relay key and a new confirmation.
     pub fn register_trusted_device(
         &mut self,
         uuid: &str,
@@ -467,6 +490,11 @@ impl Vault {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage)?;
+        if key_removed(&tx, sign_key)?
+            || answer_key.map_or(Ok(false), |key| key_removed(&tx, key))?
+        {
+            return Err(err(VaultErrorKind::AlreadyExists));
+        }
         let existing: Option<(i64, Option<i64>)> = tx
             .query_row(
                 "SELECT updated_at, deleted_at FROM trusted_device WHERE uuid = ?1",
@@ -871,6 +899,44 @@ mod tests {
                 .kind(),
             VaultErrorKind::AlreadyExists
         );
+        // Nor do its keys under a new UUID: the last sign key of the removed row, and
+        // the answer key of a removed iPhone.
+        assert!(vault.trusted_key_removed(&point(9)).unwrap());
+        assert!(!vault.trusted_key_removed(&point(1)).unwrap());
+        assert_eq!(
+            vault
+                .register_trusted_device("mac-2", "Mac", TrustedDeviceKind::Mac, &point(9), None)
+                .unwrap_err()
+                .kind(),
+            VaultErrorKind::AlreadyExists
+        );
+        assert!(vault.remove_trusted_device("PHONE-2").unwrap());
+        assert!(vault.trusted_key_removed(&point(3)).unwrap());
+        for (sign, answer) in [(point(2), point(4)), (point(5), point(3))] {
+            assert_eq!(
+                vault
+                    .register_trusted_device(
+                        "phone-3",
+                        "iPhone",
+                        TrustedDeviceKind::Iphone,
+                        &sign,
+                        Some(&answer),
+                    )
+                    .unwrap_err()
+                    .kind(),
+                VaultErrorKind::AlreadyExists
+            );
+        }
+        // New keys register.
+        vault
+            .register_trusted_device(
+                "phone-3",
+                "iPhone",
+                TrustedDeviceKind::Iphone,
+                &point(5),
+                Some(&point(6)),
+            )
+            .unwrap();
     }
 
     #[test]

@@ -123,6 +123,8 @@ fn hex_key_id(key: &[u8]) -> String {
 struct Setup {
     _root: TempDir,
     data: PathBuf,
+    /// The vault file of the iPhone.
+    file: PathBuf,
     core: Core,
     relay: QuestionsRelay,
 }
@@ -169,36 +171,104 @@ fn setup() -> Setup {
     Setup {
         _root: root,
         data,
+        file,
         core: phone,
         relay,
     }
 }
 
-/// Join the notifications-only team and register the answer key of the vectors.
-fn attach(setup: &Setup) -> String {
+/// Change the iPhone's vault as the sync of a Mac does: the core locks, the change goes
+/// into the file, and the core unlocks again.
+fn as_the_mac<T>(setup: &Setup, change: impl FnOnce(&mut Vault) -> T) -> T {
+    call(&setup.core, json!({"op": "lock"}));
+    let out = {
+        let mut vault = Vault::open(&setup.file).unwrap();
+        vault.unlock(PASS).unwrap();
+        change(&mut vault)
+    };
+    call(&setup.core, json!({"op": "unlock", "passphrase": PASS}));
+    out
+}
+
+/// The Mac confirmed the last link: it writes the row of the iPhone from the name and the
+/// key of the link (relay-questions-v1 section 5.2), and the row reaches the iPhone with
+/// the sync. Returns the UUID of the row.
+fn mac_writes_the_row(setup: &Setup) -> String {
+    let (device_id, name, public_key) = setup.relay.confirmed().pop().expect("a confirmed link");
+    assert!(name.starts_with("Test iPhone ~"), "{name}");
+    assert!(name.len() <= 64);
+    as_the_mac(setup, |vault| {
+        apassy::relay::membership::register_linked_device(
+            vault,
+            TEAM,
+            device_id,
+            &name,
+            &public_key,
+        )
+        .expect("the row")
+        .expect("an iPhone")
+        .uuid
+    })
+}
+
+/// Join the notifications-only team with the answer key `answer_public` (b64u): the
+/// relay device `device_id`. The iPhone writes no row; the Mac does.
+fn attach_with(setup: &Setup, answer_public: &str, device_id: u64) -> String {
     let (link, _) = setup.relay.link();
-    let waiting = call(&setup.core, json!({"op": "join_attach", "link": link}));
+    let waiting = call(
+        &setup.core,
+        json!({"op": "join_attach", "link": link, "answer_key": answer_public}),
+    );
     assert_eq!(waiting["state"], "waiting");
     assert_eq!(waiting["words"].as_array().unwrap().len(), 2);
     let still = call(&setup.core, json!({"op": "join_attach_poll"}));
     assert_eq!(still["state"], "waiting");
-    assert_eq!(setup.relay.confirm_links(), vec![2]);
+    assert_eq!(setup.relay.confirm_links(), vec![device_id]);
     let attached = call(&setup.core, json!({"op": "join_attach_poll"}));
     assert_eq!(attached["state"], "attached");
     let list = call(&setup.core, json!({"op": "questions_list"}));
     assert_eq!(list["status"]["enabled"], true);
     assert_eq!(list["status"]["team_id"], TEAM);
-    assert_eq!(list["status"]["relay_device_id"], 2);
+    assert_eq!(list["status"]["relay_device_id"], device_id);
     assert_eq!(list["status"]["has_key"], true);
+    // Until the row of the Mac syncs here, the iPhone is not registered and writes none.
+    assert_eq!(list["status"]["registered"], false);
+    assert_eq!(list["status"]["removed"], false);
+    assert_eq!(list["status"]["device_uuid"], Value::Null);
     assert_eq!(list["status"]["answer_key"], Value::Null);
-    let uuid = list["status"]["device_uuid"].as_str().unwrap().to_owned();
+    assert_eq!(
+        fails(
+            &setup.core,
+            json!({"op": "answer_key_register", "public_key": answer_public})
+        ),
+        "not_registered"
+    );
+    let iphones = as_the_mac(setup, |vault| {
+        vault
+            .trusted_devices()
+            .unwrap()
+            .into_iter()
+            .filter(|device| device.kind == TrustedDeviceKind::Iphone)
+            .count()
+    });
+    assert_eq!(iphones, 0, "the iPhone wrote no row");
+    let uuid = mac_writes_the_row(setup);
+    let list = call(&setup.core, json!({"op": "questions_list"}));
+    assert_eq!(list["status"]["registered"], true);
+    assert_eq!(list["status"]["device_uuid"], uuid.as_str());
+    assert_eq!(list["status"]["answer_key"], answer_public);
     let registered = call(
         &setup.core,
-        json!({"op": "answer_key_register", "public_key": ANSWER_PUBLIC}),
+        json!({"op": "answer_key_register", "public_key": answer_public}),
     );
     assert_eq!(registered["device_uuid"], uuid.as_str());
-    assert_eq!(registered["relay_device_id"], 2);
+    assert_eq!(registered["relay_device_id"], device_id);
     uuid
+}
+
+/// Join the notifications-only team with the answer key of the vectors.
+fn attach(setup: &Setup) -> String {
+    attach_with(setup, ANSWER_PUBLIC, 2)
 }
 
 #[test]
@@ -225,7 +295,10 @@ fn an_iphone_attaches_reads_a_card_and_answers_with_face_id_and_without() {
     // A second attach of the same vault is refused.
     let (link, _) = setup.relay.link();
     assert_eq!(
-        fails(&setup.core, json!({"op": "join_attach", "link": link})),
+        fails(
+            &setup.core,
+            json!({"op": "join_attach", "link": link, "answer_key": ANSWER_PUBLIC})
+        ),
         "invalid_input"
     );
 
@@ -553,11 +626,150 @@ fn the_long_poll_wakes_on_a_new_question_and_push_tokens_reach_the_relay() {
     );
 }
 
+/// The iPhone sends its answer key with the link and writes no row; an attach without it
+/// is refused before the relay is asked.
+#[test]
+fn the_row_of_an_iphone_comes_from_the_confirming_mac() {
+    let setup = setup();
+    let (link, _) = setup.relay.link();
+    assert_eq!(
+        fails(&setup.core, json!({"op": "join_attach", "link": link})),
+        "invalid_input"
+    );
+    assert_eq!(
+        fails(
+            &setup.core,
+            json!({"op": "join_attach", "link": link, "answer_key": "AAAA"})
+        ),
+        "invalid_input"
+    );
+    assert!(setup.relay.confirm_links().is_empty(), "no link was sent");
+    // `attach` checks that no row exists before the Mac writes it, and that
+    // `answer_key_register` only checks.
+    let uuid = attach(&setup);
+    // Another answer key than the row's: refused, and nothing changes.
+    let other = encode_b64u(DeviceKey::generate().unwrap().public_key());
+    assert_eq!(
+        fails(
+            &setup.core,
+            json!({"op": "answer_key_register", "public_key": other})
+        ),
+        "answer_key_changed"
+    );
+    let row = as_the_mac(&setup, |vault| {
+        vault.trusted_device(&uuid).unwrap().unwrap()
+    });
+    assert_eq!(row.answer_key, decode_b64u(ANSWER_PUBLIC));
+    assert_eq!(row.kind, TrustedDeviceKind::Iphone);
+    assert_eq!(row.name, "Test iPhone");
+    assert_eq!(row.sign_key, setup.relay.device_key(2));
+}
+
+/// The owner removes the iPhone on a Mac: once the removal syncs, the iPhone says so,
+/// answers nothing, and its old keys never register again. A new attach with a new relay
+/// key and a new answer key, confirmed on the Mac, makes it a device again.
+#[test]
+fn a_removed_iphone_cannot_answer_until_it_is_connected_again() {
+    let setup = setup();
+    let uuid = attach(&setup);
+    post(&setup.relay, &QUESTION_KEY, QID, CARD, now() + 300);
+    let (_, old_name, old_key) = setup.relay.confirmed().pop().unwrap();
+    assert!(as_the_mac(&setup, |vault| vault
+        .remove_trusted_device_and_rotate(&uuid)
+        .unwrap()));
+    let list = call(&setup.core, json!({"op": "questions_list"}));
+    assert_eq!(list["status"]["removed"], true);
+    assert_eq!(list["status"]["registered"], false);
+    assert_eq!(list["questions"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        fails(
+            &setup.core,
+            json!({"op": "answer_key_register", "public_key": ANSWER_PUBLIC})
+        ),
+        "removed"
+    );
+    assert_eq!(
+        fails(
+            &setup.core,
+            json!({"op": "question_answer", "qid": QID, "kind": "deny", "time": now()})
+        ),
+        "removed"
+    );
+    assert!(setup.relay.answers().is_empty());
+    // The Mac cannot write the old keys again.
+    let again = as_the_mac(&setup, |vault| {
+        apassy::relay::membership::register_linked_device(vault, TEAM, 9, &old_name, &old_key)
+            .unwrap_err()
+            .kind()
+    });
+    assert_eq!(again, apassy::vault::VaultErrorKind::AlreadyExists);
+    // The removed answer key cannot come back with a new relay key either.
+    let (link, _) = setup.relay.link();
+    call(
+        &setup.core,
+        json!({"op": "join_attach", "link": link, "answer_key": ANSWER_PUBLIC}),
+    );
+    setup.relay.confirm_links();
+    assert_eq!(
+        call(&setup.core, json!({"op": "join_attach_poll"}))["state"],
+        "attached"
+    );
+    let (device_id, name, key) = setup.relay.confirmed().pop().unwrap();
+    assert_eq!(device_id, 3);
+    let refused = as_the_mac(&setup, |vault| {
+        apassy::relay::membership::register_linked_device(vault, TEAM, device_id, &name, &key)
+            .unwrap_err()
+            .kind()
+    });
+    assert_eq!(refused, apassy::vault::VaultErrorKind::AlreadyExists);
+    let list = call(&setup.core, json!({"op": "questions_list"}));
+    assert_eq!(list["status"]["registered"], false);
+    assert_eq!(list["status"]["removed"], false);
+    assert_eq!(list["status"]["relay_device_id"], 3);
+}
+
+/// After the removal, a new answer key and a new relay key make the iPhone a device again.
+#[test]
+fn a_removed_iphone_joins_again_with_new_keys() {
+    let setup = setup();
+    let uuid = attach(&setup);
+    as_the_mac(&setup, |vault| {
+        vault.remove_trusted_device_and_rotate(&uuid).unwrap();
+        // The new question key reaches the iPhone with the sync; the test keeps the
+        // contract key so its cards still open.
+        vault.rotate_question_key().unwrap();
+    });
+    call(&setup.core, json!({"op": "lock"}));
+    {
+        let conn = rusqlite::Connection::open(&setup.file).unwrap();
+        conn.pragma_update(None, "key", PASS).unwrap();
+        conn.execute(
+            "UPDATE vault_secret SET value = ?1 WHERE name = 'question-key-v1'",
+            [QUESTION_KEY.as_slice()],
+        )
+        .unwrap();
+    }
+    call(&setup.core, json!({"op": "unlock", "passphrase": PASS}));
+    let new_answer = DeviceKey::generate().unwrap();
+    let new_uuid = attach_with(&setup, &encode_b64u(new_answer.public_key()), 3);
+    assert_ne!(new_uuid, uuid);
+    post(&setup.relay, &QUESTION_KEY, QID, CARD, now() + 300);
+    let sent = call(
+        &setup.core,
+        json!({"op": "question_answer", "qid": QID, "kind": "deny", "time": now()}),
+    );
+    assert_eq!(sent["kind"], "deny");
+    assert_eq!(setup.relay.answers()[0].device_id, 3);
+}
+
 #[test]
 fn a_cancelled_attach_leaves_the_vault_without_a_team() {
     let setup = setup();
     let (link, _) = setup.relay.link();
-    call(&setup.core, json!({"op": "join_attach", "link": link}));
+    call(
+        &setup.core,
+        json!({"op": "join_attach", "link": link, "answer_key": ANSWER_PUBLIC}),
+    );
     call(&setup.core, json!({"op": "join_attach_cancel"}));
     assert_eq!(
         fails(&setup.core, json!({"op": "join_attach_poll"})),

@@ -48,6 +48,8 @@ final class JoinModel {
     @ObservationIgnored private let isAway: @MainActor () -> Bool
     @ObservationIgnored private let onFinished: @MainActor (VaultEntry) -> Void
     @ObservationIgnored private let onCancel: @MainActor () -> Void
+    /// The answer key of this iPhone (X9.63) for the Mac that confirms the join, when there is one.
+    @ObservationIgnored private let answerKey: (@Sendable () throws -> Data)?
     @ObservationIgnored private var pollTask: Task<Void, Never>?
     /// The passphrase that opened the copy, only until the owner answers the Face ID offer.
     @ObservationIgnored private var openedWith: String?
@@ -56,6 +58,7 @@ final class JoinModel {
         service: any VaultService, passphraseStore: any PassphraseStore, settings: VaultSettings, biometry: Biometry,
         deviceName: String, pollInterval: Duration = .seconds(2), now: @escaping @MainActor () -> Date = { Date() },
         isAway: @escaping @MainActor () -> Bool = { false },
+        answerKey: (@Sendable () throws -> Data)? = nil,
         onFinished: @escaping @MainActor (VaultEntry) -> Void, onCancel: @escaping @MainActor () -> Void
     ) {
         self.service = service
@@ -68,6 +71,7 @@ final class JoinModel {
         self.isAway = isAway
         self.onFinished = onFinished
         self.onCancel = onCancel
+        self.answerKey = answerKey
     }
 
     // MARK: The link
@@ -116,7 +120,8 @@ final class JoinModel {
         step = .starting
         waitNote = nil
         do {
-            let join = try await service.joinStart(link: link, deviceName: trimmedDeviceName)
+            let join = try await service.joinStart(
+                link: link, deviceName: trimmedDeviceName, answerKey: try? answerKey?())
             settings.deviceName = trimmedDeviceName
             show(join)
         } catch {

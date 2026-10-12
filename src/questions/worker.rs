@@ -49,9 +49,10 @@ use crate::broker::approvals::{
     OwnerCheck, OwnerGate, OwnerProof, PendingRun, RunEnd, StricterAnswer, verify_remote_answer,
 };
 use crate::companion::digest::question_digest_v2_hex;
-use crate::relay::membership::{questions_membership, register_this_device, this_device};
+use crate::relay::membership::{questions_membership, this_device, this_device_removed};
 use crate::sync::decode_b64u;
 use crate::sync::relay_http::Cancel;
+use crate::vault::ItemEventKind;
 use crate::vault::usage::InteractionKind;
 use crate::vault::{
     ActivityDecision, Environment, NewActivity, QuestionKey, TrustedDevice, TrustedDeviceKind,
@@ -72,6 +73,22 @@ const MAX_VIEW_LINES: usize = 20;
 pub const ACTIVITY_OPERATION: &str = "answer through the relay";
 /// The relay lists at most this many questions in one answer (section 10.4).
 const LIST_PAGE: usize = 100;
+/// The owner removed this Mac from the questions (its key is in a removed row).
+pub const REMOVED: &str = "This device was removed from questions. To answer and ask through the relay again, turn “Send questions through the relay” on again: it needs your confirmation and a new key.";
+/// The vault has a questions membership on this Mac but no row of this Mac.
+pub const NOT_REGISTERED: &str = "This Mac is not a device of the questions of this vault. Turn “Send questions through the relay” off and on again.";
+/// `POST /v1/questions` or `GET /v1/questions` answered `404`: the relay predates the
+/// questions (contract section 10).
+pub const UNSUPPORTED: &str = "The relay does not support questions yet — update the relay.";
+/// After a `404` of the questions routes, the loops ask the relay again this much later.
+const UNSUPPORTED_WAIT: Duration = Duration::from_secs(5 * 60);
+/// What the answering device shows after the relay took its answer: the protocol has no
+/// receipts yet, so a refusal shows only as a run that does not go on.
+pub const SENT: &str = "Sent. The Mac checks it; if the run does not continue within a minute, the answer was refused.";
+/// The local note of a production question about a team credential (integrator
+/// decision 1).
+pub const TEAM_PRODUCTION: &str =
+    "Remote answers for team production come with shared vaults; answer on this Mac.";
 /// The shortest time between two list calls that brought nothing: a relay that does not
 /// hold the long poll is not asked in a loop.
 const LIST_AT_LEAST: Duration = Duration::from_secs(1);
@@ -154,6 +171,11 @@ pub struct QuestionsView {
     /// The open questions of the other devices of the vault, opened and checked, the
     /// soonest end first.
     pub remote: Vec<RemoteQuestion>,
+    /// The owner removed this Mac from the questions ([`REMOVED`]).
+    pub removed: bool,
+    /// The relay answered `404` to the questions routes ([`UNSUPPORTED`]); the loops
+    /// wait some minutes before they ask it again.
+    pub unsupported: bool,
 }
 
 /// A question of another device of the vault, opened and checked (section 13): it shows
@@ -163,7 +185,7 @@ pub struct RemoteQuestion {
     /// The number of the question on this Mac, for the window.
     pub id: u64,
     pub question: OpenedQuestion,
-    /// After an answer of this Mac: "Sent. Waiting for ASKER…".
+    /// After an answer of this Mac: [`SENT`].
     pub sent: Option<String>,
 }
 
@@ -223,7 +245,7 @@ impl RemoteAnswering {
     /// Sign, seal, and post `choice` (section 13 step 3). An approving choice needs
     /// `proof` for `remote_owner_action` of this question and choice, in the vault
     /// session of this Mac; a stricter one needs none. It calls the relay: run it on a
-    /// thread of its own. Success shows "Sent. Waiting for ASKER…" on the question until
+    /// thread of its own. Success shows [`SENT`] on the question until
     /// the settle takes it from the list; "Already answered", "Expired", and "cannot
     /// answer" take it at once.
     pub fn send(
@@ -243,10 +265,9 @@ impl RemoteAnswering {
         );
         if let Some(shared) = self.shared.upgrade() {
             match &result {
-                Ok(_) => shared.remote_sent(
-                    &self.question.record.qid,
-                    format!("Sent. Waiting for {}…", self.question.card.asker.name),
-                ),
+                // No receipt yet: the asking Mac checks the answer, and only the run going
+                // on (the settle) says that it counted.
+                Ok(_) => shared.remote_sent(&self.question.record.qid, SENT.to_owned()),
                 Err(
                     AnswerError::AlreadyAnswered | AnswerError::Expired | AnswerError::NotRouted,
                 ) => {
@@ -291,6 +312,28 @@ struct Asked {
     ended: Option<RunEnd>,
     /// The relay says that the question is settled or expired: nothing more to read.
     finished: bool,
+    /// The answers of this question that took effect: by device UUID, the `time` of
+    /// each, in order. A device's next answer must have a later `time`, so a replayed or
+    /// reordered answer never applies twice.
+    applied: BTreeMap<String, Vec<(u64, &'static str)>>,
+}
+
+impl Asked {
+    /// The `time` of the last answer of `device` that took effect.
+    fn last_time(&self, device: &str) -> Option<u64> {
+        self.applied
+            .get(device)
+            .and_then(|times| times.last())
+            .map(|(time, _)| *time)
+    }
+}
+
+/// The last change of the environment of a credential through the relay: the newest
+/// declaration event of the credential after it, and the answer `time` that made it.
+#[derive(Debug, Clone, Copy)]
+struct EnvironmentMark {
+    event_id: u64,
+    time: u64,
 }
 
 #[derive(Default)]
@@ -299,6 +342,12 @@ struct State {
     checked_at: Option<Instant>,
     asked: BTreeMap<u64, Asked>,
     local_only: BTreeMap<u64, String>,
+    /// By credential: the last environment correction through the relay.
+    environment: BTreeMap<u64, EnvironmentMark>,
+    /// The relay answered `404` to the questions routes: no call before this time.
+    unsupported_until: Option<Instant>,
+    /// The Activity line of [`UNSUPPORTED`] was written for this team.
+    unsupported_logged: Option<String>,
 }
 
 struct Shared {
@@ -515,6 +564,7 @@ impl Shared {
             let mut state = lock(&self.state);
             state.asked.clear();
             state.local_only.clear();
+            state.environment.clear();
             state.checked_at = None;
             state.active.take()
         };
@@ -569,26 +619,37 @@ impl Shared {
                 return Some(active.clone());
             }
         }
+        // The row of this Mac is written only when the owner turns the questions on
+        // (`EnableRelayQuestions`); the waiter never writes one. A Mac without a live row
+        // asks nothing through the relay, and a Mac whose key is in a removed row says so.
         let found = {
             let mut guard = lock(&self.vault);
             let vault = guard
                 .as_mut()
                 .filter(|vault| !vault.is_locked() && vault.path() == path)?;
-            let membership = questions_membership(vault).ok()??;
-            let me = match this_device(vault, &membership).ok()? {
-                Some(me)
-                    if me.relay_devices.get(&membership.team_id) == Some(&membership.device_id) =>
-                {
-                    me
-                }
-                _ => register_this_device(vault, &membership, &self.config.device_name).ok()?,
-            };
-            if vault.question_key().ok()?.is_none() {
-                vault.ensure_question_key().ok()?;
+            match questions_membership(vault).ok()? {
+                None => Err(None),
+                Some(membership) => match this_device(vault, &membership).ok()? {
+                    Some(me) => {
+                        if vault.question_key().ok()?.is_none() {
+                            vault.ensure_question_key().ok()?;
+                        }
+                        Ok((membership, me))
+                    }
+                    None if this_device_removed(vault, &membership).unwrap_or(false) => {
+                        Err(Some(REMOVED))
+                    }
+                    None => Err(Some(NOT_REGISTERED)),
+                },
             }
-            Some((membership, me))
         };
-        let (membership, me) = found?;
+        let (membership, me) = match found {
+            Ok(found) => found,
+            Err(problem) => {
+                self.stand_down(problem);
+                return None;
+            }
+        };
         let mut state = lock(&self.state);
         state.checked_at = Some(Instant::now());
         if let Some(active) = &mut state.active
@@ -623,9 +684,35 @@ impl Shared {
         view.posted.clear();
         view.local_only.clear();
         view.problem = None;
+        view.removed = false;
+        view.unsupported = false;
         drop(view);
         self.changed();
         Some(active)
+    }
+
+    /// The vault has a questions membership but this Mac may not ask through it: it was
+    /// removed, or it has no row. The session goes, and the view says why.
+    /// `None`: the questions are off for the vault.
+    fn stand_down(&self, problem: Option<&str>) {
+        if lock(&self.state).active.is_some() {
+            self.forget();
+        }
+        let mut view = lock(&self.view);
+        let removed = problem == Some(REMOVED);
+        let known = [Some(REMOVED), Some(NOT_REGISTERED)].contains(&view.problem.as_deref());
+        let problem = match problem {
+            Some(problem) => Some(problem.to_owned()),
+            // Off: a problem of this kind goes; another one (of the relay) stays.
+            None if known => None,
+            None => view.problem.clone(),
+        };
+        if view.problem != problem || view.removed != removed {
+            view.problem = problem;
+            view.removed = removed;
+            drop(view);
+            self.changed();
+        }
     }
 
     /// One step of the poster.
@@ -797,11 +884,15 @@ impl Shared {
         // Until shared vaults give the approvers the key (integrator decision 1), a
         // production question about a team item stays on this Mac.
         if team_item && run.question.production {
-            self.keep_local(
-                active,
-                run,
-                "A production question about a team credential waits on this Mac.",
-            );
+            self.keep_local(active, run, TEAM_PRODUCTION);
+            return;
+        }
+        // A relay without the questions routes: the question stays here until the wait
+        // after the `404` ends.
+        if self.unsupported_now() {
+            lock(&self.state)
+                .local_only
+                .insert(run.id, UNSUPPORTED.to_owned());
             return;
         }
         let Some(qid) = new_qid() else {
@@ -845,6 +936,7 @@ impl Shared {
                 applying: false,
                 ended: None,
                 finished: false,
+                applied: BTreeMap::new(),
             },
         );
         self.post(active, run.id);
@@ -877,14 +969,26 @@ impl Shared {
         };
         if posted {
             asked.posted = true;
+            state.unsupported_until = None;
             drop(state);
-            lock(&self.view).problem = None;
+            {
+                let mut view = lock(&self.view);
+                view.problem = None;
+                view.unsupported = false;
+            }
             self.end_poll();
             return;
         }
         let Err(error) = result else {
             return;
         };
+        if error.status() == Some(404) {
+            state.asked.remove(&run_id);
+            state.local_only.insert(run_id, UNSUPPORTED.to_owned());
+            drop(state);
+            self.mark_unsupported(active, &agent);
+            return;
+        }
         if error.can_pass() {
             let wait = RETRY_WAITS[asked.tries.min(RETRY_WAITS.len() - 1)];
             asked.tries += 1;
@@ -896,8 +1000,10 @@ impl Shared {
         }
         state.asked.remove(&run_id);
         let why = match error.code() {
+            // The relay counts the open questions of the team, of this Mac, and of the
+            // member, and the questions of the last hour; its message names the limit.
             Some("too_many_questions") => {
-                "The relay has too many open questions of this vault. Answer it on this Mac."
+                "The relay has too many open questions of this Mac or this vault. Answer it on this Mac."
             }
             Some("payload_too_large") => {
                 "This question is too long for your other devices. Answer it on this Mac."
@@ -910,6 +1016,35 @@ impl Shared {
         state.local_only.insert(run_id, why.to_owned());
         drop(state);
         self.activity(active, &agent, why);
+    }
+
+    /// Whether the loops wait after a `404` of the questions routes.
+    fn unsupported_now(&self) -> bool {
+        lock(&self.state)
+            .unsupported_until
+            .is_some_and(|until| Instant::now() < until)
+    }
+
+    /// The relay answered `404` to `POST` or `GET /v1/questions`: it predates the
+    /// questions. The loops wait [`UNSUPPORTED_WAIT`], Settings says so, and Activity says
+    /// it once for the team.
+    fn mark_unsupported(&self, active: &Active, agent: &str) {
+        let first = {
+            let mut state = lock(&self.state);
+            state.unsupported_until = Some(Instant::now() + UNSUPPORTED_WAIT);
+            let first = state.unsupported_logged.as_deref() != Some(active.team_id.as_str());
+            state.unsupported_logged = Some(active.team_id.clone());
+            first
+        };
+        {
+            let mut view = lock(&self.view);
+            view.unsupported = true;
+            view.problem = Some(UNSUPPORTED.to_owned());
+        }
+        if first {
+            self.activity(active, agent, UNSUPPORTED);
+        }
+        self.changed();
     }
 
     /// Settle a question that ended on this Mac with `end`.
@@ -1067,6 +1202,16 @@ impl Shared {
     ) {
         let list = match result {
             Ok(list) => list,
+            // The relay forgot the question (it ended long ago): an end, not a failure.
+            Err(error) if error.status() == Some(404) => {
+                let mut state = lock(&self.state);
+                if let Some(asked) = state.asked.get_mut(&reading.run_id)
+                    && asked.qid == reading.qid
+                {
+                    asked.finished = true;
+                }
+                return;
+            }
             Err(error) => {
                 if !matches!(error, QuestionsError::Closed) && !self.stop.load(Ordering::SeqCst) {
                     self.sleep(Duration::from_secs(2));
@@ -1323,8 +1468,37 @@ impl Shared {
             }
             None
         };
+        // A replayed or reordered answer: the answers of one device to one question take
+        // effect in the order of their signed `time`, each once.
+        let last = lock(&self.state)
+            .asked
+            .get(&reading.run_id)
+            .filter(|asked| asked.qid == reading.qid)
+            .and_then(|asked| asked.last_time(&body.by));
+        if last.is_some_and(|last| body.time <= last) {
+            return refuse(
+                &name,
+                "it is not newer than an answer of this device that counted",
+            );
+        }
         // 8. The queue takes it.
-        self.apply(active, &run, choice, proof, device)
+        let kind = choice.kind();
+        let verdict = self.apply(active, &run, choice, proof, device, body.time);
+        if matches!(verdict, Verdict::Settled { .. } | Verdict::Corrected) {
+            let mut state = lock(&self.state);
+            if let Some(asked) = state
+                .asked
+                .get_mut(&reading.run_id)
+                .filter(|asked| asked.qid == reading.qid)
+            {
+                asked
+                    .applied
+                    .entry(body.by.clone())
+                    .or_default()
+                    .push((body.time, kind));
+            }
+        }
+        verdict
     }
 
     fn apply(
@@ -1334,6 +1508,7 @@ impl Shared {
         choice: Choice,
         proof: Option<crate::broker::approvals::OwnerProof>,
         device: TrustedDevice,
+        time: u64,
     ) -> Verdict {
         let name = device.name.clone();
         let kind = choice.kind();
@@ -1397,10 +1572,30 @@ impl Shared {
                 item_id,
                 environment,
             } => {
+                // The state lock is never held while the vault is taken.
+                let mark = lock(&self.state).environment.get(&item_id).copied();
                 let mut guard = lock(&self.vault);
                 let Some(vault) = Self::vault_of(&mut guard, active) else {
                     return Verdict::Ended;
                 };
+                // A correction counts only when it is newer than the last change of the
+                // environment of the credential: after a correction through the relay,
+                // newer than the answer that made it; after any other change, newer
+                // than the change on this Mac's clock.
+                let newest = newest_declaration(vault, item_id);
+                let stale = match (newest, mark) {
+                    (Some((id, _)), Some(mark)) if id == mark.event_id => time <= mark.time,
+                    (Some((_, at)), _) => time < at,
+                    (None, Some(mark)) => time <= mark.time,
+                    (None, None) => false,
+                };
+                if stale {
+                    return Verdict::Refused {
+                        device: name,
+                        reason: "the environment of the credential changed after this answer"
+                            .to_owned(),
+                    };
+                }
                 let done = match environment {
                     RemoteEnvironment::Production => vault
                         .set_declaration_environment(item_id, Environment::Production)
@@ -1427,7 +1622,15 @@ impl Shared {
                     }
                 };
                 match done {
-                    Ok(()) => Verdict::Corrected,
+                    Ok(()) => {
+                        if let Some((event_id, _)) = newest_declaration(vault, item_id) {
+                            drop(guard);
+                            lock(&self.state)
+                                .environment
+                                .insert(item_id, EnvironmentMark { event_id, time });
+                        }
+                        Verdict::Corrected
+                    }
                     Err(_) => Verdict::Refused {
                         device: name,
                         reason: "the credential could not be changed".to_owned(),
@@ -1530,9 +1733,18 @@ impl Shared {
             }
             remote.since
         };
+        if self.unsupported_now() {
+            // A relay without the questions routes: no list until the wait ends.
+            self.sleep(Duration::from_secs(5));
+            return;
+        }
         let started = Instant::now();
         let list = match active.client.list(since, MAX_WAIT) {
             Ok(list) => list,
+            Err(error) if error.status() == Some(404) => {
+                self.mark_unsupported(&active, "Apassy");
+                return;
+            }
             Err(error) => {
                 if !matches!(error, QuestionsError::Closed) && !self.stop.load(Ordering::SeqCst) {
                     self.sleep(Duration::from_secs(2));
@@ -1609,6 +1821,16 @@ impl Shared {
             self.sleep(LIST_AT_LEAST.saturating_sub(started.elapsed()));
         }
     }
+}
+
+/// The newest declaration event of the credential `item_id`: its ID and time.
+fn newest_declaration(vault: &Vault, item_id: u64) -> Option<(u64, u64)> {
+    vault
+        .item_events(item_id, crate::vault::MAX_ITEM_EVENTS)
+        .ok()?
+        .into_iter()
+        .find(|event| event.kind == ItemEventKind::Declaration)
+        .map(|event| (event.id, event.at))
 }
 
 /// The reason of a failed check for Activity.

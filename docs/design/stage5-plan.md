@@ -29,8 +29,8 @@ CREATE TABLE relay_membership (team_id TEXT PRIMARY KEY, relay_url TEXT NOT NULL
   public_key BLOB NOT NULL, key_pkcs8 BLOB NOT NULL, purposes TEXT NOT NULL /* JSON: sync|questions|share */, created_at INTEGER NOT NULL);
 ```
 
-- Question key: `vault_secret 'question-key-v1'`, 32 random bytes, made by the first Mac that turns the feature on (`Vault::ensure_question_key`, new `src/vault/questions.rs`); every device that holds the vault gets it through its sync. Rotated when a device is removed; envelopes carry `key_id = hex(sha256(key)[..8])`.
-- Devices register their own `trusted_device` row. The relay's device list is never the source of answer keys.
+- Question key: `vault_secret 'question-key-v1'`, 32 random bytes, made by the first Mac that turns the feature on (`Vault::ensure_question_key`, new `src/vault/questions.rs`); every device that holds the vault gets it through its sync. Rotated when a device is removed (the keys of a removed device never register again); envelopes carry `key_id = hex(sha256(key)[..8])`.
+- A Mac writes its own `trusted_device` row after its owner check; the row of an iPhone is written by the Mac that confirms its link, from the keys of the link (Gate 3; relay-questions-v1 section 5.2). The relay's device list is never the source of answer keys.
 - Keep a compatibility accessor `Vault::relay_device()` over the membership with purpose `sync`; `tests/relay_sync.rs` must pass unchanged.
 
 ### A2. Envelope (contract `docs/contracts/relay-questions-v1.md`)

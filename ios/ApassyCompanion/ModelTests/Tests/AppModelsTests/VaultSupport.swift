@@ -109,6 +109,7 @@ actor SpyVaultService: VaultService {
         var passphraseChangeResult: PassphraseChange?
         var passphraseChangeCount = 0
         var reconnects: [(URL, String)] = []
+        var joinAnswerKeys: [Data?] = []
     }
 
     private let inner: PreviewVaultService
@@ -185,6 +186,9 @@ actor SpyVaultService: VaultService {
 
     nonisolated var reconnects: [(URL, String)] { state.withLock { $0.reconnects } }
 
+    /// The answer keys that `joinStart` got, in order.
+    nonisolated var joinAnswerKeys: [Data?] { state.withLock { $0.joinAnswerKeys } }
+
     func openICloudVault(url: URL, name: String, passphrase: String) async throws -> VaultEntry {
         let delay = state.withLock { state in
             state.iCloudOpenCount += 1
@@ -225,8 +229,9 @@ actor SpyVaultService: VaultService {
     }
 
     // 5.2
-    func joinStart(link: String, deviceName: String) async throws -> JoinInfo {
-        try await inner.joinStart(link: link, deviceName: deviceName)
+    func joinStart(link: String, deviceName: String, answerKey: Data?) async throws -> JoinInfo {
+        state.withLock { $0.joinAnswerKeys.append(answerKey) }
+        return try await inner.joinStart(link: link, deviceName: deviceName, answerKey: answerKey)
     }
     func joinPoll() async throws -> JoinInfo { try await inner.joinPoll() }
     func joinCancel() async throws { try await inner.joinCancel() }

@@ -242,15 +242,29 @@ final class QuestionsModel {
         }
     }
 
-    /// The answer key of this iPhone in the vault: registered once, and again after a new key.
+    /// The answer key of this iPhone in the vault. The Mac that confirmed this iPhone wrote the
+    /// row, so this only checks that the row is there with this key. The core writes nothing.
     private func registerAnswerKey() async {
+        if status.removed {
+            notice = "This device was removed from questions. To answer again, connect it again with a new link from a Mac."
+            return
+        }
+        guard status.registered else {
+            notice = "Waiting for the Mac that confirmed this iPhone: its vault must sync to this iPhone before it can answer."
+            return
+        }
         do {
             let key = try signer.publicKey()
-            guard status.answerKey != key else { return }
+            if status.answerKey == key {
+                notice = nil
+                return
+            }
             _ = try await service.answerKeyRegister(publicKey: key)
             status.answerKey = key
         } catch let error as CompanionKeyError {
             notice = "To answer here, Apassy needs Face ID on this iPhone. \(error.localizedDescription)"
+        } catch let error as VaultError {
+            notice = error.message
         } catch {
             notice = error.localizedDescription
         }
@@ -287,11 +301,8 @@ final class QuestionsModel {
             deliveries[question.qid] = nil
         } catch CompanionKeyError.biometryChanged {
             deliveries[question.qid] = .failed(
-                "Face ID changed on this iPhone, so Apassy made a new answer key. It counts after this vault syncs to your Mac. Answer on the Mac for now.")
-            if let key = try? signer.renew() {
-                _ = try? await service.answerKeyRegister(publicKey: key)
-                status.answerKey = key
-            }
+                "Face ID changed on this iPhone, so Apassy made a new answer key. On a Mac, remove this iPhone in Settings › Devices, then connect it again. Answer on the Mac for now.")
+            _ = try? signer.renew()
         } catch let error as VaultError {
             deliveries[question.qid] = .failed(Self.message(for: error, asker: question.askerName))
         } catch {
@@ -320,6 +331,7 @@ final class QuestionsModel {
 
     static func message(for error: VaultError, asker: String) -> String {
         switch error.code {
+        case .removed: "This device was removed from questions."
         case .alreadyAnswered: "Already answered."
         case .expired: "Expired."
         case .notRouted: "This device cannot answer this question."
@@ -337,10 +349,10 @@ final class QuestionsModel {
         }
         switch deliveries[question.qid] {
         case .sending: return "Sending…"
-        case .sent: return "Sent. Waiting for \(question.askerName)…"
+        case .sent: return "Sent. The Mac checks it; if the run does not continue within a minute, the answer was refused."
         case .failed(let message): return message
         case nil:
-            if question.answered != nil { return "Sent. Waiting for \(question.askerName)…" }
+            if question.answered != nil { return "Sent. The Mac checks it; if the run does not continue within a minute, the answer was refused." }
             if question.state == .expired { return "Expired" }
             return question.problem
         }
@@ -399,11 +411,15 @@ final class QuestionsModel {
         }
         attach = .starting
         do {
+            // The core rejects a key that belonged to a removed row: a removed iPhone gets a new one.
+            let key = try status.removed ? signer.renew() : signer.publicKey()
             let info = try await service.joinAttach(
-                link: link.trimmingCharacters(in: .whitespacesAndNewlines), deviceName: deviceName)
+                link: link.trimmingCharacters(in: .whitespacesAndNewlines), deviceName: deviceName, answerKey: key)
             attach = .waiting(info)
             attachTask?.cancel()
             attachTask = Task { [weak self] in await self?.pollAttach(every: pollInterval) }
+        } catch let error as CompanionKeyError {
+            attach = .failed("To answer here, Apassy needs Face ID on this iPhone. \(error.localizedDescription)")
         } catch {
             attach = .failed(error.localizedDescription)
         }

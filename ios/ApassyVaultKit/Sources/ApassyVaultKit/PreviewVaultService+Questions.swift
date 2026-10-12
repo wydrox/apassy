@@ -22,6 +22,12 @@ public struct PreviewQuestions: Sendable {
     var nextAnswerError: VaultError?
     var waits: [Bool] = []
     var registrations = 0
+    /// The row of this iPhone is in the vault (the Mac that confirmed it wrote the row).
+    var registered = true
+    /// The owner removed this iPhone on a Mac.
+    var removed = false
+    /// The answer key that the last `joinAttach` / `joinStart` sent.
+    var attachAnswerKey: Data?
 
     public init() {}
 }
@@ -57,11 +63,19 @@ extension PreviewVaultService {
     // MARK: Test and preview hooks
 
     /// Turn the questions team on or off, with these questions.
-    public func setQuestions(enabled: Bool, questions: [RemoteQuestion] = [], answerKey: Data? = nil) {
+    public func setQuestions(
+        enabled: Bool, questions: [RemoteQuestion] = [], answerKey: Data? = nil, registered: Bool = true,
+        removed: Bool = false
+    ) {
         questionsState.enabled = enabled
         questionsState.questions = questions
         questionsState.answerKey = answerKey
+        questionsState.registered = registered
+        questionsState.removed = removed
     }
+
+    /// The answer key that the last `joinAttach` sent.
+    public func attachedAnswerKey() -> Data? { questionsState.attachAnswerKey }
 
     /// The answers that `questionAnswer` took, in order.
     public func sentAnswers() -> [PreviewQuestions.Sent] { questionsState.sent }
@@ -94,7 +108,9 @@ extension PreviewVaultService {
             enabled: questionsState.enabled, teamID: questionsState.enabled ? "t_7k2m5q4x3c" : nil,
             relayDeviceID: questionsState.enabled ? 3 : nil,
             deviceUUID: questionsState.answerKey == nil ? nil : "6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b",
-            answerKey: questionsState.answerKey, hasKey: questionsState.enabled)
+            answerKey: questionsState.answerKey, hasKey: questionsState.enabled,
+            registered: questionsState.enabled && questionsState.registered,
+            removed: questionsState.enabled && questionsState.removed)
     }
 
     private func requireQuestions() throws {
@@ -116,7 +132,9 @@ extension PreviewVaultService {
     }
 
     public func questionsList() async throws -> QuestionsList {
-        QuestionsList(status: questionsStatus, questions: questionsState.enabled ? questionsState.questions : [])
+        QuestionsList(
+            status: questionsStatus,
+            questions: questionsState.enabled && !questionsState.removed ? questionsState.questions : [])
     }
 
     public func questionsWait(timeout: Int) async throws -> Bool {
@@ -151,6 +169,7 @@ extension PreviewVaultService {
         -> SentAnswer
     {
         _ = try openQuestion(qid)
+        if questionsState.removed { throw VaultError(.removed, "This device was removed from questions.") }
         if let error = questionsState.nextAnswerError {
             questionsState.nextAnswerError = nil
             throw error
@@ -173,7 +192,14 @@ extension PreviewVaultService {
         guard publicKey.count == 65, publicKey.first == 0x04 else {
             throw VaultError(.invalidInput, "The answer key is not a P-256 public key.")
         }
+        if questionsState.removed { throw VaultError(.removed, "This device was removed from questions.") }
+        if let row = questionsState.answerKey, row != publicKey {
+            throw VaultError(
+                .answerKeyChanged,
+                "The answer key of this iPhone changed. On a Mac, remove this iPhone in Settings › Devices, then connect it again.")
+        }
         questionsState.answerKey = publicKey
+        questionsState.registered = true
         questionsState.registrations += 1
         return AnswerKeyRegistration(
             deviceUUID: "6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b", teamID: "t_7k2m5q4x3c", relayDeviceID: 3)
@@ -186,14 +212,15 @@ extension PreviewVaultService {
 
     public func pushTokenClear() async throws { questionsState.pushToken = nil }
 
-    public func joinAttach(link: String, deviceName: String) async throws -> AttachInfo {
+    public func joinAttach(link: String, deviceName: String, answerKey: Data) async throws -> AttachInfo {
         guard link.contains("apassy_lnk_") else {
             throw VaultError(.linkInvalid, "This is not a device link of the Apassy relay.")
         }
-        guard !questionsState.enabled else {
+        guard !questionsState.enabled || questionsState.removed else {
             throw VaultError(.invalidInput, "This vault gets questions through the relay already.")
         }
         questionsState.attachPolls = 0
+        questionsState.attachAnswerKey = answerKey
         let info = AttachInfo(
             state: .waiting, team: "Notifications", words: ["amber", "marble"],
             expiresAt: Int64(Date().timeIntervalSince1970) + 600)
@@ -210,6 +237,10 @@ extension PreviewVaultService {
             info.state = .attached
             questionsState.attach = nil
             questionsState.enabled = true
+            // The Mac that confirms writes the row of this iPhone with the key that it sent.
+            questionsState.answerKey = questionsState.attachAnswerKey
+            questionsState.registered = true
+            questionsState.removed = false
         } else {
             questionsState.attach = info
         }

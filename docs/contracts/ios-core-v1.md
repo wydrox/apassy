@@ -1,6 +1,6 @@
 # iPhone vault core contract v1
 
-Date: 2026-10-07. Passkeys, one-time password rules, and schema 17 (sections 5.8, 5.9, 7, 10, and 11) added 2026-10-09. Questions through the relay (section 5.10) added 2026-10-12.
+Date: 2026-10-07. Passkeys, one-time password rules, and schema 17 (sections 5.8, 5.9, 7, 10, and 11) added 2026-10-09. Questions through the relay (section 5.10) added 2026-10-12. Gate 3 (questions: the row of an iPhone is written by the confirming Mac; removal; schema 19) 2026-10-12.
 Status: experimental. This contract supports the iPhone app in [ADR 0023](../adr/0023-iphone-vault.md). The Rust side (`ios/ApassyCore`, crate `apassy-core`) and the Swift side (`ios/ApassyVaultKit`) implement it. A change to this document changes both sides in the same pull request.
 
 Status of the passkey and one-time password work (branch `feat/passkeys-totp`): the sources are in the branch. Integration, signed builds, and native device acceptance are pending. Section 12 lists what is not yet confirmed. Do not read this document as a statement that a release or a device accepted these calls.
@@ -17,7 +17,7 @@ Status of the passkey and one-time password work (branch `feat/passkeys-totp`): 
 
 The vault holds an exclusive lock on `<file>.lock` while it is open, and iOS ends a suspended app that holds a file lock in an App Group container. So the core opens the vault only while it is unlocked: `lock` and `suspend` close it. The app calls `suspend` when it leaves the screen, and the AutoFill extension can then open the vault. While the app shows the vault, the extension gets `busy`.
 
-The core is the same vault code as the Mac app: the same schema (17), the same merge, the same relay client. A phone and a Mac that sync one vault must run the same schema. The one exception is a copy of schema 16, which a schema 17 client reads in a private encrypted stage (section 10). Any other schema is refused, as between two Macs.
+The core is the same vault code as the Mac app: the same schema (19), the same merge, the same relay client. A phone and a Mac that sync one vault must run the same schema. The one exception is a copy of an earlier schema: a schema 19 client merges a copy of schema 18 or 17 (`is_mergeable_schema` in `src/vault/merge.rs`) and gives its records the values of schema 19 in memory. The copy on disk or on the relay does not change. Any other schema is refused, as between two Macs. Section 10 is the history of the upgrade from schema 16 to 17.
 
 ## 2. The C interface
 
@@ -89,7 +89,7 @@ Error codes:
 | `not_found` | The item or the field is not there. |
 | `conflict` | The revision is not current: the item changed (a sync merged a change). Reload it. |
 | `storage` | The vault file failed. |
-| `unsupported_schema` | The vault or the copy has a schema that this app does not read. Update the app or the Mac. A schema 17 app reads a copy of schema 16 (section 10). An app of schema 16 cannot open a vault of schema 17. |
+| `unsupported_schema` | The vault or the copy has a schema that this app does not read. Update the app or the Mac. A schema 19 app reads a copy of schema 18 or 17 and no other (section 10). An app of an earlier schema cannot open a vault of schema 19. |
 | `link_invalid` | The text is not a device link of the relay, or the relay refused the link (used, expired, or not valid). |
 | `join_refused` | The Mac refused this iPhone, or the link expired before the confirmation. |
 | `safety_mismatch` | The relay's safety words are not the ones this iPhone computes. |
@@ -117,7 +117,7 @@ Error codes:
 
 | Op | Parameters | Result |
 | --- | --- | --- |
-| `info` **R** | | `{"vaults": [Vault], "selected": "<vault_id>" or null, "unlocked": bool, "join": Join or null, "schema": 17, "version": "0.3.4"}` |
+| `info` **R** | | `{"vaults": [Vault], "selected": "<vault_id>" or null, "unlocked": bool, "join": Join or null, "schema": 19, "version": "0.3.4"}` |
 | `select` **R** | `vault_id` | `{}`. Locks the vault that was open. |
 | `unlock` **R** | `passphrase`, `keep` (bool, app only, default false) | `{}`. Opens the selected vault. With `keep`, the core keeps the passphrase in an erasing buffer until `lock`, for `resume`. |
 | `lock` **R** | | `{}`. Closes the vault, erases a kept passphrase, drops the relay key and token from memory, and ends a long poll. |
@@ -135,7 +135,7 @@ The owner selects "Add a device…" on the Mac; the Mac shows a QR code and the 
 
 | Op | Parameters | Result |
 | --- | --- | --- |
-| `join_start` | `link`, `device_name` (optional; the config name by default) | `Join`. Makes a device key in memory and sends the link with the name of this iPhone. A join that was waiting is cancelled first. |
+| `join_start` | `link`, `device_name` (optional; the config name by default), `answer_key` (optional, b64u X9.63; section 5.10) | `Join`. Makes a device key in memory and sends the link with the name of this iPhone. A join that was waiting is cancelled first. |
 | `join_poll` | | `Join`. Asks the relay whether the Mac confirmed. After the confirmation it downloads the copy in the same call, then answers `ready`. Call it every 2 s while `waiting`. |
 | `join_cancel` | | `{}`. Cancels the link on the relay, or removes the device after a confirmation. |
 | `join_finish` | `passphrase` | `{"vault": Vault}`. Opens the copy with the passphrase, makes the vault on this iPhone, turns on relay sync, selects and unlocks it. A wrong passphrase is `wrong_passphrase` and keeps the download: the owner tries again. |
@@ -329,7 +329,7 @@ The app calls it after a fresh owner check and gives the answer straight to the 
 
 Added 2026-10-12 (stage 5, stream M3). The iPhone is an answering device of [relay-questions-v1](relay-questions-v1.md): it reads the questions of the vault that wait on a Mac, opens and checks each card, and posts the owner's answer. All these calls are of the app only (`not_allowed` in the AutoFill extension) and need the vault unlocked.
 
-The **questions team** of the selected vault is its relay membership with the purpose `questions`, else its relay sync membership (relay-questions-v1 section 3). An iCloud vault gets a notifications-only team with `join_attach` (plan §A7). The question key is the vault secret `question-key-v1` that a Mac made; the iPhone never makes one, and gets it with the sync of the vault. The iPhone's `trusted_device` row (kind `iphone`) has the relay key of the questions team as `sign_key`, the Secure Enclave answer key as `answer_key`, and its device number in that team; the core finds its own row by `sign_key`.
+The **questions team** of the selected vault is its relay membership with the purpose `questions`, else its relay sync membership (relay-questions-v1 section 3). An iCloud vault gets a notifications-only team with `join_attach` (plan §A7). The question key is the vault secret `question-key-v1` that a Mac made; the iPhone never makes one, and gets it with the sync of the vault. The iPhone's `trusted_device` row (kind `iphone`) has the relay key of the questions team as `sign_key`, the Secure Enclave answer key as `answer_key`, and its device number in that team; the core finds its own row by `sign_key`. The iPhone never writes this row: the Mac that confirms the join writes it (see after the tables).
 
 | Op | Parameters | Result |
 | --- | --- | --- |
@@ -341,11 +341,11 @@ The **questions team** of the selected vault is its relay membership with the pu
 | `answer_key_register` | `public_key` (b64u X9.63) | `{"device_uuid": "…", "team_id": "…", "relay_device_id": n}` |
 | `push_token_set` | `token` (lowercase hex, 32 to 200), `environment` (`development` or `production`), `bundle_id`? (default `com.wydrox.apassy.companion`) | `{"device_id": n, "updated_at": n}` |
 | `push_token_clear` | | `{}` |
-| `join_attach` | `link`, `device_name`? | `{"state": "waiting", "team": "…", "words": [w1, w2], "expires_at": n}` |
+| `join_attach` | `link`, `device_name`?, `answer_key` (b64u X9.63, required) | `{"state": "waiting", "team": "…", "words": [w1, w2], "expires_at": n}` |
 | `join_attach_poll` | | the same, `state` `waiting` or `attached` |
 | `join_attach_cancel` | | `{}` |
 
-`Status`: `{"enabled": bool, "team_id": "…"|null, "relay_device_id": n|null, "device_uuid": "…"|null, "answer_key": "<b64u>"|null, "has_key": bool}`. Without a questions team `enabled` is false and the list is empty; `questions_wait` answers `changed: false` at once.
+`Status`: `{"enabled": bool, "team_id": "…"|null, "relay_device_id": n|null, "device_uuid": "…"|null, "answer_key": "<b64u>"|null, "has_key": bool, "registered": bool, "removed": bool}`. `registered` is true when the row of this iPhone is in the vault. `removed` is true when the key of the membership belongs to a removed row: then the list of questions is empty and the core does not ask the relay. Without a questions team `enabled` is false and the list is empty; `questions_wait` answers `changed: false` at once.
 
 `Question`:
 
@@ -378,11 +378,23 @@ Answers (relay-questions-v1 sections 5.3, 9, and 13):
 - `time` more than 55 s old is `stale_answer` (answer again); a retry after a network error sends the same `time` and `signature` in a new envelope (section 13 step 4). A time more than 60 s ahead is `invalid_input`.
 - The core seals the answer of section 9.2 (fields in the contract's order) with the question key, a new random nonce, and the AAD with this iPhone's device number, and posts it. The relay taking it does not mean that it counted: the settle says that.
 
-`answer_key_register` writes this iPhone's own `trusted_device` row (a new random UUID the first time; the same UUID while the relay key is the same), and its device number in the questions team. The row syncs to the Macs; an approval counts only after the vault synced once. `join_attach` writes the membership (purpose `questions`) and the row without an answer key at the confirmation, and downloads nothing: a notifications-only team has no copy. It refuses a vault that has a questions team already. A refusal of the Mac, an expired link, or a cancel ends the join; the relay removes a device that was confirmed but not stored.
+**The row of an iPhone.** The iPhone never writes its own `trusted_device` row. `join_attach` needs `answer_key`; without it the call is `invalid_input`. The core appends the compressed key to the device name of the link: `"<name> ~<44 characters of b64u>"`. The name is shortened so that the whole is at most 64 bytes, the limit of a relay device name. The Mac that confirms the join writes the row during the owner check `ConfirmQuestionsDevice` (the proof covers the whole `device_name`, so it covers the answer key too): kind `iphone`, a new UUID, `sign_key` = the relay key of the link, `answer_key` from the name, and the device number in the team. `join_attach` writes only the membership (purpose `questions`) at the confirmation, and downloads nothing: a notifications-only team has no copy. A refusal of the Mac, an expired link, or a cancel ends the join; the relay removes a device that was confirmed but not stored.
 
-Errors of these calls, besides those of section 4: `no_questions` (the vault has no questions team), `not_registered` (no row, no answer key, or the signature does not verify with it), `unreadable` (the card failed a check; the message is the `problem`), `already_answered` (`409 question_settled`), `expired` (`409 question_expired`, `404`, or past `expires_at`), `not_routed`, `too_many_answers`, `stale_answer`, `push_unavailable` (`409` on `PUT /v1/push/token`).
+`join_attach` refuses a vault that has a questions team already, unless the key of that membership belongs to a removed row (the owner removed this iPhone) and the membership is for questions only: then the new key replaces the old one after the confirmation. A removed iPhone that syncs the vault through the relay (a sync membership) gets `invalid_input` that asks the owner to turn sync through the relay off and join again.
+
+`join_start` (the sync join, section 5.2) takes the same optional `answer_key` (b64u) and appends it to the device name in the same way. A Mac that confirms a device in "Add a device…" of the relay sync writes the row of the iPhone when the name of the link carries a key.
+
+`answer_key_register` writes nothing. It checks that the vault holds the row of this iPhone (found by `sign_key` = the key of the membership) with this `answer_key`, and returns the row. Its errors: `not_registered` (the row has not reached this iPhone with the sync yet), `removed` (the owner removed this iPhone), and `answer_key_changed` (the row holds another key, for example after a new Face ID enrollment: the owner removes the iPhone on the Mac and connects it again). `question_answer_string` and `question_answer` give `removed` or `not_registered` when there is no row.
+
+The keys of a removed row (`sign_key` and `answer_key`) never register again (the vault answers `AlreadyExists`). A removed iPhone connects again with a new relay key (a new `join_attach`) and a new answer key: the app calls `renew()` on the Secure Enclave key when `status.removed` is true.
+
+Errors of these calls, besides those of section 4: `no_questions` (the vault has no questions team), `not_registered` (no row, no answer key, or the signature does not verify with it), `removed` (the row of this iPhone is removed), `answer_key_changed` (the row holds another answer key), `unreadable` (the card failed a check; the message is the `problem`), `already_answered` (`409 question_settled`), `expired` (`409 question_expired`, `404`, or past `expires_at`), `not_routed`, `too_many_answers` (the relay allows 3 answers of a device for a question, 20 for a question, and a byte budget for the team), `stale_answer`, `push_unavailable` (`409` on `PUT /v1/push/token`).
+
+After an answer the app shows: "Sent. The Mac checks it; if the run does not continue within a minute, the answer was refused." The protocol has no receipts yet.
 
 The app asks for notification permission only when the owner turns notifications on, sends the device token with `push_token_set` at each launch with notifications on, and `push_token_clear` when they are turned off. The notification has the fixed text of relay-questions-v1 section 14.1; opening it shows the questions.
+
+A person who knows the passphrase of the vault (has the vault) can still write `trusted_device` rows. This is the same class of risk as holding the vault ([relay-questions-v1](relay-questions-v1.md) section 18).
 
 ## 6. `phone.json`
 
@@ -430,6 +442,8 @@ A website field is the custom detail whose label starts with "website" or "url" 
 - The answer has IDs only, never a value.
 
 ## 10. Schema 17 and the upgrade from schema 16
+
+The current schema is 19. Schema 18 adds `folder`, `shared_vault`, and `vault_secret`. Schema 19 adds `trusted_device`, `relay_membership`, and `item_home` ([relay-questions-v1](relay-questions-v1.md) section 5.2). The rest of this section is the history of schema 17.
 
 Schema 17 adds the passkey fields (section 11.1). It changes no table. A field of an earlier vault that has a reserved name (`passkey_…`) is an ordinary field of the owner, so the migration renames it. The new name is the custom label of the old name (`x_<hex>`), then the label with a number, then `legacy_field_<n>`. The value and the secret flag stay. An environment binding of the old name gets the new name. The item keeps its revision and its sync version, and the names depend only on the old data, so two copies of one vault that migrate do not conflict.
 
