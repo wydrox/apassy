@@ -28,7 +28,7 @@ Apassy is for the credentials that agents use. So the first selection has API cr
 
 An item with the same title (case is ignored) and the same kind as a credential in the vault is not selected. The preview marks it "Already in the vault".
 
-No agent gets access. An imported credential has no grant, no environment variable, and no declaration. An agent that sees all credentials sees the name, the kind, and the visible details of an imported credential, as for any other credential.
+An imported credential has no environment variable and no declaration. Since 0.5.0 an agent needs no grant ([ADR 0025](../adr/0025-low-friction-access.md)): each connected agent sees the name, the kind, the folder, and the visible details of an imported credential in its catalog, as for any other credential, unless an exception hides it. An agent can name it in a run, and the bouncer decides. Without a declaration, each use asks you until you set one ([declarations](declarations.md)). To keep an item away from agents, archive it.
 
 ## 3. What maps to what
 

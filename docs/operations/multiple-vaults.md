@@ -32,7 +32,7 @@ Or, on the unlock screen, pick the vault above the passphrase field. Settings > 
 
 Apassy then does these steps:
 
-1. It locks the open vault. Each run that waits for you ends. The inbox of that vault keeps each such run with the text "The owner switched to another vault before a decision. The run did not start."
+1. It locks the open vault. Each run that waits for you ends. The activity log of that vault keeps each such run with the text "The owner switched to another vault before a decision. The run did not start."
 2. It clears what the window holds of that vault: typed secrets, forms, the selection, shown values, an open owner check, a Touch ID prompt, and the learning view. A local training stops.
 3. It opens the chosen file, locked. The unlock screen shows its name.
 4. It reads the Touch ID unlock setting of that file. Touch ID unlock is set up for each vault file.

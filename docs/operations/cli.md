@@ -2,7 +2,7 @@
 
 Date: 2026-10-03. Decision: [ADR 0017](../adr/0017-owner-command-line.md). Wire: [owner-cli-v1](../contracts/owner-cli-v1.md).
 
-The `apassy` program opens the window when it runs without arguments. With a command, it talks to the running window. Every change uses the same checks as the window: grants, approvals, new tokens, and agent settings ask for Touch ID or the passphrase in the window, for each change.
+The `apassy` program opens the window when it runs without arguments. With a command, it talks to the running window. Every change uses the same checks as the window: approvals, new tokens, connector operations, and agent settings ask for Touch ID or the passphrase in the window, for each change.
 
 The command line never shows a secret value, and never takes one as an argument. It asks on the terminal with the echo off, or reads stdin or a file.
 
@@ -181,17 +181,17 @@ apassy agent show "Claude Code"
 apassy agent add "CI bot"                 # prints the token once
 apassy agent rotate "Claude Code"         # owner check; prints the new token once
 apassy agent revoke "CI bot"
-apassy agent see-all "Claude Code" on     # owner check
+apassy agent see-all "Claude Code" on     # owner check; removes "Only these items"
 apassy agent lifetime 30                  # owner check
-
-apassy grant set "Claude Code" "Stripe test" "Prod DB"            # this folder, you approve each run
-apassy grant set "Claude Code" "Stripe test" --folder ~/src/billing --mode bouncer
-apassy grant set "Claude Code" "Stripe test" --any-folder
-apassy grant rule "Claude Code" "Stripe test" --allow "npm test" --allow "npm run migrate" \
-    --forbid prod --max-runs 20 --expires 24 --instruction "Staging only."
-apassy grant remove "Claude Code" "Stripe test"
-apassy grant operation "Claude Code" Reporting get_sales_summary
+apassy grant operation "Claude Code" Reporting get_sales_summary   # owner check
 ```
+
+Since 0.5.0 an agent needs no grant ([ADR 0025](../adr/0025-low-friction-access.md)). Connecting it is the only setup, and the bouncer decides each use of each credential.
+
+- `apassy grant operation` allows one connector operation for `apassy_use_credential`. The app has no switch for it.
+- `apassy grant set`, `grant rule`, and `grant remove` still save or remove a process grant with its folder, mode, and rule. The broker does not read them for a run. A process grant only adds the credential to the list of an agent with "Only these items", and shows in `process_access` of `apassy_list_access`.
+- `apassy agent see-all AGENT off` gives the agent "Only these items" (no owner check). `on` removes it.
+- The command line has no command for exceptions. Answer a question in Decisions with "Never for AGENT" or "Always Ask for AGENT", and remove an exception on the page of the agent.
 
 `setup` writes `~/.config/apassy/apassy-mcp-HOST.sh` and `~/.config/apassy/apassy-hook-HOST.sh` with mode 0700. These wrapper scripts hold the token. The host configuration files do not hold the token.
 
@@ -210,17 +210,20 @@ A copy of each changed file stays next to it (`.before-apassy`). Trust the hook 
 
 ```sh
 apassy request list                       # --all for the decided ones too
-apassy request grant 12 --folder ~/src/billing      # owner check
 apassy request deny 12
-apassy runs                               # runs that wait for you
+apassy runs                               # questions that wait for you
 apassy runs approve 41                    # owner check; the window shows the run
-apassy runs approve 41 --remember
+apassy runs approve 41 --remember         # owner check; also one approval for its pattern
 apassy runs deny 41
 apassy pattern list
 apassy pattern remove 3
 apassy activity --agent "Claude Code" --limit 20
 apassy decisions export --output decisions.jsonl     # mode 0600
 ```
+
+- `apassy request` lists and closes the notes of `apassy_request_access`. An agent does not need them, and the app does not show them. `apassy request grant ID` still saves a process grant and closes the request; like `grant set`, it gives the agent nothing that the bouncer does not decide.
+- `apassy runs approve` is "Allow Once". The command line cannot give "Allow ACTION in PROJECT" or a production allowance: answer in Decisions.
+- `--remember` is the only way left to teach a pattern ([learning](learning.md), section 2). The app shows only the number of patterns (Settings > Advanced > Calibration and learning). `apassy pattern list` shows each pattern, and `apassy pattern remove` removes one.
 
 ## 7. Vault
 

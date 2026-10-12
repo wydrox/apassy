@@ -11,7 +11,7 @@ A run that waits for the owner is a question. It always shows on the asking Mac 
 3. applies the first answer that passes through the approval queue (`approve` with a `CheckMethod::Remote` proof, `deny`, or `deny_stricter`), and settles the question on the relay (`POST …/settle`) with who answered;
 4. settles a question that ended another way (an answer on this Mac or through the companion, the timeout, the broker stopping) with that outcome, best effort.
 
-An answer that does not count gets an Activity line ("An answer from DEVICE did not count: REASON."), with no command, no credential, and no value. Decisions shows "AGENT: Answered on DEVICE" for 10 minutes after an answer from another device.
+An answer that does not count gets an entry in the activity log ("An answer from DEVICE did not count: REASON."), with no command, no credential, and no value. Decisions shows "AGENT: Answered on DEVICE" for 10 minutes after an answer from another device.
 
 The relay sees only the routing: the team, the devices, the times, the sizes, and the bit `to`. It never gets a command, a credential name, a variable, or a value: every card, answer, and settle is sealed.
 

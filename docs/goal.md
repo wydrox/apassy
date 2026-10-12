@@ -63,7 +63,7 @@ Each item needs evidence: a passing test, a measurement in `docs/operations/`, o
 - [x] B9. Step 5c: local fine-tune and shadow mode follow the gate in ADR 0010: 300 decisions with 30 or more denials, AC power, one hour maximum, 100 shadow decisions, 95% agreement, no allowance of a denied request, and manual promotion. Evidence: [Fine-tune](operations/fine-tune.md): gate, shadow mode, promotion; `tests/local_finetune.rs`, `tests/shadow_mode.rs`.
 - [x] B10. The app shows the ask rate over time, the automatic decisions, and the agreement of a candidate model with the owner. Evidence: Learning tab; [learning](operations/learning.md) §5.
 - [x] B11. Step 6: Touch ID for "Approve and remember" and rule changes. A4 covers this step. Evidence: Covered by A4 (`OwnerAction::ApproveAndRemember`, `ChangeCalibration`).
-- [ ] B12. After two weeks of daily use with real credentials, the Learning tab shows that the owner is asked on 10% or fewer of the runs that reach the bouncer, over the last seven days. Rule denials do not count (owner decision, ADR 0010 third round). Status: starts when the real-secret gate (P3) opens.
+- [ ] B12. After two weeks of daily use with real credentials, the decision log (`apassy decisions export`; the Learning tab left the app in 0.5.0) shows that the owner is asked on 10% or fewer of the runs that reach the bouncer, over the last seven days. Rule denials do not count (owner decision, ADR 0010 third round). Status: starts when the real-secret gate (P3) opens.
 
 ### 7. Records
 

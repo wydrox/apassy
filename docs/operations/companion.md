@@ -6,7 +6,7 @@ Use only synthetic values for tests. This document does not open the real-secret
 
 ## 1. What it does
 
-The iPhone app shows the runs that wait for you, and lets you approve or deny them with Face ID. Use it when an agent waits for a decision (120 s). The iPhone must reach the Mac through the local network or Tailscale.
+The iPhone app shows the runs that wait for you, and lets you approve or deny them with Face ID. Use it when an agent waits for a decision (up to 5 minutes). The iPhone must reach the Mac through the local network or Tailscale.
 
 | The iPhone can | The iPhone cannot |
 | --- | --- |
@@ -57,14 +57,15 @@ The Mac keeps at most 5 paired iPhones and one pairing window at a time.
 
 ## 4. Daily use
 
-Open the app on the iPhone. The Inbox shows each run that waits, with the time it has waited. Select a run, read it, and select "Approve" (Face ID) or "Deny". "Approve and remember" also teaches the pattern of the run, as on the Mac, when the run has an offer ([learning](learning.md)).
+Open the app on the iPhone. The waiting runs of the Mac show in the Waiting list of Decisions, with the relay questions. The Inbox ("⋯" > "MAC on Wi-Fi" in Decisions) shows each run that waits, with the time it has waited. Select a run, read it, and select "Approve" (Face ID) or "Deny". "Approve and remember" also teaches the pattern of the run, as on the Mac, when the run has an offer ([learning](learning.md)).
 
 - The iPhone asks the Mac every 2 s while its app is in the foreground. It does not ask in the background, and there are no push notifications. A run that starts to wait while the app is closed shows on the next open, if it still waits.
-- The 120 s timeout of the run does not change.
+- The 5-minute wait of the question does not change.
+- The companion approves one run. It cannot give "Allow ACTION in PROJECT" or a production allowance; through the relay the iPhone can ([questions](questions.md)).
 - If you approve on the iPhone and the Mac at the same time, the first approval wins. A run settles once.
 - If the run changed after the iPhone showed it, the Mac refuses the approval ("changed") and nothing runs. Read the run again.
 - A denial from the iPhone is recorded as a denial by the owner, so it also blocks a remembered pattern ([ADR 0010](../adr/0010-closing-open-decisions.md)).
-- An access request can be denied on the iPhone. To give access, use Apassy on the Mac.
+- An access request (a note of `apassy_request_access`) can be denied on the iPhone. Since 0.5.0 an agent needs no access, and the Mac app does not show these notes ([agent path](agent-path.md), section 8c).
 - The activity log of the Mac says "Owner approved on the iPhone." for a run that you approved there.
 
 ## 5. Remove an iPhone, and reset

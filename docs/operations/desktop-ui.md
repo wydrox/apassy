@@ -37,7 +37,7 @@ With an unlocked vault, the places of the sidebar show:
 | View | What it has |
 | --- | --- |
 | All credentials, a folder | The list: the title (the folder name), the count, "+" (New Credential), the search field, the filter, and the order. A folder shows its credentials and those of its subfolders. By name, the rows group by folder path ("Personal" for the top level, "Work › Acme"); the header of the group at the top stays there while its rows scroll. Each row: the tile, the name, the project and service (or the kind), and at the right its agent state ("Needs review", "No declaration", the variable name, the environment, "Archived") or, in a recency order, the time. A production credential has a red dot. With nothing selected, the detail has the banners, "Use this vault on this Mac" for a vault from another Mac, "Get started" until each step is done ("Hide" hides it for this vault, kept in `ui.json`), the review and conflict notices, and "No credential selected" (or "No credentials yet" with "Add credential"). New Credential opens a paste field: paste a key, a .env file, a database URL, or an otpauth:// link, and Apassy shows the detected rows (name, kind, service, environment). The Folder picker and "Add" (or "Add 3") store them. "More kinds…" opens the add sheet (the kind, then the name, the secret, the service, the project, and optional custom details) for a login, an SSH key, or another kind. |
-| A credential (detail) | The toolbar: Share (a stub until shared vaults), Edit, and "⋯" with Move to Folder…, Share…, Archive…, and Delete…. The tile, the name, the kind, and the project stay above the scrolling body. Each field has its label above a left-aligned value. The secret is masked; Show needs the owner check. Agent access, History and requests, More actions, and Import data open on demand. Each credential keeps its own scroll position. |
+| A credential (detail) | The toolbar: Share (a stub until shared vaults), Edit, and "⋯" with Move to Folder…, Share…, Archive…, and Delete…. The tile, the name, the kind, and the project stay above the scrolling body. Each field has its label above a left-aligned value. The secret is masked; Show needs the owner check. "Agent use", "Rules from your answers", "Always ask me", the environment, and "Hosts and risk" follow for a credential with a secret field. History and requests, More actions, and Import data open on demand. Each credential keeps its own scroll position. |
 | A shared vault | The list "From you" and "From others". Empty until shared vaults land. |
 | Agents | The connected agents, read-only ([ADR 0025](../adr/0025-low-friction-access.md) §3f): each agent with where it runs and its uses this week, and "+" (Connect an Agent: Claude Code, Codex, T3 Code, or Other with a token and the command line; one owner check). The page of an agent shows, it does not configure: "This Mac · connected", the uses this week, its projects, "Note for the bouncer" (a sentence, saved without a check), "Exceptions" ("Never", "Always ask", and the listed items of a restricted agent; "Remove" gives authority back, so it needs the owner check, but a listed item goes at once), "Recent uses", and "Disconnect AGENT…". There are no grants, modes, or switches. |
 | Decisions | The list has three sections, each only when it has a row ([ADR 0026](../adr/0026-simple-app.md) §2). The line under the title counts the owner interactions and the automatic decisions of the week. **Waiting**: each question with the agent tile, the credentials, "AGENT · PROJECT", a red dot for production, and the time left of the 5-minute wait in orange, the least time left first; then, with "Send questions through the relay" on, each question of another Mac of the vault as "AGENT · PROJECT · from MAC", the soonest end first. **Requests**: each open credential request of an agent ([ADR 0025](../adr/0025-low-friction-access.md) §6): the agent tile, the name it asks for, and "AGENT · PROJECT". **Suggestions**: each open correction from the use log (§5): the tile of the credential, its name, and "Development or production?" or "Only in PROJECT?". Empty, the list says "Nothing needs you" and the detail "All clear". After each answer the next decision is selected. |
@@ -65,7 +65,7 @@ The demo build (`--features desktop` without `vault`) has All credentials, Decis
 
 ### Environment variable: placeholder or real value
 
-The "Environment variable" sheet has "What the program gets": "Placeholder" or "Real value" ([ADR 0011](../adr/0011-run-proxy-placeholders.md)). A placeholder needs hosts. The sheet fills them from the known hosts of the provider, and a new variable starts in placeholder mode when there are such hosts. The footer of the section says what each mode allows. The credential page shows `NAME · placeholder` for a variable in placeholder mode. "Save" needs the owner check. Apassy refuses placeholder mode for a value with less than 64 random bits.
+The "Command settings" sheet (Hosts and risk) has "What the program gets": "Placeholder" or "Real value" ([ADR 0011](../adr/0011-run-proxy-placeholders.md)). A placeholder needs hosts. The sheet fills them from the known hosts of the provider, and a new variable starts in placeholder mode when there are such hosts. The footer of the section says what each mode allows. The credential page shows `NAME · placeholder` for a variable in placeholder mode. "Save" needs the owner check. Apassy refuses placeholder mode for a value with less than 64 random bits.
 
 ### Custom details
 
@@ -77,12 +77,12 @@ The header stays visible when the body scrolls. A long credential name wraps wit
 
 Field values use dark monospaced text below their labels. Show and Hide stay beside the label. A long revealed value has its own scroll area, at most 180 points high. The owner check and the clipboard rules stay the same.
 
-Agent access, History and requests, More actions, and Import data start closed. More actions contains Archive and Delete. Import data contains the source item ID and source JSON from a 1Password transfer. Review, archive, and sync conflict notices stay visible.
+History and requests, More actions, and Import data start closed. "Hosts and risk" opens the declaration, the command settings, and the connector. More actions contains Archive and Delete. Import data contains the source item ID and source JSON from a 1Password transfer. Review, archive, and sync conflict notices stay visible.
 
 ### Timelines
 
 - History (credential page): each change, newest first: added, edited (the names of the changed fields), shown by you, declaration, variable, connector, process access, rule, API operation, archive, restore, and review. It never keeps a value. It keeps 200 events for each credential.
-- Agent requests (credential page) and Recent requests (agent page): each agent request with its result. A run with several credentials shows on each of them. The log keeps the last 500 requests of all agents.
+- Agent requests (credential page, under History and requests) and Recent uses (agent page): each agent request with its result. A run with several credentials shows on each of them. The log keeps the last 500 requests of all agents.
 
 Each timeline shows 5 rows and "Show all".
 
@@ -134,15 +134,15 @@ Settings > Advanced > Command line shows the owner socket of the `apassy` comman
 | "Vault file, passphrase, unlock method, and backup" | Settings > General (vaults, "Lock now") and Settings > Security |
 | Item details | The page of a credential: click it in Credentials |
 | "Reveal values" / "Hide values" | "Show" / "Hide" next to the secret |
-| Declaration card, "Save declaration" | Agent access > Declaration, "Save" |
-| "Environment variable for agent processes", "Save variable" | Agent access > Environment variable, "Save" |
-| "Agent connector", "Save connector" | Agent access > Connector, "Save" |
+| Declaration card, "Save declaration" | Hosts and risk > Declaration |
+| "Environment variable for agent processes", "Save variable" | Hosts and risk > Command settings |
+| "Agent connector", "Save connector" | Hosts and risk > Connector |
 | "Delete item" / "Confirm delete" | "Delete credential…", then "Delete" |
-| "Register an agent" card | Agents > "Register" |
+| "Register an agent" card | Agents > "+" ("Connect an Agent") |
 | "Token lifetime" card | Removed from the app (ADR 0025 §3f). `apassy agent lifetime` |
-| "Manage grants" | Click the agent |
-| "Allow, ask each time" / "Let the bouncer decide" | Process access sheet: "Ask me each time" / "Bouncer decides", then "Save" |
-| Grant checkboxes | API operations switches |
+| "Manage grants" | Removed (ADR 0025 §3f). The bouncer decides each use; the page of the agent lists its exceptions. |
+| "Allow, ask each time" / "Let the bouncer decide" | Removed. "Always ask me" on the credential, or "Always Ask for AGENT" on a question |
+| Grant checkboxes, API operations switches | Removed from the app. `apassy grant operation` allows a connector operation. |
 | Approval card on every view | Banner on every view, and the question in Decisions |
 | Inbox card: channel and buttons | Settings > Devices > Notifications |
 | iPhone companion, pairing, and paired iPhones | Settings > Devices > iPhone companion, Pair an iPhone, Paired iPhones; also "Add a Device…" > iPhone… |
@@ -151,7 +151,7 @@ Settings > Advanced > Command line shows the owner socket of the `apassy` comman
 | Settings > Agents, Notifications, About | Settings > Advanced (bouncer, command line, updates, shortcuts) and Settings > Devices (notifications, iPhone companion) |
 | Activity, Learning, and the access requests | Decisions: Waiting, Requests, and Suggestions; the week counts under its title |
 | Learning: calibration and candidate model | Settings > Advanced > Calibration and learning |
-| Rules view (vault build) | Removed. It was a fixture demo. Rules of a process grant are in its sheet. The demo build keeps the view, in its Settings window under Advanced. |
+| Rules view (vault build) | Removed. It was a fixture demo. The demo build keeps the view, in its Settings window under Advanced. |
 | Demo request card (vault build) | Removed. It was a fixture simulation. The demo build keeps it. |
 
 ## 4. Checks
