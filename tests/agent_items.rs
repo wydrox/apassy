@@ -384,13 +384,16 @@ fn a_command_that_is_not_known_waits_for_the_owner_before_it_runs() {
         !marker.exists(),
         "the command ran before the owner answered"
     );
-    assert_eq!(
-        run.command[0], "/bin/sh",
-        "the program as the PATH found it"
-    );
+    // The first `sh` on PATH "/usr/bin:/bin": /bin/sh on macOS, /usr/bin/sh on a
+    // merged-/usr Linux.
+    let sh = ["/usr/bin/sh", "/bin/sh"]
+        .into_iter()
+        .find(|path| std::path::Path::new(path).is_file())
+        .expect("a shell");
+    assert_eq!(run.command[0], sh, "the program as the PATH found it");
     assert_eq!(
         run.purpose,
-        format!("Tool agent wants to capture the output of: /bin/sh -c '{script}' in project")
+        format!("Tool agent wants to capture the output of: {sh} -c '{script}' in project")
     );
     assert!(run.question.item_ids.is_empty());
     assert_eq!(run.question.valid_answers, vec![AnswerKind::Once]);
