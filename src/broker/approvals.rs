@@ -134,7 +134,7 @@ pub fn shown_path(path: &str, max: usize) -> String {
     out
 }
 
-fn folder_is_broad_with(folder: &Path, home: Option<&Path>) -> bool {
+pub(crate) fn folder_is_broad_with(folder: &Path, home: Option<&Path>) -> bool {
     let canonical = std::fs::canonicalize(folder).ok();
     if [Some(folder), canonical.as_deref()]
         .into_iter()

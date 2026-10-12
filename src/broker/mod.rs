@@ -5,6 +5,7 @@
 //! only the permitted output fields to the agent. Manual grants are temporary.
 //! They are not the rule engine from P3.
 
+pub mod action_kind;
 pub mod approvals;
 pub mod bouncer;
 pub mod calibration;
@@ -17,6 +18,7 @@ pub mod model_server;
 pub mod packs;
 pub mod patterns;
 pub mod profile;
+pub mod project;
 pub mod prompts;
 pub mod proxy;
 pub mod replay;
