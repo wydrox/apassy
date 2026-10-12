@@ -33,8 +33,8 @@
 //!   Grants, rules, requests, and remembered patterns stay as history; nothing is
 //!   deleted.
 
-use super::types::{SCHEMA_VERSION, VaultErrorKind, VaultResult, err};
-use super::{agents, merge, verify_expected_columns_in};
+use super::types::{VaultErrorKind, VaultResult, err};
+use super::{FOLDER_SCHEMA_VERSION, agents, merge, verify_expected_columns_in};
 
 /// The item ID of the `only` row that marks the exception "only these items" of an
 /// agent. Item IDs start at 1, so the marker names no item. The other `only` rows of
@@ -242,7 +242,7 @@ fn add_schema_v18_with(
     derive_exceptions(tx, agents::now_unix())?;
     tx.execute_batch(SCHEMA_V18_MARKS_SQL).map_err(storage)?;
     before_marks(tx)?;
-    verify_expected_columns_in(tx, "main", SCHEMA_VERSION)
+    verify_expected_columns_in(tx, "main", FOLDER_SCHEMA_VERSION)
 }
 
 /// One process grant of an active agent, as the derivation reads it.
@@ -377,7 +377,7 @@ mod tests {
         vault.lock().unwrap();
         let conn = Connection::open_with_flags(&path, OPEN_EXISTING).unwrap();
         apply_key(&conn, PASS).unwrap();
-        let mut sql = String::new();
+        let mut sql = String::from(crate::vault::schema19::DOWNGRADE_TO_18_SQL);
         for table in [
             "folder",
             "item_folder",

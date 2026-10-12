@@ -24,15 +24,17 @@
 //! argument: SQLCipher then uses the key of the vault. A copy that another Mac rekeyed
 //! does not open, and the app asks for the new passphrase.
 //!
-//! Folders, shared vaults, and vault secrets (schema 18) are not credentials. Their rows
-//! sync one by one: the later `(updated_at, updated_by)` wins ([`merge_lww`]). A deleted
-//! folder keeps its row with `deleted_at`, so the delete reaches the other Macs and wins
-//! over an older edit.
+//! Folders, shared vaults, and vault secrets (schema 18) and trusted devices (schema 19)
+//! are not credentials. Their rows sync one by one: the later `(updated_at, updated_by)`
+//! wins ([`merge_lww`]). A deleted folder keeps its row with `deleted_at`, so the delete
+//! reaches the other Macs and wins over an older edit. A removed trusted device wins
+//! over any edit, also a later one: a revoked device stays revoked.
 //!
-//! A copy of the schema before folders ([`UPGRADABLE_SCHEMA`], 17) passes the checks of
-//! its own schema first. It has no folder, policy, declaration source, or share rows, so
-//! the merge keeps the values of this vault for its records in memory
-//! ([`keep_local_v18`]); the copy does not change.
+//! A copy of an earlier schema ([`OLDEST_UPGRADABLE_SCHEMA`] 17 to
+//! [`UPGRADABLE_SCHEMA`] 18) passes the checks of its own schema first. It has none of
+//! the rows of the later schemas, so the merge keeps the values of this vault for its
+//! records in memory ([`keep_local_v18`], [`keep_local_v19`]), takes none of those
+//! tables from it, and the copy does not change.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -44,7 +46,10 @@ use zeroize::Zeroizing;
 
 use super::sync::{SyncIdentity, content_digest, hash_value, read_sync_row, to_hex};
 use super::types::{SCHEMA_VERSION, VaultErrorKind, VaultResult, err};
-use super::{MAX_ITEM_EVENTS, Vault, agents, history, schema18, verify_expected_columns_in};
+use super::{
+    FOLDER_SCHEMA_VERSION, MAX_ITEM_EVENTS, Vault, agents, history, schema18, schema19,
+    verify_expected_columns_in,
+};
 
 /// Child tables of a credential in schema 14. Their triggers come with schema 14.
 const CHILD_TABLES_V14: [&str; 6] = [
@@ -57,7 +62,7 @@ const CHILD_TABLES_V14: [&str; 6] = [
 ];
 
 /// Tables of a credential besides the item row. Each row names its item in `item_id`.
-pub(super) const CHILD_TABLES: [&str; 10] = [
+pub(super) const CHILD_TABLES: [&str; 11] = [
     CHILD_TABLES_V14[0],
     CHILD_TABLES_V14[1],
     CHILD_TABLES_V14[2],
@@ -68,6 +73,7 @@ pub(super) const CHILD_TABLES: [&str; 10] = [
     schema18::CHILD_TABLES_V18[1],
     schema18::CHILD_TABLES_V18[2],
     schema18::CHILD_TABLES_V18[3],
+    schema19::CHILD_TABLES_V19[0],
 ];
 
 /// Tables that stay on each Mac. A pushed copy keeps only the default companion setting, and a merge never
@@ -94,7 +100,7 @@ pub const LOCAL_TABLES: [&str; 29] = [
     "companion_setting",
     "companion_certificate",
     "companion_device",
-    "relay_device",
+    "relay_membership",
     "agent_exception",
     "owner_answer",
     "item_use",
@@ -106,7 +112,7 @@ pub const LOCAL_TABLES: [&str; 29] = [
 
 /// Tables whose rows sync. `vault_meta` syncs as the one row of the file; its token
 /// lifetime is set to the default in a pushed copy, because it is a setting of each Mac.
-pub const SYNCED_TABLES: [&str; 20] = [
+pub const SYNCED_TABLES: [&str; 22] = [
     "vault_meta",
     "item",
     "item_tag",
@@ -127,6 +133,8 @@ pub const SYNCED_TABLES: [&str; 20] = [
     "shared_vault",
     "item_share",
     "vault_secret",
+    "trusted_device",
+    "item_home",
 ];
 
 /// History events of a credential that sync. The others (a reveal, agent access, a
@@ -145,22 +153,45 @@ pub const SYNCED_EVENT_KINDS: [&str; 11] = [
     "moved",
 ];
 
-/// The one earlier schema of a copy that a merge takes: schema 17, before folders. The
-/// app of an installed device still writes it. A copy of another schema is
-/// `UnsupportedSchema`.
-pub(super) const UPGRADABLE_SCHEMA: i64 = super::PASSKEY_SCHEMA_VERSION;
+/// The schema before this one: a copy of schema 18 (before trusted devices) merges, and a
+/// copy of this schema is refused by the app of schema 18 (`UnsupportedSchema`).
+pub(super) const UPGRADABLE_SCHEMA: i64 = FOLDER_SCHEMA_VERSION;
 
-// [`keep_local_v18`] does the step from schema 17 to schema 18 only. A new schema needs
-// its own step for a copy, or a refusal of the old copies.
+/// The earliest schema of a copy that a merge takes: schema 17, before folders. The
+/// released app (0.4.1) writes it. A copy of another schema is `UnsupportedSchema`.
+pub(super) const OLDEST_UPGRADABLE_SCHEMA: i64 = super::PASSKEY_SCHEMA_VERSION;
+
+// [`keep_local_v18`] and [`keep_local_v19`] do the steps from schema 17 to schema 19
+// only. A new schema needs its own step for a copy, or a refusal of the old copies.
 const _: () = assert!(SCHEMA_VERSION == UPGRADABLE_SCHEMA + 1);
+const _: () = assert!(UPGRADABLE_SCHEMA == OLDEST_UPGRADABLE_SCHEMA + 1);
 
-/// Tables whose rows sync one by one (schema 18): the table, its key column, and its
-/// other columns. The later `(updated_at, updated_by)` wins.
-const LWW_TABLES: [(&str, &str, &[&str]); 3] = [
-    (
-        "folder",
-        "uuid",
-        &[
+/// Whether a merge, a check, or an adoption takes a copy of `version`: this schema or
+/// one of the earlier schemas that it upgrades.
+pub(super) fn is_mergeable_schema(version: i64) -> bool {
+    (OLDEST_UPGRADABLE_SCHEMA..=SCHEMA_VERSION).contains(&version)
+}
+
+/// A table whose rows sync one by one.
+struct LwwTable {
+    table: &'static str,
+    /// The key column.
+    key: &'static str,
+    /// The other columns.
+    columns: &'static [&'static str],
+    /// The schema that added the table: a copy of an earlier schema has no rows.
+    since: i64,
+    /// A row with `deleted_at` wins over a row without, whatever their times.
+    removal_wins: bool,
+}
+
+/// Tables whose rows sync one by one (schema 18 and 19). The later
+/// `(updated_at, updated_by)` wins.
+const LWW_TABLES: [LwwTable; 4] = [
+    LwwTable {
+        table: "folder",
+        key: "uuid",
+        columns: &[
             "parent_uuid",
             "name",
             "position",
@@ -169,11 +200,13 @@ const LWW_TABLES: [(&str, &str, &[&str]); 3] = [
             "updated_by",
             "deleted_at",
         ],
-    ),
-    (
-        "shared_vault",
-        "uuid",
-        &[
+        since: FOLDER_SCHEMA_VERSION,
+        removal_wins: false,
+    },
+    LwwTable {
+        table: "shared_vault",
+        key: "uuid",
+        columns: &[
             "name",
             "color",
             "relay_url",
@@ -183,12 +216,33 @@ const LWW_TABLES: [(&str, &str, &[&str]); 3] = [
             "updated_by",
             "deleted_at",
         ],
-    ),
-    (
-        "vault_secret",
-        "name",
-        &["value", "updated_at", "updated_by"],
-    ),
+        since: FOLDER_SCHEMA_VERSION,
+        removal_wins: false,
+    },
+    LwwTable {
+        table: "vault_secret",
+        key: "name",
+        columns: &["value", "updated_at", "updated_by"],
+        since: FOLDER_SCHEMA_VERSION,
+        removal_wins: false,
+    },
+    LwwTable {
+        table: "trusted_device",
+        key: "uuid",
+        columns: &[
+            "name",
+            "kind",
+            "relay_devices",
+            "sign_key",
+            "answer_key",
+            "created_at",
+            "updated_at",
+            "updated_by",
+            "deleted_at",
+        ],
+        since: SCHEMA_VERSION,
+        removal_wins: true,
+    },
 ];
 
 /// A tombstone stays this long. A copy that is older than this can bring a deleted
@@ -562,6 +616,8 @@ struct Record {
     sources: Option<[String; 4]>,
     /// Schema 18: the shared vaults of the item, in UUID order.
     shares: Vec<String>,
+    /// Schema 19: the shared vault and the home credential of a mirror.
+    home: Option<(String, String)>,
 }
 
 impl Record {
@@ -570,8 +626,8 @@ impl Record {
     }
 
     /// SHA-256 of the content: everything but the row ID and the version. The archive
-    /// counts as on or off. The values of schema 18 count only when one is set, so a
-    /// credential without them has the hash of schema 17.
+    /// counts as on or off. The values of schema 18 and of schema 19 count only when one
+    /// is set, so a credential without them has the hash of the earlier schema.
     fn content_hash(&self) -> [u8; 32] {
         let mut ctx = digest::Context::new(&digest::SHA256);
         let mut text = |value: &str| {
@@ -646,6 +702,11 @@ impl Record {
                 text(share);
             }
         }
+        if let Some((shared_vault, home)) = &self.home {
+            text("v19");
+            text(shared_vault);
+            text(home);
+        }
         let mut out = [0u8; 32];
         out.copy_from_slice(ctx.finish().as_ref());
         out
@@ -673,8 +734,8 @@ fn grouped<T>(
 }
 
 /// The credentials of the scope in `schema` of schema `version`, by UUID. A copy before
-/// schema 18 has no folder, policy, declaration source, or share rows: its records have
-/// none.
+/// schema 18 has no folder, policy, declaration source, or share rows, and a copy before
+/// schema 19 has no home rows: its records have none.
 fn load_records(
     conn: &Connection,
     schema: &str,
@@ -682,7 +743,8 @@ fn load_records(
     version: i64,
 ) -> VaultResult<BTreeMap<String, Record>> {
     let filter = scope.item_filter();
-    let v18 = version >= SCHEMA_VERSION;
+    let v18 = version >= FOLDER_SCHEMA_VERSION;
+    let v19 = version >= SCHEMA_VERSION;
     let mut shares = if v18 {
         grouped(
             conn,
@@ -732,6 +794,14 @@ fn load_records(
     } else {
         ("NULL, NULL, NULL, NULL, NULL, NULL", String::new())
     };
+    let (v19_columns, v19_joins) = if v19 {
+        (
+            "h.shared_vault_uuid, h.home_uuid",
+            format!("LEFT JOIN {schema}.item_home h ON h.item_id = i.id"),
+        )
+    } else {
+        ("NULL, NULL", String::new())
+    };
     let mut records = BTreeMap::new();
     let mut stmt = conn
         .prepare(&format!(
@@ -740,13 +810,14 @@ fn load_records(
                  d.project, d.environment, d.risk, d.scope, d.reversibility, d.provider,
                  e.env_name, e.field, e.placeholder_hosts,
                  x.profile, x.base_url,
-                 {v18_columns}
+                 {v18_columns}, {v19_columns}
              FROM {schema}.item i
              LEFT JOIN {schema}.item_archive a ON a.item_id = i.id
              LEFT JOIN {schema}.declaration d ON d.item_id = i.id
              LEFT JOIN {schema}.env_binding e ON e.item_id = i.id
              LEFT JOIN {schema}.destination x ON x.item_id = i.id
              {v18_joins}
+             {v19_joins}
              WHERE i.uuid IS NOT NULL AND ({filter})"
         ))
         .map_err(storage)?;
@@ -797,6 +868,10 @@ fn load_records(
             always_ask: row.get::<_, Option<i64>>(21).map_err(storage)? == Some(1),
             sources,
             shares: shares.remove(&id).unwrap_or_default(),
+            home: match (text(26)?, text(27)?) {
+                (Some(shared_vault), Some(home)) => Some((shared_vault, home)),
+                _ => None,
+            },
         };
         records.insert(uuid, record);
     }
@@ -843,8 +918,9 @@ fn event_kinds_sql() -> String {
 }
 
 /// SHA-256 of the synced content of the scope in `schema`: each credential with its
-/// version, the tombstones, the synced history events, and (schema 18) the rows of the
-/// folders, shared vaults, and vault secrets. Local data (agents, activity, and the
+/// version, the tombstones, the synced history events, the rows of the folders, shared
+/// vaults, and vault secrets (schema 18), and the rows of the trusted devices (schema
+/// 19). Local data (agents, activity, and the
 /// others) is not in it, so agent use does not count as a change.
 pub(super) fn sync_content_digest(
     conn: &Connection,
@@ -887,20 +963,25 @@ pub(super) fn sync_content_digest(
         ctx.update(uuid.map_err(storage)?.as_bytes());
     }
     drop(stmt);
-    if version >= SCHEMA_VERSION {
-        let width = LWW_TABLES
+    // The tables of each schema in their own pass, so the digest of a vault without rows
+    // of a later table is the digest of the earlier schema.
+    for (since, tag) in [(FOLDER_SCHEMA_VERSION, b"\0w"), (SCHEMA_VERSION, b"\0d")] {
+        if version < since {
+            continue;
+        }
+        let tables: Vec<&LwwTable> = LWW_TABLES.iter().filter(|t| t.since == since).collect();
+        let width = tables.iter().map(|t| t.columns.len()).max().unwrap_or(0);
+        let selects: Vec<String> = tables
             .iter()
-            .map(|(_, _, columns)| columns.len())
-            .max()
-            .unwrap_or(0);
-        let selects: Vec<String> = LWW_TABLES
-            .iter()
-            .map(|(table, key, columns)| {
-                let mut values: Vec<&str> = columns.to_vec();
+            .map(|t| {
+                let mut values: Vec<&str> = t.columns.to_vec();
                 values.resize(width, "NULL");
                 format!(
-                    "SELECT '{table}', {key}, {} FROM {schema}.{table}",
-                    values.join(", ")
+                    "SELECT '{}', {}, {} FROM {schema}.{}",
+                    t.table,
+                    t.key,
+                    values.join(", "),
+                    t.table
                 )
             })
             .collect();
@@ -909,7 +990,7 @@ pub(super) fn sync_content_digest(
             .map_err(storage)?;
         let mut rows = stmt.query([]).map_err(storage)?;
         while let Some(row) = rows.next().map_err(storage)? {
-            ctx.update(b"\0w");
+            ctx.update(tag);
             for index in 0..width + 2 {
                 hash_value(&mut ctx, row.get_ref(index).map_err(storage)?);
             }
@@ -924,9 +1005,9 @@ pub(super) fn sync_content_digest(
 /// version and columns, and the digest of the last push (it catches a file that mixes
 /// pages of different copies). Returns its sync record and its schema version.
 ///
-/// A schema 17 copy gets the checks of schema 17: its columns, and the stored digest
-/// of its own content. The version in the header and in `vault_meta` must agree, so a
-/// copy of schema 18 with the header of schema 17 fails.
+/// A copy of an earlier schema (17 or 18) gets the checks of its schema: its columns,
+/// and the stored digest of its own content. The version in the header and in
+/// `vault_meta` must agree, so a copy of schema 19 with the header of schema 18 fails.
 fn check_attached(conn: &Connection, alias: &str) -> VaultResult<(SyncIdentity, i64)> {
     let damaged = |_| err(VaultErrorKind::Damaged);
     let mut problem = false;
@@ -951,7 +1032,7 @@ fn check_attached(conn: &Connection, alias: &str) -> VaultResult<(SyncIdentity, 
             row.get(0)
         })
         .map_err(damaged)?;
-    if version != SCHEMA_VERSION && version != UPGRADABLE_SCHEMA {
+    if !is_mergeable_schema(version) {
         return Err(err(VaultErrorKind::UnsupportedSchema));
     }
     verify_expected_columns_in(conn, alias, version)?;
@@ -978,6 +1059,17 @@ fn keep_local_v18(remote: &mut BTreeMap<String, Record>, local: &BTreeMap<String
             record.always_ask = ours.always_ask;
             record.sources.clone_from(&ours.sources);
             record.shares.clone_from(&ours.shares);
+        }
+    }
+}
+
+/// Give the records of a copy before schema 19 the home of this vault, in memory, as
+/// [`keep_local_v18`] does for the values of schema 18: a copy of schema 17 or 18
+/// cannot hold the home of a mirror.
+fn keep_local_v19(remote: &mut BTreeMap<String, Record>, local: &BTreeMap<String, Record>) {
+    for (uuid, record) in remote.iter_mut() {
+        if let Some(ours) = local.get(uuid) {
+            record.home.clone_from(&ours.home);
         }
     }
 }
@@ -1060,16 +1152,16 @@ pub struct MergeReport {
     /// Variable names that another credential of this Mac has already. The incoming
     /// credential came without its variable.
     pub skipped_variables: Vec<String>,
-    /// Rows of folders, shared vaults, and vault secrets that took the version of the
-    /// other copy (schema 18).
+    /// Rows of folders, shared vaults, and vault secrets (schema 18) and of trusted
+    /// devices (schema 19) that took the version of the other copy.
     pub folders: usize,
     /// The sync record of the other copy.
     pub remote: SyncIdentity,
     /// The synced-content digest of the other copy, as the copy holds it (before an
     /// upgrade of its schema).
     pub remote_content: [u8; 32],
-    /// The schema version of the other copy: [`SCHEMA_VERSION`], or 17 for a copy of
-    /// an installed app before folders.
+    /// The schema version of the other copy: [`SCHEMA_VERSION`], 18 for a copy before
+    /// trusted devices, or 17 for a copy of an installed app before folders.
     pub remote_schema: i64,
 }
 
@@ -1206,6 +1298,14 @@ fn write_children(
         tx.execute(
             "INSERT INTO item_share (item_id, shared_vault_uuid) VALUES (?1, ?2)",
             (id, share),
+        )
+        .map_err(storage)?;
+    }
+    // A conflict copy is not a mirror: only the credential has the home.
+    if let Some((shared_vault, home)) = &record.home {
+        tx.execute(
+            "INSERT INTO item_home (item_id, shared_vault_uuid, home_uuid) VALUES (?1, ?2, ?3)",
+            (id, shared_vault, home),
         )
         .map_err(storage)?;
     }
@@ -1350,6 +1450,7 @@ fn delete_record(tx: &rusqlite::Transaction<'_>, id: i64) -> VaultResult<()> {
         .map_err(storage)?;
     agents::delete_item_links(tx, id)?;
     schema18::forget_item(tx, id)?;
+    schema19::forget_item(tx, id)?;
     history::forget_item(tx, id)?;
     tx.execute("DELETE FROM item WHERE id = ?1", [id])
         .map_err(storage)?;
@@ -1358,31 +1459,48 @@ fn delete_record(tx: &rusqlite::Transaction<'_>, id: i64) -> VaultResult<()> {
 
 /// Take the rows of `table` from the other copy where they are later: the greater
 /// `(updated_at, updated_by)` wins. A deleted row keeps its key with `deleted_at` and the
-/// time of the delete, so it wins over an older edit, and a later edit wins over it. A
-/// copy before schema 18 has no such rows. Returns the count of rows taken.
+/// time of the delete, so it wins over an older edit, and a later edit wins over it.
+/// With `removal_wins`, a deleted row wins over a live one whatever their times, and the
+/// times decide between two rows of the same state; the order is total, so the copies
+/// agree. A copy before the schema of the table has no such rows. Returns the count of
+/// rows taken.
 fn merge_lww(
     tx: &rusqlite::Transaction<'_>,
-    table: &str,
-    key: &str,
-    columns: &[&str],
+    lww: &LwwTable,
     remote_version: i64,
 ) -> VaultResult<usize> {
-    if remote_version < SCHEMA_VERSION {
+    if remote_version < lww.since {
         return Ok(0);
     }
+    let LwwTable {
+        table,
+        key,
+        columns,
+        ..
+    } = lww;
     let all = columns.join(", ");
     let set = columns
         .iter()
         .map(|column| format!("{column} = excluded.{column}"))
         .collect::<Vec<_>>()
         .join(", ");
+    let later = format!(
+        "(excluded.updated_at, excluded.updated_by) > ({table}.updated_at, {table}.updated_by)"
+    );
+    let take = if lww.removal_wins {
+        format!(
+            "(excluded.deleted_at IS NOT NULL AND {table}.deleted_at IS NULL)
+             OR ((excluded.deleted_at IS NULL) = ({table}.deleted_at IS NULL) AND {later})"
+        )
+    } else {
+        later
+    };
     tx.execute(
         &format!(
             "INSERT INTO main.{table} ({key}, {all})
              SELECT {key}, {all} FROM {REMOTE}.{table} WHERE true
              ON CONFLICT({key}) DO UPDATE SET {set}
-             WHERE (excluded.updated_at, excluded.updated_by)
-                 > ({table}.updated_at, {table}.updated_by)"
+             WHERE {take}"
         ),
         [],
     )
@@ -1722,12 +1840,15 @@ fn merge_attached(conn: &mut Connection, scope: &SyncScope) -> VaultResult<Merge
     .map_err(storage)?;
     let local = load_records(&tx, "main", scope, SCHEMA_VERSION)?;
     let mut remote = load_records(&tx, REMOTE, scope, remote_schema)?;
-    if remote_schema == UPGRADABLE_SCHEMA {
+    if remote_schema < FOLDER_SCHEMA_VERSION {
         keep_local_v18(&mut remote, &local);
     }
-    // Folders, shared vaults, and vault secrets: the later row wins.
-    for (table, key, columns) in LWW_TABLES {
-        report.folders += merge_lww(&tx, table, key, columns, remote_schema)?;
+    if remote_schema < SCHEMA_VERSION {
+        keep_local_v19(&mut remote, &local);
+    }
+    // Folders, shared vaults, vault secrets, and trusted devices: the later row wins.
+    for lww in &LWW_TABLES {
+        report.folders += merge_lww(&tx, lww, remote_schema)?;
     }
     let local_tombs = load_tombstones(&tx, "main")?;
     let remote_tombs = load_tombstones(&tx, REMOTE)?;
@@ -1957,8 +2078,8 @@ impl Vault {
     /// Check a copy at `path` with the key of this vault and return its sync record. The
     /// copy does not change. A copy that does not open with the key (another vault, or a
     /// passphrase that changed on another Mac) is `WrongKeyOrCorrupt`; a copy that opens
-    /// but fails a check is `Damaged`. A schema 17 copy gets the checks of schema 17; a
-    /// copy of another earlier or a later schema is `UnsupportedSchema`.
+    /// but fails a check is `Damaged`. A copy of schema 17 or 18 gets the checks of its
+    /// schema; a copy of another earlier or a later schema is `UnsupportedSchema`.
     pub fn check_sync_copy(&self, path: &Path, scope: &SyncScope) -> VaultResult<SyncIdentity> {
         let conn = self.conn_ref()?;
         scope.attach(conn, path, REMOTE)?;
@@ -1970,8 +2091,9 @@ impl Vault {
     /// Merge the copy at `path` into this vault, record by record (ADR 0014). The vault
     /// must be unlocked. The copy is a local file, never a file in a synced folder. It
     /// must pass the checks of [`Vault::check_sync_copy`] and have the vault ID of this
-    /// vault (`OtherVault`). A schema 17 copy merges with the folders, policies, and
-    /// shares of this vault, and the report says so ([`MergeReport::remote_outdated`]).
+    /// vault (`OtherVault`). A copy of schema 17 merges with the folders, policies, and
+    /// shares of this vault, and a copy of schema 17 or 18 with its homes and trusted
+    /// devices; the report says so ([`MergeReport::remote_outdated`]).
     pub fn merge_from(&mut self, path: &Path, scope: &SyncScope) -> VaultResult<MergeReport> {
         self.require_unlocked()?;
         let conn = self.conn_mut()?;
@@ -2337,7 +2459,8 @@ mod schema17_tests {
     const PASS: &str = "synthetic-schema17-pass";
     const OTHER: &str = "synthetic-schema17-other";
 
-    /// What a copy of schema 18 has and a copy of schema 17 has not.
+    /// What a copy of schema 18 has and a copy of schema 17 has not (after
+    /// [`schema19::DOWNGRADE_TO_18_SQL`]).
     const DOWNGRADE_SQL: &str = "
         DROP TABLE folder; DROP TABLE item_folder; DROP TABLE item_policy;
         DROP TABLE declaration_source; DROP TABLE shared_vault; DROP TABLE item_share;
@@ -2420,6 +2543,7 @@ mod schema17_tests {
 
     /// Make the closed sync copy at `path` a copy of schema 17 with the digest of a push.
     fn make_schema17(path: &Path) {
+        raw(path, schema19::DOWNGRADE_TO_18_SQL, false);
         raw(path, DOWNGRADE_SQL, true);
     }
 
@@ -2488,7 +2612,7 @@ mod schema17_tests {
         let report = w.a.merge_from(&same, &scope).unwrap();
         assert!(!report.changed_local());
         assert!(report.remote_outdated());
-        assert_eq!(report.remote_schema, UPGRADABLE_SCHEMA);
+        assert_eq!(report.remote_schema, OLDEST_UPGRADABLE_SCHEMA);
         assert_eq!(w.a.sync_content(&scope).unwrap(), content);
         assert_eq!(sha(&same), before);
         assert_eq!(versions(&same), (17, 17));
@@ -2630,9 +2754,23 @@ mod schema17_tests {
         );
         refuse(&mut w.a, &mixed, VaultErrorKind::Damaged);
 
+        // A copy of schema 19 with the header of schema 18, and in `vault_meta` too: it
+        // has no `relay_device` table.
+        let header19 = w.dir.path().join("header19.db");
+        w.old.write_sync_copy(&header19, "Old Mac").unwrap();
+        raw(&header19, "PRAGMA user_version = 18;", false);
+        refuse(&mut w.a, &header19, VaultErrorKind::UnsupportedSchema);
+        raw(
+            &header19,
+            "UPDATE vault_meta SET schema_version = 18;",
+            true,
+        );
+        refuse(&mut w.a, &header19, VaultErrorKind::UnsupportedSchema);
+
         // A copy of schema 18 with the header of schema 17.
         let header = w.dir.path().join("header.db");
         w.old.write_sync_copy(&header, "Old Mac").unwrap();
+        raw(&header, schema19::DOWNGRADE_TO_18_SQL, true);
         raw(&header, "PRAGMA user_version = 17;", false);
         refuse(&mut w.a, &header, VaultErrorKind::UnsupportedSchema);
         // ... and in `vault_meta` too, without a new digest.
@@ -2640,7 +2778,7 @@ mod schema17_tests {
         refuse(&mut w.a, &header, VaultErrorKind::Damaged);
 
         // A later and an older schema, each with a valid digest.
-        for version in [SCHEMA_VERSION + 1, UPGRADABLE_SCHEMA - 1] {
+        for version in [SCHEMA_VERSION + 1, OLDEST_UPGRADABLE_SCHEMA - 1] {
             let path = w.dir.path().join(format!("v{version}.db"));
             w.old.write_sync_copy(&path, "Old Mac").unwrap();
             raw(
