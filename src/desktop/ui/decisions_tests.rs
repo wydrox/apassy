@@ -274,10 +274,8 @@ fn the_list_has_waiting_questions_in_order_and_no_empty_sections() {
     let (mut app, item_id) = unlocked_app_with_item(&dir);
     app.place = Place::Decisions;
     let (text, _) = frames(&mut app, DEFAULT, 3);
-    assert!(
-        !text.contains("Nothing needs you"),
-        "one empty message: {text}"
-    );
+    // As in the mockup: the list says so, and the detail says "All clear".
+    assert!(text.contains("Nothing needs you"), "{text}");
     assert!(text.contains("All clear"), "{text}");
     assert!(text.contains("by you · 0 automatic this week"), "{text}");
 
@@ -365,8 +363,6 @@ fn the_detail_shows_the_facts_the_command_and_why() {
         "acme-billing",
         "Sends to",
         "api.stripe.com",
-        "Request",
-        "\"Show the last payouts.\" (from the agent)",
         "Command",
         "curl https://api.stripe.com/v1/payouts",
         "Why you are asked",
@@ -374,13 +370,70 @@ fn the_detail_shows_the_facts_the_command_and_why() {
         "Deny",
         "Allow Once",
         "Allow production: Read in acme-billing",
-        "Production stays allowed for reading in acme-billing for all agents.",
+        "Production stays allowed for all agents in acme-billing.",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
+    // As in the mockup, the request of the user has no group of its own.
+    assert!(!text.contains("Show the last payouts."), "{text}");
     assert!(!text.contains("ui-owner-token-canary"), "{text}");
     assert!(queue.deny(pending.id));
     waiter.join().expect("waiter").expect("an answer");
+
+    // Goal item B6: when the agent sent a different request, both show.
+    let mut changed = run(
+        "Claude Code",
+        question(vec![item(item_id, "Live key")], &[]),
+    );
+    changed.agent_request = "Delete the old payouts.".to_owned();
+    let (waiter, pending) = ask(&app, &queue, 1, changed);
+    let (text, _) = frames(&mut app, WIDE, 3);
+    for expected in [
+        "Request",
+        "\"Show the last payouts.\" (from the agent)",
+        "The agent sent a different request: \"Delete the old payouts.\"",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    assert!(queue.deny(pending.id));
+    waiter.join().expect("waiter").expect("an answer");
+}
+
+/// The command of a command line tool names no host: the card has no "Sends to" row, as
+/// in the mockup.
+#[test]
+fn a_command_without_a_host_has_no_sends_to_row() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, item_id) = unlocked_app_with_item(&dir);
+    let queue = queue_of(&mut app, &dir);
+    let mut cli = run("Codex", question(vec![item(item_id, "Live key")], &[]));
+    cli.command = ["stripe", "payouts", "list"].map(str::to_owned).to_vec();
+    let (waiter, pending) = ask(&app, &queue, 1, cli);
+    app.place = Place::Decisions;
+    let (text, _) = frames(&mut app, WIDE, 3);
+    assert!(text.contains("stripe payouts list"), "{text}");
+    assert!(!text.contains("Sends to"), "{text}");
+    assert!(!text.contains("No host in the command"), "{text}");
+    assert!(queue.deny(pending.id));
+    waiter.join().expect("waiter").expect("an answer");
+}
+
+/// Agent avatars: Claude Code orange and Codex green as in the mockup, also for an ID or
+/// a member's agent; another agent gets a steady color of its own.
+#[test]
+fn agent_avatars_have_the_colors_of_the_mockup() {
+    use super::kit::agent_color;
+    let orange = egui::Color32::from_rgb(217, 119, 87);
+    let green = egui::Color32::from_rgb(16, 163, 127);
+    for name in ["Claude Code", "claude-code", "Ola's Claude Code"] {
+        assert_eq!(agent_color(name), orange, "{name}");
+    }
+    for name in ["Codex", "codex-cli"] {
+        assert_eq!(agent_color(name), green, "{name}");
+    }
+    assert_eq!(agent_color("Aider"), agent_color("Aider"));
+    assert_ne!(agent_color("Aider"), orange);
+    assert_ne!(agent_color("Aider"), green);
 }
 
 /// "Allow ACTION in PROJECT" opens the owner check. A wrong passphrase approves nothing.
@@ -1126,12 +1179,12 @@ fn suggestions_accept_a_stricter_value_at_once_and_a_looser_one_after_the_check(
     for expected in [
         "Suggestions",
         "Development or production?",
-        "Is Guarded key a development credential?",
+        "Is Guarded key a development key?",
         "Apassy noticed this from how agents use it.",
         "Seen",
         "every use went to a development or test host",
-        "Hosts",
-        "api.sandbox.example, files.test",
+        "Sends to",
+        "only api.sandbox.example, files.test",
         "Uses",
         "Ignore",
         "Development",
@@ -1330,7 +1383,7 @@ fn ignore_needs_the_check_only_when_it_restores_a_looser_environment() {
     app.place = Place::Decisions;
     let (text, _) = frames(&mut app, WIDE, 3);
     for expected in [
-        "Is Guarded key a production credential?",
+        "Is Guarded key a production key?",
         "Before",
         "Ignore makes it development again.",
         "Development and Ignore need Touch ID or the passphrase.",
@@ -1382,7 +1435,9 @@ fn ignore_needs_the_check_only_when_it_restores_a_looser_environment() {
     assert_eq!(decisions::selected_key(&app), None, "nothing waits");
 }
 
-/// The facts of a correction read as rows, the signal first; a provider shows its name.
+/// The facts of a correction read as rows in the order of the mockup (the uses, where it
+/// sends, the provider, then the signal); a provider shows its name, and the
+/// bookkeeping of the correction shows no row.
 #[test]
 fn the_facts_of_a_suggestion_read_as_rows() {
     let rows = decisions::fact_rows(&serde_json::json!({
@@ -1392,12 +1447,17 @@ fn the_facts_of_a_suggestion_read_as_rows() {
         "provider": "stripe",
         "extra_note": true,
         "nothing": null,
+        "applied": false,
+        "previous_environment": "production",
     }));
     let labels: Vec<&str> = rows.iter().map(|(label, _)| label.as_str()).collect();
-    assert_eq!(labels, ["Seen", "Provider", "Hosts", "Uses", "Extra note"]);
-    assert_eq!(rows[1].1, "Stripe");
-    assert_eq!(rows[2].1, "api.sandbox.example");
-    assert_eq!(rows[3].1, "4");
+    assert_eq!(
+        labels,
+        ["Uses", "Sends to", "Provider", "Seen", "Extra note"]
+    );
+    assert_eq!(rows[0].1, "4");
+    assert_eq!(rows[1].1, "only api.sandbox.example");
+    assert_eq!(rows[2].1, "Stripe");
     assert_eq!(rows[4].1, "Yes");
     assert!(decisions::fact_rows(&serde_json::Value::Null).is_empty());
 }

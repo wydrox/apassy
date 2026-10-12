@@ -28,8 +28,9 @@ use apassy::vault::agent_items::{CorrectionKind, NewCredentialRequest};
 use apassy::vault::exceptions::ExceptionKind;
 use apassy::vault::usage::{InteractionKind, NewItemUse, UseDecidedBy, UseOutcome};
 use apassy::vault::{
-    ActivityDecision, Declaration, Environment, ExecMode, Field, GrantPlace, ItemDraft,
-    NewActivity, Reversibility, RiskLevel, Scope, SecretValue, Vault,
+    ActivityDecision, DecidedBy, DecisionEntry, Declaration, Environment, ExecMode, Field,
+    GrantPlace, ItemDraft, LoggedDecision, NewActivity, RequestSource, Reversibility, RiskLevel,
+    Scope, SecretValue, Vault,
 };
 use eframe::egui;
 
@@ -131,6 +132,17 @@ type SeedUse = (
     UseOutcome,
     UseDecidedBy,
     &'static str,
+);
+
+/// One kind of automatic decision of the seed: the agent, its name, the credential, the
+/// project, the command, and what decided.
+type SeedAutomatic = (
+    u64,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static [&'static str],
+    DecidedBy,
 );
 
 fn seed(home: &Path) {
@@ -493,6 +505,77 @@ fn seed(home: &Path) {
     for _ in 0..7 {
         v.record_interaction(InteractionKind::Question, "tour", &[])
             .expect("interaction");
+    }
+    // The decisions of the week that did not wait for the owner, as in the mockup: "7 by
+    // you · 128 automatic this week". The bouncer, a remembered pattern, or an answer of
+    // the owner allowed them over the last five days.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    let automatic: [SeedAutomatic; 4] = [
+        (
+            claude,
+            "Claude Code",
+            "Anthropic API",
+            "apassy",
+            &["npm", "run", "eval"],
+            DecidedBy::Model,
+        ),
+        (
+            codex,
+            "Codex",
+            "OpenAI API",
+            "newsletter",
+            &["node", "scripts/summarize.mjs"],
+            DecidedBy::Pattern,
+        ),
+        (
+            claude,
+            "Claude Code",
+            "Stripe test",
+            "acme-billing",
+            &["stripe", "customers", "list"],
+            DecidedBy::Answer,
+        ),
+        (
+            ci,
+            "CI on GitHub",
+            "Stripe test",
+            "acme-billing",
+            &["stripe", "balance", "retrieve"],
+            DecidedBy::Model,
+        ),
+    ];
+    for index in 0..128u64 {
+        let (agent, name, title, project, command, decided_by) = automatic[(index % 4) as usize];
+        v.record_decision(&DecisionEntry {
+            at: now - 60 - index * (5 * 86_400 / 128),
+            agent_id: agent,
+            agent_name: name.to_owned(),
+            project_dir: format!("/Users/you/code/{project}"),
+            cwd_rel: ".".to_owned(),
+            items: vec![id(title)],
+            user_request: String::new(),
+            user_request_source: RequestSource::None,
+            command: command.iter().map(|arg| (*arg).to_owned()).collect(),
+            purpose: String::new(),
+            env_names: Vec::new(),
+            declarations: vec![None],
+            rule_flags: Vec::new(),
+            known_safe: false,
+            model_facts: Vec::new(),
+            pattern: String::new(),
+            grant_asks: false,
+            asked: false,
+            decision: LoggedDecision::Allow,
+            decided_by,
+            remembered: false,
+            policy: String::new(),
+            note: String::new(),
+            instruction: String::new(),
+        })
+        .expect("decision");
     }
 
     // Decisions: a request of Codex and a suggestion for the OpenAI key.
