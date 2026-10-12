@@ -173,6 +173,31 @@ public protocol VaultService: Sendable {
     func joinAttach(link: String, deviceName: String, answerKey: Data) async throws -> AttachInfo
     func joinAttachPoll() async throws -> AttachInfo
     func joinAttachCancel() async throws
+
+    // 5.11 Folders, adding by paste, and the options of a credential. The app syncs after each
+    // change, as after `save`.
+    /// The folders, depth first. The AutoFill extension may read them.
+    func folders() async throws -> [Folder]
+    /// A folder in `parent` (nil: the top level). `exists` when a sibling has the name.
+    func createFolder(parent: String?, name: String) async throws -> Folder
+    func renameFolder(uuid: String, name: String) async throws
+    /// Move a folder with its subfolders and credentials into `parent` (nil: the top level).
+    func moveFolder(uuid: String, parent: String?) async throws
+    /// Delete a folder. Its credentials and subfolders go to its parent. Returns the count of
+    /// credentials that moved. No credential is deleted.
+    func deleteFolder(uuid: String) async throws -> Int
+    /// Put a credential in `folder` (nil: the top level).
+    func setItemFolder(id: UInt64, folder: String?) async throws
+    /// The credentials of a paste, without a secret value (a secret field has a masked preview).
+    func detect(text: String) async throws -> [DetectedCredential]
+    /// Detect `text` again in the core and add the picked rows (`pick`: indexes of `detect`; nil:
+    /// all) to `folder` in one transaction. `titles`: a typed title for some rows, by index.
+    func addPasted(text: String, folder: String?, pick: [Int]?, titles: [Int: String]) async throws
+        -> [PastedItem]
+    /// "Always ask me" and the environment, with the owner as its source. The core does not check
+    /// the owner: ask for Face ID first when turning "Always ask me" off or choosing an
+    /// environment other than production, as the Mac does.
+    func setItemOptions(id: UInt64, alwaysAsk: Bool?, environment: CredentialEnvironment?) async throws
 }
 
 public extension VaultService {
@@ -208,5 +233,45 @@ public extension VaultService {
 
     func credentialExport() async throws -> CredentialExport {
         throw VaultError(.notAllowed, "This vault cannot export.")
+    }
+
+    // An older service has no folders and no paste detection. The app must not offer them then.
+
+    func folders() async throws -> [Folder] {
+        throw VaultError(.notAllowed, "This vault has no folders. Update Apassy.")
+    }
+
+    func createFolder(parent: String?, name: String) async throws -> Folder {
+        throw VaultError(.notAllowed, "This vault has no folders. Update Apassy.")
+    }
+
+    func renameFolder(uuid: String, name: String) async throws {
+        throw VaultError(.notAllowed, "This vault has no folders. Update Apassy.")
+    }
+
+    func moveFolder(uuid: String, parent: String?) async throws {
+        throw VaultError(.notAllowed, "This vault has no folders. Update Apassy.")
+    }
+
+    func deleteFolder(uuid: String) async throws -> Int {
+        throw VaultError(.notAllowed, "This vault has no folders. Update Apassy.")
+    }
+
+    func setItemFolder(id: UInt64, folder: String?) async throws {
+        throw VaultError(.notAllowed, "This vault has no folders. Update Apassy.")
+    }
+
+    func detect(text: String) async throws -> [DetectedCredential] {
+        throw VaultError(.notAllowed, "This vault cannot add a pasted credential. Update Apassy.")
+    }
+
+    func addPasted(text: String, folder: String?, pick: [Int]?, titles: [Int: String]) async throws
+        -> [PastedItem]
+    {
+        throw VaultError(.notAllowed, "This vault cannot add a pasted credential. Update Apassy.")
+    }
+
+    func setItemOptions(id: UInt64, alwaysAsk: Bool?, environment: CredentialEnvironment?) async throws {
+        throw VaultError(.notAllowed, "This vault cannot change the options of a credential. Update Apassy.")
     }
 }

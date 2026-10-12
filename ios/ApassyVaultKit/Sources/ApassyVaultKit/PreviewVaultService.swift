@@ -8,7 +8,7 @@ import Foundation
 public actor PreviewVaultService: VaultService {
     public static let passphrase = "preview passphrase"
 
-    private struct Stored {
+    struct Stored {
         var row: ItemRow
         var notes: String
         var fields: [FieldView]
@@ -17,7 +17,7 @@ public actor PreviewVaultService: VaultService {
     }
 
     /// A synthetic passkey with a key made here.
-    private struct Passkey {
+    struct Passkey {
         var summary: PasskeySummary
         var key: P256.Signing.PrivateKey
     }
@@ -27,11 +27,13 @@ public actor PreviewVaultService: VaultService {
     private var unlocked: Bool
     private var join: JoinInfo?
     private var joinPolls = 0
-    private var items: [UInt64: Stored] = [:]
-    private var nextID: UInt64 = 100
+    var items: [UInt64: Stored] = [:]
+    var nextID: UInt64 = 100
     private var status: SyncStatus
     /// Questions through the relay (`PreviewVaultService+Questions.swift`).
     var questionsState = PreviewQuestions()
+    /// Folders and the options of each credential (`PreviewVaultService+Organize.swift`).
+    var organizeState = PreviewOrganize()
 
     /// - Parameters:
     ///   - empty: no vault on this iPhone (the setup flow).
@@ -48,8 +50,10 @@ public actor PreviewVaultService: VaultService {
             enabled: !empty, state: empty ? .off : .ok, message: empty ? "" : "Saved to the iCloud file.", version: 41,
             lastSyncAt: Int64(Date().timeIntervalSince1970) - 60, pushed: false, merged: nil)
         if !empty {
+            organizeState.folders = PreviewOrganize.sampleFolders
             for sample in Self.samples() {
                 items[nextID] = Self.make(sample, id: nextID)
+                organizeState.options[nextID] = sample.options
                 nextID += 1
             }
         }
@@ -66,6 +70,11 @@ public actor PreviewVaultService: VaultService {
         var conflictOf: UInt64? = nil
         var archived = false
         var daysOld: Int64 = 3
+        /// The folder UUID (`PreviewOrganize.FolderID`), nil at the top level.
+        var folder: String? = nil
+        /// The provider label of the declaration.
+        var provider: String? = nil
+        var options = PreviewOrganize.Options()
     }
 
     private static func samples() -> [Sample] {
@@ -80,17 +89,20 @@ public actor PreviewVaultService: VaultService {
                         "x_4f6e652d74696d652070617373776f7264", "One-time password", .totp,
                         "otpauth://totp/GitHub:octocat?secret=JBSWY3DPEHPK3PXP", true, true
                     ),
-                ]),
+                ], folder: PreviewOrganize.FolderID.acme, provider: "GitHub",
+                options: .init(envName: "APASSY_ITEM_100", environment: .development, source: .owner)),
             Sample(
                 title: "Stripe live key", kind: .apiKey, tags: ["billing", "production"], notes: "",
                 fields: [
                     ("service", "Service", .service, "stripe", false, false),
                     ("project", "Project", .project, "shop", false, false),
                     ("token", "Token", .token, "sk_synthetic_4eC39HqLyjWDarjtT1zdp7dc", true, false),
-                ]),
+                ], folder: PreviewOrganize.FolderID.billing, provider: "Stripe",
+                options: .init(envName: "STRIPE_SECRET_KEY", environment: .production, source: .signal)),
             Sample(
                 title: "OpenAI", kind: .apiKey, tags: ["ai"], notes: "",
-                fields: [("token", "Token", .token, "synthetic-openai-key-0000", true, false)]),
+                fields: [("token", "Token", .token, "synthetic-openai-key-0000", true, false)],
+                options: .init(envName: "APASSY_ITEM_102")),
             Sample(
                 title: "Production Postgres", kind: .database, tags: ["production"], notes: "Read replica: db-ro.internal",
                 fields: [
@@ -98,7 +110,8 @@ public actor PreviewVaultService: VaultService {
                     ("database", "Database", .database, "shop", false, false),
                     ("username", "Username", .username, "app", false, false),
                     ("password", "Password", .password, "short1", true, false),
-                ]),
+                ], folder: PreviewOrganize.FolderID.billing, provider: "PostgreSQL",
+                options: .init(envName: "DATABASE_PASSWORD", environment: .production, source: .default)),
             Sample(
                 title: "Deploy key", kind: .sshKey, tags: [], notes: "",
                 fields: [
@@ -108,23 +121,24 @@ public actor PreviewVaultService: VaultService {
                         false
                     ),
                     ("public_key", "Public key", .publicKey, "deploy@ci", false, false),
-                ]),
+                ], folder: PreviewOrganize.FolderID.acme, options: .init(envName: "APASSY_ITEM_104")),
             Sample(
                 title: "Netflix", kind: .login, tags: ["home"], notes: "",
                 fields: [
                     ("username", "Username", .username, "family@example.com", false, false),
                     ("password", "Password", .password, "short1", true, false),
                     ("x_75726c", "url", .website, "netflix.com", false, true),
-                ], daysOld: 500),
+                ], daysOld: 500, folder: PreviewOrganize.FolderID.personal),
             Sample(
                 title: "Wi-Fi at home", kind: .custom, tags: ["home"], notes: "Guest network: Apassy-Guest",
-                fields: [("wifi_password", "wifi_password", .other, "synthetic wifi words", true, false)]),
+                fields: [("wifi_password", "wifi_password", .other, "synthetic wifi words", true, false)],
+                folder: PreviewOrganize.FolderID.personal),
             Sample(
                 title: "GitHub (conflict copy, MacBook Pro)", kind: .login, tags: ["work"], notes: "",
                 fields: [
                     ("username", "Username", .username, "octocat", false, false),
                     ("password", "Password", .password, "synthetic-older-Pw", true, false),
-                ], conflictOf: 100),
+                ], conflictOf: 100, folder: PreviewOrganize.FolderID.acme, provider: "GitHub"),
             Sample(
                 title: "Old Heroku", kind: .apiKey, tags: [], notes: "",
                 fields: [("token", "Token", .token, "synthetic-heroku", true, false)], archived: true),
@@ -133,6 +147,7 @@ public actor PreviewVaultService: VaultService {
 
     private func insert(_ sample: Sample) {
         items[nextID] = Self.make(sample, id: nextID)
+        organizeState.options[nextID] = sample.options
         nextID += 1
     }
 
@@ -154,14 +169,15 @@ public actor PreviewVaultService: VaultService {
             websites: sample.fields.filter { $0.role == .website }.map(\.value), tags: sample.tags,
             archived: sample.archived, hasTotp: sample.fields.contains { $0.role == .totp },
             conflictOf: sample.conflictOf, addedAt: now - 86_400 * 400, changedAt: now - 86_400 * sample.daysOld,
-            usedAt: nil, hasPassword: Self.storesPassword(secrets))
+            usedAt: nil, hasPassword: Self.storesPassword(secrets), folder: sample.folder, provider: sample.provider,
+            production: sample.options.production)
         return Stored(row: row, notes: sample.notes, fields: fields, secrets: secrets)
     }
 
     // MARK: - Helpers
 
     /// As the core: a password counts when its value is not empty. The row says so without the value.
-    private static func storesPassword(_ secrets: [String: String]) -> Bool {
+    static func storesPassword(_ secrets: [String: String]) -> Bool {
         secrets["password"].map { !$0.isEmpty } == true
     }
 
@@ -182,12 +198,12 @@ public actor PreviewVaultService: VaultService {
         guard selected != nil else { throw VaultError(.noVault, "No vault is open on this iPhone.") }
     }
 
-    private func requireUnlocked() throws {
+    func requireUnlocked() throws {
         try requireVault()
         guard unlocked else { throw VaultError(.locked, "The vault is locked.") }
     }
 
-    private func stored(_ id: UInt64) throws -> Stored {
+    func stored(_ id: UInt64) throws -> Stored {
         try requireUnlocked()
         guard let item = items[id] else { throw VaultError(.notFound, "This item is not in the vault any more.") }
         return item
@@ -300,6 +316,7 @@ public actor PreviewVaultService: VaultService {
             selected = vaults.first?.id
             unlocked = false
             items = [:]
+            organizeState = PreviewOrganize()
         }
         return leftRelay
     }
@@ -345,6 +362,7 @@ public actor PreviewVaultService: VaultService {
             enabled: true, state: .ok, message: "Up to date.", version: 41,
             lastSyncAt: Int64(Date().timeIntervalSince1970), pushed: false, merged: nil)
         if items.isEmpty {
+            organizeState.folders = PreviewOrganize.sampleFolders
             for sample in Self.samples() { insert(sample) }
         }
         return vault
@@ -367,7 +385,8 @@ public actor PreviewVaultService: VaultService {
 
     public func item(id: UInt64) async throws -> ItemDetail {
         let item = try stored(id)
-        return ItemDetail(row: item.row, notes: item.notes, fields: item.fields, passkey: item.passkey?.summary)
+        return organizeDetail(
+            ItemDetail(row: item.row, notes: item.notes, fields: item.fields, passkey: item.passkey?.summary))
     }
 
     public func reveal(id: UInt64, field: String) async throws -> String {
@@ -448,7 +467,8 @@ public actor PreviewVaultService: VaultService {
             websites: fields.filter { $0.role == .website }.compactMap(\.value), tags: draft.tags,
             archived: old?.row.archived ?? false, hasTotp: fields.contains { $0.role == .totp },
             conflictOf: old?.row.conflictOf, addedAt: old?.row.addedAt ?? now, changedAt: now, usedAt: nil,
-            hasPasskey: old?.passkey != nil, hasPassword: Self.storesPassword(secrets))
+            hasPasskey: old?.passkey != nil, hasPassword: Self.storesPassword(secrets), folder: old?.row.folder,
+            provider: old?.row.provider, production: old?.row.production ?? false)
         items[newID] = Stored(row: row, notes: draft.notes, fields: fields, secrets: secrets, passkey: old?.passkey)
         return SavedItem(id: newID, revision: row.revision)
     }
