@@ -7,7 +7,10 @@ use tempfile::TempDir;
 
 use super::super::owner_tests::unlocked_app_with_item;
 use super::super::settings_window::{MIN_SIZE, content};
-use super::{RELAY_QUESTIONS, SettingsTab};
+use super::{
+    RELAY_QUESTIONS, RELAY_QUESTIONS_NEEDS_RELAY, RELAY_QUESTIONS_OFF, RELAY_QUESTIONS_ON,
+    SettingsTab,
+};
 use crate::desktop::DesktopApp;
 
 const TALL: Vec2 = Vec2::new(MIN_SIZE.x, 6000.0);
@@ -211,13 +214,9 @@ fn a_click_on_a_tab_selects_it() {
     }
 }
 
-/// "Send questions through the relay" is on the Devices tab, off, and disabled until
-/// the relay carries the questions (stream N3). A click does nothing.
-#[test]
-fn the_relay_questions_switch_is_disabled() {
-    let dir = TempDir::new().expect("temp dir");
-    let (mut app, _) = unlocked_app_with_item(&dir);
-    app.ui.settings_tab = SettingsTab::Devices;
+/// The state of the relay switch in the AccessKit tree of three frames: disabled, and
+/// toggled.
+fn relay_switch(app: &mut DesktopApp) -> (bool, Option<egui::accesskit::Toggled>) {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
     let mut switch = None;
@@ -227,7 +226,7 @@ fn the_relay_questions_switch_is_disabled() {
             ..Default::default()
         };
         let output = ctx.run_ui(input, |ui| {
-            egui::CentralPanel::default().show(ui, |ui| content(&mut app, ui));
+            egui::CentralPanel::default().show(ui, |ui| content(app, ui));
         });
         if let Some(update) = &output.platform_output.accesskit_update {
             for (_, node) in &update.nodes {
@@ -238,11 +237,84 @@ fn the_relay_questions_switch_is_disabled() {
         }
         output.drop_without_applying_deltas();
     }
-    let (disabled, toggled) = switch.expect("the relay switch is in the AccessKit tree");
+    switch.expect("the relay switch is in the AccessKit tree")
+}
+
+/// "Send questions through the relay" is on the Devices tab and off by default. A vault
+/// that is not on the relay cannot turn it on: the switch is disabled.
+#[test]
+fn the_relay_questions_switch_needs_the_relay() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    app.ui.settings_tab = SettingsTab::Devices;
+    let (disabled, toggled) = relay_switch(&mut app);
     assert!(disabled, "the relay switch is disabled");
     assert_eq!(toggled, Some(egui::accesskit::Toggled::False), "and off");
     let (text, _) = frames(&mut app, TALL);
-    assert!(text.contains("Coming soon."), "{text}");
+    assert!(text.contains(RELAY_QUESTIONS_NEEDS_RELAY), "{text}");
+}
+
+/// With relay sync, the switch is enabled and still off by default. On adds the purpose
+/// `questions` to the sync membership, makes the question key, and registers this Mac;
+/// off takes the purpose away and keeps relay sync.
+#[test]
+fn the_relay_questions_switch_goes_on_and_off_with_relay_sync() {
+    use crate::relay::membership::{QuestionsAvailability, questions_availability};
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    app.ui.settings_tab = SettingsTab::Devices;
+    let vault = app.owner_ui.session.shared_vault();
+    let key = crate::sync::DeviceKey::generate().expect("key");
+    vault
+        .lock()
+        .unwrap()
+        .as_mut()
+        .expect("open vault")
+        .set_relay_device(&crate::vault::RelayDevice {
+            relay_url: "https://relay.example.test".to_owned(),
+            team_id: "t_7k2m5q4x3c".to_owned(),
+            device_id: 2,
+            public_key: key.public_key().to_vec(),
+            key_pkcs8: key.pkcs8().expect("pkcs8").clone(),
+            created_at: 0,
+        })
+        .expect("relay row");
+    let (disabled, toggled) = relay_switch(&mut app);
+    assert!(!disabled, "the relay switch is enabled");
+    assert_eq!(toggled, Some(egui::accesskit::Toggled::False), "and off");
+    let (text, _) = frames(&mut app, TALL);
+    assert!(text.contains(RELAY_QUESTIONS_OFF), "{text}");
+
+    super::set_relay_questions(&mut app, true);
+    let (_, toggled) = relay_switch(&mut app);
+    assert_eq!(toggled, Some(egui::accesskit::Toggled::True));
+    {
+        let guard = vault.lock().unwrap();
+        let open = guard.as_ref().expect("open vault");
+        assert_eq!(
+            questions_availability(open).unwrap(),
+            QuestionsAvailability::On {
+                team_id: "t_7k2m5q4x3c".to_owned()
+            }
+        );
+        assert!(open.question_key().unwrap().is_some());
+        assert_eq!(open.trusted_devices().unwrap().len(), 1);
+    }
+    let (text, _) = frames(&mut app, TALL);
+    assert!(text.contains(RELAY_QUESTIONS_ON), "{text}");
+
+    super::set_relay_questions(&mut app, false);
+    let (_, toggled) = relay_switch(&mut app);
+    assert_eq!(toggled, Some(egui::accesskit::Toggled::False));
+    let guard = vault.lock().unwrap();
+    let open = guard.as_ref().expect("open vault");
+    assert_eq!(
+        open.relay_device()
+            .unwrap()
+            .expect("relay sync stays")
+            .team_id,
+        "t_7k2m5q4x3c"
+    );
 }
 
 /// Settings in place of the main window: Esc and ⌘W close it. Esc with a sheet open

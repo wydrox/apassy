@@ -221,6 +221,9 @@ struct Shared {
     wake: Mutex<bool>,
     woken: Condvar,
     on_change: Box<dyn Fn() + Send + Sync>,
+    /// Also called when a run starts to wait: the questions waiter posts it through the
+    /// relay ([`NotificationCenter::set_question_hook`]).
+    question_hook: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
 impl Shared {
@@ -280,11 +283,20 @@ impl NotificationCenter {
             wake: Mutex::new(false),
             woken: Condvar::new(),
             on_change: Box::new(on_change),
+            question_hook: Mutex::new(None),
         });
         {
             let shared = Arc::clone(&shared);
             approvals.set_notifier(move || {
                 shared.wake();
+                if let Some(hook) = shared
+                    .question_hook
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .as_ref()
+                {
+                    hook();
+                }
                 (shared.on_change)();
             });
         }
@@ -318,6 +330,16 @@ impl NotificationCenter {
             jobs: Mutex::new(Some(sender)),
             watcher,
         }
+    }
+
+    /// Run `hook` too when a run starts to wait: the questions waiter
+    /// (`crate::questions::QuestionsWorker::waker`) then posts it through the relay at once.
+    pub fn set_question_hook(&self, hook: impl Fn() + Send + Sync + 'static) {
+        *self
+            .shared
+            .question_hook
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Box::new(hook));
     }
 
     /// A copy of the channel state and the deliveries.

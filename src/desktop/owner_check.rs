@@ -1220,6 +1220,9 @@ pub struct OwnerFlows {
     pub(crate) check: Option<CheckDialog>,
     pub(crate) unlock: UnlockState,
     pub(crate) notifications: Option<NotificationCenter>,
+    /// The questions waiter: the questions through the relay (ADR 0025 §3e). It does
+    /// nothing until the open vault has a membership with the purpose `questions`.
+    pub(crate) questions: Option<crate::questions::QuestionsWorker>,
     /// Inbox events that the owner marked as seen. This is not an approval (N4).
     pub(crate) acknowledged: BTreeSet<EventKey>,
     /// A copied one-time code and its clear.
@@ -1286,6 +1289,20 @@ impl DesktopApp {
                 helper,
                 move || repaint.request_repaint(),
             ));
+        }
+        if let Some(approvals) = self.approvals() {
+            let worker = crate::questions::QuestionsWorker::start(
+                approvals,
+                self.owner_ui.session.shared_vault(),
+                self.owner_gate(),
+                crate::questions::QuestionsConfig::default(),
+            );
+            let repaint = ctx.clone();
+            worker.set_on_change(move || repaint.request_repaint());
+            if let Some(center) = &self.owner.notifications {
+                center.set_question_hook(worker.waker());
+            }
+            self.owner.questions = Some(worker);
         }
     }
 
@@ -2262,6 +2279,10 @@ impl DesktopApp {
         }
         // A lock stops the iPhone listener at once and drops its key from memory.
         self.stop_companion();
+        // The relay token of the questions goes; their open questions expire on the relay.
+        if let Some(questions) = &self.owner.questions {
+            questions.forget();
+        }
         self.erase_typed_secrets(ctx);
     }
 
@@ -2309,6 +2330,9 @@ impl DesktopApp {
         self.erase_typed_secrets(None);
         if let Some(mut center) = self.owner.notifications.take() {
             center.stop();
+        }
+        if let Some(mut questions) = self.owner.questions.take() {
+            questions.stop();
         }
         // A local fine-tune stops with the app (goal item B9).
         self.learning.stop_training();

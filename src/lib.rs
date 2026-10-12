@@ -21,6 +21,17 @@ pub mod companion;
 #[cfg(feature = "vault")]
 pub mod sync;
 
+/// Questions of the broker through the relay (ADR 0025 §3e, contract relay-questions-v1).
+/// It needs the vault.
+#[cfg(feature = "vault")]
+pub mod questions;
+
+/// Relay memberships of this Mac for sync and questions (stage 5). It needs the vault.
+#[cfg(feature = "vault")]
+pub mod relay {
+    pub mod membership;
+}
+
 #[cfg(feature = "desktop")]
 pub mod desktop;
 

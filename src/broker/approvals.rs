@@ -57,7 +57,8 @@ use crate::vault::{
 
 pub use owner_auth::{
     CheckMethod, OwnerAction, OwnerAuthError, OwnerCheck, OwnerGate, OwnerProof, PROOF_LIFETIME,
-    ProofRefusal, action_words, grant_declarations, grant_has_production, touch_id_detail,
+    ProofRefusal, action_words, grant_declarations, grant_has_production, remote_key,
+    touch_id_detail, verify_remote_answer,
 };
 
 /// How often a waiting run checks that its vault session is still valid.
@@ -337,6 +338,20 @@ impl Settled {
     }
 }
 
+/// How a waiting run ended, for a watcher of the queue: the questions through the relay
+/// settle their copy on the relay with it ([`ApprovalQueue::take_ended`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunEnd {
+    pub id: u64,
+    pub outcome: ApprovalOutcome,
+    /// The check of an approval: Touch ID, the passphrase, the iPhone, or a device
+    /// through the relay.
+    pub method: Option<CheckMethod>,
+}
+
+/// The most ends that wait for [`ApprovalQueue::take_ended`]. Older ones go.
+const MAX_ENDED: usize = 256;
+
 /// [`ApprovalQueue::wait_for_first_use`] refused the wait: a question of the same
 /// agent already waits (ADR 0024, ADR 0025).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -507,6 +522,8 @@ struct QueueState {
     /// When each waiting run started to wait. It is not part of the run, so the
     /// equality of two runs (and an owner proof for one) does not depend on it.
     waiting_since: BTreeMap<u64, Instant>,
+    /// How the latest runs ended, oldest first ([`ApprovalQueue::take_ended`]).
+    ended: std::collections::VecDeque<RunEnd>,
 }
 
 type Notifier = Box<dyn Fn() + Send + Sync>;
@@ -802,6 +819,31 @@ impl ApprovalQueue {
         self.deny_stricter(id, StricterAnswer::Disconnect, vault)
     }
 
+    /// The ends of waiting runs since the last call, oldest first: an answer, a timeout,
+    /// or an invalid session. At most the last 256 are kept.
+    pub fn take_ended(&self) -> Vec<RunEnd> {
+        self.state().ended.drain(..).collect()
+    }
+
+    /// Note how the waiting run `id` ends, when it waits.
+    fn note_end(
+        state: &mut QueueState,
+        id: u64,
+        outcome: ApprovalOutcome,
+        method: Option<CheckMethod>,
+    ) {
+        if state.pending.iter().any(|run| run.id == id) {
+            if state.ended.len() >= MAX_ENDED {
+                state.ended.pop_front();
+            }
+            state.ended.push_back(RunEnd {
+                id,
+                outcome,
+                method,
+            });
+        }
+    }
+
     fn settle(
         state: &mut QueueState,
         id: u64,
@@ -810,6 +852,7 @@ impl ApprovalQueue {
         grant: Option<GrantChoice>,
         remember: Option<AnswerChoice>,
     ) {
+        Self::note_end(state, id, Self::outcome_of(answer), method);
         state.pending.retain(|run| run.id != id);
         state.waiting_since.remove(&id);
         state.offers.remove(&id);
@@ -825,8 +868,20 @@ impl ApprovalQueue {
         );
     }
 
+    fn outcome_of(answer: Answer) -> ApprovalOutcome {
+        match answer {
+            Answer::Approve | Answer::ApproveInProject | Answer::AllowProduction => {
+                ApprovalOutcome::Approved
+            }
+            Answer::ApproveAndRemember => ApprovalOutcome::ApprovedAndRemembered,
+            Answer::ApproveAndGrant => ApprovalOutcome::ApprovedAndGranted,
+            Answer::Deny => ApprovalOutcome::Denied,
+        }
+    }
+
     /// Remove a run that ended without a decision: a timeout, or an invalid session.
-    fn forget(state: &mut QueueState, id: u64) {
+    fn forget(state: &mut QueueState, id: u64, outcome: ApprovalOutcome) {
+        Self::note_end(state, id, outcome, None);
         state.pending.retain(|pending| pending.id != id);
         state.waiting_since.remove(&id);
         state.offers.remove(&id);
@@ -839,6 +894,10 @@ impl ApprovalQueue {
     pub fn invalidate_all(&self) {
         let mut state = self.state();
         state.generation = state.generation.wrapping_add(1);
+        let ids: Vec<u64> = state.pending.iter().map(|run| run.id).collect();
+        for id in ids {
+            Self::note_end(&mut state, id, ApprovalOutcome::Invalidated, None);
+        }
         state.pending.clear();
         state.waiting_since.clear();
         state.offers.clear();
@@ -998,7 +1057,7 @@ impl ApprovalQueue {
         loop {
             let mut state = self.state();
             if state.generation != generation {
-                Self::forget(&mut state, id);
+                Self::forget(&mut state, id, ApprovalOutcome::Invalidated);
                 state.decisions.remove(&id);
                 return Ok(Settled::ended(ApprovalOutcome::Invalidated));
             }
@@ -1006,14 +1065,7 @@ impl ApprovalQueue {
                 return Err(QuestionRefusal::Superseded);
             }
             if let Some(decision) = state.decisions.remove(&id) {
-                let outcome = match decision.answer {
-                    Answer::Approve | Answer::ApproveInProject | Answer::AllowProduction => {
-                        ApprovalOutcome::Approved
-                    }
-                    Answer::ApproveAndRemember => ApprovalOutcome::ApprovedAndRemembered,
-                    Answer::ApproveAndGrant => ApprovalOutcome::ApprovedAndGranted,
-                    Answer::Deny => ApprovalOutcome::Denied,
-                };
+                let outcome = Self::outcome_of(decision.answer);
                 return Ok(Settled {
                     outcome,
                     method: decision.method,
@@ -1029,7 +1081,7 @@ impl ApprovalQueue {
             }
             let now = Instant::now();
             if now >= deadline {
-                Self::forget(&mut state, id);
+                Self::forget(&mut state, id, ApprovalOutcome::TimedOut);
                 return Ok(Settled {
                     attached,
                     ..Settled::ended(ApprovalOutcome::TimedOut)
@@ -1049,7 +1101,7 @@ impl ApprovalQueue {
                 if superseded(&state) {
                     return Err(QuestionRefusal::Superseded);
                 }
-                Self::forget(&mut state, id);
+                Self::forget(&mut state, id, ApprovalOutcome::Invalidated);
                 state.decisions.remove(&id);
                 return Ok(Settled::ended(ApprovalOutcome::Invalidated));
             }

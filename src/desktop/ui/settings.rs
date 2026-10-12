@@ -25,6 +25,9 @@ use crate::desktop::notify::{self, Delivery};
 use crate::desktop::owner_store::Ephemeral;
 use crate::desktop::unlock::UnlockMethod;
 use crate::desktop::{BrokerState, DesktopApp};
+use crate::relay::membership::{
+    QuestionsAvailability, disable_questions, enable_questions, questions_availability,
+};
 
 #[cfg(test)]
 #[path = "settings_tests.rs"]
@@ -196,11 +199,60 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     });
 }
 
-/// The words of the relay row: questions through the relay come with stage 5 of ADR 0025
-/// (stream N3). Until then the switch is off and disabled.
+/// The words of the relay row (ADR 0025 §3e, contract relay-questions-v1). Off by
+/// default: only a relay membership with the purpose `questions` turns it on.
 pub(super) const RELAY_QUESTIONS: &str = "Send questions through the relay";
-const RELAY_QUESTIONS_SOON: &str =
-    "Coming soon. Then a question also reaches an iPhone away from this network.";
+pub(super) const RELAY_QUESTIONS_ON: &str = "On. Each question also goes, end-to-end encrypted, to your other devices of this vault. The relay sees no command and no credential.";
+pub(super) const RELAY_QUESTIONS_OFF: &str =
+    "Off. Turn it on to answer on your other Macs and iPhones away from this network.";
+pub(super) const RELAY_QUESTIONS_NEEDS_RELAY: &str =
+    "First sync this vault through the Apassy relay in Sync below.";
+
+/// What the relay row shows: the availability of the open, unlocked vault, or `None`.
+fn relay_questions_state(app: &DesktopApp) -> Option<QuestionsAvailability> {
+    let vault = app.owner_ui.session.shared_vault();
+    let guard = vault
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard
+        .as_ref()
+        .filter(|vault| !vault.is_locked())
+        .and_then(|vault| questions_availability(vault).ok())
+}
+
+/// Turn "Send questions through the relay" on or off for the open vault on this Mac. On
+/// adds the purpose `questions` to the relay sync membership, makes the question key,
+/// and registers this Mac as a trusted device; no relay call. Off takes the purpose away.
+pub(super) fn set_relay_questions(app: &mut DesktopApp, on: bool) {
+    let vault = app.owner_ui.session.shared_vault();
+    let result = {
+        let mut guard = vault
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match guard.as_mut().filter(|vault| !vault.is_locked()) {
+            None => Err("Unlock the vault first.".to_owned()),
+            Some(vault) if on => enable_questions(vault, &crate::sync::device_name())
+                .map(|_| ())
+                .map_err(|_| RELAY_QUESTIONS_NEEDS_RELAY.to_owned()),
+            Some(vault) => disable_questions(vault)
+                .map(|_| ())
+                .map_err(|error| format!("Apassy could not turn it off: {error}")),
+        }
+    };
+    match result {
+        Ok(()) => {
+            if let Some(questions) = &app.owner.questions {
+                questions.wake();
+            }
+            app.set_note(if on {
+                "Questions now also go to your other devices through the relay."
+            } else {
+                "Questions stay on this Mac and the paired iPhones on this network."
+            });
+        }
+        Err(message) => app.set_err(message),
+    }
+}
 
 /// Settings > Devices: each device that gets the questions of the bouncer (ADR 0025
 /// §3e), the relay, and "Add a Device…". The sync of the vaults, macOS notifications,
@@ -217,6 +269,8 @@ fn devices_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         None => "Notifications are not running".to_owned(),
     };
     let mut list = None;
+    let relay_state = relay_questions_state(app);
+    let mut switch_relay = None;
     kit::section(
         ui,
         Some("Questions go to every device"),
@@ -251,7 +305,13 @@ fn devices_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 "iPhones",
                 kit::text(phones, Font::Body).color(kit::SECONDARY),
             );
-            // Present, but off and disabled until the relay carries the questions.
+            // Off by default; on only with a relay membership for the questions.
+            let (mut on, enabled, note) = match &relay_state {
+                Some(QuestionsAvailability::On { .. }) => (true, true, RELAY_QUESTIONS_ON),
+                Some(QuestionsAvailability::CanTurnOn { .. }) => (false, true, RELAY_QUESTIONS_OFF),
+                _ => (false, false, RELAY_QUESTIONS_NEEDS_RELAY),
+            };
+            let was = on;
             s.row(|ui| {
                 egui::Sides::new()
                     .shrink_left()
@@ -261,16 +321,19 @@ fn devices_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                         |ui| {
                             ui.vertical(|ui| {
                                 ui.label(kit::text(RELAY_QUESTIONS, Font::Body).color(kit::LABEL));
-                                kit::note(ui, RELAY_QUESTIONS_SOON);
+                                kit::note(ui, note);
                             });
                         },
                         |ui| {
-                            ui.add_enabled_ui(false, |ui| {
-                                kit::toggle(ui, &mut false, RELAY_QUESTIONS)
+                            ui.add_enabled_ui(enabled, |ui| {
+                                kit::toggle(ui, &mut on, RELAY_QUESTIONS)
                             });
                         },
                     );
             });
+            if on != was {
+                switch_relay = Some(on);
+            }
         },
     );
     let mut add_mac = false;
@@ -292,6 +355,9 @@ fn devices_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         });
     });
     ui.add_space(20.0);
+    if let Some(on) = switch_relay {
+        set_relay_questions(app, on);
+    }
     let ctx = ui.ctx().clone();
     if let Some(id) = list {
         app.sync_open_sheet(super::sync::SyncSheet::Devices { id }, Some(&ctx));

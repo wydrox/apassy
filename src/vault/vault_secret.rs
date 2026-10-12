@@ -1,6 +1,7 @@
 //! Reading a `vault_secret` row (schema 18): a named secret of the vault that syncs
-//! last-writer-wins, for example the question key `question-key-v1` (contract
-//! relay-questions-v1, section 5.1). The iPhone core reads the key that a Mac made; it
+//! last-writer-wins. The question key `question-key-v1` (contract relay-questions-v1,
+//! section 5.1) has its own API in [`super::questions`] (`Vault::question_key`,
+//! `ensure_question_key`, `rotate_question_key`); the iPhone core reads it there and
 //! never makes one.
 
 use rusqlite::OptionalExtension;

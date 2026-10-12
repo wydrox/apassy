@@ -31,9 +31,9 @@
 
 mod directory;
 mod folder;
-mod relay;
-mod relay_crypto;
-mod relay_http;
+pub(crate) mod relay;
+pub(crate) mod relay_crypto;
+pub(crate) mod relay_http;
 mod state;
 mod transport;
 
@@ -51,8 +51,8 @@ pub use folder::{
 };
 pub use relay::{
     DeviceView, JoinedDevice, KeySource, LinkCode, PendingJoin, PendingLink, Receipt,
-    RelayAdoptReport, RelayCallError, RelayConfig, RelayDownload, RelayEnableReport,
-    RelayMember, RelayPoll, RelaySync, RelayTransport, clear_relay_work,
+    RelayAdoptReport, RelayCallError, RelayConfig, RelayDownload, RelayEnableReport, RelayMember,
+    RelayPoll, RelaySync, RelayTransport, clear_relay_work,
 };
 pub use relay_crypto::{
     DeviceKey, HeadFields, MAX_SNAPSHOT_BYTES, NO_PREVIOUS, SignedHead, WORDS, decode_b64u,

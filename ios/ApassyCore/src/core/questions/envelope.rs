@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 
 use ring::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
-use ring::digest::{Context, SHA256, digest};
+use ring::digest::{Context, SHA256};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -39,9 +39,11 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// `key_id` of a question key: the first 8 bytes of its SHA-256, in hex.
+/// `key_id` of a question key: the first 8 bytes of its SHA-256, in hex. The core
+/// takes it from `QuestionKey::key_id` (`Vault::question_key`); this one checks the vector.
+#[cfg(test)]
 pub fn key_id(key: &[u8]) -> String {
-    hex(&digest(&SHA256, key).as_ref()[..8])
+    apassy::vault::question_key_id(key)
 }
 
 /// A `qid`: 22 characters of b64u that decode to 16 bytes.
@@ -905,7 +907,7 @@ mod tests {
     }
 
     fn sha(bytes: &[u8]) -> String {
-        hex(digest(&SHA256, bytes).as_ref())
+        hex(ring::digest::digest(&SHA256, bytes).as_ref())
     }
 
     fn base_run(remember: Option<Remember>) -> Run {

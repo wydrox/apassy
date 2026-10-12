@@ -26,6 +26,16 @@
 //! as the Mac showed it. A phone can approve a run only: it can never make a proof for a
 //! reveal, a grant, or a pairing.
 //!
+//! The check of a device through the relay ([`OwnerCheck::Remote`], contract
+//! relay-questions-v1 section 12.4) verifies the signature of an answer string with a key
+//! of the `trusted_device` table of the vault: the Face ID answer key of an iPhone, or the
+//! relay key of a Mac, which signs after a local Touch ID for
+//! [`OwnerAction::AnswerRemoteQuestion`]. It rebuilds the signed text from the action and
+//! the question digest v2 of the run, so a signature names one question exactly as the
+//! device showed it. A remote device can approve a run, remember a project answer, allow
+//! production, or correct an environment to development for an item of the waiting
+//! question: never reveal, grant, pair, connect an agent, or change a setting.
+//!
 //! A notification, an inbox acknowledgment, or an agent request cannot make a proof
 //! (goal item N4).
 //!
@@ -45,20 +55,25 @@ use crate::broker::SharedVault;
 use crate::broker::action_kind::ActionKind;
 use crate::broker::project::Project;
 use crate::companion::crypto::{ApproveAction, approve_string, verify_ecdsa};
-use crate::companion::digest::run_digest_hex;
+use crate::companion::digest::{question_digest_v2_hex, run_digest_hex};
 use crate::companion::wire::valid_device_id;
 use crate::native::{
     AuthCancel, HelperErrorCode, MAX_AGENT_NAME_CHARS, MAX_REASON_CHARS, NativeError, NativeHelper,
 };
+use crate::questions::envelope::{Choice, RemoteEnvironment, answer_string};
 use crate::vault::exceptions::ExceptionKind;
 use crate::vault::usage::InteractionKind;
 use crate::vault::{Declaration, Vault, VaultErrorKind};
+use crate::vault::{TrustedDevice, TrustedDeviceKind};
 
 /// How long a proof stays valid after the owner check.
 pub const PROOF_LIFETIME: Duration = Duration::from_secs(60);
 
 /// A phone approval may have a time this many seconds ahead of the Mac clock.
 const COMPANION_FUTURE_SLACK: u64 = 60;
+/// An answer through the relay may have a time this many seconds ahead of the Mac clock
+/// (relay-questions-v1 section 12.4), as a phone approval.
+const REMOTE_FUTURE_SLACK: u64 = COMPANION_FUTURE_SLACK;
 
 /// An owner action that needs a fresh owner check. The target is part of the action.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,6 +264,15 @@ pub enum OwnerAction {
         device_name: String,
         public_key: Vec<u8>,
     },
+    /// Answer a question of another Mac through the relay (relay-questions-v1 section
+    /// 5.3): the Touch ID on this Mac before it signs an approving answer with its relay
+    /// key. `answer` is the action of the matching local answer for the run as the card
+    /// showed it, `asker` the name of the asking Mac, and `qid` the question.
+    AnswerRemoteQuestion {
+        qid: String,
+        asker: String,
+        answer: Box<OwnerAction>,
+    },
 }
 
 /// The words for the Touch ID prompt after the relying party of a passkey. `None` is
@@ -381,6 +405,9 @@ impl OwnerAction {
                 "add the device \"{}\" to the sync of this vault",
                 short_device_name(device_name)
             ),
+            Self::AnswerRemoteQuestion { asker, answer, .. } => {
+                format!("{} on {}", answer.reason(), short_device_name(asker))
+            }
         }
     }
 
@@ -546,6 +573,9 @@ pub enum CheckMethod {
     Passphrase,
     /// Face ID on a paired iPhone, as a signature of the approval key.
     Companion,
+    /// A device of the vault through the relay: the Face ID answer key of an iPhone, or
+    /// the relay key of a Mac after its Touch ID (relay-questions-v1 section 12.4).
+    Remote,
 }
 
 /// The check that the owner does now.
@@ -562,6 +592,19 @@ pub enum OwnerCheck {
         time: u64,
         signature: Vec<u8>,
     },
+    /// The signature of an answer through the relay (relay-questions-v1 section 12.4):
+    /// the trusted device `device_uuid`, the questions team, the question, the time in the
+    /// signed text, and the DER ECDSA signature. `correction_of` is the run that waits for
+    /// `qid`, for a correction to development ([`OwnerAction::ChangeItemRules`]): its
+    /// digest is signed. It works for the answers of a waiting question only.
+    Remote {
+        device_uuid: String,
+        team_id: String,
+        qid: String,
+        time: u64,
+        signature: Vec<u8>,
+        correction_of: Option<Box<PendingRun>>,
+    },
 }
 
 impl OwnerCheck {
@@ -575,6 +618,7 @@ impl OwnerCheck {
             Self::TouchId => CheckMethod::TouchId,
             Self::Passphrase(_) => CheckMethod::Passphrase,
             Self::Companion { .. } => CheckMethod::Companion,
+            Self::Remote { .. } => CheckMethod::Remote,
         }
     }
 }
@@ -589,6 +633,15 @@ impl fmt::Debug for OwnerCheck {
             } => write!(
                 f,
                 "OwnerCheck::Companion {{ device_id: {device_id}, time: {time}, signature: [redacted] }}"
+            ),
+            Self::Remote {
+                device_uuid,
+                qid,
+                time,
+                ..
+            } => write!(
+                f,
+                "OwnerCheck::Remote {{ device_uuid: {device_uuid}, qid: {qid}, time: {time}, signature: [redacted] }}"
             ),
         }
     }
@@ -620,6 +673,14 @@ pub enum OwnerAuthError {
     CompanionRejected,
     /// An iPhone can confirm the approval of a run only.
     CompanionUnsupported,
+    /// The time of an answer through the relay is more than [`PROOF_LIFETIME`] old, or
+    /// more than 60 seconds ahead of the Mac clock.
+    RemoteStale,
+    /// The device is not a live trusted device of the vault, or its signature does not
+    /// verify for this answer.
+    RemoteRejected,
+    /// A device through the relay can answer a waiting question only.
+    RemoteUnsupported,
     /// The app cancelled the check, because its request went away. Apassy did nothing.
     Cancelled,
     /// Another failure. The text has no secret value.
@@ -656,6 +717,15 @@ impl OwnerAuthError {
             }
             Self::CompanionUnsupported => {
                 "An iPhone can confirm the approval of a run only. Apassy did nothing.".to_owned()
+            }
+            Self::RemoteStale => {
+                "The answer from another device is too old. Nothing was approved.".to_owned()
+            }
+            Self::RemoteRejected => {
+                "The answer does not match a device of this vault. Nothing was approved.".to_owned()
+            }
+            Self::RemoteUnsupported => {
+                "Another device can answer a waiting question only. Apassy did nothing.".to_owned()
             }
             Self::Cancelled => "The check was cancelled. Apassy did nothing.".to_owned(),
             Self::Other(text) => format!("The owner check failed: {text}"),
@@ -875,6 +945,25 @@ impl OwnerGate {
                 time,
                 signature,
             } => self.check_companion(&action, &device_id, time, &signature, epoch)?,
+            OwnerCheck::Remote {
+                device_uuid,
+                team_id,
+                qid,
+                time,
+                signature,
+                correction_of,
+            } => self.check_remote(
+                &action,
+                &RemoteAnswer {
+                    device_uuid: &device_uuid,
+                    team_id: &team_id,
+                    qid: &qid,
+                    time,
+                    signature: &signature,
+                    correction_of: correction_of.as_deref(),
+                },
+                epoch,
+            )?,
             OwnerCheck::Passphrase(passphrase) => {
                 if passphrase.is_empty() {
                     return Err(OwnerAuthError::EmptyPassphrase);
@@ -911,7 +1000,8 @@ impl OwnerGate {
     /// counted here: the broker counts the question, and one answer is one interaction.
     /// A failure to count changes nothing.
     fn count_check(&self, action: &OwnerAction, path: &std::path::Path, epoch: [u8; 32]) {
-        if action.run().is_some() {
+        // The answer of another Mac counts on the asking Mac, as one question.
+        if action.run().is_some() || matches!(action, OwnerAction::AnswerRemoteQuestion { .. }) {
             return;
         }
         let mut guard = self.vault.lock().unwrap_or_else(PoisonError::into_inner);
@@ -976,6 +1066,44 @@ impl OwnerGate {
         }
     }
 
+    /// Verify the signature of an answer through the relay (relay-questions-v1 section
+    /// 12.4): the live trusted device from the vault in the session `epoch`, the time,
+    /// and the signature over the answer string that the gate rebuilds from `action` and
+    /// the digest v2 of its run. Only the answers of a waiting question make a proof.
+    fn check_remote(
+        &self,
+        action: &OwnerAction,
+        answer: &RemoteAnswer<'_>,
+        epoch: [u8; 32],
+    ) -> Result<(), OwnerAuthError> {
+        let (choice, run) = remote_choice(action, answer.correction_of)?;
+        let device = {
+            let guard = self.vault.lock().unwrap_or_else(PoisonError::into_inner);
+            match guard.as_ref() {
+                Some(vault) if !vault.is_locked() && vault.epoch() == epoch => vault
+                    .trusted_device(answer.device_uuid)
+                    .map_err(|error| OwnerAuthError::Other(error.to_string()))?,
+                _ => return Err(OwnerAuthError::SessionChanged),
+            }
+        };
+        let Some(device) = device else {
+            return Err(OwnerAuthError::RemoteRejected);
+        };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs());
+        verify_remote_answer(
+            &device,
+            answer.team_id,
+            answer.qid,
+            &choice,
+            &question_digest_v2_hex(run),
+            answer.time,
+            answer.signature,
+            now,
+        )
+    }
+
     /// The path and the epoch of the unlocked vault. The vault mutex is held only here.
     fn session(&self) -> Result<(PathBuf, [u8; 32]), OwnerAuthError> {
         let guard = self.vault.lock().unwrap_or_else(PoisonError::into_inner);
@@ -983,5 +1111,106 @@ impl OwnerGate {
             Some(vault) if !vault.is_locked() => Ok((vault.path().to_path_buf(), vault.epoch())),
             _ => Err(OwnerAuthError::VaultLocked),
         }
+    }
+}
+
+/// The parts of [`OwnerCheck::Remote`] for the check.
+struct RemoteAnswer<'a> {
+    device_uuid: &'a str,
+    team_id: &'a str,
+    qid: &'a str,
+    time: u64,
+    signature: &'a [u8],
+    correction_of: Option<&'a PendingRun>,
+}
+
+/// The answer of `action` and the run whose digest it signs. `RemoteUnsupported` for an
+/// action that a remote device cannot take, or a correction for an item that the waiting
+/// question does not offer to correct.
+fn remote_choice<'a>(
+    action: &'a OwnerAction,
+    correction_of: Option<&'a PendingRun>,
+) -> Result<(Choice, &'a PendingRun), OwnerAuthError> {
+    match action {
+        OwnerAction::ApproveRun(run) => Ok((Choice::ApproveOnce, run)),
+        OwnerAction::ApproveInProject {
+            run,
+            project,
+            action,
+        } => Ok((
+            Choice::ApproveInProject {
+                action: *action,
+                project_key: project.key.clone(),
+            },
+            run,
+        )),
+        OwnerAction::AllowProduction {
+            run,
+            project,
+            action,
+        } => Ok((
+            Choice::AllowProduction {
+                action: *action,
+                project_key: project.key.clone(),
+            },
+            run,
+        )),
+        OwnerAction::ChangeItemRules { item_id } => {
+            let run = correction_of.ok_or(OwnerAuthError::RemoteUnsupported)?;
+            let choice = Choice::CorrectEnvironment {
+                item_id: *item_id,
+                environment: RemoteEnvironment::Development,
+            };
+            if choice.valid_for(&run.question) {
+                Ok((choice, run))
+            } else {
+                Err(OwnerAuthError::RemoteUnsupported)
+            }
+        }
+        _ => Err(OwnerAuthError::RemoteUnsupported),
+    }
+}
+
+/// The key of `device` that signs `choice` (relay-questions-v1 section 5.3): the answer
+/// key of an iPhone for an answer that needs the owner check, else the relay key
+/// (`sign_key`). `None`: an iPhone without an answer key.
+pub fn remote_key<'a>(device: &'a TrustedDevice, choice: &Choice) -> Option<&'a [u8]> {
+    match device.kind {
+        TrustedDeviceKind::Iphone if choice.needs_owner_check() => device.answer_key.as_deref(),
+        _ => Some(device.sign_key.as_slice()),
+    }
+}
+
+/// Verify an answer through the relay at the time `now` (relay-questions-v1 sections
+/// 12.3 step 7 and 12.4): `now - 60 <= time <= now + 60`, then the signature over the
+/// answer string rebuilt from the device, the team, the question, `choice`, `digest`, and
+/// `time`, with the key of [`remote_key`]. A signature by the other key of the device is
+/// invalid.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_remote_answer(
+    device: &TrustedDevice,
+    team_id: &str,
+    qid: &str,
+    choice: &Choice,
+    digest: &str,
+    time: u64,
+    signature: &[u8],
+    now: u64,
+) -> Result<(), OwnerAuthError> {
+    if time.saturating_add(PROOF_LIFETIME.as_secs()) < now
+        || time > now.saturating_add(REMOTE_FUTURE_SLACK)
+    {
+        return Err(OwnerAuthError::RemoteStale);
+    }
+    let Some(text) = answer_string(&device.uuid, team_id, qid, choice, digest, time) else {
+        return Err(OwnerAuthError::RemoteRejected);
+    };
+    let Some(key) = remote_key(device, choice) else {
+        return Err(OwnerAuthError::RemoteRejected);
+    };
+    if verify_ecdsa(key, text.as_bytes(), signature) {
+        Ok(())
+    } else {
+        Err(OwnerAuthError::RemoteRejected)
     }
 }

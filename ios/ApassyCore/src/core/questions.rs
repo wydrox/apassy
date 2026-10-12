@@ -43,8 +43,6 @@ use super::errors::{CoreError, CoreResult};
 use super::wire::{Empty, Secret, ok, params};
 use super::{Core, guard, now};
 
-/// The vault secret that holds the question key (section 5.1).
-const QUESTION_KEY: &str = "question-key-v1";
 /// The bundle ID of the app, the relay's push topic (integrator decision 6).
 const BUNDLE_ID: &str = "com.wydrox.apassy.companion";
 /// A retry of an answer keeps its signature while its time is younger than this
@@ -403,12 +401,14 @@ fn own_device(vault: &Vault, sign_key: &[u8]) -> CoreResult<Option<TrustedDevice
         .find(|device| device.sign_key == sign_key))
 }
 
-/// The question key of the vault with its `key_id`.
+/// The question key of the vault with its `key_id` (`Vault::question_key`, the one API
+/// of the key). A row of another length is no key here: the iPhone never makes one.
 fn question_key(vault: &Vault) -> CoreResult<Option<(String, Zeroizing<Vec<u8>>)>> {
-    Ok(vault
-        .read_vault_secret(QUESTION_KEY)?
-        .filter(|key| key.len() == 32)
-        .map(|key| (envelope::key_id(&key), key)))
+    match vault.question_key() {
+        Ok(key) => Ok(key.map(|key| (key.key_id(), Zeroizing::new(key.bytes().to_vec())))),
+        Err(error) if error.kind() == apassy::vault::VaultErrorKind::Storage => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// What a check of the cards needs from the vault, read under the vault mutex.

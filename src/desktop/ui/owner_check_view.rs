@@ -137,7 +137,7 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
                 kit::tone_note(ui, "Apassy is checking the passphrase.", Tone::Accent);
             }
             // The Mac dialog never starts an iPhone check: the phone signs on its own.
-            Some(CheckMethod::Companion) | None => {}
+            Some(CheckMethod::Companion | CheckMethod::Remote) | None => {}
         }
         if let Some(message) = &message {
             kit::tone_note(ui, message, Tone::Critical);

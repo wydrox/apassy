@@ -27,6 +27,10 @@
 //! production passes the owner check; production and a project need none.
 //!
 //! After each answer, the next decision is selected.
+//!
+//! With "Send questions through the relay" on, a question that another device answered
+//! leaves the list, and the detail says "Answered on DEVICE" for a few minutes
+//! ([`answered_lines`]). A question that stays on this Mac says why.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -957,6 +961,15 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[
     columns::detail_body(ui, ("decision", None::<u64>), |ui| {
         super::shell::banners(app, ui, pending);
         notifications_notice(app, ui);
+        let answered = app
+            .owner
+            .questions
+            .as_ref()
+            .map(|questions| answered_lines(&questions.view(), unix_now()))
+            .unwrap_or_default();
+        for line in &answered {
+            kit::tone_note(ui, line, Tone::Accent);
+        }
         columns::nothing_selected(
             ui,
             Icon::CheckCircle,
@@ -964,6 +977,38 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[
             "Nothing waits for you. A new question also shows as a macOS notification.",
         );
     });
+}
+
+/// How long "Answered on DEVICE" stays in Decisions.
+const ANSWERED_SHOWN_FOR: u64 = 10 * 60;
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// The questions that another device answered through the relay in the last minutes,
+/// newest first: "AGENT: Answered on DEVICE".
+pub(super) fn answered_lines(view: &crate::questions::QuestionsView, now: u64) -> Vec<String> {
+    view.answered
+        .iter()
+        .rev()
+        .filter(|answered| answered.at.saturating_add(ANSWERED_SHOWN_FOR) >= now)
+        .map(|answered| {
+            let agent = shown_path(&answered.agent, 40);
+            let device = shown_path(&answered.device_name, 40);
+            format!("{agent}: Answered on {device}")
+        })
+        .collect()
+}
+
+/// Why a waiting question stays on this Mac, when it does.
+fn local_only_note(app: &DesktopApp, run_id: u64) -> Option<String> {
+    app.owner
+        .questions
+        .as_ref()
+        .and_then(|questions| questions.view().local_only.get(&run_id).cloned())
 }
 
 /// The detail of a waiting question.
@@ -1217,6 +1262,10 @@ fn draw_question(
             });
         });
     });
+    if let Some(note) = local_only_note(app, run.id) {
+        ui.add_space(8.0);
+        kit::tone_note(ui, &note, Tone::Warning);
+    }
     ui.add_space(16.0);
     let hosts = command_hosts(&run.command);
     kit::section(ui, None, None, |s| {
@@ -1956,5 +2005,44 @@ pub(super) fn apply_suggestion(
         )),
         Ok(None) => app.set_ok("Ignored. Apassy does not suggest this again."),
         Err(err) => app.set_err(err.message),
+    }
+}
+
+#[cfg(test)]
+mod answered_tests {
+    use super::*;
+    use crate::questions::{QuestionsView, RemoteAnswered};
+    use crate::vault::TrustedDeviceKind;
+
+    #[test]
+    fn a_remote_answer_shows_answered_on_its_device_for_ten_minutes() {
+        let answered = |run_id, device: &str, at| RemoteAnswered {
+            run_id,
+            agent: "claude-code".to_owned(),
+            device_name: device.to_owned(),
+            device_kind: TrustedDeviceKind::Iphone,
+            kind: "approve_once".to_owned(),
+            at,
+        };
+        let view = QuestionsView {
+            answered: vec![
+                answered(1, "Old iPhone", 1_000),
+                answered(2, "Test iPhone", 2_000),
+                answered(3, "Mac\u{202E}mini", 2_100),
+            ],
+            ..QuestionsView::default()
+        };
+        assert_eq!(
+            answered_lines(&view, 2_200),
+            [
+                "claude-code: Answered on Mac?mini",
+                "claude-code: Answered on Test iPhone"
+            ]
+        );
+        assert!(answered_lines(&view, 2_100 + ANSWERED_SHOWN_FOR + 1).is_empty());
+        assert_eq!(
+            answered(2, "Test iPhone", 0).line(),
+            "Answered on Test iPhone"
+        );
     }
 }

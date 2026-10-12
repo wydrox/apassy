@@ -28,6 +28,7 @@ mod merge;
 pub mod passkey;
 mod policy;
 pub mod providers;
+pub mod questions;
 mod relay_device;
 mod schema18;
 mod schema19;
@@ -92,6 +93,7 @@ pub use passkey::{
     PasskeyInfo, PasskeyTarget,
 };
 pub use policy::{DeclarationSource, DeclarationSources};
+pub use questions::{QUESTION_KEY_NAME, QuestionKey, question_key_id};
 pub use relay_device::RelayDevice;
 pub use schema18::ONLY_MARKER_ITEM;
 pub use suggestions::{DeclarationField, SuggestedDeclaration, SuggestionOutcome, SuggestionStats};

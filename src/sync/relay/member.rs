@@ -18,7 +18,7 @@ use zeroize::Zeroizing;
 
 use super::{ApiError, JoinedDevice, Request, Session, call, json_request};
 use crate::sync::relay_crypto::DeviceKey;
-use crate::sync::relay_http::RelayUrl;
+use crate::sync::relay_http::{Cancel, RelayUrl};
 use crate::sync::{SyncError, relay_crypto::valid_team_id};
 use crate::vault::VaultErrorKind;
 
@@ -111,8 +111,24 @@ impl RelayMember {
         body: Option<&Value>,
         wait: Duration,
     ) -> Result<Value, RelayCallError> {
+        self.call_until(method, path, body, wait, None)
+    }
+
+    /// [`Self::call`] that `cancel` ends: a long poll that the caller ends when it has
+    /// another question to wait for. A request has one cancel, so a call in flight
+    /// with `cancel` ends by `cancel` only: the caller closes it at a lock too. A later
+    /// call after [`Self::close`] still fails at once.
+    pub(crate) fn call_until(
+        &self,
+        method: &'static str,
+        path: &str,
+        body: Option<&Value>,
+        wait: Duration,
+        cancel: Option<&Cancel>,
+    ) -> Result<Value, RelayCallError> {
         let wait = wait.min(super::MAX_WAIT);
         let session = &self.session;
+        let closed = || session.cancel.is_closed() || cancel.is_some_and(Cancel::is_closed);
         let result = session.authed(|bearer| {
             let mut request = match body {
                 Some(body) => json_request(method, path, Some(bearer), body),
@@ -120,10 +136,16 @@ impl RelayMember {
             };
             request.wait = wait;
             session.bind(&mut request, None);
+            if let Some(cancel) = cancel {
+                if cancel.is_closed() {
+                    return Err(ApiError::Sync(SyncError::Vault(VaultErrorKind::Locked)));
+                }
+                request.cancel = Some(cancel);
+            }
             call::<Value>(&session.url, &request)
         });
         match result {
-            Err(_) if session.cancel.is_closed() => Err(RelayCallError::Sync(SyncError::Vault(
+            Err(_) if closed() => Err(RelayCallError::Sync(SyncError::Vault(
                 VaultErrorKind::Locked,
             ))),
             other => other.map_err(RelayCallError::from),

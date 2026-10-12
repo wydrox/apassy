@@ -11,6 +11,10 @@
 //! push of another Mac in the middle of a push, lower the size limit, answer slowly,
 //! fail the next requests, or answer every long poll at once.
 //!
+//! It also speaks the question endpoints (relay-questions-v1, section 10) and does not
+//! read the envelopes: it checks their shape and size, stores them as they came, and
+//! gives the hooks to expire a question and to read what the app sent.
+//!
 //! The chain answer follows the relay's rule: the oldest 1000 heads after `since`, with
 //! the signers of the page (a removed device with the newest version it pushed).
 //!
@@ -87,6 +91,39 @@ struct Team {
     heads: Vec<StoredHead>,
     snapshots: BTreeMap<u64, Vec<u8>>,
     receipts: BTreeMap<u64, u64>,
+    questions: Vec<FakeQuestion>,
+    question_seq: u64,
+}
+
+/// One answer to a question: the envelope as the text that came.
+#[derive(Clone)]
+struct FakeAnswer {
+    id: u64,
+    device_id: u64,
+    key_id: String,
+    nonce: String,
+    ciphertext: String,
+    at: u64,
+}
+
+/// One question of a team. The nonce and the ciphertext are the b64u text that came.
+#[derive(Clone)]
+struct FakeQuestion {
+    qid: String,
+    device_id: u64,
+    to: String,
+    key_id: String,
+    nonce: String,
+    ciphertext: String,
+    created_at: u64,
+    expires_at: u64,
+    seq: u64,
+    /// `open`, `settled`, or `expired`.
+    state: String,
+    settled_at: Option<u64>,
+    /// The settle envelope: key id, nonce, ciphertext.
+    settle: Option<(String, String, String)>,
+    answers: Vec<FakeAnswer>,
 }
 
 impl Team {
@@ -129,6 +166,10 @@ struct Relay {
     lost_answers: Vec<(String, usize)>,
     /// The seconds that a new access token lasts; 0 is the relay's 900.
     token_seconds: u64,
+    /// The id of the last answer to a question (one count for the relay).
+    next_answer: u64,
+    /// The body of each request that had one, as text.
+    bodies: Vec<String>,
 }
 
 /// A running fake relay. It stops when dropped.
@@ -340,6 +381,61 @@ impl FakeRelay {
         self.shared.1.notify_all();
     }
 
+    /// The body of each request that had one, in the order they came (a snapshot push
+    /// is read as lossy text).
+    pub fn request_bodies(&self) -> Vec<String> {
+        lock(&self.shared.0).bodies.clone()
+    }
+
+    /// Expire every open question of every team now: its `expires_at` is the present, its
+    /// state `expired`, and it gets a new `seq`. The long polls wake.
+    pub fn expire_questions(&self) {
+        let mut relay = lock(&self.shared.0);
+        for team in relay.teams.values_mut() {
+            let at = now();
+            for index in 0..team.questions.len() {
+                if team.questions[index].state == "open" {
+                    team.question_seq += 1;
+                    let question = &mut team.questions[index];
+                    question.expires_at = at;
+                    question.state = "expired".to_owned();
+                    question.seq = team.question_seq;
+                }
+            }
+        }
+        drop(relay);
+        self.shared.1.notify_all();
+    }
+
+    /// The state (`open`, `settled`, `expired`) of the question `qid` in any team.
+    pub fn question_state(&self, qid: &str) -> Option<String> {
+        lock(&self.shared.0)
+            .teams
+            .values()
+            .flat_map(|team| team.questions.iter())
+            .find(|question| question.qid == qid)
+            .map(|question| question.state.clone())
+    }
+
+    /// The number of answers stored for the question `qid` (0 when it is unknown).
+    pub fn answer_count(&self, qid: &str) -> usize {
+        lock(&self.shared.0)
+            .teams
+            .values()
+            .flat_map(|team| team.questions.iter())
+            .find(|question| question.qid == qid)
+            .map_or(0, |question| question.answers.len())
+    }
+
+    /// The number of questions posted in all teams.
+    pub fn questions_posted(&self) -> usize {
+        lock(&self.shared.0)
+            .teams
+            .values()
+            .map(|team| team.questions.len())
+            .sum()
+    }
+
     /// The live device ids of the only team.
     pub fn devices(&self) -> Vec<u64> {
         let id = self.team_id();
@@ -454,6 +550,11 @@ fn handle(shared: &Arc<(Mutex<Relay>, Condvar)>, mut stream: TcpStream) {
     let (delay, failure, lost) = {
         let mut relay = lock(&shared.0);
         relay.log.push(line.clone());
+        if !request.body.is_empty() {
+            relay
+                .bodies
+                .push(String::from_utf8_lossy(&request.body).into_owned());
+        }
         let lost = relay
             .lost_answers
             .iter_mut()
@@ -976,6 +1077,21 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> Outgoing 
                     changed.notify_all();
                     ok(json!({"last_version": current}))
                 }
+                ("POST", ["questions"]) => {
+                    post_question(&mut relay, &team_id, device_id, request, changed)
+                }
+                ("GET", ["questions"]) => {
+                    list_questions(relay, &team_id, device_id, request, changed)
+                }
+                ("POST", ["questions", qid, "answers"]) => {
+                    post_answer(&mut relay, &team_id, device_id, qid, request, changed)
+                }
+                ("GET", ["questions", qid, "answers"]) => {
+                    list_answers(relay, &team_id, device_id, qid, request, changed)
+                }
+                ("POST", ["questions", qid, "settle"]) => {
+                    settle_question(&mut relay, &team_id, device_id, qid, request, changed)
+                }
                 _ => fail(404, "not_found"),
             }
         }
@@ -1059,4 +1175,423 @@ fn put(
     let mut view = head_view(team, fields.version);
     view["chain"] = json!([]);
     ok(view)
+}
+
+/// The ciphertext limits of the contract (section 15): card, answer, settle.
+const CARD_BYTES: usize = 32_784;
+const ANSWER_BYTES: usize = 8_208;
+const SETTLE_BYTES: usize = 1_040;
+/// Open questions of a team (`open_questions`) and answers of a device to a question.
+const OPEN_QUESTIONS: usize = 20;
+const ANSWERS_PER_DEVICE: usize = 3;
+
+type Fields = serde_json::Map<String, Value>;
+
+/// The envelope of a body whose shape is right: texts as they came, and the size of the
+/// decoded ciphertext.
+struct Envelope {
+    key_id: String,
+    nonce: String,
+    ciphertext: String,
+    size: usize,
+}
+
+/// Every open question whose time has come becomes `expired`, with a new `seq`.
+fn expire_due(team: &mut Team) {
+    let at = now();
+    for index in 0..team.questions.len() {
+        if team.questions[index].state == "open" && at >= team.questions[index].expires_at {
+            team.question_seq += 1;
+            let question = &mut team.questions[index];
+            question.state = "expired".to_owned();
+            question.seq = team.question_seq;
+        }
+    }
+}
+
+/// The body as a JSON object with exactly `keys`.
+fn exact_object(request: &Incoming, keys: &[&str]) -> Option<Fields> {
+    let Value::Object(map) = serde_json::from_slice::<Value>(&request.body).ok()? else {
+        return None;
+    };
+    (map.len() == keys.len() && keys.iter().all(|key| map.contains_key(*key))).then_some(map)
+}
+
+/// `v`, `key_id`, `nonce`, and `ciphertext` of a body, in their forms.
+fn envelope(map: &Fields) -> Option<Envelope> {
+    if map["v"].as_u64() != Some(1) {
+        return None;
+    }
+    let key_id = map["key_id"].as_str()?;
+    if key_id.len() != 16
+        || !key_id
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return None;
+    }
+    let nonce = map["nonce"].as_str()?;
+    if decode_b64u(nonce)?.len() != 12 {
+        return None;
+    }
+    let ciphertext = map["ciphertext"].as_str()?;
+    let size = decode_b64u(ciphertext)?.len();
+    if size == 0 {
+        return None;
+    }
+    Some(Envelope {
+        key_id: key_id.to_owned(),
+        nonce: nonce.to_owned(),
+        ciphertext: ciphertext.to_owned(),
+        size,
+    })
+}
+
+/// A question id: 22 characters of `A-Za-z0-9-_`.
+fn valid_qid(qid: &str) -> bool {
+    qid.len() == 22
+        && qid
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+/// A number of the query: 0 when absent, `None` when it is not a number.
+fn query_number(request: &Incoming, name: &str) -> Option<u64> {
+    match request.query.get(name) {
+        None => Some(0),
+        Some(value) => value.parse().ok(),
+    }
+}
+
+fn question_view(team: &Team, question: &FakeQuestion) -> Value {
+    let name = team
+        .devices
+        .iter()
+        .find(|device| device.id == question.device_id)
+        .map_or("", |device| device.name.as_str());
+    let mut view = json!({
+        "qid": question.qid, "seq": question.seq, "to": question.to,
+        "from_device_id": question.device_id, "from_device_name": name,
+        "key_id": question.key_id, "nonce": question.nonce,
+        "ciphertext": question.ciphertext, "created_at": question.created_at,
+        "expires_at": question.expires_at, "state": question.state,
+    });
+    if let (Some(at), Some((key_id, nonce, ciphertext))) = (question.settled_at, &question.settle) {
+        view["settled_at"] = json!(at);
+        view["settle"] = json!({"key_id": key_id, "nonce": nonce, "ciphertext": ciphertext});
+    }
+    view
+}
+
+/// `POST /v1/questions`.
+fn post_question(
+    relay: &mut Relay,
+    team_id: &str,
+    device_id: u64,
+    request: &Incoming,
+    changed: &Condvar,
+) -> Outgoing {
+    let keys = [
+        "v",
+        "qid",
+        "to",
+        "expires_at",
+        "key_id",
+        "nonce",
+        "ciphertext",
+    ];
+    let Some(map) = exact_object(request, &keys) else {
+        return fail(400, "invalid_request");
+    };
+    let Some(card) = envelope(&map) else {
+        return fail(400, "invalid_request");
+    };
+    let at = now();
+    let (Some(qid), Some(to), Some(expires_at)) = (
+        map["qid"].as_str().filter(|qid| valid_qid(qid)),
+        map["to"]
+            .as_str()
+            .filter(|to| matches!(*to, "member" | "approvers")),
+        map["expires_at"]
+            .as_u64()
+            .filter(|expires| *expires > at + 10 && *expires <= at + 600),
+    ) else {
+        return fail(400, "invalid_request");
+    };
+    if card.size > CARD_BYTES {
+        return fail(413, "payload_too_large");
+    }
+    let team = relay.teams.get_mut(team_id).expect("team");
+    expire_due(team);
+    if team.questions.iter().any(|question| question.qid == qid) {
+        return fail(409, "conflict");
+    }
+    let open = team
+        .questions
+        .iter()
+        .filter(|question| question.state == "open")
+        .count();
+    if open >= OPEN_QUESTIONS {
+        return fail(403, "too_many_questions");
+    }
+    team.question_seq += 1;
+    let seq = team.question_seq;
+    team.questions.push(FakeQuestion {
+        qid: qid.to_owned(),
+        device_id,
+        to: to.to_owned(),
+        key_id: card.key_id,
+        nonce: card.nonce,
+        ciphertext: card.ciphertext,
+        created_at: at,
+        expires_at,
+        seq,
+        state: "open".to_owned(),
+        settled_at: None,
+        settle: None,
+        answers: Vec::new(),
+    });
+    changed.notify_all();
+    ok(json!({"qid": qid, "seq": seq, "created_at": at, "expires_at": expires_at}))
+}
+
+/// Nothing in the list of `device_id` after `since`: the long poll goes on.
+fn no_new_question(relay: &mut Relay, team_id: &str, device_id: u64, since: u64) -> bool {
+    let Some(team) = relay.teams.get_mut(team_id) else {
+        return false;
+    };
+    expire_due(team);
+    !team
+        .questions
+        .iter()
+        .any(|question| question.device_id != device_id && question.seq > since)
+}
+
+/// `GET /v1/questions?since=N&wait=S`.
+fn list_questions<'a>(
+    mut relay: MutexGuard<'a, Relay>,
+    team_id: &str,
+    device_id: u64,
+    request: &Incoming,
+    changed: &Condvar,
+) -> Outgoing {
+    let (Some(since), Some(wait)) = (
+        query_number(request, "since"),
+        query_number(request, "wait"),
+    ) else {
+        return fail(400, "invalid_request");
+    };
+    if wait > 25 {
+        return fail(400, "invalid_request");
+    }
+    if let Some(team) = relay.teams.get_mut(team_id) {
+        expire_due(team);
+    }
+    if wait > 0 && !relay.polls_at_once {
+        let (guard, _) = changed
+            .wait_timeout_while(relay, Duration::from_secs(wait), |relay| {
+                !relay.stopped && no_new_question(relay, team_id, device_id, since)
+            })
+            .unwrap_or_else(PoisonError::into_inner);
+        relay = guard;
+    }
+    let team = relay.teams.get_mut(team_id).expect("team");
+    expire_due(team);
+    let mut list: Vec<&FakeQuestion> = team
+        .questions
+        .iter()
+        .filter(|question| question.device_id != device_id && question.seq > since)
+        .collect();
+    list.sort_by_key(|question| question.seq);
+    let questions: Vec<Value> = list
+        .iter()
+        .take(100)
+        .map(|question| question_view(team, question))
+        .collect();
+    ok(json!({"seq": team.question_seq, "questions": questions}))
+}
+
+/// `POST /v1/questions/{qid}/answers`, with the codes in the order of section 10.2.
+fn post_answer(
+    relay: &mut Relay,
+    team_id: &str,
+    device_id: u64,
+    qid: &str,
+    request: &Incoming,
+    changed: &Condvar,
+) -> Outgoing {
+    let Some(map) = exact_object(request, &["v", "key_id", "nonce", "ciphertext"]) else {
+        return fail(400, "invalid_request");
+    };
+    let Some(answer) = envelope(&map) else {
+        return fail(400, "invalid_request");
+    };
+    if answer.size > ANSWER_BYTES {
+        return fail(413, "payload_too_large");
+    }
+    let id = relay.next_answer + 1;
+    let team = relay.teams.get_mut(team_id).expect("team");
+    expire_due(team);
+    let Some(question) = team
+        .questions
+        .iter_mut()
+        .find(|question| question.qid == qid)
+    else {
+        return fail(404, "not_found");
+    };
+    if question.device_id == device_id {
+        return fail(403, "not_routed");
+    }
+    match question.state.as_str() {
+        "settled" => return fail(409, "question_settled"),
+        "expired" => return fail(409, "question_expired"),
+        _ => {}
+    }
+    if answer.key_id != question.key_id {
+        return fail(400, "invalid_request");
+    }
+    let given = question
+        .answers
+        .iter()
+        .filter(|stored| stored.device_id == device_id)
+        .count();
+    if given >= ANSWERS_PER_DEVICE {
+        return fail(403, "too_many_answers");
+    }
+    let at = now();
+    question.answers.push(FakeAnswer {
+        id,
+        device_id,
+        key_id: answer.key_id,
+        nonce: answer.nonce,
+        ciphertext: answer.ciphertext,
+        at,
+    });
+    relay.next_answer = id;
+    changed.notify_all();
+    ok(json!({"id": id, "at": at}))
+}
+
+/// No answer after `after` and the question still open: the long poll goes on.
+fn no_new_answer(relay: &mut Relay, team_id: &str, qid: &str, after: u64) -> bool {
+    let Some(team) = relay.teams.get_mut(team_id) else {
+        return false;
+    };
+    expire_due(team);
+    team.questions
+        .iter()
+        .find(|question| question.qid == qid)
+        .is_some_and(|question| {
+            question.state == "open" && !question.answers.iter().any(|answer| answer.id > after)
+        })
+}
+
+/// `GET /v1/questions/{qid}/answers?after=N&wait=S`.
+fn list_answers<'a>(
+    mut relay: MutexGuard<'a, Relay>,
+    team_id: &str,
+    device_id: u64,
+    qid: &str,
+    request: &Incoming,
+    changed: &Condvar,
+) -> Outgoing {
+    let (Some(after), Some(wait)) = (
+        query_number(request, "after"),
+        query_number(request, "wait"),
+    ) else {
+        return fail(400, "invalid_request");
+    };
+    if wait > 25 {
+        return fail(400, "invalid_request");
+    }
+    let team = relay.teams.get_mut(team_id).expect("team");
+    expire_due(team);
+    let asked = team
+        .questions
+        .iter()
+        .any(|question| question.qid == qid && question.device_id == device_id);
+    if !asked {
+        return fail(404, "not_found");
+    }
+    if wait > 0 && !relay.polls_at_once {
+        let (guard, _) = changed
+            .wait_timeout_while(relay, Duration::from_secs(wait), |relay| {
+                !relay.stopped && no_new_answer(relay, team_id, qid, after)
+            })
+            .unwrap_or_else(PoisonError::into_inner);
+        relay = guard;
+    }
+    let team = relay.teams.get_mut(team_id).expect("team");
+    expire_due(team);
+    let Some(question) = team.questions.iter().find(|question| question.qid == qid) else {
+        return fail(404, "not_found");
+    };
+    let answers: Vec<Value> = question
+        .answers
+        .iter()
+        .filter(|answer| answer.id > after)
+        .map(|answer| {
+            json!({"id": answer.id, "device_id": answer.device_id, "member_id": 1,
+                   "role": "owner", "key_id": answer.key_id, "nonce": answer.nonce,
+                   "ciphertext": answer.ciphertext, "at": answer.at})
+        })
+        .collect();
+    ok(
+        json!({"state": question.state, "expires_at": question.expires_at,
+              "answers": answers}),
+    )
+}
+
+/// `POST /v1/questions/{qid}/settle`.
+fn settle_question(
+    relay: &mut Relay,
+    team_id: &str,
+    device_id: u64,
+    qid: &str,
+    request: &Incoming,
+    changed: &Condvar,
+) -> Outgoing {
+    let Some(map) = exact_object(request, &["v", "key_id", "nonce", "ciphertext"]) else {
+        return fail(400, "invalid_request");
+    };
+    let Some(settle) = envelope(&map) else {
+        return fail(400, "invalid_request");
+    };
+    if settle.size > SETTLE_BYTES {
+        return fail(413, "payload_too_large");
+    }
+    let team = relay.teams.get_mut(team_id).expect("team");
+    expire_due(team);
+    let Some(index) = team
+        .questions
+        .iter()
+        .position(|question| question.qid == qid && question.device_id == device_id)
+    else {
+        return fail(404, "not_found");
+    };
+    let question = &mut team.questions[index];
+    let sent = (settle.key_id, settle.nonce, settle.ciphertext);
+    match question.state.as_str() {
+        "settled" => {
+            return if question.settle.as_ref() == Some(&sent) {
+                ok(json!({"qid": qid, "state": "settled", "settled_at": question.settled_at}))
+            } else {
+                fail(409, "question_settled")
+            };
+        }
+        "expired" => return fail(409, "question_expired"),
+        _ => {}
+    }
+    if sent.0 != question.key_id {
+        return fail(400, "invalid_request");
+    }
+    let at = now();
+    team.question_seq += 1;
+    let question = &mut team.questions[index];
+    question.state = "settled".to_owned();
+    question.settled_at = Some(at);
+    question.settle = Some(sent);
+    question.seq = team.question_seq;
+    changed.notify_all();
+    ok(json!({"qid": qid, "state": "settled", "settled_at": at}))
 }
