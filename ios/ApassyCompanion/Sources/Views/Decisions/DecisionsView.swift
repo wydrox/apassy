@@ -63,12 +63,13 @@ struct DecisionsView: View {
             ApprovalsView(app: companion)
                 .presentationDragIndicator(.visible)
         }
-        // The owner opened a notification: it holds no question, so open the newest one.
+        // The owner opened a notification: it holds no question, so open the newest one, unless
+        // the owner opened something while the list was read again.
         .onChange(of: questions?.focusRequests ?? 0, initial: true) { _, requests in
             guard requests > 0, let questions else { return }
+            let before = path
             Task {
-                await questions.refresh()
-                if let qid = questions.takeFocus() { path = [.question(qid)] }
+                if let qid = await questions.takeFocus(stillFree: { path == before }) { path = [.question(qid)] }
             }
         }
         .alert(
@@ -86,10 +87,7 @@ struct DecisionsView: View {
     // MARK: The list
 
     private func list(now: Date) -> some View {
-        let waiting = Decisions.waiting(
-            questions: questions?.questions ?? [], runs: session?.runs ?? [],
-            runTimeout: session?.approvalTimeout ?? SessionModel.defaultApprovalTimeout,
-            fetchedAt: session?.fetchedAt, now: now)
+        let waiting = Decisions.waiting(questions: questions?.questions ?? [], session: session, now: now)
         let ended = (questions?.questions ?? []).filter { question in
             !waiting.contains { $0.id == "question-\(question.qid)" }
         }
@@ -112,7 +110,13 @@ struct DecisionsView: View {
                         Task { await session?.deny(request) }
                     }
                 }
-                if session?.accessRequests.isEmpty ?? true { macOnly }
+                if let session {
+                    if session.accessRequests.isEmpty {
+                        Text("No requests").font(.subheadline).foregroundStyle(.secondary)
+                    }
+                } else {
+                    macOnly
+                }
             }
             Section("Suggestions") { macOnly }
             if !ended.isEmpty, let questions {

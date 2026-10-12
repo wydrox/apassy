@@ -54,8 +54,6 @@ enum VaultSheet: Identifiable {
 @Observable
 final class VaultUI {
     var tab = VaultTab.vault
-    /// Questions or the companion, in the Approvals tab.
-    var approvals = ApprovalsHub.Source.questions
     var sheet: VaultSheet?
     /// New Folder, Rename, or Delete of a folder, as an alert over the Vault tab.
     var folderPrompt: FolderPrompt?

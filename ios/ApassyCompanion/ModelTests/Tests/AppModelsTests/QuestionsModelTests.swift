@@ -106,14 +106,14 @@ struct QuestionsModelTests {
 
     // MARK: The answer bar (ADR 0026)
 
-    @Test("the bar of a production question: Allow ACTION in PROJECT first, the rest in the menu")
+    @Test("the bar of a production question: Allow production: ACTION in PROJECT first, in red, the rest in the menu")
     func productionBar() {
         let card = PreviewVaultService.sampleQuestion().card!
         let bar = AnswerBar.make(for: card)
-        #expect(bar.primary?.label == "Allow Deploy in synthetic-shop")
-        #expect(bar.primary?.prompt == "Allow production: Deploy in synthetic-shop")
+        #expect(bar.primary?.label == "Allow production: Deploy in synthetic-shop")
+        #expect(bar.primary?.destructive == true)
         #expect(bar.primary?.answer == RemoteAnswer(kind: .allowProduction))
-        #expect(AnswerBar.note(bar.primary, card) == "Remembered for all agents in synthetic-shop")
+        #expect(AnswerBar.note(bar.primary, card) == "Remembered for all agents in synthetic-shop, production included")
         #expect(bar.allowOnce?.answer.kind == .approveOnce)
         #expect(bar.deny.answer.kind == .deny)
         #expect(bar.menu.map(\.label) == [
@@ -125,9 +125,11 @@ struct QuestionsModelTests {
 
     @Test("a project answer, a correction, and a question without a project")
     func otherBars() {
-        let project = AnswerBar.make(for: Self.card(validAnswers: ["once", "in_project:deploy"]))
+        let projectCard = Self.card(validAnswers: ["once", "in_project:deploy"])
+        let project = AnswerBar.make(for: projectCard)
         #expect(project.primary?.label == "Allow Deploy in synthetic-shop")
-        #expect(project.primary?.prompt == nil)
+        #expect(project.primary?.destructive == false)
+        #expect(AnswerBar.note(project.primary, projectCard) == "Remembered for all agents in synthetic-shop")
         #expect(project.menu.isEmpty)
         var long = Self.card(validAnswers: ["once", "in_project:read"])
         long.question.action = .read
@@ -141,6 +143,13 @@ struct QuestionsModelTests {
         #expect(correction.menu.map(\.label) == ["Production"])
         let noProject = AnswerBar.make(for: Self.card(validAnswers: ["once", "in_project:deploy"], project: false))
         #expect(noProject.primary == nil)
+        // Production offered, but no project to remember it in: no main answer, and no note.
+        let productionCard = Self.card(validAnswers: ["once", "production:deploy"], project: false)
+        let production = AnswerBar.make(for: productionCard)
+        #expect(production.primary == nil)
+        #expect(production.allowOnce?.answer.kind == .approveOnce)
+        #expect(production.menu.isEmpty)
+        #expect(AnswerBar.note(production.primary, productionCard) == nil)
         let confirmed = AnswerBar.make(for: Self.card(validAnswers: ["correct_environment"], unconfirmed: false))
         #expect(confirmed.primary == nil)
         #expect(confirmed.menu.isEmpty)
@@ -395,18 +404,54 @@ struct QuestionsModelTests {
         expired.state = .expired
         await fixture.service.setQuestions(enabled: true, questions: [older, newer, expired])
         await fixture.model.refresh()
-        #expect(fixture.model.takeFocus() == nil)
+        #expect(await fixture.model.takeFocus(stillFree: { true }) == nil)
         #expect(fixture.model.focusRequests == 0)
 
         fixture.push.open()
         #expect(fixture.model.focusRequests == 1)
-        #expect(fixture.model.takeFocus() == "newer")
-        #expect(fixture.model.takeFocus() == nil)
+        #expect(await fixture.model.takeFocus(stillFree: { true }) == "newer")
+        #expect(await fixture.model.takeFocus(stillFree: { true }) == nil)
 
         await fixture.service.setQuestions(enabled: true, questions: [expired])
         await fixture.model.refresh()
         fixture.push.open()
         #expect(fixture.model.focusRequests == 2)
-        #expect(fixture.model.takeFocus() == nil)
+        #expect(await fixture.model.takeFocus(stillFree: { true }) == nil)
+    }
+
+    @Test("the target is picked before the refresh; a question that arrives with it opens only when none waited")
+    func notificationPicksBeforeTheRefresh() async {
+        let fixture = Fixture()
+        let older = PreviewVaultService.sampleQuestion(qid: "older", now: Date().addingTimeInterval(-60))
+        await fixture.service.setQuestions(enabled: true, questions: [older])
+        await fixture.model.refresh()
+        // A newer question reaches the relay while the list is read again: the one the owner was
+        // told about (the newest when the notification opened) stays the target.
+        let newer = PreviewVaultService.sampleQuestion(qid: "newer")
+        await fixture.service.setQuestions(enabled: true, questions: [older, newer])
+        fixture.push.open()
+        #expect(await fixture.model.takeFocus(stillFree: { true }) == "older")
+        #expect(fixture.model.waiting.count == 2)
+
+        // Nothing waited before the refresh: the newest after it opens.
+        let empty = Fixture()
+        await empty.service.setQuestions(enabled: true, questions: [])
+        await empty.model.refresh()
+        await empty.service.setQuestions(enabled: true, questions: [older, newer])
+        empty.push.open()
+        #expect(await empty.model.takeFocus(stillFree: { true }) == "newer")
+    }
+
+    @Test("an opened notification opens nothing when the owner opened something during the refresh")
+    func notificationYieldsToTheOwner() async {
+        let fixture = Fixture()
+        await fixture.service.setQuestions(enabled: true, questions: [PreviewVaultService.sampleQuestion(qid: "q")])
+        await fixture.model.refresh()
+        fixture.push.open()
+        var asked = 0
+        #expect(await fixture.model.takeFocus(stillFree: { asked += 1; return false }) == nil)
+        #expect(asked == 1)
+        // The request is used up: a later look opens nothing either.
+        #expect(await fixture.model.takeFocus(stillFree: { true }) == nil)
     }
 }

@@ -93,19 +93,9 @@ private struct QuestionsPolling: ViewModifier {
 /// The Decisions tab of the vault (ADR 0026 §8): `DecisionsView`, with the questions through the
 /// relay and the runs of the Mac on this Wi-Fi in one list. The tab shell calls this initializer.
 struct ApprovalsHub: View {
-    /// Where Decisions came from before it was one list. Kept for the call site of the tab shell;
-    /// the list no longer depends on it.
-    enum Source: String, CaseIterable, Identifiable {
-        case questions
-        case companion
-
-        var id: String { rawValue }
-    }
-
     let questions: QuestionsModel?
     let companion: AppModel
     var onSettings: (() -> Void)?
-    @Binding var source: Source
 
     var body: some View {
         DecisionsView(questions: questions, companion: companion, onSettings: onSettings)

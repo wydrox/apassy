@@ -146,7 +146,8 @@ struct DecisionOutcomeBar: View {
 }
 
 extension View {
-    /// The look of a button of the bar: `.primary` filled, `.deny` red, `.secondary` gray.
+    /// The look of a button of the bar: `.primary` filled, `.production` filled red, `.deny` red,
+    /// `.secondary` gray.
     func decisionButton(_ role: DecisionButtonRole) -> some View {
         buttonStyle(DecisionButtonStyle(role: role))
     }
@@ -154,12 +155,15 @@ extension View {
 
 enum DecisionButtonRole {
     case primary
+    /// The main answer that remembers a production credential.
+    case production
     case deny
     case secondary
 }
 
 /// A capsule of 50 pt with its own fill, so it shows on the glass of the bar as in the mockup:
-/// the accent with white text, a light red with red text, or a light gray with the accent text.
+/// the accent (or red, for production) with white text, a light red with red text, or a light gray
+/// with the accent text.
 private struct DecisionButtonStyle: ButtonStyle {
     let role: DecisionButtonRole
     @Environment(\.isEnabled) private var isEnabled
@@ -180,7 +184,7 @@ private struct DecisionButtonStyle: ButtonStyle {
 
     private var foreground: Color {
         switch role {
-        case .primary: .white
+        case .primary, .production: .white
         case .deny: .red
         case .secondary: .accentColor
         }
@@ -189,6 +193,7 @@ private struct DecisionButtonStyle: ButtonStyle {
     private var background: Color {
         switch role {
         case .primary: .accentColor
+        case .production: .red
         case .deny: .red.opacity(0.12)
         case .secondary: Color(.tertiarySystemFill)
         }

@@ -16,8 +16,7 @@ struct VaultTabView: View {
             }
             Tab("Decisions", systemImage: "checkmark.circle", value: VaultTab.decisions) {
                 ApprovalsHub(
-                    questions: root.questions, companion: root.companion, onSettings: { ui.sheet = .settings },
-                    source: $ui.approvals)
+                    questions: root.questions, companion: root.companion, onSettings: { ui.sheet = .settings })
             }
             .badge(waitingCount)
             Tab("Agents", systemImage: "cpu", value: VaultTab.agents) {
@@ -82,7 +81,6 @@ struct VaultTabView: View {
         .onChange(of: root.questionsRequested, initial: true) { _, requested in
             guard requested else { return }
             ui.tab = .decisions
-            ui.approvals = .questions
             root.questionsRequested = false
         }
         // Another app sent its logins: offer the import once the vault is open (it is, here).
@@ -94,10 +92,11 @@ struct VaultTabView: View {
         #endif
     }
 
+    /// The rows of Decisions, as it lists them: a run that a question shows counts once.
     private var waitingCount: Int {
-        let questions = root.questions?.waitingCount ?? 0
-        if case .paired(let session) = root.companion.phase { return session.waitingCount + questions }
-        return questions
+        var session: SessionModel?
+        if case .paired(let paired) = root.companion.phase { session = paired }
+        return Decisions.badge(questions: root.questions?.questions ?? [], session: session, now: Date())
     }
 
     #if targetEnvironment(simulator)
@@ -122,9 +121,7 @@ struct VaultTabView: View {
                 Task { await openFolder(wanted) }
             case "newcredential": ui.sheet = .newCredential(folder: nil)
             case "decisions", "approvals": ui.tab = .decisions
-            case "questions":
-                ui.tab = .decisions
-                ui.approvals = .questions
+            case "questions": ui.tab = .decisions
             case "agents": ui.tab = .agents
             case "settings": ui.sheet = .settings
             case "generator": ui.sheet = .generator
