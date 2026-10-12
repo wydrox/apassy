@@ -50,6 +50,11 @@ final class VaultModel {
     private(set) var syncStatus: SyncStatus?
     private(set) var isSyncing = false
     private(set) var watchtower: WatchtowerReport?
+    /// The folders of the vault, depth first, while it is unlocked (ADR 0026 §5).
+    private(set) var folders: [Folder] = []
+    /// The core has folders. An older core answers that it does not know the call: the screens
+    /// then show no folders.
+    private(set) var hasFolders = false
     /// Bumped when revealed values must go: the app left the screen, or the vault locked.
     private(set) var revealEpoch = 0
 
@@ -110,6 +115,7 @@ final class VaultModel {
     var vault: VaultEntry? { info?.selectedVault }
     var hasVault: Bool { !vaults.isEmpty }
     var activeItems: [ItemRow] { VaultQuery.active(items) }
+    var folderTree: FolderTree { FolderTree(folders) }
 
     func item(_ id: UInt64) -> ItemRow? { items.first { $0.id == id } }
 
@@ -263,6 +269,7 @@ final class VaultModel {
         leftAt = nil
         items = []
         watchtower = nil
+        folders = []
         itemsVersion += 1
         try? await service.lock()
         await refreshInfo()
@@ -377,7 +384,7 @@ final class VaultModel {
 
     // MARK: Items
 
-    /// Read the rows again, then Watchtower.
+    /// Read the rows and the folders again, then Watchtower.
     func reload() async {
         guard isUnlocked else { return }
         do {
@@ -389,7 +396,25 @@ final class VaultModel {
         } catch {
             report(error)
         }
+        await reloadFolders()
         await refreshWatchtower()
+    }
+
+    /// Read the folders again. An older core has none; another error keeps what is shown.
+    func reloadFolders() async {
+        guard isUnlocked else { return }
+        do {
+            folders = try await service.folders()
+            hasFolders = true
+        } catch let error as VaultError where Self.lacksFolders(error) {
+            folders = []
+            hasFolders = false
+        } catch {}
+    }
+
+    /// The answer of a core or a service without the folder calls (contract section 5.11).
+    static func lacksFolders(_ error: VaultError) -> Bool {
+        error.code == .notAllowed || error.code == .invalidInput
     }
 
     /// Reload the rows and give iOS the logins for the QuickType bar.
@@ -483,6 +508,66 @@ final class VaultModel {
         await didChangeItems()
     }
 
+    // MARK: Folders and options
+
+    /// Run a change of the folders or of a credential's options, then reload and sync in 2 s. True
+    /// when the call succeeded; the core's message goes to `alert`.
+    private func change<T>(_ work: String, _ call: () async throws -> T) async -> T? {
+        let end = hooks.beginBackgroundWork(work)
+        defer { end() }
+        let result: T
+        do {
+            result = try await call()
+        } catch {
+            report(error)
+            await reload()
+            return nil
+        }
+        await didChangeItems()
+        return result
+    }
+
+    /// A folder in `parent` (nil: the top level).
+    @discardableResult
+    func createFolder(parent: String?, name: String) async -> Folder? {
+        await change("Make the folder") { try await service.createFolder(parent: parent, name: name) }
+    }
+
+    @discardableResult
+    func renameFolder(_ folder: Folder, to name: String) async -> Bool {
+        await change("Rename the folder") { try await service.renameFolder(uuid: folder.uuid, name: name) } != nil
+    }
+
+    /// Move a folder with its subfolders and credentials into `parent` (nil: the top level).
+    @discardableResult
+    func moveFolder(_ folder: Folder, to parent: String?) async -> Bool {
+        guard folder.parent != parent else { return true }
+        return await change("Move the folder") { try await service.moveFolder(uuid: folder.uuid, parent: parent) } != nil
+    }
+
+    /// Delete a folder. Its credentials and subfolders go to its parent: no credential is
+    /// deleted. Returns how many credentials moved, nil when it failed.
+    @discardableResult
+    func deleteFolder(_ folder: Folder) async -> Int? {
+        await change("Delete the folder") { try await service.deleteFolder(uuid: folder.uuid) }
+    }
+
+    /// Put a credential in `folder` (nil: the top level). Sharing, rules, and history stay.
+    @discardableResult
+    func moveItem(_ id: UInt64, to folder: String?) async -> Bool {
+        guard item(id)?.folder != folder else { return true }
+        return await change("Move the item") { try await service.setItemFolder(id: id, folder: folder) } != nil
+    }
+
+    /// Save "Always ask me" or the environment. The owner check, when the change needs one, is
+    /// the caller's (`ItemDetailModel`): the core does not check the owner.
+    @discardableResult
+    func setItemOptions(id: UInt64, alwaysAsk: Bool? = nil, environment: CredentialEnvironment? = nil) async -> Bool {
+        await change("Save the options") {
+            try await service.setItemOptions(id: id, alwaysAsk: alwaysAsk, environment: environment)
+        } != nil
+    }
+
     // MARK: Favorites
 
     var favoriteIDs: [UInt64] {
@@ -526,6 +611,11 @@ final class VaultModel {
     /// secret, so it expires, but it needs no owner check: nothing leaves the vault.
     func copyGenerated(_ value: String) {
         hooks.copy(value, true)
+    }
+
+    /// Copy a plain value, such as the variable of a credential.
+    func copyPlain(_ value: String) {
+        hooks.copy(value, false)
     }
 
     /// Copy the username of a row (plain).
@@ -738,6 +828,24 @@ final class VaultModel {
             report(error)
             return
         }
+        let folderResult: Result<[Folder], VaultError>?
+        do {
+            folderResult = .success(try await service.folders())
+        } catch let error as VaultError where Self.lacksFolders(error) {
+            folderResult = .failure(error)
+        } catch {
+            folderResult = nil
+        }
+        guard isCurrentSession(vaultID: vaultID, epoch: epoch) else { return }
+        switch folderResult {
+        case .success(let fresh)?:
+            folders = fresh
+            hasFolders = true
+        case .failure?:
+            folders = []
+            hasFolders = false
+        case nil: break
+        }
         let report = try? await service.watchtower()
         guard isCurrentSession(vaultID: vaultID, epoch: epoch) else { return }
         if let report { watchtower = report }
@@ -794,6 +902,7 @@ final class VaultModel {
         isUnlocked = false
         items = []
         watchtower = nil
+        folders = []
         syncStatus = nil
         revealEpoch += 1
         itemsVersion += 1

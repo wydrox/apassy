@@ -40,6 +40,8 @@ final class ItemDetailModel {
     private(set) var history: [ItemEvent]?
     /// Fields whose owner check or call runs.
     private(set) var working: Set<String> = []
+    /// An owner check or a call of the options runs.
+    private(set) var isSavingOptions = false
 
     @ObservationIgnored let vault: VaultModel
     @ObservationIgnored private let revealLifetime: Duration
@@ -254,6 +256,50 @@ final class ItemDetailModel {
     func setArchived(_ archived: Bool) async {
         guard let row = detail?.row else { return }
         await vault.setArchived(row, archived)
+        await load()
+    }
+
+    // MARK: Folder and options
+
+    /// The folder path on the screen: "Acme › Billing", or "No folder".
+    var folderLabel: String {
+        guard let detail else { return FolderTree.noFolder }
+        if let path = detail.folderPath, !path.isEmpty { return path.joined(separator: " › ") }
+        return vault.folderTree.pathLabel(detail.folder)
+    }
+
+    /// Put the credential in `folder` (nil: the top level). Moving changes nothing else, so it
+    /// needs no owner check.
+    func moveToFolder(_ folder: String?) async {
+        guard detail != nil else { return }
+        await vault.moveItem(id, to: folder)
+        await load()
+    }
+
+    /// Turn "Always ask me" on at once; turning it off asks the owner first.
+    func setAlwaysAsk(_ on: Bool) async {
+        guard let detail, let current = detail.alwaysAsk, current != on, !isSavingOptions else { return }
+        isSavingOptions = true
+        defer { isSavingOptions = false }
+        if CredentialOptions.alwaysAskNeedsOwner(from: current, to: on) {
+            guard await vault.gate.confirm(reason: "Turn off “Always ask me” for “\(title)”") else { return }
+        }
+        await vault.setItemOptions(id: id, alwaysAsk: on)
+        await load()
+    }
+
+    /// Set the environment as the owner's answer. A less careful one asks the owner first;
+    /// production and other stricter choices do not.
+    func setEnvironment(_ environment: CredentialEnvironment) async {
+        guard let detail, !isSavingOptions else { return }
+        guard CredentialOptions.shownEnvironment(detail) != environment else { return }
+        isSavingOptions = true
+        defer { isSavingOptions = false }
+        if CredentialOptions.environmentNeedsOwner(detail, to: environment) {
+            let reason = "Mark “\(title)” as \(environment.label.lowercased())"
+            guard await vault.gate.confirm(reason: reason) else { return }
+        }
+        await vault.setItemOptions(id: id, environment: environment)
         await load()
     }
 

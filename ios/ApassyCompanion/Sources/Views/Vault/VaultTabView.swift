@@ -12,7 +12,7 @@ struct VaultTabView: View {
         @Bindable var ui = ui
         TabView(selection: $ui.tab) {
             Tab("Vault", systemImage: "key.horizontal", value: VaultTab.vault) {
-                HomeView()
+                VaultRootView()
             }
             Tab("Decisions", systemImage: "checkmark.circle", value: VaultTab.decisions) {
                 ApprovalsHub(
@@ -45,6 +45,22 @@ struct VaultTabView: View {
                 case .exchange:
                     if let exchange = root.exchange {
                         NavigationStack { CredentialExchangeView(model: exchange, mode: .importing) }
+                    }
+                case .newCredential(let folder):
+                    NewCredentialView(folder: folder)
+                case .moveItem(let item):
+                    FolderPicker(
+                        title: "Move “\(item.title)”", selected: vault.folderTree.folder(of: item),
+                        choices: vault.folderTree.choices()
+                    ) { folder in
+                        await vault.moveItem(item.id, to: folder)
+                    }
+                case .moveFolder(let folder):
+                    FolderPicker(
+                        title: "Move “\(folder.name)”", selected: folder.parent,
+                        choices: vault.folderTree.moveTargets(for: folder.uuid), topLabel: "Top level"
+                    ) { parent in
+                        await vault.moveFolder(folder, to: parent)
                     }
                 }
             }
@@ -86,16 +102,25 @@ struct VaultTabView: View {
 
     #if targetEnvironment(simulator)
         /// A development aid of the Simulator, to reach a screen without taps:
-        /// `-ApassyOpen vault|items|watchtower|decisions|approvals|questions|agents|settings[:<group>]|generator|search:<text>|new:<kind>|edit:<id>|item:<id>[:reveal|:large]`.
-        /// `items` and `watchtower` open on the Vault tab, where they are now; `approvals` is the
-        /// old name of `decisions`.
+        /// `-ApassyOpen vault|items|all|watchtower|folder:<uuid or name>|decisions|approvals|questions|agents|settings[:<group>]|generator|search:<text>|new:<kind>|newcredential|edit:<id>|item:<id>[:reveal|:large|:options]`.
+        /// `items` (`all`), `watchtower`, and `folder` open on the Vault tab, where they are now;
+        /// `approvals` is the old name of `decisions`.
         private func openFromLaunchArgument() {
             guard let route = UserDefaults.standard.string(forKey: "ApassyOpen") else { return }
             let parts = route.split(separator: ":").map(String.init)
             switch parts.first {
             case "vault": ui.tab = .vault
-            // Home pushes the screen itself (`HomeView.openFromLaunchArgument`).
-            case "items", "watchtower": ui.tab = .vault
+            case "items", "all":
+                ui.tab = .vault
+                ui.homePath = [.allCredentials]
+            case "watchtower":
+                ui.tab = .vault
+                ui.homePath = [.watchtower]
+            case "folder":
+                ui.tab = .vault
+                let wanted = parts.dropFirst().joined(separator: ":")
+                Task { await openFolder(wanted) }
+            case "newcredential": ui.sheet = .newCredential(folder: nil)
             case "decisions", "approvals": ui.tab = .decisions
             case "questions":
                 ui.tab = .decisions
@@ -112,6 +137,7 @@ struct VaultTabView: View {
                 guard parts.count > 1, let id = UInt64(parts[1]) else { return }
                 ui.demoReveal = parts.count > 2 && parts[2] == "reveal"
                 ui.demoLargeType = parts.count > 2 && parts[2] == "large"
+                ui.demoOptions = parts.count > 2 && parts[2] == "options"
                 ui.homePath = [.item(id)]
             case "edit":
                 guard parts.count > 1, let id = UInt64(parts[1]) else { return }
@@ -121,221 +147,34 @@ struct VaultTabView: View {
             default: break
             }
         }
-    #endif
-}
 
-// MARK: - Home
-
-/// A screen that Home pushes besides an item or a category.
-private enum HomeScreen: Hashable {
-    case items
-    case watchtower
-}
-
-/// Watchtower, all items, favorites, the recently changed items, the categories, and the sync state.
-struct HomeView: View {
-    @Environment(VaultModel.self) private var vault
-    @Environment(VaultUI.self) private var ui
-    @State private var screen: HomeScreen?
-
-    var body: some View {
-        @Bindable var ui = ui
-        NavigationStack(path: $ui.homePath) {
-            List {
-                Section {
-                    Button {
-                        screen = .watchtower
-                    } label: {
-                        if let report = vault.watchtower, report.issueCount > 0 {
-                            WatchtowerCard(report: report)
-                        } else {
-                            WatchtowerClearRow(checked: vault.watchtower != nil)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    Button {
-                        screen = .items
-                    } label: {
-                        AllItemsRow(count: vault.activeItems.count)
-                    }
-                    .buttonStyle(.plain)
-                }
-                favorites
-                recent
-                Section("Categories") {
-                    ForEach(ItemCategory.all) { category in
-                        NavigationLink(value: VaultRoute.category(category)) {
-                            HStack {
-                                Label(category.label, systemImage: category.symbol)
-                                Spacer()
-                                Text(VaultQuery.items(vault.items, in: category).count, format: .number)
-                                    .foregroundStyle(.secondary)
-                                    .monospacedDigit()
-                            }
-                        }
-                    }
-                }
+        /// Push the folders from the top level down to a folder, by its UUID or its name, once the
+        /// folders are read.
+        private func openFolder(_ wanted: String) async {
+            for _ in 0..<50 where vault.folders.isEmpty {
+                try? await Task.sleep(for: .milliseconds(100))
             }
-            .navigationTitle(vault.vault?.name ?? "Apassy")
-            .toolbar { VaultToolbar(ui: ui, showsLock: true, vault: vault) }
-            .vaultDestinations()
-            .navigationDestination(item: $screen) { screen in
-                switch screen {
-                case .items: ItemsView()
-                case .watchtower: WatchtowerView()
-                }
+            let tree = vault.folderTree
+            guard
+                let target = tree.folder(wanted)
+                    ?? tree.folders.first(where: { $0.name.caseInsensitiveCompare(wanted) == .orderedSame })
+            else { return }
+            var chain: [VaultRoute] = []
+            var at: Folder? = target
+            while let folder = at, chain.count <= Folder.maxDepth {
+                chain.insert(.folder(folder.uuid), at: 0)
+                at = tree.folder(folder.parent)
             }
-            .refreshable { await vault.syncNow() }
-            .safeAreaInset(edge: .top, spacing: 0) {
-                if vault.vault?.syncs == true {
-                    SyncCapsule()
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                }
-            }
-        }
-        #if targetEnvironment(simulator)
-            .task { openFromLaunchArgument() }
-        #endif
-    }
-
-    #if targetEnvironment(simulator)
-        /// `-ApassyOpen items|watchtower`: the screens that were tabs before.
-        private func openFromLaunchArgument() {
-            switch UserDefaults.standard.string(forKey: "ApassyOpen") {
-            case "items": screen = .items
-            case "watchtower": screen = .watchtower
-            default: break
-            }
+            ui.homePath = chain
         }
     #endif
-
-    @ViewBuilder
-    private var favorites: some View {
-        let items = VaultQuery.favorites(vault.items, ids: vault.favoriteIDs)
-        Section {
-            if items.isEmpty {
-                Text("Swipe an item to the left and select Favorite. It shows here.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(items) { item in
-                    ItemListRow(item: item)
-                }
-            }
-        } header: {
-            Text("Favorites")
-        }
-    }
-
-    @ViewBuilder
-    private var recent: some View {
-        let items = VaultQuery.recent(vault.items)
-        if !items.isEmpty {
-            Section("Recently changed") {
-                ForEach(items) { item in
-                    ItemListRow(item: item)
-                }
-            }
-        }
-    }
-}
-
-/// Watchtower on Home when nothing needs a look (or the check has not finished yet).
-private struct WatchtowerClearRow: View {
-    let checked: Bool
-
-    var body: some View {
-        HStack(spacing: 14) {
-            Image(systemName: "checkmark.shield.fill")
-                .font(.title)
-                .foregroundStyle(.green)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Watchtower")
-                    .font(.headline)
-                Text(checked ? "Nothing needs a look" : "Checking")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 0)
-            Image(systemName: "chevron.forward")
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(.tertiary)
-                .accessibilityHidden(true)
-        }
-        .contentShape(.rect)
-        .accessibilityElement(children: .combine)
-        .accessibilityHint("Opens Watchtower")
-    }
-}
-
-/// "All items" on Home, with the count of the items that are not archived.
-private struct AllItemsRow: View {
-    let count: Int
-
-    var body: some View {
-        HStack {
-            Label("All items", systemImage: "list.bullet")
-            Spacer()
-            Text(count, format: .number)
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-            Image(systemName: "chevron.forward")
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(.tertiary)
-                .accessibilityHidden(true)
-        }
-        .contentShape(.rect)
-        .accessibilityElement(children: .combine)
-        .accessibilityHint("Opens all items")
-    }
-}
-
-/// "3 items need a look" on Home.
-struct WatchtowerCard: View {
-    let report: WatchtowerReport
-
-    var body: some View {
-        HStack(spacing: 14) {
-            Image(systemName: "exclamationmark.shield.fill")
-                .font(.title)
-                .foregroundStyle(.orange)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(report.issueCount == 1 ? "1 item needs a look" : "\(report.issueCount) items need a look")
-                    .font(.headline)
-                Text(summary)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 0)
-            Image(systemName: "chevron.forward")
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(.tertiary)
-                .accessibilityHidden(true)
-        }
-        .contentShape(.rect)
-        .accessibilityElement(children: .combine)
-        .accessibilityHint("Opens Watchtower")
-    }
-
-    private var summary: String {
-        var parts: [String] = []
-        if !report.weak.isEmpty { parts.append("\(report.weak.count) weak") }
-        let reused = report.reused.flatMap(\.self).count
-        if reused > 0 { parts.append("\(reused) reused") }
-        if !report.old.isEmpty { parts.append("\(report.old.count) old") }
-        if !report.conflicts.isEmpty {
-            parts.append(report.conflicts.count == 1 ? "1 conflict copy" : "\(report.conflicts.count) conflict copies")
-        }
-        return parts.joined(separator: ", ")
-    }
 }
 
 // MARK: - Items
 
-/// Every item that is not archived, A–Z with an index, with filters and a sort. Home pushes it.
+/// "All credentials": every credential that is not archived, grouped by folder as on the Mac
+/// (ADR 0026 §1), with filters and a sort. The headers stay at the top while the list scrolls. The
+/// Vault root pushes it.
 struct ItemsView: View {
     @Environment(VaultModel.self) private var vault
     @State private var kind: ItemKind?
@@ -348,10 +187,12 @@ struct ItemsView: View {
 
     var body: some View {
         content
-            .navigationTitle(kind?.pluralLabel ?? "All items")
+            .navigationTitle(kind?.pluralLabel ?? "All credentials")
+            .navigationSubtitle(subtitle)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) { filterMenu }
-                ToolbarItem(placement: .topBarTrailing) { NewItemMenu() }
+                ToolbarSpacer(.fixed, placement: .topBarTrailing)
+                ToolbarItem(placement: .topBarTrailing) { NewCredentialButton(folder: nil) }
             }
     }
 
@@ -360,9 +201,9 @@ struct ItemsView: View {
         let items = shown
         if vault.activeItems.isEmpty {
             ContentUnavailableView {
-                Label("No items yet", systemImage: "key")
+                Label("No credentials yet", systemImage: "key")
             } description: {
-                Text("Add a login, an API key, or another secret with the + button, or on your Mac.")
+                Text("Paste a key, a .env file, or a password with the + button, or add it on your Mac.")
             }
         } else if items.isEmpty {
             ContentUnavailableView {
@@ -377,22 +218,30 @@ struct ItemsView: View {
                 .buttonStyle(.bordered)
             }
         } else if sort == .title {
+            // As on the Mac: no folder first, then each folder by its path, A–Z inside.
             List {
-                ForEach(VaultQuery.sections(items)) { section in
-                    Section(section.letter) {
-                        ForEach(section.items) { item in
+                ForEach(vault.folderTree.groups(items)) { group in
+                    Section {
+                        ForEach(group.items) { item in
                             ItemListRow(item: item)
                         }
+                    } header: {
+                        Text(group.title)
                     }
-                    .sectionIndexLabel(section.letter)
                 }
             }
-            .listSectionIndexVisibility(.visible)
+            .listStyle(.plain)
         } else {
             List(VaultQuery.sorted(items, by: .changed)) { item in
                 ItemListRow(item: item)
             }
+            .listStyle(.plain)
         }
+    }
+
+    private var subtitle: String {
+        let count = shown.count
+        return count == 1 ? "1 item" : "\(count) items"
     }
 
     private var filterMenu: some View {

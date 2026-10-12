@@ -11,7 +11,9 @@ struct ItemDetailScreen: View {
     }
 }
 
-/// An item: its header, its fields in their order, notes, tags, times, and history.
+/// A credential, in the groups of the Mac (ADR 0026 §2, §8): the header with the provider tile and
+/// tags; the fields in their order with the variable and the folder; agent use and rules (on the
+/// Mac only for now); the options; then notes, tags, times, and history.
 struct ItemDetailView: View {
     @State private var model: ItemDetailModel
     @Environment(VaultModel.self) private var vault
@@ -76,38 +78,55 @@ struct ItemDetailView: View {
                 "This item is not in the vault", systemImage: "trash",
                 description: Text("It was deleted on this iPhone or on a Mac."))
         } else if let detail = model.detail {
-            List {
-                Section {
-                    header(detail.row)
-                }
-                .listRowBackground(Color.clear)
-                if detail.row.conflictOf != nil { conflictBanner(detail.row) }
-                if !detail.fields.isEmpty {
+            ScrollViewReader { proxy in
+                List {
+                    Section {
+                        header(detail.row)
+                    }
+                    .listRowBackground(Color.clear)
+                    if detail.row.conflictOf != nil { conflictBanner(detail.row) }
                     Section {
                         ForEach(detail.fields) { field in
                             FieldRow(field: field, model: model)
                         }
-                    }
-                }
-                if let passkey = detail.passkey { passkeySection(passkey) }
-                if !detail.notes.isEmpty {
-                    Section("Notes") {
-                        Text(detail.notes)
-                            .textSelection(.enabled)
-                    }
-                }
-                if !detail.row.tags.isEmpty {
-                    Section("Tags") {
-                        FlowLayout(spacing: 8) {
-                            ForEach(detail.row.tags, id: \.self) { tag in
-                                TagChip(text: tag)
-                            }
+                        if let envName = detail.envName, !envName.isEmpty {
+                            variableRow(envName)
                         }
-                        .padding(.vertical, 4)
+                        if vault.hasFolders {
+                            folderRow(detail.row)
+                        }
                     }
+                    if let passkey = detail.passkey { passkeySection(passkey) }
+                    Section("Agent use") { MacOnlyRow() }
+                    Section("Rules from your answers") { MacOnlyRow() }
+                    if detail.alwaysAsk != nil { options(detail).id("options") }
+                    if !detail.notes.isEmpty {
+                        Section("Notes") {
+                            Text(detail.notes)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    if !detail.row.tags.isEmpty {
+                        Section("Tags") {
+                            FlowLayout(spacing: 8) {
+                                ForEach(detail.row.tags, id: \.self) { tag in
+                                    TagChip(text: tag)
+                                }
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                    times(detail.row)
+                    history
                 }
-                times(detail.row)
-                history
+                #if targetEnvironment(simulator)
+                    .task(id: detail.id) {
+                        guard ui.demoOptions else { return }
+                        ui.demoOptions = false
+                        try? await Task.sleep(for: .milliseconds(400))
+                        proxy.scrollTo("options", anchor: .center)
+                    }
+                #endif
             }
         } else if let error = model.loadError {
             ContentUnavailableView {
@@ -124,26 +143,110 @@ struct ItemDetailView: View {
     }
 
     private func header(_ row: ItemRow) -> some View {
-        VStack(spacing: 10) {
-            ItemIcon(kind: row.kind, scale: 1.8)
+        VStack(spacing: 8) {
+            ProviderTile(row, scale: 1.9)
             Text(row.title)
                 .font(.title2.bold())
                 .multilineTextAlignment(.center)
-            if !row.subtitle.isEmpty {
-                Text(row.subtitle)
-                    .foregroundStyle(.secondary)
+                .padding(.top, 4)
+            Text(CredentialLooks.headerLine(row))
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            let caps = caps(row)
+            if !caps.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(caps) { cap in
+                        CapView(label: cap.label, red: cap.red)
+                    }
+                }
             }
-            HStack(spacing: 6) {
-                Text(row.kind.label)
-                if row.hasPasskey || model.detail?.passkey != nil { Text("· Passkey") }
-                if row.archived { Text("· Archived") }
-                if model.isFavorite { Text("· Favorite") }
-            }
-            .font(.footnote.weight(.medium))
-            .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .combine)
+    }
+
+    /// The small tags of the header: the environment (Production in red), then Passkey, Archived,
+    /// and Favorite in gray.
+    private func caps(_ row: ItemRow) -> [CredentialLooks.Cap] {
+        var caps: [CredentialLooks.Cap] = []
+        if let detail = model.detail, let environment = CredentialLooks.environmentCap(detail) { caps.append(environment) }
+        if row.hasPasskey || model.detail?.passkey != nil { caps.append(.init(label: "Passkey", red: false)) }
+        if row.archived { caps.append(.init(label: "Archived", red: false)) }
+        if model.isFavorite { caps.append(.init(label: "Favorite", red: false)) }
+        return caps
+    }
+
+    /// The variable that agent processes get. Plain: a tap copies it.
+    private func variableRow(_ envName: String) -> some View {
+        Button {
+            vault.copyPlain(envName)
+        } label: {
+            LabeledContent("Variable") {
+                Text(envName)
+                    .font(.footnote.monospaced())
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint("Copies the variable")
+        .contextMenu {
+            Button("Copy", systemImage: "doc.on.doc") { vault.copyPlain(envName) }
+        }
+    }
+
+    /// The folder: a tap opens the folder picker. Moving changes nothing else.
+    private func folderRow(_ row: ItemRow) -> some View {
+        Button {
+            ui.sheet = .moveItem(row)
+        } label: {
+            HStack(spacing: 8) {
+                LabeledContent("Folder", value: model.folderLabel)
+                Image(systemName: "chevron.forward")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
+            }
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint("Moves the credential to another folder")
+    }
+
+    /// "Always ask me" and the environment. A change that makes the bouncer less careful asks the
+    /// owner first (`ItemDetailModel`); a stricter one does not.
+    private func options(_ detail: ItemDetail) -> some View {
+        let shown = CredentialOptions.shownEnvironment(detail)
+        return Section {
+            Toggle(
+                "Always ask me",
+                isOn: Binding(
+                    get: { detail.alwaysAsk ?? false },
+                    set: { on in Task { await model.setAlwaysAsk(on) } }))
+            Picker(
+                "Environment",
+                selection: Binding<CredentialEnvironment?>(
+                    get: { shown },
+                    set: { chosen in
+                        if let chosen { Task { await model.setEnvironment(chosen) } }
+                    })
+            ) {
+                if shown == nil {
+                    Text(CredentialOptions.unsetLabel(detail)).tag(CredentialEnvironment?.none)
+                }
+                ForEach(CredentialEnvironment.allCases) { environment in
+                    Text(environment.label).tag(CredentialEnvironment?.some(environment))
+                }
+            }
+        } header: {
+            Text("Options")
+        } footer: {
+            Text(
+                "With “Always ask me”, each use by an agent waits for you. Turning it off, or a less careful environment, needs Face ID or your passphrase first."
+            )
+        }
+        .disabled(model.isSavingOptions)
     }
 
     /// The passkey: what it signs in to, never its key. The key has no reveal, copy, or large
@@ -283,6 +386,16 @@ struct ItemDetailView: View {
             if let code = model.detail?.fields.first(where: { $0.role == .totp }) { await model.showCode(code) }
         }
     #endif
+}
+
+/// Agent use and rules live in the Mac's vault and do not sync: the iPhone says so and shows no
+/// invented data.
+private struct MacOnlyRow: View {
+    var body: some View {
+        Label("Available when the Mac is connected", systemImage: "laptopcomputer")
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+    }
 }
 
 /// A tag as a chip.

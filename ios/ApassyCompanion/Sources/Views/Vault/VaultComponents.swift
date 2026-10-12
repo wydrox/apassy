@@ -13,6 +13,10 @@ enum VaultTab: Hashable {
 enum VaultRoute: Hashable {
     case item(UInt64)
     case category(ItemCategory)
+    /// A folder by its UUID.
+    case folder(String)
+    case allCredentials
+    case watchtower
 }
 
 /// A sheet of the vault tabs.
@@ -23,6 +27,13 @@ enum VaultSheet: Identifiable {
     case generator
     /// An import from another app (Apple's credential exchange).
     case exchange
+    /// "New Credential" (ADR 0026 §4): paste, then Add, into the folder on the screen (nil at the
+    /// root and in "All credentials").
+    case newCredential(folder: String?)
+    /// "Move to Folder" for a credential.
+    case moveItem(ItemRow)
+    /// "Move" for a folder.
+    case moveFolder(Folder)
 
     var id: String {
         switch self {
@@ -31,6 +42,9 @@ enum VaultSheet: Identifiable {
         case .edit(let detail): "edit-\(detail.id)"
         case .generator: "generator"
         case .exchange: "exchange"
+        case .newCredential(let folder): "new-credential-\(folder ?? "")"
+        case .moveItem(let item): "move-item-\(item.id)"
+        case .moveFolder(let folder): "move-folder-\(folder.uuid)"
         }
     }
 }
@@ -43,6 +57,8 @@ final class VaultUI {
     /// Questions or the companion, in the Approvals tab.
     var approvals = ApprovalsHub.Source.questions
     var sheet: VaultSheet?
+    /// New Folder, Rename, or Delete of a folder, as an alert over the Vault tab.
+    var folderPrompt: FolderPrompt?
     var homePath: [VaultRoute] = []
     var itemsPath: [VaultRoute] = []
     var searchText = ""
@@ -51,6 +67,8 @@ final class VaultUI {
         /// type (after the owner check).
         var demoReveal = false
         var demoLargeType = false
+        /// The item screen scrolls to its options once.
+        var demoOptions = false
     #endif
 }
 
@@ -84,14 +102,119 @@ struct ItemIcon: View {
     }
 }
 
-/// An item in a list: its icon, title, and subtitle, with marks for a code and a conflict copy.
+/// A provider tile (Stripe, GitHub, Postgres…) as on the Mac, or the symbol of the kind when no
+/// provider is known: a rounded square with a white letter or symbol.
+struct ProviderTile: View {
+    let style: ProviderTileStyle
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = 38
+    var scale: CGFloat = 1
+
+    init(_ row: ItemRow, scale: CGFloat = 1) {
+        self.style = ProviderTileStyle.of(row)
+        self.scale = scale
+    }
+
+    var body: some View {
+        let side = size * scale
+        Group {
+            switch style.mark {
+            case .letter(let letter):
+                Text(verbatim: letter)
+                    .font(.system(size: side * 0.45, weight: .bold))
+            case .database:
+                Image(systemName: "cylinder.split.1x2")
+                    .font(.system(size: side * 0.46, weight: .medium))
+            case .kind(let kind):
+                Image(systemName: kind.symbol)
+                    .font(.system(size: side * 0.46, weight: .medium))
+            }
+        }
+        .foregroundStyle(.white)
+        .frame(width: side, height: side)
+        .background(color.gradient, in: .rect(cornerRadius: side * 0.26, style: .continuous))
+        .accessibilityHidden(true)
+    }
+
+    private var color: Color {
+        if let rgb = style.rgb { return Color(rgb: rgb) }
+        if case .kind(let kind) = style.mark { return kind.tint }
+        return .gray
+    }
+}
+
+extension Color {
+    /// A color from 0xRRGGBB.
+    init(rgb: UInt32) {
+        self.init(
+            red: Double((rgb >> 16) & 0xFF) / 255, green: Double((rgb >> 8) & 0xFF) / 255,
+            blue: Double(rgb & 0xFF) / 255)
+    }
+
+    /// The color of a folder tile.
+    static let folderTile = Color(rgb: 0x5AC8FA)
+}
+
+/// A symbol in a small rounded square, as in System Settings: the rows of the Vault root.
+struct SymbolTile: View {
+    let symbol: String
+    let color: Color
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = 30
+
+    var body: some View {
+        Image(systemName: symbol)
+            .font(.system(size: size * 0.5, weight: .medium))
+            .foregroundStyle(.white)
+            .frame(width: size, height: size)
+            .background(color.gradient, in: .rect(cornerRadius: size * 0.27, style: .continuous))
+            .accessibilityHidden(true)
+    }
+}
+
+/// The red dot of a production credential.
+struct ProductionDot: View {
+    var body: some View {
+        Circle()
+            .fill(.red)
+            .frame(width: 8, height: 8)
+            .accessibilityElement()
+            .accessibilityLabel("Production")
+    }
+}
+
+/// A small tag of the credential header: "Production" in red, the others in gray.
+struct CapView: View {
+    let label: String
+    var red = false
+    var symbol: String?
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if let symbol {
+                Image(systemName: symbol)
+                    .font(.caption2.weight(.semibold))
+                    .accessibilityHidden(true)
+            }
+            Text(label)
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(red ? Color.red : Color.secondary)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(
+            red ? AnyShapeStyle(Color.red.opacity(0.12)) : AnyShapeStyle(.fill.tertiary),
+            in: .rect(cornerRadius: 7, style: .continuous))
+    }
+}
+
+/// A credential in a list: its provider tile, title, one line of detail, a red dot for production,
+/// and marks for a code and a conflict copy.
 struct ItemRowView: View {
     let item: ItemRow
     var favorite = false
 
     var body: some View {
         HStack(spacing: 12) {
-            ItemIcon(kind: item.kind)
+            ProviderTile(item)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 4) {
                     Text(item.title)
@@ -104,12 +227,10 @@ struct ItemRowView: View {
                             .accessibilityLabel("Favorite")
                     }
                 }
-                if !detailText.isEmpty {
-                    Text(detailText)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
+                Text(CredentialLooks.detailLine(item))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
             Spacer(minLength: 4)
             if item.conflictOf != nil {
@@ -122,14 +243,11 @@ struct ItemRowView: View {
                     .foregroundStyle(.secondary)
                     .accessibilityLabel("Has a one-time password")
             }
+            if item.production == true {
+                ProductionDot()
+            }
         }
         .accessibilityElement(children: .combine)
-    }
-
-    private var detailText: String {
-        if !item.subtitle.isEmpty { return item.subtitle }
-        if let site = item.websites.first { return VaultText.host(site) }
-        return item.kind.label
     }
 }
 
@@ -137,6 +255,7 @@ struct ItemRowView: View {
 struct ItemListRow: View {
     let item: ItemRow
     @Environment(VaultModel.self) private var vault
+    @Environment(VaultUI.self) private var ui
     @Environment(\.openURL) private var openURL
 
     var body: some View {
@@ -186,6 +305,9 @@ struct ItemListRow: View {
             }
             if let site = item.websites.first, let url = VaultText.websiteURL(site) {
                 Button("Open \(VaultText.host(site))", systemImage: "safari") { openURL(url) }
+            }
+            if vault.hasFolders, !item.archived {
+                Button("Move to Folder…", systemImage: "folder") { ui.sheet = .moveItem(item) }
             }
             Divider()
             if !item.archived {
@@ -283,25 +405,22 @@ struct SyncCapsule: View {
     }
 }
 
-/// The "+" menu: a new item of a kind, or the password generator.
-struct NewItemMenu: View {
+/// "+": New Credential, into the folder on the screen (ADR 0026 §4).
+struct NewCredentialButton: View {
     @Environment(VaultUI.self) private var ui
+    var folder: String?
 
     var body: some View {
-        Menu {
-            Section("New item") {
-                ForEach(ItemKind.allCases) { kind in
-                    Button(kind.label, systemImage: kind.symbol) { ui.sheet = .new(kind) }
-                }
-            }
-            Button("Password generator", systemImage: "dice") { ui.sheet = .generator }
+        Button {
+            ui.sheet = .newCredential(folder: folder)
         } label: {
-            Label("New item", systemImage: "plus")
+            Label("New Credential", systemImage: "plus")
         }
+        .buttonStyle(.glassProminent)
     }
 }
 
-/// The toolbar of Home and Items: settings, and the "+" menu.
+/// The toolbar of the Vault root: settings, the lock, and "+".
 struct VaultToolbar: ToolbarContent {
     let ui: VaultUI
     var showsLock = false
@@ -323,9 +442,10 @@ struct VaultToolbar: ToolbarContent {
                     Label("Lock now", systemImage: "lock")
                 }
             }
+            ToolbarSpacer(.fixed, placement: .topBarTrailing)
         }
         ToolbarItem(placement: .topBarTrailing) {
-            NewItemMenu()
+            NewCredentialButton(folder: nil)
         }
     }
 }
@@ -337,12 +457,15 @@ extension View {
             switch route {
             case .item(let id): ItemDetailScreen(id: id)
             case .category(let category): CategoryListView(category: category)
+            case .folder(let uuid): FolderView(uuid: uuid)
+            case .allCredentials: ItemsView()
+            case .watchtower: WatchtowerView()
             }
         }
     }
 }
 
-/// The items of one category of Home.
+/// The items of one category: the archive, from the Vault root.
 struct CategoryListView: View {
     let category: ItemCategory
     @Environment(VaultModel.self) private var vault
@@ -353,7 +476,7 @@ struct CategoryListView: View {
             if items.isEmpty {
                 ContentUnavailableView(
                     "No items in “\(category.label)”", systemImage: category.symbol,
-                    description: Text(category == .archive ? "Archived items show here." : "Add one with the + button."))
+                    description: Text(category == .archive ? "Archived credentials show here." : "Add one with the + button."))
             } else {
                 List(items) { item in
                     ItemListRow(item: item)
