@@ -93,6 +93,26 @@ Do not start an agent from a shell that has `APASSY_SESSION`. `apassy-sandbox` r
 
 ## 3. Credentials
 
+The quickest way is to paste (ADR 0025 §4, "two steps to add"):
+
+```sh
+apassy add                                # a hidden prompt: paste one secret or KEY=value line
+apassy add < .env                         # every line of a .env file
+pbpaste | apassy add --folder Work/Acme   # into a folder that exists
+op read op://dev/db/url | apassy add --folder Work/Acme --create-folder
+```
+
+`apassy add` reads the text from stdin when it is not a terminal, else from a hidden prompt (one line, at most 64 KiB). The text is a secret, a `KEY=value` line, a whole `.env` file, a URL with a password (`postgres://`, `mysql://`, `mongodb://`, `redis://`, `amqp://`), or an `otpauth://` link. The app finds the rest on this Mac, without sending the value anywhere, and adds every credential in one transaction: all of them or none. It prints one line for each, such as `Anthropic API key · ANTHROPIC_API_KEY · production`, and never a value.
+
+- The kind, the name, the provider, the variable, and the provider hosts come from the provider catalog (the value prefix, the variable name, the host). A URL is split into fields; its password is the secret, and the variable gets the whole URL.
+- A name that another credential has gets ` 2`, ` 3`, … A variable that another credential uses is not taken: the new credential gets the automatic name `APASSY_ITEM_<id>`. A reserved name such as `PATH` is not used.
+- A known provider starts in placeholder mode for its hosts (ADR 0011), as a new variable does in the window, when the value is long enough for a placeholder. Else programs get the real value. Change it with `apassy item env`. A one-time password setup key is never bound.
+- The declaration is saved with the credential, with the source of each value: `signal` (the catalog found it) or `default` (nothing did, so the most sensitive value).
+- `--folder PATH` names a folder by its names from the top level, such as `Work/Acme`, exactly or without regard to case. A folder that does not exist is an error unless `--create-folder`.
+- A session is needed and no owner check, as for `apassy item add`: a new credential gives no agent anything that the bouncer does not decide (ADR 0025 §3). Binding a variable of an existing credential still asks for the owner check.
+
+Each field by hand:
+
 ```sh
 apassy item list                          # or: apassy item list stripe --archived
 apassy item show "Stripe test"            # an ID or the exact name

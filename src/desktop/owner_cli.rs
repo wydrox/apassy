@@ -28,10 +28,10 @@ use crate::broker::approvals::{OwnerAction, OwnerProof};
 use crate::contracts::CredentialKind;
 use crate::desktop::model::{DetailDraft, ItemDraft, ModelError, ModelResult};
 use crate::owner::wire::{
-    ActivityRow, AgentRow, AgentView, BindingRow, Command, Data, DeclarationInput, DeclarationView,
-    DetailView, EventRow, GrantMode, GrantRow, ItemInput, ItemRow, ItemView, OWNER_WIRE_VERSION,
-    OperationRow, PatternRow, Request, RequestRow, Response, RuleInput, RuleView, RunRow,
-    SecretText, StatusView, VariableInput, VariableView, VaultState,
+    ActivityRow, AddedRow, AgentRow, AgentView, BindingRow, Command, Data, DeclarationInput,
+    DeclarationView, DetailView, EventRow, GrantMode, GrantRow, ItemInput, ItemRow, ItemView,
+    OWNER_WIRE_VERSION, OperationRow, PatternRow, Request, RequestRow, Response, RuleInput,
+    RuleView, RunRow, SecretText, StatusView, VariableInput, VariableView, VaultState,
 };
 use crate::vault::{
     AccessRequest, AgentSummary, EnvDelivery, Environment, ExecMode, GrantPlace, PatternState,
@@ -639,6 +639,11 @@ impl DesktopApp {
                     done("Apassy is in front.")
                 }
             }
+            Command::Add {
+                secret,
+                folder,
+                create_folder,
+            } => self.cli_add(secret, folder.as_deref(), create_folder),
             Command::ItemList { query, archived } => self.cli_item_list(&query, archived),
             Command::ItemShow { item } => {
                 let id = self.find_item(&item)?.id;
@@ -1300,6 +1305,42 @@ impl DesktopApp {
             format!("{} is added with ID {}.", summary.name, summary.id),
             Data::Items { items: vec![row] },
         )
+    }
+
+    /// `apassy add`: the credentials of a pasted text, with their variables, declarations,
+    /// and folder, in one transaction. A session and no owner check, as `item add`: a
+    /// new credential moves no authority (ADR 0025 §4).
+    fn cli_add(&mut self, text: SecretText, folder: Option<&str>, create_folder: bool) -> Run {
+        let folder = match folder.map(str::trim).filter(|path| !path.is_empty()) {
+            Some(path) => self.owner_ui.session.folder_by_path(path, create_folder)?,
+            None => None,
+        };
+        let added = self
+            .owner_ui
+            .session
+            .add_detected(text.expose(), folder.as_deref())?;
+        drop(text);
+        let items: Vec<AddedRow> = self
+            .owner_ui
+            .session
+            .added_credentials(&added)?
+            .into_iter()
+            .map(|credential| AddedRow {
+                summary: credential.line(),
+                id: credential.summary.id,
+                name: credential.summary.title,
+                kind: credential.summary.kind,
+                variable: credential.variable,
+                environment: credential.environment.as_str().to_owned(),
+                folder: credential.folder.join(" / "),
+            })
+            .collect();
+        let message = match items.as_slice() {
+            [one] => format!("{} is added.", one.summary),
+            many => format!("{} credentials are added.", many.len()),
+        };
+        self.set_ok(format!("Command line: {message}"));
+        data(message, Data::Added { items })
     }
 
     fn cli_item_edit(&mut self, item: &str, revision: Option<u64>, changes: ItemInput) -> Run {

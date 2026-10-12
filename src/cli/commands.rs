@@ -60,6 +60,24 @@ SECRET: the token, password, private key, or custom value. add asks on the termi
         the passphrase of an SSH key.
 ";
 
+pub const ADD_HELP: &str = "\
+apassy add [--folder PATH [--create-folder]]
+
+Paste a secret, a KEY=value line, a whole .env file, a URL with a password
+(postgres://user:pass@host/db), or an otpauth:// link. Apassy finds the kind, the name,
+the variable, the provider hosts, and the declaration of each credential on this Mac,
+and adds all of them at once. It prints one line for each, such as:
+  Anthropic API key · ANTHROPIC_API_KEY · production
+The text comes from stdin when it is not a terminal (apassy add < .env), else from a
+hidden prompt (one line). The command never prints a value.
+  --folder PATH     Add to this folder, such as Work/Acme. The folder must exist.
+  --create-folder   Make the folders of PATH that are missing.
+A name that another credential has gets \" 2\". A variable that another credential uses
+becomes APASSY_ITEM_<id>. A known provider gets a placeholder for its hosts (ADR 0011);
+change it with apassy item env. No owner check: a new credential gives an agent nothing
+that the bouncer does not decide.
+";
+
 pub const IMPORT_HELP: &str = "\
 apassy import FILE [--format env|1password|bitwarden|csv] [--kind KIND]
               [--project P] [--service S] [--dry-run] [--allow-duplicates] [--bind]
@@ -734,6 +752,52 @@ fn simple_call(cli: &Cli, command: Command) -> Outcome {
 fn owner_check_call(cli: &Cli, command: Command) -> Outcome {
     expect_owner_check();
     simple_call(cli, command)
+}
+
+// ---- Add ----
+
+/// The hidden prompt of `apassy add` on a terminal.
+const ADD_PROMPT: &str =
+    "Paste a secret, a KEY=value line, a URL, or an otpauth:// link (hidden): ";
+
+/// `apassy add`: the pasted text goes to the app, which adds each credential in it.
+pub fn add(cli: &Cli, mut args: Args) -> Outcome {
+    let folder = args.value(&["--folder"])?;
+    let create_folder = args.flag(&["--create-folder"]);
+    args.finish()?;
+    if create_folder && folder.is_none() {
+        return Err(Failure::Usage(usage(
+            "--create-folder needs --folder PATH.",
+        )));
+    }
+    let text = if terminal::stdin_is_terminal() {
+        terminal::read_hidden(ADD_PROMPT)?
+    } else {
+        terminal::read_stdin_secret()?
+    };
+    if text.expose().trim().is_empty() {
+        return Err(Failure::Usage(usage(
+            "Nothing to add: paste a secret, or pipe it on stdin (apassy add < .env).",
+        )));
+    }
+    let response = cli.call(Command::Add {
+        secret: text,
+        folder,
+        create_folder,
+    })?;
+    if cli.json {
+        print_json(&response);
+        return Ok(());
+    }
+    match &response.data {
+        Data::Added { items } => {
+            for item in items {
+                println!("{}", clean(&item.summary));
+            }
+        }
+        _ => cli.print_message(&response),
+    }
+    Ok(())
 }
 
 // ---- Import ----

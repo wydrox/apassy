@@ -13,6 +13,7 @@
 //! arbitrary SQLite clients.
 
 mod access;
+mod add;
 pub mod agent_items;
 mod agents;
 pub mod answers;
@@ -52,6 +53,7 @@ pub use access::{
     AccessRequest, CatalogEntry, MAX_CATALOG_ITEMS, MAX_OPEN_REQUESTS, MAX_REQUEST_REASON_BYTES,
     RequestState, custom_detail_label,
 };
+pub use add::{ItemOrigin, OriginTool};
 pub use agents::{
     AGENT_TOKEN_PREFIX, ActivityDecision, ActivityRecord, AgentSummary, AgentToken,
     DEFAULT_TOKEN_LIFETIME_DAYS, Declaration, Destination, EnvBinding, EnvDelivery, Environment,
