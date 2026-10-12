@@ -418,12 +418,76 @@ fn preview_name(agent: &str) -> String {
     }
 }
 
+/// The IDs of `ids` above `last`, oldest first, and the new mark. Without a mark yet
+/// (`None`: the first look at this vault) nothing is new: the mark becomes the highest
+/// ID.
+fn fresh_ids(last: Option<u64>, ids: &[u64]) -> (Vec<u64>, u64) {
+    let highest = ids.iter().copied().max().unwrap_or(0);
+    match last {
+        None => (Vec::new(), highest),
+        Some(last) => {
+            let mut fresh: Vec<u64> = ids.iter().copied().filter(|id| *id > last).collect();
+            fresh.sort_unstable();
+            (fresh, last.max(highest))
+        }
+    }
+}
+
+/// What waits for the owner in the vault besides the questions: the open credential
+/// requests with the agent name, and the open corrections.
+struct OwnerItems {
+    requests: Vec<(u64, String)>,
+    corrections: Vec<u64>,
+}
+
+/// The newest credential request and correction that the watcher saw in one vault file.
+struct OwnerMarks {
+    path: PathBuf,
+    request: u64,
+    correction: u64,
+}
+
+/// Announce the credential requests and the corrections that are newer than `marks`
+/// (ADR 0025 §5, §6), and return the marks for the next pass. The first look at a vault
+/// file announces nothing: what waited before is in Decisions already.
+fn announce_owner_items(
+    shared: &Shared,
+    jobs: &Sender<Job>,
+    marks: Option<OwnerMarks>,
+    path: PathBuf,
+    items: &OwnerItems,
+) -> OwnerMarks {
+    let marks = marks.filter(|marks| marks.path == path);
+    let request_ids: Vec<u64> = items.requests.iter().map(|(id, _)| *id).collect();
+    let (requests, request) = fresh_ids(marks.as_ref().map(|m| m.request), &request_ids);
+    let (corrections, correction) =
+        fresh_ids(marks.as_ref().map(|m| m.correction), &items.corrections);
+    for id in requests {
+        let agent = items
+            .requests
+            .iter()
+            .find(|(request, _)| *request == id)
+            .map_or("", |(_, agent)| agent.as_str());
+        queue_event(shared, jobs, OwnerEvent::CredentialRequested, id, agent);
+    }
+    for id in corrections {
+        queue_event(shared, jobs, OwnerEvent::CorrectionProposed, id, "");
+    }
+    OwnerMarks {
+        path,
+        request,
+        correction,
+    }
+}
+
 fn watch_loop(shared: &Shared, approvals: &ApprovalQueue, vault: &SharedVault, jobs: &Sender<Job>) {
     let mut notified_runs = BTreeSet::new();
     // `None` until the watcher sees an unlocked vault. Then that vault file and its
     // newest entry ID: older entries are history and cause no notification. Each vault
     // file has its own entry IDs, so another file starts again (ADR 0013).
     let mut last_entry: Option<(PathBuf, u64)> = None;
+    // The same for the credential requests and the corrections.
+    let mut owner_marks: Option<OwnerMarks> = None;
     loop {
         let pending = approvals.pending();
         for run in &pending {
@@ -439,16 +503,41 @@ fn watch_loop(shared: &Shared, approvals: &ApprovalQueue, vault: &SharedVault, j
         }
         notified_runs.retain(|id| pending.iter().any(|run| run.id == *id));
 
-        let rows = {
+        let (rows, owner_items) = {
             let guard = vault.lock().unwrap_or_else(PoisonError::into_inner);
             match guard.as_ref() {
-                Some(open) if !open.is_locked() => open
-                    .recent_activity(ACTIVITY_WINDOW)
-                    .ok()
-                    .map(|rows| (open.path().to_path_buf(), rows)),
-                _ => None,
+                Some(open) if !open.is_locked() => {
+                    let path = open.path().to_path_buf();
+                    let owner_items = match (open.credential_requests(true), open.corrections(true))
+                    {
+                        (Ok(requests), Ok(corrections)) => Some((
+                            path.clone(),
+                            OwnerItems {
+                                requests: requests
+                                    .into_iter()
+                                    .map(|request| (request.id, request.agent_name))
+                                    .collect(),
+                                corrections: corrections
+                                    .into_iter()
+                                    .map(|correction| correction.id)
+                                    .collect(),
+                            },
+                        )),
+                        _ => None,
+                    };
+                    (
+                        open.recent_activity(ACTIVITY_WINDOW)
+                            .ok()
+                            .map(|rows| (path, rows)),
+                        owner_items,
+                    )
+                }
+                _ => (None, None),
             }
         };
+        owner_marks = owner_items.map(|(path, items)| {
+            announce_owner_items(shared, jobs, owner_marks.take(), path, &items)
+        });
         match rows {
             None => last_entry = None,
             Some((path, rows)) => {
@@ -657,6 +746,17 @@ mod tests {
             "Apassy"
         );
         assert_eq!(OwnerEvent::QuestionWaiting.preview_name("  "), "unknown");
+    }
+
+    /// ADR 0025 §5, §6: a credential request or a correction gets one notification when
+    /// it is new. What waited at the first look is not announced again.
+    #[test]
+    fn only_new_requests_and_corrections_are_announced() {
+        assert_eq!(fresh_ids(None, &[3, 7, 5]), (Vec::new(), 7));
+        assert_eq!(fresh_ids(Some(7), &[3, 9, 7, 8]), (vec![8, 9], 9));
+        assert_eq!(fresh_ids(Some(9), &[3]), (Vec::new(), 9));
+        assert_eq!(fresh_ids(None, &[]), (Vec::new(), 0));
+        assert_eq!(fresh_ids(Some(0), &[1]), (vec![1], 1));
     }
 
     #[test]

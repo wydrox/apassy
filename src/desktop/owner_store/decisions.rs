@@ -1,10 +1,20 @@
 //! The Decisions and Agents views of the owner session (ADR 0025 §1, §3f; ADR 0026 §2).
 //!
-//! The figures of the week, the overview of one agent, the note for the bouncer, and the
-//! answers to a question that make an agent stricter. Each method here takes authority
-//! away or moves none, so none needs an owner check. Each answer that gives authority
-//! (allow once, allow in a project, allow production, a correction toward development,
-//! removing an exception) is an `OwnerRequest` and passes the owner check first.
+//! The figures of the week, the overview of one agent, the note for the bouncer, the
+//! answers to a question that make an agent stricter, the credential requests of agents
+//! (ADR 0025 §6), and the suggestions from the use log (ADR 0025 §5). Each method here
+//! takes authority away or moves none, so none needs an owner check. Each answer that
+//! gives authority (allow once, allow in a project, allow production, a correction toward
+//! development, removing an exception) is an `OwnerRequest` and passes the owner check
+//! first.
+//!
+//! - A saved credential request adds a new item, as a paste does: it moves no authority
+//!   that an item has, and the bouncer decides each use. No owner check. The item has
+//!   the origin of the request (`ask_owner`), so it is not an own item of the agent.
+//! - A suggestion that leaves its credential at an environment other than production
+//!   makes the bouncer less careful: [`OwnerSession::answer_correction`] refuses it
+//!   without a proof. Production, a project, and an ignored suggestion that changes
+//!   nothing need none.
 
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -12,9 +22,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::{OwnerSession, OwnerSummary, fail, map_err};
 use crate::broker::approvals::{ApprovalQueue, OwnerAction, OwnerProof, StricterAnswer};
 use crate::desktop::model::ModelResult;
+use crate::vault::agent_items::{
+    Correction, CorrectionAnswer, CorrectionKind, CorrectionState, CredentialRequest,
+    CredentialRequestState, RAISED_FROM_FACT, RequestOutcome,
+};
+use crate::vault::detect::Detected;
 use crate::vault::exceptions::{AgentException, ExceptionKind, MAX_AGENT_NOTE_BYTES};
 use crate::vault::usage::{InteractionKind, ItemUse};
-use crate::vault::{Environment, VaultErrorKind};
+use crate::vault::{Environment, ItemSummary, VaultErrorKind};
 
 const DAY: u64 = 86_400;
 const WEEK: u64 = 7 * DAY;
@@ -246,6 +261,162 @@ impl OwnerSession {
         self.unlocked_for(proof, &OwnerAction::ChangeItemRules { item_id })?
             .set_declaration_environment(item_id, environment)
             .map_err(map_err)
+    }
+
+    // ---- Credential requests (ADR 0025 §6). ----
+
+    /// The open credential requests of agents, oldest first.
+    pub fn open_credential_requests(&self) -> ModelResult<Vec<CredentialRequest>> {
+        self.unlocked()?.credential_requests(true).map_err(map_err)
+    }
+
+    /// Save the credential that the owner pasted for an open request: a new item in
+    /// `folder` (a folder UUID; `None`: the top level) with the origin of the request,
+    /// then the request is settled with it. The vault stays locked for the app between
+    /// both steps, so no other answer comes between them. No owner check: a new item
+    /// moves no authority.
+    pub fn save_credential_request(
+        &mut self,
+        request_id: u64,
+        detected: &Detected,
+        folder: Option<&str>,
+    ) -> ModelResult<ItemSummary> {
+        // TODO(gate2/tools): switch to `Vault::save_for_request`, which adds and settles
+        // in one transaction. Until then both steps run under one vault lock.
+        let mut vault = self.unlocked()?;
+        let request = vault.credential_request(request_id).map_err(map_err)?;
+        if request.state != CredentialRequestState::Open {
+            return Err(fail(
+                "conflict",
+                "The request no longer waits. Nothing was saved.",
+            ));
+        }
+        let added = match vault.add_detected(detected, folder, Some(&request.origin())) {
+            Err(err) if err.kind() == VaultErrorKind::NotFound => {
+                return Err(fail(
+                    "not_found",
+                    "The folder is gone. Select another folder.",
+                ));
+            }
+            other => other.map_err(map_err)?,
+        };
+        vault
+            .settle_credential_request(request_id, RequestOutcome::Saved { item_id: added.id })
+            .map_err(map_err)?;
+        Ok(added)
+    }
+
+    /// "Not Now": dismiss an open credential request. The agent gets no credential, so
+    /// no owner check.
+    pub fn dismiss_credential_request(&mut self, request_id: u64) -> ModelResult<()> {
+        match self
+            .unlocked()?
+            .settle_credential_request(request_id, RequestOutcome::Dismissed)
+        {
+            Err(err) if err.kind() == VaultErrorKind::Conflict => {
+                Err(fail("conflict", "The request no longer waits."))
+            }
+            other => other.map_err(map_err),
+        }
+    }
+
+    // ---- Suggestions (ADR 0025 §5). ----
+
+    /// The open corrections with their credential, oldest first. A correction of a
+    /// credential that the list does not show (deleted, archived) is left out.
+    pub fn open_suggestions(&self) -> ModelResult<Vec<(Correction, OwnerSummary)>> {
+        let corrections = self.unlocked()?.corrections(true).map_err(map_err)?;
+        if corrections.is_empty() {
+            return Ok(Vec::new());
+        }
+        // The vault lock is free again: `search` takes it.
+        let items: BTreeMap<u64, OwnerSummary> = self
+            .search("")?
+            .into_iter()
+            .map(|item| (item.id, item))
+            .collect();
+        Ok(corrections
+            .into_iter()
+            .filter_map(|correction| {
+                let item = items.get(&correction.item_id)?.clone();
+                Some((correction, item))
+            })
+            .collect())
+    }
+
+    /// The environment that `answer` to `correction` gives its credential, if it sets
+    /// one: the proposed environment when accepted, and the environment before a raise
+    /// ([`RAISED_FROM_FACT`]) when ignored.
+    ///
+    /// TODO(gate2/tools): switch the owner-check rule to the vault helper
+    /// `needs_owner_check_for_correction` when it lands; this is the same matrix.
+    pub fn suggestion_environment(
+        correction: &Correction,
+        answer: CorrectionAnswer,
+    ) -> Option<Environment> {
+        match (answer, correction.kind) {
+            (CorrectionAnswer::Accepted, CorrectionKind::Environment) => {
+                Environment::parse(&correction.proposed).ok()
+            }
+            (CorrectionAnswer::Accepted, CorrectionKind::Project) => None,
+            (CorrectionAnswer::Ignored, _) => correction
+                .facts
+                .get(RAISED_FROM_FACT)
+                .and_then(serde_json::Value::as_str)
+                .and_then(|text| Environment::parse(text).ok()),
+        }
+    }
+
+    /// Answer an open correction of `item_id`. `chosen`: the owner chose this
+    /// environment instead of the proposal; the correction is ignored, then the
+    /// environment is set as the owner's answer. Returns the environment that the
+    /// credential got, if any.
+    ///
+    /// An answer that leaves the credential at an environment other than production
+    /// needs `proof` for its agent settings (`OwnerAction::ChangeItemRules`): without
+    /// it the answer is refused and nothing changes.
+    pub fn answer_correction(
+        &mut self,
+        correction_id: u64,
+        item_id: u64,
+        answer: CorrectionAnswer,
+        chosen: Option<Environment>,
+        proof: Option<OwnerProof>,
+    ) -> ModelResult<Option<Environment>> {
+        let checked = proof.is_some();
+        let mut vault = match proof {
+            Some(proof) => self.unlocked_for(proof, &OwnerAction::ChangeItemRules { item_id })?,
+            None => self.unlocked()?,
+        };
+        let correction = vault
+            .item_corrections(item_id)
+            .map_err(map_err)?
+            .into_iter()
+            .find(|correction| {
+                correction.id == correction_id && correction.state == CorrectionState::Open
+            })
+            .ok_or_else(|| {
+                fail(
+                    "conflict",
+                    "The suggestion no longer waits. Nothing changed.",
+                )
+            })?;
+        let result = chosen.or_else(|| Self::suggestion_environment(&correction, answer));
+        if !checked && result.is_some_and(|environment| environment != Environment::Production) {
+            return Err(fail(
+                "owner_check_required",
+                "This answer makes the bouncer less careful. It needs Touch ID or the passphrase.",
+            ));
+        }
+        vault
+            .settle_correction(correction_id, answer)
+            .map_err(map_err)?;
+        if let Some(environment) = chosen {
+            vault
+                .set_declaration_environment(item_id, environment)
+                .map_err(map_err)?;
+        }
+        Ok(result)
     }
 }
 

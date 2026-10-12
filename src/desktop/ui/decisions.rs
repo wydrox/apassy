@@ -1,27 +1,45 @@
 //! Decisions (ADR 0026 §2, ADR 0025 §3): what waits for the owner.
 //!
-//! The list has the questions that wait ("Waiting"): the agent, the credential, the
-//! project, a red dot for production, and the time left of the 5-minute wait. Credential
-//! requests ("Requests") and corrections ("Suggestions") come with the agent tools: until
-//! the vault keeps them, the list has no such section. The line under the title counts
-//! the owner interactions and the automatic decisions of the week (ADR 0025 §1).
+//! The list has three sections, each only when it has a row:
+//!
+//! - **Waiting**: the questions that wait, with the agent, the credential, the project, a
+//!   red dot for production, and the time left of the 5-minute wait.
+//! - **Requests**: the open credential requests of agents (ADR 0025 §6).
+//! - **Suggestions**: the open corrections from the use log (ADR 0025 §5).
+//!
+//! The line under the title counts the owner interactions and the automatic decisions of
+//! the week (ADR 0025 §1).
 //!
 //! The detail of a question has its facts, its command, why the owner is asked, and a bar
 //! at the bottom: Deny, Allow Once, and the remembered answer that the question offers
 //! ([`QuestionInfo::valid_answers`]). The "⋯" menu makes the agent stricter. Each answer
-//! that gives authority passes the owner check; a stricter answer needs none. After an
-//! answer, the next question is selected.
+//! that gives authority passes the owner check; a stricter answer needs none.
+//!
+//! The detail of a request says what the agent asks for, why, where the owner gets it
+//! (the domain as plain text: Apassy opens no link that an agent wrote), and where it is
+//! saved. The owner pastes the key in a masked field and sees what Apassy found, as in
+//! New Credential. Save adds the item with the origin of the request and needs no owner
+//! check: a new item moves no authority. Not Now dismisses the request. The paste is
+//! erased after each answer, on another selection, and on lock, and no value shows.
+//!
+//! The detail of a suggestion has its question, the facts of the use log, and Ignore and
+//! the two choices. An answer that leaves the credential at an environment other than
+//! production passes the owner check; production and a project need none.
+//!
+//! After each answer, the next decision is selected.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use eframe::egui::{
-    self, Align, Frame, Label, Layout, Margin, Pos2, Rect, Sense, TextStyle, TextWrapMode, Vec2,
-    WidgetInfo, WidgetText, WidgetType,
+    self, Align, Frame, Label, Layout, Margin, Pos2, Rect, RichText, Sense, TextEdit, TextStyle,
+    TextWrapMode, Vec2, WidgetInfo, WidgetText, WidgetType,
 };
+use serde_json::Value;
 
 use super::columns::{self, Group};
+use super::folders::FolderTree;
 use super::kit::{self, Font, Icon, Style, Tone};
 use crate::broker::action_kind::ActionKind;
 use crate::broker::approvals::{
@@ -30,24 +48,114 @@ use crate::broker::approvals::{
 use crate::broker::server::QUESTION_WAIT;
 use crate::contracts::CredentialKind;
 use crate::desktop::owner_check::OwnerRequest;
+use crate::desktop::owner_store::{OwnerSession, OwnerSummary};
 use crate::desktop::{BrokerState, DesktopApp};
 use crate::vault::Environment;
+use crate::vault::agent_items::{
+    Correction, CorrectionAnswer, CorrectionKind, CredentialRequest, RAISED_FROM_FACT,
+};
+use crate::vault::detect::{self, Detected};
 
 /// The longest project name in a button. A longer name ends with "…".
 const SHORT_PROJECT: usize = 28;
 /// The longest folder path in the facts.
 const SHOWN_PATH: usize = 80;
+/// The salt of the paste field of a request.
+pub(super) const REQUEST_FIELD: &str = "decision-request";
+/// The note when the paste of a request has no credential.
+const NOTHING_FOUND: &str = "Apassy found no credential in the text. Paste the secret, a KEY=value line, or a URL with a password.";
+
+/// One decision of the list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum Key {
+    /// A waiting question, by run ID.
+    Run(u64),
+    /// An open credential request, by request ID.
+    Request(u64),
+    /// An open correction, by correction ID.
+    Suggestion(u64),
+}
+
+/// The paste of a request. It is a secret: Debug shows no value, and a drop erases it.
+/// A lock resets the state of the view, so it erases the paste too.
+#[derive(Default)]
+struct Paste(String);
+
+impl Paste {
+    fn erase(&mut self) {
+        use zeroize::Zeroize;
+        self.0.zeroize();
+    }
+}
+
+impl std::fmt::Debug for Paste {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Paste(..)")
+    }
+}
+
+impl Drop for Paste {
+    fn drop(&mut self) {
+        self.erase();
+    }
+}
 
 /// The state of the view.
 #[derive(Debug, Default)]
 pub(crate) struct State {
-    /// The selected question, by run ID.
-    selected: Option<u64>,
+    /// The selected decision.
+    selected: Option<Key>,
     /// Its place in the list in the last frame. When it goes (an answer, a time-out), the
-    /// question that takes its place is selected.
+    /// decision that takes its place is selected.
     index: usize,
     /// "Disconnect AGENT…" waits for its confirmation: the run and the agent name.
     disconnect: Option<(u64, String)>,
+    /// The request of the paste and its folder: the request ID and the folder UUID
+    /// (`None`: the top level).
+    form: Option<(u64, Option<String>)>,
+    /// The paste of the selected request.
+    paste: Paste,
+}
+
+/// What waits for the owner, in the order of the list.
+pub(super) struct Open {
+    pub(super) waiting: Vec<Waiting>,
+    pub(super) requests: Vec<CredentialRequest>,
+    pub(super) suggestions: Vec<(Correction, OwnerSummary)>,
+}
+
+impl Open {
+    fn keys(&self) -> Vec<Key> {
+        self.waiting
+            .iter()
+            .map(|waiting| Key::Run(waiting.run.id))
+            .chain(self.requests.iter().map(|request| Key::Request(request.id)))
+            .chain(
+                self.suggestions
+                    .iter()
+                    .map(|(correction, _)| Key::Suggestion(correction.id)),
+            )
+            .collect()
+    }
+}
+
+/// An answer to a credential request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RequestAnswer {
+    /// Save the paste for the request.
+    Save,
+    /// Dismiss the request.
+    NotNow,
+}
+
+/// An answer to a suggestion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SuggestionAnswer {
+    Ignore,
+    /// Accept the proposal (a project).
+    Accept,
+    /// The credential is in this environment: the proposal or the other choice.
+    Environment(Environment),
 }
 
 /// One question that waits, with the time left of its wait.
@@ -170,9 +278,13 @@ pub(super) fn primary_label(question: &QuestionInfo) -> Option<String> {
     })
 }
 
-/// The question to select: the selected one while it waits, else the one at its place,
+/// The decision to select: the selected one while it waits, else the one at its place,
 /// else the last one.
-pub(super) fn next_selection(ids: &[u64], selected: Option<u64>, index: usize) -> Option<u64> {
+pub(super) fn next_selection<T: Copy + PartialEq>(
+    ids: &[T],
+    selected: Option<T>,
+    index: usize,
+) -> Option<T> {
     if selected.is_some_and(|id| ids.contains(&id)) {
         return selected;
     }
@@ -241,6 +353,228 @@ fn production(run: &PendingRun) -> bool {
     run.question.production || run.question.items.iter().any(|item| item.production)
 }
 
+/// "Codex asks for a Stripe test key".
+pub(super) fn request_title(request: &CredentialRequest) -> String {
+    format!("{} asks for a {}", request.agent_name, request.name)
+}
+
+/// The project of a request, or "No project".
+fn request_project(request: &CredentialRequest) -> String {
+    if request.project_label.is_empty() {
+        "No project".to_owned()
+    } else {
+        request.project_label.clone()
+    }
+}
+
+/// The domains of "where to get it", as the owner must read them: the hosts of the URLs
+/// in the text (after user info such as `stripe.com@`), else the hosts of bare words such
+/// as `dashboard.stripe.com/apikeys`. A host that is not plain ASCII is left out, so a
+/// look-alike name never shows as a domain. Apassy shows them as text and opens no link
+/// (ADR 0025 §6: an agent wrote the text).
+pub(super) fn where_domains(text: &str) -> Vec<String> {
+    use crate::vault::providers::url_hosts;
+    let mut hosts = url_hosts(text);
+    if hosts.is_empty() {
+        hosts = text
+            .split_whitespace()
+            .filter(|word| word.contains('.') && !word.contains("://"))
+            .flat_map(|word| {
+                let word = word.trim_matches(|c: char| ",;:()<>\"'`".contains(c));
+                url_hosts(&format!("https://{word}"))
+            })
+            .filter(|host| {
+                // A domain ends with a word of letters: "e.g." and "v1.2" are none.
+                host.contains('.')
+                    && host.rsplit('.').next().is_some_and(|tld| {
+                        tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic())
+                    })
+            })
+            .collect();
+    }
+    let mut unique: Vec<String> = Vec::new();
+    for host in hosts {
+        if !unique.contains(&host) {
+            unique.push(host);
+        }
+    }
+    unique
+}
+
+/// The name of an environment for a button: "Development".
+fn environment_label(environment: Environment) -> &'static str {
+    match environment {
+        Environment::Production => "Production",
+        Environment::Staging => "Staging",
+        Environment::Development => "Development",
+        Environment::Local => "Local",
+    }
+}
+
+/// The environment before a raise to production, from the facts of a correction.
+fn raised_from(correction: &Correction) -> Option<Environment> {
+    correction
+        .facts
+        .get(RAISED_FROM_FACT)
+        .and_then(Value::as_str)
+        .and_then(|text| Environment::parse(text).ok())
+}
+
+/// The question of a suggestion: "Is Stripe key a development credential?" or "Limit
+/// Stripe key to acme-billing?".
+pub(super) fn suggestion_question(correction: &Correction, name: &str) -> String {
+    match correction.kind {
+        CorrectionKind::Environment => {
+            format!("Is {name} a {} credential?", correction.proposed)
+        }
+        CorrectionKind::Project => format!("Limit {name} to {}?", correction.proposed),
+    }
+}
+
+/// The line under a suggestion in the list.
+fn suggestion_subtitle(correction: &Correction) -> String {
+    match correction.kind {
+        CorrectionKind::Environment => "Development or production?".to_owned(),
+        CorrectionKind::Project => format!("Only in {}?", correction.proposed),
+    }
+}
+
+/// The choices of a suggestion besides Ignore, the proposal first: the proposed
+/// environment and the other one (production, or the environment before a raise), or
+/// the project.
+pub(super) fn suggestion_choices(correction: &Correction) -> Vec<(String, SuggestionAnswer)> {
+    match correction.kind {
+        CorrectionKind::Project => vec![(
+            format!("Only in {}", short(&correction.proposed)),
+            SuggestionAnswer::Accept,
+        )],
+        CorrectionKind::Environment => {
+            let Ok(proposed) = Environment::parse(&correction.proposed) else {
+                return Vec::new();
+            };
+            let other = if proposed == Environment::Production {
+                raised_from(correction).unwrap_or(Environment::Development)
+            } else {
+                Environment::Production
+            };
+            [proposed, other]
+                .into_iter()
+                .map(|environment| {
+                    (
+                        environment_label(environment).to_owned(),
+                        SuggestionAnswer::Environment(environment),
+                    )
+                })
+                .collect()
+        }
+    }
+}
+
+/// What an answer to a suggestion does: the answer to the correction, the environment
+/// that the owner chose instead of the proposal, and the environment that the
+/// credential gets. An environment other than production needs the owner check.
+///
+/// TODO(gate2/tools): switch to the vault helper `needs_owner_check_for_correction`
+/// when it lands; this is the same matrix.
+pub(super) fn suggestion_outcome(
+    correction: &Correction,
+    answer: SuggestionAnswer,
+) -> (CorrectionAnswer, Option<Environment>, Option<Environment>) {
+    let (answer, chosen) = match answer {
+        SuggestionAnswer::Ignore => (CorrectionAnswer::Ignored, None),
+        SuggestionAnswer::Accept => (CorrectionAnswer::Accepted, None),
+        SuggestionAnswer::Environment(environment)
+            if correction.kind == CorrectionKind::Environment
+                && correction.proposed == environment.as_str() =>
+        {
+            (CorrectionAnswer::Accepted, None)
+        }
+        SuggestionAnswer::Environment(environment) => {
+            (CorrectionAnswer::Ignored, Some(environment))
+        }
+    };
+    let result = chosen.or_else(|| OwnerSession::suggestion_environment(correction, answer));
+    (answer, chosen, result)
+}
+
+/// True when the answer passes the owner check first: the bouncer is then less careful.
+pub(super) fn suggestion_needs_check(correction: &Correction, answer: SuggestionAnswer) -> bool {
+    suggestion_outcome(correction, answer)
+        .2
+        .is_some_and(|environment| environment != Environment::Production)
+}
+
+/// The facts of a correction as rows for the owner, the signal first. Lists are joined,
+/// a provider shows its name, and a folder its short path.
+pub(super) fn fact_rows(facts: &Value) -> Vec<(String, String)> {
+    const ORDER: [&str; 8] = [
+        "signal",
+        "provider",
+        "hosts",
+        "uses",
+        "project_label",
+        "project_key",
+        "agents",
+        RAISED_FROM_FACT,
+    ];
+    let Some(map) = facts.as_object() else {
+        return match facts {
+            Value::Null => Vec::new(),
+            other => vec![("Facts".to_owned(), other.to_string())],
+        };
+    };
+    let mut keys: Vec<&String> = map.keys().collect();
+    keys.sort_by_key(|key| {
+        (
+            ORDER
+                .iter()
+                .position(|known| known == key)
+                .unwrap_or(ORDER.len()),
+            (*key).clone(),
+        )
+    });
+    keys.into_iter()
+        .filter(|key| !map[*key].is_null())
+        .map(|key| (fact_label(key), fact_value(key, &map[key])))
+        .collect()
+}
+
+fn fact_label(key: &str) -> String {
+    match key {
+        "signal" => "Seen".to_owned(),
+        "provider" => "Provider".to_owned(),
+        "hosts" => "Hosts".to_owned(),
+        "uses" => "Uses".to_owned(),
+        "project_label" => "Project".to_owned(),
+        "project_key" => "Folder".to_owned(),
+        "agents" => "Agents".to_owned(),
+        RAISED_FROM_FACT => "Before".to_owned(),
+        other => {
+            let words = other.replace('_', " ");
+            let mut chars = words.chars();
+            chars.next().map_or_else(String::new, |first| {
+                first.to_uppercase().chain(chars).collect()
+            })
+        }
+    }
+}
+
+fn fact_value(key: &str, value: &Value) -> String {
+    let text = |value: &Value| match value {
+        Value::String(text) => text.clone(),
+        Value::Bool(true) => "Yes".to_owned(),
+        Value::Bool(false) => "No".to_owned(),
+        other => other.to_string(),
+    };
+    match (key, value) {
+        ("provider", Value::String(id)) => crate::vault::providers::find(id)
+            .map_or_else(|| id.clone(), |provider| provider.label.clone()),
+        ("project_key", Value::String(path)) => shown_path(path, SHOWN_PATH),
+        (_, Value::Array(values)) => values.iter().map(text).collect::<Vec<_>>().join(", "),
+        (_, value) => text(value),
+    }
+}
+
 // ---- The queue. ----
 
 fn queue(app: &DesktopApp) -> Option<(Arc<ApprovalQueue>, Duration)> {
@@ -276,11 +610,12 @@ pub(super) fn waiting(app: &DesktopApp, pending: &[PendingRun]) -> Vec<Waiting> 
     waiting
 }
 
-/// The open credential requests of agents. The vault keeps them in `credential_request`
-/// (schema 18), but it has no API for them until the agent tools (stream T2), so there is
-/// none to show.
-fn open_requests(_app: &DesktopApp) -> usize {
-    0
+/// The open credential requests of agents (ADR 0025 §6).
+fn open_requests(app: &DesktopApp) -> usize {
+    app.owner_ui
+        .session
+        .open_credential_requests()
+        .map_or(0, |requests| requests.len())
 }
 
 /// The red count of Decisions in the sidebar: what blocks an agent, the waiting
@@ -289,10 +624,50 @@ pub(super) fn badge_count(app: &DesktopApp, pending: &[PendingRun]) -> usize {
     pending.len() + open_requests(app)
 }
 
+/// Everything that waits for the owner, in the order of the list.
+pub(super) fn open(app: &DesktopApp, pending: &[PendingRun]) -> Open {
+    let session = &app.owner_ui.session;
+    Open {
+        waiting: waiting(app, pending),
+        requests: session.open_credential_requests().unwrap_or_default(),
+        suggestions: session.open_suggestions().unwrap_or_default(),
+    }
+}
+
 /// The selected question, by run ID.
 #[cfg(test)]
 pub(super) fn selected(app: &DesktopApp) -> Option<u64> {
+    match app.ui.decisions.selected {
+        Some(Key::Run(run_id)) => Some(run_id),
+        _ => None,
+    }
+}
+
+/// The selected decision.
+#[cfg(test)]
+pub(super) fn selected_key(app: &DesktopApp) -> Option<Key> {
     app.ui.decisions.selected
+}
+
+/// Select a decision, as a click on its row does.
+#[cfg(test)]
+pub(super) fn select_key(app: &mut DesktopApp, key: Key) {
+    app.ui.decisions.selected = Some(key);
+    app.ui.decisions.disconnect = None;
+}
+
+/// Type into the paste field of the selected request.
+#[cfg(test)]
+pub(super) fn set_paste(app: &mut DesktopApp, text: &str) {
+    let paste = &mut app.ui.decisions.paste;
+    paste.erase();
+    paste.0.push_str(text);
+}
+
+/// The paste of the selected request is empty.
+#[cfg(test)]
+pub(super) fn paste_is_empty(app: &DesktopApp) -> bool {
+    app.ui.decisions.paste.0.is_empty()
 }
 
 /// "Disconnect AGENT…" waits for its confirmation.
@@ -303,30 +678,114 @@ pub(super) fn disconnecting(app: &DesktopApp) -> bool {
 
 /// Select a question, for example from the banner of another view.
 pub(super) fn select(app: &mut DesktopApp, run_id: u64) {
-    app.ui.decisions.selected = Some(run_id);
+    app.ui.decisions.selected = Some(Key::Run(run_id));
     app.ui.decisions.disconnect = None;
 }
 
-fn sync_selection(state: &mut State, waiting: &[Waiting]) {
-    let ids: Vec<u64> = waiting.iter().map(|waiting| waiting.run.id).collect();
-    state.selected = next_selection(&ids, state.selected, state.index);
+fn sync_selection(state: &mut State, open: &Open) {
+    let keys = open.keys();
+    state.selected = next_selection(&keys, state.selected, state.index);
     if let Some(selected) = state.selected {
-        state.index = ids.iter().position(|id| *id == selected).unwrap_or(0);
+        state.index = keys.iter().position(|key| *key == selected).unwrap_or(0);
     }
     if state
         .disconnect
         .as_ref()
-        .is_some_and(|(run_id, _)| !ids.contains(run_id))
+        .is_some_and(|(run_id, _)| !keys.contains(&Key::Run(*run_id)))
     {
         state.disconnect = None;
     }
+    // The paste belongs to one request: another selection erases it.
+    let request = match state.selected {
+        Some(Key::Request(id)) => open.requests.iter().find(|request| request.id == id),
+        _ => None,
+    };
+    if state.form.as_ref().map(|(id, _)| *id) != request.map(|request| request.id) {
+        state.paste.erase();
+        state.form = request.map(|request| (request.id, request.folder.clone()));
+    }
+}
+
+/// Erase the paste of a request and the undo history of its field.
+fn erase_paste(app: &mut DesktopApp, ctx: &egui::Context) {
+    app.ui.decisions.paste.erase();
+    super::forget_secret_field(ctx, REQUEST_FIELD);
 }
 
 // ---- The list column. ----
 
+/// One row of the list, with its key.
+struct ListRow {
+    key: Key,
+    tile: kit::Tile,
+    title: String,
+    subtitle: String,
+    production: bool,
+    left: Option<String>,
+}
+
+fn list_rows(open: Open) -> Vec<Group<ListRow>> {
+    let mut groups = Vec::new();
+    let waiting: Vec<ListRow> = open
+        .waiting
+        .into_iter()
+        .map(|waiting| {
+            let run = &waiting.run;
+            ListRow {
+                key: Key::Run(run.id),
+                tile: kit::Tile::letter(super::agents::agent_color(&run.agent), &run.agent),
+                title: item_names(run),
+                subtitle: format!("{} · {}", run.agent, project_text(run)),
+                production: production(run),
+                left: Some(clock(waiting.left)),
+            }
+        })
+        .collect();
+    let requests: Vec<ListRow> = open
+        .requests
+        .into_iter()
+        .map(|request| ListRow {
+            key: Key::Request(request.id),
+            tile: kit::Tile::letter(
+                super::agents::agent_color(&request.agent_name),
+                &request.agent_name,
+            ),
+            subtitle: format!("{} · {}", request.agent_name, request_project(&request)),
+            title: request.name,
+            production: false,
+            left: None,
+        })
+        .collect();
+    let suggestions: Vec<ListRow> = open
+        .suggestions
+        .into_iter()
+        .map(|(correction, item)| ListRow {
+            key: Key::Suggestion(correction.id),
+            tile: super::credential_tile(item.kind, &item.service, &item.name),
+            title: item.name,
+            subtitle: suggestion_subtitle(&correction),
+            production: false,
+            left: None,
+        })
+        .collect();
+    for (title, rows) in [
+        ("Waiting", waiting),
+        ("Requests", requests),
+        ("Suggestions", suggestions),
+    ] {
+        if !rows.is_empty() {
+            groups.push(Group {
+                title: title.to_owned(),
+                rows,
+            });
+        }
+    }
+    groups
+}
+
 pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[PendingRun]) {
-    let waiting = waiting(app, pending);
-    sync_selection(&mut app.ui.decisions, &waiting);
+    let open = open(app, pending);
+    sync_selection(&mut app.ui.decisions, &open);
     let subtitle = app
         .owner_ui
         .session
@@ -334,13 +793,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[Pe
         .map(|counts| counts.line())
         .unwrap_or_default();
     columns::list_toolbar(ui, "Decisions", &subtitle, |_| {});
-    let mut groups = Vec::new();
-    if !waiting.is_empty() {
-        groups.push(Group {
-            title: "Waiting".to_owned(),
-            rows: waiting,
-        });
-    }
+    let groups = list_rows(open);
     let selected = app.ui.decisions.selected;
     let mut chosen = None;
     columns::grouped_rows(
@@ -348,28 +801,24 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[Pe
         "decisions-list",
         &groups,
         true,
-        |ui, waiting| {
-            let run = &waiting.run;
+        |ui, row| {
             let response = ui
-                .push_id(("decision-row", run.id), |ui| {
+                .push_id(("decision-row", row.key), |ui| {
                     decision_row(
                         ui,
                         &DecisionRow {
-                            tile: kit::Tile::letter(
-                                super::agents::agent_color(&run.agent),
-                                &run.agent,
-                            ),
-                            title: &item_names(run),
-                            subtitle: &format!("{} · {}", run.agent, project_text(run)),
-                            production: production(run),
-                            left: &clock(waiting.left),
-                            selected: selected == Some(run.id),
+                            tile: row.tile.clone(),
+                            title: &row.title,
+                            subtitle: &row.subtitle,
+                            production: row.production,
+                            left: row.left.as_deref(),
+                            selected: selected == Some(row.key),
                         },
                     )
                 })
                 .inner;
             if response.clicked() {
-                chosen = Some(run.id);
+                chosen = Some(row.key);
             }
         },
         |ui| {
@@ -378,8 +827,9 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[Pe
             }
         },
     );
-    if let Some(run_id) = chosen {
-        select(app, run_id);
+    if let Some(key) = chosen {
+        app.ui.decisions.selected = Some(key);
+        app.ui.decisions.disconnect = None;
     }
 }
 
@@ -389,8 +839,8 @@ struct DecisionRow<'a> {
     title: &'a str,
     subtitle: &'a str,
     production: bool,
-    /// The time left, in orange.
-    left: &'a str,
+    /// The time left of a question, in orange.
+    left: Option<&'a str>,
     selected: bool,
 }
 
@@ -400,11 +850,12 @@ fn decision_row(ui: &mut egui::Ui, row: &DecisionRow<'_>) -> egui::Response {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 48.0), Sense::click());
     let name = format!(
-        "{}, {}{}, {} left",
+        "{}, {}{}{}",
         row.title,
         row.subtitle,
         if row.production { ", production" } else { "" },
         row.left
+            .map_or_else(String::new, |left| format!(", {left} left"))
     );
     response.widget_info(|| {
         WidgetInfo::selected(WidgetType::SelectableLabel, true, row.selected, &name)
@@ -443,14 +894,17 @@ fn decision_row(ui: &mut egui::Ui, row: &DecisionRow<'_>) -> egui::Response {
     let galley = |value: egui::RichText, max: f32| {
         WidgetText::from(value).into_galley(ui, Some(TextWrapMode::Truncate), max, TextStyle::Body)
     };
-    let time = galley(kit::text(row.left, Font::Callout).color(time_color), 60.0);
-    let mut right = rect.right() - 8.0 - time.size().x;
-    painter.galley(
-        Pos2::new(right, rect.center().y - time.size().y / 2.0),
-        time,
-        time_color,
-    );
-    right -= 6.0;
+    let mut right = rect.right() - 8.0;
+    if let Some(left) = row.left {
+        let time = galley(kit::text(left, Font::Callout).color(time_color), 60.0);
+        right -= time.size().x;
+        painter.galley(
+            Pos2::new(right, rect.center().y - time.size().y / 2.0),
+            time,
+            time_color,
+        );
+        right -= 6.0;
+    }
     if row.production {
         painter.circle_filled(Pos2::new(right - 3.5, rect.center().y), 3.5, dot);
         right -= 13.0;
@@ -475,33 +929,49 @@ fn decision_row(ui: &mut egui::Ui, row: &DecisionRow<'_>) -> egui::Response {
 // ---- The detail column. ----
 
 pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[PendingRun]) {
-    let waiting = waiting(app, pending);
-    sync_selection(&mut app.ui.decisions, &waiting);
-    let current = app
-        .ui
-        .decisions
-        .selected
-        .and_then(|id| waiting.iter().find(|waiting| waiting.run.id == id))
-        .cloned();
-    let mut answer = None;
-    columns::detail_toolbar(ui, |ui| {
-        if let Some(current) = &current {
-            more_menu(ui, &current.run, &mut answer);
+    let mut open = open(app, pending);
+    sync_selection(&mut app.ui.decisions, &open);
+    match app.ui.decisions.selected {
+        Some(Key::Run(id)) => {
+            if let Some(current) = open.waiting.into_iter().find(|w| w.run.id == id) {
+                return question_detail(app, ui, pending, current);
+            }
         }
+        Some(Key::Request(id)) => {
+            if let Some(request) = open.requests.into_iter().find(|r| r.id == id) {
+                return request_detail(app, ui, pending, &request);
+            }
+        }
+        Some(Key::Suggestion(id)) => {
+            if let Some(index) = open.suggestions.iter().position(|(c, _)| c.id == id) {
+                let (correction, item) = open.suggestions.swap_remove(index);
+                return suggestion_detail(app, ui, pending, &correction, &item);
+            }
+        }
+        None => {}
+    }
+    columns::detail_toolbar(ui, |_| {});
+    columns::detail_body(ui, ("decision", None::<u64>), |ui| {
+        super::shell::banners(app, ui, pending);
+        notifications_notice(app, ui);
+        columns::nothing_selected(
+            ui,
+            Icon::CheckCircle,
+            "All clear",
+            "Nothing waits for you. A new question also shows as a macOS notification.",
+        );
     });
-    let Some(current) = current else {
-        columns::detail_body(ui, ("decision", None::<u64>), |ui| {
-            super::shell::banners(app, ui, pending);
-            notifications_notice(app, ui);
-            columns::nothing_selected(
-                ui,
-                Icon::CheckCircle,
-                "All clear",
-                "Nothing waits for you. A new question also shows as a macOS notification.",
-            );
-        });
-        return;
-    };
+}
+
+/// The detail of a waiting question.
+fn question_detail(
+    app: &mut DesktopApp,
+    ui: &mut egui::Ui,
+    pending: &[PendingRun],
+    current: Waiting,
+) {
+    let mut answer = None;
+    columns::detail_toolbar(ui, |ui| more_menu(ui, &current.run, &mut answer));
     egui::Panel::bottom(egui::Id::new(("decision-bar", current.run.id)))
         .resizable(false)
         .show_separator_line(true)
@@ -1008,5 +1478,478 @@ fn disconnect_sheet(app: &mut DesktopApp, ctx: &egui::Context) {
             StricterAnswer::Disconnect,
             &format!("{agent} is disconnected. Its token does not work."),
         );
+    }
+}
+
+// ---- Requests (ADR 0025 §6). ----
+
+/// The detail of a credential request.
+fn request_detail(
+    app: &mut DesktopApp,
+    ui: &mut egui::Ui,
+    pending: &[PendingRun],
+    request: &CredentialRequest,
+) {
+    columns::detail_toolbar(ui, |_| {});
+    let tree = FolderTree::load(app);
+    let mut folder = app
+        .ui
+        .decisions
+        .form
+        .as_ref()
+        .filter(|(id, _)| *id == request.id)
+        .and_then(|(_, folder)| folder.clone());
+    // A folder that is gone gives way to the top level.
+    if folder
+        .as_deref()
+        .is_some_and(|uuid| tree.get(uuid).is_none())
+    {
+        folder = None;
+    }
+    let detected = detect::detect(&app.ui.decisions.paste.0);
+    let ready = detected.len() == 1;
+    let mut answer = None;
+    egui::Panel::bottom(egui::Id::new(("request-bar", request.id)))
+        .resizable(false)
+        .show_separator_line(true)
+        .frame(
+            Frame::NONE
+                .fill(kit::SURFACE)
+                .inner_margin(Margin::symmetric(16, 10)),
+        )
+        .show(ui, |ui| request_bar(ui, ready, &mut answer));
+    columns::detail_body(ui, ("request", request.id), |ui| {
+        super::shell::banners(app, ui, pending);
+        notifications_notice(app, ui);
+        request_header(ui, request);
+        ui.add_space(16.0);
+        kit::section(ui, None, None, |s| {
+            s.labeled(
+                "For",
+                kit::text(&request.purpose, Font::Body).color(kit::SECONDARY),
+            );
+            s.row(|ui| get_it_at(ui, &request.where_to_get));
+            s.row(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(kit::text("Saves to", Font::Body).color(kit::LABEL));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let label = tree.path_label(folder.as_deref());
+                        let menu = kit::picker(
+                            ui,
+                            ("request-folder", request.id),
+                            &mut folder,
+                            &tree.choices(),
+                            label.as_str(),
+                            170.0,
+                        );
+                        ui.ctx().accesskit_node_builder(menu.id, |node| {
+                            node.set_label(format!("Saves to, {label}"));
+                        });
+                    });
+                });
+            });
+        });
+        kit::section(ui, Some("Key"), None, |s| {
+            s.row(|ui| paste_field(ui, &mut app.ui.decisions.paste.0));
+        });
+        let typed = !app.ui.decisions.paste.0.trim().is_empty();
+        match detected.as_slice() {
+            [] if typed => kit::tone_note(ui, NOTHING_FOUND, Tone::Warning),
+            [] => {}
+            [found] => detected_row(ui, found, &request.name),
+            many => kit::tone_note(
+                ui,
+                format!(
+                    "The text has {} credentials. Paste one for this request.",
+                    many.len()
+                ),
+                Tone::Warning,
+            ),
+        }
+        kit::note(
+            ui,
+            format!(
+                "{} never sees the value. The bouncer decides each use of it.",
+                request.agent_name
+            ),
+        );
+    });
+    drop(detected);
+    app.ui.decisions.form = Some((request.id, folder));
+    // The field keeps no undo history: Cmd+Z never brings a paste back.
+    super::forget_secret_field(ui.ctx(), REQUEST_FIELD);
+    if let Some(answer) = answer {
+        apply_request(app, ui.ctx(), request, answer);
+    }
+}
+
+fn request_header(ui: &mut egui::Ui, request: &CredentialRequest) {
+    ui.horizontal(|ui| {
+        kit::tile(
+            ui,
+            &kit::Tile::letter(
+                super::agents::agent_color(&request.agent_name),
+                &request.agent_name,
+            ),
+            48.0,
+        );
+        ui.add_space(6.0);
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.add(
+                Label::new(kit::text(request_title(request), Font::Title3).color(kit::LABEL))
+                    .wrap(),
+            );
+            ui.label(kit::text(request_project(request), Font::Callout).color(kit::SECONDARY));
+        });
+    });
+}
+
+/// "Get it at": the domain in bold as plain text, then the whole text of the agent. Not
+/// a link: the text came from an agent, and a link can hide where it goes.
+fn get_it_at(ui: &mut egui::Ui, where_to_get: &str) {
+    let domains = where_domains(where_to_get);
+    egui::Sides::new().shrink_right().show(
+        ui,
+        |ui| ui.label(kit::text("Get it at", Font::Body).color(kit::LABEL)),
+        |ui| {
+            let shown = if domains.is_empty() {
+                kit::text(
+                    if where_to_get.is_empty() {
+                        "The agent did not say"
+                    } else {
+                        "No domain in the text"
+                    },
+                    Font::Body,
+                )
+                .color(kit::SECONDARY)
+            } else {
+                kit::medium(domains.join(", "), Font::Body).color(kit::LABEL)
+            };
+            ui.add(Label::new(shown).truncate())
+        },
+    );
+    if !where_to_get.is_empty() && domains.first().map(String::as_str) != Some(where_to_get) {
+        ui.add(
+            Label::new(kit::text(where_to_get, Font::Callout).color(kit::SECONDARY))
+                .wrap()
+                .selectable(false),
+        );
+    }
+    if !domains.is_empty() {
+        ui.add(
+            Label::new(
+                kit::text(
+                    "Apassy opens no link. Check the domain before you sign in.",
+                    Font::Callout,
+                )
+                .color(kit::TERTIARY),
+            )
+            .wrap(),
+        );
+    }
+}
+
+/// The masked paste field of a request.
+fn paste_field(ui: &mut egui::Ui, value: &mut String) {
+    super::presize(value, super::SECRET_VALUE_CAPACITY);
+    let response = ui.add(
+        TextEdit::multiline(value)
+            .password(true)
+            .id(super::secret_field_id(REQUEST_FIELD))
+            .char_limit(super::SECRET_VALUE_CAPACITY / 4)
+            .font(egui::TextStyle::Monospace)
+            .hint_text(kit::text("Paste the key", Font::Mono).color(kit::TERTIARY))
+            .margin(kit::FIELD_MARGIN)
+            .desired_rows(3)
+            .desired_width(f32::INFINITY),
+    );
+    ui.ctx().accesskit_node_builder(response.id, |node| {
+        node.set_label("Paste the requested credential");
+    });
+}
+
+/// What Apassy found in the paste, as New Credential shows it: the provider tile, the
+/// name of the request, the provider, the variable, the host, and the environment.
+fn detected_row(ui: &mut egui::Ui, found: &Detected, name: &str) {
+    let provider = found
+        .provider
+        .as_deref()
+        .and_then(crate::vault::providers::find)
+        .map_or_else(|| found.kind.label().to_owned(), |p| p.label.clone());
+    let (cap, red) =
+        super::new_credential::row_cap(found).unwrap_or(("Production by default", false));
+    kit::section(ui, None, None, |s| {
+        s.row(|ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                kit::tile(
+                    ui,
+                    &super::credential_tile(found.kind, &provider, name),
+                    32.0,
+                );
+                ui.vertical(|ui| {
+                    ui.set_width((ui.available_width() - 150.0).max(80.0));
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.add(Label::new(kit::medium(name, Font::Body).color(kit::LABEL)).truncate());
+                    ui.add(
+                        Label::new(
+                            RichText::new(super::new_credential::row_line(found))
+                                .font(egui::FontId::monospace(11.5))
+                                .color(kit::SECONDARY),
+                        )
+                        .truncate(),
+                    );
+                });
+                kit::cap(ui, cap, red);
+            });
+        });
+    });
+}
+
+/// The bar of a request: Not Now and Save.
+fn request_bar(ui: &mut egui::Ui, ready: bool, answer: &mut Option<RequestAnswer>) {
+    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        if ui
+            .add_enabled_ui(ready, |ui| kit::button(ui, "Save", Style::Prominent))
+            .inner
+            .clicked()
+        {
+            *answer = Some(RequestAnswer::Save);
+        }
+        if kit::button(ui, "Not Now", Style::Bordered).clicked() {
+            *answer = Some(RequestAnswer::NotNow);
+        }
+        let caption = if ready {
+            "Save adds a new credential. Apassy shows no value."
+        } else {
+            "Paste the key to save it."
+        };
+        ui.add(Label::new(kit::text(caption, Font::Callout).color(kit::SECONDARY)).truncate());
+    });
+}
+
+/// Answer a credential request. Save adds the pasted credential with the origin of the
+/// request and settles the request with it; Not Now dismisses it. Neither needs the
+/// owner check: no authority moves. The paste is erased after either.
+pub(super) fn apply_request(
+    app: &mut DesktopApp,
+    ctx: &egui::Context,
+    request: &CredentialRequest,
+    answer: RequestAnswer,
+) {
+    match answer {
+        RequestAnswer::NotNow => {
+            erase_paste(app, ctx);
+            let result = app.owner_ui.session.dismiss_credential_request(request.id);
+            let _ = app.apply(
+                result,
+                &format!("Not now. {} gets no {}.", request.agent_name, request.name),
+            );
+        }
+        RequestAnswer::Save => {
+            let mut detected = detect::detect(&app.ui.decisions.paste.0);
+            if detected.len() != 1 {
+                drop(detected);
+                app.set_err("Paste one credential for this request. Nothing was saved.");
+                return;
+            }
+            let mut found = detected.remove(0);
+            drop(detected);
+            found.title.clone_from(&request.name);
+            let tree = FolderTree::load(app);
+            let folder = app
+                .ui
+                .decisions
+                .form
+                .as_ref()
+                .filter(|(id, _)| *id == request.id)
+                .and_then(|(_, folder)| folder.clone())
+                .filter(|uuid| tree.get(uuid).is_some());
+            let result =
+                app.owner_ui
+                    .session
+                    .save_credential_request(request.id, &found, folder.as_deref());
+            drop(found);
+            match result {
+                Ok(item) => {
+                    erase_paste(app, ctx);
+                    app.set_ok(format!(
+                        "Saved {} in {} for {}. The bouncer decides each use.",
+                        item.title,
+                        tree.path_label(folder.as_deref()),
+                        request.agent_name
+                    ));
+                }
+                // The paste stays, so the owner can choose another folder.
+                Err(err) => app.set_err(err.message),
+            }
+        }
+    }
+}
+
+// ---- Suggestions (ADR 0025 §5). ----
+
+/// The detail of a suggestion.
+fn suggestion_detail(
+    app: &mut DesktopApp,
+    ui: &mut egui::Ui,
+    pending: &[PendingRun],
+    correction: &Correction,
+    item: &OwnerSummary,
+) {
+    columns::detail_toolbar(ui, |_| {});
+    let mut answer = None;
+    egui::Panel::bottom(egui::Id::new(("suggestion-bar", correction.id)))
+        .resizable(false)
+        .show_separator_line(true)
+        .frame(
+            Frame::NONE
+                .fill(kit::SURFACE)
+                .inner_margin(Margin::symmetric(16, 10)),
+        )
+        .show(ui, |ui| suggestion_bar(ui, correction, &mut answer));
+    columns::detail_body(ui, ("suggestion", correction.id), |ui| {
+        super::shell::banners(app, ui, pending);
+        notifications_notice(app, ui);
+        let tile = item_tile(app, item.id, &item.name);
+        ui.horizontal(|ui| {
+            kit::tile(ui, &tile, 48.0);
+            ui.add_space(6.0);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.add(
+                    Label::new(
+                        kit::text(suggestion_question(correction, &item.name), Font::Title3)
+                            .color(kit::LABEL),
+                    )
+                    .wrap(),
+                );
+                ui.label(
+                    kit::text("Apassy noticed this from how agents use it.", Font::Callout)
+                        .color(kit::SECONDARY),
+                );
+            });
+        });
+        ui.add_space(16.0);
+        let facts = fact_rows(&correction.facts);
+        kit::section(ui, None, None, |s| {
+            s.labeled(
+                "Credential",
+                kit::text(&item.name, Font::Body).color(kit::SECONDARY),
+            );
+            for (label, value) in &facts {
+                s.labeled(label, kit::text(value, Font::Body).color(kit::SECONDARY));
+            }
+        });
+        kit::note(ui, suggestion_note(correction));
+    });
+    if let Some(answer) = answer {
+        apply_suggestion(app, ui.ctx(), correction, &item.name, answer);
+    }
+}
+
+/// The note under the facts: what holds until the owner answers.
+fn suggestion_note(correction: &Correction) -> String {
+    match (correction.kind, correction.proposed.as_str()) {
+        (CorrectionKind::Project, project) => {
+            format!("With the project {project}, a use in another project asks you.")
+        }
+        (CorrectionKind::Environment, "production") => match raised_from(correction) {
+            Some(before) => format!(
+                "Apassy treats it as production until you answer. Ignore makes it {} again.",
+                before.as_str()
+            ),
+            None => "Production makes the bouncer more careful with it.".to_owned(),
+        },
+        (CorrectionKind::Environment, _) => {
+            "Until you answer, the bouncer treats it as production and asks more often.".to_owned()
+        }
+    }
+}
+
+/// The bar of a suggestion: Ignore on the left; a caption; the choices, the proposal as
+/// the main button.
+fn suggestion_bar(
+    ui: &mut egui::Ui,
+    correction: &Correction,
+    answer: &mut Option<SuggestionAnswer>,
+) {
+    let choices = suggestion_choices(correction);
+    let mut checked: Vec<&str> = choices
+        .iter()
+        .filter(|(_, choice)| suggestion_needs_check(correction, *choice))
+        .map(|(label, _)| label.as_str())
+        .collect();
+    if suggestion_needs_check(correction, SuggestionAnswer::Ignore) {
+        checked.push("Ignore");
+    }
+    let caption = match checked.as_slice() {
+        [] => String::new(),
+        [one] => format!("{one} needs Touch ID or the passphrase."),
+        [first, second, ..] => format!("{first} and {second} need Touch ID or the passphrase."),
+    };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        if kit::button(ui, "Ignore", Style::Bordered).clicked() {
+            *answer = Some(SuggestionAnswer::Ignore);
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            for (index, (label, choice)) in choices.iter().enumerate() {
+                let style = if index == 0 {
+                    Style::Prominent
+                } else {
+                    Style::Bordered
+                };
+                if kit::button(ui, label, style).clicked() {
+                    *answer = Some(*choice);
+                }
+            }
+            ui.add(Label::new(kit::text(caption, Font::Callout).color(kit::SECONDARY)).truncate());
+        });
+    });
+}
+
+/// Answer a suggestion. An answer that leaves the credential at an environment other
+/// than production opens the owner check; the others act at once.
+pub(super) fn apply_suggestion(
+    app: &mut DesktopApp,
+    ctx: &egui::Context,
+    correction: &Correction,
+    name: &str,
+    answer: SuggestionAnswer,
+) {
+    let (settle, chosen, result) = suggestion_outcome(correction, answer);
+    if let Some(environment) = result.filter(|environment| *environment != Environment::Production)
+    {
+        app.ask_owner(
+            OwnerRequest::AnswerSuggestion {
+                correction_id: correction.id,
+                item_id: correction.item_id,
+                name: name.to_owned(),
+                answer: settle,
+                chosen,
+                environment,
+            },
+            Some(ctx),
+        );
+        return;
+    }
+    let outcome = app.owner_ui.session.answer_correction(
+        correction.id,
+        correction.item_id,
+        settle,
+        chosen,
+        None,
+    );
+    match outcome {
+        Ok(Some(environment)) => app.set_ok(format!("{name} is {}.", environment.as_str())),
+        Ok(None) if settle == CorrectionAnswer::Accepted => app.set_ok(format!(
+            "{name} is limited to {}. A use in another project asks you.",
+            correction.proposed
+        )),
+        Ok(None) => app.set_ok("Ignored. Apassy does not suggest this again."),
+        Err(err) => app.set_err(err.message),
     }
 }

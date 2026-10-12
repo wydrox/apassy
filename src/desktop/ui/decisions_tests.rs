@@ -13,7 +13,8 @@ use eframe::egui::{self, Pos2, RawInput, Rect, Vec2};
 use tempfile::TempDir;
 
 use super::decisions::{
-    self, Answer, Primary, action_label, clock, next_selection, primary, primary_label, time_left,
+    self, Answer, Key, Primary, RequestAnswer, SuggestionAnswer, action_label, clock,
+    next_selection, primary, primary_label, time_left,
 };
 use super::owner_tests::{PASS, WRONG, collect, socket_dir, unlocked_app_with_item};
 use super::{agents, draw};
@@ -24,6 +25,11 @@ use crate::broker::approvals::{
 };
 use crate::broker::project::Project;
 use crate::desktop::{BrokerState, DesktopApp, Place};
+use crate::vault::OriginTool;
+use crate::vault::agent_items::{
+    Correction, CorrectionAnswer, CorrectionKind, CorrectionState, CredentialRequest,
+    CredentialRequestState, NewCredentialRequest, RAISED_FROM_FACT,
+};
 use crate::vault::exceptions::ExceptionKind;
 
 const DEFAULT: Vec2 = Vec2::new(1180.0, 800.0);
@@ -803,6 +809,654 @@ fn decisions_and_agents_draw_at_every_size_with_and_without_content() {
     );
     assert!(queue.deny(pending.id));
     waiter.join().expect("waiter").expect("an answer");
+}
+
+// ---- Requests and Suggestions (ADR 0025 §5, §6). ----
+
+/// A synthetic key of a provider with a known prefix.
+fn fake(prefix: &str, len: usize) -> String {
+    format!("{prefix}{}", &"EXAMPLE0".repeat(len / 8 + 1)[..len])
+}
+
+/// The open request of `agent` for a credential. The agent is registered at its first
+/// request. Returns the agent ID and the request ID.
+fn ask_for_key(app: &mut DesktopApp, agent: &str, name: &str, where_to_get: &str) -> (u64, u64) {
+    let known = app
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.credential_requests(false))
+        .expect("open")
+        .expect("read")
+        .into_iter()
+        .find(|request| request.agent_name == agent)
+        .map(|request| request.agent_id);
+    let agent_id = match known {
+        Some(id) => id,
+        None => {
+            app.owner_ui
+                .session
+                .register_agent(agent)
+                .expect("agent")
+                .0
+                .id
+        }
+    };
+    let request = app
+        .owner_ui
+        .session
+        .with_vault(|vault| {
+            vault.open_credential_request(&NewCredentialRequest {
+                agent_id,
+                agent_name: agent.to_owned(),
+                project_key: "/synthetic/acme-billing".to_owned(),
+                project_label: "acme-billing".to_owned(),
+                name: name.to_owned(),
+                purpose: "Run the payout tests against the Stripe test mode.".to_owned(),
+                where_to_get: where_to_get.to_owned(),
+                folder: None,
+            })
+        })
+        .expect("open")
+        .expect("request");
+    (agent_id, request)
+}
+
+fn request_of(app: &DesktopApp, id: u64) -> CredentialRequest {
+    app.owner_ui
+        .session
+        .with_vault(|vault| vault.credential_request(id))
+        .expect("open")
+        .expect("request")
+}
+
+fn propose(
+    app: &DesktopApp,
+    item_id: u64,
+    kind: CorrectionKind,
+    proposed: &str,
+    facts: serde_json::Value,
+) -> u64 {
+    app.owner_ui
+        .session
+        .with_vault(|vault| vault.propose_correction(item_id, kind, proposed, &facts))
+        .expect("open")
+        .expect("propose")
+        .expect("a new correction")
+}
+
+fn correction_of(app: &DesktopApp, item_id: u64, id: u64) -> Correction {
+    app.owner_ui
+        .session
+        .with_vault(|vault| vault.item_corrections(item_id))
+        .expect("open")
+        .expect("read")
+        .into_iter()
+        .find(|correction| correction.id == id)
+        .expect("the correction")
+}
+
+fn environment_of(app: &DesktopApp, item_id: u64) -> Option<crate::vault::Environment> {
+    app.owner_ui
+        .session
+        .declaration(item_id)
+        .expect("read")
+        .map(|declaration| declaration.environment)
+}
+
+/// The domain of "where to get it" is the host that a browser would open: user info
+/// does not fool it, a bare host counts, and a look-alike name that is not plain ASCII
+/// shows as no domain.
+#[test]
+fn the_domain_of_where_to_get_it_is_the_real_host() {
+    assert_eq!(
+        decisions::where_domains("Create one at https://dashboard.stripe.com/test/apikeys"),
+        ["dashboard.stripe.com"]
+    );
+    assert_eq!(
+        decisions::where_domains("https://dashboard.stripe.com@keys.evil-example.net/login"),
+        ["keys.evil-example.net"]
+    );
+    assert_eq!(
+        decisions::where_domains("dashboard.stripe.com/apikeys, then Reveal"),
+        ["dashboard.stripe.com"]
+    );
+    assert!(
+        decisions::where_domains("The Stripe dashboard, e.g. Developers > API keys.").is_empty()
+    );
+    assert!(decisions::where_domains("https://str\u{0456}pe.com/keys").is_empty());
+    assert!(decisions::where_domains("").is_empty());
+}
+
+/// A request shows in "Requests" with the agent and the project, and its detail says
+/// what the agent asks for, why, the domain as plain text, and the folder. It counts in
+/// the badge; a suggestion does not.
+#[test]
+fn a_request_shows_its_facts_and_counts_in_the_badge() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, item_id) = unlocked_app_with_item(&dir);
+    let where_to_get = "Create one at https://dashboard.stripe.com@keys.evil-example.net/apikeys";
+    let (_, request) = ask_for_key(&mut app, "Codex", "Stripe test key", where_to_get);
+    propose(
+        &app,
+        item_id,
+        CorrectionKind::Environment,
+        "development",
+        serde_json::json!({ "signal": "every use went to a development or test host", "uses": 3 }),
+    );
+    assert_eq!(
+        decisions::badge_count(&app, &[]),
+        1,
+        "requests count, suggestions do not"
+    );
+    app.place = Place::Decisions;
+    let (text, _) = frames(&mut app, WIDE, 3);
+    for expected in [
+        "Requests",
+        "Suggestions",
+        "Stripe test key",
+        "Codex · acme-billing",
+        "Codex asks for a Stripe test key",
+        "For",
+        "Run the payout tests against the Stripe test mode.",
+        "Get it at",
+        "keys.evil-example.net",
+        where_to_get,
+        "Apassy opens no link. Check the domain before you sign in.",
+        "Saves to",
+        "Personal",
+        "Key",
+        "Not Now",
+        "Save",
+        "Codex never sees the value.",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    assert_eq!(decisions::selected_key(&app), Some(Key::Request(request)));
+    // The domain is the host that a browser opens, not the user info before "@".
+    assert!(!text.contains("\ndashboard.stripe.com\n"), "{text}");
+}
+
+/// Save adds the pasted credential with the origin of the request (the agent asked, the
+/// owner pasted: not an own item of the agent), settles the request with it, erases the
+/// paste, and selects the next decision. No owner check, and no value shows.
+#[test]
+fn save_adds_the_item_with_the_request_origin_and_settles_the_request() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    let (agent_id, first) = ask_for_key(
+        &mut app,
+        "Codex",
+        "Stripe test key",
+        "https://dashboard.stripe.com/test/apikeys",
+    );
+    let (_, second) = ask_for_key(
+        &mut app,
+        "Codex",
+        "OpenAI key",
+        "platform.openai.com/api-keys",
+    );
+    app.place = Place::Decisions;
+    frames(&mut app, DEFAULT, 2);
+    assert_eq!(decisions::selected_key(&app), Some(Key::Request(first)));
+    let key = fake("sk_test_", 24);
+    decisions::set_paste(&mut app, &key);
+    let (text, _) = frames(&mut app, WIDE, 3);
+    assert!(text.contains("Stripe"), "the provider: {text}");
+    assert!(!text.contains(&key), "the paste is masked: {text}");
+
+    let ctx = egui::Context::default();
+    let request = request_of(&app, first);
+    decisions::apply_request(&mut app, &ctx, &request, RequestAnswer::Save);
+    assert!(app.owner.check.is_none(), "a new item needs no owner check");
+    assert!(decisions::paste_is_empty(&app), "the paste is erased");
+    let saved = request_of(&app, first);
+    assert_eq!(saved.state, CredentialRequestState::Saved);
+    let item_id = saved.item_id.expect("the saved item");
+    let origin = app
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.item_origin(item_id))
+        .expect("open")
+        .expect("read")
+        .expect("an origin");
+    assert_eq!(origin.origin.tool, OriginTool::AskOwner);
+    assert_eq!(origin.origin.agent_id, agent_id);
+    assert_eq!(origin.origin.project_label, "acme-billing");
+    let own = app
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.agent_owns_item(agent_id, item_id))
+        .expect("open")
+        .expect("read");
+    assert!(!own, "the owner pasted the value: not the agent's own item");
+    let details = app.owner_ui.session.details(item_id).expect("details");
+    assert_eq!(details.name, "Stripe test key");
+    assert!(
+        app.status_text
+            .contains("Saved Stripe test key in Personal for Codex"),
+        "{}",
+        app.status_text
+    );
+    assert!(!app.status_text.contains(&key));
+
+    let (text, _) = frames(&mut app, WIDE, 3);
+    assert_eq!(
+        decisions::selected_key(&app),
+        Some(Key::Request(second)),
+        "the next request"
+    );
+    assert!(text.contains("Codex asks for a OpenAI key"), "{text}");
+    assert!(!text.contains(&key), "{text}");
+    assert_eq!(decisions::badge_count(&app, &[]), 1);
+}
+
+/// Not Now dismisses the request without a check and adds nothing. A paste of another
+/// request is erased when the selection moves.
+#[test]
+fn not_now_dismisses_the_request() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    let (_, first) = ask_for_key(&mut app, "Codex", "Stripe test key", "");
+    let (_, second) = ask_for_key(
+        &mut app,
+        "Codex",
+        "GitHub token",
+        "github.com/settings/tokens",
+    );
+    app.place = Place::Decisions;
+    frames(&mut app, DEFAULT, 2);
+    decisions::set_paste(&mut app, &fake("ghp_", 36));
+    decisions::select_key(&mut app, Key::Request(second));
+    let (text, _) = frames(&mut app, DEFAULT, 2);
+    assert!(
+        decisions::paste_is_empty(&app),
+        "another selection erases the paste"
+    );
+    assert!(text.contains("github.com"), "{text}");
+    decisions::select_key(&mut app, Key::Request(first));
+    let (text, _) = frames(&mut app, DEFAULT, 2);
+    assert!(text.contains("The agent did not say"), "{text}");
+
+    let items_before = app.owner_ui.session.search("").expect("search").len();
+    let ctx = egui::Context::default();
+    let request = request_of(&app, first);
+    decisions::apply_request(&mut app, &ctx, &request, RequestAnswer::NotNow);
+    assert!(app.owner.check.is_none());
+    assert_eq!(
+        request_of(&app, first).state,
+        CredentialRequestState::Dismissed
+    );
+    assert_eq!(
+        app.owner_ui.session.search("").expect("search").len(),
+        items_before
+    );
+    assert!(
+        app.status_text
+            .contains("Not now. Codex gets no Stripe test key."),
+        "{}",
+        app.status_text
+    );
+    frames(&mut app, DEFAULT, 1);
+    assert_eq!(decisions::selected_key(&app), Some(Key::Request(second)));
+    // Save without a paste saves nothing.
+    let request = request_of(&app, second);
+    decisions::apply_request(&mut app, &ctx, &request, RequestAnswer::Save);
+    assert_eq!(request_of(&app, second).state, CredentialRequestState::Open);
+}
+
+/// The matrix of the owner check for suggestions: a stricter answer (production, a
+/// project, ignoring a development proposal) acts at once; an answer that leaves the
+/// credential at development waits for the check, and a wrong passphrase changes nothing.
+#[test]
+fn suggestions_accept_a_stricter_value_at_once_and_a_looser_one_after_the_check() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, item_id) = unlocked_app_with_item(&dir);
+    let development = propose(
+        &app,
+        item_id,
+        CorrectionKind::Environment,
+        "development",
+        serde_json::json!({
+            "signal": "every use went to a development or test host",
+            "hosts": ["api.sandbox.example", "files.test"],
+            "uses": 3,
+        }),
+    );
+    app.place = Place::Decisions;
+    let (text, _) = frames(&mut app, WIDE, 3);
+    for expected in [
+        "Suggestions",
+        "Development or production?",
+        "Is Guarded key a development credential?",
+        "Apassy noticed this from how agents use it.",
+        "Seen",
+        "every use went to a development or test host",
+        "Hosts",
+        "api.sandbox.example, files.test",
+        "Uses",
+        "Ignore",
+        "Development",
+        "Production",
+        "Development needs Touch ID or the passphrase.",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    assert_eq!(
+        decisions::selected_key(&app),
+        Some(Key::Suggestion(development))
+    );
+    let correction = correction_of(&app, item_id, development);
+    assert!(decisions::suggestion_needs_check(
+        &correction,
+        SuggestionAnswer::Environment(crate::vault::Environment::Development)
+    ));
+    assert!(!decisions::suggestion_needs_check(
+        &correction,
+        SuggestionAnswer::Environment(crate::vault::Environment::Production)
+    ));
+    assert!(!decisions::suggestion_needs_check(
+        &correction,
+        SuggestionAnswer::Ignore
+    ));
+
+    let ctx = egui::Context::default();
+    let before = environment_of(&app, item_id);
+    let looser = SuggestionAnswer::Environment(crate::vault::Environment::Development);
+    decisions::apply_suggestion(&mut app, &ctx, &correction, "Guarded key", looser);
+    let check = app.owner.check.as_ref().expect("the owner check opens");
+    assert!(
+        check
+            .request
+            .describe()
+            .contains("Mark \"Guarded key\" as development"),
+        "{}",
+        check.request.describe()
+    );
+    assert!(
+        app.confirm_owner_now(OwnerCheck::passphrase(WRONG))
+            .is_err()
+    );
+    assert_eq!(environment_of(&app, item_id), before);
+    assert_eq!(
+        correction_of(&app, item_id, development).state,
+        CorrectionState::Open
+    );
+    // The session refuses a looser answer without a proof, also when called directly.
+    let refused = app.owner_ui.session.answer_correction(
+        development,
+        item_id,
+        CorrectionAnswer::Accepted,
+        None,
+        None,
+    );
+    assert_eq!(refused.expect_err("refused").code, "owner_check_required");
+    decisions::apply_suggestion(&mut app, &ctx, &correction, "Guarded key", looser);
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("owner check");
+    assert_eq!(
+        environment_of(&app, item_id),
+        Some(crate::vault::Environment::Development)
+    );
+    assert_eq!(
+        correction_of(&app, item_id, development).state,
+        CorrectionState::Accepted
+    );
+    let sources = app
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.declaration_sources(item_id))
+        .expect("open")
+        .expect("read");
+    assert_eq!(sources.environment, crate::vault::DeclarationSource::Owner);
+
+    // Production is stricter: no check.
+    let production = propose(
+        &app,
+        item_id,
+        CorrectionKind::Environment,
+        "production",
+        serde_json::json!({ "signal": "the value has a production prefix of its provider", "provider": "stripe" }),
+    );
+    let correction = correction_of(&app, item_id, production);
+    decisions::apply_suggestion(
+        &mut app,
+        &ctx,
+        &correction,
+        "Guarded key",
+        SuggestionAnswer::Environment(crate::vault::Environment::Production),
+    );
+    assert!(app.owner.check.is_none(), "stricter: no owner check");
+    assert_eq!(
+        environment_of(&app, item_id),
+        Some(crate::vault::Environment::Production)
+    );
+    assert_eq!(
+        correction_of(&app, item_id, production).state,
+        CorrectionState::Accepted
+    );
+
+    // A project is stricter: no check.
+    let project = propose(
+        &app,
+        item_id,
+        CorrectionKind::Project,
+        "acme-billing",
+        serde_json::json!({ "project_label": "acme-billing", "project_key": "/synthetic/acme-billing", "uses": 5, "agents": ["Codex"] }),
+    );
+    frames(&mut app, WIDE, 2);
+    decisions::select_key(&mut app, Key::Suggestion(project));
+    let (text, _) = frames(&mut app, WIDE, 3);
+    for expected in [
+        "Limit Guarded key to acme-billing?",
+        "Only in acme-billing",
+        "Agents",
+        "Codex",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    let correction = correction_of(&app, item_id, project);
+    decisions::apply_suggestion(
+        &mut app,
+        &ctx,
+        &correction,
+        "Guarded key",
+        SuggestionAnswer::Accept,
+    );
+    assert!(app.owner.check.is_none());
+    let declaration = app
+        .owner_ui
+        .session
+        .declaration(item_id)
+        .expect("read")
+        .expect("declared");
+    assert_eq!(declaration.project, "acme-billing");
+}
+
+/// Ignore needs no check when it changes nothing. Ignoring a raise to production gives
+/// the credential its looser environment back, so that Ignore waits for the check.
+#[test]
+fn ignore_needs_the_check_only_when_it_restores_a_looser_environment() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, item_id) = unlocked_app_with_item(&dir);
+    let ctx = egui::Context::default();
+    let development = propose(
+        &app,
+        item_id,
+        CorrectionKind::Environment,
+        "development",
+        serde_json::json!({ "uses": 3 }),
+    );
+    let correction = correction_of(&app, item_id, development);
+    decisions::apply_suggestion(
+        &mut app,
+        &ctx,
+        &correction,
+        "Guarded key",
+        SuggestionAnswer::Ignore,
+    );
+    assert!(app.owner.check.is_none());
+    assert_eq!(
+        correction_of(&app, item_id, development).state,
+        CorrectionState::Ignored
+    );
+    assert!(app.status_text.contains("Ignored."), "{}", app.status_text);
+
+    // The use log raised the item from development to production until the answer.
+    app.owner_ui
+        .session
+        .with_vault(|vault| {
+            vault.set_declaration_environment(item_id, crate::vault::Environment::Production)
+        })
+        .expect("open")
+        .expect("raise");
+    let raised = propose(
+        &app,
+        item_id,
+        CorrectionKind::Environment,
+        "production",
+        serde_json::json!({ "signal": "the value has a production prefix of its provider", RAISED_FROM_FACT: "development" }),
+    );
+    let correction = correction_of(&app, item_id, raised);
+    assert!(decisions::suggestion_needs_check(
+        &correction,
+        SuggestionAnswer::Ignore
+    ));
+    let choices = decisions::suggestion_choices(&correction);
+    assert_eq!(choices[0].0, "Production");
+    assert_eq!(choices[1].0, "Development");
+    app.place = Place::Decisions;
+    let (text, _) = frames(&mut app, WIDE, 3);
+    for expected in [
+        "Is Guarded key a production credential?",
+        "Before",
+        "Ignore makes it development again.",
+        "Development and Ignore need Touch ID or the passphrase.",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    decisions::apply_suggestion(
+        &mut app,
+        &ctx,
+        &correction,
+        "Guarded key",
+        SuggestionAnswer::Ignore,
+    );
+    let check = app.owner.check.as_ref().expect("the owner check opens");
+    assert!(
+        check
+            .request
+            .describe()
+            .contains("Ignore the suggestion for \"Guarded key\": it is development again."),
+        "{}",
+        check.request.describe()
+    );
+    assert!(
+        app.confirm_owner_now(OwnerCheck::passphrase(WRONG))
+            .is_err()
+    );
+    assert_eq!(
+        environment_of(&app, item_id),
+        Some(crate::vault::Environment::Production)
+    );
+    decisions::apply_suggestion(
+        &mut app,
+        &ctx,
+        &correction,
+        "Guarded key",
+        SuggestionAnswer::Ignore,
+    );
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("owner check");
+    assert_eq!(
+        environment_of(&app, item_id),
+        Some(crate::vault::Environment::Development)
+    );
+    assert_eq!(
+        correction_of(&app, item_id, raised).state,
+        CorrectionState::Ignored
+    );
+    frames(&mut app, WIDE, 1);
+    assert_eq!(decisions::selected_key(&app), None, "nothing waits");
+}
+
+/// The facts of a correction read as rows, the signal first; a provider shows its name.
+#[test]
+fn the_facts_of_a_suggestion_read_as_rows() {
+    let rows = decisions::fact_rows(&serde_json::json!({
+        "uses": 4,
+        "hosts": ["api.sandbox.example"],
+        "signal": "every use went to a development or test host",
+        "provider": "stripe",
+        "extra_note": true,
+        "nothing": null,
+    }));
+    let labels: Vec<&str> = rows.iter().map(|(label, _)| label.as_str()).collect();
+    assert_eq!(labels, ["Seen", "Provider", "Hosts", "Uses", "Extra note"]);
+    assert_eq!(rows[1].1, "Stripe");
+    assert_eq!(rows[2].1, "api.sandbox.example");
+    assert_eq!(rows[3].1, "4");
+    assert_eq!(rows[4].1, "Yes");
+    assert!(decisions::fact_rows(&serde_json::Value::Null).is_empty());
+}
+
+/// A request (with a detected paste) and a suggestion draw at the default and the
+/// smallest window, with the sidebar full, collapsed, and floating. No text runs past
+/// the edge, and the paste never shows.
+#[test]
+fn requests_and_suggestions_draw_at_every_size() {
+    #[derive(Debug, Clone, Copy)]
+    enum Sidebar {
+        Full,
+        Collapsed,
+        Float,
+    }
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, item_id) = unlocked_app_with_item(&dir);
+    let (_, request) = ask_for_key(
+        &mut app,
+        "A coding agent with a rather long name",
+        "A Stripe test key with a rather long name for the narrow card",
+        "Open https://dashboard.stripe.com/test/apikeys and create a restricted key with write access to payouts",
+    );
+    let suggestion = propose(
+        &app,
+        item_id,
+        CorrectionKind::Environment,
+        "development",
+        serde_json::json!({
+            "signal": "every use went to a development or test host",
+            "hosts": ["api.sandbox.example", "uploads.sandbox.example", "files.test"],
+            "uses": 12,
+        }),
+    );
+    let key = fake("sk_test_", 24);
+    for (selected, expected) in [
+        (Key::Request(request), ["Get it at", "Not Now", "Save"]),
+        (
+            Key::Suggestion(suggestion),
+            ["Seen", "Ignore", "Development"],
+        ),
+    ] {
+        for size in [DEFAULT, SMALLEST] {
+            for sidebar in [Sidebar::Full, Sidebar::Collapsed, Sidebar::Float] {
+                app.place = Place::Decisions;
+                app.ui.sidebar_hidden = matches!(sidebar, Sidebar::Collapsed);
+                app.ui.sidebar_float = matches!(sidebar, Sidebar::Float);
+                decisions::select_key(&mut app, selected);
+                frames(&mut app, size, 1);
+                if matches!(selected, Key::Request(_)) {
+                    decisions::set_paste(&mut app, &key);
+                }
+                let (text, past) = frames(&mut app, size, 3);
+                let at = format!("{selected:?} at {size:?}, {sidebar:?}");
+                for needle in expected {
+                    assert!(text.contains(needle), "{needle} in {at}: {text}");
+                }
+                assert!(!text.contains(&key), "the paste shows in {at}");
+                assert!(past.is_empty(), "past the edge in {at}: {past:?}");
+            }
+        }
+    }
 }
 
 /// "Connect an Agent" offers the four hosts and says that a question waits 5 minutes.

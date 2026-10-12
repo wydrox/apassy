@@ -345,6 +345,19 @@ pub enum OwnerRequest {
         name: String,
         environment: crate::vault::Environment,
     },
+    /// Answer a suggestion of Decisions (ADR 0025 §5) so that its credential is not
+    /// production: accept "development", choose development instead of production, or
+    /// ignore a raise to production. The bouncer is then less careful, so it needs the
+    /// check. `environment` is what the credential gets.
+    AnswerSuggestion {
+        correction_id: u64,
+        item_id: u64,
+        name: String,
+        answer: crate::vault::agent_items::CorrectionAnswer,
+        /// The environment that the owner chose instead of the proposal.
+        chosen: Option<crate::vault::Environment>,
+        environment: crate::vault::Environment,
+    },
     /// Apply a calibrated `task_match` level, in hundredths (ADR 0009 step 3).
     ApplyCalibration {
         level: u32,
@@ -728,6 +741,7 @@ impl OwnerRequest {
             | Self::Unarchive { item_id, .. }
             | Self::SetEnvironment { item_id, .. }
             | Self::CorrectEnvironment { item_id, .. }
+            | Self::AnswerSuggestion { item_id, .. }
             | Self::AlwaysAskOff { item_id, .. } => {
                 OwnerAction::ChangeItemRules { item_id: *item_id }
             }
@@ -1024,6 +1038,22 @@ impl OwnerRequest {
                 ..
             } => format!(
                 "Mark \"{name}\" as {}. The bouncer is less careful with it than with production. The question of agent \"{agent}\" still waits for your answer.",
+                environment.as_str()
+            ),
+            Self::AnswerSuggestion {
+                name,
+                answer: crate::vault::agent_items::CorrectionAnswer::Ignored,
+                chosen: None,
+                environment,
+                ..
+            } => format!(
+                "Ignore the suggestion for \"{name}\": it is {} again. The bouncer is less careful with it than with production.",
+                environment.as_str()
+            ),
+            Self::AnswerSuggestion {
+                name, environment, ..
+            } => format!(
+                "Mark \"{name}\" as {}. The bouncer is less careful with it than with production.",
                 environment.as_str()
             ),
             Self::AlwaysAskOff { name, .. } => format!(
@@ -1505,6 +1535,23 @@ impl DesktopApp {
                     "{name} is marked as {}. The question of {agent} still waits: allow it or deny it.",
                     environment.as_str()
                 )),
+                Err(err) => self.set_err(err.message),
+            },
+            OwnerRequest::AnswerSuggestion {
+                correction_id,
+                item_id,
+                name,
+                answer,
+                chosen,
+                environment,
+            } => match session.answer_correction(
+                correction_id,
+                item_id,
+                answer,
+                chosen,
+                Some(proof),
+            ) {
+                Ok(_) => self.set_ok(format!("{name} is {}.", environment.as_str())),
                 Err(err) => self.set_err(err.message),
             },
             OwnerRequest::ApproveAndRemember(run) => {
