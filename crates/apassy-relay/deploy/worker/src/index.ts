@@ -1,11 +1,13 @@
 // The edge Worker of apassy-relay: it serves static files, limits creation
 // requests and snapshot pushes, bounds the declared length of every body, and
-// forwards relay requests with the required edge secret.
+// forwards relay requests with the required edge secret. `/internal/` routes (the APNs
+// sender, apns.ts) are handled here and never forwarded.
 // Erasable TypeScript only (no enums, namespaces, or parameter properties), so
 // Node can run it with type stripping in the tests.
 // workerd accepts only handlers as exports of this main module, so values such as
 // the length limits live in limits.ts. Type exports are fine: they are erased.
 
+import { handleInternal, type PushEnv } from "./apns.ts";
 import { MAX_JSON_LENGTH, MAX_PROXY_LENGTH, MAX_SNAPSHOT_LENGTH } from "./limits.ts";
 
 /** A Workers VPC service binding: a tunnel from the relay's host, no public origin. */
@@ -21,7 +23,7 @@ export interface AssetService {
   fetch(request: Request): Promise<Response>;
 }
 
-export interface Env {
+export interface Env extends PushEnv {
   /** The origin of the relay, for example a quick tunnel URL. A var. */
   RELAY_ORIGIN?: string;
   /** The edge secret. A Worker secret. */
@@ -137,10 +139,14 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     // Check the raw path before URL parsing removes dot segments or backslashes.
     const rawPath = request.url.replace(/^[^:]+:\/\/[^/?#]+/, "").split(/[?#]/, 1)[0]!;
+    const url = new URL(request.url);
+    // The parsed path is checked too: `/./internal/push` parses to `/internal/push`.
+    for (const path of [rawPath, url.pathname]) {
+      if (path === "/internal" || path.startsWith("/internal/")) return handleInternal(request, env);
+    }
     if (rawPath.startsWith("/dl/") && unsafeDownloadPath(rawPath)) {
       return staticResponse(text(404, "not found"), false);
     }
-    const url = new URL(request.url);
     const isDownload = url.pathname.startsWith("/dl/");
     const isStatic = url.pathname === "/install.sh" || url.pathname === "/guide" || isDownload;
     if (isStatic) {

@@ -16,6 +16,13 @@
   ],
   // /guide explicitly fetches /guide.html; do not redirect that asset back to /guide.
   "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true, "html_handling": "none" },
-  "vars": { "RELAY_ORIGIN": "https://replace-me.trycloudflare.com" },
+  // APNS_KEY_ID is set by the owner before the deploy. The Worker secrets are EDGE_SECRET,
+  // PUSH_SECRET, and APNS_KEY: set them with `wrangler secret put`, never in this file.
+  "vars": {
+    "RELAY_ORIGIN": "https://replace-me.trycloudflare.com",
+    "APNS_KEY_ID": "",
+    "APNS_TEAM_ID": "7S3F9767BM",
+    "APNS_TOPIC": "com.wydrox.apassy.companion"
+  },
   "observability": { "enabled": false }
 }
