@@ -201,16 +201,7 @@ fn create_asks_for_a_name_and_lists_the_vault() {
     assert!(text.contains("Client Work"), "{text}");
     app.settings_open = true;
     let text = frames(&mut app);
-    for expected in [
-        "Vaults",
-        "Personal",
-        "Client Work",
-        "Open",
-        "Rename…",
-        "Remove from list…",
-        "New vault…",
-        "Open vault file…",
-    ] {
+    for expected in ["Vaults", "Personal", "Client Work", "Open"] {
         assert!(text.contains(expected), "missing {expected}: {text}");
     }
 }
@@ -229,15 +220,12 @@ fn settings_show_the_sections_of_the_selected_tab_only() {
     let cases = [
         (
             SettingsTab::General,
-            &["Vaults", "New vault…", "Import from 1Password…"][..],
-            &["Keyboard shortcuts", "Back up now", "Broker and bouncer"][..],
+            &["Vault", "Personal", "Import…"][..],
+            &["Keyboard shortcuts", "Back up now", "Bouncer"][..],
         ),
         (
             SettingsTab::Devices,
-            &[
-                "Questions go to every device",
-                "A waiting approval or a blocked request causes a macOS notification.",
-            ][..],
+            &["Questions go to every device", "This Mac", "Notifications"][..],
             &["Lock now", "Back up now", "Keyboard shortcuts"][..],
         ),
         (
@@ -248,7 +236,7 @@ fn settings_show_the_sections_of_the_selected_tab_only() {
         (
             SettingsTab::Advanced,
             &[
-                "Broker and bouncer",
+                "Bouncer",
                 "Command line",
                 "Updates",
                 "Keyboard shortcuts",
@@ -301,13 +289,7 @@ fn settings_show_how_the_bouncer_model_starts() {
     app.settings_open = true;
     app.ui.settings_tab = SettingsTab::Advanced;
     let text = frames(&mut app);
-    for expected in [
-        "Broker and bouncer",
-        "Start the model",
-        "When a run needs it",
-        "Status",
-        "Open log",
-    ] {
+    for expected in ["Bouncer", "Model", "Start the model", "When a run needs it"] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
     assert!(!text.contains("Start now"), "{text}");
@@ -324,12 +306,7 @@ fn settings_show_how_the_bouncer_model_starts() {
     set(StartMode::External);
     let text = frames(&mut app);
     assert!(text.contains("Managed outside Apassy"), "{text}");
-    for hidden in [
-        "Stop after",
-        "Start now",
-        "Install the Laya environment",
-        "Install the model",
-    ] {
+    for hidden in ["Stop after", "Start now", "Install…"] {
         assert!(!text.contains(hidden), "{hidden}: {text}");
     }
     set(StartMode::WhenNeeded);
@@ -340,16 +317,20 @@ fn settings_show_how_the_bouncer_model_starts() {
         "30 minutes without a run",
         // The script is missing here, so the status does not promise a start.
         "Cannot start",
-        "Something that the model needs is missing.",
-        "Or install the Laya environment with these commands in Terminal:",
+        "Apassy cannot find the start script tools/basemodel/start.sh.",
         // No uv here, so no install button.
         "Install uv first: brew install uv",
         "Until then, every run waits for you.",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
-    assert!(text.contains("laya[serve]==0.3.20"), "{text}");
-    assert!(!text.contains("Install the model"), "{text}");
+    // The Terminal commands are in the menu of the row, not on the page.
+    assert!(!text.contains("laya[serve]==0.3.20"), "{text}");
+    assert!(
+        super::settings::install_commands(&server.status()).contains("laya[serve]==0.3.20"),
+        "the menu copies the install commands"
+    );
+    assert!(!text.contains("Install…"), "{text}");
     // A start would fail, so there is no "Start now".
     assert!(!text.contains("Start now"), "{text}");
 
@@ -453,24 +434,29 @@ fn settings_offer_the_model_install_and_name_a_launch_agent() {
     // The environment and the model are missing.
     let text = frames(&mut app);
     for expected in [
-        "Install the model",
-        "with these commands in Terminal:",
+        "Install…",
+        "The LaunchAgent com.example.bouncer starts the bouncer with APASSY_BASE_MODEL",
+        "That file does not exist, so the start fails.",
+        "Copy remove commands",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    assert!(!text.contains("Install uv first"), "{text}");
+    // The install commands are in the menu of the row; the last downloads the weights.
+    let commands = super::settings::install_commands(&server.status());
+    for expected in [
         "\nuv venv --python 3.12 .venv\n",
-        // The last command downloads the base weights.
         &format!(
             "\n.venv/bin/python -B {}",
             dir.path()
                 .join("tools/basemodel/fetch_weights.py")
                 .display()
         ),
-        "The LaunchAgent com.example.bouncer starts the bouncer with APASSY_BASE_MODEL",
-        "That file does not exist, so the start fails.",
-        "To remove it, run these commands in Terminal. Apassy does not change it.",
-        &remove,
     ] {
-        assert!(text.contains(expected), "{expected}: {text}");
+        assert!(commands.contains(expected), "{expected}: {commands}");
     }
-    assert!(!text.contains("Install uv first"), "{text}");
+    // "Copy remove commands" copies the commands that remove the LaunchAgent.
+    assert_eq!(server.status().launch_agents[0].remove_commands(), remove);
 
     // "Managed outside Apassy" offers no install. The missing model still shows.
     server
@@ -480,7 +466,7 @@ fn settings_offer_the_model_install_and_name_a_launch_agent() {
         })
         .expect("settings");
     let text = frames(&mut app);
-    assert!(!text.contains("Install the model"), "{text}");
+    assert!(!text.contains("Install…"), "{text}");
     assert!(text.contains("That file does not exist"), "{text}");
 
     // With the model, "Managed outside Apassy" has no note.
@@ -499,8 +485,8 @@ fn settings_offer_the_model_install_and_name_a_launch_agent() {
     for expected in [
         "The LaunchAgent com.example.bouncer also starts the bouncer.",
         "With \"With Apassy\", Apassy starts and stops the model itself.",
-        &remove,
-        "Install the model",
+        "Copy remove commands",
+        "Install…",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
@@ -509,7 +495,7 @@ fn settings_offer_the_model_install_and_name_a_launch_agent() {
     std::fs::remove_file(&uv).expect("remove");
     let text = frames(&mut app);
     assert!(text.contains("Install uv first: brew install uv"), "{text}");
-    assert!(!text.contains("Install the model"), "{text}");
+    assert!(!text.contains("Install…"), "{text}");
 
     // A `.venv` whose Python is gone: the Terminal commands clear it, as the install.
     std::fs::create_dir_all(laya_dir.join(".venv/bin")).expect("dir");
@@ -518,10 +504,10 @@ fn settings_offer_the_model_install_and_name_a_launch_agent() {
         laya_dir.join(".venv/bin/python"),
     )
     .expect("symlink");
-    let text = frames(&mut app);
+    let commands = super::settings::install_commands(&server.status());
     assert!(
-        text.contains("\nuv venv --clear --python 3.12 .venv\n"),
-        "{text}"
+        commands.contains("\nuv venv --clear --python 3.12 .venv\n"),
+        "{commands}"
     );
     std::fs::remove_file(laya_dir.join(".venv/bin/python")).expect("remove");
 
@@ -529,11 +515,7 @@ fn settings_offer_the_model_install_and_name_a_launch_agent() {
     executable(&laya_dir.join(".venv/bin/python"));
     executable(&laya_dir.join(".venv/bin/laya-serve"));
     let text = frames(&mut app);
-    for hidden in [
-        "Install the model",
-        "Install uv first",
-        "with these commands in Terminal",
-    ] {
+    for hidden in ["Install…", "Install uv first"] {
         assert!(!text.contains(hidden), "{hidden}: {text}");
     }
     server.shutdown();
@@ -688,9 +670,7 @@ fn settings_offer_the_weights_download_again_after_it_failed() {
         "The install failed. Downloading the model weights failed",
         "The first start of the model server downloads the weights.",
         "Stopped",
-        "Install the model",
-        "Or download them with this command in Terminal:",
-        &format!(".venv/bin/python -B {}", tools.join(FETCH_SCRIPT).display()),
+        "Install…",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
@@ -700,8 +680,9 @@ fn settings_offer_the_weights_download_again_after_it_failed() {
     server.shutdown();
 }
 
-/// Settings > General shows the file of the open vault one time, in Vaults. "Lock now"
-/// is a row of Vaults, and About has no second version row.
+/// Settings > General shows where the open vault lives in short words, not its whole
+/// path (that is the hover text). "Lock now" is on its row, and About has no second
+/// version row.
 #[test]
 fn settings_show_the_vault_file_one_time() {
     let dir = TempDir::new().expect("temp dir");
@@ -711,12 +692,14 @@ fn settings_show_the_vault_file_one_time() {
     app.settings_open = true;
     app.ui.settings_tab = SettingsTab::General;
     let text = frames(&mut app);
-    assert_eq!(text.matches(path.as_str()).count(), 1, "{path}: {text}");
-    assert!(text.contains("Lock now"), "{text}");
-    assert!(
-        text.contains("The broker refuses all agent requests while the vault is locked."),
-        "{text}"
+    assert_eq!(text.matches(path.as_str()).count(), 0, "{path}: {text}");
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let place = super::vaults::short_location(
+        &path_of(&app, "Personal"),
+        home.as_deref(),
+        &app.vault_list.data_dir,
     );
+    assert!(text.contains(&place), "{place}: {text}");
 
     app.ui.settings_tab = SettingsTab::Advanced;
     let text = frames(&mut app);
@@ -1821,4 +1804,32 @@ fn every_variant_of_the_credential_page_draws_at_default_and_minimum_sizes() {
     let text = frames_at(&mut app, Vec2::new(1180.0, 800.0));
     assert!(text.contains("Production"), "{text}");
     assert!(!text.contains("Is this a development key?"), "{text}");
+}
+
+/// Settings > General says where a vault lives in short words: the place, and the last
+/// two folders under it.
+#[test]
+fn the_vault_place_reads_in_short_words() {
+    use super::vaults::short_location;
+    let home = Path::new("/Users/synthetic");
+    let data = home.join("Library/Application Support/Apassy");
+    let place = |path: &Path| short_location(path, Some(home), &data);
+    assert_eq!(place(&data.join("vault.db")), "On this Mac");
+    assert_eq!(
+        place(&home.join("Library/Mobile Documents/com~apple~CloudDocs/Apassy/vault.db")),
+        "iCloud Drive › Apassy"
+    );
+    assert_eq!(
+        place(&home.join("Library/CloudStorage/GoogleDrive-a@example.com/My Drive/Vaults/w.db")),
+        "Google Drive › My Drive › Vaults"
+    );
+    assert_eq!(
+        place(&home.join("Documents/a/b/c/v.db")),
+        "Home › … › b › c"
+    );
+    assert_eq!(
+        place(Path::new("/Volumes/Backup/Apassy/v.db")),
+        "Backup › Apassy"
+    );
+    assert_eq!(place(Path::new("/srv/vaults/v.db")), "/srv/vaults");
 }

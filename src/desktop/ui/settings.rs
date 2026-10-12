@@ -1,16 +1,20 @@
-//! Settings in four tabs (ADR 0026 §3), as the toolbar of a macOS settings window:
-//! General (the vaults, import, and the browser extension), Devices (each device that
-//! gets the questions, ADR 0025 §3e: this Mac, the other Macs through sync, the iPhones,
-//! and the relay), Security (unlock, the passphrase, and backup), and Advanced (the
-//! bouncer, calibration and learning, the command line, updates, and the keyboard
-//! shortcuts). Each change that is rare or risky opens a sheet.
+//! Settings in four tabs (ADR 0026 §3), as in the mockup: General (the vaults, import,
+//! and the browser extension), Devices (each device that gets the questions, ADR 0025
+//! §3e: this Mac, the other Macs through sync, the iPhones, and the relay; then sync and
+//! the iPhone app), Security (Touch ID, the passphrase, owner checks, and backup), and
+//! Advanced (the bouncer with calibration and learning, the command line, updates, and
+//! the keyboard shortcuts).
+//!
+//! Each tab is a list of groups of rows ([`rows`]): the label on the left, the value or
+//! the control on the right, and a short footnote only where it helps. Each change that
+//! is rare or risky opens a sheet.
 //!
 //! Settings of single agents are gone (ADR 0025 §3f): the agent screen shows, it does
 //! not configure.
 
 use std::path::PathBuf;
 
-use eframe::egui::{self, Pos2, Rect, Sense, Stroke, Vec2, WidgetInfo, WidgetType};
+use eframe::egui::{self, Color32, Pos2, Rect, Sense, Shape, Stroke, Vec2, WidgetInfo, WidgetType};
 
 use super::kit::{self, Font, Icon, Style, Tone};
 use super::{
@@ -26,6 +30,9 @@ use crate::desktop::owner_store::Ephemeral;
 use crate::desktop::unlock::UnlockMethod;
 use crate::desktop::{BrokerState, DesktopApp};
 use crate::relay::membership::{QuestionsAvailability, questions_availability};
+
+#[path = "settings_rows.rs"]
+pub(super) mod rows;
 
 #[cfg(test)]
 #[path = "settings_tests.rs"]
@@ -47,7 +54,7 @@ pub(crate) enum SettingsTab {
 }
 
 /// The old Notifications tab, for the Activity view that still opens it ("Open
-/// Settings" when macOS notifications are off). Its sections are in Devices now. Remove
+/// Settings" when macOS notifications are off). Its rows are in Devices now. Remove
 /// with the Activity view (ADR 0026 §2).
 #[allow(non_upper_case_globals)]
 impl SettingsTab {
@@ -78,8 +85,8 @@ pub(crate) fn open(app: &mut DesktopApp, tab: SettingsTab) {
 /// One tab of the toolbar: an icon above its label.
 const TAB_SIZE: Vec2 = Vec2::new(80.0, 50.0);
 const TAB_GAP: f32 = 4.0;
-/// The width of the four tabs, for the minimum size of the window.
-pub(super) const TAB_BAR_WIDTH: f32 = 4.0 * TAB_SIZE.x + 3.0 * TAB_GAP;
+/// The width of the four tabs.
+const TAB_BAR_WIDTH: f32 = 4.0 * TAB_SIZE.x + 3.0 * TAB_GAP;
 
 /// The toolbar of the Settings window: the four tabs, centered. The selected tab has a
 /// gray fill and the accent color.
@@ -106,9 +113,9 @@ fn tab_button(ui: &mut egui::Ui, tab: SettingsTab, selected: bool) -> egui::Resp
     }
     let painter = ui.painter();
     if selected {
-        painter.rect_filled(rect, 7, kit::FILL_HOVER);
+        painter.rect_filled(rect, 7, Color32::from_black_alpha(20));
     } else if response.hovered() {
-        painter.rect_filled(rect, 7, kit::FILL);
+        painter.rect_filled(rect, 7, Color32::from_black_alpha(10));
     }
     let color = if selected {
         kit::ACCENT
@@ -116,13 +123,13 @@ fn tab_button(ui: &mut egui::Ui, tab: SettingsTab, selected: bool) -> egui::Resp
         kit::SECONDARY
     };
     let icon = Rect::from_center_size(
-        Pos2::new(rect.center().x, rect.top() + 18.0),
+        Pos2::new(rect.center().x, rect.top() + 16.0),
         Vec2::splat(22.0),
     );
     paint_tab_icon(painter, icon, tab, color);
     let label = kit::galley(ui, kit::text(tab.label(), Font::Footnote));
     painter.galley(
-        Pos2::new(rect.center().x - label.size().x / 2.0, icon.bottom() + 3.0),
+        Pos2::new(rect.center().x - label.size().x / 2.0, icon.bottom() + 2.0),
         label,
         color,
     );
@@ -132,35 +139,67 @@ fn tab_button(ui: &mut egui::Ui, tab: SettingsTab, selected: bool) -> egui::Resp
     response
 }
 
-/// The icon of a tab: a gear, a laptop, a lock, and sliders, as in the mockup.
-fn paint_tab_icon(painter: &egui::Painter, rect: Rect, tab: SettingsTab, color: egui::Color32) {
-    let size = rect.width();
-    let p = |x: f32, y: f32| rect.min + Vec2::new(x * size, y * size);
-    let stroke = Stroke::new((size / 11.0).clamp(1.0, 2.6), color);
+/// The icon of a tab, as the line icons of the mockup on a 24-point grid: a gear, a
+/// laptop, a lock, and two sliders.
+fn paint_tab_icon(painter: &egui::Painter, rect: Rect, tab: SettingsTab, color: Color32) {
+    let unit = rect.width() / 24.0;
+    let p = |x: f32, y: f32| rect.min + Vec2::new(x, y) * unit;
+    let stroke = Stroke::new(1.7 * unit, color);
     match tab {
-        SettingsTab::General => kit::paint_icon(painter, rect, Icon::Gearshape, color),
-        SettingsTab::Security => kit::paint_icon(painter, rect, Icon::Lock, color),
+        SettingsTab::General => {
+            // Six teeth around the center, and the hole.
+            let center = p(12.0, 12.0);
+            let mut outline = Vec::new();
+            for tooth in 0..6 {
+                let base = (tooth as f32 * 60.0 - 90.0).to_radians();
+                for (offset, radius) in [(-26.0, 7.4), (-13.0, 10.0), (13.0, 10.0), (26.0, 7.4)] {
+                    let angle = base + f32::to_radians(offset);
+                    outline.push(center + Vec2::angled(angle) * radius * unit);
+                }
+            }
+            painter.add(Shape::closed_line(outline, stroke));
+            painter.circle_stroke(center, 3.0 * unit, stroke);
+        }
         SettingsTab::Devices => {
             painter.rect_stroke(
-                Rect::from_min_max(p(0.18, 0.2), p(0.82, 0.66)),
-                size * 0.08,
+                Rect::from_min_max(p(5.0, 5.0), p(19.0, 15.0)),
+                1.5 * unit,
                 stroke,
                 egui::StrokeKind::Middle,
             );
-            painter.line_segment([p(0.06, 0.8), p(0.94, 0.8)], stroke);
+            painter.line_segment([p(3.0, 18.5), p(21.0, 18.5)], stroke);
+        }
+        SettingsTab::Security => {
+            painter.rect_stroke(
+                Rect::from_min_max(p(5.5, 10.5), p(18.5, 20.5)),
+                2.0 * unit,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+            let mut shackle = vec![p(8.5, 10.5)];
+            for step in 0..=12 {
+                let angle = std::f32::consts::PI * (1.0 + step as f32 / 12.0);
+                shackle.push(p(12.0, 7.5) + Vec2::angled(angle) * 3.5 * unit);
+            }
+            shackle.push(p(15.5, 10.5));
+            painter.add(Shape::line(shackle, stroke));
         }
         SettingsTab::Advanced => {
-            let radius = 0.1;
-            for (y, knob) in [(0.24, 0.32), (0.5, 0.66), (0.76, 0.44)] {
-                painter.line_segment([p(0.08, y), p(knob - radius, y)], stroke);
-                painter.line_segment([p(knob + radius, y), p(0.92, y)], stroke);
-                painter.circle_stroke(p(knob, y), radius * size, stroke);
+            for (from, to) in [
+                ((5.0, 7.0), (14.0, 7.0)),
+                ((18.0, 7.0), (19.0, 7.0)),
+                ((5.0, 17.0), (8.0, 17.0)),
+                ((12.0, 17.0), (19.0, 17.0)),
+            ] {
+                painter.line_segment([p(from.0, from.1), p(to.0, to.1)], stroke);
             }
+            painter.circle_stroke(p(16.0, 7.0), 2.0 * unit, stroke);
+            painter.circle_stroke(p(10.0, 17.0), 2.0 * unit, stroke);
         }
     }
 }
 
-/// The sections of the selected tab. The tab bar is above them, in the window.
+/// The groups of the selected tab. The tab bar is above them, in the window.
 pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let tab = app.ui.settings_tab;
     // Each tab has its own IDs, so the focus of one tab never moves to another.
@@ -173,7 +212,6 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
         SettingsTab::Devices => {
             devices_section(app, ui);
             super::sync::settings_section(app, ui);
-            notifications_section(app, ui);
             super::companion::draw(app, ui);
         }
         SettingsTab::Security => {
@@ -182,31 +220,52 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
         }
         SettingsTab::Advanced => {
             broker_section(app, ui);
-            crate::desktop::learning_ui::settings_panel(app, ui);
             command_line_section(app, ui);
             super::updates::section(app, ui);
-            shortcuts_section(ui);
-            kit::section(ui, Some("About"), None, |s| {
-                s.labeled(
-                    "Contract",
-                    kit::text(crate::contracts::CONTRACT_VERSION.to_string(), Font::Body)
-                        .color(kit::SECONDARY),
-                );
-            });
+            about_section(ui);
         }
     });
+    // Room for the shadow of the last group.
+    ui.add_space(2.0);
+}
+
+/// A row that shows more rows below it: "Show" and "Hide". The state stays in the
+/// memory of egui.
+fn shows_more(ui: &egui::Ui, key: &str) -> (egui::Id, bool) {
+    let id = egui::Id::new(("apassy-settings-more", key));
+    (
+        id,
+        ui.ctx()
+            .data(|data| data.get_temp::<bool>(id))
+            .unwrap_or(false),
+    )
+}
+
+fn show_more_button(ui: &mut egui::Ui, id: egui::Id, open: bool, name: &str) {
+    let label = if open { "Hide" } else { "Show" };
+    let button = kit::small_button(ui, label, Style::Bordered);
+    let spoken = format!("{label} {name}");
+    ui.ctx()
+        .accesskit_node_builder(button.id, |node| node.set_label(spoken));
+    if button.clicked() {
+        ui.ctx().data_mut(|data| data.insert_temp(id, !open));
+    }
 }
 
 /// The words of the relay row (ADR 0025 §3e, contract relay-questions-v1). Off by
 /// default: only a relay membership with the purpose `questions` turns it on.
+/// `RELAY_QUESTIONS` names its switch for VoiceOver.
 pub(super) const RELAY_QUESTIONS: &str = "Send questions through the relay";
-pub(super) const RELAY_QUESTIONS_ON: &str = "On. Each question also goes, end-to-end encrypted, to your other devices of this vault. The relay sees no command and no credential.";
+/// The label of the relay row.
+pub(super) const RELAY_ROW: &str = "Relay";
+pub(super) const RELAY_QUESTIONS_ON: &str = "Questions also go to your other devices of this vault. The relay sees no command and no credential.";
 pub(super) const RELAY_QUESTIONS_OFF: &str =
-    "Off. Turn it on to answer on your other Macs and iPhones away from this network.";
-pub(super) const RELAY_QUESTIONS_NEW_TEAM: &str = "Off. This vault does not sync through the relay: turning it on makes a team on the relay for its questions only, with a team code from the operator.";
+    "Off. Turn it on to answer on your other devices away from this network.";
+pub(super) const RELAY_QUESTIONS_NEW_TEAM: &str = "Off. Turning it on makes a relay team for the questions only, with a team code from the operator.";
 pub(super) const RELAY_QUESTIONS_LOCKED: &str = "Unlock the vault to change it.";
-pub(super) const RELAY_QUESTIONS_JOIN: &str = "Off. This vault already has a questions team on the relay: turning it on joins that team with a link from a Mac that has it on.";
-pub(super) const RELAY_QUESTIONS_REMOVED: &str = "Off. This Mac was removed from the questions of this vault. Turning it on again needs a new key: a link from a Mac that has it on, and your confirmation there.";
+pub(super) const RELAY_QUESTIONS_JOIN: &str = "Off. Turning it on joins the questions team of this vault, with a link from a Mac that has it on.";
+pub(super) const RELAY_QUESTIONS_REMOVED: &str =
+    "Off. This Mac was removed. Turning it on again needs a link from a Mac that has it on.";
 /// The button that removes a device from the questions, after its confirmation.
 pub(super) const REMOVE_DEVICE: &str = "Remove…";
 /// The button that links an iPhone or another Mac to the questions team.
@@ -236,9 +295,16 @@ pub(super) fn set_relay_questions(app: &mut DesktopApp, on: bool, ctx: Option<&e
     }
 }
 
+/// What the owner chose for the macOS notifications of this Mac.
+enum NotifyAction {
+    Allow,
+    OpenSettings,
+    Check,
+}
+
 /// Settings > Devices: each device that gets the questions of the bouncer (ADR 0025
-/// §3e), the relay, and "Add a Device…". The sync of the vaults, macOS notifications,
-/// and the iPhone companion follow, each in its own section.
+/// §3e), the relay, and "Add device…". This Mac shows its macOS notifications. The sync
+/// of the vaults and the iPhone app follow, each in its own group.
 fn devices_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let others = super::sync::other_macs(app);
     let iphones = app
@@ -246,10 +312,8 @@ fn devices_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         .session
         .companion_devices()
         .map_or(0, |devices| devices.len());
-    let this_mac = match &app.owner.notifications {
-        Some(center) => center.view().channel.summary(),
-        None => "Notifications are not running".to_owned(),
-    };
+    let mac_name = app.companion.mac_name().map(str::to_owned);
+    let notifications = app.owner.notifications.as_ref().map(|center| center.view());
     let mut list = None;
     let relay_state = relay_questions_state(app);
     let relay_devices = if matches!(relay_state, Some(QuestionsAvailability::On { .. })) {
@@ -269,127 +333,158 @@ fn devices_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let mut switch_relay = None;
     let mut add_relay_iphone = false;
     let mut remove_device = None;
-    kit::section(
-        ui,
-        Some("Questions go to every device"),
-        Some(
-            "A run that waits for you shows on this Mac and on each paired iPhone. The first answer counts. Other Macs get the vault through sync.",
-        ),
-        |s| {
-            s.labeled(
-                "This Mac",
-                kit::text(this_mac, Font::Body).color(kit::SECONDARY),
-            );
-            s.row(|ui| {
-                egui::Sides::new().shrink_left().truncate().show(
+    let mut notify_action = None;
+    rows::group(ui, Some("Questions go to every device"), |g| {
+        // This Mac, with its macOS notifications (goal items N1 to N4).
+        let (label, prefix) = match &mac_name {
+            Some(name) => (name.clone(), "This Mac · "),
+            None => ("This Mac".to_owned(), ""),
+        };
+        g.row(|ui| {
+            let Some(view) = &notifications else {
+                rows::one_line(
                     ui,
-                    |ui| ui.label(kit::text("Other Macs", Font::Body).color(kit::LABEL)),
-                    |ui| {
-                        if let Some(id) = &others.relay
-                            && kit::small_button(ui, "Devices…", Style::Bordered).clicked()
-                        {
-                            list = Some(id.clone());
-                        }
-                        ui.label(kit::text(&others.words, Font::Body).color(kit::SECONDARY));
-                    },
+                    rows::label_text(&label).into(),
+                    Some(rows::value(format!("{prefix}Notifications not running"))),
+                    |_| {},
                 );
-            });
-            let phones = match iphones {
-                0 => "None paired".to_owned(),
-                1 => "1 paired".to_owned(),
-                count => format!("{count} paired"),
+                ui.add(
+                    egui::Label::new(rows::note(
+                        "They start with the Apassy window and the broker. Questions still wait in Decisions.",
+                    ))
+                    .wrap(),
+                );
+                return;
             };
-            s.labeled(
-                "iPhones",
-                kit::text(phones, Font::Body).color(kit::SECONDARY),
-            );
-            // Off by default; on only with a relay membership for the questions.
-            let (mut on, enabled, note) = match &relay_state {
-                Some(QuestionsAvailability::On { .. }) => (true, true, RELAY_QUESTIONS_ON),
-                Some(QuestionsAvailability::CanTurnOn { .. }) => (false, true, RELAY_QUESTIONS_OFF),
-                Some(QuestionsAvailability::NeedsTeam) => (false, true, RELAY_QUESTIONS_NEW_TEAM),
-                Some(QuestionsAvailability::JoinTeam { .. }) => (false, true, RELAY_QUESTIONS_JOIN),
-                Some(QuestionsAvailability::Removed { sync: false, .. }) => {
-                    (false, true, RELAY_QUESTIONS_REMOVED)
-                }
-                Some(QuestionsAvailability::Removed { sync: true, .. }) => {
-                    (false, false, super::sync::questions::REMOVED_SYNC)
-                }
-                None => (false, false, RELAY_QUESTIONS_LOCKED),
+            let channel = &view.channel;
+            let words = if channel.can_deliver() {
+                "Notifications on"
+            } else if channel.needs_permission() {
+                "Notifications not allowed yet"
+            } else {
+                "Notifications off"
             };
-            let was = on;
-            s.row(|ui| {
-                egui::Sides::new()
-                    .shrink_left()
-                    .wrap_mode(egui::TextWrapMode::Wrap)
-                    .show(
-                        ui,
-                        |ui| {
-                            ui.vertical(|ui| {
-                                ui.label(kit::text(RELAY_QUESTIONS, Font::Body).color(kit::LABEL));
-                                kit::note(ui, note);
-                            });
-                        },
-                        |ui| {
-                            ui.add_enabled_ui(enabled, |ui| {
-                                kit::toggle(ui, &mut on, RELAY_QUESTIONS)
-                            });
-                        },
-                    );
-            });
-            if on != was {
-                switch_relay = Some(on);
-            }
-            // A relay that predates the questions, and other problems of the relay.
-            if let Some(problem) = &relay_problem {
-                s.row(|ui| kit::tone_note(ui, problem, Tone::Critical));
-            }
-            // The devices that get the questions through the relay, "Remove…" for each
-            // other device, and a new device.
-            for device in &relay_devices {
-                s.row(|ui| {
-                    egui::Sides::new().shrink_left().truncate().show(
-                        ui,
-                        |ui| {
-                            ui.vertical(|ui| {
-                                ui.label(kit::text(&device.name, Font::Body).color(kit::LABEL));
-                                kit::note(ui, &device.words);
-                            });
-                        },
-                        |ui| {
-                            if device.removable
-                                && kit::small_button(ui, REMOVE_DEVICE, Style::Destructive)
-                                    .clicked()
-                            {
-                                remove_device = Some(device.uuid.clone());
-                            }
-                        },
-                    );
-                });
-            }
-            if was {
-                s.row(|ui| {
-                    egui::Sides::new().shrink_left().truncate().show(
-                        ui,
-                        |ui| {
-                            kit::note(
-                                ui,
-                                "An iPhone answers the questions with Face ID, also away from this network.",
+            rows::one_line(
+                ui,
+                rows::label_text(&label).into(),
+                Some(rows::value(format!("{prefix}{words}"))),
+                |ui| {
+                    if channel.needs_permission()
+                        && kit::small_button(ui, "Allow…", Style::Prominent)
+                            .on_hover_text(
+                                "macOS shows a prompt for \"Apassy\" at the top right of the screen. Select \"Allow\".",
                             )
-                        },
-                        |ui| {
-                            add_relay_iphone =
-                                kit::small_button(ui, ADD_IPHONE, Style::Bordered).clicked();
-                        },
-                    );
-                });
+                            .clicked()
+                    {
+                        notify_action = Some(NotifyAction::Allow);
+                    }
+                    if channel.needs_settings()
+                        && kit::small_button(ui, "Open System Settings…", Style::Bordered)
+                            .on_hover_text(
+                                "System Settings > Notifications > Apassy. Turn on \"Allow notifications\" and select \"Banners\".",
+                            )
+                            .clicked()
+                    {
+                        notify_action = Some(NotifyAction::OpenSettings);
+                    }
+                    if !channel.can_deliver()
+                        && kit::small_button(ui, "Check again", Style::Bordered).clicked()
+                    {
+                        notify_action = Some(NotifyAction::Check);
+                    }
+                },
+            );
+            // What to do, only while notifications do not work.
+            if !channel.can_deliver() {
+                ui.add(egui::Label::new(rows::note(&channel.summary())).wrap());
             }
-        },
-    );
+            let failed = view
+                .deliveries
+                .values()
+                .filter(|delivery| matches!(delivery, Delivery::Failed(_)))
+                .count();
+            if failed > 0 {
+                ui.add(
+                    egui::Label::new(
+                        kit::text(
+                            format!("{failed} notification(s) failed. Questions still wait in Decisions."),
+                            Font::Callout,
+                        )
+                        .color(Tone::Critical.text()),
+                    )
+                    .wrap(),
+                );
+            }
+        });
+        g.line("Other Macs", Some(rows::value(&others.words)), |ui| {
+            if others.relay.is_some()
+                && kit::small_button(ui, "Devices…", Style::Bordered).clicked()
+            {
+                list = others.relay.clone();
+            }
+        });
+        let phones = match iphones {
+            0 => "None paired".to_owned(),
+            1 => "1 paired".to_owned(),
+            count => format!("{count} paired"),
+        };
+        g.line("iPhones", Some(rows::value(phones)), |_| {});
+        // Off by default; on only with a relay membership for the questions.
+        let (mut on, enabled, note) = match &relay_state {
+            Some(QuestionsAvailability::On { .. }) => (true, true, RELAY_QUESTIONS_ON),
+            Some(QuestionsAvailability::CanTurnOn { .. }) => (false, true, RELAY_QUESTIONS_OFF),
+            Some(QuestionsAvailability::NeedsTeam) => (false, true, RELAY_QUESTIONS_NEW_TEAM),
+            Some(QuestionsAvailability::JoinTeam { .. }) => (false, true, RELAY_QUESTIONS_JOIN),
+            Some(QuestionsAvailability::Removed { sync: false, .. }) => {
+                (false, true, RELAY_QUESTIONS_REMOVED)
+            }
+            Some(QuestionsAvailability::Removed { sync: true, .. }) => {
+                (false, false, super::sync::questions::REMOVED_SYNC)
+            }
+            None => (false, false, RELAY_QUESTIONS_LOCKED),
+        };
+        let was = on;
+        let value = was.then(|| rows::value("End-to-end encrypted"));
+        g.line_note(RELAY_ROW, value, Some(rows::note(note)), |ui| {
+            ui.add_enabled_ui(enabled, |ui| kit::toggle(ui, &mut on, RELAY_QUESTIONS));
+        });
+        if on != was {
+            switch_relay = Some(on);
+        }
+        // A relay that predates the questions, and other problems of the relay.
+        if let Some(problem) = &relay_problem {
+            g.tone_row(problem, Tone::Critical.text());
+        }
+        // The devices that get the questions through the relay, "Remove…" for each
+        // other device, and a new device.
+        for device in &relay_devices {
+            g.line_note(
+                device.name.as_str(),
+                None,
+                Some(rows::note(&device.words)),
+                |ui| {
+                    if device.removable
+                        && kit::small_button(ui, REMOVE_DEVICE, Style::Destructive).clicked()
+                    {
+                        remove_device = Some(device.uuid.clone());
+                    }
+                },
+            );
+        }
+        if was {
+            add_relay_iphone = g
+                .link(ADD_IPHONE)
+                .on_hover_text(
+                    "An iPhone answers the questions with Face ID, also away from this network.",
+                )
+                .clicked();
+        }
+    });
     let mut add_mac = false;
     let mut add_iphone = false;
+    ui.add_space(10.0);
     ui.horizontal(|ui| {
-        let add = kit::button(ui, "Add a Device…", Style::Bordered);
+        let add = kit::button(ui, "Add device…", Style::Bordered);
         egui::Popup::menu(&add).show(|ui| {
             ui.set_min_width(200.0);
             add_mac = ui
@@ -404,8 +499,23 @@ fn devices_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             add_iphone = ui.selectable_label(false, "iPhone…").clicked();
         });
     });
-    ui.add_space(20.0);
     let ctx = ui.ctx().clone();
+    if let Some(action) = notify_action
+        && let Some(center) = &app.owner.notifications
+    {
+        match action {
+            // The notifier (Contents/Helpers/ApassyNotify.app, display name "Apassy")
+            // asks macOS. After a denial, macOS shows no new prompt.
+            NotifyAction::Allow => center.request_permission(),
+            NotifyAction::OpenSettings => match notify::open_notification_settings() {
+                Ok(()) => center.refresh_status(),
+                Err(err) => center.report_problem(format!(
+                    "Apassy cannot open System Settings ({err}). Open System Settings > Notifications > Apassy."
+                )),
+            },
+            NotifyAction::Check => center.refresh_status(),
+        }
+    }
     if let Some(on) = switch_relay {
         set_relay_questions(app, on, Some(&ctx));
     }
@@ -422,7 +532,7 @@ fn devices_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
 }
 
-/// "Add a Device…" > "iPhone…": the iPhone listener goes on, and the pairing code of
+/// "Add device…" > "iPhone…": the iPhone listener goes on, and the pairing code of
 /// "Pair an iPhone" shows below.
 fn add_an_iphone(app: &mut DesktopApp, ctx: &egui::Context) {
     let on = app
@@ -438,78 +548,113 @@ fn add_an_iphone(app: &mut DesktopApp, ctx: &egui::Context) {
     }
 }
 
+/// Settings > Security > Unlock: Touch ID, the passphrase, and the owner checks.
 fn security_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    let touch_id_for_checks = app.owner.touch_id_note().map_or_else(
-        || "Touch ID for owner checks: available.".to_owned(),
-        |note| format!("Touch ID for owner checks: {note}"),
-    );
     let mut change = false;
-    kit::section(ui, Some("Unlock"), Some(&touch_id_for_checks), |s| {
-        let gray = egui::Color32::from_rgb(99, 99, 104);
-        change = s
-            .nav(
-                Some((Icon::Lock, gray)),
-                "Change passphrase",
-                Some("Old backups still need the old passphrase."),
-                None,
-            )
-            .clicked();
-        s.row(|ui| unlock_method(app, ui));
+    let ctx = ui.ctx().clone();
+    let setup_id = egui::Id::new("apassy-touch-id-setup");
+    let mut setup = ctx
+        .data(|data| data.get_temp::<bool>(setup_id))
+        .unwrap_or(false);
+    let mut action = None;
+    rows::group(ui, Some("Unlock"), |g| {
+        action = touch_id_rows(app, g, &mut setup);
+        g.line("Passphrase", None, |ui| {
+            change = kit::small_button(ui, "Change passphrase…", Style::Bordered)
+                .on_hover_text("Old backups still need the old passphrase.")
+                .clicked();
+        });
+        // Touch ID for owner checks, with the reason when it is not available.
+        let note = app.owner.touch_id_note();
+        g.line("Owner checks", None, |ui| {
+            let words = if note.is_some() {
+                "Passphrase"
+            } else {
+                "Touch ID"
+            };
+            let value = ui.label(rows::value(words));
+            if let Some(note) = &note {
+                value.on_hover_text(format!("Touch ID for owner checks: {note}"));
+            }
+        });
     });
+    ctx.data_mut(|data| data.insert_temp(setup_id, setup));
+    match action {
+        Some(TouchIdAction::Off) => app.start_touch_id_off(
+            Some(&ctx),
+            "Touch ID unlock is off. Apassy deleted the unlock key from the keychain.",
+        ),
+        Some(TouchIdAction::On) => app.start_touch_id_setup(&ctx),
+        None => {}
+    }
     if change {
         app.ui.sheet = Some(Sheet::ChangePassphrase);
     }
 }
 
-/// The unlock method: passphrase or Touch ID (goal items A2, A3). The passphrase stays
-/// the root key.
-fn unlock_method(app: &mut DesktopApp, ui: &mut egui::Ui) {
+enum TouchIdAction {
+    On,
+    Off,
+}
+
+/// The Touch ID switch (goal items A2, A3). The passphrase stays the root key. "On"
+/// first asks for the passphrase in a row below; "Off" acts at once.
+fn touch_id_rows(
+    app: &mut DesktopApp,
+    g: &mut rows::Group<'_>,
+    setup: &mut bool,
+) -> Option<TouchIdAction> {
     let unlock = &app.owner.unlock;
     let busy = unlock.reading.is_some() || unlock.changing.is_some();
     let setting = unlock.setting.clone();
-    let current = match &setting {
-        Some(setting) if setting.method == UnlockMethod::TouchId => {
-            "Touch ID. The passphrase still works."
-        }
-        _ => "Passphrase",
-    };
-    egui::Sides::new().show(
-        ui,
-        |ui| ui.label(kit::text("Unlock method", Font::Body).color(kit::LABEL)),
-        |ui| ui.label(kit::text(current, Font::Body).color(kit::SECONDARY)),
-    );
-    if busy {
-        kit::note(
-            ui,
+    let touch_id = setting
+        .as_ref()
+        .is_some_and(|setting| setting.method == UnlockMethod::TouchId);
+    let can_set_up = setting
+        .as_ref()
+        .is_some_and(|setting| setting.method == UnlockMethod::Passphrase && setting.can_set_up);
+    *setup &= can_set_up && !busy;
+    let shown = touch_id || *setup;
+    let mut on = shown;
+    let note = if busy {
+        Some(rows::note(
             "Apassy is reading or changing the Touch ID unlock setting.",
-        );
-        return;
-    }
-    let Some(setting) = setting else {
-        return;
+        ))
+    } else {
+        setting
+            .as_ref()
+            .and_then(|setting| setting.note.as_deref())
+            .map(|note| kit::text(note, Font::Callout).color(Tone::Warning.text()))
     };
-    if let Some(note) = &setting.note {
-        kit::tone_note(ui, note, Tone::Warning);
-    }
-    let ctx = ui.ctx().clone();
-    match setting.method {
-        UnlockMethod::TouchId => {
-            if kit::small_button(ui, "Turn off Touch ID unlock", Style::Bordered).clicked() {
-                app.start_touch_id_off(
-                    Some(&ctx),
-                    "Touch ID unlock is off. Apassy deleted the unlock key from the keychain.",
-                );
-            }
+    let value = touch_id.then(|| rows::value("The passphrase still works"));
+    g.line_note("Touch ID", value, note, |ui| {
+        ui.add_enabled_ui(!busy && (touch_id || can_set_up), |ui| {
+            kit::toggle(ui, &mut on, "Touch ID unlock")
+        });
+    });
+    let mut action = None;
+    if on != shown {
+        if touch_id {
+            action = Some(TouchIdAction::Off);
+        } else {
+            *setup = on;
         }
-        UnlockMethod::Passphrase if setting.can_set_up => {
-            kit::note(
-                ui,
-                "Touch ID setup, backup restore, and recovery need the passphrase. A fingerprint change turns Touch ID unlock off.",
-            );
-            ui.horizontal(|ui| {
+    }
+    if *setup {
+        g.line_note(
+            "Passphrase",
+            None,
+            Some(rows::note(
+                "Touch ID setup, a restore, and recovery need the passphrase. A fingerprint change turns Touch ID unlock off.",
+            )),
+            |ui| {
+                let ctx = ui.ctx().clone();
+                if kit::small_button(ui, "Turn on", Style::Prominent).clicked() {
+                    action = Some(TouchIdAction::On);
+                }
                 let field = ui
                     .scope(|ui| {
-                        ui.set_max_width(220.0);
+                        ui.set_max_width(200.0);
                         secure_input(
                             ui,
                             TOUCH_ID_SETUP_FIELD,
@@ -522,50 +667,45 @@ fn unlock_method(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 ctx.accesskit_node_builder(field.id, |node| {
                     node.set_label("Passphrase for Touch ID unlock");
                 });
-                let submit =
-                    field.lost_focus() && ctx.input(|input| input.key_pressed(egui::Key::Enter));
-                if kit::small_button(ui, "Turn on Touch ID unlock", Style::Bordered).clicked()
-                    || submit
-                {
-                    app.start_touch_id_setup(&ctx);
+                if field.lost_focus() && ctx.input(|input| input.key_pressed(egui::Key::Enter)) {
+                    action = Some(TouchIdAction::On);
                 }
-            });
-        }
-        UnlockMethod::Passphrase => {}
+            },
+        );
     }
+    action
 }
 
+/// Settings > Security > Backup.
 fn backup_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let mut open = None;
-    kit::section(
+    rows::section(
         ui,
         Some("Backup"),
         Some(
-            "A backup is an encrypted copy of the vault file. Keep it in a safe place, for example on an external disk.",
+            "The vault locks after a backup. Keep backups in a safe place, for example on an external disk.",
         ),
-        |s| {
-            let green = egui::Color32::from_rgb(52, 170, 90);
-            if s.nav(
-                Some((Icon::Folder, green)),
-                "Back up now",
-                Some("The vault locks after the backup."),
-                None,
-            )
-            .clicked()
-            {
-                open = Some(Sheet::Backup);
-            }
-            let orange = egui::Color32::from_rgb(255, 149, 0);
-            if s.nav(
-                Some((Icon::Clock, orange)),
-                "Restore from a backup",
-                Some("Agents are revoked, and each credential waits for your review."),
-                None,
-            )
-            .clicked()
-            {
-                open = Some(Sheet::Restore);
-            }
+        |g| {
+            g.line(
+                "Backup",
+                Some(rows::value("Encrypted copy of the vault")),
+                |ui| {
+                    if kit::small_button(ui, "Back up now…", Style::Bordered)
+                        .on_hover_text("The vault locks after the backup.")
+                        .clicked()
+                    {
+                        open = Some(Sheet::Backup);
+                    }
+                },
+            );
+            g.line("Restore from a backup", None, |ui| {
+                if kit::small_button(ui, "Restore…", Style::Bordered)
+                    .on_hover_text("Agents are revoked, and each credential waits for your review.")
+                    .clicked()
+                {
+                    open = Some(Sheet::Restore);
+                }
+            });
         },
     );
     if open.is_some() {
@@ -573,132 +713,54 @@ fn backup_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
 }
 
-/// The real notification channel (goal items N1 to N4).
-fn notifications_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    kit::section(
-        ui,
-        Some("Notifications"),
-        Some(
-            "A waiting approval or a blocked request causes a macOS notification. The notification shows only the agent name and the event type. You decide in this app.",
-        ),
-        |s| {
-            let Some(center) = &app.owner.notifications else {
-                s.row(|ui| {
-                    kit::tone_note(
-                        ui,
-                        "Notifications: not running. The notification center starts with the Apassy window and the broker. Questions still wait in Decisions.",
-                        Tone::Warning,
-                    );
-                });
-                return;
-            };
-            let view = center.view();
-            let tone = if view.channel.can_deliver() {
-                Tone::Good
-            } else {
-                Tone::Warning
-            };
-            s.labeled(
-                "Status",
-                kit::text(view.channel.summary(), Font::Callout).color(tone.text()),
-            );
-            let failed = view
-                .deliveries
-                .values()
-                .filter(|delivery| matches!(delivery, Delivery::Failed(_)))
-                .count();
-            if failed > 0 {
-                s.row(|ui| {
-                    kit::tone_note(
-                        ui,
-                        format!("{failed} notification(s) failed. Questions still wait in Decisions, and the other events are in the activity log (apassy activity)."),
-                        Tone::Critical,
-                    );
-                });
-            }
-            // The actions sit at the trailing edge, as "Check now" in Settings > Advanced.
-            // The layout runs right to left: the main action comes first, so it is the
-            // rightmost button.
-            s.row(|ui| {
-                // One control high: in the page scroll area the free height is unbounded.
-                let size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
-                let layout = egui::Layout::right_to_left(egui::Align::Center);
-                ui.allocate_ui_with_layout(size, layout, |ui| {
-                    // The notifier (Contents/Helpers/ApassyNotify.app, display name
-                    // "Apassy") asks macOS. The button hides while the prompt shows.
-                    if view.channel.needs_permission()
-                        && kit::small_button(ui, "Allow notifications", Style::Prominent)
-                            .on_hover_text(
-                                "macOS shows a prompt for \"Apassy\" at the top right of the screen. Select \"Allow\".",
-                            )
-                            .clicked()
-                    {
-                        center.request_permission();
-                    }
-                    // After a denial, macOS shows no new prompt. Only System Settings helps.
-                    if view.channel.needs_settings()
-                        && kit::small_button(ui, "Open System Settings", Style::Prominent)
-                            .on_hover_text(
-                                "System Settings > Notifications > Apassy. Turn on \"Allow notifications\" and select \"Banners\".",
-                            )
-                            .clicked()
-                    {
-                        match notify::open_notification_settings() {
-                            Ok(()) => center.refresh_status(),
-                            Err(err) => center.report_problem(format!(
-                                "Apassy cannot open System Settings ({err}). Open System Settings > Notifications > Apassy."
-                            )),
-                        }
-                    }
-                    if kit::small_button(ui, "Check again", Style::Bordered).clicked() {
-                        center.refresh_status();
-                    }
-                });
-            });
-        },
-    );
-}
-
 /// The keyboard shortcuts of the window.
-fn shortcuts_section(ui: &mut egui::Ui) {
-    kit::section(
-        ui,
-        Some("Keyboard shortcuts"),
-        Some(
-            "⌘H is the macOS shortcut for \"Hide Apassy\". The app menu takes it before the window, so showing values uses ⌘⇧H. The page scrolls to the focused control, and a closed sheet gives the focus back to the control that opened it.",
-        ),
-        |s| {
-            for (keys, action) in [
-                ("⌘1 ⌘2 ⌘3", "All credentials, Decisions, Agents"),
-                ("⌘,", "Settings"),
-                ("⌘W, Esc", "Close Settings"),
-                ("⌘[", "Back to the list"),
-                ("⌘N", "New credential"),
-                ("⌘F", "Search credentials"),
-                ("⌘L", "Lock the vault"),
-                ("⌃⌘S", "Hide or show the sidebar"),
-                ("Return, ⌘S", "The default action of the open sheet"),
-                (
-                    "⌘⇧H",
-                    "Show or hide the secret values of the open credential",
-                ),
-                ("Tab, ⇧Tab", "Move to the next or the previous control"),
-                ("← → ↑ ↓", "Move to the nearest control"),
-                (
-                    "Space",
-                    "Press the control, or select the next option of a picker",
-                ),
-                ("← → on a picker", "Select the previous or the next option"),
-                (
-                    "Page Up, Page Down, Home, End",
-                    "Scroll the page or the sheet",
-                ),
-                ("Esc", "Close the sheet, a menu, or an error message"),
-            ] {
-                s.labeled(action, kit::text(keys, Font::Mono).color(kit::SECONDARY));
+const SHORTCUTS: [(&str, &str); 16] = [
+    ("⌘1 ⌘2 ⌘3", "All credentials, Decisions, Agents"),
+    ("⌘,", "Settings"),
+    ("⌘W, Esc", "Close Settings"),
+    ("⌘[", "Back to the list"),
+    ("⌘N", "New credential"),
+    ("⌘F", "Search credentials"),
+    ("⌘L", "Lock the vault"),
+    ("⌃⌘S", "Hide or show the sidebar"),
+    ("Return, ⌘S", "The default action of the open sheet"),
+    ("⌘⇧H", "Show or hide the secret values"),
+    ("Tab, ⇧Tab", "Next or previous control"),
+    ("← → ↑ ↓", "Nearest control"),
+    ("Space", "Press the control, or the next option"),
+    ("← → on a picker", "Previous or next option"),
+    (
+        "Page Up, Page Down, Home, End",
+        "Scroll the page or the sheet",
+    ),
+    ("Esc", "Close the sheet, a menu, or an error"),
+];
+
+/// Settings > Advanced > About: the keyboard shortcuts behind "Show", and the contract.
+fn about_section(ui: &mut egui::Ui) {
+    let (id, open) = shows_more(ui, "shortcuts");
+    rows::group(ui, Some("About"), |g| {
+        g.line("Keyboard shortcuts", None, |ui| {
+            show_more_button(ui, id, open, "keyboard shortcuts");
+        });
+        if open {
+            for (keys, action) in SHORTCUTS {
+                g.line(
+                    action,
+                    Some(kit::text(keys, Font::Mono).color(kit::SECONDARY)),
+                    |_| {},
+                );
             }
-        },
-    );
+            g.note_row(
+                "⌘H stays the macOS shortcut for \"Hide Apassy\", so showing values uses ⌘⇧H.",
+            );
+        }
+        g.line(
+            "Contract",
+            Some(rows::value(crate::contracts::CONTRACT_VERSION.to_string())),
+            |_| {},
+        );
+    });
 }
 
 /// "Asked you": how often a run waited for the owner in the last 7 days.
@@ -710,73 +772,31 @@ fn asked_words(asked: u32) -> String {
     }
 }
 
-/// The broker, the bouncer, and its model server (ADR 0024), with how often the bouncer
-/// asked you this week.
+/// Settings > Advanced > Bouncer: the model server (ADR 0024) in one row with its state
+/// and its action, how it starts, how often the bouncer asked you this week, the broker,
+/// and calibration and learning behind "Show".
 fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let server = app.model_server.clone();
     let status = server.as_ref().map(|server| server.status());
     let asked = crate::desktop::learning_ui::asked_this_week(app);
+    let (learning_id, learning_open) = shows_more(ui, "learning");
     let mut action = None;
-    kit::section(
-        ui,
-        Some("Broker and bouncer"),
-        Some(
-            "A locked vault refuses all agent requests. Destinations use https://, or http:// on this computer only. The broker does not follow redirects.",
-        ),
-        |s| {
-            match &app.broker {
-                BrokerState::Running(handle) => {
-                    s.labeled(
-                        "Broker",
-                        kit::text("Accepts agent requests", Font::Callout).color(Tone::Good.text()),
-                    );
-                    let bouncer = handle.bouncer_url().map_or_else(
-                        || {
-                            kit::text("Not set. Every run waits for you.", Font::Callout)
-                                .color(Tone::Warning.text())
-                        },
-                        |url| kit::text(url, Font::Callout).color(kit::SECONDARY),
-                    );
-                    s.labeled("Bouncer", bouncer);
-                    s.labeled(
-                        "Socket",
-                        kit::text(handle.socket_path().display().to_string(), Font::MonoSmall)
-                            .color(kit::SECONDARY),
-                    );
-                    if handle.bouncer_url().is_some() {
-                        s.row(|ui| {
-                            kit::note(
-                                ui,
-                                "A Jev-compatible bouncer, for example Laya. If it does not answer, every run waits for you.",
-                            );
-                        });
-                    }
-                }
-                BrokerState::Failed(message) => {
-                    s.labeled(
-                        "Broker",
-                        kit::text(message, Font::Callout).color(Tone::Critical.text()),
-                    );
-                }
-                BrokerState::NotStarted => {
-                    s.labeled(
-                        "Broker",
-                        kit::text("Starts with the desktop window", Font::Callout)
-                            .color(kit::SECONDARY),
-                    );
-                }
-            }
-            if let Some(asked) = asked {
-                s.labeled(
-                    "Asked you",
-                    kit::text(asked_words(asked), Font::Callout).color(kit::SECONDARY),
-                );
-            }
-            if let Some(status) = &status {
-                action = model_server_rows(s, status);
-            }
-        },
-    );
+    rows::group(ui, Some("Bouncer"), |g| {
+        if let Some(status) = &status {
+            action = model_server_rows(g, status);
+        }
+        if let Some(asked) = asked {
+            g.line("Asked you", Some(rows::value(asked_words(asked))), |_| {});
+        }
+        broker_rows(app, g);
+        g.line("Calibration and learning", None, |ui| {
+            show_more_button(ui, learning_id, learning_open, "calibration and learning");
+        });
+    });
+    if learning_open {
+        ui.add_space(12.0);
+        crate::desktop::learning_ui::settings_panel(app, ui);
+    }
     let Some(server) = server else {
         return;
     };
@@ -808,7 +828,7 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         }
         Some(ModelAction::CancelInstall) => {
             server.cancel_install();
-            app.set_note("The install stopped. \"Install the model\" starts it again.");
+            app.set_note("The install stopped. \"Install…\" starts it again.");
         }
         Some(ModelAction::OpenLog(log)) => {
             if !log.is_file() {
@@ -819,7 +839,51 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 app.set_err(format!("Apassy cannot open {} ({err}).", log.display()));
             }
         }
+        Some(ModelAction::Copy(text)) => {
+            ui.ctx().copy_text(text);
+            app.set_ok("The commands are copied. Paste them in Terminal.");
+        }
         None => {}
+    }
+}
+
+/// The broker: whether it accepts agent requests, the bouncer address, and the socket
+/// on hover.
+fn broker_rows(app: &DesktopApp, g: &mut rows::Group<'_>) {
+    match &app.broker {
+        BrokerState::Running(handle) => {
+            let socket = handle.socket_path().display().to_string();
+            g.line("Broker", None, |ui| {
+                ui.label(
+                    kit::text("Accepts agent requests", Font::Body).color(Tone::Good.text()),
+                )
+                .on_hover_text(format!(
+                    "Socket: {socket}\nA locked vault refuses all agent requests. Destinations use https://, or http:// on this computer only. The broker does not follow redirects."
+                ));
+            });
+            match handle.bouncer_url() {
+                Some(url) => g.line("Address", Some(rows::value(url)), |_| {}),
+                None => g.line(
+                    "Address",
+                    Some(
+                        kit::text("Not set. Every run waits for you.", Font::Body)
+                            .color(Tone::Warning.text()),
+                    ),
+                    |_| {},
+                ),
+            }
+        }
+        BrokerState::Failed(message) => g.line_note(
+            "Broker",
+            None,
+            Some(kit::text(message, Font::Callout).color(Tone::Critical.text())),
+            |_| {},
+        ),
+        BrokerState::NotStarted => g.line(
+            "Broker",
+            Some(rows::value("Starts with the desktop window")),
+            |_| {},
+        ),
     }
 }
 
@@ -831,8 +895,9 @@ enum ModelAction {
     OpenLog(PathBuf),
     Install,
     CancelInstall,
+    /// Commands for Terminal, to the pasteboard. They hold no secret.
+    Copy(String),
 }
-
 /// The state in words, its tone, and a note.
 fn model_server_words(status: &Status) -> (String, Tone, Option<String>) {
     let url = &status.url;
@@ -941,8 +1006,8 @@ fn model_server_words(status: &Status) -> (String, Tone, Option<String>) {
 }
 
 /// The install commands of `docs/operations/bouncer.md` section 1, with the paths of
-/// this Mac.
-fn install_commands(status: &Status) -> String {
+/// this Mac. The menu of the "Model" row copies them.
+pub(super) fn install_commands(status: &Status) -> String {
     let dir = shell_word(&status.laya_dir.to_string_lossy());
     let mut commands =
         format!("D={dir}\nmkdir -p \"$D\" && chmod 700 \"$(dirname \"$D\")\" && cd \"$D\"");
@@ -975,89 +1040,60 @@ fn fetch_command(tools: &std::path::Path) -> String {
     )
 }
 
-/// "Start the model", "Stop after", the status, the install note, and the buttons.
-fn model_server_rows(s: &mut kit::Section<'_>, status: &Status) -> Option<ModelAction> {
+/// The "Model" row, how the model starts, and the notes of an install or a problem.
+fn model_server_rows(g: &mut rows::Group<'_>, status: &Status) -> Option<ModelAction> {
     let mut action = None;
     let current = status.settings.start;
-    s.field("Start the model", |ui| {
-        let mut mode = current;
-        let options: Vec<(StartMode, String)> = StartMode::ALL
-            .iter()
-            .map(|mode| (*mode, mode.label().to_owned()))
-            .collect();
-        let response = kit::picker(
-            ui,
-            "bouncer-start",
-            &mut mode,
-            &options,
-            current.label(),
-            220.0,
-        );
-        if mode != current {
-            action = Some(ModelAction::Settings(BouncerSettings {
-                start: mode,
-                ..status.settings.clone()
-            }));
-        }
-        response
-    });
-    if current == StartMode::WhenNeeded {
-        let minutes = status.settings.idle_minutes;
-        s.field("Stop after", |ui| {
-            let mut chosen = minutes;
-            let options: Vec<(u32, String)> = IDLE_CHOICES
-                .iter()
-                .map(|minutes| (*minutes, format!("{minutes} minutes without a run")))
-                .collect();
-            let label = format!("{minutes} minutes without a run");
-            let response = kit::picker(ui, "bouncer-idle", &mut chosen, &options, label, 220.0);
-            if chosen != minutes {
-                action = Some(ModelAction::Settings(BouncerSettings {
-                    idle_minutes: chosen,
-                    ..status.settings.clone()
-                }));
-            }
-            response
-        });
-    }
-    let (words, tone, note) = model_server_words(status);
-    s.status(
-        "Status",
-        note.as_deref(),
-        kit::text(words, Font::Callout).color(tone.text()),
+    let (words, tone, status_note) = model_server_words(status);
+    let install = install_offer(status);
+    let note = install.note.clone().or(status_note);
+    let active = matches!(
+        status.state,
+        ServerState::Starting { .. } | ServerState::Running { .. }
     );
-    if let ServerState::Failed { log_tail, .. } = &status.state
-        && !log_tail.is_empty()
-    {
-        s.row(|ui| {
-            kit::note(ui, "The last lines of the log:");
-            kit::code_block(ui, &log_tail.join("\n"), log_tail.len());
-        });
-    }
-    if status.url_from_env {
-        s.row(|ui| {
-            kit::note(
-                ui,
-                "APASSY_BOUNCER_URL sets the address. It wins over the setting.",
-            )
-        });
-    }
-    if let Some(next) = install_rows(s, status) {
-        action = Some(next);
-    }
-    launch_agent_rows(s, status);
-    // The actions sit at the trailing edge, as in Notifications.
-    s.row(|ui| {
-        let size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
-        let layout = egui::Layout::right_to_left(egui::Align::Center);
-        ui.allocate_ui_with_layout(size, layout, |ui| {
-            if current.managed() {
-                let active = matches!(
-                    status.state,
-                    ServerState::Starting { .. } | ServerState::Running { .. }
-                );
+    g.line_note(
+        "Model",
+        Some(kit::text(words, Font::Body).color(tone.text())),
+        note.as_deref().map(rows::note),
+        |ui| {
+            // The rare actions: the logs and the Terminal commands.
+            let more = kit::icon_button(ui, Icon::More, "More bouncer actions", kit::Size::Small);
+            egui::Popup::menu(&more).show(|ui| {
+                ui.set_min_width(220.0);
+                if ui
+                    .selectable_label(false, "Open log")
+                    .on_hover_text(status.log.display().to_string())
+                    .clicked()
+                {
+                    action = Some(ModelAction::OpenLog(status.log.clone()));
+                }
+                if ui
+                    .selectable_label(false, "Open install log")
+                    .on_hover_text(status.install_log.display().to_string())
+                    .clicked()
+                {
+                    action = Some(ModelAction::OpenLog(status.install_log.clone()));
+                }
+                if let Some((label, commands)) = &install.commands
+                    && ui.selectable_label(false, *label).clicked()
+                {
+                    action = Some(ModelAction::Copy(commands.clone()));
+                }
+            });
+            if install.installing {
+                if kit::small_button(ui, "Cancel install", Style::Bordered).clicked() {
+                    action = Some(ModelAction::CancelInstall);
+                }
+            } else if let Some(hover) = &install.button {
+                if kit::small_button(ui, "Install…", Style::Prominent)
+                    .on_hover_text(hover)
+                    .clicked()
+                {
+                    action = Some(ModelAction::Install);
+                }
+            } else if current.managed() {
                 // A start would fail while the preflight fails, so there is no
-                // "Start now". The status and the install rows name what is missing.
+                // "Start now". The note names what is missing.
                 if status.owned {
                     if kit::small_button(ui, "Stop", Style::Bordered).clicked() {
                         action = Some(ModelAction::Stop);
@@ -1069,22 +1105,81 @@ fn model_server_rows(s: &mut kit::Section<'_>, status: &Status) -> Option<ModelA
                     action = Some(ModelAction::Start);
                 }
             }
-            if kit::small_button(ui, "Open log", Style::Bordered)
-                .on_hover_text(status.log.display().to_string())
-                .clicked()
-            {
-                action = Some(ModelAction::OpenLog(status.log.clone()));
-            }
-        });
+        },
+    );
+    for (text, tone) in &install.warnings {
+        g.tone_row(text, tone.text());
+    }
+    if status.url_from_env {
+        g.note_row("APASSY_BOUNCER_URL sets the address. It wins over the setting.");
+    }
+    g.field("Start the model", |ui| {
+        let mut mode = current;
+        let options: Vec<(StartMode, String)> = StartMode::ALL
+            .iter()
+            .map(|mode| (*mode, mode.label().to_owned()))
+            .collect();
+        let response = kit::picker(
+            ui,
+            "bouncer-start",
+            &mut mode,
+            &options,
+            current.label(),
+            200.0,
+        );
+        if mode != current {
+            action = Some(ModelAction::Settings(BouncerSettings {
+                start: mode,
+                ..status.settings.clone()
+            }));
+        }
+        response
     });
+    if current == StartMode::WhenNeeded {
+        let minutes = status.settings.idle_minutes;
+        g.field("Stop after", |ui| {
+            let mut chosen = minutes;
+            let options: Vec<(u32, String)> = IDLE_CHOICES
+                .iter()
+                .map(|minutes| (*minutes, format!("{minutes} minutes without a run")))
+                .collect();
+            let label = format!("{minutes} minutes without a run");
+            let response = kit::picker(ui, "bouncer-idle", &mut chosen, &options, label, 200.0);
+            if chosen != minutes {
+                action = Some(ModelAction::Settings(BouncerSettings {
+                    idle_minutes: chosen,
+                    ..status.settings.clone()
+                }));
+            }
+            response
+        });
+    }
+    if let Some(next) = launch_agent_rows(g, status) {
+        action = Some(next);
+    }
     action
 }
 
-/// The install of the Laya environment: the progress with "Cancel install", the result,
-/// and, in a managed mode with a missing environment, "Install the model".
-fn install_rows(s: &mut kit::Section<'_>, status: &Status) -> Option<ModelAction> {
-    let mut action = None;
-    let installing = matches!(status.install, InstallState::Installing { .. });
+/// What the "Model" row offers for the install of the Laya environment.
+#[derive(Default)]
+struct InstallOffer {
+    /// The install runs: "Cancel install".
+    installing: bool,
+    /// "Install…" with its hover text.
+    button: Option<String>,
+    /// The short note of the row, in place of the note of the state.
+    note: Option<String>,
+    /// The Terminal commands in the menu of the row: its label and the commands.
+    commands: Option<(&'static str, String)>,
+    /// Rows in a status color: a failed install, or a missing `uv`.
+    warnings: Vec<(String, Tone)>,
+}
+
+/// The install of the Laya environment: its progress, its result, and, in a managed mode
+/// with a missing environment, "Install…" with a short note. The commands for Terminal
+/// are in the menu of the row.
+fn install_offer(status: &Status) -> InstallOffer {
+    let mut offer = InstallOffer::default();
     match &status.install {
         InstallState::Installing {
             step,
@@ -1092,54 +1187,31 @@ fn install_rows(s: &mut kit::Section<'_>, status: &Status) -> Option<ModelAction
             label,
             since,
         } => {
-            s.row(|ui| {
-                let seconds = since.elapsed().as_secs();
-                let progress = if *of == 0 {
-                    format!("Installing the model: preparing ({seconds} s).")
-                } else {
-                    format!("Installing the model: step {step} of {of}, {label} ({seconds} s).")
-                };
-                kit::note(ui, progress);
-                let what = if *label == FETCH_LABEL {
-                    "The Python of the environment downloads the Laya base weights (about 800 MB) into the Hugging Face cache."
-                } else {
-                    "uv downloads Python packages."
-                };
-                kit::note(
-                    ui,
-                    format!(
-                        "{what} This can take several minutes. The output goes to {}.",
-                        status.install_log.display()
-                    ),
-                );
-                if kit::small_button(ui, "Cancel install", Style::Bordered).clicked() {
-                    action = Some(ModelAction::CancelInstall);
-                }
-            });
+            let seconds = since.elapsed().as_secs();
+            let progress = if *of == 0 {
+                format!("Installing the model: preparing ({seconds} s).")
+            } else {
+                format!("Installing the model: step {step} of {of}, {label} ({seconds} s).")
+            };
+            let what = if *label == FETCH_LABEL {
+                "It downloads the Laya base weights (about 800 MB)."
+            } else {
+                "uv downloads Python packages."
+            };
+            offer.installing = true;
+            offer.note = Some(format!("{progress} {what} This can take several minutes."));
+            return offer;
         }
-        InstallState::Failed { reason, log_tail } => {
-            s.row(|ui| {
-                kit::tone_note(ui, format!("The install failed. {reason}"), Tone::Warning);
-                if !log_tail.is_empty() {
-                    kit::note(ui, "The last lines of the install log:");
-                    kit::code_block(ui, &log_tail.join("\n"), log_tail.len());
-                }
-                if kit::small_button(ui, "Open install log", Style::Bordered)
-                    .on_hover_text(status.install_log.display().to_string())
-                    .clicked()
-                {
-                    action = Some(ModelAction::OpenLog(status.install_log.clone()));
-                }
-            });
+        InstallState::Failed { reason, .. } => {
+            offer
+                .warnings
+                .push((format!("The install failed. {reason}"), Tone::Warning));
         }
         InstallState::Done if status.venv_ready => {
-            s.row(|ui| {
-                kit::tone_note(
-                    ui,
-                    format!("The model is installed in {}.", status.laya_dir.display()),
-                    Tone::Good,
-                );
-            });
+            offer.note = Some(format!(
+                "The model is installed in {}.",
+                status.laya_dir.display()
+            ));
         }
         InstallState::Done | InstallState::Idle => {}
     }
@@ -1149,87 +1221,66 @@ fn install_rows(s: &mut kit::Section<'_>, status: &Status) -> Option<ModelAction
         .err()
         .filter(|problem| matches!(problem, Problem::NoScript | Problem::NoVenv { .. }));
     // Only the download of the weights failed: the server can start and downloads
-    // them, and "Install the model" tries the download again.
+    // them, and "Install…" tries the download again.
     let weights_retry = problem.is_none()
         && status.venv_ready
         && !status.weights_cached
         && matches!(status.install, InstallState::Failed { .. });
     if !status.settings.start.managed()
-        || installing
         || (problem.is_none() && status.venv_ready && !weights_retry)
     {
-        return action;
+        return offer;
     }
     if weights_retry {
-        s.row(|ui| {
-            kit::note(
-                ui,
-                "The model weights are not in the Hugging Face cache yet. The first start of the model server downloads them (about 800 MB).",
+        offer.note = Some(
+            "The model weights are not in the cache yet. The first start of the model server downloads the weights."
+                .to_owned(),
+        );
+        match &status.uv {
+            Some(_) => offer.button = Some("Download the model weights again".to_owned()),
+            None => offer.warnings.push((UV_MISSING.to_owned(), Tone::Warning)),
+        }
+        if let Some(tools) = &status.script_dir {
+            let command = format!(
+                "cd {} && {}",
+                shell_word(&status.laya_dir.to_string_lossy()),
+                fetch_command(tools)
             );
-            match &status.uv {
-                Some(_) => {
-                    if kit::small_button(ui, "Install the model", Style::Prominent)
-                        .on_hover_text("Download the model weights again")
-                        .clicked()
-                    {
-                        action = Some(ModelAction::Install);
-                    }
-                }
-                None => kit::tone_note(ui, UV_MISSING, Tone::Warning),
-            }
-            if let Some(tools) = &status.script_dir {
-                kit::note(ui, "Or download them with this command in Terminal:");
-                let command = format!(
-                    "cd {} && {}",
-                    shell_word(&status.laya_dir.to_string_lossy()),
-                    fetch_command(tools)
-                );
-                kit::code_block(ui, &command, 1);
-            }
-        });
-        return action;
+            offer.commands = Some(("Copy the download command", command));
+        }
+        return offer;
     }
-    s.row(|ui| {
-        if let Some(problem) = problem {
-            kit::tone_note(ui, problem.text(), Tone::Warning);
-            if matches!(problem, Problem::NoScript) {
-                kit::note(
-                    ui,
-                    "Build the app with scripts/build-app.sh, or run Apassy from the repository. The script is in tools/basemodel.",
-                );
+    let mut note = String::new();
+    match problem {
+        Some(Problem::NoScript) => note.push_str(
+            "Apassy cannot find the start script tools/basemodel/start.sh. Build the app with scripts/build-app.sh. ",
+        ),
+        Some(_) => note.push_str("The Laya environment is missing. "),
+        None => {}
+    }
+    if !status.venv_ready {
+        match &status.uv {
+            Some(uv) => {
+                offer.button = Some(format!(
+                    "Install the Laya environment in {} with {}. It downloads Python packages and can take several minutes.",
+                    status.laya_dir.display(),
+                    uv.display()
+                ));
             }
+            None => offer.warnings.push((UV_MISSING.to_owned(), Tone::Warning)),
         }
-        if !status.venv_ready {
-            match &status.uv {
-                Some(uv) => {
-                    kit::note(
-                        ui,
-                        format!(
-                            "\"Install the model\" installs the Laya environment in {} with {}. It downloads Python packages and can take several minutes.",
-                            status.laya_dir.display(),
-                            uv.display()
-                        ),
-                    );
-                    if kit::small_button(ui, "Install the model", Style::Prominent).clicked() {
-                        action = Some(ModelAction::Install);
-                    }
-                }
-                None => kit::tone_note(ui, UV_MISSING, Tone::Warning),
-            }
-            kit::note(
-                ui,
-                "Or install the Laya environment with these commands in Terminal:",
-            );
-            kit::code_block(ui, &install_commands(status), 6);
-        }
-        kit::note(ui, "Until then, every run waits for you.");
-    });
-    action
+        offer.commands = Some(("Copy the install commands", install_commands(status)));
+    }
+    note.push_str("Until then, every run waits for you.");
+    offer.note = Some(note);
+    offer
 }
 
-/// A note for each LaunchAgent that runs `start.sh` with a missing model, or in a mode
-/// where Apassy starts the server itself. Apassy never changes the LaunchAgent.
-fn launch_agent_rows(s: &mut kit::Section<'_>, status: &Status) {
+/// A row for each LaunchAgent that runs `start.sh` with a missing model, or in a mode
+/// where Apassy starts the server itself, with the commands that remove it. Apassy never
+/// changes the LaunchAgent.
+fn launch_agent_rows(g: &mut rows::Group<'_>, status: &Status) -> Option<ModelAction> {
+    let mut action = None;
     for agent in &status.launch_agents {
         let Some(conflict) = agent.conflict(status.settings.start) else {
             continue;
@@ -1246,14 +1297,97 @@ fn launch_agent_rows(s: &mut kit::Section<'_>, status: &Status) {
                 mode.label()
             ),
         };
-        s.row(|ui| {
-            kit::tone_note(ui, text, Tone::Warning);
-            kit::note(
-                ui,
-                "To remove it, run these commands in Terminal. Apassy does not change it.",
-            );
-            kit::code_block(ui, &agent.remove_commands(), 2);
-        });
+        g.line_note(
+            "LaunchAgent",
+            None,
+            Some(kit::text(text, Font::Callout).color(Tone::Warning.text())),
+            |ui| {
+                if kit::small_button(ui, "Copy remove commands", Style::Bordered)
+                    .on_hover_text("Apassy does not change the LaunchAgent. Paste the commands in Terminal to remove it.")
+                    .clicked()
+                {
+                    action = Some(ModelAction::Copy(agent.remove_commands()));
+                }
+            },
+        );
+    }
+    action
+}
+
+/// Settings > Advanced > Command line (ADR 0017).
+fn command_line_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    let open = app.cli_sessions_open();
+    let installed = super::cli_tools::installed();
+    let mut end = false;
+    let mut install = false;
+    rows::section(
+        ui,
+        Some("Command line"),
+        Some(
+            "Then add ~/.local/bin to PATH in ~/.zshrc, and run eval \"$(apassy login)\" and apassy doctor in Terminal. Commands never show a secret value.",
+        ),
+        |g| {
+            let place = if installed {
+                "~/.local/bin"
+            } else {
+                "Not installed"
+            };
+            g.line("apassy", Some(rows::value(place)), |ui| {
+                if !installed {
+                    install = kit::small_button(ui, "Install tools…", Style::Bordered)
+                        .on_hover_text(
+                            "Install links in ~/.local/bin. Existing commands are not replaced.",
+                        )
+                        .clicked();
+                }
+            });
+            match (app.cli.socket_path(), app.cli.problem.as_deref()) {
+                // The name of the socket; its whole path on hover.
+                (Some(path), _) => g.line("Socket", None, |ui| {
+                    let name = path.file_name().map_or_else(
+                        || path.display().to_string(),
+                        |name| name.to_string_lossy().into_owned(),
+                    );
+                    ui.label(rows::value(name))
+                        .on_hover_text(path.display().to_string());
+                }),
+                (None, Some(problem)) => g.line_note(
+                    "Socket",
+                    None,
+                    Some(kit::text(problem, Font::Callout).color(Tone::Critical.text())),
+                    |_| {},
+                ),
+                (None, None) => g.line(
+                    "Socket",
+                    Some(rows::value("Starts with the desktop window")),
+                    |_| {},
+                ),
+            }
+            let sessions = match open {
+                0 => "None open".to_owned(),
+                1 => "1 open".to_owned(),
+                count => format!("{count} open"),
+            };
+            g.line("Sessions", Some(rows::value(sessions)), |ui| {
+                if open > 0 {
+                    end = kit::small_button(ui, "End all", Style::Bordered)
+                        .on_hover_text("End all sessions")
+                        .clicked();
+                }
+            });
+        },
+    );
+    if install {
+        match super::cli_tools::install() {
+            Ok(()) => app.set_ok(
+                "CLI tools are installed in ~/.local/bin. Add it to PATH, then run eval \"$(apassy login)\" in Terminal.",
+            ),
+            Err(error) => app.set_err(error),
+        }
+    }
+    if end {
+        app.end_cli_sessions();
+        app.set_ok("Every command-line session ended.");
     }
 }
 
@@ -1270,71 +1404,6 @@ fn open_file(path: &std::path::Path) -> std::io::Result<()> {
         let _ = child.wait();
     });
     Ok(())
-}
-
-/// The owner command line (ADR 0017).
-fn command_line_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    let open = app.cli_sessions_open();
-    let mut end = false;
-    let mut install = false;
-    kit::section(
-        ui,
-        Some("Command line"),
-        Some(
-            "The apassy command talks to this window. apassy login asks you here first. Commands never show a secret value. Approvals, new tokens, and changes that give access ask you here each time. Agents need no grant: the bouncer decides each use.",
-        ),
-        |s| {
-            s.row(|ui| {
-                install = kit::button(ui, "Install CLI tools", Style::Bordered).clicked();
-            });
-            s.row(|ui| {
-                kit::note(ui, "Install links in ~/.local/bin. Existing commands are not replaced. Then run these commands in Terminal:");
-                kit::code_block(ui, "export PATH=\"$HOME/.local/bin:$PATH\"\neval \"$(apassy login)\"\napassy doctor", 3);
-                kit::note(ui, "The PATH command applies to this terminal session. Add it to ~/.zshrc to use the tools in each new terminal.");
-            });
-            match (app.cli.socket_path(), app.cli.problem.as_deref()) {
-                (Some(path), _) => s.labeled(
-                    "Socket",
-                    kit::text(path.display().to_string(), Font::MonoSmall).color(kit::SECONDARY),
-                ),
-                (None, Some(problem)) => s.labeled(
-                    "Socket",
-                    kit::text(problem, Font::Callout).color(Tone::Critical.text()),
-                ),
-                (None, None) => s.labeled(
-                    "Socket",
-                    kit::text("Starts with the desktop window", Font::Callout)
-                        .color(kit::SECONDARY),
-                ),
-            }
-            let sessions = match open {
-                0 => "None open".to_owned(),
-                1 => "1 open".to_owned(),
-                count => format!("{count} open"),
-            };
-            s.labeled(
-                "Sessions",
-                kit::text(sessions, Font::Callout).color(kit::SECONDARY),
-            );
-            if open > 0 {
-                s.row(|ui| {
-                    end = kit::small_button(ui, "End all sessions", Style::Bordered).clicked();
-                });
-            }
-        },
-    );
-    if install {
-        match super::cli_tools::install() {
-            Ok(()) => app.set_ok(
-                "CLI tools are installed in ~/.local/bin. Run the commands below in Terminal.",
-            ),
-            Err(error) => app.set_err(error),
-        }
-    }
-    if end {
-        app.end_cli_sessions();
-        app.set_ok("Every command-line session ended.");
-    }
 }
 
 // ---- Sheets. ----

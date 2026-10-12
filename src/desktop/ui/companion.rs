@@ -1,4 +1,4 @@
-//! Settings > Devices > iPhone companion: the iPhone listener, the pairing QR code, the code the owner
+//! Settings > Devices > iPhone app: the iPhone listener, the pairing QR code, the code the owner
 //! types, and the paired iPhones (ADR 0020).
 //!
 //! The Mac never shows the 6-digit code: only the iPhone does, and the owner types it
@@ -7,7 +7,8 @@
 
 use eframe::egui::{self, Color32, Key, Rect, Response, Sense, Ui, Vec2, WidgetInfo, WidgetType};
 
-use super::kit::{self, Font, Icon, Style, Tone};
+use super::kit::{self, Font, Style, Tone};
+use super::settings::rows;
 use super::timeline::relative_time;
 use super::{Sheet, close_sheet};
 use crate::companion::pairing::PairingView;
@@ -23,6 +24,8 @@ const CODE_DIGITS: usize = 6;
 /// A bound on the whole text, so that a paste of spaces does not fill the field.
 const CODE_MAX_CHARS: usize = 32;
 
+/// Settings > Devices > iPhone app: the listener with its state and "Pair…", the
+/// pairing code while a pairing runs, and the paired iPhones.
 pub(super) fn draw(app: &mut DesktopApp, ui: &mut Ui) {
     listener_section(app, ui);
     if app.companion_controller().is_some() {
@@ -39,45 +42,71 @@ fn listener_section(app: &mut DesktopApp, ui: &mut Ui) {
         .is_ok_and(|(setting, _)| setting.enabled);
     let mut on = enabled;
     let mut retry = false;
-    kit::section(
+    let mut pair = false;
+    // "Pair…" is a row here while no pairing runs.
+    let closed = app
+        .companion_controller()
+        .map(|controller| matches!(controller.view(), PairingView::Closed));
+    let opening = app.companion.opening_window();
+    rows::section(
         ui,
-        Some("iPhone companion"),
+        Some("iPhone app"),
         Some(
-            "The iPhone app shows the runs that wait for you and approves them with Face ID. It never shows a secret value, and it cannot connect an agent, remove an exception, or change a setting. It reaches this Mac on the same local network or through Tailscale.",
+            "The iPhone app approves runs that wait for you with Face ID, on this network or through Tailscale. It never shows a secret value or changes a setting.",
         ),
-        |s| {
-            s.toggle(
-                "Allow the iPhone app on this network",
-                Some(
-                    "Paired iPhones can approve or deny runs that wait for you. This works only while the vault is unlocked.",
-                ),
-                &mut on,
-            );
+        |g| {
+            g.toggle("Allow the iPhone app on this network", None, &mut on);
             match &app.companion.listener {
-                Listener::Running { handle, .. } => s.labeled(
+                Listener::Running { handle, .. } => g.line(
                     "Status",
-                    kit::text(
-                        format!("Listening on port {}", handle.port()),
-                        Font::Callout,
-                    )
-                    .color(Tone::Good.text()),
+                    Some(
+                        kit::text(format!("Listening on port {}", handle.port()), Font::Body)
+                            .color(Tone::Good.text()),
+                    ),
+                    |_| {},
                 ),
-                Listener::Failed { message, .. } => s.row(|ui| {
-                    kit::tone_note(ui, message, Tone::Critical);
-                    retry = kit::small_button(ui, "Try again", Style::Bordered).clicked();
-                }),
-                Listener::Off => s.labeled(
+                Listener::Failed { message, .. } => g.line_note(
                     "Status",
-                    kit::text(
-                        if enabled {
-                            "Starting"
-                        } else {
-                            "Off. Nothing listens on the network."
+                    None,
+                    Some(kit::text(message, Font::Callout).color(Tone::Critical.text())),
+                    |ui| {
+                        retry = kit::small_button(ui, "Try again", Style::Bordered).clicked();
+                    },
+                ),
+                Listener::Off => g.line(
+                    "Status",
+                    Some(rows::value(if enabled {
+                        "Starting"
+                    } else {
+                        "Off. Nothing listens on the network."
+                    })),
+                    |_| {},
+                ),
+            }
+            if closed == Some(true) {
+                g.row(|ui| {
+                    rows::one_line(
+                        ui,
+                        rows::label_text("Pair an iPhone").into(),
+                        opening.then(|| rows::value("Apassy is making the pairing code.")),
+                        |ui| {
+                            if !opening {
+                                pair = kit::small_button(ui, "Pair…", Style::Bordered)
+                                    .on_hover_text(
+                                        "Open the Apassy app on the iPhone and scan the code. Then type the 6-digit code that the iPhone shows.",
+                                    )
+                                    .clicked();
+                            }
                         },
-                        Font::Callout,
-                    )
-                    .color(kit::SECONDARY),
-                ),
+                    );
+                    if !opening {
+                        ui.add(egui::Label::new(rows::note(
+                            "Open the Apassy app on the iPhone and scan the code. Then type the 6-digit code that the iPhone shows.",
+                        ))
+                        .wrap());
+                    }
+                    notice(app, ui);
+                });
             }
         },
     );
@@ -86,6 +115,10 @@ fn listener_section(app: &mut DesktopApp, ui: &mut Ui) {
     }
     if retry {
         app.retry_companion();
+    }
+    if pair {
+        let ctx = ui.ctx().clone();
+        app.open_pairing(&ctx);
     }
 }
 
@@ -99,22 +132,18 @@ fn pairing_section(app: &mut DesktopApp, ui: &mut Ui) {
         return;
     };
     let view = controller.view();
-    let opening = app.companion.opening_window();
     let mac_name = app.companion.mac_name().unwrap_or_default().to_owned();
     let check_open = app.owner.check.is_some();
-    let mut open = false;
     let mut cancel = false;
     let mut submit = false;
     let footer = match &view {
-        PairingView::Closed => Some(
-            "Open the Apassy app on the iPhone and scan the code. Then type the 6-digit code that the iPhone shows.",
-        ),
-        PairingView::Open { .. } => Some(
-            "Do not photograph or share this code. Anyone who scans it can ask to pair, but nothing is paired until you type the code that only the iPhone shows and confirm with Touch ID or your passphrase.",
-        ),
-        PairingView::Waiting { .. } => Some(
-            "Apassy never shows this code on the Mac. A wrong code pairs nothing, and the third wrong code closes the window.",
-        ),
+        PairingView::Closed => "",
+        PairingView::Open { .. } => {
+            "Do not photograph or share this code. Nothing pairs until you type the code that only the iPhone shows and confirm with Touch ID or your passphrase."
+        }
+        PairingView::Waiting { .. } => {
+            "Apassy never shows this code on the Mac. A wrong code pairs nothing, and the third closes the window."
+        }
     };
     // The main control of a new pairing step takes the focus (for a keyboard user):
     // Cancel while the code shows, and the code field when the iPhone asks.
@@ -128,19 +157,12 @@ fn pairing_section(app: &mut DesktopApp, ui: &mut Ui) {
         && step != 0
         && kit::keyboard_mode(ui.ctx());
     ui.ctx().data_mut(|data| data.insert_temp(step_key, step));
-    kit::section(ui, Some("Pair an iPhone"), footer, |s| match &view {
-        PairingView::Closed => s.row(|ui| {
-            if opening {
-                kit::note(ui, "Apassy is making the pairing code.");
-            } else {
-                ui.horizontal(|ui| {
-                    kit::icon_tile(ui, Icon::Phone, kit::ACCENT);
-                    ui.add_space(4.0);
-                    open = kit::button(ui, "Pair an iPhone", Style::Prominent).clicked();
-                });
-            }
-            notice(app, ui);
-        }),
+    // While no pairing runs, "Pair…" is a row of the iPhone app.
+    if matches!(view, PairingView::Closed) {
+        return;
+    }
+    rows::section(ui, Some("Pair an iPhone"), Some(footer), |s| match &view {
+        PairingView::Closed => {}
         PairingView::Open { expires_at } => {
             s.row(|ui| match &app.companion.invite {
                 Some(qr) => {
@@ -150,21 +172,21 @@ fn pairing_section(app: &mut DesktopApp, ui: &mut Ui) {
                 }
                 None => kit::note(ui, "Apassy is making the pairing code."),
             });
-            s.labeled(
-                "Mac name",
-                kit::text(&mac_name, Font::Body).color(kit::SECONDARY),
-            );
+            s.labeled("Mac name", rows::value(&mac_name));
             let left = expires_at.saturating_sub(now());
-            s.labeled(
-                "Code works for",
-                kit::text(countdown(left), Font::Mono).color(kit::SECONDARY),
-            );
             s.row(|ui| {
-                let button = kit::button(ui, "Cancel", Style::Bordered);
-                if started {
-                    button.request_focus();
-                }
-                cancel = button.clicked();
+                rows::one_line(
+                    ui,
+                    rows::label_text("Code works for").into(),
+                    Some(kit::text(countdown(left), Font::Mono).color(kit::SECONDARY)),
+                    |ui| {
+                        let button = kit::small_button(ui, "Cancel", Style::Bordered);
+                        if started {
+                            button.request_focus();
+                        }
+                        cancel = button.clicked();
+                    },
+                );
                 notice(app, ui);
             });
         }
@@ -212,18 +234,14 @@ fn pairing_section(app: &mut DesktopApp, ui: &mut Ui) {
             s.row(|ui| {
                 ui.horizontal(|ui| {
                     ui.add_enabled_ui(!check_open, |ui| {
-                        submit |= kit::button(ui, "Pair", Style::Prominent).clicked();
+                        submit |= kit::small_button(ui, "Pair", Style::Prominent).clicked();
                     });
-                    cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
+                    cancel = kit::small_button(ui, "Cancel", Style::Bordered).clicked();
                 });
                 notice(app, ui);
             });
         }
     });
-    if open {
-        let ctx = ui.ctx().clone();
-        app.open_pairing(&ctx);
-    }
     if cancel {
         app.cancel_pairing();
     }
@@ -308,48 +326,42 @@ fn devices_section(app: &mut DesktopApp, ui: &mut Ui) {
     let now = now();
     let mut remove = None;
     let mut reset = false;
-    kit::section(
+    rows::section(
         ui,
         Some("Paired iPhones"),
-        Some(
-            "Removing an iPhone takes effect at once. \"Reset pairing\" removes every iPhone and makes a new certificate, so an iPhone that pinned the old one cannot connect.",
-        ),
+        Some("Removing an iPhone takes effect at once. \"Reset pairing\" removes every iPhone."),
         |s| {
             if devices.is_empty() {
-                s.row(|ui| kit::note(ui, "No iPhone is paired."));
+                s.note_row("No iPhone is paired.");
             }
             for device in &devices {
-                s.row(|ui| {
-                    egui::Sides::new().shrink_left().show(
-                        ui,
-                        |ui| {
-                            ui.vertical(|ui| {
-                                ui.label(kit::text(&device.name, Font::Body).color(kit::LABEL));
-                                let date = format_utc(device.paired_at);
-                                let paired = date.split(' ').next().unwrap_or_default();
-                                let seen = device.last_seen_at.map_or_else(
-                                    || "never".to_owned(),
-                                    |at| relative_time(at, now),
-                                );
-                                kit::note(ui, format!("Paired {paired}. Last seen {seen}."));
-                            });
-                        },
-                        |ui| {
-                            let button = kit::small_button(ui, "Remove", Style::Destructive);
-                            let name = format!("Remove {}", device.name);
-                            ui.ctx()
-                                .accesskit_node_builder(button.id, |node| node.set_label(name));
-                            if button.clicked() {
-                                remove = Some((device.device_id.clone(), device.name.clone()));
-                            }
-                        },
-                    );
-                });
+                let date = format_utc(device.paired_at);
+                let paired = date.split(' ').next().unwrap_or_default();
+                let seen = device
+                    .last_seen_at
+                    .map_or_else(|| "never".to_owned(), |at| relative_time(at, now));
+                s.line_note(
+                    &device.name,
+                    None,
+                    Some(rows::note(&format!("Paired {paired}. Last seen {seen}."))),
+                    |ui| {
+                        let button = kit::small_button(ui, "Remove", Style::Destructive);
+                        let name = format!("Remove {}", device.name);
+                        ui.ctx()
+                            .accesskit_node_builder(button.id, |node| node.set_label(name));
+                        if button.clicked() {
+                            remove = Some((device.device_id.clone(), device.name.clone()));
+                        }
+                    },
+                );
             }
             reset = s
                 .clickable_row("Reset pairing…", |ui| {
                     ui.label(kit::text("Reset pairing…", Font::Body).color(Tone::Critical.text()));
                 })
+                .on_hover_text(
+                    "Removes every iPhone and makes a new certificate, so an iPhone that pinned the old one cannot connect.",
+                )
                 .clicked();
         },
     );

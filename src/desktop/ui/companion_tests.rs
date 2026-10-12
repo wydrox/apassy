@@ -460,9 +460,9 @@ fn the_settings_page_shows_the_companion() {
     let ctx = egui::Context::default();
     let (text, _) = settings_frame(&ctx, &mut app);
     for expected in [
-        "iPhone companion",
+        "iPhone app",
         "Allow the iPhone app on this network",
-        "This works only while the vault is unlocked.",
+        "It never shows a secret value",
         "Off. Nothing listens on the network.",
         "Paired iPhones",
         "No iPhone is paired.",

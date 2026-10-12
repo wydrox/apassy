@@ -840,8 +840,8 @@ fn view_steps() -> Vec<Step> {
         Key(egui::Key::Escape, egui::Modifiers::NONE),
         Size(1180.0, 740.0),
         Wait(1.0),
-        // Each tab of Settings, drawn in the main window, where the tour can click: the
-        // input hook reaches only the main window.
+        // Each tab of Settings: the same window, drawn in the main one at its size,
+        // where the tour can click (the input hook reaches only the main window).
         Embed(true),
         Key(egui::Key::Comma, cmd),
         Wait(1.5),
@@ -888,8 +888,10 @@ const LAYOUT: Layout = Layout {
     decision_request: (450.0, 174.0),
     decision_suggestion: (450.0, 250.0),
     first_agent: (450.0, 70.0),
-    settings_tabs: [460.0, 545.0, 630.0, 715.0],
-    settings_tab_y: 88.0,
+    // The Settings window drawn in the main one: 600 points wide, centered, 50 points
+    // from the top; its four tabs of 80 points are centered in it, 14 points down.
+    settings_tabs: [464.0, 548.0, 632.0, 716.0],
+    settings_tab_y: 89.0,
 };
 
 /// The tour. `APASSY_TOUR` names a file with other steps after the unlock, one per

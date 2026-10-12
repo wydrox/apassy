@@ -516,7 +516,7 @@ fn open_settings_from_decisions_shows_the_notifications_tab() {
     assert_eq!(app.ui.settings_tab, super::SettingsTab::Notifications);
     let text = app_frame(&egui::Context::default(), &mut app);
     assert!(
-        text.contains("A waiting approval or a blocked request causes a macOS notification."),
+        text.contains("Questions go to every device") && text.contains("Notifications"),
         "{text}"
     );
     assert!(!text.contains("Keyboard shortcuts"), "{text}");
