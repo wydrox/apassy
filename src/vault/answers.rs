@@ -156,10 +156,11 @@ impl Vault {
         )
     }
 
-    /// Allow production for `item_id`, `project`, and `action`. Only the broker calls
-    /// it, after an owner check (`OwnerAction::AllowProduction`). `NotFound`: no such
-    /// item.
-    pub(crate) fn allow_production(
+    /// Allow production for `item_id`, `project`, and `action`. In the app only the
+    /// broker calls it, after an owner check (`OwnerAction::AllowProduction`); the
+    /// screenshot seed (examples/screenshots.rs) calls it for its synthetic vault.
+    /// `NotFound`: no such item.
+    pub fn allow_production(
         &mut self,
         item_id: u64,
         project: &ProjectRef,

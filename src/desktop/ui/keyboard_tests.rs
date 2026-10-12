@@ -281,12 +281,22 @@ fn add_long_credential(app: &mut DesktopApp, name: &str) -> u64 {
         .id
 }
 
+/// The footer of the credential page ("Added …"), painted only when it is in view.
+fn footer_painted(window: &Window) -> bool {
+    window
+        .texts
+        .iter()
+        .any(|(text, _)| text.starts_with("Added "))
+}
+
+/// The header of the credential scrolls with its body, as in the mockup; the toolbar
+/// and the list stay.
 #[test]
-fn credential_header_stays_visible_after_body_scroll_and_the_list_stays_beside_it() {
+fn credential_header_scrolls_with_the_body_and_the_list_stays_beside_it() {
     for size in [SIZE, Vec2::new(900.0, 600.0)] {
         let dir = TempDir::new().expect("temp dir");
         let (mut app, _) = unlocked_app_with_item(&dir);
-        let name = "Long synthetic credential for the fixed header";
+        let name = "Long synthetic credential for the scrolling header";
         let id = add_long_credential(&mut app, name);
         app.select_item(id.to_string());
         let mut window = Window::new();
@@ -308,21 +318,28 @@ fn credential_header_stays_visible_after_body_scroll_and_the_list_stays_beside_i
             "Edit is in the toolbar"
         );
         let secret_top = text_top(&window, "Secret").expect("the body starts at Secret");
-        assert!(text_top(&window, "More actions").is_none());
+        assert!(!footer_painted(&window));
 
         window.wheel_to_end(&mut app);
         assert!(
             text_top(&window, "Secret").is_none_or(|top| top < secret_top - 100.0),
             "the wheel must move the body at {size:?}"
         );
-        window.visible_text_rect("More actions");
-        for (label, before) in [name, "Edit"].into_iter().zip(header) {
-            let after = window.visible_text_rect(label);
-            assert_eq!(
-                before, after,
-                "{label} moved after the body scrolled at {size:?}"
-            );
-        }
+        assert!(footer_painted(&window), "{}", window.text);
+        assert_eq!(
+            window.visible_text_rect("Edit"),
+            header[1],
+            "the toolbar stays at {size:?}"
+        );
+        let name_left = window
+            .text_bounds
+            .iter()
+            .filter(|(text, _, clip)| text == name && clip.contains_rect(header[0]))
+            .count();
+        assert_eq!(
+            name_left, 0,
+            "the header scrolled with the body at {size:?}"
+        );
         // ⌘[ leaves the credential: nothing is selected, the list stays.
         window.press(&mut app, Key::OpenBracket, Modifiers::COMMAND);
         assert_eq!(app.selected_item_id, None);
@@ -357,7 +374,7 @@ fn a_different_credential_starts_with_its_body_at_the_top() {
             text_top(&window, "Secret").is_none(),
             "the first body scrolled"
         );
-        window.visible_text_rect("More actions");
+        assert!(footer_painted(&window), "{}", window.text);
 
         app.select_item(second.to_string());
         window.idle(&mut app);
@@ -367,7 +384,7 @@ fn a_different_credential_starts_with_its_body_at_the_top() {
             (first_top - second_top).abs() < 1.0,
             "the new item inherited a scroll offset"
         );
-        assert!(text_top(&window, "More actions").is_none());
+        assert!(!footer_painted(&window));
     }
 }
 
@@ -689,6 +706,11 @@ fn return_in_a_field_does_the_default_action() {
     assert!(app.owner_ui.fresh_token.is_none());
 }
 
+/// The "⋯" button of the credential toolbar, at the right of the traffic-light row.
+fn more_button(window: &Window) -> Pos2 {
+    Pos2::new(window.size.x - 12.0 - 17.0, kit::LIGHTS_Y)
+}
+
 /// A destructive alert starts on Cancel. Return or Space cancels, never deletes.
 #[test]
 fn a_delete_alert_starts_on_cancel() {
@@ -696,15 +718,28 @@ fn a_delete_alert_starts_on_cancel() {
     let (mut app, id) = open_item(&dir);
     let mut window = Window::new();
     window.idle(&mut app);
-    window.click(&mut app, "More actions");
-    window.tab_to(&mut app, "Delete credential…", 60);
+    window.tab_to(&mut app, "More actions for this credential", 60);
+    window.press(&mut app, Key::Space, Modifiers::NONE);
+    assert!(
+        egui::Popup::is_any_open(&window.ctx),
+        "Space opens the menu"
+    );
+    window.tab_to(&mut app, "Delete…", 12);
     window.press(&mut app, Key::Enter, Modifiers::NONE);
     assert!(app.pending_delete, "the alert is open");
     assert_eq!(window.focused_name().as_deref(), Some("Cancel"));
     window.press(&mut app, Key::Enter, Modifiers::NONE);
     assert!(!app.pending_delete, "Return pressed Cancel");
     assert!(app.owner_ui.session.details(id).is_ok_and(|d| !d.hidden));
-    assert_eq!(window.focused_name().as_deref(), Some("Delete credential…"));
+    assert_eq!(
+        window.focused_name().as_deref(),
+        Some("More actions for this credential"),
+        "the focus is back on the menu button"
+    );
+    assert!(
+        !egui::Popup::is_any_open(&window.ctx),
+        "the menu stays closed"
+    );
 }
 
 /// A destructive alert opened with the pointer shows no focus ring. Return or Space
@@ -715,10 +750,9 @@ fn return_on_a_delete_alert_opened_with_the_pointer_cancels() {
     let (mut app, id) = open_item(&dir);
     let mut window = Window::new();
     window.idle(&mut app);
-    window.click(&mut app, "More actions");
     for key in [Key::Enter, Key::Space] {
-        window.wheel_to_end(&mut app);
-        window.click(&mut app, "Delete credential…");
+        window.click_at(&mut app, more_button(&window));
+        window.click(&mut app, "Delete…");
         assert!(app.pending_delete, "the alert is open");
         assert!(!kit::keyboard_mode(&window.ctx), "a pointer user");
         assert_ne!(
@@ -979,20 +1013,22 @@ fn the_focus_survives_a_control_that_goes_away() {
     let (mut app, _) = open_item(&dir);
     let mut window = Window::new();
     window.idle(&mut app);
-    window.click(&mut app, "More actions");
-    window.tab_to(&mut app, "Archive credential…", 60);
+    window.tab_to(&mut app, "More actions for this credential", 60);
+    window.press(&mut app, Key::Space, Modifiers::NONE);
+    window.tab_to(&mut app, "Archive…", 12);
     window.press(&mut app, Key::Enter, Modifiers::NONE);
     assert_eq!(app.ui.sheet, Some(Sheet::ArchiveItem));
     // The archive sheet: Return archives (no button had to be clicked).
     window.press(&mut app, Key::Enter, Modifiers::NONE);
     assert_eq!(app.ui.sheet, None, "the item is archived");
     window.idle(&mut app);
-    // The "Archive credential…" row is gone. The focus is on the page, not lost.
+    // The "Archive…" menu item is gone. The focus is on the page, not lost.
     let layer = window.focused_layer().expect("a control has the focus");
     assert_eq!(layer.order, egui::Order::Background);
-    assert_ne!(
-        window.focused_name().as_deref(),
-        Some("Archive credential…")
+    assert_ne!(window.focused_name().as_deref(), Some("Archive…"));
+    assert!(
+        !egui::Popup::is_any_open(&window.ctx),
+        "the menu stays closed"
     );
 }
 

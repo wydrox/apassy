@@ -410,7 +410,13 @@ fn the_code_is_masked_until_the_owner_shows_it() {
     // The seed is not a detail row, and the password stays masked.
     window.assert_no_seed();
     assert!(!window.text.contains(PASSWORD), "{}", window.text);
-    assert!(window.text.contains("Add custom detail"), "{}", window.text);
+    // The details group draws its rows; adding a detail is in the "⋯" menu.
+    assert!(window.text.contains("Password"), "{}", window.text);
+    assert!(
+        !window.text.contains("Add custom detail"),
+        "{}",
+        window.text
+    );
     assert_eq!(window.clipboard_writes, 0);
 }
 

@@ -4,7 +4,8 @@
 //! `screenshots seed HOME`: make `HOME/Library/Application Support/Apassy/vault.db`
 //! with synthetic data that looks like the approved mockup
 //! (docs/design/app-v2-mockup.html): folders, credentials with provider tiles, agents,
-//! agent uses, exceptions, a credential request, and a suggestion. Each value is fake.
+//! agent uses, a remembered answer, exceptions, a credential request, and a suggestion.
+//! Each value is fake.
 //! The script uses a scratch HOME, never the owner's.
 //!
 //! `screenshots run`: open the real window for the vault of `$HOME`, type the
@@ -25,6 +26,7 @@ use apassy::broker::action_kind::ActionKind;
 use apassy::contracts::CredentialKind;
 use apassy::desktop::{DesktopApp, native_options};
 use apassy::vault::agent_items::{CorrectionKind, NewCredentialRequest};
+use apassy::vault::answers::ProjectRef;
 use apassy::vault::exceptions::ExceptionKind;
 use apassy::vault::usage::{InteractionKind, NewItemUse, UseDecidedBy, UseOutcome};
 use apassy::vault::{
@@ -353,8 +355,23 @@ fn seed(home: &Path) {
     )
     .expect("grant");
 
+    // A remembered answer of the owner, as in the mockup: "Allow reading in
+    // acme-billing" for the production Stripe key, answered on the iPhone. In the app
+    // only the broker stores it, after the owner check; the seed writes it directly.
+    v.allow_production(
+        id("Stripe live"),
+        &ProjectRef {
+            key: code.join("acme-billing").display().to_string(),
+            label: "acme-billing".to_owned(),
+        },
+        ActionKind::Read,
+        "iPhone",
+        &["api.stripe.com".to_owned()],
+    )
+    .expect("answer");
+
     // Exceptions: they show in "Rules from your answers" of the credential and in the
-    // agent. Remembered answers need the owner check of the broker, so the tour has none.
+    // agent.
     v.add_agent_exception(ci, id("Stripe live"), ExceptionKind::Never)
         .expect("exception");
     v.add_agent_exception(t3, id("Stripe live"), ExceptionKind::AlwaysAsk)

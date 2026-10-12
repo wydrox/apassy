@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 use eframe::egui::{self, Align, Label, Layout, Pos2, Rect, RichText, Sense, Vec2};
 
 use super::columns;
+use super::detail_rows as rows;
 use super::folders::FolderTree;
 use super::kit::{self, Font, Icon, Section, Size, Style, Tone};
 use super::otp;
@@ -189,7 +190,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
             id: item.id,
             name: item.name.clone(),
             subtitle: if username.is_empty() {
-                item.kind.label().to_owned()
+                looks.kind_label.clone()
             } else {
                 username
             },
@@ -435,8 +436,11 @@ fn environment_label(environment: Environment) -> &'static str {
 /// environment, and its shared vaults.
 struct Looks {
     tile: kit::Tile,
-    /// The label of the provider of its declaration, such as "Stripe".
+    /// The label of its provider, such as "Stripe": the provider of its declaration,
+    /// else the provider that its service or its name names (the one of its tile).
     provider: Option<String>,
+    /// Its kind as its provider names it, such as "Secret key" (see [`field_kind`]).
+    kind_label: String,
     environment: EnvState,
     /// The names of the shared vaults that hold it. Empty until shared vaults land
     /// (ADR 0026 §6).
@@ -445,22 +449,56 @@ struct Looks {
 
 impl Looks {
     fn of(app: &DesktopApp, item_id: u64, kind: CredentialKind, service: &str, name: &str) -> Self {
-        let provider = app
-            .owner_ui
-            .session
+        let session = &app.owner_ui.session;
+        let declared = session
             .with_vault(|vault| vault.declaration_provider(item_id))
             .and_then(Result::ok)
             .flatten()
             .and_then(|id| providers::find(&id))
             .map(|provider| provider.label.clone());
-        let tile_service = provider.as_deref().unwrap_or(service);
+        let tile_service = declared.as_deref().unwrap_or(service);
+        let variable = session
+            .env_binding(item_id)
+            .ok()
+            .flatten()
+            .map(|binding| binding.env_name)
+            .filter(|variable| variable != &format!("APASSY_ITEM_{item_id}"));
+        let provider = declared
+            .clone()
+            .or_else(|| super::named_provider(service, name).map(|(label, _)| label.to_owned()));
         Self {
             tile: super::credential_tile(kind, tile_service, name),
             provider,
+            kind_label: field_kind(kind, variable.as_deref()),
             environment: EnvState::of(app, item_id),
             shared: shared_vaults(app, item_id),
         }
     }
+}
+
+/// The kind of a key as its provider names it, from the end of its variable:
+/// `STRIPE_SECRET_KEY` is a "Secret key", `CLOUDFLARE_API_TOKEN` an "API token", and
+/// `GITHUB_TOKEN` a "Token", as in the mockup. Another variable or kind gives the label
+/// of the kind.
+fn field_kind(kind: CredentialKind, variable: Option<&str>) -> String {
+    const ENDINGS: [(&str, &str); 7] = [
+        ("_SECRET_KEY", "Secret key"),
+        ("_API_TOKEN", "API token"),
+        ("_AUTH_TOKEN", "Auth token"),
+        ("_ACCESS_TOKEN", "Access token"),
+        ("_API_KEY", "API key"),
+        ("_ACCESS_KEY_ID", "Access key"),
+        ("_TOKEN", "Token"),
+    ];
+    if kind == CredentialKind::ApiKey
+        && let Some(variable) = variable
+        && let Some((_, label)) = ENDINGS
+            .iter()
+            .find(|(ending, _)| variable.to_ascii_uppercase().ends_with(ending))
+    {
+        return (*label).to_owned();
+    }
+    kind.label().to_owned()
 }
 
 /// Open the add sheet with an empty form. ⌘N does the same.
@@ -638,41 +676,70 @@ pub(super) fn detail_column(
         return;
     }
     detail_toolbar(app, ui, &details);
-    kit::column_with_bottom_space(ui, columns::DETAIL_WIDTH, 12.0, |ui| {
-        draw_detail_header(app, ui);
-    });
-    ui.separator();
-    // A credential has its own scroll position. Opening a different credential must not
-    // start at the bottom of the details of the one before.
+    // The header scrolls with the body, as in the mockup. A credential has its own
+    // scroll position: opening a different credential must not start at the bottom of
+    // the details of the one before. A question of an agent waits in Decisions, not on
+    // the page.
     columns::detail_body(ui, ("credential", id), |ui| {
-        ui.add_space(6.0);
-        super::shell::banners(app, ui, pending);
-        draw_detail_body(app, ui);
+        rows::reading_column(ui, |ui| {
+            ui.scope(|ui| super::updates::banner(app, ui));
+            ui.scope(|ui| super::sync::banner(app, ui));
+            draw_detail_header(app, ui);
+            draw_detail_body(app, ui);
+        });
     });
 }
 
-/// The toolbar of a credential: Share, Edit, and "⋯" with Move to Folder, Share,
-/// Archive, and Delete.
+/// The key of the history of a credential, shown from the "⋯" menu.
+fn history_key(id: u64) -> String {
+    format!("credential-history-{id}")
+}
+
+/// The toolbar of a credential: Share, Edit, and "⋯" with the rare actions: Move to
+/// Folder, Share, Add Custom Detail, the history, Archive, and Delete (ADR 0026 §1).
 fn detail_toolbar(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) {
     let id = details.id;
+    let history_open = app.ui.is_expanded(&history_key(id));
     let mut edit = false;
     let mut share = false;
     let mut move_to = false;
+    let mut add_detail = false;
+    let mut history = false;
     let mut archive = false;
     let mut delete = false;
     columns::detail_toolbar(ui, |ui| {
         let more =
             kit::toolbar_button(ui, Some(Icon::More), "", "More actions for this credential");
         egui::Popup::menu(&more).show(|ui| {
-            ui.set_min_width(180.0);
+            ui.set_min_width(200.0);
             move_to = ui.selectable_label(false, "Move to Folder…").clicked();
             share |= ui.selectable_label(false, "Share…").clicked();
+            if details.details.len() < MAX_DETAILS {
+                add_detail = ui.selectable_label(false, "Add Custom Detail…").clicked();
+            }
+            let label = if history_open {
+                "Hide History"
+            } else {
+                "Show History"
+            };
+            history = ui.selectable_label(false, label).clicked();
             ui.separator();
             if !details.archived {
                 archive = ui.selectable_label(false, "Archive…").clicked();
             }
             delete = ui.selectable_label(false, "Delete…").clicked();
+            // A choice with Return or Space closes the menu, as a click does.
+            if move_to || share || add_detail || history || archive || delete {
+                ui.close();
+            }
         });
+        // A choice closes the menu. For a keyboard user the focus goes back to "⋯", so
+        // a sheet or an alert that the choice opens gives it back there, not to an item
+        // of the closed menu.
+        let chosen = move_to || share || add_detail || history || archive || delete;
+        if chosen && kit::keyboard_mode(ui.ctx()) {
+            more.request_focus();
+        }
         edit = kit::toolbar_button(ui, None, "Edit", "Edit").clicked();
         share |= kit::toolbar_button(ui, Some(Icon::Share), "Share", "Share").clicked();
     });
@@ -682,6 +749,10 @@ fn detail_toolbar(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetail
         app.ui.sheet = Some(Sheet::Share { item_id: id });
     } else if move_to {
         super::folders::open_move(app, id);
+    } else if add_detail {
+        open_edit(app, details, true);
+    } else if history {
+        app.ui.set_expanded(&history_key(id), !history_open);
     } else if archive {
         app.ui.sheet = Some(Sheet::ArchiveItem);
     } else if delete {
@@ -748,9 +819,11 @@ fn overview(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &super::shell::Pen
     });
 }
 
-/// The header of a credential: its tile, its name, its kind, and its project. It stays
-/// above the scrolling body.
+/// The header of a credential, as in the mockup: its tile, its name at 20 points, its
+/// provider and kind ("Stripe · Secret key"), and its caps (Production, the shared
+/// vaults). It scrolls with the body.
 pub(super) fn draw_detail_header(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    const TILE: f32 = 56.0;
     let Some(id) = selected_id(app) else {
         return;
     };
@@ -761,32 +834,61 @@ pub(super) fn draw_detail_header(app: &mut DesktopApp, ui: &mut egui::Ui) {
         return;
     }
     let looks = Looks::of(app, id, details.kind, &details.service, &details.name);
-    ui.horizontal(|ui| {
-        kit::tile(ui, &looks.tile, 56.0);
-        ui.add_space(6.0);
+    // "Stripe · Secret key"; without a provider, the service or the project.
+    let source = looks
+        .provider
+        .clone()
+        .unwrap_or_else(|| meta_line(&details.project, &details.service));
+    let subtitle = if source.is_empty() {
+        looks.kind_label.clone()
+    } else {
+        format!("{source} · {}", looks.kind_label)
+    };
+    let title = kit::text(&details.name, Font::Title)
+        .size(20.0)
+        .color(kit::LABEL);
+    let subtitle = kit::text(subtitle, Font::Body).color(kit::SECONDARY);
+    let cap = looks.environment.cap();
+    let caps = cap.is_some() || details.archived || !looks.shared.is_empty();
+    let width = (ui.available_width() - TILE - 14.0).max(40.0);
+    // The tile is centered on the text, as `align-items: center` of the mockup.
+    let text_height = {
+        let wrapped = |text: RichText| {
+            let job = egui::WidgetText::from(text);
+            job.into_galley(
+                ui,
+                Some(egui::TextWrapMode::Wrap),
+                width,
+                egui::TextStyle::Body,
+            )
+            .size()
+            .y
+        };
+        wrapped(title.clone()) + 2.0 + wrapped(subtitle.clone()) + if caps { 24.0 } else { 0.0 }
+    };
+    ui.add_space(6.0);
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 14.0;
         ui.vertical(|ui| {
-            ui.set_max_width((ui.available_width()).max(40.0));
+            ui.add_space(((text_height - TILE) / 2.0).max(0.0));
+            kit::tile(ui, &looks.tile, TILE);
+        });
+        ui.vertical(|ui| {
+            ui.set_max_width(width);
             ui.spacing_mut().item_spacing.y = 2.0;
-            ui.add(Label::new(kit::text(&details.name, Font::Title).color(kit::LABEL)).wrap());
-            // "Stripe · API key"; without a provider, the service or the project.
-            let source = looks
-                .provider
-                .clone()
-                .unwrap_or_else(|| meta_line(&details.project, &details.service));
-            let subtitle = if source.is_empty() {
-                details.kind.label().to_owned()
-            } else {
-                format!("{source} · {}", details.kind.label())
-            };
-            ui.add(Label::new(kit::text(subtitle, Font::Callout).color(kit::SECONDARY)).wrap());
-            let cap = looks.environment.cap();
-            if cap.is_some() || details.archived || !looks.shared.is_empty() {
+            let top = ((TILE - text_height) / 2.0).max(0.0);
+            ui.add_space(top);
+            ui.add(Label::new(title).wrap());
+            ui.add(Label::new(subtitle).wrap());
+            if caps {
                 ui.add_space(5.0);
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     if let Some((label, red)) = cap {
                         kit::cap(ui, label, red);
                     }
+                    // The tag of each shared vault. None until shared vaults land
+                    // (ADR 0026 §6).
                     for vault in &looks.shared {
                         kit::cap(ui, vault, false);
                     }
@@ -797,6 +899,7 @@ pub(super) fn draw_detail_header(app: &mut DesktopApp, ui: &mut egui::Ui) {
             }
         });
     });
+    ui.add_space(rows::HEADER_GAP);
 }
 
 #[cfg(test)]
@@ -890,7 +993,12 @@ pub(super) fn draw_detail_body(app: &mut DesktopApp, ui: &mut egui::Ui) {
         rules_group(app, ui, &details);
         agent_settings_group(app, ui, &details);
     }
-    detail_disclosure(app, ui, id, "history", "History and requests", |app, ui| {
+    // The history comes from "Show History" in the "⋯" menu: a rare look back.
+    if app.ui.is_expanded(&history_key(id)) {
+        if rows::group_label(ui, "History", Some(("Hide", "Hide the history"))) {
+            app.ui.set_expanded(&history_key(id), false);
+        }
+        ui.spacing_mut().item_spacing.y = 6.0;
         timeline::change_timeline(app, ui, id);
         let requests = app
             .owner_ui
@@ -906,33 +1014,7 @@ pub(super) fn draw_detail_body(app: &mut DesktopApp, ui: &mut egui::Ui) {
             "No agent asked for this credential yet.",
             false,
         );
-    });
-    let mut archive = false;
-    let mut delete = false;
-    detail_disclosure(app, ui, id, "actions", "More actions", |_app, ui| {
-        kit::section(ui, None, None, |s| {
-            if !details.archived {
-                archive = s
-                    .clickable_row("Archive credential…", |ui| {
-                        ui.label(kit::text("Archive credential…", Font::Body).color(kit::LABEL));
-                        kit::note(ui, "Agents cannot use it. Search still finds it.");
-                    })
-                    .clicked();
-            }
-            delete = s
-                .clickable_row("Delete credential…", |ui| {
-                    ui.label(
-                        kit::text("Delete credential…", Font::Body).color(Tone::Critical.text()),
-                    );
-                })
-                .clicked();
-        });
-    });
-    if archive {
-        app.ui.sheet = Some(Sheet::ArchiveItem);
-    }
-    if delete {
-        app.pending_delete = true;
+        ui.spacing_mut().item_spacing.y = 0.0;
     }
     footer(app, ui, id);
     removal_sheet(app, ui.ctx(), &details, passkey.as_ref());
@@ -1033,48 +1115,62 @@ fn secret_value(ui: &mut egui::Ui, app: &DesktopApp, id: u64, name: &str) {
 /// "Show" or "Hide" for the secret values. The value sits below its field label.
 fn mask_button(ui: &mut egui::Ui, revealed: bool) -> bool {
     let label = if revealed { "Hide" } else { "Show" };
-    let button = kit::button_with(ui, Some(Icon::Eye), label, Style::Bordered, Size::Small)
-        .on_hover_text("Show or hide secret values  ⌘⇧H");
     let name = if revealed {
         "Hide the secret values"
     } else {
         "Show the secret values"
     };
-    ui.ctx()
-        .accesskit_node_builder(button.id, |node| node.set_label(name));
-    button.clicked()
+    rows::pill_button(ui, label, name)
+        .on_hover_text("Show or hide secret values  ⌘⇧H")
+        .clicked()
 }
 
 /// A row of a group: the label at the left, the value at the right, as in System
 /// Settings. A value that does not fit goes under the label.
-fn pair_row(section: &mut Section<'_>, label: &str, value: RichText) {
-    section.labeled(label, value);
+fn pair_row(group: &mut rows::Group<'_>, label: &str, value: RichText) {
+    group.pair(label, value);
 }
 
-/// The masked secret row: the label, "••••", and Show or Hide. A shown value goes under
-/// the row, in its own scroll area. Returns true when Show or Hide is pressed.
+/// The masked secret row, as in the mockup: the label, the dots, and Show or Hide. A
+/// shown value goes under the row, in its own scroll area. Returns true when Show or
+/// Hide is pressed.
 fn secret_row(
     app: &DesktopApp,
-    section: &mut Section<'_>,
+    group: &mut rows::Group<'_>,
     id: u64,
     label: &str,
     name: &str,
     revealed: bool,
 ) -> bool {
-    section.row(|ui| {
-        let shown = app.owner_ui.session.revealed_value(id, name).is_some();
-        let mut toggle = false;
-        egui::Sides::new().show(
-            ui,
-            |ui| ui.label(kit::text(label, Font::Body).color(kit::LABEL)),
-            |ui| {
-                toggle = mask_button(ui, revealed);
-                if !shown {
-                    ui.label(kit::text(MASKED_VALUE, Font::Mono).color(kit::SECONDARY));
-                }
-            },
-        );
+    let shown = app.owner_ui.session.revealed_value(id, name).is_some();
+    group.row(|ui| {
+        let width = ui.available_width();
+        let toggle = ui
+            .allocate_ui_with_layout(
+                Vec2::new(width, 24.0),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.set_min_size(Vec2::new(width, 24.0));
+                    ui.label(kit::text(label, Font::Body).color(kit::LABEL));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 10.0;
+                        let toggle = mask_button(ui, revealed);
+                        if !shown {
+                            ui.label(
+                                kit::text(MASKED_VALUE, Font::Body)
+                                    .size(15.0)
+                                    .extra_letter_spacing(2.0)
+                                    .color(kit::LABEL),
+                            );
+                        }
+                        toggle
+                    })
+                    .inner
+                },
+            )
+            .inner;
         if shown {
+            ui.add_space(4.0);
             secret_value(ui, app, id, name);
         }
         toggle
@@ -1140,8 +1236,7 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
     let revealed = details.any_revealed();
     let footer = revealed.then(|| details.reveal_warning());
     let mut toggle = false;
-    let mut add_detail = false;
-    kit::section(ui, None, footer, |s| {
+    rows::group(ui, |s| {
         if !username.is_empty() {
             pair_row(
                 s,
@@ -1177,7 +1272,7 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
             .filter(|detail| !is_import_data(detail) && !otp::is_otp_detail(detail))
         {
             if otp::exposes_setup_key(detail) {
-                otp::exposed_row(s, detail);
+                s.row(|ui| otp::exposed_content(ui, detail));
             } else {
                 match &detail.value {
                     Some(value) => pair_row(
@@ -1191,19 +1286,14 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
                 }
             }
         }
-        if details.details.len() < MAX_DETAILS {
-            add_detail = s
-                .clickable_row("Add custom detail", |ui| {
-                    ui.horizontal(|ui| {
-                        kit::paint_icon_in(ui, Icon::Plus, 12.0, kit::ACCENT);
-                        ui.label(
-                            kit::text("Add custom detail", Font::Body).color(kit::ACCENT_TEXT),
-                        );
-                    });
-                })
-                .clicked();
-        }
     });
+    if let Some(footer) = footer {
+        ui.add_space(6.0);
+        egui::Frame::NONE
+            .inner_margin(egui::Margin::symmetric(12, 0))
+            .show(ui, |ui| kit::note(ui, footer));
+    }
+    ui.add_space(rows::GROUP_GAP);
     if details.details.iter().any(is_import_data) {
         detail_disclosure(app, ui, id, "import", "Import data", |app, ui| {
             kit::section(ui, None, None, |s| {
@@ -1218,30 +1308,15 @@ fn fields_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails,
         });
     }
     if !details.notes.is_empty() {
-        kit::section(ui, Some("Notes"), None, |s| {
+        rows::group_label(ui, "Notes", None);
+        rows::group(ui, |s| {
             s.row(|ui| kit::paragraph(ui, &details.notes, Font::Body, kit::LABEL));
         });
+        ui.add_space(rows::GROUP_GAP);
     }
     if toggle {
         toggle_values(app, ui.ctx());
     }
-    if add_detail {
-        open_edit(app, details, true);
-    }
-}
-
-/// A row that opens something: the label, the value, and a chevron. `name` is its name
-/// for VoiceOver.
-fn chevron_row(section: &mut Section<'_>, label: &str, value: &str) -> egui::Response {
-    section.clickable_row(&format!("{label}, {value}"), |ui| {
-        ui.horizontal(|ui| {
-            ui.label(kit::text(label, Font::Body).color(kit::LABEL));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                kit::paint_icon_in(ui, Icon::ChevronRight, 12.0, kit::TERTIARY);
-                ui.add(Label::new(kit::text(value, Font::Body).color(kit::SECONDARY)).truncate());
-            });
-        });
-    })
 }
 
 /// The names of the shared vaults that hold a credential. None until shared vaults
@@ -1263,10 +1338,11 @@ fn place_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) 
     };
     let mut move_to = false;
     let mut share = false;
-    kit::section(ui, None, None, |s| {
-        move_to = chevron_row(s, "Folder", &folder).clicked();
-        share = chevron_row(s, "Shared in", &shared).clicked();
+    rows::group(ui, |s| {
+        move_to = s.chevron("Folder", &folder).clicked();
+        share = s.chevron("Shared in", &shared).clicked();
     });
+    ui.add_space(rows::GROUP_GAP);
     if move_to {
         super::folders::open_move(app, id);
     } else if share {
@@ -1274,57 +1350,45 @@ fn place_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) 
     }
 }
 
-/// The header of a group with a link at the right, such as "Agent use" and "Show All".
-fn group_header(ui: &mut egui::Ui, title: &str, link: Option<(&str, &str)>) -> bool {
-    let mut clicked = false;
-    ui.horizontal(|ui| {
-        ui.add_space(2.0);
-        ui.label(kit::text(title, Font::Headline).color(kit::LABEL));
-        if let Some((label, name)) = link {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let button = kit::small_button(ui, label, Style::Link);
-                ui.ctx()
-                    .accesskit_node_builder(button.id, |node| node.set_label(name));
-                clicked = button.clicked();
-            });
-        }
-    });
-    ui.add_space(2.0);
-    clicked
-}
-
 /// The uses that the "Agent use" group shows before "Show All".
 const RECENT_USES: usize = 3;
 /// The uses that "Show All" shows.
 const ALL_USES: usize = 200;
 
-/// What a use of a credential came to, for its row: the mark and the words.
-fn use_outcome(item_use: &ItemUse) -> (Tone, String) {
+/// What a use of a credential came to, for its row: the round mark and the words.
+fn use_outcome(item_use: &ItemUse) -> (rows::Mark, String) {
+    use rows::Mark;
     let on = if item_use.answered_on.is_empty() {
         String::new()
     } else {
         format!(", on {}", item_use.answered_on)
     };
     match (item_use.outcome, item_use.decided_by) {
-        (UseOutcome::Allowed, UseDecidedBy::Owner) => (Tone::Accent, format!("You allowed it{on}")),
+        (UseOutcome::Allowed, UseDecidedBy::Owner) => {
+            (Mark::Owner, format!("You allowed once{on}"))
+        }
         (UseOutcome::Allowed, UseDecidedBy::Answer) => {
-            (Tone::Good, "Allowed by your answer".to_owned())
+            (Mark::Allowed, "Allowed by your answer".to_owned())
         }
         (UseOutcome::Allowed, UseDecidedBy::Pattern) => {
-            (Tone::Good, "Allowed by a remembered pattern".to_owned())
+            (Mark::Allowed, "Allowed by a remembered pattern".to_owned())
         }
-        (UseOutcome::Allowed, UseDecidedBy::Rule) => (Tone::Good, "Allowed by a rule".to_owned()),
+        (UseOutcome::Allowed, UseDecidedBy::Rule) => {
+            (Mark::Allowed, "Allowed by a rule".to_owned())
+        }
         (UseOutcome::Allowed, UseDecidedBy::Bouncer) => {
-            (Tone::Good, "Allowed automatically".to_owned())
+            (Mark::Allowed, "Allowed automatically".to_owned())
         }
-        (UseOutcome::Denied, UseDecidedBy::Owner) => (Tone::Critical, format!("You denied it{on}")),
-        (UseOutcome::Denied, _) => (Tone::Critical, "Denied".to_owned()),
-        (UseOutcome::Refused, _) => (Tone::Critical, "Refused".to_owned()),
-        (UseOutcome::TimedOut, _) => (Tone::Warning, "No answer in time".to_owned()),
+        (UseOutcome::Denied, UseDecidedBy::Owner) => (Mark::Refused, format!("You denied it{on}")),
+        (UseOutcome::Denied, _) => (Mark::Refused, "Denied".to_owned()),
+        (UseOutcome::Refused, _) => (Mark::Refused, "Refused".to_owned()),
+        (UseOutcome::TimedOut, _) => (Mark::TimedOut, "No answer in time".to_owned()),
     }
 }
 
-/// "Agent use": the newest uses with their result, and "Show All" for the list.
+/// "Agent use", as in the mockup: the newest uses, each with its round mark, the agent
+/// and the project, the command and its result, and the time at the right; "Show All"
+/// on the label lists every use.
 fn agent_use_group(app: &mut DesktopApp, ui: &mut egui::Ui, id: u64) {
     let key = format!("credential-uses-{id}");
     let all = app.ui.is_expanded(&key);
@@ -1336,31 +1400,41 @@ fn agent_use_group(app: &mut DesktopApp, ui: &mut egui::Ui, id: u64) {
         .unwrap_or_default();
     let link = if all {
         Some(("Show Less", "Show fewer agent uses"))
-    } else if uses.len() > RECENT_USES {
+    } else if !uses.is_empty() {
         Some(("Show All", "Show all agent uses"))
     } else {
         None
     };
-    if group_header(ui, "Agent use", link) {
+    if rows::group_label(ui, "Agent use", link) {
         app.ui.set_expanded(&key, !all);
     }
     let now = timeline::now();
     let shown = if all { uses.len() } else { RECENT_USES };
-    kit::section(ui, None, None, |s| {
+    rows::group(ui, |s| {
         if uses.is_empty() {
-            s.row(|ui| kit::note(ui, "No agent used it yet."));
+            s.line(|ui| {
+                ui.label(kit::text("No agent used it yet.", Font::Body).color(kit::SECONDARY))
+            });
         }
         for item_use in uses.iter().take(shown) {
-            let (tone, outcome) = use_outcome(item_use);
+            let (mark, outcome) = use_outcome(item_use);
             let who = format!("{} in {}", item_use.agent_name, item_use.project_label);
             let when = relative_time(item_use.at, now);
             s.row(|ui| {
-                ui.horizontal(|ui| {
-                    kit::dot(ui, tone);
-                    ui.add_space(2.0);
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
                     ui.vertical(|ui| {
-                        ui.set_width((ui.available_width() - 90.0).max(80.0));
-                        ui.spacing_mut().item_spacing.y = 1.0;
+                        ui.add_space(1.0);
+                        rows::status_mark(ui, mark);
+                    });
+                    let when_width =
+                        kit::galley(ui, kit::text(&when, Font::Callout)).size().x + 10.0;
+                    ui.vertical(|ui| {
+                        ui.set_width((ui.available_width() - when_width).max(80.0));
+                        ui.spacing_mut().item_spacing.y = 3.0;
+                        // The second line sits right under the first: no minimum
+                        // control height.
+                        ui.spacing_mut().interact_size.y = 0.0;
                         ui.add(
                             Label::new(kit::text(&who, Font::Body).color(kit::LABEL)).truncate(),
                         );
@@ -1369,24 +1443,21 @@ fn agent_use_group(app: &mut DesktopApp, ui: &mut egui::Ui, id: u64) {
                             ui.add(
                                 Label::new(
                                     kit::text(&item_use.command_summary, Font::Mono)
-                                        .size(11.5)
                                         .color(kit::SECONDARY),
                                 )
                                 .truncate(),
                             );
-                            ui.label(
-                                kit::text(format!(" · {outcome}"), Font::Footnote)
-                                    .color(kit::SECONDARY),
-                            );
+                            ui.add(Label::new(rows::small(format!(" · {outcome}"))).truncate());
                         });
                     });
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(kit::text(&when, Font::Footnote).color(kit::SECONDARY));
+                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                        ui.label(kit::text(&when, Font::Callout).color(kit::TERTIARY));
                     });
                 });
             });
         }
     });
+    ui.add_space(rows::GROUP_GAP);
 }
 
 /// One rule of the "Rules from your answers" group.
@@ -1434,6 +1505,9 @@ fn rules_of(app: &DesktopApp, id: u64) -> Vec<Rule> {
             )
         })
         .unwrap_or_default();
+    // The answers first, then "Never for" before "Always ask for", as in the mockup.
+    let mut exceptions = exceptions;
+    exceptions.sort_by_key(|exception| exception.kind != ExceptionKind::Never);
     answers
         .into_iter()
         .map(Rule::Answer)
@@ -1449,57 +1523,73 @@ fn rules_of(app: &DesktopApp, id: u64) -> Vec<Rule> {
         .collect()
 }
 
-/// "Rules from your answers": each with Remove.
+/// The line under a remembered answer, as in the mockup: "All agents · production ·
+/// your answer on iPhone, Oct 10".
+fn answer_line(answer: &OwnerAnswer, now: u64) -> String {
+    let mut parts = vec!["All agents".to_owned()];
+    if answer.scope == AnswerScope::Production {
+        parts.push("production".to_owned());
+    }
+    let on = if answer.answered_on.is_empty() {
+        String::new()
+    } else {
+        format!(" on {}", answer.answered_on)
+    };
+    parts.push(format!(
+        "your answer{on}, {}",
+        relative_time(answer.created_at, now)
+    ));
+    parts.join(" · ")
+}
+
+/// "Rules from your answers": each rule with Remove at the right.
 fn rules_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) {
     let rules = rules_of(app, details.id);
     let now = timeline::now();
     let mut remove = None;
-    group_header(ui, "Rules from your answers", None);
-    kit::section(ui, None, None, |s| {
+    rows::group_label(ui, "Rules from your answers", None);
+    rows::group(ui, |s| {
         if rules.is_empty() {
-            s.row(|ui| kit::note(ui, "None. The bouncer decides each use."));
+            s.line(|ui| {
+                ui.label(
+                    kit::text("None. The bouncer decides each use.", Font::Body)
+                        .color(kit::SECONDARY),
+                )
+            });
         }
         for (index, rule) in rules.iter().enumerate() {
             let title = rule.title();
-            s.row(|ui| {
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.set_width((ui.available_width() - 90.0).max(80.0));
-                        ui.spacing_mut().item_spacing.y = 2.0;
-                        ui.add(Label::new(kit::text(&title, Font::Body).color(kit::LABEL)).wrap());
-                        if let Rule::Answer(answer) = rule {
-                            ui.horizontal(|ui| {
-                                if answer.scope == AnswerScope::Production {
-                                    kit::cap(ui, "Production", true);
-                                }
-                                let on = if answer.answered_on.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!(" on {}", answer.answered_on)
-                                };
-                                kit::note(
-                                    ui,
-                                    format!(
-                                        "Your answer{on}, {}. It covers every agent.",
-                                        relative_time(answer.created_at, now)
-                                    ),
-                                );
-                            });
-                        }
-                    });
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let button = kit::small_button(ui, "Remove", Style::Bordered);
-                        let name = format!("Remove the rule: {title}");
-                        ui.ctx()
-                            .accesskit_node_builder(button.id, |node| node.set_label(name));
-                        if button.clicked() {
-                            remove = Some(index);
-                        }
-                    });
+            let line = match rule {
+                Rule::Answer(answer) => Some(answer_line(answer, now)),
+                Rule::Exception(..) => None,
+            };
+            s.line(|ui| {
+                let button_width = 80.0;
+                let title_text = kit::text(&title, Font::Body).color(kit::LABEL);
+                match &line {
+                    // A title alone stays on the center line of the row, with Remove.
+                    None => {
+                        ui.add(Label::new(title_text).truncate());
+                    }
+                    Some(line) => {
+                        ui.vertical(|ui| {
+                            ui.set_width((ui.available_width() - button_width).max(80.0));
+                            ui.spacing_mut().item_spacing.y = 3.0;
+                            ui.add(Label::new(title_text).wrap());
+                            ui.add(Label::new(rows::small(line)).wrap());
+                        });
+                    }
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let name = format!("Remove the rule: {title}");
+                    if rows::pill_button(ui, "Remove", &name).clicked() {
+                        remove = Some(index);
+                    }
                 });
             });
         }
     });
+    ui.add_space(rows::GROUP_GAP);
     let Some(rule) = remove.and_then(|index| rules.into_iter().nth(index)) else {
         return;
     };
@@ -1580,37 +1670,35 @@ fn agent_settings_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &Owner
         _ => "Set automatically",
     };
     let mut toggle_access = false;
-    kit::section(ui, None, None, |s| {
-        s.toggle("Always ask me", None, &mut ask)
+    rows::group(ui, |s| {
+        s.toggle("Always ask me", &mut ask)
             .on_hover_text("Each use by an agent waits for you.");
-        s.row(|ui| {
-            egui::Sides::new().show(
-                ui,
-                |ui| ui.label(kit::text("Environment", Font::Body).color(kit::LABEL)),
-                |ui| {
-                    let menu = kit::picker(
+        s.line(|ui| {
+            ui.label(kit::text("Environment", Font::Body).color(kit::LABEL));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.push_id(("credential-environment", id), |ui| {
+                    rows::pop_menu(
                         ui,
-                        ("credential-environment", id),
                         &mut environment,
                         &options,
-                        shown.as_str(),
-                        150.0,
-                    );
-                    let name = format!("Environment, {shown}");
-                    ui.ctx()
-                        .accesskit_node_builder(menu.id, |node| node.set_label(name));
-                },
-            );
+                        &shown,
+                        &format!("Environment, {shown}"),
+                    )
+                });
+            });
         });
-        let access = chevron_row(s, "Hosts and risk", hosts);
+        let access = s.chevron("Hosts and risk", hosts);
         ui_expanded(&access, access_open);
         toggle_access = access.clicked();
     });
+    ui.add_space(rows::GROUP_GAP);
     if toggle_access {
         app.ui.set_expanded(&access_key, !access_open);
     }
     if access_open {
+        ui.spacing_mut().item_spacing.y = 6.0;
         access_section(app, ui, id, details.kind);
+        ui.spacing_mut().item_spacing.y = 0.0;
     }
     if ask != always_ask {
         set_always_ask(app, ui.ctx(), details, ask);
@@ -1746,31 +1834,39 @@ fn environment_question(app: &mut DesktopApp, ui: &mut egui::Ui, details: &Owner
         }
         None => "Until you answer, the bouncer treats it as production.".to_owned(),
     };
+    // The banner of the mockup: an icon, the question and its line, and two buttons.
     let mut answer = None;
-    kit::notice(
-        ui,
-        Tone::Warning,
-        "Is this a development key?",
-        Some(&message),
-        |ui| {
-            ui.horizontal(|ui| {
-                let development = kit::small_button(ui, "Development", Style::Bordered);
-                ui.ctx().accesskit_node_builder(development.id, |node| {
-                    node.set_label("Mark as a development key");
-                });
-                if development.clicked() {
-                    answer = Some(Environment::Development);
-                }
-                let production = kit::small_button(ui, "Production", Style::Bordered);
-                ui.ctx().accesskit_node_builder(production.id, |node| {
-                    node.set_label("Mark as a production key");
-                });
-                if production.clicked() {
+    rows::group(ui, |s| {
+        s.line(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
+            ui.painter()
+                .rect_filled(rect, 7, egui::Color32::from_rgb(255, 244, 229));
+            kit::paint_icon(
+                ui.painter(),
+                Rect::from_center_size(rect.center(), Vec2::splat(16.0)),
+                Icon::Warning,
+                egui::Color32::from_rgb(200, 106, 0),
+            );
+            let buttons = 200.0;
+            ui.vertical(|ui| {
+                ui.set_width((ui.available_width() - buttons).max(80.0));
+                ui.spacing_mut().item_spacing.y = 1.0;
+                ui.label(kit::medium("Is this a development key?", Font::Body).color(kit::LABEL));
+                ui.add(Label::new(rows::small(&message)).wrap());
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if rows::pill_button(ui, "Production", "Mark as a production key").clicked() {
                     answer = Some(Environment::Production);
                 }
+                if rows::pill_button(ui, "Development", "Mark as a development key").clicked() {
+                    answer = Some(Environment::Development);
+                }
             });
-        },
-    );
+        });
+    });
+    ui.add_space(rows::GROUP_GAP);
     if let Some(environment) = answer {
         set_environment(app, ui.ctx(), details, environment);
     }
@@ -1800,6 +1896,8 @@ fn footer(app: &DesktopApp, ui: &mut egui::Ui, id: u64) {
     if parts.is_empty() {
         return;
     }
+    // Each group adds its gap under it; the footer sits 22 points under the last one.
+    ui.add_space(rows::FOOTER_GAP - rows::GROUP_GAP);
     ui.vertical_centered(|ui| {
         ui.label(kit::text(parts.join(" · "), Font::Footnote).color(kit::TERTIARY));
     });
@@ -3957,3 +4055,41 @@ mod conflict_tests {
 #[cfg(test)]
 #[path = "passkey_tests.rs"]
 mod passkey_tests;
+
+#[cfg(test)]
+mod looks_tests {
+    use super::*;
+
+    /// The kind of a key comes from its variable, as in the mockup.
+    #[test]
+    fn a_key_is_named_by_the_end_of_its_variable() {
+        let key = CredentialKind::ApiKey;
+        assert_eq!(field_kind(key, Some("STRIPE_SECRET_KEY")), "Secret key");
+        assert_eq!(field_kind(key, Some("CLOUDFLARE_API_TOKEN")), "API token");
+        assert_eq!(field_kind(key, Some("GITHUB_TOKEN")), "Token");
+        assert_eq!(field_kind(key, Some("OPENAI_API_KEY")), "API key");
+        assert_eq!(field_kind(key, Some("STRIPE_TEST_KEY")), key.label());
+        assert_eq!(field_kind(key, None), key.label());
+        let database = CredentialKind::Database;
+        assert_eq!(
+            field_kind(database, Some("DATABASE_TOKEN")),
+            database.label()
+        );
+    }
+
+    /// The header names the provider of the tile; a database without one gets the
+    /// blue database tile of the mockup, not a green kind tile.
+    #[test]
+    fn the_provider_and_the_tile_follow_one_rule() {
+        let (label, tile) = super::super::named_provider("", "Stripe live").expect("Stripe");
+        assert_eq!(label, "Stripe");
+        assert_eq!(
+            tile,
+            super::super::credential_tile(CredentialKind::ApiKey, "", "Stripe live")
+        );
+        assert!(super::super::named_provider("", "Billing database").is_none());
+        let tile = super::super::credential_tile(CredentialKind::Database, "", "Billing database");
+        assert_eq!(tile.color, egui::Color32::from_rgb(51, 103, 145));
+        assert_eq!(tile.mark, kit::Mark::Icon(Icon::Database));
+    }
+}
