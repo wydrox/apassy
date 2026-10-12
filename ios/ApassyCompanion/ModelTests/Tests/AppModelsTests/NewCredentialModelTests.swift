@@ -145,7 +145,7 @@ struct NewCredentialModelTests {
         #expect(paste.rows.isEmpty)
     }
 
-    @Test("Add right after a change detects the new text first")
+    @Test("Add right after a change detects the new text first, shows its rows, and adds on the next tap")
     func addDetectsFirst() async throws {
         let service = PreviewVaultService(unlocked: true)
         let (vault, _) = makeVault(service: service)
@@ -153,9 +153,60 @@ struct NewCredentialModelTests {
         defer { vault.stopSync() }
         let paste = NewCredentialModel(service: service, folder: nil, debounce: .seconds(30))
         paste.text = Paste.stripe
+        #expect(await paste.add(in: vault) == nil)
+        #expect(paste.rows.map(\.found.title) == ["Stripe test"])
+        #expect(paste.error == NewCredentialModel.rowsChanged)
         let added = try #require(await paste.add(in: vault))
         #expect(added.map(\.title) == ["Stripe test"])
         #expect(vault.item(added[0].id)?.folder == nil)
+    }
+
+    @Test("a text changed before the detection adds nothing on Add, and the rows are refreshed")
+    func addAfterChangedText() async throws {
+        let service = PreviewVaultService(unlocked: true)
+        let (vault, _) = makeVault(service: service)
+        await vault.start()
+        defer { vault.stopSync() }
+        let before = vault.items.count
+        let paste = NewCredentialModel(service: service, folder: nil, debounce: .seconds(30))
+        paste.text = Paste.env
+        await paste.detectNow()
+        #expect(paste.rows.count == 3)
+        // The owner leaves out the GitHub token, then changes the text: the GitHub line moves up,
+        // so the rows on the screen no longer match the text. The detection has not run yet.
+        paste.setKeep(false, row: 1)
+        paste.text = """
+            GITHUB_TOKEN=ghp_EXAMPLE000000000000000000000000000000
+            STRIPE_SECRET_KEY=sk_test_EXAMPLE00000000000000000000
+            DATABASE_URL=postgres://app:EXAMPLE-password@db.example.com:5432/app
+            """
+        #expect(!paste.isCurrent)
+        #expect(paste.keptCount == 2)
+
+        #expect(await paste.add(in: vault) == nil)
+        #expect(vault.items.count == before)
+        #expect(paste.error == NewCredentialModel.rowsChanged)
+        #expect(paste.isCurrent)
+        #expect(paste.rows.map(\.found.envName) == ["GITHUB_TOKEN", "STRIPE_SECRET_KEY", "DATABASE_URL"])
+        #expect(paste.rows.map(\.found.line) == [1, 2, 3])
+        #expect(!paste.text.isEmpty)
+    }
+
+    @Test("Add with the rows on the screen still matching the text adds the checked rows")
+    func addAfterSameRows() async throws {
+        let service = PreviewVaultService(unlocked: true)
+        let (vault, _) = makeVault(service: service)
+        await vault.start()
+        defer { vault.stopSync() }
+        let paste = NewCredentialModel(service: service, folder: nil, debounce: .seconds(30))
+        paste.text = Paste.env
+        await paste.detectNow()
+        paste.setKeep(false, row: 1)
+        // A trailing newline: the same rows, the same lines.
+        paste.text = Paste.env + "\n"
+        let added = try #require(await paste.add(in: vault))
+        #expect(added.count == 2)
+        #expect(!vault.activeItems.contains { $0.title.hasPrefix("GitHub token") })
     }
 
     @Test("with every row unchecked, Add is off and says why")
@@ -201,6 +252,29 @@ struct NewCredentialModelTests {
         paste.clear()
         try? await Task.sleep(for: .milliseconds(120))
         #expect(paste.rows.isEmpty)
+    }
+
+    @Test("the paste goes when revealed values go, and the sheet keeps its folder")
+    func dropsWithRevealedValues() async {
+        let (vault, _) = makeVault(service: PreviewVaultService(unlocked: true))
+        await vault.start()
+        defer { vault.stopSync() }
+        let paste = model(folder: billing)
+        paste.follow(revealEpoch: vault.revealEpoch)
+        paste.text = Paste.env
+        await paste.detectNow()
+        #expect(paste.rows.count == 3)
+        // Seeing the same epoch again changes nothing.
+        paste.follow(revealEpoch: vault.revealEpoch)
+        #expect(paste.text == Paste.env)
+
+        vault.enterBackground()
+        paste.follow(revealEpoch: vault.revealEpoch)
+        #expect(paste.text.isEmpty)
+        #expect(paste.rows.isEmpty)
+        #expect(paste.maskedText.isEmpty)
+        #expect(paste.folder == billing)
+        await vault.settle()
     }
 
     @Test("the folder menu lists the tree with depths, after No folder")
@@ -289,7 +363,7 @@ struct ItemEditorFolderTests {
         #expect(!editor.movesFolder)
     }
 
-    @Test("a failed move keeps the saved item and shows the alert of the vault")
+    @Test("a failed move keeps the saved item and shows the alert of the vault once the sheet is gone")
     func failedMove() async throws {
         let service = PreviewVaultService(unlocked: true)
         let (vault, _) = makeVault(service: service)
@@ -303,7 +377,12 @@ struct ItemEditorFolderTests {
         editor.values["password"] = "p"
         let saved = try #require(await editor.save(in: vault))
         #expect(vault.item(saved.id) != nil)
-        #expect(vault.alert != nil)
         #expect(editor.error == nil)
+        // Not while the sheet is up: the alert of the tabs cannot show above it.
+        #expect(vault.alert == nil)
+        let message = try #require(editor.moveFailure)
+        editor.reportMoveFailure(to: vault)
+        #expect(vault.alert == message)
+        #expect(editor.moveFailure == nil)
     }
 }

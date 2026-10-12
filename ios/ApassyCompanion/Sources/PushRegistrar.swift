@@ -72,9 +72,19 @@ extension PushRegistrar: UNUserNotificationCenterDelegate {
     }
 }
 
-/// The app delegate of SwiftUI's adaptor: only the device token of APNs and the delegate of the
-/// notification center.
+/// The app delegate of SwiftUI's adaptor: the device token of APNs, the delegate of the
+/// notification center, and no keyboards of other apps.
 final class AppDelegate: NSObject, UIApplicationDelegate {
+    /// No keyboard of another app in Apassy: such a keyboard sees every key, so it could read a
+    /// pasted secret or a passphrase. The system keyboard stays. This is app-wide, as in other
+    /// password managers.
+    func application(
+        _ application: UIApplication,
+        shouldAllowExtensionPointIdentifier extensionPointIdentifier: UIApplication.ExtensionPointIdentifier
+    ) -> Bool {
+        extensionPointIdentifier != .keyboard
+    }
+
     func application(
         _ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {

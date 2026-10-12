@@ -2,7 +2,7 @@ import ApassyVaultKit
 import Foundation
 
 /// What the tile of a credential shows, as the Mac's `credential_tile`: the tile of its provider
-/// when the provider or the title names a known one, else the tile of its kind.
+/// when the provider (else the service) or the title names a known one, else the tile of its kind.
 struct ProviderTileStyle: Equatable, Sendable {
     enum Mark: Equatable, Sendable {
         /// The first letter of the provider, in white.
@@ -44,9 +44,27 @@ struct ProviderTileStyle: Equatable, Sendable {
         return ProviderTileStyle(mark: .kind(kind), rgb: nil)
     }
 
+    /// The tile of a row, as the Mac's `provider.unwrap_or(service)`: the provider of its
+    /// declaration, else its service. The core puts the service in the subtitle of an API key, an
+    /// SSH key without a public key, and another kind; the subtitle of a login or a database is a
+    /// username or a host, and that of an SSH key a public key, which name no provider.
     static func of(_ row: ItemRow) -> ProviderTileStyle {
-        of(provider: row.provider, title: row.title, kind: row.kind)
+        of(provider: row.provider ?? service(row), title: row.title, kind: row.kind)
     }
+
+    /// The service in the subtitle of a row, or nil when the subtitle is something else.
+    static func service(_ row: ItemRow) -> String? {
+        let subtitle = row.subtitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !subtitle.isEmpty else { return nil }
+        switch row.kind {
+        case .apiKey, .custom: return subtitle
+        case .sshKey: return publicKeyPrefixes.contains { subtitle.hasPrefix($0) } ? nil : subtitle
+        case .login, .database: return nil
+        }
+    }
+
+    /// The first word of an OpenSSH public key.
+    private static let publicKeyPrefixes = ["ssh-", "ecdsa-", "sk-ssh-", "sk-ecdsa-"]
 
     /// The first letter or digit, upper case; "?" when there is none.
     static func letter(_ name: String) -> String {
@@ -111,8 +129,16 @@ enum CredentialOptions {
 
     /// Whether choosing `new` needs the owner check first. As on the Mac (contract ios-core-v1
     /// §5.11), every environment but production does: the owner, not a passer-by with an unlocked
-    /// iPhone, says that a credential is not production. Production never needs the check.
+    /// iPhone, says that a credential is not production. A credential without a declaration needs
+    /// the check for any choice, production too: the Mac saves the first declaration only after
+    /// the owner check, so no value counts as the owner's without it.
     static func environmentNeedsOwner(_ detail: ItemDetail, to new: CredentialEnvironment) -> Bool {
-        new != .production
+        detail.environment == nil || new != .production
+    }
+
+    /// The core has the options of a credential (contract section 5.11). An older core sends no
+    /// "Always ask me": the screen then shows no Options group.
+    static func isAvailable(_ detail: ItemDetail) -> Bool {
+        detail.alwaysAsk != nil
     }
 }

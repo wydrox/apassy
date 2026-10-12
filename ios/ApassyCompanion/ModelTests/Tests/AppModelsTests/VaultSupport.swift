@@ -114,13 +114,34 @@ actor SpyVaultService: VaultService {
 
     private let inner: PreviewVaultService
     private nonisolated let state: Mutex<State>
+    /// Forward the calls of contract section 5.11 (folders, the paste, the options) to the
+    /// preview. Without it they answer `not_allowed`, as an older core.
+    private nonisolated let organize: Bool
+    /// Answer rows and details without the members of section 5.11 (folder, provider,
+    /// production, the folder path, the variable, and the options), as an older core.
+    private nonisolated let olderRows: Bool
 
     init(
         inner: PreviewVaultService = PreviewVaultService(empty: false, unlocked: true), syncWaits: [Bool] = [],
-        syncError: VaultError? = nil
+        syncError: VaultError? = nil, organize: Bool = false, olderRows: Bool = false
     ) {
         self.inner = inner
+        self.organize = organize
+        self.olderRows = olderRows
         state = Mutex(State(syncWaits: syncWaits, syncError: syncError))
+    }
+
+    /// An older core: no call of section 5.11, and rows and details without its members.
+    static func olderCore() -> SpyVaultService {
+        SpyVaultService(organize: false, olderRows: true)
+    }
+
+    private nonisolated func older(_ row: ItemRow) -> ItemRow {
+        var row = row
+        row.folder = nil
+        row.provider = nil
+        row.production = nil
+        return row
     }
 
     /// How many times `sync()` was called.
@@ -238,8 +259,21 @@ actor SpyVaultService: VaultService {
     func joinFinish(passphrase: String) async throws -> VaultEntry { try await inner.joinFinish(passphrase: passphrase) }
 
     // 5.3
-    func items(archived: ArchiveFilter) async throws -> [ItemRow] { try await inner.items(archived: archived) }
-    func item(id: UInt64) async throws -> ItemDetail { try await inner.item(id: id) }
+    func items(archived: ArchiveFilter) async throws -> [ItemRow] {
+        let rows = try await inner.items(archived: archived)
+        return olderRows ? rows.map(older) : rows
+    }
+    func item(id: UInt64) async throws -> ItemDetail {
+        var detail = try await inner.item(id: id)
+        guard olderRows else { return detail }
+        detail.row = older(detail.row)
+        detail.folderPath = nil
+        detail.envName = nil
+        detail.alwaysAsk = nil
+        detail.environment = nil
+        detail.environmentSource = nil
+        return detail
+    }
     func reveal(id: UInt64, field: String) async throws -> String { try await inner.reveal(id: id, field: field) }
     func totp(id: UInt64, field: String) async throws -> TotpCode { try await inner.totp(id: id, field: field) }
     func history(id: UInt64) async throws -> [ItemEvent] { try await inner.history(id: id) }
@@ -317,6 +351,54 @@ actor SpyVaultService: VaultService {
     }
     func passkeyRemove(id: UInt64, revision: UInt64) async throws { try await inner.passkeyRemove(id: id, revision: revision) }
     func credentialExport() async throws -> CredentialExport { try await inner.credentialExport() }
+
+    // 5.11, with `organize` only; else the answers of the defaults of `VaultService`.
+    private nonisolated func requireOrganize(_ what: String) throws {
+        guard organize else {
+            let message =
+                switch what {
+                case "hold folders": "This vault has no folders. Update Apassy."
+                default: "This vault cannot \(what). Update Apassy."
+                }
+            throw VaultError(.notAllowed, message)
+        }
+    }
+    func folders() async throws -> [Folder] {
+        try requireOrganize("hold folders")
+        return try await inner.folders()
+    }
+    func createFolder(parent: String?, name: String) async throws -> Folder {
+        try requireOrganize("hold folders")
+        return try await inner.createFolder(parent: parent, name: name)
+    }
+    func renameFolder(uuid: String, name: String) async throws {
+        try requireOrganize("hold folders")
+        try await inner.renameFolder(uuid: uuid, name: name)
+    }
+    func moveFolder(uuid: String, parent: String?) async throws {
+        try requireOrganize("hold folders")
+        try await inner.moveFolder(uuid: uuid, parent: parent)
+    }
+    func deleteFolder(uuid: String) async throws -> Int {
+        try requireOrganize("hold folders")
+        return try await inner.deleteFolder(uuid: uuid)
+    }
+    func setItemFolder(id: UInt64, folder: String?) async throws {
+        try requireOrganize("hold folders")
+        try await inner.setItemFolder(id: id, folder: folder)
+    }
+    func detect(text: String) async throws -> [DetectedCredential] {
+        try requireOrganize("add a pasted credential")
+        return try await inner.detect(text: text)
+    }
+    func addPasted(text: String, folder: String?, pick: [Int]?, titles: [Int: String]) async throws -> [PastedItem] {
+        try requireOrganize("add a pasted credential")
+        return try await inner.addPasted(text: text, folder: folder, pick: pick, titles: titles)
+    }
+    func setItemOptions(id: UInt64, alwaysAsk: Bool?, environment: CredentialEnvironment?) async throws {
+        try requireOrganize("change the options of a credential")
+        try await inner.setItemOptions(id: id, alwaysAsk: alwaysAsk, environment: environment)
+    }
 }
 
 // MARK: Settings

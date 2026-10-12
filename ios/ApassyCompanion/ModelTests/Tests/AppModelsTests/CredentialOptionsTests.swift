@@ -38,6 +38,26 @@ struct CredentialOptionsTests {
             == ProviderTileStyle(mark: .letter("N"), rgb: 0xE50914))
     }
 
+    @Test("without a provider, the service in the subtitle picks the tile, as the Mac's provider or service")
+    func tileOfService() {
+        let token = ItemRow(
+            id: 1, revision: 1, title: "DNS token", kind: .apiKey, subtitle: "cloudflare", websites: [], tags: [],
+            archived: false, hasTotp: false, conflictOf: nil, addedAt: nil, changedAt: nil, usedAt: nil)
+        #expect(ProviderTileStyle.of(token) == ProviderTileStyle(mark: .letter("C"), rgb: 0xF48120))
+        // The provider of the declaration comes first.
+        #expect(ProviderTileStyle.of(row(kind: .apiKey, subtitle: "cloudflare", provider: "Stripe"))
+            == ProviderTileStyle(mark: .letter("S"), rgb: 0x635BFF))
+        #expect(ProviderTileStyle.of(row(kind: .custom, subtitle: "github"))
+            == ProviderTileStyle(mark: .letter("G"), rgb: 0x1F2328))
+        #expect(ProviderTileStyle.of(row(kind: .sshKey, subtitle: "sentry"))
+            == ProviderTileStyle(mark: .letter("S"), rgb: 0x362D59))
+        // A username, a host, and a public key name no service.
+        #expect(ProviderTileStyle.of(row(kind: .login, subtitle: "stripe-admin")).mark == .kind(.login))
+        #expect(ProviderTileStyle.of(row(kind: .database, subtitle: "github.example.com")).mark == .kind(.database))
+        #expect(ProviderTileStyle.of(row(kind: .sshKey, subtitle: "ssh-ed25519 AAAAC3Nz github")).mark == .kind(.sshKey))
+        #expect(ProviderTileStyle.of(row(kind: .apiKey)).mark == .kind(.apiKey))
+    }
+
     @Test("PostgreSQL gets the database tile, and an unknown provider the tile of its kind")
     func tileOfDatabaseAndKind() {
         #expect(ProviderTileStyle.of(provider: "PostgreSQL", title: "x", kind: .database)
@@ -93,10 +113,20 @@ struct CredentialOptionsTests {
         let unconfirmed = try await detail(environment: .development, source: .default)
         #expect(CredentialOptions.environmentNeedsOwner(unconfirmed, to: .development))
 
-        // Without a declaration, too, production is the only choice without the check.
+        // Without a declaration every choice needs the check, production too, as on the Mac.
         let none = try await detail(environment: nil, source: nil)
-        #expect(!CredentialOptions.environmentNeedsOwner(none, to: .production))
+        #expect(CredentialOptions.environmentNeedsOwner(none, to: .production))
         #expect(CredentialOptions.environmentNeedsOwner(none, to: .staging))
+    }
+
+    @Test("the Options group shows only when the core sends Always ask me")
+    func optionsAvailable() async throws {
+        #expect(CredentialOptions.isAvailable(try await service.item(id: 100)))
+        var older = try await service.item(id: 100)
+        older.alwaysAsk = nil
+        older.environment = nil
+        older.environmentSource = nil
+        #expect(!CredentialOptions.isAvailable(older))
     }
 
     // MARK: VaultModel
@@ -220,9 +250,28 @@ struct CredentialOptionsTests {
 
     @Test("the folder label follows a move")
     func folderLabel() async {
-        let (model, _) = await detailModel(100)
+        let (model, vault) = await detailModel(100)
         #expect(model.folderLabel == "Acme")
-        await model.moveToFolder(PreviewOrganize.FolderID.billing)
+        #expect(await vault.moveItem(100, to: PreviewOrganize.FolderID.billing))
+        await model.load()
         #expect(model.folderLabel == "Acme › Billing")
+    }
+
+    @Test("the first environment of a credential without a declaration waits for the owner, production too")
+    func firstEnvironmentNeedsOwner() async {
+        let check = ScriptedOwnerCheck(answer: false)
+        let (model, vault) = await detailModel(102, check: check)
+        #expect(model.detail?.environment == nil)
+
+        await refused(by: vault) { await model.setEnvironment(.production) }
+        #expect(model.detail?.environment == nil)
+        #expect(check.calls == 1)
+
+        check.answer = true
+        await model.setEnvironment(.production)
+        #expect(check.calls == 2)
+        #expect(check.reasons.last == "Mark “OpenAI” as production")
+        #expect(model.detail?.environment == .production)
+        #expect(model.detail?.environmentSource == .owner)
     }
 }

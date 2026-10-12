@@ -99,7 +99,7 @@ struct ItemDetailView: View {
                     if let passkey = detail.passkey { passkeySection(passkey) }
                     Section("Agent use") { MacOnlyRow() }
                     Section("Rules from your answers") { MacOnlyRow() }
-                    if detail.alwaysAsk != nil { options(detail).id("options") }
+                    if CredentialOptions.isAvailable(detail) { options(detail).id("options") }
                     if !detail.notes.isEmpty {
                         Section("Notes") {
                             Text(detail.notes)
@@ -243,7 +243,7 @@ struct ItemDetailView: View {
             Text("Options")
         } footer: {
             Text(
-                "With “Always ask me”, each use by an agent waits for you. Turning it off, or a less careful environment, needs Face ID or your passphrase first."
+                "With “Always ask me”, each use by an agent waits for you. Turning it off, a less careful environment, or the first environment of a credential needs Face ID or your passphrase first."
             )
         }
         .disabled(model.isSavingOptions)

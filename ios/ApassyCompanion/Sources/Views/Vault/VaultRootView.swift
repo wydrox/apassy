@@ -2,7 +2,8 @@ import ApassyVaultKit
 import SwiftUI
 
 /// The root of the Vault tab, like the Mac sidebar (ADR 0026 §8): Watchtower as a card, "All
-/// credentials", the folders, and the sync state. "+" opens New Credential.
+/// credentials", the favorites (when there are some), the archive, the password generator, the
+/// folders, and the sync state. "+" opens New Credential.
 struct VaultRootView: View {
     @Environment(VaultModel.self) private var vault
     @Environment(VaultUI.self) private var ui
@@ -26,12 +27,25 @@ struct VaultRootView: View {
                             title: "All credentials", symbol: "key.horizontal.fill", color: .accentColor,
                             count: vault.activeItems.count)
                     }
+                    let favorites = vault.favoriteItems.count
+                    if favorites > 0 {
+                        NavigationLink(value: VaultRoute.favorites) {
+                            PlaceRow(title: "Favorites", symbol: "star.fill", color: .yellow, count: favorites)
+                        }
+                    }
                     let archived = VaultQuery.archived(vault.items).count
                     if archived > 0 {
                         NavigationLink(value: VaultRoute.category(.archive)) {
                             PlaceRow(title: "Archive", symbol: "archivebox.fill", color: .gray, count: archived)
                         }
                     }
+                    Button {
+                        ui.sheet = .generator
+                    } label: {
+                        PlaceRow(title: "Password generator", symbol: "dice.fill", color: .indigo)
+                    }
+                    .foregroundStyle(.primary)
+                    .accessibilityHint("Makes a new password")
                 }
                 if vault.hasFolders { folders }
                 // Shared vaults (ADR 0026 §6) come with V3: a "Shared" section shows here only
@@ -87,23 +101,47 @@ struct VaultRootView: View {
     }
 }
 
-/// A place of the Vault root: a symbol tile, the title, and a count.
+/// A place of the Vault root: a symbol tile, the title, and a count (none for a tool).
 private struct PlaceRow: View {
     let title: String
     let symbol: String
     let color: Color
-    let count: Int
+    var count: Int?
 
     var body: some View {
         HStack(spacing: 12) {
             SymbolTile(symbol: symbol, color: color)
             Text(title)
             Spacer(minLength: 4)
-            Text(count, format: .number)
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
+            if let count {
+                Text(count, format: .number)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
         }
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// The favorite credentials, in the order the owner added them, from the Vault root. A swipe or
+/// the context menu removes one.
+struct FavoritesView: View {
+    @Environment(VaultModel.self) private var vault
+
+    var body: some View {
+        let items = vault.favoriteItems
+        Group {
+            if items.isEmpty {
+                ContentUnavailableView(
+                    "No favorites", systemImage: "star",
+                    description: Text("Swipe a credential to the left and select Favorite. It shows here."))
+            } else {
+                List(items) { item in
+                    ItemListRow(item: item)
+                }
+            }
+        }
+        .navigationTitle("Favorites")
     }
 }
 
