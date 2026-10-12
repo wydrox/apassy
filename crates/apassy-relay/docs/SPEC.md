@@ -224,7 +224,7 @@ Item rules at `POST /v1/items`:
 - Plain HTTP/1.1 on one port. JSON bodies at most 64 KiB (`api::MAX_JSON_BODY`), else 413 `payload_too_large`. Unknown fields are refused where the type says `deny_unknown_fields`.
 - Every JSON response is the core envelope (`api::Envelope`): `{"ok":true,"result":...}` or `{"ok":false,"error":{"code":"...","message":"..."}}`. The HTTP status comes from `error::status_of(code)`.
 - `Content-Type: application/json` on every JSON response. `Cache-Control: no-store` on every `/v1` and `/mcp` response.
-- Load (`config::Limits`, not read from the environment). At most 256 requests run at once. Agent paths (`/p/`, `/mcp`, `/v1/runs`, `/v1/access`) can be slow, so they take at most 256 - 32 of them. The other 32 are kept for members, approvers, the owner's host (`/v1/host/...` is in the member lane, not the agent lane), and `/healthz`. A request over a limit gets 503 `busy` as an envelope, with `Retry-After: 2`. `apassy-team run` asks again after a `busy` answer while it waits.
+- Load (`config::Limits`, not read from the environment). At most 256 requests run at once. Agent paths (`/p/`, `/mcp`, `/v1/runs`, `/v1/access`) can be slow, so they take at most 256 - 32 of them. The other 32 are kept for members, approvers, the owner's host (`/v1/host/...` is in the member lane, not the agent lane), and `/healthz`. A request over a limit gets 503 `busy` as an envelope, with `Retry-After: 2`. `apassy-team run` asks again after a `busy` answer while it waits. Question long polls have a lane of their own, apart from the 256 (section 25.5).
 - Auth column: `edge` = edge header only; `member` = edge + member bearer; `approver` = member bearer with role owner or manager; `owner` = owner bearer; `agent` = edge + agent bearer; `any` = member or agent bearer.
 
 | Method and path | Auth | Body | Result |
@@ -502,7 +502,7 @@ CMD ["serve"]
 
 ## 17. Cloudflare Worker
 
-`deploy/worker/` (track client): `src/index.ts`, `src/limits.ts`, `wrangler.jsonc`, `package.json` (pinned devDependencies, not installed), `test/index.test.ts`.
+`deploy/worker/` (track client): `src/index.ts`, `src/limits.ts`, `src/apns.ts` (the APNs sender of `/internal/push`, section 25.6), `wrangler.jsonc`, `package.json` (pinned devDependencies, not installed), `test/index.test.ts`, `test/apns.test.ts`, and `spike/` (the A4 spike, section 25.7).
 
 `src/index.ts` is the Worker's main module. It exports only the `default` handler (and types): workerd refuses to start a Worker whose main module exports any other value. Shared values, such as the body length limits, live in `src/limits.ts`. A test checks this.
 
@@ -512,6 +512,7 @@ The Worker, about 40 lines:
 - Headers: a copy of the incoming headers; delete `x-apassy-edge` (any case), then set it to `env.EDGE_SECRET`.
 - `fetch(target, {method, headers, body: request.body for methods other than GET and HEAD, redirect: "manual"})`. The body streams; nothing is buffered. Return the response as is. For GET and HEAD, no body is forwarded, so `Content-Length` and `Transfer-Encoding` are removed from the forwarded headers.
 - No logging of URLs (the path holds session keys). `observability.enabled: false`.
+- `/internal` and every path under `/internal/` are handled by the Worker itself (`apns.ts`, section 25.6) and never forwarded.
 - Per-IP limits (Workers Rate Limiting, keyed by `cf-connecting-ip`, fail open when the binding is missing or fails; over the limit: 429 `rate_limited` with `Retry-After: 60`, and the relay never sees the request): `CREATE_LIMITER` (10 a minute) for `POST /v1/join`, `/v1/teams`, `/v1/devices/link`, and `/v1/devices/link/cancel`; `AUTH_LIMITER` (60 a minute) for `POST /v1/auth/challenge` and `/v1/auth/token`; `SYNC_LIMITER` (60 a minute) for `PUT /v1/sync/snapshot`.
 - Body length (24.5, 24.10): tiny_http reads the rest of a declared body after any early answer, on any path. So before the limiter and the relay, the Worker checks the `Content-Length` of every request other than GET and HEAD, by its exact method and path: `PUT /v1/sync/snapshot` up to 64 MiB plus 64 KiB (`MAX_SNAPSHOT_LENGTH`); a path under `/p/` up to 8 MiB plus 64 KiB (`MAX_PROXY_LENGTH`, the proxy's `MAX_REQUEST_BODY` plus the margin); every other path, including `PUT /v1/sync/snapshot/`, `POST /v1/sync/snapshot`, and paths the relay does not route, up to 64 KiB plus 64 KiB (`MAX_JSON_LENGTH`). Above it: 413 `payload_too_large`. A `Content-Length` that is not 1 to 20 digits: 400 `invalid_request`. The push must also have a `Content-Length` and no `Transfer-Encoding` (else 400). Another request without `Content-Length` passes: it has no body or a chunked one, and tiny_http does not read the rest of a chunked body after an early answer, so the relay reads at most its own cap. The relay keeps its own checks (24.3, 12).
 
@@ -1076,38 +1077,40 @@ New actions, all without the head text, the signature, or any snapshot byte: `sy
 - An early answer does not end a request with a declared body, on any path: the relay reads the rest of it before the connection closes. The Worker bounds the bytes at the edge (section 17): a push with a missing, malformed, or chunked length, or one above 64 MiB plus 64 KiB, never reaches the relay; a body under `/p/` is bounded at 8 MiB plus 64 KiB, and every other body (a trailing slash, another method, an unknown path) at 128 KiB. Only the exact push is rate-limited: `SYNC_LIMITER` allows about 60 a minute per IP address. What stays open: a caller without a token can still trickle a body within those bounds, and each such request holds a request thread until the edge or the client ends the connection; no transfer slot bounds them. That works on any route, within about 60 pushes a minute per address for a push of up to 64 MiB and with no rate limit for the smaller bodies elsewhere; many addresses get more. A caller that reaches the relay's origin without the Worker has no such bound, but it needs the edge secret. Ending it needs a server with read timeouts that can close the socket on an early answer.
 - Sizes, times, device ids and names, and the push rate are visible to the operator and in the audit.
 
-## 25. Questions and push **(DRAFT)**
+## 25. Questions and push
 
-**Status: DRAFT, 2026-10-12. Not built, not deployed.** ADR 0025 of the core, §3d and §3e (stage 5), and section A of its `docs/design/stage5-plan.md`. A device of a vault posts a question of its agent broker; the relay stores it sealed, routes it to the other devices of the same member (and, for a team, to the owners and managers), takes their sealed answers, and triggers an Apple push without content through the Worker. The relay never reads a question or an answer: they are ChaCha20-Poly1305 envelopes under a key that only the devices of the vault hold. The app side is `docs/contracts/relay-questions-v1.md` of the core (branch `stage5/c0-contract`); both documents describe one wire, and this section takes precedence for the relay. The envelopes' plaintext, the answer signatures, and the trust rules are in the contract only: the relay needs none of them.
+**Status: built (stream R4, branch `feat/questions`), not deployed; the A4 spike (25.7) has not run yet.** ADR 0025 of the core, §3d and §3e (stage 5), and section A of its `docs/design/stage5-plan.md`. A device of a vault posts a question of its agent broker; the relay stores it sealed, routes it to the other devices of the same member (and, for `to: "approvers"`, to the owners' and managers' devices), takes their sealed answers, and triggers an Apple push without content through the Worker. The relay never reads a question or an answer: they are ChaCha20-Poly1305 envelopes under a key that only the devices of the vault hold. The app side is `docs/contracts/relay-questions-v1.md` of the core, with its integrator decisions; both documents describe one wire, and this section takes precedence for the relay. The envelopes' plaintext, the answer signatures, and the trust rules are in the contract only: the relay needs none of them. Code: `src/server/questions.rs` (routes, routing, limits, maintenance), `src/server/push.rs` (the push trigger), `deploy/worker/src/apns.ts` (the APNs sender).
 
 ### 25.1 Words and limits
 
 | Thing | Rule |
 | --- | --- |
 | Question | one sealed card of one asking device: `qid`, `to`, `key_id`, `nonce`, `ciphertext`, `expires_at`; a state `open`, `settled`, or `expired` |
-| `qid` | base64url of 16 bytes (22 characters), made by the asker; unique in the team (409 `conflict` otherwise) |
+| `qid` | base64url of 16 bytes: exactly 22 characters of `A-Za-z0-9-_` that decode to 16 bytes (non-canonical text refused); made by the asker; unique in the team (409 `conflict` otherwise). In a path, a `qid` out of its form is 400 |
 | `to` | `member` or `approvers` (the routing bit, 25.3); stored as `to_approvers` 0 or 1 |
 | `key_id` | 16 lowercase hex characters; an answer and a settle must carry the question's `key_id` (400 otherwise) |
-| `nonce` | base64url of 12 bytes |
-| Ciphertext | base64url, not empty; a card at most 32784 bytes, an answer at most 8208, a settle at most 1040 (decoded); over: 413 `payload_too_large` |
+| `nonce` | base64url of exactly 12 bytes |
+| Ciphertext | base64url, not empty (400); a card at most 32784 bytes, an answer at most 8208, a settle at most 1040 (decoded); over: 413 `payload_too_large` |
+| `v` | `1` in every body; another value is 400 |
 | `expires_at` | unix seconds, `now + 10 < expires_at <= now + 600` on the relay clock (400 otherwise). The app uses 300 s. The relay never changes it: the card's AAD binds it |
+| State at a time | `settled` stays settled; an `open` question with `expires_at <= now` is `expired` at once, in every answer and check, before maintenance marks it |
 | Asker | the device of the access token that posted the question (`question.device_id`) |
 | Routing set | 25.3 |
 | Answer | one sealed answer of one device in the routing set, stamped by the relay with its device id, member id, role, and time |
 | Settle | one sealed envelope of the asker that ends the question |
 | Question sequence | `team.question_seq`, a counter of the team that only grows; a question takes the next value when it is posted, settled, and expired (`question.seq`) |
-| `open_questions` | per team, default 20, 1 to 1000: questions with state `open`. Over: 403 `too_many_questions` |
+| `open_questions` | per team, default 20, 1 to 1000: questions with state `open` and `expires_at > now`. Over: 403 `too_many_questions` |
 | `questions_per_hour` | per team, default 300, 1 to 1000000: questions with `created_at` in the last 3600 seconds. Over: 403 `too_many_questions` |
 | Answers per device per question | 3, fixed. Over: 403 `too_many_answers` |
-| Question long polls | 1 per device for the list (`question_polls`, `LongPolls::new(1)`) and 1 per device for answers (`answer_polls`, `LongPolls::new(1)`); a second is answered at once, as with `wait=0`; `wait` 0 to 25 |
+| Question long polls | 1 per device for the list (`question_polls`) and 1 per device for answers (`answer_polls`), both `LongPolls::new(1)`; a second is answered at once, as with `wait=0`; `wait` 0 to 25. They run in the question lane (25.5) |
 | List page | at most 100 questions per answer |
-| Push token | at most 1 per device; hex of the APNs device token, 32 to 200 characters; `environment` `development` or `production`; `bundle_id` equal to `APASSY_RELAY_PUSH_TOPIC` |
+| Push token | at most 1 per device; lowercase hex of the APNs device token, 32 to 200 characters, stored as its text; `environment` `development` or `production`; `bundle_id` equal to `APASSY_RELAY_PUSH_TOPIC` |
 | Retention | maintenance deletes a question and its answers 24 hours after `created_at` |
-| Auth | an access token of a live device (`Need::Member`, then `MemberAuth.device` required, as 24.5). A member token is 401 `unauthenticated` |
+| Auth | an access token of a live device (`Need::Member`, then `MemberAuth.device` required, as 24.5). A member token is 401 `unauthenticated`, before its body is parsed |
 
 ### 25.2 Schema version 5 (team file)
 
-`Store::open_team` migrates a version 4 file to version 5 with the copy rule of 23.2 and 24.2: copy to `<file>.pre-v5` (mode 0600, written as `.pre-v5.tmp`, synced, renamed; refuse to migrate when the copy cannot be made; keep it, the version 4 image refuses version 5), then in one `BEGIN IMMEDIATE` transaction create the tables, add the column, and set `PRAGMA user_version = 5`. The migration is additive. A new team file is made at version 5. `remove_team_file` also removes `.pre-v5` and `.pre-v5.tmp`.
+`Store::open_team` migrates a version 4 file to version 5 with the copy rule of 23.2 and 24.2: copy to `<file>.pre-v5` (mode 0600, written as `.pre-v5.tmp`, synced, renamed; refuse to migrate when the copy cannot be made; keep it, the version 4 image refuses version 5), then in one `BEGIN IMMEDIATE` transaction add the column, create the tables, and set `PRAGMA user_version = 5`. The migration is additive: no table is rebuilt, and the sync tables and rows are untouched. A version 3 file goes through 4 to 5 in one start, with both copies. A new team file is made at version 5. Version 1 and versions above 5 are refused. `remove_team_file` also removes `.pre-v5` and `.pre-v5.tmp`.
 
 ```sql
 ALTER TABLE team ADD COLUMN question_seq INTEGER NOT NULL DEFAULT 0;
@@ -1139,7 +1142,7 @@ CREATE TABLE device_wrapped_key (
 
 - The plan's `question` table has one `settle_ciphertext`; a settle also needs its nonce (`settle_nonce`). `team.question_seq` is not in the plan: `max(seq)` of the kept rows can go down when maintenance deletes them, and a device that polls with `since` above it would miss new questions.
 - `device_wrapped_key` is for shared vaults (plan section B, stream V3) and for the question key of approvers' devices (contract section 5.4). This stage creates the table and no route uses it.
-- Revoking a device deletes its `push_token` row in the same transaction. Its questions and answers stay until maintenance deletes them.
+- Revoking a device (`DELETE /v1/devices/{id}`) or a member (`DELETE /v1/members/{id}`, `POST /v1/leave`) deletes the `push_token` rows of the removed devices in the same transaction. Their questions and answers stay until maintenance deletes them.
 
 ### 25.3 Routing
 
@@ -1154,119 +1157,126 @@ WHERE d.revoked_at IS NULL AND m.revoked_at IS NULL AND d.id <> :asker_device
 - The asking device is never in its own set: it cannot list or answer its own question.
 - A device outside the set gets 403 `not_routed` when it answers, and never sees the question in its list. It can learn that a `qid` exists only if it knows the `qid` (128 random bits).
 - The relay does not check what the asker put in `to`. `to_approvers` is the one bit of a question that the relay reads; the card's AAD binds it, so a relay that flips it makes the card fail to open.
+- Until shared vaults (integrator decision 1 of the contract), the app sends every question with `to: "member"`. The relay already routes `approvers`, so V3 needs no relay change.
 
 ### 25.4 Endpoints
 
-All in the member lane (not `is_agent_path`). Routes: `["v1","questions"]` POST and GET, `["v1","questions",qid,"answers"]` POST and GET, `["v1","questions",qid,"settle"]` POST, `["v1","push","token"]` PUT and DELETE; `Need::Member` for all, then the handler requires `MemberAuth.device` (401 otherwise) and reads the device and its member again (`own_device`). A POST or PUT checks its token again after the body (23.5).
+Routes: `["v1","questions"]` POST and GET, `["v1","questions",qid,"answers"]` POST and GET, `["v1","questions",qid,"settle"]` POST, `["v1","push","token"]` PUT and DELETE; `Need::Member` for all, then the handler requires `MemberAuth.device` (401 otherwise). The device and its member are read again at each request, and a POST or PUT reads the token again after its body (23.5), so the role and the liveness used for routing are current. A request without a valid token is 401 before its body is read, as on every endpoint.
 
 | Method and path | Auth | Body | Result |
 | --- | --- | --- | --- |
-| `POST /v1/questions` | device | `QuestionPost {v, qid, to, expires_at, key_id, nonce, ciphertext}` | `{qid, seq, created_at, expires_at}`. In one transaction: `open_questions` and `questions_per_hour` (403 `too_many_questions`, a `limit_reached` row as in section 22), the `qid` is new (409 `conflict`), the row with the caller's device and member, `seq = ++team.question_seq`, `question_posted`. Then the notifier wakes the question long polls, and the push trigger runs (25.6). |
-| `GET /v1/questions?since=N&wait=S` | device | | `{seq, questions: [QuestionView]}`: the questions whose routing set holds the caller, with `seq > since`, oldest `seq` first, at most 100. `QuestionView` = `{qid, seq, to, from_device_id, from_device_name, key_id, nonce, ciphertext, created_at, expires_at, state}`, plus `settled_at` and `settle {key_id, nonce, ciphertext}` when settled. The top-level `seq` is `team.question_seq`. `wait`: while the list is empty, hold up to `wait` seconds on the team notifier (a post, a settle, or an expiry wakes it). |
-| `POST /v1/questions/{qid}/answers` | device | `AnswerPost {v, key_id, nonce, ciphertext}` | `{id, at}`. Checks in this order: 400 (shape) → 413 → 401 → 404 `not_found` (no such `qid` in the team) → 403 `not_routed` (25.3) → 409 `question_settled` / `question_expired` (state, or `expires_at <= now`) → 400 (`key_id` differs) → 403 `too_many_answers`. The row stamps the caller's device id, member id, role, and the relay time. Row `question_answered`; the notifier wakes the asker's answer long poll. The relay does not settle the question. |
+| `POST /v1/questions` | device | `QuestionPost {v, qid, to, expires_at, key_id, nonce, ciphertext}` | `{qid, seq, created_at, expires_at}`. Forms (400), then the size (413). Then in one transaction: the `qid` is new (409 `conflict`: a retry of a post that landed), `open_questions` and `questions_per_hour` (403 `too_many_questions` with a message that names the limit, a `limit_reached` row as in section 22, committed), the row with the caller's device and member, `seq = ++team.question_seq`, `question_posted`. Then the notifier wakes the long polls, and the push trigger runs (25.6). |
+| `GET /v1/questions?since=N&wait=S` | device | | `{seq, questions: [QuestionView]}`: the questions whose routing set holds the caller, with `seq > since`, oldest `seq` first, at most 100. `QuestionView` = `{qid, seq, to, from_device_id, from_device_name, key_id, nonce, ciphertext, created_at, expires_at, state}`, plus `settled_at` and `settle {key_id, nonce, ciphertext}` when settled. The top-level `seq` is `team.question_seq`. `wait`: while the list is empty, hold up to `wait` seconds on the team notifier (a post, a settle, an expiry, or a deletion wakes it). A top-level `seq` below `since` (a restored relay) answers at once. |
+| `POST /v1/questions/{qid}/answers` | device | `EnvelopePost {v, key_id, nonce, ciphertext}` | `{id, at}`. Checks in this order: 400 (shape) → 413 → 404 `not_found` (no such `qid` in the team) → 403 `not_routed` (25.3) → 409 `question_settled` / `question_expired` (state at now) → 400 (`key_id` differs) → 403 `too_many_answers`. The row stamps the caller's device id, member id, role, and the relay time. Row `question_answered`; the notifier wakes the asker's answer long poll. The relay does not settle the question. |
 | `GET /v1/questions/{qid}/answers?after=N&wait=S` | the asker's device | | `{state, expires_at, answers: [{id, device_id, member_id, role, key_id, nonce, ciphertext, at}]}` with `id > after`, `id` order. Another device: 404 `not_found` (as a link of another member, 23.5). `wait`: while there is no such answer and the state is `open`, hold up to `wait` seconds. |
-| `POST /v1/questions/{qid}/settle` | the asker's device | `SettlePost {v, key_id, nonce, ciphertext}` | `{qid, state: "settled", settled_at}`. Another device: 404. An `open` question past `expires_at`: 409 `question_expired`. A settled question: the same `nonce` and `ciphertext` again answer the same (a retry); others are 409 `question_settled`. `seq = ++team.question_seq`, row `question_settled`, the notifier wakes. |
-| `PUT /v1/push/token` | device | `PushToken {token, environment, bundle_id}` | `{device_id, updated_at}`; upsert for the caller's device, `failed_at` cleared. A relay without `APASSY_RELAY_PUSH_URL` or `APASSY_RELAY_PUSH_TOPIC`: 409 `push_unavailable`. `bundle_id` other than the topic: 400. Row `push_token_set {device_id, environment}` |
-| `DELETE /v1/push/token` | device | | `{device_id}`; removes the caller's row (no row: the same answer). Row `push_token_removed` |
+| `POST /v1/questions/{qid}/settle` | the asker's device | `EnvelopePost {v, key_id, nonce, ciphertext}` | `{qid, state: "settled", settled_at}`. 400 (shape) → 413 → 404 for another device or an unknown `qid`. A settled question: the same `key_id`, `nonce`, and `ciphertext` again answer the same (a retry, no new `seq`); another envelope is 409 `question_settled`. An expired question (state at now): 409 `question_expired`. Then 400 when the `key_id` differs. `seq = ++team.question_seq`, row `question_settled`, the notifier wakes. |
+| `PUT /v1/push/token` | device | `PushTokenPut {token, environment, bundle_id}` | `{device_id, updated_at}`; upsert for the caller's device, `failed_at` cleared. A relay without push (25.6): 409 `push_unavailable`. A token, environment, or `bundle_id` (other than the topic) out of its form: 400. Row `push_token_set {device_id, environment}` |
+| `DELETE /v1/push/token` | device | | `{device_id}`; removes the caller's row (no row: the same answer). Row `push_token_removed {device_id}` when a row was removed |
 
 New error codes in `src/error.rs`: `not_routed` 403, `too_many_questions` 403, `too_many_answers` 403, `question_settled` 409, `question_expired` 409, `push_unavailable` 409. `too_many_questions` is 403, not 429: the app holds every call to the relay after a 429 (contract relay-sync-v1 section 3), and a full question limit must not stop its sync.
 
-### 25.5 Long polls and the notifier
+### 25.5 Long polls, the notifier, and the question lane
 
-- The team notifier of section 22 wakes on a post, an answer, a settle, an expiry, and a delete by maintenance. A woken poll reads the file again and answers only when its condition holds; else it waits for the rest of its `wait`.
-- `Core` gets `question_polls: LongPolls::new(1)` and `answer_polls: LongPolls::new(1)`, keyed by device id, apart from `sync_polls`. A device can thus hold three member-lane threads with long polls (sync, questions, answers). With the 32 member-lane requests of the whole relay (section 9) this is a limit of the relay, not of a team: about ten active Macs fill the lane. R4 must raise the member lane or move the long polls to a lane of their own before more than one team uses questions **(open)**.
+- The team notifier of section 22 wakes on a post, an answer, a settle, an expiry, and a deletion by maintenance. A woken poll reads the file again and answers only when its condition holds; else it waits for the rest of its `wait` (it also reads again every 500 ms, so an expiry by the clock is seen without maintenance).
+- `Core` gets `question_polls` and `answer_polls` (`LongPolls::new(1)` each, keyed by device id), apart from `sync_polls`. The three kinds of poll of one device do not take each other's place.
+- The question lane (integrator decision 4 of the contract): the accept loop sends a `GET /v1/questions` or `GET /v1/questions/{qid}/answers` with a `wait` above 0 to its own lane of `Limits::question_long_polls` threads (128, not read from the environment). These threads are not counted in `max_active`, so question polls never take the member reserve of section 9 or the threads of sync and every member request. When the question lane is full, such a request runs in the member lane like any other and is answered at once, as with `wait=0`. The lane bounds the relay, not a team: about 64 active devices with both polls fill it, and then their polls return at once and the app asks again.
 - A long poll in flight when its device is revoked answers at its `wait`; the next request is 401.
 
 ### 25.6 Push
 
-**Relay side.** After the commit of `POST /v1/questions`, the handler reads the push tokens of the routing set (`failed_at IS NULL`) and hands one job `{team, tokens by environment, expires_at}` to the push thread through a bounded queue of 256 jobs. A full queue drops the job (row `push_dropped`, at most one per ten seconds per team). The request never waits for the push. The push thread, for each environment, posts batches of at most 100 tokens:
+**Relay side** (`src/server/push.rs`). After the commit of `POST /v1/questions`, the handler reads the push tokens of the routing set (`failed_at IS NULL`) in the same transaction, and hands one job `{team, tokens with their device and environment, expires_at}` to the push thread through a bounded queue of 256 jobs. A full queue drops the job (row `push_dropped {}`, at most one per ten seconds per team). The request never waits for the push. The push thread, for each environment (`development` first), posts batches of at most 50 tokens (each token is one subrequest of the Worker):
 
 ```
 POST <APASSY_RELAY_PUSH_URL>          (for example https://apassy-relay.wyderka.cc/internal/push)
-X-Apassy-Edge: <edge secret>
+X-Apassy-Push: <push secret>
 Content-Type: application/json
 
 {"tokens":["<hex>",...],"environment":"production","collapse_id":"apassy-question","expires_at":1790000300}
 ```
 
-- The client is `ureq` (already a dependency, with rustls), timeout 10 s, no redirects, no retry: a push that fails is lost, and the question still waits on the asking Mac and in the list.
-- The answer is `{"results":[{"token":"<hex>","status":200},{"token":"<hex>","status":410,"reason":"Unregistered"}]}`. A token with status 410, or 400 with reason `BadDeviceToken` or `DeviceTokenNotForTopic`, gets `failed_at = now` and is not used again until its device sends `PUT /v1/push/token`. Rows `push_sent {count}` per job and `push_failed {device_id, reason}` per failed token (rate-limited per device).
-- Config: `APASSY_RELAY_PUSH_URL` and `APASSY_RELAY_PUSH_TOPIC` (the bundle id, for example `com.wydrox.apassy.companion`). Without both, push is off: no trigger, and `PUT /v1/push/token` is 409. The edge secret is the relay's `APASSY_RELAY_EDGE_SECRET`, the same value as the Worker's `EDGE_SECRET`; it now goes both ways **(open: a separate `PUSH_SECRET`)**.
+- The client is `ureq` (already a dependency, with rustls and the webpki roots), timeout 10 s for the whole call, no redirects, no retry: a push that fails is lost, and the question still waits on the asking Mac and in the list.
+- The answer is `{"results":[{"token":"<hex>","status":200},{"token":"<hex>","status":410,"reason":"Unregistered"}]}`. A token with status 410, or 400 with reason `BadDeviceToken` or `DeviceTokenNotForTopic`, gets `failed_at = now` (only while the device still has that token) and is not used again until its device sends `PUT /v1/push/token`. Rows: `push_sent {count, environment}` per job and environment when at least one was sent; `push_failed {device_id, status, reason}` per token that APNs did not take, at most one per device and ten seconds; `push_failed {count, status, reason: "worker"}` when the Worker did not answer 200 with results (`status` 0: no answer), at most one per team and ten seconds.
+- Config (`src/config.rs`): `APASSY_RELAY_PUSH_URL` (`https://`, or `http://` to a loopback address for tests), `APASSY_RELAY_PUSH_TOPIC` (the bundle id, `com.wydrox.apassy.companion`), and `APASSY_RELAY_PUSH_SECRET` or `APASSY_RELAY_PUSH_SECRET_FILE` (at least 32 bytes; the Worker's `PUSH_SECRET`). All three: push is on. None: push is off, the relay logs one line at start, no job is made, and `PUT /v1/push/token` is 409. Some but not all, or a value out of its form: the relay refuses to start (a configuration error), so a typo does not turn push off without a word.
+- The push secret is its own secret (integrator decision 5), not the edge secret: the edge secret goes from the Worker to the relay only, and the push secret from the relay to the Worker only.
 
 **Worker side** (`deploy/worker/src/apns.ts`, called from `src/index.ts`):
 
-- `POST /internal/push`, exact path and method. Any other method or path under `/internal/` is 404. A request without `X-Apassy-Edge` equal to `EDGE_SECRET` (compared with `crypto.subtle.timingSafeEqual` on equal lengths) is 404 too, with the same body: a scan learns nothing. `/internal/` is never forwarded to the relay.
-- The body is at most 64 KiB, JSON, with exactly the four fields; `tokens` 1 to 100 entries of 32 to 200 lowercase hex characters; `environment` `development` or `production`; `collapse_id` 1 to 64 bytes; `expires_at` a number. Else 400.
-- The APNs provider token: a JWT `{"alg":"ES256","kid":APNS_KEY_ID}.{"iss":APNS_TEAM_ID,"iat":<now>}` signed with the `.p8` key (`crypto.subtle.importKey("pkcs8", …, {name:"ECDSA", namedCurve:"P-256"})`, `sign({name:"ECDSA", hash:"SHA-256"})`, which gives the raw `r||s` form JWS needs). The Worker keeps it in a module variable and makes a new one after 40 minutes (Apple accepts a token for 60 minutes and refuses one renewed more often than every 20).
-- For each token: `POST https://api.push.apple.com/3/device/<token>` (`production`) or `https://api.sandbox.push.apple.com/3/device/<token>` (`development`) with `authorization: bearer <jwt>`, `apns-topic: APNS_TOPIC`, `apns-push-type: alert`, `apns-priority: 10`, `apns-expiration: <expires_at>`, `apns-collapse-id: <collapse_id>`, and the fixed payload:
+- Every path that is `/internal` or starts with `/internal/` (checked on the raw path and on the parsed one) goes to `handleInternal` and is never forwarded to the relay, rate-limited, or length-checked as a relay route.
+- `POST /internal/push`, exact path and method. Any other method or path, a missing `PUSH_SECRET`, or an `X-Apassy-Push` header that is missing or not equal to `PUSH_SECRET`: 404 with the same plain-text body (`not found`), so a scan learns nothing. The secret is compared through the SHA-256 digests of both values, with a constant-time loop.
+- The body is at most 64 KiB (a declared `Content-Length` above it, or more bytes read: 413), JSON, an object with exactly the four fields; `tokens` 1 to 50 entries of 32 to 200 lowercase hex characters; `environment` `development` or `production`; `collapse_id` 1 to 64 characters of `A-Za-z0-9._-`; `expires_at` a non-negative integer. Else 400 `invalid_request`. Then a Worker without `APNS_KEY`, `APNS_KEY_ID`, `APNS_TEAM_ID`, or `APNS_TOPIC`, or with a key that does not import: 503 `push_unavailable`.
+- The APNs provider token: a JWT `{"alg":"ES256","kid":APNS_KEY_ID}.{"iss":APNS_TEAM_ID,"iat":<now>}` signed with the `.p8` key (`crypto.subtle.importKey("pkcs8", …, {name:"ECDSA", namedCurve:"P-256"})`, `sign({name:"ECDSA", hash:"SHA-256"})`, which gives the raw `r||s` form JWS needs). The Worker keeps it in a module variable with its inputs and makes a new one after 50 minutes or when the key, key id, or team id changes (Apple accepts a token for 60 minutes and refuses one renewed more often than every 20).
+- For each token, in parallel: `POST https://api.push.apple.com/3/device/<token>` (`production`) or `https://api.sandbox.push.apple.com/3/device/<token>` (`development`) with `authorization: bearer <jwt>`, `apns-topic: APNS_TOPIC`, `apns-push-type: alert`, `apns-priority: 10`, `apns-expiration: <expires_at>`, `apns-collapse-id: <collapse_id>`, `content-type: application/json`, and the fixed payload:
 
 ```json
 {"aps":{"alert":{"title":"Apassy","body":"A question is waiting"},"sound":"default","interruption-level":"time-sensitive"}}
 ```
 
-- The answer lists each token with the APNs status and, for an error, the APNs `reason`. The Worker logs nothing (`observability.enabled: false` stays).
-- Secrets and vars: `APNS_KEY` is a Worker secret (`wrangler secret put APNS_KEY`, the `.p8` text piped through Apassy, never typed or echoed); `APNS_KEY_ID`, `APNS_TEAM_ID` (`7S3F9767BM`), and `APNS_TOPIC` are vars in `wrangler.jsonc`. The key is never in git, on the VPS, or in a Docker image.
+- The answer is 200 `{"results":[...]}` in the order of `tokens`: each token with the APNs status and, for a status other than 200, the APNs `reason` when it is a word of 1 to 64 letters, else `Unknown`. A fetch that throws gives status 0, reason `Unreachable`. The Worker logs nothing (`observability.enabled: false` stays).
+- Secrets and vars: `PUSH_SECRET` and `APNS_KEY` are Worker secrets (`wrangler secret put`, the values piped through Apassy, never typed or echoed); `APNS_KEY_ID` (set by the owner before the deploy), `APNS_TEAM_ID` (`7S3F9767BM`), and `APNS_TOPIC` (`com.wydrox.apassy.companion`) are vars in `wrangler.jsonc`. The key is never in git, on the VPS, or in a Docker image.
 - The payload, the headers, and the collapse id are the same for every question: Apple learns that a device of this bundle gets a question at a time, nothing else.
 
 ### 25.7 The A4 spike and the fallback
 
-APNs speaks HTTP/2 only. Before R4 builds the Worker sender, a spike must show that a Worker's `fetch` reaches APNs: from a preview Worker (not the production route), `POST https://api.sandbox.push.apple.com/3/device/00` with an empty JSON body and no `authorization` must answer **403 with `{"reason":"MissingProviderToken"}`**. Any other result (a connection error, a protocol error, a 4xx without that reason) means the Worker cannot send, and R4 takes the fallback:
+APNs speaks HTTP/2 only. Before push goes live, a spike must show that a Worker's `fetch` reaches APNs: `deploy/worker/spike/` is a separate throwaway Worker (`apassy-apns-spike`, no route, no binding) that posts to `https://api.sandbox.push.apple.com/3/device/00` with an empty JSON body and no `authorization`. The owner runs it on Cloudflare's network with `npx wrangler dev --remote -c spike/wrangler.jsonc` and `curl -s http://127.0.0.1:8787/` (`deploy/worker/spike/README.md`); nothing is deployed. The expected answer is **403 with `{"reason":"MissingProviderToken"}`** (`"ok":true`). Any other result (a connection error, a protocol error, a 4xx without that reason) means the Worker cannot send, and push takes the fallback instead of `apns.ts`:
 
-- The relay sends APNs itself from its push thread: `h2` with `tokio` (a current-thread runtime on the push thread only) and `tokio-rustls`, the same headers, payload, JWT rules (`ring` `ECDSA_P256_SHA256_FIXED_SIGNING`), and failure handling as 25.6. `/internal/push` is not built.
+- The relay sends APNs itself from its push thread: `h2` with `tokio` (a current-thread runtime on the push thread only) and `tokio-rustls`, the same headers, payload, JWT rules (`ring` `ECDSA_P256_SHA256_FIXED_SIGNING`), and failure handling as 25.6. Not built.
 - The `.p8` key is then a file on the VPS: `/opt/apassy/secrets/relay/apns_key.p8`, mode 0400, owned by the relay user, mounted read-only like the master key, named by `APASSY_RELAY_APNS_KEY_FILE`, with `APASSY_RELAY_APNS_KEY_ID`, `APASSY_RELAY_APNS_TEAM_ID`, and `APASSY_RELAY_PUSH_TOPIC`. This puts an Apple key on the VPS, which the plan avoids: it needs the owner's decision.
-- The spike's result and the choice go in `docs/OPERATIONS.md` with the deploy.
+- The spike's result and the choice go in `docs/OPERATIONS.md` (section 19) with the deploy. Without push, questions still work: the devices find them by their long polls.
 
 ### 25.8 Maintenance and expiry
 
-Every 5 seconds, per team (with the maintenance of 23.5 and 24.5):
+Every 5 seconds, per team (with the maintenance of 23.5 and 24.5), in one transaction:
 
-- open questions with `expires_at <= now` become `expired`, each with `seq = ++team.question_seq`, a row `question_expired`, and one wake of the notifier;
-- questions with `created_at <= now - 86400` are deleted with their answers (`ON DELETE CASCADE`), and the notifier wakes;
+- open questions with `expires_at <= now` become `expired`, oldest `seq` first, each with `seq = ++team.question_seq` and a row `question_expired`;
+- questions with `created_at <= now - 86400` are deleted with their answers;
+- one wake of the notifier when anything changed;
 - nothing else: push tokens stay until replaced, removed, or their device is revoked.
 
 ### 25.9 Audit
 
-New actions, with device ids and counts only: no `qid`, no `key_id`, no nonce, no ciphertext, no push token, no bundle id.
+New actions, with device ids and counts only: no `qid`, no `key_id`, no nonce, no ciphertext, no push token, no bundle id, no secret.
 
 | Action | Detail |
 | --- | --- |
 | `question_posted` | `{device_id, to_approvers, routed}` (`routed` = the size of the routing set) |
 | `question_answered` | `{device_id, asker_device_id}` |
 | `question_settled` | `{device_id}` |
-| `question_expired` | `{device_id}` (the asker) |
-| `question_refused` | `{reason}`: `not_routed`, `too_many_questions`, `too_many_answers`, `settled`, `expired`; rate-limited as other refusals |
+| `question_expired` | `{device_id}` (the asker; actor `relay`) |
+| `question_refused` | `{reason}`: `not_routed`, `too_many_questions`, `too_many_answers`, `settled`, `expired`; actor `edge` as other refusals, at most one row per reason and ten seconds |
 | `push_token_set`, `push_token_removed` | `{device_id, environment}` / `{device_id}` |
 | `push_sent` | `{count, environment}` |
-| `push_failed` | `{device_id, status, reason}` with the APNs reason text (a fixed word list from Apple, at most 64 bytes) |
+| `push_failed` | `{device_id, status, reason}` with the APNs reason word, or `{count, status, reason: "worker"}` |
 | `push_dropped` | `{}` |
 
-`limit_reached` names `open_questions` and `questions_per_hour`. The masks need no change: no new row holds a token form.
+`limit_reached` names `open_questions` and `questions_per_hour`. The masks need no change: no new row holds a token form. The relay logs nothing of a question or a push; the one push line in the log is "push is off" at start.
 
 ### 25.10 Operator
 
-`limits ID` reads and sets `--open-questions N` and `--questions-per-hour N` with the ranges of 25.1; `TeamLimits` gets both with `serde(default)`. `teams` shows, for an open team, `open_questions` and `push_tokens` (counts). No command shows a question, an answer, or a token.
+`limits ID` reads and sets `--open-questions N` (1 to 1000) and `--questions-per-hour N` (1 to 1000000); the result prints eleven effective values. `TeamLimits` gets both with `serde(default)`, so an existing `limits` column reads unchanged. `teams` shows, for an open team, `open_questions` and `push_tokens` (counts). No command shows a question, an answer, or a token.
 
 ### 25.11 Tests
 
-- The contract's vectors: the relay accepts the vector card's `qid`, `key_id`, `nonce`, and ciphertext length, and its AAD helper (if any is built for tests) gives the contract's AAD bytes.
-- Post, list, answer, read, settle: one asker and two devices of its member; both list the question, answer, and the asker reads both answers in order; after the settle both see `settled` with the settle envelope, and a third answer is 409 `question_settled`.
-- Routing: a device of another member gets nothing in its list and 403 `not_routed` on an answer for `to: "member"`; with `to: "approvers"`, a manager's and an owner's devices list and answer, a member's do not. The asking device does not see its own question and gets 403 on an answer. A device revoked after the post gets 401; a member whose role drops from manager stops seeing approvers' questions at once.
-- Asker only: `GET …/answers` and `POST …/settle` from another device of the same member are 404.
-- Limits: the 21st open question and the 301st in an hour are 403 `too_many_questions` with one `limit_reached` row per ten seconds; the 4th answer of one device is 403 `too_many_answers`; a card of 32785 bytes is 413; `expires_at` of `now + 10` and `now + 601` are 400; an answer with another `key_id` is 400; a `qid` again is 409 `conflict`.
-- Expiry: a question past `expires_at` becomes `expired` with a new `seq` within 5 s and refuses answers (409 `question_expired`) and settles; after 24 hours it and its answers are gone (404).
-- Sequence: `since` from the top-level `seq` sees each post, settle, and expiry once; after the 24-hour deletion of every row, a new question still gets a `seq` above every earlier one.
-- Long polls: `wait=25` on the list returns on a post; on answers it returns on an answer and on an expiry; a second poll of the same device returns at once; the three kinds of poll of one device do not block each other.
-- Push: with a mock Worker, a post sends one request per environment with the tokens of the routing set only (not the asker's, not other members', not failed ones), the edge secret, and `expires_at`; a 410 result marks the token failed and the next post skips it; `PUT` clears it; a Worker that does not answer within 10 s delays no request. Without push config, `PUT /v1/push/token` is 409 and no push is tried.
-- The Worker (`deploy/worker/test/`): `/internal/push` without the secret, with a wrong one, with another method, and `/internal/x` are 404 with the same body and never reach the relay; a valid call with a mock `fetch` sends one APNs request per token with the headers and the payload above, to the sandbox host for `development`; the JWT has `kid`, `iss`, `iat`, verifies with the public key of a test `.p8`, and is reused within 40 minutes; 410 and `BadDeviceToken` come back in the results.
-- Migration: a version 4 file opens as version 5 with `.pre-v5` next to it; a failed copy leaves version 4; the sync tables and rows are untouched.
-- Separation: the access token of team A gets 404 for a `qid` of team B on every question route, and team B's lists, answers, and tokens are untouched.
-- No audit row, response to another device, or log holds a ciphertext, a nonce, a `qid`, a push token, or the edge secret.
+`tests/server_questions.rs`, unit tests in `src/server/questions.rs`, `src/server/push.rs`, `src/server/store.rs`, `src/server/http.rs`, `src/config.rs`, and `deploy/worker/test/apns.test.ts`:
+
+- The contract's vectors: the relay accepts the vector `qid`, `key_id`, the three nonces, and the card, answer, and settle ciphertexts (1154, 386, 221 bytes) and returns them byte for byte; the card AAD built from the clear fields equals the contract's hex.
+- Post, list, answer, read, settle: one asker and two devices of its member; both list the question, answer, and the asker reads both answers in order with the stamp; after the settle both see `settled` with the settle envelope and the next `seq`; a third answer is 409 `question_settled`; the same settle again answers the same, another is 409; a repost is 409 `conflict`.
+- Routing: devices of other members get nothing in their list and 403 `not_routed` on an answer for `to: "member"`; with `to: "approvers"`, a manager's and an owner's devices list and answer (stamped `owner` and `manager`), a member's do not. The asking device does not see its own question and gets 403 on an answer. A device revoked after the post gets 401; a member whose role drops from manager stops seeing approvers' questions at once.
+- Asker only: `GET …/answers` and `POST …/settle` from another device of the same member are 404; a member token is 401 on all seven routes.
+- Limits and forms: the 21st open question and the 26th in an hour (operator limit 25) are 403 `too_many_questions` with one `limit_reached` row per ten seconds; the 4th answer of one device is 403 `too_many_answers`; a card of 32785, an answer of 8209 (also on an unknown `qid`: 413 before 404), and a settle of 1041 bytes are 413, and 32784, 8208, 1040 pass; `expires_at` of `now + 10` and `now + 650` are 400 (the exact bounds in a unit test); `v`, `qid`, `to`, `key_id`, `nonce`, an empty ciphertext, and an unknown field are 400; an answer or settle with another `key_id` is 400; the operator sets both limits and `teams` shows the counts.
+- Expiry: a question past `expires_at` refuses answers and settles (409 `question_expired`) before maintenance; maintenance marks it `expired` with a new `seq`; after 24 hours every question and answer is gone (404), and a new question still gets a `seq` above every earlier one.
+- Long polls: `wait=25` on the list returns on a post; on answers it returns on an answer and on an expiry; a second poll of the same device returns at once; a sync poll and a list poll of one device do not stop its answer poll from waiting.
+- The question lane: with `max_active` 2 and two question polls held, `GET /v1/me` still answers 200 and a third poll is answered at once; a version that counts question polls in `max_active` fails this test.
+- Push: with a mock Worker, a post sends one call per environment with the tokens of the routing set only (not the asker's, not another member's, not failed ones), the push secret, the constant collapse id, and `expires_at`; a 410 result marks the token failed and the next post skips it; `PUT` clears it; revoking a device or a member removes its token; a Worker that does not answer delays no post. Without push config, `PUT /v1/push/token` is 409 and nothing is sent. Config: all three values or none.
+- The Worker: `/internal/push` without the secret, with a wrong one, with another method, `/internal/x`, and `/internal/push/` are 404 with the same body and never reach the relay; a valid call with a mock `fetch` sends one APNs request per token with the headers and the payload above, to the sandbox host for `development`; the JWT has `kid`, `iss`, `iat`, verifies with the public key of a test key, is reused within 50 minutes and renewed after; 410 and `BadDeviceToken` come back in the results; malformed bodies are 400, large ones 413, a missing APNs config 503.
+- Migration: a version 4 file opens as version 5 with `.pre-v5` next to it; a failed copy leaves version 4 without the new tables; the sync tables and rows are untouched; version 6 is refused.
+- Separation: the access token of team A gets nothing of team B's questions and 404 for its `qid` on every question route; the same `qid` is free in another team.
+- No audit row holds a `qid`, a `key_id`, a nonce, a ciphertext, a push token, the bundle id, or the push secret.
 
 ### 25.12 What this does not protect
 
 - The relay sees the metadata: which device of which member posts and answers, when, how large each envelope is, the routing bit, and which devices have push tokens. The operator, root, a disk snapshot, and a backup hold the sealed envelopes for up to 24 hours. Cloudflare sees the same.
 - The relay can drop, delay, or reorder questions, answers, and pushes, and can lie about roles in its stamp (the contract's section 18 says what the app trusts it for). It cannot read an envelope or make an answer that counts.
-- The edge secret now also lets its holder ask the Worker to send the fixed notification to any token it knows. It still gives no content and no access to a team.
+- The push secret lets its holder ask the Worker to send the fixed notification to any token it knows. It gives no content and no access to a team. It is on the VPS (a file like the edge secret) and in the Worker.
 - Apple sees each push: the device token, the bundle id, and the time.
 - With the fallback of 25.7, the APNs key is on the VPS, and root on the VPS can send notifications as Apassy.
-- Long polls of questions share the member lane with sync and every member request (25.5).
+- A full question lane makes question polls return at once (the app asks again); it does not stop other requests.

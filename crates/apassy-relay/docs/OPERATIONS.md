@@ -697,7 +697,7 @@ apassy-team me          # team Family (t_...): member rafal (id 1, owner)
 
 A code works once. A typo in a name does not use it. The owner then invites members (section 9) and runs `apassy-team host` for the team's items (section 11). A host serves the team of its owner token.
 
-**The teams.** `admin teams` shows the id, name, state, and effective limits of each team. For an active team, it also shows the member, item, and agent counts, the time of the last audit row, and the vault sync version and the size of its snapshot (`sync_version`, `sync_size`; 0 without a snapshot). It shows no names of people or items, no runs, and no audit.
+**The teams.** `admin teams` shows the id, name, state, and effective limits of each team. For an active team, it also shows the member, item, and agent counts, the time of the last audit row, the vault sync version and the size of its snapshot (`sync_version`, `sync_size`; 0 without a snapshot), and the counts of open questions and push tokens (`open_questions`, `push_tokens`). It shows no names of people or items, no runs, and no audit.
 
 **Team limits.** Each team starts with these limits:
 
@@ -712,6 +712,8 @@ A code works once. A typo in a name does not use it. The owner then invites memb
 | `sync_bytes` | 67108864 (64 MiB) |
 | `sync_pushes_per_hour` | 600 |
 | `sync_transfers` | 2 |
+| `open_questions` | 20 |
+| `questions_per_hour` | 300 |
 
 Read all effective values:
 
@@ -725,9 +727,10 @@ Change only the necessary fields:
 docker compose exec relay apassy-relay admin limits t_7k2m5q4x3c --members 25 --items 200
 docker compose exec relay apassy-relay admin limits t_7k2m5q4x3c --agents 40 --runs-per-hour 500 --pending-runs 20 --agent-requests 28
 docker compose exec relay apassy-relay admin limits t_7k2m5q4x3c --sync-bytes 33554432 --sync-pushes-per-hour 300 --sync-transfers 4
+docker compose exec relay apassy-relay admin limits t_7k2m5q4x3c --open-questions 40 --questions-per-hour 600
 ```
 
-The command prints all nine effective values. If a field has no flag, its value stays the same. Values must be integers from 1 to 1000000. The `agent_requests` range is 1 to 224. The `sync_bytes` range is 1048576 to 67108864 (the largest vault snapshot, in bytes; 64 MiB is also the most that the app and the head grammar allow), and the `sync_transfers` range is 1 to 8 (snapshot uploads and downloads of the team at once; over it, 503 `busy`). The relay also allows at most 16 snapshot transfers of all teams at once.
+The command prints all eleven effective values. If a field has no flag, its value stays the same. Values must be integers from 1 to 1000000. The `agent_requests` range is 1 to 224. The `sync_bytes` range is 1048576 to 67108864 (the largest vault snapshot, in bytes; 64 MiB is also the most that the app and the head grammar allow), and the `sync_transfers` range is 1 to 8 (snapshot uploads and downloads of the team at once; over it, 503 `busy`). The relay also allows at most 16 snapshot transfers of all teams at once. The `open_questions` range is 1 to 1000 (questions that wait for an answer; over it, 403 `too_many_questions`, see section 19); `questions_per_hour` is 1 to 1000000.
 
 Use the command for active or suspended teams. A change adds `limits_changed` with actor `operator` to the team audit and relay audit.
 
@@ -804,3 +807,135 @@ The installer refuses a binary whose checksum is not in `SHA256SUMS`. A missing 
 The Worker also checks the declared length of every request body before it forwards it, because the relay reads every declared byte of a body even when it answers early, on any path (docs/SPEC.md section 24.10). A snapshot push (exactly `PUT /v1/sync/snapshot`) with `Transfer-Encoding` or with a missing or non-numeric `Content-Length` gets 400 `invalid_request`; one that declares more than 64 MiB plus 64 KiB gets 413 `payload_too_large`. A body under `/p/` (the agent proxy) may declare up to 8 MiB plus 64 KiB; every other body, on any other path or method (`PUT /v1/sync/snapshot/` or `POST /v1/sync/snapshot` included), up to 128 KiB. Above that: 413; a non-numeric length: 400. The relay keeps its own checks. This bounds bytes, not time: a client that sends a body slowly still holds a relay thread until the connection ends, and only pushes are rate-limited.
 
 A workflow in `.github/workflows/health.yml` checks `/healthz` and `/v1/me` (401) every hour. A failed run is the alert: GitHub notifies the owner of the repository.
+
+## 19. Questions and push (team schema 5)
+
+The relay carries the questions of an agent broker from the asking Mac to the other devices of the vault, and wakes iPhones with a push notification without content (docs/SPEC.md section 25; the app's contract is `docs/contracts/relay-questions-v1.md` of the core). It stores sealed envelopes for at most 24 hours and never reads them. The Worker sends the Apple pushes; the relay asks it to, with its own push secret.
+
+What changes at the first start of this version:
+
+- Each team file moves to schema version 5: the relay copies it to `teams/<id>.db.pre-v5` (the way back for an older image, mode 0600), then adds the tables `question`, `question_answer`, `push_token`, `device_wrapped_key`, and the column `team.question_seq` in one transaction. The change is additive: no table is rebuilt, sync rows stay. A team whose copy cannot be made stays at version 4 and does not open; free disk space and start again. The previous image (`sync-*`, schema 4) refuses a version 5 file.
+- New routes in the member lane: `/v1/questions`, `/v1/questions/{qid}/answers`, `/v1/questions/{qid}/settle`, `/v1/push/token`. Question long polls have their own 128 threads, apart from the 256 of section 15, so they never take the member reserve.
+- New team limits `open_questions` (20) and `questions_per_hour` (300), section 17. Over either: 403 `too_many_questions`, and the question stays on the asking Mac.
+- The audit gets `question_*` and `push_*` rows with device ids and counts only.
+
+### 19.1 Push: what is where
+
+| What | Where | Kind |
+| --- | --- | --- |
+| `APNS_KEY` | Worker | secret: the text of the Apple `.p8` key (APNs, team `7S3F9767BM`) |
+| `PUSH_SECRET` | Worker | secret: 64 hex characters, the same as the relay's push secret |
+| `APNS_KEY_ID` | Worker, `wrangler.jsonc` `vars` | the Key ID of the `.p8` key (empty in git: set it before the deploy) |
+| `APNS_TEAM_ID`, `APNS_TOPIC` | Worker, `wrangler.jsonc` `vars` | `7S3F9767BM`, `com.wydrox.apassy.companion` |
+| `/opt/apassy/secrets/relay/push_secret` | VPS | the push secret, owner 10001, mode 0400 |
+| `APASSY_RELAY_PUSH_URL`, `APASSY_RELAY_PUSH_TOPIC`, `APASSY_RELAY_PUSH_SECRET_FILE` | `/opt/apassy/compose.yaml`, service `relay`, `environment` | `https://apassy-relay.wyderka.cc/internal/push`, `com.wydrox.apassy.companion`, `/run/secrets/relay/push_secret` |
+
+- The relay needs all three push variables or none. None: push is off and the relay logs `push is off` once at start; questions still reach the devices by their long polls, and `PUT /v1/push/token` answers 409 `push_unavailable`. Some but not all: the relay does not start.
+- The `.p8` key never goes on the VPS, into git, or into an image. It is only a Worker secret.
+- The push secret goes only from the relay to the Worker (`X-Apassy-Push`); the edge secret only from the Worker to the relay. Rotate it like the edge secret (section 14): a new file on the VPS, a restart, and `wrangler secret put PUSH_SECRET` with the same text.
+
+### 19.2 Owner steps for the deploy
+
+Run them in this order. Steps 1 to 4 change nothing on the live relay.
+
+1. **The A4 spike.** Can a Worker reach APNs over HTTP/2? From `deploy/worker/`:
+
+   ```sh
+   npx wrangler dev --remote -c spike/wrangler.jsonc     # runs on Cloudflare's network, deploys nothing
+   curl -s http://127.0.0.1:8787/                        # in another terminal
+   ```
+
+   Expect `"status":403`, `MissingProviderToken`, and `"ok":true`. Stop wrangler with Ctrl-C. Anything else: stop here; push needs the fallback of SPEC 25.7 (the APNs key on the VPS), which is the owner's decision and is not built. Write the result in this section.
+
+2. **The APNs key.** In the Apple Developer account (team `7S3F9767BM`), Certificates, Identifiers & Profiles, Keys: make a key with Apple Push Notifications service (APNs), environment Sandbox & Production. Download the `.p8` once and put its text into an Apassy item (for example "APNs key"). Note its Key ID. Set `APNS_KEY_ID` in `deploy/worker/wrangler.jsonc` to it.
+
+3. **The secrets.** Make the push secret on the Mac and copy it to the VPS and the Worker without typing or echoing it:
+
+   ```sh
+   umask 077; openssl rand -hex 32 > ~/.apassy-relay/push_secret
+   ssh ottervibe 'sudo sh -c "umask 077; cat > /opt/apassy/secrets/relay/push_secret && chown 10001:10001 /opt/apassy/secrets/relay/push_secret && chmod 0400 /opt/apassy/secrets/relay/push_secret"' < ~/.apassy-relay/push_secret
+   cd deploy/worker
+   npx wrangler secret put PUSH_SECRET < ~/.apassy-relay/push_secret
+   ```
+
+   Put the key through Apassy (`apassy_run_with_secrets` with the item of step 2, from `deploy/worker/`):
+
+   ```sh
+   printf '%s' "$APNS_KEY" | npx wrangler secret put APNS_KEY
+   ```
+
+4. **The Worker.** It must serve `/internal/push` before the relay calls it. Test and deploy (section 7):
+
+   ```sh
+   cd deploy/worker && npm test && npm run typecheck && npx wrangler deploy
+   curl -s -o /dev/null -w '%{http_code}\n' -X POST https://apassy-relay.wyderka.cc/internal/push   # 404: no secret
+   curl -s https://apassy-relay.wyderka.cc/healthz                                                # ok
+   ```
+
+   Optional: a call with the secret and a token of 64 zeros (through Apassy, never on the command line) answers `{"results":[{"token":"00…","status":400,"reason":"BadDeviceToken"}]}`: Apple took the provider token. `403` with `InvalidProviderToken` means a wrong key, Key ID, or team id.
+
+5. **The backup.** Note the image the relay runs now (the rollback target), then back up:
+
+   ```sh
+   ssh ottervibe 'grep "image: apassy-relay" /opt/apassy/compose.yaml'     # for example apassy-relay:sync-4208643
+   ssh ottervibe 'cd /opt/apassy && docker compose exec -T relay apassy-relay admin backup'
+   ```
+
+   Keep the folder name it prints (`/opt/apassy/backups/relay/<UTC time>`).
+
+6. **The relay.** Build the image of the commit, as in section 16, with the tag `apassy-relay:questions-<commit>`:
+
+   ```sh
+   git archive --format=tar <commit> | ssh ottervibe 'rm -rf /opt/apassy/build && mkdir -p /opt/apassy/build && tar -x -C /opt/apassy/build'
+   ssh ottervibe 'cd /opt/apassy/build && docker build -t apassy-relay:questions-<commit> .'
+   ```
+
+   In `/opt/apassy/compose.yaml` (and in `deploy/vps/compose.yaml`, committed with the deploy) set `image: apassy-relay:questions-<commit>` and add to `environment` of `relay`:
+
+   ```yaml
+      APASSY_RELAY_PUSH_URL: https://apassy-relay.wyderka.cc/internal/push
+      APASSY_RELAY_PUSH_TOPIC: com.wydrox.apassy.companion
+      APASSY_RELAY_PUSH_SECRET_FILE: /run/secrets/relay/push_secret
+   ```
+
+   Then:
+
+   ```sh
+   ssh ottervibe 'cd /opt/apassy && docker compose up -d --wait'
+   ```
+
+7. **Checks.**
+
+   ```sh
+   ssh ottervibe 'cd /opt/apassy && docker compose logs --tail 20 relay'            # no "cannot be moved to schema version 5", no "push is off"
+   ssh ottervibe 'cd /opt/apassy && docker compose exec relay ls -l /data/teams'     # a .db.pre-v5 next to each .db
+   ssh ottervibe 'cd /opt/apassy && docker compose exec relay apassy-relay admin teams'   # every team "open": true, with open_questions and push_tokens
+   curl -s https://apassy-relay.wyderka.cc/healthz
+   apassy-team me
+   ```
+
+   A Mac with relay sync still syncs (its sync rows are untouched). The first push shows as `push_sent` in the team audit; a `push_failed` with `reason: "worker"` means the relay could not reach the Worker or the secrets differ.
+
+8. **Later.** Delete the `.pre-v5` files when no rollback to schema 4 is needed any more (they hold the team as it was at the migration).
+
+### 19.3 Rollback
+
+- **Push only.** Remove the three `APASSY_RELAY_PUSH_*` lines from `compose.yaml` and `docker compose up -d --wait`: push is off, questions still work. Or leave the relay and remove `PUSH_SECRET` from the Worker (`npx wrangler secret delete PUSH_SECRET`): `/internal/push` answers 404 and the relay records `push_failed`.
+- **The Worker.** The new Worker serves every old route as before. To go back: `npx wrangler rollback` (to the previous version), or deploy the previous commit of `deploy/worker/`.
+- **The relay image.** The previous image refuses the version 5 team files, so a rollback puts the version 4 copies back. It loses every change of the teams since the migration: questions and push tokens (the iPhones send their tokens again), and also members, devices, and vault sync heads made after it. A Mac that pushed a snapshot after the migration then sees an older copy on the relay (section 13). Prefer a fix forward when the problem is not the migration itself.
+
+  On the VPS (`ssh ottervibe`, then `cd /opt/apassy`):
+
+  ```sh
+  docker compose stop relay
+  docker compose run --rm --no-deps --entrypoint bash relay \
+    -c 'for f in /data/teams/*.db.pre-v5; do cp -p "$f" "${f%.pre-v5}"; done; ls -l /data/teams'
+  ```
+
+  Then set the image noted in step 5 (for example `apassy-relay:sync-4208643`) in `/opt/apassy/compose.yaml`, remove the three `APASSY_RELAY_PUSH_*` lines, and start:
+
+  ```sh
+  ssh ottervibe 'cd /opt/apassy && docker compose up -d --wait && docker compose exec relay apassy-relay admin teams'
+  ```
+
+  Every team must be `"open": true`. A team made after the migration has no `.pre-v5` and is version 5 from the start: the old image cannot open it; suspend it, or restore the backup of step 5 instead (section 13: put `relay.db` and `teams/` of that folder into the volume with the relay stopped). The backup of step 5 is the same state as the `.pre-v5` files, plus `relay.db` and the snapshots.
