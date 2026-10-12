@@ -1,11 +1,13 @@
 {
   "schema_version": 1,
-  "provider_version": 1,
+  "provider_version": 2,
   "id": "anthropic",
   "kind": "provider",
   "label": "Anthropic",
   "description": "Anthropic API keys and admin keys.",
   "known_hosts": ["api.anthropic.com"],
+  "variable": "ANTHROPIC_API_KEY",
+  "prefixes": ["sk-ant-"],
   "signals": [
     {
       "id": "admin-key",

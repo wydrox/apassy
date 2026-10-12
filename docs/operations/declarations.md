@@ -33,6 +33,7 @@ The provider data is in `packs/providers/`, one JSON file for each provider. The
 | `resend.json` | Resend | api.resend.com | `re_` |
 | `sendgrid.json` | SendGrid | api.sendgrid.com | `SG.` |
 | `sentry.json` | Sentry | sentry.io | DSN host `*.ingest.sentry.io`, `sntrys_`, `sntryu_` |
+| `slack.json` | Slack | slack.com | `xoxb-` bot, `xoxp-` user, and `xapp-` app-level tokens |
 | `stripe.json` | Stripe | api.stripe.com, files.stripe.com, connect.stripe.com, uploads.stripe.com | `sk_live_`, `sk_test_`, `rk_live_`, `rk_test_`, `pk_live_`, `pk_test_` |
 | `supabase.json` | Supabase | supabase.co, supabase.com | JWT role `service_role` or `anon`, `sb_secret_`, `sb_publishable_`, `sbp_` |
 | `twilio.json` | Twilio | twilio.com | `AC` account SID, `SK` API key SID, `TWILIO_AUTH_TOKEN` |
@@ -54,6 +55,9 @@ A file is one JSON object. The loader rejects unknown fields at every level, and
 | `label`, `description` | Text for the owner. |
 | `generic` | Optional. A generic provider (PostgreSQL) loses to a specific provider (Supabase, Neon). |
 | `known_hosts` | Provider API hosts in lowercase. A provider needs one or more, unless it is generic. A general file has none. |
+| `variable` | The default environment variable of a detected credential, such as `STRIPE_SECRET_KEY`. A provider needs one. The loader refuses a reserved name (`PATH`, `APASSY_*`, ...). A general file has none. |
+| `title` | Optional. The title of a detected credential, such as `GitHub token`. The default is the label and "API key". |
+| `prefixes` | Optional. Value prefixes of the keys of the provider, such as `sk_live_`. Case matters. Two or more characters, no space, and one provider for each prefix. The paste detection (section 3a) names the provider of a value by the longest prefix. |
 | `signals` | A list of signals: `id`, `when`, `suggest`, `reason`. |
 
 `suggest` has the optional fields `environment`, `risk`, `scope`, and `reversibility`, with the values of ADR 0008. A general signal must suggest a field. `reason` is one or two sentences for the owner.
@@ -97,6 +101,23 @@ What the detection reads from an item:
 5. An item with a stored declaration shows the stored values. The suggestion stays as a hint.
 
 The review card after a restore (goal item V4) shows the provider, because the provider gives known hosts to the analysis.
+
+## 3a. Paste detection
+
+ADR 0025 §4 ("Two steps to add"). `apassy::vault::detect::detect(text) -> Vec<Detected>` reads one pasted text on this Mac. It is pure: no vault, no network. `summary_line(&Detected)` gives the result line, for example "Anthropic API key · `ANTHROPIC_API_KEY` · production".
+
+| Input | Result |
+| --- | --- |
+| A secret | One item. A value prefix of the catalog (`prefixes`, longest wins) or a value signal (shape, JWT, JSON key file) names the provider: kind API key, field `token`, title from `title` (Stripe: "Stripe live" or "Stripe test" by the prefix), the provider `variable`, the provider `known_hosts` as the hosts. |
+| `KEY=value`, a `.env` file | One item for each line with a value, with its line number. `export`, quotes, comments, and blank lines as in the import (`src/vault/detect/dotenv.rs`, shared with `apassy import`). The variable is the key in uppercase. A key without a provider gives a Custom item titled from the key ("Database Password"). |
+| `postgres://`, `postgresql://`, `mysql://`, `mongodb://`, `mongodb+srv://`, `redis://`, `amqp://` | Fields `host`, `database`, `username`, `password` (secret, decoded), and `url` (secret, the whole URL). The variable (`DATABASE_URL`, `MONGODB_URI`, `REDIS_URL`, `AMQP_URL`) delivers `url`. Kind Database when the URL has a user, a password, and a database; otherwise Custom. No hosts: the value goes to the process as it is. |
+| `otpauth://totp/...` | A Custom item with the one-time password detail, titled "Issuer (account)". No variable. A HOTP or broken link gives nothing. |
+| `-----BEGIN ... PRIVATE KEY-----` | An SSH key. |
+| Anything else | A Custom item "Credential" with the field `secret` and no variable: the vault names it `APASSY_ITEM_<id>`. |
+
+The declaration comes from the catalog signals of section 2, with the facts of the new item (variable, fields, URL hosts). Each value has a source: `signal`, or `default` for the most sensitive default. "live", "prod", or "production" as a word of the value is a production signal; a word of a value never lowers the environment. A test key (`sk_test_`) or a test word gives staging, as the catalog says, not development.
+
+`swap.rs` keeps the vendor prefix of a value in its placeholder. A test there checks that its table covers every pack prefix. The pack prefixes it does not keep yet: `AIza`, `nfp_`, `sk-admin-`, `pscale_tkn_`, `pscale_oauth_`, `sntrys_`, `sntryu_`, `sb_secret_`, `sb_publishable_`, `sbp_`.
 
 ## 4. Synthetic evaluation
 

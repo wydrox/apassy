@@ -1,12 +1,14 @@
 {
   "schema_version": 1,
-  "provider_version": 1,
+  "provider_version": 2,
   "id": "postgres",
   "kind": "provider",
   "label": "PostgreSQL",
   "description": "A PostgreSQL connection URL of any host. A hosted provider (Supabase, Neon) replaces it.",
   "generic": true,
   "known_hosts": [],
+  "variable": "DATABASE_URL",
+  "title": "PostgreSQL database",
   "signals": [
     {
       "id": "connection-url",

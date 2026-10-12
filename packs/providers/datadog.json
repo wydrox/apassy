@@ -1,11 +1,12 @@
 {
   "schema_version": 1,
-  "provider_version": 1,
+  "provider_version": 2,
   "id": "datadog",
   "kind": "provider",
   "label": "Datadog",
   "description": "Datadog API keys and application keys, for all Datadog sites.",
   "known_hosts": ["datadoghq.com", "datadoghq.eu", "ddog-gov.com"],
+  "variable": "DD_API_KEY",
   "signals": [
     {
       "id": "api-key",

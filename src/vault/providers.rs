@@ -17,6 +17,10 @@
 //! When two signals suggest different values for one field, the suggestion takes the
 //! more sensitive value and says so. A field without a signal keeps the most sensitive
 //! value of the declaration form (ADR 0008).
+//!
+//! A provider also names what the paste detection ([`super::detect`], ADR 0025 §4)
+//! gives a new item: the default environment variable (`variable`), the title of a
+//! detected credential (`title`), and the value prefixes of its keys (`prefixes`).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -26,7 +30,7 @@ use serde::Deserialize;
 use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, Visitor};
 use zeroize::Zeroizing;
 
-use super::agents::{Environment, Reversibility, RiskLevel, Scope};
+use super::agents::{Environment, Reversibility, RiskLevel, Scope, checked_env_name};
 use super::suggestions::{DeclarationField, SuggestedDeclaration};
 
 /// The provider file format that this version of Apassy reads.
@@ -84,6 +88,10 @@ const BUILTIN: &[(&str, &str)] = &[
     (
         "sentry.json",
         include_str!("../../packs/providers/sentry.json"),
+    ),
+    (
+        "slack.json",
+        include_str!("../../packs/providers/slack.json"),
     ),
     (
         "stripe.json",
@@ -149,6 +157,16 @@ struct ProviderFile {
     generic: bool,
     #[serde(default)]
     known_hosts: Vec<String>,
+    /// The default environment variable of a credential of the provider, such as
+    /// `STRIPE_SECRET_KEY`. A provider needs one. A general file has none.
+    variable: Option<String>,
+    /// The title of a detected credential, such as `GitHub token`. The default is the
+    /// label and "API key".
+    title: Option<String>,
+    /// Value prefixes of the keys of the provider, such as `sk_live_`. The detection
+    /// names the provider of a value by the longest prefix. Case matters.
+    #[serde(default)]
+    prefixes: Vec<String>,
     signals: Vec<SignalFile>,
 }
 
@@ -263,8 +281,21 @@ pub struct Provider {
     pub version: u64,
     /// Provider API hosts. A host also covers its subdomains.
     pub known_hosts: Vec<String>,
+    /// The default environment variable of a credential of the provider.
+    pub variable: String,
+    /// The title of a detected credential of the provider.
+    pub title: String,
+    /// Value prefixes of the keys of the provider. Case matters.
+    pub prefixes: Vec<String>,
     generic: bool,
     signals: Vec<Signal>,
+}
+
+impl Provider {
+    /// A generic provider, such as a PostgreSQL URL of any host.
+    pub fn is_generic(&self) -> bool {
+        self.generic
+    }
 }
 
 /// All provider files.
@@ -286,6 +317,11 @@ pub fn builtin() -> Result<&'static Catalog, &'static ProviderError> {
 /// A built-in provider by its ID.
 pub fn find(id: &str) -> Option<&'static Provider> {
     builtin().ok()?.find(id)
+}
+
+/// The built-in provider of the longest value prefix, and the prefix.
+pub fn prefix_match(value: &str) -> Option<(&'static Provider, &'static str)> {
+    builtin().ok()?.prefix_match(value)
 }
 
 /// The known API hosts of a built-in provider. Empty for an unknown ID.
@@ -320,6 +356,21 @@ impl Catalog {
         self.providers.iter().find(|provider| provider.id == id)
     }
 
+    /// The provider of the longest prefix that `value` starts with, and the prefix. The
+    /// value must be longer than the prefix.
+    pub fn prefix_match(&self, value: &str) -> Option<(&Provider, &str)> {
+        self.providers
+            .iter()
+            .flat_map(|provider| {
+                provider
+                    .prefixes
+                    .iter()
+                    .map(move |prefix| (provider, prefix.as_str()))
+            })
+            .filter(|(_, prefix)| value.len() > prefix.len() && value.starts_with(prefix))
+            .max_by_key(|(_, prefix)| prefix.len())
+    }
+
     fn add(&mut self, name: &str, text: &str) -> Result<(), String> {
         let file: ProviderFile = serde_json::from_str(text).map_err(|error| error.to_string())?;
         if file.schema_version != SCHEMA_VERSION {
@@ -347,16 +398,66 @@ impl Catalog {
             check_host(host).map_err(|message| format!("`known_hosts`: {message}"))?;
         }
         match file.kind {
-            FileKind::General if file.generic || !file.known_hosts.is_empty() => {
+            FileKind::General
+                if file.generic
+                    || !file.known_hosts.is_empty()
+                    || file.variable.is_some()
+                    || file.title.is_some()
+                    || !file.prefixes.is_empty() =>
+            {
                 return Err(
-                    "a general file has no provider, so it has no `known_hosts` and no `generic`"
+                    "a general file has no provider, so it has no `known_hosts`, \
+                     `generic`, `variable`, `title`, or `prefixes`"
                         .to_owned(),
                 );
             }
             FileKind::Provider if !file.generic && file.known_hosts.is_empty() => {
                 return Err("a provider needs `known_hosts`, or `generic: true`".to_owned());
             }
+            FileKind::Provider if file.variable.is_none() => {
+                return Err("a provider needs a `variable`".to_owned());
+            }
             _ => {}
+        }
+        if let Some(variable) = &file.variable
+            && checked_env_name(variable).is_err()
+        {
+            return Err(format!(
+                "`variable` `{variable}` must be an environment variable name (uppercase \
+                 letters, digits, `_`) and not a reserved name"
+            ));
+        }
+        if let Some(title) = &file.title
+            && (title.trim().is_empty()
+                || title.trim() != title
+                || title.len() > super::types::MAX_TITLE_BYTES)
+        {
+            return Err(format!(
+                "`title` must have text, no spaces at the ends, and at most {} bytes",
+                super::types::MAX_TITLE_BYTES
+            ));
+        }
+        for (at, prefix) in file.prefixes.iter().enumerate() {
+            if prefix.chars().count() < 2
+                || prefix.chars().any(|c| c.is_whitespace() || c.is_control())
+            {
+                return Err(format!(
+                    "`prefixes` has `{prefix}`: a prefix has two or more characters and no space"
+                ));
+            }
+            if file.prefixes[..at].contains(prefix) {
+                return Err(format!("`prefixes` has `{prefix}` twice"));
+            }
+            if let Some(other) = self
+                .providers
+                .iter()
+                .find(|provider| provider.prefixes.contains(prefix))
+            {
+                return Err(format!(
+                    "`prefixes` has `{prefix}`, which is a prefix of `{}` already",
+                    other.id
+                ));
+            }
         }
         if file.signals.is_empty() {
             return Err("`signals` is an empty list".to_owned());
@@ -389,11 +490,16 @@ impl Catalog {
         match file.kind {
             FileKind::General => self.general = signals,
             FileKind::Provider => self.providers.push(Provider {
+                title: file
+                    .title
+                    .unwrap_or_else(|| format!("{} API key", file.label)),
                 id: file.id,
                 label: file.label,
                 description: file.description,
                 version: file.provider_version,
                 known_hosts: file.known_hosts,
+                variable: file.variable.unwrap_or_default(),
+                prefixes: file.prefixes,
                 generic: file.generic,
                 signals,
             }),
@@ -430,8 +536,9 @@ impl Catalog {
                 votes.add(&signal.suggest, &signal.reason);
             }
         }
-        if let Some((_, index, reason)) = best {
+        if let Some(((_, strength), index, reason)) = best {
             suggestion.provider = Some(self.providers[index].id.clone());
+            suggestion.provider_strength = strength;
             reason.clone_into(&mut suggestion.provider_reason);
         }
         suggestion.environment = merge(votes.environment);
@@ -886,6 +993,9 @@ pub struct Suggestion {
     pub provider: Option<String>,
     /// Why Apassy names the provider.
     pub provider_reason: String,
+    /// The strength of the signal that names the provider: 3 for a value, 2 for a host,
+    /// 1 for a variable name, and 0 for a word or no provider.
+    pub provider_strength: u8,
     pub environment: Option<Suggested<Environment>>,
     pub risk: Option<Suggested<RiskLevel>>,
     pub scope: Option<Suggested<Scope>>,
@@ -1077,6 +1187,7 @@ mod tests {
     fn live_and_test_keys_suggest_their_environment() {
         let live = suggest(&key_item("Payments", &fake("sk_live_", 24)));
         assert_eq!(live.provider.as_deref(), Some("stripe"));
+        assert_eq!(live.provider_strength, 3);
         assert_eq!(
             live.prefilled(),
             SuggestedDeclaration {
@@ -1241,6 +1352,7 @@ mod tests {
     const GOOD: &str = r#"{
       "schema_version": 1, "provider_version": 1, "id": "demo", "kind": "provider",
       "label": "Demo", "description": "A demo provider.", "known_hosts": ["api.demo.example"],
+      "variable": "DEMO_API_KEY", "prefixes": ["demo_"],
       "signals": [ { "id": "key", "when": { "value_starts": ["demo_"] },
                      "suggest": { "risk": "low" }, "reason": "A demo key." } ]
     }"#;
@@ -1268,11 +1380,70 @@ mod tests {
                 r#""value_shape": { "starts": ["demo_"], "min_len": 9, "max_len": 3, "chars": "alnum" }"#,
             ),
             GOOD.replace(r#""value_starts": ["demo_"]"#, r#""words": ["Demo"]"#),
+            GOOD.replace(r#""variable": "DEMO_API_KEY", "#, ""),
+            GOOD.replace("DEMO_API_KEY", "demo_api_key"),
+            GOOD.replace("DEMO_API_KEY", "PATH"),
+            GOOD.replace("DEMO_API_KEY", "APASSY_KEY"),
+            GOOD.replace(r#""prefixes": ["demo_"]"#, r#""prefixes": ["demo_", "demo_"]"#),
+            GOOD.replace(r#""prefixes": ["demo_"]"#, r#""prefixes": ["d"]"#),
+            GOOD.replace(r#""prefixes": ["demo_"]"#, r#""prefixes": ["demo key"]"#),
+            GOOD.replace(r#""prefixes": ["demo_"]"#, r#""prefixes": "demo_""#),
+            GOOD.replace(r#""prefixes""#, r#""title": "", "prefixes""#),
+            GOOD.replace(r#""prefixes""#, r#""title": " Demo", "prefixes""#),
+            GOOD.replace(r#""prefixes""#, r#""variables": "X", "prefixes""#),
         ];
         for text in &bad {
             assert!(load_one(text).is_err(), "must be rejected: {text}");
         }
         let twice = Catalog::from_files(&[("demo.json", GOOD), ("demo.json", GOOD)]);
         assert!(twice.is_err());
+        // Two providers cannot share a prefix.
+        let other = GOOD.replace(r#""id": "demo""#, r#""id": "other""#);
+        let shared = Catalog::from_files(&[("demo.json", GOOD), ("other.json", &other)]);
+        assert!(shared.is_err());
+        // A general file has no provider data.
+        let general = r#"{ "schema_version": 1, "provider_version": 1, "id": "general",
+          "kind": "general", "label": "General", "description": "Words.", "variable": "X_KEY",
+          "signals": [ { "id": "prod", "when": { "words": ["prod"] },
+                         "suggest": { "environment": "production" }, "reason": "Prod." } ] }"#;
+        assert!(Catalog::from_files(&[("general.json", general)]).is_err());
+        let loaded = load_one(GOOD).expect("the good file loads");
+        let demo = loaded.find("demo").expect("demo");
+        assert_eq!(demo.variable, "DEMO_API_KEY");
+        assert_eq!(demo.title, "Demo API key");
+        assert_eq!(demo.prefixes, ["demo_"]);
+        let titled =
+            load_one(&GOOD.replace(r#""prefixes""#, r#""title": "Demo token", "prefixes""#))
+                .expect("a title loads");
+        assert_eq!(titled.find("demo").expect("demo").title, "Demo token");
+    }
+
+    #[test]
+    fn every_provider_names_a_variable_and_the_longest_prefix_wins() {
+        let catalog = builtin().expect("built-in provider files");
+        for provider in catalog.providers() {
+            assert!(
+                checked_env_name(&provider.variable).is_ok(),
+                "{}",
+                provider.id
+            );
+            assert!(!provider.title.is_empty(), "{}", provider.id);
+        }
+        let name = |value: &str| {
+            catalog
+                .prefix_match(value)
+                .map(|(provider, prefix)| (provider.id.clone(), prefix.to_owned()))
+        };
+        let pair = |id: &str, prefix: &str| Some((id.to_owned(), prefix.to_owned()));
+        assert_eq!(
+            name(&fake("sk-ant-api03-", 40)),
+            pair("anthropic", "sk-ant-")
+        );
+        assert_eq!(name(&fake("sk-proj-", 40)), pair("openai", "sk-proj-"));
+        assert_eq!(name(&fake("sk-", 40)), pair("openai", "sk-"));
+        assert_eq!(name(&fake("sk_live_", 24)), pair("stripe", "sk_live_"));
+        // A value must be longer than its prefix.
+        assert_eq!(name("sk_live_"), None);
+        assert_eq!(name("plain-value-0000"), None);
     }
 }

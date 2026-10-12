@@ -1,11 +1,13 @@
 {
   "schema_version": 1,
-  "provider_version": 1,
+  "provider_version": 2,
   "id": "cloudflare",
   "kind": "provider",
   "label": "Cloudflare",
   "description": "Cloudflare API tokens and the global API key, for the API and Wrangler.",
   "known_hosts": ["api.cloudflare.com"],
+  "variable": "CLOUDFLARE_API_TOKEN",
+  "title": "Cloudflare API token",
   "signals": [
     {
       "id": "global-api-key",
