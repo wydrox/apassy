@@ -49,6 +49,7 @@ final class ScriptedPush: PushPermission {
     var allows: Bool
     private(set) var asked = 0
     private(set) var registrations = 0
+    private var onOpen: (@MainActor () -> Void)?
     let environment = PushEnvironment.development
 
     init(allows: Bool) { self.allows = allows }
@@ -59,6 +60,11 @@ final class ScriptedPush: PushPermission {
     }
 
     func registerForPushes() { registrations += 1 }
+
+    func observeOpens(_ handler: @escaping @MainActor () -> Void) { onOpen = handler }
+
+    /// The owner opens a notification.
+    func open() { onOpen?() }
 }
 
 @MainActor
@@ -100,11 +106,14 @@ struct QuestionsModelTests {
 
     // MARK: The answer bar (ADR 0026)
 
-    @Test("the bar of a production question: Allow production first, the rest in the menu")
+    @Test("the bar of a production question: Allow ACTION in PROJECT first, the rest in the menu")
     func productionBar() {
-        let bar = AnswerBar.make(for: PreviewVaultService.sampleQuestion().card!)
-        #expect(bar.primary?.label == "Allow production: Deploy in synthetic-shop")
+        let card = PreviewVaultService.sampleQuestion().card!
+        let bar = AnswerBar.make(for: card)
+        #expect(bar.primary?.label == "Allow Deploy in synthetic-shop")
+        #expect(bar.primary?.prompt == "Allow production: Deploy in synthetic-shop")
         #expect(bar.primary?.answer == RemoteAnswer(kind: .allowProduction))
+        #expect(AnswerBar.note(bar.primary, card) == "Remembered for all agents in synthetic-shop")
         #expect(bar.allowOnce?.answer.kind == .approveOnce)
         #expect(bar.deny.answer.kind == .deny)
         #expect(bar.menu.map(\.label) == [
@@ -118,7 +127,14 @@ struct QuestionsModelTests {
     func otherBars() {
         let project = AnswerBar.make(for: Self.card(validAnswers: ["once", "in_project:deploy"]))
         #expect(project.primary?.label == "Allow Deploy in synthetic-shop")
+        #expect(project.primary?.prompt == nil)
         #expect(project.menu.isEmpty)
+        var long = Self.card(validAnswers: ["once", "in_project:read"])
+        long.question.action = .read
+        long.question.project = .init(key: "/x/.git", label: "a-project-with-a-very-long-name")
+        #expect(AnswerBar.make(for: long).primary?.label == "Allow Read in a-project-with-a-very-l…")
+        #expect(AnswerBar.note(AnswerBar.make(for: long).primary, long)
+            == "Remembered for all agents in a-project-with-a-very-long-name")
         let correction = AnswerBar.make(for: Self.card(validAnswers: ["correct_environment"]))
         #expect(correction.primary?.label == "Development")
         #expect(correction.allowOnce == nil)
@@ -337,5 +353,60 @@ struct QuestionsModelTests {
         #expect(fixture.signer.key != oldKey)
         #expect(await fixture.service.attachedAnswerKey() == fixture.signer.key)
         fixture.model.cancelAttach()
+    }
+
+    // MARK: The outcome in place of the bar
+
+    @Test("an open question has no outcome; this iPhone's answer, a settle, or the expiry replace the bar")
+    func outcomes() async {
+        let fixture = Fixture()
+        let question = await fixture.withQuestion()
+        #expect(fixture.model.outcome(for: fixture.model.questions[0]) == nil)
+
+        await fixture.model.send(AnswerBar.make(for: question.card!).deny, for: fixture.model.questions[0])
+        #expect(fixture.model.outcome(for: fixture.model.questions[0])
+            == QuestionOutcome(text: QuestionsModel.sentText, tone: .neutral))
+
+        await fixture.service.settleQuestion(qid: question.qid, by: "Mac mini")
+        await fixture.model.refresh()
+        #expect(fixture.model.outcome(for: fixture.model.questions[0])
+            == QuestionOutcome(text: "Allowed on Mac mini", tone: .allowed))
+
+        var denied = PreviewVaultService.sampleQuestion()
+        denied.state = .settled
+        denied.settle = QuestionSettle(outcome: "denied", deviceName: "MacBook Pro", at: 1)
+        #expect(fixture.model.outcome(for: denied) == QuestionOutcome(text: "Denied on MacBook Pro", tone: .denied))
+        denied.settle = QuestionSettle(outcome: "timed_out", at: 1)
+        #expect(fixture.model.outcome(for: denied)?.text == "Expired")
+
+        let late = PreviewVaultService.sampleQuestion(qid: "late", now: Date().addingTimeInterval(-301))
+        #expect(late.state == .open)
+        #expect(fixture.model.outcome(for: late) == QuestionOutcome(text: "Expired", tone: .neutral))
+    }
+
+    // MARK: Opening a notification
+
+    @Test("an opened notification opens the newest waiting question, once")
+    func notificationOpensTheNewestQuestion() async {
+        let fixture = Fixture()
+        let older = PreviewVaultService.sampleQuestion(qid: "older", now: Date().addingTimeInterval(-60))
+        let newer = PreviewVaultService.sampleQuestion(qid: "newer")
+        var expired = PreviewVaultService.sampleQuestion(qid: "ended", now: Date().addingTimeInterval(5))
+        expired.state = .expired
+        await fixture.service.setQuestions(enabled: true, questions: [older, newer, expired])
+        await fixture.model.refresh()
+        #expect(fixture.model.takeFocus() == nil)
+        #expect(fixture.model.focusRequests == 0)
+
+        fixture.push.open()
+        #expect(fixture.model.focusRequests == 1)
+        #expect(fixture.model.takeFocus() == "newer")
+        #expect(fixture.model.takeFocus() == nil)
+
+        await fixture.service.setQuestions(enabled: true, questions: [expired])
+        await fixture.model.refresh()
+        fixture.push.open()
+        #expect(fixture.model.focusRequests == 2)
+        #expect(fixture.model.takeFocus() == nil)
     }
 }
