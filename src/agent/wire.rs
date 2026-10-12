@@ -34,11 +34,21 @@ pub mod codes {
     /// ADR 0025 §6: the item was not created by this agent with capture, generate, or
     /// save. The code is the same for an item that does not exist.
     pub const NOT_OWNER: &str = "not_owner";
-    /// ADR 0025 §6: this agent created the most items in the last hour.
+    /// ADR 0025 §6: this agent added or changed the most items in the last hour. Apassy
+    /// refused; the agent asks the owner.
     pub const TOO_MANY_ITEMS: &str = "too_many_items";
+    /// ADR 0025 §6: this agent has the most open or new credential requests in the last
+    /// hour.
+    pub const TOO_MANY_REQUESTS: &str = "too_many_requests";
     /// Apassy refused to capture: the command, the file, or the output does not meet the
     /// capture rules. The text never has a part of the output.
     pub const CAPTURE_REFUSED: &str = "capture_refused";
+    /// The owner denied the question of a run or a capture.
+    pub const APPROVAL_DENIED: &str = "approval_denied";
+    /// The owner did not answer the question within its time (5 minutes).
+    pub const APPROVAL_TIMEOUT: &str = "approval_timeout";
+    /// The vault was locked or replaced while the question waited.
+    pub const APPROVAL_INVALIDATED: &str = "approval_invalidated";
     /// The owner has not answered a credential request yet. The request stays open; the
     /// same request again waits again.
     pub const WAITING: &str = "waiting";
@@ -95,6 +105,19 @@ pub struct GenerateSpec {
     /// `alnum` (default), `hex`, `base64url`, or `symbols`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alphabet: Option<String>,
+}
+
+/// Which part of a captured output is the credential (ADR 0025 §6). The broker applies it
+/// before it stores the value; the agent never sees the output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Extract {
+    /// A dot path in JSON output, such as `Credentials.SessionToken` or `items.0.key`.
+    Json(String),
+    /// One line, from 1.
+    Line(u32),
+    /// The rest of the first line that holds this text, such as `Token:`.
+    After(String),
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -201,9 +224,13 @@ pub enum Action {
         folder: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         purpose: Option<String>,
-        /// `PATH` for the command. The adapter sends its own `PATH`.
+        /// `PATH` for a command that the owner approves. A known token command never
+        /// uses it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
+        /// The part of the output to store. Default: the whole output, trimmed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extract: Option<Extract>,
     },
     /// ADR 0025 §6: Apassy makes a random value and saves it. The value never comes back.
     GenerateCredential {
@@ -253,6 +280,9 @@ pub enum Action {
         cwd: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
+        /// For `command` or `file`: the part of the output to store.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extract: Option<Extract>,
     },
     /// ADR 0025 §6: change the name, the notes, the variable, or the hosts of an item
     /// that this agent created.
@@ -264,8 +294,9 @@ pub enum Action {
         notes: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         env_name: Option<String>,
+        /// HTTPS hosts of a placeholder: only for an API key or a login.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        hosts: Option<Vec<String>>,
+        placeholder_hosts: Option<Vec<String>>,
     },
 }
 
@@ -373,7 +404,21 @@ mod tests {
         let update = r#"{"v":0,"token":"t","action":{"kind":"update_credential","item_id":4,"generate":{"length":20,"alphabet":"hex"}}}"#;
         let update: WireRequest = serde_json::from_str(update).expect("valid request");
         assert!(update.action.waits());
+        let capture = r#"{"v":0,"token":"t","action":{"kind":"capture_credential","command":["op","read","op://v/i/f"],"extract":{"after":"Token:"}}}"#;
+        let capture: WireRequest = serde_json::from_str(capture).expect("valid request");
+        assert!(matches!(
+            capture.action,
+            Action::CaptureCredential {
+                extract: Some(Extract::After(_)),
+                ..
+            }
+        ));
+        let describe = r#"{"v":0,"token":"t","action":{"kind":"describe_credential","item_id":4,"placeholder_hosts":["api.example.com"]}}"#;
+        assert!(serde_json::from_str::<WireRequest>(describe).is_ok());
         for bad in [
+            r#"{"v":0,"token":"t","action":{"kind":"describe_credential","item_id":4,"hosts":["api.example.com"]}}"#,
+            r#"{"v":0,"token":"t","action":{"kind":"capture_credential","file":"/x","extract":{"json":"a","line":1}}}"#,
+            r#"{"v":0,"token":"t","action":{"kind":"capture_credential","file":"/x","extract":{"regex":"."}}}"#,
             r#"{"v":0,"token":"t","action":{"kind":"update_credential","item_id":4,"generate":{"seed":1}}}"#,
             r#"{"v":0,"token":"t","action":{"kind":"generate_credential","name":"x","reveal":true}}"#,
             r#"{"v":0,"token":"t","action":{"kind":"describe_credential","item_id":4,"value":"x"}}"#,

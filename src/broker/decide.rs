@@ -137,6 +137,7 @@ pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
             folder,
             purpose,
             path,
+            extract,
         } => super::agent_items::capture(
             ctx,
             &request.token,
@@ -148,6 +149,7 @@ pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
                 folder: folder.as_deref(),
                 purpose: purpose.as_deref(),
                 path: path.as_deref(),
+                extract: extract.as_ref(),
             },
         ),
         Action::GenerateCredential {
@@ -204,6 +206,7 @@ pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
             generate,
             cwd,
             path,
+            extract,
         } => super::agent_items::update(
             ctx,
             &request.token,
@@ -214,6 +217,7 @@ pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
                 generate: generate.as_ref(),
                 cwd: cwd.as_deref(),
                 path: path.as_deref(),
+                extract: extract.as_ref(),
             },
         ),
         Action::DescribeCredential {
@@ -221,7 +225,7 @@ pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
             name,
             notes,
             env_name,
-            hosts,
+            placeholder_hosts,
         } => super::agent_items::describe(
             ctx,
             &request.token,
@@ -230,7 +234,7 @@ pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
                 title: name.clone(),
                 notes: notes.clone(),
                 env_name: env_name.clone(),
-                hosts: hosts.clone(),
+                placeholder_hosts: placeholder_hosts.clone(),
             },
         ),
     }
