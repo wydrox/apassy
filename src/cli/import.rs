@@ -123,151 +123,52 @@ pub fn parse(format: Format, text: &str, options: &Options) -> (Vec<Entry>, Vec<
 
 // ---- .env ----
 
-/// The key of a `KEY=value` line, with an optional `export`.
-fn env_key(line: &str) -> Option<(&str, &str)> {
-    let line = line.strip_prefix("export ").map_or(line, str::trim_start);
-    let (key, value) = line.split_once('=')?;
-    let key = key.trim();
-    let valid = !key.is_empty()
-        && key
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        && !key.as_bytes()[0].is_ascii_digit();
-    valid.then_some((key, value))
-}
+/// The `.env` parser of the paste detection (`src/vault/detect/dotenv.rs`). The command
+/// line builds without the vault feature; then it includes the file by path. The import
+/// does not read `Skipped::not_env`; the detection does.
+#[cfg(not(feature = "vault"))]
+#[path = "../vault/detect/dotenv.rs"]
+#[allow(dead_code)]
+mod dotenv;
+#[cfg(feature = "vault")]
+use crate::vault::detect::dotenv;
+
+use dotenv::{custom_field, env_key};
 
 fn parse_env(text: &str, options: &Options) -> (Vec<Entry>, Vec<Skipped>) {
     let kind = options.env_kind.unwrap_or(CredentialKind::ApiKey);
+    let (lines, skips) = dotenv::parse(text);
+    let skipped = skips
+        .into_iter()
+        .map(|skip| Skipped {
+            line: skip.line,
+            reason: skip.reason,
+        })
+        .collect();
     let mut entries = Vec::new();
-    let mut skipped = Vec::new();
-    let lines: Vec<&str> = text.lines().collect();
-    let mut index = 0;
-    while index < lines.len() {
-        let number = index + 1;
-        let line = lines[index].trim_start();
-        index += 1;
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((key, raw)) = env_key(line) else {
-            skipped.push(Skipped {
-                line: number,
-                reason: "not a KEY=value line".to_owned(),
-            });
-            continue;
-        };
-        let raw = raw.trim_start();
-        let mut value = match raw.chars().next() {
-            Some(quote @ ('"' | '\'')) => {
-                // A quoted value can span lines, for example a private key.
-                let mut body = raw[1..].to_owned();
-                loop {
-                    if let Some(end) = closing_quote(&body, quote) {
-                        body.truncate(end);
-                        break;
-                    }
-                    if index >= lines.len() {
-                        body.zeroize();
-                        skipped.push(Skipped {
-                            line: number,
-                            reason: format!("{key}: the quote does not close"),
-                        });
-                        body = String::new();
-                        break;
-                    }
-                    body.push('\n');
-                    body.push_str(lines[index]);
-                    index += 1;
-                }
-                if quote == '"' {
-                    unescape_double(&body)
-                } else {
-                    body
-                }
-            }
-            _ => {
-                // An unquoted value ends at " #".
-                let end = raw.find(" #").unwrap_or(raw.len());
-                raw[..end].trim().to_owned()
-            }
-        };
-        if value.is_empty() {
-            if !skipped.iter().any(|s| s.line == number) {
-                skipped.push(Skipped {
-                    line: number,
-                    reason: format!("{key}: the value is empty"),
-                });
-            }
-            continue;
-        }
+    for mut line in lines {
+        let key = line.key;
         let mut item = ItemInput {
-            name: Some(key.to_owned()),
+            name: Some(key.clone()),
             kind: Some(kind),
             ..ItemInput::default()
         };
         match kind {
-            CredentialKind::Custom => item.field_name = Some(custom_field(key)),
+            CredentialKind::Custom => item.field_name = Some(custom_field(&key)),
             CredentialKind::Login => {
                 // A login needs a username. The key stands in for it.
-                item.username = Some(key.to_owned());
+                item.username = Some(key.clone());
             }
             _ => {}
         }
-        item.secret = Some(SecretText::new(std::mem::take(&mut value)));
+        item.secret = Some(SecretText::new(std::mem::take(&mut *line.value)));
         entries.push(Entry {
-            line: number,
+            line: line.line,
             item,
-            variable: Some(key.to_owned()),
+            variable: Some(key),
         });
     }
     (entries, skipped)
-}
-
-/// The position of the closing quote. In double quotes, `\"` does not close.
-fn closing_quote(body: &str, quote: char) -> Option<usize> {
-    let mut escaped = false;
-    for (at, c) in body.char_indices() {
-        if quote == '"' && c == '\\' && !escaped {
-            escaped = true;
-            continue;
-        }
-        if c == quote && !escaped {
-            return Some(at);
-        }
-        escaped = false;
-    }
-    None
-}
-
-fn unescape_double(body: &str) -> String {
-    let mut out = String::with_capacity(body.len());
-    let mut chars = body.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('r') => out.push('\r'),
-            Some('t') => out.push('\t'),
-            Some(other) => out.push(other),
-            None => out.push('\\'),
-        }
-    }
-    out
-}
-
-/// A custom field name from a variable name: lowercase letters, digits, and `_`. A
-/// built-in name gets a `value_` prefix.
-fn custom_field(key: &str) -> String {
-    let name = key.to_lowercase();
-    match name.as_str() {
-        "service" | "project" | "token" | "password" | "private_key" | "passphrase"
-        | "username" | "host" | "database" | "public_key" => format!("value_{name}"),
-        _ if name.starts_with("x_") => format!("value_{name}"),
-        _ => name,
-    }
 }
 
 // ---- CSV ----

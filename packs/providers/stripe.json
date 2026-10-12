@@ -1,11 +1,13 @@
 {
   "schema_version": 1,
-  "provider_version": 1,
+  "provider_version": 2,
   "id": "stripe",
   "kind": "provider",
   "label": "Stripe",
   "description": "Stripe API keys: live and test mode secret keys, restricted keys, and publishable keys.",
   "known_hosts": ["api.stripe.com", "files.stripe.com", "connect.stripe.com", "uploads.stripe.com"],
+  "variable": "STRIPE_SECRET_KEY",
+  "prefixes": ["sk_live_", "rk_live_", "pk_live_", "sk_test_", "rk_test_", "pk_test_"],
   "signals": [
     {
       "id": "live-secret-key",

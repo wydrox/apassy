@@ -167,13 +167,20 @@ fn check_provider(name: &str, text: &str) -> Result<String, String> {
     let id = value["id"].as_str().unwrap_or("?");
     let kind = value["kind"].as_str().unwrap_or("?");
     let signals = value["signals"].as_array().map_or(0, Vec::len);
-    let hosts = catalog
-        .find(id)
-        .map_or(0, |provider| provider.known_hosts.len());
+    let provider = catalog.find(id);
+    let hosts = provider.map_or(0, |provider| provider.known_hosts.len());
+    let prefixes = provider.map_or(0, |provider| provider.prefixes.len());
     let version = value["provider_version"].as_u64().unwrap_or(0);
     let mut line = format!("{kind} `{id}` v{version}, {}", plural(signals, "signal"));
     if hosts > 0 {
         line.push_str(&format!(", {}", plural(hosts, "known host")));
+    }
+    if prefixes > 0 {
+        let word = if prefixes == 1 { "prefix" } else { "prefixes" };
+        line.push_str(&format!(", {prefixes} value {word}"));
+    }
+    if let Some(provider) = provider {
+        line.push_str(&format!(", variable {}", provider.variable));
     }
     Ok(line)
 }

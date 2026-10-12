@@ -539,6 +539,54 @@ mod tests {
         assert_eq!(placeholder.as_bytes()[13], b'-');
     }
 
+    /// Value prefixes of the provider catalog (`packs/providers/*.json`) that this
+    /// table does not keep yet. A placeholder of such a value keeps a shorter known
+    /// prefix (`sk-` for `sk-admin-`) or none, so a tool that checks the full prefix
+    /// may refuse it. Adding them changes placeholders, a broker change of its own.
+    const PACK_PREFIXES_NOT_KEPT: [&str; 10] = [
+        "AIza",
+        "nfp_",
+        "sk-admin-",
+        "pscale_tkn_",
+        "pscale_oauth_",
+        "sntrys_",
+        "sntryu_",
+        "sb_secret_",
+        "sb_publishable_",
+        "sbp_",
+    ];
+
+    #[test]
+    fn known_prefixes_cover_the_prefixes_of_the_provider_catalog() {
+        let catalog = crate::vault::providers::builtin().expect("provider catalog");
+        let mut missing = Vec::new();
+        for provider in catalog.providers() {
+            for prefix in &provider.prefixes {
+                if !KNOWN_PREFIXES.contains(&prefix.as_str())
+                    && !PACK_PREFIXES_NOT_KEPT.contains(&prefix.as_str())
+                {
+                    missing.push(format!("{}: {prefix}", provider.id));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "pack prefixes missing from KNOWN_PREFIXES: {missing:?}"
+        );
+        // The list of exceptions stays true: each one is a pack prefix that the table
+        // does not have.
+        for prefix in PACK_PREFIXES_NOT_KEPT {
+            assert!(!KNOWN_PREFIXES.contains(&prefix), "{prefix} is kept now");
+            assert!(
+                catalog
+                    .providers()
+                    .iter()
+                    .any(|provider| provider.prefixes.iter().any(|p| p == prefix)),
+                "{prefix} is not a pack prefix"
+            );
+        }
+    }
+
     #[test]
     fn placeholder_does_not_keep_an_unknown_prefix() {
         let value = "abc_DEFghiJKLmnoPQRstuVWXyz0123";

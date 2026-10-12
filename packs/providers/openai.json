@@ -1,11 +1,13 @@
 {
   "schema_version": 1,
-  "provider_version": 1,
+  "provider_version": 2,
   "id": "openai",
   "kind": "provider",
   "label": "OpenAI",
   "description": "OpenAI API keys: project keys, service account keys, and admin keys.",
   "known_hosts": ["api.openai.com"],
+  "variable": "OPENAI_API_KEY",
+  "prefixes": ["sk-proj-", "sk-svcacct-", "sk-admin-", "sk-"],
   "signals": [
     {
       "id": "admin-key",

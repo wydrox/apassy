@@ -1,11 +1,12 @@
 {
   "schema_version": 1,
-  "provider_version": 1,
+  "provider_version": 2,
   "id": "neon",
   "kind": "provider",
   "label": "Neon",
   "description": "Neon serverless Postgres: API keys and database hosts.",
   "known_hosts": ["neon.tech"],
+  "variable": "NEON_API_KEY",
   "signals": [
     {
       "id": "host",

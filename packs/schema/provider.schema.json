@@ -45,6 +45,25 @@
       "type": "array",
       "items": { "$ref": "#/$defs/host" }
     },
+    "variable": {
+      "description": "The default environment variable of a detected credential of the provider, such as STRIPE_SECRET_KEY. A provider needs one. Not for a general file. The loader also refuses reserved names (PATH, HOME, APASSY_*, ...).",
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[A-Z_][A-Z0-9_]*$"
+    },
+    "title": {
+      "description": "The title of a detected credential, such as `GitHub token`. The default is the label and `API key`. Not for a general file.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^\\S(.*\\S)?$"
+    },
+    "prefixes": {
+      "description": "Value prefixes of the keys of the provider, such as sk_live_. Case matters. The paste detection names the provider of a value by the longest prefix. A prefix belongs to one provider only. Not for a general file.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 2, "pattern": "^\\S+$" }
+    },
     "signals": {
       "type": "array",
       "minItems": 1,
@@ -55,12 +74,13 @@
     {
       "if": { "properties": { "kind": { "const": "general" } } },
       "then": {
-        "not": { "anyOf": [{ "required": ["known_hosts"] }, { "properties": { "generic": { "const": true } }, "required": ["generic"] }] }
+        "not": { "anyOf": [{ "required": ["known_hosts"] }, { "properties": { "generic": { "const": true } }, "required": ["generic"] }, { "required": ["variable"] }, { "required": ["title"] }, { "required": ["prefixes"] }] }
       }
     },
     {
       "if": { "properties": { "kind": { "const": "provider" } } },
       "then": {
+        "required": ["variable"],
         "anyOf": [{ "required": ["known_hosts"] }, { "properties": { "generic": { "const": true } }, "required": ["generic"] }]
       }
     }

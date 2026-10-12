@@ -1,11 +1,13 @@
 {
   "schema_version": 1,
-  "provider_version": 1,
+  "provider_version": 2,
   "id": "sendgrid",
   "kind": "provider",
   "label": "SendGrid",
   "description": "SendGrid API keys (SG.) for email.",
   "known_hosts": ["api.sendgrid.com"],
+  "variable": "SENDGRID_API_KEY",
+  "prefixes": ["SG."],
   "signals": [
     {
       "id": "api-key",

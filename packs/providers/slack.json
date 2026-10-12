@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "provider_version": 1,
+  "id": "slack",
+  "kind": "provider",
+  "label": "Slack",
+  "description": "Slack bot, user, and app-level tokens.",
+  "known_hosts": ["slack.com"],
+  "variable": "SLACK_BOT_TOKEN",
+  "title": "Slack token",
+  "prefixes": ["xoxb-", "xoxp-", "xapp-"],
+  "signals": [
+    {
+      "id": "bot-token",
+      "when": { "value_starts": ["xoxb-"] },
+      "suggest": { "risk": "medium", "reversibility": "partial" },
+      "reason": "A bot token (xoxb-) reads and posts messages with the scopes of its app. A sent message can be deleted, but people may have read it. Its scopes come from the app settings, so Apassy does not suggest the scope."
+    },
+    {
+      "id": "user-token",
+      "when": { "value_starts": ["xoxp-"] },
+      "suggest": { "risk": "high", "reversibility": "partial" },
+      "reason": "A user token (xoxp-) acts as a person, with the scopes that the person granted. Apassy does not suggest the scope."
+    },
+    {
+      "id": "app-token",
+      "when": { "value_starts": ["xapp-"] },
+      "suggest": { "risk": "medium" },
+      "reason": "An app-level token (xapp-) opens Socket Mode connections for its app. It works together with a bot or user token of the app."
+    },
+    {
+      "id": "variable-name",
+      "when": { "env_name_contains": ["slack"] },
+      "reason": "The variable name names Slack."
+    },
+    {
+      "id": "name",
+      "when": { "words": ["slack"] },
+      "reason": "The item name or a label names Slack."
+    },
+    {
+      "id": "host",
+      "when": { "hosts": ["slack.com"] },
+      "reason": "A host of the item is a Slack host."
+    }
+  ]
+}

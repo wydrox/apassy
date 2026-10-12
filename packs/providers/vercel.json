@@ -1,11 +1,13 @@
 {
   "schema_version": 1,
-  "provider_version": 1,
+  "provider_version": 2,
   "id": "vercel",
   "kind": "provider",
   "label": "Vercel",
   "description": "Vercel access tokens for the API and the CLI.",
   "known_hosts": ["api.vercel.com"],
+  "variable": "VERCEL_TOKEN",
+  "title": "Vercel token",
   "signals": [
     {
       "id": "access-token",

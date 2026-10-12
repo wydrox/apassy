@@ -16,6 +16,7 @@ mod access;
 mod agents;
 mod candidate;
 mod companion;
+pub mod detect;
 mod history;
 mod learning;
 mod merge;
