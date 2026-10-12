@@ -12,8 +12,13 @@
 //! `eval`, `$( )`, and wrappers such as `sudo` and `timeout`, find *deploy* and
 //! *delete*. When several rules match, the most dangerous class counts. The analysis
 //! can only raise the class. The model never lowers it.
+//!
+//! [`classify`] always gives a kind, with the fallback *change*, for display and
+//! history. [`classify_certain`] gives a kind only when a rule identifies the command;
+//! a production allowance (ADR 0025 §3b) uses it, so an unknown command or a project
+//! script always asks the owner (Gate 1 review).
 
-use super::shell_risk::Analysis;
+use super::shell_risk::{self, Analysis};
 
 /// What a command does, from the least to the most dangerous.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -129,12 +134,14 @@ const DEPLOY_WORDS: &[&str] = &[
 /// Analysis flags that mean a loss of data.
 const DELETE_FLAGS: &[&str] = &["data_loss", "irreversible"];
 /// Analysis flags that say nothing about the kind of action. Every other flag (such
-/// as `system_change` or `remote_code`) makes at least a change.
+/// as `system_change` or `remote_code`) makes at least a change. `secret_output` is not
+/// neutral (Gate 1 review): a command that prints a secret is never a *read*, so a
+/// production allowance for *read* never covers it.
 const NEUTRAL_FLAGS: &[&str] = &[
-    "secret_output",
     "production",
     "injection_phrase",
     "foreign_host",
+    "db_host_from_command",
 ];
 /// SQL function names with these parts delete: `pg_terminate_backend`, `lo_unlink`,
 /// `pg_drop_replication_slot`, and in inline code `os.remove`, `shutil.rmtree`.
@@ -186,6 +193,771 @@ pub fn classify(command: &[String], analysis: &Analysis) -> ActionKind {
         kind = kind.more_dangerous(Change);
     }
     kind
+}
+
+/// The kind of action of `command` only when a rule positively identifies it, for a
+/// production allowance (ADR 0025 §3b, Gate 1 review). `None` when the kind comes only
+/// from the fallback of [`classify`] ("everything else is a change"): the broker then
+/// asks the owner, whatever the allowances.
+///
+/// `Some(kind)`, with the kind of [`classify`], when every program of the command is
+/// known and its arguments match a rule:
+///
+/// - a certain *read* of the fixed read lists (`ls`, `kubectl get`, `git log`,
+///   `stripe payouts list`, a plain `SELECT` in `psql -c`, ...);
+/// - an explicit *delete*: `rm`, `rmdir`, `dropdb`, `dd`, `git push --force`,
+///   `git clean`, `kubectl delete`, `terraform destroy`, `aws s3 rb`, SQL `DROP`,
+///   `DELETE`, `TRUNCATE` in `psql -c`, ...;
+/// - an explicit *deploy*: `git push`, `vercel`, `vercel --prod`, `wrangler deploy`,
+///   `fly deploy`, `helm install|upgrade`, `kubectl apply|rollout`, `terraform apply`,
+///   `pulumi up`, `docker push`, `npm publish`, `cargo publish`, `gh release create`;
+/// - an explicit *change* of a known tool: `git commit|add|checkout|merge|fetch|...`,
+///   `npm|pnpm|yarn|bun install|add|update|remove`, `pip install`, `cargo add`,
+///   `stripe RESOURCE create|update|...`, `gh pr create|comment|...`,
+///   `kubectl scale|patch|label|...`, `aws SERVICE create-*|put-*|update-*|...`,
+///   `docker pull|tag|stop|...`, SQL `INSERT`, `UPDATE`, `CREATE`, `ALTER`, `GRANT` in
+///   `psql -c`, `mysql -e`, `sqlite3`, `mkdir`, `touch`.
+///
+/// `None` for the fallback: an unknown program, a program by a path outside the
+/// system folders (`./ship.sh`, `bin/deploy`), a project script or task (`make`,
+/// `npm run`, `rake`), a shell text (`sh -c`, `eval`), an interpreter (`python`,
+/// `node script.js`, inline code), a wrapper that runs other commands (`sudo`, `xargs`),
+/// an assignment that can run a program (`PAGER=...`), a shell mark in an argument, a
+/// subcommand of a known tool that runs code or a remote shell (`kubectl exec`,
+/// `docker run`, `heroku run`, `terraform plan`, `gh workflow run`), a command that
+/// prints the environment, and SQL that runs code or reads files (`COPY`, `DO`,
+/// `dblink`, `lo_export`). Also `None` when the analysis raises the kind of the rules
+/// (an analysis flag or a known write) to anything but *delete*: the rules do not know
+/// what the command does then.
+///
+/// Note that `git commit` runs the hooks of the repository and `npm install` runs the
+/// install scripts of the packages and of the project. They are still explicit changes.
+pub fn classify_certain(command: &[String], analysis: &Analysis) -> Option<ActionKind> {
+    if !certain_command(command) {
+        return None;
+    }
+    let rules = classify(command, &Analysis::default());
+    let kind = classify(command, analysis);
+    (kind == rules || kind == Delete).then_some(kind)
+}
+
+/// Programs by a path in these folders are the system programs of their names.
+const SYSTEM_BIN: &[&str] = &["/bin/", "/usr/bin/", "/sbin/", "/usr/sbin/"];
+
+/// Programs that delete by their name.
+const DELETE_PROGRAMS: &[&str] = &[
+    "rm", "rmdir", "unlink", "shred", "dropdb", "dropuser", "dd", "truncate", "srm", "wipefs",
+];
+
+/// A positive rule identifies the kind of the one simple command `argv`: its wrappers
+/// are transparent, its program is known, and its arguments match a rule of the
+/// program. See [`classify_certain`].
+fn certain_command(argv: &[String]) -> bool {
+    let mut i = 0;
+    loop {
+        let Some(first) = argv.get(i) else {
+            return false;
+        };
+        if is_assignment(first) {
+            if !harmless_assignment(first) {
+                return false;
+            }
+            i += 1;
+            continue;
+        }
+        let name = program_name(first);
+        let rest = &argv[i + 1..];
+        let skip = match name.as_str() {
+            "env" => {
+                if rest
+                    .iter()
+                    .any(|a| a == "-S" || a.starts_with("--split-string"))
+                {
+                    return false;
+                }
+                options_end(rest, &["-u", "--unset", "-C", "--chdir"])
+            }
+            "timeout" => options_end(rest, &["-s", "--signal", "-k", "--kill-after"]) + 1,
+            "nice" => options_end(rest, &["-n", "--adjustment"]),
+            "nohup" | "time" | "command" | "exec" | "stdbuf" | "caffeinate" => {
+                options_end(rest, &[])
+            }
+            _ => break,
+        };
+        i += 1 + skip;
+    }
+    let program = &argv[i];
+    if program.contains('/') && !SYSTEM_BIN.iter().any(|dir| program.starts_with(dir)) {
+        return false;
+    }
+    let name = program_name(program);
+    let args = &argv[i + 1..];
+    if prints_environment(&name, args) {
+        return false;
+    }
+    // SQL clients check their queries; a shell mark is only allowed in a query.
+    match name.as_str() {
+        "psql" => return sql_certain(args, &PSQL),
+        "mysql" | "mariadb" => return sql_certain(args, &MYSQL),
+        "sqlite3" => return sqlite_certain(args),
+        _ => {}
+    }
+    if args.iter().any(|a| has_shell_mark(a)) {
+        return false;
+    }
+    if args.len() == 1
+        && VERSION_ARGS.contains(&args[0].as_str())
+        && VERSION_PROGRAMS.contains(&name.as_str())
+    {
+        return true;
+    }
+    let ops = operands(args, &[]);
+    let op = |i: usize| ops.get(i).copied();
+    match name.as_str() {
+        _ if DELETE_PROGRAMS.contains(&name.as_str()) || name.starts_with("mkfs") => true,
+        _ if READ_PROGRAMS.contains(&name.as_str()) => read_tool(&name, args),
+        "mkdir" | "touch" => true,
+        "find" => !args
+            .iter()
+            .any(|a| matches!(a.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir")),
+        "git" => git_certain(args),
+        "gh" | "glab" => gh_certain(&name, args),
+        "kubectl" => kubectl_certain(args),
+        "helm" => {
+            !args
+                .iter()
+                .any(|a| a.starts_with("--kubeconfig") || a.starts_with("--post-renderer"))
+                && (helm(args) != Change
+                    || matches!(
+                        operands(args, &["-n", "--namespace", "--kube-context"]).first(),
+                        Some(&("uninstall" | "delete" | "rollback"))
+                    ))
+        }
+        "aws" => aws_certain(args),
+        "stripe" => stripe(args) || stripe_change(args),
+        "fly" | "flyctl" => fly(args) || fly_change(args),
+        "terraform" | "tofu" => {
+            terraform(args)
+                || matches!(
+                    op(0),
+                    Some("apply" | "destroy" | "fmt" | "validate" | "taint" | "untaint")
+                )
+                || (op(0) == Some("state") && matches!(op(1), Some("rm" | "mv")))
+        }
+        "docker" | "podman" => docker(args) || docker_change(args),
+        "vercel" => vercel_certain(args),
+        "wrangler" => wrangler(args) || wrangler_change(args),
+        "heroku" => heroku(args) || heroku_change(args),
+        "pulumi" => matches!(op(0), Some("up" | "update" | "destroy")),
+        "npm" | "pnpm" | "yarn" | "bun" => matches!(
+            op(0),
+            Some(
+                "install"
+                    | "i"
+                    | "ci"
+                    | "add"
+                    | "update"
+                    | "up"
+                    | "upgrade"
+                    | "remove"
+                    | "rm"
+                    | "uninstall"
+                    | "un"
+                    | "publish"
+                    | "unpublish"
+            )
+        ),
+        "pip" | "pip3" => matches!(op(0), Some("install" | "uninstall")),
+        "cargo" => matches!(
+            op(0),
+            Some("add" | "remove" | "update" | "fetch" | "publish" | "yank")
+        ),
+        _ => false,
+    }
+}
+
+/// `git`: the read list, `push`, the delete rules, and explicit changes. Not with `-c`,
+/// `--config-env`, or an unknown global option, and not for an unknown subcommand (an
+/// alias can run a program).
+fn git_certain(args: &[String]) -> bool {
+    let mut i = 0;
+    while let Some(arg) = args.get(i) {
+        match arg.as_str() {
+            "-C" => i += 2,
+            "--no-pager"
+            | "-P"
+            | "--no-optional-locks"
+            | "--bare"
+            | "--literal-pathspecs"
+            | "--no-replace-objects" => i += 1,
+            a if a.starts_with("--git-dir=")
+                || a.starts_with("--work-tree=")
+                || a.starts_with("--namespace=") =>
+            {
+                i += 1
+            }
+            a if a.starts_with('-') => return false,
+            _ => break,
+        }
+    }
+    let Some(sub) = args.get(i) else {
+        return false;
+    };
+    let rest = &args[i + 1..];
+    let first = rest.first().map(String::as_str);
+    if git(args) != Change {
+        return true;
+    }
+    match sub.as_str() {
+        "commit" | "add" | "mv" | "rm" | "restore" | "checkout" | "switch" | "merge" | "rebase"
+        | "cherry-pick" | "revert" | "reset" | "fetch" | "pull" | "clone" | "init" | "branch"
+        | "tag" | "notes" | "am" | "apply" => {
+            // `--exec` and `-x` run a command for each commit of a rebase; an upload pack
+            // (`clone -u`) and a setting of a clone (`clone -c core.sshCommand=...`) run
+            // a program.
+            !rest.iter().any(|a| {
+                a == "-x"
+                    || a.starts_with("--exec")
+                    || a.starts_with("--upload-pack")
+                    || a.starts_with("--config")
+                    || (sub == "clone" && (a == "-u" || a == "-c"))
+            })
+        }
+        "stash" => matches!(first, None | Some("push" | "save" | "pop" | "apply")),
+        "worktree" => matches!(first, Some("add" | "remove" | "prune" | "move")),
+        "remote" => matches!(
+            first,
+            Some("add" | "remove" | "rm" | "rename" | "set-url" | "prune")
+        ),
+        "config" => !rest.iter().any(|a| a == "-e" || a == "--edit"),
+        _ => false,
+    }
+}
+
+/// `gh` and `glab`: the read list, `api` with `DELETE`, and the explicit changes of a
+/// noun. `gh workflow run`, `gh run rerun`, and `gh pr merge` can start a deploy of the
+/// repository: not certain.
+fn gh_certain(name: &str, args: &[String]) -> bool {
+    if gh(name, args) {
+        return true;
+    }
+    let first = args.first().map(String::as_str);
+    let second = args.get(1).map(String::as_str);
+    match first {
+        Some("api") => args.iter().any(|a| {
+            a.eq_ignore_ascii_case("delete")
+                || a.eq_ignore_ascii_case("-xdelete")
+                || a.eq_ignore_ascii_case("--method=delete")
+        }),
+        Some("release") => second == Some("create") || second == Some("delete"),
+        Some(
+            "pr" | "mr" | "issue" | "repo" | "gist" | "label" | "secret" | "variable" | "project"
+            | "ssh-key" | "gpg-key" | "alias" | "cache" | "run",
+        ) => matches!(
+            second,
+            Some(
+                "create"
+                    | "edit"
+                    | "comment"
+                    | "note"
+                    | "close"
+                    | "reopen"
+                    | "review"
+                    | "ready"
+                    | "lock"
+                    | "unlock"
+                    | "delete"
+                    | "checkout"
+                    | "clone"
+                    | "fork"
+                    | "set"
+                    | "add"
+                    | "remove"
+                    | "rename"
+                    | "cancel"
+            )
+        ),
+        _ => false,
+    }
+}
+
+/// `kubectl`: the read list, `apply`, `rollout`, `delete`, and explicit changes. Not
+/// `exec`, `run`, `cp`, `debug`, `attach`, `port-forward`, `proxy`, or `edit` (an
+/// editor), and not with a kubeconfig file of the command.
+fn kubectl_certain(args: &[String]) -> bool {
+    if kubectl(args) {
+        return true;
+    }
+    if args.iter().any(|a| a.starts_with("--kubeconfig")) {
+        return false;
+    }
+    let ops = operands(
+        args,
+        &[
+            "-n",
+            "--namespace",
+            "--context",
+            "--cluster",
+            "--user",
+            "-s",
+            "--server",
+            "-l",
+            "--selector",
+            "-o",
+            "--output",
+            "-f",
+            "--filename",
+            "--replicas",
+            "-p",
+            "--patch",
+            "--type",
+        ],
+    );
+    matches!(
+        ops.first().copied(),
+        Some(
+            "apply"
+                | "rollout"
+                | "delete"
+                | "scale"
+                | "patch"
+                | "create"
+                | "label"
+                | "annotate"
+                | "set"
+                | "cordon"
+                | "uncordon"
+                | "drain"
+                | "taint"
+                | "expose"
+                | "autoscale"
+                | "replace"
+        )
+    )
+}
+
+/// `aws SERVICE OPERATION`: the read list, `s3 rb|rm`, `delete-*`, `terminate-*`, and
+/// explicit changes (`create-*`, `put-*`, `update-*`, `modify-*`, `tag-*`, ...,
+/// `s3 cp|mv|sync|mb`). Not `lambda invoke`, `ssm send-command`, or `start-*` (a
+/// build, a task, a session, or a workflow can run anything).
+fn aws_certain(args: &[String]) -> bool {
+    if aws(args) == Read {
+        return true;
+    }
+    let ops = operands(
+        args,
+        &[
+            "--profile",
+            "--region",
+            "--output",
+            "--endpoint-url",
+            "--query",
+            "--color",
+            "--cli-read-timeout",
+            "--cli-connect-timeout",
+            "--ca-bundle",
+        ],
+    );
+    let (Some(service), Some(op)) = (ops.first().copied(), ops.get(1).copied()) else {
+        return false;
+    };
+    if service == "s3" {
+        return matches!(op, "rb" | "rm" | "cp" | "mv" | "sync" | "mb");
+    }
+    [
+        "delete-",
+        "terminate-",
+        "create-",
+        "put-",
+        "update-",
+        "modify-",
+        "tag-",
+        "untag-",
+        "attach-",
+        "detach-",
+        "associate-",
+        "disassociate-",
+        "enable-",
+        "disable-",
+        "add-",
+        "remove-",
+        "register-",
+        "deregister-",
+        "set-",
+        "stop-",
+        "reboot-",
+    ]
+    .iter()
+    .any(|prefix| op.starts_with(prefix))
+}
+
+/// `stripe RESOURCE create|update|...`, `stripe post PATH`, `stripe delete PATH`.
+fn stripe_change(args: &[String]) -> bool {
+    let ops = operands(
+        args,
+        &[
+            "--api-key",
+            "--project-name",
+            "-p",
+            "--stripe-account",
+            "--stripe-version",
+            "-d",
+            "--data",
+            "-e",
+            "--expand",
+            "--color",
+            "--log-level",
+        ],
+    );
+    match ops.first().copied() {
+        Some("post" | "delete") => true,
+        Some("listen" | "trigger" | "login" | "logout" | "config" | "fixtures" | "serve")
+        | None => false,
+        Some(_) => matches!(
+            ops.get(1).copied(),
+            Some(
+                "create"
+                    | "update"
+                    | "delete"
+                    | "cancel"
+                    | "capture"
+                    | "confirm"
+                    | "attach"
+                    | "detach"
+                    | "finalize_invoice"
+                    | "void_invoice"
+                    | "pay"
+                    | "send_invoice"
+                    | "close"
+                    | "expire"
+            )
+        ),
+    }
+}
+
+/// `fly deploy`, `fly secrets set|unset`, `fly scale ...`, `fly NOUN create|destroy`.
+fn fly_change(args: &[String]) -> bool {
+    let ops = operands(args, &["-a", "--app", "-c", "--config", "-r", "--region"]);
+    match ops.first().copied() {
+        Some("deploy") => true,
+        Some("secrets") => matches!(ops.get(1).copied(), Some("set" | "unset")),
+        Some("scale") => matches!(ops.get(1).copied(), Some("count" | "vm" | "memory")),
+        Some("apps" | "volumes" | "machine" | "machines") => matches!(
+            ops.get(1).copied(),
+            Some("create" | "destroy" | "stop" | "start" | "restart" | "extend")
+        ),
+        _ => false,
+    }
+}
+
+/// `docker push`, `docker rm|rmi|kill|stop|...`, `docker pull|tag`, `docker NOUN
+/// create|rm|prune`, `docker compose stop|down|pull`. Not `run`, `exec`, `build`, or
+/// `compose up|run|build|exec`: they run code of an image or of the project.
+fn docker_change(args: &[String]) -> bool {
+    if args
+        .iter()
+        .any(|a| a == "--config" || a.starts_with("--config="))
+    {
+        return false;
+    }
+    let ops = operands(
+        args,
+        &[
+            "-H",
+            "--host",
+            "--context",
+            "-f",
+            "--file",
+            "-p",
+            "--project-name",
+        ],
+    );
+    let second = ops.get(1).copied();
+    match ops.first().copied() {
+        Some(
+            "push" | "pull" | "tag" | "rm" | "rmi" | "kill" | "stop" | "start" | "restart"
+            | "pause" | "unpause" | "rename",
+        ) => true,
+        Some("image") => matches!(second, Some("pull" | "push" | "tag" | "rm" | "prune")),
+        Some("container") => matches!(
+            second,
+            Some("stop" | "start" | "restart" | "rm" | "prune" | "kill" | "rename")
+        ),
+        Some("volume" | "network") => {
+            matches!(
+                second,
+                Some("create" | "rm" | "prune" | "connect" | "disconnect")
+            )
+        }
+        Some("system") => second == Some("prune"),
+        Some("compose") => matches!(second, Some("stop" | "down" | "pull" | "rm" | "restart")),
+        _ => false,
+    }
+}
+
+/// `vercel` deploys and reads, and explicit changes: `env add|rm|pull`, `link`,
+/// `domains|alias|dns add|rm|set`, `promote`, `rollback`, `redeploy`. Not `build` or
+/// `dev`: they run the project.
+fn vercel_certain(args: &[String]) -> bool {
+    let ops = operands(
+        args,
+        &[
+            "--token",
+            "-t",
+            "--scope",
+            "-S",
+            "--cwd",
+            "-A",
+            "--local-config",
+            "-Q",
+            "--global-config",
+        ],
+    );
+    let kind = vercel(args);
+    match ops.first().copied() {
+        None | Some("deploy") => true,
+        Some(path) if path.contains(['/', '.']) => true,
+        Some("promote" | "rollback" | "redeploy" | "link") => true,
+        Some("env" | "domains" | "dns" | "alias" | "aliases" | "certs") => {
+            kind == Read
+                || matches!(
+                    ops.get(1).copied(),
+                    Some("add" | "rm" | "remove" | "set" | "pull")
+                )
+        }
+        Some(_) => kind == Read,
+    }
+}
+
+/// `wrangler deploy|publish`, `wrangler versions deploy|upload`, and `put` or `delete`
+/// of `kv`, `secret`, and `r2 object`. Not `dev` and not `d1 execute` or `d1 migrations
+/// apply` (SQL of a file).
+fn wrangler_change(args: &[String]) -> bool {
+    let ops = operands(
+        args,
+        &[
+            "-c",
+            "--config",
+            "-e",
+            "--env",
+            "--binding",
+            "--namespace-id",
+        ],
+    );
+    let at = |i: usize| ops.get(i).copied();
+    match at(0) {
+        Some("deploy" | "publish") => true,
+        Some("versions") => matches!(at(1), Some("deploy" | "upload")),
+        Some("secret") => matches!(at(1), Some("put" | "delete")),
+        Some("kv") => matches!(at(1), Some("key")) && matches!(at(2), Some("put" | "delete")),
+        Some("kv:key") => matches!(at(1), Some("put" | "delete")),
+        Some("r2") => matches!(at(1), Some("object")) && matches!(at(2), Some("put" | "delete")),
+        _ => false,
+    }
+}
+
+/// `heroku config:set|unset`, `ps:scale|restart|stop`, `maintenance:on|off`,
+/// `releases:rollback`, `apps:create|destroy`, `addons:create|destroy`, `pg:reset`. Not
+/// `run`, `ps:exec`, or `pg:psql`: they run a command or any SQL.
+fn heroku_change(args: &[String]) -> bool {
+    matches!(
+        args.first().map(String::as_str),
+        Some(
+            "config:set"
+                | "config:unset"
+                | "config:add"
+                | "config:remove"
+                | "ps:scale"
+                | "ps:restart"
+                | "ps:stop"
+                | "restart"
+                | "maintenance:on"
+                | "maintenance:off"
+                | "releases:rollback"
+                | "rollback"
+                | "apps:create"
+                | "create"
+                | "apps:destroy"
+                | "destroy"
+                | "addons:create"
+                | "addons:destroy"
+                | "pg:reset"
+        )
+    )
+}
+
+/// An SQL client with only certain queries: plain `SELECT` (or a psql meta command that
+/// lists), or statements by [`certain_sql`], and only known options.
+fn sql_certain(args: &[String], client: &SqlClient) -> bool {
+    let mut queries = Vec::new();
+    let mut operands = 0;
+    let mut i = 0;
+    while let Some(arg) = args.get(i) {
+        i += 1;
+        let (option, attached) = match arg.split_once('=') {
+            Some((o, v)) if o.starts_with("--") => (o, Some(v)),
+            _ => (arg.as_str(), None),
+        };
+        if client.query.contains(&option) {
+            match attached.or_else(|| args.get(i).map(String::as_str)) {
+                Some(query) => queries.push(query),
+                None => return false,
+            }
+            if attached.is_none() {
+                i += 1;
+            }
+            continue;
+        }
+        if has_shell_mark(arg) {
+            return false;
+        }
+        if client.with_value.contains(&option) {
+            if attached.is_none() {
+                i += 1;
+            }
+        } else if !option.starts_with('-') {
+            operands += 1;
+        } else if !(client.flags.contains(&option)
+            || (!client.meta && option.starts_with("-p") && !option.starts_with("--")))
+        {
+            return false;
+        }
+    }
+    !queries.is_empty()
+        && operands <= client.max_operands
+        && queries
+            .iter()
+            .all(|q| plain_select(q) || (client.meta && psql_meta_read(q)) || certain_sql(q, false))
+}
+
+/// `sqlite3 [OPTIONS] DATABASE SQL...` with certain SQL only.
+fn sqlite_certain(args: &[String]) -> bool {
+    if sqlite(args) == Read {
+        return true;
+    }
+    let mut positional = Vec::new();
+    let mut i = 0;
+    while let Some(arg) = args.get(i) {
+        i += 1;
+        match arg
+            .strip_prefix('-')
+            .map(|o| format!("-{}", o.trim_start_matches('-')))
+        {
+            Some(o)
+                if [
+                    "-readonly",
+                    "-json",
+                    "-csv",
+                    "-header",
+                    "-noheader",
+                    "-column",
+                    "-line",
+                    "-list",
+                    "-box",
+                    "-table",
+                    "-markdown",
+                    "-batch",
+                    "-bail",
+                ]
+                .contains(&o.as_str()) => {}
+            Some(o) if ["-separator", "-newline", "-nullvalue"].contains(&o.as_str()) => i += 1,
+            Some(_) => return false,
+            None => positional.push(arg.as_str()),
+        }
+    }
+    positional.len() >= 2
+        && !has_shell_mark(positional[0])
+        && positional[1..]
+            .iter()
+            .all(|sql| plain_select(sql) || certain_sql(sql, true))
+}
+
+/// SQL verbs whose statements have a known kind: a change or a delete.
+const SQL_CERTAIN_VERBS: &[&str] = &[
+    "insert", "update", "delete", "create", "alter", "drop", "truncate", "grant", "revoke",
+    "comment",
+];
+/// SQL words that run code, read or write files, or reach another server.
+const SQL_UNCERTAIN_WORDS: &[&str] = &[
+    "copy",
+    "do",
+    "call",
+    "execute",
+    "exec",
+    "outfile",
+    "dumpfile",
+    "infile",
+    "program",
+    "function",
+    "procedure",
+    "trigger",
+    "extension",
+    "language",
+    "server",
+    "load",
+    "attach",
+    "pragma",
+    "system",
+    "subscription",
+    "publication",
+    "foreign",
+    "mapping",
+];
+/// Parts of SQL function names that run code, touch files, or reach another server.
+const SQL_UNCERTAIN_CALLS: &[&str] = &[
+    "dblink",
+    "lo_",
+    "pg_read",
+    "pg_ls_",
+    "pg_stat_file",
+    "pg_file",
+    "load_file",
+    "sys_",
+    "xp_",
+    "http",
+    "writefile",
+    "readfile",
+    "load_extension",
+    "edit",
+    "fts3_tokenizer",
+    "pg_execute",
+    "query_to_xml",
+    "pg_sleep",
+];
+
+/// Statements that are each a plain `SELECT`, or start with a verb of
+/// [`SQL_CERTAIN_VERBS`] with no comment, dollar quote, meta command, word of
+/// [`SQL_UNCERTAIN_WORDS`], or call of [`SQL_UNCERTAIN_CALLS`]. `INSERT`, `UPDATE`,
+/// `CREATE TABLE`, and `ALTER` are a change; `DELETE`, `DROP`, and `TRUNCATE` a delete
+/// by the word rules.
+fn certain_sql(sql: &str, sqlite: bool) -> bool {
+    let lower = sql.to_lowercase();
+    if lower.contains(['\\', '$']) || lower.contains("--") || lower.contains("/*") {
+        return false;
+    }
+    if sqlite && lower.trim_start().starts_with('.') {
+        return false;
+    }
+    let statements: Vec<&str> = lower
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    !statements.is_empty()
+        && statements.iter().all(|statement| {
+            let words: Vec<&str> = statement
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .filter(|w| !w.is_empty())
+                .collect();
+            plain_select(statement)
+                || (words
+                    .first()
+                    .is_some_and(|verb| SQL_CERTAIN_VERBS.contains(verb))
+                    && !words.iter().any(|w| SQL_UNCERTAIN_WORDS.contains(w))
+                    && !function_calls(statement)
+                        .iter()
+                        .any(|name| SQL_UNCERTAIN_CALLS.iter().any(|part| name.contains(part))))
+        })
 }
 
 /// Deploy or Delete when a hard word rule matches anywhere in the command, also inside
@@ -439,7 +1211,6 @@ const READ_PROGRAMS: &[&str] = &[
     "uptime",
     "nproc",
     "sw_vers",
-    "printenv",
     "echo",
     "printf",
     "which",
@@ -548,6 +1319,9 @@ fn classify_program(name: &str, args: &[String], depth: usize) -> ActionKind {
     }
     if DELETE_WORDS.contains(&name) || name == "dd" || name.starts_with("mkfs") {
         return Delete;
+    }
+    if prints_environment(name, args) {
+        return Change;
     }
     let read = match name {
         _ if READ_PROGRAMS.contains(&name) => read_tool(name, args),
@@ -670,6 +1444,17 @@ fn operands<'a>(args: &'a [String], with_value: &[&str]) -> Vec<&'a str> {
         i += 1;
     }
     out
+}
+
+/// Gate 1 review: the command prints the environment or a part of it, so it is never a
+/// *read*: `printenv`, `echo $KEY` and `printf` with a variable, a jq filter that reads
+/// `env` or `$ENV`, and `/proc/PID/environ` as an argument. The output masking does not
+/// see a value that a filter encodes or cuts.
+fn prints_environment(name: &str, args: &[String]) -> bool {
+    let mut argv = vec![name.to_owned()];
+    argv.extend(args.iter().cloned());
+    shell_risk::reads_environment(&argv)
+        || (matches!(name, "echo" | "printf") && args.iter().any(|a| a.contains('$')))
 }
 
 fn read_tool(name: &str, args: &[String]) -> bool {
@@ -1321,7 +2106,9 @@ fn wrangler(args: &[String]) -> bool {
     }
 }
 
-/// `heroku apps|ps|logs|config|releases|...` and their `:info`, `:get` forms.
+/// `heroku apps|ps|logs|releases|...` and their `:info` forms. `config` and
+/// `config:get` print the values of the config variables, secrets included: never a
+/// *read* (Gate 1 review).
 fn heroku(args: &[String]) -> bool {
     matches!(
         args.first().map(String::as_str),
@@ -1330,8 +2117,6 @@ fn heroku(args: &[String]) -> bool {
                 | "apps:info"
                 | "ps"
                 | "logs"
-                | "config"
-                | "config:get"
                 | "releases"
                 | "releases:info"
                 | "addons"
