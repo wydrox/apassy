@@ -421,15 +421,10 @@ fn shared_section(app: &mut DesktopApp, ui: &mut egui::Ui, rail: bool) {
     }
 }
 
-/// What waits for the owner: runs and open access requests of agents.
+/// What blocks an agent: the waiting questions and the open credential requests.
 fn decisions_badge(app: &DesktopApp, pending: &Pending) -> Badge {
     #[cfg(feature = "vault")]
-    let count = pending.len()
-        + app
-            .owner_ui
-            .session
-            .access_requests(true)
-            .map_or(0, |requests| requests.len());
+    let count = super::decisions::badge_count(app, pending);
     #[cfg(not(feature = "vault"))]
     let count = {
         let _ = pending;

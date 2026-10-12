@@ -222,10 +222,10 @@ impl DesktopApp {
         ui.sheet = None;
         ui.close_after_check = None;
         ui.start = Step::Home;
-        ui.activity_tab = Default::default();
         ui.credential_filter = Default::default();
         ui.focus_search = false;
-        ui.grant = Default::default();
+        ui.decisions = Default::default();
+        ui.agents = Default::default();
         ui.agent_setup = Default::default();
         ui.agent_onboarding = Default::default();
 

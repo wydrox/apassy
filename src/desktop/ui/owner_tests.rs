@@ -13,7 +13,6 @@ use super::start::{draw_unlock_card, unlock_with_passphrase};
 use super::{PASSPHRASE_CAPACITY, SECRET_VALUE_CAPACITY, draw, kit, secret_field_id};
 use crate::broker::approvals::{ApprovalOutcome, PendingRun};
 use crate::contracts::CredentialKind;
-use crate::desktop::inbox::EventKey;
 use crate::desktop::owner_check::OwnerRequest;
 use crate::desktop::owner_store::{Ephemeral, SecretForm};
 use crate::desktop::{BrokerState, DesktopApp, ItemDraft, Place};
@@ -352,52 +351,6 @@ fn automatic_command_settings_require_the_owner_check() {
     }
 }
 
-#[test]
-fn automatic_access_request_in_any_folder_requires_each_run_approval() {
-    use crate::broker::approvals::{OwnerAction, OwnerCheck};
-
-    let dir = TempDir::new().expect("temp dir");
-    let (mut app, item_id) = unlocked_app_with_item(&dir);
-    let (agent, _token) = app
-        .owner_ui
-        .session
-        .register_agent("Automatic agent")
-        .unwrap();
-    let proof = app
-        .owner_gate()
-        .authorize(
-            OwnerAction::ShowAllCredentials { agent_id: agent.id },
-            OwnerCheck::passphrase(PASS),
-        )
-        .unwrap();
-    app.owner_ui
-        .session
-        .set_agent_sees_all(agent.id, true, Some(proof))
-        .unwrap();
-    let request_id = {
-        let shared = app.owner_ui.session.shared_vault();
-        let mut guard = shared.lock().unwrap();
-        guard
-            .as_mut()
-            .unwrap()
-            .request_access(agent.id, item_id, "Run the command.", "")
-            .unwrap()
-            .0
-    };
-    assert!(app.owner_ui.session.env_binding(item_id).unwrap().is_none());
-    app.place = Place::Decisions;
-    app.ui.grant = super::agents::GrantForm {
-        any_folder: true,
-        mode: super::agents::Decision::Bouncer,
-        ..super::agents::GrantForm::default()
-    };
-    app.ui.sheet = Some(super::Sheet::AccessRequest { request_id });
-    let text = app_frame(&egui::Context::default(), &mut app);
-    assert!(text.contains("you approve each run with it"), "{text}");
-    assert_eq!(app.ui.grant.mode, super::agents::Decision::Ask);
-    assert!(!text.contains(TOKEN), "{text}");
-}
-
 /// A4: "Show" shows the owner check. Touch ID answers `not_available`, and
 /// the dialog says so. A wrong passphrase reveals nothing. The right one reveals.
 #[test]
@@ -517,10 +470,10 @@ fn text_pos(shape: &egui::Shape, needle: &str) -> Option<Pos2> {
     }
 }
 
-/// "Open Settings" in the "macOS notifications are off" notice of Activity opens
+/// "Open Settings" in the "macOS notifications are off" notice of Decisions opens
 /// Settings > Notifications, also when another tab was open before.
 #[test]
-fn open_settings_from_activity_shows_the_notifications_tab() {
+fn open_settings_from_decisions_shows_the_notifications_tab() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&dir);
     app.start_broker(&socket_dir(&dir));
@@ -590,9 +543,9 @@ pub(super) fn socket_dir(dir: &TempDir) -> PathBuf {
     dir.path().join("s").join("broker.sock")
 }
 
-/// A4, N4: "Approve once" needs the owner check. "Mark as seen" is not an approval.
+/// A4, N4: "Allow Once" needs the owner check. A notification is not an approval.
 #[test]
-fn approval_needs_the_owner_check_and_seen_is_not_an_approval() {
+fn allow_once_needs_the_owner_check() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&dir);
     app.start_broker(&socket_dir(&dir));
@@ -615,21 +568,12 @@ fn approval_needs_the_owner_check_and_seen_is_not_an_approval() {
     let ctx = egui::Context::default();
     app.place = Place::Decisions;
     let text = app_frame(&ctx, &mut app);
-    assert!(
-        text.contains("UI agent asks to run a command with secrets"),
-        "{text}"
-    );
-    assert!(text.contains("Approval waiting"), "{text}");
-    assert!(text.contains("Mark as seen"), "{text}");
+    assert!(text.contains("UI agent wants to use DEMO_KEY"), "{text}");
+    assert!(text.contains("Allow Once"), "{text}");
     assert!(text.contains("A notification is not an approval"), "{text}");
-
-    // "Mark as seen" only marks the event.
-    app.owner.acknowledged.insert(EventKey::Run(run.id));
-    let text = app_frame(&ctx, &mut app);
-    assert!(text.contains("Seen"), "{text}");
     assert_eq!(approvals.pending(), vec![run.clone()]);
 
-    // "Approve once" opens the owner check. The run still waits.
+    // "Allow Once" opens the owner check. The run still waits.
     app.ask_owner(OwnerRequest::ApproveRun(run.clone()), Some(&ctx));
     assert!(app_frame(&ctx, &mut app).contains("Approve one run of agent"));
     assert_eq!(approvals.pending(), vec![run.clone()]);
@@ -658,237 +602,11 @@ fn approval_needs_the_owner_check_and_seen_is_not_an_approval() {
     assert_eq!(waiter.join().expect("waiter"), ApprovalOutcome::Approved);
 }
 
-/// ADR 0024: a first use shows its card. "Allow in FOLDER" needs one owner check for the
-/// run, the access, and the declaration from the card.
-#[test]
-fn a_first_use_card_allows_in_the_folder_with_one_owner_check() {
-    use crate::broker::approvals::{FirstUseDeclaration, FirstUseItem, FirstUseOffer};
-    use crate::vault::Environment;
-
-    let dir = TempDir::new().expect("temp dir");
-    let (mut app, item_id) = unlocked_app_with_item(&dir);
-    app.start_broker(&socket_dir(&dir));
-    let BrokerState::Running(handle) = &app.broker else {
-        panic!("the broker did not start");
-    };
-    let approvals = Arc::clone(handle.approvals());
-    let offer = FirstUseOffer {
-        agent_id: 1,
-        folder: "/tmp/synthetic-shop".to_owned(),
-        items: vec![FirstUseItem {
-            item_id,
-            name: "Guarded key".to_owned(),
-            declaration: None,
-        }],
-    };
-    let waiter = {
-        let approvals = Arc::clone(&approvals);
-        let offer = offer.clone();
-        std::thread::spawn(move || {
-            approvals.wait_for_first_use(
-                waiting_run("UI agent"),
-                offer,
-                Duration::from_secs(20),
-                || true,
-            )
-        })
-    };
-    let run = loop {
-        if let Some(run) = approvals.pending().into_iter().next() {
-            break run;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    };
-    let ctx = egui::Context::default();
-    app.place = Place::Decisions;
-    let text = app_frame(&ctx, &mut app);
-    for expected in [
-        "UI agent wants to use \"Guarded key\" for the first time",
-        "Allow in synthetic-shop",
-        "Allow once",
-        "Declaration:",
-        // M2: the card says what the process gets, here the automatic real value.
-        "Guarded key: the process gets the real value in APASSY_ITEM_",
-    ] {
-        assert!(text.contains(expected), "{expected}: {text}");
-    }
-    assert!(!text.contains("Approve and remember"), "{text}");
-    // The card made the declaration form. A field without a suggestion is strict.
-    let form = app
-        .ui
-        .first_use_forms
-        .get_mut(&(run.id, item_id))
-        .expect("a form")
-        .clone();
-    assert!(!form.project.trim().is_empty());
-    let mut declaration = form.to_declaration();
-    declaration.environment = Environment::Development;
-    let declarations = vec![FirstUseDeclaration {
-        item_id,
-        declaration: declaration.clone(),
-        provider: form.provider.clone(),
-        suggested: None,
-    }];
-    app.ask_owner(
-        OwnerRequest::ApproveAndGrant {
-            run: run.clone(),
-            offer,
-            declarations,
-        },
-        Some(&ctx),
-    );
-    let text = app_frame(&ctx, &mut app);
-    assert!(text.contains("Give agent \"UI agent\" access to"), "{text}");
-    // L3: the dialog names the declaration that it saves and what later runs do.
-    for expected in [
-        "Apassy saves the declaration of \"Guarded key\": development,",
-        "Later runs there that the bouncer finds clean may start without asking.",
-    ] {
-        assert!(text.contains(expected), "{expected}: {text}");
-    }
-    assert_eq!(
-        approvals.pending(),
-        vec![run.clone()],
-        "no access before the check"
-    );
-    confirm_with(&mut app, &ctx, PASS);
-    // M1: the queue took the answer. The broker saves the access when the run starts, so
-    // the toast does not claim a saved access.
-    assert!(
-        app.status_text.contains(
-            "Apassy saves the access to Guarded key in /tmp/synthetic-shop when the run starts"
-        ),
-        "{}",
-        app.status_text
-    );
-    assert!(
-        !app.status_text.contains("need no new approval"),
-        "{}",
-        app.status_text
-    );
-    let settled = waiter.join().expect("waiter").expect("no other first use");
-    assert_eq!(settled.outcome, ApprovalOutcome::ApprovedAndGranted);
-    let grant = settled.grant.expect("a grant");
-    assert_eq!(grant.folder, "/tmp/synthetic-shop");
-    assert_eq!(grant.declarations[0].declaration, declaration);
-    // The form goes with the run.
-    app_frame(&ctx, &mut app);
-    assert!(app.ui.first_use_forms.is_empty());
-}
-
-/// A first use waits in the queue of the running broker. Returns the waiting thread and
-/// the run.
-fn wait_first_use(
-    approvals: &Arc<crate::broker::approvals::ApprovalQueue>,
-    run: PendingRun,
-    offer: crate::broker::approvals::FirstUseOffer,
-) -> (
-    std::thread::JoinHandle<
-        Result<crate::broker::approvals::Settled, crate::broker::approvals::FirstUseBusy>,
-    >,
-    PendingRun,
-) {
-    let waiter = {
-        let approvals = Arc::clone(approvals);
-        std::thread::spawn(move || {
-            approvals.wait_for_first_use(run, offer, Duration::from_secs(20), || true)
-        })
-    };
-    let run = loop {
-        if let Some(run) = approvals.pending().into_iter().next() {
-            break run;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    };
-    (waiter, run)
-}
-
-/// ADR 0024, F2: the card for the root folder offers "Allow once" only, and a path with
-/// control or direction characters is shown without them. The request keeps the real path.
-#[test]
-fn a_first_use_card_for_a_broad_folder_offers_allow_once_only() {
-    use crate::broker::approvals::{FirstUseItem, FirstUseOffer, OwnerAction, OwnerCheck};
-
-    let dir = TempDir::new().expect("temp dir");
-    let (mut app, item_id) = unlocked_app_with_item(&dir);
-    app.start_broker(&socket_dir(&dir));
-    let BrokerState::Running(handle) = &app.broker else {
-        panic!("the broker did not start");
-    };
-    let approvals = Arc::clone(handle.approvals());
-    let offer = FirstUseOffer {
-        agent_id: 1,
-        folder: "/".to_owned(),
-        items: vec![FirstUseItem {
-            item_id,
-            name: "Guarded key".to_owned(),
-            declaration: None,
-        }],
-    };
-    let (waiter, run) = wait_first_use(&approvals, waiting_run("UI agent"), offer.clone());
-    let ctx = egui::Context::default();
-    app.place = Place::Decisions;
-    let text = app_frame(&ctx, &mut app);
-    for expected in [
-        "UI agent wants to use \"Guarded key\" for the first time",
-        "Allow once",
-        "offers \"Allow once\" only",
-    ] {
-        assert!(text.contains(expected), "{expected}: {text}");
-    }
-    assert!(!text.contains("Allow in "), "{text}");
-    assert!(!text.contains("Declaration:"), "{text}");
-    assert!(app.ui.first_use_forms.is_empty());
-    // A crafted grant request is refused by the queue, and the run still waits.
-    let proof = crate::broker::approvals::OwnerGate::new(app.owner_ui.session.shared_vault(), None)
-        .authorize(
-            OwnerAction::ApproveAndGrant {
-                run: run.clone(),
-                offer,
-                declarations: Vec::new(),
-            },
-            OwnerCheck::passphrase(PASS),
-        )
-        .expect("owner check");
-    assert!(approvals.approve(proof).is_err());
-    assert_eq!(approvals.pending(), vec![run.clone()]);
-    assert!(approvals.deny(run.id));
-    waiter.join().expect("waiter").expect("no other first use");
-
-    // A folder that is not broad, with characters that must not reach the screen.
-    let folder = format!("/tmp/shop\u{202e}\u{7}evil{}", "x".repeat(300));
-    let offer = FirstUseOffer {
-        agent_id: 1,
-        folder: folder.clone(),
-        items: vec![FirstUseItem {
-            item_id,
-            name: "Guarded key".to_owned(),
-            declaration: None,
-        }],
-    };
-    let hostile = PendingRun {
-        cwd: folder,
-        ..waiting_run("UI agent")
-    };
-    let (waiter, run) = wait_first_use(&approvals, hostile, offer);
-    let text = app_frame(&ctx, &mut app);
-    assert!(text.contains("Allow in "), "{text}");
-    assert!(
-        !text.contains('\u{202e}') && !text.contains('\u{7}'),
-        "{text}"
-    );
-    assert!(text.contains("shop??evil"), "{text}");
-    assert!(!text.contains(&"x".repeat(300)), "{text}");
-    assert!(approvals.deny(run.id));
-    waiter.join().expect("waiter").expect("no other first use");
-}
-
 /// ADR 0024, M2: an automatic binding delivers the real value, also for a known
-/// provider. The Command settings sheet opens with that, and the card says so.
+/// provider. The Command settings sheet opens with that.
 #[test]
 fn a_known_provider_with_automatic_settings_opens_the_sheet_with_the_real_value() {
     use super::Sheet;
-    use crate::broker::approvals::{FirstUseItem, FirstUseOffer};
     use crate::vault::EnvDelivery;
 
     let dir = TempDir::new().expect("temp dir");
@@ -927,105 +645,6 @@ fn a_known_provider_with_automatic_settings_opens_the_sheet_with_the_real_value(
     assert!(!app.owner_ui.env_placeholder_input);
     assert_eq!(app.owner_ui.env_hosts_input, hosts.join(", "));
     assert_eq!(app.owner_ui.env_field_input, effective.field);
-
-    app.start_broker(&socket_dir(&dir));
-    let BrokerState::Running(handle) = &app.broker else {
-        panic!("the broker did not start");
-    };
-    let approvals = Arc::clone(handle.approvals());
-    let offer = FirstUseOffer {
-        agent_id: 1,
-        folder: "/tmp/synthetic-shop".to_owned(),
-        items: vec![FirstUseItem {
-            item_id,
-            name: "Stripe test key".to_owned(),
-            declaration: None,
-        }],
-    };
-    let (waiter, run) = wait_first_use(&approvals, waiting_run("UI agent"), offer);
-    let ctx = egui::Context::default();
-    app.place = Place::Decisions;
-    let text = app_frame(&ctx, &mut app);
-    assert!(
-        text.contains(&format!(
-            "Stripe test key: the process gets the real value in {}",
-            effective.env_name
-        )),
-        "{text}"
-    );
-    assert!(approvals.deny(run.id));
-    waiter.join().expect("waiter").expect("no other first use");
-}
-
-/// ADR 0024, L3: for a production declaration the owner check says that the item still
-/// asks at each run. An access in the root folder cannot be described as lasting.
-#[test]
-fn the_owner_check_text_of_a_grant_names_production_and_the_saved_declaration() {
-    use crate::broker::approvals::{FirstUseDeclaration, FirstUseItem, FirstUseOffer};
-    use crate::vault::{Declaration, Environment, Reversibility, RiskLevel, Scope};
-
-    let production = Declaration {
-        project: "shop".to_owned(),
-        environment: Environment::Production,
-        risk: RiskLevel::High,
-        scope: Scope::Admin,
-        reversibility: Reversibility::Irreversible,
-    };
-    let offer = FirstUseOffer {
-        agent_id: 1,
-        folder: "/tmp/synthetic-shop".to_owned(),
-        items: vec![FirstUseItem {
-            item_id: 7,
-            name: "Live key".to_owned(),
-            declaration: None,
-        }],
-    };
-    let request = OwnerRequest::ApproveAndGrant {
-        run: waiting_run("UI agent"),
-        offer: offer.clone(),
-        declarations: vec![FirstUseDeclaration {
-            item_id: 7,
-            declaration: production,
-            provider: None,
-            suggested: None,
-        }],
-    };
-    let text = request.describe();
-    for expected in [
-        "the declaration of \"Live key\": production, high risk, admin, irreversible",
-        "A production credential still waits for you at each run",
-    ] {
-        assert!(text.contains(expected), "{expected}: {text}");
-    }
-    assert!(
-        !text.contains("Later runs there that the bouncer finds clean"),
-        "{text}"
-    );
-    let OwnerRequest::ApproveAndGrant {
-        run,
-        offer,
-        declarations,
-    } = request
-    else {
-        unreachable!()
-    };
-    let reason = crate::broker::approvals::OwnerAction::ApproveAndGrant {
-        run,
-        offer,
-        declarations,
-    }
-    .reason();
-    assert!(reason.contains("production asks each run"), "{reason}");
-    assert!(reason.contains("save declarations: production"), "{reason}");
-    assert!(
-        reason.chars().count() <= crate::native::MAX_REASON_CHARS,
-        "{reason}"
-    );
-    assert!(!reason.chars().any(char::is_control), "{reason}");
-    assert!(
-        !reason.contains("without asking") && !reason.contains("skip asking"),
-        "{reason}"
-    );
 }
 
 /// D2: native Touch ID accepts at most 200 Unicode characters. Full environment
@@ -1245,13 +864,10 @@ fn approve_and_remember_and_calibration_need_the_owner_check() {
         std::thread::sleep(Duration::from_millis(5));
     };
     let ctx = egui::Context::default();
+    // The card of ADR 0026 offers no pattern; the command line still can (ADR 0010).
     app.place = Place::Decisions;
     let text = app_frame(&ctx, &mut app);
-    assert!(text.contains("Approve and remember"), "{text}");
-    assert!(
-        text.contains("Pattern: npm test (0 of 3 approvals)"),
-        "{text}"
-    );
+    assert!(!text.contains("Approve and remember"), "{text}");
 
     app.ask_owner(OwnerRequest::ApproveAndRemember(run.clone()), Some(&ctx));
     assert!(app_frame(&ctx, &mut app).contains("and remember its pattern npm test"));

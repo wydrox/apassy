@@ -247,7 +247,8 @@ pub(super) fn expired_tokens(agents: &[crate::vault::AgentSummary], now: u64) ->
         .count()
 }
 
-/// A run that waits for the owner, on top of each detail but Decisions.
+/// A question that waits for the owner, on top of each detail but Decisions. "Review"
+/// opens it in Decisions.
 #[cfg(feature = "vault")]
 fn approval_banner(
     app: &mut DesktopApp,
@@ -257,12 +258,12 @@ fn approval_banner(
     let Some(run) = pending.first() else {
         return;
     };
-    let title = format!("{} asks to run a command with secrets", run.agent);
+    let title = format!("{} waits for your answer", run.agent);
     let more = pending.len() - 1;
     kit::notice(ui, Tone::Warning, &title, None, |ui| {
         ui.add(
             egui::Label::new(
-                kit::text(super::activity::shell_words(&run.command), kit::Font::Mono)
+                kit::text(super::decisions::shell_words(&run.command), kit::Font::Mono)
                     .color(kit::LABEL),
             )
             .truncate(),
@@ -270,7 +271,8 @@ fn approval_banner(
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             if kit::small_button(ui, "Review", Style::Prominent).clicked() {
-                app.ui.sheet = Some(Sheet::Approval(run.id));
+                super::decisions::select(app, run.id);
+                super::sidebar::navigate(app, Place::Decisions);
             }
             if more > 0
                 && kit::small_button(ui, &format!("{more} more waiting"), Style::Link).clicked()
@@ -316,26 +318,11 @@ pub(super) fn sheets(app: &mut DesktopApp, ctx: &egui::Context) {
         #[cfg(feature = "vault")]
         Sheet::ArchiveItem => super::items::archive_sheet(app, ctx),
         #[cfg(feature = "vault")]
-        Sheet::RegisterAgent => super::agents::register_sheet(app, ctx),
+        Sheet::RegisterAgent => super::agent_onboarding::sheet(app, ctx),
         #[cfg(feature = "vault")]
         Sheet::RevokeAgent { agent_id, name } => {
             super::agents::revoke_sheet(app, ctx, agent_id, &name)
         }
-        #[cfg(feature = "vault")]
-        Sheet::ProcessAccess {
-            agent_id,
-            item_id,
-            mode,
-            any_folder,
-        } => super::agents::access_sheet(app, ctx, agent_id, item_id, mode, any_folder),
-        #[cfg(feature = "vault")]
-        Sheet::GrantMany { agent_id } => super::agents::grant_many_sheet(app, ctx, agent_id),
-        #[cfg(feature = "vault")]
-        Sheet::AccessRequest { request_id } => {
-            super::activity::access_request_sheet(app, ctx, request_id)
-        }
-        #[cfg(feature = "vault")]
-        Sheet::Approval(run_id) => super::activity::approval_sheet(app, ctx, run_id),
         #[cfg(feature = "vault")]
         Sheet::ChangePassphrase => super::settings::passphrase_sheet(app, ctx),
         #[cfg(feature = "vault")]

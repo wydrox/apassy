@@ -669,7 +669,7 @@ fn return_in_a_field_does_the_default_action() {
     window.press(&mut app, Key::ArrowUp, Modifiers::NONE);
     assert_eq!(window.focused_layer(), Some(in_sheet));
 
-    // The host picker is first. Move to Name and replace the suggested name.
+    // The hosts are first. Move to Name and replace the suggested name.
     window.tab_to_text_field(&mut app, 10);
     assert!(
         window.ctx.text_edit_focused(),
@@ -679,8 +679,11 @@ fn return_in_a_field_does_the_default_action() {
     window.frame(&mut app, vec![Event::Text("Keyboard agent".to_owned())]);
     window.press(&mut app, Key::Enter, Modifiers::NONE);
     let agents = app.owner_ui.session.agents().expect("agents");
-    assert_eq!(agents.len(), 1, "Return registered the agent");
+    assert_eq!(agents.len(), 1, "Return connects the agent");
     assert_eq!(agents[0].name, "Keyboard agent");
+    // Connecting needs one owner check; the token comes after it.
+    assert!(app.owner.check.is_some(), "the owner check is open");
+    assert!(app.owner_ui.fresh_token.is_none());
 }
 
 /// A destructive alert starts on Cancel. Return or Space cancels, never deletes.
@@ -815,8 +818,9 @@ fn shortcuts_switch_places_open_settings_go_back_and_lock() {
     ] {
         window.press(&mut app, key, Modifiers::COMMAND);
         assert_eq!(app.place, place);
+        // An empty Decisions ("Nothing needs you", "All clear") has no control to focus.
         assert!(
-            window.focused().is_some(),
+            window.focused().is_some() || place == Place::Decisions,
             "the list took the focus for {place:?}"
         );
     }
@@ -1351,252 +1355,4 @@ fn wrong_synced_passphrase_shows_clear_error_and_allows_keyboard_retry() {
         app.current_vault_name().as_deref(),
         Some("Team on this Mac")
     );
-}
-
-/// The guide grants access without any variable setup. A canceled owner check
-/// must not grant access.
-#[test]
-fn agent_setup_guides_credentials_without_leaving_the_agent() {
-    use crate::broker::approvals::OwnerCheck;
-    use crate::desktop::owner_store::FreshToken;
-
-    let dir = TempDir::new().unwrap();
-    let (mut app, item_id) = unlocked_app_with_item(&dir);
-    let item_name = app.owner_ui.session.details(item_id).unwrap().name;
-    let (agent, token) = app.owner_ui.session.register_agent("Codex").unwrap();
-    app.owner_ui.selected_agent = Some(agent.id);
-    app.place = Place::Agents;
-    app.owner_ui.fresh_token = Some(FreshToken {
-        agent_name: agent.name.clone(),
-        token,
-        rotated: false,
-    });
-    let mut window = Window::new();
-    window.size = Vec2::new(1180.0, 1200.0);
-    window.idle(&mut app);
-    app.ui.agent_setup.result = Some(Ok(super::agent_setup::Host::Codex));
-    window.idle(&mut app);
-    let next = window
-        .texts
-        .iter()
-        .rev()
-        .find(|(text, _)| text == "Choose credentials")
-        .unwrap()
-        .1;
-    window.click_at(&mut app, next + Vec2::new(4.0, 4.0));
-    assert!(app.owner_ui.fresh_token.is_none());
-    assert!(window.text.contains("Ready for agent access"));
-    window.tab_to(&mut app, &item_name, 30);
-    window.press(&mut app, Key::Space, Modifiers::NONE);
-    assert!(app.owner_ui.session.env_binding(item_id).unwrap().is_none());
-    window.click(&mut app, "Set access…");
-    assert!(matches!(app.ui.sheet, Some(Sheet::GrantMany { agent_id }) if agent_id == agent.id));
-    assert!(app.ui.grant.selection.contains(&item_id));
-    app.ui.grant.dir = dir.path().to_str().unwrap().to_owned();
-    window.click(&mut app, "Give access to 1 credential");
-    assert!(app.owner.check.is_some());
-    assert!(
-        app.owner_ui
-            .session
-            .exec_grants(agent.id)
-            .unwrap()
-            .is_empty()
-    );
-    app.close_owner_check(Some(&window.ctx));
-    window.idle(&mut app);
-    assert!(matches!(app.ui.sheet, Some(Sheet::GrantMany { .. })));
-    assert!(
-        app.owner_ui
-            .session
-            .exec_grants(agent.id)
-            .unwrap()
-            .is_empty()
-    );
-    window.click(&mut app, "Give access to 1 credential");
-    app.confirm_owner_now(OwnerCheck::passphrase(super::owner_tests::PASS))
-        .unwrap();
-    window.idle(&mut app);
-    assert!(app.ui.sheet.is_none());
-    assert!(app.owner_ui.session.env_binding(item_id).unwrap().is_none());
-    window.click(&mut app, "Continue");
-    assert!(window.text.contains("Start the host and check a request"));
-    assert!(window.text.contains("/hooks"));
-    assert!(window.text.contains("Do not read or print secret values."));
-}
-
-#[test]
-fn several_credentials_can_receive_access_without_variable_names() {
-    use crate::broker::approvals::OwnerCheck;
-    use crate::desktop::owner_store::SecretForm;
-    let dir = TempDir::new().unwrap();
-    let (mut app, first) = unlocked_app_with_item(&dir);
-    let mut secrets = SecretForm::default();
-    secrets.token = "synthetic-second-agent-key".to_owned();
-    let second = app
-        .owner_ui
-        .session
-        .add(
-            &crate::desktop::ItemDraft {
-                name: "Second key".to_owned(),
-                ..Default::default()
-            },
-            &secrets,
-        )
-        .unwrap()
-        .id;
-    let (agent, _) = app.owner_ui.session.register_agent("Codex").unwrap();
-    app.owner_ui.selected_agent = Some(agent.id);
-    app.place = Place::Agents;
-    let mut window = Window::new();
-    window.size = Vec2::new(1180.0, 1600.0);
-    window.idle(&mut app);
-    window.click(&mut app, "Give access to several credentials…");
-    assert!(matches!(app.ui.sheet, Some(Sheet::GrantMany { .. })));
-    for name in ["Guarded key", "Second key"] {
-        window.tab_to(&mut app, name, 35);
-        window.press(&mut app, Key::Space, Modifiers::NONE);
-    }
-    app.ui.grant.dir = dir.path().to_str().unwrap().to_owned();
-    window.click(&mut app, "Give access to 2 credentials");
-    assert!(app.owner.check.is_some());
-    assert!(
-        app.owner_ui
-            .session
-            .exec_grants(agent.id)
-            .unwrap()
-            .is_empty()
-    );
-    app.confirm_owner_now(OwnerCheck::passphrase(super::owner_tests::PASS))
-        .unwrap();
-    window.idle(&mut app);
-    assert!(app.ui.sheet.is_none());
-    assert_eq!(app.owner_ui.session.exec_grants(agent.id).unwrap().len(), 2);
-    for item in [first, second] {
-        assert!(app.owner_ui.session.env_binding(item).unwrap().is_none());
-    }
-}
-
-#[test]
-fn bulk_access_resumes_after_the_owner_selects_a_custom_secret_field() {
-    use crate::broker::approvals::OwnerCheck;
-    use crate::contracts::CredentialKind;
-    use crate::desktop::owner_store::{SecretForm, detail_field_name};
-    use crate::desktop::{DetailDraft, ItemDraft};
-
-    let dir = TempDir::new().expect("synthetic vault");
-    let (mut app, first) = unlocked_app_with_item(&dir);
-    let mut secrets = SecretForm::default();
-    secrets.custom_value = "synthetic-primary-secret".to_owned();
-    secrets.details[0] = "synthetic-second-secret".to_owned();
-    let custom = app
-        .owner_ui
-        .session
-        .add(
-            &ItemDraft {
-                name: "Custom credential".to_owned(),
-                kind: CredentialKind::Custom,
-                field_name: "primary_secret".to_owned(),
-                details: vec![DetailDraft {
-                    label: "Second secret".to_owned(),
-                    hidden: true,
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-            &secrets,
-        )
-        .expect("custom credential")
-        .id;
-    assert!(
-        app.owner_ui
-            .session
-            .process_binding(custom)
-            .unwrap()
-            .is_none()
-    );
-    let (agent, _) = app.owner_ui.session.register_agent("Codex").unwrap();
-    app.owner_ui.selected_agent = Some(agent.id);
-    app.place = Place::Agents;
-    let mut window = Window::new();
-    window.size = Vec2::new(1180.0, 1600.0);
-    window.idle(&mut app);
-    window.click(&mut app, "Give access to several credentials…");
-    for name in ["Guarded key", "Custom credential"] {
-        window.tab_to(&mut app, name, 35);
-        window.press(&mut app, Key::Space, Modifiers::NONE);
-    }
-    app.ui.grant.dir = dir.path().to_str().unwrap().to_owned();
-    let selection = app.ui.grant.selection.clone();
-    assert_eq!(selection, [first, custom].into_iter().collect());
-    window.click(&mut app, "Choose field for Custom credential…");
-    assert_eq!(app.place, Place::Agents);
-    assert_eq!(app.ui.sheet, Some(Sheet::Variable));
-    assert_eq!(app.ui.grant.resume_agent, Some(agent.id));
-    assert_eq!(app.ui.grant.selection, selection);
-    assert!(window.text.contains("Command settings"), "{}", window.text);
-    assert!(app.owner_ui.env_name_input.is_empty());
-    window.click(&mut app, "primary_secret");
-    window.click(&mut app, "Second secret");
-    assert_eq!(
-        app.owner_ui.env_field_input,
-        detail_field_name("Second secret")
-    );
-    window.click(&mut app, "Save");
-    assert!(app.owner.check.is_some());
-    assert!(app.owner_ui.session.env_binding(custom).unwrap().is_none());
-    assert!(
-        app.owner_ui
-            .session
-            .exec_grants(agent.id)
-            .unwrap()
-            .is_empty()
-    );
-    app.confirm_owner_now(OwnerCheck::passphrase(super::owner_tests::PASS))
-        .expect("owner selects the secret field");
-    window.idle(&mut app);
-    assert!(matches!(app.ui.sheet, Some(Sheet::GrantMany { agent_id }) if agent_id == agent.id));
-    assert_eq!(app.ui.grant.resume_agent, None);
-    assert_eq!(app.ui.grant.selection, selection);
-    assert_eq!(app.ui.grant.dir, dir.path().to_str().unwrap());
-    let binding = app
-        .owner_ui
-        .session
-        .process_binding(custom)
-        .unwrap()
-        .unwrap();
-    assert_eq!(binding.env_name, format!("APASSY_ITEM_{custom}"));
-    assert_eq!(binding.field, detail_field_name("Second secret"));
-    assert!(
-        app.owner_ui
-            .session
-            .exec_grants(agent.id)
-            .unwrap()
-            .is_empty()
-    );
-    for value in ["synthetic-primary-secret", "synthetic-second-secret"] {
-        assert!(!window.text.contains(value), "{}", window.text);
-    }
-    window.click(&mut app, "Give access to 2 credentials");
-    assert!(app.owner.check.is_some());
-    assert!(
-        app.owner_ui
-            .session
-            .exec_grants(agent.id)
-            .unwrap()
-            .is_empty()
-    );
-    app.confirm_owner_now(OwnerCheck::passphrase(super::owner_tests::PASS))
-        .expect("owner grants access");
-    window.idle(&mut app);
-    assert!(app.ui.sheet.is_none());
-    let granted: std::collections::BTreeSet<_> = app
-        .owner_ui
-        .session
-        .exec_grants(agent.id)
-        .unwrap()
-        .into_iter()
-        .map(|grant| grant.item_id)
-        .collect();
-    assert_eq!(granted, selection);
-    assert!(app.owner_ui.session.env_binding(first).unwrap().is_none());
 }
