@@ -25,7 +25,6 @@ One version, 0.5.0, for the Mac app, the iPhone app, and the browser extension. 
 - Shared vaults ([ADR 0026](docs/adr/0026-simple-app.md) §6) are not built. You cannot share a vault yet.
 - The Mac does not send its agents, agent use, rules, requests, and suggestions to the iPhone yet. The Agents tab, "Agent use" and "Rules from your answers" of a credential, and Requests and Suggestions in Decisions on the iPhone show "Available when the Mac is connected".
 - Push notifications on the iPhone are in TestFlight without Time Sensitive delivery.
-- The "Get started" list of a new vault still shows the steps of the old model.
 - Acceptance on physical Macs and iPhones is open.
 
 ### Added
@@ -53,6 +52,7 @@ One version, 0.5.0, for the Mac app, the iPhone app, and the browser extension. 
 ### Changed
 
 - The Mac disk image has the version in its name (`Apassy-0.5.0.dmg`), and <https://apassy.wyderka.cc/download> redirects to it. `latest.json` and `/download/Apassy.dmg` stay as before, so apps from 0.3.0 still update. From 0.5.0, the app also accepts the versioned name in `latest.json`.
+- A new vault shows two steps instead of the "Get started" list: paste your first credential, and connect an agent. A step shows done when it is; the list goes away when both are done.
 - An agent needs no grant. Connecting it is the only setup. Every agent gets the catalog of credential names without values, with folder paths, less the credentials that its exceptions hide. This replaces "a first use always waits for the owner" of [ADR 0024](docs/adr/0024-access-at-first-use.md).
 - Without a running bouncer, each run and each connector use waits for you. An agent still has at most one waiting question.
 - New credentials of AWS, Google Cloud, GitHub, Stripe, Supabase, and PlanetScale get the real value, because the command-line tools of these providers do not accept a placeholder. Apassy keeps their hosts for the bouncer. Cloudflare keeps the placeholder.

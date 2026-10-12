@@ -341,7 +341,7 @@ fn run_host(cli: &Cli, mut args: Args) -> Outcome {
         "The Apassy sandbox replaces the host's inner sandbox. Host approval prompts stay active."
     );
     println!(
-        "Use a test credential for the first request. Check its result and its entry in Activity."
+        "Use a test credential for the first request. Check its result and its entry in Decisions."
     );
     Ok(())
 }
