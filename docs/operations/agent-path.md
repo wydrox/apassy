@@ -187,9 +187,8 @@ A credential that the paste detection or an agent tool adds (ADR 0025 §4, §6) 
 | Stripe | The Stripe CLI (`stripe`) is a Go program. |
 | Supabase | The Supabase CLI (`supabase`, a Go program) uses the access token (`sbp_`). `supabase secrets set` copies keys to another service. |
 | PlanetScale | `pscale` is a Go program, and a database password (`pscale_pw_`) goes over the MySQL protocol, not HTTPS. |
-| Cloudflare | `terraform`, `cloudflared`, and `flarectl` are Go programs. Wrangler (Node.js) works with either delivery. |
 
-The other providers (Anthropic, OpenAI, Resend, SendGrid, Slack, Twilio, Sentry, Datadog, Netlify, Vercel, Neon) are mostly used with HTTP clients and Node.js or Python tools that read `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, or `REQUESTS_CA_BUNDLE`, so they keep the placeholder.
+The other providers (Anthropic, OpenAI, Resend, SendGrid, Slack, Twilio, Sentry, Datadog, Netlify, Vercel, Neon) are mostly used with HTTP clients and Node.js or Python tools that read `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, or `REQUESTS_CA_BUNDLE`, so they keep the placeholder. Cloudflare keeps it too: Wrangler (Node.js) works with it. For `terraform`, `cloudflared`, or `flarectl` (Go programs), choose "Real value" on the credential.
 
 ## 8c. What an agent sees, any folder, and access requests (ADR 0012)
 

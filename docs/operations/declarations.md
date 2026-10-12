@@ -57,7 +57,7 @@ A file is one JSON object. The loader rejects unknown fields at every level, and
 | `known_hosts` | Provider API hosts in lowercase. A provider needs one or more, unless it is generic. A general file has none. |
 | `variable` | The default environment variable of a detected credential, such as `STRIPE_SECRET_KEY`. A provider needs one. The loader refuses a reserved name (`PATH`, `APASSY_*`, ...). A general file has none. |
 | `title` | Optional. The title of a detected credential, such as `GitHub token`. The default is the label and "API key". |
-| `real_value` | Optional, default `false`. `true` for a provider that signs requests with the secret (AWS, Google Cloud), or whose main command-line tools do not work with a placeholder (GitHub, Stripe, Supabase, PlanetScale, Cloudflare; see the table below): a detected credential then gets the real value, never a placeholder, and the known hosts stay recorded for the bouncer. A general file has none. |
+| `real_value` | Optional, default `false`. `true` for a provider that signs requests with the secret (AWS, Google Cloud), or whose main command-line tools do not work with a placeholder (GitHub, Stripe, Supabase, PlanetScale; see the table below): a detected credential then gets the real value, never a placeholder, and the known hosts stay recorded for the bouncer. A general file has none. |
 | `prefixes` | Optional. Value prefixes of the keys of the provider, such as `sk_live_`. Case matters. Two or more characters, no space, and one provider for each prefix. The paste detection (section 3a) names the provider of a value by the longest prefix. |
 | `signals` | A list of signals: `id`, `when`, `suggest`, `reason`. |
 
@@ -72,7 +72,6 @@ Providers with `"real_value": true` (Gate 2, 2026-10-12; [agent-path.md §8b](ag
 | `stripe` | 3 | The Stripe CLI is a Go program. |
 | `supabase` | 3 | The Supabase CLI (Go) uses the `sbp_` access token; `supabase secrets set` copies keys to another service. |
 | `planetscale` | 3 | `pscale` is a Go program; a `pscale_pw_` password goes over the MySQL protocol, not HTTPS. |
-| `cloudflare` | 3 | `terraform`, `cloudflared`, and `flarectl` are Go programs. |
 
 The cost: such a credential reaches the process as it is, so a command can send it to any host. The `foreign_host` flag (section 6) and the bouncer still see the provider hosts, and the owner can choose "Placeholder" for one credential. `tests/add_detected.rs` (`providers_of_cli_tools_get_the_real_value`) checks the delivery.
 

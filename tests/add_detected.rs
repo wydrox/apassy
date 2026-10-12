@@ -468,8 +468,8 @@ fn signing_providers_get_the_real_value_and_keep_their_hosts() {
 
 /// Providers whose main command-line tools do not trust the certificate of the run or
 /// do not speak HTTPS with the secret (`gh`, `git`, the Stripe CLI, the Supabase CLI,
-/// `pscale`, `terraform`, `cloudflared`) get the real value (docs/operations/agent-path.md
-/// §8b). The known hosts stay recorded for the bouncer.
+/// `pscale`) get the real value (docs/operations/agent-path.md §8b). The known hosts stay
+/// recorded for the bouncer. Cloudflare keeps the placeholder: Wrangler works with it.
 #[test]
 fn providers_of_cli_tools_get_the_real_value() {
     let dir = TempDir::new().unwrap();
@@ -481,10 +481,6 @@ fn providers_of_cli_tools_get_the_real_value() {
         (fake("sk_test_", 24), "stripe"),
         (fake("sbp_", 40), "supabase"),
         (fake("pscale_tkn_", 32), "planetscale"),
-        (
-            format!("CLOUDFLARE_API_TOKEN={}", fake("", 40)),
-            "cloudflare",
-        ),
     ];
     for (text, provider) in cases {
         let detected = one(&text);
@@ -504,8 +500,13 @@ fn providers_of_cli_tools_get_the_real_value() {
             "{provider}"
         );
     }
-    // An HTTP API provider without such a CLI keeps the placeholder.
-    for text in [fake("sk-ant-api03-", 40), fake("re_", 24)] {
+    // An HTTP API provider without such a CLI keeps the placeholder, and so does
+    // Cloudflare, whose main CLI (Wrangler, Node.js) works with it.
+    for text in [
+        fake("sk-ant-api03-", 40),
+        fake("re_", 24),
+        format!("CLOUDFLARE_API_TOKEN={}", fake("", 40)),
+    ] {
         let summary = vault.add_detected(&one(&text), None, None).expect("add");
         let binding = vault.env_binding(summary.id).unwrap().expect("a variable");
         assert!(
