@@ -2,18 +2,16 @@ import ApassyVaultKit
 import SwiftUI
 
 /// Weak, reused, and old passwords, and conflict copies. The core checks the passwords in memory
-/// and answers item IDs only.
+/// and answers item IDs only. The Vault tab pushes it; its items open through the destinations of
+/// that stack.
 struct WatchtowerView: View {
     @Environment(VaultModel.self) private var vault
 
     var body: some View {
-        NavigationStack {
-            content
-                .navigationTitle("Watchtower")
-                .vaultDestinations()
-                .refreshable { await vault.refreshWatchtower() }
-                .task { await vault.refreshWatchtower() }
-        }
+        content
+            .navigationTitle("Watchtower")
+            .refreshable { await vault.refreshWatchtower() }
+            .task { await vault.refreshWatchtower() }
     }
 
     @ViewBuilder

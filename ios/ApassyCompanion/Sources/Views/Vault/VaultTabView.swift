@@ -1,8 +1,8 @@
 import ApassyVaultKit
 import SwiftUI
 
-/// The unlocked vault: Home, Items, Watchtower, Approvals (the questions through the relay and the
-/// companion), and Search.
+/// The unlocked vault: Vault, Decisions (the questions through the relay and the companion),
+/// Agents, and Search (ADR 0026 §8). Watchtower and all items open from the Vault tab.
 struct VaultTabView: View {
     @Environment(VaultModel.self) private var vault
     @Environment(RootModel.self) private var root
@@ -11,22 +11,18 @@ struct VaultTabView: View {
     var body: some View {
         @Bindable var ui = ui
         TabView(selection: $ui.tab) {
-            Tab("Home", systemImage: "house", value: VaultTab.home) {
+            Tab("Vault", systemImage: "key.horizontal", value: VaultTab.vault) {
                 HomeView()
             }
-            Tab("Items", systemImage: "list.bullet", value: VaultTab.items) {
-                ItemsView()
-            }
-            Tab("Watchtower", systemImage: "checkmark.shield", value: VaultTab.watchtower) {
-                WatchtowerView()
-            }
-            .badge(vault.watchtower?.issueCount ?? 0)
-            Tab("Approvals", systemImage: "checkmark.seal", value: VaultTab.approvals) {
+            Tab("Decisions", systemImage: "checkmark.circle", value: VaultTab.decisions) {
                 ApprovalsHub(
                     questions: root.questions, companion: root.companion, onSettings: { ui.sheet = .settings },
                     source: $ui.approvals)
             }
             .badge(waitingCount)
+            Tab("Agents", systemImage: "cpu", value: VaultTab.agents) {
+                AgentsView()
+            }
             Tab(value: VaultTab.search, role: .search) {
                 SearchView()
             }
@@ -69,7 +65,7 @@ struct VaultTabView: View {
         // The owner opened the notification of a question.
         .onChange(of: root.questionsRequested, initial: true) { _, requested in
             guard requested else { return }
-            ui.tab = .approvals
+            ui.tab = .decisions
             ui.approvals = .questions
             root.questionsRequested = false
         }
@@ -90,17 +86,21 @@ struct VaultTabView: View {
 
     #if targetEnvironment(simulator)
         /// A development aid of the Simulator, to reach a screen without taps:
-        /// `-ApassyOpen items|watchtower|approvals|questions|settings|generator|search:<text>|new:<kind>|edit:<id>|item:<id>[:reveal|:large]`.
+        /// `-ApassyOpen vault|items|watchtower|decisions|approvals|questions|agents|settings[:<group>]|generator|search:<text>|new:<kind>|edit:<id>|item:<id>[:reveal|:large]`.
+        /// `items` and `watchtower` open on the Vault tab, where they are now; `approvals` is the
+        /// old name of `decisions`.
         private func openFromLaunchArgument() {
             guard let route = UserDefaults.standard.string(forKey: "ApassyOpen") else { return }
             let parts = route.split(separator: ":").map(String.init)
             switch parts.first {
-            case "items": ui.tab = .items
-            case "watchtower": ui.tab = .watchtower
-            case "approvals": ui.tab = .approvals
+            case "vault": ui.tab = .vault
+            // Home pushes the screen itself (`HomeView.openFromLaunchArgument`).
+            case "items", "watchtower": ui.tab = .vault
+            case "decisions", "approvals": ui.tab = .decisions
             case "questions":
-                ui.tab = .approvals
+                ui.tab = .decisions
                 ui.approvals = .questions
+            case "agents": ui.tab = .agents
             case "settings": ui.sheet = .settings
             case "generator": ui.sheet = .generator
             case "search":
@@ -126,24 +126,39 @@ struct VaultTabView: View {
 
 // MARK: - Home
 
-/// Favorites, the recently changed items, the categories, Watchtower, and the sync state.
+/// A screen that Home pushes besides an item or a category.
+private enum HomeScreen: Hashable {
+    case items
+    case watchtower
+}
+
+/// Watchtower, all items, favorites, the recently changed items, the categories, and the sync state.
 struct HomeView: View {
     @Environment(VaultModel.self) private var vault
     @Environment(VaultUI.self) private var ui
+    @State private var screen: HomeScreen?
 
     var body: some View {
         @Bindable var ui = ui
         NavigationStack(path: $ui.homePath) {
             List {
-                if let report = vault.watchtower, report.issueCount > 0 {
-                    Section {
-                        Button {
-                            ui.tab = .watchtower
-                        } label: {
+                Section {
+                    Button {
+                        screen = .watchtower
+                    } label: {
+                        if let report = vault.watchtower, report.issueCount > 0 {
                             WatchtowerCard(report: report)
+                        } else {
+                            WatchtowerClearRow(checked: vault.watchtower != nil)
                         }
-                        .buttonStyle(.plain)
                     }
+                    .buttonStyle(.plain)
+                    Button {
+                        screen = .items
+                    } label: {
+                        AllItemsRow(count: vault.activeItems.count)
+                    }
+                    .buttonStyle(.plain)
                 }
                 favorites
                 recent
@@ -164,6 +179,12 @@ struct HomeView: View {
             .navigationTitle(vault.vault?.name ?? "Apassy")
             .toolbar { VaultToolbar(ui: ui, showsLock: true, vault: vault) }
             .vaultDestinations()
+            .navigationDestination(item: $screen) { screen in
+                switch screen {
+                case .items: ItemsView()
+                case .watchtower: WatchtowerView()
+                }
+            }
             .refreshable { await vault.syncNow() }
             .safeAreaInset(edge: .top, spacing: 0) {
                 if vault.vault?.syncs == true {
@@ -173,7 +194,21 @@ struct HomeView: View {
                 }
             }
         }
+        #if targetEnvironment(simulator)
+            .task { openFromLaunchArgument() }
+        #endif
     }
+
+    #if targetEnvironment(simulator)
+        /// `-ApassyOpen items|watchtower`: the screens that were tabs before.
+        private func openFromLaunchArgument() {
+            switch UserDefaults.standard.string(forKey: "ApassyOpen") {
+            case "items": screen = .items
+            case "watchtower": screen = .watchtower
+            default: break
+            }
+        }
+    #endif
 
     @ViewBuilder
     private var favorites: some View {
@@ -203,6 +238,57 @@ struct HomeView: View {
                 }
             }
         }
+    }
+}
+
+/// Watchtower on Home when nothing needs a look (or the check has not finished yet).
+private struct WatchtowerClearRow: View {
+    let checked: Bool
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "checkmark.shield.fill")
+                .font(.title)
+                .foregroundStyle(.green)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Watchtower")
+                    .font(.headline)
+                Text(checked ? "Nothing needs a look" : "Checking")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+            Image(systemName: "chevron.forward")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+        }
+        .contentShape(.rect)
+        .accessibilityElement(children: .combine)
+        .accessibilityHint("Opens Watchtower")
+    }
+}
+
+/// "All items" on Home, with the count of the items that are not archived.
+private struct AllItemsRow: View {
+    let count: Int
+
+    var body: some View {
+        HStack {
+            Label("All items", systemImage: "list.bullet")
+            Spacer()
+            Text(count, format: .number)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            Image(systemName: "chevron.forward")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+        }
+        .contentShape(.rect)
+        .accessibilityElement(children: .combine)
+        .accessibilityHint("Opens all items")
     }
 }
 
@@ -249,10 +335,9 @@ struct WatchtowerCard: View {
 
 // MARK: - Items
 
-/// Every item that is not archived, A–Z with an index, with filters and a sort.
+/// Every item that is not archived, A–Z with an index, with filters and a sort. Home pushes it.
 struct ItemsView: View {
     @Environment(VaultModel.self) private var vault
-    @Environment(VaultUI.self) private var ui
     @State private var kind: ItemKind?
     @State private var tag: String?
     @State private var sort = ItemSort.title
@@ -262,16 +347,12 @@ struct ItemsView: View {
     }
 
     var body: some View {
-        @Bindable var ui = ui
-        NavigationStack(path: $ui.itemsPath) {
-            content
-                .navigationTitle(kind?.pluralLabel ?? "Items")
-                .toolbar {
-                    VaultToolbar(ui: ui, vault: vault)
-                    ToolbarItem(placement: .topBarTrailing) { filterMenu }
-                }
-                .vaultDestinations()
-        }
+        content
+            .navigationTitle(kind?.pluralLabel ?? "All items")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) { filterMenu }
+                ToolbarItem(placement: .topBarTrailing) { NewItemMenu() }
+            }
     }
 
     @ViewBuilder
