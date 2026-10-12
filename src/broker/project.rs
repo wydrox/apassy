@@ -5,9 +5,16 @@
 //! home folder, its parents, and the filesystem aliases of them are never a project
 //! (ADR 0024). The code reads only `.git` entries, with no `git` binary and no
 //! library, so the answer is the same on every machine and in tests.
+//!
+//! The agent can write files in its working directory, so a `.git` entry is not
+//! trusted: only a directory or a regular file counts (never a FIFO or a device), a
+//! file is read up to 4096 bytes, and a common directory that is the root, the home
+//! folder, or one of their parents makes the entry broken, never a project key.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::fs::{self, OpenOptions};
+use std::io::{ErrorKind, Read};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Component, Path, PathBuf};
 
 use super::approvals::folder_is_broad_with;
 
@@ -17,8 +24,9 @@ pub struct Project {
     /// The canonical path of the git common directory. All worktrees of one
     /// repository share it. For a folder without git, it is the canonical folder.
     pub key: String,
-    /// A name for a card: the name of the folder that contains the common directory
-    /// (the repository folder for a normal repository), or the folder name.
+    /// A name for a card: the repository folder for a normal repository, the folder of
+    /// a bare repository without `.git` (`repo.git` is `repo`), the name of a submodule
+    /// (`.git/modules/NAME`), or the folder name.
     pub label: String,
     /// The folder where the search ended: the worktree that holds `.git`, or the
     /// working directory itself when there is no `.git`.
@@ -27,13 +35,17 @@ pub struct Project {
 
 /// The project of `cwd`, or `None` when the folder is too wide to be one.
 ///
-/// The search walks up from `cwd` to the nearest folder with `.git` and never goes
-/// to `home` or above. `.git` is either the common directory itself, or a file
-/// `gitdir: PATH` of a linked worktree (the path may be relative to the folder). The
-/// gitdir of a linked worktree has a `commondir` file (relative to the gitdir) that
-/// names the common directory. Without `.git`, the project is `cwd` itself. The
-/// root, `home`, its parents, and aliases of them give `None`, by
-/// [`folder_is_broad_with`]. Without `home`, only the root is known to be broad.
+/// The search walks up from `cwd` to the nearest folder with a usable `.git` and never
+/// goes to `home` or above. `.git` is either the common directory itself (also as a
+/// symlink to a directory), or a regular file `gitdir: PATH` of a linked worktree or a
+/// submodule (the path may be relative to the folder). The gitdir of a linked worktree
+/// has a regular file `commondir` (relative to the gitdir) that names the common
+/// directory. The resolution reads at most these two files, so it has no loop. A
+/// `.git` entry of another type, an unreadable or missing target, or a common
+/// directory that is broad is skipped, and the search goes on to the parent. Without
+/// `.git`, the project is `cwd` itself. The root, `home`, its parents, and aliases of
+/// them give `None`, by [`folder_is_broad_with`]. Without `home`, only the root is
+/// known to be broad.
 pub fn project_of(cwd: &Path, home: Option<&Path>) -> Option<Project> {
     let cwd = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     if folder_is_broad_with(&cwd, home) {
@@ -43,7 +55,7 @@ pub fn project_of(cwd: &Path, home: Option<&Path>) -> Option<Project> {
         if folder_is_broad_with(folder, home) {
             break;
         }
-        if let Some(common) = git_common_dir(folder) {
+        if let Some(common) = git_common_dir(folder, home) {
             return Some(Project {
                 key: common.to_string_lossy().into_owned(),
                 label: label_of(&common),
@@ -58,46 +70,122 @@ pub fn project_of(cwd: &Path, home: Option<&Path>) -> Option<Project> {
     })
 }
 
+/// The most that is read of a `.git` file or a `commondir` file.
+const MAX_GIT_FILE: u64 = 4096;
+
+/// Open a file without a wait on a FIFO that replaced it after the type check.
+#[cfg(target_os = "macos")]
+const O_NONBLOCK: i32 = 0x0004;
+#[cfg(not(target_os = "macos"))]
+const O_NONBLOCK: i32 = 0o4000;
+
 /// The canonical git common directory for the `.git` entry of `folder`. `None`
 /// when there is no usable `.git`: the search then goes on to the parent.
-fn git_common_dir(folder: &Path) -> Option<PathBuf> {
+fn git_common_dir(folder: &Path, home: Option<&Path>) -> Option<PathBuf> {
     let dot_git = folder.join(".git");
-    let metadata = fs::symlink_metadata(&dot_git).ok()?;
+    // `metadata` follows a symlink: its target must be a directory or a regular file.
+    let metadata = fs::metadata(&dot_git).ok()?;
     let common = if metadata.is_dir() {
         dot_git
-    } else if metadata.is_file() || metadata.file_type().is_symlink() {
-        let gitdir = resolve(folder, &gitdir_line(&dot_git)?);
-        match fs::read_to_string(gitdir.join("commondir")) {
-            Ok(text) => resolve(&gitdir, text.lines().next()?.trim()),
-            Err(_) => gitdir,
+    } else if metadata.is_file() {
+        let gitdir = canonical_dir(&folder.join(gitdir_line(&dot_git)?))?;
+        let commondir = gitdir.join("commondir");
+        match fs::symlink_metadata(&commondir) {
+            Err(error) if error.kind() == ErrorKind::NotFound => gitdir,
+            Err(_) => return None,
+            Ok(_) => {
+                let text = read_small(&commondir)?;
+                let line = text.lines().next()?.trim();
+                if line.is_empty() {
+                    return None;
+                }
+                gitdir.join(line)
+            }
         }
     } else {
         return None;
     };
-    fs::canonicalize(common)
-        .ok()
-        .filter(|common| common.is_dir())
+    let common = canonical_dir(&common)?;
+    let broad = folder_is_broad_with(&common, home)
+        || folder_is_broad_with(&repository_folder(&common), home);
+    (!broad).then_some(common)
+}
+
+/// The canonical form of `path` when it is a directory.
+fn canonical_dir(path: &Path) -> Option<PathBuf> {
+    fs::canonicalize(path).ok().filter(|path| path.is_dir())
 }
 
 /// The path after `gitdir:` in a `.git` file.
 fn gitdir_line(dot_git: &Path) -> Option<String> {
-    let text = fs::read_to_string(dot_git).ok()?;
+    let text = read_small(dot_git)?;
     let path = text.lines().find_map(|line| line.strip_prefix("gitdir:"))?;
     let path = path.trim();
     (!path.is_empty()).then(|| path.to_owned())
 }
 
-/// `path` as an absolute path: a relative one starts at `base`.
-fn resolve(base: &Path, path: &str) -> PathBuf {
-    base.join(path)
+/// The first [`MAX_GIT_FILE`] bytes of a regular file, as text. `None` for a FIFO, a
+/// device, a folder, or a file that cannot be read.
+fn read_small(path: &Path) -> Option<String> {
+    if !fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    // The type again on the open file: the path may have changed after the check.
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_GIT_FILE).read_to_end(&mut bytes).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// The name of the folder that contains the common directory.
+/// The folder that the repository is named after: the folder that holds `.git`, or
+/// the common directory of a bare repository or a submodule.
+fn repository_folder(common: &Path) -> PathBuf {
+    match (common.file_name(), common.parent()) {
+        (Some(name), Some(parent)) if name == ".git" => parent.to_path_buf(),
+        _ => common.to_path_buf(),
+    }
+}
+
+/// The name for the card of a common directory: the submodule name for
+/// `.git/modules/NAME` (the innermost one of nested submodules), else the name of
+/// [`repository_folder`] without a `.git` suffix.
 fn label_of(common: &Path) -> String {
-    common
-        .parent()
-        .map(label_of_folder)
-        .unwrap_or_else(|| common.to_string_lossy().into_owned())
+    if let Some(name) = submodule_name(common) {
+        return name;
+    }
+    let name = label_of_folder(&repository_folder(common));
+    match name.strip_suffix(".git") {
+        Some(stem) if !stem.is_empty() => stem.to_owned(),
+        _ => name,
+    }
+}
+
+/// `NAME` of `.../.git/modules/NAME`, and of `.../.git/modules/A/modules/NAME` for a
+/// nested submodule. A name may have several parts (`libs/foo`).
+fn submodule_name(common: &Path) -> Option<String> {
+    let parts: Vec<String> = common
+        .components()
+        .filter_map(|part| match part {
+            Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    let git = parts.iter().rposition(|part| part == ".git")?;
+    if parts.get(git + 1).map(String::as_str) != Some("modules") {
+        return None;
+    }
+    let rest = &parts[git + 2..];
+    rest.split(|part| part == "modules")
+        .rfind(|group| !group.is_empty())
+        .map(|group| group.join("/"))
+        .or_else(|| rest.last().cloned())
 }
 
 fn label_of_folder(folder: &Path) -> String {
