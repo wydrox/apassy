@@ -17,10 +17,13 @@ const MAX_FILE_BYTES: u64 = 64 * 1024;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct UiPrefs {
-    /// The owner hid the sidebar.
+    /// The owner collapsed the sidebar to its icons.
     pub(crate) sidebar_hidden: bool,
     /// The list IDs of the vaults where the owner hid the "Get started" list.
     pub(crate) get_started_hidden: BTreeSet<String>,
+    /// The folders whose subfolders the sidebar shows, by UUID. A folder UUID is
+    /// random and the same on each Mac that syncs the vault.
+    pub(crate) open_folders: BTreeSet<String>,
 }
 
 impl UiPrefs {
@@ -99,6 +102,7 @@ mod tests {
         let prefs = UiPrefs {
             sidebar_hidden: true,
             get_started_hidden: ["vault-a".to_owned(), "vault-b".to_owned()].into(),
+            open_folders: ["folder-1".to_owned()].into(),
         };
         prefs.save(&path).expect("save");
         assert_eq!(UiPrefs::load(&path), prefs);
@@ -138,6 +142,19 @@ mod tests {
 
         next.ui.toggle_sidebar();
         assert!(!UiPrefs::load(&path).sidebar_hidden);
+
+        // An open folder stays open after a restart; the narrow-window float does not
+        // touch the file.
+        next.ui.toggle_folder("folder-a");
+        assert!(UiPrefs::load(&path).open_folders.contains("folder-a"));
+        next.ui.toggle_sidebar_in(true);
+        assert!(next.ui.sidebar_float);
+        assert!(!UiPrefs::load(&path).sidebar_hidden);
+        let mut third = crate::desktop::DesktopApp::new();
+        third.ui.load_prefs(dir.path().to_path_buf());
+        assert!(third.ui.open_folders.contains("folder-a"));
+        third.ui.toggle_folder("folder-a");
+        assert!(UiPrefs::load(&path).open_folders.is_empty());
     }
 
     #[test]

@@ -781,7 +781,7 @@ fn settings_show_the_browser_extension_and_the_last_request() {
     let dir = TempDir::new().unwrap();
     let (mut app, _) = unlocked_app_with_item(&dir);
     let ctx = egui::Context::default();
-    app.view = crate::desktop::OwnerView::Settings;
+    app.settings_open = true;
     let text = app_frame(&ctx, &mut app);
     assert!(text.contains("Browser extension"), "{text}");
     // A test program is not in an app bundle, so it connects no browser.

@@ -7,7 +7,7 @@ use eframe::egui;
 
 use super::Sheet;
 use super::kit::{self, Font, Icon, Style, Tone};
-use crate::desktop::{DesktopApp, OwnerView};
+use crate::desktop::{DesktopApp, Place};
 
 /// The key of "Hide" for a vault that has no list ID. This lasts for the session only.
 const HIDDEN: &str = "get-started-hidden";
@@ -256,11 +256,11 @@ fn act(app: &mut DesktopApp, go: Go) {
                 });
             if let Some((id, _)) = first {
                 app.select_item(id.to_string());
-                app.view = OwnerView::Item;
+                app.show_credentials();
             }
         }
         Go::RegisterAgent => {
-            app.view = OwnerView::Agents;
+            app.place = Place::Agents;
             app.owner_ui.selected_agent = None;
             app.ui.sheet = Some(Sheet::RegisterAgent);
         }
@@ -271,7 +271,7 @@ fn act(app: &mut DesktopApp, go: Go) {
                 .into_iter()
                 .find(|agent| !agent.revoked);
             if let Some(agent) = agent {
-                app.view = OwnerView::Agents;
+                app.place = Place::Agents;
                 app.owner_ui.selected_agent = Some(agent.id);
                 if matches!(go, Go::ShowConnect) {
                     app.ui.set_expanded("agent-setup", true);
@@ -289,13 +289,13 @@ mod tests {
 
     use super::super::owner_tests::{PASS, app_frame, locked_app, unlocked_app_with_item};
     use super::Progress;
-    use crate::desktop::OwnerView;
+    use crate::desktop::Place;
 
     #[test]
     fn the_steps_follow_the_vault_and_offer_one_next_action() {
         let dir = TempDir::new().expect("temp dir");
         let (mut app, _) = unlocked_app_with_item(&dir);
-        app.view = OwnerView::Vault;
+        app.place = Place::CREDENTIALS;
         let ctx = egui::Context::default();
         let text = app_frame(&ctx, &mut app);
         assert!(text.contains("Get started · 2 of 5"), "{text}");
@@ -330,7 +330,7 @@ mod tests {
         let dir = TempDir::new().expect("temp dir");
         let mut app = locked_app(&dir, "empty.db");
         app.owner_ui.session.unlock(PASS).expect("unlock");
-        app.view = OwnerView::Vault;
+        app.place = Place::CREDENTIALS;
         let ctx = egui::Context::default();
         let text = app_frame(&ctx, &mut app);
         assert!(text.contains("Get started · 0 of 5"), "{text}");
@@ -343,7 +343,7 @@ mod tests {
         let dir = TempDir::new().expect("temp dir");
         let data = TempDir::new().expect("temp dir");
         let (mut app, _) = unlocked_app_with_item(&dir);
-        app.view = OwnerView::Vault;
+        app.place = Place::CREDENTIALS;
         app.ui.load_prefs(data.path().to_path_buf());
         app.vault_list.current = Some("vault-a".to_owned());
         let ctx = egui::Context::default();
@@ -361,7 +361,7 @@ mod tests {
 
         // A new app reads the file: vault-a stays hidden, vault-b does not.
         let (mut again, _) = unlocked_app_with_item(&TempDir::new().expect("temp dir"));
-        again.view = OwnerView::Vault;
+        again.place = Place::CREDENTIALS;
         again.ui.load_prefs(data.path().to_path_buf());
         let ctx = egui::Context::default();
         again.vault_list.current = Some("vault-a".to_owned());

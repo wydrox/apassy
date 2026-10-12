@@ -54,7 +54,7 @@ use crate::broker::approvals::{OwnerAction, OwnerProof};
 use crate::desktop::companion::QrModules;
 use crate::desktop::owner_check::{OwnerRequest, Task, TaskPoll};
 use crate::desktop::owner_store::Ephemeral;
-use crate::desktop::{DesktopApp, OwnerView};
+use crate::desktop::{DesktopApp, Place};
 use crate::sync::{
     DEFAULT_RELAY_URL, DeviceKey, DeviceView, JoinedDevice, KeySource, LinkCode, PendingJoin,
     PendingLink, Receipt, RelayAdoptReport, RelayConfig, RelayDownload, RelayEnableReport,
@@ -2523,7 +2523,7 @@ impl DesktopApp {
         let unlocked = self.owner_ui.session.unlock(&passphrase);
         drop(passphrase);
         self.ui.start = super::Step::Home;
-        self.view = OwnerView::Vault;
+        self.place = Place::CREDENTIALS;
         if unlocked.is_ok() {
             let _ = self.sync_after_unlock();
             self.sync.adopted_vault = Some(id);

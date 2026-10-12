@@ -1603,7 +1603,7 @@ impl DesktopApp {
         if delete_login {
             if selected {
                 self.selected_item_id = None;
-                self.view = super::OwnerView::Vault;
+                self.show_credentials();
             }
             self.pending_delete = false;
             self.set_ok(format!("The login \"{name}\" is deleted with its passkey."));

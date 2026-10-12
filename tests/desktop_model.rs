@@ -8,7 +8,7 @@ use apassy::desktop::model::{
     SAMPLE_EXPIRY_ISO, SAMPLE_OPERATION, SAMPLE_RULE_TEXT, SAMPLE_USAGE_LIMIT,
     UNSUPPORTED_SAMPLE_TEXT,
 };
-use apassy::desktop::{DesktopApp, OwnerView, native_options, smoke_test};
+use apassy::desktop::{DesktopApp, Place, native_options, smoke_test};
 
 fn ready_model() -> DesktopModel {
     let mut model = DesktopModel::new();
@@ -501,7 +501,7 @@ fn reset_reloads_fixtures_locked() {
 #[test]
 fn ui_tests_instantiate_model_only() {
     let app = DesktopApp::new();
-    assert_eq!(app.view(), OwnerView::Vault);
+    assert_eq!(app.place(), &Place::CREDENTIALS);
     assert!(app.model().is_locked());
     assert_eq!(app.model().foundation_status().banner, DEMO_BANNER);
 }

@@ -9,7 +9,7 @@ use tempfile::TempDir;
 
 use super::owner_tests::unlocked_app_with_item;
 use super::{Sheet, draw, kit};
-use crate::desktop::{DesktopApp, OwnerView};
+use crate::desktop::{DesktopApp, Place};
 
 const SIZE: Vec2 = Vec2::new(1180.0, 760.0);
 
@@ -248,7 +248,7 @@ fn count_focus_strokes(shape: &egui::Shape, count: &mut usize) {
 fn open_item(dir: &TempDir) -> (DesktopApp, u64) {
     let (mut app, id) = unlocked_app_with_item(dir);
     app.select_item(id.to_string());
-    app.view = OwnerView::Item;
+    app.show_credentials();
     (app, id)
 }
 
@@ -282,7 +282,7 @@ fn add_long_credential(app: &mut DesktopApp, name: &str) -> u64 {
 }
 
 #[test]
-fn credential_header_stays_visible_after_body_scroll_and_back_returns_to_list() {
+fn credential_header_stays_visible_after_body_scroll_and_the_list_stays_beside_it() {
     for size in [SIZE, Vec2::new(900.0, 600.0)] {
         let dir = TempDir::new().expect("temp dir");
         let (mut app, _) = unlocked_app_with_item(&dir);
@@ -292,9 +292,18 @@ fn credential_header_stays_visible_after_body_scroll_and_back_returns_to_list() 
         let mut window = Window::new();
         window.size = size;
         window.idle(&mut app);
-        let header = ["Credentials", name, "Edit"].map(|label| window.visible_text_rect(label));
-        assert!(header[0].left() > 216.0, "Credentials is the Back control");
-        assert!(header.iter().all(|rect| rect.top() >= kit::TITLE_BAR));
+        // The rightmost match: the header of the detail, right of the list row.
+        let header = [name, "Edit"].map(|label| window.visible_text_rect(label));
+        let list_edge = kit::RAIL_WIDTH + kit::LIST_WIDTH_NARROW;
+        assert!(
+            header[0].left() > list_edge,
+            "the name is in the detail column"
+        );
+        assert!(
+            header[0].top() >= kit::TOOLBAR,
+            "the name is under the toolbar"
+        );
+        assert!(header[1].bottom() <= kit::TOOLBAR, "Edit is in the toolbar");
         let secret_top = text_top(&window, "Secret").expect("the body starts at Secret");
         assert!(text_top(&window, "More actions").is_none());
 
@@ -304,19 +313,26 @@ fn credential_header_stays_visible_after_body_scroll_and_back_returns_to_list() 
             "the wheel must move the body at {size:?}"
         );
         window.visible_text_rect("More actions");
-        for (label, before) in ["Credentials", name, "Edit"].into_iter().zip(header) {
+        for (label, before) in [name, "Edit"].into_iter().zip(header) {
             let after = window.visible_text_rect(label);
             assert_eq!(
                 before, after,
                 "{label} moved after the body scrolled at {size:?}"
             );
         }
-        let back = window.visible_text_rect("Credentials");
-        window.click_at(&mut app, back.center());
-        assert_eq!(
-            app.view,
-            OwnerView::Vault,
-            "Back returns to the credential list"
+        // ⌘[ leaves the credential: nothing is selected, the list stays.
+        window.press(&mut app, Key::OpenBracket, Modifiers::COMMAND);
+        assert_eq!(app.selected_item_id, None);
+        assert!(app.place.is_credentials());
+        assert!(
+            window.text.contains("No credential selected"),
+            "{}",
+            window.text
+        );
+        assert!(
+            window.text.contains(name),
+            "the list row stays: {}",
+            window.text
         );
     }
 }
@@ -495,6 +511,9 @@ fn a_new_credential_secret_requires_discard_confirmation() {
     let mut window = Window::new();
     window.idle(&mut app);
     window.press(&mut app, Key::N, Modifiers::COMMAND);
+    assert_eq!(app.ui.sheet, Some(Sheet::NewCredential));
+    // "Choose Kind…" has the focus: Return opens the kind picker.
+    window.press(&mut app, Key::Enter, Modifiers::NONE);
     assert_eq!(app.ui.sheet, Some(Sheet::AddItem { kind_chosen: false }));
     window.press(&mut app, Key::Enter, Modifiers::NONE);
     assert_eq!(app.ui.sheet, Some(Sheet::AddItem { kind_chosen: true }));
@@ -519,6 +538,7 @@ fn change_kind_keeps_typed_data_until_the_owner_confirms_discard() {
     let mut window = Window::new();
     window.idle(&mut app);
     window.press(&mut app, Key::N, Modifiers::COMMAND);
+    window.press(&mut app, Key::Enter, Modifiers::NONE);
     window.press(&mut app, Key::Enter, Modifiers::NONE);
     window.frame(&mut app, vec![Event::Text("Unsaved credential".to_owned())]);
     window
@@ -631,7 +651,7 @@ fn a_sheet_takes_the_focus_and_gives_it_back() {
 fn return_in_a_field_does_the_default_action() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&dir);
-    app.view = OwnerView::Agents;
+    app.place = Place::Agents;
     let mut window = Window::new();
     window.idle(&mut app);
     // A key press puts the window in keyboard mode, as a real key does.
@@ -774,29 +794,39 @@ fn arrows_change_a_picker_without_moving_the_focus() {
     );
 }
 
-/// ⌘1 to ⌘4 and ⌘, switch the view, ⌘[ goes back, and ⌘L locks.
+/// ⌘1 to ⌘3 switch the place, ⌘, opens the Settings window, ⌘[ leaves the credential,
+/// and ⌘L locks.
 #[test]
-fn shortcuts_switch_views_go_back_and_lock() {
+fn shortcuts_switch_places_open_settings_go_back_and_lock() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = open_item(&dir);
     let mut window = Window::new();
     window.idle(&mut app);
     window.press(&mut app, Key::OpenBracket, Modifiers::COMMAND);
-    assert_eq!(app.view, OwnerView::Vault, "⌘[ goes back to the list");
-    for (key, view) in [
-        (Key::Num2, OwnerView::Agents),
-        (Key::Num3, OwnerView::Activity),
-        (Key::Num4, OwnerView::Learning),
-        (Key::Comma, OwnerView::Settings),
-        (Key::Num1, OwnerView::Vault),
+    assert!(app.place.is_credentials(), "⌘[ stays in the list");
+    assert_eq!(app.selected_item_id, None, "⌘[ leaves the credential");
+    for (key, place) in [
+        (Key::Num2, Place::Decisions),
+        (Key::Num3, Place::Agents),
+        (Key::Num1, Place::CREDENTIALS),
     ] {
         window.press(&mut app, key, Modifiers::COMMAND);
-        assert_eq!(app.view, view);
+        assert_eq!(app.place, place);
         assert!(
             window.focused().is_some(),
-            "the page took the focus for {view:?}"
+            "the list took the focus for {place:?}"
         );
     }
+    window.press(&mut app, Key::Comma, Modifiers::COMMAND);
+    assert!(app.settings_open, "⌘, opens the Settings window");
+    assert!(window.text.contains("General"), "{}", window.text);
+    // Settings stands in place of the window here: ⌘2 goes on to Decisions.
+    window.press(&mut app, Key::Num2, Modifiers::COMMAND);
+    assert_eq!(app.place, Place::Decisions);
+    assert!(!app.settings_open);
+    window.press(&mut app, Key::Comma, Modifiers::COMMAND);
+    window.press(&mut app, Key::W, Modifiers::COMMAND);
+    assert!(!app.settings_open, "⌘W closes Settings");
     window.press(&mut app, Key::L, Modifiers::COMMAND);
     assert!(app.owner_ui.session.is_locked(), "⌘L locks");
 }
@@ -881,7 +911,7 @@ fn escape_closes_an_error_message() {
 fn a_menu_choice_with_the_keyboard_closes_the_menu() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&dir);
-    app.view = OwnerView::Vault;
+    app.place = Place::CREDENTIALS;
     let mut window = Window::new();
     window.idle(&mut app);
     // The toolbar draws from left to right: the search field, then the filter menu.
@@ -947,7 +977,7 @@ fn the_focus_survives_a_control_that_goes_away() {
 fn a_sheet_opened_with_the_pointer_focuses_its_first_text_field() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&dir);
-    app.view = OwnerView::Agents;
+    app.place = Place::Agents;
     let mut window = Window::new();
     window.idle(&mut app);
     assert!(
@@ -969,7 +999,7 @@ fn a_sheet_opened_with_the_pointer_focuses_its_first_text_field() {
     window.idle(&mut app);
     // The pointer opens the next sheet after the keyboard replaced the suggested name.
     window.click_at(&mut app, Pos2::new(400.0, 100.0));
-    app.view = OwnerView::Vault;
+    app.place = Place::CREDENTIALS;
     app.ui.sheet = Some(Sheet::AddItem { kind_chosen: true });
     app.ui.focus_form_name = true;
     window.idle(&mut app);
@@ -1023,13 +1053,13 @@ fn return_moves_through_the_new_vault_fields_and_creates_the_vault() {
 }
 
 #[test]
-fn control_command_s_hides_and_shows_the_sidebar() {
+fn control_command_s_collapses_the_sidebar_and_floats_it_in_a_narrow_window() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&dir);
-    app.view = OwnerView::Vault;
+    app.place = Place::CREDENTIALS;
     let mut window = Window::new();
     window.idle(&mut app);
-    assert!(window.text.contains("Learning"), "{}", window.text);
+    assert!(window.text.contains("Personal"), "{}", window.text);
     // The open vault has a name for VoiceOver, with where it lives.
     assert!(
         window
@@ -1039,15 +1069,41 @@ fn control_command_s_hides_and_shows_the_sidebar() {
         "{:?}",
         window.names.values().collect::<Vec<_>>()
     );
+    let has_name = |window: &Window, wanted: &str| window.names.values().any(|name| name == wanted);
+    assert!(has_name(&window, "Hide sidebar  ⌃⌘S"));
     window.press(&mut app, Key::S, Modifiers::COMMAND | Modifiers::CTRL);
     assert!(app.ui.sidebar_hidden);
-    assert!(!window.text.contains("Learning"), "{}", window.text);
-    // The shortcuts of the views still work without the sidebar.
-    window.press(&mut app, Key::Num2, Modifiers::COMMAND);
-    assert_eq!(app.view, OwnerView::Agents);
+    assert!(!window.text.contains("Personal"), "{}", window.text);
+    // The rail keeps each place, with its name for VoiceOver.
+    assert!(
+        has_name(&window, "Decisions  ⌘2"),
+        "{:?}",
+        window.names.values().collect::<Vec<_>>()
+    );
+    window.press(&mut app, Key::Num3, Modifiers::COMMAND);
+    assert_eq!(app.place, Place::Agents);
     window.press(&mut app, Key::S, Modifiers::COMMAND | Modifiers::CTRL);
     assert!(!app.ui.sidebar_hidden);
-    assert!(window.text.contains("Learning"), "{}", window.text);
+    assert!(window.text.contains("Personal"), "{}", window.text);
+
+    // A narrow window shows the rail. ⌃⌘S floats the full sidebar over the list; a
+    // choice closes it.
+    window.size = Vec2::new(900.0, 600.0);
+    window.idle(&mut app);
+    assert!(!window.text.contains("Personal"), "{}", window.text);
+    window.press(&mut app, Key::S, Modifiers::COMMAND | Modifiers::CTRL);
+    assert!(app.ui.sidebar_float);
+    assert!(!app.ui.sidebar_hidden, "the float is not kept");
+    assert!(window.text.contains("Personal"), "{}", window.text);
+    window.click(&mut app, "All credentials");
+    assert_eq!(app.place, Place::CREDENTIALS);
+    assert!(!app.ui.sidebar_float, "a choice closes the sidebar");
+    assert!(!window.text.contains("Personal"), "{}", window.text);
+    // A click outside closes it too.
+    window.press(&mut app, Key::S, Modifiers::COMMAND | Modifiers::CTRL);
+    assert!(app.ui.sidebar_float);
+    window.click_at(&mut app, Pos2::new(700.0, 300.0));
+    assert!(!app.ui.sidebar_float, "a click outside closes the sidebar");
 }
 
 #[test]
@@ -1306,7 +1362,7 @@ fn agent_setup_guides_credentials_without_leaving_the_agent() {
     let item_name = app.owner_ui.session.details(item_id).unwrap().name;
     let (agent, token) = app.owner_ui.session.register_agent("Codex").unwrap();
     app.owner_ui.selected_agent = Some(agent.id);
-    app.view = OwnerView::Agents;
+    app.place = Place::Agents;
     app.owner_ui.fresh_token = Some(FreshToken {
         agent_name: agent.name.clone(),
         token,
@@ -1387,7 +1443,7 @@ fn several_credentials_can_receive_access_without_variable_names() {
         .id;
     let (agent, _) = app.owner_ui.session.register_agent("Codex").unwrap();
     app.owner_ui.selected_agent = Some(agent.id);
-    app.view = OwnerView::Agents;
+    app.place = Place::Agents;
     let mut window = Window::new();
     window.size = Vec2::new(1180.0, 1600.0);
     window.idle(&mut app);
@@ -1457,7 +1513,7 @@ fn bulk_access_resumes_after_the_owner_selects_a_custom_secret_field() {
     );
     let (agent, _) = app.owner_ui.session.register_agent("Codex").unwrap();
     app.owner_ui.selected_agent = Some(agent.id);
-    app.view = OwnerView::Agents;
+    app.place = Place::Agents;
     let mut window = Window::new();
     window.size = Vec2::new(1180.0, 1600.0);
     window.idle(&mut app);
@@ -1470,7 +1526,7 @@ fn bulk_access_resumes_after_the_owner_selects_a_custom_secret_field() {
     let selection = app.ui.grant.selection.clone();
     assert_eq!(selection, [first, custom].into_iter().collect());
     window.click(&mut app, "Choose field for Custom credential…");
-    assert_eq!(app.view, OwnerView::Agents);
+    assert_eq!(app.place, Place::Agents);
     assert_eq!(app.ui.sheet, Some(Sheet::Variable));
     assert_eq!(app.ui.grant.resume_agent, Some(agent.id));
     assert_eq!(app.ui.grant.selection, selection);

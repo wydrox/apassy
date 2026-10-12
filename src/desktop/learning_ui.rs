@@ -344,7 +344,7 @@ mod vault_view {
                 Some("Go to Agents"),
             );
             if agents {
-                app.view = crate::desktop::OwnerView::Agents;
+                app.place = crate::desktop::Place::Agents;
                 app.owner_ui.selected_agent = None;
             }
             return;

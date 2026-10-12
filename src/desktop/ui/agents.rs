@@ -7,11 +7,11 @@
 
 use eframe::egui::{self, Align, Layout};
 
-use super::kit::{self, Font, Icon, Size, Style, Tone};
+use super::kit::{self, Font, Icon, Style, Tone};
 use super::{Sheet, ask_owner_from_sheet, close_sheet};
 use crate::desktop::owner_check::OwnerRequest;
 use crate::desktop::owner_store::{FreshToken, RuleForm, format_utc};
-use crate::desktop::{DesktopApp, OwnerView};
+use crate::desktop::{DesktopApp, Place};
 use crate::vault::{AgentSummary, EnvDelivery, ExecMode, GrantPlace};
 
 fn now() -> u64 {
@@ -29,11 +29,62 @@ fn date(unix: u64) -> String {
         .to_owned()
 }
 
-pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    match app.owner_ui.selected_agent {
-        Some(agent_id) => draw_agent(app, ui, agent_id),
-        None => draw_list(app, ui),
+/// The detail column of Agents: the selected agent, or with none, an empty state.
+pub(super) fn detail_column(
+    app: &mut DesktopApp,
+    ui: &mut egui::Ui,
+    pending: &super::shell::Pending,
+) {
+    super::columns::detail_toolbar(ui, |_| {});
+    let selected = app.owner_ui.selected_agent;
+    super::columns::detail_body(ui, ("agent", selected), |ui| {
+        super::shell::banners(app, ui, pending);
+        match selected {
+            Some(agent_id) => draw_agent(app, ui, agent_id),
+            None => draw_empty(app, ui),
+        }
+    });
+}
+
+/// No agent is selected. With no active agent, the empty state has the one main
+/// action, "Connect agent".
+fn draw_empty(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    let agents = app.owner_ui.session.agents().unwrap_or_default();
+    let revoked = agents.iter().filter(|agent| agent.revoked).count();
+    let active = agents.len() - revoked;
+    if active > 0 {
+        super::columns::nothing_selected(
+            ui,
+            Icon::Agent,
+            "No agent selected",
+            "Select an agent in the list.",
+        );
+        return;
     }
+    // Revoked agents stay in the folded list, for their history. A restore revokes every
+    // agent, so the owner registers them again here.
+    let (title, message) = if revoked == 0 {
+        (
+            "No agents yet",
+            "Connect Claude Code or Codex. Then select the credentials it can use.",
+        )
+    } else {
+        (
+            "No active agents",
+            "Every agent of this vault is revoked, for example after a restore. Register each agent host again; it gets a new token.",
+        )
+    };
+    if kit::empty_state(ui, Icon::Person, title, message, Some("Connect agent")) {
+        open_register(app);
+    }
+}
+
+/// Open the sheet that registers an agent, for the host of the setup.
+fn open_register(app: &mut DesktopApp) {
+    app.owner_ui.new_agent_name = super::agent_setup::Host::from_index(app.ui.setup_host)
+        .name()
+        .to_owned();
+    app.ui.sheet = Some(Sheet::RegisterAgent);
 }
 
 fn status(agent: &AgentSummary, now: u64) -> (&'static str, Tone) {
@@ -118,7 +169,7 @@ fn choose_host(app: &mut DesktopApp, host: usize) {
             .into_iter()
             .find(|agent| !agent.revoked && agent.name == name)
     });
-    app.view = OwnerView::Agents;
+    app.place = Place::Agents;
     if let Some(agent) = existing {
         app.owner_ui.selected_agent = Some(agent.id);
         app.ui.sheet = None;
@@ -206,116 +257,131 @@ fn cli_guidance(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
 }
 
-fn draw_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    let agents = match app.owner_ui.session.agents() {
+/// The list column of Agents: the active agents with their token state, then the
+/// revoked ones, folded. "+" connects an agent.
+pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    let agents = app.owner_ui.session.agents();
+    let count = agents.as_ref().map_or(0, |agents| {
+        agents.iter().filter(|agent| !agent.revoked).count()
+    });
+    let mut register = false;
+    super::columns::list_toolbar(ui, "Agents", &format!("{count} connected"), |ui| {
+        register = kit::plain_icon_button(ui, Icon::Plus, "Connect agent").clicked();
+    });
+    if register {
+        open_register(app);
+    }
+    let agents = match agents {
         Ok(agents) => agents,
         Err(err) => {
             kit::tone_note(ui, err.message, Tone::Critical);
             return;
         }
     };
-    let mut register = false;
-    // With no active agent, the empty state has the one main action. A second
-    // prominent button in the header would say the same thing twice.
-    let empty = agents.iter().all(|agent| agent.revoked);
-    kit::page_header(
-        ui,
-        "Agents",
-        Some("An agent uses a credential through Apassy. It never receives the secret value."),
-        |ui| {
-            if !empty {
-                register = kit::button_with(
-                    ui,
-                    Some(Icon::Plus),
-                    "Connect agent",
-                    Style::Prominent,
-                    Size::Regular,
+    let now = now();
+    let (revoked, active): (Vec<_>, Vec<_>) = agents.into_iter().partition(|agent| agent.revoked);
+    let rows: Vec<(u64, String, String, &'static str, Tone)> = active
+        .iter()
+        .map(|agent| {
+            let (label, tone) = status(agent, now);
+            let subtitle = if agent.token_expired_at(now) {
+                format!(
+                    "The token expired on {}. Rotate it.",
+                    date(agent.token_expires_at)
                 )
-                .clicked();
+            } else {
+                format!("Token until {}", date(agent.token_expires_at))
+            };
+            (agent.id, agent.name.clone(), subtitle, label, tone)
+        })
+        .collect();
+    let groups = if rows.is_empty() {
+        Vec::new()
+    } else {
+        vec![super::columns::Group {
+            title: "Connected".to_owned(),
+            rows,
+        }]
+    };
+    let selected = app.owner_ui.selected_agent;
+    let mut open = None;
+    let mut expanded = app.ui.is_expanded("revoked-agents");
+    super::columns::grouped_rows(
+        ui,
+        "agent-list",
+        &groups,
+        false,
+        |ui, (id, name, subtitle, label, _tone)| {
+            let response = ui
+                .push_id(("agent-row", id), |ui| {
+                    kit::list_row(
+                        ui,
+                        &kit::ListRow {
+                            tile: kit::Tile::letter(agent_color(name), name),
+                            title: name,
+                            subtitle,
+                            meta: Some(label),
+                            production: false,
+                            selected: selected == Some(*id),
+                        },
+                    )
+                })
+                .inner;
+            if response.clicked() {
+                open = Some(*id);
+            }
+        },
+        |ui| {
+            if active.is_empty() && revoked.is_empty() {
+                super::columns::list_note(ui, "No agents yet.");
+            }
+            if !revoked.is_empty() {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    kit::disclosure(
+                        ui,
+                        &mut expanded,
+                        &format!("Revoked agents ({})", revoked.len()),
+                    );
+                });
+                if expanded {
+                    ui.add_space(4.0);
+                    kit::section(ui, None, Some("A revoked token does not work."), |s| {
+                        for agent in &revoked {
+                            s.labeled(
+                                &agent.name,
+                                kit::text(
+                                    format!("Registered {}", date(agent.created_at)),
+                                    Font::Callout,
+                                )
+                                .color(kit::SECONDARY),
+                            );
+                        }
+                    });
+                }
             }
         },
     );
-    let now = now();
-    let (revoked, active): (Vec<_>, Vec<_>) = agents.into_iter().partition(|agent| agent.revoked);
-    if active.is_empty() {
-        // Revoked agents stay in the folded list below, for their history. A restore
-        // revokes every agent, so the owner registers them again here.
-        let (title, message) = if revoked.is_empty() {
-            (
-                "No agents yet",
-                "Connect Claude Code or Codex. Then select the credentials it can use.",
-            )
-        } else {
-            (
-                "No active agents",
-                "Every agent of this vault is revoked, for example after a restore. Register each agent host again; it gets a new token.",
-            )
-        };
-        register |= kit::empty_state(ui, Icon::Person, title, message, Some("Connect agent"));
-    }
-    let mut open = None;
-    if !active.is_empty() {
-        kit::section(ui, None, None, |s| {
-            for agent in &active {
-                let (label, tone) = status(agent, now);
-                let subtitle = if agent.token_expired_at(now) {
-                    format!(
-                        "The token expired on {}. Rotate it.",
-                        date(agent.token_expires_at)
-                    )
-                } else {
-                    format!("Token until {}", date(agent.token_expires_at))
-                };
-                let detail = kit::text(label, Font::Callout).color(tone.text());
-                if s.nav(
-                    Some((Icon::Person, kit::ACCENT)),
-                    &agent.name,
-                    Some(&subtitle),
-                    Some(detail),
-                )
-                .clicked()
-                {
-                    open = Some(agent.id);
-                }
-            }
-        });
-    }
-    if !revoked.is_empty() {
-        let mut expanded = app.ui.is_expanded("revoked-agents");
-        if kit::disclosure(
-            ui,
-            &mut expanded,
-            &format!("Revoked agents ({})", revoked.len()),
-        )
-        .changed()
-        {
-            app.ui.set_expanded("revoked-agents", expanded);
-        }
-        if expanded {
-            ui.add_space(4.0);
-            kit::section(ui, None, Some("A revoked token does not work."), |s| {
-                for agent in &revoked {
-                    s.labeled(
-                        &agent.name,
-                        kit::text(
-                            format!("Registered {}", date(agent.created_at)),
-                            Font::Callout,
-                        )
-                        .color(kit::SECONDARY),
-                    );
-                }
-            });
-        }
-    }
+    app.ui.set_expanded("revoked-agents", expanded);
     if let Some(agent_id) = open {
         app.owner_ui.selected_agent = Some(agent_id);
     }
-    if register {
-        app.owner_ui.new_agent_name = super::agent_setup::Host::from_index(app.ui.setup_host)
-            .name()
-            .to_owned();
-        app.ui.sheet = Some(Sheet::RegisterAgent);
-    }
+}
+
+/// A steady color for the tile of an agent, from its name.
+fn agent_color(name: &str) -> egui::Color32 {
+    const COLORS: [egui::Color32; 5] = [
+        egui::Color32::from_rgb(217, 119, 87),
+        egui::Color32::from_rgb(16, 163, 127),
+        egui::Color32::from_rgb(110, 90, 230),
+        egui::Color32::from_rgb(36, 41, 47),
+        egui::Color32::from_rgb(0, 122, 255),
+    ];
+    let sum = name
+        .bytes()
+        .fold(0usize, |sum, byte| sum.wrapping_add(byte as usize));
+    COLORS[sum % COLORS.len()]
 }
 
 fn draw_agent(app: &mut DesktopApp, ui: &mut egui::Ui, agent_id: u64) {
@@ -325,10 +391,6 @@ fn draw_agent(app: &mut DesktopApp, ui: &mut egui::Ui, agent_id: u64) {
     {
         app.ui.grant.resume_agent = None;
         app.ui.sheet = Some(Sheet::GrantMany { agent_id });
-    }
-    if kit::back_link(ui, "Agents") {
-        app.owner_ui.selected_agent = None;
-        return;
     }
     let Some(agent) = app
         .owner_ui
@@ -546,7 +608,7 @@ fn process_access_section(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &Agent
         },
     );
     if go_to_credentials {
-        app.view = OwnerView::Vault;
+        app.show_credentials();
     }
     if open_many {
         app.ui.grant = GrantForm::default();
@@ -717,7 +779,7 @@ pub(super) fn register_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool 
                     rotated: false,
                 });
                 app.ui.sheet = None;
-                app.view = OwnerView::Agents;
+                app.place = Place::Agents;
                 app.set_ok(format!("{} is ready for connection settings.", agent.name));
             }
             Err(err) => app.set_err(err.message),
@@ -1466,7 +1528,7 @@ fn open_command_settings(app: &mut DesktopApp, item_id: u64) {
     app.select_item(item_id.to_string());
     super::items::prepare_sheet(app, item_id, &Sheet::Variable);
     app.ui.sheet = Some(Sheet::Variable);
-    app.view = OwnerView::Agents;
+    app.place = Place::Agents;
 }
 
 /// What the agent can see (ADR 0012). "All credentials" needs the owner check; turning
@@ -1589,7 +1651,7 @@ mod onboarding_tests {
         let dir = tempfile::TempDir::new().unwrap();
         let (mut app, _) = super::super::owner_tests::unlocked_app_with_item(&dir);
         let (agent, token) = app.owner_ui.session.register_agent("Codex").unwrap();
-        app.view = OwnerView::Agents;
+        app.place = Place::Agents;
         app.owner_ui.selected_agent = Some(agent.id);
         app.ui.setup_host = super::super::agent_setup::Host::Claude.index();
         app.owner_ui.fresh_token = Some(FreshToken {
