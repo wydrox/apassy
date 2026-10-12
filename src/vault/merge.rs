@@ -1798,6 +1798,16 @@ fn merge_attached(conn: &mut Connection, scope: &SyncScope) -> VaultResult<Merge
                         )
                         .map_err(storage)?;
                     }
+                    // "Always ask" is a safety flag: after edits on both sides it stays
+                    // on when either side has it on. Both Macs get the same result.
+                    if ours.always_ask || theirs.always_ask {
+                        tx.execute(
+                            "INSERT INTO item_policy (item_id, always_ask) VALUES (?1, 1)
+                             ON CONFLICT(item_id) DO UPDATE SET always_ask = 1",
+                            [ours.id],
+                        )
+                        .map_err(storage)?;
+                    }
                 }
             },
             (None, None) => {}
@@ -2534,6 +2544,65 @@ mod schema17_tests {
         assert_eq!(w.b.item_folder(mail).unwrap(), Some(work.uuid.clone()));
         assert!(w.b.always_ask(mail).unwrap());
         assert_eq!(w.b.folder_path(Some(&work.uuid)).unwrap(), ["Work"]);
+        assert_eq!(
+            w.a.sync_content(&scope).unwrap(),
+            w.b.sync_content(&scope).unwrap()
+        );
+    }
+
+    /// "Always ask" is a safety flag: after concurrent edits of one credential it stays on
+    /// when either side has it on, whichever side wins the conflict.
+    #[test]
+    fn a_concurrent_edit_never_drops_always_ask() {
+        let mut w = world();
+        let scope = SyncScope::vault();
+        let dir = w.dir.path().to_path_buf();
+        let push = |vault: &mut Vault, name: &str, device: &str| {
+            let path = dir.join(name);
+            vault.write_sync_copy(&path, device).unwrap();
+            path
+        };
+
+        // The other side wins: Mac A turns "Always ask" on for the login, then Mac B
+        // changes the password later without it.
+        let mail_a = id_of(&w.a, "Mail");
+        w.a.set_always_ask(mail_a, true).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let mail_b = id_of(&w.b, "Mail");
+        edit(&mut w.b, mail_b, login("SYNTH-password-mac-b"));
+        let from_b = push(&mut w.b, "b-1.db", "Mac B");
+        let report = w.a.merge_from(&from_b, &scope).unwrap();
+        assert_eq!(report.conflicts.len(), 1);
+        let mail_a = id_of(&w.a, "Mail");
+        assert_eq!(
+            w.a.reveal(mail_a, "password").unwrap().expose(),
+            "SYNTH-password-mac-b",
+            "the later edit wins"
+        );
+        assert!(w.a.always_ask(mail_a).unwrap(), "the winner without it");
+
+        // This side wins: Mac B turns "Always ask" on for the API key, then Mac A changes
+        // the token later without it.
+        let stripe_b = id_of(&w.b, "Stripe");
+        w.b.set_always_ask(stripe_b, true).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let stripe_a = id_of(&w.a, "Stripe");
+        edit(&mut w.a, stripe_a, api_key("Stripe", "SYNTH-stripe-mac-a"));
+        let from_b = push(&mut w.b, "b-2.db", "Mac B");
+        let report = w.a.merge_from(&from_b, &scope).unwrap();
+        assert_eq!(report.conflicts.len(), 1);
+        let stripe_a = id_of(&w.a, "Stripe");
+        assert_eq!(
+            w.a.reveal(stripe_a, "token").unwrap().expose(),
+            "SYNTH-stripe-mac-a"
+        );
+        assert!(w.a.always_ask(stripe_a).unwrap(), "the loser had it");
+
+        // Mac B takes the result of Mac A: both Macs agree, both flags on.
+        let from_a = push(&mut w.a, "a-1.db", "Mac A");
+        w.b.merge_from(&from_a, &scope).unwrap();
+        assert!(w.b.always_ask(id_of(&w.b, "Mail")).unwrap());
+        assert!(w.b.always_ask(id_of(&w.b, "Stripe")).unwrap());
         assert_eq!(
             w.a.sync_content(&scope).unwrap(),
             w.b.sync_content(&scope).unwrap()

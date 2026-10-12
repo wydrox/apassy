@@ -366,7 +366,8 @@ impl Vault {
     /// level), after its last subfolder. The same parent changes nothing.
     ///
     /// - `InvalidInput`: `parent` is the folder or one of its subfolders (a cycle), or the
-    ///   deepest subfolder would be below [`MAX_FOLDER_DEPTH`].
+    ///   deepest subfolder would be below [`MAX_FOLDER_DEPTH`] and not higher than now (a
+    ///   subtree that two Macs made too deep can move up).
     /// - `NotFound`: the folder or the parent is not a folder.
     /// - `AlreadyExists`: a folder in `parent` has the same name.
     pub fn move_folder(&mut self, uuid: &str, parent: Option<&str>) -> VaultResult<()> {
@@ -386,11 +387,16 @@ impl Vault {
             }
             None => 0,
         };
-        if depth + tree.height(uuid) > MAX_FOLDER_DEPTH {
-            return Err(err(VaultErrorKind::InvalidInput));
-        }
         if folder.parent.as_deref() == parent {
             return Ok(());
+        }
+        // Two Macs can make a subtree deeper than the limit. It can still move up: only a
+        // move whose deepest level is below the limit and lower than now is refused.
+        let height = tree.height(uuid);
+        let bottom = depth + height;
+        let bottom_now = tree.depth(uuid) - 1 + height;
+        if bottom > MAX_FOLDER_DEPTH && bottom >= bottom_now {
+            return Err(err(VaultErrorKind::InvalidInput));
         }
         if tree.name_taken(parent, &folder.name, Some(uuid)) {
             return Err(err(VaultErrorKind::AlreadyExists));
