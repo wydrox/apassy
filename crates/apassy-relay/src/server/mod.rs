@@ -94,6 +94,9 @@ pub struct Core {
     pub question_polls: LongPolls,
     /// The open answer long polls of each asking device: at most one.
     pub answer_polls: LongPolls,
+    /// Question long polls of this team that hold a thread of the question lane
+    /// (`Limits::question_long_polls_per_team`).
+    pub question_lane: AtomicUsize,
     /// The push trigger of the relay, shared by every `Core`.
     pub push: Arc<push::Push>,
     stop: Arc<AtomicBool>,

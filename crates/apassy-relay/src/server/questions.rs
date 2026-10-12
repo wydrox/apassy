@@ -7,9 +7,11 @@
 //! asker settle it once. The relay never opens an envelope: it checks forms and sizes
 //! only. Every change of a question takes the next value of the team's question
 //! sequence, so a device that lists with its last `seq` sees each change once.
-//! Maintenance expires questions at `expires_at` and deletes them 24 hours after they
-//! were posted. A post hands the push tokens of the routing set to `server::push`.
+//! Maintenance expires questions at `expires_at`, drops the ciphertexts and answers of
+//! a question 10 minutes after it ended, and deletes the rest 24 hours after it was
+//! posted. A post hands the push tokens of the routing set to `server::push`.
 
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -25,7 +27,7 @@ use crate::ids::{DeviceId, MemberId};
 use crate::server::Core;
 use crate::server::approvals::MAX_WAIT_SECS;
 use crate::server::audit::{RELAY_ACTOR, member_actor};
-use crate::server::auth::{MemberAuth, parse_role, role_text};
+use crate::server::auth::{MemberAuth, device_member, parse_role, role_text};
 use crate::server::push::PushTarget;
 use crate::server::store::{db, to_i, to_u};
 
@@ -35,6 +37,8 @@ pub const MAX_ANSWER_BYTES: usize = 8_208;
 pub const MAX_SETTLE_BYTES: usize = 1_040;
 /// Answers of one device to one question.
 pub const MAX_ANSWERS_PER_DEVICE: u64 = 3;
+/// Answers of all devices to one question.
+pub const MAX_ANSWERS_PER_QUESTION: u64 = 20;
 /// Questions in one list answer.
 pub const MAX_LIST: u64 = 100;
 /// `expires_at` is in `(now + MIN_LIFETIME_SECS, now + MAX_LIFETIME_SECS]`.
@@ -42,6 +46,9 @@ pub const MIN_LIFETIME_SECS: u64 = 10;
 pub const MAX_LIFETIME_SECS: u64 = 600;
 /// Maintenance deletes a question and its answers this long after `created_at`.
 pub const RETENTION_SECS: u64 = 86_400;
+/// Maintenance drops the card, the settle, and the answers of a question this long
+/// after it was settled or expired, keeping its metadata until `RETENTION_SECS`.
+pub const PURGE_AFTER_SECS: u64 = 600;
 /// The length of a `qid`: base64url of 16 bytes.
 const QID_LEN: usize = 22;
 /// The push token: lowercase hex, 32 to 200 characters.
@@ -147,9 +154,10 @@ fn envelope(request: &EnvelopePost, max: usize) -> RelayResult<Envelope> {
     })
 }
 
-/// A refused question call: one `question_refused` row, rate-limited as other refusals.
-/// Called outside a transaction: it takes the store itself.
-fn refused(core: &Core, now: u64, error: &RelayError) {
+/// A refused question call: one `question_refused` row with the calling device,
+/// rate-limited as other refusals. Called outside a transaction: it takes the store
+/// itself.
+fn refused(core: &Core, now: u64, device: DeviceId, error: &RelayError) {
     // One rate limit per reason, so one kind of refusal does not hide another.
     let (kind, reason) = match error.code {
         codes::NOT_ROUTED => ("question_not_routed", "not_routed"),
@@ -164,7 +172,7 @@ fn refused(core: &Core, now: u64, error: &RelayError) {
         now,
         kind,
         "question_refused",
-        &json!({"reason": reason}),
+        &json!({"reason": reason, "device_id": device}),
     );
 }
 
@@ -357,10 +365,109 @@ fn too_many_questions(
     ))
 }
 
+/// The bytes of ciphertext that the team's file holds now: cards, settles, and
+/// answers (the `question_bytes` limit).
+fn stored_bytes(conn: &Connection) -> RelayResult<u64> {
+    conn.query_row(
+        "SELECT (SELECT coalesce(sum(length(ciphertext) + coalesce(length(settle_ciphertext), 0)), 0) \
+         FROM question) + (SELECT coalesce(sum(length(ciphertext)), 0) FROM question_answer)",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(to_u)
+    .map_err(db)
+}
+
+/// The question counts that the limits of a post read, at `now`: open questions and
+/// questions of the last hour, of the team, of `member`, and of `device`.
+struct Counts {
+    open: u64,
+    hour: u64,
+    member_open: u64,
+    member_hour: u64,
+    device_open: u64,
+    device_hour: u64,
+}
+
+fn counts_for(
+    conn: &Connection,
+    member: MemberId,
+    device: DeviceId,
+    now: u64,
+) -> RelayResult<Counts> {
+    conn.query_row(
+        "SELECT coalesce(sum(state = 'open' AND expires_at > ?1), 0), \
+         coalesce(sum(created_at > ?2), 0), \
+         coalesce(sum(member_id = ?3 AND state = 'open' AND expires_at > ?1), 0), \
+         coalesce(sum(member_id = ?3 AND created_at > ?2), 0), \
+         coalesce(sum(device_id = ?4 AND state = 'open' AND expires_at > ?1), 0), \
+         coalesce(sum(device_id = ?4 AND created_at > ?2), 0) FROM question",
+        params![
+            to_i(now),
+            to_i(now.saturating_sub(3600)),
+            to_i(member.0),
+            to_i(device.0)
+        ],
+        |row| {
+            Ok(Counts {
+                open: to_u(row.get(0)?),
+                hour: to_u(row.get(1)?),
+                member_open: to_u(row.get(2)?),
+                member_hour: to_u(row.get(3)?),
+                device_open: to_u(row.get(4)?),
+                device_hour: to_u(row.get(5)?),
+            })
+        },
+    )
+    .map_err(db)
+}
+
+/// One thread of the question lane held by a long poll of this team. Dropping it
+/// gives the seat back.
+struct LaneSeat<'a>(&'a Core);
+
+impl Drop for LaneSeat<'_> {
+    fn drop(&mut self) {
+        self.0.question_lane.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// A seat of the team's share of the question lane (`question_long_polls_per_team`),
+/// or `None` when the team holds all of its share: then the poll answers at once.
+fn lane_seat(core: &Core) -> Option<LaneSeat<'_>> {
+    let max = core.config.limits.question_long_polls_per_team;
+    core.question_lane
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
+            (held < max).then_some(held + 1)
+        })
+        .ok()
+        .map(|_| LaneSeat(core))
+}
+
+/// The caller read again at each turn of a long poll: 401 when its device or its
+/// member was revoked, or its role changed, since the request began. The role routes
+/// questions, so a poll does not go on with an old one.
+fn still_the_caller(conn: &Connection, by: &MemberAuth, device: DeviceId) -> RelayResult<()> {
+    let current = device_member(conn, device)?;
+    if current.id != by.id || current.role != by.role {
+        return Err(RelayError::unauthenticated());
+    }
+    Ok(())
+}
+
 /// `POST /v1/questions`.
 pub fn post(core: &Core, by: &MemberAuth, request: &QuestionPost, now: u64) -> RelayResult<Value> {
     let device = device_of(by)?;
     let new = checked_post(request, now)?;
+    if new.to_approvers && !core.config.questions_to_approvers {
+        // Until shared vaults (integrator decision 1) approvers cannot open a question.
+        let error = RelayError::new(
+            codes::NOT_ROUTED,
+            "This relay does not route questions to approvers yet. Ask with to: member.",
+        );
+        refused(core, now, device, &error);
+        return Err(error);
+    }
     let limits = core.limits();
     // A refusal commits too: its `limit_reached` row stays.
     let outcome = core.store.tx(|tx| {
@@ -377,30 +484,40 @@ pub fn post(core: &Core, by: &MemberAuth, request: &QuestionPost, now: u64) -> R
                 "A question with this qid exists in the team.",
             )));
         }
-        let open: i64 = tx
-            .query_row(
-                "SELECT count(*) FROM question WHERE state = 'open' AND expires_at > ?1",
-                params![to_i(now)],
-                |row| row.get(0),
-            )
-            .map_err(db)?;
-        if to_u(open) >= limits.open_questions {
-            return Ok(Err(too_many_questions(core, tx, now, "open_questions")?));
+        let counts = counts_for(tx, by.id, device, now)?;
+        // The team's limits, then the shares of one member and of one device, so one
+        // device cannot use the whole team's quota; then the bytes the file holds.
+        for (count, limit, kind) in [
+            (counts.open, limits.open_questions, "open_questions"),
+            (counts.hour, limits.questions_per_hour, "questions_per_hour"),
+            (
+                counts.member_open,
+                limits.member_open_questions,
+                "member_open_questions",
+            ),
+            (
+                counts.member_hour,
+                limits.member_questions_per_hour,
+                "member_questions_per_hour",
+            ),
+            (
+                counts.device_open,
+                limits.device_open_questions,
+                "device_open_questions",
+            ),
+            (
+                counts.device_hour,
+                limits.device_questions_per_hour,
+                "device_questions_per_hour",
+            ),
+        ] {
+            if count >= limit {
+                return Ok(Err(too_many_questions(core, tx, now, kind)?));
+            }
         }
-        let hour: i64 = tx
-            .query_row(
-                "SELECT count(*) FROM question WHERE created_at > ?1",
-                params![to_i(now.saturating_sub(3600))],
-                |row| row.get(0),
-            )
-            .map_err(db)?;
-        if to_u(hour) >= limits.questions_per_hour {
-            return Ok(Err(too_many_questions(
-                core,
-                tx,
-                now,
-                "questions_per_hour",
-            )?));
+        let bytes = stored_bytes(tx)?.saturating_add(new.ciphertext.len() as u64);
+        if bytes > limits.question_bytes {
+            return Ok(Err(too_many_questions(core, tx, now, "question_bytes")?));
         }
         let seq = next_seq(tx)?;
         tx.execute(
@@ -432,7 +549,7 @@ pub fn post(core: &Core, by: &MemberAuth, request: &QuestionPost, now: u64) -> R
         )?;
         Ok(Ok((seq, push_targets(tx, &routed)?)))
     })?;
-    let (seq, targets) = outcome.inspect_err(|error| refused(core, now, error))?;
+    let (seq, targets) = outcome.inspect_err(|error| refused(core, now, device, error))?;
     core.notify.notify();
     core.push.trigger(core, targets, request.expires_at, now);
     Ok(json!({
@@ -488,7 +605,7 @@ fn list_now(
         .prepare(&format!(
             "SELECT {QUESTION_COLUMNS}, coalesce(d.name, '') FROM question q \
              LEFT JOIN device d ON d.id = q.device_id \
-             WHERE q.seq > ?1 AND q.device_id <> ?2 \
+             WHERE q.seq > ?1 AND q.device_id <> ?2 AND length(q.ciphertext) > 0 \
              AND (q.member_id = ?3 OR (q.to_approvers = 1 AND ?4)) \
              ORDER BY q.seq LIMIT ?5"
         ))
@@ -515,7 +632,8 @@ fn list_now(
 /// `GET /v1/questions?since=N&wait=S`. While no question is routed to the caller after
 /// `since`, holds the answer up to `wait` seconds on the team notifier. A device has at
 /// most one such poll, and `hold` is false when the relay's question lane is full: then
-/// the answer comes at once, as with `wait=0`.
+/// the answer comes at once, as with `wait=0`, and so does a poll over the team's share
+/// of the lane. Each turn reads the caller again (401 when revoked or its role changed).
 pub fn list(
     core: &Core,
     by: &MemberAuth,
@@ -529,13 +647,15 @@ pub fn list(
     } else {
         None
     };
-    let wait_secs = if poll.is_some() { wait_secs } else { 0 };
+    let seat = poll.as_ref().and_then(|_| lane_seat(core));
+    let wait_secs = if seat.is_some() { wait_secs } else { 0 };
     let deadline = Instant::now() + Duration::from_secs(wait_secs.min(MAX_WAIT_SECS));
     loop {
         let seen = core.notify.current();
-        let list = core
-            .store
-            .with(|conn| list_now(conn, by, device, since, crate::now_unix()))?;
+        let list = core.store.with(|conn| {
+            still_the_caller(conn, by, device)?;
+            list_now(conn, by, device, since, crate::now_unix())
+        })?;
         let remaining = deadline.saturating_duration_since(Instant::now());
         // A sequence below `since` (a restored relay) answers at once too.
         if !list.questions.is_empty() || list.seq < since || remaining.is_zero() || core.stopping()
@@ -599,6 +719,27 @@ pub fn answer(
                 "This device already sent 3 answers to this question.",
             )));
         }
+        let all: i64 = tx
+            .query_row(
+                "SELECT count(*) FROM question_answer WHERE qid = ?1",
+                params![qid.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(db)?;
+        if to_u(all) >= MAX_ANSWERS_PER_QUESTION {
+            return Ok(Err(RelayError::new(
+                codes::TOO_MANY_ANSWERS,
+                format!("This question already has {MAX_ANSWERS_PER_QUESTION} answers."),
+            )));
+        }
+        let bytes = stored_bytes(tx)?.saturating_add(sealed.ciphertext.len() as u64);
+        if bytes > core.limits().question_bytes {
+            core.limit_error_on(tx, now, "question_bytes")?;
+            return Ok(Err(RelayError::new(
+                codes::TOO_MANY_ANSWERS,
+                "The team's question_bytes limit is reached.",
+            )));
+        }
         tx.execute(
             "INSERT INTO question_answer (qid, device_id, member_id, role, key_id, nonce, \
              ciphertext, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -625,7 +766,7 @@ pub fn answer(
         )?;
         Ok(Ok(id))
     })?;
-    let id = outcome.inspect_err(|error| refused(core, now, error))?;
+    let id = outcome.inspect_err(|error| refused(core, now, device, error))?;
     core.notify.notify();
     Ok(json!({"id": id, "at": now}))
 }
@@ -676,7 +817,8 @@ fn answers_now(
 
 /// `GET /v1/questions/{qid}/answers?after=N&wait=S`, for the asking device only. While
 /// there is no answer after `after` and the question is open, holds up to `wait`
-/// seconds. One such poll per device; `hold` as in `list`.
+/// seconds. One such poll per device; `hold`, the team's share, and the caller read at
+/// each turn as in `list`.
 pub fn answers(
     core: &Core,
     by: &MemberAuth,
@@ -691,13 +833,15 @@ pub fn answers(
     } else {
         None
     };
-    let wait_secs = if poll.is_some() { wait_secs } else { 0 };
+    let seat = poll.as_ref().and_then(|_| lane_seat(core));
+    let wait_secs = if seat.is_some() { wait_secs } else { 0 };
     let deadline = Instant::now() + Duration::from_secs(wait_secs.min(MAX_WAIT_SECS));
     loop {
         let seen = core.notify.current();
-        let list = core
-            .store
-            .with(|conn| answers_now(conn, &qid, device, after, crate::now_unix()))?;
+        let list = core.store.with(|conn| {
+            still_the_caller(conn, by, device)?;
+            answers_now(conn, &qid, device, after, crate::now_unix())
+        })?;
         let remaining = deadline.saturating_duration_since(Instant::now());
         if !list.answers.is_empty()
             || list.state != "open"
@@ -771,7 +915,7 @@ pub fn settle(
         )?;
         Ok(Ok((now, true)))
     })?;
-    let (settled_at, changed) = outcome.inspect_err(|error| refused(core, now, error))?;
+    let (settled_at, changed) = outcome.inspect_err(|error| refused(core, now, device, error))?;
     if changed {
         core.notify.notify();
     }
@@ -866,8 +1010,10 @@ pub fn push_token_delete(core: &Core, by: &MemberAuth, now: u64) -> RelayResult<
 }
 
 /// Every 5 seconds, per team: open questions past `expires_at` become `expired`, each
-/// with the next sequence value and a `question_expired` row; questions posted more
-/// than 24 hours ago go with their answers. Wakes the long polls on any change.
+/// with the next sequence value and a `question_expired` row; 10 minutes after a
+/// question was settled or expired its answers, card, and settle go (no list shows it
+/// again); questions posted more than 24 hours ago go with their answers. Wakes the
+/// long polls on an expiry or a deletion.
 pub fn maintenance(core: &Core, now: u64) -> RelayResult<()> {
     let changed = core.store.tx(|tx| {
         let expired: Vec<(String, i64)> = {
@@ -899,6 +1045,25 @@ pub fn maintenance(core: &Core, now: u64) -> RelayResult<()> {
                 &json!({"device_id": to_u(*device)}),
             )?;
         }
+        // Ten minutes after a question ended, only its metadata stays: the answers go,
+        // and so do the card and the settle (an empty card marks the question purged).
+        let ended = "(state = 'settled' AND settled_at <= ?1) OR (state <> 'settled' AND expires_at <= ?1)";
+        let purge = to_i(now.saturating_sub(PURGE_AFTER_SECS));
+        tx.execute(
+            &format!(
+                "DELETE FROM question_answer WHERE qid IN (SELECT qid FROM question WHERE {ended})"
+            ),
+            params![purge],
+        )
+        .map_err(db)?;
+        tx.execute(
+            &format!(
+                "UPDATE question SET ciphertext = x'', settle_nonce = NULL, \
+                 settle_ciphertext = NULL WHERE length(ciphertext) > 0 AND ({ended})"
+            ),
+            params![purge],
+        )
+        .map_err(db)?;
         let cutoff = to_i(now.saturating_sub(RETENTION_SECS));
         tx.execute(
             "DELETE FROM question_answer WHERE qid IN (SELECT qid FROM question WHERE created_at <= ?1)",

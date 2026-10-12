@@ -361,7 +361,7 @@ fn the_vector_envelopes_go_through_post_list_answer_and_settle() {
     );
     assert_eq!(
         rows(&rows_now, "question_refused"),
-        vec![&json!({"reason": "settled"})]
+        vec![&json!({"reason": "settled", "device_id": mac.id})]
     );
     let text = format!("{rows_now:?}");
     for secret in [
@@ -380,7 +380,11 @@ fn the_vector_envelopes_go_through_post_list_answer_and_settle() {
 
 #[test]
 fn routing_follows_the_member_and_the_approvers() {
-    let mut relay = start(UpstreamOptions::default());
+    // `to: "approvers"` needs the relay flag until shared vaults.
+    let mut relay = start_with(
+        |config| config.questions_to_approvers = true,
+        UpstreamOptions::default(),
+    );
     let owner = personal_team(&mut relay);
     let alice = join(&relay, "member", "alice");
     let alice_phone = add_device(&relay, &alice, "Alice iPhone");
@@ -469,7 +473,11 @@ fn routing_follows_the_member_and_the_approvers() {
         "unauthenticated",
     );
     let refusals = audit(&relay);
-    assert!(rows(&refusals, "question_refused").contains(&&json!({"reason": "not_routed"})));
+    // The first refusal of the ten seconds, with the device that was refused.
+    assert!(
+        rows(&refusals, "question_refused")
+            .contains(&&json!({"reason": "not_routed", "device_id": owner.id}))
+    );
     assert_eq!(
         rows(&refusals, "question_posted")[1],
         &json!({"device_id": alice.id, "to_approvers": true, "routed": 3})
@@ -666,34 +674,65 @@ fn limits_sizes_and_forms() {
         Some(&sealed(SETTLE_NONCE, &encode_b64(&[3; 1_040]))),
     );
 
-    // 20 open questions; the 21st is refused, with one `limit_reached` row in ten seconds.
-    for n in 2..=20 {
+    // Open questions: 10 of one device, 15 of one member, 20 of the team. Each refusal
+    // names its limit, with one `limit_reached` row per limit in ten seconds.
+    let bob = join(&relay, "member", "bob");
+    let refused_with = |by: &Device, n: u8, limit: &str| {
+        let (status, value) = relay.call(
+            "POST",
+            "/v1/questions",
+            Some(&by.token),
+            Some(&card(&qid(n), "member", now_unix() + 300, &good)),
+        );
+        assert_eq!(
+            (status, code(&value)),
+            (403, "too_many_questions"),
+            "{limit}"
+        );
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains(&format!("team's {limit} limit")),
+            "{message}"
+        );
+    };
+    for n in 2..=11 {
         ask(&relay, &mac, &qid(n), "member");
     }
-    ask(&relay, &mac, &qid(21), "member");
-    for n in [22, 23] {
-        let (status, value) = post(&card(&qid(n), "member", now_unix() + 300, &good));
-        assert_eq!((status, code(&value)), (403, "too_many_questions"));
-        assert!(
-            value["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("open_questions")
-        );
+    refused_with(&mac, 12, "device_open_questions");
+    refused_with(&mac, 12, "device_open_questions");
+    // Another device of the same member has its own share, up to the member's.
+    for n in 12..=16 {
+        ask(&relay, &phone, &qid(n), "member");
     }
+    refused_with(&phone, 17, "member_open_questions");
+    // Another member fills the team.
+    for n in 17..=21 {
+        ask(&relay, &bob, &qid(n), "member");
+    }
+    refused_with(&bob, 22, "open_questions");
     let reached = audit(&relay);
     assert_eq!(
         rows(&reached, "limit_reached"),
-        vec![&json!({"limit": "open_questions"})]
+        vec![
+            &json!({"limit": "device_open_questions"}),
+            &json!({"limit": "member_open_questions"}),
+            &json!({"limit": "open_questions"}),
+        ]
     );
-    assert!(rows(&reached, "question_refused").contains(&&json!({"reason": "too_many_questions"})));
+    assert!(
+        rows(&reached, "question_refused")
+            .contains(&&json!({"reason": "too_many_questions", "device_id": mac.id}))
+    );
 
-    // The operator raises the open limit and sets the hourly one.
+    // The operator raises the open limits and sets the hourly one: 21 questions of
+    // this hour so far.
     let limits = relay
         .operator(Command::Limits {
             team: team.clone(),
             set: Some(TeamLimitsUpdate {
                 open_questions: Some(1000),
+                member_open_questions: Some(1000),
+                device_open_questions: Some(1000),
                 questions_per_hour: Some(25),
                 ..Default::default()
             }),
@@ -701,17 +740,29 @@ fn limits_sizes_and_forms() {
         .unwrap();
     assert_eq!(limits["open_questions"], 1000);
     assert_eq!(limits["questions_per_hour"], 25);
+    assert_eq!(limits["device_questions_per_hour"], 150);
     for n in 22..=25 {
         ask(&relay, &mac, &qid(n), "member");
     }
-    let (status, value) = post(&card(&qid(26), "member", now_unix() + 300, &good));
-    assert_eq!((status, code(&value)), (403, "too_many_questions"));
-    assert!(
-        value["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("questions_per_hour")
-    );
+    refused_with(&mac, 26, "questions_per_hour");
+    // Hourly shares: the asking Mac has 15 of this hour, its member 20.
+    relay
+        .operator(Command::Limits {
+            team: team.clone(),
+            set: Some(TeamLimitsUpdate {
+                questions_per_hour: Some(1000),
+                device_questions_per_hour: Some(16),
+                member_questions_per_hour: Some(22),
+                ..Default::default()
+            }),
+        })
+        .unwrap();
+    ask(&relay, &mac, &qid(26), "member");
+    refused_with(&mac, 27, "device_questions_per_hour");
+    ask(&relay, &phone, &qid(27), "member");
+    refused_with(&phone, 28, "member_questions_per_hour");
+    // Another member still asks.
+    ask(&relay, &bob, &qid(28), "member");
     let infos = relay.operator(Command::Teams).unwrap();
     let info = infos
         .as_array()
@@ -719,7 +770,7 @@ fn limits_sizes_and_forms() {
         .iter()
         .find(|info| info["id"] == json!(team))
         .unwrap();
-    assert_eq!(info["open_questions"], 24);
+    assert_eq!(info["open_questions"], 27);
     assert_eq!(info["push_tokens"], 0);
 }
 
@@ -1299,4 +1350,414 @@ fn a_team_sees_nothing_of_another_team() {
     );
     assert_eq!(a_answers["answers"].as_array().unwrap().len(), 1);
     assert_eq!(a_answers["answers"][0]["device_id"], a_phone.id);
+}
+
+#[test]
+fn approvers_questions_wait_for_shared_vaults() {
+    let mut relay = start(UpstreamOptions::default());
+    let mac = personal_team(&mut relay);
+    let phone = add_device(&relay, &mac, "iPhone");
+    // Without APASSY_RELAY_QUESTIONS_TO_APPROVERS: forms first, then 403, nothing stored.
+    let (status, value) = relay.call(
+        "POST",
+        "/v1/questions",
+        Some(&mac.token),
+        Some(&card(
+            &qid(1),
+            "approvers",
+            now_unix() + 650,
+            &encode_b64(&[1; 20]),
+        )),
+    );
+    assert_eq!((status, code(&value)), (400, "invalid_request"));
+    let (status, value) = relay.call(
+        "POST",
+        "/v1/questions",
+        Some(&mac.token),
+        Some(&card(
+            &qid(1),
+            "approvers",
+            now_unix() + 300,
+            &encode_b64(&[1; 20]),
+        )),
+    );
+    assert_eq!((status, code(&value)), (403, "not_routed"));
+    assert_eq!(list(&relay, &phone, 0), json!({"seq": 0, "questions": []}));
+    assert_eq!(
+        rows(&audit(&relay), "question_refused"),
+        vec![&json!({"reason": "not_routed", "device_id": mac.id})]
+    );
+    // `member` questions go on.
+    ask(&relay, &mac, &qid(1), "member");
+}
+
+#[test]
+fn answers_per_question_are_capped() {
+    let mut relay = start(UpstreamOptions::default());
+    let mac = personal_team(&mut relay);
+    let phone = add_device(&relay, &mac, "iPhone");
+    let mini = add_device(&relay, &mac, "Mac mini");
+    ask(&relay, &mac, &qid(1), "member");
+    // 19 answers of the Mac mini, written past its own limit of 3, and one of the phone.
+    relay.edit_vault_live(&format!(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 19) \
+         INSERT INTO question_answer (qid, device_id, member_id, role, key_id, nonce, ciphertext, at) \
+         SELECT '{}', {}, {}, 'owner', '{KEY_ID}', x'00', x'00', 0 FROM n",
+        qid(1),
+        mini.id,
+        mini.member
+    ));
+    assert_eq!(answer(&relay, &phone, &qid(1)).0, 200);
+    let (status, value) = answer(&relay, &phone, &qid(1));
+    assert_eq!((status, code(&value)), (403, "too_many_answers"));
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("20 answers")
+    );
+}
+
+/// The bytes of ciphertext in the team file (cards, settles, answers), and the answer
+/// rows.
+fn stored(relay: &TestRelay) -> (u64, u64) {
+    let (bytes, answers) = &relay.vault_rows(
+        "SELECT (SELECT coalesce(sum(length(ciphertext) + coalesce(length(settle_ciphertext), 0)), 0) FROM question) \
+         + (SELECT coalesce(sum(length(ciphertext)), 0) FROM question_answer), \
+         (SELECT count(*) FROM question_answer)",
+    )[0];
+    let number = |cell: &[u8]| String::from_utf8_lossy(cell).parse::<u64>().unwrap();
+    (number(bytes), number(answers))
+}
+
+#[test]
+fn question_storage_has_a_budget_and_ended_questions_lose_their_ciphertext() {
+    let mut relay = start(UpstreamOptions::default());
+    let mac = personal_team(&mut relay);
+    let phone = add_device(&relay, &mac, "iPhone");
+    let team = team_of(&mac.token);
+    let core = relay.hub().team(&team).unwrap();
+    relay
+        .operator(Command::Limits {
+            team: team.clone(),
+            set: Some(TeamLimitsUpdate {
+                question_bytes: Some(1_048_576),
+                open_questions: Some(1000),
+                member_open_questions: Some(1000),
+                device_open_questions: Some(1000),
+                ..Default::default()
+            }),
+        })
+        .unwrap();
+    let big = encode_b64(&vec![1; questions::MAX_CARD_BYTES]);
+    // 31 full cards are 1016304 bytes; the 32nd would pass 1 MiB.
+    for n in 1..=31 {
+        relay.ok(
+            "POST",
+            "/v1/questions",
+            &mac.token,
+            Some(&card(&qid(n), "member", now_unix() + 300, &big)),
+        );
+    }
+    let (status, value) = relay.call(
+        "POST",
+        "/v1/questions",
+        Some(&mac.token),
+        Some(&card(&qid(32), "member", now_unix() + 300, &big)),
+    );
+    assert_eq!((status, code(&value)), (403, "too_many_questions"));
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("question_bytes")
+    );
+    // Answers count too: three full answers fit, a fourth does not.
+    let full_answer = |n: u8| {
+        relay.call(
+            "POST",
+            &format!("/v1/questions/{}/answers", qid(n)),
+            Some(&phone.token),
+            Some(&sealed(
+                ANSWER_NONCE,
+                &encode_b64(&vec![2; questions::MAX_ANSWER_BYTES]),
+            )),
+        )
+    };
+    for _ in 0..3 {
+        assert_eq!(full_answer(1).0, 200);
+    }
+    let (status, value) = full_answer(2);
+    assert_eq!((status, code(&value)), (403, "too_many_answers"));
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("question_bytes")
+    );
+    assert_eq!(
+        rows(&audit(&relay), "limit_reached"),
+        vec![&json!({"limit": "question_bytes"})]
+    );
+    // A settle is never refused for the budget.
+    relay.ok(
+        "POST",
+        &format!("/v1/questions/{}/settle", qid(1)),
+        &mac.token,
+        Some(&sealed(SETTLE_NONCE, &encode_b64(&[3; 1_040]))),
+    );
+    assert_eq!(stored(&relay), (31 * 32_784 + 1_040 + 3 * 8_208, 3));
+
+    // Ended questions keep their ciphertext for ten minutes after the end.
+    let now = now_unix();
+    questions::maintenance(&core, now + 301).unwrap();
+    assert_eq!(stored(&relay).1, 3);
+    assert_eq!(
+        list(&relay, &phone, 0)["questions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        31
+    );
+    // Then only the metadata stays: no list shows the question, the asker reads its
+    // state without answers, and the budget is free again.
+    questions::maintenance(&core, now + 901).unwrap();
+    assert_eq!(stored(&relay), (0, 0));
+    let seq = list(&relay, &phone, 0)["seq"].as_u64().unwrap();
+    assert_eq!(
+        list(&relay, &phone, 0),
+        json!({"seq": seq, "questions": []})
+    );
+    let read = relay.ok(
+        "GET",
+        &format!("/v1/questions/{}/answers", qid(1)),
+        &mac.token,
+        None,
+    );
+    assert_eq!(
+        (
+            read["state"].as_str(),
+            read["answers"].as_array().unwrap().len()
+        ),
+        (Some("settled"), 0)
+    );
+    let (status, value) = answer(&relay, &phone, &qid(2));
+    assert_eq!((status, code(&value)), (409, "question_expired"));
+    // The rows stay until the day is over: a repost of a qid is still a conflict.
+    assert_eq!(
+        relay.vault_rows("SELECT count(*), 0 FROM question")[0].0,
+        b"31".to_vec()
+    );
+    relay.fails(
+        "POST",
+        "/v1/questions",
+        Some(&mac.token),
+        Some(&card(&qid(2), "member", now_unix() + 300, &big)),
+        409,
+        "conflict",
+    );
+    relay.ok(
+        "POST",
+        "/v1/questions",
+        &mac.token,
+        Some(&card(&qid(32), "member", now_unix() + 300, &big)),
+    );
+}
+
+#[test]
+fn a_long_poll_ends_with_401_when_its_device_is_revoked_or_its_role_changes() {
+    let mut relay = start(UpstreamOptions::default());
+    let owner = personal_team(&mut relay);
+    let phone = add_device(&relay, &owner, "iPhone");
+    let maria = join(&relay, "manager", "maria");
+    let alice = join(&relay, "member", "alice");
+    let alice_phone = add_device(&relay, &alice, "Alice iPhone");
+    ask(&relay, &alice, &qid(1), "member");
+    let relay = &relay;
+    let status_of = |token: &str, path: &str| {
+        timed(|| {
+            let (status, value) = relay.call("GET", path, Some(token), None);
+            (status, code(&value).to_string(), value)
+        })
+    };
+    std::thread::scope(|scope| {
+        // A list poll of a device revoked while it waits: 401, not the next question.
+        let revoked = scope.spawn(|| status_of(&phone.token, "/v1/questions?since=0&wait=25"));
+        // A list poll of a manager who becomes a member.
+        let demoted = scope.spawn(|| status_of(&maria.token, "/v1/questions?since=0&wait=25"));
+        // The asker's answer poll of a device revoked while it waits.
+        let asker = scope.spawn(|| {
+            status_of(
+                &alice.token,
+                &format!("/v1/questions/{}/answers?after=0&wait=25", qid(1)),
+            )
+        });
+        std::thread::sleep(Duration::from_millis(700));
+        relay.ok(
+            "DELETE",
+            &format!("/v1/devices/{}", phone.id),
+            &owner.token,
+            None,
+        );
+        relay.ok(
+            "PUT",
+            &format!("/v1/members/{}/role", maria.member),
+            &owner.token,
+            Some(&json!({"role": "member"})),
+        );
+        relay.ok(
+            "DELETE",
+            &format!("/v1/devices/{}", alice.id),
+            &owner.token,
+            None,
+        );
+        ask(relay, &owner, &qid(2), "member");
+        assert_eq!(answer(relay, &alice_phone, &qid(1)).0, 200);
+        for poll in [revoked, demoted, asker] {
+            let ((status, code, value), took) = poll.join().unwrap();
+            assert_eq!((status, code.as_str()), (401, "unauthenticated"), "{value}");
+            assert!(took < Duration::from_secs(10), "{took:?}");
+        }
+    });
+}
+
+#[test]
+fn a_team_holds_at_most_its_share_of_the_question_lane() {
+    let mut relay = start_with(
+        |config| {
+            config.limits.question_long_polls = 8;
+            config.limits.question_long_polls_per_team = 2;
+        },
+        UpstreamOptions::default(),
+    );
+    let mac = personal_team(&mut relay);
+    let phone = add_device(&relay, &mac, "iPhone");
+    let mini = add_device(&relay, &mac, "Mac mini");
+    let (other_token, _) = relay.new_team_device("Other", "owner");
+    let other = device_of(&relay, other_token);
+    let relay = &relay;
+    std::thread::scope(|scope| {
+        // Two polls of the team take its share.
+        let polls: Vec<_> = [&phone, &mini]
+            .into_iter()
+            .map(|device| {
+                scope.spawn(move || {
+                    timed(|| relay.ok("GET", "/v1/questions?since=0&wait=25", &device.token, None))
+                })
+            })
+            .collect();
+        std::thread::sleep(Duration::from_millis(700));
+        // A third poll of the team is answered at once, though the lane has room.
+        let ((status, third), took) = timed(|| {
+            relay.call(
+                "GET",
+                &format!("/v1/questions/{}/answers?after=0&wait=25", qid(9)),
+                Some(&mac.token),
+                None,
+            )
+        });
+        assert!(took < Duration::from_secs(3), "{took:?}");
+        assert_eq!((status, code(&third)), (404, "not_found"));
+        let (listed, took) =
+            timed(|| relay.ok("GET", "/v1/questions?since=0&wait=25", &mac.token, None));
+        assert!(took < Duration::from_secs(3), "{took:?}");
+        assert_eq!(listed["questions"], json!([]));
+        // Another team still waits in the lane.
+        let (_, took) =
+            timed(|| relay.ok("GET", "/v1/questions?since=0&wait=2", &other.token, None));
+        assert!(took >= Duration::from_millis(1500), "{took:?}");
+        ask(relay, &mac, &qid(1), "member");
+        for poll in polls {
+            let (woken, took) = poll.join().unwrap();
+            assert!(took < Duration::from_secs(10), "{took:?}");
+            assert_eq!(qids(&woken), vec![qid(1)]);
+        }
+    });
+    // The seats came back: the team's polls wait again.
+    let (_, took) = timed(|| relay.ok("GET", "/v1/questions?since=1&wait=2", &phone.token, None));
+    assert!(took >= Duration::from_millis(1500), "{took:?}");
+}
+
+/// Sends the headers of a request, waits `pause`, then sends its JSON body. Returns
+/// the status and the JSON envelope.
+fn slow_body(
+    relay: &TestRelay,
+    method: &str,
+    path: &str,
+    token: &str,
+    body: &Value,
+    pause: Duration,
+) -> (u16, Value) {
+    use std::io::{Read, Write};
+    let body = body.to_string();
+    let addr = relay.url.trim_start_matches("http://").to_string();
+    let mut stream = std::net::TcpStream::connect(&addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nX-Apassy-Edge: {}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        relay.edge_secret,
+        body.len()
+    )
+    .unwrap();
+    stream.flush().unwrap();
+    std::thread::sleep(pause);
+    stream.write_all(body.as_bytes()).unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    let status = answer
+        .split(' ')
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("no status in {answer:?}"));
+    let json = answer
+        .find('{')
+        .zip(answer.rfind('}'))
+        .map(|(start, end)| serde_json::from_str(&answer[start..=end]).unwrap())
+        .unwrap_or(Value::Null);
+    (status, json)
+}
+
+#[test]
+fn the_request_time_of_a_question_call_is_taken_after_its_body() {
+    let mut relay = start(UpstreamOptions::default());
+    let mac = personal_team(&mut relay);
+    let phone = add_device(&relay, &mac, "iPhone");
+    // `expires_at` is 602 s after the headers: too far for the time of the headers,
+    // within 600 s of the time of the body.
+    let headers_at = now_unix();
+    let (status, posted) = slow_body(
+        &relay,
+        "POST",
+        "/v1/questions",
+        &mac.token,
+        &card(&qid(1), "member", headers_at + 602, &encode_b64(&[1; 20])),
+        Duration::from_millis(3_200),
+    );
+    assert_eq!(status, 200, "{posted}");
+    assert!(posted["result"]["created_at"].as_u64().unwrap() >= headers_at + 3);
+    let headers_at = now_unix();
+    let (status, answered) = slow_body(
+        &relay,
+        "POST",
+        &format!("/v1/questions/{}/answers", qid(1)),
+        &phone.token,
+        &sealed(ANSWER_NONCE, &encode_b64(&[5; 30])),
+        Duration::from_millis(2_200),
+    );
+    assert_eq!(status, 200, "{answered}");
+    assert!(answered["result"]["at"].as_u64().unwrap() >= headers_at + 2);
+    let headers_at = now_unix();
+    let (status, settled) = slow_body(
+        &relay,
+        "POST",
+        &format!("/v1/questions/{}/settle", qid(1)),
+        &mac.token,
+        &sealed(SETTLE_NONCE, &encode_b64(&[3; 20])),
+        Duration::from_millis(2_200),
+    );
+    assert_eq!(status, 200, "{settled}");
+    assert!(settled["result"]["settled_at"].as_u64().unwrap() >= headers_at + 2);
 }

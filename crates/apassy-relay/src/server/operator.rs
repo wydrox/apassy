@@ -27,9 +27,11 @@ use crate::server::hub::Hub;
 /// The longest request line.
 const MAX_LINE: u64 = 4096;
 
-/// One command of the operator.
+/// One command of the operator. One at a time, read from a line: the size of the
+/// `Limits` variant does not matter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
+#[allow(clippy::large_enum_variant)]
 pub enum Command {
     /// A one-time code that makes one team (`apassy-team create`).
     TeamCode {

@@ -361,6 +361,7 @@ impl Hub {
             sync_commit: Mutex::new(()),
             question_polls: LongPolls::new(1),
             answer_polls: LongPolls::new(1),
+            question_lane: AtomicUsize::new(0),
             push: self.push.clone(),
             stop: self.stop.clone(),
             closed: AtomicBool::new(false),
@@ -717,8 +718,9 @@ impl Hub {
                 ),
             };
             let detail = json!({"team_id": id, "limits": limits});
-            let text = serde_json::to_string(&limits)
-                .map_err(|_| RelayError::internal("The limits cannot be written."))?;
+            // Question limits at their default stay out of the column, so the image
+            // before questions can read it after a rollback.
+            let text = limits.stored_json()?;
             tx.execute(
                 "UPDATE team SET limits = ?1 WHERE id = ?2",
                 params![text, id.as_str()],

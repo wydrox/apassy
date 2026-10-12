@@ -27,7 +27,9 @@ const USAGE: &str = "Usage:
   apassy-relay admin limits <team id> [--members <n>] [--items <n>] [--agents <n>]
     [--runs-per-hour <n>] [--pending-runs <n>] [--agent-requests <n>]
     [--sync-bytes <n>] [--sync-pushes-per-hour <n>] [--sync-transfers <n>]
-    [--open-questions <n>] [--questions-per-hour <n>]
+    [--open-questions <n>] [--questions-per-hour <n>] [--question-bytes <n>]
+    [--member-open-questions <n>] [--member-questions-per-hour <n>]
+    [--device-open-questions <n>] [--device-questions-per-hour <n>]
   apassy-relay admin suspend|resume|delete <team id>
   apassy-relay admin backup
 
@@ -36,10 +38,13 @@ The configuration is read from the environment:
   APASSY_RELAY_EDGE_SECRET or _FILE, APASSY_RELAY_KEY or _FILE (the master key),
   APASSY_RELAY_SESSION_TTL, APASSY_RELAY_APPROVAL_TIMEOUT,
   APASSY_RELAY_BLOCKED_ADDRESSES, APASSY_RELAY_BACKUP_DIR, and for push all of
-  APASSY_RELAY_PUSH_URL, APASSY_RELAY_PUSH_TOPIC, APASSY_RELAY_PUSH_SECRET or _FILE.
+  APASSY_RELAY_PUSH_URL, APASSY_RELAY_PUSH_TOPIC, APASSY_RELAY_PUSH_SECRET or _FILE,
+  APASSY_RELAY_QUESTIONS_TO_APPROVERS (0 or 1).
 `migrate` also reads APASSY_RELAY_OLD_KEY or _FILE: the key of the old team.db.
 `admin` reads only APASSY_RELAY_DATA and talks to the running relay.";
 
+/// Parsed once from the arguments: the size of `Admin` does not matter.
+#[allow(clippy::large_enum_variant)]
 enum Command {
     Serve,
     Init { team: Option<(String, String)> },
@@ -107,9 +112,14 @@ fn parse_admin(args: &[String]) -> Result<Operator, String> {
                 "--sync-transfers",
                 "--open-questions",
                 "--questions-per-hour",
+                "--question-bytes",
+                "--member-open-questions",
+                "--member-questions-per-hour",
+                "--device-open-questions",
+                "--device-questions-per-hour",
             ];
             let flags = parse_flags(&rest[1..], &names)?;
-            let mut values = [None; 11];
+            let mut values = [None; 16];
             for (index, text) in flags.iter().enumerate() {
                 if let Some(text) = text {
                     values[index] =
@@ -133,6 +143,11 @@ fn parse_admin(args: &[String]) -> Result<Operator, String> {
                     sync_transfers: values[8],
                     open_questions: values[9],
                     questions_per_hour: values[10],
+                    question_bytes: values[11],
+                    member_open_questions: values[12],
+                    member_questions_per_hour: values[13],
+                    device_open_questions: values[14],
+                    device_questions_per_hour: values[15],
                 });
             if let Some(update) = set {
                 TeamLimits::default()
@@ -338,6 +353,16 @@ mod tests {
             vec!["limits", "t_abcdefgh23", "--sync-transfers", "9"],
             vec!["limits", "t_abcdefgh23", "--open-questions", "1001"],
             vec!["limits", "t_abcdefgh23", "--questions-per-hour", "0"],
+            vec!["limits", "t_abcdefgh23", "--question-bytes", "1048575"],
+            vec!["limits", "t_abcdefgh23", "--member-open-questions", "0"],
+            vec!["limits", "t_abcdefgh23", "--member-questions-per-hour", "0"],
+            vec!["limits", "t_abcdefgh23", "--device-open-questions", "1001"],
+            vec![
+                "limits",
+                "t_abcdefgh23",
+                "--device-questions-per-hour",
+                "1000001",
+            ],
             vec!["limits", "t_abcdefgh23", "--items", "1", "--items", "2"],
             vec!["limits", "t_abcdefgh23", "--unknown", "1"],
             vec!["limits", "t_abcdefgh23", "t_bcdefgh234"],
@@ -374,6 +399,16 @@ mod tests {
                 "10",
                 "--questions-per-hour",
                 "11",
+                "--question-bytes",
+                "1048576",
+                "--member-open-questions",
+                "13",
+                "--member-questions-per-hour",
+                "14",
+                "--device-open-questions",
+                "15",
+                "--device-questions-per-hour",
+                "16",
             ]))
             .unwrap(),
             Operator::Limits {
@@ -390,6 +425,11 @@ mod tests {
                     sync_transfers: Some(1),
                     open_questions: Some(10),
                     questions_per_hour: Some(11),
+                    question_bytes: Some(1_048_576),
+                    member_open_questions: Some(13),
+                    member_questions_per_hour: Some(14),
+                    device_open_questions: Some(15),
+                    device_questions_per_hour: Some(16),
                 }),
             }
         );

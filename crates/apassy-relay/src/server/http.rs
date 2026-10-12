@@ -715,8 +715,9 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
     // A body can take a long time to arrive. Read the caller again now, so a device or
     // member revoked, or a role changed, while the body was on its way counts for this
     // request too (the token was checked first only to protect the team's slots).
+    let after_body = now_unix();
     let principal = if method == "POST" || method == "PUT" {
-        match authenticate(&core, need, token, now_unix()) {
+        match authenticate(&core, need, token, after_body) {
             Ok(principal) => principal,
             Err(error) => {
                 respond_error(request, &error);
@@ -725,6 +726,19 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
         }
     } else {
         principal
+    };
+    // The question routes take the time after the body too: a slow body cannot answer
+    // a question that expired while it arrived, or post one with an old clock.
+    let now = if matches!(
+        endpoint,
+        Endpoint::QuestionPost
+            | Endpoint::AnswerPost(_)
+            | Endpoint::Settle(_)
+            | Endpoint::PushTokenPut
+    ) {
+        after_body
+    } else {
+        now
     };
     if endpoint == Endpoint::Mcp {
         respond_mcp(&core, request, principal, &body);

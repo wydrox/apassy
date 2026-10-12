@@ -14,6 +14,7 @@
 //! | `APASSY_RELAY_PUSH_URL` | The Worker's push route, such as `https://apassy-relay.wyderka.cc/internal/push` | none: push is off |
 //! | `APASSY_RELAY_PUSH_TOPIC` | The bundle id of the iPhone app, such as `com.wydrox.apassy.companion` | none: push is off |
 //! | `APASSY_RELAY_PUSH_SECRET` or `APASSY_RELAY_PUSH_SECRET_FILE` | The secret the relay sends to the push route as `X-Apassy-Push` (the Worker's `PUSH_SECRET`); at least 32 bytes | none: push is off |
+//! | `APASSY_RELAY_QUESTIONS_TO_APPROVERS` | `1`: take questions with `to: "approvers"`; `0`: refuse them with 403 `not_routed` (until shared vaults) | `0` |
 //!
 //! Push needs all three push values; none of them turns it off. Some but not all is a
 //! configuration error, so a typo does not turn push off without a word.
@@ -143,6 +144,9 @@ pub struct Limits {
     /// apart from `max_active`, so they never take the member reserve. A poll over this
     /// runs in the member lane and is answered at once, as with `wait=0`.
     pub question_long_polls: usize,
+    /// The question long polls of one team at once, out of `question_long_polls`, so
+    /// one team cannot fill the lane. A poll over this is answered at once.
+    pub question_long_polls_per_team: usize,
 }
 
 impl Default for Limits {
@@ -154,6 +158,7 @@ impl Default for Limits {
             host_long_polls: 2,
             sync_transfers_total: 16,
             question_long_polls: 128,
+            question_long_polls_per_team: 32,
         }
     }
 }
@@ -177,6 +182,9 @@ pub struct RelayConfig {
     pub backup_dir: PathBuf,
     /// The push trigger (docs/SPEC.md section 25.6). `None`: push is off.
     pub push: Option<PushConfig>,
+    /// Questions with `to: "approvers"` are taken (`APASSY_RELAY_QUESTIONS_TO_APPROVERS`).
+    /// Off until shared vaults (integrator decision 1): such a post is 403 `not_routed`.
+    pub questions_to_approvers: bool,
 }
 
 /// Where and how the relay asks the Worker to send pushes.
@@ -285,6 +293,15 @@ impl RelayConfig {
                 lookup("APASSY_RELAY_BACKUP_DIR").unwrap_or_else(|| "/backups".to_string()),
             ),
             push: push_from(&lookup)?,
+            questions_to_approvers: match lookup("APASSY_RELAY_QUESTIONS_TO_APPROVERS").as_deref() {
+                None | Some("0") => false,
+                Some("1") => true,
+                Some(_) => {
+                    return Err(RelayError::invalid(
+                        "APASSY_RELAY_QUESTIONS_TO_APPROVERS is 0 or 1.",
+                    ));
+                }
+            },
         })
     }
 }
@@ -527,6 +544,14 @@ mod tests {
             RelayConfig::from_lookup(lookup(&pairs))
         };
         assert!(with(&[]).unwrap().push.is_none());
+        assert!(!with(&[]).unwrap().questions_to_approvers);
+        let approvers = |value: &'static str| {
+            with(&[("APASSY_RELAY_QUESTIONS_TO_APPROVERS", value)])
+                .map(|config| config.questions_to_approvers)
+        };
+        assert!(!approvers("0").unwrap());
+        assert!(approvers("1").unwrap());
+        assert!(approvers("yes").is_err());
         let url = (
             "APASSY_RELAY_PUSH_URL",
             "https://relay.example.test/internal/push",

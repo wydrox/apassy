@@ -64,7 +64,27 @@ pub struct TeamLimits {
     pub open_questions: u64,
     /// Questions posted in the last 3600 seconds.
     pub questions_per_hour: u64,
+    /// The bytes of question and answer ciphertext the team's file holds at once.
+    pub question_bytes: u64,
+    /// `open_questions` and `questions_per_hour` of one member, and of one device.
+    pub member_open_questions: u64,
+    pub member_questions_per_hour: u64,
+    pub device_open_questions: u64,
+    pub device_questions_per_hour: u64,
 }
+
+/// The fields of `TeamLimits` that the image before questions (`sync-*`, 84a57fa) does
+/// not know: it reads the stored JSON with `deny_unknown_fields`. `stored_json` leaves
+/// them out while they equal their default, so a rollback can still read the column.
+pub const QUESTION_LIMIT_FIELDS: [&str; 7] = [
+    "open_questions",
+    "questions_per_hour",
+    "question_bytes",
+    "member_open_questions",
+    "member_questions_per_hour",
+    "device_open_questions",
+    "device_questions_per_hour",
+];
 
 impl Default for TeamLimits {
     fn default() -> Self {
@@ -80,6 +100,11 @@ impl Default for TeamLimits {
             sync_transfers: 2,
             open_questions: 20,
             questions_per_hour: 300,
+            question_bytes: 8_388_608,
+            member_open_questions: 15,
+            member_questions_per_hour: 225,
+            device_open_questions: 10,
+            device_questions_per_hour: 150,
         }
     }
 }
@@ -110,6 +135,16 @@ pub struct TeamLimitsUpdate {
     pub open_questions: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub questions_per_hour: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member_open_questions: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member_questions_per_hour: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_open_questions: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_questions_per_hour: Option<u64>,
 }
 
 impl TeamLimits {
@@ -122,6 +157,8 @@ impl TeamLimits {
             ("pending_runs", self.pending_runs),
             ("sync_pushes_per_hour", self.sync_pushes_per_hour),
             ("questions_per_hour", self.questions_per_hour),
+            ("member_questions_per_hour", self.member_questions_per_hour),
+            ("device_questions_per_hour", self.device_questions_per_hour),
         ] {
             if !(1..=1_000_000).contains(&value) {
                 return Err(RelayError::invalid(format!(
@@ -140,8 +177,19 @@ impl TeamLimits {
         if !(1..=8).contains(&self.sync_transfers) {
             return Err(RelayError::invalid("sync_transfers must be 1 to 8."));
         }
-        if !(1..=1000).contains(&self.open_questions) {
-            return Err(RelayError::invalid("open_questions must be 1 to 1000."));
+        for (field, value) in [
+            ("open_questions", self.open_questions),
+            ("member_open_questions", self.member_open_questions),
+            ("device_open_questions", self.device_open_questions),
+        ] {
+            if !(1..=1000).contains(&value) {
+                return Err(RelayError::invalid(format!("{field} must be 1 to 1000.")));
+            }
+        }
+        if !(MIN_QUESTION_BYTES..=MAX_QUESTION_BYTES).contains(&self.question_bytes) {
+            return Err(RelayError::invalid(format!(
+                "question_bytes must be {MIN_QUESTION_BYTES} to {MAX_QUESTION_BYTES}."
+            )));
         }
         Ok(())
     }
@@ -161,11 +209,46 @@ impl TeamLimits {
             sync_transfers: update.sync_transfers.unwrap_or(self.sync_transfers),
             open_questions: update.open_questions.unwrap_or(self.open_questions),
             questions_per_hour: update.questions_per_hour.unwrap_or(self.questions_per_hour),
+            question_bytes: update.question_bytes.unwrap_or(self.question_bytes),
+            member_open_questions: update
+                .member_open_questions
+                .unwrap_or(self.member_open_questions),
+            member_questions_per_hour: update
+                .member_questions_per_hour
+                .unwrap_or(self.member_questions_per_hour),
+            device_open_questions: update
+                .device_open_questions
+                .unwrap_or(self.device_open_questions),
+            device_questions_per_hour: update
+                .device_questions_per_hour
+                .unwrap_or(self.device_questions_per_hour),
         };
         limits.validate()?;
         Ok(limits)
     }
+
+    /// The text of the `limits` column: every field, except a field of
+    /// `QUESTION_LIMIT_FIELDS` that equals its default. The image before questions
+    /// refuses unknown fields, so with default question limits it still reads the
+    /// column after a rollback (docs/OPERATIONS.md section 19.3).
+    pub fn stored_json(&self) -> RelayResult<String> {
+        let unwritable = || RelayError::internal("The limits cannot be written.");
+        let mut value = serde_json::to_value(self).map_err(|_| unwritable())?;
+        let defaults = serde_json::to_value(Self::default()).map_err(|_| unwritable())?;
+        if let Some(fields) = value.as_object_mut() {
+            for name in QUESTION_LIMIT_FIELDS {
+                if fields.get(name) == defaults.get(name) {
+                    fields.remove(name);
+                }
+            }
+        }
+        serde_json::to_string(&value).map_err(|_| unwritable())
+    }
 }
+
+/// The range of `question_bytes`: 1 MiB to 256 MiB.
+pub const MIN_QUESTION_BYTES: u64 = 1_048_576;
+pub const MAX_QUESTION_BYTES: u64 = 268_435_456;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -482,6 +565,9 @@ mod tests {
                 "runs_per_hour": 1000, "pending_runs": 50, "agent_requests": 56,
                 "sync_bytes": 67108864, "sync_pushes_per_hour": 600, "sync_transfers": 2,
                 "open_questions": 20, "questions_per_hour": 300,
+                "question_bytes": 8388608,
+                "member_open_questions": 15, "member_questions_per_hour": 225,
+                "device_open_questions": 10, "device_questions_per_hour": 150,
             })
         );
         assert_eq!(serde_json::from_str::<TeamLimits>("{}").unwrap(), defaults);
@@ -540,9 +626,106 @@ mod tests {
         assert!(questions(1001, 300).is_err());
         assert!(questions(20, 0).is_err());
         assert!(questions(20, 1_000_001).is_err());
+        for (field, low, high) in [
+            ("member_open_questions", 1, 1000),
+            ("device_open_questions", 1, 1000),
+            ("member_questions_per_hour", 1, 1_000_000),
+            ("device_questions_per_hour", 1, 1_000_000),
+            ("question_bytes", MIN_QUESTION_BYTES, MAX_QUESTION_BYTES),
+        ] {
+            let set = |value: u64| {
+                defaults.apply(
+                    serde_json::from_value::<TeamLimitsUpdate>(serde_json::json!({field: value}))
+                        .unwrap(),
+                )
+            };
+            assert!(set(low).is_ok() && set(high).is_ok(), "{field}");
+            assert!(set(low - 1).is_err() && set(high + 1).is_err(), "{field}");
+        }
         // A stored row from before questions reads the question defaults.
         let old: TeamLimits = serde_json::from_str(r#"{"members":7,"sync_transfers":3}"#).unwrap();
         assert_eq!((old.open_questions, old.questions_per_hour), (20, 300));
+    }
+
+    /// `TeamLimits` of the image before questions (84a57fa), field for field: it reads
+    /// the `limits` column with `deny_unknown_fields`.
+    #[derive(Debug, Deserialize)]
+    #[serde(default, deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct OldTeamLimits {
+        members: u64,
+        items: u64,
+        agents: u64,
+        runs_per_hour: u64,
+        pending_runs: u64,
+        agent_requests: u64,
+        sync_bytes: u64,
+        sync_pushes_per_hour: u64,
+        sync_transfers: u64,
+    }
+
+    impl Default for OldTeamLimits {
+        fn default() -> Self {
+            Self {
+                members: 50,
+                items: 500,
+                agents: 100,
+                runs_per_hour: 1000,
+                pending_runs: 50,
+                agent_requests: 56,
+                sync_bytes: 67_108_864,
+                sync_pushes_per_hour: 600,
+                sync_transfers: 2,
+            }
+        }
+    }
+
+    #[test]
+    fn stored_limits_with_default_question_limits_read_in_the_old_image() {
+        let defaults = TeamLimits::default();
+        let text = defaults.stored_json().unwrap();
+        serde_json::from_str::<OldTeamLimits>(&text).unwrap();
+        assert_eq!(serde_json::from_str::<TeamLimits>(&text).unwrap(), defaults);
+        // A changed limit of the old image stays readable too.
+        let changed = defaults
+            .apply(TeamLimitsUpdate {
+                members: Some(7),
+                sync_transfers: Some(3),
+                ..Default::default()
+            })
+            .unwrap();
+        let text = changed.stored_json().unwrap();
+        let old = serde_json::from_str::<OldTeamLimits>(&text).unwrap();
+        assert_eq!((old.members, old.sync_transfers), (7, 3));
+        assert_eq!(serde_json::from_str::<TeamLimits>(&text).unwrap(), changed);
+        // Each question limit changed from its default is written, and the old image
+        // refuses the column: the rollback restores relay.db (OPERATIONS 19.3).
+        for field in QUESTION_LIMIT_FIELDS {
+            let value = match field {
+                "question_bytes" => MIN_QUESTION_BYTES,
+                _ => 1,
+            };
+            let update =
+                serde_json::from_value::<TeamLimitsUpdate>(serde_json::json!({field: value}))
+                    .unwrap();
+            let limits = defaults.apply(update).unwrap();
+            let text = limits.stored_json().unwrap();
+            assert!(text.contains(field), "{field}");
+            assert!(
+                serde_json::from_str::<OldTeamLimits>(&text).is_err(),
+                "{field}"
+            );
+            assert_eq!(serde_json::from_str::<TeamLimits>(&text).unwrap(), limits);
+        }
+        // The operator still sees every field.
+        assert_eq!(
+            serde_json::to_value(defaults)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .len(),
+            16
+        );
     }
 
     #[test]

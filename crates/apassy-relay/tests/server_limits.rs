@@ -22,7 +22,9 @@ fn defaults() -> Value {
     json!({"members":50,"items":500,"agents":100,"runs_per_hour":1000,
            "pending_runs":50,"agent_requests":56,"sync_bytes":67108864,
            "sync_pushes_per_hour":600,"sync_transfers":2,
-           "open_questions":20,"questions_per_hour":300})
+           "open_questions":20,"questions_per_hour":300,"question_bytes":8388608,
+           "member_open_questions":15,"member_questions_per_hour":225,
+           "device_open_questions":10,"device_questions_per_hour":150})
 }
 
 fn set(relay: &TestRelay, update: Value) -> Value {

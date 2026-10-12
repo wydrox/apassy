@@ -427,6 +427,7 @@ mod tests {
             limits: Default::default(),
             backup_dir: dir.path().join("backups"),
             push: None,
+            questions_to_approvers: false,
         };
         let owner = Relay::init(&config, "team", "owner").unwrap();
         let hub = Hub::open(config, Arc::new(AtomicBool::new(false))).unwrap();
