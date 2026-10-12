@@ -31,7 +31,7 @@ The app layout is in [desktop UI](desktop-ui.md).
 
 ## 3. Connect Claude Code and Codex
 
-1. In Agents, click "+" ("Connect an Agent") for each host, pick it, and confirm once. Apassy saves the settings of Claude Code, Codex, and T3 Code. The token expires after 30 days. Rotate it on the page of the agent.
+1. In Agents, click "+" ("Connect an Agent") for each host, pick it, and confirm once. Apassy saves the settings of Claude Code, Codex, and T3 Code. The token expires after 30 days. "Reconnect…" on the page of the agent gives a new one.
 2. For another host ("Other"), add the MCP server with the path `/Applications/Apassy.app/Contents/MacOS/apassy-mcp`: [agent path](agent-path.md), section 4. Give the host a tool time-out of at least 330 seconds (`MCP_TOOL_TIMEOUT=330000` for Claude Code): a question waits up to 5 minutes.
 3. Install the prompt hook for each host: [host hooks](host-hooks.md), section 6.
 4. There is no access to give. The bouncer decides each use and asks you in Decisions when it is not sure ([agent path](agent-path.md), section 8).
@@ -41,9 +41,10 @@ The app layout is in [desktop UI](desktop-ui.md).
 
 ## 4. Every day
 
-- A banner on every view shows a question that waits for you, and Decisions lists it, with the time left of its 5 minutes. Answer "Deny", "Allow Once", or "Allow ACTION in PROJECT". An answer that allows needs Touch ID or the passphrase.
-- A production run waits for you, unless you allowed production for that project and kind of action.
-- "Approve and remember" makes a pattern. A pattern runs without a prompt after 3 approvals. One denial blocks it.
+- A banner on every view shows a question that waits for you, and Decisions lists it, with the time left of its 5 minutes. Answer "Deny", "Allow Once", or "Allow ACTION in PROJECT", for example "Allow Read in shop". Apassy remembers "Allow ACTION in PROJECT" for the credential, the project, and the kind of action, for all agents. An answer that allows needs Touch ID or the passphrase.
+- A production run waits for you, unless you allowed production for that project and kind of action. A question about a production credential offers "Allow production: ACTION in PROJECT" instead. A credential that is production only by default offers "Development" and "Production".
+- The "⋯" menu of a question has the stricter answers "Never for AGENT", "Always Ask for AGENT", and "Disconnect AGENT…". They need no owner check. The credential page lists your remembered answers under "Rules from your answers"; "Remove" takes one away.
+- Decisions also shows Requests (an agent asks you to paste a credential) and Suggestions (corrections from how agents use a credential).
 - The line under the Decisions title shows how often Apassy asked you this week. Goal item B12: after two weeks, you are asked on 10% or fewer of the runs, over the last seven days.
 - Settings > Devices > Notifications has the "Allow notifications" button.
 

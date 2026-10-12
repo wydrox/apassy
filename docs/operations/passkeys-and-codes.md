@@ -75,7 +75,7 @@ The website keeps its copy of the public key. Remove the passkey in the account 
 - The Mac editor hides a visible detail that has an OTP label or looks like a setup key, also when you save without a change.
 - Credential Exchange export gives the seed to the other app, after the owner check.
 
-The agent catalog hides setup keys, including visible fields from an earlier build. The decision log masks their stored values. An owner can still bind a hidden setup key to an environment variable and grant process access. The dialog names the field and says that programs can make one-time codes. The owner proof names the field, variable, delivery mode, and setup-key status. Automatic batch binding refuses setup keys, including a field that becomes a setup key while its dialog is open.
+The agent catalog hides setup keys, including visible fields from an earlier build. The decision log masks their stored values. An owner can still bind a hidden setup key to an environment variable in "Command settings". The dialog names the field and says that programs can make one-time codes. The owner proof names the field, variable, delivery mode, and setup-key status. Automatic batch binding refuses setup keys, including a field that becomes a setup key while its dialog is open.
 
 ## 5. Upgrade to schema 17
 
