@@ -30,6 +30,8 @@ public actor PreviewVaultService: VaultService {
     private var items: [UInt64: Stored] = [:]
     private var nextID: UInt64 = 100
     private var status: SyncStatus
+    /// Questions through the relay (`PreviewVaultService+Questions.swift`).
+    var questionsState = PreviewQuestions()
 
     /// - Parameters:
     ///   - empty: no vault on this iPhone (the setup flow).
