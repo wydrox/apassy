@@ -11,6 +11,12 @@
 //! | `APASSY_RELAY_APPROVAL_TIMEOUT` | Seconds a run waits for the owner's host; 30 to 86400 | `600` |
 //! | `APASSY_RELAY_BACKUP_DIR` | Where `admin backup` writes a new dated folder | `/backups` |
 //! | `APASSY_RELAY_BLOCKED_ADDRESSES` | Public addresses or networks the proxy refuses too, comma-separated (the relay's own) | none |
+//! | `APASSY_RELAY_PUSH_URL` | The Worker's push route, such as `https://apassy-relay.wyderka.cc/internal/push` | none: push is off |
+//! | `APASSY_RELAY_PUSH_TOPIC` | The bundle id of the iPhone app, such as `com.wydrox.apassy.companion` | none: push is off |
+//! | `APASSY_RELAY_PUSH_SECRET` or `APASSY_RELAY_PUSH_SECRET_FILE` | The secret the relay sends to the push route as `X-Apassy-Push` (the Worker's `PUSH_SECRET`); at least 32 bytes | none: push is off |
+//!
+//! Push needs all three push values; none of them turns it off. Some but not all is a
+//! configuration error, so a typo does not turn push off without a word.
 //!
 //! A `_FILE` variable names a file whose content (trailing newline removed) is the
 //! value. It wins over the plain variable.
@@ -23,6 +29,7 @@ use crate::error::{RelayError, RelayResult};
 use crate::secret::SecretString;
 
 pub const MIN_EDGE_SECRET_BYTES: usize = 32;
+pub const MIN_PUSH_SECRET_BYTES: usize = 32;
 pub const MIN_KEY_BYTES: usize = 16;
 pub const DEFAULT_SESSION_TTL_SECS: u64 = 900;
 pub const MAX_SESSION_TTL_SECS: u64 = 3600;
@@ -131,6 +138,11 @@ pub struct Limits {
     /// The most snapshot transfers (pushes and downloads) of all teams at once. One
     /// more gets 503 `busy`. Each team also has its own `sync_transfers` limit.
     pub sync_transfers_total: usize,
+    /// The question long polls of all teams at once (`GET /v1/questions` and
+    /// `GET /v1/questions/{qid}/answers` with a `wait`). They have their own threads,
+    /// apart from `max_active`, so they never take the member reserve. A poll over this
+    /// runs in the member lane and is answered at once, as with `wait=0`.
+    pub question_long_polls: usize,
 }
 
 impl Default for Limits {
@@ -141,6 +153,7 @@ impl Default for Limits {
             long_polls_per_agent: 4,
             host_long_polls: 2,
             sync_transfers_total: 16,
+            question_long_polls: 128,
         }
     }
 }
@@ -162,6 +175,19 @@ pub struct RelayConfig {
     pub limits: Limits,
     /// Where `apassy-relay admin backup` writes (`APASSY_RELAY_BACKUP_DIR`).
     pub backup_dir: PathBuf,
+    /// The push trigger (docs/SPEC.md section 25.6). `None`: push is off.
+    pub push: Option<PushConfig>,
+}
+
+/// Where and how the relay asks the Worker to send pushes.
+#[derive(Debug, Clone)]
+pub struct PushConfig {
+    /// The Worker's push route: `https://`, or `http://` to a loopback address (tests).
+    pub url: String,
+    /// The bundle id of the iPhone app (the APNs topic). A push token names it.
+    pub topic: String,
+    /// Sent as `X-Apassy-Push`. Never logged.
+    pub secret: SecretString,
 }
 
 impl RelayConfig {
@@ -258,8 +284,76 @@ impl RelayConfig {
             backup_dir: PathBuf::from(
                 lookup("APASSY_RELAY_BACKUP_DIR").unwrap_or_else(|| "/backups".to_string()),
             ),
+            push: push_from(&lookup)?,
         })
     }
+}
+
+/// The push values: all three, or none (push off).
+fn push_from(lookup: &impl Fn(&str) -> Option<String>) -> RelayResult<Option<PushConfig>> {
+    let url = lookup("APASSY_RELAY_PUSH_URL");
+    let topic = lookup("APASSY_RELAY_PUSH_TOPIC");
+    let has_secret = lookup("APASSY_RELAY_PUSH_SECRET").is_some()
+        || lookup("APASSY_RELAY_PUSH_SECRET_FILE").is_some();
+    if url.is_none() && topic.is_none() && !has_secret {
+        return Ok(None);
+    }
+    let (Some(url), Some(topic), true) = (url, topic, has_secret) else {
+        return Err(RelayError::invalid(
+            "Push needs APASSY_RELAY_PUSH_URL, APASSY_RELAY_PUSH_TOPIC, and APASSY_RELAY_PUSH_SECRET (or _FILE), or none of them.",
+        ));
+    };
+    let url = checked_push_url(&url)?;
+    let topic = topic.trim().to_string();
+    if !is_bundle_id(&topic) {
+        return Err(RelayError::invalid(
+            "APASSY_RELAY_PUSH_TOPIC is a bundle id such as com.example.app.",
+        ));
+    }
+    let secret = secret_from(lookup, "APASSY_RELAY_PUSH_SECRET")?;
+    if secret.len() < MIN_PUSH_SECRET_BYTES {
+        return Err(RelayError::invalid(format!(
+            "The push secret must have at least {MIN_PUSH_SECRET_BYTES} bytes."
+        )));
+    }
+    Ok(Some(PushConfig { url, topic, secret }))
+}
+
+/// An `https://` URL, or an `http://` URL to a loopback address (tests). The secret
+/// goes with every call, so it never goes in clear over a network.
+fn checked_push_url(text: &str) -> RelayResult<String> {
+    let text = text.trim();
+    let invalid = || {
+        RelayError::invalid(
+            "APASSY_RELAY_PUSH_URL is an https:// URL such as https://apassy-relay.example.com/internal/push.",
+        )
+    };
+    if text.contains(['?', '#', '@', ' ']) {
+        return Err(invalid());
+    }
+    let rest = if let Some(rest) = text.strip_prefix("https://") {
+        rest
+    } else if let Some(rest) = text.strip_prefix("http://") {
+        let host = rest.split(['/', ':']).next().unwrap_or_default();
+        if !matches!(host, "127.0.0.1" | "localhost") {
+            return Err(invalid());
+        }
+        rest
+    } else {
+        return Err(invalid());
+    };
+    if rest.split('/').next().is_none_or(str::is_empty) {
+        return Err(invalid());
+    }
+    Ok(text.to_string())
+}
+
+/// A bundle id: letters, digits, `.` and `-`, 1 to 155 bytes, no empty part.
+pub fn is_bundle_id(text: &str) -> bool {
+    (1..=155).contains(&text.len())
+        && text.split('.').all(|part| {
+            !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
 }
 
 /// An `http://` or `https://` origin without a path, query, or trailing slash.
@@ -418,6 +512,62 @@ mod tests {
             ]))
             .is_err()
         );
+    }
+
+    #[test]
+    fn push_is_all_three_values_or_none() {
+        let base = [
+            ("APASSY_RELAY_PUBLIC_URL", "https://relay.example.test"),
+            ("APASSY_RELAY_EDGE_SECRET", EDGE),
+            ("APASSY_RELAY_KEY", "a synthetic vault passphrase"),
+        ];
+        let with = |extra: &[(&'static str, &'static str)]| {
+            let mut pairs = base.to_vec();
+            pairs.extend_from_slice(extra);
+            RelayConfig::from_lookup(lookup(&pairs))
+        };
+        assert!(with(&[]).unwrap().push.is_none());
+        let url = (
+            "APASSY_RELAY_PUSH_URL",
+            "https://relay.example.test/internal/push",
+        );
+        let topic = ("APASSY_RELAY_PUSH_TOPIC", "com.wydrox.apassy.companion");
+        let secret = (
+            "APASSY_RELAY_PUSH_SECRET",
+            "push-secret-for-tests-0123456789abcdef",
+        );
+        let push = with(&[url, topic, secret]).unwrap().push.unwrap();
+        assert_eq!(push.url, "https://relay.example.test/internal/push");
+        assert_eq!(push.topic, "com.wydrox.apassy.companion");
+        assert_eq!(push.secret.expose(), secret.1);
+        // Some but not all is an error, and so is a value out of its form.
+        for partial in [vec![url], vec![topic, secret], vec![url, topic]] {
+            assert!(with(&partial).is_err());
+        }
+        for bad_url in [
+            "http://relay.example.test/internal/push",
+            "ftp://relay.example.test/x",
+            "https://",
+            "https://relay.example.test/x?y=1",
+        ] {
+            assert!(
+                with(&[("APASSY_RELAY_PUSH_URL", bad_url), topic, secret]).is_err(),
+                "{bad_url}"
+            );
+        }
+        assert!(
+            with(&[
+                ("APASSY_RELAY_PUSH_URL", "http://127.0.0.1:9/internal/push"),
+                topic,
+                secret
+            ])
+            .is_ok()
+        );
+        assert!(with(&[url, ("APASSY_RELAY_PUSH_TOPIC", "com..x"), secret]).is_err());
+        assert!(with(&[url, ("APASSY_RELAY_PUSH_TOPIC", "com x"), secret]).is_err());
+        assert!(with(&[url, topic, ("APASSY_RELAY_PUSH_SECRET", "short")]).is_err());
+        assert!(is_bundle_id("com.wydrox.apassy.companion"));
+        assert!(!is_bundle_id(""));
     }
 
     #[test]

@@ -27,6 +27,7 @@ const USAGE: &str = "Usage:
   apassy-relay admin limits <team id> [--members <n>] [--items <n>] [--agents <n>]
     [--runs-per-hour <n>] [--pending-runs <n>] [--agent-requests <n>]
     [--sync-bytes <n>] [--sync-pushes-per-hour <n>] [--sync-transfers <n>]
+    [--open-questions <n>] [--questions-per-hour <n>]
   apassy-relay admin suspend|resume|delete <team id>
   apassy-relay admin backup
 
@@ -34,7 +35,8 @@ The configuration is read from the environment:
   APASSY_RELAY_DATA, APASSY_RELAY_LISTEN, APASSY_RELAY_PUBLIC_URL,
   APASSY_RELAY_EDGE_SECRET or _FILE, APASSY_RELAY_KEY or _FILE (the master key),
   APASSY_RELAY_SESSION_TTL, APASSY_RELAY_APPROVAL_TIMEOUT,
-  APASSY_RELAY_BLOCKED_ADDRESSES, APASSY_RELAY_BACKUP_DIR.
+  APASSY_RELAY_BLOCKED_ADDRESSES, APASSY_RELAY_BACKUP_DIR, and for push all of
+  APASSY_RELAY_PUSH_URL, APASSY_RELAY_PUSH_TOPIC, APASSY_RELAY_PUSH_SECRET or _FILE.
 `migrate` also reads APASSY_RELAY_OLD_KEY or _FILE: the key of the old team.db.
 `admin` reads only APASSY_RELAY_DATA and talks to the running relay.";
 
@@ -103,9 +105,11 @@ fn parse_admin(args: &[String]) -> Result<Operator, String> {
                 "--sync-bytes",
                 "--sync-pushes-per-hour",
                 "--sync-transfers",
+                "--open-questions",
+                "--questions-per-hour",
             ];
             let flags = parse_flags(&rest[1..], &names)?;
-            let mut values = [None; 9];
+            let mut values = [None; 11];
             for (index, text) in flags.iter().enumerate() {
                 if let Some(text) = text {
                     values[index] =
@@ -127,6 +131,8 @@ fn parse_admin(args: &[String]) -> Result<Operator, String> {
                     sync_bytes: values[6],
                     sync_pushes_per_hour: values[7],
                     sync_transfers: values[8],
+                    open_questions: values[9],
+                    questions_per_hour: values[10],
                 });
             if let Some(update) = set {
                 TeamLimits::default()
@@ -263,6 +269,11 @@ fn main() -> ExitCode {
         Command::Serve => match Relay::start(config) {
             Ok(running) => {
                 eprintln!("apassy-relay: listening on {}", running.addr);
+                if running.hub().config.push.is_none() {
+                    eprintln!(
+                        "apassy-relay: push is off (APASSY_RELAY_PUSH_URL, APASSY_RELAY_PUSH_TOPIC, and APASSY_RELAY_PUSH_SECRET are not set): questions reach the devices by their long polls only"
+                    );
+                }
                 running.wait();
                 ExitCode::SUCCESS
             }
@@ -325,6 +336,8 @@ mod tests {
             vec!["limits", "t_abcdefgh23", "--sync-bytes", "268435457"],
             vec!["limits", "t_abcdefgh23", "--sync-pushes-per-hour", "0"],
             vec!["limits", "t_abcdefgh23", "--sync-transfers", "9"],
+            vec!["limits", "t_abcdefgh23", "--open-questions", "1001"],
+            vec!["limits", "t_abcdefgh23", "--questions-per-hour", "0"],
             vec!["limits", "t_abcdefgh23", "--items", "1", "--items", "2"],
             vec!["limits", "t_abcdefgh23", "--unknown", "1"],
             vec!["limits", "t_abcdefgh23", "t_bcdefgh234"],
@@ -357,6 +370,10 @@ mod tests {
                 "8",
                 "--sync-transfers",
                 "1",
+                "--open-questions",
+                "10",
+                "--questions-per-hour",
+                "11",
             ]))
             .unwrap(),
             Operator::Limits {
@@ -371,6 +388,8 @@ mod tests {
                     sync_bytes: Some(1_048_576),
                     sync_pushes_per_hour: Some(8),
                     sync_transfers: Some(1),
+                    open_questions: Some(10),
+                    questions_per_hour: Some(11),
                 }),
             }
         );

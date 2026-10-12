@@ -343,6 +343,11 @@ fn revoke_member(core: &Core, by: &MemberAuth, id: MemberId, now: u64) -> RelayR
                 .map_err(db)?
         };
         tx.execute(
+            "DELETE FROM push_token WHERE device_id IN (SELECT id FROM device WHERE member_id = ?1)",
+            params![to_i(id.0)],
+        )
+        .map_err(db)?;
+        tx.execute(
             "UPDATE device SET revoked_at = ?2 WHERE member_id = ?1 AND revoked_at IS NULL",
             params![to_i(id.0), to_i(now)],
         )

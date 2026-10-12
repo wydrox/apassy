@@ -84,6 +84,12 @@ pub mod paths {
     pub const SYNC_SNAPSHOT: &str = "/v1/sync/snapshot";
     /// `POST`: this device merged a version.
     pub const SYNC_RECEIPT: &str = "/v1/sync/receipt";
+    /// `POST`: a new question; `GET ?since=N&wait=S`: the questions routed to this device
+    /// (docs/SPEC.md section 25). `/v1/questions/{qid}/answers` (`POST`, `GET
+    /// ?after=N&wait=S`) and `/v1/questions/{qid}/settle` (`POST`) are under it.
+    pub const QUESTIONS: &str = "/v1/questions";
+    /// `PUT`: the APNs token of this device; `DELETE`: removes it.
+    pub const PUSH_TOKEN: &str = "/v1/push/token";
     pub const MCP: &str = "/mcp";
     /// `/p/<session key>/<host[:port]>/<path>`.
     pub const PROXY_PREFIX: &str = "/p/";
@@ -959,6 +965,110 @@ pub struct SyncHeadView {
 #[serde(deny_unknown_fields)]
 pub struct ReceiptRequest {
     pub version: u64,
+}
+
+/// `POST /v1/questions` (docs/SPEC.md section 25.4). The relay never opens the
+/// ciphertext; it checks only the forms and the sizes.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionPost {
+    pub v: u64,
+    /// 16 random bytes of the asker, base64url: 22 characters.
+    pub qid: String,
+    /// `member` or `approvers`.
+    pub to: String,
+    pub expires_at: u64,
+    /// 16 lowercase hex characters.
+    pub key_id: String,
+    /// 12 bytes, base64url.
+    pub nonce: String,
+    /// base64url, not empty.
+    pub ciphertext: String,
+}
+
+/// `POST /v1/questions/{qid}/answers` and `POST /v1/questions/{qid}/settle`: one sealed
+/// envelope under the question's key.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvelopePost {
+    pub v: u64,
+    pub key_id: String,
+    pub nonce: String,
+    pub ciphertext: String,
+}
+
+/// `PUT /v1/push/token`: the APNs device token of the calling device.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PushTokenPut {
+    /// Lowercase hex, 32 to 200 characters.
+    pub token: String,
+    /// `development` or `production`: the `aps-environment` of the build.
+    pub environment: String,
+    /// Must equal the relay's push topic.
+    pub bundle_id: String,
+}
+
+/// A sealed envelope in an answer of the relay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SealedView {
+    pub key_id: String,
+    /// base64url.
+    pub nonce: String,
+    /// base64url.
+    pub ciphertext: String,
+}
+
+/// One question in `GET /v1/questions`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionView {
+    pub qid: String,
+    pub seq: u64,
+    /// `member` or `approvers`.
+    pub to: String,
+    pub from_device_id: DeviceId,
+    pub from_device_name: String,
+    pub key_id: String,
+    pub nonce: String,
+    pub ciphertext: String,
+    pub created_at: u64,
+    pub expires_at: u64,
+    /// `open`, `settled`, or `expired`.
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle: Option<SealedView>,
+}
+
+/// `GET /v1/questions?since=N&wait=S`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionList {
+    /// The team's question sequence now. Below the caller's `since`: the relay was
+    /// restored from a backup, read again from 0.
+    pub seq: u64,
+    pub questions: Vec<QuestionView>,
+}
+
+/// One answer in `GET /v1/questions/{qid}/answers`, stamped by the relay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnswerView {
+    pub id: u64,
+    pub device_id: DeviceId,
+    pub member_id: MemberId,
+    pub role: Role,
+    pub key_id: String,
+    pub nonce: String,
+    pub ciphertext: String,
+    pub at: u64,
+}
+
+/// `GET /v1/questions/{qid}/answers?after=N&wait=S`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnswerList {
+    pub state: String,
+    pub expires_at: u64,
+    pub answers: Vec<AnswerView>,
 }
 
 #[cfg(test)]

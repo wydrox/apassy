@@ -63,6 +63,21 @@ pub mod codes {
     pub const SYNC_HEAD_INVALID: &str = "sync_head_invalid";
     /// `If-Match` does not name the current version. The answer has `ETag`.
     pub const PRECONDITION_FAILED: &str = "precondition_failed";
+    // Questions and push (docs/SPEC.md section 25).
+    /// An answer from a device outside the routing set of the question, or from the
+    /// asking device itself.
+    pub const NOT_ROUTED: &str = "not_routed";
+    /// The team has `open_questions` open questions, or posted `questions_per_hour`.
+    /// 403, not 429: the app holds every call to the relay after a 429.
+    pub const TOO_MANY_QUESTIONS: &str = "too_many_questions";
+    /// The device already posted 3 answers to this question.
+    pub const TOO_MANY_ANSWERS: &str = "too_many_answers";
+    /// An answer to a settled question, or a settle with another envelope.
+    pub const QUESTION_SETTLED: &str = "question_settled";
+    /// An answer or a settle after `expires_at`.
+    pub const QUESTION_EXPIRED: &str = "question_expired";
+    /// `PUT /v1/push/token` on a relay without push.
+    pub const PUSH_UNAVAILABLE: &str = "push_unavailable";
     // Anything else.
     pub const RELAY_ERROR: &str = "relay_error";
 }
@@ -93,10 +108,13 @@ pub fn status_of(code: &str) -> u16 {
         | JOIN_PENDING
         | JOIN_REFUSED
         | NOT_KEY_HOLDER
-        | SYNC_HEAD_INVALID => 403,
+        | SYNC_HEAD_INVALID
+        | NOT_ROUTED
+        | TOO_MANY_QUESTIONS
+        | TOO_MANY_ANSWERS => 403,
         NOT_FOUND => 404,
         METHOD_NOT_ALLOWED => 405,
-        CONFLICT | RUN_NOT_PENDING => 409,
+        CONFLICT | RUN_NOT_PENDING | QUESTION_SETTLED | QUESTION_EXPIRED | PUSH_UNAVAILABLE => 409,
         PRECONDITION_FAILED => 412,
         PAYLOAD_TOO_LARGE => 413,
         NOT_SUPPORTED => 501,
@@ -182,6 +200,20 @@ mod tests {
         assert_eq!(RelayError::new(codes::RELEASE_INVALID, "x").status(), 403);
         assert_eq!(RelayError::new(codes::TEAM_LIMIT, "x").status(), 403);
         assert_eq!(RelayError::new(codes::SYNC_HEAD_INVALID, "x").status(), 403);
+        for code in [
+            codes::NOT_ROUTED,
+            codes::TOO_MANY_QUESTIONS,
+            codes::TOO_MANY_ANSWERS,
+        ] {
+            assert_eq!(RelayError::new(code, "x").status(), 403);
+        }
+        for code in [
+            codes::QUESTION_SETTLED,
+            codes::QUESTION_EXPIRED,
+            codes::PUSH_UNAVAILABLE,
+        ] {
+            assert_eq!(RelayError::new(code, "x").status(), 409);
+        }
         assert_eq!(
             RelayError::new(codes::PRECONDITION_FAILED, "x").status(),
             412

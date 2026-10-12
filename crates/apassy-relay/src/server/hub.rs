@@ -159,6 +159,8 @@ pub fn remove_team_file(config: &RelayConfig, id: &TeamId) -> RelayResult<()> {
         with(".pre-v3.tmp"),
         with(".pre-v4"),
         with(".pre-v4.tmp"),
+        with(".pre-v5"),
+        with(".pre-v5.tmp"),
     ];
     for file in std::iter::once(path.clone().into_os_string()).chain(extra) {
         match std::fs::remove_file(&file) {
@@ -248,6 +250,9 @@ pub struct TeamInfo {
     /// `None` while the team is not open.
     pub sync_version: Option<u64>,
     pub sync_size: Option<u64>,
+    /// Open questions and push tokens (counts). `None` while the team is not open.
+    pub open_questions: Option<u64>,
+    pub push_tokens: Option<u64>,
 }
 
 /// The teams of the relay.
@@ -265,6 +270,8 @@ pub struct Hub {
     lock: Mutex<Option<File>>,
     /// Snapshot transfers of every team in flight.
     sync_transfers: Arc<AtomicUsize>,
+    /// The push trigger, shared by every team.
+    push: Arc<crate::server::push::Push>,
 }
 
 impl Hub {
@@ -285,6 +292,7 @@ impl Hub {
         let rules = RuleSet::builtin().map_err(|_| {
             RelayError::internal("The built-in rule packs of the core cannot be loaded.")
         })?;
+        let push = crate::server::push::Push::start(config.push.clone(), stop.clone())?;
         let hub = Arc::new(Self {
             public_host: crate::decision::public_host(&config.public_url),
             config: Arc::new(config),
@@ -296,6 +304,7 @@ impl Hub {
             draining: Mutex::new(HashMap::new()),
             lock: Mutex::new(Some(lock)),
             sync_transfers: Arc::new(AtomicUsize::new(0)),
+            push,
         });
         let rows = hub.directory.teams()?;
         finish_migration(&hub.config, &rows);
@@ -350,6 +359,9 @@ impl Hub {
             relay_sync_transfers: self.sync_transfers.clone(),
             sync_polls: LongPolls::new(1),
             sync_commit: Mutex::new(()),
+            question_polls: LongPolls::new(1),
+            answer_polls: LongPolls::new(1),
+            push: self.push.clone(),
             stop: self.stop.clone(),
             closed: AtomicBool::new(false),
             team_limits: RwLock::new(team_limits),
@@ -629,6 +641,7 @@ impl Hub {
                                 |r| Ok((r.get(0)?, r.get(1)?)),
                             )
                             .map_err(db)?;
+                        let questions = crate::server::questions::counts(conn, now)?;
                         Ok((
                             count("SELECT count(*) FROM member WHERE revoked_at IS NULL")?,
                             count("SELECT count(*) FROM item WHERE archived_at IS NULL")?,
@@ -643,6 +656,7 @@ impl Hub {
                             last.map(to_u),
                             to_u(sync_version),
                             to_u(sync_size),
+                            questions,
                         ))
                     })
                     .ok()
@@ -662,6 +676,8 @@ impl Hub {
                 last_activity: counts.and_then(|c| c.3),
                 sync_version: counts.map(|c| c.4),
                 sync_size: counts.map(|c| c.5),
+                open_questions: counts.map(|c| c.6.0),
+                push_tokens: counts.map(|c| c.6.1),
             });
         }
         Ok(infos)

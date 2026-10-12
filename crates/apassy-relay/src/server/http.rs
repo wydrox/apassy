@@ -5,6 +5,8 @@
 //! the edge secret; the proxy path `/p/`; the route (404, 405); the body (413); the
 //! token and its role; the endpoint. Every JSON answer is an envelope. The endpoints of
 //! the owner's host (`/v1/host/...`) are not agent paths: they use the member lane.
+//! Question long polls have a lane of their own (`Limits::question_long_polls`), apart
+//! from `max_active`, so they never take the threads of the member reserve.
 
 use std::io::Read;
 use std::sync::Arc;
@@ -28,6 +30,7 @@ use crate::secret::{TokenKind, parse_token};
 use crate::server::approvals::Denier;
 use crate::server::auth::{self, Need, Principal};
 use crate::server::hub::Hub;
+use crate::server::questions::{self, Qid};
 use crate::server::sync::{PushRequest, SyncError};
 use crate::server::{Core, admin, approvals, decide, devices, host, joins, mcp, sync};
 
@@ -91,6 +94,13 @@ pub enum Endpoint {
     SyncPush,
     SyncReceipt,
     SyncDelete,
+    QuestionPost,
+    QuestionList,
+    AnswerPost(Qid),
+    AnswerList(Qid),
+    Settle(Qid),
+    PushTokenPut,
+    PushTokenDelete,
 }
 
 type Routed = (Need, Endpoint);
@@ -221,6 +231,34 @@ pub fn route(method: &str, path: &str) -> RelayResult<Routed> {
             ],
         ),
         ["v1", "sync", "receipt"] => pick(method, &[("POST", Need::Member, SyncReceipt)]),
+        ["v1", "questions"] => pick(
+            method,
+            &[
+                ("POST", Need::Member, QuestionPost),
+                ("GET", Need::Member, QuestionList),
+            ],
+        ),
+        ["v1", "questions", qid, "answers"] => {
+            let qid = questions::path_qid(qid)?;
+            pick(
+                method,
+                &[
+                    ("POST", Need::Member, AnswerPost(qid)),
+                    ("GET", Need::Member, AnswerList(qid)),
+                ],
+            )
+        }
+        ["v1", "questions", qid, "settle"] => pick(
+            method,
+            &[("POST", Need::Member, Settle(questions::path_qid(qid)?))],
+        ),
+        ["v1", "push", "token"] => pick(
+            method,
+            &[
+                ("PUT", Need::Member, PushTokenPut),
+                ("DELETE", Need::Member, PushTokenDelete),
+            ],
+        ),
         _ => Err(not_found()),
     }
 }
@@ -245,17 +283,54 @@ pub fn is_agent_path(url: &str) -> bool {
         || path.starts_with("/v1/runs/")
 }
 
-/// The request threads in use: all of them, and those of agent paths.
+/// True for a question long poll: `GET /v1/questions` or `GET
+/// /v1/questions/{qid}/answers` with a `wait` above 0. It may run in the question lane.
+pub fn is_question_poll(method: &str, url: &str) -> bool {
+    let (path, query) = url.split_once('?').unwrap_or((url, ""));
+    let polls = path == paths::QUESTIONS
+        || path
+            .strip_prefix("/v1/questions/")
+            .and_then(|rest| rest.strip_suffix("/answers"))
+            .is_some_and(|qid| !qid.is_empty() && !qid.contains('/'));
+    method == "GET"
+        && polls
+        && query_param(query, "wait")
+            .and_then(|wait| wait.parse::<u64>().ok())
+            .is_some_and(|wait| wait > 0)
+}
+
+/// The threads a request runs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lane {
+    /// Members, approvers, the host, `/healthz`: any of `max_active`.
+    Member,
+    /// The proxy, MCP, runs, access: `max_active` without the member reserve.
+    Agent,
+    /// A question long poll: `question_long_polls`, apart from `max_active`.
+    Question,
+}
+
+/// The request threads in use: all of them, those of agent paths, and the question
+/// long polls (not in `all`).
 struct Slots {
     all: AtomicUsize,
     agent: AtomicUsize,
+    questions: AtomicUsize,
 }
 
 impl Slots {
-    fn release(&self, agent: bool) {
-        self.all.fetch_sub(1, Ordering::Relaxed);
-        if agent {
-            self.agent.fetch_sub(1, Ordering::Relaxed);
+    fn release(&self, lane: Lane) {
+        match lane {
+            Lane::Question => {
+                self.questions.fetch_sub(1, Ordering::Relaxed);
+            }
+            Lane::Agent => {
+                self.all.fetch_sub(1, Ordering::Relaxed);
+                self.agent.fetch_sub(1, Ordering::Relaxed);
+            }
+            Lane::Member => {
+                self.all.fetch_sub(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -263,12 +338,12 @@ impl Slots {
 /// Owns the global slots even if the handler panics or its thread cannot start.
 struct SlotGuard {
     slots: Arc<Slots>,
-    agent: bool,
+    lane: Lane,
 }
 
 impl Drop for SlotGuard {
     fn drop(&mut self) {
-        self.slots.release(self.agent);
+        self.slots.release(self.lane);
     }
 }
 
@@ -322,32 +397,58 @@ pub fn serve(serving: Serving) {
     let slots = Arc::new(Slots {
         all: AtomicUsize::new(0),
         agent: AtomicUsize::new(0),
+        questions: AtomicUsize::new(0),
     });
     let mut last_maintenance = Instant::now();
     while !stop.load(Ordering::Relaxed) {
         match server.recv_timeout(Duration::from_millis(200)) {
             Ok(Some(request)) => {
                 // Only the accept loop takes a slot, so a load and an add do not race.
-                let agent = is_agent_path(request.url());
-                let full = slots.all.load(Ordering::Relaxed) >= limits.max_active
-                    || (agent && slots.agent.load(Ordering::Relaxed) >= agent_max);
+                let lane = if is_question_poll(request.method().as_str(), request.url())
+                    && slots.questions.load(Ordering::Relaxed) < limits.question_long_polls
+                {
+                    Lane::Question
+                } else if is_agent_path(request.url()) {
+                    Lane::Agent
+                } else {
+                    Lane::Member
+                };
+                let full = match lane {
+                    Lane::Question => false,
+                    Lane::Agent => {
+                        slots.all.load(Ordering::Relaxed) >= limits.max_active
+                            || slots.agent.load(Ordering::Relaxed) >= agent_max
+                    }
+                    Lane::Member => slots.all.load(Ordering::Relaxed) >= limits.max_active,
+                };
                 if full {
                     respond_busy(request);
                 } else {
-                    slots.all.fetch_add(1, Ordering::Relaxed);
-                    if agent {
-                        slots.agent.fetch_add(1, Ordering::Relaxed);
+                    match lane {
+                        Lane::Question => {
+                            slots.questions.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Lane::Agent => {
+                            slots.all.fetch_add(1, Ordering::Relaxed);
+                            slots.agent.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Lane::Member => {
+                            slots.all.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                     let (hub, proxy) = (hub.clone(), proxy.clone());
                     let guard = SlotGuard {
                         slots: slots.clone(),
-                        agent,
+                        lane,
                     };
+                    // Only a question poll in its own lane may wait: one that overflows
+                    // into the member lane is answered at once.
+                    let hold = lane == Lane::Question;
                     let _ = std::thread::Builder::new()
                         .name("relay-request".to_string())
                         .spawn(move || {
                             let _guard = guard;
-                            handle(&hub, &proxy, request);
+                            handle(&hub, &proxy, request, hold);
                         });
                 }
             }
@@ -361,6 +462,7 @@ pub fn serve(serving: Serving) {
                     .and_then(|()| devices::maintenance(&core, now_unix()))
                     .and_then(|()| joins::expire(&core, now_unix()))
                     .and_then(|()| sync::maintenance(&core, now_unix()))
+                    .and_then(|()| questions::maintenance(&core, now_unix()))
                     .is_err()
                 {
                     eprintln!(
@@ -450,8 +552,8 @@ fn respond_ok(request: Request, result: Value) {
     respond_json(request, 200, &Envelope::success(result), false);
 }
 
-/// Handles one request.
-fn handle(hub: &Hub, proxy: &Proxy, mut request: Request) {
+/// Handles one request. `hold`: a question long poll may wait (its own lane).
+fn handle(hub: &Hub, proxy: &Proxy, mut request: Request, hold: bool) {
     let now = now_unix();
     let method = request.method().as_str().to_string();
     let url = request.url().to_string();
@@ -628,7 +730,15 @@ fn handle(hub: &Hub, proxy: &Proxy, mut request: Request) {
         respond_mcp(&core, request, principal, &body);
         return;
     }
-    match dispatch(&core, endpoint, principal.as_ref(), &query, &body, now) {
+    match dispatch(
+        &core,
+        endpoint,
+        principal.as_ref(),
+        &query,
+        &body,
+        hold,
+        now,
+    ) {
         Ok(result) => respond_ok(request, result),
         Err(error) => respond_error(request, &error),
     }
@@ -934,6 +1044,16 @@ fn member_of(principal: Option<&Principal>) -> RelayResult<&auth::MemberAuth> {
     }
 }
 
+/// The member of a device's access token. The question and push endpoints are for
+/// devices only: a member token is 401 before its body is read as a request.
+fn device_member_of(principal: Option<&Principal>) -> RelayResult<&auth::MemberAuth> {
+    let member = member_of(principal)?;
+    if member.device.is_none() {
+        return Err(RelayError::unauthenticated());
+    }
+    Ok(member)
+}
+
 fn agent_of(principal: Option<&Principal>) -> RelayResult<&auth::AgentAuth> {
     match principal {
         Some(Principal::Agent(agent)) => Ok(agent),
@@ -941,13 +1061,24 @@ fn agent_of(principal: Option<&Principal>) -> RelayResult<&auth::AgentAuth> {
     }
 }
 
-/// Runs one endpoint. The principal has passed `auth::allow` for its need.
+/// The `wait` of a query: 0 to 25 seconds.
+fn wait_of(query: &str) -> RelayResult<u64> {
+    let wait = number(query, "wait")?.unwrap_or(0);
+    if wait > approvals::MAX_WAIT_SECS {
+        return Err(RelayError::invalid("The wait is from 0 to 25 seconds."));
+    }
+    Ok(wait)
+}
+
+/// Runs one endpoint. The principal has passed `auth::allow` for its need. `hold`: a
+/// question long poll may wait.
 fn dispatch(
     core: &Core,
     endpoint: Endpoint,
     principal: Option<&Principal>,
     query: &str,
     body: &[u8],
+    hold: bool,
     now: u64,
 ) -> RelayResult<Value> {
     use Endpoint::*;
@@ -1068,6 +1199,50 @@ fn dispatch(
             now,
         )?),
         SyncReceipt => sync::receipt(core, member_of(principal)?, &parse_body(body)?, now),
+        QuestionPost => {
+            questions::post(core, device_member_of(principal)?, &parse_body(body)?, now)
+        }
+        QuestionList => {
+            let since = number(query, "since")?.unwrap_or(0);
+            let wait = wait_of(query)?;
+            to_value(&questions::list(
+                core,
+                device_member_of(principal)?,
+                since,
+                wait,
+                hold,
+            )?)
+        }
+        AnswerPost(qid) => questions::answer(
+            core,
+            device_member_of(principal)?,
+            qid,
+            &parse_body(body)?,
+            now,
+        ),
+        AnswerList(qid) => {
+            let after = number(query, "after")?.unwrap_or(0);
+            let wait = wait_of(query)?;
+            to_value(&questions::answers(
+                core,
+                device_member_of(principal)?,
+                qid,
+                after,
+                wait,
+                hold,
+            )?)
+        }
+        Settle(qid) => questions::settle(
+            core,
+            device_member_of(principal)?,
+            qid,
+            &parse_body(body)?,
+            now,
+        ),
+        PushTokenPut => {
+            questions::push_token_put(core, device_member_of(principal)?, &parse_body(body)?, now)
+        }
+        PushTokenDelete => questions::push_token_delete(core, device_member_of(principal)?, now),
         SyncHead | SyncSnapshot | SyncPush | SyncDelete => {
             Err(RelayError::internal("This endpoint is served elsewhere."))
         }
@@ -1112,11 +1287,12 @@ mod tests {
         let slots = Arc::new(Slots {
             all: AtomicUsize::new(1),
             agent: AtomicUsize::new(1),
+            questions: AtomicUsize::new(0),
         });
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _global = SlotGuard {
                 slots: slots.clone(),
-                agent: true,
+                lane: Lane::Agent,
             };
             let _team = TeamSlotGuard::take(&core, now_unix()).unwrap();
             assert_eq!(core.agent_requests.load(Ordering::Relaxed), 1);
@@ -1253,6 +1429,85 @@ mod tests {
             );
         }
         assert!(!is_agent_path("/v1/sync/head?since=1&wait=25"));
+        let qid = Qid::parse("oKGio6SlpqeoqaqrrK2urw").unwrap();
+        assert_eq!(
+            route("POST", "/v1/questions").unwrap(),
+            (Need::Member, Endpoint::QuestionPost)
+        );
+        assert_eq!(
+            route("GET", "/v1/questions").unwrap(),
+            (Need::Member, Endpoint::QuestionList)
+        );
+        assert_eq!(
+            route("POST", "/v1/questions/oKGio6SlpqeoqaqrrK2urw/answers").unwrap(),
+            (Need::Member, Endpoint::AnswerPost(qid))
+        );
+        assert_eq!(
+            route("GET", "/v1/questions/oKGio6SlpqeoqaqrrK2urw/answers").unwrap(),
+            (Need::Member, Endpoint::AnswerList(qid))
+        );
+        assert_eq!(
+            route("POST", "/v1/questions/oKGio6SlpqeoqaqrrK2urw/settle").unwrap(),
+            (Need::Member, Endpoint::Settle(qid))
+        );
+        assert_eq!(
+            route("PUT", "/v1/push/token").unwrap(),
+            (Need::Member, Endpoint::PushTokenPut)
+        );
+        assert_eq!(
+            route("DELETE", "/v1/push/token").unwrap(),
+            (Need::Member, Endpoint::PushTokenDelete)
+        );
+        assert_eq!(
+            route("POST", "/v1/questions/short/answers")
+                .unwrap_err()
+                .code,
+            codes::INVALID_REQUEST
+        );
+        for (method, path) in [
+            ("PUT", "/v1/questions"),
+            ("GET", "/v1/questions/oKGio6SlpqeoqaqrrK2urw/settle"),
+            ("DELETE", "/v1/questions/oKGio6SlpqeoqaqrrK2urw/answers"),
+            ("GET", "/v1/push/token"),
+        ] {
+            assert_eq!(
+                route(method, path).unwrap_err().code,
+                codes::METHOD_NOT_ALLOWED
+            );
+        }
+        assert_eq!(
+            route("GET", "/v1/questions/oKGio6SlpqeoqaqrrK2urw")
+                .unwrap_err()
+                .code,
+            codes::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn question_polls_are_gets_with_a_wait() {
+        for (method, url) in [
+            ("GET", "/v1/questions?since=3&wait=25"),
+            ("GET", "/v1/questions?wait=1"),
+            (
+                "GET",
+                "/v1/questions/oKGio6SlpqeoqaqrrK2urw/answers?after=0&wait=25",
+            ),
+        ] {
+            assert!(is_question_poll(method, url), "{method} {url}");
+        }
+        for (method, url) in [
+            ("GET", "/v1/questions"),
+            ("GET", "/v1/questions?since=3&wait=0"),
+            ("GET", "/v1/questions?wait=x"),
+            ("POST", "/v1/questions?wait=25"),
+            ("GET", "/v1/questions/x/settle?wait=25"),
+            ("GET", "/v1/questions//answers?wait=25"),
+            ("GET", "/v1/questions/a/b/answers?wait=25"),
+            ("GET", "/v1/sync/head?wait=25"),
+            ("GET", "/v1/questionsx?wait=25"),
+        ] {
+            assert!(!is_question_poll(method, url), "{method} {url}");
+        }
     }
 
     #[test]

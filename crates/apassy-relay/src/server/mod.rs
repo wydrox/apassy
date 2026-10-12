@@ -23,6 +23,8 @@ pub mod hub;
 pub mod joins;
 pub mod mcp;
 pub mod operator;
+pub mod push;
+pub mod questions;
 pub mod runkeys;
 pub mod sessions;
 pub mod store;
@@ -88,6 +90,12 @@ pub struct Core {
     pub sync_polls: LongPolls,
     /// One commit, delete, or snapshot lookup of this team at a time.
     pub sync_commit: Mutex<()>,
+    /// The open question list long polls of each device: at most one.
+    pub question_polls: LongPolls,
+    /// The open answer long polls of each asking device: at most one.
+    pub answer_polls: LongPolls,
+    /// The push trigger of the relay, shared by every `Core`.
+    pub push: Arc<push::Push>,
     stop: Arc<AtomicBool>,
     /// Set when the team is suspended or the relay stops.
     closed: AtomicBool,

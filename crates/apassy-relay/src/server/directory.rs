@@ -60,6 +60,10 @@ pub struct TeamLimits {
     pub sync_pushes_per_hour: u64,
     /// Snapshot pushes and downloads of the team at once.
     pub sync_transfers: u64,
+    /// Questions with the state `open` (docs/SPEC.md section 25).
+    pub open_questions: u64,
+    /// Questions posted in the last 3600 seconds.
+    pub questions_per_hour: u64,
 }
 
 impl Default for TeamLimits {
@@ -74,6 +78,8 @@ impl Default for TeamLimits {
             sync_bytes: 67_108_864,
             sync_pushes_per_hour: 600,
             sync_transfers: 2,
+            open_questions: 20,
+            questions_per_hour: 300,
         }
     }
 }
@@ -100,6 +106,10 @@ pub struct TeamLimitsUpdate {
     pub sync_pushes_per_hour: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sync_transfers: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_questions: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub questions_per_hour: Option<u64>,
 }
 
 impl TeamLimits {
@@ -111,6 +121,7 @@ impl TeamLimits {
             ("runs_per_hour", self.runs_per_hour),
             ("pending_runs", self.pending_runs),
             ("sync_pushes_per_hour", self.sync_pushes_per_hour),
+            ("questions_per_hour", self.questions_per_hour),
         ] {
             if !(1..=1_000_000).contains(&value) {
                 return Err(RelayError::invalid(format!(
@@ -129,6 +140,9 @@ impl TeamLimits {
         if !(1..=8).contains(&self.sync_transfers) {
             return Err(RelayError::invalid("sync_transfers must be 1 to 8."));
         }
+        if !(1..=1000).contains(&self.open_questions) {
+            return Err(RelayError::invalid("open_questions must be 1 to 1000."));
+        }
         Ok(())
     }
 
@@ -145,6 +159,8 @@ impl TeamLimits {
                 .sync_pushes_per_hour
                 .unwrap_or(self.sync_pushes_per_hour),
             sync_transfers: update.sync_transfers.unwrap_or(self.sync_transfers),
+            open_questions: update.open_questions.unwrap_or(self.open_questions),
+            questions_per_hour: update.questions_per_hour.unwrap_or(self.questions_per_hour),
         };
         limits.validate()?;
         Ok(limits)
@@ -465,6 +481,7 @@ mod tests {
                 "members": 50, "items": 500, "agents": 100,
                 "runs_per_hour": 1000, "pending_runs": 50, "agent_requests": 56,
                 "sync_bytes": 67108864, "sync_pushes_per_hour": 600, "sync_transfers": 2,
+                "open_questions": 20, "questions_per_hour": 300,
             })
         );
         assert_eq!(serde_json::from_str::<TeamLimits>("{}").unwrap(), defaults);
@@ -510,6 +527,22 @@ mod tests {
                     .is_err()
             );
         }
+        let questions = |open: u64, per_hour: u64| {
+            defaults.apply(TeamLimitsUpdate {
+                open_questions: Some(open),
+                questions_per_hour: Some(per_hour),
+                ..Default::default()
+            })
+        };
+        assert!(questions(1, 1).is_ok());
+        assert!(questions(1000, 1_000_000).is_ok());
+        assert!(questions(0, 300).is_err());
+        assert!(questions(1001, 300).is_err());
+        assert!(questions(20, 0).is_err());
+        assert!(questions(20, 1_000_001).is_err());
+        // A stored row from before questions reads the question defaults.
+        let old: TeamLimits = serde_json::from_str(r#"{"members":7,"sync_transfers":3}"#).unwrap();
+        assert_eq!((old.open_questions, old.questions_per_hour), (20, 300));
     }
 
     #[test]

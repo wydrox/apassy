@@ -306,6 +306,8 @@ pub fn revoke(core: &Core, by: &MemberAuth, id: DeviceId, now: u64) -> RelayResu
             statement.query_map(params![to_i(id.0)], |row| Ok(AgentId(to_u(row.get(0)?)))).map_err(db)?.collect::<Result<Vec<_>, _>>().map_err(db)?
         };
         conn.execute("UPDATE device SET revoked_at = ?2 WHERE id = ?1", params![to_i(id.0), to_i(now)]).map_err(db)?;
+        // A removed device gets no more pushes (docs/SPEC.md section 25.2).
+        conn.execute("DELETE FROM push_token WHERE device_id = ?1", params![to_i(id.0)]).map_err(db)?;
         conn.execute("UPDATE agent SET revoked_at = ?2 WHERE device_id = ?1 AND revoked_at IS NULL", params![to_i(id.0), to_i(now)]).map_err(db)?;
         conn.execute("UPDATE device_link SET state = 'expired', decided_at = ?2 WHERE made_by_device = ?1 AND state IN ('open','pending')", params![to_i(id.0), to_i(now)]).map_err(db)?;
         invalidate_pending(core, conn, now, &member_actor(by.id.0), "device_revoked", |run| agents.contains(&run.agent_id))?;
@@ -424,6 +426,7 @@ mod tests {
             upstream: Default::default(),
             limits: Default::default(),
             backup_dir: dir.path().join("backups"),
+            push: None,
         };
         let owner = Relay::init(&config, "team", "owner").unwrap();
         let hub = Hub::open(config, Arc::new(AtomicBool::new(false))).unwrap();
