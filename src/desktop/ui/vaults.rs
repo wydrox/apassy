@@ -16,7 +16,7 @@ use super::kit::{self, Font, Icon, Style, Tone};
 use super::start::Step;
 use super::{Sheet, close_sheet};
 use crate::desktop::owner_store::ENDED_BY_SWITCH;
-use crate::desktop::{DesktopApp, ItemDraft, OwnerView};
+use crate::desktop::{DesktopApp, ItemDraft, Place};
 use crate::vaults::{self, LEGACY_VAULT_NAME, Registry, VaultEntry};
 
 /// The vault list in the app.
@@ -211,7 +211,7 @@ impl DesktopApp {
         self.ui.discard_item_kind_change = false;
         self.files.forget();
         self.erase_typed_secrets(ctx);
-        self.view = OwnerView::Vault;
+        self.place = Place::CREDENTIALS;
         self.selected_item_id = None;
         self.search.clear();
         self.add_form = ItemDraft::default();

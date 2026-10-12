@@ -10,10 +10,10 @@ use super::owner_tests::{PASS, locked_app};
 use super::{Sheet, draw};
 use crate::broker::approvals::{OwnerAction, OwnerCheck};
 use crate::contracts::CredentialKind;
+use crate::desktop::DesktopApp;
 use crate::desktop::model::{DetailDraft, ItemDraft};
 use crate::desktop::owner_check::OwnerRequest;
 use crate::desktop::owner_store::{SecretForm, detail_field_name};
-use crate::desktop::{DesktopApp, OwnerView};
 use crate::otp::{self, OtpError};
 use crate::vault::{Field, ItemDraft as VaultDraft, SecretValue};
 
@@ -227,7 +227,7 @@ fn app_with_login(dir: &TempDir) -> (DesktopApp, u64) {
         )
         .expect("add");
     app.select_item(item.id.to_string());
-    app.view = OwnerView::Item;
+    app.show_credentials();
     (app, item.id)
 }
 
@@ -258,7 +258,7 @@ fn app_with_two_codes(dir: &TempDir) -> (DesktopApp, u64) {
         )
         .expect("add");
     app.select_item(item.id.to_string());
-    app.view = OwnerView::Item;
+    app.show_credentials();
     (app, item.id)
 }
 
@@ -612,7 +612,7 @@ fn an_unreadable_seed_shows_a_message_and_no_copy_button() {
         )
         .expect("add");
     app.select_item(item.id.to_string());
-    app.view = OwnerView::Item;
+    app.show_credentials();
     show_code(&mut app, item.id, "OTP");
     let mut window = Window::new();
     window.idle(&mut app);
@@ -782,7 +782,7 @@ fn a_valid_value_saves_and_the_page_masks_the_code() {
     assert!(app.owner_ui.add_secrets.is_blank());
     assert_eq!(stored_otp_labels(&app, items[0].id), [otp::LABEL]);
     app.select_item(items[0].id.to_string());
-    app.view = OwnerView::Item;
+    app.show_credentials();
     window.idle(&mut app);
     assert!(window.text.contains("Show code"), "{}", window.text);
     assert!(!shows_any_current_digits(&window.text), "{}", window.text);
@@ -920,7 +920,7 @@ fn a_visible_detail_with_a_setup_key_is_not_drawn() {
         )
         .expect("add");
     app.select_item(item.id.to_string());
-    app.view = OwnerView::Item;
+    app.show_credentials();
     let mut window = Window::new();
     window.idle(&mut app);
     window.assert_no_seed();
@@ -1084,7 +1084,7 @@ fn app_with_uri_label(dir: &TempDir) -> (DesktopApp, u64) {
         )
         .expect("add");
     app.select_item(item.id.to_string());
-    app.view = OwnerView::Item;
+    app.show_credentials();
     (app, item.id)
 }
 

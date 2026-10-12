@@ -4,10 +4,10 @@ use eframe::egui;
 
 use super::kit::{self, Font, Style, Tone};
 use super::timeline;
+use crate::desktop::DesktopApp;
 use crate::desktop::update::{
     CHANGELOG_URL, DOWNLOAD_PAGE_URL, Phase, StagedKind, UpdateView, open,
 };
-use crate::desktop::{DesktopApp, OwnerView};
 
 /// What the owner clicked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,7 +215,7 @@ const IMAGE_NOTE: &str = "Apassy cannot replace itself in its folder. Open the d
 /// "Apassy X is ready" on top of each page but Settings > About, which has the same
 /// buttons.
 pub(super) fn banner(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    if app.view == OwnerView::Settings && app.ui.settings_tab == super::SettingsTab::About {
+    if app.settings_open && app.ui.settings_tab == super::SettingsTab::About {
         return;
     }
     let view = app.updates.view();
@@ -292,6 +292,7 @@ fn act(app: &mut DesktopApp, ctx: &egui::Context, action: Action) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::desktop::Place;
     use crate::desktop::update::{SUPPORTED, Staged};
     use eframe::egui::{Pos2, RawInput, Rect, Shape, Vec2};
 
@@ -466,10 +467,10 @@ mod tests {
 
         app.updates
             .set_phase_for_test(Phase::Ready(staged(StagedKind::App)));
-        for view in [OwnerView::Vault, OwnerView::Agents, OwnerView::Activity] {
-            app.view = view;
+        for place in [Place::CREDENTIALS, Place::Agents, Place::Decisions] {
+            app.place = place.clone();
             let text = draw(&mut app, size);
-            assert!(text.contains("Apassy 0.3.1 is ready."), "{view:?}: {text}");
+            assert!(text.contains("Apassy 0.3.1 is ready."), "{place:?}: {text}");
             assert!(text.contains("Restart now"), "{text}");
             assert!(text.contains("It installs when you quit Apassy."), "{text}");
             assert!(text.contains("Later"), "{text}");

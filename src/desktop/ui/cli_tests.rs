@@ -864,7 +864,7 @@ fn backup_locks_and_restore_opens_the_sheet() {
     assert!(restore.ok, "{restore:?}");
     assert!(matches!(app.ui.sheet, Some(super::Sheet::Restore)));
     // Settings > Security has Backup, under the sheet.
-    assert_eq!(app.view, crate::desktop::OwnerView::Settings);
+    assert!(app.settings_open);
     assert_eq!(app.ui.settings_tab, super::SettingsTab::Security);
     assert_eq!(app.owner_ui.restore_source, backup.display().to_string());
 }

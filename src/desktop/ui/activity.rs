@@ -16,7 +16,7 @@ use crate::broker::approvals::{
 use crate::desktop::inbox::{self, InboxKind};
 use crate::desktop::notify::Delivery;
 use crate::desktop::owner_check::OwnerRequest;
-use crate::desktop::{BrokerState, DesktopApp, OwnerView};
+use crate::desktop::{BrokerState, DesktopApp};
 use crate::vault::providers::{self, Suggestion};
 use crate::vault::{
     AccessRequest, ActivityDecision, Declaration, EnvDelivery, Environment, ExecMode, GrantPlace,
@@ -105,7 +105,7 @@ fn notifications_notice(app: &mut DesktopApp, ui: &mut egui::Ui) {
         |ui| kit::small_button(ui, "Open Settings", Style::Link).clicked(),
     );
     if open {
-        app.view = OwnerView::Settings;
+        app.open_settings_window();
         app.ui.settings_tab = super::settings::SettingsTab::Notifications;
     }
 }

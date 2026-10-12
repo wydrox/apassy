@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 
 use eframe::egui::{self, Align, Label, Layout, Pos2, Rect, RichText, Sense, Vec2};
 
+use super::columns;
+use super::folders::FolderTree;
 use super::kit::{self, Font, Icon, Section, Size, Style, Tone};
 use super::otp;
 use super::timeline::{self, relative_time};
@@ -27,7 +29,7 @@ use crate::desktop::owner_store::{
     DETAIL_PREFIX, DeclarationForm, DetailLine, MAX_DETAILS, OwnerDetails, OwnerSummary,
     PasskeyItem, SecretForm, field_label,
 };
-use crate::desktop::{DesktopApp, OwnerView};
+use crate::desktop::{DesktopApp, Place};
 use crate::vault::providers::{self, Suggested};
 use crate::vault::{EnvDelivery, Environment, ItemTimes, Reversibility, RiskLevel, Scope};
 
@@ -130,74 +132,78 @@ impl Sort {
     }
 }
 
-pub(super) fn draw_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    // A passkey removal that waits for the owner does not outlive its credential page.
-    forget_removal(ui.ctx());
-    let all = app.owner_ui.session.search("").unwrap_or_default();
-    let mut add = false;
-    // With no credential, the empty state has the one main action (⌘N still works).
-    kit::page_header(ui, "Credentials", None, |ui| {
-        if !all.is_empty() {
-            add = kit::button_with(ui, Some(Icon::Plus), "Add", Style::Prominent, Size::Regular)
-                .on_hover_text("New credential  ⌘N")
-                .clicked();
-        }
-    });
-    // A vault from another Mac: its agents stay on that Mac, so this one sets them up
-    // here. The panel is part of this page, under its title.
-    if app.ui.setup_vault.is_some() && super::agents::next_steps_panel(app, ui) {
-        app.ui.setup_vault = None;
-    }
-    // The steps of a new vault. With no credential, they replace the empty state:
-    // "Add a credential" is then the one main action.
-    let guided = super::get_started::draw(app, ui);
-    if all.is_empty() && guided {
-        if add {
-            open_add(app);
-        }
-        app.ui.focus_search = false;
+/// One row of the credential list, read before the list draws.
+struct ListedItem {
+    id: u64,
+    name: String,
+    subtitle: String,
+    status: String,
+    production: bool,
+    tile: kit::Tile,
+}
+
+/// The list column of a credentials place: the toolbar with the title, the count, and
+/// "+", the search field, the filter and the order, then the rows. By name, the rows
+/// group by folder, and the header of a group stays at the top while its rows scroll.
+pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    let title = columns::place_title(app);
+    if let Place::Shared(_) = &app.place {
+        shared_list(app, ui, &title);
         return;
     }
-    if all.is_empty() {
-        add |= kit::empty_state(
-            ui,
-            Icon::Key,
-            "No credentials yet",
-            "Add an API key, a login, an SSH key, or a database password. Agents use a credential through Apassy and never see its value.",
-            Some("Add credential"),
-        );
-        if add {
-            open_add(app);
-        }
+    let place = app.place.clone();
+    let tree = FolderTree::load(app);
+    let session = &app.owner_ui.session;
+    let all = session.search("").unwrap_or_default();
+    let archived = session.archived().unwrap_or_default();
+    let conflicts = session.conflict_copies().unwrap_or_default();
+    let vault_empty = all.is_empty();
+    let in_place: Vec<OwnerSummary> = all
+        .into_iter()
+        .filter(|item| tree.contains(&place, item.id))
+        .collect();
+    let active = in_place
+        .iter()
+        .filter(|item| !archived.contains_key(&item.id))
+        .count();
+    let mut add = false;
+    columns::list_toolbar(
+        ui,
+        &title,
+        &columns::count_label(active, "item", "items"),
+        |ui| {
+            add = kit::plain_icon_button(ui, Icon::Plus, "New credential  ⌘N").clicked();
+        },
+    );
+    if add {
+        app.ui.sheet = Some(Sheet::NewCredential);
+    }
+    if vault_empty {
         // No search field without credentials. ⌘F must not focus it later by surprise.
         app.ui.focus_search = false;
+        columns::list_note(ui, "No items");
         return;
     }
-    let archived = app.owner_ui.session.archived().unwrap_or_default();
-    let conflicts = app.owner_ui.session.conflict_copies().unwrap_or_default();
-    let conflict_count = all
-        .iter()
-        .filter(|item| archived.contains_key(&item.id) && conflicts.contains_key(&item.id))
-        .count();
-    let archived_count = all
-        .iter()
-        .filter(|item| archived.contains_key(&item.id) && !conflicts.contains_key(&item.id))
-        .count();
-    // Each scope keeps the IDs below a notice the same when it comes or goes.
-    ui.scope(|ui| review_notice(app, ui));
-    ui.scope(|ui| conflict_notice(app, ui, conflict_count));
-    toolbar(app, ui);
-    ui.add_space(18.0);
+    columns::list_inset(ui, |ui| toolbar(app, ui));
 
     let session = &app.owner_ui.session;
     let times = session.item_times().unwrap_or_default();
     let query = app.search.trim().to_owned();
     let filter = app.ui.credential_filter;
     let sort = app.ui.credential_sort;
-    let found = if query.is_empty() {
-        all
+    let archived_count = in_place
+        .iter()
+        .filter(|item| archived.contains_key(&item.id) && !conflicts.contains_key(&item.id))
+        .count();
+    let found: Vec<OwnerSummary> = if query.is_empty() {
+        in_place
     } else {
-        session.search(&query).unwrap_or_default()
+        session
+            .search(&query)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| tree.contains(&place, item.id))
+            .collect()
     };
     let needs_setup = |id: u64| {
         session.needs_review(id).unwrap_or(false)
@@ -222,143 +228,175 @@ pub(super) fn draw_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
     } else {
         archived_count
     };
-
-    if items.is_empty() {
-        let message = match filter {
-            _ if !query.is_empty() => format!("No credential matches “{query}”."),
-            Filter::Archived => "No credential is archived.".to_owned(),
-            Filter::Conflicts => "No archived conflict copy needs review.".to_owned(),
-            Filter::NeedsSetup => "Every credential has a declaration.".to_owned(),
-            _ => "No credential matches the filter.".to_owned(),
-        };
-        kit::note(ui, message);
-        ui.add_space(12.0);
-    }
-    let mut open = None;
-    let grouped = sort == Sort::Name && !matches!(filter, Filter::Kind(_) | Filter::Conflicts);
-    let row = |s: &mut Section<'_>, item: &OwnerSummary, open: &mut Option<u64>| {
-        let meta = meta_line(&item.project, &item.service);
-        let subtitle = (!meta.is_empty()).then_some(meta.as_str());
-        let detail = if archived.contains_key(&item.id) && conflicts.contains_key(&item.id) {
-            kit::medium("Conflict copy", Font::Callout).color(Tone::Warning.text())
+    let listed = |item: &OwnerSummary| {
+        let status = if archived.contains_key(&item.id) && conflicts.contains_key(&item.id) {
+            "Conflict copy".to_owned()
         } else if archived.contains_key(&item.id) {
-            kit::medium("Archived", Font::Callout).color(kit::SECONDARY)
+            "Archived".to_owned()
         } else {
             row_detail(app, item.id, sort, times.get(&item.id))
+                .text()
+                .to_owned()
         };
-        if s.nav(
-            Some(kind_icon(item.kind)),
-            &item.name,
-            subtitle,
-            Some(detail),
-        )
-        .clicked()
-        {
-            *open = Some(item.id);
+        let meta = meta_line(&item.project, &item.service);
+        ListedItem {
+            id: item.id,
+            name: item.name.clone(),
+            subtitle: if meta.is_empty() {
+                item.kind.label().to_owned()
+            } else {
+                meta
+            },
+            status,
+            production: session
+                .declaration(item.id)
+                .ok()
+                .flatten()
+                .is_some_and(|declaration| declaration.environment == Environment::Production),
+            tile: super::credential_tile(item.kind, &item.service, &item.name),
         }
     };
-    if grouped {
-        for kind in CredentialKind::ALL {
-            let group: Vec<_> = items.iter().filter(|item| item.kind == kind).collect();
-            if group.is_empty() {
-                continue;
-            }
-            kit::section(ui, Some(kind_plural(kind)), None, |s| {
-                for item in group {
-                    row(s, item, &mut open);
-                }
-            });
+    let grouped = sort == Sort::Name && !matches!(filter, Filter::Kind(_) | Filter::Conflicts);
+    let groups: Vec<columns::Group<ListedItem>> = if grouped {
+        // The top level first, then each folder by its path.
+        let mut by_folder: BTreeMap<(bool, String), Vec<ListedItem>> = BTreeMap::new();
+        for item in &items {
+            let folder = tree.folder_of(item.id);
+            by_folder
+                .entry((folder.is_some(), tree.path_label(folder)))
+                .or_default()
+                .push(listed(item));
         }
-    } else if !items.is_empty() {
+        by_folder
+            .into_iter()
+            .map(|((_, title), rows)| columns::Group { title, rows })
+            .collect()
+    } else if items.is_empty() {
+        Vec::new()
+    } else {
         let title = match filter {
             Filter::Kind(kind) => kind_plural(kind).to_owned(),
-            Filter::Conflicts => format!("Conflicting changes ({conflict_count})"),
+            Filter::Conflicts => format!("Conflicting changes ({})", items.len()),
             _ => sort.title().to_owned(),
         };
-        kit::section(ui, Some(&title), None, |s| {
-            for item in &items {
-                row(s, item, &mut open);
+        vec![columns::Group {
+            title,
+            rows: items.iter().map(listed).collect(),
+        }]
+    };
+    let headers = !grouped || groups.len() > 1;
+    let empty_message = items.is_empty().then(|| match filter {
+        _ if !query.is_empty() => format!("No credential matches “{query}”."),
+        Filter::Archived => "No credential is archived.".to_owned(),
+        Filter::Conflicts => "No archived conflict copy needs review.".to_owned(),
+        Filter::NeedsSetup => "Every credential has a declaration.".to_owned(),
+        _ if place != Place::CREDENTIALS && active == 0 => {
+            "No credentials in this folder.".to_owned()
+        }
+        _ => "No credential matches the filter.".to_owned(),
+    });
+    let selected = selected_id(app);
+    let mut open = None;
+    let mut show_archived = false;
+    columns::grouped_rows(
+        ui,
+        ("credential-list", &place),
+        &groups,
+        headers,
+        |ui, item| {
+            let response = ui
+                .push_id(("credential-row", item.id), |ui| {
+                    kit::list_row(
+                        ui,
+                        &kit::ListRow {
+                            tile: item.tile.clone(),
+                            title: &item.name,
+                            subtitle: &item.subtitle,
+                            meta: Some(&item.status),
+                            production: item.production,
+                            selected: selected == Some(item.id),
+                        },
+                    )
+                })
+                .inner;
+            if response.clicked() {
+                open = Some(item.id);
             }
-        });
-    }
-    if hidden_archived > 0 {
-        ui.horizontal(|ui| {
-            let noun = if hidden_archived == 1 {
-                "archived credential is hidden."
-            } else {
-                "archived credentials are hidden."
-            };
-            kit::note(ui, format!("{hidden_archived} {noun}"));
-            if kit::small_button(ui, "Show archived", Style::Link).clicked() {
-                app.ui.credential_filter = Filter::Archived;
+        },
+        |ui| {
+            if let Some(message) = &empty_message {
+                columns::list_note(ui, message);
             }
-        });
+            if hidden_archived > 0 {
+                ui.add_space(8.0);
+                let noun = if hidden_archived == 1 {
+                    "archived credential is hidden."
+                } else {
+                    "archived credentials are hidden."
+                };
+                ui.horizontal_wrapped(|ui| {
+                    ui.add_space(8.0);
+                    kit::note(ui, format!("{hidden_archived} {noun}"));
+                    show_archived = kit::small_button(ui, "Show archived", Style::Link).clicked();
+                });
+            }
+        },
+    );
+    if show_archived {
+        app.ui.credential_filter = Filter::Archived;
     }
     if let Some(id) = open {
         app.select_item(id.to_string());
     }
-    if add {
-        open_add(app);
-    }
 }
 
-/// Search, filter, and sort in one row. ⌘F puts the focus in the search field. The
-/// search field takes the width that the two menus leave. The controls draw from left
-/// to right, so Tab visits them in the order that the owner sees.
+/// The list of a shared vault: "From you" and "From others" (ADR 0026 §6). Shared vaults
+/// come later, so the list has no item yet.
+fn shared_list(app: &mut DesktopApp, ui: &mut egui::Ui, title: &str) {
+    columns::list_toolbar(ui, title, "0 items", |_| {});
+    app.ui.focus_search = false;
+    columns::list_note(ui, "No items yet.");
+}
+
+/// Search, then the filter and the order. ⌘F puts the focus in the search field. The
+/// controls draw from left to right and top to bottom, so Tab visits them in the order
+/// that the owner sees.
 fn toolbar(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    const MENU_WIDTH: f32 = 150.0;
-    let width = ui.available_width();
-    ui.allocate_ui_with_layout(
-        Vec2::new(width, 28.0),
-        Layout::left_to_right(Align::Center),
-        |ui| {
-            let gap = ui.spacing().item_spacing.x;
-            // A menu button is exactly `MENU_WIDTH` wide, with its padding and chevron.
-            // The search field takes the rest, so the toolbar ends at the page edge.
-            let menus = 2.0 * (MENU_WIDTH + gap);
-            let search_width = (width - menus).max(160.0);
-            let field = ui
-                .scope(|ui| {
-                    ui.set_width(search_width);
-                    kit::text_input(
-                        ui,
-                        &mut app.search,
-                        "credential-search",
-                        "Search by name, project, service, or notes",
-                    )
-                    .on_hover_text("Search  ⌘F")
-                })
-                .inner;
-            ui.ctx()
-                .accesskit_node_builder(field.id, |node| node.set_label("Search credentials"));
-            if std::mem::take(&mut app.ui.focus_search) {
-                field.request_focus();
-            }
-            let mut filter = app.ui.credential_filter;
-            let filters: Vec<(Filter, String)> = Filter::ALL
-                .into_iter()
-                .map(|option| (option, option.label().to_owned()))
-                .collect();
-            let label = filter.label();
-            kit::picker(
-                ui,
-                "credential-filter",
-                &mut filter,
-                &filters,
-                label,
-                MENU_WIDTH,
-            );
-            app.ui.credential_filter = filter;
-            let mut sort = app.ui.credential_sort;
-            let sorts: Vec<(Sort, String)> = Sort::ALL
-                .into_iter()
-                .map(|option| (option, option.label().to_owned()))
-                .collect();
-            let label = format!("Sort: {}", sort.label());
-            kit::picker(ui, "credential-sort", &mut sort, &sorts, label, MENU_WIDTH);
-            app.ui.credential_sort = sort;
-        },
-    );
+    let field = kit::search_field(ui, &mut app.search, "credential-search", "Search")
+        .on_hover_text("Search by name, project, service, or notes  ⌘F");
+    ui.ctx()
+        .accesskit_node_builder(field.id, |node| node.set_label("Search credentials"));
+    if std::mem::take(&mut app.ui.focus_search) {
+        field.request_focus();
+    }
+    ui.add_space(6.0);
+    let menu_width = ((ui.available_width() - 8.0) / 2.0).floor().max(60.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let mut filter = app.ui.credential_filter;
+        let filters: Vec<(Filter, String)> = Filter::ALL
+            .into_iter()
+            .map(|option| (option, option.label().to_owned()))
+            .collect();
+        let label = filter.label();
+        kit::picker(
+            ui,
+            "credential-filter",
+            &mut filter,
+            &filters,
+            label,
+            menu_width,
+        );
+        app.ui.credential_filter = filter;
+        let mut sort = app.ui.credential_sort;
+        let sorts: Vec<(Sort, String)> = Sort::ALL
+            .into_iter()
+            .map(|option| (option, option.label().to_owned()))
+            .collect();
+        let label = format!("Sort: {}", sort.label());
+        kit::picker(ui, "credential-sort", &mut sort, &sorts, label, menu_width);
+        app.ui.credential_sort = sort;
+    });
 }
 
 /// Name order, or newest first by a time. An item without the time goes last.
@@ -555,14 +593,15 @@ fn selected_id(app: &DesktopApp) -> Option<u64> {
     app.selected_item_id.as_deref()?.parse().ok()
 }
 
-/// Navigation stays outside the scrolling detail body.
-pub(super) fn draw_detail_header(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    if kit::back_link(ui, "Credentials") {
-        app.view = OwnerView::Vault;
-        return;
-    }
+/// The detail column of a credentials place: the selected credential, or, with none,
+/// the notices of the vault and its first steps.
+pub(super) fn detail_column(
+    app: &mut DesktopApp,
+    ui: &mut egui::Ui,
+    pending: &super::shell::Pending,
+) {
     let Some(id) = selected_id(app) else {
-        kit::note(ui, "Select a credential in the list.");
+        overview(app, ui, pending);
         return;
     };
     let details = match app.owner_ui.session.details(id) {
@@ -571,59 +610,205 @@ pub(super) fn draw_detail_header(app: &mut DesktopApp, ui: &mut egui::Ui) {
             // The credential is gone, for example after "Delete login" for a passkey
             // without a password, or after a delete on another device.
             app.selected_item_id = None;
-            app.view = OwnerView::Vault;
+            overview(app, ui, pending);
             return;
         }
         Err(err) => {
-            kit::tone_note(ui, err.message, Tone::Critical);
+            columns::detail_toolbar(ui, |_| {});
+            kit::column(ui, columns::DETAIL_WIDTH, |ui| {
+                kit::tone_note(ui, err.message, Tone::Critical);
+            });
             return;
         }
     };
     if details.hidden {
-        kit::note(ui, &details.message);
+        columns::detail_toolbar(ui, |_| {});
+        kit::column(ui, columns::DETAIL_WIDTH, |ui| {
+            kit::note(ui, &details.message)
+        });
         return;
     }
+    detail_toolbar(app, ui, &details);
+    kit::column_with_bottom_space(ui, columns::DETAIL_WIDTH, 12.0, |ui| {
+        draw_detail_header(app, ui);
+    });
+    ui.separator();
+    // A credential has its own scroll position. Opening a different credential must not
+    // start at the bottom of the details of the one before.
+    columns::detail_body(ui, ("credential", id), |ui| {
+        ui.add_space(6.0);
+        super::shell::banners(app, ui, pending);
+        draw_detail_body(app, ui);
+    });
+}
+
+/// The toolbar of a credential: Share, Edit, and "⋯" with Move to Folder, Share,
+/// Archive, and Delete.
+fn detail_toolbar(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) {
+    let id = details.id;
     let mut edit = false;
-    let title_width = (ui.available_width() - 100.0).max(100.0);
-    egui::Sides::new().show(
-        ui,
-        |ui| {
-            ui.set_max_width(title_width);
-            ui.horizontal(|ui| {
-                let (icon, color) = kind_icon(details.kind);
-                kit::icon_tile_sized(ui, icon, color, 40.0);
-                ui.add_space(4.0);
-                ui.vertical(|ui| {
-                    ui.set_max_width((title_width - 56.0).max(40.0));
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.add(
-                        Label::new(kit::text(&details.name, Font::Title).color(kit::LABEL)).wrap(),
-                    );
-                    let meta = meta_line(&details.project, &details.service);
-                    let subtitle = if meta.is_empty() {
-                        details.kind.label().to_owned()
-                    } else {
-                        format!("{} · {meta}", details.kind.label())
-                    };
-                    ui.add(
-                        Label::new(kit::text(subtitle, Font::Callout).color(kit::SECONDARY)).wrap(),
-                    );
-                });
-            });
-        },
-        |ui| edit = kit::button(ui, "Edit", Style::Bordered).clicked(),
-    );
+    let mut share = false;
+    let mut move_to = false;
+    let mut archive = false;
+    let mut delete = false;
+    columns::detail_toolbar(ui, |ui| {
+        let more =
+            kit::toolbar_button(ui, Some(Icon::More), "", "More actions for this credential");
+        egui::Popup::menu(&more).show(|ui| {
+            ui.set_min_width(180.0);
+            move_to = ui.selectable_label(false, "Move to Folder…").clicked();
+            share |= ui.selectable_label(false, "Share…").clicked();
+            ui.separator();
+            if !details.archived {
+                archive = ui.selectable_label(false, "Archive…").clicked();
+            }
+            delete = ui.selectable_label(false, "Delete…").clicked();
+        });
+        edit = kit::toolbar_button(ui, None, "Edit", "Edit").clicked();
+        share |= kit::toolbar_button(ui, Some(Icon::Share), "Share", "Share").clicked();
+    });
     if edit {
-        open_edit(app, &details, false);
+        open_edit(app, details, false);
+    } else if share {
+        app.ui.sheet = Some(Sheet::Share { item_id: id });
+    } else if move_to {
+        super::folders::open_move(app, id);
+    } else if archive {
+        app.ui.sheet = Some(Sheet::ArchiveItem);
+    } else if delete {
+        app.pending_delete = true;
     }
+}
+
+/// No credential is selected: the banners, the setup of a vault from another Mac, the
+/// first steps, the review and conflict notices, and an empty state.
+fn overview(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &super::shell::Pending) {
+    // A passkey removal that waits for the owner does not outlive its credential page.
+    forget_removal(ui.ctx());
+    columns::detail_toolbar(ui, |_| {});
+    let shared = matches!(app.place, Place::Shared(_));
+    columns::detail_body(ui, ("credentials-overview", shared), |ui| {
+        super::shell::banners(app, ui, pending);
+        if shared {
+            columns::nothing_selected(
+                ui,
+                Icon::People,
+                "No items yet",
+                "Use Share on a credential to add it to this shared vault.",
+            );
+            return;
+        }
+        // A vault from another Mac: its agents stay on that Mac, so this one sets them
+        // up here.
+        if app.ui.setup_vault.is_some() && super::agents::next_steps_panel(app, ui) {
+            app.ui.setup_vault = None;
+        }
+        let session = &app.owner_ui.session;
+        let all = session.search("").unwrap_or_default();
+        let archived = session.archived().unwrap_or_default();
+        let conflicts = session.conflict_copies().unwrap_or_default();
+        let conflict_count = all
+            .iter()
+            .filter(|item| archived.contains_key(&item.id) && conflicts.contains_key(&item.id))
+            .count();
+        // The steps of a new vault. With no credential, they replace the empty state:
+        // "Add a credential" is then the one main action.
+        let guided = super::get_started::draw(app, ui);
+        ui.scope(|ui| review_notice(app, ui));
+        ui.scope(|ui| conflict_notice(app, ui, conflict_count));
+        if all.is_empty() {
+            if !guided
+                && kit::empty_state(
+                    ui,
+                    Icon::Key,
+                    "No credentials yet",
+                    "Add an API key, a login, an SSH key, or a database password. Agents use a credential through Apassy and never see its value.",
+                    Some("Add credential"),
+                )
+            {
+                open_add(app);
+            }
+        } else {
+            columns::nothing_selected(
+                ui,
+                Icon::Key,
+                "No credential selected",
+                "Select a credential in the list.",
+            );
+        }
+    });
+}
+
+/// The header of a credential: its tile, its name, its kind, and its project. It stays
+/// above the scrolling body.
+pub(super) fn draw_detail_header(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    let Some(id) = selected_id(app) else {
+        return;
+    };
+    let Ok(details) = app.owner_ui.session.details(id) else {
+        return;
+    };
+    if details.hidden {
+        return;
+    }
+    ui.horizontal(|ui| {
+        let tile = super::credential_tile(details.kind, &details.service, &details.name);
+        kit::tile(ui, &tile, 48.0);
+        ui.add_space(6.0);
+        ui.vertical(|ui| {
+            ui.set_max_width((ui.available_width()).max(40.0));
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.add(Label::new(kit::text(&details.name, Font::Title).color(kit::LABEL)).wrap());
+            let meta = meta_line(&details.project, &details.service);
+            let subtitle = if meta.is_empty() {
+                details.kind.label().to_owned()
+            } else {
+                format!("{} · {meta}", details.kind.label())
+            };
+            ui.add(Label::new(kit::text(subtitle, Font::Callout).color(kit::SECONDARY)).wrap());
+            if details.archived {
+                kit::cap(ui, "Archived", false);
+            }
+        });
+    });
 }
 
 #[cfg(test)]
 fn draw_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
     draw_detail_header(app, ui);
-    if app.view == OwnerView::Item {
+    if app.selected_item_id.is_some() {
         draw_detail_body(app, ui);
     }
+}
+
+/// The Share sheet (ADR 0026 §6). Shared vaults come later, so it says so and closes.
+/// Returns true on Escape.
+pub(super) fn share_sheet(app: &mut DesktopApp, ctx: &egui::Context, item_id: u64) -> bool {
+    let name = app
+        .owner_ui
+        .session
+        .details(item_id)
+        .map(|details| details.name)
+        .unwrap_or_default();
+    let mut done = false;
+    let response = kit::sheet(ctx, "share-credential", 440.0, |ui| {
+        kit::sheet_title(
+            ui,
+            &format!("Share “{name}”"),
+            Some(
+                "A shared vault gets the same credential, not a copy. This Mac has no shared vault yet.",
+            ),
+        );
+        kit::sheet_buttons(
+            ui,
+            |_| {},
+            |ui| done = kit::button(ui, "Done", Style::Prominent).clicked(),
+        );
+    });
+    if done || super::save_pressed(app, ctx) {
+        close_sheet(app, ctx);
+    }
+    response.escape
 }
 
 pub(super) fn draw_detail_body(app: &mut DesktopApp, ui: &mut egui::Ui) {
@@ -1261,7 +1446,7 @@ pub(super) fn draw_delete_alert(app: &mut DesktopApp, ctx: &egui::Context) {
         app.pending_delete = false;
         if app.apply(result, "The credential is deleted.").is_some() {
             app.selected_item_id = None;
-            app.view = OwnerView::Vault;
+            app.show_credentials();
         }
     }
 }
@@ -2895,7 +3080,8 @@ mod conflict_tests {
                     if detail {
                         draw_detail(app, ui);
                     } else {
-                        draw_list(app, ui);
+                        list_column(app, ui);
+                        detail_column(app, ui, &Vec::new());
                     }
                 },
             );

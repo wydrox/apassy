@@ -4,14 +4,15 @@
 
 use eframe::egui::{self, Align, Label, Layout};
 
-use super::kit::{self, Font, Icon, Size, Style, Tone};
+use super::columns;
+use super::kit::{self, Font, Icon, Style, Tone};
 use super::{Sheet, close_sheet, extra_label, kind_icon, kind_plural, meta_line};
 use crate::contracts::{CredentialKind, Decision};
 use crate::desktop::model::{
     AMBIGUOUS_SAMPLE_TEXT, CONFLICTING_SAMPLE_TEXT, DesktopModel, ExtraField, INTERPRETER_ID,
-    ItemDetails, ItemDraft, SAMPLE_RULE_TEXT, UNSUPPORTED_SAMPLE_TEXT,
+    ItemDetails, ItemDraft, ItemSummary, SAMPLE_RULE_TEXT, UNSUPPORTED_SAMPLE_TEXT,
 };
-use crate::desktop::{DemoScenario, DesktopApp, DraftStatus, OwnerView, RequestStatus};
+use crate::desktop::{DemoScenario, DesktopApp, DraftStatus, RequestStatus};
 
 fn locked_state(ui: &mut egui::Ui, title: &str) {
     kit::page_header(ui, title, None, |_| {});
@@ -24,52 +25,87 @@ fn locked_state(ui: &mut egui::Ui, title: &str) {
     );
 }
 
-pub(super) fn draw_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    if app.model.is_locked() {
-        locked_state(ui, "Credentials");
-        return;
-    }
+/// The list column of the demo credentials, grouped by kind.
+pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    let locked = app.model.is_locked();
+    let count = if locked {
+        0
+    } else {
+        app.model.list_items("").len()
+    };
     let mut add = false;
-    kit::page_header(
+    let title = columns::place_title(app);
+    columns::list_toolbar(
         ui,
-        "Credentials",
-        Some(
-            "Five credential categories. This desktop assigns a fixed synthetic value. Real secrets are not valid input.",
-        ),
+        &title,
+        &columns::count_label(count, "item", "items"),
         |ui| {
-            add = kit::button_with(ui, Some(Icon::Plus), "Add", Style::Prominent, Size::Regular)
-                .clicked();
+            if !locked {
+                add = kit::plain_icon_button(ui, Icon::Plus, "New credential").clicked();
+            }
         },
     );
-    kit::text_input(
-        ui,
-        &mut app.search,
-        "demo-search",
-        "Search by name, project, service, or notes",
-    );
-    ui.add_space(18.0);
+    if locked {
+        columns::list_note(ui, "The demo vault is locked.");
+        return;
+    }
+    columns::list_inset(ui, |ui| {
+        kit::search_field(ui, &mut app.search, "demo-search", "Search");
+    });
     let items = app.model.list_items(&app.search);
-    if items.is_empty() {
-        kit::note(ui, "No item matches.");
-    }
+    let groups: Vec<columns::Group<ItemSummary>> = CredentialKind::ALL
+        .into_iter()
+        .filter_map(|kind| {
+            let rows: Vec<ItemSummary> = items
+                .iter()
+                .filter(|item| item.kind == kind)
+                .cloned()
+                .collect();
+            (!rows.is_empty()).then(|| columns::Group {
+                title: kind_plural(kind).to_owned(),
+                rows,
+            })
+        })
+        .collect();
+    let selected = app.selected_item_id.clone();
     let mut open = None;
-    for kind in CredentialKind::ALL {
-        let group: Vec<_> = items.iter().filter(|item| item.kind == kind).collect();
-        if group.is_empty() {
-            continue;
-        }
-        kit::section(ui, Some(kind_plural(kind)), None, |s| {
-            for item in group {
-                let meta = meta_line(&item.project, &item.service);
-                let subtitle = (!meta.is_empty()).then_some(meta.as_str());
-                if s.nav(Some(kind_icon(kind)), &item.name, subtitle, None)
-                    .clicked()
-                {
-                    open = Some(item.id.clone());
-                }
+    columns::grouped_rows(
+        ui,
+        "demo-list",
+        &groups,
+        true,
+        |ui, item| {
+            let meta = meta_line(&item.project, &item.service);
+            let subtitle = if meta.is_empty() {
+                item.kind.label().to_owned()
+            } else {
+                meta
+            };
+            let response = ui
+                .push_id(("demo-row", &item.id), |ui| {
+                    kit::list_row(
+                        ui,
+                        &kit::ListRow {
+                            tile: super::credential_tile(item.kind, &item.service, &item.name),
+                            title: &item.name,
+                            subtitle: &subtitle,
+                            meta: None,
+                            production: false,
+                            selected: selected.as_deref() == Some(item.id.as_str()),
+                        },
+                    )
+                })
+                .inner;
+            if response.clicked() {
+                open = Some(item.id.clone());
             }
-        });
-    }
+        },
+        |ui| {
+            if items.is_empty() {
+                columns::list_note(ui, "No item matches.");
+            }
+        },
+    );
     if let Some(id) = open {
         app.select_item(id);
     }
@@ -79,17 +115,101 @@ pub(super) fn draw_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
 }
 
+/// The detail column of the demo credentials.
+pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    columns::detail_toolbar(ui, |_| {});
+    let selected = app.selected_item_id.clone();
+    columns::detail_body(ui, ("demo-detail", selected), |ui| {
+        if app.model.is_locked() {
+            locked_state(ui, "Credentials");
+        } else if app.selected_item_id.is_some() {
+            draw_detail(app, ui);
+        } else {
+            columns::nothing_selected(
+                ui,
+                Icon::Key,
+                "No credential selected",
+                "Select a credential in the list.",
+            );
+        }
+    });
+}
+
+/// The list column of Decisions in the demo: the requests that wait.
+pub(super) fn decisions_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    let waiting = app
+        .model
+        .list_requests()
+        .iter()
+        .filter(|request| request.status == RequestStatus::Pending)
+        .count();
+    let subtitle = if waiting == 0 {
+        "Nothing needs you".to_owned()
+    } else {
+        format!("{waiting} waiting")
+    };
+    columns::list_toolbar(ui, "Decisions", &subtitle, |_| {});
+    columns::list_note(
+        ui,
+        "The fixture requests and their history are on the right.",
+    );
+}
+
+pub(super) fn decisions_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    columns::detail_toolbar(ui, |_| {});
+    columns::detail_body(ui, "demo-decisions", |ui| draw_activity(app, ui));
+}
+
+/// The list column of Agents in the demo: the catalog agents.
+pub(super) fn agents_list(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    let agents = app.model.catalog_agents();
+    let connected = agents.iter().filter(|agent| agent.connected).count();
+    columns::list_toolbar(ui, "Agents", &format!("{connected} connected"), |_| {});
+    let groups = vec![columns::Group {
+        title: "Catalog".to_owned(),
+        rows: agents.to_vec(),
+    }];
+    columns::grouped_rows(
+        ui,
+        "demo-agents",
+        &groups,
+        false,
+        |ui, agent| {
+            kit::list_row(
+                ui,
+                &kit::ListRow {
+                    tile: kit::Tile::letter(kit::ACCENT, &agent.name),
+                    title: &agent.name,
+                    subtitle: &agent.summary,
+                    meta: agent.connected.then_some(agent.status_label),
+                    production: false,
+                    selected: false,
+                },
+            );
+        },
+        |_| {},
+    );
+}
+
+pub(super) fn agents_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    columns::detail_toolbar(ui, |_| {});
+    columns::detail_body(ui, "demo-agents-detail", |ui| draw_agents(app, ui));
+}
+
+/// The Settings window of the demo: the fixture rule interpreter, under Advanced
+/// (ADR 0026 §2).
+pub(super) fn draw_settings(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    kit::page_header(ui, "Settings", Some("Advanced"), |_| {});
+    draw_rules(app, ui);
+}
+
 fn selected(app: &DesktopApp) -> Option<(String, ItemDetails)> {
     let id = app.selected_item_id.clone()?;
     let details = app.model.item_details(&id).ok()?;
     Some((id, details))
 }
 
-pub(super) fn draw_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    if kit::back_link(ui, "Credentials") {
-        app.view = OwnerView::Vault;
-        return;
-    }
+fn draw_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let Some((id, details)) = selected(app) else {
         kit::note(ui, "Select an item in the vault.");
         return;
@@ -246,7 +366,7 @@ pub(super) fn draw_delete_alert(app: &mut DesktopApp, ctx: &egui::Context) {
         app.pending_delete = false;
         if app.apply(result, "The item was deleted.").is_some() {
             app.selected_item_id = None;
-            app.view = OwnerView::Vault;
+            app.show_credentials();
         }
     }
 }

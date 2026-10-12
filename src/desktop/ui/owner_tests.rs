@@ -16,7 +16,7 @@ use crate::contracts::CredentialKind;
 use crate::desktop::inbox::EventKey;
 use crate::desktop::owner_check::OwnerRequest;
 use crate::desktop::owner_store::{Ephemeral, SecretForm};
-use crate::desktop::{BrokerState, DesktopApp, ItemDraft, OwnerView};
+use crate::desktop::{BrokerState, DesktopApp, ItemDraft, Place};
 use crate::native::{Biometry, HelperErrorCode, NativeHelper};
 
 pub(super) const PASS: &str = "ui-owner-pass-ok";
@@ -385,7 +385,7 @@ fn automatic_access_request_in_any_folder_requires_each_run_approval() {
             .0
     };
     assert!(app.owner_ui.session.env_binding(item_id).unwrap().is_none());
-    app.view = OwnerView::Activity;
+    app.place = Place::Decisions;
     app.ui.grant = super::agents::GrantForm {
         any_folder: true,
         mode: super::agents::Decision::Bouncer,
@@ -407,7 +407,7 @@ fn reveal_waits_for_the_owner_check_and_falls_back_to_the_passphrase() {
     app.owner.helper = Some(not_available_helper(dir.path()));
     app.owner.native.biometry = Some(Biometry::Unavailable(HelperErrorCode::NotAvailable));
     app.select_item(item_id.to_string());
-    app.view = OwnerView::Item;
+    app.show_credentials();
     let ctx = egui::Context::default();
 
     let text = app_frame(&ctx, &mut app);
@@ -531,7 +531,7 @@ fn open_settings_from_activity_shows_the_notifications_tab() {
         not_available_helper(dir.path()),
         || {},
     ));
-    app.view = OwnerView::Activity;
+    app.place = Place::Decisions;
     app.ui.settings_tab = super::SettingsTab::About;
     let ctx = egui::Context::default();
     let text = app_frame(&ctx, &mut app);
@@ -559,7 +559,7 @@ fn open_settings_from_activity_shows_the_notifications_tab() {
         let output = ctx.run_ui(input(time, events), |ui| draw(&mut app, ui));
         output.drop_without_applying_deltas();
     }
-    assert_eq!(app.view, OwnerView::Settings);
+    assert!(app.settings_open);
     assert_eq!(app.ui.settings_tab, super::SettingsTab::Notifications);
     let text = app_frame(&egui::Context::default(), &mut app);
     assert!(
@@ -612,7 +612,7 @@ fn approval_needs_the_owner_check_and_seen_is_not_an_approval() {
         std::thread::sleep(Duration::from_millis(5));
     };
     let ctx = egui::Context::default();
-    app.view = OwnerView::Activity;
+    app.place = Place::Decisions;
     let text = app_frame(&ctx, &mut app);
     assert!(
         text.contains("UI agent asks to run a command with secrets"),
@@ -699,7 +699,7 @@ fn a_first_use_card_allows_in_the_folder_with_one_owner_check() {
         std::thread::sleep(Duration::from_millis(5));
     };
     let ctx = egui::Context::default();
-    app.view = OwnerView::Activity;
+    app.place = Place::Decisions;
     let text = app_frame(&ctx, &mut app);
     for expected in [
         "UI agent wants to use \"Guarded key\" for the first time",
@@ -826,7 +826,7 @@ fn a_first_use_card_for_a_broad_folder_offers_allow_once_only() {
     };
     let (waiter, run) = wait_first_use(&approvals, waiting_run("UI agent"), offer.clone());
     let ctx = egui::Context::default();
-    app.view = OwnerView::Activity;
+    app.place = Place::Decisions;
     let text = app_frame(&ctx, &mut app);
     for expected in [
         "UI agent wants to use \"Guarded key\" for the first time",
@@ -943,7 +943,7 @@ fn a_known_provider_with_automatic_settings_opens_the_sheet_with_the_real_value(
     };
     let (waiter, run) = wait_first_use(&approvals, waiting_run("UI agent"), offer);
     let ctx = egui::Context::default();
-    app.view = OwnerView::Activity;
+    app.place = Place::Decisions;
     let text = app_frame(&ctx, &mut app);
     assert!(
         text.contains(&format!(
@@ -1244,7 +1244,7 @@ fn approve_and_remember_and_calibration_need_the_owner_check() {
         std::thread::sleep(Duration::from_millis(5));
     };
     let ctx = egui::Context::default();
-    app.view = OwnerView::Activity;
+    app.place = Place::Decisions;
     let text = app_frame(&ctx, &mut app);
     assert!(text.contains("Approve and remember"), "{text}");
     assert!(

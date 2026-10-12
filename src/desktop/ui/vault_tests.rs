@@ -17,7 +17,7 @@ use crate::agent::wire::Action;
 use crate::broker::approvals::{ApprovalOutcome, OwnerAction, OwnerCheck, PendingRun};
 use crate::desktop::inbox::EventKey;
 use crate::desktop::owner_store::{ENDED_BY_SWITCH, FreshToken, SecretForm};
-use crate::desktop::{BrokerState, DesktopApp, ItemDraft, OwnerView};
+use crate::desktop::{BrokerState, DesktopApp, ItemDraft};
 use crate::vault::{ActivityDecision, NewActivity};
 use crate::vaults::Registry;
 
@@ -199,7 +199,7 @@ fn create_asks_for_a_name_and_lists_the_vault() {
     // The sidebar shows the open vault. Settings lists each vault with its file.
     let text = frames(&mut app);
     assert!(text.contains("Client Work"), "{text}");
-    app.view = OwnerView::Settings;
+    app.settings_open = true;
     let text = frames(&mut app);
     for expected in [
         "Vaults",
@@ -221,7 +221,7 @@ fn settings_show_the_sections_of_the_selected_tab_only() {
     let dir = TempDir::new().expect("temp dir");
     let mut app = app_in(&dir);
     create(&mut app, "Personal", PASS_A);
-    app.view = OwnerView::Settings;
+    app.settings_open = true;
     let text = frames(&mut app);
     for tab in ["General", "Security", "Agents", "Notifications", "About"] {
         assert!(text.contains(tab), "tab {tab}: {text}");
@@ -294,7 +294,7 @@ fn settings_show_how_the_bouncer_model_starts() {
         Host::none(),
     );
     app.model_server = Some(Arc::clone(&server));
-    app.view = OwnerView::Settings;
+    app.settings_open = true;
     app.ui.settings_tab = SettingsTab::Agents;
     let text = frames(&mut app);
     for expected in [
@@ -439,7 +439,7 @@ fn settings_offer_the_model_install_and_name_a_launch_agent() {
         std::thread::sleep(Duration::from_millis(20));
     }
     app.model_server = Some(Arc::clone(&server));
-    app.view = OwnerView::Settings;
+    app.settings_open = true;
     app.ui.settings_tab = SettingsTab::Agents;
     let remove = format!(
         "launchctl bootout gui/$(id -u)/com.example.bouncer\nrm {}",
@@ -581,7 +581,7 @@ fn settings_show_start_now_and_the_first_start_download() {
         Duration::from_secs(1),
     );
     app.model_server = Some(Arc::clone(&server));
-    app.view = OwnerView::Settings;
+    app.settings_open = true;
     app.ui.settings_tab = SettingsTab::Agents;
 
     // laya-serve is missing: "Cannot start" and no "Start now".
@@ -667,7 +667,7 @@ fn settings_offer_the_weights_download_again_after_it_failed() {
         Duration::from_secs(1),
     );
     app.model_server = Some(Arc::clone(&server));
-    app.view = OwnerView::Settings;
+    app.settings_open = true;
     app.ui.settings_tab = SettingsTab::Agents;
     // A run finds no environment.
     assert!(crate::broker::model_server::ModelGate::before_model(&*server).is_err());
@@ -704,7 +704,7 @@ fn settings_show_the_vault_file_one_time() {
     let mut app = app_in(&dir);
     create(&mut app, "Personal", PASS_A);
     let path = path_of(&app, "Personal").display().to_string();
-    app.view = OwnerView::Settings;
+    app.settings_open = true;
     app.ui.settings_tab = SettingsTab::General;
     let text = frames(&mut app);
     assert_eq!(text.matches(path.as_str()).count(), 1, "{path}: {text}");
@@ -857,7 +857,7 @@ fn a_switch_ends_waiting_runs_and_clears_the_state_of_the_vault() {
     // Nothing of Beta stays.
     assert!(!app.ui.agent_setup.advanced);
     assert!(app.ui.agent_setup.result.is_none());
-    assert_eq!(app.view, OwnerView::Vault);
+    assert!(app.place.is_credentials());
     assert!(app.selected_item_id.is_none());
     assert!(app.search.is_empty());
     assert!(app.owner_ui.session.revealed_value(item, "token").is_none());
@@ -980,7 +980,7 @@ fn remove_from_list_keeps_the_file_and_rename_checks_the_name() {
         app.status_text
     );
 
-    app.view = OwnerView::Settings;
+    app.settings_open = true;
     app.ui.sheet = Some(Sheet::Vault(VaultSheet::Remove { id: alpha.clone() }));
     let text = frames(&mut app);
     assert!(text.contains("Remove “Alpha” from the list?"), "{text}");
@@ -1094,4 +1094,229 @@ fn open_and_restore_add_the_file_to_the_list() {
     assert!(restored.ends_with("vaults/restored-x.db"), "{restored:?}");
     assert!(app.owner_ui.session.is_locked());
     assert_eq!(app.vault_list.registry.entries().len(), 2);
+}
+
+/// Draw one frame with `events` and two without, at the tall size, in one context.
+/// Returns the painted text and each text with its position, of the last frame.
+fn frames_with(app: &mut DesktopApp, events: Vec<egui::Event>) -> (String, Vec<(String, Pos2)>) {
+    let ctx = egui::Context::default();
+    let mut text = String::new();
+    let mut placed = Vec::new();
+    for events in [events, Vec::new(), Vec::new()] {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SIZE)),
+            events,
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| draw(app, ui));
+        text.clear();
+        placed.clear();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut text);
+            collect_placed(&clipped.shape, &mut placed);
+        }
+        output.drop_without_applying_deltas();
+    }
+    (text, placed)
+}
+
+fn collect_placed(shape: &egui::Shape, out: &mut Vec<(String, Pos2)>) {
+    match shape {
+        egui::Shape::Text(text) => out.push((text.galley.text().to_owned(), text.pos)),
+        egui::Shape::Vec(nested) => nested.iter().for_each(|inner| collect_placed(inner, out)),
+        _ => {}
+    }
+}
+
+/// ⌘S: the default action of the open sheet.
+fn command_s() -> egui::Event {
+    egui::Event::Key {
+        key: egui::Key::S,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::COMMAND,
+    }
+}
+
+/// Click the last painted text `needle` (the top layer draws last) in one context.
+fn click_text(app: &mut DesktopApp, needle: &str) {
+    let ctx = egui::Context::default();
+    let frame = |app: &mut DesktopApp, events: Vec<egui::Event>| {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SIZE)),
+            events,
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| draw(app, ui));
+        let mut placed = Vec::new();
+        for clipped in &output.shapes {
+            collect_placed(&clipped.shape, &mut placed);
+        }
+        output.drop_without_applying_deltas();
+        placed
+    };
+    frame(app, Vec::new());
+    let placed = frame(app, Vec::new());
+    let at = placed
+        .iter()
+        .rev()
+        .find(|(text, _)| text == needle)
+        .map(|(_, pos)| *pos + Vec2::new(4.0, 4.0))
+        .unwrap_or_else(|| panic!("{needle} is not on the screen"));
+    let button = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    frame(app, vec![egui::Event::PointerMoved(at)]);
+    frame(app, vec![button(true)]);
+    frame(app, vec![button(false)]);
+    frame(app, Vec::new());
+}
+
+/// Folders (ADR 0026 §5): New Folder makes a folder and a nested one, a taken name is
+/// refused, Rename renames, Move to Folder moves a credential and the list follows the
+/// folder, and Delete moves the credentials of the folder up to its parent.
+#[test]
+fn folder_sheets_create_nested_rename_move_and_delete() {
+    use super::folders::{self, FolderTree};
+    use crate::desktop::Place;
+
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = app_in(&dir);
+    create(&mut app, "Personal", PASS_A);
+    let filed = add_item(&mut app, "Filed key");
+    add_item(&mut app, "Loose key");
+    let folder_of = |app: &DesktopApp, id: u64| {
+        app.owner_ui
+            .session
+            .with_vault(|vault| vault.item_folder(id))
+            .expect("open")
+            .expect("item")
+    };
+
+    // New Folder at the top level: "+" on the Personal header opens it.
+    folders::open_new(&mut app, None);
+    let (text, _) = frames_with(&mut app, Vec::new());
+    assert!(
+        text.contains("New Folder") && text.contains("In Personal."),
+        "{text}"
+    );
+    app.ui.folder_name = "Work".to_owned();
+    frames_with(&mut app, vec![command_s()]);
+    assert_eq!(app.ui.sheet, None, "{}", app.status_text);
+    let tree = FolderTree::load(&app);
+    let work = tree.folders[0].uuid.clone();
+    assert_eq!(
+        app.place,
+        Place::Folder(Some(work.clone())),
+        "the new folder shows"
+    );
+
+    // A nested folder: its parent opens in the sidebar.
+    folders::open_new(&mut app, Some(work.clone()));
+    let (text, _) = frames_with(&mut app, Vec::new());
+    assert!(text.contains("In Work."), "{text}");
+    app.ui.folder_name = "Acme".to_owned();
+    frames_with(&mut app, vec![command_s()]);
+    assert_eq!(app.ui.sheet, None, "{}", app.status_text);
+    let tree = FolderTree::load(&app);
+    let acme = tree
+        .children(Some(&work))
+        .next()
+        .expect("nested folder")
+        .uuid
+        .clone();
+    assert_eq!(tree.path(&acme), ["Work", "Acme"]);
+    assert!(app.ui.open_folders.contains(&work));
+    let (text, _) = frames_with(&mut app, Vec::new());
+    assert!(
+        text.contains("Acme"),
+        "the sidebar shows the nested folder: {text}"
+    );
+
+    // A taken name, in any case, is refused and the sheet stays.
+    folders::open_new(&mut app, Some(work.clone()));
+    app.ui.folder_name = "acme".to_owned();
+    frames_with(&mut app, vec![command_s()]);
+    assert!(app.ui.sheet.is_some(), "the sheet stays after an error");
+    assert!(
+        app.status_text.contains("already there"),
+        "{}",
+        app.status_text
+    );
+    app.ui.sheet = None;
+
+    // Rename.
+    folders::open_rename(&mut app, &acme);
+    assert_eq!(app.ui.folder_name, "Acme", "Rename starts with the name");
+    let (text, _) = frames_with(&mut app, Vec::new());
+    assert!(text.contains("Rename “Acme”"), "{text}");
+    app.ui.folder_name = "Acme Inc".to_owned();
+    frames_with(&mut app, vec![command_s()]);
+    assert_eq!(app.ui.sheet, None, "{}", app.status_text);
+    assert_eq!(
+        FolderTree::load(&app).name(&acme).as_deref(),
+        Some("Acme Inc")
+    );
+
+    // Move to Folder: the credential goes to Acme Inc; the folder list holds it.
+    app.place = Place::CREDENTIALS;
+    app.select_item(filed.to_string());
+    folders::open_move(&mut app, filed);
+    assert_eq!(app.ui.move_target, None, "it starts at the top level");
+    let (text, _) = frames_with(&mut app, Vec::new());
+    assert!(
+        text.contains("Move “Filed key”") && text.contains("Acme Inc"),
+        "{text}"
+    );
+    app.ui.move_target = Some(acme.clone());
+    frames_with(&mut app, vec![command_s()]);
+    assert_eq!(app.ui.sheet, None, "{}", app.status_text);
+    assert_eq!(folder_of(&app, filed).as_deref(), Some(acme.as_str()));
+    // "All credentials" groups by folder path.
+    let (text, _) = frames_with(&mut app, Vec::new());
+    assert!(text.contains("Work › Acme Inc"), "{text}");
+    // The list of Work holds the credentials of its subfolders.
+    app.place = Place::Folder(Some(work.clone()));
+    let (text, _) = frames_with(&mut app, Vec::new());
+    assert!(
+        text.contains("Filed key") && !text.contains("Loose key"),
+        "{text}"
+    );
+
+    // Delete Acme Inc: its credential moves up to Work. No credential is deleted.
+    app.place = Place::Folder(Some(acme.clone()));
+    folders::open_delete(&mut app, &acme);
+    let (text, _) = frames_with(&mut app, Vec::new());
+    assert!(text.contains("Delete “Acme Inc”?"), "{text}");
+    assert!(
+        text.contains("move to Work. No credential is deleted."),
+        "{text}"
+    );
+    click_text(&mut app, "Delete");
+    assert_eq!(app.ui.sheet, None, "{}", app.status_text);
+    assert!(FolderTree::load(&app).get(&acme).is_none());
+    assert_eq!(folder_of(&app, filed).as_deref(), Some(work.as_str()));
+    assert_eq!(
+        app.place,
+        Place::Folder(Some(work.clone())),
+        "the list shows the parent"
+    );
+    assert!(
+        app.status_text.contains("Its credential is in Work."),
+        "{}",
+        app.status_text
+    );
+    assert!(
+        app.owner_ui.session.details(filed).is_ok(),
+        "the credential stays"
+    );
+
+    // Delete Work: the credential goes to the top level.
+    assert!(folders::delete(&mut app, &work));
+    assert_eq!(folder_of(&app, filed), None);
+    assert_eq!(app.place, Place::CREDENTIALS);
 }

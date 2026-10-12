@@ -12,7 +12,7 @@ use super::agent_setup::Host;
 use super::kit::{self, Style, Tone};
 use super::{Sheet, agents, items};
 use crate::desktop::owner_check::OwnerRequest;
-use crate::desktop::{DesktopApp, OwnerView};
+use crate::desktop::{DesktopApp, Place};
 use crate::vault::AgentSummary;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -69,7 +69,7 @@ pub(super) fn connected(app: &mut DesktopApp, agent_id: u64, host: Host) {
     app.ui.agent_onboarding.saved(agent_id, host);
     app.ui.agent_onboarding.vault_path = app.owner_ui.session.vault_path();
     app.owner_ui.selected_agent = Some(agent_id);
-    app.view = OwnerView::Agents;
+    app.place = Place::Agents;
 }
 
 pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary) {
@@ -192,7 +192,7 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary
                             s.row(|ui| {
                                 kit::note(ui, "Add a credential with a secret value in Credentials. Then return to this guide.");
                                 if kit::button(ui, "Go to Credentials", Style::Bordered).clicked() {
-                                    app.view = OwnerView::Vault;
+                                    app.show_credentials();
                                 }
                             });
                         }
@@ -316,7 +316,7 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary
         app.ui.sheet = Some(Sheet::GrantMany { agent_id: agent.id });
     }
     if activity {
-        app.view = OwnerView::Activity;
+        app.place = Place::Decisions;
     }
 }
 
@@ -347,7 +347,7 @@ fn open_variable(app: &mut DesktopApp, item_id: u64) {
     app.select_item(item_id.to_string());
     items::prepare_sheet(app, item_id, &Sheet::Variable);
     app.ui.sheet = Some(Sheet::Variable);
-    app.view = OwnerView::Agents;
+    app.place = Place::Agents;
 }
 
 fn credential_rows(app: &DesktopApp) -> Result<Vec<(u64, String, Option<String>)>, String> {
@@ -418,7 +418,7 @@ mod tests {
         connected(&mut app, agent.id, Host::Codex);
         app.ui.agent_onboarding.selection.insert(item_id);
         open_variable(&mut app, item_id);
-        assert_eq!(app.view, OwnerView::Agents);
+        assert_eq!(app.place, Place::Agents);
         assert_eq!(app.owner_ui.selected_agent, Some(agent.id));
         assert_eq!(app.ui.sheet, Some(Sheet::Variable));
         let request = OwnerRequest::SaveVariable {
@@ -439,7 +439,7 @@ mod tests {
         app.confirm_owner_now(OwnerCheck::passphrase(PASS)).unwrap();
         super::super::close_sheet_after_check(&mut app);
         assert!(app.ui.sheet.is_none());
-        assert_eq!(app.view, OwnerView::Agents);
+        assert_eq!(app.place, Place::Agents);
         assert_eq!(
             app.ui.agent_onboarding.selection,
             [item_id].into_iter().collect()

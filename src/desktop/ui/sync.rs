@@ -46,7 +46,7 @@ use super::{
 use crate::desktop::owner_store::Ephemeral;
 pub(crate) use crate::desktop::sync_worker::UiStatus;
 use crate::desktop::sync_worker::{BEFORE_LOCK_LIMIT, DOWNLOAD_EVERY, SyncEvent, SyncWorker};
-use crate::desktop::{DesktopApp, OwnerView};
+use crate::desktop::{DesktopApp, Place};
 use crate::sync::{
     FileStatus, FolderEntry, FolderSync, SYNC_FILE_EXTENSION, SyncConfig, SyncError, SyncFolder,
     SyncOutcome, TransportKind, VaultSync, list_folder_vaults, read_state,
@@ -1170,7 +1170,7 @@ impl DesktopApp {
         self.sync.open_pick = None;
         self.sync.open_path.clear();
         self.ui.start = Step::Home;
-        self.view = OwnerView::Vault;
+        self.place = Place::CREDENTIALS;
         if unlocked.is_ok() {
             let _ = self.sync_after_unlock();
             self.sync.adopted_vault = Some(id);

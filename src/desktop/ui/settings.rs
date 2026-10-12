@@ -20,7 +20,7 @@ use crate::desktop::notify::{self, Delivery};
 use crate::desktop::owner_check::OwnerRequest;
 use crate::desktop::owner_store::Ephemeral;
 use crate::desktop::unlock::UnlockMethod;
-use crate::desktop::{BrokerState, DesktopApp, OwnerView};
+use crate::desktop::{BrokerState, DesktopApp};
 use crate::vault::DEFAULT_TOKEN_LIFETIME_DAYS;
 
 /// The tab of the Settings view. Each tab shows a few related sections.
@@ -49,7 +49,7 @@ const TABS: [(SettingsTab, &str); 5] = [
 
 /// Show Settings with the given tab.
 pub(crate) fn open(app: &mut DesktopApp, tab: SettingsTab) {
-    app.view = OwnerView::Settings;
+    app.open_settings_window();
     app.ui.settings_tab = tab;
 }
 

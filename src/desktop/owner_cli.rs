@@ -23,7 +23,7 @@ use super::owner_socket::{self, Envelope, OwnerSocket};
 use super::owner_store::{
     DETAIL_PREFIX, MAX_DETAILS, OwnerDetails, OwnerSummary, RuleForm, SecretForm, detail_field_name,
 };
-use super::{BrokerState, DesktopApp, OwnerView};
+use super::{BrokerState, DesktopApp};
 use crate::broker::approvals::{OwnerAction, OwnerProof};
 use crate::contracts::CredentialKind;
 use crate::desktop::model::{DetailDraft, ItemDraft, ModelError, ModelResult};
@@ -661,7 +661,7 @@ impl DesktopApp {
                     super::ui::close_sheet(self, ctx);
                     self.pending_delete = false;
                     self.selected_item_id = None;
-                    self.view = OwnerView::Vault;
+                    self.show_credentials();
                 }
                 self.cli_wrote(&format!("{} is deleted.", found.name))
             }

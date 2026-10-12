@@ -9,10 +9,10 @@ use super::super::owner_tests::{PASS, collect, locked_app};
 use super::super::{Sheet, draw};
 use crate::broker::approvals::OwnerCheck;
 use crate::contracts::CredentialKind;
+use crate::desktop::DesktopApp;
 use crate::desktop::model::ItemDraft;
 use crate::desktop::owner_check::OwnerRequest;
 use crate::desktop::owner_store::SecretForm;
-use crate::desktop::{DesktopApp, OwnerView};
 use crate::vault::passkey::b64url_encode;
 use crate::vault::{PasskeyCreate, PasskeyTarget};
 
@@ -123,7 +123,7 @@ fn unlocked_app(dir: &TempDir, name: &str) -> DesktopApp {
 
 fn select(app: &mut DesktopApp, item_id: u64) {
     app.select_item(item_id.to_string());
-    app.view = OwnerView::Item;
+    app.show_credentials();
 }
 
 /// A login with a password, no passkey yet. Returns the ID and the revision.
@@ -469,7 +469,7 @@ fn deleting_a_login_with_only_a_passkey_warns_about_the_whole_login() {
     pass_owner_check(&mut app);
     window.idle(&mut app);
     assert!(app.owner_ui.session.details(id).is_err(), "still there");
-    assert_eq!(app.view, OwnerView::Vault);
+    assert!(app.place.is_credentials());
 }
 
 #[test]
@@ -533,7 +533,7 @@ fn the_sheet_does_not_come_back_after_the_owner_leaves_the_page() {
     window.idle(&mut app);
     window.click(&mut app, "Delete login…");
     assert!(window.has("Delete this login?"), "{}", window.text);
-    app.view = OwnerView::Vault;
+    app.selected_item_id = None;
     window.idle(&mut app);
     select(&mut app, id);
     window.idle(&mut app);
