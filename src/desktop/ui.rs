@@ -34,13 +34,13 @@ mod decisions_tests;
 mod demo;
 #[cfg(feature = "vault")]
 pub(crate) mod files;
+/// The two first steps of a new vault (ADR 0026 §7).
+#[cfg(feature = "vault")]
+mod first_steps;
 mod focus;
 /// Folders of the personal vault: the tree and the sheets (ADR 0026 §5).
 #[cfg(feature = "vault")]
 mod folders;
-/// The steps from a new vault to the first agent request.
-#[cfg(feature = "vault")]
-mod get_started;
 #[cfg(feature = "vault")]
 pub(crate) mod import;
 #[cfg(feature = "vault")]
@@ -284,10 +284,6 @@ pub(crate) struct UiState {
     /// The folder that the Move sheet selects. `None`: the top level.
     #[cfg(feature = "vault")]
     pub(crate) move_target: Option<String>,
-    /// The list IDs of the vaults where the owner hid the "Get started" list. `ui.json`
-    /// keeps them across restarts.
-    #[cfg(feature = "vault")]
-    get_started_hidden: BTreeSet<String>,
     /// `ui.json`. Only the window sets it, so a test never writes the real folder.
     #[cfg(feature = "vault")]
     prefs_path: Option<std::path::PathBuf>,
@@ -347,7 +343,6 @@ impl UiState {
         let path = crate::desktop::ui_prefs::UiPrefs::path(&data_dir);
         let prefs = crate::desktop::ui_prefs::UiPrefs::load(&path);
         self.sidebar_hidden = prefs.sidebar_hidden;
-        self.get_started_hidden = prefs.get_started_hidden;
         self.open_folders = prefs.open_folders;
         self.prefs_path = Some(path);
     }
@@ -359,7 +354,6 @@ impl UiState {
         if let Some(path) = &self.prefs_path {
             let prefs = crate::desktop::ui_prefs::UiPrefs {
                 sidebar_hidden: self.sidebar_hidden,
-                get_started_hidden: self.get_started_hidden.clone(),
                 open_folders: self.open_folders.clone(),
             };
             let _ = prefs.save(path);
@@ -1381,8 +1375,8 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let mut app = app_with_vault(&dir);
         let (text, _) = draw_frames(&mut app, DEFAULT_SIZE, 3);
-        // A new vault shows the steps; their first one adds a credential.
-        assert!(text.contains("Get started · 0 of 5"), "{text}");
+        // A new vault shows the two first steps; the first one pastes a credential.
+        assert!(text.contains("Paste your first credential"), "{text}");
         app.ui.sheet = Some(Sheet::AddItem { kind_chosen: false });
         let (text, _) = draw_frames(&mut app, DEFAULT_SIZE, 3);
         for kind in [

@@ -832,9 +832,9 @@ fn overview(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &super::shell::Pen
             .iter()
             .filter(|item| archived.contains_key(&item.id) && conflicts.contains_key(&item.id))
             .count();
-        // The steps of a new vault. With no credential, they replace the empty state:
-        // "Add a credential" is then the one main action.
-        let guided = super::get_started::draw(app, ui);
+        // The two first steps of a new vault. With no credential, they are the empty
+        // state.
+        let guided = super::first_steps::draw(app, ui);
         ui.scope(|ui| review_notice(app, ui));
         ui.scope(|ui| conflict_notice(app, ui, conflict_count));
         if all.is_empty() {

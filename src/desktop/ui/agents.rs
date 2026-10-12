@@ -120,7 +120,10 @@ pub(super) fn next_steps_panel(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool 
     let mut cli = app.ui.is_expanded("next-step-cli");
     kit::section(ui, Some("Use this vault on this Mac"), Some(&intro), |s| {
         s.row(|ui| {
-            kit::note(ui, "Agents and grants stay on this Mac. Set them here before an agent can use a credential.");
+            kit::note(
+                ui,
+                "Agents stay on this Mac. Connect them here before an agent can use a credential.",
+            );
         });
         s.row(|ui| {
             ui.horizontal_wrapped(|ui| {
@@ -166,8 +169,8 @@ fn choose_host(app: &mut DesktopApp, ctx: &egui::Context, host: usize) {
     agent_onboarding::connect(app, Some(ctx), host, host.agent_name());
 }
 
-/// The app knows the first three stages. A settings file or an allowed activity
-/// entry cannot prove the last two: access requests can wait and runs can fail.
+/// The app knows the first three stages. A settings file or an allowed request
+/// cannot prove the last two: access requests can wait and runs can fail.
 fn connection_progress(app: &mut DesktopApp, ui: &mut egui::Ui, cli: bool) {
     let links = super::cli_tools::installed();
     let window = app.cli.socket_path().is_some();
@@ -204,7 +207,7 @@ fn connection_progress(app: &mut DesktopApp, ui: &mut egui::Ui, cli: bool) {
             (
                 "First successful request",
                 false,
-                "Check the result of a test request and its entry in Activity",
+                "Check the result of a test request and its entry in Decisions",
             ),
         ] {
             s.status(

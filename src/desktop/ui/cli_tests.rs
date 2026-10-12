@@ -56,7 +56,7 @@ fn next_steps_show_choices_without_registration_and_exclude_archived_items() {
     for choice in ["Claude Code", "Codex", "CLI", "Skip"] {
         assert!(text.contains(choice), "{text}");
     }
-    assert!(text.contains("Agents and grants stay on this Mac"));
+    assert!(text.contains("Agents stay on this Mac. Connect them here"));
     assert!(
         !text.contains("Setup checks"),
         "the initial panel stays compact"
@@ -93,7 +93,7 @@ fn next_steps_distinguish_a_cli_session_from_a_successful_agent_request() {
     assert!(text.contains("Checked\nCLI connected"), "{text}");
     assert!(
         text.contains(
-            "To check\nFirst successful request\nCheck the result of a test request and its entry in Activity"
+            "To check\nFirst successful request\nCheck the result of a test request and its entry in Decisions"
         ),
         "{text}"
     );
