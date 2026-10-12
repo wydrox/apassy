@@ -274,7 +274,10 @@ fn the_list_has_waiting_questions_in_order_and_no_empty_sections() {
     let (mut app, item_id) = unlocked_app_with_item(&dir);
     app.place = Place::Decisions;
     let (text, _) = frames(&mut app, DEFAULT, 3);
-    assert!(text.contains("Nothing needs you"), "{text}");
+    assert!(
+        !text.contains("Nothing needs you"),
+        "one empty message: {text}"
+    );
     assert!(text.contains("All clear"), "{text}");
     assert!(text.contains("by you · 0 automatic this week"), "{text}");
 
@@ -763,11 +766,7 @@ fn decisions_and_agents_draw_at_every_size_with_and_without_content() {
         }
     };
     // Empty states.
-    check(
-        &mut app,
-        Place::Decisions,
-        &["Decisions", "Nothing needs you", "All clear"],
-    );
+    check(&mut app, Place::Decisions, &["Decisions", "All clear"]);
     check(
         &mut app,
         Place::Agents,

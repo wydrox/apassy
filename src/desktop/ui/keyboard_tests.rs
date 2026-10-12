@@ -300,10 +300,13 @@ fn credential_header_stays_visible_after_body_scroll_and_the_list_stays_beside_i
             "the name is in the detail column"
         );
         assert!(
-            header[0].top() >= kit::TOOLBAR,
+            header[0].top() >= kit::DETAIL_TOOLBAR,
             "the name is under the toolbar"
         );
-        assert!(header[1].bottom() <= kit::TOOLBAR, "Edit is in the toolbar");
+        assert!(
+            header[1].bottom() <= kit::DETAIL_TOOLBAR,
+            "Edit is in the toolbar"
+        );
         let secret_top = text_top(&window, "Secret").expect("the body starts at Secret");
         assert!(text_top(&window, "More actions").is_none());
 
@@ -913,44 +916,57 @@ fn escape_closes_an_error_message() {
 }
 
 /// A menu picker: Space opens it, Tab moves through the options, Return chooses one,
-/// the menu closes, and the focus goes back to the menu button.
+/// the menu closes, and the focus goes back to the menu button. The picker is the
+/// folder of New Credential.
 #[test]
 fn a_menu_choice_with_the_keyboard_closes_the_menu() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&dir);
+    app.owner_ui
+        .session
+        .with_vault(|vault| vault.create_folder(None, "Menu folder"))
+        .expect("unlocked")
+        .expect("folder");
     app.place = Place::CREDENTIALS;
+    app.ui.sheet = Some(Sheet::NewCredential);
     let mut window = Window::new();
     window.idle(&mut app);
-    // The toolbar draws from left to right: the search field, then the filter menu.
     for _ in 0..30 {
         window.press(&mut app, Key::Tab, Modifiers::NONE);
-        if window.ctx.text_edit_focused() {
+        if window
+            .focused_name()
+            .is_some_and(|name| name.starts_with("Folder, "))
+        {
             break;
         }
     }
+    let before = window.focused_name().expect("a control has the focus");
     assert!(
-        window.ctx.text_edit_focused(),
-        "Tab reaches the search field"
+        before.starts_with("Folder, "),
+        "Tab reaches the folder menu: {before}"
     );
-    window.press(&mut app, Key::Tab, Modifiers::NONE);
-    let button = window.focused().expect("the filter menu has the focus");
-    let before = app.ui.credential_filter;
+    let button = window.focused().expect("the folder menu has the focus");
     window.press(&mut app, Key::Space, Modifiers::NONE);
     assert!(
         egui::Popup::is_any_open(&window.ctx),
         "Space opens the menu"
     );
-    window.tab_to(&mut app, "Archived", 12);
+    window.tab_to(&mut app, "Menu folder", 12);
     window.press(&mut app, Key::Enter, Modifiers::NONE);
+    window.idle(&mut app);
     assert!(
         !egui::Popup::is_any_open(&window.ctx),
         "the choice closed the menu"
     );
-    assert_ne!(app.ui.credential_filter, before, "the filter changed");
     assert_eq!(
         window.focused(),
         Some(button),
         "the focus is back on the menu"
+    );
+    assert_eq!(
+        window.focused_name().as_deref(),
+        Some("Folder, Menu folder"),
+        "the folder changed"
     );
 }
 

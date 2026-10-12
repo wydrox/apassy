@@ -2,7 +2,8 @@
 //!
 //! The list column has a toolbar with the title, a count, and "+", then the rows of the
 //! place. The detail column has a toolbar on top and a scrolling body in a reading
-//! column. Both toolbars hold the title bar of the window, so a drag on them moves it.
+//! column. The top row of both toolbars is the row of the traffic lights
+//! ([`kit::LIGHTS_Y`]). Both toolbars hold the title bar of the window, so a drag on them moves it.
 //! A place draws its own rows and its own body ([`super::items`], [`super::agents`],
 //! [`super::decisions`]); this module has their frame.
 
@@ -65,8 +66,9 @@ impl Columns {
     }
 }
 
-/// The toolbar of a list column: the title and the line under it, and the buttons at
-/// the right.
+/// The toolbar of a list column: the title on the row of the traffic lights, the line
+/// under it, and the buttons at the right on the same row. Next to the traffic lights
+/// (a rail or no sidebar), the title starts after them.
 pub(super) fn list_toolbar(
     ui: &mut Ui,
     title: &str,
@@ -76,53 +78,48 @@ pub(super) fn list_toolbar(
     let full = ui.max_rect();
     let rect = Rect::from_min_size(full.min, Vec2::new(full.width(), kit::TOOLBAR));
     kit::window_drag_region(ui, rect);
-    ui.scope_builder(
-        egui::UiBuilder::new()
-            .max_rect(Rect::from_min_max(
-                Pos2::new(rect.left() + 16.0, rect.top()),
-                Pos2::new(rect.right() - 10.0, rect.bottom()),
-            ))
-            .layout(Layout::left_to_right(Align::Center)),
-        |ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            let right = ui.max_rect().right();
-            // The buttons first, from the right, so the title takes what they leave.
-            let buttons = ui
-                .scope_builder(
-                    egui::UiBuilder::new()
-                        .max_rect(ui.max_rect())
-                        .layout(Layout::right_to_left(Align::Center)),
-                    |ui| {
-                        trailing(ui);
-                        ui.min_rect().width()
-                    },
-                )
-                .inner;
-            let title_rect = Rect::from_min_max(
-                ui.max_rect().min,
-                Pos2::new(right - buttons - 6.0, ui.max_rect().bottom()),
-            );
-            ui.scope_builder(
-                egui::UiBuilder::new()
-                    .max_rect(title_rect)
-                    .layout(Layout::left_to_right(Align::Center)),
-                |ui| kit::toolbar_title(ui, title, subtitle),
-            );
-        },
+    let center_y = rect.top() + kit::LIGHTS_Y;
+    let row = Rect::from_min_max(
+        Pos2::new(rect.left() + 16.0, center_y - 14.0),
+        Pos2::new(rect.right() - 10.0, center_y + 14.0),
+    );
+    // The buttons first, from the right, so the title takes what they leave.
+    let buttons = ui
+        .scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(row)
+                .layout(Layout::right_to_left(Align::Center)),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                trailing(ui);
+                ui.min_rect().width()
+            },
+        )
+        .inner;
+    let left = row.left().max(kit::LIGHTS_RIGHT + 10.0);
+    kit::toolbar_title_on_row(
+        ui,
+        left,
+        row.right() - buttons - 6.0,
+        center_y,
+        title,
+        subtitle,
     );
     ui.allocate_rect(rect, Sense::hover());
 }
 
-/// The toolbar of a detail column: its buttons at the right.
+/// The toolbar of a detail column: its buttons at the right, on the row of the traffic
+/// lights.
 pub(super) fn detail_toolbar(ui: &mut Ui, trailing: impl FnOnce(&mut Ui)) {
     let full = ui.max_rect();
-    let rect = Rect::from_min_size(full.min, Vec2::new(full.width(), kit::TOOLBAR));
+    let rect = Rect::from_min_size(full.min, Vec2::new(full.width(), kit::DETAIL_TOOLBAR));
     kit::window_drag_region(ui, rect);
+    let center_y = rect.top() + kit::LIGHTS_Y;
     ui.scope_builder(
         egui::UiBuilder::new()
             .max_rect(Rect::from_min_max(
-                rect.min,
-                Pos2::new(rect.right() - 12.0, rect.bottom()),
+                Pos2::new(rect.left(), center_y - 14.0),
+                Pos2::new(rect.right() - 12.0, center_y + 14.0),
             ))
             .layout(Layout::right_to_left(Align::Center)),
         |ui| {
@@ -133,14 +130,15 @@ pub(super) fn detail_toolbar(ui: &mut Ui, trailing: impl FnOnce(&mut Ui)) {
     ui.allocate_rect(rect, Sense::hover());
 }
 
-/// A margin of 12 points at the sides of a list column, for the search field.
+/// A margin of 12 points at the sides of a list column, for the search field. With the
+/// item spacing under it, the rows start 8 points below, as in the mockup.
 pub(super) fn list_inset<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     egui::Frame::NONE
         .inner_margin(Margin {
             left: 12,
             right: 12,
             top: 0,
-            bottom: 8,
+            bottom: 2,
         })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -250,8 +248,15 @@ pub(super) fn detail_body(
         });
 }
 
-/// The detail of a place with nothing selected.
+/// The detail of a place with nothing selected, in the middle of the space that is
+/// left, as in the mockup.
 pub(super) fn nothing_selected(ui: &mut Ui, icon: Icon, title: &str, message: &str) {
+    // The icon, the title, and the message are about 82 points high, under 48 points
+    // of space of their own.
+    let space = ui.available_rect_before_wrap().height();
+    if space.is_finite() {
+        ui.add_space((space / 2.0 - 48.0 - 41.0).max(0.0));
+    }
     kit::empty_state(ui, icon, title, message, None);
 }
 

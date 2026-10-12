@@ -717,6 +717,9 @@ fn view_steps() -> Vec<Step> {
         // sidebar that floats over the list.
         Key(egui::Key::Num1, cmd),
         Wait(0.5),
+        // A click on an empty part of the sidebar ends the keyboard focus that the
+        // shortcut gave to the first control of the list.
+        Click(110.0, 600.0),
         Key(egui::Key::S, ctrl_cmd),
         Wait(1.0),
         Shot("sidebar-collapsed"),
@@ -773,14 +776,14 @@ struct Layout {
 }
 
 const LAYOUT: Layout = Layout {
-    work_triangle: (33.0, 168.0),
-    work_row: (120.0, 168.0),
-    stripe_live_in_work: (450.0, 230.0),
-    decision_request: (450.0, 200.0),
-    decision_suggestion: (450.0, 260.0),
-    first_agent: (450.0, 84.0),
+    work_triangle: (33.0, 104.0),
+    work_row: (120.0, 104.0),
+    stripe_live_in_work: (450.0, 176.0),
+    decision_request: (450.0, 174.0),
+    decision_suggestion: (450.0, 250.0),
+    first_agent: (450.0, 70.0),
     settings_tabs: [460.0, 545.0, 630.0, 715.0],
-    settings_tab_y: 75.0,
+    settings_tab_y: 88.0,
 };
 
 /// The tour. `APASSY_TOUR` names a file with other steps after the unlock, one per

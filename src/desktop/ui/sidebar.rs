@@ -89,34 +89,43 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending, m
         SidebarMode::Full => {
             kit::window_drag_region(
                 ui,
-                Rect::from_min_size(full.min, Vec2::new(full.width(), kit::TOOLBAR)),
+                Rect::from_min_size(full.min, Vec2::new(full.width(), kit::SIDEBAR_TOP)),
             );
-            // Right of the window buttons, at the end of the top row.
-            let button = Rect::from_min_size(
-                Pos2::new(full.right() - 18.0 - 26.0, full.top() + 13.0),
+            // At the end of the row of the traffic lights.
+            let button = Rect::from_center_size(
+                Pos2::new(full.right() - 8.0 - 13.0, full.top() + kit::LIGHTS_Y),
                 Vec2::splat(26.0),
             );
             toggle_button(app, ui, button, narrow, true);
-            ui.add_space(kit::TOOLBAR);
+            space_to(ui, full.top() + kit::SIDEBAR_TOP);
             full_content(app, ui, pending);
         }
         SidebarMode::Rail | SidebarMode::Float => {
             kit::window_drag_region(
                 ui,
-                Rect::from_min_size(full.min, Vec2::new(full.width(), kit::TITLE_BAR)),
+                Rect::from_min_size(full.min, Vec2::new(full.width(), kit::RAIL_TOP - 8.0)),
             );
-            // Under the window buttons, which take the top of the rail.
-            let button = Rect::from_min_size(
-                Pos2::new(full.center().x - 13.0, full.top() + kit::TITLE_BAR + 4.0),
+            // Under the traffic lights, which take the top of the rail.
+            let button = Rect::from_center_size(
+                Pos2::new(full.center().x, full.top() + kit::LIGHTS_Y + 27.0),
                 Vec2::splat(26.0),
             );
             // Under a floating sidebar, its own button is the one to use.
             if mode == SidebarMode::Rail {
                 toggle_button(app, ui, button, narrow, false);
             }
-            ui.add_space(kit::TITLE_BAR + 38.0);
+            space_to(ui, full.top() + kit::RAIL_TOP);
             rail_content(app, ui, pending);
         }
+    }
+}
+
+/// Move the cursor of `ui` down to `top`. The sidebar button above it is placed at a
+/// fixed rect, and its scope already moved the cursor down by its own height.
+fn space_to(ui: &mut egui::Ui, top: f32) {
+    let space = top - ui.cursor().top();
+    if space > 0.0 {
+        ui.add_space(space);
     }
 }
 
@@ -163,12 +172,12 @@ pub(super) fn draw_float(app: &mut DesktopApp, ctx: &egui::Context, pending: &Pe
                             screen.height() - 10.0,
                         ));
                         let full = ui.max_rect();
-                        let button = Rect::from_min_size(
-                            Pos2::new(full.right() - 8.0 - 26.0, full.top() + 13.0),
+                        let button = Rect::from_center_size(
+                            Pos2::new(full.right() - 8.0 - 13.0, full.top() + kit::LIGHTS_Y),
                             Vec2::splat(26.0),
                         );
                         toggle_button(app, ui, button, true, true);
-                        ui.add_space(kit::TOOLBAR);
+                        space_to(ui, full.top() + kit::SIDEBAR_TOP);
                         full_content(app, ui, pending);
                     });
             });

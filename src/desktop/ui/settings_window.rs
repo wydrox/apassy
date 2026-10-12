@@ -160,9 +160,17 @@ pub(super) fn draw_in_place(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 {
                     app.settings_open = false;
                 }
+                // On the row of the traffic lights, after them.
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.add_space(16.0);
-                    kit::toolbar_title(ui, "Settings", "");
+                    ui.add_space((kit::LIGHTS_RIGHT + 10.0 - ui.max_rect().left()).max(16.0));
+                    ui.add(
+                        egui::Label::new(
+                            kit::text("Settings", kit::Font::Body)
+                                .variation(b"wght", 700.0)
+                                .color(kit::LABEL),
+                        )
+                        .selectable(false),
+                    );
                 });
             });
             #[cfg(feature = "vault")]

@@ -293,9 +293,6 @@ pub(crate) struct UiState {
     /// The filter of the credential list.
     #[cfg(feature = "vault")]
     pub(crate) credential_filter: items::Filter,
-    /// The order of the credential list.
-    #[cfg(feature = "vault")]
-    pub(crate) credential_sort: items::Sort,
     /// ⌘F: the search field takes the focus in the next frame.
     #[cfg(feature = "vault")]
     pub(crate) focus_search: bool,
@@ -694,7 +691,8 @@ pub(super) fn credential_tile(
     kit::Tile::icon(color, icon)
 }
 
-/// The plural section title of a credential kind.
+/// The plural section title of a credential kind, for the demo list.
+#[cfg(not(feature = "vault"))]
 pub(super) fn kind_plural(kind: crate::contracts::CredentialKind) -> &'static str {
     use crate::contracts::CredentialKind;
     match kind {
@@ -988,7 +986,7 @@ mod tests {
                 Place::Shared("drawn-shared".to_owned()),
                 ["Drawn team", "No items yet"],
             ),
-            (Place::Decisions, ["Decisions", "Nothing needs you"]),
+            (Place::Decisions, ["Decisions", "All clear"]),
             (Place::Agents, ["Agents", "No agents yet"]),
         ];
         (app, places)
@@ -1732,16 +1730,16 @@ mod tests {
             .id
     }
 
-    /// The list hides an archived credential until a search or the "Archived" filter.
-    /// A filter by kind and the recency orders work.
+    /// The list hides an archived credential until a search or the "Archived" list
+    /// ("Show archived"), and goes back to all credentials by name.
     #[cfg(feature = "vault")]
     #[test]
-    fn the_list_sorts_filters_and_hides_archived_credentials() {
+    fn the_list_hides_archived_credentials_until_asked() {
         use crate::contracts::CredentialKind;
 
         let dir = tempfile::TempDir::new().expect("temp dir");
         let mut app = app_with_vault(&dir);
-        let alpha = add_named(&mut app, "Alpha key", CredentialKind::ApiKey);
+        add_named(&mut app, "Alpha key", CredentialKind::ApiKey);
         add_named(&mut app, "Beta login", CredentialKind::Login);
         let gamma = add_named(&mut app, "Gamma key", CredentialKind::ApiKey);
         app.owner_ui.session.archive(gamma).expect("archive");
@@ -1770,30 +1768,14 @@ mod tests {
             "{text}"
         );
 
-        app.ui.credential_filter = items::Filter::Kind(CredentialKind::Login);
-        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
-        assert!(
-            text.contains("Beta login") && !text.contains("Alpha key"),
-            "{text}"
-        );
-
-        // The newest change goes first.
+        // "Show All" under the search field goes back to all credentials, by name.
+        assert!(text.contains("Show All"), "{text}");
         app.ui.credential_filter = items::Filter::All;
-        app.ui.credential_sort = items::Sort::Changed;
-        let details = app.owner_ui.session.details(alpha).expect("details");
-        let mut draft = details.to_draft();
-        draft.notes = "changed".to_owned();
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        app.owner_ui
-            .session
-            .update(alpha, details.revision, &draft, &Default::default())
-            .expect("update");
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
         let first = text.find("Alpha key").expect("alpha");
         let second = text.find("Beta login").expect("beta");
         assert!(first < second, "{text}");
-        assert!(text.contains("Recently changed"), "{text}");
-        assert!(text.contains("Changed just now"), "{text}");
+        assert!(!text.contains("Show All"), "{text}");
     }
 
     /// The page of a credential shows custom details (hidden ones masked), the history,

@@ -476,18 +476,13 @@ pub(super) fn sidebar_switcher(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let tile = tile_color(&name);
     let mut pick = None;
     let mut lock = false;
-    let header = ui
-        .horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            let width = ui.available_width() - 28.0;
-            // The full name and status, also when the sidebar cuts them.
-            let header = kit::vault_header(ui, width, &name, &status, tone, tile).on_hover_text(
-                format!("{name}\n{status}\nSwitch vaults. The open vault locks first."),
-            );
-            lock = kit::title_bar_button(ui, kit::Icon::Lock, "Lock the vault  ⌘L").clicked();
-            header
-        })
-        .inner;
+    // The menu of the header has Lock (⌘L), so the footer has no lock button, as in the
+    // mockup. The rail keeps one.
+    let width = ui.available_width();
+    // The full name and status, also when the sidebar cuts them.
+    let header = kit::vault_header(ui, width, &name, &status, tone, tile).on_hover_text(format!(
+        "{name}\n{status}\nSwitch vaults or lock. The open vault locks first."
+    ));
     // Wider than the header: a vault name and its note fit on one line.
     let menu_width = header.rect.width().max(240.0);
     egui::Popup::menu(&header).width(menu_width).show(|ui| {

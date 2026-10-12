@@ -26,8 +26,7 @@ use super::otp;
 use super::timeline::{self, relative_time};
 use super::{
     SECRET_VALUE_CAPACITY, Sheet, UiState, ask_owner_from_sheet, close_sheet, extra_label,
-    forget_secret_field, forget_secret_form, kind_blurb, kind_icon, kind_plural, meta_line,
-    secure_input,
+    forget_secret_field, forget_secret_form, kind_blurb, kind_icon, meta_line, secure_input,
 };
 use crate::broker::approvals::action_words;
 use crate::broker::profile::REPORTING_API_V0;
@@ -43,9 +42,7 @@ use crate::vault::answers::{AnswerScope, OwnerAnswer};
 use crate::vault::exceptions::{AgentException, ExceptionKind};
 use crate::vault::providers::{self, Suggested};
 use crate::vault::usage::{ItemUse, UseDecidedBy, UseOutcome};
-use crate::vault::{
-    DeclarationSource, EnvDelivery, Environment, ItemTimes, Reversibility, RiskLevel, Scope,
-};
+use crate::vault::{DeclarationSource, EnvDelivery, Environment, Reversibility, RiskLevel, Scope};
 
 // ---- The list. ----
 
@@ -54,28 +51,15 @@ use crate::vault::{
 pub(crate) enum Filter {
     #[default]
     All,
-    Kind(CredentialKind),
     /// Archived versions retained after concurrent sync changes.
     Conflicts,
     Archived,
 }
 
 impl Filter {
-    const ALL: [Self; 8] = [
-        Self::All,
-        Self::Kind(CredentialKind::ApiKey),
-        Self::Kind(CredentialKind::Login),
-        Self::Kind(CredentialKind::SshKey),
-        Self::Kind(CredentialKind::Database),
-        Self::Kind(CredentialKind::Custom),
-        Self::Conflicts,
-        Self::Archived,
-    ];
-
     fn label(self) -> &'static str {
         match self {
             Self::All => "All credentials",
-            Self::Kind(kind) => kind_plural(kind),
             Self::Conflicts => "Conflicting changes",
             Self::Archived => "Archived",
         }
@@ -84,13 +68,7 @@ impl Filter {
 
 /// Conflict copies have a separate review list and archive count. A search still
 /// finds them with a distinct label. Restored copies follow the active filters.
-fn matches_filter(
-    item: &OwnerSummary,
-    filter: Filter,
-    searching: bool,
-    archived: bool,
-    conflict: bool,
-) -> bool {
+fn matches_filter(filter: Filter, searching: bool, archived: bool, conflict: bool) -> bool {
     let conflict = archived && conflict;
     if filter == Filter::Conflicts {
         return conflict;
@@ -101,43 +79,7 @@ fn matches_filter(
     if archived && !searching {
         return false;
     }
-    match filter {
-        Filter::Kind(kind) => item.kind == kind,
-        Filter::All | Filter::Archived | Filter::Conflicts => true,
-    }
-}
-
-/// The order of the list.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum Sort {
-    #[default]
-    Name,
-    Changed,
-    Used,
-    Added,
-}
-
-impl Sort {
-    const ALL: [Self; 4] = [Self::Name, Self::Changed, Self::Used, Self::Added];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Name => "Name",
-            Self::Changed => "Last changed",
-            Self::Used => "Last used",
-            Self::Added => "Date added",
-        }
-    }
-
-    /// The title of the list in this order.
-    fn title(self) -> &'static str {
-        match self {
-            Self::Name => "Credentials",
-            Self::Changed => "Recently changed",
-            Self::Used => "Recently used by agents",
-            Self::Added => "Newest first",
-        }
-    }
+    true
 }
 
 /// One row of the credential list, read before the list draws.
@@ -145,7 +87,7 @@ struct ListedItem {
     id: u64,
     name: String,
     subtitle: String,
-    /// "Archived", "Conflict copy", or the time of a time order.
+    /// "Archived", "Conflict copy", or nothing.
     status: String,
     production: bool,
     /// In at least one shared vault.
@@ -154,7 +96,7 @@ struct ListedItem {
 }
 
 /// The list column of a credentials place: the toolbar with the title, the count, and
-/// "+", the search field, the filter and the order, then the rows. By name, the rows
+/// "+", the search field, then the rows. By name, the rows
 /// group by folder, and the header of a group stays at the top while its rows scroll.
 pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let title = columns::place_title(app);
@@ -198,10 +140,8 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
     columns::list_inset(ui, |ui| toolbar(app, ui));
 
     let session = &app.owner_ui.session;
-    let times = session.item_times().unwrap_or_default();
     let query = app.search.trim().to_owned();
     let filter = app.ui.credential_filter;
-    let sort = app.ui.credential_sort;
     let archived_count = in_place
         .iter()
         .filter(|item| archived.contains_key(&item.id) && !conflicts.contains_key(&item.id))
@@ -220,7 +160,6 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
         .into_iter()
         .filter(|item| {
             matches_filter(
-                item,
                 filter,
                 !query.is_empty(),
                 archived.contains_key(&item.id),
@@ -228,7 +167,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
             )
         })
         .collect();
-    sort_items(&mut items, sort, &times);
+    items.sort_by_key(|item| item.name.to_lowercase());
     let hidden_archived = if filter == Filter::Archived || !query.is_empty() {
         0
     } else {
@@ -240,7 +179,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
         } else if archived.contains_key(&item.id) {
             "Archived".to_owned()
         } else {
-            row_time(sort, times.get(&item.id))
+            String::new()
         };
         let looks = Looks::of(app, item.id, item.kind, &item.service, &item.name);
         let username = matches!(item.kind, CredentialKind::Login | CredentialKind::Database)
@@ -260,7 +199,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
             tile: looks.tile,
         }
     };
-    let grouped = sort == Sort::Name && !matches!(filter, Filter::Kind(_) | Filter::Conflicts);
+    let grouped = filter != Filter::Conflicts;
     let groups: Vec<columns::Group<ListedItem>> = if grouped {
         // The top level first, then each folder by its path.
         let mut by_folder: BTreeMap<(bool, String), Vec<ListedItem>> = BTreeMap::new();
@@ -279,9 +218,8 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
         Vec::new()
     } else {
         let title = match filter {
-            Filter::Kind(kind) => kind_plural(kind).to_owned(),
             Filter::Conflicts => format!("Conflicting changes ({})", items.len()),
-            _ => sort.title().to_owned(),
+            _ => "Credentials".to_owned(),
         };
         vec![columns::Group {
             title,
@@ -351,9 +289,10 @@ fn shared_list(app: &mut DesktopApp, ui: &mut egui::Ui, title: &str) {
     columns::list_note(ui, "No items yet.");
 }
 
-/// Search, then the filter and the order. ⌘F puts the focus in the search field. The
-/// controls draw from left to right and top to bottom, so Tab visits them in the order
-/// that the owner sees.
+/// The search field. ⌘F puts the focus in it. The list has no filter or order menus,
+/// as in the mockup: the rows group by folder. A list of archived credentials or of
+/// conflict copies (from "Show archived" and from the review of conflicting changes)
+/// says so under the field, with "Show All" to go back.
 fn toolbar(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let field = kit::search_field(ui, &mut app.search, "credential-search", "Search")
         .on_hover_text("Search by name, project, service, or notes  ⌘F");
@@ -362,68 +301,17 @@ fn toolbar(app: &mut DesktopApp, ui: &mut egui::Ui) {
     if std::mem::take(&mut app.ui.focus_search) {
         field.request_focus();
     }
-    ui.add_space(6.0);
-    let menu_width = ((ui.available_width() - 8.0) / 2.0).floor().max(60.0);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-        let mut filter = app.ui.credential_filter;
-        let filters: Vec<(Filter, String)> = Filter::ALL
-            .into_iter()
-            .map(|option| (option, option.label().to_owned()))
-            .collect();
-        let label = filter.label();
-        kit::picker(
-            ui,
-            "credential-filter",
-            &mut filter,
-            &filters,
-            label,
-            menu_width,
-        );
-        app.ui.credential_filter = filter;
-        let mut sort = app.ui.credential_sort;
-        let sorts: Vec<(Sort, String)> = Sort::ALL
-            .into_iter()
-            .map(|option| (option, option.label().to_owned()))
-            .collect();
-        let label = format!("Sort: {}", sort.label());
-        kit::picker(ui, "credential-sort", &mut sort, &sorts, label, menu_width);
-        app.ui.credential_sort = sort;
-    });
-}
-
-/// Name order, or newest first by a time. An item without the time goes last.
-fn sort_items(items: &mut [OwnerSummary], sort: Sort, times: &BTreeMap<u64, ItemTimes>) {
-    let time = |item: &OwnerSummary| {
-        let times = times.get(&item.id).copied().unwrap_or_default();
-        match sort {
-            Sort::Name => None,
-            Sort::Changed => times.changed,
-            Sort::Used => times.used,
-            Sort::Added => times.added,
-        }
-    };
-    items.sort_by(|a, b| {
-        time(b)
-            .cmp(&time(a))
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
-}
-
-/// The right side of a list row in a time order: the time. By name, nothing: the row
-/// shows only the shared mark and the production dot.
-fn row_time(sort: Sort, times: Option<&ItemTimes>) -> String {
-    let times = times.copied().unwrap_or_default();
-    let now = timeline::now();
-    let when = |at: Option<u64>, verb: &str, never: &str| match at {
-        Some(at) => format!("{verb} {}", relative_time(at, now)),
-        None => never.to_owned(),
-    };
-    match sort {
-        Sort::Name => String::new(),
-        Sort::Changed => when(times.changed, "Changed", "No change"),
-        Sort::Used => when(times.used, "Used", "Not used yet"),
-        Sort::Added => when(times.added, "Added", ""),
+    if app.ui.credential_filter != Filter::All {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            ui.label(
+                kit::text(app.ui.credential_filter.label(), Font::Footnote).color(kit::SECONDARY),
+            );
+            if kit::small_button(ui, "Show All", Style::Link).clicked() {
+                app.ui.credential_filter = Filter::All;
+            }
+        });
     }
 }
 
@@ -3789,22 +3677,10 @@ mod conflict_tests {
     const PASS: &str = "conflict-ui-test-pass";
     const CANARY: &str = "conflict-ui-secret-canary";
 
-    fn summary() -> OwnerSummary {
-        OwnerSummary {
-            id: 1,
-            name: "User name (conflict copy, Mac)".to_owned(),
-            kind: CredentialKind::ApiKey,
-            service: String::new(),
-            project: String::new(),
-            revision: 1,
-        }
-    }
-
     #[test]
     fn conflict_filter_separates_verified_copies_and_preserves_search() {
-        let item = summary();
         let matches = |filter, searching, archived, conflict| {
-            matches_filter(&item, filter, searching, archived, conflict)
+            matches_filter(filter, searching, archived, conflict)
         };
         // A user-selected name cannot make an ordinary archived item a conflict.
         assert!(matches(Filter::Archived, false, true, false));
@@ -3813,18 +3689,6 @@ mod conflict_tests {
         assert!(!matches(Filter::Archived, true, true, true));
         assert!(!matches(Filter::All, false, true, true));
         assert!(matches(Filter::All, true, true, true));
-        assert!(matches(
-            Filter::Kind(CredentialKind::ApiKey),
-            true,
-            true,
-            true
-        ));
-        assert!(!matches(
-            Filter::Kind(CredentialKind::Login),
-            true,
-            true,
-            true
-        ));
         // A deliberate restore removes the copy from the archived review list.
         assert!(!matches(Filter::Conflicts, false, false, true));
         assert!(matches(Filter::All, false, false, true));

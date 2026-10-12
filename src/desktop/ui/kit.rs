@@ -160,6 +160,11 @@ pub(crate) fn medium(value: impl Into<String>, font: Font) -> RichText {
     text(value, font).variation(b"wght", 560.0)
 }
 
+/// The title of a list row: 13 points at weight 500, as in the mockup.
+pub(crate) fn row_title(value: impl Into<String>) -> RichText {
+    text(value, Font::Body).variation(b"wght", 500.0)
+}
+
 /// A wrapping label.
 pub(crate) fn paragraph(ui: &mut Ui, value: impl Into<String>, font: Font, color: Color32) {
     ui.add(Label::new(text(value, font).color(color)).wrap());
@@ -1424,24 +1429,25 @@ pub(crate) fn vault_header(
         if response.has_focus() {
             inner_focus_ring(painter, rect, 8);
         }
-        // The tile: the initial of the vault on its color.
+        // The avatar: the initial of the vault in a 22-point circle of its color, as in
+        // the mockup.
         let tile_rect = Rect::from_center_size(
-            Pos2::new(rect.left() + 18.0, rect.center().y),
-            Vec2::splat(26.0),
+            Pos2::new(rect.left() + 17.0, rect.center().y),
+            Vec2::splat(22.0),
         );
-        painter.rect_filled(tile_rect, 7, tile);
+        painter.circle_filled(tile_rect.center(), 11.0, tile);
         let initial: String = name
             .chars()
             .find(|c| c.is_alphanumeric())
             .map_or_else(|| "V".to_owned(), |c| c.to_uppercase().collect());
-        let letter = galley(ui, medium(initial, Font::Body));
+        let letter = galley(ui, text(initial, Font::Footnote).variation(b"wght", 600.0));
         painter.galley(
             tile_rect.center() - letter.size() / 2.0,
             letter,
             Color32::WHITE,
         );
         // The name and the status, cut to the room left of the chevrons.
-        let text_left = tile_rect.right() + 9.0;
+        let text_left = tile_rect.right() + 8.0;
         let text_width = (rect.right() - 20.0 - text_left).max(0.0);
         let line = |value: RichText, color: Color32| {
             WidgetText::from(value.color(color)).into_galley(
@@ -1451,7 +1457,7 @@ pub(crate) fn vault_header(
                 TextStyle::Body,
             )
         };
-        let title = line(medium(name, Font::Body), LABEL);
+        let title = line(text(name, Font::Body), LABEL);
         let status_color = match tone {
             Tone::Neutral => SECONDARY,
             other => other.text(),
@@ -1518,8 +1524,27 @@ pub(crate) const WIDE_LIST_WINDOW: f32 = 1040.0;
 /// Below this window width, the sidebar is a rail of icons. Opened, it floats over the
 /// list.
 pub(crate) const NARROW_WINDOW: f32 = 1000.0;
-/// The height of the toolbar on top of the list and the detail: it holds the title bar.
-pub(crate) const TOOLBAR: f32 = 52.0;
+/// The vertical center of the traffic lights, from the top of the window. The window
+/// has a transparent title bar and no toolbar (an NSToolbar would need unsafe code, which
+/// the crate forbids), so macOS draws the lights at the height of a plain title bar. The
+/// top row of each column centers on this line: the sidebar button, the title of the
+/// list and its "+", and the buttons of the detail.
+pub(crate) const LIGHTS_Y: f32 = 16.0;
+/// The right edge of the traffic lights, from the left edge of the window. A title next
+/// to the lights starts after it.
+pub(crate) const LIGHTS_RIGHT: f32 = 69.0;
+/// The height of the toolbar on top of the list: the title on the row of the traffic
+/// lights, the count under it, and "+". It holds the title bar.
+pub(crate) const TOOLBAR: f32 = 40.0;
+/// The height of the toolbar on top of the detail: its buttons on the row of the traffic
+/// lights.
+pub(crate) const DETAIL_TOOLBAR: f32 = 34.0;
+/// The top of the sidebar rows: right under the row of the traffic lights.
+pub(crate) const SIDEBAR_TOP: f32 = 30.0;
+/// The top of the rail icons: under the traffic lights and the sidebar button.
+pub(crate) const RAIL_TOP: f32 = 66.0;
+/// The hairline between the columns (the mockup: 0.5 px of black at 9 %).
+pub(crate) const COLUMN_EDGE: Color32 = Color32::from_black_alpha(23);
 /// The fill of a hovered sidebar row and of a pressed small button.
 const FILL2: Color32 = Color32::from_rgb(235, 235, 237);
 /// The leading edge of each row, as in the mockup.
@@ -1613,27 +1638,54 @@ pub(crate) fn cap(ui: &mut Ui, label: &str, red: bool) -> Response {
     response
 }
 
-/// The title and the line under it, at the left of a list toolbar.
-pub(crate) fn toolbar_title(ui: &mut Ui, title: &str, subtitle: &str) {
-    ui.vertical(|ui| {
-        ui.spacing_mut().item_spacing.y = 0.0;
-        ui.add(
-            Label::new(
-                text(title, Font::Body)
-                    .variation(b"wght", 700.0)
-                    .color(LABEL),
-            )
-            .truncate()
-            .selectable(false),
-        );
-        if !subtitle.is_empty() {
-            ui.add(
-                Label::new(text(subtitle, Font::Footnote).color(SECONDARY))
-                    .truncate()
-                    .selectable(false),
-            );
-        }
-    });
+/// The title of a list toolbar with its first line centered on `center_y` (the row of
+/// the traffic lights) and the line under it, from `left` to `right`.
+pub(crate) fn toolbar_title_on_row(
+    ui: &mut Ui,
+    left: f32,
+    right: f32,
+    center_y: f32,
+    title: &str,
+    subtitle: &str,
+) {
+    let width = (right - left).max(10.0);
+    let title_text = text(title, Font::Body)
+        .variation(b"wght", 700.0)
+        .color(LABEL);
+    let height = galley(ui, title_text.clone()).size().y;
+    let title_rect = Rect::from_min_size(
+        Pos2::new(left, (center_y - height / 2.0).round()),
+        Vec2::new(width, height),
+    );
+    put_left(
+        ui,
+        title_rect,
+        Label::new(title_text).truncate().selectable(false),
+    );
+    if subtitle.is_empty() {
+        return;
+    }
+    let sub_text = text(subtitle, Font::Footnote).color(SECONDARY);
+    let sub_height = galley(ui, sub_text.clone()).size().y;
+    put_left(
+        ui,
+        Rect::from_min_size(
+            Pos2::new(left, title_rect.bottom()),
+            Vec2::new(width, sub_height),
+        ),
+        Label::new(sub_text).truncate().selectable(false),
+    );
+}
+
+/// A widget in `rect`, at its left edge and centered vertically.
+fn put_left(ui: &mut Ui, rect: Rect, widget: impl egui::Widget) -> Response {
+    ui.scope_builder(
+        UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::left_to_right(Align::Center)),
+        |ui| ui.add(widget),
+    )
+    .inner
 }
 
 /// A borderless 28-point icon button of a toolbar or a footer. `name` is its name for
@@ -1730,17 +1782,23 @@ pub(crate) fn search_field(
         Pos2::new(rect.left() + 24.0, rect.top()),
         Pos2::new(rect.right() - 4.0, rect.bottom()),
     );
+    // The margin goes in the frame: with a frame, a text edit has no margin of its own.
+    // The row is centered on the magnifier.
     let response = ui
-        .scope_builder(UiBuilder::new().max_rect(field_rect), |ui| {
-            ui.add(
-                TextEdit::singleline(value)
-                    .id_salt(salt)
-                    .frame(Frame::NONE)
-                    .hint_text(text(placeholder, Font::Body).color(TERTIARY))
-                    .margin(Margin::symmetric(2, 6))
-                    .desired_width(field_rect.width()),
-            )
-        })
+        .scope_builder(
+            UiBuilder::new()
+                .max_rect(field_rect)
+                .layout(Layout::left_to_right(Align::Center)),
+            |ui| {
+                ui.add(
+                    TextEdit::singleline(value)
+                        .id_salt(salt)
+                        .frame(Frame::NONE.inner_margin(Margin::symmetric(2, 6)))
+                        .hint_text(text(placeholder, Font::Body).color(TERTIARY))
+                        .desired_width(field_rect.width()),
+                )
+            },
+        )
         .inner;
     if response.has_focus() {
         focus_ring(ui.painter(), rect, 7);
@@ -1833,7 +1891,7 @@ pub(crate) fn list_row(ui: &mut Ui, row: &ListRow<'_>) -> Response {
             TextStyle::Body,
         )
     };
-    let title = line(medium(row.title, Font::Body).color(title_color));
+    let title = line(row_title(row.title).color(title_color));
     let subtitle = (!row.subtitle.is_empty())
         .then(|| line(text(row.subtitle, Font::Callout).color(sub_color)));
     let height = title.size().y + subtitle.as_ref().map_or(0.0, |sub| sub.size().y);

@@ -28,10 +28,12 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     if !columns.narrow {
         app.ui.sidebar_float = false;
     }
-    egui::Panel::left("apassy-sidebar")
+    // The columns are split by a hairline, as in the mockup, not by the 1-point line
+    // of egui.
+    let sidebar = egui::Panel::left("apassy-sidebar")
         .resizable(false)
         .exact_size(columns.sidebar_width())
-        .show_separator_line(true)
+        .show_separator_line(false)
         .frame(Frame::NONE.fill(kit::SIDEBAR).inner_margin(Margin {
             left: if columns.sidebar == SidebarMode::Full {
                 10
@@ -48,13 +50,20 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
         }))
         .show(ui, |ui| {
             super::sidebar::draw(app, ui, &pending, columns.sidebar)
-        });
-    egui::Panel::left("apassy-list")
+        })
+        .response
+        .rect;
+    let list = egui::Panel::left("apassy-list")
         .resizable(false)
         .exact_size(columns.list_width)
-        .show_separator_line(true)
+        .show_separator_line(false)
         .frame(Frame::NONE.fill(kit::LIST))
-        .show(ui, |ui| list_column(app, ui, &pending));
+        .show(ui, |ui| list_column(app, ui, &pending))
+        .response
+        .rect;
+    for rect in [sidebar, list] {
+        column_edge(ui, rect);
+    }
     egui::CentralPanel::default()
         .frame(Frame::NONE.fill(kit::DETAIL))
         .show(ui, |ui| detail_column(app, ui, &pending));
@@ -65,6 +74,17 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     if !(app.settings_open && app.ui.settings_sheet && !ctx.embed_viewports()) {
         sheets(app, &ctx);
     }
+}
+
+/// The hairline at the right edge of a column, inside it.
+fn column_edge(ui: &egui::Ui, rect: egui::Rect) {
+    let width = 1.0 / ui.ctx().pixels_per_point();
+    let x = rect.right() - width / 2.0;
+    ui.painter().vline(
+        x,
+        rect.y_range(),
+        egui::Stroke::new(width, kit::COLUMN_EDGE),
+    );
 }
 
 /// The list column of the place. After a navigation with the keyboard, its first

@@ -910,11 +910,9 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[Pe
                 chosen = Some(row.key);
             }
         },
-        |ui| {
-            if groups.is_empty() {
-                columns::list_note(ui, "Nothing needs you");
-            }
-        },
+        // With nothing open, the detail says "All clear"; the list stays empty, so the
+        // window shows one message, not two.
+        |_| {},
     );
     if let Some(key) = chosen {
         app.ui.decisions.selected = Some(key);
@@ -1000,10 +998,7 @@ fn decision_row(ui: &mut egui::Ui, row: &DecisionRow<'_>) -> egui::Response {
     }
     let left = tile_rect.right() + 10.0;
     let text_width = (right - left).max(10.0);
-    let title = galley(
-        kit::medium(row.title, Font::Body).color(title_color),
-        text_width,
-    );
+    let title = galley(kit::row_title(row.title).color(title_color), text_width);
     let subtitle = galley(
         kit::text(row.subtitle, Font::Callout).color(sub_color),
         text_width,
