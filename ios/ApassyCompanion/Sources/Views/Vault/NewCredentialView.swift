@@ -120,8 +120,12 @@ private struct PasteSheet: View {
         .onChange(of: vault.isUnlocked) { _, unlocked in
             if !unlocked { close() }
         }
-        // The app left the screen: the field shows the masks again.
-        .onChange(of: vault.revealEpoch) { editing = false }
+        // The app left the screen (the background, the app switcher): the paste goes as revealed
+        // values go, and the sheet stays open, empty.
+        .onChange(of: vault.revealEpoch, initial: true) { _, epoch in
+            editing = false
+            model.follow(revealEpoch: epoch)
+        }
     }
 
     private func close() {
@@ -203,6 +207,8 @@ private struct PasteSheet: View {
             .padding(.top, 6)
             .textCase(nil)
         }
+        // "Add" sends the text as it is: it cannot change meanwhile.
+        .disabled(model.isAdding)
     }
 
     private var scanner: some View {
@@ -243,6 +249,8 @@ private struct PasteSheet: View {
                     keep: Binding(get: { row.keep }, set: { model.setKeep($0, row: row.id) }))
             }
         }
+        // The checkboxes and the titles that "Add" sends stay as they are while it runs.
+        .disabled(model.isAdding)
     }
 
     #if targetEnvironment(simulator)

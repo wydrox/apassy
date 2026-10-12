@@ -83,6 +83,8 @@ final class ItemEditorModel {
     /// Optional built-in secrets of the stored item that the owner removes.
     var removedSecrets: Set<String> = []
     private(set) var error: String?
+    /// The message of a move into the folder that failed after the save (`reportMoveFailure`).
+    private(set) var moveFailure: String?
     private(set) var tagMessage: String?
     private(set) var isSaving = false
 
@@ -353,16 +355,26 @@ final class ItemEditorModel {
         }
     }
 
-    /// Put the saved item in the chosen folder. The item is saved already, so a failure shows as
-    /// an alert of the vault and the sheet closes: a second save would add a new item twice.
+    /// Put the saved item in the chosen folder. The item is saved already, so the sheet closes on
+    /// a failure too (a second save would add a new item twice): the message waits in
+    /// `moveFailure` until the sheet is gone, as the alert of the tabs cannot show above a sheet.
     private func moveIfNeeded(_ saved: SavedItem, in vault: VaultModel) async {
         guard movesFolder else { return }
         do {
             try await vault.service.setItemFolder(id: saved.id, folder: folder)
             storedFolder = folder
             await vault.didImport()
-        } catch {
+        } catch let error as VaultError where error.code == .locked {
             vault.report(error)
+        } catch {
+            moveFailure = error.localizedDescription
         }
+    }
+
+    /// The sheet is gone: show a failed move as an alert of the vault.
+    func reportMoveFailure(to vault: VaultModel) {
+        guard let moveFailure else { return }
+        self.moveFailure = nil
+        vault.alert = moveFailure
     }
 }

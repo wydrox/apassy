@@ -268,14 +268,6 @@ final class ItemDetailModel {
         return vault.folderTree.pathLabel(detail.folder)
     }
 
-    /// Put the credential in `folder` (nil: the top level). Moving changes nothing else, so it
-    /// needs no owner check.
-    func moveToFolder(_ folder: String?) async {
-        guard detail != nil else { return }
-        await vault.moveItem(id, to: folder)
-        await load()
-    }
-
     /// Turn "Always ask me" on at once; turning it off asks the owner first.
     func setAlwaysAsk(_ on: Bool) async {
         guard let detail, let current = detail.alwaysAsk, current != on, !isSavingOptions else { return }
@@ -288,8 +280,8 @@ final class ItemDetailModel {
         await load()
     }
 
-    /// Set the environment as the owner's answer. A less careful one asks the owner first;
-    /// production and other stricter choices do not.
+    /// Set the environment as the owner's answer. A less careful one, and the first one of a
+    /// credential without a declaration, ask the owner first; production on a declaration does not.
     func setEnvironment(_ environment: CredentialEnvironment) async {
         guard let detail, !isSavingOptions else { return }
         guard CredentialOptions.shownEnvironment(detail) != environment else { return }

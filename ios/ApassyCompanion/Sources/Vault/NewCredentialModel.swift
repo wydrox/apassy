@@ -44,6 +44,15 @@ final class NewCredentialModel {
         }
     }
 
+    /// The note when "Add" found other rows than those on the screen: the text changed.
+    static let rowsChanged = "The text changed. Check the credentials, then tap Add again."
+
+    /// A row as `add` compares it: its index in the detection and its identity.
+    private struct RowIdentity: Equatable {
+        let index: Int
+        let key: String
+    }
+
     /// The note when a paste has no credential, as on the Mac.
     static let nothingFound =
         "Apassy found no credential in the text. Paste a secret, a KEY=value line, a .env file, a URL with a password, or an otpauth:// link."
@@ -74,6 +83,8 @@ final class NewCredentialModel {
     @ObservationIgnored private var generation = 0
     /// The generation that `rows` belong to.
     @ObservationIgnored private var detected = 0
+    /// The last `revealEpoch` of the vault that `follow(revealEpoch:)` saw.
+    @ObservationIgnored private var seenEpoch: Int?
 
     /// `folder`: the folder the sheet opened in (ADR 0026 §4).
     init(service: any VaultService, folder: String?, debounce: Duration = .milliseconds(300)) {
@@ -210,7 +221,14 @@ final class NewCredentialModel {
         guard !isAdding else { return nil }
         isAdding = true
         defer { isAdding = false }
+        // The rows that the owner saw and checked. When the text changed since, the detection
+        // below may give other rows: then nothing is added, and the owner checks the new rows.
+        let shown = rows.map { RowIdentity(index: $0.id, key: $0.key) }
         await detectNow()
+        guard rows.map({ RowIdentity(index: $0.id, key: $0.key) }) == shown else {
+            if !rows.isEmpty { error = Self.rowsChanged }
+            return nil
+        }
         guard keptCount > 0 else {
             error = rows.isEmpty ? (detectError ?? Self.nothingFound) : "Pick at least one credential."
             return nil
@@ -227,6 +245,15 @@ final class NewCredentialModel {
             if (error as? VaultError)?.code == .notFound { await loadFolders() }
             return nil
         }
+    }
+
+    /// Follow the drops of revealed values (`VaultModel.revealEpoch`): the app went to the
+    /// background, left the screen for a moment, or locked. The paste goes with the revealed
+    /// values, and the sheet stays open, empty. The first call only notes the epoch.
+    func follow(revealEpoch: Int) {
+        defer { seenEpoch = revealEpoch }
+        guard let seenEpoch, seenEpoch != revealEpoch else { return }
+        clear()
     }
 
     /// Drop the paste and the rows. Each way out of the sheet calls it.
@@ -249,21 +276,22 @@ struct FolderMenuChoice: Identifiable, Hashable {
     let depth: Int
 }
 
-/// The folder menu of "New Credential" and of the editor.
+/// The folder menu of "New Credential" and of the editor. The order, the levels, and the labels
+/// come from `FolderTree`, as in the folder picker.
 enum FolderMenu {
-    static let noFolder = "No folder"
+    static let noFolder = FolderTree.noFolder
 
-    /// "No folder", then each folder in tree order (the core's order is depth first).
+    /// "No folder", then each folder in tree order (`FolderTree.choices`).
     static func choices(_ folders: [Folder]) -> [FolderMenuChoice] {
         [FolderMenuChoice(id: nil, name: noFolder, depth: 0)]
-            + folders.map { folder in
-                FolderMenuChoice(id: folder.uuid, name: folder.name, depth: max(folders.path(to: folder.uuid).count - 1, 0))
+            + FolderTree(folders).choices().map { choice in
+                FolderMenuChoice(id: choice.folder.uuid, name: choice.folder.name, depth: choice.level)
             }
     }
 
-    /// "Acme › Billing", as the Mac's path label; "No folder" for nil or a folder that is gone.
+    /// "Acme › Billing", as the Mac's path label; "No folder" for nil or a folder that is gone
+    /// (`FolderTree.pathLabel`).
     static func label(_ folders: [Folder], _ uuid: String?) -> String {
-        let path = folders.path(to: uuid)
-        return path.isEmpty ? noFolder : path.joined(separator: " › ")
+        FolderTree(folders).pathLabel(uuid)
     }
 }

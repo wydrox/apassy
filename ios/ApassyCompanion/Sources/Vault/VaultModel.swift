@@ -68,12 +68,32 @@ final class VaultModel {
     var alert: String?
 
     /// Show the error of an action. A vault that the core closed (`locked`) shows the lock screen.
+    /// While a sheet shows the messages itself (`capturingAlert`), the message goes to it.
     func report(_ error: any Error) {
         if (error as? VaultError)?.code == .locked {
             Task { await closedByCore() }
             return
         }
+        if captured != nil {
+            captured?.append(error.localizedDescription)
+            return
+        }
         alert = error.localizedDescription
+    }
+
+    /// The messages that `report` gave while `capturingAlert` runs; nil otherwise.
+    @ObservationIgnored private var captured: [String]?
+
+    /// Run `work` and return the last message that it reported, instead of putting it in `alert`.
+    /// The alert of the tabs cannot show above a sheet, so a sheet such as the folder picker shows
+    /// the message itself and stays open. A `locked` answer still closes the vault.
+    func capturingAlert(_ work: () async -> Void) async -> String? {
+        let outer = captured
+        captured = []
+        await work()
+        let message = captured?.last
+        captured = outer
+        return message
     }
 
     /// The core answered `locked`. While the app is away or the vault is suspended that is
@@ -576,6 +596,10 @@ final class VaultModel {
     }
 
     func isFavorite(_ id: UInt64) -> Bool { favoriteIDs.contains(id) }
+
+    /// The favorite credentials that are not archived, in the order the owner added them: the
+    /// Favorites row of the Vault root and its list.
+    var favoriteItems: [ItemRow] { VaultQuery.favorites(items, ids: favoriteIDs) }
 
     func toggleFavorite(_ id: UInt64) {
         guard let vault else { return }

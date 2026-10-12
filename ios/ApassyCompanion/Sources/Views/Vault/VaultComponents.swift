@@ -16,6 +16,8 @@ enum VaultRoute: Hashable {
     /// A folder by its UUID.
     case folder(String)
     case allCredentials
+    /// The favorites, from the Vault root.
+    case favorites
     case watchtower
 }
 
@@ -461,6 +463,7 @@ extension View {
             case .category(let category): CategoryListView(category: category)
             case .folder(let uuid): FolderView(uuid: uuid)
             case .allCredentials: ItemsView()
+            case .favorites: FavoritesView()
             case .watchtower: WatchtowerView()
             }
         }
