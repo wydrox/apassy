@@ -1,39 +1,54 @@
-//! Screenshots of the desktop app for the README and the site (scripts/screenshots.sh).
+//! Screenshots of the desktop app: the tour of each view for UI work, and the images of
+//! the README and the site (scripts/screenshots.sh).
 //!
 //! `screenshots seed HOME`: make `HOME/Library/Application Support/Apassy/vault.db`
-//! with synthetic credentials, agents, grants, activity, and decisions. Each value is
-//! fake. The script uses a scratch HOME, never the owner's.
+//! with synthetic data that looks like the approved mockup
+//! (docs/design/app-v2-mockup.html): folders, credentials with provider tiles, agents,
+//! agent uses, exceptions, a credential request, and a suggestion. Each value is fake.
+//! The script uses a scratch HOME, never the owner's.
 //!
 //! `screenshots run`: open the real window for the vault of `$HOME`, type the
 //! passphrase through the input hook of eframe, and walk the views. Before each view
 //! it prints `SHOT <name>` and waits until the file `<name>.done` exists in the
 //! current directory. The script then captures the window. No window input comes
 //! from macOS, so the tour needs no Accessibility permission.
+//!
+//! After the unlock, the tour sends one run of an agent to the broker of the app (the
+//! token is in `HOME/tour-agent-token`), so Decisions has a question that waits.
 
 use std::collections::VecDeque;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
+use apassy::broker::action_kind::ActionKind;
 use apassy::contracts::CredentialKind;
 use apassy::desktop::{DesktopApp, native_options};
+use apassy::vault::agent_items::{CorrectionKind, NewCredentialRequest};
+use apassy::vault::exceptions::ExceptionKind;
+use apassy::vault::usage::{InteractionKind, NewItemUse, UseDecidedBy, UseOutcome};
 use apassy::vault::{
-    ActivityDecision, DecidedBy, DecisionEntry, Declaration, Environment, ExecMode, ExecRule,
-    Field, GrantPlace, ItemDraft, LoggedDecision, NewActivity, PatternKey, RequestSource,
-    Reversibility, RiskLevel, Scope, SecretValue, Vault,
+    ActivityDecision, Declaration, Environment, ExecMode, Field, GrantPlace, ItemDraft,
+    NewActivity, Reversibility, RiskLevel, Scope, SecretValue, Vault,
 };
 use eframe::egui;
 
 const PASS: &str = "screenshots-demo-passphrase";
-const DAY: u64 = 86_400;
+/// The file in the scratch HOME with the token of the agent that asks in the tour.
+const TOKEN_FILE: &str = "tour-agent-token";
+/// The file in the scratch HOME with the ID of the item that the agent asks for.
+const ASK_ITEM_FILE: &str = "tour-ask-item";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
         [cmd, home] if cmd == "seed" => seed(Path::new(home)),
+        [cmd, home] if cmd == "seed-empty" => seed_empty(Path::new(home)),
         [cmd] if cmd == "run" => run(),
         [] => {
-            eprintln!("usage: screenshots seed HOME | screenshots run | screenshots COMMAND…");
+            eprintln!(
+                "usage: screenshots seed HOME | screenshots seed-empty HOME | screenshots run | screenshots COMMAND…"
+            );
             std::process::exit(2);
         }
         // Each other command goes to the owner command line, as in the app binary. The
@@ -52,22 +67,6 @@ fn field(name: &str, value: &str, secret: bool) -> Field {
     }
 }
 
-fn item(
-    title: &str,
-    kind: CredentialKind,
-    notes: &str,
-    tags: &[&str],
-    fields: Vec<Field>,
-) -> ItemDraft {
-    ItemDraft {
-        title: title.to_owned(),
-        kind,
-        notes: notes.to_owned(),
-        tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
-        fields,
-    }
-}
-
 fn declaration(project: &str, env: &str, risk: &str, scope: &str, undo: &str) -> Declaration {
     Declaration {
         project: project.to_owned(),
@@ -78,14 +77,8 @@ fn declaration(project: &str, env: &str, risk: &str, scope: &str, undo: &str) ->
     }
 }
 
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_secs()
-}
-
-fn seed(home: &Path) {
+/// The data directory in `home`, empty, with the settings that keep the tour offline.
+fn data_dir(home: &Path) -> PathBuf {
     let data = home.join("Library/Application Support/Apassy");
     let path = data.join("vault.db");
     assert!(
@@ -102,383 +95,432 @@ fn seed(home: &Path) {
         r#"{"auto_check": false, "auto_install": false}"#,
     )
     .expect("update settings");
-    // Project folders as the owner would see them. The vault checks only that
-    // they are absolute.
-    let api = "/Users/you/code/acme-api".to_owned();
-    let site = "/Users/you/code/acme-site".to_owned();
+    data
+}
 
+/// A vault with no credential and no agent: the first steps.
+fn seed_empty(home: &Path) {
+    let path = data_dir(home).join("vault.db");
+    let mut v = Vault::create(&path, PASS).expect("create");
+    v.unlock(PASS).expect("unlock");
+    v.lock().expect("lock");
+    println!("seeded an empty vault {}", path.display());
+}
+
+/// One credential of the seed.
+struct Seed {
+    title: &'static str,
+    kind: CredentialKind,
+    folder: &'static str,
+    /// `development`, `production`, or empty for no declaration.
+    env: &'static str,
+    /// The variable of the secret field, or empty.
+    variable: &'static str,
+    fields: Vec<Field>,
+}
+
+/// One use of the seed: the agent, its name, the credential, the project, the action,
+/// the command, the outcome, who decided, and the device of the owner's answer.
+type SeedUse = (
+    u64,
+    &'static str,
+    &'static str,
+    &'static str,
+    ActionKind,
+    &'static str,
+    UseOutcome,
+    UseDecidedBy,
+    &'static str,
+);
+
+fn seed(home: &Path) {
+    let data = data_dir(home);
+    let path = data.join("vault.db");
     let mut v = Vault::create(&path, PASS).expect("create");
     v.unlock(PASS).expect("unlock");
 
-    let stripe = v
-        .add(item(
-            "Stripe test mode",
-            CredentialKind::ApiKey,
-            "Secret key of the acme-api sandbox account.",
-            &["payments"],
-            vec![field("token", "demo-stripe-test-key-not-real", true)],
-        ))
-        .expect("add")
-        .id;
-    let github = v
-        .add(item(
-            "GitHub deploy bot",
-            CredentialKind::ApiKey,
-            "Fine-grained token: contents and pull requests of acme/acme-api.",
-            &["ci"],
-            vec![field("token", "demo-github-token-not-real", true)],
-        ))
-        .expect("add")
-        .id;
-    let openai = v
-        .add(item(
-            "OpenAI API",
-            CredentialKind::ApiKey,
-            "Project key with a monthly budget of $50.",
-            &["ai"],
-            vec![field("token", "demo-openai-key-not-real", true)],
-        ))
-        .expect("add")
-        .id;
-    let cloudflare = v
-        .add(item(
-            "Cloudflare Workers",
-            CredentialKind::ApiKey,
-            "Edit Workers and R2 of the acme-site account.",
-            &["hosting"],
-            vec![field("token", "demo-cloudflare-token-not-real", true)],
-        ))
-        .expect("add")
-        .id;
-    let staging_db = v
-        .add(item(
-            "Staging database",
-            CredentialKind::Database,
-            "",
-            &["postgres"],
-            vec![
-                field("host", "db.staging.acme.internal", false),
-                field("database", "acme", false),
-                field("username", "app", false),
-                field("password", "demo-staging-password-not-real", true),
+    // Folders as in the mockup: Work › Acme, Work › Apassy, Side projects, Infra, Home.
+    let work = v.create_folder(None, "Work").expect("folder").uuid;
+    let acme = v.create_folder(Some(&work), "Acme").expect("folder").uuid;
+    let apassy = v.create_folder(Some(&work), "Apassy").expect("folder").uuid;
+    let side = v.create_folder(None, "Side projects").expect("folder").uuid;
+    let infra = v.create_folder(None, "Infra").expect("folder").uuid;
+    let home_folder = v.create_folder(None, "Home").expect("folder").uuid;
+    let folder_of = |name: &str| match name {
+        "acme" => Some(acme.clone()),
+        "apassy" => Some(apassy.clone()),
+        "side" => Some(side.clone()),
+        "infra" => Some(infra.clone()),
+        "home" => Some(home_folder.clone()),
+        _ => None,
+    };
+
+    use CredentialKind::{ApiKey, Custom, Database, Login, SshKey};
+    let seeds = vec![
+        Seed {
+            title: "Anthropic API",
+            kind: ApiKey,
+            folder: "apassy",
+            env: "development",
+            variable: "ANTHROPIC_API_KEY",
+            fields: vec![
+                field("token", "demo-anthropic-key-not-real", true),
+                field("host", "api.anthropic.com", false),
             ],
-        ))
-        .expect("add")
-        .id;
-    let prod_db = v
-        .add(item(
-            "Production database",
-            CredentialKind::Database,
-            "Read replica for debugging. Writes go through migrations only.",
-            &["postgres"],
-            vec![
+        },
+        Seed {
+            title: "GitHub deploy bot",
+            kind: ApiKey,
+            folder: "apassy",
+            env: "development",
+            variable: "GITHUB_TOKEN",
+            fields: vec![
+                field("token", "demo-github-token-not-real", true),
+                field("host", "api.github.com", false),
+            ],
+        },
+        Seed {
+            title: "Stripe live",
+            kind: ApiKey,
+            folder: "acme",
+            env: "production",
+            variable: "STRIPE_SECRET_KEY",
+            fields: vec![
+                field("token", "demo-stripe-live-key-not-real", true),
+                field("host", "api.stripe.com", false),
+            ],
+        },
+        Seed {
+            title: "Stripe test",
+            kind: ApiKey,
+            folder: "acme",
+            env: "development",
+            variable: "STRIPE_TEST_KEY",
+            fields: vec![
+                field("token", "demo-stripe-test-key-not-real", true),
+                field("host", "api.stripe.com", false),
+            ],
+        },
+        Seed {
+            title: "Billing database",
+            kind: Database,
+            folder: "acme",
+            env: "production",
+            variable: "DATABASE_PASSWORD",
+            fields: vec![
                 field("host", "db.acme.internal", false),
-                field("database", "acme", false),
-                field("username", "readonly", false),
-                field("password", "demo-production-password-not-real", true),
+                field("database", "billing", false),
+                field("username", "billing_rw", false),
+                field("password", "demo-billing-password-not-real", true),
             ],
-        ))
-        .expect("add")
-        .id;
-    let aws = v
-        .add(item(
-            "AWS S3 uploads",
-            CredentialKind::ApiKey,
-            "Access key of the preview bucket.",
-            &["cloud"],
-            vec![field("token", "demo-aws-secret-not-real", true)],
-        ))
-        .expect("add")
-        .id;
-    v.add(item(
-        "Fly.io dashboard",
-        CredentialKind::Login,
-        "",
-        &["hosting"],
-        vec![
-            field("username", "dev@acme.test", false),
-            field("password", "demo-fly-password-not-real", true),
-        ],
-    ))
-    .expect("add");
-    v.add(item(
-        "Build server",
-        CredentialKind::SshKey,
-        "Deploy key for ci-01.",
-        &["ci"],
-        vec![field("private_key", "demo-ssh-private-key-not-real", true)],
-    ))
-    .expect("add");
-
-    for (id, decl) in [
-        (
-            stripe,
-            declaration("acme-api", "development", "medium", "read-write", "partial"),
-        ),
-        (
-            github,
-            declaration(
-                "acme-api",
-                "production",
-                "medium",
-                "read-write",
-                "reversible",
-            ),
-        ),
-        (
-            openai,
-            declaration("acme-api", "development", "low", "read-write", "reversible"),
-        ),
-        (
-            cloudflare,
-            declaration("acme-site", "production", "high", "admin", "partial"),
-        ),
-        (
-            staging_db,
-            declaration("acme-api", "staging", "medium", "read-write", "partial"),
-        ),
-        (
-            prod_db,
-            declaration(
-                "acme-api",
-                "production",
-                "high",
-                "read-only",
-                "irreversible",
-            ),
-        ),
-        (
-            aws,
-            declaration("acme-site", "staging", "medium", "read-write", "reversible"),
-        ),
-    ] {
-        v.set_declaration(id, &decl).expect("declaration");
+        },
+        Seed {
+            title: "Cloudflare Workers",
+            kind: ApiKey,
+            folder: "infra",
+            env: "development",
+            variable: "CLOUDFLARE_API_TOKEN",
+            fields: vec![
+                field("token", "demo-cloudflare-token-not-real", true),
+                field("host", "api.cloudflare.com", false),
+            ],
+        },
+        Seed {
+            title: "Fly.io",
+            kind: Login,
+            folder: "infra",
+            env: "",
+            variable: "",
+            fields: vec![
+                field("username", "rafal@example.com", false),
+                field("password", "demo-fly-password-not-real", true),
+            ],
+        },
+        Seed {
+            title: "OpenAI API",
+            kind: ApiKey,
+            folder: "side",
+            env: "",
+            variable: "OPENAI_API_KEY",
+            fields: vec![
+                field("token", "demo-openai-key-not-real", true),
+                field("host", "api.openai.com", false),
+            ],
+        },
+        Seed {
+            title: "Build server",
+            kind: SshKey,
+            folder: "infra",
+            env: "",
+            variable: "",
+            fields: vec![field("private_key", "demo-ssh-private-key-not-real", true)],
+        },
+        Seed {
+            title: "Netflix",
+            kind: Login,
+            folder: "home",
+            env: "",
+            variable: "",
+            fields: vec![
+                field("username", "family@example.com", false),
+                field("password", "demo-netflix-password-not-real", true),
+            ],
+        },
+        Seed {
+            title: "Home Wi-Fi",
+            kind: Custom,
+            folder: "home",
+            env: "",
+            variable: "",
+            fields: vec![field("password", "demo-wifi-password-not-real", true)],
+        },
+    ];
+    let mut ids = std::collections::BTreeMap::new();
+    for seed in seeds {
+        let secret = seed
+            .fields
+            .iter()
+            .find(|field| field.secret)
+            .map(|field| field.name.clone())
+            .expect("a secret field");
+        let id = v
+            .add(ItemDraft {
+                title: seed.title.to_owned(),
+                kind: seed.kind,
+                notes: String::new(),
+                tags: Vec::new(),
+                fields: seed.fields,
+            })
+            .expect("add")
+            .id;
+        v.set_item_folder(id, folder_of(seed.folder).as_deref())
+            .expect("folder");
+        let project = match seed.folder {
+            "acme" => "acme-billing",
+            "apassy" => "apassy",
+            "side" => "newsletter",
+            _ => "infra",
+        };
+        match seed.env {
+            "production" => v
+                .set_declaration(
+                    id,
+                    &declaration(project, "production", "high", "read-write", "partial"),
+                )
+                .expect("declaration"),
+            "development" => v
+                .set_declaration(
+                    id,
+                    &declaration(project, "development", "low", "read-write", "reversible"),
+                )
+                .expect("declaration"),
+            _ => {}
+        }
+        if !seed.variable.is_empty() {
+            v.set_env_binding(id, seed.variable, &secret)
+                .expect("env binding");
+        }
+        ids.insert(seed.title, id);
     }
-    for (id, env, name) in [
-        (stripe, "STRIPE_SECRET_KEY", "token"),
-        (github, "GITHUB_TOKEN", "token"),
-        (openai, "OPENAI_API_KEY", "token"),
-        (cloudflare, "CLOUDFLARE_API_TOKEN", "token"),
-        (staging_db, "PGPASSWORD", "password"),
-        (prod_db, "PROD_PGPASSWORD", "password"),
-        (aws, "AWS_SECRET_ACCESS_KEY", "token"),
-    ] {
-        v.set_env_binding(id, env, name).expect("env binding");
-    }
+    let id = |title: &str| ids[title];
 
-    let (claude, _) = v.register_agent("Claude Code").expect("agent");
+    // Agents as in the mockup. Claude Code asks in the tour.
+    let (claude, token) = v.register_agent("Claude Code").expect("agent");
     let (codex, _) = v.register_agent("Codex").expect("agent");
-    let claude = claude.id;
-    let codex = codex.id;
-    v.set_exec_grants(
-        claude,
-        &[stripe, github, staging_db],
-        &GrantPlace::Folder(api.clone()),
-        ExecMode::Bouncer,
-    )
-    .expect("grant");
-    v.set_exec_grant(claude, prod_db, &api, ExecMode::Ask)
-        .expect("grant");
-    v.set_exec_grants(
-        codex,
-        &[openai, cloudflare],
-        &GrantPlace::Folder(site.clone()),
-        ExecMode::Bouncer,
-    )
-    .expect("grant");
-    v.set_exec_rule(
-        claude,
-        stripe,
-        ExecRule {
-            allowed_prefixes: Vec::new(),
-            forbidden_words: vec!["refund".to_owned()],
-            expires_at: None,
-            max_runs_per_hour: Some(30),
-            instruction: "Test mode only. Read balances and list objects. Never create refunds."
-                .to_owned(),
-        },
-    )
-    .expect("rule");
-    v.set_exec_rule(
-        claude,
-        prod_db,
-        ExecRule {
-            allowed_prefixes: vec!["psql".to_owned()],
-            forbidden_words: vec!["--force".to_owned(), "drop".to_owned()],
-            expires_at: None,
-            max_runs_per_hour: Some(10),
-            instruction: "Read-only queries for debugging. Never run migrations.".to_owned(),
-        },
-    )
-    .expect("rule");
-    // ADR 0012: Codex sees the names of all credentials and asks for one.
-    v.set_agent_sees_all(codex, true).expect("sees all");
-    v.request_access(
-        codex,
-        aws,
-        "Upload the preview build of acme-site to S3.",
-        &site,
-    )
-    .expect("access request");
+    let (t3, _) = v.register_agent("T3 Code").expect("agent");
+    let (ci, _) = v.register_agent("CI on GitHub").expect("agent");
+    let (claude, codex, t3, ci) = (claude.id, codex.id, t3.id, ci.id);
+    v.set_agent_note(ci, "CI agent for Acme. Only the Stripe test key.")
+        .expect("note");
+    std::fs::write(home.join(TOKEN_FILE), token.expose()).expect("token file");
+    std::fs::write(home.join(ASK_ITEM_FILE), id("Stripe live").to_string()).expect("item file");
+    set_file_owner_only(&home.join(TOKEN_FILE));
 
-    // The activity log, oldest first: the view shows the newest on top.
-    let runs: [(u64, &str, u64, &str, ActivityDecision, &str); 7] = [
+    // Claude Code may use the production key in the projects of the scratch HOME. With
+    // no bouncer in the tour, its run waits for the owner.
+    let code = home.join("code/acme-billing");
+    std::fs::create_dir_all(&code).expect("project dir");
+    let code = std::fs::canonicalize(home.join("code")).expect("project dir");
+    v.set_exec_grants(
+        claude,
+        &[id("Stripe live")],
+        &GrantPlace::Folder(code.display().to_string()),
+        ExecMode::Bouncer,
+    )
+    .expect("grant");
+
+    // Exceptions: they show in "Rules from your answers" of the credential and in the
+    // agent. Remembered answers need the owner check of the broker, so the tour has none.
+    v.add_agent_exception(ci, id("Stripe live"), ExceptionKind::Never)
+        .expect("exception");
+    v.add_agent_exception(t3, id("Stripe live"), ExceptionKind::AlwaysAsk)
+        .expect("exception");
+    v.add_agent_exception(codex, id("Billing database"), ExceptionKind::Never)
+        .expect("exception");
+
+    // Agent use: the newest uses of each key, with their result.
+    let uses: [SeedUse; 9] = [
         (
-            claude,
-            "Claude Code",
-            github,
-            "run git push origin feat/checkout",
-            ActivityDecision::Allow,
-            "The bouncer allowed it: it fits the task.",
+            t3,
+            "T3 Code",
+            "Stripe live",
+            "scratch",
+            ActionKind::Change,
+            "curl -X POST paste.example",
+            UseOutcome::Refused,
+            UseDecidedBy::Bouncer,
+            "",
         ),
         (
             codex,
             "Codex",
-            openai,
-            "run npm run eval -- --suite smoke",
-            ActivityDecision::Allow,
-            "The bouncer allowed it: it fits the task.",
+            "Stripe live",
+            "acme-billing",
+            ActionKind::Deploy,
+            "stripe deploy",
+            UseOutcome::Allowed,
+            UseDecidedBy::Owner,
+            "iPhone",
         ),
         (
             claude,
             "Claude Code",
-            staging_db,
-            "run npm run migrate",
-            ActivityDecision::Allow,
-            "A remembered pattern allowed it.",
+            "Stripe live",
+            "apassy",
+            ActionKind::Read,
+            "stripe status",
+            UseOutcome::Allowed,
+            UseDecidedBy::Bouncer,
+            "",
         ),
         (
             claude,
             "Claude Code",
-            prod_db,
-            "run psql -c \"select count(*) from orders\"",
-            ActivityDecision::Allow,
-            "The owner approved it.",
+            "Stripe test",
+            "acme-billing",
+            ActionKind::Change,
+            "stripe customers create",
+            UseOutcome::Allowed,
+            UseDecidedBy::Bouncer,
+            "",
         ),
         (
             claude,
             "Claude Code",
-            stripe,
-            "run printenv STRIPE_SECRET_KEY",
-            ActivityDecision::Deny,
-            "The owner denied it: the command could print a secret.",
+            "Anthropic API",
+            "apassy",
+            ActionKind::Read,
+            "npm run eval",
+            UseOutcome::Allowed,
+            UseDecidedBy::Bouncer,
+            "",
+        ),
+        (
+            codex,
+            "Codex",
+            "OpenAI API",
+            "newsletter",
+            ActionKind::Change,
+            "node scripts/summarize.mjs",
+            UseOutcome::Allowed,
+            UseDecidedBy::Bouncer,
+            "",
         ),
         (
             claude,
             "Claude Code",
-            staging_db,
-            "run npm run db:reset --force",
-            ActivityDecision::Deny,
-            "Your rule: never --force.",
+            "GitHub deploy bot",
+            "apassy",
+            ActionKind::Deploy,
+            "git push origin main",
+            UseOutcome::Allowed,
+            UseDecidedBy::Owner,
+            "this Mac",
         ),
         (
             claude,
             "Claude Code",
-            stripe,
-            "run stripe balance retrieve",
-            ActivityDecision::Allow,
-            "The bouncer allowed it: read-only.",
+            "Billing database",
+            "acme-billing",
+            ActionKind::Read,
+            "psql -c select count(*) from invoices",
+            UseOutcome::Allowed,
+            UseDecidedBy::Owner,
+            "this Mac",
+        ),
+        (
+            ci,
+            "CI on GitHub",
+            "Stripe test",
+            "acme-billing",
+            ActionKind::Read,
+            "stripe balance retrieve",
+            UseOutcome::Allowed,
+            UseDecidedBy::Bouncer,
+            "",
         ),
     ];
-    for (agent_id, agent_name, item_id, operation, decision, reason) in runs {
+    for (agent, name, title, project, action, command, outcome, decided_by, on) in uses {
+        v.record_item_use(&NewItemUse {
+            item_id: id(title),
+            agent_id: Some(agent),
+            agent_name: name.to_owned(),
+            project_key: format!("/Users/you/code/{project}"),
+            project_label: project.to_owned(),
+            action,
+            command_summary: command.to_owned(),
+            hosts: Vec::new(),
+            outcome,
+            decided_by,
+            answered_on: on.to_owned(),
+            decision_log_id: None,
+        })
+        .expect("use");
         v.record_activity(&NewActivity {
-            agent_id: Some(agent_id),
-            agent_name: agent_name.to_owned(),
-            item_id: Some(item_id),
-            operation: operation.to_owned(),
-            decision,
-            reason: reason.to_owned(),
+            agent_id: Some(agent),
+            agent_name: name.to_owned(),
+            item_id: Some(id(title)),
+            operation: format!("run {command}"),
+            decision: if outcome == UseOutcome::Allowed {
+                ActivityDecision::Allow
+            } else {
+                ActivityDecision::Deny
+            },
+            reason: String::new(),
         })
         .expect("activity");
     }
+    for _ in 0..7 {
+        v.record_interaction(InteractionKind::Question, "tour", &[])
+            .expect("interaction");
+    }
 
-    // Two weeks of decisions for the Learning view: the owner is asked less each week.
-    let commands: [(&[&str], u64, &str); 6] = [
-        (&["npm", "test"], staging_db, "PGPASSWORD"),
-        (&["npm", "run", "migrate"], staging_db, "PGPASSWORD"),
-        (
-            &["stripe", "balance", "retrieve"],
-            stripe,
-            "STRIPE_SECRET_KEY",
-        ),
-        (&["git", "push", "origin", "HEAD"], github, "GITHUB_TOKEN"),
-        (
-            &["stripe", "customers", "list", "--limit", "5"],
-            stripe,
-            "STRIPE_SECRET_KEY",
-        ),
-        (&["gh", "pr", "create", "--fill"], github, "GITHUB_TOKEN"),
-    ];
-    let now = now();
-    for day in 0..14u64 {
-        let runs_today = 6 + (day % 4);
-        // Runs half an hour apart, the last one of today a moment ago.
-        let day_end = now - (13 - day) * DAY - 600;
-        for n in 0..runs_today {
-            let (command, item_id, env) = commands[((day * 7 + n * 3) % 6) as usize];
-            // Early on, one run in two waits for the owner. After two weeks, one in ten.
-            let asked = (n * 14) < (7 - day / 2).max(1) * runs_today;
-            let denied = asked && n == 0 && day % 5 == 2;
-            let decided_by = match (asked, denied) {
-                (_, true) => DecidedBy::Owner,
-                (true, false) => DecidedBy::Owner,
-                (false, _) if day > 6 && n % 3 == 0 => DecidedBy::Pattern,
-                _ => DecidedBy::Model,
-            };
-            v.record_decision(&DecisionEntry {
-                at: day_end - (runs_today - 1 - n) * 1800,
-                agent_id: claude,
-                agent_name: "Claude Code".to_owned(),
-                project_dir: api.clone(),
-                cwd_rel: String::new(),
-                items: vec![item_id],
-                user_request: "Finish the checkout flow and its tests.".to_owned(),
-                user_request_source: RequestSource::Host,
-                command: command.iter().map(|arg| (*arg).to_owned()).collect(),
-                purpose: "Run the task of the user.".to_owned(),
-                env_names: vec![env.to_owned()],
-                declarations: vec![None],
-                rule_flags: Vec::new(),
-                known_safe: false,
-                model_facts: vec![
-                    ("task_match".to_owned(), 0.93),
-                    ("destroy".to_owned(), 0.02),
-                ],
-                pattern: command.join(" "),
-                grant_asks: false,
-                asked,
-                decision: if denied {
-                    LoggedDecision::Deny
-                } else {
-                    LoggedDecision::Allow
-                },
-                decided_by,
-                remembered: false,
-                policy: "apassy-bouncer-v7".to_owned(),
-                note: String::new(),
-                instruction: String::new(),
-            })
-            .expect("decision");
-        }
-    }
-    // Remembered patterns: three owner approvals make a pattern active.
-    for (item_id, template) in [
-        (staging_db, "npm run migrate"),
-        (stripe, "stripe balance retrieve"),
-    ] {
-        let key = PatternKey {
-            agent_id: claude,
-            project_dir: api.clone(),
-            items: vec![item_id],
-            policy: String::new(),
-            cwd_rel: String::new(),
-            template: template.to_owned(),
-        };
-        for n in 0..3 {
-            v.remember_approval(&key, template, now - (3 - n) * DAY)
-                .expect("pattern");
-        }
-    }
+    // Decisions: a request of Codex and a suggestion for the OpenAI key.
+    v.open_credential_request(&NewCredentialRequest {
+        agent_id: codex,
+        agent_name: "Codex".to_owned(),
+        project_key: "/Users/you/code/newsletter".to_owned(),
+        project_label: "newsletter".to_owned(),
+        name: "Resend API key".to_owned(),
+        purpose: "Send the test email of the newsletter".to_owned(),
+        where_to_get: "resend.com/api-keys".to_owned(),
+        folder: Some(side.clone()),
+    })
+    .expect("request");
+    v.propose_correction(
+        id("OpenAI API"),
+        CorrectionKind::Environment,
+        "development",
+        &serde_json::json!({
+            "signal": "Used only with api.openai.com, in three projects",
+            "provider": "openai",
+            "hosts": ["api.openai.com"],
+            "uses": 14,
+            "agents": ["Codex", "Claude Code"],
+        }),
+    )
+    .expect("correction");
+
     v.lock().expect("lock");
     println!("seeded {}", path.display());
 }
@@ -491,12 +533,70 @@ fn set_owner_only(dir: &Path) {
     }
 }
 
+#[cfg(unix)]
+fn set_file_owner_only(file: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+}
+
+/// The run that waits for the owner in Decisions: Claude Code reads the payouts with the
+/// production Stripe key in `acme-billing`. It runs on its own thread and ends with the
+/// answer, the timeout, or the app.
+fn ask_in_background() {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return;
+    };
+    let (Ok(token), Ok(item)) = (
+        std::fs::read_to_string(home.join(TOKEN_FILE)),
+        std::fs::read_to_string(home.join(ASK_ITEM_FILE)),
+    ) else {
+        return;
+    };
+    let Ok(item) = item.trim().parse::<u64>() else {
+        return;
+    };
+    let project = home.join("code/acme-billing");
+    // A stand-in for the Stripe command line, so the broker finds the program. The
+    // tour never answers, so it does not run.
+    let bin = home.join("code/bin");
+    let _ = std::fs::create_dir_all(&project);
+    let _ = std::fs::create_dir_all(&bin);
+    let _ = std::fs::write(bin.join("stripe"), "#!/bin/sh\nexit 0\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ =
+            std::fs::set_permissions(bin.join("stripe"), std::fs::Permissions::from_mode(0o700));
+    }
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let project = std::fs::canonicalize(&project).unwrap_or(project);
+    std::thread::spawn(move || {
+        let action = apassy::agent::wire::Action::Run {
+            items: vec![item],
+            command: ["stripe", "payouts", "list", "--limit", "10"]
+                .map(str::to_owned)
+                .to_vec(),
+            cwd: project.display().to_string(),
+            purpose: "List the last payouts for the monthly report.".to_owned(),
+            path: Some(path),
+            user_request: Some("Check why the October payout is late.".to_owned()),
+        };
+        let socket = apassy::agent::client::default_socket_path();
+        match apassy::agent::client::send(&socket, token.trim(), action) {
+            Ok(response) => eprintln!("tour: the run ended: {response:?}"),
+            Err(error) => eprintln!("tour: the run failed: {error}"),
+        }
+    });
+}
+
 // ---------------------------------------------------------------- run
 
-/// One step of the tour. Positions are in points of the 1180 x 800 window.
+/// One step of the tour. Positions are in points of the 1180 x 740 window.
 enum Step {
     Wait(f64),
     Type(&'static str),
+    /// A paste from the clipboard, such as a `.env` file.
+    Paste(&'static str),
     Click(f32, f32),
     Scroll(f32, f32, f32),
     Shot(&'static str),
@@ -509,6 +609,11 @@ enum Step {
     Snap(&'static str),
     /// Minimize the window (`true`) or bring it back (`false`).
     Minimize(bool),
+    /// Draw a second window in the main one (`true`), so the tour can click in it: the
+    /// input hook reaches only the main window.
+    Embed(bool),
+    /// Send the run that waits for the owner ([`ask_in_background`]).
+    Ask,
     Quit,
 }
 
@@ -553,62 +658,153 @@ fn run() {
     .expect("window");
 }
 
-/// The tour. Positions are in points of the 1180 x 740 window. `APASSY_TOUR` names a
-/// file with other steps after the unlock, one per line: `click X Y`, `scroll X Y DY`,
-/// `wait S`, `shot NAME`, `snap NAME`, `size W H`, `type TEXT`, `key cmd+2`. It helps
-/// to find the positions of a new layout. With `APASSY_TOUR_RAW` set, the file steps
-/// run alone, without the unlock: for a scratch HOME with no vault (onboarding).
+/// The `.env` file that the tour pastes in New Credential, as in the mockup.
+const DOT_ENV: &str = "# .env\nRESEND_API_KEY=re_FAKE123\nSTRIPE_SECRET_KEY=sk_test_FAKE51H\nSENTRY_AUTH_TOKEN=sntrys_FAKE\nDATABASE_PASSWORD=fake-pass\n";
+
+/// The views of the tour, after the unlock. Each `Shot` name becomes `ui-NAME.png`.
+/// Positions are in points of the 1180 x 740 window; the places open with their
+/// shortcuts, so most steps do not depend on the layout of the sidebar.
+fn view_steps() -> Vec<Step> {
+    use Step::*;
+    let cmd = egui::Modifiers::COMMAND;
+    let ctrl_cmd = egui::Modifiers::COMMAND | egui::Modifiers::CTRL;
+    vec![
+        Ask,
+        Wait(1.0),
+        // All credentials, nothing selected.
+        Shot("all-credentials"),
+        // The Work folder, opened in the sidebar: its subfolders and its groups.
+        Click(LAYOUT.work_triangle.0, LAYOUT.work_triangle.1),
+        Wait(0.5),
+        Click(LAYOUT.work_row.0, LAYOUT.work_row.1),
+        Wait(1.0),
+        Shot("folder"),
+        // The production Stripe key: the top of its detail, then its options.
+        Click(LAYOUT.stripe_live_in_work.0, LAYOUT.stripe_live_in_work.1),
+        Wait(1.5),
+        Shot("credential"),
+        Scroll(820.0, 450.0, -2000.0),
+        Wait(1.0),
+        Shot("credential-options"),
+        // New Credential with a pasted .env file.
+        Key(egui::Key::N, cmd),
+        Wait(1.0),
+        Paste(DOT_ENV),
+        Wait(1.5),
+        Shot("new-credential"),
+        // The first Escape leaves the paste field, the second closes the sheet.
+        Key(egui::Key::Escape, egui::Modifiers::NONE),
+        Wait(0.5),
+        Key(egui::Key::Escape, egui::Modifiers::NONE),
+        Wait(1.0),
+        // Decisions: the question that waits (selected first), a request, a suggestion.
+        Key(egui::Key::Num2, cmd),
+        Wait(1.5),
+        Shot("decisions-question"),
+        Click(LAYOUT.decision_request.0, LAYOUT.decision_request.1),
+        Wait(1.0),
+        Shot("decisions-request"),
+        Click(LAYOUT.decision_suggestion.0, LAYOUT.decision_suggestion.1),
+        Wait(1.0),
+        Shot("decisions-suggestion"),
+        // Agents, the first one selected.
+        Key(egui::Key::Num3, cmd),
+        Wait(1.0),
+        Click(LAYOUT.first_agent.0, LAYOUT.first_agent.1),
+        Wait(1.0),
+        Shot("agents"),
+        // The sidebar as a rail (⌃⌘S), then the narrow window with its rail, and the
+        // sidebar that floats over the list.
+        Key(egui::Key::Num1, cmd),
+        Wait(0.5),
+        Key(egui::Key::S, ctrl_cmd),
+        Wait(1.0),
+        Shot("sidebar-collapsed"),
+        Key(egui::Key::S, ctrl_cmd),
+        Wait(0.5),
+        Size(960.0, 740.0),
+        Wait(1.0),
+        Shot("narrow"),
+        Key(egui::Key::S, ctrl_cmd),
+        Wait(1.0),
+        Shot("narrow-float"),
+        Key(egui::Key::Escape, egui::Modifiers::NONE),
+        Size(1180.0, 740.0),
+        Wait(1.0),
+        // Each tab of Settings, drawn in the main window, where the tour can click: the
+        // input hook reaches only the main window.
+        Embed(true),
+        Key(egui::Key::Comma, cmd),
+        Wait(1.5),
+        Shot("settings-general"),
+        Click(LAYOUT.settings_tabs[1], LAYOUT.settings_tab_y),
+        Wait(1.0),
+        Shot("settings-devices"),
+        Click(LAYOUT.settings_tabs[2], LAYOUT.settings_tab_y),
+        Wait(1.0),
+        Shot("settings-security"),
+        Click(LAYOUT.settings_tabs[3], LAYOUT.settings_tab_y),
+        Wait(1.0),
+        Shot("settings-advanced"),
+        // Back to General, so the window opens there.
+        Click(LAYOUT.settings_tabs[0], LAYOUT.settings_tab_y),
+        Wait(0.5),
+        Key(egui::Key::W, cmd),
+        Wait(0.5),
+        Embed(false),
+        // Last, the real Settings window as it opens. Its input does not come from the
+        // tour, so the tour ends with it open.
+        Key(egui::Key::Comma, cmd),
+        Wait(1.5),
+        Shot("settings-window"),
+    ]
+}
+
+/// The positions that the tour clicks, in points of the 1180 x 740 window.
+struct Layout {
+    work_triangle: (f32, f32),
+    work_row: (f32, f32),
+    stripe_live_in_work: (f32, f32),
+    decision_request: (f32, f32),
+    decision_suggestion: (f32, f32),
+    first_agent: (f32, f32),
+    settings_tabs: [f32; 4],
+    settings_tab_y: f32,
+}
+
+const LAYOUT: Layout = Layout {
+    work_triangle: (33.0, 168.0),
+    work_row: (120.0, 168.0),
+    stripe_live_in_work: (450.0, 230.0),
+    decision_request: (450.0, 200.0),
+    decision_suggestion: (450.0, 260.0),
+    first_agent: (450.0, 84.0),
+    settings_tabs: [460.0, 545.0, 630.0, 715.0],
+    settings_tab_y: 75.0,
+};
+
+/// The tour. `APASSY_TOUR` names a file with other steps after the unlock, one per
+/// line: `click X Y`, `scroll X Y DY`, `wait S`, `shot NAME`, `snap NAME`, `size W H`,
+/// `type TEXT`, `paste TEXT` (`\n` for a new line), `key cmd+2`, `embed on|off`, `ask`.
+/// It helps to find the positions of a new layout. With `APASSY_TOUR_RAW` set, the
+/// file steps run alone, without the unlock: for a scratch HOME with no vault (first
+/// steps). `APASSY_TOUR_FIRST_STEPS` takes the first steps of an empty vault.
 fn tour_steps() -> Vec<Step> {
     use Step::*;
     let mut steps = if std::env::var_os("APASSY_TOUR_RAW").is_some() {
         vec![Wait(1.0)]
     } else {
-        vec![
-            Type(PASS),
-            Wait(0.5),
-            Click(590.0, 461.0),
-            Wait(3.5),
-            Shot("vault"),
-        ]
+        vec![Type(PASS), Wait(0.5), Click(590.0, 461.0), Wait(3.5)]
     };
-    match std::env::var("APASSY_TOUR") {
-        Ok(file) => steps.extend(parse_steps(
-            &std::fs::read_to_string(&file).expect("tour file"),
-        )),
-        Err(_) => steps.extend([
-            // A production credential: its declaration and variable.
-            Click(415.0, 708.0),
-            Wait(1.5),
-            Shot("credential"),
-            // Claude Code: process access per credential, then its recent requests.
-            // The views open with their shortcuts, so the tour does not depend on the
-            // layout of the sidebar.
-            Key(egui::Key::Num2, egui::Modifiers::COMMAND),
-            Wait(1.0),
-            Click(404.0, 135.0),
-            Wait(1.5),
-            // Past the token and the setup checks, to what it can see and use.
-            Scroll(700.0, 500.0, -645.0),
-            Wait(1.0),
-            Shot("agent"),
-            Scroll(700.0, 500.0, -500.0),
-            Wait(1.0),
-            Shot("requests"),
-            // Access requests and blocked runs.
-            Key(egui::Key::Num3, egui::Modifiers::COMMAND),
-            Wait(1.0),
-            // A click on an empty part of the sidebar ends the keyboard focus that the
-            // shortcut gave to the first control of the page.
-            Click(110.0, 600.0),
-            Wait(1.0),
-            Shot("activity"),
-            // The ask rate over two weeks.
-            Key(egui::Key::Num4, egui::Modifiers::COMMAND),
-            Wait(1.0),
-            Click(110.0, 600.0),
-            Wait(1.5),
-            Shot("learning"),
-        ]),
+    if std::env::var_os("APASSY_TOUR_FIRST_STEPS").is_some() {
+        steps.extend([Wait(1.0), Shot("first-steps")]);
+    } else {
+        match std::env::var("APASSY_TOUR") {
+            Ok(file) => steps.extend(parse_steps(
+                &std::fs::read_to_string(&file).expect("tour file"),
+            )),
+            Err(_) => steps.extend(view_steps()),
+        }
     }
     // A live tour waits for more steps (`APASSY_TOUR_LIVE`) and ends on `quit`.
     if std::env::var_os("APASSY_TOUR_LIVE").is_none() {
@@ -638,10 +834,15 @@ fn parse_steps(text: &str) -> Vec<Step> {
             Some("snap") => steps.push(Snap(name(1))),
             Some("size") => steps.push(Size(num(1), num(2))),
             Some("type") => steps.push(Type(Box::leak(parts[1..].join(" ").into_boxed_str()))),
+            Some("paste") => steps.push(Paste(Box::leak(
+                parts[1..].join(" ").replace("\\n", "\n").into_boxed_str(),
+            ))),
             Some("key") => {
                 let (key, modifiers) = parse_key(parts[1]);
                 steps.push(Key(key, modifiers));
             }
+            Some("embed") => steps.push(Embed(parts.get(1) != Some(&"off"))),
+            Some("ask") => steps.push(Ask),
             Some("quit") => steps.push(Quit),
             Some("minimize") => steps.push(Minimize(true)),
             Some("restore") => steps.push(Minimize(false)),
@@ -658,6 +859,7 @@ fn parse_key(spec: &str) -> (egui::Key, egui::Modifiers) {
     for part in spec.split('+') {
         match part.to_ascii_lowercase().as_str() {
             "cmd" => modifiers |= egui::Modifiers::COMMAND,
+            "ctrl" => modifiers |= egui::Modifiers::CTRL,
             "shift" => modifiers |= egui::Modifiers::SHIFT,
             "alt" => modifiers |= egui::Modifiers::ALT,
             name => {
@@ -758,6 +960,7 @@ impl Tour {
         match step {
             Step::Wait(seconds) => pause = seconds,
             Step::Type(text) => self.events.push(egui::Event::Text(text.to_owned())),
+            Step::Paste(text) => self.events.push(egui::Event::Paste(text.to_owned())),
             Step::Click(x, y) => {
                 let pos = egui::pos2(x, y);
                 self.events.push(egui::Event::PointerMoved(pos));
@@ -817,6 +1020,8 @@ impl Tour {
                 }
                 pause = 1.0;
             }
+            Step::Embed(on) => ctx.set_embed_viewports(on),
+            Step::Ask => ask_in_background(),
             Step::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
         }
         self.next_at = Instant::now() + Duration::from_secs_f64(pause);
