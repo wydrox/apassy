@@ -96,6 +96,9 @@ pub enum ItemEventKind {
     Restored,
     /// The owner confirmed the agent settings after a restore.
     ReviewConfirmed,
+    /// The owner moved the item to another folder (schema 18). The detail is the folder
+    /// path, empty for the top level.
+    Moved,
 }
 
 impl ItemEventKind {
@@ -121,6 +124,7 @@ impl ItemEventKind {
             Self::OperationRemoved => "operation_removed",
             Self::Restored => "restored",
             Self::ReviewConfirmed => "review_confirmed",
+            Self::Moved => "moved",
         }
     }
 
@@ -146,6 +150,7 @@ impl ItemEventKind {
             "operation_removed" => Self::OperationRemoved,
             "restored" => Self::Restored,
             "review_confirmed" => Self::ReviewConfirmed,
+            "moved" => Self::Moved,
             _ => return Err(err(VaultErrorKind::Storage)),
         })
     }
@@ -575,6 +580,7 @@ mod tests {
             ItemEventKind::OperationRemoved,
             ItemEventKind::Restored,
             ItemEventKind::ReviewConfirmed,
+            ItemEventKind::Moved,
         ] {
             assert_eq!(ItemEventKind::parse(kind.as_str()).expect("parse"), kind);
         }

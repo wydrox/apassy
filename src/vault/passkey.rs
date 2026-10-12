@@ -1507,6 +1507,12 @@ mod tests {
              UPDATE item_field SET name = 'passkey_rp_id' WHERE name = 'aaa';
              UPDATE item_field SET name = 'passkey_key' WHERE name = 'bbb';
              UPDATE sync_device SET applying = 0;
+             DROP TABLE folder; DROP TABLE item_folder; DROP TABLE item_policy;
+             DROP TABLE declaration_source; DROP TABLE shared_vault; DROP TABLE item_share;
+             DROP TABLE vault_secret; DROP TABLE agent_exception; DROP TABLE owner_answer;
+             DROP TABLE item_use; DROP TABLE item_origin; DROP TABLE credential_request;
+             DROP TABLE correction; DROP TABLE owner_interaction;
+             ALTER TABLE agent DROP COLUMN note;
              UPDATE vault_meta SET schema_version = 16 WHERE id = 1;
              PRAGMA user_version = 16;",
         )
@@ -1548,7 +1554,7 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 17);
+        assert_eq!(version, crate::vault::SCHEMA_VERSION);
         assert!(vault.all_passkeys().unwrap().is_empty());
         assert_eq!(
             vault.passkey_info(id).unwrap_err().to_string(),

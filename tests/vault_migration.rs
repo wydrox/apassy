@@ -1,6 +1,6 @@
 #![cfg(feature = "vault")]
 
-//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 16) to
+//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 17) to
 //! the current version, with data at each version. Synthetic values only.
 //!
 //! The schema SQL below is a frozen copy of the statements that each earlier version ran
@@ -22,7 +22,7 @@ use apassy::vault::{
 use tempfile::TempDir;
 
 const PASS: &str = "synthetic-migration-passphrase";
-const CURRENT_VERSION: i64 = 17;
+const CURRENT_VERSION: i64 = 18;
 /// The vault ID of the frozen version 13 file.
 const V13_VAULT_ID: &str = "6f1c2d3e-4a5b-4c6d-8e7f-0123456789ab";
 
@@ -1885,4 +1885,194 @@ fn version_17_migration_renames_reserved_fields_and_their_binding() {
     drop(vault);
     assert_eq!(sync_columns(&path), before, "record IDs and clocks stay");
     assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
+}
+
+/// Schema 17 (ADR 0023) adds no table and no column: a passkey is an item field.
+const V17_SQL: &str = "
+UPDATE vault_meta SET schema_version = 17 WHERE id = 1;
+PRAGMA user_version = 17;
+";
+
+/// The agent exceptions of the closed file at `path`: (agent, item, kind), and the
+/// count of rows whose time is the time of their grant.
+fn exception_rows(path: &Path) -> (Vec<(i64, i64, String)>, i64) {
+    let conn = rusqlite::Connection::open(path).expect("open");
+    conn.pragma_update(None, "key", PASS).expect("key");
+    let mut stmt = conn
+        .prepare(
+            "SELECT agent_id, item_id, kind FROM agent_exception
+             ORDER BY agent_id, item_id, kind",
+        )
+        .expect("prepare");
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("rows");
+    let timed: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM agent_exception e JOIN exec_grant g
+                 ON g.agent_id = e.agent_id AND g.item_id = e.item_id
+             WHERE e.created_at = g.created_at",
+            [],
+            |row| row.get(0),
+        )
+        .expect("times");
+    drop(stmt);
+    conn.close().map_err(|(_, err)| err).expect("close");
+    (rows, timed)
+}
+
+/// Tables and columns of schema 18 that the closed file at `path` has.
+fn schema18_parts(path: &Path) -> Vec<&'static str> {
+    let conn = rusqlite::Connection::open(path).expect("open");
+    conn.pragma_update(None, "key", PASS).expect("key");
+    let parts = [
+        ("folder", "SELECT uuid FROM folder LIMIT 0"),
+        ("item_folder", "SELECT item_id FROM item_folder LIMIT 0"),
+        (
+            "agent_exception",
+            "SELECT kind FROM agent_exception LIMIT 0",
+        ),
+        (
+            "owner_interaction",
+            "SELECT * FROM owner_interaction LIMIT 0",
+        ),
+        ("agent.note", "SELECT note FROM agent LIMIT 0"),
+    ]
+    .into_iter()
+    .filter(|(_, sql)| conn.prepare(sql).is_ok())
+    .map(|(name, _)| name)
+    .collect();
+    conn.close().map_err(|(_, err)| err).expect("close");
+    parts
+}
+
+/// Counts that the migration must keep: agents, grants, rules, patterns, and agents
+/// that see all items.
+fn kept_counts(path: &Path) -> [i64; 5] {
+    let conn = rusqlite::Connection::open(path).expect("open");
+    conn.pragma_update(None, "key", PASS).expect("key");
+    let count = |sql: &str| -> i64 { conn.query_row(sql, [], |row| row.get(0)).expect("count") };
+    let counts = [
+        count("SELECT count(*) FROM agent"),
+        count("SELECT count(*) FROM exec_grant"),
+        count("SELECT count(*) FROM grant_rule"),
+        count("SELECT count(*) FROM remembered_pattern"),
+        count("SELECT count(*) FROM agent WHERE see_all = 1"),
+    ];
+    conn.close().map_err(|(_, err)| err).expect("close");
+    counts
+}
+
+/// ADR 0025 §3f: the migration from 17 turns the agent settings into exceptions, in the
+/// same transaction as the tables, so nothing gets looser and nothing is deleted. A
+/// failure late (the version mark, after the derivation) or early (a table name in use)
+/// leaves version 17 without any table, column, or exception of version 18.
+#[test]
+fn version_18_migration_derives_exceptions_and_is_atomic() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("v17.db");
+    build_legacy(&path, 13);
+    let conn = rusqlite::Connection::open(&path).expect("open");
+    conn.pragma_update(None, "key", PASS).expect("key");
+    conn.execute_batch(V14_SQL).expect("frozen schema 14");
+    conn.execute_batch(V15_SQL).expect("frozen schema 15");
+    conn.execute_batch(V16_SQL).expect("frozen schema 16");
+    conn.execute_batch(V17_SQL).expect("frozen schema 17");
+    // The legacy agents: 1 sees all and has a grant "Bouncer decides" (item 1) and one
+    // "Ask me each time" (item 2); 2 sees only its grants and has none; 3 is revoked.
+    // Agent 4 sees only its grants: item 3 "Bouncer decides", item 4 "Ask me each time".
+    // The revoked agent 3 has a grant "Ask me each time" too.
+    let now = now();
+    conn.execute(
+        "INSERT INTO agent (id, name, token, created_at, token_issued_at, see_all)
+         VALUES (4, 'MIG narrow agent', ?1, ?2, ?2, 0)",
+        (vec![0x44u8; 32], now - 500),
+    )
+    .expect("agent");
+    for (agent, item, mode, at) in [
+        (4, 3, "allow", now - 400),
+        (4, 4, "ask", now - 300),
+        (3, 5, "ask", now - 200),
+    ] {
+        conn.execute(
+            "INSERT INTO exec_grant (agent_id, item_id, project_dir, mode, created_at)
+             VALUES (?1, ?2, '/tmp/mig-narrow', ?3, ?4)",
+            (agent, item, mode, at),
+        )
+        .expect("grant");
+    }
+    // Late: a trigger refuses the version mark, after the tables and the derivation.
+    conn.execute_batch(
+        "CREATE TRIGGER mig_block_v18 BEFORE UPDATE OF schema_version ON vault_meta
+         WHEN NEW.schema_version = 18 BEGIN SELECT RAISE(ABORT, 'blocked'); END;",
+    )
+    .expect("blocking trigger");
+    conn.close().map_err(|(_, e)| e).unwrap();
+    assert_eq!(raw_versions(&path), (17, 17));
+    let before = sync_columns(&path);
+    let kept = kept_counts(&path);
+    assert_eq!(kept, [4, 5, 1, 1, 1]);
+
+    let mut vault = Vault::open(&path).expect("open");
+    assert_eq!(
+        vault.unlock(PASS).unwrap_err().kind(),
+        VaultErrorKind::Storage
+    );
+    drop(vault);
+    assert_eq!(raw_versions(&path), (17, 17), "no partial migration");
+    assert!(schema18_parts(&path).is_empty());
+
+    // Early: a table with the name of a version 18 table.
+    let conn = rusqlite::Connection::open(&path).expect("open");
+    conn.pragma_update(None, "key", PASS).unwrap();
+    conn.execute_batch("DROP TRIGGER mig_block_v18; CREATE TABLE owner_interaction (x INTEGER);")
+        .unwrap();
+    conn.close().map_err(|(_, e)| e).unwrap();
+    let mut vault = Vault::open(&path).expect("open");
+    assert_eq!(
+        vault.unlock(PASS).unwrap_err().kind(),
+        VaultErrorKind::Storage
+    );
+    drop(vault);
+    assert_eq!(raw_versions(&path), (17, 17));
+    assert_eq!(
+        schema18_parts(&path),
+        ["owner_interaction"],
+        "only the blocking table"
+    );
+    let conn = rusqlite::Connection::open(&path).expect("open");
+    conn.pragma_update(None, "key", PASS).unwrap();
+    conn.execute_batch("DROP TABLE owner_interaction;").unwrap();
+    conn.close().map_err(|(_, e)| e).unwrap();
+
+    let mut vault = Vault::open(&path).expect("open");
+    vault.unlock(PASS).expect("schema 17 to current");
+    assert_items(&vault);
+    assert!(vault.folders().expect("folders").is_empty());
+    for item in 1..=5 {
+        assert_eq!(vault.item_folder(item).expect("folder"), None);
+        assert!(!vault.always_ask(item).expect("policy"));
+    }
+    drop(vault);
+    assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
+    let marker = i64::try_from(apassy::vault::ONLY_MARKER_ITEM).unwrap();
+    let (rows, timed) = exception_rows(&path);
+    assert_eq!(
+        rows,
+        [
+            (1, 2, "always_ask".to_owned()),
+            (2, marker, "only".to_owned()),
+            (4, marker, "only".to_owned()),
+            (4, 3, "only".to_owned()),
+            (4, 4, "always_ask".to_owned()),
+            (4, 4, "only".to_owned()),
+        ],
+        "see_all = 0 becomes 'only these items'; 'ask' becomes 'always ask'; \
+         'allow' and a revoked agent become nothing"
+    );
+    assert_eq!(timed, 4, "each exception keeps the time of its grant");
+    assert_eq!(kept_counts(&path), kept, "grants, rules, and patterns stay");
+    assert_eq!(sync_columns(&path), before, "record IDs and clocks stay");
 }

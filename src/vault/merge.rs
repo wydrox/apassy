@@ -24,9 +24,15 @@
 //! argument: SQLCipher then uses the key of the vault. A copy that another Mac rekeyed
 //! does not open, and the app asks for the new passphrase.
 //!
-//! A copy of the schema before passkeys ([`UPGRADABLE_SCHEMA`]) passes the checks of its
-//! own schema first. Then the merge gives its records the field names of the current
-//! schema in memory ([`upgrade_records`]); the copy does not change.
+//! Folders, shared vaults, and vault secrets (schema 18) are not credentials. Their rows
+//! sync one by one: the later `(updated_at, updated_by)` wins ([`merge_lww`]). A deleted
+//! folder keeps its row with `deleted_at`, so the delete reaches the other Macs and wins
+//! over an older edit.
+//!
+//! A copy of the schema before folders ([`UPGRADABLE_SCHEMA`], 17) passes the checks of
+//! its own schema first. It has no folder, policy, declaration source, or share rows, so
+//! the merge keeps the values of this vault for its records in memory
+//! ([`keep_local_v18`]); the copy does not change.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -36,12 +42,12 @@ use ring::digest;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use zeroize::Zeroizing;
 
-use super::sync::{SyncIdentity, content_digest, read_sync_row, to_hex};
-use super::types::{SCHEMA_VERSION, VaultErrorKind, VaultResult, err, is_passkey_field};
-use super::{MAX_ITEM_EVENTS, Vault, agents, history, verify_expected_columns_in};
+use super::sync::{SyncIdentity, content_digest, hash_value, read_sync_row, to_hex};
+use super::types::{SCHEMA_VERSION, VaultErrorKind, VaultResult, err};
+use super::{MAX_ITEM_EVENTS, Vault, agents, history, schema18, verify_expected_columns_in};
 
-/// Tables of a credential besides the item row. Each row names its item in `item_id`.
-pub(super) const CHILD_TABLES: [&str; 6] = [
+/// Child tables of a credential in schema 14. Their triggers come with schema 14.
+const CHILD_TABLES_V14: [&str; 6] = [
     "item_tag",
     "item_field",
     "item_archive",
@@ -50,9 +56,23 @@ pub(super) const CHILD_TABLES: [&str; 6] = [
     "destination",
 ];
 
+/// Tables of a credential besides the item row. Each row names its item in `item_id`.
+pub(super) const CHILD_TABLES: [&str; 10] = [
+    CHILD_TABLES_V14[0],
+    CHILD_TABLES_V14[1],
+    CHILD_TABLES_V14[2],
+    CHILD_TABLES_V14[3],
+    CHILD_TABLES_V14[4],
+    CHILD_TABLES_V14[5],
+    schema18::CHILD_TABLES_V18[0],
+    schema18::CHILD_TABLES_V18[1],
+    schema18::CHILD_TABLES_V18[2],
+    schema18::CHILD_TABLES_V18[3],
+];
+
 /// Tables that stay on each Mac. A pushed copy keeps only the default companion setting, and a merge never
 /// reads them from another copy.
-pub const LOCAL_TABLES: [&str; 22] = [
+pub const LOCAL_TABLES: [&str; 29] = [
     "agent",
     "grant_rule",
     "activity",
@@ -75,11 +95,18 @@ pub const LOCAL_TABLES: [&str; 22] = [
     "companion_certificate",
     "companion_device",
     "relay_device",
+    "agent_exception",
+    "owner_answer",
+    "item_use",
+    "item_origin",
+    "credential_request",
+    "correction",
+    "owner_interaction",
 ];
 
 /// Tables whose rows sync. `vault_meta` syncs as the one row of the file; its token
 /// lifetime is set to the default in a pushed copy, because it is a setting of each Mac.
-pub const SYNCED_TABLES: [&str; 13] = [
+pub const SYNCED_TABLES: [&str; 20] = [
     "vault_meta",
     "item",
     "item_tag",
@@ -93,11 +120,18 @@ pub const SYNCED_TABLES: [&str; 13] = [
     "sync_tombstone",
     "sync_peer",
     "sqlite_sequence",
+    "folder",
+    "item_folder",
+    "item_policy",
+    "declaration_source",
+    "shared_vault",
+    "item_share",
+    "vault_secret",
 ];
 
 /// History events of a credential that sync. The others (a reveal, agent access, a
 /// restore, a review) are about this Mac and stay on it.
-pub const SYNCED_EVENT_KINDS: [&str; 10] = [
+pub const SYNCED_EVENT_KINDS: [&str; 11] = [
     "created",
     "tracked",
     "edited",
@@ -108,16 +142,54 @@ pub const SYNCED_EVENT_KINDS: [&str; 10] = [
     "variable_removed",
     "connector",
     "connector_removed",
+    "moved",
 ];
 
-/// The one earlier schema of a copy that a merge takes: schema 16, before passkeys. The
+/// The one earlier schema of a copy that a merge takes: schema 17, before folders. The
 /// app of an installed device still writes it. A copy of another schema is
 /// `UnsupportedSchema`.
-pub(super) const UPGRADABLE_SCHEMA: i64 = super::RELAY_DEVICE_SCHEMA_VERSION;
+pub(super) const UPGRADABLE_SCHEMA: i64 = super::PASSKEY_SCHEMA_VERSION;
 
-// [`upgrade_records`] does the step from schema 16 to schema 17 only. A new schema needs
+// [`keep_local_v18`] does the step from schema 17 to schema 18 only. A new schema needs
 // its own step for a copy, or a refusal of the old copies.
 const _: () = assert!(SCHEMA_VERSION == UPGRADABLE_SCHEMA + 1);
+
+/// Tables whose rows sync one by one (schema 18): the table, its key column, and its
+/// other columns. The later `(updated_at, updated_by)` wins.
+const LWW_TABLES: [(&str, &str, &[&str]); 3] = [
+    (
+        "folder",
+        "uuid",
+        &[
+            "parent_uuid",
+            "name",
+            "position",
+            "created_at",
+            "updated_at",
+            "updated_by",
+            "deleted_at",
+        ],
+    ),
+    (
+        "shared_vault",
+        "uuid",
+        &[
+            "name",
+            "color",
+            "relay_url",
+            "team_id",
+            "created_at",
+            "updated_at",
+            "updated_by",
+            "deleted_at",
+        ],
+    ),
+    (
+        "vault_secret",
+        "name",
+        &["value", "updated_at", "updated_by"],
+    ),
+];
 
 /// A tombstone stays this long. A copy that is older than this can bring a deleted
 /// credential back.
@@ -204,7 +276,20 @@ CREATE TRIGGER item_event_sync_insert AFTER INSERT ON item_event WHEN NEW.uuid I
 END;
 "
     );
-    for table in CHILD_TABLES {
+    sql.push_str(&child_triggers_sql(&CHILD_TABLES_V14));
+    sql.push_str(
+        "
+UPDATE vault_meta SET schema_version = 14 WHERE id = 1;
+PRAGMA user_version = 14;
+",
+    );
+    sql
+}
+
+/// The triggers of child tables: a change of a child row is a change of its credential.
+pub(super) fn child_triggers_sql(tables: &[&str]) -> String {
+    let mut sql = String::new();
+    for table in tables {
         sql.push_str(&format!(
             "
 CREATE TRIGGER {table}_sync_insert AFTER INSERT ON {table} WHEN {NOT_APPLYING} BEGIN
@@ -220,12 +305,6 @@ END;
 "
         ));
     }
-    sql.push_str(
-        "
-UPDATE vault_meta SET schema_version = 14 WHERE id = 1;
-PRAGMA user_version = 14;
-",
-    );
     sql
 }
 
@@ -474,6 +553,15 @@ struct Record {
     declaration: Option<[String; 6]>,
     env: Option<(String, String, Option<String>)>,
     destination: Option<(String, String)>,
+    /// Schema 18: the folder UUID, as stored (it can name a folder that is gone).
+    folder: Option<String>,
+    /// Schema 18: "Always ask" for the item.
+    always_ask: bool,
+    /// Schema 18: the sources of the declaration values (environment, risk, scope,
+    /// reversibility).
+    sources: Option<[String; 4]>,
+    /// Schema 18: the shared vaults of the item, in UUID order.
+    shares: Vec<String>,
 }
 
 impl Record {
@@ -482,7 +570,8 @@ impl Record {
     }
 
     /// SHA-256 of the content: everything but the row ID and the version. The archive
-    /// counts as on or off.
+    /// counts as on or off. The values of schema 18 count only when one is set, so a
+    /// credential without them has the hash of schema 17.
     fn content_hash(&self) -> [u8; 32] {
         let mut ctx = digest::Context::new(&digest::SHA256);
         let mut text = |value: &str| {
@@ -529,6 +618,34 @@ impl Record {
             }
             None => text("-"),
         }
+        if self.folder.is_some()
+            || self.always_ask
+            || self.sources.is_some()
+            || !self.shares.is_empty()
+        {
+            text("v18");
+            match &self.folder {
+                Some(folder) => {
+                    text("f");
+                    text(folder);
+                }
+                None => text("-"),
+            }
+            text(if self.always_ask { "1" } else { "0" });
+            match &self.sources {
+                Some(values) => {
+                    text("s");
+                    for value in values {
+                        text(value);
+                    }
+                }
+                None => text("-"),
+            }
+            text(&self.shares.len().to_string());
+            for share in &self.shares {
+                text(share);
+            }
+        }
         let mut out = [0u8; 32];
         out.copy_from_slice(ctx.finish().as_ref());
         out
@@ -555,13 +672,29 @@ fn grouped<T>(
     Ok(map)
 }
 
-/// The credentials of the scope in `schema`, by UUID.
+/// The credentials of the scope in `schema` of schema `version`, by UUID. A copy before
+/// schema 18 has no folder, policy, declaration source, or share rows: its records have
+/// none.
 fn load_records(
     conn: &Connection,
     schema: &str,
     scope: &SyncScope,
+    version: i64,
 ) -> VaultResult<BTreeMap<String, Record>> {
     let filter = scope.item_filter();
+    let v18 = version >= SCHEMA_VERSION;
+    let mut shares = if v18 {
+        grouped(
+            conn,
+            &format!(
+                "SELECT item_id, shared_vault_uuid FROM {schema}.item_share
+                 ORDER BY item_id, shared_vault_uuid"
+            ),
+            |row| Ok((row.get(0)?, row.get::<_, String>(1)?)),
+        )?
+    } else {
+        BTreeMap::new()
+    };
     let mut tags = grouped(
         conn,
         &format!("SELECT item_id, tag FROM {schema}.item_tag ORDER BY item_id, position, rowid"),
@@ -584,93 +717,86 @@ fn load_records(
             ))
         },
     )?;
-    let mut archive = grouped(
-        conn,
-        &format!("SELECT item_id, archived_at FROM {schema}.item_archive"),
-        |row| Ok((row.get(0)?, row.get::<_, i64>(1)?)),
-    )?;
-    let mut declarations = grouped(
-        conn,
-        &format!(
-            "SELECT item_id, project, environment, risk, scope, reversibility, provider
-             FROM {schema}.declaration"
-        ),
-        |row| {
-            Ok((
-                row.get(0)?,
-                [
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                ],
-            ))
-        },
-    )?;
-    let mut envs = grouped(
-        conn,
-        &format!("SELECT item_id, env_name, field, placeholder_hosts FROM {schema}.env_binding"),
-        |row| {
-            Ok((
-                row.get(0)?,
-                (
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                ),
-            ))
-        },
-    )?;
-    let mut destinations = grouped(
-        conn,
-        &format!("SELECT item_id, profile, base_url FROM {schema}.destination"),
-        |row| {
-            Ok((
-                row.get(0)?,
-                (row.get::<_, String>(1)?, row.get::<_, String>(2)?),
-            ))
-        },
-    )?;
+    // The one-to-one rows (each keyed by `item_id`) come with the item row in one
+    // statement: the digest runs at each sync and each check for a change, and each
+    // statement costs more than its rows.
+    let (v18_columns, v18_joins) = if v18 {
+        (
+            "f.folder_uuid, p.always_ask, s.environment, s.risk, s.scope, s.reversibility",
+            format!(
+                "LEFT JOIN {schema}.item_folder f ON f.item_id = i.id
+                 LEFT JOIN {schema}.item_policy p ON p.item_id = i.id
+                 LEFT JOIN {schema}.declaration_source s ON s.item_id = i.id"
+            ),
+        )
+    } else {
+        ("NULL, NULL, NULL, NULL, NULL, NULL", String::new())
+    };
     let mut records = BTreeMap::new();
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT i.id, i.uuid, i.updated_at, i.updated_by, i.title, i.kind, i.notes, i.clock
-             FROM {schema}.item i WHERE i.uuid IS NOT NULL AND ({filter})"
+            "SELECT i.id, i.uuid, i.updated_at, i.updated_by, i.title, i.kind, i.notes, i.clock,
+                 a.archived_at,
+                 d.project, d.environment, d.risk, d.scope, d.reversibility, d.provider,
+                 e.env_name, e.field, e.placeholder_hosts,
+                 x.profile, x.base_url,
+                 {v18_columns}
+             FROM {schema}.item i
+             LEFT JOIN {schema}.item_archive a ON a.item_id = i.id
+             LEFT JOIN {schema}.declaration d ON d.item_id = i.id
+             LEFT JOIN {schema}.env_binding e ON e.item_id = i.id
+             LEFT JOIN {schema}.destination x ON x.item_id = i.id
+             {v18_joins}
+             WHERE i.uuid IS NOT NULL AND ({filter})"
         ))
         .map_err(storage)?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, String>(7)?,
-            ))
-        })
-        .map_err(storage)?;
-    for row in rows {
-        let (id, uuid, updated_at, updated_by, title, kind, notes, clock) = row.map_err(storage)?;
+    let mut rows = stmt.query([]).map_err(storage)?;
+    while let Some(row) = rows.next().map_err(storage)? {
+        let id: i64 = row.get(0).map_err(storage)?;
+        let uuid: String = row.get(1).map_err(storage)?;
+        let text = |index: usize| row.get::<_, Option<String>>(index).map_err(storage);
+        let declaration = match [
+            text(9)?,
+            text(10)?,
+            text(11)?,
+            text(12)?,
+            text(13)?,
+            text(14)?,
+        ] {
+            [Some(a), Some(b), Some(c), Some(d), Some(e), Some(f)] => Some([a, b, c, d, e, f]),
+            _ => None,
+        };
+        let env = match (text(15)?, text(16)?) {
+            (Some(name), Some(field)) => Some((name, field, text(17)?)),
+            _ => None,
+        };
+        let destination = match (text(18)?, text(19)?) {
+            (Some(profile), Some(url)) => Some((profile, url)),
+            _ => None,
+        };
+        let sources = match [text(22)?, text(23)?, text(24)?, text(25)?] {
+            [Some(a), Some(b), Some(c), Some(d)] => Some([a, b, c, d]),
+            _ => None,
+        };
         let record = Record {
             id,
             uuid: uuid.clone(),
-            updated_at,
-            updated_by,
-            clock: parse_clock(&clock),
-            title,
-            kind,
-            notes,
+            updated_at: row.get(2).map_err(storage)?,
+            updated_by: row.get(3).map_err(storage)?,
+            clock: parse_clock(&row.get::<_, String>(7).map_err(storage)?),
+            title: row.get(4).map_err(storage)?,
+            kind: row.get(5).map_err(storage)?,
+            notes: row.get(6).map_err(storage)?,
             tags: tags.remove(&id).unwrap_or_default(),
             fields: fields.remove(&id).unwrap_or_default(),
-            archived_at: archive.remove(&id).and_then(|mut all| all.pop()),
-            declaration: declarations.remove(&id).and_then(|mut all| all.pop()),
-            env: envs.remove(&id).and_then(|mut all| all.pop()),
-            destination: destinations.remove(&id).and_then(|mut all| all.pop()),
+            archived_at: row.get(8).map_err(storage)?,
+            declaration,
+            env,
+            destination,
+            folder: text(20)?,
+            always_ask: row.get::<_, Option<i64>>(21).map_err(storage)? == Some(1),
+            sources,
+            shares: shares.remove(&id).unwrap_or_default(),
         };
         records.insert(uuid, record);
     }
@@ -717,16 +843,18 @@ fn event_kinds_sql() -> String {
 }
 
 /// SHA-256 of the synced content of the scope in `schema`: each credential with its
-/// version, the tombstones, and the synced history events. Local data (agents,
-/// activity, and the others) is not in it, so agent use does not count as a change.
+/// version, the tombstones, the synced history events, and (schema 18) the rows of the
+/// folders, shared vaults, and vault secrets. Local data (agents, activity, and the
+/// others) is not in it, so agent use does not count as a change.
 pub(super) fn sync_content_digest(
     conn: &Connection,
     schema: &str,
     scope: &SyncScope,
+    version: i64,
 ) -> VaultResult<[u8; 32]> {
     let mut ctx = digest::Context::new(&digest::SHA256);
     ctx.update(b"apassy-sync-records-v1");
-    for (uuid, record) in load_records(conn, schema, scope)? {
+    for (uuid, record) in load_records(conn, schema, scope, version)? {
         ctx.update(b"\0r");
         ctx.update(uuid.as_bytes());
         ctx.update(&record.updated_at.to_be_bytes());
@@ -758,6 +886,35 @@ pub(super) fn sync_content_digest(
         ctx.update(b"\0e");
         ctx.update(uuid.map_err(storage)?.as_bytes());
     }
+    drop(stmt);
+    if version >= SCHEMA_VERSION {
+        let width = LWW_TABLES
+            .iter()
+            .map(|(_, _, columns)| columns.len())
+            .max()
+            .unwrap_or(0);
+        let selects: Vec<String> = LWW_TABLES
+            .iter()
+            .map(|(table, key, columns)| {
+                let mut values: Vec<&str> = columns.to_vec();
+                values.resize(width, "NULL");
+                format!(
+                    "SELECT '{table}', {key}, {} FROM {schema}.{table}",
+                    values.join(", ")
+                )
+            })
+            .collect();
+        let mut stmt = conn
+            .prepare(&format!("{} ORDER BY 1, 2", selects.join(" UNION ALL ")))
+            .map_err(storage)?;
+        let mut rows = stmt.query([]).map_err(storage)?;
+        while let Some(row) = rows.next().map_err(storage)? {
+            ctx.update(b"\0w");
+            for index in 0..width + 2 {
+                hash_value(&mut ctx, row.get_ref(index).map_err(storage)?);
+            }
+        }
+    }
     let mut out = [0u8; 32];
     out.copy_from_slice(ctx.finish().as_ref());
     Ok(out)
@@ -767,9 +924,9 @@ pub(super) fn sync_content_digest(
 /// version and columns, and the digest of the last push (it catches a file that mixes
 /// pages of different copies). Returns its sync record and its schema version.
 ///
-/// A schema 16 copy gets the checks of schema 16: its columns, and the stored digest
+/// A schema 17 copy gets the checks of schema 17: its columns, and the stored digest
 /// of its own content. The version in the header and in `vault_meta` must agree, so a
-/// copy of schema 17 with the header of schema 16 fails.
+/// copy of schema 18 with the header of schema 17 fails.
 fn check_attached(conn: &Connection, alias: &str) -> VaultResult<(SyncIdentity, i64)> {
     let damaged = |_| err(VaultErrorKind::Damaged);
     let mut problem = false;
@@ -808,130 +965,21 @@ fn check_attached(conn: &Connection, alias: &str) -> VaultResult<(SyncIdentity, 
     }
 }
 
-/// The private tables that [`super::passkey::add_schema_v17`] reads and writes, for
-/// [`upgrade_records`]. They hold names only, never a value.
-const UPGRADE_TABLES_SQL: &str = "
-CREATE TABLE vault_meta (id INTEGER PRIMARY KEY, schema_version INTEGER NOT NULL);
-INSERT INTO vault_meta (id, schema_version) VALUES (1, 16);
-PRAGMA user_version = 16;
-CREATE TABLE sync_device (
-    id INTEGER PRIMARY KEY,
-    device_id TEXT NOT NULL DEFAULT '',
-    device_name TEXT NOT NULL DEFAULT '',
-    applying INTEGER NOT NULL DEFAULT 0
-);
-INSERT INTO sync_device (id) VALUES (1);
-CREATE TABLE item (
-    id INTEGER PRIMARY KEY,
-    uuid TEXT,
-    title TEXT NOT NULL DEFAULT '',
-    kind TEXT NOT NULL DEFAULT '',
-    notes TEXT NOT NULL DEFAULT '',
-    revision INTEGER NOT NULL DEFAULT 1,
-    updated_at INTEGER NOT NULL DEFAULT 0,
-    updated_by TEXT NOT NULL DEFAULT '',
-    clock TEXT NOT NULL DEFAULT ''
-);
-CREATE TABLE item_field (
-    item_id INTEGER NOT NULL,
-    position INTEGER NOT NULL,
-    name TEXT NOT NULL,
-    value TEXT NOT NULL DEFAULT '',
-    secret INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE env_binding (
-    item_id INTEGER PRIMARY KEY,
-    env_name TEXT NOT NULL,
-    field TEXT NOT NULL,
-    placeholder_hosts TEXT
-);
-";
-
-/// Give the records of a schema 16 copy the field names of schema 17, in memory.
+/// Give the records of a schema 17 copy the schema 18 values of this vault, in memory.
 ///
-/// The names come from the migration itself ([`super::passkey::add_schema_v17`]), so
-/// each record gets the names that the unlock of a schema 16 vault gives: an ordinary
-/// field with a reserved name gets a free name, and a variable of that field follows it.
-/// The migration runs on a private in-memory database that holds only the field names,
-/// the secret flags, and the variable fields of the records with a reserved name. No
-/// value goes into it. Values, versions, and clocks stay, so the merge compares the
-/// same content on both sides and makes no conflict from the upgrade.
-fn upgrade_records(records: &mut BTreeMap<String, Record>) -> VaultResult<()> {
-    let mut legacy: Vec<&mut Record> = records
-        .values_mut()
-        .filter(|record| {
-            record
-                .fields
-                .iter()
-                .any(|(name, ..)| is_passkey_field(name))
-        })
-        .collect();
-    if legacy.is_empty() {
-        return Ok(());
-    }
-    let mut conn = Connection::open_in_memory().map_err(storage)?;
-    conn.execute_batch(UPGRADE_TABLES_SQL).map_err(storage)?;
-    let tx = conn.transaction().map_err(storage)?;
-    for (index, record) in legacy.iter().enumerate() {
-        let item = i64::try_from(index).map_err(storage)?;
-        tx.execute("INSERT INTO item (id) VALUES (?1)", [item])
-            .map_err(storage)?;
-        for (position, (name, _, secret)) in record.fields.iter().enumerate() {
-            tx.execute(
-                "INSERT INTO item_field (item_id, position, name, secret)
-                 VALUES (?1, ?2, ?3, ?4)",
-                (
-                    item,
-                    i64::try_from(position).map_err(storage)?,
-                    name,
-                    secret,
-                ),
-            )
-            .map_err(storage)?;
-        }
-        if let Some((env_name, field, _)) = &record.env {
-            tx.execute(
-                "INSERT INTO env_binding (item_id, env_name, field) VALUES (?1, ?2, ?3)",
-                (item, env_name, field),
-            )
-            .map_err(storage)?;
+/// A copy of schema 17 cannot hold a folder, "Always ask", the sources of a declaration,
+/// or a share. So each of its records keeps the values of the same credential here, and a
+/// credential that is new here gets none. The merge then compares the same values on both
+/// sides: the upgrade makes no conflict, and an old copy never drops "Always ask".
+fn keep_local_v18(remote: &mut BTreeMap<String, Record>, local: &BTreeMap<String, Record>) {
+    for (uuid, record) in remote.iter_mut() {
+        if let Some(ours) = local.get(uuid) {
+            record.folder.clone_from(&ours.folder);
+            record.always_ask = ours.always_ask;
+            record.sources.clone_from(&ours.sources);
+            record.shares.clone_from(&ours.shares);
         }
     }
-    super::passkey::add_schema_v17(&tx)?;
-    let version: i64 = tx
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .map_err(storage)?;
-    if version != SCHEMA_VERSION {
-        return Err(err(VaultErrorKind::Storage));
-    }
-    for (index, record) in legacy.iter_mut().enumerate() {
-        let item = i64::try_from(index).map_err(storage)?;
-        let names: Vec<String> = {
-            let mut stmt = tx
-                .prepare("SELECT name FROM item_field WHERE item_id = ?1 ORDER BY position")
-                .map_err(storage)?;
-            stmt.query_map([item], |row| row.get(0))
-                .map_err(storage)?
-                .collect::<Result<_, _>>()
-                .map_err(storage)?
-        };
-        if names.len() != record.fields.len() || names.iter().any(|name| is_passkey_field(name)) {
-            return Err(err(VaultErrorKind::Storage));
-        }
-        for ((name, ..), new) in record.fields.iter_mut().zip(names) {
-            *name = new;
-        }
-        if let Some((_, field, _)) = record.env.as_mut() {
-            *field = tx
-                .query_row(
-                    "SELECT field FROM env_binding WHERE item_id = ?1",
-                    [item],
-                    |row| row.get(0),
-                )
-                .map_err(storage)?;
-        }
-    }
-    Ok(())
 }
 
 /// Remove the local data from the attached copy `alias`, shrink it, and store the digest
@@ -1012,20 +1060,23 @@ pub struct MergeReport {
     /// Variable names that another credential of this Mac has already. The incoming
     /// credential came without its variable.
     pub skipped_variables: Vec<String>,
+    /// Rows of folders, shared vaults, and vault secrets that took the version of the
+    /// other copy (schema 18).
+    pub folders: usize,
     /// The sync record of the other copy.
     pub remote: SyncIdentity,
     /// The synced-content digest of the other copy, as the copy holds it (before an
     /// upgrade of its schema).
     pub remote_content: [u8; 32],
-    /// The schema version of the other copy: [`SCHEMA_VERSION`], or 16 for a copy of
-    /// an installed app before passkeys.
+    /// The schema version of the other copy: [`SCHEMA_VERSION`], or 17 for a copy of
+    /// an installed app before folders.
     pub remote_schema: i64,
 }
 
 impl MergeReport {
-    /// Whether the merge changed the credentials of this vault.
+    /// Whether the merge changed the credentials or the folders of this vault.
     pub fn changed_local(&self) -> bool {
-        self.inserted + self.updated + self.deleted + self.conflicts.len() > 0
+        self.inserted + self.updated + self.deleted + self.conflicts.len() + self.folders > 0
     }
 
     /// Whether the other copy has an earlier schema than this vault. Then the caller
@@ -1125,8 +1176,38 @@ fn write_children(
         )
         .map_err(storage)?;
     }
+    // A conflict copy stays in the folder of its credential.
+    if let Some(folder) = &record.folder {
+        tx.execute(
+            "INSERT INTO item_folder (item_id, folder_uuid) VALUES (?1, ?2)",
+            (id, folder),
+        )
+        .map_err(storage)?;
+    }
     if !with_settings {
         return Ok(());
+    }
+    if record.always_ask {
+        tx.execute(
+            "INSERT INTO item_policy (item_id, always_ask) VALUES (?1, 1)",
+            [id],
+        )
+        .map_err(storage)?;
+    }
+    if let Some([environment, risk, scope, reversibility]) = &record.sources {
+        tx.execute(
+            "INSERT INTO declaration_source (item_id, environment, risk, scope, reversibility)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            (id, environment, risk, scope, reversibility),
+        )
+        .map_err(storage)?;
+    }
+    for share in &record.shares {
+        tx.execute(
+            "INSERT INTO item_share (item_id, shared_vault_uuid) VALUES (?1, ?2)",
+            (id, share),
+        )
+        .map_err(storage)?;
     }
     if let Some(at) = record.archived_at {
         tx.execute(
@@ -1268,10 +1349,44 @@ fn delete_record(tx: &rusqlite::Transaction<'_>, id: i64) -> VaultResult<()> {
     tx.execute("DELETE FROM item_tag WHERE item_id = ?1", [id])
         .map_err(storage)?;
     agents::delete_item_links(tx, id)?;
+    schema18::forget_item(tx, id)?;
     history::forget_item(tx, id)?;
     tx.execute("DELETE FROM item WHERE id = ?1", [id])
         .map_err(storage)?;
     Ok(())
+}
+
+/// Take the rows of `table` from the other copy where they are later: the greater
+/// `(updated_at, updated_by)` wins. A deleted row keeps its key with `deleted_at` and the
+/// time of the delete, so it wins over an older edit, and a later edit wins over it. A
+/// copy before schema 18 has no such rows. Returns the count of rows taken.
+fn merge_lww(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    key: &str,
+    columns: &[&str],
+    remote_version: i64,
+) -> VaultResult<usize> {
+    if remote_version < SCHEMA_VERSION {
+        return Ok(0);
+    }
+    let all = columns.join(", ");
+    let set = columns
+        .iter()
+        .map(|column| format!("{column} = excluded.{column}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    tx.execute(
+        &format!(
+            "INSERT INTO main.{table} ({key}, {all})
+             SELECT {key}, {all} FROM {REMOTE}.{table} WHERE true
+             ON CONFLICT({key}) DO UPDATE SET {set}
+             WHERE (excluded.updated_at, excluded.updated_by)
+                 > ({table}.updated_at, {table}.updated_by)"
+        ),
+        [],
+    )
+    .map_err(storage)
 }
 
 fn conflict_origin_event_uuid(copy: &str, origin: &str) -> String {
@@ -1573,7 +1688,7 @@ pub(super) fn mark_seen(conn: &mut Connection) -> VaultResult<()> {
 fn merge_attached(conn: &mut Connection, scope: &SyncScope) -> VaultResult<MergeReport> {
     ensure_device(conn)?;
     let (remote_identity, remote_schema) = check_attached(conn, REMOTE)?;
-    let remote_content = sync_content_digest(conn, REMOTE, scope)?;
+    let remote_content = sync_content_digest(conn, REMOTE, scope, remote_schema)?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(storage)?;
@@ -1589,6 +1704,7 @@ fn merge_attached(conn: &mut Connection, scope: &SyncScope) -> VaultResult<Merge
         deleted: 0,
         conflicts: Vec::new(),
         skipped_variables: Vec::new(),
+        folders: 0,
         remote: remote_identity,
         remote_content,
         remote_schema,
@@ -1604,10 +1720,14 @@ fn merge_attached(conn: &mut Connection, scope: &SyncScope) -> VaultResult<Merge
         [],
     )
     .map_err(storage)?;
-    let local = load_records(&tx, "main", scope)?;
-    let mut remote = load_records(&tx, REMOTE, scope)?;
+    let local = load_records(&tx, "main", scope, SCHEMA_VERSION)?;
+    let mut remote = load_records(&tx, REMOTE, scope, remote_schema)?;
     if remote_schema == UPGRADABLE_SCHEMA {
-        upgrade_records(&mut remote)?;
+        keep_local_v18(&mut remote, &local);
+    }
+    // Folders, shared vaults, and vault secrets: the later row wins.
+    for (table, key, columns) in LWW_TABLES {
+        report.folders += merge_lww(&tx, table, key, columns, remote_schema)?;
     }
     let local_tombs = load_tombstones(&tx, "main")?;
     let remote_tombs = load_tombstones(&tx, REMOTE)?;
@@ -1821,13 +1941,13 @@ impl Vault {
     /// tombstones, and the synced history. A change of local data (agents, activity) does
     /// not change it. The vault must be unlocked.
     pub fn sync_content(&self, scope: &SyncScope) -> VaultResult<[u8; 32]> {
-        sync_content_digest(self.conn_ref()?, "main", scope)
+        sync_content_digest(self.conn_ref()?, "main", scope, SCHEMA_VERSION)
     }
 
     /// Check a copy at `path` with the key of this vault and return its sync record. The
     /// copy does not change. A copy that does not open with the key (another vault, or a
     /// passphrase that changed on another Mac) is `WrongKeyOrCorrupt`; a copy that opens
-    /// but fails a check is `Damaged`. A schema 16 copy gets the checks of schema 16; a
+    /// but fails a check is `Damaged`. A schema 17 copy gets the checks of schema 17; a
     /// copy of another earlier or a later schema is `UnsupportedSchema`.
     pub fn check_sync_copy(&self, path: &Path, scope: &SyncScope) -> VaultResult<SyncIdentity> {
         let conn = self.conn_ref()?;
@@ -1840,8 +1960,8 @@ impl Vault {
     /// Merge the copy at `path` into this vault, record by record (ADR 0014). The vault
     /// must be unlocked. The copy is a local file, never a file in a synced folder. It
     /// must pass the checks of [`Vault::check_sync_copy`] and have the vault ID of this
-    /// vault (`OtherVault`). A schema 16 copy merges with the field names of the current
-    /// schema, and the report says so ([`MergeReport::remote_outdated`]).
+    /// vault (`OtherVault`). A schema 17 copy merges with the folders, policies, and
+    /// shares of this vault, and the report says so ([`MergeReport::remote_outdated`]).
     pub fn merge_from(&mut self, path: &Path, scope: &SyncScope) -> VaultResult<MergeReport> {
         self.require_unlocked()?;
         let conn = self.conn_mut()?;
@@ -2187,24 +2307,36 @@ mod tests {
     }
 }
 
-/// Copies of an installed app before passkeys (schema 16). The copies are real sync
-/// copies of the same vault, made old the way that app wrote them.
+/// Copies of an installed app before folders (schema 17). The copies are real sync
+/// copies of the same vault, made old the way that app wrote them: without the tables
+/// and the column of schema 18.
 #[cfg(test)]
-mod schema16_tests {
+mod schema17_tests {
     use std::fs;
     use std::path::Path;
+    use std::time::Duration;
 
     use super::super::{
-        Field, ItemDraft, OPEN_EXISTING, OPEN_READONLY, SecretValue, apply_key, close_conn,
+        DeclarationSource, DeclarationSources, Field, ItemDraft, OPEN_EXISTING, OPEN_READONLY,
+        SecretValue, apply_key, close_conn,
     };
     use super::*;
     use crate::contracts::CredentialKind;
     use crate::sync::{FolderSync, SyncConfig};
 
-    const PASS: &str = "synthetic-schema16-pass";
-    const OTHER: &str = "synthetic-schema16-other";
-    /// The names of the fields now, and the reserved names that they had in schema 16.
-    const RENAMES: [(&str, &str); 2] = [("aaa", "passkey_rp_id"), ("bbb", "passkey_key")];
+    const PASS: &str = "synthetic-schema17-pass";
+    const OTHER: &str = "synthetic-schema17-other";
+
+    /// What a copy of schema 18 has and a copy of schema 17 has not.
+    const DOWNGRADE_SQL: &str = "
+        DROP TABLE folder; DROP TABLE item_folder; DROP TABLE item_policy;
+        DROP TABLE declaration_source; DROP TABLE shared_vault; DROP TABLE item_share;
+        DROP TABLE vault_secret; DROP TABLE agent_exception; DROP TABLE owner_answer;
+        DROP TABLE item_use; DROP TABLE item_origin; DROP TABLE credential_request;
+        DROP TABLE correction; DROP TABLE owner_interaction;
+        ALTER TABLE agent DROP COLUMN note;
+        UPDATE vault_meta SET schema_version = 17 WHERE id = 1;
+        PRAGMA user_version = 17;";
 
     fn field(name: &str, value: &str, secret: bool) -> Field {
         Field {
@@ -2227,22 +2359,14 @@ mod schema16_tests {
         }
     }
 
-    fn custom(secret: &str) -> ItemDraft {
+    fn api_key(title: &str, token: &str) -> ItemDraft {
         ItemDraft {
-            title: "Legacy".to_owned(),
-            kind: CredentialKind::Custom,
+            title: title.to_owned(),
+            kind: CredentialKind::ApiKey,
             notes: String::new(),
             tags: Vec::new(),
-            fields: vec![
-                field("aaa", "SYNTH-plain", false),
-                field("bbb", secret, true),
-            ],
+            fields: vec![field("token", token, true)],
         }
-    }
-
-    /// The name that the schema 17 migration gives a field with the reserved `name`.
-    fn label(name: &str) -> String {
-        format!("x_{}", to_hex(name.as_bytes()))
     }
 
     fn sha(path: &Path) -> [u8; 32] {
@@ -2284,45 +2408,15 @@ mod schema16_tests {
         (header, meta)
     }
 
-    /// Make the closed file at `path` a file of schema 16: the fields of [`RENAMES`] and
-    /// their variable get the reserved names that the owner gave them then, and the
-    /// version is 16. `applying` keeps the versions of the records: this is the old
-    /// state, not an edit. A sync copy (`copy`) gets the digest of the push of that app.
-    fn make_schema16(path: &Path, copy: bool) {
-        let mut sql = String::from(
-            "INSERT OR IGNORE INTO sync_device (id, device_id, device_name)
-                 VALUES (1, 'fixture', '');
-             UPDATE sync_device SET applying = 1;",
-        );
-        for (now, old) in RENAMES {
-            sql.push_str(&format!(
-                "UPDATE item_field SET name = '{old}' WHERE name = '{now}';
-                 UPDATE env_binding SET field = '{old}' WHERE field = '{now}';"
-            ));
-        }
-        sql.push_str(if copy {
-            "DELETE FROM sync_device;"
-        } else {
-            "UPDATE sync_device SET applying = 0;"
-        });
-        sql.push_str(
-            "UPDATE vault_meta SET schema_version = 16 WHERE id = 1;
-             PRAGMA user_version = 16;",
-        );
-        raw(path, &sql, copy);
+    /// Make the closed sync copy at `path` a copy of schema 17 with the digest of a push.
+    fn make_schema17(path: &Path) {
+        raw(path, DOWNGRADE_SQL, true);
     }
 
     fn adopt(seed: &Path, path: &Path) -> Vault {
         let (mut vault, _) = Vault::adopt_sync_copy(seed, path, PASS).unwrap();
         vault.unlock(PASS).unwrap();
         vault
-    }
-
-    /// Lock, make the vault file schema 16, and unlock: the migration of an update.
-    fn update_app(vault: &mut Vault) {
-        vault.lock().unwrap();
-        make_schema16(vault.path(), false);
-        vault.unlock(PASS).unwrap();
     }
 
     fn id_of(vault: &Vault, title: &str) -> u64 {
@@ -2336,28 +2430,7 @@ mod schema16_tests {
         vault.update(id, revision, draft).unwrap();
     }
 
-    /// The fields of the migrated "Legacy" item: names, secret flags, values, variable.
-    fn assert_legacy(vault: &Vault, secret: &str) {
-        let id = id_of(vault, "Legacy");
-        let details = vault.details(id).unwrap();
-        let (rp, key) = (label("passkey_rp_id"), label("passkey_key"));
-        let fields: Vec<(&str, bool)> = details
-            .fields
-            .iter()
-            .map(|field| (field.name.as_str(), field.secret))
-            .collect();
-        assert_eq!(fields, [(rp.as_str(), false), (key.as_str(), true)]);
-        assert_eq!(vault.reveal(id, &rp).unwrap().expose(), "SYNTH-plain");
-        assert_eq!(vault.reveal(id, &key).unwrap().expose(), secret);
-        let binding = vault.env_binding(id).unwrap().unwrap();
-        assert_eq!(
-            (binding.env_name.as_str(), binding.field.as_str()),
-            ("LEGACY_TOKEN", key.as_str())
-        );
-        assert!(vault.all_passkeys().unwrap().is_empty());
-    }
-
-    /// Mac A and Mac B updated to schema 17; an old Mac still pushes schema 16 copies.
+    /// Mac A and Mac B have schema 18; an old Mac still pushes schema 17 copies.
     struct World {
         dir: tempfile::TempDir,
         a: Vault,
@@ -2370,31 +2443,32 @@ mod schema16_tests {
         let mut a = Vault::create(&dir.path().join("a.db"), PASS).unwrap();
         a.unlock(PASS).unwrap();
         a.add(login("SYNTH-password")).unwrap();
-        let legacy = a.add(custom("SYNTH-secret")).unwrap().id;
-        a.set_env_binding(legacy, "LEGACY_TOKEN", "bbb").unwrap();
+        a.add(api_key("Stripe", "SYNTH-stripe")).unwrap();
         let seed = dir.path().join("seed.db");
         a.write_sync_copy(&seed, "Mac A").unwrap();
         let b = adopt(&seed, &dir.path().join("b.db"));
         let old = adopt(&seed, &dir.path().join("old.db"));
-        let mut world = World { dir, a, b, old };
-        update_app(&mut world.a);
-        update_app(&mut world.b);
-        assert_legacy(&world.a, "SYNTH-secret");
-        assert_legacy(&world.b, "SYNTH-secret");
-        world
+        World { dir, a, b, old }
     }
 
-    /// A push of the old Mac: a schema 16 copy with the reserved names.
+    /// A push of the old Mac: a schema 17 copy.
     fn old_push(world: &mut World, name: &str) -> std::path::PathBuf {
         let path = world.dir.path().join(name);
         world.old.write_sync_copy(&path, "Old Mac").unwrap();
-        make_schema16(&path, true);
-        assert_eq!(versions(&path), (16, 16));
+        make_schema17(&path);
+        assert_eq!(versions(&path), (17, 17));
         path
     }
 
+    fn signal_sources() -> DeclarationSources {
+        DeclarationSources {
+            environment: DeclarationSource::Signal,
+            ..DeclarationSources::default()
+        }
+    }
+
     #[test]
-    fn a_schema16_copy_merges_with_the_names_of_the_migration_and_does_not_change() {
+    fn a_schema17_copy_merges_and_keeps_the_folder_and_policy_of_this_vault() {
         let mut w = world();
         let scope = SyncScope::vault();
         // The same content: nothing to take, but the copy is old.
@@ -2407,75 +2481,67 @@ mod schema16_tests {
         assert_eq!(report.remote_schema, UPGRADABLE_SCHEMA);
         assert_eq!(w.a.sync_content(&scope).unwrap(), content);
         assert_eq!(sha(&same), before);
-        assert_eq!(versions(&same), (16, 16));
-        assert_eq!(
-            w.a.check_sync_copy(&same, &scope).unwrap().vault_id,
-            w.a.sync_identity().unwrap().vault_id
-        );
+        assert_eq!(versions(&same), (17, 17));
 
-        // The old Mac changes the legacy secret; Mac A changes the login.
-        let legacy = id_of(&w.old, "Legacy");
-        edit(&mut w.old, legacy, custom("SYNTH-secret-old-mac"));
+        // Mac A puts the login in a folder with "Always ask"; then the old Mac changes the
+        // password and adds a credential. The old Mac never saw the folder: a conflict,
+        // and the later change of the old Mac wins.
+        let work = w.a.create_folder(None, "Work").unwrap();
         let mail = id_of(&w.a, "Mail");
-        edit(&mut w.a, mail, login("SYNTH-password-a"));
+        w.a.set_item_folder(mail, Some(&work.uuid)).unwrap();
+        w.a.set_always_ask(mail, true).unwrap();
+        w.a.set_declaration_sources(mail, &signal_sources())
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let old_mail = id_of(&w.old, "Mail");
+        edit(&mut w.old, old_mail, login("SYNTH-password-old-mac"));
+        w.old.add(api_key("Gamma", "SYNTH-gamma")).unwrap();
         let changed = old_push(&mut w, "changed.db");
         let before = sha(&changed);
         let report = w.a.merge_from(&changed, &scope).unwrap();
-        assert_eq!((report.inserted, report.updated, report.deleted), (0, 1, 0));
-        assert!(report.conflicts.is_empty());
-        assert!(report.skipped_variables.is_empty());
+        assert_eq!((report.inserted, report.updated, report.deleted), (1, 1, 0));
+        assert_eq!(report.conflicts.len(), 1);
+        assert_eq!(report.folders, 0, "a schema 17 copy has no folder rows");
         assert!(report.remote_outdated());
         assert_eq!(sha(&changed), before);
-        assert_eq!(w.a.search("").unwrap().len(), 2);
-        assert_legacy(&w.a, "SYNTH-secret-old-mac");
         let mail = id_of(&w.a, "Mail");
         assert_eq!(
             w.a.reveal(mail, "password").unwrap().expose(),
-            "SYNTH-password-a"
+            "SYNTH-password-old-mac"
         );
+        assert_eq!(w.a.item_folder(mail).unwrap(), Some(work.uuid.clone()));
+        assert!(w.a.always_ask(mail).unwrap(), "an old copy never drops it");
+        assert_eq!(w.a.declaration_sources(mail).unwrap(), signal_sources());
+        let gamma = id_of(&w.a, "Gamma");
+        assert_eq!(w.a.item_folder(gamma).unwrap(), None);
+        assert!(!w.a.always_ask(gamma).unwrap());
+        let (&copy, _) = w.a.conflict_copies().unwrap().first_key_value().unwrap();
+        assert!(w.a.is_archived(copy).unwrap());
+        assert_eq!(w.a.item_folder(copy).unwrap(), Some(work.uuid.clone()));
         // A second merge of the same copy changes nothing.
         let again = w.a.merge_from(&changed, &scope).unwrap();
         assert!(!again.changed_local());
 
-        // Mac A writes the current schema; the other updated Mac takes it.
+        // Mac A writes the current schema; the other updated Mac takes all of it.
         let push = w.dir.path().join("a-push.db");
         w.a.write_sync_copy(&push, "Mac A").unwrap();
         assert_eq!(versions(&push), (SCHEMA_VERSION, SCHEMA_VERSION));
         let report = w.b.merge_from(&push, &scope).unwrap();
-        assert_eq!((report.inserted, report.updated, report.deleted), (0, 2, 0));
-        assert!(report.conflicts.is_empty());
+        assert_eq!(report.folders, 1);
+        assert!(report.changed_local());
         assert!(!report.remote_outdated());
-        assert_legacy(&w.b, "SYNTH-secret-old-mac");
-        assert_eq!(w.b.search("").unwrap().len(), 2);
+        let mail = id_of(&w.b, "Mail");
+        assert_eq!(w.b.item_folder(mail).unwrap(), Some(work.uuid.clone()));
+        assert!(w.b.always_ask(mail).unwrap());
+        assert_eq!(w.b.folder_path(Some(&work.uuid)).unwrap(), ["Work"]);
         assert_eq!(
             w.a.sync_content(&scope).unwrap(),
             w.b.sync_content(&scope).unwrap()
         );
-
-        // Mac B changes the login; the old copy comes again after it.
-        let mail = id_of(&w.b, "Mail");
-        edit(&mut w.b, mail, login("SYNTH-password-b"));
-        let push = w.dir.path().join("b-push.db");
-        w.b.write_sync_copy(&push, "Mac B").unwrap();
-        let report = w.a.merge_from(&push, &scope).unwrap();
-        assert_eq!((report.inserted, report.updated), (0, 1));
-        assert!(report.conflicts.is_empty());
-        let report = w.b.merge_from(&changed, &scope).unwrap();
-        assert!(!report.changed_local());
-        for vault in [&w.a, &w.b] {
-            assert_eq!(vault.search("").unwrap().len(), 2);
-            assert!(vault.conflict_copies().unwrap().is_empty());
-            let mail = id_of(vault, "Mail");
-            assert_eq!(
-                vault.reveal(mail, "password").unwrap().expose(),
-                "SYNTH-password-b"
-            );
-            assert_legacy(vault, "SYNTH-secret-old-mac");
-        }
     }
 
     #[test]
-    fn schema16_copies_keep_every_check_and_other_schemas_fail() {
+    fn schema17_copies_keep_every_check_and_other_schemas_fail() {
         let mut w = world();
         let scope = SyncScope::vault();
         let content = w.a.sync_content(&scope).unwrap();
@@ -2495,13 +2561,13 @@ mod schema16_tests {
         );
         refuse(&mut w.a, &mixed, VaultErrorKind::Damaged);
 
-        // A copy of schema 17 with the header of schema 16.
+        // A copy of schema 18 with the header of schema 17.
         let header = w.dir.path().join("header.db");
         w.old.write_sync_copy(&header, "Old Mac").unwrap();
-        raw(&header, "PRAGMA user_version = 16;", false);
+        raw(&header, "PRAGMA user_version = 17;", false);
         refuse(&mut w.a, &header, VaultErrorKind::UnsupportedSchema);
         // ... and in `vault_meta` too, without a new digest.
-        raw(&header, "UPDATE vault_meta SET schema_version = 16;", false);
+        raw(&header, "UPDATE vault_meta SET schema_version = 17;", false);
         refuse(&mut w.a, &header, VaultErrorKind::Damaged);
 
         // A later and an older schema, each with a valid digest.
@@ -2524,10 +2590,10 @@ mod schema16_tests {
         let other = w.dir.path().join("other.db");
         let mut foreign = Vault::create(&other, PASS).unwrap();
         foreign.unlock(PASS).unwrap();
-        foreign.add(custom("SYNTH-foreign")).unwrap();
+        foreign.add(api_key("Foreign", "SYNTH-foreign")).unwrap();
         let foreign_copy = w.dir.path().join("foreign.db");
         foreign.write_sync_copy(&foreign_copy, "Foreign").unwrap();
-        make_schema16(&foreign_copy, true);
+        make_schema17(&foreign_copy);
         // The key of the vault does not open it (another salt). The passphrase does,
         // and the vault ID refuses it.
         refuse(&mut w.a, &foreign_copy, VaultErrorKind::WrongKeyOrCorrupt);
@@ -2544,19 +2610,18 @@ mod schema16_tests {
         refuse(&mut w.a, &rekeyed, VaultErrorKind::WrongKeyOrCorrupt);
 
         assert_eq!(w.a.sync_content(&scope).unwrap(), content);
-        assert_legacy(&w.a, "SYNTH-secret");
     }
 
-    /// The real folder sync: enable links to a schema 16 file and writes schema 17, also
+    /// The real folder sync: enable links to a schema 17 file and writes schema 18, also
     /// with the same content; a later old push merges once and is replaced once.
     #[test]
-    fn folder_sync_links_a_schema16_file_and_replaces_it_with_the_current_schema() {
+    fn folder_sync_links_a_schema17_file_and_replaces_it_with_the_current_schema() {
         let mut w = world();
         let folder = w.dir.path().join("Dropbox").join("Apassy");
         fs::create_dir_all(&folder).unwrap();
         let file = folder.join("Personal.apassy");
         w.old.write_sync_copy(&file, "Old Mac").unwrap();
-        make_schema16(&file, true);
+        make_schema17(&file);
         let data = w.dir.path().join("a-data");
         fs::create_dir_all(&data).unwrap();
         let sync = FolderSync::new(SyncConfig::in_data_dir(&data, w.a.path(), &folder, "vault"));
@@ -2573,9 +2638,9 @@ mod schema16_tests {
         assert!(again.merge.is_none());
         assert!(!again.pushed);
 
-        // The old Mac pushes a change in schema 16 through the folder.
-        let legacy = id_of(&w.old, "Legacy");
-        edit(&mut w.old, legacy, custom("SYNTH-secret-folder"));
+        // The old Mac pushes a change in schema 17 through the folder.
+        let stripe = id_of(&w.old, "Stripe");
+        edit(&mut w.old, stripe, api_key("Stripe", "SYNTH-stripe-folder"));
         let pushed = old_push(&mut w, "old-folder-push.db");
         fs::rename(&pushed, &file).unwrap();
         let outcome = sync.sync(&mut w.a).unwrap();
@@ -2584,8 +2649,11 @@ mod schema16_tests {
         assert!(merge.conflicts.is_empty());
         assert!(outcome.pushed);
         assert_eq!(versions(&file), (SCHEMA_VERSION, SCHEMA_VERSION));
-        assert_legacy(&w.a, "SYNTH-secret-folder");
-        assert_eq!(w.a.search("").unwrap().len(), 2);
+        let stripe = id_of(&w.a, "Stripe");
+        assert_eq!(
+            w.a.reveal(stripe, "token").unwrap().expose(),
+            "SYNTH-stripe-folder"
+        );
         let again = sync.sync(&mut w.a).unwrap();
         assert!(again.merge.is_none());
         assert!(!again.pushed);
@@ -2596,7 +2664,6 @@ mod schema16_tests {
         let report = w.b.merge_from(&local, &SyncScope::vault()).unwrap();
         assert!(report.conflicts.is_empty());
         assert!(!report.remote_outdated());
-        assert_legacy(&w.b, "SYNTH-secret-folder");
         assert_eq!(
             w.a.sync_content(&SyncScope::vault()).unwrap(),
             w.b.sync_content(&SyncScope::vault()).unwrap()

@@ -105,6 +105,7 @@ fn event_text(event: &ItemEvent) -> (String, Option<String>, Tone) {
             Tone::Warning,
         ),
         ItemEventKind::ReviewConfirmed => ("Agent settings confirmed".to_owned(), None, Tone::Good),
+        ItemEventKind::Moved => ("Moved".to_owned(), detail(), Tone::Neutral),
     }
 }
 
