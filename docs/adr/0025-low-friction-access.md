@@ -47,7 +47,7 @@ The bouncer gets this context at each use:
 - the folder, the project (the repository and the branch),
 - the command and the hosts that the secret goes to,
 - the item: its provider and its declaration, with the source of each value (§4),
-- the history: earlier uses of the item in the project, by which agent, with what result, and the owner's earlier answers.
+- the history: earlier uses of the item in the project, by which agent, with what result, and the owner's earlier answers. History never runs a command by itself: it makes the bouncer decide instead of asking the owner. It counts only for the same agent, and a stricter declaration clears it.
 
 It starts the run without a question when the use fits the context. Examples:
 
@@ -64,7 +64,7 @@ It asks the owner when:
 
 The rules that the model cannot change stay:
 
-- A production declaration waits for the owner at each run (ADR 0010), unless the owner allowed production for the project and the kind of action (§3b). The model and the usage log never make such an allowance.
+- A production declaration waits for the owner at each run (ADR 0010), unless the owner allowed production for the project and the kind of action (§3b). The model and the usage log never make such an allowance. This rule applies to production that a strong signal found (a value prefix such as `sk_live_`, or a name such as `PROD`) or that the owner or the usage log confirmed. Production that is only the careful default (no signal) is *unconfirmed*: the first use in each project and kind of action asks the owner, the question also offers "Development" and "Production", and the answer is remembered as a project answer. A production allowance and a remembered answer for a production item apply only to a command whose kind a rule identifies; an unclear command asks. They also bind the hosts the secret went to; another host asks.
 - A one-time-code setup key is never chosen automatically (the OTP fix in PR #13).
 - A placeholder goes only to its hosts (ADR 0011).
 - Without a running bouncer, each run waits for the owner.
