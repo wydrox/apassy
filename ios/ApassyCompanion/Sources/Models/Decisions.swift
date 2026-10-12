@@ -81,11 +81,12 @@ enum Decisions {
     static func clock(_ seconds: Int) -> String { WaitClock.text(seconds) }
 
     /// Everything that waits for the owner, newest first, in one list: the open questions through
-    /// the relay that have not expired, and the runs of the paired Mac. A run that a question
-    /// already shows (the same run of the same agent) is not shown twice; the question is richer.
-    /// A run whose waiting time the Mac did not say goes last.
+    /// the relay that have not expired, and the runs of the paired Mac, named `pairedMac`. A run
+    /// that a question already shows (the same run of the same agent, asked by that Mac) is not
+    /// shown twice; the question is richer. A run whose waiting time the Mac did not say goes last.
     static func waiting(
-        questions: [RemoteQuestion], runs: [PendingRun], runTimeout: Int, fetchedAt: Date?, now: Date
+        questions: [RemoteQuestion], runs: [PendingRun], runTimeout: Int, fetchedAt: Date?, pairedMac: String?,
+        now: Date
     ) -> [WaitingDecision] {
         let at = Int64(now.timeIntervalSince1970)
         let open = questions.filter { $0.state == .open && $0.expiresAt > at }
@@ -94,7 +95,7 @@ enum Decisions {
                 source: .question(question), createdAt: Date(timeIntervalSince1970: TimeInterval(question.createdAt)),
                 deadline: Date(timeIntervalSince1970: TimeInterval(question.expiresAt)))
         }
-        for run in runs where !open.contains(where: { shows($0, run) }) {
+        for run in runs where !open.contains(where: { shows($0, run, pairedMac: pairedMac) }) {
             var created: Date?
             var deadline: Date?
             if let fetchedAt, let waited = run.waitingSeconds {
@@ -122,11 +123,60 @@ enum Decisions {
         return "Development"
     }
 
+    /// Waiting as Decisions shows it: the questions, and the runs of `session`'s Mac.
+    @MainActor
+    static func waiting(questions: [RemoteQuestion], session: SessionModel?, now: Date) -> [WaitingDecision] {
+        waiting(
+            questions: questions, runs: session?.runs ?? [],
+            runTimeout: session?.approvalTimeout ?? SessionModel.defaultApprovalTimeout,
+            fetchedAt: session?.fetchedAt, pairedMac: session?.macName, now: now)
+    }
+
+    /// The number on the Decisions tab: the rows of Waiting (a run that a question shows counts
+    /// once) and the requests of the Mac.
+    @MainActor
+    static func badge(questions: [RemoteQuestion], session: SessionModel?, now: Date) -> Int {
+        waiting(questions: questions, session: session, now: now).count + (session?.accessRequests.count ?? 0)
+    }
+
     /// Whether `question` is the same run as `run`: the asking Mac sends each waiting run to the
-    /// relay too.
-    private static func shows(_ question: RemoteQuestion, _ run: PendingRun) -> Bool {
-        guard let card = question.card else { return false }
+    /// relay too. The run IDs of two Macs can meet, so the question must come from the paired Mac.
+    /// The iPhone knows that Mac by its name only (the relay device of the card is not part of the
+    /// pairing), and both names are the Mac's computer name; a name that does not match keeps both
+    /// rows, which shows a run twice but never hides one.
+    private static func shows(_ question: RemoteQuestion, _ run: PendingRun, pairedMac: String?) -> Bool {
+        guard let card = question.card, let pairedMac, sameMac(question.askerName, pairedMac) else { return false }
         return card.run.id == run.id && card.run.agent == run.agent && card.run.command == run.command
+    }
+
+    /// Whether two names are of one Mac: the listener writes the computer name without control
+    /// characters and cut to 40 characters, the trusted device trimmed and without control
+    /// characters, so both are compared cut and trimmed.
+    static func sameMac(_ lhs: String, _ rhs: String) -> Bool {
+        let clean = { (name: String) -> String in
+            let scalars = name.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }.prefix(40)
+            return String(String.UnicodeScalarView(scalars)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let left = clean(lhs)
+        return !left.isEmpty && left == clean(rhs)
+    }
+}
+
+/// Drops the taps on an answer bar that come right after a decision appears or changes: a finger
+/// that was on its way to the screen before (a row, a notification, "I have read the new version")
+/// must not answer the new one.
+struct AnswerGuard: Equatable {
+    static let delay: TimeInterval = 0.5
+
+    private(set) var armedAt: Date?
+
+    /// The decision appeared or changed at `now`.
+    mutating func arm(now: Date) { armedAt = now }
+
+    /// Whether a tap at `now` counts.
+    func accepts(now: Date) -> Bool {
+        guard let armedAt else { return true }
+        return now.timeIntervalSince(armedAt) >= Self.delay
     }
 }
 

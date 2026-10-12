@@ -8,7 +8,8 @@ import SwiftUI
 /// The view keeps the run as the owner opened it and sends that run's digest. When the inbox
 /// later shows another digest for the same run, the view shows the new run and Allow stays off
 /// until the owner confirms that they read it (`RunSnapshot`), so the owner never approves
-/// something that the screen did not show.
+/// something that the screen did not show. The confirmation is in the notice above the run, not in
+/// the bar: a second tap on it must never land on Allow and Remember.
 struct RunDetailView: View {
     /// A sheet of the companion's Inbox, or a screen pushed in Decisions.
     enum Presentation {
@@ -23,6 +24,7 @@ struct RunDetailView: View {
     @State private var approvals = 0
     @State private var denials = 0
     @State private var failures = 0
+    @State private var tapGuard = AnswerGuard()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -129,6 +131,8 @@ struct RunDetailView: View {
             }
             .contentMargins(.bottom, 24, for: .scrollContent)
             .scrollEdgeEffectStyle(.soft, for: .bottom)
+            // A tap meant for the list must not answer this run.
+            .onAppear { tapGuard.arm(now: Date()) }
             // The digest of the run on the Mac decides. The time left changes each poll and is
             // not part of it. `initial: true` also checks the first appearance: a poll can land
             // between the last inbox render (the run that the row passed in) and the view's
@@ -138,6 +142,7 @@ struct RunDetailView: View {
             // announcement run for a real change and not for an unchanged first appearance.
             .onChange(of: live?.digest, initial: true) {
                 if snapshot.observe(live) {
+                    tapGuard.arm(now: Date())
                     withAnimation(reduceMotion ? nil : .snappy) { proxy.scrollTo(Self.topID, anchor: .top) }
                     AccessibilityNotification.Announcement(Self.changedNotice).post()
                 }
@@ -162,9 +167,21 @@ struct RunDetailView: View {
                     text:
                         "The Mac changed this run. The new version is shown below. Read it again, then confirm, before you allow it."
                 )
+                if snapshot.needsReview && availability == .current && !isBusy {
+                    Button {
+                        withAnimation(reduceMotion ? nil : .snappy) { snapshot.confirmReading() }
+                        tapGuard.arm(now: Date())
+                    } label: {
+                        Label("I have read the new version", systemImage: "checkmark")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .decisionButton(.secondary)
+                    .padding(.top, 8)
+                }
             }
             .listRowBackground(Color.clear)
             .listRowInsets(EdgeInsets())
+            .listRowSeparator(.hidden)
         }
     }
 
@@ -260,15 +277,7 @@ struct RunDetailView: View {
 
     @ViewBuilder
     private var buttons: some View {
-        if snapshot.needsReview && availability == .current && !isBusy {
-            Button {
-                withAnimation(reduceMotion ? nil : .snappy) { snapshot.confirmReading() }
-            } label: {
-                Label("I have read the new version", systemImage: "checkmark")
-                    .frame(maxWidth: .infinity)
-            }
-            .decisionButton(.primary)
-        } else if shown.remember != nil {
+        if shown.remember != nil {
             Button {
                 perform(.approveAndRemember)
             } label: {
@@ -315,7 +324,7 @@ struct RunDetailView: View {
     }
 
     private func perform(_ action: Action) {
-        guard action == .deny ? canDeny : canApprove else { return }
+        guard action == .deny ? canDeny : canApprove, tapGuard.accepts(now: Date()) else { return }
         let run = shown
         phase = .working(action)
         Task {

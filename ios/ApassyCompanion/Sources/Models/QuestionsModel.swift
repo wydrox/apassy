@@ -55,17 +55,16 @@ struct AnswerBar: Equatable {
     struct Choice: Equatable, Identifiable {
         let answer: RemoteAnswer
         let label: String
+        /// Red: Disconnect in the menu, and the production answer in the bar.
         var destructive = false
-        /// The answer in the Face ID prompt, when it says more than the button.
-        var prompt: String?
 
         var id: String { "\(answer.kind.rawValue)-\(answer.itemID ?? "")-\(answer.environment?.rawValue ?? "")" }
     }
 
     var deny: Choice
     var allowOnce: Choice?
-    /// "Allow Deploy in shop" (for production too, as in the mockup; the Face ID prompt says
-    /// "Allow production: Deploy in shop"), or "Development".
+    /// "Allow Deploy in shop", "Allow production: Deploy in shop" (red, as on the Mac, so it never
+    /// looks like the project answer), or "Development".
     var primary: Choice?
     var menu: [Choice]
 
@@ -87,8 +86,8 @@ struct AnswerBar: Equatable {
         var primary: Choice?
         if let project, offered.contains("production:\(action.rawValue)") {
             primary = Choice(
-                answer: RemoteAnswer(kind: .allowProduction), label: "Allow \(action.label) in \(project)",
-                prompt: "Allow production: \(action.label) in \(project)")
+                answer: RemoteAnswer(kind: .allowProduction),
+                label: "Allow production: \(action.label) in \(project)", destructive: true)
         } else if let project, offered.contains("in_project:\(action.rawValue)") {
             primary = Choice(answer: RemoteAnswer(kind: .approveInProject), label: "Allow \(action.label) in \(project)")
         }
@@ -128,7 +127,8 @@ struct AnswerBar: Equatable {
     static func note(_ primary: Choice?, _ card: QuestionCard) -> String? {
         guard let primary, let project = card.question.project?.label else { return nil }
         switch primary.answer.kind {
-        case .approveInProject, .allowProduction: return "Remembered for all agents in \(project)"
+        case .approveInProject: return "Remembered for all agents in \(project)"
+        case .allowProduction: return "Remembered for all agents in \(project), production included"
         case .correctEnvironment: return "Remembered for this credential"
         default: return nil
         }
@@ -325,7 +325,7 @@ final class QuestionsModel {
             if prepared.needsFaceID {
                 signature = try await signer.sign(
                     Data(prepared.answerString.utf8),
-                    reason: Self.faceIDReason(agent: card.run.agent, answer: choice.prompt ?? choice.label))
+                    reason: Self.faceIDReason(agent: card.run.agent, answer: choice.label))
             }
             let sent = try await post(question.qid, choice.answer, prepared, signature)
             deliveries[question.qid] = .sent(sent.kind)
@@ -425,10 +425,15 @@ final class QuestionsModel {
         focusRequests += 1
     }
 
-    /// The question to open after a notification, once: the newest that waits, or nil.
-    func takeFocus() -> String? {
+    /// The question to open after a notification, once, or nil: the newest that waits after the
+    /// list is read again, so the question the notification announced opens even when the list
+    /// was old. `stillFree` is asked after the refresh: false when the owner opened something
+    /// meanwhile, and then nothing opens, so a question never changes under the owner's finger.
+    func takeFocus(stillFree: () -> Bool) async -> String? {
         guard focusPending else { return nil }
         focusPending = false
+        await refresh()
+        guard stillFree() else { return nil }
         return waiting.max { $0.createdAt < $1.createdAt }?.qid
     }
 

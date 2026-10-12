@@ -4,12 +4,13 @@ import SwiftUI
 
 /// A question through the relay as the mockup's "Decision" (screen 6): the question in one
 /// sentence, its facts, the command, why the owner is asked, and the fixed glass bar: Allow ACTION
-/// in PROJECT, Deny, Allow Once. "⋯" holds the agent exceptions and the environment of a
-/// credential. Allowing asks for Face ID; the stricter answers do not. Once the question ended
+/// in PROJECT (in red as "Allow production: ACTION in PROJECT"), Deny, Allow Once. "⋯" holds the
+/// agent exceptions and the environment of a credential. Allowing asks for Face ID; the stricter answers do not. Once the question ended
 /// (expired, answered on another device, or sent from here) the outcome takes the place of the bar.
 struct QuestionDetailView: View {
     let model: QuestionsModel
     let qid: String
+    @State private var tapGuard = AnswerGuard()
 
     private var question: RemoteQuestion? { model.questions.first { $0.qid == qid } }
 
@@ -67,6 +68,8 @@ struct QuestionDetailView: View {
             }
         }
         .contentMargins(.bottom, 24, for: .scrollContent)
+        // A tap meant for the list or a notification must not answer this question.
+        .onAppear { tapGuard.arm(now: Date()) }
         .toolbar {
             if outcome == nil, !bar.menu.isEmpty {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -139,7 +142,7 @@ struct QuestionDetailView: View {
                 Button { answer(primary, question) } label: {
                     Text(primary.label).lineLimit(1).frame(maxWidth: .infinity)
                 }
-                .decisionButton(.primary)
+                .decisionButton(primary.destructive ? .production : .primary)
             }
             HStack(spacing: 8) {
                 Button(role: .destructive) { answer(bar.deny, question) } label: {
@@ -163,6 +166,7 @@ struct QuestionDetailView: View {
     }
 
     private func answer(_ choice: AnswerBar.Choice, _ question: RemoteQuestion) {
+        guard tapGuard.accepts(now: Date()) else { return }
         Task { await model.send(choice, for: question) }
     }
 }
