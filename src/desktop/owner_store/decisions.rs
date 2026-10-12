@@ -29,7 +29,7 @@ use crate::vault::agent_items::{
 use crate::vault::detect::Detected;
 use crate::vault::exceptions::{AgentException, ExceptionKind, MAX_AGENT_NOTE_BYTES};
 use crate::vault::usage::{InteractionKind, ItemUse};
-use crate::vault::{Environment, ItemSummary, VaultErrorKind};
+use crate::vault::{Environment, ItemSummary, Vault, VaultErrorKind};
 
 const DAY: u64 = 86_400;
 const WEEK: u64 = 7 * DAY;
@@ -281,8 +281,6 @@ impl OwnerSession {
         detected: &Detected,
         folder: Option<&str>,
     ) -> ModelResult<ItemSummary> {
-        // TODO(gate2/tools): switch to `Vault::save_for_request`, which adds and settles
-        // in one transaction. Until then both steps run under one vault lock.
         let mut vault = self.unlocked()?;
         let request = vault.credential_request(request_id).map_err(map_err)?;
         if request.state != CredentialRequestState::Open {
@@ -291,19 +289,28 @@ impl OwnerSession {
                 "The request no longer waits. Nothing was saved.",
             ));
         }
-        let added = match vault.add_detected(detected, folder, Some(&request.origin())) {
-            Err(err) if err.kind() == VaultErrorKind::NotFound => {
-                return Err(fail(
-                    "not_found",
-                    "The folder is gone. Select another folder.",
-                ));
-            }
+        let folder_gone = || fail("not_found", "The folder is gone. Select another folder.");
+        if folder.is_none() && request.folder.is_some() {
+            // The owner chose the top level, but `save_for_request` takes `None` for the
+            // folder of the request: add and settle in two steps under this vault lock.
+            let added = vault
+                .add_detected(detected, None, Some(&request.origin()))
+                .map_err(map_err)?;
+            vault
+                .settle_credential_request(request_id, RequestOutcome::Saved { item_id: added.id })
+                .map_err(map_err)?;
+            return Ok(added);
+        }
+        // Adds and settles in one transaction. The request exists, so `NotFound` is the folder.
+        let added = match vault.save_for_request(request_id, std::slice::from_ref(detected), folder)
+        {
+            Err(err) if err.kind() == VaultErrorKind::NotFound => return Err(folder_gone()),
             other => other.map_err(map_err)?,
         };
-        vault
-            .settle_credential_request(request_id, RequestOutcome::Saved { item_id: added.id })
-            .map_err(map_err)?;
-        Ok(added)
+        added
+            .into_iter()
+            .next()
+            .ok_or_else(|| fail("storage", "Nothing was saved."))
     }
 
     /// "Not Now": dismiss an open credential request. The agent gets no credential, so
@@ -347,9 +354,6 @@ impl OwnerSession {
     /// The environment that `answer` to `correction` gives its credential, if it sets
     /// one: the proposed environment when accepted, and the environment before a raise
     /// ([`RAISED_FROM_FACT`]) when ignored.
-    ///
-    /// TODO(gate2/tools): switch the owner-check rule to the vault helper
-    /// `needs_owner_check_for_correction` when it lands; this is the same matrix.
     pub fn suggestion_environment(
         correction: &Correction,
         answer: CorrectionAnswer,
@@ -365,6 +369,20 @@ impl OwnerSession {
                 .and_then(serde_json::Value::as_str)
                 .and_then(|text| Environment::parse(text).ok()),
         }
+    }
+
+    /// Whether an answer to correction `correction_id` passes the owner check first.
+    /// `chosen`: the owner chose this environment instead of the proposal; it is checked
+    /// when it is not production. Otherwise the vault decides
+    /// (`Vault::needs_owner_check_for_correction`). With no vault: `true`.
+    pub fn answer_needs_check(
+        &self,
+        correction_id: u64,
+        answer: CorrectionAnswer,
+        chosen: Option<Environment>,
+    ) -> bool {
+        self.with_vault(|vault| answer_needs_check(vault, correction_id, answer, chosen))
+            .unwrap_or(true)
     }
 
     /// Answer an open correction of `item_id`. `chosen`: the owner chose this
@@ -402,7 +420,7 @@ impl OwnerSession {
                 )
             })?;
         let result = chosen.or_else(|| Self::suggestion_environment(&correction, answer));
-        if !checked && result.is_some_and(|environment| environment != Environment::Production) {
+        if !checked && answer_needs_check(&vault, correction_id, answer, chosen) {
             return Err(fail(
                 "owner_check_required",
                 "This answer makes the bouncer less careful. It needs Touch ID or the passphrase.",
@@ -417,6 +435,19 @@ impl OwnerSession {
                 .map_err(map_err)?;
         }
         Ok(result)
+    }
+}
+
+/// The owner-check rule of [`OwnerSession::answer_needs_check`] for a vault in hand.
+fn answer_needs_check(
+    vault: &Vault,
+    correction_id: u64,
+    answer: CorrectionAnswer,
+    chosen: Option<Environment>,
+) -> bool {
+    match chosen {
+        Some(environment) => environment != Environment::Production,
+        None => vault.needs_owner_check_for_correction(correction_id, answer),
     }
 }
 
