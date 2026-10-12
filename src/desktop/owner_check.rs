@@ -1730,40 +1730,9 @@ impl DesktopApp {
         }
     }
 
-    /// The declaration of an item with `environment` as the answer of the owner. The
-    /// other values stay. The vault needs a project, and a pasted credential has none
-    /// (ADR 0025 §4): the project of the item, its folder, or its name stands in.
-    pub(crate) fn environment_form(
-        &self,
-        item_id: u64,
-        environment: crate::vault::Environment,
-    ) -> Result<DeclarationForm, String> {
-        let session = &self.owner_ui.session;
-        let mut form = session
-            .declaration_form(item_id)
-            .map_err(|err| err.message)?;
-        if form.project.trim().is_empty() {
-            let details = session.details(item_id).map_err(|err| err.message)?;
-            let folder = session
-                .with_vault(|vault| -> Result<Vec<String>, crate::vault::VaultError> {
-                    let folder = vault.item_folder(item_id)?;
-                    vault.folder_path(folder.as_deref())
-                })
-                .and_then(Result::ok)
-                .and_then(|path| path.last().cloned());
-            form.project = [Some(details.project), folder, Some(details.name)]
-                .into_iter()
-                .flatten()
-                .map(|text| text.trim().to_owned())
-                .find(|text| !text.is_empty())
-                .unwrap_or_else(|| "Personal".to_owned());
-        }
-        form.environment = environment;
-        Ok(form)
-    }
-
-    /// Mark the environment of an item as the answer of the owner: the declaration, and
-    /// its source "owner" (ADR 0025 §4). The other sources stay.
+    /// Mark the environment of an item as the answer of the owner: only the environment
+    /// and its source "owner" change (ADR 0025 §4). The project of a pasted credential
+    /// stays empty, and the other values and sources stay.
     fn complete_set_environment(
         &mut self,
         item_id: u64,
@@ -1771,32 +1740,30 @@ impl DesktopApp {
         environment: crate::vault::Environment,
         proof: OwnerProof,
     ) {
-        let form = match self.environment_form(item_id, environment) {
-            Ok(form) => form,
-            Err(message) => {
-                drop(proof);
-                return self.set_err(message);
-            }
-        };
-        let session = &mut self.owner_ui.session;
-        if let Err(err) = session.set_declaration(item_id, &form, proof) {
-            return self.set_err(err.message);
-        }
-        let marked = session.with_vault(|vault| {
-            let mut sources = vault.declaration_sources(item_id)?;
-            sources.environment = crate::vault::DeclarationSource::Owner;
-            vault.set_declaration_sources(item_id, &sources)
+        let action = OwnerAction::ChangeItemRules { item_id };
+        let result = self.owner_ui.session.with_vault(|vault| {
+            proof
+                .check(&action, &vault.epoch())
+                .map_err(|refusal| refusal.message().to_owned())?;
+            vault
+                .set_declaration_environment(item_id, environment)
+                .map_err(|err| format!("The environment did not change: {err}."))
         });
-        match marked {
+        match result {
             Some(Ok(())) => {
-                self.owner_ui.declaration_form = form;
-                self.owner_ui.declaration_form.stored = true;
+                self.reload_declaration_form(item_id);
                 self.set_ok(format!("{name} is marked as {}.", environment.as_str()));
             }
-            Some(Err(err)) => self.set_err(format!(
-                "The environment is saved, but not its source: {err}."
-            )),
+            Some(Err(message)) => self.set_err(message),
             None => self.set_err("The vault is locked."),
+        }
+    }
+
+    /// Show the stored declaration of an item in the declaration form.
+    pub(crate) fn reload_declaration_form(&mut self, item_id: u64) {
+        if let Ok(mut form) = self.owner_ui.session.declaration_form(item_id) {
+            form.stored = true;
+            self.owner_ui.declaration_form = form;
         }
     }
 

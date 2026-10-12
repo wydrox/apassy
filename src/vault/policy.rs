@@ -184,6 +184,151 @@ impl Vault {
         .map_err(|_| err(VaultErrorKind::Storage))?;
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))
     }
+
+    /// Set only the environment of the declaration, as the answer of the owner: its
+    /// source becomes [`DeclarationSource::Owner`]. The project (it may be empty on
+    /// purpose), the other values, their sources, and the provider stay. Without a
+    /// declaration the credential gets one with the conservative defaults and this
+    /// environment; the other values then count as defaults. A declaration event goes
+    /// to the history. The same environment from the owner changes nothing.
+    /// `NotFound`: no such credential.
+    pub fn set_declaration_environment(
+        &mut self,
+        item_id: u64,
+        environment: agents::Environment,
+    ) -> VaultResult<()> {
+        let item = to_sql_id(item_id)?;
+        let conn = self.conn_mut()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        agents::require_item(&tx, item)?;
+        fn storage<E>(_: E) -> super::types::VaultError {
+            err(VaultErrorKind::Storage)
+        }
+        let stored: Option<(String, String, String, String, String, String)> = tx
+            .query_row(
+                "SELECT project, environment, risk, scope, reversibility, provider
+                 FROM declaration WHERE item_id = ?1",
+                [item],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(storage)?;
+        let has_row = stored.is_some();
+        let same_environment = stored
+            .as_ref()
+            .is_some_and(|row| row.1 == environment.as_str());
+        let (declaration, provider) = match stored {
+            Some((project, _, risk, scope, reversibility, provider)) => (
+                agents::Declaration {
+                    project,
+                    environment,
+                    risk: agents::RiskLevel::parse(&risk).map_err(storage)?,
+                    scope: agents::Scope::parse(&scope).map_err(storage)?,
+                    reversibility: agents::Reversibility::parse(&reversibility).map_err(storage)?,
+                },
+                provider,
+            ),
+            None => (
+                agents::Declaration {
+                    project: String::new(),
+                    environment,
+                    risk: super::providers::DEFAULT_RISK,
+                    scope: super::providers::DEFAULT_SCOPE,
+                    reversibility: super::providers::DEFAULT_REVERSIBILITY,
+                },
+                String::new(),
+            ),
+        };
+        let mut sources = if has_row {
+            let current = tx
+                .query_row(
+                    "SELECT environment, risk, scope, reversibility FROM declaration_source
+                     WHERE item_id = ?1",
+                    [item],
+                    |row| Ok([row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?]),
+                )
+                .optional()
+                .map_err(storage)?;
+            match current {
+                Some::<[String; 4]>(values) => {
+                    let parse = |text: &str| {
+                        DeclarationSource::parse(text).ok_or_else(|| err(VaultErrorKind::Storage))
+                    };
+                    DeclarationSources {
+                        environment: parse(&values[0])?,
+                        risk: parse(&values[1])?,
+                        scope: parse(&values[2])?,
+                        reversibility: parse(&values[3])?,
+                    }
+                }
+                None => DeclarationSources::default(),
+            }
+        } else {
+            DeclarationSources {
+                environment: DeclarationSource::Owner,
+                risk: DeclarationSource::Default,
+                scope: DeclarationSource::Default,
+                reversibility: DeclarationSource::Default,
+            }
+        };
+        if has_row && same_environment && sources.environment == DeclarationSource::Owner {
+            return Ok(());
+        }
+        sources.environment = DeclarationSource::Owner;
+        tx.execute(
+            "INSERT INTO declaration
+                 (item_id, project, environment, risk, scope, reversibility, provider)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(item_id) DO UPDATE SET environment = excluded.environment",
+            (
+                item,
+                declaration.project.as_str(),
+                declaration.environment.as_str(),
+                declaration.risk.as_str(),
+                declaration.scope.as_str(),
+                declaration.reversibility.as_str(),
+                provider.as_str(),
+            ),
+        )
+        .map_err(storage)?;
+        if sources == DeclarationSources::default() {
+            tx.execute("DELETE FROM declaration_source WHERE item_id = ?1", [item])
+        } else {
+            tx.execute(
+                "INSERT INTO declaration_source (item_id, environment, risk, scope, reversibility)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(item_id) DO UPDATE SET environment = excluded.environment,
+                     risk = excluded.risk, scope = excluded.scope,
+                     reversibility = excluded.reversibility",
+                (
+                    item,
+                    sources.environment.as_str(),
+                    sources.risk.as_str(),
+                    sources.scope.as_str(),
+                    sources.reversibility.as_str(),
+                ),
+            )
+        }
+        .map_err(storage)?;
+        super::history::record(
+            &tx,
+            item,
+            super::history::ItemEventKind::Declaration,
+            &declaration.history_detail(Some(provider.as_str())),
+        )?;
+        tx.commit().map_err(storage)
+    }
 }
 
 #[cfg(test)]
@@ -278,6 +423,79 @@ mod tests {
         assert_eq!(DeclarationSource::parse("other"), None);
         assert_eq!(
             vault.declaration_sources(999).unwrap_err().kind(),
+            VaultErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn set_declaration_environment_changes_only_the_environment() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut vault, id) = vault_with_item(&dir);
+        // No declaration: a new one with the careful defaults and an empty project.
+        vault
+            .set_declaration_environment(id, agents::Environment::Development)
+            .unwrap();
+        let created = vault.declaration(id).unwrap().expect("declaration");
+        assert_eq!(created.environment, agents::Environment::Development);
+        assert!(created.project.is_empty());
+        assert_eq!(created.risk, super::super::providers::DEFAULT_RISK);
+        let sources = vault.declaration_sources(id).unwrap();
+        assert_eq!(sources.environment, DeclarationSource::Owner);
+        assert_eq!(sources.risk, DeclarationSource::Default);
+
+        // A declaration with a project, other values, and a source: only the
+        // environment and its source change.
+        let declaration = agents::Declaration {
+            project: "web".to_owned(),
+            environment: agents::Environment::Production,
+            risk: agents::RiskLevel::Low,
+            scope: agents::Scope::ReadOnly,
+            reversibility: agents::Reversibility::Reversible,
+        };
+        vault
+            .save_declaration(id, &declaration, Some("stripe"), None)
+            .unwrap();
+        let signal = DeclarationSources {
+            environment: DeclarationSource::Signal,
+            risk: DeclarationSource::Usage,
+            scope: DeclarationSource::Default,
+            reversibility: DeclarationSource::Signal,
+        };
+        vault.set_declaration_sources(id, &signal).unwrap();
+        vault
+            .set_declaration_environment(id, agents::Environment::Staging)
+            .unwrap();
+        let after = vault.declaration(id).unwrap().expect("declaration");
+        assert_eq!(
+            after,
+            agents::Declaration {
+                environment: agents::Environment::Staging,
+                ..declaration
+            }
+        );
+        assert_eq!(
+            vault.declaration_provider(id).unwrap().as_deref(),
+            Some("stripe")
+        );
+        assert_eq!(
+            vault.declaration_sources(id).unwrap(),
+            DeclarationSources {
+                environment: DeclarationSource::Owner,
+                ..signal
+            }
+        );
+        // The same answer changes nothing.
+        let scope = SyncScope::vault();
+        let content = vault.sync_content(&scope).unwrap();
+        vault
+            .set_declaration_environment(id, agents::Environment::Staging)
+            .unwrap();
+        assert_eq!(vault.sync_content(&scope).unwrap(), content);
+        assert_eq!(
+            vault
+                .set_declaration_environment(999, agents::Environment::Staging)
+                .unwrap_err()
+                .kind(),
             VaultErrorKind::NotFound
         );
     }

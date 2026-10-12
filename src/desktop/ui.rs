@@ -1260,12 +1260,11 @@ mod tests {
 
         app.place = Place::CREDENTIALS;
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
-        assert!(text.contains("Review after restore"), "{text}");
         assert!(text.contains("Restored key"), "{text}");
-        assert!(text.contains("Needs review"), "{text}");
 
         app.select_item(item.id.to_string());
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+        assert!(text.contains("Review after restore"), "{text}");
         assert!(text.contains("Confirm settings"), "{text}");
         assert!(text.contains("production, high risk"), "{text}");
         assert_masked(&text);

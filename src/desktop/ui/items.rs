@@ -1802,21 +1802,13 @@ pub(super) fn set_environment(
         );
         return;
     }
-    let form = match app.environment_form(id, environment) {
-        Ok(form) => form,
-        Err(message) => return app.set_err(message),
-    };
-    let result = app.owner_ui.session.with_vault(|vault| {
-        let provider = vault.declaration_provider(id)?;
-        vault.save_declaration(id, &form.to_declaration(), provider.as_deref(), None)?;
-        let mut sources = vault.declaration_sources(id)?;
-        sources.environment = DeclarationSource::Owner;
-        vault.set_declaration_sources(id, &sources)
-    });
+    let result = app
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.set_declaration_environment(id, environment));
     match result {
         Some(Ok(())) => {
-            app.owner_ui.declaration_form = form;
-            app.owner_ui.declaration_form.stored = true;
+            app.reload_declaration_form(id);
             app.set_ok(format!(
                 "{} is marked as production. Each run with it waits for you.",
                 details.name

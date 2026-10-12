@@ -1654,6 +1654,66 @@ fn the_development_key_question_and_its_answers() {
     assert!(!text.contains("Is this a development key?"), "{text}");
 }
 
+/// A pasted credential has an empty project on purpose (ADR 0025 §4). Changing the
+/// environment on the detail page changes only the environment and its source: the
+/// project stays empty, and the folder name or title never stands in for it.
+#[test]
+fn changing_the_environment_keeps_the_pasted_project_empty() {
+    use crate::desktop::owner_check::OwnerRequest;
+    use crate::vault::{DeclarationSource, Environment};
+
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = app_in(&dir);
+    create(&mut app, "Personal", PASS_A);
+    let first = paste(&mut app, &fake_key("sk-ant-api03-", 42));
+    let second = paste(&mut app, &fake_key("sk-ant-api03-", 43));
+    let read = |app: &DesktopApp, id: u64| {
+        let declaration = app
+            .owner_ui
+            .session
+            .declaration(id)
+            .expect("read")
+            .expect("declaration");
+        let sources = app
+            .owner_ui
+            .session
+            .with_vault(|vault| vault.declaration_sources(id))
+            .expect("open")
+            .expect("sources");
+        (declaration, sources.environment)
+    };
+    let (before, _) = read(&app, first);
+    assert!(before.project.is_empty(), "a pasted item has no project");
+
+    app.select_item(first.to_string());
+    frames(&mut app);
+    click_text(&mut app, "Development");
+    assert!(matches!(
+        app.owner.check.as_ref().map(|check| &check.request),
+        Some(OwnerRequest::SetEnvironment { .. })
+    ));
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS_A))
+        .expect("owner check");
+    let (after, source) = read(&app, first);
+    assert_eq!(after.environment, Environment::Development);
+    assert_eq!(source, DeclarationSource::Owner);
+    assert!(after.project.is_empty(), "the project stays empty");
+    assert_eq!(
+        (after.risk, after.scope, after.reversibility),
+        (before.risk, before.scope, before.reversibility)
+    );
+
+    // Production needs no check and keeps the project empty as well.
+    app.select_item(second.to_string());
+    frames(&mut app);
+    click_text(&mut app, "Production");
+    assert!(app.owner.check.is_none());
+    let (after, source) = read(&app, second);
+    assert_eq!(after.environment, Environment::Production);
+    assert_eq!(source, DeclarationSource::Owner);
+    assert!(after.project.is_empty(), "the project stays empty");
+}
+
 /// Every variant of the credential page draws at the default and the minimum window
 /// size, with the sidebar full and collapsed: a plain key, a pasted key with the
 /// question, a production key, a login, a one-time password, an archived credential, a
