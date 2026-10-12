@@ -223,23 +223,31 @@ An agent stores a new credential without seeing it. The full rules are in sectio
 
 | Tool | What it does |
 | --- | --- |
-| `apassy_capture_credential` | Runs one program in `cwd` (no shell, no secret, no host or URL in the arguments), for example `["gh", "auth", "token"]`, or reads one file, and stores the trimmed output. |
+| `apassy_capture_credential` | Runs a command in `cwd` (no secret in its environment) or reads one file, and stores the trimmed output, or the part that `extract` names (`{"json": "a.b"}`, `{"line": 2}`, `{"after": "Token:"}`). A known token command runs at once; any other command, and a file outside the project, asks you first. |
 | `apassy_generate_credential` | Apassy makes a random value: `length` 16 to 128 (default 32), `alphabet` `alnum`, `hex`, `base64url`, or `symbols`. |
-| `apassy_save_credential` | Stores a value that the agent has. The value is already in its transcript; capture is better. |
-| `apassy_ask_owner_for_credential` | Asks you to paste a credential: name, purpose, where to get it. The call waits up to 5 minutes, then `waiting`; the same call again waits again. |
-| `apassy_update_credential` | A new value (capture or generation) for a credential that this agent made. |
-| `apassy_describe_credential` | A new name, notes, variable, or narrower hosts for a credential that this agent made. |
+| `apassy_save_credential` | Stores a value that the agent has. The value is already in its transcript; capture and generate are better, and the tool says so. |
+| `apassy_ask_owner_for_credential` | Asks you to paste a credential: name, purpose, where to get it. The call waits up to 5 minutes, then `waiting`; the same name again in the same project waits again. |
+| `apassy_update_credential` | A new value (capture or generation) for a credential that this agent made. The previous value stays for you to restore. |
+| `apassy_describe_credential` | A new name, notes, variable, or narrower placeholder hosts for a credential that this agent made. |
+
+Known token commands (they run without a question; exact shapes and options in section 4c of the [broker contract](../contracts/broker-v0.md)): `gh auth token`, `op read op://…`, `aws configure get NAME`, `aws sts get-session-token`, `aws ecr get-login-password`, `gcloud auth print-access-token`, `gcloud auth print-identity-token`, `gcloud auth application-default print-access-token`, `az account get-access-token`, `fly auth token` / `flyctl auth token`, `heroku auth:token`, `doppler secrets get NAME --plain`, `vault kv get -field=FIELD PATH`, `vault print token`. The program comes only from `/usr/bin`, `/bin`, `/usr/sbin`, `/opt/homebrew/bin`, or `/usr/local/bin`: the `PATH` and the folder of the agent do not change it.
+
+A capture question ("Tool agent wants to capture the output of: /opt/homebrew/bin/npx some-cli token in shop", or "… the file: /Users/me/.config/x/token in shop") shows the program as the agent's `PATH` finds it. Answer "Allow once" or "Deny"; nothing is remembered, so the same command asks again next time. It waits up to 300 seconds like a run question, and the same request again joins it.
 
 What to expect:
 
-- The agent gets `item_id`, `name`, `env_name`, and a one-line summary such as `GitHub token · GH_TOKEN · production`. Never the value: not in the answer, the activity, the history, or an error.
+- The agent gets `item_id`, `name`, `env_name`, and a one-line summary such as `GitHub token · GH_TOKEN · production`. Never the value: not in the answer, a question, the activity, the history, or an error.
 - The paste detection (ADR 0025 §4) finds the provider, the variable, the hosts, and the declaration. A value without a signal is production by default, so its first use in a project asks you.
-- The item history says `Added by AGENT in PROJECT (capture).` The bouncer decides each use of the item as for any other item.
+- The item history and Activity say `Added by AGENT in PROJECT (capture).` The bouncer decides each use of the item as for any other item.
 - An agent changes only the credentials that it made with capture, generate, or save. Any other credential gives `not_owner`.
+- A new value keeps the old one on the item for you (`Vault::restore_previous_value`; the item page will offer it). It goes after the next allowed use of the item, or after 7 days. The declaration becomes the stricter of the old one and the one that the new value shows, with the weaker sources.
+- A variable name of an agent's credential cannot be the name of another credential or the variable of its provider (`STRIPE_SECRET_KEY` of your Stripe key). Placeholder hosts are only for an API key or a login.
 - The same value again returns the agent's own credential. Values of other credentials are not compared.
-- At most 10 new credentials per agent per hour (`too_many_items`).
-- Capture refuses the Apassy data folder, the vault file, the Keychain folders, a folder, a FIFO, a device, more than 64 KiB, an empty output, and a failed command (`capture_refused`).
-- A request of `apassy_ask_owner_for_credential` waits in the app (`Vault::credential_requests`). Save it (the agent gets the item) or dismiss it (the agent gets `dismissed`).
+- At most 10 new or changed credentials per agent per hour; above it Apassy refuses (`too_many_items`) and tells the agent to ask you.
+- Capture refuses, without a question: the Apassy data folder, each vault file and its backup and synced copy, the Apassy folder in iCloud Drive, the Keychain folders, `security`, a folder, a FIFO, a device, more than 64 KiB, an empty output, and a failed command (`capture_refused`).
+- A request of `apassy_ask_owner_for_credential` waits in the app (`Vault::credential_requests`; `where_domain` is the domain of "where to get it"). Save it (`Vault::save_for_request`: the agent gets the item) or dismiss it (the agent gets `dismissed`). At most 5 open or new requests per agent per hour (`too_many_requests`).
+
+What this does not protect: a known token command runs outside the agent's sandbox and uses the network to reach its service, without a question. A process of your user can replace a program in the Homebrew folders. An allowed command runs as it is when it runs; you see its arguments, not what it does.
 
 Corrections: after each allowed run, Apassy compares the use log with the declaration and proposes a correction once: "development" when every use went to a development or test host, "production" when a value declared development has a live prefix (the item is production at once until you answer), and a project when every use was in one project. An ignored correction never comes again.
 

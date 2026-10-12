@@ -107,7 +107,7 @@ impl ItemOrigin {
 }
 
 /// The folder of the new items: its UUID and its path for the "moved" event.
-struct Place {
+pub(super) struct Place {
     uuid: String,
     path: String,
 }
@@ -142,24 +142,41 @@ impl Vault {
     ) -> VaultResult<Vec<ItemSummary>> {
         self.require_unlocked()?;
         // The vault holds its exclusive lock, so the folder stays until the commit.
-        let place = match folder {
-            Some(uuid) => Some(Place {
-                uuid: uuid.to_owned(),
-                path: self.folder_path(Some(uuid))?.join(" / "),
-            }),
-            None => None,
-        };
+        let place = self.add_place(folder)?;
         let conn = self.conn_mut()?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| err(VaultErrorKind::Storage))?;
-        let mut added = Vec::with_capacity(detected.len());
-        for one in detected {
-            added.push(add_one(&tx, one, place.as_ref(), origin)?);
-        }
+        let added = add_all_in(&tx, detected, place.as_ref(), origin)?;
         tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
         Ok(added)
     }
+
+    /// The folder of new items for [`add_all_in`]: its UUID and its path, checked now.
+    pub(super) fn add_place(&self, folder: Option<&str>) -> VaultResult<Option<Place>> {
+        folder
+            .map(|uuid| {
+                Ok(Place {
+                    uuid: uuid.to_owned(),
+                    path: self.folder_path(Some(uuid))?.join(" / "),
+                })
+            })
+            .transpose()
+    }
+}
+
+/// [`Vault::add_detected_all`] in a transaction of the caller, so that another change
+/// commits with the new items (`Vault::save_for_request`).
+pub(super) fn add_all_in(
+    tx: &Transaction<'_>,
+    detected: &[Detected],
+    place: Option<&Place>,
+    origin: Option<&ItemOrigin>,
+) -> VaultResult<Vec<ItemSummary>> {
+    detected
+        .iter()
+        .map(|one| add_one(tx, one, place, origin))
+        .collect()
 }
 
 fn add_one(

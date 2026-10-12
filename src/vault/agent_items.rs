@@ -8,39 +8,63 @@
 //!   value or a new description from the agent, and only own items take part in the
 //!   value check ("a value that exists returns the existing item"), so the check tells
 //!   the agent nothing about the other items of the vault.
+//! - **New values.** [`Vault::replace_own_item_value`] keeps the value that it replaces
+//!   ([`PreviousValue`]): never delivered to an agent, not in the catalog, not in the
+//!   details. The owner can put it back with [`Vault::restore_previous_value`]. It is
+//!   dropped after the next allowed use of the item (a row `allowed` in `item_use`) or
+//!   after [`PREVIOUS_VALUE_SECONDS`]. The new value is detected again, and the
+//!   declaration becomes the stricter of the old one and the detected one.
 //! - **Credential requests.** An agent asks the owner to paste a credential. The owner
-//!   saves it (the app adds the item with [`CredentialRequest::origin`]) or dismisses
-//!   the request.
+//!   saves it ([`Vault::save_for_request`], or the app adds the item with
+//!   [`CredentialRequest::origin`] and settles the request) or dismisses the request. A
+//!   request is the same request when the agent, the project, and the name are the same.
 //! - **Corrections.** The broker proposes a change of the declaration when the use log
 //!   does not fit it (`broker::corrections`). Each `(item, kind, proposed)` exists once:
 //!   an ignored proposal is never made again. Accepting applies the change through the
 //!   declaration API, as an answer of the owner.
 //!
+//! The previous value lives in columns of the local table `item_origin` that this module
+//! adds when it first needs them (`previous_value`, `previous_field`, `previous_at`,
+//! `previous_use`), so no schema version changes. A later schema version should create
+//! them. `item_origin` is local: a pushed copy of the vault has no row of it.
+//!
 //! No function here returns or logs a secret value. The value check compares in memory.
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::Value;
+use zeroize::Zeroizing;
 
 use super::add::{ItemOrigin, OriginTool};
 use super::agents::{
-    EnvDelivery, Environment, MAX_PLACEHOLDER_HOSTS, checked_env_name, from_sql_time, now_unix,
-    parse_placeholder_host, process_binding_in, to_sql_time,
+    Declaration, EnvDelivery, Environment, MAX_PLACEHOLDER_HOSTS, Reversibility, RiskLevel, Scope,
+    checked_env_name, from_sql_time, now_unix, parse_placeholder_host, process_binding_in,
+    to_sql_time,
 };
+use super::detect::{self, Detected};
 use super::exceptions::ExceptionKind;
 use super::history::{self, EditChange, ItemEventKind};
+use super::policy::{DeclarationSource, DeclarationSources};
 use super::types::{
     ItemSummary, MAX_FIELD_VALUE_BYTES, MAX_NOTES_BYTES, MAX_TITLE_BYTES, VaultErrorKind,
     VaultResult, err, kind_from_str,
 };
 use super::usage::InteractionKind;
-use super::{Vault, to_public_id, to_sql_id};
+use super::{Vault, providers, to_public_id, to_sql_id};
+use crate::contracts::CredentialKind;
 
-/// An agent adds at most this many items in one hour (ADR 0025 §6).
+/// An agent adds or changes at most this many items in one hour (ADR 0025 §6): each new
+/// item and each new value counts.
 pub const MAX_AGENT_ITEMS_PER_HOUR: usize = 10;
 /// The longest name, purpose, or "where to get it" of a credential request, in bytes.
 pub const MAX_REQUEST_TEXT_BYTES: usize = 500;
-/// An agent has at most this many open credential requests.
-pub const MAX_OPEN_REQUESTS_PER_AGENT: usize = 5;
+/// An agent has at most this many credential requests that are open or that it made in
+/// the last hour.
+pub const MAX_AGENT_REQUESTS_PER_HOUR: usize = 5;
+/// How long the previous value of an item stays for a restore, at most: 7 days.
+pub const PREVIOUS_VALUE_SECONDS: u64 = 7 * 24 * 3600;
+/// The activity operation of `update_credential`. The hourly limit counts its allowed
+/// entries.
+pub const UPDATE_OPERATION: &str = "update credential";
 const HOUR_SECONDS: u64 = 3600;
 
 fn storage<E>(_: E) -> super::types::VaultError {
@@ -63,8 +87,24 @@ pub struct ItemDescription {
     pub env_name: Option<String>,
     /// The hosts of a placeholder (ADR 0011). They can only narrow where the value goes:
     /// a placeholder for these hosts instead of the real value, or a subset of the
-    /// placeholder hosts that the item has.
-    pub hosts: Option<Vec<String>>,
+    /// placeholder hosts that the item has. Not for a Custom, Database, or SSH key item:
+    /// such a value is not an API key in an HTTPS header.
+    pub placeholder_hosts: Option<Vec<String>>,
+}
+
+/// The value that the last `update_credential` replaced, without the value. `None` from
+/// [`Vault::previous_value`] when there is none, or when it was dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviousValue {
+    pub item_id: u64,
+    /// The field that got the new value.
+    pub field: String,
+    /// When the agent gave the new value (Unix time).
+    pub replaced_at: u64,
+    /// The agent that gave the new value.
+    pub replaced_by: String,
+    /// The value is dropped at this time at the latest (Unix time).
+    pub until: u64,
 }
 
 /// The state of a credential request.
@@ -105,10 +145,79 @@ pub struct NewCredentialRequest {
     pub name: String,
     /// Why the agent needs it. The owner reads it.
     pub purpose: String,
-    /// Where the owner gets it, for example a page of the provider. May be empty.
+    /// Where the owner gets it, for example a page of the provider, as plain text. May
+    /// be empty.
     pub where_to_get: String,
     /// The folder UUID of the new item. `None`: the top level.
     pub folder: Option<String>,
+}
+
+/// A request name for the identity of a request: lowercase, one space between words.
+fn request_name_key(name: &str) -> String {
+    name.split_whitespace()
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Top-level domains that a host without `https://` may have. Without a scheme, `x.json`
+/// or `e.g` is no host.
+const BARE_TLDS: &[&str] = &[
+    "com", "net", "org", "io", "dev", "app", "ai", "co", "cloud", "sh", "so", "xyz", "me", "tech",
+    "us", "uk", "de", "eu", "fr", "pl", "nl", "jp", "ca", "au", "in", "gg", "run", "page", "site",
+    "tools", "email", "build",
+];
+
+/// The registrable domain of the first host in `text`, for the UI: `resend.com` from
+/// "https://resend.com/api-keys" or "dashboard.stripe.com > API keys". `None` when the
+/// text names no host. It is a display hint, not a check.
+pub fn registrable_domain(text: &str) -> Option<String> {
+    let separators = |c: char| c.is_whitespace() || "<>()[]{}\"',;|".contains(c);
+    for token in text.split(separators) {
+        let (rest, scheme) = match token
+            .strip_prefix("https://")
+            .or_else(|| token.strip_prefix("http://"))
+        {
+            Some(rest) => (rest, true),
+            None => (token, false),
+        };
+        let host = rest
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or_default()
+            .rsplit('@')
+            .next()
+            .unwrap_or_default();
+        let host = host.split(':').next().unwrap_or_default();
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        let labels: Vec<&str> = host.split('.').collect();
+        let valid = labels.len() >= 2
+            && labels.iter().all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && !label.starts_with('-')
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            });
+        let Some(tld) = labels.last().filter(|_| valid) else {
+            continue;
+        };
+        if tld.len() < 2 || !tld.bytes().all(|b| b.is_ascii_alphabetic()) {
+            continue;
+        }
+        if !scheme && !BARE_TLDS.contains(tld) {
+            continue;
+        }
+        // The public suffix list: `example.co.uk`, not `co.uk`.
+        let Some(domain) = psl::domain(host.as_bytes()).filter(|d| d.suffix().is_known()) else {
+            continue;
+        };
+        return std::str::from_utf8(domain.as_bytes())
+            .ok()
+            .map(str::to_owned);
+    }
+    None
 }
 
 impl NewCredentialRequest {
@@ -135,7 +244,11 @@ pub struct CredentialRequest {
     pub project_label: String,
     pub name: String,
     pub purpose: String,
+    /// Plain text from the agent. The app shows it as text, never as a link.
     pub where_to_get: String,
+    /// The registrable domain in `where_to_get`, such as `resend.com`, for the UI
+    /// ([`registrable_domain`]). It comes from the stored text.
+    pub where_domain: Option<String>,
     pub folder: Option<String>,
     pub created_at: u64,
     pub state: CredentialRequestState,
@@ -157,15 +270,13 @@ impl CredentialRequest {
         }
     }
 
-    /// The same request: the agent, the name, the purpose, the place to get it, the
-    /// folder, and the project.
+    /// The same request: the agent, the project, and the name (without regard to case
+    /// and spaces). A retry with other words for the purpose or the place to get it is
+    /// the same request, so it waits for the same answer.
     pub fn same_as(&self, new: &NewCredentialRequest) -> bool {
         self.agent_id == new.agent_id
-            && self.name == new.name
-            && self.purpose == new.purpose
-            && self.where_to_get == new.where_to_get
-            && self.folder == new.folder
             && self.project_key == new.project_key
+            && request_name_key(&self.name) == request_name_key(&new.name)
     }
 }
 
@@ -384,6 +495,331 @@ fn normal_hosts(hosts: &[String]) -> VaultResult<Vec<String>> {
     Ok(lines)
 }
 
+const PREVIOUS_COLUMNS: [(&str, &str); 4] = [
+    ("previous_value", "TEXT"),
+    ("previous_field", "TEXT"),
+    ("previous_at", "INTEGER"),
+    ("previous_use", "INTEGER"),
+];
+
+/// The previous-value columns that `item_origin` has.
+fn previous_columns(conn: &Connection) -> VaultResult<Vec<String>> {
+    let mut stmt = conn
+        .prepare("SELECT name FROM pragma_table_info('item_origin')")
+        .map_err(storage)?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage)?;
+    Ok(names
+        .into_iter()
+        .filter(|name| PREVIOUS_COLUMNS.iter().any(|(column, _)| column == name))
+        .collect())
+}
+
+/// Add the previous-value columns to `item_origin` when they are missing (see the
+/// module documentation).
+fn ensure_previous_columns(conn: &Connection) -> VaultResult<()> {
+    let present = previous_columns(conn)?;
+    for (column, kind) in PREVIOUS_COLUMNS {
+        if !present.iter().any(|name| name == column) {
+            conn.execute_batch(&format!(
+                "ALTER TABLE item_origin ADD COLUMN {column} {kind}"
+            ))
+            .map_err(storage)?;
+        }
+    }
+    Ok(())
+}
+
+/// SQL: the previous value of the origin row `o` is still valid at `?now`: younger than
+/// [`PREVIOUS_VALUE_SECONDS`], and no allowed use of the item came after the new value.
+const PREVIOUS_VALID: &str = "o.previous_value IS NOT NULL
+     AND o.previous_at + ?2 > ?3
+     AND NOT EXISTS (SELECT 1 FROM item_use u WHERE u.item_id = o.item_id
+         AND u.outcome = 'allowed' AND u.id > o.previous_use)";
+
+/// How weak a source is: the owner is the strongest, a default the weakest.
+fn weakness(source: DeclarationSource) -> u8 {
+    match source {
+        DeclarationSource::Owner => 0,
+        DeclarationSource::Signal => 1,
+        DeclarationSource::Usage => 2,
+        DeclarationSource::Default => 3,
+    }
+}
+
+fn weaker(a: DeclarationSource, b: DeclarationSource) -> DeclarationSource {
+    if weakness(b) > weakness(a) { b } else { a }
+}
+
+/// ADR 0025 §5, `update_credential`: detect the new value again, and give the item the
+/// stricter of its declaration and the detected one, value by value. Each source becomes
+/// the weaker of the two, so a declaration that a signal of the old value made never
+/// stays "development from a signal" for a value without a signal. A value that is not
+/// one credential counts as a value without a signal. A change goes to the history.
+fn redeclare_in(tx: &Transaction<'_>, item: i64, value: &str) -> VaultResult<()> {
+    let found = detect::detect(value);
+    let (new, new_sources) = match found.as_slice() {
+        [one] => (
+            Declaration {
+                project: String::new(),
+                environment: one.environment,
+                risk: one.risk,
+                scope: one.scope,
+                reversibility: one.reversibility,
+            },
+            sources_of(one),
+        ),
+        _ => (
+            Declaration {
+                project: String::new(),
+                environment: providers::DEFAULT_ENVIRONMENT,
+                risk: providers::DEFAULT_RISK,
+                scope: providers::DEFAULT_SCOPE,
+                reversibility: providers::DEFAULT_REVERSIBILITY,
+            },
+            DeclarationSources {
+                environment: DeclarationSource::Default,
+                risk: DeclarationSource::Default,
+                scope: DeclarationSource::Default,
+                reversibility: DeclarationSource::Default,
+            },
+        ),
+    };
+    drop(found);
+    type Row = (String, String, String, String, String, Option<String>);
+    let stored: Option<Row> = tx
+        .query_row(
+            "SELECT project, environment, risk, scope, reversibility, provider
+             FROM declaration WHERE item_id = ?1",
+            [item],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(storage)?;
+    let (old, provider) = match stored {
+        Some((project, environment, risk, scope, reversibility, provider)) => (
+            Some(Declaration {
+                project,
+                environment: Environment::parse(&environment).map_err(storage)?,
+                risk: RiskLevel::parse(&risk).map_err(storage)?,
+                scope: Scope::parse(&scope).map_err(storage)?,
+                reversibility: Reversibility::parse(&reversibility).map_err(storage)?,
+            }),
+            provider.filter(|provider| !provider.is_empty()),
+        ),
+        None => (None, None),
+    };
+    let old_sources: Option<[String; 4]> = tx
+        .query_row(
+            "SELECT environment, risk, scope, reversibility FROM declaration_source
+             WHERE item_id = ?1",
+            [item],
+            |row| Ok([row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?]),
+        )
+        .optional()
+        .map_err(storage)?;
+    let parse =
+        |text: &str| DeclarationSource::parse(text).ok_or_else(|| err(VaultErrorKind::Storage));
+    // No row: each value is from the owner (`policy.rs`).
+    let old_sources = match old_sources {
+        Some([a, b, c, d]) => DeclarationSources {
+            environment: parse(&a)?,
+            risk: parse(&b)?,
+            scope: parse(&c)?,
+            reversibility: parse(&d)?,
+        },
+        None => DeclarationSources::default(),
+    };
+    let (declaration, sources) = match &old {
+        Some(old) => (
+            Declaration {
+                project: old.project.clone(),
+                environment: old.environment.max(new.environment),
+                risk: old.risk.max(new.risk),
+                scope: old.scope.max(new.scope),
+                reversibility: old.reversibility.max(new.reversibility),
+            },
+            DeclarationSources {
+                environment: weaker(old_sources.environment, new_sources.environment),
+                risk: weaker(old_sources.risk, new_sources.risk),
+                scope: weaker(old_sources.scope, new_sources.scope),
+                reversibility: weaker(old_sources.reversibility, new_sources.reversibility),
+            },
+        ),
+        None => (new.clone(), new_sources),
+    };
+    if old.as_ref() != Some(&declaration) {
+        tx.execute(
+            "INSERT INTO declaration (item_id, project, environment, risk, scope, reversibility)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(item_id) DO UPDATE SET environment = excluded.environment,
+                 risk = excluded.risk, scope = excluded.scope,
+                 reversibility = excluded.reversibility",
+            (
+                item,
+                declaration.project.as_str(),
+                declaration.environment.as_str(),
+                declaration.risk.as_str(),
+                declaration.scope.as_str(),
+                declaration.reversibility.as_str(),
+            ),
+        )
+        .map_err(storage)?;
+        history::record(
+            tx,
+            item,
+            ItemEventKind::Declaration,
+            &declaration.history_detail(provider.as_deref()),
+        )?;
+    }
+    if sources != old_sources {
+        if sources == DeclarationSources::default() {
+            tx.execute("DELETE FROM declaration_source WHERE item_id = ?1", [item])
+        } else {
+            tx.execute(
+                "INSERT INTO declaration_source (item_id, environment, risk, scope, reversibility)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(item_id) DO UPDATE SET environment = excluded.environment,
+                     risk = excluded.risk, scope = excluded.scope,
+                     reversibility = excluded.reversibility",
+                (
+                    item,
+                    sources.environment.as_str(),
+                    sources.risk.as_str(),
+                    sources.scope.as_str(),
+                    sources.reversibility.as_str(),
+                ),
+            )
+        }
+        .map_err(storage)?;
+    }
+    Ok(())
+}
+
+fn sources_of(found: &Detected) -> DeclarationSources {
+    let source = |source: detect::Source| match source {
+        detect::Source::Signal => DeclarationSource::Signal,
+        detect::Source::Default => DeclarationSource::Default,
+    };
+    DeclarationSources {
+        environment: source(found.sources.environment),
+        risk: source(found.sources.risk),
+        scope: source(found.sources.scope),
+        reversibility: source(found.sources.reversibility),
+    }
+}
+
+/// Settle an open request in the transaction of the caller. A save lists `listed` for an
+/// agent with "only these items". `Conflict`: the request is not open any more.
+fn settle_in(
+    tx: &Transaction<'_>,
+    request: &CredentialRequest,
+    outcome: RequestOutcome,
+    listed: &[u64],
+) -> VaultResult<()> {
+    let sql_id = to_sql_id(request.id)?;
+    let agent = to_sql_id(request.agent_id)?;
+    let now = to_sql_time(now_unix())?;
+    let updated = match outcome {
+        RequestOutcome::Saved { item_id } => {
+            let item = to_sql_id(item_id)?;
+            super::agents::require_item(tx, item)?;
+            let view = super::exceptions::view_in(tx, agent)?;
+            let active: bool = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM agent WHERE id = ?1 AND revoked_at IS NULL",
+                    [agent],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(storage)?
+                > 0;
+            if active && view.restricted {
+                for listed in listed {
+                    if !view.listed.contains(listed) {
+                        tx.execute(
+                            "INSERT OR IGNORE INTO agent_exception (agent_id, item_id, kind, created_at)
+                             VALUES (?1, ?2, ?3, ?4)",
+                            (agent, to_sql_id(*listed)?, ExceptionKind::Only.as_str(), now),
+                        )
+                        .map_err(storage)?;
+                    }
+                }
+            }
+            tx.execute(
+                "UPDATE credential_request SET state = 'saved', item_id = ?1, decided_at = ?2
+                 WHERE id = ?3 AND state = 'open'",
+                (item, now, sql_id),
+            )
+            .map_err(storage)?
+        }
+        RequestOutcome::Dismissed => tx
+            .execute(
+                "UPDATE credential_request SET state = 'dismissed', decided_at = ?1
+                 WHERE id = ?2 AND state = 'open'",
+                (now, sql_id),
+            )
+            .map_err(storage)?,
+    };
+    if updated != 1 {
+        return Err(err(VaultErrorKind::Conflict));
+    }
+    Ok(())
+}
+
+/// A placeholder (ADR 0011) fits an API key or a login password in an HTTPS header. A
+/// Custom value, a database password, or an SSH key is not sent that way.
+pub fn placeholder_kind(kind: CredentialKind) -> bool {
+    matches!(kind, CredentialKind::ApiKey | CredentialKind::Login)
+}
+
+/// Another item than `item` has the variable `name`: its own name, the variable of its
+/// provider, or its automatic name.
+fn env_name_taken(tx: &Transaction<'_>, item: i64, name: &str) -> VaultResult<bool> {
+    let explicit: Option<i64> = tx
+        .query_row(
+            "SELECT item_id FROM env_binding WHERE env_name = ?1 AND item_id != ?2",
+            (name, item),
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    if explicit.is_some() {
+        return Ok(true);
+    }
+    if name
+        .strip_prefix("APASSY_ITEM_")
+        .is_some_and(|rest| rest.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Ok(true);
+    }
+    let mut stmt = tx
+        .prepare(
+            "SELECT DISTINCT provider FROM declaration
+             WHERE item_id != ?1 AND provider IS NOT NULL AND provider != ''",
+        )
+        .map_err(storage)?;
+    let used = stmt
+        .query_map([item], |row| row.get::<_, String>(0))
+        .map_err(storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage)?;
+    Ok(used
+        .iter()
+        .any(|id| providers::find(id).is_some_and(|provider| provider.variable == name)))
+}
+
 impl Vault {
     /// Store the origin of an item that an agent added. `AlreadyExists`: the item has an
     /// origin. `NotFound`: no such item.
@@ -453,8 +889,8 @@ impl Vault {
     }
 
     /// How many items `agent_id` made in the last hour with capture, generate, or save.
-    /// The limit is [`MAX_AGENT_ITEMS_PER_HOUR`]. An item that the owner deleted no
-    /// longer counts: its origin goes with it, and only the owner deletes.
+    /// An item that the owner deleted no longer counts: its origin goes with it, and only
+    /// the owner deletes.
     pub fn agent_items_in_last_hour(&self, agent_id: u64) -> VaultResult<usize> {
         let since = now_unix().saturating_sub(HOUR_SECONDS);
         Ok(self
@@ -462,6 +898,28 @@ impl Vault {
             .iter()
             .filter(|item| item.origin.tool.is_agent_value())
             .count())
+    }
+
+    /// How many new values `agent_id` gave its items in the last hour: the allowed
+    /// [`UPDATE_OPERATION`] entries of the activity log.
+    pub fn agent_updates_in_last_hour(&self, agent_id: u64) -> VaultResult<usize> {
+        let since = to_sql_time(now_unix().saturating_sub(HOUR_SECONDS))?;
+        let count: i64 = self
+            .conn_ref()?
+            .query_row(
+                "SELECT COUNT(*) FROM activity WHERE agent_id = ?1 AND operation = ?2
+                 AND decision = 'allow' AND at >= ?3",
+                (to_sql_id(agent_id)?, UPDATE_OPERATION, since),
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        usize::try_from(count).map_err(storage)
+    }
+
+    /// The new items and the new values of `agent_id` in the last hour. The limit is
+    /// [`MAX_AGENT_ITEMS_PER_HOUR`] (ADR 0025 §6).
+    pub fn agent_changes_in_last_hour(&self, agent_id: u64) -> VaultResult<usize> {
+        Ok(self.agent_items_in_last_hour(agent_id)? + self.agent_updates_in_last_hour(agent_id)?)
     }
 
     /// True when `item_id` exists and is an own item of `agent_id`: the agent made its
@@ -499,8 +957,13 @@ impl Vault {
     }
 
     /// Give an own item of `agent_id` a new value (ADR 0025 §6, `update_credential`):
-    /// the field of its variable, or its first secret field. The revision grows, and an
-    /// edit event names the field, not the value.
+    /// the field of its variable, or its first secret field. In the same transaction:
+    ///
+    /// - the replaced value stays as the previous value ([`PreviousValue`]); an older
+    ///   previous value goes;
+    /// - the new value is detected again, and the declaration becomes the stricter of
+    ///   the old one and the detected one, with the weaker sources (ADR 0025 §5);
+    /// - the revision grows, and an edit event names the field, not the value.
     ///
     /// - `NotFound`: the item does not exist or is not an own item of the agent.
     /// - `InvalidInput`: the value is empty or too long, the item has no secret field, or
@@ -546,6 +1009,17 @@ impl Vault {
         {
             return Err(err(VaultErrorKind::InvalidInput));
         }
+        let old: Option<Zeroizing<String>> = tx
+            .query_row(
+                "SELECT value FROM item_field WHERE item_id = ?1 AND name = ?2 AND secret = 1",
+                (item, field.as_str()),
+                |row| row.get::<_, String>(0).map(Zeroizing::new),
+            )
+            .optional()
+            .map_err(storage)?;
+        let Some(old) = old else {
+            return Err(err(VaultErrorKind::InvalidInput));
+        };
         let changed = tx
             .execute(
                 "UPDATE item_field SET value = ?1 WHERE item_id = ?2 AND name = ?3 AND secret = 1",
@@ -555,6 +1029,143 @@ impl Vault {
         if changed != 1 {
             return Err(err(VaultErrorKind::InvalidInput));
         }
+        // The previous value: never delivered, dropped after the next allowed use.
+        ensure_previous_columns(&tx)?;
+        let last_use: i64 = tx
+            .query_row("SELECT COALESCE(MAX(id), 0) FROM item_use", [], |row| {
+                row.get(0)
+            })
+            .map_err(storage)?;
+        tx.execute(
+            "UPDATE item_origin SET previous_value = ?1, previous_field = ?2, previous_at = ?3,
+                 previous_use = ?4 WHERE item_id = ?5",
+            (
+                old.as_str(),
+                field.as_str(),
+                to_sql_time(now_unix())?,
+                last_use,
+                item,
+            ),
+        )
+        .map_err(storage)?;
+        drop(old);
+        tx.execute(
+            "UPDATE item SET revision = revision + 1 WHERE id = ?1",
+            [item],
+        )
+        .map_err(storage)?;
+        history::record(
+            &tx,
+            item,
+            ItemEventKind::Edited,
+            &EditChange::detail(&[EditChange::Secret(field)]),
+        )?;
+        redeclare_in(&tx, item, value)?;
+        let (title, kind, revision): (String, String, i64) = tx
+            .query_row(
+                "SELECT title, kind, revision FROM item WHERE id = ?1",
+                [item],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(storage)?;
+        tx.commit().map_err(storage)?;
+        Ok(ItemSummary {
+            id: item_id,
+            title,
+            kind: kind_from_str(&kind)?,
+            revision: u64::try_from(revision).map_err(storage)?,
+        })
+    }
+
+    /// The previous value of an item, without the value (for the item page). `None`: the
+    /// item has none, or it was dropped (an allowed use came after the new value, or it
+    /// is older than [`PREVIOUS_VALUE_SECONDS`]).
+    pub fn previous_value(&self, item_id: u64) -> VaultResult<Option<PreviousValue>> {
+        let item = to_sql_id(item_id)?;
+        let conn = self.conn_ref()?;
+        if previous_columns(conn)?.len() != PREVIOUS_COLUMNS.len() {
+            return Ok(None);
+        }
+        let row: Option<(String, i64, String)> = conn
+            .query_row(
+                &format!(
+                    "SELECT o.previous_field, o.previous_at, o.agent_name FROM item_origin o
+                     WHERE o.item_id = ?1 AND {PREVIOUS_VALID}"
+                ),
+                (
+                    item,
+                    to_sql_time(PREVIOUS_VALUE_SECONDS)?,
+                    to_sql_time(now_unix())?,
+                ),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(storage)?;
+        row.map(|(field, at, agent)| {
+            let replaced_at = from_sql_time(at)?;
+            Ok(PreviousValue {
+                item_id,
+                field,
+                replaced_at,
+                replaced_by: agent,
+                until: replaced_at.saturating_add(PREVIOUS_VALUE_SECONDS),
+            })
+        })
+        .transpose()
+    }
+
+    /// The owner puts the previous value back (ADR 0025 §6, `update_credential`). Only
+    /// the owner calls it, after the owner check of the app. The previous value goes; the
+    /// declaration stays as it is (it is at least as strict as before the new value). The
+    /// revision grows, and an edit event names the field, not the value.
+    ///
+    /// - `NotFound`: no such item, or no previous value (none, or dropped).
+    /// - `InvalidInput`: the field of the previous value is no longer a secret field.
+    pub fn restore_previous_value(&mut self, item_id: u64) -> VaultResult<ItemSummary> {
+        let item = to_sql_id(item_id)?;
+        self.require_unlocked()?;
+        let conn = self.conn_mut()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        if previous_columns(&tx)?.len() != PREVIOUS_COLUMNS.len() {
+            return Err(err(VaultErrorKind::NotFound));
+        }
+        let found: Option<(Zeroizing<String>, String)> = tx
+            .query_row(
+                &format!(
+                    "SELECT o.previous_value, o.previous_field FROM item_origin o
+                     JOIN item i ON i.id = o.item_id
+                     WHERE o.item_id = ?1 AND {PREVIOUS_VALID}"
+                ),
+                (
+                    item,
+                    to_sql_time(PREVIOUS_VALUE_SECONDS)?,
+                    to_sql_time(now_unix())?,
+                ),
+                |row| Ok((Zeroizing::new(row.get::<_, String>(0)?), row.get(1)?)),
+            )
+            .optional()
+            .map_err(storage)?;
+        let Some((value, field)) = found else {
+            return Err(err(VaultErrorKind::NotFound));
+        };
+        let changed = tx
+            .execute(
+                "UPDATE item_field SET value = ?1 WHERE item_id = ?2 AND name = ?3 AND secret = 1",
+                (value.as_str(), item, field.as_str()),
+            )
+            .map_err(storage)?;
+        drop(value);
+        if changed != 1 {
+            return Err(err(VaultErrorKind::InvalidInput));
+        }
+        tx.execute(
+            "UPDATE item_origin SET previous_value = NULL, previous_field = NULL,
+                 previous_at = NULL, previous_use = NULL WHERE item_id = ?1",
+            [item],
+        )
+        .map_err(storage)?;
         tx.execute(
             "UPDATE item SET revision = revision + 1 WHERE id = ?1",
             [item],
@@ -582,6 +1193,30 @@ impl Vault {
         })
     }
 
+    /// Erase each previous value that is no longer valid (see
+    /// [`Vault::previous_value`]). Returns how many went. The app can call it at unlock;
+    /// each function here treats a value that is no longer valid as gone already.
+    pub fn prune_previous_values(&mut self) -> VaultResult<usize> {
+        let conn = self.conn_mut()?;
+        if previous_columns(conn)?.len() != PREVIOUS_COLUMNS.len() {
+            return Ok(0);
+        }
+        conn.execute(
+            &format!(
+                "UPDATE item_origin SET previous_value = NULL, previous_field = NULL,
+                     previous_at = NULL, previous_use = NULL
+                 WHERE previous_value IS NOT NULL AND item_id NOT IN (
+                     SELECT o.item_id FROM item_origin o WHERE o.item_id > ?1 AND {PREVIOUS_VALID})"
+            ),
+            (
+                0_i64,
+                to_sql_time(PREVIOUS_VALUE_SECONDS)?,
+                to_sql_time(now_unix())?,
+            ),
+        )
+        .map_err(storage)
+    }
+
     /// Change the title, the notes, the variable, or the hosts of an own item of
     /// `agent_id` (ADR 0025 §6, `describe_credential`). A title that another item has
     /// gets a number. All checks run before any change.
@@ -589,8 +1224,11 @@ impl Vault {
     /// - `NotFound`: the item does not exist or is not an own item of the agent.
     /// - `InvalidInput`: an empty or too long title, too long notes, a variable name that
     ///   is not valid or is reserved, hosts that are not valid, hosts that would widen
-    ///   where the value goes, or nothing to change.
-    /// - `AlreadyExists`: another item uses the variable name.
+    ///   where the value goes, hosts for a Custom, Database, or SSH key item, or nothing
+    ///   to change.
+    /// - `AlreadyExists`: another item has the variable name: its own name, or the
+    ///   variable of its provider (`STRIPE_SECRET_KEY` of a Stripe item). An automatic
+    ///   name (`APASSY_ITEM_<id>`) is reserved.
     pub fn describe_own_item(
         &mut self,
         agent_id: u64,
@@ -618,7 +1256,11 @@ impl Vault {
             .as_deref()
             .map(|name| checked_env_name(name.trim()).map(str::to_owned))
             .transpose()?;
-        let hosts = change.hosts.as_deref().map(normal_hosts).transpose()?;
+        let hosts = change
+            .placeholder_hosts
+            .as_deref()
+            .map(normal_hosts)
+            .transpose()?;
         let conn = self.conn_mut()?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -630,18 +1272,20 @@ impl Vault {
         if (env_name.is_some() || hosts.is_some()) && binding.is_none() {
             return Err(err(VaultErrorKind::InvalidInput));
         }
-        if let Some(name) = &env_name {
-            let taken: Option<i64> = tx
-                .query_row(
-                    "SELECT item_id FROM env_binding WHERE env_name = ?1 AND item_id != ?2",
-                    (name.as_str(), item),
-                    |row| row.get(0),
-                )
-                .optional()
+        if hosts.is_some() {
+            let kind: String = tx
+                .query_row("SELECT kind FROM item WHERE id = ?1", [item], |row| {
+                    row.get(0)
+                })
                 .map_err(storage)?;
-            if taken.is_some() {
-                return Err(err(VaultErrorKind::AlreadyExists));
+            if !placeholder_kind(kind_from_str(&kind)?) {
+                return Err(err(VaultErrorKind::InvalidInput));
             }
+        }
+        if let Some(name) = &env_name
+            && env_name_taken(&tx, item, name)?
+        {
+            return Err(err(VaultErrorKind::AlreadyExists));
         }
         let delivery = match (&binding, hosts) {
             (Some(binding), None) => binding.delivery.clone(),
@@ -724,7 +1368,7 @@ impl Vault {
             )?;
         }
         if let Some(binding) = &binding
-            && (env_name.is_some() || change.hosts.is_some())
+            && (env_name.is_some() || change.placeholder_hosts.is_some())
         {
             let stored_name: Option<String> = tx
                 .query_row(
@@ -837,6 +1481,22 @@ impl Vault {
         self.query_credential_requests("WHERE agent_id = ?1", [to_sql_id(agent_id)?])
     }
 
+    /// The credential requests of one agent that are open or that it made in the last
+    /// hour. The limit is [`MAX_AGENT_REQUESTS_PER_HOUR`].
+    pub fn agent_requests_in_last_hour(&self, agent_id: u64) -> VaultResult<usize> {
+        let since = to_sql_time(now_unix().saturating_sub(HOUR_SECONDS))?;
+        let count: i64 = self
+            .conn_ref()?
+            .query_row(
+                "SELECT COUNT(*) FROM credential_request
+                 WHERE agent_id = ?1 AND (state = 'open' OR created_at >= ?2)",
+                (to_sql_id(agent_id)?, since),
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        usize::try_from(count).map_err(storage)
+    }
+
     fn query_credential_requests<P: rusqlite::Params>(
         &self,
         filter: &str,
@@ -880,6 +1540,7 @@ impl Vault {
                 project_label: row.4,
                 name: row.5,
                 purpose: row.6,
+                where_domain: registrable_domain(&row.7),
                 where_to_get: row.7,
                 folder: row.8,
                 created_at: from_sql_time(row.9)?,
@@ -907,52 +1568,15 @@ impl Vault {
         if request.state != CredentialRequestState::Open {
             return Err(err(VaultErrorKind::Conflict));
         }
-        let sql_id = to_sql_id(id)?;
-        let agent = to_sql_id(request.agent_id)?;
-        let now = to_sql_time(now_unix())?;
+        let listed: Vec<u64> = match outcome {
+            RequestOutcome::Saved { item_id } => vec![item_id],
+            RequestOutcome::Dismissed => Vec::new(),
+        };
         let conn = self.conn_mut()?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage)?;
-        let updated = match outcome {
-            RequestOutcome::Saved { item_id } => {
-                let item = to_sql_id(item_id)?;
-                super::agents::require_item(&tx, item)?;
-                let view = super::exceptions::view_in(&tx, agent)?;
-                let active: bool = tx
-                    .query_row(
-                        "SELECT COUNT(*) FROM agent WHERE id = ?1 AND revoked_at IS NULL",
-                        [agent],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .map_err(storage)?
-                    > 0;
-                if active && view.restricted && !view.listed.contains(&item_id) {
-                    tx.execute(
-                        "INSERT OR IGNORE INTO agent_exception (agent_id, item_id, kind, created_at)
-                         VALUES (?1, ?2, ?3, ?4)",
-                        (agent, item, ExceptionKind::Only.as_str(), now),
-                    )
-                    .map_err(storage)?;
-                }
-                tx.execute(
-                    "UPDATE credential_request SET state = 'saved', item_id = ?1, decided_at = ?2
-                     WHERE id = ?3 AND state = 'open'",
-                    (item, now, sql_id),
-                )
-                .map_err(storage)?
-            }
-            RequestOutcome::Dismissed => tx
-                .execute(
-                    "UPDATE credential_request SET state = 'dismissed', decided_at = ?1
-                     WHERE id = ?2 AND state = 'open'",
-                    (now, sql_id),
-                )
-                .map_err(storage)?,
-        };
-        if updated != 1 {
-            return Err(err(VaultErrorKind::Conflict));
-        }
+        settle_in(&tx, &request, outcome, &listed)?;
         tx.commit().map_err(storage)?;
         let _ = self.record_interaction(
             InteractionKind::Question,
@@ -960,6 +1584,54 @@ impl Vault {
             &[],
         );
         Ok(())
+    }
+
+    /// The owner saves the credentials of an open request in one transaction: the
+    /// detected items with the origin of the request ([`CredentialRequest::origin`]),
+    /// each on the list of an agent with "only these items", and the request settled as
+    /// saved with the first item. All of it, or nothing. One interaction is counted.
+    /// `folder` is a folder UUID; `None` takes the folder of the request.
+    ///
+    /// - `NotFound`: no such request, or the folder is gone.
+    /// - `Conflict`: the request is not open.
+    /// - `InvalidInput`: nothing to save, or an item that [`Vault::add_detected`] refuses.
+    pub fn save_for_request(
+        &mut self,
+        request_id: u64,
+        detected: &[Detected],
+        folder: Option<&str>,
+    ) -> VaultResult<Vec<ItemSummary>> {
+        self.require_unlocked()?;
+        if detected.is_empty() {
+            return Err(err(VaultErrorKind::InvalidInput));
+        }
+        let request = self.credential_request(request_id)?;
+        if request.state != CredentialRequestState::Open {
+            return Err(err(VaultErrorKind::Conflict));
+        }
+        let folder = folder.or(request.folder.as_deref());
+        let place = self.add_place(folder)?;
+        let origin = request.origin();
+        let conn = self.conn_mut()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        let added = super::add::add_all_in(&tx, detected, place.as_ref(), Some(&origin))?;
+        let ids: Vec<u64> = added.iter().map(|summary| summary.id).collect();
+        let first = *ids.first().ok_or_else(|| err(VaultErrorKind::Storage))?;
+        settle_in(
+            &tx,
+            &request,
+            RequestOutcome::Saved { item_id: first },
+            &ids,
+        )?;
+        tx.commit().map_err(storage)?;
+        let _ = self.record_interaction(
+            InteractionKind::Question,
+            &format!("credential request \"{}\"", request.name),
+            &[],
+        );
+        Ok(added)
     }
 
     // ---- Corrections ----
@@ -1062,6 +1734,51 @@ impl Vault {
         Ok(out)
     }
 
+    /// Whether the answer `answer` to correction `correction_id` gives authority back, so
+    /// the app asks for the owner check first (U2):
+    ///
+    /// - accepting an environment that is looser than the declaration now (for example
+    ///   `development` for a production item; an item without a declaration counts as
+    ///   production);
+    /// - ignoring a correction that raised the environment until the answer
+    ///   ([`RAISED_FROM_FACT`]) when the environment that comes back is looser than now.
+    ///
+    /// A project correction narrows, so it needs no check. A correction that does not
+    /// exist or does not read gives `true`: when in doubt, the owner confirms.
+    pub fn needs_owner_check_for_correction(
+        &self,
+        correction_id: u64,
+        answer: CorrectionAnswer,
+    ) -> bool {
+        let Ok(sql_id) = to_sql_id(correction_id) else {
+            return true;
+        };
+        let Some(correction) = self
+            .query_corrections("WHERE id = ?1", [sql_id])
+            .ok()
+            .and_then(|mut found| found.pop())
+        else {
+            return true;
+        };
+        if correction.kind != CorrectionKind::Environment {
+            return false;
+        }
+        let current = match self.declaration(correction.item_id) {
+            Ok(declaration) => declaration.map_or(Environment::Production, |d| d.environment),
+            Err(_) => return true,
+        };
+        let after = match answer {
+            CorrectionAnswer::Accepted => Environment::parse(&correction.proposed).ok(),
+            CorrectionAnswer::Ignored => match correction.facts.get(RAISED_FROM_FACT) {
+                None => return false,
+                Some(raised) => raised
+                    .as_str()
+                    .and_then(|text| Environment::parse(text).ok()),
+            },
+        };
+        after.is_none_or(|after| after < current)
+    }
+
     /// The owner answers a correction. One interaction is counted (ADR 0025 §1).
     ///
     /// - Accepted: an environment correction sets the environment as an answer of the
@@ -1136,5 +1853,141 @@ impl Vault {
             &[],
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vault::{Field, ItemDraft, SecretValue};
+
+    #[test]
+    fn the_registrable_domain_comes_from_the_first_host() {
+        for (text, domain) in [
+            ("https://resend.com/api-keys", Some("resend.com")),
+            (
+                "dashboard.stripe.com > Developers > API keys",
+                Some("stripe.com"),
+            ),
+            (
+                "Open https://console.cloud.google.com/apis/credentials",
+                Some("google.com"),
+            ),
+            (
+                "https://portal.example.co.uk:8443/keys?x=1",
+                Some("example.co.uk"),
+            ),
+            ("http://user@api.example.dev/", Some("example.dev")),
+            ("Settings > Auth tokens", None),
+            ("see config.json, e.g. the token", None),
+            ("", None),
+        ] {
+            assert_eq!(registrable_domain(text).as_deref(), domain, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_request_is_the_agent_the_project_and_the_name() {
+        let new = NewCredentialRequest {
+            agent_id: 1,
+            agent_name: "Agent".to_owned(),
+            project_key: "/p/.git".to_owned(),
+            project_label: "p".to_owned(),
+            name: "Sentry  TOKEN".to_owned(),
+            purpose: "Other words.".to_owned(),
+            where_to_get: "elsewhere".to_owned(),
+            folder: Some("f".to_owned()),
+        };
+        let known = CredentialRequest {
+            id: 1,
+            agent_id: 1,
+            agent_name: "Agent".to_owned(),
+            project_key: "/p/.git".to_owned(),
+            project_label: "p".to_owned(),
+            name: "Sentry token".to_owned(),
+            purpose: "Upload maps.".to_owned(),
+            where_to_get: String::new(),
+            where_domain: None,
+            folder: None,
+            created_at: 0,
+            state: CredentialRequestState::Open,
+            item_id: None,
+            decided_at: None,
+        };
+        assert!(known.same_as(&new));
+        assert!(!known.same_as(&NewCredentialRequest {
+            project_key: "/q/.git".to_owned(),
+            ..new.clone()
+        }));
+        assert!(!known.same_as(&NewCredentialRequest {
+            agent_id: 2,
+            ..new.clone()
+        }));
+        assert!(!known.same_as(&NewCredentialRequest {
+            name: "Sentry DSN".to_owned(),
+            ..new
+        }));
+    }
+
+    /// The previous value goes after seven days, and the prune erases it.
+    #[test]
+    fn the_previous_value_expires_after_seven_days() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut vault = Vault::create(&dir.path().join("v.db"), "previous-pass-ok").unwrap();
+        vault.unlock("previous-pass-ok").unwrap();
+        let (agent, _) = vault.register_agent("Agent").unwrap();
+        let item = vault
+            .add(ItemDraft {
+                title: "Own".to_owned(),
+                kind: CredentialKind::Custom,
+                notes: String::new(),
+                tags: Vec::new(),
+                fields: vec![Field {
+                    name: "secret".to_owned(),
+                    value: SecretValue::new("FAKE-old-value-0001".to_owned()),
+                    secret: true,
+                }],
+            })
+            .unwrap()
+            .id;
+        vault
+            .set_item_origin(
+                item,
+                &ItemOrigin {
+                    agent_id: agent.id,
+                    agent_name: "Agent".to_owned(),
+                    project_key: String::new(),
+                    project_label: String::new(),
+                    tool: OriginTool::Generate,
+                },
+            )
+            .unwrap();
+        assert!(vault.previous_value(item).unwrap().is_none());
+        vault
+            .replace_own_item_value(agent.id, item, "FAKE-new-value-0002")
+            .unwrap();
+        assert!(vault.previous_value(item).unwrap().is_some());
+        let old = to_sql_time(now_unix() - PREVIOUS_VALUE_SECONDS - 1).unwrap();
+        vault
+            .conn_mut()
+            .unwrap()
+            .execute("UPDATE item_origin SET previous_at = ?1", [old])
+            .unwrap();
+        assert!(vault.previous_value(item).unwrap().is_none());
+        assert_eq!(
+            vault.restore_previous_value(item).unwrap_err().kind(),
+            VaultErrorKind::NotFound
+        );
+        assert_eq!(vault.prune_previous_values().unwrap(), 1);
+        let stored: Option<String> = vault
+            .conn_ref()
+            .unwrap()
+            .query_row(
+                "SELECT previous_value FROM item_origin WHERE item_id = ?1",
+                [to_sql_id(item).unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(stored.is_none(), "erased");
     }
 }
