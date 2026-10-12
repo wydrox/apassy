@@ -100,6 +100,18 @@ The Worker sends APNs; the relay triggers it (`POST /internal/push` with an edge
 - Roles: members cannot reveal or copy mirrored values in the UI; managers and owners can. This is UI-enforced: a member's Mac holds the bytes (document in ADR 0026).
 - Revocation: revoke the device, new projection key, re-wrap, re-push. Values already seen are not clawed back.
 
+## D. The Mac feed (Mac → iPhone, read only, with signed actions)
+
+The agents, their use, the rules from the owner's answers, the requests, and the suggestions are rows of the Mac's vault that do not sync (they hold history, not credentials). The iPhone app v2 ([ios-v2-plan.md](ios-v2-plan.md)) shows "Available when the Mac is connected" in these places until this feed exists.
+
+- **Content** (no secret value, ever): agents (name, last use, projects, note, exceptions), for each item its agent use (the last 20 uses and the summary) and its rules, the open requests, the suggestions, and the weekly counts of Decisions. Commands are masked as in a question card. Item ids refer to the synced vault, so the iPhone shows titles from its own copy.
+- **Writer:** each Mac that runs the broker publishes its own feed. The iPhone merges the feeds and names the Mac in each row.
+- **Transport:** the relay keeps the latest feed of each device: `PUT /v1/feed {v:1, key_id, nonce, ciphertext, seq}` replaces it, `GET /v1/feed?since=<seq>&wait=25` returns what changed. The key is the question key (`question-key-v1`, A1), so it rotates when a device is removed. AAD = `"apassy-feed-v1\0" || team_id || "\0" || device_uuid || "\0" || seq`. At most 256 KiB for each feed.
+- **Freshness:** the Mac publishes after a change (at most every 10 s) and every 15 minutes while it runs. The iPhone shows "From <Mac>, <time>". After 24 hours without a feed it shows the data dimmed with "The Mac has not reported since …".
+- **Actions from the iPhone:** `POST /v1/feed/actions {v:1, key_id, nonce, ciphertext}`, read by the Mac with the same long poll as the answers. `action_string = "apassy-feed-action-v1\n<device uuid>\n<team id>\n<action id>\n<kind>:<target>\n<feed seq>\n<time>"`. Kinds: `remove_exception`, `grant_request` (loosening: the answer key after Face ID, as in A5), `disconnect_agent`, `dismiss_suggestion` (stricter: no check). The Mac applies each action id once, checks it against its current rows (a stale target is refused), writes the history line, and publishes a new feed.
+- **Relay:** team schema 6 (`feed`, `feed_action`), with the limits of A3 and the 8 MiB budget of a team. An older relay answers 404, and the iPhone keeps the "Available when the Mac is connected" state.
+- **Order:** contract `docs/contracts/relay-feed-v1.md` → relay schema 6 ‖ Mac publisher (`src/questions/feed.rs`) ‖ iPhone consumer (core `feed_*` calls, the Agents tab, agent use and rules on a credential, Requests and Suggestions in Decisions) → gate (2× opus + 1× fable) → owner step: relay deploy.
+
 ## C. Streams
 
 | Stream | Files | Depends on | Needs the owner |
@@ -110,6 +122,7 @@ The Worker sends APNs; the relay triggers it (`POST /internal/push` with an edge
 | R4 relay | relay `store.rs` v5, `server/questions.rs`, `server/push.rs`, routes, limits, audit, Worker `apns.ts`, docs + rollback section | C0, A4 spike | spike, deploy |
 | M3 iPhone | `ios/ApassyCore/src/core/questions.rs`, Swift `QuestionsView`, push registration, entitlements, contract | F19, C0 | APNs capability, profiles, TestFlight |
 | V3 shared vaults | `src/vault/share.rs`, `src/sync/projection.rs`, sidebar, Share sheet, relay key-wrap routes | F19, R4 | relay deploy |
+| FD Mac feed (D) | contract `relay-feed-v1`, relay schema 6, `src/questions/feed.rs`, core `feed_*`, iPhone Agents and Mac-only sections | R4, iPhone v2 | relay deploy |
 
 Order: F19 + C0 (+ A4 spike) → N3 ‖ R4 ‖ M3 → Gate 3 (2× opus + 1× fable: envelope, `check_remote`, replay, first valid answer, routing, push without content, membership migration) → owner steps → V3.
 
