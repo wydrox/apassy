@@ -670,3 +670,12 @@ Settle ciphertext (hex, 221 bytes):
 - The answer signature verifies over the answer string and fails after one changed character of it, and with the companion request key. ECDSA signatures are randomized: a new signature of the same string differs and still verifies.
 - The asker accepts the answer for the question of section 7.1 with the clock at `1790000030` to `1790000090`, and refuses it at `1790000091` (stale), with another digest (`changed`), with the choice `approve_in_project:deploy:/tmp/synthetic-shop/.git` (not in `valid_answers`), and from a `trusted_device` row whose `answer_key` is another key.
 - Every field of `QuestionInfo` changes the digest v2 (as `every_field_changes_the_digest` for v1), and moving text between `why` and an item name, or between two items, changes it.
+
+## Integrator decisions on the open questions (2026-10-12)
+
+1. **Team approvers.** Until shared vaults (V3) give approvers the question key, their device entries and roles, every question goes to the asking member's own devices only. A production question about a team item cannot be answered remotely until then; it waits on the asking Mac.
+2. **"Allow once" on a production team item** needs an owner or a manager of the team (ADR 0026 §6). Kept.
+3. **One relay id per device is not enough.** Schema 19 maps a trusted device to a relay device id per team (`trusted_device` → per-team mapping), so one vault can be in a notifications-only team and in shared-vault teams.
+4. **Long polls.** The relay gets a separate pool of long-poll slots for questions (stream R4), so question waits do not take the shared member slots.
+5. **Push secret.** The relay calls the Worker's push route with its own `PUSH_SECRET`, not the edge secret.
+6. **Bundle id.** `com.wydrox.apassy.companion` (checked in `ios/ApassyCompanion/project.yml`). Device ids follow the schema 19 `trusted_device.uuid` format.
