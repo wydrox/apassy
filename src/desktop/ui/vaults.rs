@@ -679,8 +679,8 @@ pub(super) fn name_field(
     })
 }
 
-/// Settings > General > Vaults: each vault with its file, "Rename…", and "Remove from
-/// list…", and "Lock now".
+/// Settings > General > Vaults: each vault with its file and where it syncs, "Rename…",
+/// and "Remove from list…", and "Lock now". The sync controls are in Settings > Devices.
 pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     list_note(app, ui);
     let current = app.vault_list.current.clone();
@@ -734,6 +734,19 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                         )
                         .truncate(),
                     );
+                    // Where it syncs. Settings > Devices changes it.
+                    if app.sync.offered {
+                        ui.add(
+                            Label::new(
+                                kit::text(
+                                    format!("Sync: {}", super::sync::method_words(app, entry)),
+                                    Font::Footnote,
+                                )
+                                .color(kit::SECONDARY),
+                            )
+                            .truncate(),
+                        );
+                    }
                 });
             }
             if s.clickable_row("New vault…", |ui| {
@@ -775,7 +788,6 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         }
         app.ui.sheet = Some(Sheet::Vault(sheet));
     }
-    super::sync::settings_section(app, ui);
 }
 
 /// A sheet of the vault list. Returns true when the owner pressed Escape.

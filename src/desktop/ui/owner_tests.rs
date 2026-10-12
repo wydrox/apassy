@@ -532,7 +532,7 @@ fn open_settings_from_activity_shows_the_notifications_tab() {
         || {},
     ));
     app.place = Place::Decisions;
-    app.ui.settings_tab = super::SettingsTab::About;
+    app.ui.settings_tab = super::SettingsTab::Advanced;
     let ctx = egui::Context::default();
     let text = app_frame(&ctx, &mut app);
     assert!(text.contains("macOS notifications are off"), "{text}");

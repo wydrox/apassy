@@ -831,13 +831,13 @@ fn shortcuts_switch_places_open_settings_go_back_and_lock() {
     assert!(app.owner_ui.session.is_locked(), "⌘L locks");
 }
 
-/// Tab through Settings > Agents, which is longer than the window: the page scrolls, so
-/// each focused control is on screen. Page Down scrolls Settings > About without a focus.
+/// Tab through Settings > Advanced, which is longer than the window: the page scrolls,
+/// so each focused control is on screen. Page Down scrolls it without a focus.
 #[test]
 fn the_page_scrolls_to_the_focus_and_with_page_keys() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&dir);
-    super::open_settings(&mut app, super::SettingsTab::Agents);
+    super::open_settings(&mut app, super::SettingsTab::Advanced);
     let mut window = Window::new();
     window.idle(&mut app);
     let screen = Rect::from_min_size(Pos2::ZERO, SIZE);
@@ -864,31 +864,31 @@ fn the_page_scrolls_to_the_focus_and_with_page_keys() {
     let mut fresh = Window::new();
     let second = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&second);
-    super::open_settings(&mut app, super::SettingsTab::About);
+    super::open_settings(&mut app, super::SettingsTab::Advanced);
     fresh.idle(&mut app);
-    let top = text_top(&fresh, "Updates").expect("the top of Settings shows");
+    let top = text_top(&fresh, "Broker and bouncer").expect("the top of Settings shows");
     assert_eq!(
         text_top(&fresh, "Contract"),
         None,
         "the bottom is out of view"
     );
     fresh.press(&mut app, Key::PageDown, Modifiers::NONE);
-    let after = text_top(&fresh, "Updates");
+    let after = text_top(&fresh, "Broker and bouncer");
     assert!(
         after.is_none_or(|after| after < top - SIZE.y / 2.0),
         "Page Down scrolled: {top} -> {after:?}"
     );
     fresh.press(&mut app, Key::PageUp, Modifiers::NONE);
-    let back = text_top(&fresh, "Updates").expect("Page Up came back");
+    let back = text_top(&fresh, "Broker and bouncer").expect("Page Up came back");
     assert!((back - top).abs() < 2.0, "{top} -> {back}");
     fresh.press(&mut app, Key::End, Modifiers::NONE);
     assert!(
         text_top(&fresh, "Contract").is_some(),
         "End shows the bottom"
     );
-    assert_eq!(text_top(&fresh, "Updates"), None);
+    assert_eq!(text_top(&fresh, "Broker and bouncer"), None);
     fresh.press(&mut app, Key::Home, Modifiers::NONE);
-    let home = text_top(&fresh, "Updates").expect("Home scrolled back up");
+    let home = text_top(&fresh, "Broker and bouncer").expect("Home scrolled back up");
     assert!((home - top).abs() < 2.0, "{top} -> {home}");
 }
 

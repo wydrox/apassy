@@ -1,11 +1,16 @@
-//! Settings in five tabs: General (vaults, sync, import), Security (passphrase,
-//! backup), Agents (token lifetime, broker, command line), Notifications (macOS, the
-//! iPhone companion), and About (updates in `updates.rs`, shortcuts). Each change that
-//! is rare or risky opens a sheet.
+//! Settings in four tabs (ADR 0026 §3), as the toolbar of a macOS settings window:
+//! General (the vaults, import, and the browser extension), Devices (each device that
+//! gets the questions, ADR 0025 §3e: this Mac, the other Macs through sync, the iPhones,
+//! and the relay), Security (unlock, the passphrase, and backup), and Advanced (the
+//! bouncer, calibration and learning, the command line, updates, and the keyboard
+//! shortcuts). Each change that is rare or risky opens a sheet.
+//!
+//! Settings of single agents are gone (ADR 0025 §3f): the agent screen shows, it does
+//! not configure.
 
 use std::path::PathBuf;
 
-use eframe::egui;
+use eframe::egui::{self, Pos2, Rect, Sense, Stroke, Vec2, WidgetInfo, WidgetType};
 
 use super::kit::{self, Font, Icon, Style, Tone};
 use super::{
@@ -17,35 +22,51 @@ use crate::broker::model_server::{
     ServerState, StartMode, Status, UV_MISSING, shell_word,
 };
 use crate::desktop::notify::{self, Delivery};
-use crate::desktop::owner_check::OwnerRequest;
 use crate::desktop::owner_store::Ephemeral;
 use crate::desktop::unlock::UnlockMethod;
 use crate::desktop::{BrokerState, DesktopApp};
-use crate::vault::DEFAULT_TOKEN_LIFETIME_DAYS;
 
-/// The tab of the Settings view. Each tab shows a few related sections.
+#[cfg(test)]
+#[path = "settings_tests.rs"]
+mod tests;
+
+/// The tab of the Settings window.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub(crate) enum SettingsTab {
-    /// Vaults, sync, and import.
+    /// The vaults, import, and the browser extension.
     #[default]
     General,
-    /// The passphrase, the unlock method, and backups.
+    /// This Mac, the other Macs, the iPhones, and the relay.
+    Devices,
+    /// Unlock, the passphrase, and backups.
     Security,
-    /// The token lifetime, the broker, and the command line.
-    Agents,
-    /// macOS notifications and the iPhone companion.
-    Notifications,
-    /// Updates, keyboard shortcuts, and the contract version.
-    About,
+    /// The bouncer, calibration and learning, the command line, updates, and the
+    /// keyboard shortcuts.
+    Advanced,
 }
 
-const TABS: [(SettingsTab, &str); 5] = [
-    (SettingsTab::General, "General"),
-    (SettingsTab::Security, "Security"),
-    (SettingsTab::Agents, "Agents"),
-    (SettingsTab::Notifications, "Notifications"),
-    (SettingsTab::About, "About"),
-];
+/// The old Notifications tab, for the Activity view that still opens it ("Open
+/// Settings" when macOS notifications are off). Its sections are in Devices now. Remove
+/// with the Activity view (ADR 0026 §2).
+#[allow(non_upper_case_globals)]
+impl SettingsTab {
+    pub(crate) const Notifications: Self = Self::Devices;
+}
+
+impl SettingsTab {
+    /// The tabs in the order of the toolbar.
+    pub(crate) const ALL: [Self; 4] =
+        [Self::General, Self::Devices, Self::Security, Self::Advanced];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Devices => "Devices",
+            Self::Security => "Security",
+            Self::Advanced => "Advanced",
+        }
+    }
+}
 
 /// Show Settings with the given tab.
 pub(crate) fn open(app: &mut DesktopApp, tab: SettingsTab) {
@@ -53,14 +74,94 @@ pub(crate) fn open(app: &mut DesktopApp, tab: SettingsTab) {
     app.ui.settings_tab = tab;
 }
 
+/// One tab of the toolbar: an icon above its label.
+const TAB_SIZE: Vec2 = Vec2::new(80.0, 50.0);
+const TAB_GAP: f32 = 4.0;
+/// The width of the four tabs, for the minimum size of the window.
+pub(super) const TAB_BAR_WIDTH: f32 = 4.0 * TAB_SIZE.x + 3.0 * TAB_GAP;
+
+/// The toolbar of the Settings window: the four tabs, centered. The selected tab has a
+/// gray fill and the accent color.
+pub(super) fn tab_bar(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = TAB_GAP;
+        ui.add_space(((ui.available_width() - TAB_BAR_WIDTH) / 2.0).max(0.0));
+        for tab in SettingsTab::ALL {
+            if tab_button(ui, tab, app.ui.settings_tab == tab).clicked() {
+                app.ui.settings_tab = tab;
+            }
+        }
+    });
+}
+
+fn tab_button(ui: &mut egui::Ui, tab: SettingsTab, selected: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(TAB_SIZE, Sense::click());
+    let enabled = ui.is_enabled();
+    response.widget_info(|| {
+        WidgetInfo::selected(WidgetType::SelectableLabel, enabled, selected, tab.label())
+    });
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let painter = ui.painter();
+    if selected {
+        painter.rect_filled(rect, 7, kit::FILL_HOVER);
+    } else if response.hovered() {
+        painter.rect_filled(rect, 7, kit::FILL);
+    }
+    let color = if selected {
+        kit::ACCENT
+    } else {
+        kit::SECONDARY
+    };
+    let icon = Rect::from_center_size(
+        Pos2::new(rect.center().x, rect.top() + 18.0),
+        Vec2::splat(22.0),
+    );
+    paint_tab_icon(painter, icon, tab, color);
+    let label = kit::galley(ui, kit::text(tab.label(), Font::Footnote));
+    painter.galley(
+        Pos2::new(rect.center().x - label.size().x / 2.0, icon.bottom() + 3.0),
+        label,
+        color,
+    );
+    if response.has_focus() {
+        kit::focus_ring(painter, rect, 7);
+    }
+    response
+}
+
+/// The icon of a tab: a gear, a laptop, a lock, and sliders, as in the mockup.
+fn paint_tab_icon(painter: &egui::Painter, rect: Rect, tab: SettingsTab, color: egui::Color32) {
+    let size = rect.width();
+    let p = |x: f32, y: f32| rect.min + Vec2::new(x * size, y * size);
+    let stroke = Stroke::new((size / 11.0).clamp(1.0, 2.6), color);
+    match tab {
+        SettingsTab::General => kit::paint_icon(painter, rect, Icon::Gearshape, color),
+        SettingsTab::Security => kit::paint_icon(painter, rect, Icon::Lock, color),
+        SettingsTab::Devices => {
+            painter.rect_stroke(
+                Rect::from_min_max(p(0.18, 0.2), p(0.82, 0.66)),
+                size * 0.08,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+            painter.line_segment([p(0.06, 0.8), p(0.94, 0.8)], stroke);
+        }
+        SettingsTab::Advanced => {
+            let radius = 0.1;
+            for (y, knob) in [(0.24, 0.32), (0.5, 0.66), (0.76, 0.44)] {
+                painter.line_segment([p(0.08, y), p(knob - radius, y)], stroke);
+                painter.line_segment([p(knob + radius, y), p(0.92, y)], stroke);
+                painter.circle_stroke(p(knob, y), radius * size, stroke);
+            }
+        }
+    }
+}
+
+/// The sections of the selected tab. The tab bar is above them, in the window.
 pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    kit::page_header(ui, "Settings", None, |_| {});
-    let mut tab = app.ui.settings_tab;
-    let picker = kit::segmented(ui, "settings-tab", &mut tab, &TABS);
-    ui.ctx()
-        .accesskit_node_builder(picker.id, |node| node.set_label("Settings section"));
-    app.ui.settings_tab = tab;
-    ui.add_space(18.0);
+    let tab = app.ui.settings_tab;
     // Each tab has its own IDs, so the focus of one tab never moves to another.
     ui.push_id(tab, |ui| match tab {
         SettingsTab::General => {
@@ -68,20 +169,20 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
             super::import::section(app, ui);
             super::browser_settings::section(app, ui);
         }
+        SettingsTab::Devices => {
+            devices_section(app, ui);
+            super::sync::settings_section(app, ui);
+            notifications_section(app, ui);
+            super::companion::draw(app, ui);
+        }
         SettingsTab::Security => {
             security_section(app, ui);
             backup_section(app, ui);
         }
-        SettingsTab::Agents => {
-            agents_section(app, ui);
+        SettingsTab::Advanced => {
             broker_section(app, ui);
+            crate::desktop::learning_ui::settings_panel(app, ui);
             command_line_section(app, ui);
-        }
-        SettingsTab::Notifications => {
-            notifications_section(app, ui);
-            super::companion::draw(app, ui);
-        }
-        SettingsTab::About => {
             super::updates::section(app, ui);
             shortcuts_section(ui);
             kit::section(ui, Some("About"), None, |s| {
@@ -95,13 +196,135 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     });
 }
 
+/// The words of the relay row: questions through the relay come with stage 5 of ADR 0025
+/// (stream N3). Until then the switch is off and disabled.
+pub(super) const RELAY_QUESTIONS: &str = "Send questions through the relay";
+const RELAY_QUESTIONS_SOON: &str =
+    "Coming soon. Then a question also reaches an iPhone away from this network.";
+
+/// Settings > Devices: each device that gets the questions of the bouncer (ADR 0025
+/// §3e), the relay, and "Add a Device…". The sync of the vaults, macOS notifications,
+/// and the iPhone companion follow, each in its own section.
+fn devices_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    let others = super::sync::other_macs(app);
+    let iphones = app
+        .owner_ui
+        .session
+        .companion_devices()
+        .map_or(0, |devices| devices.len());
+    let this_mac = match &app.owner.notifications {
+        Some(center) => center.view().channel.summary(),
+        None => "Notifications are not running".to_owned(),
+    };
+    let mut list = None;
+    kit::section(
+        ui,
+        Some("Questions go to every device"),
+        Some(
+            "A run that waits for you shows on this Mac and on each paired iPhone. The first answer counts. Other Macs get the vault through sync.",
+        ),
+        |s| {
+            s.labeled(
+                "This Mac",
+                kit::text(this_mac, Font::Body).color(kit::SECONDARY),
+            );
+            s.row(|ui| {
+                egui::Sides::new().shrink_left().truncate().show(
+                    ui,
+                    |ui| ui.label(kit::text("Other Macs", Font::Body).color(kit::LABEL)),
+                    |ui| {
+                        if let Some(id) = &others.relay
+                            && kit::small_button(ui, "Devices…", Style::Bordered).clicked()
+                        {
+                            list = Some(id.clone());
+                        }
+                        ui.label(kit::text(&others.words, Font::Body).color(kit::SECONDARY));
+                    },
+                );
+            });
+            let phones = match iphones {
+                0 => "None paired".to_owned(),
+                1 => "1 paired".to_owned(),
+                count => format!("{count} paired"),
+            };
+            s.labeled(
+                "iPhones",
+                kit::text(phones, Font::Body).color(kit::SECONDARY),
+            );
+            // Present, but off and disabled until the relay carries the questions.
+            s.row(|ui| {
+                egui::Sides::new()
+                    .shrink_left()
+                    .wrap_mode(egui::TextWrapMode::Wrap)
+                    .show(
+                        ui,
+                        |ui| {
+                            ui.vertical(|ui| {
+                                ui.label(kit::text(RELAY_QUESTIONS, Font::Body).color(kit::LABEL));
+                                kit::note(ui, RELAY_QUESTIONS_SOON);
+                            });
+                        },
+                        |ui| {
+                            ui.add_enabled_ui(false, |ui| {
+                                kit::toggle(ui, &mut false, RELAY_QUESTIONS)
+                            });
+                        },
+                    );
+            });
+        },
+    );
+    let mut add_mac = false;
+    let mut add_iphone = false;
+    ui.horizontal(|ui| {
+        let add = kit::button(ui, "Add a Device…", Style::Bordered);
+        egui::Popup::menu(&add).show(|ui| {
+            ui.set_min_width(200.0);
+            add_mac = ui
+                .add_enabled(
+                    others.relay.is_some(),
+                    egui::Button::selectable(false, "Another Mac…"),
+                )
+                .on_disabled_hover_text(
+                    "First sync this vault through the Apassy relay in Sync below.",
+                )
+                .clicked();
+            add_iphone = ui.selectable_label(false, "iPhone…").clicked();
+        });
+    });
+    ui.add_space(20.0);
+    let ctx = ui.ctx().clone();
+    if let Some(id) = list {
+        app.sync_open_sheet(super::sync::SyncSheet::Devices { id }, Some(&ctx));
+    } else if add_mac && let Some(id) = others.relay {
+        app.sync_open_sheet(super::sync::SyncSheet::AddMac { id }, Some(&ctx));
+    } else if add_iphone {
+        add_an_iphone(app, &ctx);
+    }
+}
+
+/// "Add a Device…" > "iPhone…": the iPhone listener goes on, and the pairing code of
+/// "Pair an iPhone" shows below.
+fn add_an_iphone(app: &mut DesktopApp, ctx: &egui::Context) {
+    let on = app
+        .owner_ui
+        .session
+        .companion_status()
+        .is_ok_and(|(setting, _)| setting.enabled);
+    if !on {
+        app.set_companion_on(true);
+    }
+    if app.companion_controller().is_some() {
+        app.open_pairing(ctx);
+    }
+}
+
 fn security_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let touch_id_for_checks = app.owner.touch_id_note().map_or_else(
         || "Touch ID for owner checks: available.".to_owned(),
         |note| format!("Touch ID for owner checks: {note}"),
     );
     let mut change = false;
-    kit::section(ui, Some("Security"), Some(&touch_id_for_checks), |s| {
+    kit::section(ui, Some("Unlock"), Some(&touch_id_for_checks), |s| {
         let gray = egui::Color32::from_rgb(99, 99, 104);
         change = s
             .nav(
@@ -230,44 +453,6 @@ fn backup_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
 }
 
-/// Token lifetime for every agent (goal item P1).
-fn agents_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    let current = app.owner_ui.session.token_lifetime_days().ok();
-    let footer = format!(
-        "{}A token works for this number of days after Apassy issues it. Then the agent gets token_expired, and you rotate the token. The default is {DEFAULT_TOKEN_LIFETIME_DAYS} days. A change applies to every active token from its issue time.",
-        current.map_or_else(String::new, |days| format!(
-            "Current lifetime: {days} days. "
-        ))
-    );
-    let mut save = false;
-    kit::section(ui, Some("Agents"), Some(&footer), |s| {
-        s.field("Token lifetime", |ui| {
-            let placeholder = current.map_or_else(String::new, |days| days.to_string());
-            let field = kit::number_input(
-                ui,
-                &mut app.owner_ui.token_lifetime_input,
-                "token-lifetime",
-                &placeholder,
-            );
-            ui.label(kit::text("days (1 to 365)", Font::Body).color(kit::SECONDARY));
-            // Return in the field saves, as the button does.
-            save = kit::small_button(ui, "Save", Style::Bordered).clicked()
-                || (field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)));
-            field
-        });
-    });
-    if save {
-        let days = app.owner_ui.token_lifetime_input.clone();
-        match crate::desktop::owner_store::parse_lifetime_days(&days) {
-            Ok(_) => {
-                let ctx = ui.ctx().clone();
-                app.ask_owner(OwnerRequest::SetTokenLifetime { days }, Some(&ctx));
-            }
-            Err(err) => app.set_err(err.message),
-        }
-    }
-}
-
 /// The real notification channel (goal items N1 to N4).
 fn notifications_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     kit::section(
@@ -311,7 +496,7 @@ fn notifications_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     );
                 });
             }
-            // The actions sit at the trailing edge, as "Check now" in Settings > About.
+            // The actions sit at the trailing edge, as "Check now" in Settings > Advanced.
             // The layout runs right to left: the main action comes first, so it is the
             // rightmost button.
             s.row(|ui| {
@@ -364,8 +549,9 @@ fn shortcuts_section(ui: &mut egui::Ui) {
         ),
         |s| {
             for (keys, action) in [
-                ("⌘1 ⌘2 ⌘3 ⌘4", "Credentials, Agents, Activity, Learning"),
+                ("⌘1 ⌘2 ⌘3", "All credentials, Decisions, Agents"),
                 ("⌘,", "Settings"),
+                ("⌘W, Esc", "Close Settings"),
                 ("⌘[", "Back to the list"),
                 ("⌘N", "New credential"),
                 ("⌘F", "Search credentials"),
@@ -395,9 +581,21 @@ fn shortcuts_section(ui: &mut egui::Ui) {
     );
 }
 
+/// "Asked you": how often a run waited for the owner in the last 7 days.
+fn asked_words(asked: u32) -> String {
+    match asked {
+        0 => "Not this week".to_owned(),
+        1 => "1 time this week".to_owned(),
+        count => format!("{count} times this week"),
+    }
+}
+
+/// The broker, the bouncer, and its model server (ADR 0024), with how often the bouncer
+/// asked you this week.
 fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let server = app.model_server.clone();
     let status = server.as_ref().map(|server| server.status());
+    let asked = crate::desktop::learning_ui::asked_this_week(app);
     let mut action = None;
     kit::section(
         ui,
@@ -447,6 +645,12 @@ fn broker_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                             .color(kit::SECONDARY),
                     );
                 }
+            }
+            if let Some(asked) = asked {
+                s.labeled(
+                    "Asked you",
+                    kit::text(asked_words(asked), Font::Callout).color(kit::SECONDARY),
+                );
             }
             if let Some(status) = &status {
                 action = model_server_rows(s, status);

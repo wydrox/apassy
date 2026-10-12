@@ -3,6 +3,10 @@
 //! fine-tune with its gate, the agreement of a candidate model in shadow mode, and the
 //! promotion and rollback of a model.
 //!
+//! ADR 0026 takes the Learning view out of the navigation. Settings > Advanced keeps a
+//! compact panel ([`settings_panel`]): the figures of the week, the calibration, and
+//! the candidate model.
+//!
 //! The view reads the vault and calls the broker learning functions. Nothing here
 //! changes the active policy without an owner action. A training starts only when the
 //! owner clicks "Train a candidate". A promotion and a rollback need the owner check.
@@ -198,6 +202,8 @@ mod vault_view {
     const DAY: u64 = 86_400;
     /// The disclosure key of the calibration and model sections.
     const ADVANCED: &str = "learning-advanced";
+    /// The same disclosure in Settings > Advanced.
+    const SETTINGS_ADVANCED: &str = "settings-learning-advanced";
     /// The disclosure key of the ask rate table.
     const TABLE: &str = "learning-ask-rate-table";
     /// Days in the ask rate table.
@@ -278,7 +284,10 @@ mod vault_view {
         }
     }
 
-    fn load(app: &DesktopApp, now: u64) -> Option<Result<Loaded, String>> {
+    /// Read the learning data. Without `lists`, the automatic decisions, the inspected
+    /// decision, and the names of the agents and the credentials stay empty: the panel
+    /// of Settings does not show them.
+    fn load(app: &DesktopApp, now: u64, lists: bool) -> Option<Result<Loaded, String>> {
         let shared = app.owner_ui.session.shared_vault();
         let guard = shared.lock().unwrap_or_else(PoisonError::into_inner);
         let vault = guard.as_ref().filter(|vault| !vault.is_locked())?;
@@ -286,23 +295,35 @@ mod vault_view {
         let result = (|| {
             Ok(Loaded {
                 days: vault.ask_rate_by_day(since)?,
-                automatic: vault.automatic_decisions(AUTOMATIC_SHOWN)?,
+                automatic: if lists {
+                    vault.automatic_decisions(AUTOMATIC_SHOWN)?
+                } else {
+                    Vec::new()
+                },
                 inspected: match app.learning.inspected {
-                    Some(id) => vault.decision(id)?,
-                    None => None,
+                    Some(id) if lists => vault.decision(id)?,
+                    _ => None,
                 },
                 patterns: vault.patterns()?,
                 calibration: vault.calibration()?,
-                agents: vault
-                    .list_agents()?
-                    .into_iter()
-                    .map(|agent| (agent.id, agent.name))
-                    .collect(),
-                item_names: vault
-                    .search("")?
-                    .into_iter()
-                    .map(|item| (item.id, item.title))
-                    .collect(),
+                agents: if lists {
+                    vault
+                        .list_agents()?
+                        .into_iter()
+                        .map(|agent| (agent.id, agent.name))
+                        .collect()
+                } else {
+                    BTreeMap::new()
+                },
+                item_names: if lists {
+                    vault
+                        .search("")?
+                        .into_iter()
+                        .map(|item| (item.id, item.title))
+                        .collect()
+                } else {
+                    BTreeMap::new()
+                },
                 candidate: match vault.shadow_candidate()? {
                     Some(record) => Some(CandidateView::new(
                         &record,
@@ -322,7 +343,7 @@ mod vault_view {
     pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
         let now = learning::now();
         poll_training(app);
-        let loaded = match load(app, now) {
+        let loaded = match load(app, now, true) {
             None => {
                 kit::note(ui, "Unlock the vault to see learning.");
                 return;
@@ -365,6 +386,103 @@ mod vault_view {
         if let Some(record) = &loaded.inspected {
             draw_inspected(app, ui.ctx(), record, &loaded.item_names);
         }
+    }
+
+    /// Runs that waited for the owner in the last 7 days. `None` while the vault is
+    /// locked or does not answer.
+    pub(crate) fn asked_this_week(app: &DesktopApp) -> Option<u32> {
+        let now = learning::now();
+        let shared = app.owner_ui.session.shared_vault();
+        let guard = shared.lock().unwrap_or_else(PoisonError::into_inner);
+        let vault = guard.as_ref().filter(|vault| !vault.is_locked())?;
+        let days = vault
+            .ask_rate_by_day((now / DAY).saturating_sub(6) * DAY)
+            .ok()?;
+        Some(week(&days, now).asked)
+    }
+
+    /// Settings > Advanced > Calibration and learning (ADR 0026 §2: the Learning view
+    /// leaves the navigation). The figures of the week, then the threshold calibration
+    /// and the candidate model behind a disclosure. The bouncer section above it says
+    /// how often Apassy asked you.
+    pub(crate) fn settings_panel(app: &mut DesktopApp, ui: &mut egui::Ui) {
+        let now = learning::now();
+        poll_training(app);
+        let loaded = match load(app, now, false) {
+            None => return,
+            Some(Err(message)) => {
+                kit::tone_note(ui, message, Tone::Critical);
+                return;
+            }
+            Some(Ok(loaded)) => loaded,
+        };
+        let empty = loaded.is_empty();
+        kit::section(
+            ui,
+            Some("Calibration and learning"),
+            Some(
+                "Apassy learns from your answers. A remembered pattern and a calibrated level act only at the model step. They never change the hard rules or the production rule.",
+            ),
+            |s| {
+                if empty {
+                    s.row(|ui| {
+                        kit::note(
+                            ui,
+                            "Nothing to learn from yet. Learning starts with the runs of your agents.",
+                        );
+                    });
+                    return;
+                }
+                let week = week(&loaded.days, now);
+                s.labeled(
+                    "Ran without you",
+                    kit::text(
+                        format!(
+                            "{} this week · model {} · pattern {}",
+                            week.by_model + week.by_pattern,
+                            week.by_model,
+                            week.by_pattern
+                        ),
+                        Font::Callout,
+                    )
+                    .color(kit::SECONDARY),
+                );
+                let (active, learning) = pattern_counts(&loaded.patterns, now);
+                s.labeled(
+                    "Remembered patterns",
+                    kit::text(
+                        format!("{active} active · {learning} still learning"),
+                        Font::Callout,
+                    )
+                    .color(kit::SECONDARY),
+                );
+            },
+        );
+        if empty {
+            return;
+        }
+        let mut open = app.ui.is_expanded(SETTINGS_ADVANCED);
+        if kit::disclosure(ui, &mut open, "Calibration and models").changed() {
+            app.ui.set_expanded(SETTINGS_ADVANCED, open);
+        }
+        if open {
+            ui.add_space(10.0);
+            draw_calibration(app, ui, loaded.calibration.as_ref(), now);
+            draw_models(app, ui, &loaded);
+        } else {
+            ui.add_space(20.0);
+        }
+    }
+
+    /// The active patterns and the patterns that still learn.
+    fn pattern_counts(patterns: &[PatternRecord], now: u64) -> (usize, usize) {
+        patterns.iter().fold((0, 0), |(active, learning), pattern| {
+            match pattern.state(now) {
+                PatternState::Active => (active + 1, learning),
+                PatternState::Learning { .. } => (active, learning + 1),
+                _ => (active, learning),
+            }
+        })
     }
 
     /// The power source, read again at most every 30 seconds.
@@ -625,19 +743,7 @@ mod vault_view {
                 ),
             )
         };
-        let states: Vec<PatternState> = loaded
-            .patterns
-            .iter()
-            .map(|pattern| pattern.state(now))
-            .collect();
-        let active = states
-            .iter()
-            .filter(|state| matches!(state, PatternState::Active))
-            .count();
-        let learning = states
-            .iter()
-            .filter(|state| matches!(state, PatternState::Learning { .. }))
-            .count();
+        let (active, learning) = pattern_counts(&loaded.patterns, now);
         let gap = 12.0;
         let width = (ui.available_width() - 2.0 * gap) / 3.0;
         ui.horizontal(|ui| {
@@ -1303,7 +1409,10 @@ mod vault_view {
     }
 }
 
-pub(crate) use vault_view::{LearningUiState, apply_calibration, promote_model, roll_back_model};
+pub(crate) use vault_view::{
+    LearningUiState, apply_calibration, asked_this_week, promote_model, roll_back_model,
+    settings_panel,
+};
 
 #[cfg(test)]
 mod tests {
@@ -1432,6 +1541,10 @@ mod tests {
     }
 
     fn draw_view(app: &mut DesktopApp) -> String {
+        draw_with(app, draw)
+    }
+
+    fn draw_with(app: &mut DesktopApp, view: fn(&mut DesktopApp, &mut egui::Ui)) -> String {
         let ctx = egui::Context::default();
         let mut text = String::new();
         for _ in 0..2 {
@@ -1442,7 +1555,7 @@ mod tests {
                 )),
                 ..Default::default()
             };
-            let output = ctx.run_ui(input, |ui| draw(app, ui));
+            let output = ctx.run_ui(input, |ui| view(app, ui));
             text.clear();
             for clipped in &output.shapes {
                 text_of(&clipped.shape, &mut text);
@@ -1450,6 +1563,97 @@ mod tests {
             output.drop_without_applying_deltas();
         }
         text
+    }
+
+    /// Settings > Advanced: the compact panel shows the figures of the week, and the
+    /// calibration and the models behind its disclosure. `asked_this_week` counts the
+    /// runs that waited for the owner, for the bouncer row.
+    #[test]
+    fn the_settings_panel_shows_the_week_and_the_calibration() {
+        use crate::broker::learning::now;
+        use crate::vault::{DecidedBy, DecisionEntry, LoggedDecision, RequestSource};
+
+        let dir = tempfile::TempDir::new().expect("dir");
+        let pass = "learning-panel-pass";
+        let mut app = DesktopApp::new();
+        app.owner_ui
+            .session
+            .create_file(&dir.path().join("panel.db"), pass)
+            .expect("create");
+        app.owner_ui.session.unlock(pass).expect("unlock");
+        let text = draw_with(&mut app, settings_panel);
+        assert!(text.contains("Calibration and learning"), "{text}");
+        assert!(text.contains("Nothing to learn from yet."), "{text}");
+        assert!(!text.contains("Calibration and models"), "{text}");
+        assert_eq!(asked_this_week(&app), Some(0));
+
+        let entry = |asked: bool, decided_by: DecidedBy| DecisionEntry {
+            at: now(),
+            agent_id: 1,
+            agent_name: "Panel agent".to_owned(),
+            project_dir: "/work/app".to_owned(),
+            cwd_rel: ".".to_owned(),
+            items: vec![1],
+            user_request: String::new(),
+            user_request_source: RequestSource::Host,
+            command: vec!["git".to_owned(), "status".to_owned()],
+            purpose: String::new(),
+            env_names: Vec::new(),
+            declarations: vec![None],
+            rule_flags: Vec::new(),
+            known_safe: true,
+            model_facts: Vec::new(),
+            pattern: String::new(),
+            grant_asks: false,
+            asked,
+            decision: LoggedDecision::Allow,
+            decided_by,
+            remembered: false,
+            policy: String::new(),
+            note: String::new(),
+            instruction: String::new(),
+        };
+        {
+            let shared = app.owner_ui.session.shared_vault();
+            let mut guard = shared.lock().expect("vault");
+            let vault = guard.as_mut().expect("open");
+            vault
+                .record_decision(&entry(false, DecidedBy::Model))
+                .expect("model decision");
+            for _ in 0..2 {
+                vault
+                    .record_decision(&entry(true, DecidedBy::Owner))
+                    .expect("owner decision");
+            }
+        }
+        assert_eq!(asked_this_week(&app), Some(2));
+        let text = draw_with(&mut app, settings_panel);
+        for expected in [
+            "Ran without you",
+            "1 this week · model 1 · pattern 0",
+            "Remembered patterns",
+            "0 active · 0 still learning",
+            "Calibration and models",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
+        assert!(!text.contains("Threshold calibration"), "folded: {text}");
+        app.ui.set_expanded("settings-learning-advanced", true);
+        let text = draw_with(&mut app, settings_panel);
+        for expected in [
+            "Threshold calibration",
+            "Active task_match level: 75% (default).",
+            "Candidate model",
+            "No candidate model.",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
+        // The panel has no lists of the Learning view.
+        assert!(!text.contains("Automatic decisions"), "{text}");
+
+        app.owner_ui.session.lock().expect("lock");
+        assert_eq!(asked_this_week(&app), None);
+        assert!(!draw_with(&mut app, settings_panel).contains("Calibration and learning"));
     }
 
     /// A new vault shows one empty state, not zeros and empty lists.
