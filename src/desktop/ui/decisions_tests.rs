@@ -663,19 +663,32 @@ fn the_agent_page_saves_the_note_and_removes_an_exception_after_the_check() {
         "Exceptions",
         "Never: Guarded key",
         "Remove",
-        "Recent uses",
+        // A new agent sees no credential until it is connected.
+        "No credentials yet",
         "Disconnect CI on GitHub…",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
+    // As in the mockup: no uses list and no token row; "⋯" has Reconnect.
     for absent in [
         "Process access",
         "What it can see",
         "API operations",
         "Give access",
+        "Recent uses",
+        "Reconnect",
+        "Only 0",
     ] {
         assert!(!text.contains(absent), "{absent}: {text}");
     }
+    // A connected agent without "only these items" sees each credential name.
+    app.owner_ui
+        .session
+        .with_vault(|vault| vault.set_agent_sees_all(agent.id, true))
+        .expect("open")
+        .expect("sees all");
+    let (text, _) = frames(&mut app, WIDE, 3);
+    assert!(text.contains("Credential names, never values"), "{text}");
 
     // The note: no owner check.
     app.ui.agents.note = Some((

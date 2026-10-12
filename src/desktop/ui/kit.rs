@@ -1514,8 +1514,11 @@ pub(crate) fn title_bar_button(ui: &mut Ui, icon: Icon, name: &str) -> Response 
 
 /// The width of the full sidebar.
 pub(crate) const SIDEBAR_WIDTH: f32 = 216.0;
-/// The width of the sidebar as a rail of icons.
-pub(crate) const RAIL_WIDTH: f32 = 56.0;
+/// The width of the sidebar as a rail of icons. The traffic lights of macOS take
+/// [`LIGHTS_RIGHT`] points, wider than the 56 points of the mockup, where they are
+/// smaller: the rail keeps them inside, with the margin of the red one at the right, so
+/// they do not run into the list. Its icons center under the yellow light.
+pub(crate) const RAIL_WIDTH: f32 = 78.0;
 /// The width of the list column, and in a window narrower than [`WIDE_LIST_WINDOW`].
 pub(crate) const LIST_WIDTH: f32 = 300.0;
 pub(crate) const LIST_WIDTH_NARROW: f32 = 236.0;

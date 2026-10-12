@@ -151,13 +151,7 @@ pub(super) fn draw_float(app: &mut DesktopApp, ctx: &egui::Context, pending: &Pe
             }
             let rect =
                 Rect::from_min_size(screen.min, Vec2::new(kit::SIDEBAR_WIDTH, screen.height()));
-            let painter = ui.painter();
-            painter.rect_filled(
-                rect.translate(Vec2::new(6.0, 0.0)),
-                0,
-                Color32::from_black_alpha(18),
-            );
-            painter.rect_filled(rect, 0, kit::SIDEBAR);
+            paint_float_frame(ui, outside, rect);
             ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
                 Frame::NONE
                     .inner_margin(Margin {
@@ -188,6 +182,34 @@ pub(super) fn draw_float(app: &mut DesktopApp, ctx: &egui::Context, pending: &Pe
         app.ui.sidebar_float = false;
     }
 }
+
+/// The shadow of the floating sidebar over the window, as in the mockup: a soft shadow
+/// of 40 points to the right (12 points away, black at 18 %), a faint scrim over the
+/// rest of the window, and a hairline at its edge.
+fn paint_float_frame(ui: &egui::Ui, outside: Rect, rect: Rect) {
+    let painter = ui.painter();
+    painter.rect_filled(outside, 0, FLOAT_SCRIM);
+    painter.add(FLOAT_SHADOW.as_shape(rect, 0));
+    painter.rect_filled(rect, 0, kit::SIDEBAR);
+    let width = 1.0 / ui.ctx().pixels_per_point();
+    painter.vline(
+        rect.right() + width / 2.0,
+        rect.y_range(),
+        egui::Stroke::new(width, Color32::from_black_alpha(51)),
+    );
+}
+
+/// The shadow of the floating sidebar (the mockup: `12px 0 40px rgba(0,0,0,.18)`).
+const FLOAT_SHADOW: egui::Shadow = egui::Shadow {
+    offset: [12, 0],
+    blur: 40,
+    spread: 0,
+    color: Color32::from_black_alpha(46),
+};
+
+/// The rest of the window under the floating sidebar: dimmed, so the part of the list
+/// beside the sidebar reads as behind it, and a click there closes the sidebar.
+const FLOAT_SCRIM: Color32 = Color32::from_black_alpha(28);
 
 /// The rows and the footer of the full sidebar.
 fn full_content(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending) {

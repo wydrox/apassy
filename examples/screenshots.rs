@@ -330,6 +330,10 @@ fn seed(home: &Path) {
     let (t3, _) = v.register_agent("T3 Code").expect("agent");
     let (ci, _) = v.register_agent("CI on GitHub").expect("agent");
     let (claude, codex, t3, ci) = (claude.id, codex.id, t3.id, ci.id);
+    // Connected in the app, an agent sees the name of each credential.
+    for agent in [claude, codex, t3, ci] {
+        v.set_agent_sees_all(agent, true).expect("sees all");
+    }
     v.set_agent_note(ci, "CI agent for Acme. Only the Stripe test key.")
         .expect("note");
     std::fs::write(home.join(TOKEN_FILE), token.expose()).expect("token file");

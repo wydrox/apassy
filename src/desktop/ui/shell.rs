@@ -35,16 +35,8 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
         .exact_size(columns.sidebar_width())
         .show_separator_line(false)
         .frame(Frame::NONE.fill(kit::SIDEBAR).inner_margin(Margin {
-            left: if columns.sidebar == SidebarMode::Full {
-                10
-            } else {
-                8
-            },
-            right: if columns.sidebar == SidebarMode::Full {
-                10
-            } else {
-                8
-            },
+            left: side_margin(columns.sidebar),
+            right: side_margin(columns.sidebar),
             top: 0,
             bottom: 10,
         }))
@@ -74,6 +66,13 @@ pub(super) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     if !(app.settings_open && app.ui.settings_sheet && !ctx.embed_viewports()) {
         sheets(app, &ctx);
     }
+}
+
+/// The margin at the sides of the sidebar. On the rail, wide enough for the traffic
+/// lights ([`kit::RAIL_WIDTH`]), it keeps the icon rows 42 points wide, near the 40 of
+/// the mockup.
+fn side_margin(mode: SidebarMode) -> i8 {
+    if mode == SidebarMode::Full { 10 } else { 18 }
 }
 
 /// The hairline at the right edge of a column, inside it.

@@ -43,21 +43,71 @@ pub(crate) struct State {
     pub(super) note: Option<(u64, String)>,
 }
 
-/// The detail column of Agents: the selected agent, or with none, an empty state.
+/// The detail column of Agents: the selected agent, or with none, an empty state. As in
+/// the mockup, the page has no banner of a waiting question: the red count of Decisions
+/// in the sidebar shows it. A ready update and a sync note still show.
 pub(super) fn detail_column(
     app: &mut DesktopApp,
     ui: &mut egui::Ui,
-    pending: &super::shell::Pending,
+    _pending: &super::shell::Pending,
 ) {
-    super::columns::detail_toolbar(ui, |_| {});
     let selected = app.owner_ui.selected_agent;
-    super::columns::detail_body(ui, ("agent", selected), |ui| {
-        super::shell::banners(app, ui, pending);
-        match selected {
-            Some(agent_id) => draw_agent(app, ui, agent_id),
-            None => draw_empty(app, ui),
+    let agent = selected.and_then(|agent_id| {
+        app.owner_ui
+            .session
+            .agents()
+            .ok()
+            .and_then(|agents| agents.into_iter().find(|agent| agent.id == agent_id))
+    });
+    let mut reconnect = false;
+    super::columns::detail_toolbar(ui, |ui| {
+        if let Some(agent) = agent.as_ref().filter(|agent| !agent.revoked) {
+            reconnect = more_menu(ui, agent);
         }
     });
+    if let Some(agent) = agent.as_ref().filter(|_| reconnect) {
+        let ctx = ui.ctx().clone();
+        agent_onboarding::reconnect(app, &ctx, &agent.name);
+    }
+    super::columns::detail_body(ui, ("agent", selected), |ui| {
+        ui.scope(|ui| super::updates::banner(app, ui));
+        ui.scope(|ui| super::sync::banner(app, ui));
+        match agent {
+            Some(agent) => draw_agent(app, ui, &agent),
+            None => {
+                if selected.is_some() {
+                    app.owner_ui.selected_agent = None;
+                }
+                draw_empty(app, ui);
+            }
+        }
+    });
+}
+
+/// "⋯" in the toolbar: the rare actions of an agent, under the date its token ends.
+/// Returns true on "Reconnect with a New Token…".
+fn more_menu(ui: &mut egui::Ui, agent: &AgentSummary) -> bool {
+    let mut reconnect = false;
+    let more = kit::toolbar_button(ui, Some(Icon::More), "", "More actions for this agent");
+    egui::Popup::menu(&more).show(|ui| {
+        ui.set_min_width(200.0);
+        ui.label(kit::text(token_words(agent, now()), Font::Callout).color(kit::SECONDARY));
+        ui.separator();
+        reconnect = ui
+            .selectable_label(false, "Reconnect with a New Token…")
+            .clicked();
+    });
+    reconnect
+}
+
+/// The token line of the "⋯" menu.
+fn token_words(agent: &AgentSummary, now: u64) -> String {
+    let day = short_date(agent.token_expires_at, now);
+    if agent.token_expired_at(now) {
+        format!("Token expired {day}")
+    } else {
+        format!("Token valid until {day}")
+    }
 }
 
 /// No agent is selected. With no connected agent, the empty state has the one main
@@ -359,7 +409,9 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
 }
 
-/// A steady color for the tile of an agent, from its name.
+/// A steady color for the tile of an agent, from its name. The known hosts have the
+/// colors of the mockup: Claude Code orange, Codex green, T3 Code purple, and a GitHub
+/// agent near black.
 pub(super) fn agent_color(name: &str) -> egui::Color32 {
     const COLORS: [egui::Color32; 5] = [
         egui::Color32::from_rgb(217, 119, 87),
@@ -368,6 +420,16 @@ pub(super) fn agent_color(name: &str) -> egui::Color32 {
         egui::Color32::from_rgb(36, 41, 47),
         egui::Color32::from_rgb(0, 122, 255),
     ];
+    let lower = name.to_lowercase();
+    let known = [
+        ("claude", COLORS[0]),
+        ("codex", COLORS[1]),
+        ("t3", COLORS[2]),
+        ("github", COLORS[3]),
+    ];
+    if let Some((_, color)) = known.iter().find(|(word, _)| lower.contains(word)) {
+        return *color;
+    }
     let sum = name
         .bytes()
         .fold(0usize, |sum, byte| sum.wrapping_add(byte as usize));
@@ -383,37 +445,16 @@ fn exception_words(kind: ExceptionKind) -> &'static str {
     }
 }
 
-/// What a use came to, in a few words.
-fn use_words(item_use: &crate::vault::usage::ItemUse) -> &'static str {
-    use crate::vault::usage::{UseDecidedBy, UseOutcome};
-    match (item_use.outcome, item_use.decided_by) {
-        (UseOutcome::Allowed, UseDecidedBy::Owner) => "you allowed it",
-        (UseOutcome::Allowed, UseDecidedBy::Answer) => "allowed by your answer",
-        (UseOutcome::Allowed, _) => "allowed automatically",
-        (UseOutcome::Denied, UseDecidedBy::Owner) => "you denied it",
-        (UseOutcome::Denied, _) => "denied",
-        (UseOutcome::Refused, _) => "refused",
-        (UseOutcome::TimedOut, _) => "no answer in time",
-    }
-}
-
-fn draw_agent(app: &mut DesktopApp, ui: &mut egui::Ui, agent_id: u64) {
-    let Some(agent) = app
-        .owner_ui
-        .session
-        .agents()
-        .ok()
-        .and_then(|agents| agents.into_iter().find(|agent| agent.id == agent_id))
-    else {
-        app.owner_ui.selected_agent = None;
-        return;
-    };
+fn draw_agent(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary) {
+    let agent_id = agent.id;
     let now = now();
+    // The header sits lower than the toolbar, as in the mockup.
+    ui.add_space(12.0);
     ui.horizontal(|ui| {
         kit::tile(
             ui,
             &kit::Tile::letter(agent_color(&agent.name), &agent.name),
-            48.0,
+            56.0,
         );
         ui.add_space(6.0);
         ui.vertical(|ui| {
@@ -421,8 +462,8 @@ fn draw_agent(app: &mut DesktopApp, ui: &mut egui::Ui, agent_id: u64) {
             ui.add(Label::new(kit::text(&agent.name, Font::Title).color(kit::LABEL)).wrap());
             ui.label(
                 kit::text(
-                    format!("{WHERE} · connected {}", date(agent.created_at)),
-                    Font::Callout,
+                    format!("{WHERE} · connected {}", short_date(agent.created_at, now)),
+                    Font::Body,
                 )
                 .color(kit::SECONDARY),
             );
@@ -446,10 +487,19 @@ fn draw_agent(app: &mut DesktopApp, ui: &mut egui::Ui, agent_id: u64) {
             return;
         }
     };
-    let reconnect = stats_group(ui, &agent, &overview, now);
+    // The credentials in the catalog of the agent: `None` when it sees each name.
+    let visible = app
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.visible_items_for_agent(agent_id))
+        .and_then(Result::ok)
+        .map_or_else(
+            || overview.restricted.then_some(0),
+            |visible| visible.map(|items| items.len()),
+        );
+    let reconnect = stats_group(ui, agent, &overview, visible, now);
     note_group(app, ui, agent_id, &overview);
-    exceptions_group(app, ui, &agent, &overview.exceptions);
-    recent_group(ui, &overview, now);
+    exceptions_group(app, ui, agent, &overview.exceptions);
     let mut disconnect = false;
     kit::section(ui, None, None, |s| {
         disconnect = s
@@ -472,11 +522,51 @@ fn draw_agent(app: &mut DesktopApp, ui: &mut egui::Ui, agent_id: u64) {
     }
 }
 
-/// Uses, projects, what the agent sees, and its token. Returns true on "Reconnect…".
+/// What the agent sees, for the "Sees" row. `visible`: the number of credentials of an
+/// agent restricted to its listed ones ("only these items", ADR 0025 §3f), or `None`
+/// for an agent that sees the name of each credential.
+fn sees_words(visible: Option<usize>) -> String {
+    match visible {
+        None => "Credential names, never values".to_owned(),
+        Some(0) => "No credentials yet".to_owned(),
+        Some(count) => format!(
+            "Only {}, never values",
+            super::columns::count_label(count, "credential", "credentials")
+        ),
+    }
+}
+
+/// A day as in the mockup: "Oct 9", with the year when it is not this year.
+fn short_date(unix: u64, now: u64) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let day = date(unix);
+    let parts: Vec<&str> = day.split('-').collect();
+    let [year, month, day_of_month] = parts[..] else {
+        return day;
+    };
+    let (Ok(month), Ok(day_of_month)) = (month.parse::<usize>(), day_of_month.parse::<u32>())
+    else {
+        return day;
+    };
+    let Some(name) = month.checked_sub(1).and_then(|index| MONTHS.get(index)) else {
+        return day;
+    };
+    if date(now).starts_with(year) {
+        format!("{name} {day_of_month}")
+    } else {
+        format!("{name} {day_of_month}, {year}")
+    }
+}
+
+/// Uses, projects, and what the agent sees. An expired token adds its row with
+/// "Reconnect…": the agent cannot work until then. Returns true on "Reconnect…".
 fn stats_group(
     ui: &mut egui::Ui,
     agent: &AgentSummary,
     overview: &AgentOverview,
+    visible: Option<usize>,
     now: u64,
 ) -> bool {
     let mut reconnect = false;
@@ -497,27 +587,13 @@ fn stats_group(
             )
             .color(kit::SECONDARY),
         );
-        let listed = overview
-            .exceptions
-            .iter()
-            .filter(|row| row.exception.kind == ExceptionKind::Only)
-            .count();
         s.labeled(
             "Sees",
-            kit::text(
-                if overview.restricted {
-                    format!(
-                        "Only {}, never values",
-                        super::columns::count_label(listed, "credential", "credentials")
-                    )
-                } else {
-                    "Credential names, never values".to_owned()
-                },
-                Font::Body,
-            )
-            .color(kit::SECONDARY),
+            kit::text(sees_words(visible), Font::Body).color(kit::SECONDARY),
         );
-        let expired = agent.token_expired_at(now);
+        if !agent.token_expired_at(now) {
+            return;
+        }
         s.row(|ui| {
             egui::Sides::new().shrink_left().show(
                 ui,
@@ -525,37 +601,43 @@ fn stats_group(
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 2.0;
                         ui.label(kit::text("Token", Font::Body).color(kit::LABEL));
-                        let (text, tone) = if expired {
-                            (
-                                format!(
-                                    "Expired {}. Reconnect to give it a new one.",
-                                    date(agent.token_expires_at)
-                                ),
-                                Tone::Critical,
-                            )
-                        } else {
-                            (
-                                format!("Valid until {}", date(agent.token_expires_at)),
-                                Tone::Neutral,
-                            )
-                        };
                         ui.add(
-                            Label::new(kit::text(text, Font::Callout).color(tone.text())).wrap(),
+                            Label::new(
+                                kit::text(
+                                    format!(
+                                        "Expired {}. Reconnect to give it a new one.",
+                                        short_date(agent.token_expires_at, now)
+                                    ),
+                                    Font::Callout,
+                                )
+                                .color(Tone::Critical.text()),
+                            )
+                            .wrap(),
                         );
                     });
                 },
                 |ui| {
-                    let style = if expired {
-                        Style::Prominent
-                    } else {
-                        Style::Bordered
-                    };
-                    reconnect = kit::small_button(ui, "Reconnect…", style).clicked();
+                    reconnect = kit::small_button(ui, "Reconnect…", Style::Prominent).clicked();
                 },
             );
         });
     });
     reconnect
+}
+
+/// The title of a group of the agent page, as in the mockup: small, semibold, and
+/// gray, close over its group. A group leaves 20 points under it; the mockup has about
+/// 18 over a title, so the title moves up into that space.
+fn group_label(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(-10.0);
+    ui.horizontal(|ui| {
+        ui.add_space(2.0);
+        ui.label(
+            kit::text(title, Font::Headline)
+                .size(12.0)
+                .color(kit::SECONDARY),
+        );
+    });
 }
 
 /// "Note for the bouncer": a hint, not a limit (ADR 0025 §3f). Saving it needs no check.
@@ -569,31 +651,24 @@ fn note_group(app: &mut DesktopApp, ui: &mut egui::Ui, agent_id: u64, overview: 
         let Some((_, text)) = state.note.as_mut() else {
             return;
         };
-        kit::section(
+        group_label(ui, "Note for the bouncer");
+        kit::text_area(
             ui,
-            Some("Note for the bouncer"),
-            Some(&format!(
-                "The bouncer reads it as a hint, not as a limit. At most {MAX_AGENT_NOTE_BYTES} bytes."
-            )),
-            |s| {
-                s.row(|ui| {
-                    kit::text_area(
-                        ui,
-                        text,
-                        &format!("agent-note-{agent_id}"),
-                        "Optional. For example: CI agent for Acme, only the Stripe test key.",
-                        2,
-                    );
-                });
-                if text.trim() != overview.note.trim() {
-                    s.row(|ui| {
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            save = kit::small_button(ui, "Save Note", Style::Prominent).clicked();
-                        });
-                    });
-                }
-            },
-        );
+            text,
+            &format!("agent-note-{agent_id}"),
+            "Optional. For example: CI agent for Acme, only the Stripe test key.",
+            2,
+        )
+        .on_hover_text(format!(
+            "The bouncer reads it as a hint, not as a limit. At most {MAX_AGENT_NOTE_BYTES} bytes."
+        ));
+        if text.trim() != overview.note.trim() {
+            ui.add_space(6.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                save = kit::small_button(ui, "Save Note", Style::Prominent).clicked();
+            });
+        }
+        ui.add_space(16.0);
     }
     if save {
         save_note(app, agent_id);
@@ -621,7 +696,8 @@ fn exceptions_group(
     exceptions: &[ExceptionRow],
 ) {
     let mut remove = None;
-    kit::section(ui, Some("Exceptions"), None, |s| {
+    group_label(ui, "Exceptions");
+    kit::section(ui, None, None, |s| {
         if exceptions.is_empty() {
             s.row(|ui| {
                 kit::note(ui, "None. Exceptions come from your answers in Decisions.");
@@ -699,40 +775,6 @@ pub(super) fn remove_exception(
         },
         Some(ctx),
     );
-}
-
-/// "Recent uses": what the agent used lately and how each use ended.
-fn recent_group(ui: &mut egui::Ui, overview: &AgentOverview, now: u64) {
-    kit::section(ui, Some("Recent uses"), None, |s| {
-        if overview.recent.is_empty() {
-            s.row(|ui| kit::note(ui, "This agent did not use a credential yet."));
-        }
-        for recent in &overview.recent {
-            let item_use = &recent.item_use;
-            let place = if item_use.project_label.is_empty() {
-                String::new()
-            } else {
-                format!(" in {}", item_use.project_label)
-            };
-            s.row(|ui| {
-                ui.add(
-                    Label::new(
-                        kit::text(format!("{}{place}", recent.item_name), Font::Body)
-                            .color(kit::LABEL),
-                    )
-                    .truncate(),
-                );
-                kit::note(
-                    ui,
-                    format!(
-                        "{} · {}",
-                        use_words(item_use),
-                        kit::relative_time(item_use.at, now)
-                    ),
-                );
-            });
-        }
-    });
 }
 
 // ---- Sheets. ----
@@ -1033,4 +1075,57 @@ pub(super) fn revoke_sheet(
         close_sheet(app, ctx);
     }
     response.escape
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sees_tells_the_whole_catalog_from_a_list_of_credentials() {
+        assert_eq!(sees_words(None), "Credential names, never values");
+        assert_eq!(sees_words(Some(0)), "No credentials yet");
+        assert_eq!(sees_words(Some(1)), "Only 1 credential, never values");
+        assert_eq!(sees_words(Some(3)), "Only 3 credentials, never values");
+    }
+
+    #[test]
+    fn a_short_date_has_the_year_only_for_another_year() {
+        // 2026-10-09 12:00 UTC and 2025-12-31 12:00 UTC.
+        let oct_9 = 1_791_547_200;
+        let new_year_eve = 1_767_182_400;
+        assert_eq!(short_date(oct_9, oct_9 + 86_400), "Oct 9");
+        assert_eq!(short_date(new_year_eve, oct_9), "Dec 31, 2025");
+    }
+
+    #[test]
+    fn the_token_line_tells_valid_from_expired() {
+        let oct_9 = 1_791_547_200;
+        let agent = AgentSummary {
+            id: 1,
+            name: "Claude Code".to_owned(),
+            created_at: 0,
+            revoked: false,
+            token_issued_at: 0,
+            token_expires_at: oct_9,
+        };
+        assert_eq!(token_words(&agent, oct_9 - 60), "Token valid until Oct 9");
+        assert_eq!(token_words(&agent, oct_9 + 60), "Token expired Oct 9");
+    }
+
+    #[test]
+    fn the_known_hosts_have_the_colors_of_the_mockup() {
+        let orange = egui::Color32::from_rgb(217, 119, 87);
+        assert_eq!(agent_color("Claude Code"), orange);
+        assert_eq!(agent_color("claude-code"), orange);
+        assert_eq!(agent_color("Codex"), egui::Color32::from_rgb(16, 163, 127));
+        assert_eq!(
+            agent_color("T3 Code"),
+            egui::Color32::from_rgb(110, 90, 230)
+        );
+        assert_eq!(
+            agent_color("CI on GitHub"),
+            egui::Color32::from_rgb(36, 41, 47)
+        );
+    }
 }

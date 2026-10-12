@@ -1098,10 +1098,13 @@ mod tests {
         assert!(text.contains("This Mac · 0 uses this week"), "{text}");
         app.owner_ui.selected_agent = Some(agent.id);
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
-        let expiry = crate::vault::format_utc(agent.token_expires_at);
-        let day = expiry.split(' ').next().expect("a date");
-        assert!(text.contains(&format!("Valid until {day}")), "{text}");
-        assert!(text.contains("Reconnect…"), "{text}");
+        // A valid token is a rare matter, as in the mockup: its date and "Reconnect
+        // with a New Token…" are in the "⋯" menu of the toolbar
+        // (`agents::tests::the_token_line_tells_valid_from_expired`). An expired token
+        // shows on the page with "Reconnect…".
+        assert!(text.contains("Disconnect Claude Code…"), "{text}");
+        assert!(!text.contains("Valid until"), "{text}");
+        assert!(!text.contains("Reconnect…"), "{text}");
 
         // Settings has no token lifetime (ADR 0025 §3f); the command line sets it.
         open_settings(&mut app, SettingsTab::Advanced);
