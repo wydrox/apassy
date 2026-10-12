@@ -1,6 +1,6 @@
 # iPhone vault core contract v1
 
-Date: 2026-10-07. Passkeys, one-time password rules, and schema 17 (sections 5.8, 5.9, 7, 10, and 11) added 2026-10-09. Questions through the relay (section 5.10) added 2026-10-12. Gate 3 (questions: the row of an iPhone is written by the confirming Mac; removal; schema 19) 2026-10-12.
+Date: 2026-10-07. Passkeys, one-time password rules, and schema 17 (sections 5.8, 5.9, 7, 10, and 11) added 2026-10-09. Questions through the relay (section 5.10) added 2026-10-12. Gate 3 (questions: the row of an iPhone is written by the confirming Mac; removal; schema 19) 2026-10-12. Folders, adding by paste, and the options of a credential (section 5.11, and the new members of `Row` and `Detail`) added 2026-10-12 for the iPhone app v2.
 Status: experimental. This contract supports the iPhone app in [ADR 0023](../adr/0023-iphone-vault.md). The Rust side (`ios/ApassyCore`, crate `apassy-core`) and the Swift side (`ios/ApassyVaultKit`) implement it. A change to this document changes both sides in the same pull request.
 
 Status of the passkey and one-time password work (branch `feat/passkeys-totp`): the sources are in the branch. Integration, signed builds, and native device acceptance are pending. Section 12 lists what is not yet confirmed. Do not read this document as a statement that a release or a device accepted these calls.
@@ -105,7 +105,7 @@ Error codes:
 | `io` | A file operation failed. |
 | `excluded` | `passkey_register`: the vault has a passkey that the website lists in `excluded` (archived items count). |
 | `unsupported_algorithm` | `passkey_register`: the website lists algorithms, and ES256 (-7) is not one of them. |
-| `exists` | A passkey with this ID is in the vault already. `passkey_register` gives it when the login that gets the passkey has one. `passkey_import` counts it and does not raise it (section 5.8). |
+| `exists` | A passkey with this ID is in the vault already. `passkey_register` gives it when the login that gets the passkey has one. `passkey_import` counts it and does not raise it (section 5.8). `folder_create`, `folder_rename`, and `folder_move` give it when a folder in that place has the name, without regard to case (section 5.11). |
 | `bad_key` | The key of a passkey is not a P-256 PKCS #8 key. The core and the Swift wrapper define the code, but `passkey_import` counts a bad key as failed, so no call answers it now. |
 | `internal` | A bug. The message says so. |
 
@@ -175,7 +175,8 @@ Swift refuses unresolved provider conflict versions before publication. It keeps
 {"id": 12, "revision": 3, "title": "GitHub", "kind": "login", "subtitle": "octocat",
  "websites": ["https://github.com"], "tags": ["work"], "archived": false,
  "has_totp": true, "has_passkey": false, "has_password": true, "conflict_of": null,
- "added_at": 1791100000, "changed_at": 1791200000, "used_at": null}
+ "added_at": 1791100000, "changed_at": 1791200000, "used_at": null,
+ "folder": "5b0e…", "provider": "GitHub", "production": false}
 ```
 
 - `kind`: `login`, `api_key`, `ssh_key`, `database`, or `custom`.
@@ -184,9 +185,22 @@ Swift refuses unresolved provider conflict versions before publication. It keeps
 - `conflict_of`: the ID of the item whose conflict copy this is, when a sync kept both versions.
 - `has_totp`: true when the item has a field with the role `totp` (section 7). The list reads the stored value of a field only to see whether it starts with an explicit `otpauth://totp` URI, and only when the label does not already decide. No answer holds the seed.
 - `has_passkey`: true when the item holds a valid passkey (section 5.8). The row never holds a key.
+- `folder`: the UUID of the folder of the item (section 5.11); null at the top level, also when its folder was deleted on another device.
+- `provider`: the label of the provider of the item's declaration (`Stripe`, `GitHub`, `PostgreSQL`), as the Mac picks its provider tile; null without a declaration or a provider. Without it the Mac takes the tile from the service and the title, and the app does the same.
+- `production`: the red dot of the Mac: the declaration says `production` and its environment came from the owner or a signal. An environment from a default or from usage is not marked (the bouncer still treats it as production until the owner answers).
 - `has_password`: true when the item stores a secret field `password` with a non-empty value. It is the same test that `passkey_remove` uses to decide between keeping and deleting the login. The row never holds the value. The Swift `ItemRow` reads `has_password` as optional: a core that does not send it gives `nil`, and the app must then warn that removing a passkey can delete the login. `has_passkey` is `false` when absent.
 
-`Detail` is a `Row` with `"notes": "…"`, `"fields": [Field]`, and, for a login with a passkey, `"passkey": {"rp_id", "user_name", "user_display_name", "credential_id", "user_handle"}` (base64, no key; the member is absent when the item has no passkey). The fields of a passkey (names that start with `passkey_`) are never in `fields`. `Field`:
+`Detail` is a `Row` with `"notes": "…"`, `"fields": [Field]`, and, for a login with a passkey, `"passkey": {"rp_id", "user_name", "user_display_name", "credential_id", "user_handle"}` (base64, no key; the member is absent when the item has no passkey), and these members (section 5.11):
+
+- `folder_path`: the folder names from the top level to the item's folder; `[]` at the top level.
+- `env_name`: the variable that agent processes get (the stored one, or the automatic `APASSY_ITEM_<id>`); null when the item has no secret field to deliver.
+- `always_ask`: "Always ask me": each use by an agent waits for the owner.
+- `environment`: `production`, `staging`, `development`, or `local`; null without a declaration.
+- `environment_source`: `owner`, `signal`, `usage`, or `default`; null without a declaration.
+
+The Swift `ItemRow` and `ItemDetail` read every member of section 5.11 as optional, so an answer of an older core still decodes (the members are then nil).
+
+The fields of a passkey (names that start with `passkey_`) are never in `fields`. `Field`:
 
 ```json
 {"name": "password", "label": "Password", "secret": true, "value": null, "role": "password", "custom": false}
@@ -395,6 +409,48 @@ After an answer the app shows: "Sent. The Mac checks it; if the run does not con
 The app asks for notification permission only when the owner turns notifications on, sends the device token with `push_token_set` at each launch with notifications on, and `push_token_clear` when they are turned off. The notification has the fixed text of relay-questions-v1 section 14.1; opening it shows the questions.
 
 A person who knows the passphrase of the vault (has the vault) can still write `trusted_device` rows. This is the same class of risk as holding the vault ([relay-questions-v1](relay-questions-v1.md) section 18).
+
+### 5.11 Folders, adding by paste, and the options of a credential
+
+Added 2026-10-12 for the iPhone app v2 ([ADR 0026](../adr/0026-simple-app.md) §4, §5, §8; [ADR 0025](../adr/0025-low-friction-access.md) §4). The rules are the Mac's: the folders of the vault (`src/vault/folders.rs`), "New Credential" (`src/desktop/ui/new_credential.rs`, `src/desktop/owner_store/add.rs`), and the options of the credential screen (`src/desktop/ui/items.rs`). Every call needs the unlocked vault (`locked`). Only `folders` is open to the `autofill` role; the others give it `not_allowed`. A core older than this section answers each call with `invalid_input` ("This call is not known.").
+
+Each change goes through the vault in its own transaction, so it syncs as `save` does: the app calls `sync` after the change (section 5.5). Folder rows sync one by one (the later change wins; a deleted folder stays deleted). The folder of a credential, "Always ask me", and the source of the environment sync with the credential.
+
+| Op | Parameters | Result |
+| --- | --- | --- |
+| `folders` **R** | | `{"folders": [Folder]}`, depth first; each level by position, then name. |
+| `folder_create` | `parent` (a folder UUID; null or absent: the top level), `name` | `{"folder": Folder}` with `count` 0. |
+| `folder_rename` | `uuid`, `name` | `{}`. The same name changes nothing. |
+| `folder_move` | `uuid`, `parent` (null or absent: the top level) | `{}`. The folder moves with its subfolders and credentials, after the last subfolder of `parent`. |
+| `folder_delete` | `uuid` | `{"moved": n}`: the count of credentials that moved to the parent folder (the top level when it has none). Its subfolders move there too. No credential is deleted. |
+| `item_folder_set` | `id`, `folder` (null or absent: the top level) | `{}`. Moving changes nothing else (sharing, rules, and history stay); the history gets "Moved to Acme / Billing". |
+| `detect` | `text` | `{"found": [Found]}`. No secret value is in the answer. Nothing found is `[]`. |
+| `add_pasted` | `text`, `folder` (optional), `pick` (optional: indexes of `found`), `titles` (optional: `[{"index": n, "title": "…"}]`) | `{"items": [{"id": 12, "revision": 1, "title": "Stripe live", "summary": "Stripe live · STRIPE_SECRET_KEY · production"}]}` |
+| `item_options_set` | `id`, `always_ask` (optional bool), `environment` (optional: `production`, `staging`, `development`, or `local`) | `{}` |
+
+`Folder`: `{"uuid": "5b0e…", "parent": "…" or null, "name": "Billing", "position": 0, "count": 3}`. `count`: the credentials directly in the folder that are not archived. A parent that another device deleted, or a cycle that two moves on two devices made, reads as the top level.
+
+Folder rules (`Vault::create_folder` and the others): a name is trimmed, has 1 to 64 bytes and no control character, and is unique among its siblings without regard to case (`exists`, "A folder with this name is already there."). Folders nest at most 4 levels. A name that breaks a rule, a folder that would go below level 4, and a move into the folder itself or one of its subfolders are `invalid_input`. A folder or a parent that is not there (another device deleted it) is `not_found`. `item_folder_set` of an item that is not there is `not_found` with the message of an item.
+
+`Found`:
+
+```json
+{"index": 0, "title": "Stripe live", "kind": "api_key", "provider": "Stripe",
+ "env_name": "STRIPE_SECRET_KEY", "hosts": ["api.stripe.com"], "environment": "production",
+ "environment_source": "signal", "risk": "high", "line": null,
+ "summary": "Stripe live · STRIPE_SECRET_KEY · production",
+ "fields": [{"name": "token", "label": "Token", "secret": true, "preview": "sk_live_••••••••"}]}
+```
+
+- The detection is the Mac's (`apassy::vault::detect`): a secret, a `KEY=value` line, a whole `.env` file (one entry for each assignment, with its `line` from 1), a URL with credentials (`postgres://`, `mysql://`, `mongodb://`, `redis://`, `amqp://`), an SSH private key, or an `otpauth://` link. It runs in the core on the iPhone and sends nothing anywhere.
+- `provider` is the label of the provider of the catalog; null for a value without a provider (a Custom item, "Credential"). `kind` is as in `Row`. `environment` and `risk` are the declaration that the detection gives. `environment_source` is `signal` (a strong signal: a value prefix such as `sk_live_`, or an environment word of the variable) or `default` (the most sensitive value). The Mac shows the environment of a row only for `signal`: a red "Production", or "Staging", or "Development" (also for `local`).
+- `summary`: "TITLE · VARIABLE · ENVIRONMENT", without the variable when there is none.
+- The `preview` of a plain field (the user name, the host, and the database of a URL) is its value. The `preview` of a secret field is a mask: the public value prefix of the provider (`sk_live_`, `ghp_`), else the URL scheme (`postgres://`), then `••••••••`. The mask has a fixed length. A plain value that holds a secret value of the same credential is masked too. No title, summary, or field of the answer holds a secret value.
+- `text` has at most 1 MiB (`invalid_input`). The core keeps it in an erasing buffer and drops it after the detection.
+
+`add_pasted` detects `text` again in the core (the app never sends a detected value back) and saves the picked entries in one transaction: all or none (`Vault::add_detected_all`). `pick` names entries by the `index` of `detect` for the same text; when it is absent, every entry. An index that is not there, a repeated index, and an empty `pick` are `invalid_input`; a text with no credential is `invalid_input` with the Mac's note. A title of `titles` replaces the detected title of that entry when it is not empty after trimming (at most 128 bytes), as the title field of each row on the Mac does. The rest is the Mac's: a title that another item has gets " 2", " 3"; a variable that another item uses becomes the automatic name; the declaration, its provider, and the source of each value are saved; the items go to `folder` (`not_found`, "The folder is gone. Select another folder.", when it is not there). The items have no origin: the owner pasted them, as on the Mac (the `item_origin` table records only agents, ADR 0025 §6). `summary` uses the stored title, the stored variable, and the stored environment.
+
+`item_options_set` saves what the owner answered on the credential screen. `always_ask` turns "Always ask me" on or off. `environment` sets the environment of the declaration with the source `owner`; the project, the provider, the other values, and their sources stay. An item without a declaration gets one with this environment and the most sensitive other values, which count as defaults. A declaration event goes to the history. Both members are optional; `always_ask` is applied first. An item that is not there is `not_found` and nothing changes. The core does not check the owner: the app asks for Face ID or the passphrase first when the change makes the bouncer less careful (turning "Always ask me" off, or an environment other than `production`), as the Mac asks for its owner check. Turning "Always ask me" on and choosing `production` need no check.
 
 ## 6. `phone.json`
 
