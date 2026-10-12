@@ -61,26 +61,32 @@ The Secure Enclave keys are compiled out of a simulator build (`#if !targetEnvir
 
 `ApassyCompanion` is a SwiftUI app for iOS 26 (iPhone only) with the Liquid Glass design, and an AutoFill extension. It has no third-party code besides the vault core. Its bundle IDs are `com.wydrox.apassy.companion` and `com.wydrox.apassy.companion.autofill`, and its name on the home screen is Apassy.
 
-### The vault (ADR 0023)
+### The vault (ADR 0023, ADR 0026)
 
 For a personal vault, keep **iCloud Drive** selected on the Mac. On the iPhone, select **iCloud**, then select the matching `.apassy` file in **Files > iCloud Drive > Apassy**. Enter its passphrase. The app keeps an offline local vault and syncs changes in both directions while it is active and unlocked. iCloud does not need the companion QR code or a relay team. A "saved" result confirms the local iCloud file; receipt on another device needs a check on that device.
 
-If file access expires, use the file selection control in Sync settings to select the same vault again. Removing the vault from the iPhone leaves its iCloud file. Unresolved iCloud file conflicts stop publication; the local vault and conflict versions stay intact.
+If file access expires, use "Select the iCloud file again" in Settings > Devices to select the same vault again. Removing the vault from the iPhone leaves its iCloud file. Unresolved iCloud file conflicts stop publication; the local vault and conflict versions stay intact.
+
+The unlocked app has four tabs: **Vault**, **Decisions**, **Agents**, and **Search**. Settings is a sheet (the gear on the Vault and Decisions tabs).
 
 | Part | What it does |
 | --- | --- |
 | Welcome and join | **iCloud** opens the personal vault file from iCloud Drive with its passphrase. **Join a team** uses the relay QR code from "Add a device…" on the Mac. Both offer Face ID unlock. "Only approve agent runs" goes to companion pairing. |
 | Lock | The passphrase, or Face ID when the passphrase is stored behind it. A new Face ID enrollment deletes it, and the screen says so. "Lock after": immediately (the default), 1, 5, 15 minutes, or 1 hour. |
-| Home | Favorites (on this iPhone only), recently changed items, the kinds with counts, the archive, a Watchtower card, and the sync state. |
-| Items and Search | All items A to Z with an index, filters by kind and tag, sorting, and swipe actions (favorite, archive, copy). The search tab searches titles, usernames, tags, and websites. |
-| An item | Each field in the Mac's order and labels. A secret shows as dots: reveal, copy, a one-time code, and large type each need Face ID or the passphrase. A website opens in Safari. Notes, tags, times, history, and a note on a conflict copy. Edit, favorite, archive, delete. |
-| New and edit | A form for each kind (login, API key, SSH key, database, other), custom details, tags, notes, the password generator, and a one-time password from its QR code. A secret left empty keeps its stored value. |
+| Vault tab | The Watchtower card (weak, reused, and old passwords, and conflict copies; "Nothing needs a look" when it is clear), then "All credentials", "Favorites" (only when there are favorites; on this iPhone only), "Archive" (only when something is archived), "Password generator", and the folders, nested, with "New Folder". The sync state shows at the top. "+" opens New Credential. |
+| All credentials | Every credential that is not archived, grouped by folder as on the Mac (A to Z inside), with filters by kind and tag and a sort. |
+| A folder | Its subfolders, then its credentials with provider tiles and a red dot for production. "⋯" or a swipe: new folder, rename, move, delete. Deleting a folder moves its credentials and subfolders to the parent; no credential is deleted. "+" adds a credential to the folder. |
+| New Credential | "+" opens it. Paste text or scan a QR code, then Add. The core detects what the text is (a key, a database URL, an `otpauth://` link, a `.env`), and the sheet shows masked previews only. A `.env` gives one row per line, each with a checkbox and an editable title. You can pick a folder. "Fill in by hand" opens the full editor for a kind. The paste is cleared when the app leaves the foreground, when you cancel, and when the vault locks. |
+| A credential | The header with the provider tile and the environment, then the fields in the Mac's order and labels. A secret shows as dots: reveal, copy, a one-time code, and large type each need Face ID or the passphrase. Then Variable (the name agents get; a tap copies it) and Folder (a tap moves the credential). "Agent use" and "Rules from your answers" show "Available when the Mac is connected". Options: "Always ask me" and Environment. Turning "Always ask me" off, choosing any environment other than production, or setting the first environment needs Face ID or the passphrase first; a stricter change does not. Then notes, tags, times, history, and a note on a conflict copy. Edit, favorite, archive, delete. A website opens in Safari. |
+| Edit | The full form for each kind (login, API key, SSH key, database, other), a Folder row, custom details, tags, notes, the password generator, and a one-time password from its QR code. A secret left empty keeps its stored value. |
 | Generator | Random, memorable (the EFF word list), or a PIN, with the strength. |
-| Watchtower | Weak, reused, and old passwords, and conflict copies. |
-| Settings | Sync (state, "Sync now", devices, the new passphrase of the vault, "Use the relay copy"), removing the vault from this iPhone, another vault, Face ID unlock, lock and clipboard times, AutoFill, the companion, the version, and the licenses. |
+| Decisions tab | See "Decisions" below. |
+| Agents tab | "Available when the Mac is connected". The agents and their exceptions live in the vault of the Mac and do not sync, so the tab shows nothing else. |
+| Search tab | Searches titles, usernames, tags, and websites. Archived credentials show in their own section. |
+| Settings | Four groups. **General**: the vault (name or vault picker, "Add another vault", remove from this iPhone), "Move to another app" (import and export), and AutoFill. **Devices**: sync (service, state, last sync, "Sync now", team devices, "Select the iCloud file again", the new passphrase of the vault, "Use the relay copy"), questions through the relay, the Mac on Wi-Fi, and "Open Decisions". **Security**: "Unlock with Face ID", "Lock after", "Lock now", and "Clear copied secrets after". **Advanced**: the versions of the app and the vault core, and the licenses. |
 | AutoFill | Logins, one-time codes, and passkeys in Safari and apps, after Face ID or the passphrase for each fill or sign-in. New passkeys are saved in a new login or in a login of the website. The QuickType bar shows usernames, hosts, and passkey accounts only. |
-| Passkeys | A login holds at most one passkey (ES256). The item shows its website, account, and the start of its ID. The ordinary screens never show or copy the key: it is not a field, so no reveal, copy, or large type shows it. After Face ID, the system export can move it to another app. A login with a password and a passkey offers "Remove passkey": Face ID, then the login keeps its fields. A login with a passkey and no password offers "Delete login" instead: removing the passkey of such a login deletes the entire item (notes, tags, websites, one-time passwords, custom details, history, and agent access) on this iPhone and, at the next sync, on the other devices. The dialog says this. To keep the data, add a password with Edit first, or archive the login. |
-| Import and export | Apple's credential exchange (iOS 26): Settings > Move to another app exports logins, one-time passwords, and passkeys to an app that the owner picks in the sheet of iOS. To import, start the export in the other app (Passwords, 1Password) and pick Apassy. Both ask for Face ID first; the data goes app to app in memory, never to a file. |
+| Passkeys | A login holds at most one passkey (ES256). The credential shows its website, account, and the start of its ID. The ordinary screens never show or copy the key: it is not a field, so no reveal, copy, or large type shows it. After Face ID, the system export can move it to another app. A login with a password and a passkey offers "Remove passkey": Face ID, then the login keeps its fields. A login with a passkey and no password offers "Delete login" instead: removing the passkey of such a login deletes the entire item (notes, tags, websites, one-time passwords, custom details, history, and agent access) on this iPhone and, at the next sync, on the other devices. The dialog says this. To keep the data, add a password with Edit first, or archive the login. |
+| Import and export | Apple's credential exchange (iOS 26): Settings > General > Move to another app exports logins, one-time passwords, and passkeys to an app that the owner picks in the sheet of iOS. To import, start the export in the other app (Passwords, 1Password) and pick Apassy. Both ask for Face ID first; the data goes app to app in memory, never to a file. |
 
 What the app does with the vault:
 
@@ -88,15 +94,32 @@ What the app does with the vault:
 - It syncs at unlock, after each change, and when the relay has a new version (a long poll while the app is active). It never syncs in the background.
 - A copy stays on this iPhone (no Universal Clipboard) and expires after the time in Settings (60 s by default).
 - It drops a revealed value after 30 s and in the background, and covers its content whenever it is not active.
+- It refuses keyboards of other apps (a third-party keyboard would see a pasted secret or a passphrase). The system keyboard stays.
+- Folders, the paste detection, and the credential options need a core that has the calls of contract section 5.11. With an older core the screens show less (no folders, no Options group) and nothing fails.
 
-### Approvals (ADR 0020)
+### Decisions (ADR 0026, ADR 0020)
 
-The Approvals tab is the companion: Inbox, Activity, and Mac in one screen, with its own pairing on the local network.
+The Decisions tab shows what blocks an agent now. Its badge counts the rows of Waiting.
+
+| Part | What it does |
+| --- | --- |
+| Waiting | The questions through the relay and the runs of the paired Mac on Wi-Fi, in one list, newest first. Each row has the agent, the credential, the project, a red dot for production, and a timer. A run that a question already shows counts once. |
+| Requests | "Available when the Mac is connected". When a Mac is paired: its open access requests, or "No requests". |
+| Suggestions | "Available when the Mac is connected". |
+| Ended | Questions that expired or were answered elsewhere, with who answered. |
+| A question | The sentence, the facts, the command, and why the owner is asked. A fixed bar at the bottom has "Allow ACTION in PROJECT", "Deny", and "Allow Once". A production question shows a red "Allow production: ACTION in PROJECT". Its "⋯" menu holds the stricter answers and the environment of a credential. When the question has ended, the outcome takes the place of the bar. |
+| Face ID | An answer that gives authority asks for Face ID, as the core decides. The stricter answers go without it. A changed Face ID enrollment makes a new answer key; the Mac removes the old device, and the owner connects this iPhone again. |
+| Notification | A notification says only "A question is waiting". Opening one shows the newest waiting question. |
+| "⋯" menu | "Notifications" (when the relay is connected), "Connect this iPhone" (when it is not), and "Mac on Wi-Fi" (pairing, Activity, Mac). |
+
+### Mac on Wi-Fi (ADR 0020)
+
+"Mac on Wi-Fi" in the "⋯" menu of Decisions opens the companion: Inbox, Activity, and Mac in one sheet, with its own pairing on the local network. The runs of the paired Mac also show in Waiting.
 
 | Part | What it does |
 | --- | --- |
 | Pairing flow | A welcome screen, the QR scanner (VisionKit), the 6-digit code that the owner types on the Mac, and the end states: paired, closed by the Mac, expired, and "This link does not work". |
-| Inbox | The runs that wait, then the open access requests, under a floating glass capsule with the state of the connection. A run opens in a sheet with every field and the buttons Deny, Approve, and Approve and remember. |
+| Inbox | The runs that wait, then the open access requests, under a floating glass capsule with the state of the connection. A run opens in a sheet with every field and the buttons Deny, Allow Once, and Allow and Remember. |
 | Activity | The newest 50 entries of the activity log of the Mac. |
 | Mac | The connection, the Mac, this iPhone, "Unpair this iPhone", and "Forget this Mac" when another device answers in place of the Mac. |
 
@@ -104,7 +127,7 @@ What the companion does with what it sees:
 
 - It asks the Mac for the inbox every 2 s while it is active, and stops in the background.
 - It keeps the inbox and the activity in memory only, writes no log of commands, and covers its content with a window of its own whenever it is not active, so the app switcher and a sheet never show a command. The cover waits while the Face ID prompt or the camera permission dialog of the app is up, and it always shows in the background. The polling stops in the background only.
-- The run sheet sends the digest of the run as the owner opened it. When the inbox shows another digest for the same run, the sheet shows the new run and keeps Approve off until the owner confirms that they read it.
+- The run sheet sends the digest of the run as the owner opened it. When the inbox shows another digest for the same run, the sheet shows the new run and keeps the allow buttons off until the owner confirms that they read it.
 - A key that cannot be used again (a changed Face ID enrollment) ends the pairing and shows the pairing flow with the reason. A failed Face ID match does not: the owner can try again.
 - It offers no way to paste the pairing link, and registers no URL scheme: the code is scanned inside the app.
 
@@ -117,8 +140,28 @@ A Simulator build (never a device build) takes these development aids:
 | `-ApassyPreviewVault`, `-ApassyPreviewEmpty`, `-ApassyPreviewUnlocked` | The in-memory vault with synthetic items (passphrase `preview passphrase`), an empty iPhone, or the vault unlocked. |
 | `-ApassyJoinLink <link>`, `-ApassyJoinPassphrase <passphrase>` | A join as if the code had been scanned, and the passphrase step. |
 | `-ApassyUnlockPassphrase <passphrase>` | Unlock once at launch. |
-| `-ApassyOpen <route>` | Open a screen: `items`, `watchtower`, `approvals`, `settings`, `generator`, `search:<text>`, `new:<kind>`, `edit:<id>`, `item:<id>[:reveal|:large]`. |
+| `-ApassyOpen <route>` | Open a screen. The routes are below. |
+| `-ApassyPasteDemo stripe\|env` | Fill New Credential with synthetic values that the preview vault detects: one Stripe key, or a `.env` with three lines. Use it with `-ApassyOpen newcredential`. |
+| `-ApassyPreviewDecisions list\|detail` | With `-ApassyPreviewVault`, give the preview vault synthetic questions. `detail` also opens the newest one, as a notification would. |
 | `-ApassyPairingLink <link>` | The companion pairing, as below. |
+
+The `-ApassyOpen` routes:
+
+| Route | Opens |
+| --- | --- |
+| `vault` | The Vault tab. |
+| `items` or `all` | All credentials. |
+| `watchtower` | Watchtower. |
+| `folder:<uuid or name>` | A folder, with its parents pushed. |
+| `newcredential` | New Credential. |
+| `decisions`, `questions`, or `approvals` | The Decisions tab (`approvals` is the old name). |
+| `agents` | The Agents tab. |
+| `settings` or `settings:general\|devices\|security\|advanced` | Settings, or one of its groups. |
+| `generator` | The password generator. |
+| `search:<text>` | The Search tab with the text. |
+| `new:<kind>` | The editor for a new credential. The kinds are `login`, `api_key`, `ssh_key`, `database`, and `custom`. |
+| `edit:<id>` | The editor for the credential with this id. |
+| `item:<id>[:reveal\|:large\|:options]` | A credential; with its first secret revealed, in large type, or scrolled to Options. |
 
 For a join with the real core, run a Mac on the fake relay of the tests, then launch the Simulator build with the link it prints:
 
@@ -150,7 +193,7 @@ Use a synthetic vault for these checks.
 5. Disconnect the iPhone from the network. Check local unlock and AutoFill. Edit a credential, then reconnect and check both devices.
 6. Edit the same credential differently on both devices before sync. Check the active item and the preserved conflict copy.
 7. Change the passphrase on the Mac. Check the new-passphrase path and Face ID unlock on the iPhone.
-8. Restart the iPhone app. Check that the bookmark still permits sync. Select the file again through Sync settings to check recovery.
+8. Restart the iPhone app. Check that the bookmark still permits sync. Select the file again with "Select the iCloud file again" in Settings > Devices to check recovery.
 9. Remove the test vault from the iPhone. Check that its iCloud file and Mac vault remain.
 
 Local core and adapter tests do not prove iCloud delivery, persistent file access on a physical iPhone, or Face ID behavior. These checks need the updated app on a physical device.
@@ -177,7 +220,7 @@ xcodebuild -project ApassyCompanion.xcodeproj -scheme ApassyCompanion \
   -destination 'generic/platform=iOS' -derivedDataPath /tmp/apassy-dd-app CODE_SIGNING_ALLOWED=NO build
 ```
 
-The tests of the models (the pairing flow, the session with the Mac, and the vault models: unlock and auto-lock, join, item details, the editor, the generator, the owner check, passkeys, and the credential exchange) run on macOS, without a Simulator, against the in-memory vault. They compile the same source files as the app:
+The tests of the models (the pairing flow, the session with the Mac, and the vault models: unlock and auto-lock, join, item details, the editor, the generator, the owner check, passkeys, and the credential exchange; and for v2 the decisions and the questions through the relay, the folder tree and folder changes, the credential options, the New Credential paste, and the older core that lacks the calls of contract section 5.11) run on macOS, without a Simulator, against the in-memory vault. They compile the same source files as the app:
 
 ```
 cd ios/ApassyCompanion/ModelTests
@@ -200,15 +243,15 @@ The Secure Enclave and Face ID exist only on a device, so an approval can only b
 
 1. On the Mac, unlock Apassy and open Settings > iPhone companion. Turn on "Allow the iPhone app on this network". The iPhone and the Mac must be on the same Wi-Fi network or connected through Tailscale. For Tailscale, connect the Mac before you make the QR code. Existing pairings need a new pairing to store this address.
 2. Select "Pair an iPhone". The Mac shows a QR code. It never puts the link on the pasteboard.
-3. On the iPhone, open Apassy. Check the name of the iPhone, then select "Scan the code" and point the camera at the QR code. Approve the Face ID prompt: the approval key signs once, to prove that this iPhone holds it.
+3. On the iPhone, open Apassy and go to Decisions > "⋯" > Mac on Wi-Fi (an iPhone with no vault starts at the pairing flow with "Only approve agent runs"). Check the name of the iPhone, then select "Scan the code" and point the camera at the QR code. Approve the Face ID prompt: the approval key signs once, to prove that this iPhone holds it.
 4. The iPhone shows a 6-digit code such as `348 942`. Type it in Apassy on the Mac and select Pair. The Mac then asks for Touch ID or your passphrase.
-5. The iPhone says "Paired". Select Continue. Runs that wait show in the Inbox.
+5. The iPhone says "Paired". Select Continue. Runs that wait show in the Inbox and in Waiting on the Decisions tab.
 
 A wrong code pairs nothing, and three wrong codes close the window. If the iPhone says "This link does not work", another device may have used the link: select Cancel on the Mac and make a new code.
 
 ### The Simulator
 
-The Simulator has no camera and no Secure Enclave. A Simulator build uses software keys in the keychain, and says "Simulator: keys are not in the Secure Enclave" on the welcome screen and in the Mac tab. It is for development only.
+The Simulator has no camera and no Secure Enclave. A Simulator build uses software keys in the keychain, and says "Simulator: keys are not in the Secure Enclave" on the welcome screen and in the Mac section of Mac on Wi-Fi. It is for development only.
 
 Because the Simulator cannot scan, a Simulator build (never a device build) can start a pairing from a launch argument, as if the code had been scanned:
 
