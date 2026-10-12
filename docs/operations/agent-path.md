@@ -29,7 +29,7 @@ It adds one extra field to each response. The broker must drop that field.
 1. Start `./target/release/apassy`.
 2. Create and unlock a vault.
 3. In Credentials, click "Add" and select "API key". Put `FAKE-ALPHA-TOKEN-7731` in the Token field.
-4. Open the credential. Under "Agent access", click "Connector". Type `http://127.0.0.1:8787` and click "Save". A real service uses `https://HOST`.
+4. Open the credential. Under "Hosts and risk", click "Connector". Type `http://127.0.0.1:8787` and click "Save". A real service uses `https://HOST`.
 5. In Agents, click "Connect agent". Select the host, enter a name, and click "Continue".
 6. For this manual demo, open "Advanced setup" and copy the token. Click "I saved the token". The token works for 30 days. "Token lifetime" in Settings changes this time for all tokens (1 to 365 days). Under "Token and manual setup", "Rotate token…" gives a new token and stops the old token at once. Put the new token in the MCP configuration.
 7. On the page of the agent, under "API operations", turn on `get_sales_summary`.
@@ -139,15 +139,11 @@ The broker checks access again after a pending decision. A changed secret field,
 
 Without setup, an agent can name any credential of its `catalog` in `apassy_run_with_secrets`. The bouncer decides, and it can ask the owner (section 8d, ADR 0025). A process grant is not the authority for a run, and the broker does not read it. The upgrade to schema 18 turned each grant in "Ask me each time", and each grant with a rule or an instruction, into "Always ask for this agent".
 
-Setup in the desktop app, to add a rule for a credential and a folder:
+The desktop app has no access to set up. On the page of a credential, "Hosts and risk" > "Command settings" sets an optional variable name, the secret field of a custom credential with several secret fields, and the delivery; leave the variable name empty for automatic use. "Always ask me" on the page makes each use wait for you. To make one agent stricter, answer a question with "Not for this agent" or "Always ask for this agent" in its "⋯" menu.
 
-1. Select the credential in Agents. A saved environment variable is not required. For a custom credential with several secret fields, select the field under "Command settings". Leave the variable name empty for automatic use.
-2. In Agents, open the agent. Under "Process access", click the credential. Type the project folder.
-3. Under "Decision", select "Ask me each time" or "Bouncer decides". Click "Save".
+The agent must send `user_request`: the user's own words that led to the command. For a decision of the bouncer, each item needs a declaration (ADR 0008). Apassy suggests one when you add the credential. To change it, open the credential, and under "Hosts and risk" click "Declaration". A declaration value that is only a default makes the bouncer ask.
 
-The agent must send `user_request`: the user's own words that led to the command. For a decision of the bouncer, each item needs a declaration (ADR 0008). Apassy suggests one when you add the credential. To change it, open the credential, and under "Agent access" click "Declaration". A declaration value that is only a default makes the bouncer ask.
-
-When an agent calls `apassy_run_with_secrets` in "ask" mode, a banner shows on every view, and the Activity view shows the approval card. "Review" in the banner opens the same card. The card shows the agent, the purpose, the command, the directory, and the variable names. Click "Approve once" or "Deny". The request waits a maximum of 300 seconds. A lock, a backup, a restore, or a stop of the app ends every waiting run with `approval_invalidated`. An approval that the broker did not use before a lock is not valid after the unlock. The agent must send the request again.
+When the bouncer asks you about a call of `apassy_run_with_secrets`, a banner shows on every view, and Decisions shows the question. "Review" in the banner opens it. The question shows the agent, the purpose, the command, the directory, the variable names, and why you are asked. Click "Deny", "Allow Once", or "Allow ACTION in PROJECT". The request waits a maximum of 300 seconds. A lock, a backup, a restore, or a stop of the app ends every waiting run with `approval_invalidated`. An approval that the broker did not use before a lock is not valid after the unlock. The agent must send the request again.
 
 For Claude Code, set `MCP_TOOL_TIMEOUT` to a value higher than 300000, because a run can wait 300 seconds (5 minutes) for your answer. The setup command uses 330000. If the host ends the call first, the agent calls again with the same request: it joins the waiting question (section 8d).
 

@@ -4,6 +4,75 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-12
+
+One version, 0.5.0, for the Mac app, the iPhone app, and the browser extension. Agents need no setup for each credential: a connected agent sees the names of your credentials, and the bouncer decides each use from the first one or asks you ([ADR 0025](docs/adr/0025-low-friction-access.md)). The Mac app has a new window with folders, Decisions, and Agents, you add a credential by pasting it, and the iPhone app follows the same model ([ADR 0026](docs/adr/0026-simple-app.md)).
+
+### Upgrade notes
+
+- Make an encrypted backup first. Then update every Mac and iPhone that shares the vault through a folder, iCloud Drive, or the relay, at the same time.
+- The first unlock migrates the vault from schema 17 to schema 19. Apassy 0.4.1 and older cannot open the upgraded vault or read its copies. A 0.5.0 build still merges a copy of schema 17 or 18 from a device that has not updated yet.
+- The agent settings of 0.4.1 become exceptions, so no agent gets more than before without you ([ADR 0025](docs/adr/0025-low-friction-access.md) §3f):
+  - An agent that did not see all credentials gets the exception "only these items": the credentials of its grants that still work (not expired) and of its connector grants. It does not see the other credentials, and the bouncer treats them as "Not for this agent". Such an agent without grants gets no credential.
+  - A grant in "Ask me each time" becomes "Always ask for this agent". So does a grant with a command prefix, a forbidden word, a run limit, an expiry, or an instruction, a rule that does not read, and an "any folder" grant with the real value.
+  - Any other grant in "Bouncer decides" becomes nothing: the bouncer decides by default now. An agent that saw all credentials gets no "only these items".
+  - Revoked agents and grants of deleted credentials get nothing. Grants, rules, requests, and remembered patterns stay as history. You remove an exception on the page of the agent, after the owner check.
+- A question waits 5 minutes, so the host of an agent needs a longer tool time-out: `MCP_TOOL_TIMEOUT=330000` for Claude Code, `tool_timeout_sec = 330` for Codex. "Connect an Agent" and `apassy setup` write these values. Set them for a host that you connected by hand.
+- Questions through the relay need a relay with team schema 5, which is not deployed yet. With the current relay, Settings > Devices says "The relay does not support questions yet — update the relay.", and each question stays on the Mac that asks and on an iPhone paired on the local network.
+
+### Not done yet
+
+- Shared vaults ([ADR 0026](docs/adr/0026-simple-app.md) §6) are not built. You cannot share a vault yet.
+- The Mac does not send its agents, agent use, rules, requests, and suggestions to the iPhone yet. The Agents tab, "Agent use" and "Rules from your answers" of a credential, and Requests and Suggestions in Decisions on the iPhone show "Available when the Mac is connected".
+- Push notifications on the iPhone are in TestFlight without Time Sensitive delivery.
+- The "Get started" list of a new vault still shows the steps of the old model.
+- Acceptance on physical Macs and iPhones is open.
+
+### Added
+
+- **The bouncer decides from the first use** ([ADR 0025](docs/adr/0025-low-friction-access.md) §3). It reads the agent, the user request, the project (a git repository with all its worktrees, or a folder without git), the kind of action (read, change, deploy, delete or irreversible), the command, the hosts that the secret goes to, the provider and declaration of the credential, and the history. It asks you when the credential has no history in the project, when a secret goes to a host that is not a host of its provider, when a hard rule applies, or when it is not sure.
+- **Decisions** lists what waits for you: Waiting (with the time left of the 5-minute wait), Requests, and Suggestions. A question has Deny, Allow Once, and "Allow ACTION in PROJECT". Apassy remembers that answer for the credential, the project, and the kind of action, for all agents. The "⋯" menu has the stricter answers "Not for this agent", "Always ask for this agent", and "Disconnect the agent". An answer that allows needs Touch ID or the passphrase; a stricter answer does not.
+- You can allow production for one project and one kind of action: "Allow production: ACTION in PROJECT", after the owner check. It covers only a command whose kind a rule identifies, and only the hosts of that run. The credential page lists your answers and allowances, and removes one with one click. A credential that is production only by the careful default asks once in each project and kind of action, with "Development" and "Production" as answers.
+- Each credential page shows its agent use. From that use, Apassy suggests corrections in Decisions > Suggestions, for example "Mark it as production?" or "Limit it to this project?". Until you answer, the bouncer uses the more careful value.
+- The line under the Decisions title and "Asked you" in Settings > Advanced count how often Apassy asked you this week.
+- Agent tools that add credentials, without the agent getting a value ([ADR 0025](docs/adr/0025-low-friction-access.md) §6):
+  - `apassy_capture_credential` saves the output of a command or a file. A fixed list of token commands, such as `gh auth token` or `op read op://…`, runs at once; any other command, and a file outside the project, waits for you.
+  - `apassy_generate_credential` makes a password or a token, and `apassy_save_credential` saves a value that the agent already has.
+  - `apassy_ask_owner_for_credential` opens a request in Decisions > Requests: you paste the credential, and the agent gets the item.
+  - `apassy_update_credential` and `apassy_describe_credential` change only credentials that the agent created. An update keeps the previous value hidden for up to 7 days, and you can restore it.
+  - An agent creates or updates at most 10 credentials and opens at most 5 requests each hour.
+- **Questions through the relay** (Settings > Devices > "Send questions through the relay", off by default, after the owner check). Each waiting question goes end-to-end encrypted to every device of the vault, and the first valid answer counts. The relay sees the routing only. The iPhone gets a push notification without content and answers with Face ID; another Mac answers after Touch ID. A vault in iCloud Drive gets a team for questions only. "Add an iPhone or a Mac…" adds a device with a QR code and safety words. This needs the relay update (see Upgrade notes).
+- **The Mac window** has three columns ([ADR 0026](docs/adr/0026-simple-app.md)): a sidebar with "All credentials", the folders, Decisions with a red count, Agents, the lock state, and Settings; a list; and a detail. ⌃⌘S collapses the sidebar, and ⌘1 to ⌘3 switch places.
+- Folders, nested to any depth. Deleting a folder moves its credentials to the parent folder. Agents see the folder path in their catalog, and the bouncer reads it as context.
+- **New Credential** ("+"): paste a secret, a `KEY=value` line, a `.env` file, a URL with a password, or an `otpauth://` link, then Add. Apassy finds the kind, the provider, the name, the variable, the hosts, and the declaration on this Mac, without sending the value anywhere. A `.env` file gives one row for each line. "More kinds…" opens the full form. `apassy add [--folder PATH]` does the same from a terminal.
+- The credential page shows the provider, the secret, the variable, the host, the folder, the agent use, the rules from your answers, "Always ask me", the environment, and "Hosts and risk". While the environment is only a default, it asks "Is this a development key?".
+- "Connect an Agent" in Agents: pick Claude Code, Codex, T3 Code, or Other, and confirm once. Apassy saves the host settings; for Other it shows the token and the MCP configuration one time. The page of an agent shows its uses, its projects, an optional note for the bouncer, its exceptions, and Disconnect.
+- **The iPhone app** follows the Mac ([ADR 0026](docs/adr/0026-simple-app.md) §8): the tabs Vault, Decisions, Agents, and Search; the Vault with the Watchtower card, "All credentials", "Favorites", "Archive", "Password generator", and nested folders; New Credential by paste or QR code, with the detection on the iPhone and masked previews only; a credential with its variable, folder, "Always ask me", and environment; and the editor with a Folder row.
+- The iPhone Decisions tab shows the relay questions and the runs of the Mac paired on Wi-Fi in one Waiting list, with a fixed bar: "Allow ACTION in PROJECT", Deny, and Allow Once. A production answer is red. An answer that allows needs Face ID.
+
+### Changed
+
+- An agent needs no grant. Connecting it is the only setup. Every agent gets the catalog of credential names without values, with folder paths, less the credentials that its exceptions hide. This replaces "a first use always waits for the owner" of [ADR 0024](docs/adr/0024-access-at-first-use.md).
+- Without a running bouncer, each run and each connector use waits for you. An agent still has at most one waiting question.
+- New credentials of AWS, Google Cloud, GitHub, Stripe, Supabase, and PlanetScale get the real value, because the command-line tools of these providers do not accept a placeholder. Apassy keeps their hosts for the bouncer. Cloudflare keeps the placeholder.
+- Settings is its own window (⌘,) with four tabs: General (vaults, import, browser extension), Devices (this Mac, other Macs, iPhones, sync, notifications, the iPhone companion, the relay), Security (unlock, passphrase, backup), and Advanced (broker and bouncer, calibration and learning, command line, updates, shortcuts).
+- The vault schema is 19 (it was 17). Schema 18 adds folders, the policy of an item, the use log, your answers, exceptions, requests, and suggestions. Schema 19 adds the devices that may answer questions and one relay membership for each team; the relay sync key moves there.
+- On the iPhone, Home, Items, Watchtower, and Approvals become Vault, Decisions, Agents, and Search. Watchtower is a card in Vault. The companion of the Mac on Wi-Fi is "Mac on Wi-Fi" in the "⋯" menu of Decisions. Settings has the groups General, Devices, Security, and Advanced.
+
+### Removed
+
+- From the Mac app: grants, decision modes, the folders of an agent, and the "see all" switch; the process access and access request sheets; and the first-use card, which is a question in Decisions now.
+- The Activity and Learning views. Decisions shows what waits and the counts of the week; the calibration and the candidate model are in Settings > Advanced > Calibration and learning.
+- The "Needs setup" filter and the agent column of the credential list.
+- The token lifetime setting of the app. `apassy agent lifetime` reads and sets it.
+
+### Security
+
+- The bouncer never counts `printenv`, `echo $NAME`, an environment read of `jq` or `yq`, `/proc/PID/environ`, or `heroku config` as a read. An environment read of `jq` or `yq` and `/proc/PID/environ` raise the secret output flag, which always asks you.
+- A database host on the command line that one of the credentials of the run does not know asks you.
+- A `.git` file makes a folder part of a project only with a link back from its repository. A `.git` symlink is never followed.
+- The iPhone app refuses third-party keyboards, which would see a pasted secret or a passphrase.
+
 ## [0.4.1] - 2026-10-12
 
 One version, 0.4.1, for the Mac app, the iPhone app, and the browser extension. Signed and notarized Mac packaging, optimized iPhone packaging, and native Mac passkey registration and sign-in have passed. Newly created Mac passkeys are immediately available to sign in without an AutoFill refresh. Acceptance on a physical iPhone and of the browser extension from the Chrome Web Store is still open ([status and checks](docs/operations/passkeys-and-codes.md#1-status)).
@@ -281,7 +350,9 @@ The alpha. It was not published.
 - Secrets for agent processes with owner approval: the socket never returns a secret value ([ADR 0006](docs/adr/0006-process-secrets.md)).
 - Plain-language rules and a local bouncer on Laya ([ADR 0007](docs/adr/0007-rules-and-local-bouncer.md)).
 
-[Unreleased]: https://github.com/wydrox/apassy/compare/v0.3.6...HEAD
+[Unreleased]: https://github.com/wydrox/apassy/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/wydrox/apassy/releases/tag/v0.5.0
+[0.4.1]: https://github.com/wydrox/apassy/releases/tag/v0.4.1
 [0.3.6]: https://github.com/wydrox/apassy/releases/tag/v0.3.6
 [0.3.5]: https://github.com/wydrox/apassy/releases/tag/v0.3.5
 [0.3.4]: https://github.com/wydrox/apassy/releases/tag/v0.3.4

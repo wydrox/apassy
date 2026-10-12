@@ -50,7 +50,7 @@ The restored vault does not trust the agent authority in the backup. An old or c
 
 1. Unlock the restored vault.
 2. Find the banner "Review after restore" in Credentials. It lists each item that waits for your review. The list marks each such item "Needs review".
-3. Click the name of an item. Examine the declaration, the environment variable, and the connector in the banner "Review after restore". Correct them under "Agent access" if necessary.
+3. Click the name of an item. Examine the declaration, the environment variable, and the connector in the banner "Review after restore". Correct them under "Hosts and risk" if necessary.
 4. Click "Confirm settings". Do this for each item in the list.
 5. In Agents, register each agent again. Put the new token in `APASSY_AGENT_TOKEN` of the MCP configuration of the agent host. The old tokens do not work.
 6. Give process access, grants, and rules again.

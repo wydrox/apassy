@@ -25,7 +25,7 @@ If Laya does not answer in 3 seconds, the bouncer is unavailable. Then every run
 
 ### Install from Apassy
 
-You do not need Terminal for these commands. In Settings > Agents > Broker and bouncer, choose "With Apassy" or "When a run needs it". While the Laya environment is missing, the section shows "Install the model":
+You do not need Terminal for these commands. In Settings > Advanced > Broker and bouncer, choose "With Apassy" or "When a run needs it". While the Laya environment is missing, the section shows "Install the model":
 
 - Apassy runs the same `uv` commands: `uv venv --python 3.12 .venv` (only when `.venv/bin/python` is missing, with `--clear` when `.venv` exists without it), `uv pip install --python .venv/bin/python "laya[serve]==0.3.20"`, and `uv pip install --python .venv/bin/python -r tools/basemodel/requirements.txt`. The requirements come from `Apassy.app/Contents/Resources/tools/basemodel`, or from the repository when Apassy runs from `target/`.
 - The last step, "Downloading the model weights", runs `.venv/bin/python -B tools/basemodel/fetch_weights.py`. It downloads the pinned base weights (about 800 MB) into the Hugging Face cache of the user, so the first start of the server does not wait for them. Weights that are already there are not downloaded again. `-B`, and the scripts themselves, write no `__pycache__` next to the scripts: in `Apassy.app` it would break the code signature.
@@ -40,7 +40,7 @@ You do not need Terminal for these commands. In Settings > Agents > Broker and b
 
 ### Start from Apassy
 
-Settings > Agents > Broker and bouncer > "Start the model" sets how Apassy starts the model server on this Mac:
+Settings > Advanced > Broker and bouncer > "Start the model" sets how Apassy starts the model server on this Mac:
 
 - **With Apassy**: Apassy starts it when the app starts and stops it when the app quits. The vault does not need to be unlocked.
 - **When a run needs it** (the default, [ADR 0024](../adr/0024-access-at-first-use.md)): the first run that needs the model starts it. The run waits up to 25 seconds for the first answer. "Stop after" (10, 30, or 60 minutes without a run, default 30) stops it again. Apassy stops only a server that it started.
@@ -87,16 +87,9 @@ LAYA_HOST=127.0.0.1 LAYA_PORT=8770 tools/basemodel/start.sh
 - Without a checkpoint, it starts the stock `laya-serve` (zero-shot). Each answer then has `laya-rl-agent` in the `model` field.
 - The activity log shows the version after the model answers, for example `task_match 91%, writes 4%. Model: apassy-base-v1+1a2b3c4d`.
 
-## 2. Set a rule
+## 2. Rules
 
-In Agents, open an agent. Under "Process access", click the credential:
-
-1. Type the project folder. Under "Decision", select "Bouncer decides". Click "Save".
-2. Open the sheet again. Open "Rule". Type the permitted command prefixes, one per line, for example `npm test` and `npm run migrate`.
-3. Optional: forbidden words, an expiry in hours, a limit of runs per hour, and your instruction in plain words.
-4. Click "Save rule".
-
-The bouncer decides only if the rule has command prefixes. Without prefixes, every run waits for you.
+Since 0.5.0 there is no rule to set for an agent and a credential ([ADR 0025](../adr/0025-low-friction-access.md)). The broker does not read process grants and their rules; the upgrade turned a grant with a rule into "Always ask for this agent" (section 3.0). To make a credential stricter, turn on "Always ask me" on its page. To make one agent stricter, answer a question with "Not for this agent" or "Always ask for this agent". Your answers ("Allow ACTION in PROJECT") are the rules that the bouncer remembers; the page of the credential lists them under "Rules from your answers".
 
 ## 3. Decision order
 

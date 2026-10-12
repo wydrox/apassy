@@ -10,7 +10,7 @@ The command line never shows a secret value, and never takes one as an argument.
 
 The app contains `apassy`, `apassy-mcp`, `apassy-hook`, and `apassy-sandbox`. It also contains the Seatbelt profile for `apassy-sandbox`.
 
-In Apassy, open Settings > Agents > Command line. Use Install CLI tools to put links in `~/.local/bin`.
+In Apassy, open Settings > Advanced > Command line. Use Install CLI tools to put links in `~/.local/bin`.
 
 You can also install the links from Terminal:
 
@@ -87,7 +87,7 @@ apassy status
 apassy logout                 # or: eval "$(apassy logout)"
 ```
 
-`login` prints `export APASSY_SESSION='apassy_cli_…'` (`set -gx …` in fish). It refuses to print the token on a terminal: use it with `eval`, or add `--raw` for the token only. A session belongs to the open vault. It ends after 30 idle minutes, after 12 hours, at a lock, when another vault opens, after a backup or a passphrase change, and when Apassy quits. Settings > Agents > Command line shows the open sessions and ends them.
+`login` prints `export APASSY_SESSION='apassy_cli_…'` (`set -gx …` in fish). It refuses to print the token on a terminal: use it with `eval`, or add `--raw` for the token only. A session belongs to the open vault. It ends after 30 idle minutes, after 12 hours, at a lock, when another vault opens, after a backup or a passphrase change, and when Apassy quits. Settings > Advanced > Command line shows the open sessions and ends them.
 
 Do not start an agent from a shell that has `APASSY_SESSION`. `apassy-sandbox` removes it from the agent environment; an agent started without the sandbox would inherit it.
 

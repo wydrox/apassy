@@ -49,8 +49,8 @@ flowchart LR
 
 - **The agent never receives the value.** The broker socket never returns a secret. The secret exists only in the environment of the command ([ADR 0006](docs/adr/0006-process-secrets.md)).
 - **Placeholders.** A variable can hold a placeholder that looks like the key. Apassy's proxy puts the real value only into HTTPS requests to the hosts of that credential, and refuses the placeholder anywhere else ([ADR 0011](docs/adr/0011-run-proxy-placeholders.md)).
-- **The bouncer runs on your Mac.** 64 rule packs and the `apassy-base-v1` model check every command. A production credential always waits for you ([bouncer](docs/operations/bouncer.md)).
-- **It learns.** "Approve and remember" turns a routine command into a pattern, and the Learning view shows how often you are asked ([learning](docs/operations/learning.md)).
+- **The bouncer runs on your Mac.** 64 rule packs and the `apassy-base-v1` model check every command. A production credential waits for you, unless you allowed production for that project and kind of action ([bouncer](docs/operations/bouncer.md), [ADR 0025](docs/adr/0025-low-friction-access.md)).
+- **It learns.** "Approve and remember" turns a routine command into a pattern, and the line under Decisions shows how often you were asked this week ([learning](docs/operations/learning.md)).
 - **Agents run in a sandbox.** `apassy-sandbox` starts Claude Code and Codex in a Seatbelt profile that denies the vaults, the backups, the model, and the app ([isolation](docs/operations/isolation.md)).
 - **Several vaults, synced if you want it.** Keep personal and client credentials apart: each vault has its own passphrase, agents, and rules, and one is open at a time. A vault can sync between your Macs through iCloud Drive, Dropbox, Google Drive, OneDrive, or Syncthing, and changes merge one credential at a time ([several vaults](docs/operations/multiple-vaults.md), [sync](docs/operations/sync.md)).
 - **Fill logins in your browser.** The Apassy extension for Chromium browsers fills a login on its website after Touch ID, for each fill. Agents never get the password ([browser](docs/operations/browser.md)).
@@ -107,8 +107,8 @@ cargo test --locked --features desktop,vault      # the test suite
 
 ## Connect an agent
 
-1. Open Apassy, create a vault, and add a credential. In **Agents**, click **Register** for Claude Code or Codex. Apassy shows the agent token once.
-2. Add the MCP server to the host:
+1. Open Apassy, create a vault, click **+**, and paste a credential (a key, a `.env` file, or a database URL), then **Add**. In **Agents**, click **+** (**Connect an Agent**), pick Claude Code, Codex, or T3 Code, and confirm once. Apassy saves the host settings.
+2. For another host, pick **Other**: Apassy shows the agent token once. Add the MCP server to the host:
 
    ```json
    {
@@ -121,8 +121,8 @@ cargo test --locked --features desktop,vault      # the test suite
    }
    ```
 
-   Do not commit a file with a token. For Claude Code, set `MCP_TOOL_TIMEOUT` higher than `120000`. The agent can then call `apassy_list_access` and `apassy_use_credential`.
-3. Open the agent in Apassy and give it process access to a credential for a project folder. Start with **Ask me each time**.
+   Do not commit a file with a token. Give the host a tool time-out of at least 330 seconds (for Claude Code, `MCP_TOOL_TIMEOUT=330000`): a question waits up to 5 minutes for you. The agent can then call `apassy_list_access`, `apassy_run_with_secrets`, and `apassy_use_credential`.
+3. There is nothing else to set up. The agent sees the names of your credentials, never their values. The bouncer decides each use, and asks you in **Decisions** when it is not sure ([ADR 0025](docs/adr/0025-low-friction-access.md)).
 4. Recommended: install the prompt hook ([host hooks](docs/operations/host-hooks.md)), and start the host in Apassy's sandbox with its own sandbox off, for example `apassy-sandbox -- codex -c sandbox_mode=danger-full-access` ([isolation](docs/operations/isolation.md), section 3).
 
 The full first-day checklist is [daily use](docs/operations/daily-use.md).
@@ -131,15 +131,15 @@ Or from a terminal: `eval "$(apassy login)"`, then `apassy setup claude --write`
 
 ## Command line
 
-The `apassy` program in the app is also an owner command line. It talks to the running window, so every grant, approval, and new token still asks for Touch ID or the passphrase there. It never shows a secret value and never takes one as an argument ([command line](docs/operations/cli.md), [ADR 0017](docs/adr/0017-owner-command-line.md)).
+The `apassy` program in the app is also an owner command line. It talks to the running window, so every approval and new token still asks for Touch ID or the passphrase there. It never shows a secret value and never takes one as an argument ([command line](docs/operations/cli.md), [ADR 0017](docs/adr/0017-owner-command-line.md)).
 
 ```sh
 ln -s /Applications/Apassy.app/Contents/MacOS/apassy /usr/local/bin/apassy
 eval "$(apassy login)"                           # Touch ID in the window
+apassy add < .env                                # finds the kind, variable, and hosts of each line
 apassy item add "Stripe test" --kind api-key     # asks for the token with the echo off
 apassy import .env --project billing             # or a 1Password or Bitwarden CSV export
 apassy item env "Stripe test" STRIPE_SECRET_KEY
-apassy grant set "Claude Code" "Stripe test" --folder ~/src/billing
 apassy runs approve 41
 apassy doctor
 ```

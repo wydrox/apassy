@@ -370,7 +370,7 @@ Findings:
 
 - `Contents/Helpers/ApassyNotify.app`: the notifier is the main program of its own bundle. Bundle ID and signing ID `com.wydrox.apassy.notify`, display name "Apassy", `LSUIElement`. No entitlements. `native/ApassyNotify/*.swift`, with the shared `Protocol.swift` and `Caller.swift`.
 - The Apassy app starts the notifier as its child, as it starts the keychain helper. Before `notify_authorize` and `notify`, the notifier does the AppKit check-in, and then it gets the notification center (R5, R9).
-- `notify` never asks for permission. Only the "Allow notifications" button asks, with a 120 s prompt. After a denial, Settings > Notifications shows "Open System Settings". It opens `x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=com.wydrox.apassy.notify`. Measured: System Settings opened the Notifications pane (`newSelection: 'com.apple.settings.notifications'`). The agent did not check that the pane selects the Apassy entry.
+- `notify` never asks for permission. Only the "Allow notifications" button asks, with a 120 s prompt. After a denial, Settings > Devices > Notifications shows "Open System Settings". It opens `x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=com.wydrox.apassy.notify`. Measured: System Settings opened the Notifications pane (`newSelection: 'com.apple.settings.notifications'`). The agent did not check that the pane selects the Apassy entry.
 
 ### Guard
 

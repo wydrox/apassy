@@ -11,7 +11,7 @@ This document does not open the real-secret gate.
 - A request that the broker blocks causes a macOS notification "Request blocked".
 - The preview has the agent name and the event type only. It never has the command, the user request, the purpose, or a value (N2).
 - The owner decides in the app. A notification is not an approval. "Mark as seen" in the inbox is not an approval (N4).
-- Activity > Inbox shows the events and the delivery result of each event. Settings > Notifications shows the channel state and its buttons. When macOS cannot show a banner, Activity shows a short notice with a link to Settings.
+- Activity > Inbox shows the events and the delivery result of each event. Settings > Devices > Notifications shows the channel state and its buttons. When macOS cannot show a banner, Activity shows a short notice with a link to Settings.
 
 ## Design
 
@@ -69,10 +69,10 @@ A delivery fails when the notifier answers `notifications_denied`, `notification
 Then:
 
 - the event in the inbox shows "Notification failed: ... The event stays in this inbox.",
-- Settings > Notifications shows the number of failed notifications and the channel state,
+- Settings > Devices > Notifications shows the number of failed notifications and the channel state,
 - nothing changes in the approval queue. The run still waits until the owner decides or the approval time ends.
 
-The channel state comes from `notify_status` at start, from each `notify` answer, and from the "Check again" button in Settings > Notifications. After a `notifications_denied` answer, the sender reads `notify_status` again, so Settings shows the real permission state.
+The channel state comes from `notify_status` at start, from each `notify` answer, and from the "Check again" button in Settings > Devices > Notifications. After a `notifications_denied` answer, the sender reads `notify_status` again, so Settings shows the real permission state.
 
 Permission (measured on macOS 27, [native-app.md](native-app.md#notification-research-n1)):
 

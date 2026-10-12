@@ -1,7 +1,7 @@
 # ADR 0025 — Low-friction access: the bouncer decides, two steps to add, agents add credentials
 
 Date: 2026-10-12.
-Status: PROPOSED. The owner agreed to the direction on 2026-10-12 ("tak"). Not in the code. It changes [ADR 0024](0024-access-at-first-use.md) §1 and [ADR 0012](0012-agent-visibility-and-access-requests.md) §3.
+Status: ACCEPTED. The owner agreed to the direction on 2026-10-12 ("tak"). Shipped in 0.5.0 (stages 1 to 5). Questions through the relay (§3d, §3e) need the relay's team schema 5, which is not deployed yet; until then a question stays on the Mac that asks and on an iPhone paired on the local network. It changes [ADR 0024](0024-access-at-first-use.md) §1 and [ADR 0012](0012-agent-visibility-and-access-requests.md) §3.
 
 ## Context
 

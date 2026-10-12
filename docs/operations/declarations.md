@@ -104,7 +104,7 @@ What the detection reads from an item:
 
 1. The owner adds an item, or saves a change of an item. The app computes the declaration form with `OwnerSession::declaration_form` (`Vault::suggest_declaration`). This runs only in the owner flow, with the vault unlocked. The broker never runs the detection.
 2. The detection reads the field values in the owner process. The values stay in erasing buffers (`Zeroizing`). The suggestion has the provider name, the field values, and the reasons from the data files. It has no secret value.
-3. The Declaration sheet (open a credential, then "Agent access" > "Declaration") shows:
+3. The Declaration sheet (open a credential, then "Hosts and risk" > "Declaration") shows:
    - the provider, with a choice of "None" or a built-in provider, and the known hosts of the chosen provider,
    - each field as a segmented control, filled with the suggested value, or with the most sensitive default when no signal matched,
    - "Apassy suggested VALUE. You changed it." under a field when the owner changed a suggested value, and the reason when signals disagree,
