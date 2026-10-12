@@ -8,7 +8,11 @@
 //! - **Suggestions**: the open corrections from the use log (ADR 0025 §5).
 //!
 //! The line under the title counts the owner interactions and the automatic decisions of
-//! the week (ADR 0025 §1).
+//! the week (ADR 0025 §1). When macOS cannot show a notification, one small line at the
+//! bottom of the list says so, once for the place, not in each detail.
+//!
+//! Each row and each header has the round avatar of the agent ([`kit::avatar`]); a
+//! suggestion has the tile of its credential.
 //!
 //! The detail of a question has its facts, its command, why the owner is asked, and a bar
 //! at the bottom: Deny, Allow Once, and the remembered answer that the question offers
@@ -71,6 +75,10 @@ use crate::vault::agent_items::{
 };
 use crate::vault::detect::{self, Detected};
 
+/// The color of the time left, as in the mockup (#c86a00).
+const TIMER: egui::Color32 = egui::Color32::from_rgb(200, 106, 0);
+/// The fill of the bars at the bottom of a detail, as in the mockup.
+const BAR_FILL: egui::Color32 = egui::Color32::from_rgb(246, 246, 247);
 /// The longest project name in a button. A longer name ends with "…".
 const SHORT_PROJECT: usize = 28;
 /// The longest folder path in the facts.
@@ -475,12 +483,21 @@ fn raised_from(correction: &Correction) -> Option<Environment> {
         .and_then(|text| Environment::parse(text).ok())
 }
 
-/// The question of a suggestion: "Is Stripe key a development credential?" or "Limit
-/// Stripe key to acme-billing?".
-pub(super) fn suggestion_question(correction: &Correction, name: &str) -> String {
+/// The question of a suggestion: "Is OpenAI API a development key?" (a key, as in the
+/// mockup; another kind is a credential) or "Limit Stripe key to acme-billing?".
+pub(super) fn suggestion_question(
+    correction: &Correction,
+    name: &str,
+    kind: CredentialKind,
+) -> String {
+    let noun = match kind {
+        CredentialKind::ApiKey | CredentialKind::SshKey => "key",
+        CredentialKind::Database => "database",
+        CredentialKind::Login | CredentialKind::Custom => "credential",
+    };
     match correction.kind {
         CorrectionKind::Environment => {
-            format!("Is {name} a {} credential?", correction.proposed)
+            format!("Is {name} a {} {noun}?", correction.proposed)
         }
         CorrectionKind::Project => format!("Limit {name} to {}?", correction.proposed),
     }
@@ -562,17 +579,21 @@ pub(super) fn suggestion_needs_check(
         .answer_needs_check(correction.id, settle, chosen)
 }
 
-/// The facts of a correction as rows for the owner, the signal first. Lists are joined,
-/// a provider shows its name, and a folder its short path.
+/// The facts of a correction as rows for the owner, in the order of the mockup: the
+/// uses, the project, where it sends, the provider, then the signal. Lists are joined,
+/// a provider shows its name, and a folder its short path. The bookkeeping of the
+/// correction (whether it applied, the environment before) shows no row: "Before"
+/// names the environment that Ignore gives back.
 pub(super) fn fact_rows(facts: &Value) -> Vec<(String, String)> {
+    use crate::broker::corrections::{APPLIED_FACT, PREVIOUS_ENVIRONMENT_FACT};
     const ORDER: [&str; 8] = [
-        "signal",
-        "provider",
-        "hosts",
         "uses",
         "project_label",
         "project_key",
+        "hosts",
+        "provider",
         "agents",
+        "signal",
         RAISED_FROM_FACT,
     ];
     let Some(map) = facts.as_object() else {
@@ -581,7 +602,10 @@ pub(super) fn fact_rows(facts: &Value) -> Vec<(String, String)> {
             other => vec![("Facts".to_owned(), other.to_string())],
         };
     };
-    let mut keys: Vec<&String> = map.keys().collect();
+    let mut keys: Vec<&String> = map
+        .keys()
+        .filter(|key| *key != APPLIED_FACT && *key != PREVIOUS_ENVIRONMENT_FACT)
+        .collect();
     keys.sort_by_key(|key| {
         (
             ORDER
@@ -601,7 +625,7 @@ fn fact_label(key: &str) -> String {
     match key {
         "signal" => "Seen".to_owned(),
         "provider" => "Provider".to_owned(),
-        "hosts" => "Hosts".to_owned(),
+        "hosts" => "Sends to".to_owned(),
         "uses" => "Uses".to_owned(),
         "project_label" => "Project".to_owned(),
         "project_key" => "Folder".to_owned(),
@@ -628,6 +652,13 @@ fn fact_value(key: &str, value: &Value) -> String {
         ("provider", Value::String(id)) => crate::vault::providers::find(id)
             .map_or_else(|| id.clone(), |provider| provider.label.clone()),
         ("project_key", Value::String(path)) => shown_path(path, SHOWN_PATH),
+        // The use log has no other host for the item (`development_hosts`).
+        ("hosts", Value::Array(values)) if !values.is_empty() => {
+            format!(
+                "only {}",
+                values.iter().map(text).collect::<Vec<_>>().join(", ")
+            )
+        }
         (_, Value::Array(values)) => values.iter().map(text).collect::<Vec<_>>().join(", "),
         (_, value) => text(value),
     }
@@ -792,10 +823,18 @@ fn erase_paste(app: &mut DesktopApp, ctx: &egui::Context) {
 
 // ---- The list column. ----
 
+/// The mark at the left of a row or a header: the round avatar of the agent that asks,
+/// or the tile of the credential of a suggestion.
+#[derive(Clone)]
+enum Mark {
+    Agent(String),
+    Tile(kit::Tile),
+}
+
 /// One row of the list, with its key.
 struct ListRow {
     key: Key,
-    tile: kit::Tile,
+    mark: Mark,
     title: String,
     subtitle: String,
     production: bool,
@@ -811,7 +850,7 @@ fn list_rows(open: Open) -> Vec<Group<ListRow>> {
             let run = &waiting.run;
             ListRow {
                 key: Key::Run(run.id),
-                tile: kit::Tile::letter(super::agents::agent_color(&run.agent), &run.agent),
+                mark: Mark::Agent(run.agent.clone()),
                 title: item_names(run),
                 subtitle: format!("{} · {}", run.agent, project_text(run)),
                 production: production(run),
@@ -822,7 +861,7 @@ fn list_rows(open: Open) -> Vec<Group<ListRow>> {
             let run = remote.run();
             ListRow {
                 key: Key::Remote(remote.question.id),
-                tile: kit::Tile::letter(super::agents::agent_color(&run.agent), &run.agent),
+                mark: Mark::Agent(run.agent.clone()),
                 title: item_names(run),
                 subtitle: remote_subtitle(&remote.question),
                 production: production(run),
@@ -835,10 +874,7 @@ fn list_rows(open: Open) -> Vec<Group<ListRow>> {
         .into_iter()
         .map(|request| ListRow {
             key: Key::Request(request.id),
-            tile: kit::Tile::letter(
-                super::agents::agent_color(&request.agent_name),
-                &request.agent_name,
-            ),
+            mark: Mark::Agent(request.agent_name.clone()),
             subtitle: format!("{} · {}", request.agent_name, request_project(&request)),
             title: request.name,
             production: false,
@@ -850,7 +886,7 @@ fn list_rows(open: Open) -> Vec<Group<ListRow>> {
         .into_iter()
         .map(|(correction, item)| ListRow {
             key: Key::Suggestion(correction.id),
-            tile: super::credential_tile(item.kind, &item.service, &item.name),
+            mark: Mark::Tile(super::credential_tile(item.kind, &item.service, &item.name)),
             title: item.name,
             subtitle: suggestion_subtitle(&correction),
             production: false,
@@ -882,11 +918,18 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[Pe
         .map(|counts| counts.line())
         .unwrap_or_default();
     columns::list_toolbar(ui, "Decisions", &subtitle, |_| {});
+    // The rows come first in the layout, so ⌘2 and Tab reach them before the footer.
+    let notice = notifications_off(app);
+    let area = ui.available_rect_before_wrap();
+    let footer_top = area.bottom() - if notice.is_some() { FOOTER } else { 0.0 };
+    let rows_rect = Rect::from_min_max(area.min, Pos2::new(area.right(), footer_top));
     let groups = list_rows(open);
+    let empty = groups.is_empty();
     let selected = app.ui.decisions.selected;
     let mut chosen = None;
+    let mut rows_ui = ui.new_child(egui::UiBuilder::new().max_rect(rows_rect));
     columns::grouped_rows(
-        ui,
+        &mut rows_ui,
         "decisions-list",
         &groups,
         true,
@@ -896,7 +939,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[Pe
                     decision_row(
                         ui,
                         &DecisionRow {
-                            tile: row.tile.clone(),
+                            mark: &row.mark,
                             title: &row.title,
                             subtitle: &row.subtitle,
                             production: row.production,
@@ -910,10 +953,20 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[Pe
                 chosen = Some(row.key);
             }
         },
-        // With nothing open, the detail says "All clear"; the list stays empty, so the
-        // window shows one message, not two.
-        |_| {},
+        // With nothing open, the list says so, and the detail says "All clear", as in
+        // the mockup.
+        |ui| {
+            if empty {
+                ui.add_space(40.0);
+                columns::list_note(ui, "Nothing needs you");
+            }
+        },
     );
+    if let Some(summary) = notice {
+        let footer = Rect::from_min_max(Pos2::new(area.left(), footer_top), area.max);
+        notifications_footer(app, ui, footer, &summary);
+    }
+    ui.allocate_rect(area, Sense::hover());
     if let Some(key) = chosen {
         app.ui.decisions.selected = Some(key);
         app.ui.decisions.disconnect = None;
@@ -922,7 +975,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[Pe
 
 /// One row of the list.
 struct DecisionRow<'a> {
-    tile: kit::Tile,
+    mark: &'a Mark,
     title: &'a str,
     subtitle: &'a str,
     production: bool,
@@ -962,28 +1015,32 @@ fn decision_row(ui: &mut egui::Ui, row: &DecisionRow<'_>) -> egui::Response {
     if response.has_focus() {
         kit::inner_focus_ring(painter, rect, 8);
     }
+    // An agent has a round avatar of 28 points, a credential a tile of 32, as in the
+    // mockup.
+    let side = match row.mark {
+        Mark::Agent(_) => 28.0,
+        Mark::Tile(_) => 32.0,
+    };
     let tile_rect = Rect::from_min_size(
-        Pos2::new(rect.left() + 8.0, rect.center().y - 16.0),
-        Vec2::splat(32.0),
+        Pos2::new(rect.left() + 8.0, rect.center().y - side / 2.0),
+        Vec2::splat(side),
     );
-    kit::paint_tile(ui, tile_rect, &row.tile);
+    match row.mark {
+        Mark::Agent(name) => kit::paint_avatar(ui, tile_rect, name),
+        Mark::Tile(tile) => kit::paint_tile(ui, tile_rect, tile),
+    }
     let (title_color, sub_color, time_color, dot) = if row.selected {
         let white = egui::Color32::WHITE;
         (white, egui::Color32::from_white_alpha(210), white, white)
     } else {
-        (
-            kit::LABEL,
-            kit::SECONDARY,
-            Tone::Warning.text(),
-            kit::PRODUCTION,
-        )
+        (kit::LABEL, kit::SECONDARY, TIMER, kit::PRODUCTION)
     };
     let galley = |value: egui::RichText, max: f32| {
         WidgetText::from(value).into_galley(ui, Some(TextWrapMode::Truncate), max, TextStyle::Body)
     };
     let mut right = rect.right() - 8.0;
     if let Some(left) = row.left {
-        let time = galley(kit::text(left, Font::Callout).color(time_color), 60.0);
+        let time = galley(timer_text(left, Font::Callout).color(time_color), 60.0);
         right -= time.size().x;
         painter.galley(
             Pos2::new(right, rect.center().y - time.size().y / 2.0),
@@ -1042,7 +1099,6 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[
     columns::detail_toolbar(ui, |_| {});
     columns::detail_body(ui, ("decision", None::<u64>), |ui| {
         super::shell::banners(app, ui, pending);
-        notifications_notice(app, ui);
         let answered = app
             .owner
             .questions
@@ -1102,18 +1158,11 @@ fn question_detail(
 ) {
     let mut answer = None;
     columns::detail_toolbar(ui, |ui| more_menu(ui, &current.run, &mut answer));
-    egui::Panel::bottom(egui::Id::new(("decision-bar", current.run.id)))
-        .resizable(false)
-        .show_separator_line(true)
-        .frame(
-            Frame::NONE
-                .fill(kit::SURFACE)
-                .inner_margin(Margin::symmetric(16, 10)),
-        )
-        .show(ui, |ui| action_bar(ui, &current.run, &mut answer));
-    columns::detail_body(ui, ("decision", Some(current.run.id)), |ui| {
+    bottom_bar(ui, ("decision-bar", current.run.id), |ui| {
+        action_bar(ui, &current.run, &mut answer);
+    });
+    decision_body(ui, ("decision", Some(current.run.id)), |ui| {
         super::shell::banners(app, ui, pending);
-        notifications_notice(app, ui);
         draw_question(app, ui, &current, &mut answer, None);
     });
     if let Some(answer) = answer {
@@ -1144,22 +1193,15 @@ fn remote_detail(
     let run = remote.run().clone();
     let mut answer = None;
     columns::detail_toolbar(ui, |ui| more_menu(ui, &run, &mut answer));
-    egui::Panel::bottom(egui::Id::new(("decision-remote-bar", remote.question.id)))
-        .resizable(false)
-        .show_separator_line(true)
-        .frame(
-            Frame::NONE
-                .fill(kit::SURFACE)
-                .inner_margin(Margin::symmetric(16, 10)),
-        )
-        .show(ui, |ui| action_bar(ui, &run, &mut answer));
+    bottom_bar(ui, ("decision-remote-bar", remote.question.id), |ui| {
+        action_bar(ui, &run, &mut answer);
+    });
     let current = Waiting {
         run,
         left: remote.left,
     };
-    columns::detail_body(ui, ("decision-remote", Some(remote.question.id)), |ui| {
+    decision_body(ui, ("decision-remote", Some(remote.question.id)), |ui| {
         super::shell::banners(app, ui, pending);
-        notifications_notice(app, ui);
         draw_question(app, ui, &current, &mut answer, Some(&remote.question));
     });
     if let Some(answer) = answer {
@@ -1168,27 +1210,243 @@ fn remote_detail(
     disconnect_sheet(app, ui.ctx());
 }
 
-/// A short banner when macOS cannot show a notification. The controls are in Settings.
-fn notifications_notice(app: &mut DesktopApp, ui: &mut egui::Ui) {
-    let Some(center) = &app.owner.notifications else {
-        return;
-    };
-    let view = center.view();
-    if view.channel.can_deliver() {
-        return;
-    }
-    let summary = view.channel.summary();
-    let open = kit::notice(
-        ui,
-        Tone::Warning,
-        "macOS notifications are off",
-        Some(&summary),
-        |ui| kit::small_button(ui, "Open Settings", Style::Link).clicked(),
+/// The height of the footer of the list.
+const FOOTER: f32 = 36.0;
+
+/// Why macOS cannot show a notification, or `None` when it can (or no notifier runs).
+fn notifications_off(app: &DesktopApp) -> Option<String> {
+    let view = app.owner.notifications.as_ref()?.view();
+    (!view.channel.can_deliver()).then(|| view.channel.summary())
+}
+
+/// One small line at the bottom of the list when macOS cannot show a notification:
+/// questions still wait here, so it says so once, not on each decision. The reason is
+/// its tooltip; the controls are in Settings.
+fn notifications_footer(app: &mut DesktopApp, ui: &mut egui::Ui, rect: Rect, summary: &str) {
+    ui.painter().hline(
+        rect.x_range(),
+        rect.top() + 0.5,
+        egui::Stroke::new(1.0, kit::SEPARATOR),
+    );
+    let inner = Rect::from_min_max(
+        Pos2::new(rect.left() + 16.0, rect.top() + 1.0),
+        Pos2::new(rect.right() - 8.0, rect.bottom()),
+    );
+    let mut open = false;
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(Layout::left_to_right(Align::Center)),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            kit::paint_icon_in(ui, Icon::Warning, 12.0, Tone::Warning.mark());
+            ui.add(
+                Label::new(
+                    kit::text("macOS notifications are off", Font::Footnote).color(kit::SECONDARY),
+                )
+                .truncate(),
+            )
+            .on_hover_text(summary);
+            open = kit::small_button(ui, "Open Settings", Style::Link)
+                .on_hover_text(summary)
+                .clicked();
+        },
     );
     if open {
         app.open_settings_window();
         app.ui.settings_tab = super::settings::SettingsTab::Notifications;
     }
+}
+
+/// The time left in the orange of the mockup, at weight 500.
+fn timer_text(value: impl Into<String>, font: Font) -> RichText {
+    kit::text(value, font).variation(b"wght", 500.0)
+}
+
+/// The header of a detail as in the mockup: the mark at 56 points, the title at 20
+/// points bold, and the line under it.
+fn detail_header(ui: &mut egui::Ui, mark: &Mark, title: &str, line: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 14.0;
+        match mark {
+            Mark::Agent(name) => kit::avatar(ui, name, 56.0),
+            Mark::Tile(tile) => kit::tile(ui, tile, 56.0),
+        };
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            // Centered on the mark when the title has one line, as in the mockup.
+            let one_line: f32 = 24.0 + 2.0 + 18.0;
+            let title_rich = kit::text(title, Font::Title).size(20.0).color(kit::LABEL);
+            let lines = kit::galley(ui, title_rich.clone()).size().x > ui.available_width();
+            if !lines {
+                ui.add_space(((56.0 - one_line) / 2.0).max(0.0));
+            }
+            ui.add(Label::new(title_rich).wrap());
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                line(ui);
+            });
+        });
+    });
+    ui.add_space(22.0);
+}
+
+/// The label of a group in a detail: 12 points, semibold, secondary, as in the mockup.
+fn group_label(ui: &mut egui::Ui, label: &str) {
+    // A section leaves 20 points under it; the mockup has 18 above a label and 6 under.
+    ui.add_space(-8.0);
+    ui.horizontal(|ui| {
+        ui.add_space(2.0);
+        ui.label(
+            kit::text(label, Font::Callout)
+                .variation(b"wght", 600.0)
+                .color(kit::SECONDARY),
+        );
+    });
+    ui.add_space(-2.0);
+}
+
+/// The body of a detail: the reading column of the mockup, 584 points wide.
+fn decision_body(
+    ui: &mut egui::Ui,
+    salt: impl std::hash::Hash + std::fmt::Debug,
+    add: impl FnOnce(&mut egui::Ui),
+) {
+    columns::detail_body(ui, salt, |ui| {
+        Frame::NONE
+            .inner_margin(Margin::symmetric(12, 0))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                add(ui);
+            });
+    });
+}
+
+/// The kinds of buttons in the bars at the bottom of a detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Bar {
+    /// White with a hairline border.
+    Plain,
+    /// White with a hairline border and red text: Deny.
+    Deny,
+    /// The main answer, in the accent color.
+    Main,
+    /// The main answer that allows production: red, as on the iPhone.
+    Production,
+}
+
+/// A button of a bar at the bottom of a detail, as in the mockup: 28 points high, 7
+/// round, 14 at each side, the label at weight 500.
+fn bar_button(ui: &mut egui::Ui, label: &str, kind: Bar) -> egui::Response {
+    let galley = kit::galley(ui, kit::text(label, Font::Body).variation(b"wght", 500.0));
+    let size = Vec2::new(galley.size().x + 28.0, 28.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let enabled = ui.is_enabled();
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, label));
+    if response.gained_focus() {
+        response.scroll_to_me(None);
+    }
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let pressed = response.is_pointer_button_down_on();
+    let hovered = response.hovered();
+    let (fill, text, border) = match kind {
+        Bar::Plain | Bar::Deny => (
+            if pressed {
+                kit::FILL_PRESSED
+            } else if hovered {
+                egui::Color32::from_rgb(250, 250, 250)
+            } else {
+                egui::Color32::WHITE
+            },
+            if kind == Bar::Deny {
+                kit::PRODUCTION
+            } else {
+                kit::LABEL
+            },
+            Some(egui::Color32::from_black_alpha(48)),
+        ),
+        Bar::Main => (
+            if pressed || hovered {
+                egui::Color32::from_rgb(0, 94, 224)
+            } else {
+                egui::Color32::from_rgb(10, 108, 255)
+            },
+            egui::Color32::WHITE,
+            None,
+        ),
+        Bar::Production => (
+            if pressed || hovered {
+                egui::Color32::from_rgb(200, 40, 32)
+            } else {
+                kit::PRODUCTION
+            },
+            egui::Color32::WHITE,
+            None,
+        ),
+    };
+    let (fill, text) = if enabled {
+        (fill, text)
+    } else {
+        (fill.gamma_multiply(0.4), text.gamma_multiply(0.6))
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, 7, fill);
+    if let Some(border) = border {
+        painter.rect_stroke(
+            rect,
+            7,
+            egui::Stroke::new(1.0, border),
+            egui::StrokeKind::Inside,
+        );
+    }
+    if response.has_focus() {
+        kit::focus_ring(painter, rect, 7);
+    }
+    painter.galley(rect.center() - galley.size() / 2.0, galley, text);
+    response
+}
+
+/// A bar at the bottom of a detail: a hairline on top, the light fill of the mockup.
+fn bottom_bar(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    add: impl FnOnce(&mut egui::Ui),
+) {
+    egui::Panel::bottom(egui::Id::new(id))
+        .resizable(false)
+        .show_separator_line(true)
+        .frame(
+            Frame::NONE
+                .fill(BAR_FILL)
+                .inner_margin(Margin::symmetric(16, 10)),
+        )
+        .show(ui, add);
+}
+
+/// The caption of a bar: 11.5 points, secondary, left-aligned in the space between the
+/// buttons, on at most two lines.
+fn bar_caption(ui: &mut egui::Ui, caption: &str) {
+    if caption.is_empty() {
+        return;
+    }
+    let width = ui.available_width();
+    ui.allocate_ui_with_layout(
+        Vec2::new(width, 28.0),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.set_max_width(width);
+            ui.add(
+                Label::new(
+                    kit::text(caption, Font::Footnote)
+                        .size(11.5)
+                        .color(kit::SECONDARY),
+                )
+                .wrap(),
+            );
+        },
+    );
 }
 
 /// "⋯": the stricter answers that the question offers (ADR 0025 §3f).
@@ -1245,9 +1503,9 @@ fn action_bar(ui: &mut egui::Ui, run: &PendingRun, answer: &mut Option<Answer>) 
             "Allow is remembered for all agents in {}.",
             short(&project.label)
         ),
-        (Some(Primary::Production(action)), Some(project)) => format!(
-            "Production stays allowed for {} in {} for all agents.",
-            crate::broker::approvals::action_words(action),
+        // The button names the action; the caption stays on two lines next to it.
+        (Some(Primary::Production(_)), Some(project)) => format!(
+            "Production stays allowed for all agents in {}.",
             short(&project.label)
         ),
         (Some(Primary::Correct), _) => unconfirmed(run).map_or_else(String::new, |item| {
@@ -1257,14 +1515,15 @@ fn action_bar(ui: &mut egui::Ui, run: &PendingRun, answer: &mut Option<Answer>) 
     };
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        if kit::button(ui, "Deny", Style::Destructive).clicked() {
+        if bar_button(ui, "Deny", Bar::Deny).clicked() {
             *answer = Some(Answer::Deny);
         }
+        ui.add_space(4.0);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             match (main, &main_label) {
                 (Some(Primary::Correct), Some(label)) => {
                     let item = unconfirmed(run);
-                    if kit::button(ui, label, Style::Prominent).clicked()
+                    if bar_button(ui, label, Bar::Main).clicked()
                         && let Some(item) = item
                     {
                         *answer = Some(Answer::Development {
@@ -1272,7 +1531,7 @@ fn action_bar(ui: &mut egui::Ui, run: &PendingRun, answer: &mut Option<Answer>) 
                             name: item.name.clone(),
                         });
                     }
-                    if kit::button(ui, "Production", Style::Bordered).clicked()
+                    if bar_button(ui, "Production", Bar::Plain).clicked()
                         && let Some(item) = item
                     {
                         *answer = Some(Answer::MarkProduction {
@@ -1280,29 +1539,36 @@ fn action_bar(ui: &mut egui::Ui, run: &PendingRun, answer: &mut Option<Answer>) 
                             name: item.name.clone(),
                         });
                     }
-                    if kit::button(ui, "Allow Once", Style::Bordered).clicked() {
+                    if bar_button(ui, "Allow Once", Bar::Plain).clicked() {
                         *answer = Some(Answer::Once);
                     }
                 }
                 (Some(remembered), Some(label)) => {
-                    if kit::button(ui, label, Style::Prominent).clicked() {
+                    // Production has its own red button, as on the iPhone (ADR 0025 §3b).
+                    let kind = if matches!(remembered, Primary::Production(_)) {
+                        Bar::Production
+                    } else {
+                        Bar::Main
+                    };
+                    if bar_button(ui, label, kind).clicked() {
                         *answer = Some(match remembered {
                             Primary::Production(action) => Answer::Production(action),
                             Primary::InProject(action) => Answer::InProject(action),
                             Primary::Correct => Answer::Once,
                         });
                     }
-                    if kit::button(ui, "Allow Once", Style::Bordered).clicked() {
+                    if bar_button(ui, "Allow Once", Bar::Plain).clicked() {
                         *answer = Some(Answer::Once);
                     }
                 }
                 _ => {
-                    if kit::button(ui, "Allow Once", Style::Prominent).clicked() {
+                    if bar_button(ui, "Allow Once", Bar::Main).clicked() {
                         *answer = Some(Answer::Once);
                     }
                 }
             }
-            ui.add(Label::new(kit::text(caption, Font::Callout).color(kit::SECONDARY)).truncate());
+            ui.add_space(8.0);
+            bar_caption(ui, &caption);
         });
     });
 }
@@ -1356,44 +1622,22 @@ fn draw_question(
 ) {
     let run = &waiting.run;
     let question = &run.question;
-    ui.horizontal(|ui| {
-        kit::tile(
-            ui,
-            &kit::Tile::letter(super::agents::agent_color(&run.agent), &run.agent),
-            48.0,
-        );
-        ui.add_space(6.0);
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
-            ui.add(
-                Label::new(
-                    kit::text(
-                        format!("{} wants to use {}", run.agent, item_names(run)),
-                        Font::Title3,
-                    )
-                    .color(kit::LABEL),
-                )
-                .wrap(),
+    detail_header(
+        ui,
+        &Mark::Agent(run.agent.clone()),
+        &format!("{} wants to use {}", run.agent, item_names(run)),
+        |ui| {
+            ui.label(
+                kit::text(format!("{} · ", project_text(run)), Font::Body).color(kit::SECONDARY),
             );
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                ui.label(
-                    kit::text(format!("{} · ", project_text(run)), Font::Callout)
-                        .color(kit::SECONDARY),
-                );
-                ui.label(
-                    kit::text(
-                        format!("{} left to answer", clock(waiting.left)),
-                        Font::Callout,
-                    )
-                    .color(Tone::Warning.text()),
-                );
-            });
-        });
-    });
+            ui.label(timer_text(clock(waiting.left), Font::Body).color(TIMER));
+            ui.label(kit::text(" left to answer", Font::Body).color(kit::SECONDARY));
+        },
+    );
+    let mut notes = false;
     match remote {
         Some(remote) => {
-            ui.add_space(8.0);
+            notes = true;
             kit::tone_note(
                 ui,
                 format!(
@@ -1408,12 +1652,14 @@ fn draw_question(
         }
         None => {
             if let Some(note) = local_only_note(app, run.id) {
-                ui.add_space(8.0);
+                notes = true;
                 kit::tone_note(ui, &note, Tone::Warning);
             }
         }
     }
-    ui.add_space(16.0);
+    if notes {
+        ui.add_space(12.0);
+    }
     let hosts = command_hosts(&run.command);
     kit::section(ui, None, None, |s| {
         for item in &question.items {
@@ -1433,26 +1679,24 @@ fn draw_question(
             "Project",
             kit::text(project_text(run), Font::Body).color(kit::SECONDARY),
         );
-        s.labeled(
-            "Sends to",
-            kit::text(
-                if hosts.is_empty() {
-                    "No host in the command".to_owned()
-                } else {
-                    hosts.join(", ")
-                },
-                Font::Body,
-            )
-            .color(kit::SECONDARY),
-        );
+        // A command without a host (a command line tool) has no row, as in the mockup.
+        if !hosts.is_empty() {
+            s.labeled(
+                "Sends to",
+                kit::text(hosts.join(", "), Font::Body).color(kit::SECONDARY),
+            );
+        }
     });
-    if !run.user_request.is_empty() {
+    // The request of the user shows only when the agent sent a different one (goal item
+    // B6): the owner then compares the two. Else the mockup has no request group.
+    if !run.user_request.is_empty() && !run.agent_request.is_empty() {
         let source = if run.request_source.is_empty() {
             "from the agent"
         } else {
             run.request_source.as_str()
         };
-        kit::section(ui, Some("Request"), None, |s| {
+        group_label(ui, "Request");
+        kit::section(ui, None, None, |s| {
             s.row(|ui| {
                 kit::paragraph(
                     ui,
@@ -1461,25 +1705,33 @@ fn draw_question(
                     kit::LABEL,
                 );
                 // Goal item B6: the hook request replaced a different text of the agent.
-                if !run.agent_request.is_empty() {
-                    kit::tone_note(
-                        ui,
-                        format!(
-                            "The agent sent a different request: \"{}\"",
-                            run.agent_request
-                        ),
-                        Tone::Warning,
-                    );
-                }
+                kit::tone_note(
+                    ui,
+                    format!(
+                        "The agent sent a different request: \"{}\"",
+                        run.agent_request
+                    ),
+                    Tone::Warning,
+                );
             });
         });
     }
-    kit::section(ui, Some("Command"), None, |s| {
+    group_label(ui, "Command");
+    kit::section(ui, None, None, |s| {
         s.row(|ui| {
-            ui.add(
-                Label::new(kit::text(shell_words(&run.command), Font::Mono).color(kit::LABEL))
-                    .wrap(),
-            );
+            Frame::NONE
+                .fill(egui::Color32::from_rgb(242, 242, 244))
+                .corner_radius(6)
+                .inner_margin(Margin::symmetric(10, 8))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.add(
+                        Label::new(
+                            kit::text(shell_words(&run.command), Font::Mono).color(kit::LABEL),
+                        )
+                        .wrap(),
+                    );
+                });
         });
     });
     let why = if !question.why.is_empty() {
@@ -1489,7 +1741,8 @@ fn draw_question(
     } else {
         "The bouncer did not decide this run, so it asks you.".to_owned()
     };
-    kit::section(ui, Some("Why you are asked"), None, |s| {
+    group_label(ui, "Why you are asked");
+    kit::section(ui, None, None, |s| {
         s.row(|ui| kit::paragraph(ui, why, Font::Body, kit::LABEL));
     });
     // The correction stays at hand when the bar offers a remembered answer.
@@ -1498,9 +1751,10 @@ fn draw_question(
         .contains(&AnswerKind::CorrectEnvironment)
         && primary(question) != Some(Primary::Correct)
     {
+        group_label(ui, "Environment");
         kit::section(
             ui,
-            Some("Environment"),
+            None,
             Some("Until you answer, the bouncer treats it as production and asks more often."),
             |s| {
                 for item in question.items.iter().filter(|item| item.unconfirmed) {
@@ -1539,10 +1793,21 @@ fn draw_question(
             },
         );
     }
-    kit::note(
-        ui,
-        "The process can read these secrets. An allow needs Touch ID or the passphrase now. A notification is not an approval.",
-    );
+    // The quiet line at the foot of a detail of the mockup (`.meta-foot`).
+    ui.add_space(2.0);
+    ui.vertical_centered(|ui| {
+        ui.add(
+            Label::new(
+                kit::text(
+                    "The process can read these secrets. An allow needs Touch ID or the passphrase now. A notification is not an approval.",
+                    Font::Footnote,
+                )
+                .color(kit::TERTIARY),
+            )
+            .wrap()
+            .halign(Align::Center),
+        );
+    });
 }
 
 /// Do the answer of the owner. An answer that gives authority opens the owner check;
@@ -1860,49 +2125,23 @@ fn request_detail(
     let detected = detect::detect(&app.ui.decisions.paste.0);
     let ready = detected.len() == 1;
     let mut answer = None;
-    egui::Panel::bottom(egui::Id::new(("request-bar", request.id)))
-        .resizable(false)
-        .show_separator_line(true)
-        .frame(
-            Frame::NONE
-                .fill(kit::SURFACE)
-                .inner_margin(Margin::symmetric(16, 10)),
-        )
-        .show(ui, |ui| request_bar(ui, ready, &mut answer));
-    columns::detail_body(ui, ("request", request.id), |ui| {
+    bottom_bar(ui, ("request-bar", request.id), |ui| {
+        request_bar(ui, ready, &mut answer);
+    });
+    decision_body(ui, ("request", request.id), |ui| {
         super::shell::banners(app, ui, pending);
-        notifications_notice(app, ui);
         request_header(ui, request);
-        ui.add_space(16.0);
         kit::section(ui, None, None, |s| {
             s.labeled(
                 "For",
                 kit::text(&request.purpose, Font::Body).color(kit::SECONDARY),
             );
             s.row(|ui| get_it_at(ui, &request.where_to_get));
-            s.row(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label(kit::text("Saves to", Font::Body).color(kit::LABEL));
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let label = tree.path_label(folder.as_deref());
-                        let menu = kit::picker(
-                            ui,
-                            ("request-folder", request.id),
-                            &mut folder,
-                            &tree.choices(),
-                            label.as_str(),
-                            170.0,
-                        );
-                        ui.ctx().accesskit_node_builder(menu.id, |node| {
-                            node.set_label(format!("Saves to, {label}"));
-                        });
-                    });
-                });
-            });
+            s.row(|ui| saves_to(ui, request.id, &tree, &mut folder));
         });
-        kit::section(ui, Some("Key"), None, |s| {
-            s.row(|ui| paste_field(ui, &mut app.ui.decisions.paste.0));
-        });
+        group_label(ui, "Key");
+        paste_field(ui, &mut app.ui.decisions.paste.0);
+        ui.add_space(-2.0);
         let typed = !app.ui.decisions.paste.0.trim().is_empty();
         match detected.as_slice() {
             [] if typed => kit::tone_note(ui, NOTHING_FOUND, Tone::Warning),
@@ -1917,13 +2156,18 @@ fn request_detail(
                 Tone::Warning,
             ),
         }
-        kit::note(
-            ui,
-            format!(
-                "{} never sees the value. The bouncer decides each use of it.",
-                request.agent_name
-            ),
-        );
+        ui.horizontal(|ui| {
+            ui.add_space(6.0);
+            kit::paragraph(
+                ui,
+                format!(
+                    "{} never sees the value. The bouncer decides each use of it.",
+                    request.agent_name
+                ),
+                Font::Callout,
+                kit::SECONDARY,
+            );
+        });
     });
     drop(detected);
     app.ui.decisions.form = Some((request.id, folder));
@@ -1935,31 +2179,84 @@ fn request_detail(
 }
 
 fn request_header(ui: &mut egui::Ui, request: &CredentialRequest) {
-    ui.horizontal(|ui| {
-        kit::tile(
-            ui,
-            &kit::Tile::letter(
-                super::agents::agent_color(&request.agent_name),
-                &request.agent_name,
-            ),
-            48.0,
-        );
-        ui.add_space(6.0);
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
-            ui.add(
-                Label::new(kit::text(request_title(request), Font::Title3).color(kit::LABEL))
-                    .wrap(),
-            );
-            ui.label(kit::text(request_project(request), Font::Callout).color(kit::SECONDARY));
-        });
-    });
+    detail_header(
+        ui,
+        &Mark::Agent(request.agent_name.clone()),
+        &request_title(request),
+        |ui| {
+            ui.label(kit::text(request_project(request), Font::Body).color(kit::SECONDARY));
+        },
+    );
 }
 
-/// "Get it at": the domain in bold as plain text, then the whole text of the agent. Not
-/// a link: the text came from an agent, and a link can hide where it goes.
+/// "Saves to": the folder as a plain value, as in the mockup, and "Change" with a menu
+/// of the folders.
+fn saves_to(ui: &mut egui::Ui, id: u64, tree: &FolderTree, folder: &mut Option<String>) {
+    let label = tree.path_label(folder.as_deref());
+    egui::Sides::new().shrink_left().show(
+        ui,
+        |ui| ui.label(kit::text("Saves to", Font::Body).color(kit::LABEL)),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let change = kit::small_button(ui, "Change", Style::Link);
+            ui.ctx().accesskit_node_builder(change.id, |node| {
+                node.set_label(format!("Change the folder, now {label}"));
+            });
+            egui::Popup::menu(&change)
+                .id(egui::Id::new(("request-folder", id)))
+                .show(|ui| {
+                    ui.set_min_width(180.0);
+                    for (choice, name) in tree.choices() {
+                        if ui.selectable_label(*folder == choice, name).clicked() {
+                            *folder = choice;
+                            ui.close();
+                        }
+                    }
+                });
+            ui.add(Label::new(kit::text(&label, Font::Body).color(kit::SECONDARY)).truncate());
+        },
+    );
+}
+
+/// "Get it at" on one line, as in the mockup: the text of the agent with its domain in
+/// medium weight. When the text does not start with its real domain (user info such as
+/// `stripe.com@`, or no domain), the domain in bold comes first and the whole text under
+/// it. Not a link: the text came from an agent, and a link can hide where it goes.
 fn get_it_at(ui: &mut egui::Ui, where_to_get: &str) {
     let domains = where_domains(where_to_get);
+    let plain = where_to_get
+        .strip_prefix("https://")
+        .or_else(|| where_to_get.strip_prefix("http://"))
+        .unwrap_or(where_to_get);
+    if let [domain] = domains.as_slice()
+        && !plain.contains(char::is_whitespace)
+        && plain.len() <= 80
+        && let Some(rest) = plain.strip_prefix(domain.as_str())
+        && (rest.is_empty() || rest.starts_with('/'))
+    {
+        egui::Sides::new().shrink_right().show(
+            ui,
+            |ui| ui.label(kit::text("Get it at", Font::Body).color(kit::LABEL)),
+            |ui| {
+                let mut job = egui::text::LayoutJob::default();
+                kit::medium(domain, Font::Body).color(kit::LABEL).append_to(
+                    &mut job,
+                    ui.style(),
+                    egui::FontSelection::Default,
+                    Align::Center,
+                );
+                kit::text(rest, Font::Body).color(kit::SECONDARY).append_to(
+                    &mut job,
+                    ui.style(),
+                    egui::FontSelection::Default,
+                    Align::Center,
+                );
+                ui.add(Label::new(job).truncate())
+                    .on_hover_text("Apassy opens no link. Check the domain before you sign in.")
+            },
+        );
+        return;
+    }
     egui::Sides::new().shrink_right().show(
         ui,
         |ui| ui.label(kit::text("Get it at", Font::Body).color(kit::LABEL)),
@@ -2062,22 +2359,17 @@ fn detected_row(ui: &mut egui::Ui, found: &Detected, name: &str) {
 fn request_bar(ui: &mut egui::Ui, ready: bool, answer: &mut Option<RequestAnswer>) {
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        if ui
-            .add_enabled_ui(ready, |ui| kit::button(ui, "Save", Style::Prominent))
+        let save = ui
+            .add_enabled_ui(ready, |ui| bar_button(ui, "Save", Bar::Main))
             .inner
-            .clicked()
-        {
+            .on_disabled_hover_text("Paste the key to save it.")
+            .on_hover_text("Save adds a new credential. Apassy shows no value.");
+        if save.clicked() {
             *answer = Some(RequestAnswer::Save);
         }
-        if kit::button(ui, "Not Now", Style::Bordered).clicked() {
+        if bar_button(ui, "Not Now", Bar::Plain).clicked() {
             *answer = Some(RequestAnswer::NotNow);
         }
-        let caption = if ready {
-            "Save adds a new credential. Apassy shows no value."
-        } else {
-            "Paste the key to save it."
-        };
-        ui.add(Label::new(kit::text(caption, Font::Callout).color(kit::SECONDARY)).truncate());
     });
 }
 
@@ -2152,49 +2444,41 @@ fn suggestion_detail(
 ) {
     columns::detail_toolbar(ui, |_| {});
     let mut answer = None;
-    egui::Panel::bottom(egui::Id::new(("suggestion-bar", correction.id)))
-        .resizable(false)
-        .show_separator_line(true)
-        .frame(
-            Frame::NONE
-                .fill(kit::SURFACE)
-                .inner_margin(Margin::symmetric(16, 10)),
-        )
-        .show(ui, |ui| suggestion_bar(ui, app, correction, &mut answer));
-    columns::detail_body(ui, ("suggestion", correction.id), |ui| {
+    bottom_bar(ui, ("suggestion-bar", correction.id), |ui| {
+        suggestion_bar(ui, app, correction, &mut answer);
+    });
+    decision_body(ui, ("suggestion", correction.id), |ui| {
         super::shell::banners(app, ui, pending);
-        notifications_notice(app, ui);
         let tile = item_tile(app, item.id, &item.name);
-        ui.horizontal(|ui| {
-            kit::tile(ui, &tile, 48.0);
-            ui.add_space(6.0);
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 2.0;
-                ui.add(
-                    Label::new(
-                        kit::text(suggestion_question(correction, &item.name), Font::Title3)
-                            .color(kit::LABEL),
-                    )
-                    .wrap(),
-                );
+        detail_header(
+            ui,
+            &Mark::Tile(tile),
+            &suggestion_question(correction, &item.name, item.kind),
+            |ui| {
                 ui.label(
-                    kit::text("Apassy noticed this from how agents use it.", Font::Callout)
+                    kit::text("Apassy noticed this from how agents use it.", Font::Body)
                         .color(kit::SECONDARY),
                 );
-            });
-        });
-        ui.add_space(16.0);
+            },
+        );
         let facts = fact_rows(&correction.facts);
-        kit::section(ui, None, None, |s| {
-            s.labeled(
-                "Credential",
-                kit::text(&item.name, Font::Body).color(kit::SECONDARY),
+        if !facts.is_empty() {
+            kit::section(ui, None, None, |s| {
+                for (label, value) in &facts {
+                    s.labeled(label, kit::text(value, Font::Body).color(kit::SECONDARY));
+                }
+            });
+            ui.add_space(-18.0);
+        }
+        ui.horizontal(|ui| {
+            ui.add_space(6.0);
+            kit::paragraph(
+                ui,
+                suggestion_note(correction),
+                Font::Callout,
+                kit::SECONDARY,
             );
-            for (label, value) in &facts {
-                s.labeled(label, kit::text(value, Font::Body).color(kit::SECONDARY));
-            }
         });
-        kit::note(ui, suggestion_note(correction));
     });
     if let Some(answer) = answer {
         apply_suggestion(app, ui.ctx(), correction, &item.name, answer);
@@ -2244,21 +2528,19 @@ fn suggestion_bar(
     };
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        if kit::button(ui, "Ignore", Style::Bordered).clicked() {
+        if bar_button(ui, "Ignore", Bar::Plain).clicked() {
             *answer = Some(SuggestionAnswer::Ignore);
         }
+        ui.add_space(4.0);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             for (index, (label, choice)) in choices.iter().enumerate() {
-                let style = if index == 0 {
-                    Style::Prominent
-                } else {
-                    Style::Bordered
-                };
-                if kit::button(ui, label, style).clicked() {
+                let kind = if index == 0 { Bar::Main } else { Bar::Plain };
+                if bar_button(ui, label, kind).clicked() {
                     *answer = Some(*choice);
                 }
             }
-            ui.add(Label::new(kit::text(caption, Font::Callout).color(kit::SECONDARY)).truncate());
+            ui.add_space(8.0);
+            bar_caption(ui, &caption);
         });
     });
 }

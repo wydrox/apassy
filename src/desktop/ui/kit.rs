@@ -1616,6 +1616,71 @@ pub(crate) fn tile(ui: &mut Ui, tile: &Tile, side: f32) -> Response {
     response
 }
 
+// ---- Agent avatars. ----
+
+/// The color of an agent, as in the mockup and Connect an Agent: Claude Code orange,
+/// Codex green, T3 Code purple, a CI agent of GitHub near black. Any other agent gets
+/// a steady color from its name. The name is compared without case, spaces, or dashes,
+/// so "claude-code" and "Ola's Claude Code" are Claude Code too.
+pub(crate) fn agent_color(name: &str) -> Color32 {
+    const OTHERS: [Color32; 6] = [
+        Color32::from_rgb(0, 122, 255),
+        Color32::from_rgb(88, 86, 214),
+        Color32::from_rgb(191, 90, 242),
+        Color32::from_rgb(48, 176, 199),
+        Color32::from_rgb(255, 55, 95),
+        Color32::from_rgb(142, 142, 147),
+    ];
+    let plain: String = name
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    if plain.contains("claude") {
+        Color32::from_rgb(217, 119, 87)
+    } else if plain.contains("codex") {
+        Color32::from_rgb(16, 163, 127)
+    } else if plain.contains("t3code") {
+        Color32::from_rgb(110, 90, 230)
+    } else if plain.contains("github") {
+        Color32::from_rgb(36, 41, 47)
+    } else {
+        let sum = plain
+            .bytes()
+            .fold(0usize, |sum, byte| sum.wrapping_add(byte as usize));
+        OTHERS[sum % OTHERS.len()]
+    }
+}
+
+/// Paint the round avatar of an agent in `rect`: its first letter in white, semibold,
+/// on [`agent_color`].
+pub(crate) fn paint_avatar(ui: &Ui, rect: Rect, name: &str) {
+    let side = rect.width().min(rect.height());
+    let painter = ui.painter();
+    painter.circle_filled(rect.center(), side / 2.0, agent_color(name));
+    let letter: String = name
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .map_or_else(|| "?".to_owned(), |c| c.to_uppercase().collect());
+    let galley = galley(
+        ui,
+        text(letter, Font::Body)
+            .size((side * 0.42).round())
+            .variation(b"wght", 600.0),
+    );
+    painter.galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
+}
+
+/// The round avatar of an agent, `side` points wide, in the layout: 28 in a list row,
+/// 56 in the header of a detail, 20 in a fact row.
+pub(crate) fn avatar(ui: &mut Ui, name: &str, side: f32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(side), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        paint_avatar(ui, rect, name);
+    }
+    response
+}
+
 /// A cap: a small gray label in the header of a detail ("Development", the name of a
 /// shared vault). `red` is the one red cap, "Production".
 pub(crate) fn cap(ui: &mut Ui, label: &str, red: bool) -> Response {
