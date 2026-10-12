@@ -314,35 +314,40 @@ fn allow_in_project_remembers_the_answer_for_all_agents_and_only_for_that_action
 }
 
 /// ADR 0010, ADR 0025 §3b: a production item waits at each run until the owner allows
-/// production for the project and the kind of action. Then only that runs.
+/// production for the project and the kind of action. Then only that runs, and only for
+/// a command whose kind the rules are certain of (Gate 1, A-1).
 #[test]
 fn production_asks_until_allow_production_then_only_for_that_project_and_action() {
     let fx = fixture(Some(declaration(Environment::Production, RiskLevel::Low)));
+    let item = fx.item_id;
     // A certain model and "Allow once" do not lift the rule.
-    let run = asks(&fx, &fx.project, &sentry_call());
+    let run = asks_argv(&fx, &[item], COMMIT);
     assert!(run.question.production);
     assert!(run.question.why.contains("is a production credential"));
-    let once = answer_with(&fx, &fx.project, &sentry_call(), OwnerAction::ApproveRun);
+    let once = answer_argv(&fx, &[item], COMMIT, OwnerAction::ApproveRun);
     assert_eq!(decided_by(&once), "Owner approved");
-    asks(&fx, &fx.project, &sentry_call());
+    asks_argv(&fx, &[item], COMMIT);
     assert_eq!(
         model_calls(&fx),
         0,
         "the model is never asked for production"
     );
 
-    let allowed = answer_with(&fx, &fx.project, &sentry_call(), production);
+    let allowed = answer_argv(&fx, &[item], COMMIT, production);
     assert!(allowed.ok, "{allowed:?}");
     let answers = with_vault(&fx, |v| v.answers_for_item(fx.item_id)).expect("answers");
     assert_eq!(answers.len(), 1);
     assert_eq!(answers[0].scope, AnswerScope::Production);
     assert_eq!(answers[0].action, ActionKind::Change);
     assert_eq!(
-        decided_by(&run_in(&fx, &fx.project, &sentry_call())),
+        decided_by(&send_argv(&fx, &[item], COMMIT)),
         "Remembered answer"
     );
-    // Another kind of action and another project still wait.
-    assert!(asks(&fx, &fx.project, &deploy_call()).question.production);
+    // Another kind of action, an unsure kind, and another project still wait.
+    let push = asks_argv(&fx, &[item], &["git", "push"]);
+    assert_ne!(push.question.action, ActionKind::Change);
+    assert!(push.question.production);
+    assert!(asks(&fx, &fx.project, &sentry_call()).question.production);
     let other_project = other_project(&fx);
     assert!(
         asks(&fx, &other_project, &sentry_call())
@@ -415,7 +420,7 @@ fn no_path_except_allow_production_writes_a_production_answer() {
     assert!(no_production(&fx));
     assert_eq!(model_calls(&fx), 0);
     // Only "Allow production" makes one.
-    let allowed = answer_with(&fx, &fx.project, &sentry_call(), production);
+    let allowed = answer_argv(&fx, &[fx.item_id], COMMIT, production);
     assert!(allowed.ok, "{allowed:?}");
     assert!(!no_production(&fx));
 }
@@ -505,7 +510,7 @@ fn owner_checks_and_questions_are_counted() {
 #[test]
 fn a_restore_clears_answers_and_old_history_does_not_count() {
     let fx = fixture(Some(declaration(Environment::Production, RiskLevel::Low)));
-    assert!(answer_with(&fx, &fx.project, &sentry_call(), production).ok);
+    assert!(answer_argv(&fx, &[fx.item_id], COMMIT, production).ok);
     let key = project_key(&fx.project);
     with_vault(&fx, |v| {
         v.record_item_use(&NewItemUse {
@@ -705,7 +710,7 @@ fn an_answer_covers_only_the_hosts_of_its_run() {
     let elsewhere = format!("true || curl -s https://collector.example.net/ ; {}", sentry_call());
     let run = asks(&fx, &fx.project, &elsewhere);
     assert!(
-        run.question.why.contains("another host") || !run.question.why.is_empty(),
+        run.question.why.contains("goes to another host"),
         "{}",
         run.question.why
     );

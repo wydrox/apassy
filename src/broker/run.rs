@@ -34,7 +34,8 @@
 //!    5. A remembered answer of the owner for each item, the project, and the kind of
 //!       action starts the run, when each destination host of the run is a host of the
 //!       answer or a known host of the item. For a production item (also by default),
-//!       the rules must be certain of the kind of action.
+//!       the rules must be certain of the kind of action. An answer that exists but
+//!       does not cover the run (another host, an unsure kind) asks the owner.
 //!    6. An item whose declaration names another project asks the owner (only an
 //!       answer of the owner for this project, step 5, covers it).
 //!    7. A missing user request or a missing declaration asks the owner (ADR 0008).
@@ -75,7 +76,7 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use super::action_kind::{ActionKind, classify};
+use super::action_kind::{ActionKind, classify, classify_certain};
 use super::approvals::{
     AnswerChoice, AnswerKind, ApprovalOutcome, CheckMethod, PendingRun, QuestionInfo, QuestionItem,
     QuestionRefusal, Settled, action_words,
@@ -90,7 +91,7 @@ use super::proxy::{
     mint_placeholder,
 };
 use super::shadow::{self, ShadowInput};
-use super::shell_risk::{Analysis, ProviderHosts, analyze_run, injection_flag};
+use super::shell_risk::{self, Analysis, DB_HOST_FLAG, ProviderHosts, analyze_run, injection_flag};
 use crate::agent::wire::{WireResponse, codes};
 use crate::vault::answers::{AnswerScope, ProjectRef, normal_host};
 use crate::vault::exceptions::Standing;
@@ -437,6 +438,17 @@ fn route<F: FnMut() -> Result<(), String>>(
     if !known.answer.is_empty() && known.answer.iter().all(|answer| *answer) {
         return Route::Answer;
     }
+    // An answer of the owner that does not cover this run, for example a run to another
+    // host (Gate 1, A-2), asks: the owner decides the difference, not the model.
+    for (index, facts) in checked.facts.iter().enumerate() {
+        if let Some(Some(unfit)) = known.unfit.get(index) {
+            return Route::Ask(format!(
+                "Your answer for \"{}\" in {place} for {} does not cover this run: {unfit}.",
+                facts.name,
+                action_words(run.action)
+            ));
+        }
+    }
     // The item of another project (ADR 0025 §3): only the owner decides, and an answer
     // of the owner for this project counts.
     for (index, facts) in checked.facts.iter().enumerate() {
@@ -638,7 +650,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
     // counts for a production item only when a rule is certain of it.
     let action = classify(request.command, &analysis);
     let certain = classify_certain(request.command, &analysis);
-    let hosts = run_hosts(request.command, &analysis);
+    let hosts = run_hosts(request.command);
     // `db_host_from_command` says only that the command names its database host. A
     // known host of the items settles it; another host keeps the flag, so the owner
     // decides (Gate 1, A-2).
@@ -1684,50 +1696,21 @@ fn canonical_dir(path: &Path) -> Option<PathBuf> {
     canonical.is_dir().then_some(canonical)
 }
 
-// ---- The command analysis of ADR 0025 (stream gate1/helpers) ----
-
-/// The flag of a database command whose host comes from the command line.
-const DB_HOST_FLAG: &str = "db_host_from_command";
-
-/// The kind of action when a rule positively identifies it. `None`: the rules are not
-/// sure, and `classify` gave the more dangerous fallback.
-fn classify_certain(_command: &[String], _analysis: &Analysis) -> Option<ActionKind> {
-    None
-}
-
 /// The database host of the command comes from the command line.
 fn db_host_from_command(analysis: &Analysis) -> bool {
     analysis.flags.iter().any(|flag| flag == DB_HOST_FLAG)
 }
 
-/// The destination hosts of a run, in normal form ([`normal_host`]).
-fn run_hosts(command: &[String], _analysis: &Analysis) -> Vec<String> {
-    let mut hosts: Vec<String> = command_hosts(command)
+/// The destination hosts of a run, in normal form ([`normal_host`]): the URLs, the
+/// database hosts, and the HTTP proxies and targets of the command
+/// (`shell_risk::command_hosts`).
+fn run_hosts(command: &[String]) -> Vec<String> {
+    let mut hosts: Vec<String> = shell_risk::command_hosts(command)
         .iter()
         .filter_map(|host| normal_host(host))
         .collect();
     hosts.sort();
     hosts.dedup();
-    hosts
-}
-
-/// The hosts of the URLs in the command, for the use log. At most 16.
-fn command_hosts(command: &[String]) -> Vec<String> {
-    let words: Vec<String> = command
-        .iter()
-        .flat_map(|arg| {
-            arg.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '(' | ')'))
-                .filter(|word| !word.is_empty())
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let mut hosts: Vec<String> = Vec::new();
-    for host in super::shell_risk::url_hosts(&words) {
-        if !hosts.contains(&host) && hosts.len() < 16 {
-            hosts.push(host);
-        }
-    }
     hosts
 }
 
@@ -1786,7 +1769,7 @@ fn store_uses(
     decided_by: UseDecidedBy,
     answered_on: &str,
 ) {
-    let hosts = command_hosts(request.command);
+    let hosts = run_hosts(request.command);
     let command_summary = request.label();
     for item_id in request.items {
         // Only an item that exists gets a row.
