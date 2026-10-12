@@ -357,7 +357,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     kit::list_row(
                         ui,
                         &kit::ListRow {
-                            tile: kit::Tile::letter(agent_color(name), name),
+                            tile: kit::Tile::agent(name),
                             title: name,
                             subtitle,
                             meta: *meta,
@@ -409,33 +409,6 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
 }
 
-/// A steady color for the tile of an agent, from its name. The known hosts have the
-/// colors of the mockup: Claude Code orange, Codex green, T3 Code purple, and a GitHub
-/// agent near black.
-pub(super) fn agent_color(name: &str) -> egui::Color32 {
-    const COLORS: [egui::Color32; 5] = [
-        egui::Color32::from_rgb(217, 119, 87),
-        egui::Color32::from_rgb(16, 163, 127),
-        egui::Color32::from_rgb(110, 90, 230),
-        egui::Color32::from_rgb(36, 41, 47),
-        egui::Color32::from_rgb(0, 122, 255),
-    ];
-    let lower = name.to_lowercase();
-    let known = [
-        ("claude", COLORS[0]),
-        ("codex", COLORS[1]),
-        ("t3", COLORS[2]),
-        ("github", COLORS[3]),
-    ];
-    if let Some((_, color)) = known.iter().find(|(word, _)| lower.contains(word)) {
-        return *color;
-    }
-    let sum = name
-        .bytes()
-        .fold(0usize, |sum, byte| sum.wrapping_add(byte as usize));
-    COLORS[sum % COLORS.len()]
-}
-
 /// The words of an exception in its row.
 fn exception_words(kind: ExceptionKind) -> &'static str {
     match kind {
@@ -451,11 +424,7 @@ fn draw_agent(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary) {
     // The header sits lower than the toolbar, as in the mockup.
     ui.add_space(12.0);
     ui.horizontal(|ui| {
-        kit::tile(
-            ui,
-            &kit::Tile::letter(agent_color(&agent.name), &agent.name),
-            56.0,
-        );
+        kit::tile(ui, &kit::Tile::agent(&agent.name), 56.0);
         ui.add_space(6.0);
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
@@ -1116,15 +1085,18 @@ mod tests {
     #[test]
     fn the_known_hosts_have_the_colors_of_the_mockup() {
         let orange = egui::Color32::from_rgb(217, 119, 87);
-        assert_eq!(agent_color("Claude Code"), orange);
-        assert_eq!(agent_color("claude-code"), orange);
-        assert_eq!(agent_color("Codex"), egui::Color32::from_rgb(16, 163, 127));
+        assert_eq!(kit::agent_color("Claude Code"), orange);
+        assert_eq!(kit::agent_color("claude-code"), orange);
         assert_eq!(
-            agent_color("T3 Code"),
+            kit::agent_color("Codex"),
+            egui::Color32::from_rgb(16, 163, 127)
+        );
+        assert_eq!(
+            kit::agent_color("T3 Code"),
             egui::Color32::from_rgb(110, 90, 230)
         );
         assert_eq!(
-            agent_color("CI on GitHub"),
+            kit::agent_color("CI on GitHub"),
             egui::Color32::from_rgb(36, 41, 47)
         );
     }

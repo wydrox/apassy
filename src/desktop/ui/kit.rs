@@ -1566,6 +1566,8 @@ pub(crate) enum Mark {
 pub(crate) struct Tile {
     pub(crate) color: Color32,
     pub(crate) mark: Mark,
+    /// A circle instead of a rounded square: the avatar of an agent.
+    pub(crate) round: bool,
 }
 
 impl Tile {
@@ -1577,6 +1579,7 @@ impl Tile {
         Self {
             color,
             mark: Mark::Letter(letter),
+            round: false,
         }
     }
 
@@ -1584,6 +1587,15 @@ impl Tile {
         Self {
             color,
             mark: Mark::Icon(icon),
+            round: false,
+        }
+    }
+
+    /// The round avatar of an agent, in [`agent_color`], as in Decisions.
+    pub(crate) fn agent(name: &str) -> Self {
+        Self {
+            round: true,
+            ..Self::letter(agent_color(name), name)
         }
     }
 }
@@ -1592,7 +1604,11 @@ impl Tile {
 pub(crate) fn paint_tile(ui: &Ui, rect: Rect, tile: &Tile) {
     let side = rect.width();
     let painter = ui.painter();
-    painter.rect_filled(rect, (side * 0.25).round() as u8, tile.color);
+    if tile.round {
+        painter.circle_filled(rect.center(), side / 2.0, tile.color);
+    } else {
+        painter.rect_filled(rect, (side * 0.25).round() as u8, tile.color);
+    }
     match &tile.mark {
         Mark::Letter(letter) => {
             let galley = galley(
