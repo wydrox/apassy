@@ -466,11 +466,46 @@ fn signing_providers_get_the_real_value_and_keep_their_hosts() {
     }
 }
 
+/// Providers whose main command-line tools do not trust the certificate of the run or
+/// do not speak HTTPS with the secret (`gh`, `git`, the Stripe CLI, the Supabase CLI,
+/// `pscale`, `terraform`, `cloudflared`) get the real value (docs/operations/agent-path.md
+/// §8b). The known hosts stay recorded for the bouncer.
 #[test]
-fn stripe_and_github_still_get_a_placeholder() {
+fn providers_of_cli_tools_get_the_real_value() {
     let dir = TempDir::new().unwrap();
     let mut vault = vault(&dir);
-    for text in [fake("sk_live_", 24), fake("ghp_", 36)] {
+    let cases = [
+        (fake("ghp_", 36), "github"),
+        (fake("github_pat_", 40), "github"),
+        (fake("sk_live_", 24), "stripe"),
+        (fake("sk_test_", 24), "stripe"),
+        (fake("sbp_", 40), "supabase"),
+        (fake("pscale_tkn_", 32), "planetscale"),
+        (
+            format!("CLOUDFLARE_API_TOKEN={}", fake("", 40)),
+            "cloudflare",
+        ),
+    ];
+    for (text, provider) in cases {
+        let detected = one(&text);
+        assert_eq!(detected.provider.as_deref(), Some(provider), "{provider}");
+        assert!(!detected.hosts.is_empty(), "{provider} keeps its hosts");
+        let summary = vault.add_detected(&detected, None, None).expect("add");
+        let binding = vault.env_binding(summary.id).unwrap().expect("a variable");
+        assert_eq!(binding.delivery, EnvDelivery::Value, "{provider}");
+        assert_eq!(
+            vault.declaration_provider(summary.id).unwrap().as_deref(),
+            Some(provider)
+        );
+        assert!(
+            apassy::vault::providers::find(provider)
+                .expect("built in")
+                .real_value,
+            "{provider}"
+        );
+    }
+    // An HTTP API provider without such a CLI keeps the placeholder.
+    for text in [fake("sk-ant-api03-", 40), fake("re_", 24)] {
         let summary = vault.add_detected(&one(&text), None, None).expect("add");
         let binding = vault.env_binding(summary.id).unwrap().expect("a variable");
         assert!(

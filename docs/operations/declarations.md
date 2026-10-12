@@ -57,11 +57,24 @@ A file is one JSON object. The loader rejects unknown fields at every level, and
 | `known_hosts` | Provider API hosts in lowercase. A provider needs one or more, unless it is generic. A general file has none. |
 | `variable` | The default environment variable of a detected credential, such as `STRIPE_SECRET_KEY`. A provider needs one. The loader refuses a reserved name (`PATH`, `APASSY_*`, ...). A general file has none. |
 | `title` | Optional. The title of a detected credential, such as `GitHub token`. The default is the label and "API key". |
-| `real_value` | Optional, default `false`. `true` for a provider that signs requests with the secret (AWS, Google Cloud): a detected credential then gets the real value, never a placeholder, and the known hosts stay recorded for the bouncer. A general file has none. |
+| `real_value` | Optional, default `false`. `true` for a provider that signs requests with the secret (AWS, Google Cloud), or whose main command-line tools do not work with a placeholder (GitHub, Stripe, Supabase, PlanetScale, Cloudflare; see the table below): a detected credential then gets the real value, never a placeholder, and the known hosts stay recorded for the bouncer. A general file has none. |
 | `prefixes` | Optional. Value prefixes of the keys of the provider, such as `sk_live_`. Case matters. Two or more characters, no space, and one provider for each prefix. The paste detection (section 3a) names the provider of a value by the longest prefix. |
 | `signals` | A list of signals: `id`, `when`, `suggest`, `reason`. |
 
 `suggest` has the optional fields `environment`, `risk`, `scope`, and `reversibility`, with the values of ADR 0008. A general signal must suggest a field. `reason` is one or two sentences for the owner.
+
+Providers with `"real_value": true` (Gate 2, 2026-10-12; [agent-path.md §8b](agent-path.md#8b-placeholder-mode-adr-0011)):
+
+| Provider | `provider_version` | Why |
+| --- | --- | --- |
+| `aws`, `gcp` | 3 | The secret signs each request (SigV4, a service account key). |
+| `github` | 3 | `gh` (Go) does not trust the certificate of the run on macOS; `git` over HTTPS often gets the token through `gh`. |
+| `stripe` | 3 | The Stripe CLI is a Go program. |
+| `supabase` | 3 | The Supabase CLI (Go) uses the `sbp_` access token; `supabase secrets set` copies keys to another service. |
+| `planetscale` | 3 | `pscale` is a Go program; a `pscale_pw_` password goes over the MySQL protocol, not HTTPS. |
+| `cloudflare` | 3 | `terraform`, `cloudflared`, and `flarectl` are Go programs. |
+
+The cost: such a credential reaches the process as it is, so a command can send it to any host. The `foreign_host` flag (section 6) and the bouncer still see the provider hosts, and the owner can choose "Placeholder" for one credential. `tests/add_detected.rs` (`providers_of_cli_tools_get_the_real_value`) checks the delivery.
 
 All conditions in `when` must hold. A list means "one of the items".
 
@@ -126,6 +139,20 @@ The declaration comes from the catalog signals of section 2, with the facts of t
 A test key (`sk_test_`) or a test word of the variable gives staging, as the catalog says, not development.
 
 `swap.rs` keeps the vendor prefix of a value in its placeholder. A test there checks that its table covers every pack prefix. The pack prefixes it does not keep yet: `AIza`, `nfp_`, `sk-admin-`, `pscale_tkn_`, `pscale_oauth_`, `sntrys_`, `sntryu_`, `sb_secret_`, `sb_publishable_`, `sbp_`.
+
+## 3b. Corrections from the use log
+
+ADR 0025 §5, `src/broker/corrections.rs`. After an allowed run, the broker may propose a correction of the declaration. The facts JSON never has a value.
+
+| Correction | When | Changes before the owner answers | Facts |
+| --- | --- | --- | --- |
+| Environment "production" | The value has a strong production signal (`sk_live_`, ...) and the item is not production. | When the environment did not come from the owner: production at once, source `usage`. When the owner set it: nothing. | `provider`, `previous_source`, `previous_environment`, `applied` (`true` or `false`), and `raised_from` only when applied. Ignoring an applied correction gives `raised_from` back, which is looser. |
+| Environment "development" | Production only by default, 3 or more allowed uses, every use to a development or test host (a word such as `dev`, `test`, `sandbox`, or a `.test` name), no other host, and no production signal in the value. | Nothing. | `hosts`, `uses`, `previous_environment`, `applied: false`, `unverified: true`: the agent chose the hosts, and Apassy did not check them. |
+| Project | No project, 5 or more allowed uses, all in one project. | Nothing. | `project_key`, `project_label`, `uses`, `agents`. |
+
+The development hint comes only from host names. The packs have no list of documented sandbox hosts yet, so a hint alone never makes a development proposal without the conditions above.
+
+Cost: the broker remembers, for each item of the vault session, the item revision, the declaration, its sources, and the field of the variable. It reveals the value and runs the detection only after one of them changed. It reads the use log while the item has fewer than 5 allowed uses, after a change, and else every 10 allowed uses (`RECHECK_USES`). `corrections::checks` counts both for the tests.
 
 ## 4. Synthetic evaluation
 

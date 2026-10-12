@@ -178,6 +178,19 @@ Select "Real value" for:
 - A value that the program uses itself: a JWT signing secret, a webhook secret, a database password.
 - A command that copies the secret to another service, for example `vercel env add`.
 
+A credential that the paste detection or an agent tool adds (ADR 0025 §4, §6) gets a placeholder for the known hosts of its provider, except for the providers below. Their provider file has `"real_value": true`, so the new credential gets the real value, and the known hosts stay recorded for the bouncer and the `foreign_host` check. The owner can still select "Placeholder" for one credential.
+
+| Provider | Why the real value |
+| --- | --- |
+| AWS, Google Cloud | The SDKs and CLIs sign each request with the secret (SigV4, a service account key). A placeholder cannot sign. |
+| GitHub | `gh` is a Go program and does not trust the certificate of the run on macOS. `git` over HTTPS often gets the token through `gh` as its credential helper, so a push or a clone fails with a placeholder. |
+| Stripe | The Stripe CLI (`stripe`) is a Go program. |
+| Supabase | The Supabase CLI (`supabase`, a Go program) uses the access token (`sbp_`). `supabase secrets set` copies keys to another service. |
+| PlanetScale | `pscale` is a Go program, and a database password (`pscale_pw_`) goes over the MySQL protocol, not HTTPS. |
+| Cloudflare | `terraform`, `cloudflared`, and `flarectl` are Go programs. Wrangler (Node.js) works with either delivery. |
+
+The other providers (Anthropic, OpenAI, Resend, SendGrid, Slack, Twilio, Sentry, Datadog, Netlify, Vercel, Neon) are mostly used with HTTP clients and Node.js or Python tools that read `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, or `REQUESTS_CA_BUNDLE`, so they keep the placeholder.
+
 ## 8c. What an agent sees, any folder, and access requests (ADR 0012)
 
 - **Several credentials at once:** in Agents, open the agent. Under "Process access", click "Give access to several credentials…". Switch on each credential, choose "This folder" (and type it) or "Any folder", choose the decision, and click "Give access to N credentials". You confirm once.

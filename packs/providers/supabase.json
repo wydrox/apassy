@@ -1,12 +1,13 @@
 {
   "schema_version": 1,
-  "provider_version": 2,
+  "provider_version": 3,
   "id": "supabase",
   "kind": "provider",
   "label": "Supabase",
   "description": "Supabase project keys (service_role, anon, secret, publishable), personal access tokens, and project hosts.",
   "known_hosts": ["supabase.co", "supabase.com"],
   "variable": "SUPABASE_SERVICE_ROLE_KEY",
+  "real_value": true,
   "title": "Supabase key",
   "prefixes": ["sb_secret_", "sb_publishable_", "sbp_"],
   "signals": [
