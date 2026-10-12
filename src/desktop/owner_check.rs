@@ -395,6 +395,28 @@ pub enum OwnerRequest {
         item_id: u64,
         name: String,
     },
+    /// Set the environment of an item to a value that is not production, as the owner's
+    /// answer (ADR 0025 §4). The bouncer is then less careful, so it needs the check.
+    /// Production is stricter and needs none: the page sets it without this request.
+    SetEnvironment {
+        item_id: u64,
+        name: String,
+        environment: crate::vault::Environment,
+    },
+    /// Turn "Always ask me" off for an item (ADR 0025 §3). Turning it on is stricter and
+    /// needs no check.
+    AlwaysAskOff {
+        item_id: u64,
+        name: String,
+    },
+    /// Remove an exception of an agent for an item (ADR 0025 §3f). It gives authority
+    /// back.
+    RemoveAgentException {
+        agent_id: u64,
+        agent_name: String,
+        item_id: u64,
+        kind: crate::vault::exceptions::ExceptionKind,
+    },
     RotateToken {
         agent_id: u64,
         agent_name: String,
@@ -659,7 +681,21 @@ impl OwnerRequest {
             Self::SaveDeclaration { item_id, .. }
             | Self::SaveConnector { item_id, .. }
             | Self::ConfirmReview { item_id }
-            | Self::Unarchive { item_id, .. } => OwnerAction::ChangeItemRules { item_id: *item_id },
+            | Self::Unarchive { item_id, .. }
+            | Self::SetEnvironment { item_id, .. }
+            | Self::AlwaysAskOff { item_id, .. } => {
+                OwnerAction::ChangeItemRules { item_id: *item_id }
+            }
+            Self::RemoveAgentException {
+                agent_id,
+                item_id,
+                kind,
+                ..
+            } => OwnerAction::RemoveAgentException {
+                agent_id: *agent_id,
+                item_id: *item_id,
+                kind: *kind,
+            },
             Self::ConnectAgent {
                 agent_id, show_all, ..
             } => OwnerAction::ConnectAgent {
@@ -940,6 +976,28 @@ impl OwnerRequest {
             Self::Unarchive { name, .. } => format!(
                 "Bring \"{name}\" back from the archive. Agents with a grant can use it again."
             ),
+            Self::SetEnvironment {
+                name, environment, ..
+            } => format!(
+                "Mark \"{name}\" as {}. The bouncer is less careful with it than with production.",
+                environment.as_str()
+            ),
+            Self::AlwaysAskOff { name, .. } => format!(
+                "Turn off \"Always ask me\" for \"{name}\". The bouncer then decides each use."
+            ),
+            Self::RemoveAgentException {
+                agent_name, kind, ..
+            } => match kind {
+                crate::vault::exceptions::ExceptionKind::Never => format!(
+                    "Remove \"Never for {agent_name}\". The bouncer then decides each use by {agent_name}."
+                ),
+                crate::vault::exceptions::ExceptionKind::AlwaysAsk => format!(
+                    "Remove \"Always ask for {agent_name}\". The bouncer then decides each use by {agent_name}."
+                ),
+                crate::vault::exceptions::ExceptionKind::Only => format!(
+                    "Remove this item from the items that {agent_name} may use."
+                ),
+            },
             Self::RotateToken { agent_name, .. } => {
                 format!("Give {agent_name} a new token. The old token stops working.")
             }
@@ -1478,6 +1536,10 @@ impl DesktopApp {
                 let result = session.set_declaration(item_id, &form, proof);
                 if self.apply(result, "The declaration is saved.").is_some() {
                     self.owner_ui.declaration_form.stored = true;
+                    // The owner saw and confirmed each value (ADR 0025 §4).
+                    let _ = self.owner_ui.session.with_vault(|vault| {
+                        vault.set_declaration_sources(item_id, &Default::default())
+                    });
                 }
             }
             OwnerRequest::SaveVariable {
@@ -1517,6 +1579,56 @@ impl DesktopApp {
                         "{name} is back from the archive. Agents with a grant can use it again."
                     ),
                 );
+            }
+            OwnerRequest::SetEnvironment {
+                item_id,
+                name,
+                environment,
+            } => self.complete_set_environment(item_id, &name, environment, proof),
+            OwnerRequest::AlwaysAskOff { item_id, name } => {
+                let action = OwnerAction::ChangeItemRules { item_id };
+                let result = session.with_vault(|vault| {
+                    proof
+                        .check(&action, &vault.epoch())
+                        .map_err(|refusal| refusal.message().to_owned())?;
+                    vault
+                        .set_always_ask(item_id, false)
+                        .map_err(|err| format!("\"Always ask me\" did not change: {err}."))
+                });
+                match result {
+                    Some(Ok(())) => self.set_ok(format!(
+                        "\"Always ask me\" is off for {name}. The bouncer decides each use."
+                    )),
+                    Some(Err(message)) => self.set_err(message),
+                    None => self.set_err("The vault is locked."),
+                }
+            }
+            OwnerRequest::RemoveAgentException {
+                agent_id,
+                agent_name,
+                item_id,
+                kind,
+            } => {
+                let action = OwnerAction::RemoveAgentException {
+                    agent_id,
+                    item_id,
+                    kind,
+                };
+                let result = session.with_vault(|vault| {
+                    proof
+                        .check(&action, &vault.epoch())
+                        .map_err(|refusal| refusal.message().to_owned())?;
+                    vault
+                        .remove_agent_exception(agent_id, item_id, kind)
+                        .map_err(|err| format!("The exception did not change: {err}."))
+                });
+                match result {
+                    Some(Ok(_)) => self.set_ok(format!(
+                        "The exception for {agent_name} is removed. The bouncer decides each use."
+                    )),
+                    Some(Err(message)) => self.set_err(message),
+                    None => self.set_err("The vault is locked."),
+                }
             }
             OwnerRequest::ConfirmReview { item_id } => {
                 let result = session.confirm_review(item_id, proof);
@@ -1615,6 +1727,76 @@ impl DesktopApp {
             self.set_ok(format!(
                 "The passkey is removed from \"{name}\". The login keeps its password."
             ));
+        }
+    }
+
+    /// The declaration of an item with `environment` as the answer of the owner. The
+    /// other values stay. The vault needs a project, and a pasted credential has none
+    /// (ADR 0025 §4): the project of the item, its folder, or its name stands in.
+    pub(crate) fn environment_form(
+        &self,
+        item_id: u64,
+        environment: crate::vault::Environment,
+    ) -> Result<DeclarationForm, String> {
+        let session = &self.owner_ui.session;
+        let mut form = session
+            .declaration_form(item_id)
+            .map_err(|err| err.message)?;
+        if form.project.trim().is_empty() {
+            let details = session.details(item_id).map_err(|err| err.message)?;
+            let folder = session
+                .with_vault(|vault| -> Result<Vec<String>, crate::vault::VaultError> {
+                    let folder = vault.item_folder(item_id)?;
+                    vault.folder_path(folder.as_deref())
+                })
+                .and_then(Result::ok)
+                .and_then(|path| path.last().cloned());
+            form.project = [Some(details.project), folder, Some(details.name)]
+                .into_iter()
+                .flatten()
+                .map(|text| text.trim().to_owned())
+                .find(|text| !text.is_empty())
+                .unwrap_or_else(|| "Personal".to_owned());
+        }
+        form.environment = environment;
+        Ok(form)
+    }
+
+    /// Mark the environment of an item as the answer of the owner: the declaration, and
+    /// its source "owner" (ADR 0025 §4). The other sources stay.
+    fn complete_set_environment(
+        &mut self,
+        item_id: u64,
+        name: &str,
+        environment: crate::vault::Environment,
+        proof: OwnerProof,
+    ) {
+        let form = match self.environment_form(item_id, environment) {
+            Ok(form) => form,
+            Err(message) => {
+                drop(proof);
+                return self.set_err(message);
+            }
+        };
+        let session = &mut self.owner_ui.session;
+        if let Err(err) = session.set_declaration(item_id, &form, proof) {
+            return self.set_err(err.message);
+        }
+        let marked = session.with_vault(|vault| {
+            let mut sources = vault.declaration_sources(item_id)?;
+            sources.environment = crate::vault::DeclarationSource::Owner;
+            vault.set_declaration_sources(item_id, &sources)
+        });
+        match marked {
+            Some(Ok(())) => {
+                self.owner_ui.declaration_form = form;
+                self.owner_ui.declaration_form.stored = true;
+                self.set_ok(format!("{name} is marked as {}.", environment.as_str()));
+            }
+            Some(Err(err)) => self.set_err(format!(
+                "The environment is saved, but not its source: {err}."
+            )),
+            None => self.set_err("The vault is locked."),
         }
     }
 
