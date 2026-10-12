@@ -42,11 +42,17 @@ fail() { printf 'screenshots: FAILED: %s\n' "$*" >&2; exit 1; }
 # A short path: the broker socket of the scratch HOME must fit in SUN_LEN.
 WORK="$(mktemp -d /tmp/apassy-shots.XXXXXX)"
 APP_PID=""
+AWAKE_PID=""
 cleanup() {
   [ -z "$APP_PID" ] || kill "$APP_PID" 2>/dev/null || true
+  [ -z "$AWAKE_PID" ] || kill "$AWAKE_PID" 2>/dev/null || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT
+# A sleeping display stops the window from drawing, and each capture would show the
+# last frame. Keep the display on (and wake it) while the tour runs.
+caffeinate -d -u -t 900 &
+AWAKE_PID=$!
 
 # The window number of a process, for screencapture -l: the largest window, or the
 # window with the title given (a second window).
@@ -66,7 +72,7 @@ for w in list where (w[kCGWindowOwnerPID as String] as? Int32) == pid && (w[kCGW
 windows.sort { $0.1 > $1.1 }
 // Without a name (no Screen Recording permission for names), a second window is the
 // smaller one.
-if !title.isEmpty { if windows.count > 1 { print(windows[1].0); exit(0) } else { exit(1) } }
+if !title.isEmpty { if windows.count > 1 { print(windows[1].0); exit(0) } else { FileHandle.standardError.write("windows: \(windows.count)\n".data(using: .utf8)!); exit(1) } }
 if let first = windows.first { print(first.0); exit(0) }
 exit(1)
 EOF
