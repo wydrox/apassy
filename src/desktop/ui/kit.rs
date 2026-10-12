@@ -2811,6 +2811,7 @@ pub(crate) enum Icon {
     Warning,
     Info,
     Xmark,
+    Clock,
     #[cfg(not(feature = "vault"))]
     List,
     Folder,
@@ -2975,6 +2976,10 @@ pub(crate) fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color
         Icon::Xmark => {
             line(&[(0.24, 0.24), (0.76, 0.76)]);
             line(&[(0.76, 0.24), (0.24, 0.76)]);
+        }
+        Icon::Clock => {
+            circle(0.5, 0.5, 0.4);
+            line(&[(0.5, 0.26), (0.5, 0.5), (0.68, 0.6)]);
         }
         #[cfg(not(feature = "vault"))]
         Icon::List => {
