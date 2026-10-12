@@ -4,8 +4,9 @@ import Mark from "./Mark.astro";
 // "Placeholder" (the run gets a stand-in with the prefix and length of the value; the
 // proxy puts the real value only into HTTPS requests to the hosts of the variable) or
 // "Real value" (for programs that need the key itself). A new variable starts as a
-// placeholder when the provider's hosts are known. Go programs such as the Stripe CLI
-// do not trust the run's certificate, so the example is curl. Shown values are cut short.
+// placeholder when the provider's hosts are known and its tools accept one; Stripe, GitHub,
+// AWS, Google Cloud, Supabase, and PlanetScale get the real value (packs/providers/*.json
+// `real_value`), so the example is OpenAI with curl. Shown values are cut short.
 ---
 <section class="section" id="placeholders">
   <div class="container">
@@ -27,8 +28,8 @@ import Mark from "./Mark.astro";
     <div class="diagram card" data-reveal style="--i:4">
       <div class="node run">
         <p class="label">Agent run</p>
-        <code class="cmd">curl -u $STRIPE_SECRET_KEY: …/v1/balance</code>
-        <code class="env">STRIPE_SECRET_KEY=<mark>sk_live_Qm7r…</mark></code>
+        <code class="cmd">curl -H "Authorization: Bearer $OPENAI_API_KEY" …/v1/models</code>
+        <code class="env">OPENAI_API_KEY=<mark>sk-proj-Qm7r…</mark></code>
         <p class="note">placeholder, new for each run</p>
       </div>
 
@@ -51,7 +52,7 @@ import Mark from "./Mark.astro";
 
       <div class="ends">
         <div class="node end ok">
-          <p class="host">api.stripe.com</p>
+          <p class="host">api.openai.com</p>
           <p class="result"><span class="dot"></span>200 · the real key went in</p>
         </div>
         <div class="node end bad">

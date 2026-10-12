@@ -58,12 +58,10 @@ flowchart LR
 
 ## A look inside
 
-| | |
-| :---: | :---: |
-| <img src="docs/images/app-agent.png" alt="Process access of an agent per credential" /> | <img src="docs/images/app-requests.png" alt="Recent requests of an agent with the reason for each decision" /> |
-| **Agent access.** Each agent gets the credentials it needs, in one folder, and you choose who decides. | **Requests.** Every request, with the command and the reason for the decision. |
-| <img src="docs/images/app-activity.png" alt="Access requests and blocked runs in the Activity view" /> | <img src="docs/images/app-learning.png" alt="The share of runs that asked the owner over 14 days" /> |
-| **Activity.** Access requests and blocked runs wait in your inbox. | **Learning.** Apassy asks you less each week. |
+| |
+| :---: |
+| <img src="docs/images/app-requests.png" alt="Recent requests of an agent with the reason for each decision" /> |
+| **Requests.** Every request, with the command and the reason for the decision. These screenshots show the window before 0.5.0; new ones follow. |
 
 The screenshots show synthetic data. `scripts/screenshots.sh` takes them from the real app.
 

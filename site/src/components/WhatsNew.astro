@@ -1,7 +1,7 @@
 ---
 import { VERSION } from "../lib/site";
 
-// Current credential view, agent connection, and browser extension changes.
+// The changes of 0.5.0 (ADR 0025, ADR 0026).
 // The cards describe established vault, sync, import, and update features.
 // Their small views are drawings of the app, not screenshots.
 const vaults = [
@@ -21,13 +21,12 @@ const items = [
   <div class="container">
     <header class="center">
       <p class="eyebrow" data-reveal>Apassy {VERSION}</p>
-      <h2 class="h2" data-reveal style="--i:1">Credential controls stay in view.</h2>
+      <h2 class="h2" data-reveal style="--i:1">Paste to add. The bouncer decides.</h2>
       <p class="lead" data-reveal style="--i:2">
-        Back, the title, and Edit stay visible when you scroll through a credential.
-        Dark values use a monospaced font below their labels.
-        The groups for Agent access, history, actions, and imported 1Password data stay closed until you open them.
-        Agent setup offers host connection first.
-        The browser extension installs from the Chrome Web Store.
+        Paste a key or a .env file and press Add: Apassy finds the provider, the variable, and the hosts.
+        Agents need no setup for each credential. The bouncer decides each use and asks you in Decisions when it is not sure,
+        and your answer counts for the whole project.
+        Folders keep credentials in order, in a window with a sidebar, a list, and the details.
       </p>
     </header>
 
