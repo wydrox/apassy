@@ -1029,9 +1029,9 @@ fn update_makes_the_declaration_stricter_with_the_weaker_sources() {
             vault.declaration_sources(own).unwrap(),
         )
     });
-    assert_eq!(declaration.environment, Environment::Staging);
+    assert_eq!(declaration.environment, Environment::Development);
     assert_eq!(sources.environment, DeclarationSource::Signal);
-    // A value without a signal: production, from the default; never "staging" from the
+    // A value without a signal: production, from the default; never "development" from the
     // signal of the old value.
     let plain = project_file(&fx, "new.txt", "FAKEplainvaluewithoutanysignal0001");
     let updated = send(&fx, update_action(own, Some(&plain), false));

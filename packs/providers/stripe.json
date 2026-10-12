@@ -25,13 +25,13 @@
     {
       "id": "test-secret-key",
       "when": { "value_starts": ["sk_test_"] },
-      "suggest": { "environment": "staging", "risk": "low", "scope": "admin", "reversibility": "reversible" },
-      "reason": "A test mode secret key (sk_test_) reaches test data only. It moves no real money."
+      "suggest": { "environment": "development", "risk": "low", "scope": "admin", "reversibility": "reversible" },
+      "reason": "A test mode secret key (sk_test_) is a development key: it reaches test data only and moves no real money."
     },
     {
       "id": "test-restricted-key",
       "when": { "value_starts": ["rk_test_"] },
-      "suggest": { "environment": "staging", "risk": "low", "reversibility": "reversible" },
+      "suggest": { "environment": "development", "risk": "low", "reversibility": "reversible" },
       "reason": "A test mode restricted key (rk_test_) reaches test data only. Its permissions come from the Stripe dashboard."
     },
     {
@@ -43,7 +43,7 @@
     {
       "id": "test-publishable-key",
       "when": { "value_starts": ["pk_test_"] },
-      "suggest": { "environment": "staging", "risk": "low", "scope": "read-only", "reversibility": "reversible" },
+      "suggest": { "environment": "development", "risk": "low", "scope": "read-only", "reversibility": "reversible" },
       "reason": "A test mode publishable key (pk_test_) is public and reaches test data only."
     },
     {

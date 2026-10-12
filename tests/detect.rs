@@ -105,6 +105,24 @@ fn a_key_gets_the_title_and_line_of_the_mockup() {
 }
 
 #[test]
+fn a_stripe_test_key_is_a_development_key() {
+    for prefix in ["sk_test_", "rk_test_", "pk_test_"] {
+        let key = one(&fake(prefix, 24));
+        assert_eq!(key.environment, Environment::Development, "{prefix}");
+        assert_eq!(key.sources.environment, Source::Signal, "{prefix}");
+    }
+
+    // The variable name does not change it.
+    let named = one(&format!("STRIPE_SECRET_KEY={}", fake("sk_test_", 24)));
+    assert_eq!(named.environment, Environment::Development);
+    assert_eq!(named.env_name.as_deref(), Some("STRIPE_SECRET_KEY"));
+
+    // A live word in the variable still makes it production.
+    let live = one(&format!("STRIPE_LIVE_KEY={}", fake("sk_test_", 24)));
+    assert_eq!(live.environment, Environment::Production);
+}
+
+#[test]
 fn a_live_value_is_production_from_a_signal_and_never_lower() {
     let live = one(&fake("sk_live_", 24));
     assert_eq!(live.title, "Stripe live");
@@ -122,10 +140,10 @@ fn a_live_value_is_production_from_a_signal_and_never_lower() {
     assert_eq!(named.environment, Environment::Production);
     assert_eq!(named.env_name.as_deref(), Some("STRIPE_TEST_KEY"));
 
-    // A test value: the provider file puts test mode in staging.
+    // A test value: the provider file puts test mode in development.
     let test = one(&fake("sk_test_", 24));
     assert_eq!(test.title, "Stripe test");
-    assert_eq!(test.environment, Environment::Staging);
+    assert_eq!(test.environment, Environment::Development);
     assert_eq!(test.sources.environment, Source::Signal);
     assert_eq!(test.risk, RiskLevel::Low);
 
@@ -200,7 +218,7 @@ fn a_dotenv_file_gives_one_item_for_each_line() {
             ),
             (
                 Some(4),
-                "Stripe test · STRIPE_SECRET_KEY · staging".to_owned()
+                "Stripe test · STRIPE_SECRET_KEY · development".to_owned()
             ),
             (
                 Some(5),

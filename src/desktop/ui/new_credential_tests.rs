@@ -258,10 +258,10 @@ fn a_dotenv_paste_adds_only_the_checked_lines() {
 
 /// The folder menu puts the credential in another folder than the one of the list, and
 /// the list follows it. An empty paste adds nothing. Cancel erases the paste, and
-/// "More kinds…" leads to the add form, which also puts a credential in the folder of
+/// "Fill in by hand…" leads to the add form, which also puts a credential in the folder of
 /// the list.
 #[test]
-fn the_folder_menu_cancel_and_more_kinds() {
+fn the_folder_menu_cancel_and_fill_in_by_hand() {
     use crate::contracts::CredentialKind;
     use crate::desktop::ItemDraft;
 
@@ -303,7 +303,7 @@ fn the_folder_menu_cancel_and_more_kinds() {
     assert!(app.owner_ui.add_secrets.custom_value.is_empty());
 
     open_with(&mut app, &mut window, &fake("ghp_", 36));
-    window.click(&mut app, "More kinds…");
+    window.click(&mut app, "Fill in by hand…");
     assert_eq!(app.ui.sheet, Some(Sheet::AddItem { kind_chosen: false }));
     assert!(app.owner_ui.add_secrets.custom_value.is_empty());
 
@@ -326,4 +326,41 @@ fn the_folder_menu_cancel_and_more_kinds() {
         .map(|item| item.id)
         .expect("added");
     assert_eq!(folder_of(&app, router).as_deref(), Some(home.uuid.as_str()));
+}
+
+/// The paste shows masked unless the owner edits it: each `.env` line keeps its variable
+/// and the public prefix of the provider, never the value, and a comment line does not
+/// show. A Stripe test key is a development key.
+#[test]
+fn the_paste_shows_masked_and_a_stripe_test_key_is_development() {
+    use crate::vault::detect;
+
+    let paste = format!(
+        "# synthetic .env\nSTRIPE_SECRET_KEY={}\nDATABASE_PASSWORD=example-pass\nDATABASE_URL=postgres://app:EXAMPLE0@db.example.com:5432/app\n",
+        fake("sk_test_", 24),
+    );
+    let detected = detect::detect(&paste);
+    assert_eq!(
+        super::masked_paste(&detected),
+        "STRIPE_SECRET_KEY=sk_test_••••••••\nDATABASE_PASSWORD=••••••••\nDATABASE_URL=postgres://••••••••"
+    );
+    assert_eq!(super::masked_paste(&[]), "••••••••");
+    assert_eq!(super::row_cap(&detected[0]), Some(("Development", false)));
+    assert_eq!(super::row_line(&detected[1]), "Secret · DATABASE_PASSWORD");
+
+    // On the screen: the masked lines, no value, and the Development cap.
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = unlocked(&dir);
+    let mut window = Window::new();
+    open_with(&mut app, &mut window, &paste);
+    assert!(
+        window.text.contains("STRIPE_SECRET_KEY=sk_test_••••••••"),
+        "{}",
+        window.text
+    );
+    assert!(window.text.contains("Development"), "{}", window.text);
+    assert!(!window.text.contains("Staging"), "{}", window.text);
+    for secret in ["EXAMPLE0", "example-pass", "synthetic .env"] {
+        assert!(!window.text.contains(secret), "{secret}: {}", window.text);
+    }
 }

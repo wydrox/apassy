@@ -135,7 +135,7 @@ The declaration comes from the catalog signals of section 2, with the facts of t
 - `localhost`, `127.0.0.1`, `0.0.0.0`, or `host.docker.internal` alone never makes a credential local, low-risk, or reversible: a tunnel or a proxy to a production database has the same URL. The general signal `local-host` also needs a local word. A secret value gives only the host of a URL at its start, never a host of its query (`?application_name=http://localhost`) or its password.
 - A title and the result line never have a part of a secret value: they come from the provider, the scheme, the variable name, or the database name of a certain split.
 
-A test key (`sk_test_`) or a test word of the variable gives staging, as the catalog says, not development.
+A Stripe test key (`sk_test_`, `rk_test_`, `pk_test_`) gives development, as the catalog says. A test word of the variable (`STRIPE_TEST_KEY`, `TEST_TOKEN`) still gives staging.
 
 `swap.rs` keeps the vendor prefix of a value in its placeholder. A test there checks that its table covers every pack prefix. The pack prefixes it does not keep yet: `AIza`, `nfp_`, `sk-admin-`, `pscale_tkn_`, `pscale_oauth_`, `sntrys_`, `sntryu_`, `sb_secret_`, `sb_publishable_`, `sbp_`.
 
