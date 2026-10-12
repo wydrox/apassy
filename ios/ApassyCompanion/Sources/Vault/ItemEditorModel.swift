@@ -73,6 +73,13 @@ final class ItemEditorModel {
     var customName = ""
     var customValue = ""
     var details: [Detail] = []
+    /// The folder of the item; nil: the top level (contract 5.11, `item_folder_set`).
+    var folder: String?
+    /// The folder that the stored item is in; nil for a new item.
+    private(set) var storedFolder: String?
+    /// The folders of the vault, depth first. Empty until `loadFolders`, and with a core without
+    /// folders: the form then shows no folder row.
+    private(set) var folders: [Folder] = []
     /// Optional built-in secrets of the stored item that the owner removes.
     var removedSecrets: Set<String> = []
     private(set) var error: String?
@@ -86,14 +93,15 @@ final class ItemEditorModel {
     /// Fields of the stored item that the form does not show.
     private var extras: [DraftField] = []
 
-    /// A new item of `kind`.
-    init(kind: ItemKind) {
+    /// A new item of `kind`, in `folder` (the folder that the owner adds in).
+    init(kind: ItemKind, folder: String? = nil) {
         self.kind = kind
         existing = nil
         passkey = nil
         title = ""
         notes = ""
         tags = []
+        self.folder = folder
     }
 
     /// An existing item. Secret values are not read: they start empty ("Unchanged").
@@ -104,6 +112,8 @@ final class ItemEditorModel {
         title = detail.row.title
         notes = detail.notes
         tags = detail.row.tags
+        folder = detail.row.folder
+        storedFolder = detail.row.folder
         let specs = Self.specs(kind)
         for field in detail.fields {
             if !field.custom, specs.contains(where: { $0.name == field.name }) {
@@ -247,6 +257,23 @@ final class ItemEditorModel {
         tagMessage = nil
     }
 
+    // MARK: The folder
+
+    /// Read the folders. A folder that another device deleted reads as the top level, as the
+    /// core reads it, so it is no change.
+    func loadFolders(from service: any VaultService) async {
+        folders = (try? await service.folders()) ?? []
+        let known = Set(folders.map(\.uuid))
+        if let folder, !known.contains(folder) { self.folder = nil }
+        if let storedFolder, !known.contains(storedFolder) { self.storedFolder = nil }
+    }
+
+    /// Save moves the item: a new item that goes into a folder, or a stored item whose folder
+    /// the owner changed.
+    var movesFolder: Bool { folder != storedFolder }
+
+    var folderLabel: String { FolderMenu.label(folders, folder) }
+
     // MARK: The draft
 
     /// The body that `save` sends.
@@ -318,10 +345,24 @@ final class ItemEditorModel {
         do {
             let saved = try await vault.save(id: existing?.id, revision: existing?.revision, draft: draft())
             error = nil
+            await moveIfNeeded(saved, in: vault)
             return saved
         } catch {
             self.error = error.localizedDescription
             return nil
+        }
+    }
+
+    /// Put the saved item in the chosen folder. The item is saved already, so a failure shows as
+    /// an alert of the vault and the sheet closes: a second save would add a new item twice.
+    private func moveIfNeeded(_ saved: SavedItem, in vault: VaultModel) async {
+        guard movesFolder else { return }
+        do {
+            try await vault.service.setItemFolder(id: saved.id, folder: folder)
+            storedFolder = folder
+            await vault.didImport()
+        } catch {
+            vault.report(error)
         }
     }
 }
