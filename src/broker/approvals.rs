@@ -33,6 +33,12 @@
 //! [`AnswerChoice`] that it remembers after its second check. The stricter answers
 //! ("Not for this agent", "Always ask for this agent", "Disconnect the agent") deny the
 //! run and need no owner check ([`ApprovalQueue::deny_stricter`]).
+//!
+//! A question names the answers that can take effect ([`QuestionInfo::valid_answers`]).
+//! The queue refuses a remembered answer that the question does not offer, for example
+//! "Allow ACTION in PROJECT" without a running bouncer or for a kind of action that the
+//! rules are not sure of. A call joins a waiting question when its run is the same
+//! except for the IDs, the bouncer text (`risk`, `question.why`), and the pattern offer.
 
 mod owner_auth;
 
@@ -94,10 +100,16 @@ pub struct QuestionInfo {
     /// project, and no answer can be remembered.
     pub project: Option<Project>,
     pub action: ActionKind,
-    /// An item of the run has a production declaration without an allowance.
+    /// An item of the run has a production declaration from a real signal without an
+    /// allowance: only "Allow production" can be remembered.
     pub production: bool,
     /// Why the owner is asked, for the card. No secret value.
     pub why: String,
+    /// Each item of the run, in the order of `item_ids`.
+    pub items: Vec<QuestionItem>,
+    /// The answers that can take effect now. The card offers only these, and the queue
+    /// refuses a remembered answer that is not here.
+    pub valid_answers: Vec<AnswerKind>,
 }
 
 impl Default for QuestionInfo {
@@ -109,8 +121,47 @@ impl Default for QuestionInfo {
             action: ActionKind::Change,
             production: false,
             why: String::new(),
+            items: Vec::new(),
+            valid_answers: vec![AnswerKind::Once],
         }
     }
+}
+
+/// One item of a question (ADR 0025 §3, §5).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QuestionItem {
+    pub item_id: u64,
+    pub name: String,
+    /// Production from a real signal (the owner, a value signal, or usage): each run
+    /// waits unless the owner allowed production for the project and the kind of action.
+    pub production: bool,
+    /// Production only by default, without a signal. The first use in a project with a
+    /// kind of action asks, and the owner can correct the environment
+    /// ([`AnswerKind::CorrectEnvironment`]).
+    pub unconfirmed: bool,
+    /// "Always ask me" of the item, or "Always ask for this agent": nothing is
+    /// remembered for it.
+    pub always_ask: bool,
+}
+
+/// An answer that a question can offer (ADR 0025 §3, §3b, §3f, §5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnswerKind {
+    /// "Allow once".
+    Once,
+    /// "Allow ACTION in PROJECT".
+    InProject(ActionKind),
+    /// "Allow production for PROJECT: ACTION".
+    Production(ActionKind),
+    /// "Not for this agent".
+    NeverForAgent,
+    /// "Always ask for this agent".
+    AlwaysAskForAgent,
+    /// "Disconnect the agent".
+    Disconnect,
+    /// "Development" or "Production": the owner corrects the environment of an item whose
+    /// production value is only a default (`QuestionItem::unconfirmed`).
+    CorrectEnvironment,
 }
 
 /// What "Allow ACTION in PROJECT" or "Allow production for PROJECT: ACTION" remembers
@@ -360,8 +411,11 @@ pub enum ApprovalRefusal {
     /// The declarations of "Allow in this folder" do not match the first use: each
     /// item without a declaration needs exactly one.
     DeclarationsDoNotMatch,
-    /// A remembered answer for a run without a project, or for another project or
-    /// kind of action than the question names.
+    /// A remembered answer for a run without a project, for another project or kind of
+    /// action than the question names, or one that the question does not offer because
+    /// it could not take effect ([`QuestionInfo::valid_answers`]: no bouncer runs, the
+    /// rules are not certain of the kind of action, an item always asks, or a rule flag
+    /// asks at each run).
     NoProject,
     /// "Allow production" for a question without a production item.
     NotProduction,
@@ -389,7 +443,7 @@ impl ApprovalRefusal {
                 "Each new credential needs one declaration. Nothing was approved. Review the request again."
             }
             Self::NoProject => {
-                "This run has no project to remember. Nothing was approved. Use \"Allow once\"."
+                "Apassy cannot remember this answer for this run. Nothing was approved. Use \"Allow once\"."
             }
             Self::NotProduction => {
                 "This run uses no production credential. Nothing was approved. Review the request again."
@@ -423,11 +477,16 @@ struct Question {
     turn: u64,
 }
 
-/// The run with its IDs at 0, to compare two calls.
+/// The run with its IDs at 0 and without the text of the bouncer and the pattern offer,
+/// to compare two calls. The same request again can get another model text or another
+/// approval count; it is still the same request.
 fn template_of(run: &PendingRun) -> PendingRun {
     let mut template = run.clone();
     template.id = 0;
     template.question.id = 0;
+    template.risk.clear();
+    template.remember = None;
+    template.question.why.clear();
     template
 }
 
@@ -618,9 +677,15 @@ impl ApprovalQueue {
         {
             return Err(ApprovalRefusal::NoProject);
         }
+        let offered = if production {
+            AnswerKind::Production(action)
+        } else {
+            AnswerKind::InProject(action)
+        };
         match (production, question.production) {
             (true, false) => Err(ApprovalRefusal::NotProduction),
             (false, true) => Err(ApprovalRefusal::ProductionNeedsAllowance),
+            _ if !question.valid_answers.contains(&offered) => Err(ApprovalRefusal::NoProject),
             _ => Ok(AnswerChoice {
                 project: project.clone(),
                 action,
@@ -1441,6 +1506,46 @@ mod tests {
         assert!(queue.deny(waiting[0].id));
         let settled = foreign.join().expect("join").expect("an answer");
         assert!(!settled.attached);
+    }
+
+    /// Gate 1 (C-F7): the same request again joins its question also when the bouncer
+    /// text or the pattern offer changed.
+    #[test]
+    fn a_question_is_joined_without_the_bouncer_text_and_the_pattern_offer() {
+        let queue = Arc::new(ApprovalQueue::new());
+        let first = {
+            let queue = Arc::clone(&queue);
+            std::thread::spawn(move || {
+                let mut run = run();
+                run.risk = "The model was not sure.".to_owned();
+                run.question.why = run.risk.clone();
+                queue.wait_for_question(run, 7, [1; 32], Duration::from_secs(5), || true)
+            })
+        };
+        let id = wait_until_pending(&queue);
+        let joined = {
+            let queue = Arc::clone(&queue);
+            std::thread::spawn(move || {
+                let mut run = run();
+                run.risk = "Another model text.".to_owned();
+                run.question.why = run.risk.clone();
+                run.remember = Some(RememberOffer {
+                    pattern: "true".to_owned(),
+                    approvals: 1,
+                    needed: 3,
+                });
+                queue.wait_for_question(run, 7, [1; 32], Duration::from_secs(5), || true)
+            })
+        };
+        assert_eq!(
+            first.join().expect("join"),
+            Err(QuestionRefusal::Superseded)
+        );
+        assert_eq!(queue.pending().len(), 1);
+        assert!(queue.deny(id));
+        let settled = joined.join().expect("join").expect("an answer");
+        assert!(settled.attached);
+        assert_eq!(settled.outcome, ApprovalOutcome::Denied);
     }
 
     #[test]

@@ -38,7 +38,7 @@ This command writes configuration. It does not check the host connection or a fi
 
 Then give the agent access: apassy grant set AGENT ITEM --folder DIR
 Start the host in the Apassy sandbox (see docs/operations/isolation.md):
-  claude: MCP_TOOL_TIMEOUT=180000 apassy-sandbox -- claude --settings '{\"sandbox\":{\"enabled\":false}}'
+  claude: MCP_TOOL_TIMEOUT=330000 apassy-sandbox -- claude --settings '{\"sandbox\":{\"enabled\":false}}'
   codex:  apassy-sandbox -- codex -c sandbox_mode=danger-full-access
 Host approval prompts stay active.
 ";
@@ -333,7 +333,7 @@ fn run_host(cli: &Cli, mut args: Args) -> Outcome {
     println!("From the project folder, start the host in the Apassy sandbox:");
     match host {
         Host::Claude => println!(
-            "MCP_TOOL_TIMEOUT=180000 apassy-sandbox -- claude --settings '{{\"sandbox\":{{\"enabled\":false}}}}'"
+            "MCP_TOOL_TIMEOUT=330000 apassy-sandbox -- claude --settings '{{\"sandbox\":{{\"enabled\":false}}}}'"
         ),
         Host::Codex => println!("apassy-sandbox -- codex -c sandbox_mode=danger-full-access"),
     }
@@ -580,7 +580,7 @@ fn claude(mcp_wrapper: &Path, hook_wrapper: Option<&Path>, write: bool) -> Outco
         }
     }
     println!(
-        "Set MCP_TOOL_TIMEOUT above 120000 for Claude Code: a run can wait 120 s for you. In the Apassy sandbox, also set \"sandbox\": {{\"enabled\": false}} in the Claude Code settings."
+        "Set MCP_TOOL_TIMEOUT to at least 330000 for Claude Code: a question can wait 5 minutes for you. In the Apassy sandbox, also set \"sandbox\": {{\"enabled\": false}} in the Claude Code settings."
     );
     Ok(())
 }
@@ -594,7 +594,7 @@ fn codex_home() -> Result<PathBuf, Failure> {
 
 fn codex_section(mcp_wrapper: &Path) -> String {
     format!(
-        "[mcp_servers.apassy]\ncommand = \"{}\"\ntool_timeout_sec = 180\n",
+        "[mcp_servers.apassy]\ncommand = \"{}\"\ntool_timeout_sec = 330\n",
         mcp_wrapper
             .display()
             .to_string()
@@ -844,7 +844,7 @@ mod tests {
 
     #[test]
     fn codex_setup_accepts_only_its_existing_configuration() {
-        let expected = "[mcp_servers.apassy]\ncommand = \"/tmp/apassy-mcp-codex.sh\"\ntool_timeout_sec = 180\n";
+        let expected = "[mcp_servers.apassy]\ncommand = \"/tmp/apassy-mcp-codex.sh\"\ntool_timeout_sec = 330\n";
         assert!(!codex_section_present("model = \"test\"\n", expected).unwrap());
         let current = format!(
             "model = \"test\"\n{expected}\n# user note\n[mcp_servers.other]\ncommand = \"other\"\n"

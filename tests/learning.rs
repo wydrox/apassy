@@ -16,13 +16,16 @@ use apassy::agent::wire::{Action, WireResponse};
 use apassy::broker::approvals::{
     ApprovalRefusal, OwnerAction, OwnerCheck, OwnerGate, OwnerProof, PendingRun,
 };
+use apassy::broker::action_kind::ActionKind;
 use apassy::broker::bouncer::{BouncerClient, Thresholds};
 use apassy::broker::http::TlsClient;
 use apassy::broker::learning::{self, RunScope};
 use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault, calibration};
 use apassy::contracts::CredentialKind;
+use apassy::vault::exceptions::ExceptionKind;
+use apassy::vault::usage::{NewItemUse, UseDecidedBy, UseOutcome};
 use apassy::vault::{
-    DecidedBy, DecisionEntry, Declaration, Environment, ExecMode, ExecRule, Field, ItemDraft,
+    DecidedBy, DecisionEntry, Declaration, Environment, ExecMode, Field, ItemDraft,
     LoggedDecision, PATTERN_APPROVALS_NEEDED, PatternState, RequestSource, Reversibility,
     RiskLevel, Scope, SecretValue, Vault,
 };
@@ -48,7 +51,7 @@ struct Fixture {
 
 fn staging() -> Declaration {
     Declaration {
-        project: "demo".to_owned(),
+        project: "project".to_owned(),
         environment: Environment::Staging,
         risk: RiskLevel::Medium,
         scope: Scope::ReadWrite,
@@ -99,6 +102,7 @@ fn fixture_with(model: &'static [(&'static str, f64)], approval_timeout: Duratio
     vault
         .set_declaration(item.id, &staging())
         .expect("declaration");
+    seed_history(&mut vault, item.id, agent.id, &project);
     let shared: SharedVault = Arc::new(Mutex::new(Some(vault)));
     let mut options = BrokerOptions::with_tls(TlsClient::platform().expect("TLS"));
     options.approval_timeout = approval_timeout;
@@ -120,6 +124,35 @@ fn fixture_with(model: &'static [(&'static str, f64)], approval_timeout: Duratio
         token: token.expose().to_owned(),
         broker,
         model_calls: bouncer.bodies,
+    }
+}
+
+/// ADR 0025 §3: the model decides only for an item that this agent used in the project
+/// before. Each kind of action of this agent gets one earlier use that the bouncer
+/// allowed.
+fn seed_history(vault: &mut Vault, item: u64, agent: u64, project: &std::path::Path) {
+    for action in [
+        ActionKind::Read,
+        ActionKind::Change,
+        ActionKind::Deploy,
+        ActionKind::Delete,
+    ] {
+        vault
+            .record_item_use(&NewItemUse {
+                item_id: item,
+                agent_id: Some(agent),
+                agent_name: "Learning agent".to_owned(),
+                project_key: project.display().to_string(),
+                project_label: "project".to_owned(),
+                action,
+                command_summary: "run earlier".to_owned(),
+                hosts: Vec::new(),
+                outcome: UseOutcome::Allowed,
+                decided_by: UseDecidedBy::Bouncer,
+                answered_on: String::new(),
+                decision_log_id: None,
+            })
+            .expect("history");
     }
 }
 
@@ -474,31 +507,21 @@ fn an_active_pattern_never_overrides_the_earlier_steps() {
     );
     assert!(card.remember.is_none());
 
-    // Hard rules of the grant: forbidden word, run limit, and expiry deny.
-    let set_rule = |rule: ExecRule| {
-        with_vault(&fx, |vault| {
-            vault
-                .set_exec_rule(fx.agent_id, fx.item_id, rule)
-                .expect("rule");
-        });
-    };
-    set_rule(ExecRule {
-        forbidden_words: vec!["limit".to_owned()],
-        ..ExecRule::default()
+    // "Always ask for this agent" (ADR 0025 §3f; the upgrade turned each grant rule
+    // into it) asks before the pattern.
+    with_vault(&fx, |vault| {
+        vault
+            .add_agent_exception(fx.agent_id, fx.item_id, ExceptionKind::AlwaysAsk)
+            .expect("always ask");
     });
-    assert_eq!(code(&run(&fx, &report("4"))), "rule_forbidden_word");
-    set_rule(ExecRule {
-        expires_at: Some(1),
-        ..ExecRule::default()
+    let card = expect_prompt(&fx, || run(&fx, &report("4")));
+    assert!(card.risk.contains("always ask"), "{}", card.risk);
+    assert!(card.remember.is_none());
+    with_vault(&fx, |vault| {
+        vault
+            .remove_agent_exception(fx.agent_id, fx.item_id, ExceptionKind::AlwaysAsk)
+            .expect("remove");
     });
-    assert_eq!(code(&run(&fx, &report("4"))), "rule_expired");
-    set_rule(ExecRule {
-        max_runs_per_hour: Some(1),
-        ..ExecRule::default()
-    });
-    // Runs in this hour already happened. The limit denies the next one.
-    assert_eq!(code(&run(&fx, &report("4"))), "rule_rate_limit");
-    set_rule(ExecRule::default());
 
     // Production rule (ADR 0010, goal item P2). The pattern is taught under the
     // production declaration, so its key matches.
@@ -563,7 +586,7 @@ fn an_active_pattern_never_overrides_the_earlier_steps() {
         calls,
         "no step after the pattern asked the model"
     );
-    // The hard rule denials are in the decision log as rule decisions.
+    // A process grant has no hard rule any more (ADR 0025): no rule decision.
     let rules = with_vault(&fx, |vault| {
         vault
             .decision_log()
@@ -572,7 +595,7 @@ fn an_active_pattern_never_overrides_the_earlier_steps() {
             .filter(|record| record.entry.decided_by == DecidedBy::Rule)
             .count()
     });
-    assert_eq!(rules, 3);
+    assert_eq!(rules, 0);
 }
 
 /// Every decision goes to the log without secret values. The export has the documented
@@ -591,34 +614,27 @@ fn decision_log_and_export_have_no_secret_values() {
         Some(&format!("Use {SECRET} for the report.")),
     );
     assert_eq!(decided_by(&response), "Bouncer allowed");
-    // A hard rule denial.
+    // A request check denial: an item that the agent may not use.
+    assert_eq!(
+        code(&send(
+            &fx,
+            &fx.token,
+            vec![fx.item_id + 1000],
+            &report("forbidden"),
+            Some("Print the weekly report."),
+        )),
+        "not_granted"
+    );
+    // "Always ask for this agent" (a grant in "ask" mode after the upgrade), and the
+    // owner denies.
     with_vault(&fx, |vault| {
         vault
-            .set_exec_rule(
-                fx.agent_id,
-                fx.item_id,
-                ExecRule {
-                    forbidden_words: vec!["forbidden".to_owned()],
-                    ..ExecRule::default()
-                },
-            )
-            .expect("rule");
-    });
-    assert_eq!(code(&run(&fx, &report("forbidden"))), "rule_forbidden_word");
-    // A grant in "ask" mode, and the owner does not answer in time.
-    with_vault(&fx, |vault| {
-        vault
-            .set_exec_grant(
-                fx.agent_id,
-                fx.item_id,
-                &fx.project.display().to_string(),
-                ExecMode::Ask,
-            )
-            .expect("grant");
+            .add_agent_exception(fx.agent_id, fx.item_id, ExceptionKind::AlwaysAsk)
+            .expect("always ask");
     });
     let denier = owner(&fx, OwnerAnswer::Deny);
     assert_eq!(code(&run(&fx, &report("2"))), "approval_denied");
-    // "Approve and remember" is not offered for a grant in "ask" mode.
+    // "Approve and remember" is not offered for an item that always asks.
     assert!(denier.join().expect("owner").remember.is_none());
 
     let (log, export, days) = with_vault(&fx, |vault| {
@@ -679,6 +695,7 @@ fn decision_log_and_export_have_no_secret_values() {
         keys,
         vec![
             "agent",
+            "asked",
             "at",
             "command",
             "cwd_rel",
@@ -719,13 +736,8 @@ fn decision_log_and_export_have_no_secret_values() {
     let quick = fixture_with(&[], Duration::from_millis(300));
     with_vault(&quick, |vault| {
         vault
-            .set_exec_grant(
-                quick.agent_id,
-                quick.item_id,
-                &quick.project.display().to_string(),
-                ExecMode::Ask,
-            )
-            .expect("grant");
+            .add_agent_exception(quick.agent_id, quick.item_id, ExceptionKind::AlwaysAsk)
+            .expect("always ask");
     });
     assert_eq!(code(&run(&quick, &report("1"))), "approval_timeout");
     let last = with_vault(&quick, |vault| vault.decision_log().expect("log"))

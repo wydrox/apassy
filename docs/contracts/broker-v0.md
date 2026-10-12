@@ -60,7 +60,7 @@ A run with a variable in placeholder mode ([ADR 0011](../adr/0011-run-proxy-plac
 
 - `catalog` is always present, for every agent. It lists each credential that is not archived and that no exception hides from the agent (section 4b).
 - Each entry has `folder`: the names of the folders of the credential, from the root. The array is empty for a credential in the root.
-- `access` is `needs_field` (the credential has no secret field to use in a command), `can_use`, `requested`, or `can_request`. Any other connected agent can use a `can_request` credential in a run: the bouncer decides, and it can ask the owner.
+- `access` is `needs_field` (the credential has no secret field to use in a command) or `can_use`. A process grant is no authority, so each other credential is `can_use`: the bouncer decides each use, and it can ask the owner. `requested` and `can_request` are no longer made.
 - `sees_all_credentials` is `false` also for an agent that an exception limits to a list ("only these items").
 - `process_access` and `items` do not list a credential that is hidden from the agent. The action `request_access` has `item_id`, `reason`, and an optional `cwd`. It answers at once with `request_id`, `state`, and `new`. Its codes are `not_visible`, `invalid_request`, `already_granted`, and `too_many_requests`.
 
@@ -101,6 +101,7 @@ The broker does the checks in this order:
 5. The parameters match the operation.
 6. The destination is `https://HOST[:PORT]`, or `http://` on a loopback address. See [ADR 0005](../adr/0005-connector-tls.md).
 7. The item category matches the profile.
+7a. The standing rules of ADR 0025 §3: "Always ask me", "Always ask for this agent", and a production declaration make the call wait for the owner as a question of the agent (`question_waiting`, `approval_denied`, `approval_timeout`, `approval_invalidated` as for a run). The broker then checks steps 1 to 7 again; a change gives `authorization_changed`. Each decided use is in the use log.
 8. The broker reads the secret field. Then it releases the vault lock and calls the destination.
 9. For `https://`, the TLS handshake and the certificate check finish before the broker sends a request byte.
 
@@ -117,15 +118,16 @@ A process grant is no longer the authority for a run. Every connected agent can 
 
 An item that does not exist also gives `not_granted`, so the code does not tell which items exist. A connector call (`apassy_use_credential`) still needs a connector grant, and an exception that hides the item wins (`not_granted`).
 
-A process grant that covers the working directory still applies its own hard rule (expiry, `rule_expired`; command prefixes, `rule_command_not_permitted`; forbidden words, `rule_forbidden_word`; hourly limit, `rule_rate_limit`) and its instruction. A grant in "Ask me each time" still asks. A grant gives nothing outside its folder. The order of the bouncer is in [the bouncer](../operations/bouncer.md), section 3.
+A process grant is not read for a run: the codes `rule_expired`, `rule_command_not_permitted`, `rule_forbidden_word`, and `rule_rate_limit` are no longer made. The upgrade to schema 18 turned each grant that asked or had a rule into `always_ask`. The order of the bouncer is in [the bouncer](../operations/bouncer.md), section 3.
 
 When the bouncer cannot allow a run, a question waits for the owner:
 
-- The wait is at most 300 seconds. After that the code is `approval_timeout`.
-- An agent has at most one waiting question. A second, different request gets `question_waiting`.
+- The wait is at most 300 seconds (5 minutes). After that the code is `approval_timeout`.
+- An agent has at most one waiting question. A second, different request gets `question_waiting`; the agent waits, then calls again with the same request.
+- When the host of the agent ends the call earlier, the question stays open; the same request again joins it. Two calls are the same request when the run is the same except for the text of the bouncer and the pattern offer.
 - The same request of the same agent, in the same vault session, joins the waiting question. The newest call gets the answer. The older call ends at once with `question_waiting` and the text that a newer call took over the question. A call never joins the question of another agent.
 - The code `first_use_waiting` and the offer "Allow in FOLDER" (ADR 0024) are no longer made.
-- If the owner answers "Allow ACTION in PROJECT" or "Allow production for PROJECT: ACTION", the broker saves the answer after its second check, in the same vault session. If the save fails, the code is `answer_failed` and the command does not start.
+- The question names the answers that can take effect (`valid_answers`). If the owner answers "Allow ACTION in PROJECT" or "Allow production for PROJECT: ACTION", the broker saves the answer after its second check, in the same vault session, with the destination hosts of the run and the known hosts of each item. A production item that already has its allowance is skipped, and the failed save of one item does not stop the others. If the project changed, the code is `answer_failed` and the command does not start.
 - A success response then has `remembered`: a text that says what the owner allowed.
 
 ### 4a. Vault sessions and owner approvals (goal item V3)

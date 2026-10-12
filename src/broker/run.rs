@@ -11,42 +11,56 @@
 //!    item gives the same `not_granted`), the owner reviewed the item after a restore,
 //!    the item is not archived, the item has a process binding (a one-time-code setup key
 //!    is never chosen automatically), and the variables differ. A process grant is no
-//!    authority any more. A grant of the agent for the item that covers the working
-//!    directory still applies its hard rule (expiry, command prefixes, forbidden words,
-//!    hourly limit) and its instruction, and "Ask me each time" still asks.
+//!    authority and is not read: the upgrade to schema 18 turned each grant that asked or
+//!    had a rule into "Always ask for this agent".
 //! 6. The bouncer decides the use (ADR 0025 §3), in this order. The command analysis
 //!    gets the known hosts of the provider of each item (goal item B4), and the user
 //!    request comes from the host hook when there is one (goal item B6).
-//!    1. Hard rules ask the owner: a rule flag of the analysis (for example a secret
-//!       that goes to a host that is not a host of its provider); a production item
-//!       without an owner allowance for the item, the project, and the kind of action
-//!       (ADR 0010, ADR 0025 §3b); "Always ask me" of the item, "Always ask for this
-//!       agent", or a grant in "Ask me each time".
-//!    2. Without a running bouncer, each run asks the owner.
+//!    1. Hard rules and security vetoes ask the owner, whatever was remembered: a rule
+//!       flag of the analysis (for example `secret_output`, a secret that goes to a
+//!       host that is not a host of its provider, or a production word); a database
+//!       host from the command that is not a known host of the items; "Always ask me"
+//!       of the item or "Always ask for this agent"; and a production item (production from the owner, a value signal, or
+//!       usage) without a production allowance that fits the run (ADR 0010, ADR 0025
+//!       §3b): one for the item, the project, and the kind of action, where the rules are
+//!       certain of that kind, and where each destination host of the run is a host of
+//!       the allowance or a known host of the item.
+//!    2. Without a running bouncer, each run asks the owner. Every remembered route
+//!       below needs it.
 //!    3. A working directory that is no project (the root, the home folder, and its
 //!       parents) asks the owner: nothing can be remembered there.
-//!    4. A remembered answer of the owner for each item, the project, and the kind of
-//!       action (production items: a production allowance) starts the run.
-//!    5. A missing user request or a missing declaration asks the owner (ADR 0008).
-//!    6. An active remembered pattern starts the run (ADR 0009, ADR 0010).
-//!    7. A declaration value that is only a default (`declaration_source`) asks the
+//!    4. An item that is production only by default (no signal) asks at its first use
+//!       in the project with a kind of action, until the owner answered for them.
+//!    5. A remembered answer of the owner for each item, the project, and the kind of
+//!       action starts the run, when each destination host of the run is a host of the
+//!       answer or a known host of the item. For a production item (also by default),
+//!       the rules must be certain of the kind of action. An answer that exists but
+//!       does not cover the run (another host, an unsure kind) asks the owner.
+//!    6. An item whose declaration names another project asks the owner (only an
+//!       answer of the owner for this project, step 5, covers it).
+//!    7. A missing user request or a missing declaration asks the owner (ADR 0008).
+//!    8. An active remembered pattern starts the run (ADR 0009, ADR 0010). Patterns
+//!       belong to the project key.
+//!    9. A declaration value that is only a default (`declaration_source`) asks the
 //!       owner: a weak signal makes the bouncer stricter.
-//!    8. History: each item was used in the project with this kind of action, and the
-//!       bouncer allowed that use. The run starts.
-//!    9. An item without such history asks the owner, unless its declaration is
-//!       development (or local) with low risk, or a process grant of the agent covers
-//!       the working directory.
-//!    10. The model decides (contract v7, ADR 0008). Unclear asks the owner. A candidate
-//!        in shadow mode answers in parallel and has no effect (goal item B9).
+//!    10. An item that this agent did not use in the project with this kind of action
+//!        (history: a use that the bouncer allowed, after the last stricter
+//!        declaration) asks the owner, unless its declaration is development (or local)
+//!        with low risk.
+//!    11. The model decides (contract v7, ADR 0008). History never starts a run by
+//!        itself. Unclear asks the owner. A candidate in shadow mode answers in parallel
+//!        and has no effect (goal item B9).
 //! 7. A question waits for the owner (at most one per agent; the same request again
-//!    joins it). "Allow ACTION in PROJECT" and "Allow production" remember an answer
-//!    after step 8. An owner denial blocks the pattern of the request.
+//!    joins it). It names the answers that can take effect. "Allow ACTION in PROJECT"
+//!    and "Allow production" remember an answer with the destination hosts of the run
+//!    after step 8; a production item that already has its allowance is skipped. An
+//!    owner denial blocks the pattern of the request.
 //! 8. After a decision, the broker checks the vault, the agent, and the rules again.
 //!    The vault epoch must be the same as in step 1. A lock, an unlock, or a restore
 //!    in between makes the decision invalid (goal item V3).
-//!    The credential revision, process binding, grant, declaration, provider, exceptions,
-//!    "Always ask me", the project, and canonical directories must also be the same as in
-//!    the original check.
+//!    The credential revision, process binding, declaration and its sources, provider,
+//!    exceptions, "Always ask me", the project, and canonical directories must also be
+//!    the same as in the original check.
 //! 9. The broker reads the secrets, releases the vault lock, and starts the process.
 //!    A variable in placeholder mode (ADR 0011) gets a placeholder. The broker then
 //!    starts a run proxy that puts the real value into HTTPS requests to the hosts of
@@ -62,10 +76,10 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use super::action_kind::{ActionKind, classify};
+use super::action_kind::{ActionKind, classify, classify_certain};
 use super::approvals::{
-    AnswerChoice, ApprovalOutcome, CheckMethod, PendingRun, QuestionInfo, QuestionRefusal, Settled,
-    action_words,
+    AnswerChoice, AnswerKind, ApprovalOutcome, CheckMethod, PendingRun, QuestionInfo, QuestionItem,
+    QuestionRefusal, Settled, action_words,
 };
 use super::bouncer::{BouncerRequest, BouncerVerdict, DecisionContext, Learned, decide_learned};
 use super::decide::{BrokerContext, authenticate, lock, locked_response};
@@ -77,16 +91,16 @@ use super::proxy::{
     mint_placeholder,
 };
 use super::shadow::{self, ShadowInput};
-use super::shell_risk::{Analysis, ProviderHosts, analyze_run, injection_flag};
+use super::shell_risk::{self, Analysis, DB_HOST_FLAG, ProviderHosts, analyze_run, injection_flag};
 use crate::agent::wire::{WireResponse, codes};
-use crate::vault::answers::{AnswerScope, ProjectRef};
+use crate::vault::answers::{AnswerScope, ProjectRef, normal_host};
 use crate::vault::exceptions::Standing;
 use crate::vault::providers;
 use crate::vault::usage::{InteractionKind, NewItemUse, UseDecidedBy, UseOutcome};
 use crate::vault::{
     ActivityDecision, AgentSummary, DecisionEntry, Declaration, DeclarationSource,
-    DeclarationSources, EnvBinding, EnvDelivery, Environment, ExecGrant, ExecMode, GrantPlace,
-    NewActivity, OwnerLabel, RealOutcome, RiskLevel, Vault, VaultErrorKind,
+    DeclarationSources, EnvBinding, EnvDelivery, Environment, NewActivity, OwnerLabel,
+    RealOutcome, RiskLevel, Vault, VaultErrorKind,
 };
 
 /// A shadow thread waits this long after the owner time limit for the real outcome.
@@ -103,7 +117,7 @@ const MAX_PATH_BYTES: usize = 4096;
 const OWNER_APPROVED_ON_IPHONE: &str = "Owner approved on the iPhone";
 const INVALIDATED: &str = "The vault was locked, or Apassy stopped, before the run started. The approval is not valid. Send the request again after the owner unlocks the vault.";
 /// ADR 0025 §3: an agent has at most one waiting question.
-pub(super) const QUESTION_WAITING: &str = "Another question of this agent waits for the owner in Apassy. Wait for that answer, then send this request again. The same request again joins the waiting question.";
+pub(super) const QUESTION_WAITING: &str = "Another question of this agent waits for the owner in Apassy (up to 5 minutes). Wait for that answer, then call again with the same request. The same request again joins the waiting question.";
 const QUESTION_SUPERSEDED: &str =
     "A newer call with the same request joined the waiting question. The answer goes to that call.";
 /// The start of the activity text of a run that the owner approved and remembered for the
@@ -193,18 +207,14 @@ struct Checked {
     cwd: PathBuf,
     /// The project of the working directory (ADR 0025 §3a). `None`: no project.
     project: Option<Project>,
-    /// Canonical project directory. Remembered patterns bind to it.
+    /// Canonical project directory: the root of the project, else the working
+    /// directory. Remembered patterns generalize paths below it.
     project_dir: PathBuf,
     /// Working directory relative to the project directory.
     relative_dir: String,
     env_names: Vec<String>,
     /// The variables in placeholder mode (ADR 0011).
     placeholder_names: Vec<String>,
-    /// A grant that covers the working directory is in "ask" mode, or is for any folder
-    /// with the real value.
-    any_ask: bool,
-    /// Owner instructions of the grants, joined.
-    instruction: String,
     /// Owner declarations, one per item. `None` when an item has none.
     declarations: Vec<Option<Declaration>>,
     /// The known hosts of the provider of each item with a provider (goal item B4).
@@ -227,31 +237,49 @@ struct ItemFacts {
     weak_source: bool,
     /// The declaration is development or local, with low risk.
     dev_low: bool,
+    /// Production from the owner, a value signal, or usage: the hard rule of ADR 0010.
     production: bool,
-    /// A process grant of the agent covers the working directory.
-    granted: bool,
+    /// Production only by default, without a signal: unconfirmed (ADR 0025 §4, §5).
+    unconfirmed: bool,
+    /// The project that the declaration names, when it is not the project of the run.
+    foreign_project: Option<String>,
+    /// The hosts where the secret may go: the hosts of the provider, the hosts of a
+    /// placeholder, and the `host` field of the item. Lowercase, without a port.
+    known_hosts: Vec<String>,
+}
+
+impl ItemFacts {
+    /// "Always ask me" or "Always ask for this agent".
+    fn asks_always(&self) -> bool {
+        self.always_ask || self.standing == Standing::AlwaysAsk
+    }
 }
 
 #[derive(PartialEq, Eq)]
 struct ItemAuthorization {
     binding: EnvBinding,
-    /// The grant that covers the working directory, if any.
-    grant: Option<ExecGrant>,
     revision: u64,
     declaration: Option<Declaration>,
     sources: DeclarationSources,
     provider: Option<String>,
     standing: Standing,
     always_ask: bool,
+    host_field: Option<String>,
 }
 
 /// What the owner said before about each item of a run (ADR 0025 §3).
 #[derive(Debug, Clone, Default)]
 struct Known {
-    /// A remembered answer for the item, the project, and the kind of action. For a
-    /// production item, a production allowance.
+    /// A remembered answer that fits the run: for the item, the project, and the kind of
+    /// action, with each destination host of the run among its hosts or the known hosts
+    /// of the item. A production item needs a production allowance, and a production
+    /// item (also by default) needs a kind of action that the rules are certain of.
     answer: Vec<bool>,
-    /// The bouncer allowed the item in the project with this kind of action before.
+    /// An answer for the item, the project, and the kind of action exists, but it does
+    /// not fit the run. The card says why.
+    unfit: Vec<Option<&'static str>>,
+    /// This agent used the item in the project with this kind of action before, and the
+    /// bouncer allowed it, after the last stricter declaration.
     history: Vec<bool>,
 }
 
@@ -264,38 +292,81 @@ enum Route {
     Answer,
     /// A remembered pattern.
     Pattern,
-    /// The history of the item in the project.
-    History,
     /// The model step.
     Model,
 }
 
-/// The decision order of ADR 0025 §3 up to the model step. `bouncer_ready` runs only
-/// when no hard rule asked: it can start the model server.
-fn route(
-    checked: &Checked,
-    analysis: &Analysis,
+/// The facts of one run that the decision order reads besides the items.
+struct RunFacts<'a> {
+    analysis: &'a Analysis,
     has_user_request: bool,
-    known: &Known,
     pattern: bool,
     action: ActionKind,
-    bouncer_ready: impl FnOnce() -> Result<(), String>,
-) -> Route {
-    let place = checked.project.as_ref().map_or_else(
-        || "this folder".to_owned(),
-        |project| format!("\"{}\"", project.label),
-    );
+    /// The destination hosts of the run, in the form of [`normal_host`].
+    hosts: &'a [String],
+}
+
+/// The bouncer runs: a model is set, and the gate of Settings > Agents lets it answer.
+/// The gate can start the model server, so it runs at most once per request.
+struct Readiness<F: FnMut() -> Result<(), String>> {
+    check: F,
+    known: Option<Result<(), String>>,
+}
+
+impl<F: FnMut() -> Result<(), String>> Readiness<F> {
+    fn new(check: F) -> Self {
+        Self { check, known: None }
+    }
+
+    fn get(&mut self) -> Result<(), String> {
+        if self.known.is_none() {
+            self.known = Some((self.check)());
+        }
+        self.known
+            .clone()
+            .unwrap_or_else(|| Err("not checked".to_owned()))
+    }
+}
+
+/// True when `host` is `known` or matches a known `*.domain`.
+fn host_matches(host: &str, known: &str) -> bool {
+    host == known
+        || known
+            .strip_prefix("*.")
+            .is_some_and(|domain| host.ends_with(&format!(".{domain}")))
+}
+
+/// Each host of `hosts` is in `allowed`.
+fn hosts_within<'a>(hosts: &[String], allowed: impl Iterator<Item = &'a String> + Clone) -> bool {
+    hosts
+        .iter()
+        .all(|host| allowed.clone().any(|known| host_matches(host, known)))
+}
+
+/// The security vetoes and hard rules of step 6.1. Each gives one sentence for the card.
+fn hard_rules(checked: &Checked, run: &RunFacts<'_>, known: &Known, place: &str) -> Vec<String> {
     let mut why = Vec::new();
-    if !analysis.flags.is_empty() {
-        why.push(format!("Rule flags: {}.", analysis.flags.join(", ")));
+    if !run.analysis.flags.is_empty() {
+        why.push(format!("Rule flags: {}.", run.analysis.flags.join(", ")));
+    }
+    if let Some(host) = foreign_db_host(checked, run) {
+        why.push(format!(
+            "The command connects to the database host {host}, which is not a host of these credentials."
+        ));
     }
     for (index, facts) in checked.facts.iter().enumerate() {
         if facts.production && !known.answer.get(index).copied().unwrap_or(false) {
-            why.push(format!(
+            let mut text = format!(
                 "\"{}\" is a production credential: you approve each run, unless you allow production for {place}: {}.",
                 facts.name,
-                action_words(action)
-            ));
+                action_words(run.action)
+            );
+            if let Some(Some(unfit)) = known.unfit.get(index) {
+                text.push_str(&format!(
+                    " The allowance does not cover this run: {unfit}."
+                ));
+            }
+            why.push(text);
         }
         if facts.standing == Standing::AlwaysAsk {
             why.push(format!(
@@ -306,13 +377,42 @@ fn route(
             why.push(format!("\"{}\" is set to always ask.", facts.name));
         }
     }
-    if checked.any_ask {
-        why.push("A process grant of this agent asks the owner at each run.".to_owned());
+    why
+}
+
+/// A database host from the command that is not a known host of any item of the run.
+fn foreign_db_host(checked: &Checked, run: &RunFacts<'_>) -> Option<String> {
+    if !db_host_from_command(run.analysis) {
+        return None;
     }
+    run.hosts
+        .iter()
+        .find(|host| {
+            !checked
+                .facts
+                .iter()
+                .flat_map(|facts| &facts.known_hosts)
+                .any(|known| host_matches(host, known))
+        })
+        .cloned()
+}
+
+/// The decision order of ADR 0025 §3 up to the model step.
+fn route<F: FnMut() -> Result<(), String>>(
+    checked: &Checked,
+    run: &RunFacts<'_>,
+    known: &Known,
+    ready: &mut Readiness<F>,
+) -> Route {
+    let place = checked.project.as_ref().map_or_else(
+        || "this folder".to_owned(),
+        |project| format!("\"{}\"", project.label),
+    );
+    let why = hard_rules(checked, run, known, &place);
     if !why.is_empty() {
         return Route::Ask(why.join(" "));
     }
-    if let Err(reason) = bouncer_ready() {
+    if let Err(reason) = ready.get() {
         return Route::Ask(format!(
             "No bouncer runs, so each run waits for you: {reason}"
         ));
@@ -322,10 +422,46 @@ fn route(
             "The folder is not a project (the root, the home folder, or a parent of it), so Apassy remembers nothing there.".to_owned(),
         );
     }
+    for (index, facts) in checked.facts.iter().enumerate() {
+        if facts.unconfirmed && !known.answer.get(index).copied().unwrap_or(false) {
+            let mut text = format!(
+                "\"{}\" is production only by default (no signal found it). Its first use in {place} for {} asks you. Correct it to development, or allow it.",
+                facts.name,
+                action_words(run.action)
+            );
+            if let Some(Some(unfit)) = known.unfit.get(index) {
+                text.push_str(&format!(" Your answer does not cover this run: {unfit}."));
+            }
+            return Route::Ask(text);
+        }
+    }
     if !known.answer.is_empty() && known.answer.iter().all(|answer| *answer) {
         return Route::Answer;
     }
-    if !has_user_request {
+    // An answer of the owner that does not cover this run, for example a run to another
+    // host (Gate 1, A-2), asks: the owner decides the difference, not the model.
+    for (index, facts) in checked.facts.iter().enumerate() {
+        if let Some(Some(unfit)) = known.unfit.get(index) {
+            return Route::Ask(format!(
+                "Your answer for \"{}\" in {place} for {} does not cover this run: {unfit}.",
+                facts.name,
+                action_words(run.action)
+            ));
+        }
+    }
+    // The item of another project (ADR 0025 §3): only the owner decides, and an answer
+    // of the owner for this project counts.
+    for (index, facts) in checked.facts.iter().enumerate() {
+        if let Some(declared) = &facts.foreign_project
+            && !known.answer.get(index).copied().unwrap_or(false)
+        {
+            return Route::Ask(format!(
+                "\"{}\" is declared for the project \"{declared}\", not for {place}.",
+                facts.name
+            ));
+        }
+    }
+    if !run.has_user_request {
         return Route::Ask("The agent did not send the user request.".to_owned());
     }
     if let Some(index) = checked.declarations.iter().position(Option::is_none) {
@@ -334,7 +470,7 @@ fn route(
             checked.facts[index].name
         ));
     }
-    if pattern {
+    if run.pattern {
         return Route::Pattern;
     }
     if let Some(facts) = checked.facts.iter().find(|facts| facts.weak_source) {
@@ -343,29 +479,71 @@ fn route(
             facts.name
         ));
     }
-    if !known.history.is_empty() && known.history.iter().all(|history| *history) {
-        return Route::History;
-    }
     for (index, facts) in checked.facts.iter().enumerate() {
-        if !known.history.get(index).copied().unwrap_or(false) && !facts.dev_low && !facts.granted {
+        if !known.history.get(index).copied().unwrap_or(false) && !facts.dev_low {
             return Route::Ask(format!(
-                "\"{}\" was not used in {place} for {} before, and its declaration is not development with low risk.",
+                "This agent did not use \"{}\" in {place} for {} before, and its declaration is not development with low risk.",
                 facts.name,
-                action_words(action)
+                action_words(run.action)
             ));
         }
     }
     Route::Model
 }
 
+/// The answers that a question can take now (ADR 0025 §3): a remembered answer only
+/// when it can take effect for a later run of the same kind.
+fn valid_answers<F: FnMut() -> Result<(), String>>(
+    checked: &Checked,
+    run: &RunFacts<'_>,
+    certain: Option<ActionKind>,
+    production_waiting: bool,
+    ready: &mut Readiness<F>,
+) -> Vec<AnswerKind> {
+    let mut valid = vec![
+        AnswerKind::Once,
+        AnswerKind::NeverForAgent,
+        AnswerKind::AlwaysAskForAgent,
+        AnswerKind::Disconnect,
+    ];
+    let sure = certain == Some(run.action)
+        || checked
+            .facts
+            .iter()
+            .all(|facts| !facts.production && !facts.unconfirmed);
+    // "Always ask me" of an item asks every agent, so nothing can be remembered for it.
+    // "Always ask for this agent" asks this agent only: an answer covers the others.
+    let can_remember = checked.project.is_some()
+        && run.analysis.flags.is_empty()
+        && foreign_db_host(checked, run).is_none()
+        && checked.facts.iter().all(|facts| !facts.always_ask)
+        && sure
+        && ready.get().is_ok();
+    if can_remember {
+        valid.push(if production_waiting {
+            AnswerKind::Production(run.action)
+        } else {
+            AnswerKind::InProject(run.action)
+        });
+    }
+    if checked.facts.iter().any(|facts| facts.unconfirmed) {
+        valid.push(AnswerKind::CorrectEnvironment);
+    }
+    valid
+}
+
 /// Read the answers and the history of each item (ADR 0025 §3). A read error counts as
 /// no answer and no history, so the owner decides.
-fn known(vault: &Vault, items: &[u64], checked: &Checked, action: ActionKind) -> Known {
+fn known(
+    vault: &Vault,
+    items: &[u64],
+    checked: &Checked,
+    action: ActionKind,
+    certain: Option<ActionKind>,
+    hosts: &[String],
+) -> Known {
     let Some(project) = &checked.project else {
-        return Known {
-            answer: vec![false; items.len()],
-            history: vec![false; items.len()],
-        };
+        return known_nothing(items.len());
     };
     let mut known = Known::default();
     for (item, facts) in items.iter().zip(&checked.facts) {
@@ -374,14 +552,24 @@ fn known(vault: &Vault, items: &[u64], checked: &Checked, action: ActionKind) ->
         } else {
             AnswerScope::Project
         };
-        known.answer.push(
-            vault
-                .answer_for(*item, &project.key, action, scope)
-                .is_ok_and(|answer| answer.is_some()),
-        );
+        let answer = vault
+            .answer_for(*item, &project.key, action, scope)
+            .ok()
+            .flatten();
+        let unfit = answer.as_ref().and_then(|answer| {
+            if (facts.production || facts.unconfirmed) && certain != Some(action) {
+                Some("the rules are not certain of the kind of action")
+            } else if !hosts_within(hosts, answer.hosts.iter().chain(&facts.known_hosts)) {
+                Some("the command goes to another host")
+            } else {
+                None
+            }
+        });
+        known.answer.push(answer.is_some() && unfit.is_none());
+        known.unfit.push(unfit);
         known.history.push(
             vault
-                .item_used_in_project(*item, &project.key, action)
+                .item_used_in_project(*item, &project.key, action, checked.agent.id)
                 .unwrap_or(false),
         );
     }
@@ -458,8 +646,25 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         analysis.known_safe = false;
         analysis.known_command = false;
     }
-    // ADR 0025 §3a: hard rules on the words, then the flags of the analysis.
+    // ADR 0025 §3a: hard rules on the words, then the flags of the analysis. The kind
+    // counts for a production item only when a rule is certain of it.
     let action = classify(request.command, &analysis);
+    let certain = classify_certain(request.command, &analysis);
+    let hosts = run_hosts(request.command);
+    // `db_host_from_command` says only that the command names its database host. A
+    // known host of the items settles it; another host keeps the flag, so the owner
+    // decides (Gate 1, A-2).
+    if db_host_from_command(&analysis)
+        && hosts.iter().all(|host| {
+            checked
+                .facts
+                .iter()
+                .flat_map(|facts| &facts.known_hosts)
+                .any(|known| host_matches(host, known))
+        })
+    {
+        analysis.flags.retain(|flag| flag != DB_HOST_FLAG);
+    }
     let context = DecisionContext {
         analysis: &analysis,
         declarations: &checked.declarations,
@@ -474,9 +679,16 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         cwd_rel: &checked.relative_dir,
         items: request.items,
         declarations: &checked.declarations,
-        instruction: &checked.instruction,
+        instruction: "",
     };
-    let pattern = learning::request_pattern(scope, request.command);
+    // ADR 0025 §3a: a pattern belongs to the project key, so all worktrees of one
+    // repository share it.
+    let pattern = learning::request_pattern(scope, request.command).map(|mut pattern| {
+        if let Some(project) = &checked.project {
+            pattern.key.project_dir.clone_from(&project.key);
+        }
+        pattern
+    });
     // Goal item B9: the active model (the default bouncer or a promoted model) and the
     // candidate in shadow mode come from the vault. ADR 0025: the answers and the
     // history of each item.
@@ -487,7 +699,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
             (
                 learning::lookup(vault, pattern.as_ref(), now),
                 shadow::models(vault, ctx.bouncer.as_ref()),
-                known(vault, request.items, &checked, action),
+                known(vault, request.items, &checked, action, certain, &hosts),
             )
         })
         .unwrap_or_else(|| {
@@ -497,35 +709,31 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                 known_nothing(request.items.len()),
             )
         });
-    let always_asks = checked.any_ask
-        || checked
-            .facts
-            .iter()
-            .any(|facts| facts.always_ask || facts.standing == Standing::AlwaysAsk);
-    let route = route(
-        &checked,
-        &analysis,
-        context.has_user_request,
-        &known,
-        learned.learned.pattern.is_some(),
+    let always_asks = checked.facts.iter().any(ItemFacts::asks_always);
+    // The setting of Settings > Agents: "Off" asks no model, and "When a run needs it"
+    // starts the model server first. Unavailable asks the owner.
+    let mut ready = Readiness::new(|| match &models.active {
+        Some(_) => ctx
+            .model_gate
+            .as_ref()
+            .map_or(Ok(()), |gate| gate.before_model()),
+        None => Err("no bouncer is set.".to_owned()),
+    });
+    let run_facts = RunFacts {
+        analysis: &analysis,
+        has_user_request: context.has_user_request,
+        pattern: learned.learned.pattern.is_some(),
         action,
-        || match &models.active {
-            // The setting of Settings > Agents: "Off" asks no model, and "When a run
-            // needs it" starts the model server first. Unavailable asks the owner.
-            Some(_) => ctx
-                .model_gate
-                .as_ref()
-                .map_or(Ok(()), |gate| gate.before_model()),
-            None => Err("no bouncer is set.".to_owned()),
-        },
-    );
+        hosts: &hosts,
+    };
+    let route = route(&checked, &run_facts, &known, &mut ready);
     let bouncer_request = BouncerRequest {
         user_request: user_request.to_owned(),
         command: request.command.join(" "),
         relative_dir: checked.relative_dir.clone(),
         purpose: request.purpose.trim().to_owned(),
         env_names: checked.env_names.clone(),
-        instruction: checked.instruction.clone(),
+        instruction: String::new(),
     };
     // Shadow mode (ADR 0010): for a request that reaches the model step, the candidate
     // answers on its own thread. Its answer goes only to the vault. The decision below
@@ -585,10 +793,6 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
             "Remembered pattern allowed: {}.",
             learned.learned.pattern.as_deref().unwrap_or_default()
         ),
-        Route::History => format!(
-            "The bouncer allowed {} with these credentials in \"{project_text}\" before.",
-            action_words(action)
-        ),
         Route::Model => {
             decide_learned(
                 &verdict,
@@ -607,13 +811,36 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         Route::Ask(_) => ("Owner approved", UseDecidedBy::Owner),
         Route::Answer => ("Remembered answer", UseDecidedBy::Answer),
         Route::Pattern => ("Remembered pattern", UseDecidedBy::Pattern),
-        Route::History | Route::Model => ("Bouncer allowed", UseDecidedBy::Bouncer),
+        Route::Model => ("Bouncer allowed", UseDecidedBy::Bouncer),
     };
     let production_waiting = checked
         .facts
         .iter()
         .zip(&known.answer)
         .any(|(facts, answer)| facts.production && !answer);
+    // ADR 0025 §3: the card offers only the answers that can take effect.
+    let (valid, remember) = if needs_approval {
+        let valid = valid_answers(&checked, &run_facts, certain, production_waiting, &mut ready);
+        // A pattern acts only with a running bouncer.
+        let remember = learned
+            .offer(pattern.as_ref(), &context, always_asks)
+            .filter(|_| ready.get().is_ok());
+        (valid, remember)
+    } else {
+        (Vec::new(), None)
+    };
+    let question_items: Vec<QuestionItem> = request
+        .items
+        .iter()
+        .zip(&checked.facts)
+        .map(|(item, facts)| QuestionItem {
+            item_id: *item,
+            name: facts.name.clone(),
+            production: facts.production,
+            unconfirmed: facts.unconfirmed,
+            always_ask: facts.asks_always(),
+        })
+        .collect();
     // The activity log names an approval on the iPhone. The answer to the agent keeps
     // `decided_by`, and the inbox reads the prefix "Owner approved" in both cases.
     let mut logged_decided_by = decided_by;
@@ -685,7 +912,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
             user_request: user_request.to_owned(),
             request_source: resolved.source.clone(),
             agent_request: resolved.agent_text.clone().unwrap_or_default(),
-            remember: learned.offer(pattern.as_ref(), &context, always_asks),
+            remember,
             question: QuestionInfo {
                 id: 0,
                 item_ids: request.items.to_vec(),
@@ -693,6 +920,8 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                 action,
                 production: production_waiting,
                 why: risk_note.clone(),
+                items: question_items,
+                valid_answers: valid,
             },
         };
         let settled = ctx.approvals.wait_for_question(
@@ -776,7 +1005,9 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                 .as_mut()
                 .filter(|vault| !vault.is_locked() && vault.path() == checked.vault_file)
             {
-                let _ = vault.record_interaction(InteractionKind::Question, &label);
+                // One answer is one interaction: the owner check of an approval is
+                // not counted again (`OwnerGate`).
+                let _ = vault.record_interaction(InteractionKind::Question, &label, request.items);
             }
         }
         if let Some(call) = shadow_call.take() {
@@ -923,7 +1154,15 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         // ADR 0025: "Allow ACTION in PROJECT" and "Allow production" are saved now, in
         // the session of the decision and after the second check.
         if let Some(choice) = &answer_choice {
-            if let Err(reason) = save_answer(vault, &checked, request.items, choice, &answered_on) {
+            let saved = save_answer(
+                vault,
+                &checked,
+                request.items,
+                choice,
+                &answered_on,
+                &hosts,
+            );
+            if let Err(reason) = saved {
                 record(
                     vault,
                     &agent,
@@ -943,7 +1182,9 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
                 );
                 return WireResponse::failure(codes::ANSWER_FAILED, reason);
             }
-            if logged_decided_by != OWNER_APPROVED_ON_IPHONE {
+            if saved == Ok(0) {
+                answer_choice = None;
+            } else if logged_decided_by != OWNER_APPROVED_ON_IPHONE {
                 logged_decided_by = OWNER_REMEMBERED;
             }
         }
@@ -1101,6 +1342,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
 fn known_nothing(items: usize) -> Known {
     Known {
         answer: vec![false; items],
+        unfit: vec![None; items],
         history: vec![false; items],
     }
 }
@@ -1112,21 +1354,49 @@ fn home_dir() -> Option<PathBuf> {
         .and_then(|home| canonical_dir(Path::new(&home)))
 }
 
-/// True when the grant works in `cwd`.
-fn covers(grant: &ExecGrant, cwd: &Path) -> bool {
-    match &grant.place {
-        GrantPlace::Folder(dir) => {
-            canonical_dir(Path::new(dir)).is_some_and(|folder| cwd.starts_with(folder))
-        }
-        GrantPlace::AnyFolder => true,
-    }
-}
-
 fn not_granted(item_id: u64) -> (&'static str, String) {
     (
         codes::NOT_GRANTED,
         format!("The owner did not let this agent use item {item_id}."),
     )
+}
+
+/// Letters and digits of `text` in lowercase, so "Demo project" and `demo-project`
+/// compare equal.
+fn project_words(text: &str) -> String {
+    text.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// The project that a declaration names, when it is not `project` (ADR 0025 §3: the
+/// item of another project asks). An empty name fits every project. A name fits the
+/// label, the folder of the project, or its key; a path fits the root or the key.
+pub(super) fn foreign_project(declared: &str, project: Option<&Project>) -> Option<String> {
+    let declared = declared.trim();
+    let project = project?;
+    if declared.is_empty() {
+        return None;
+    }
+    let path = Path::new(declared);
+    if path.is_absolute() {
+        let fits = canonical_dir(path).is_some_and(|dir| {
+            dir == project.root || dir.display().to_string() == project.key
+        });
+        return (!fits).then(|| declared.to_owned());
+    }
+    let wanted = project_words(declared);
+    let root_name = project
+        .root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let fits = !wanted.is_empty()
+        && [project.label.as_str(), root_name.as_str()]
+            .iter()
+            .any(|name| project_words(name) == wanted);
+    (!fits).then(|| declared.to_owned())
 }
 
 fn check(
@@ -1141,13 +1411,8 @@ fn check(
         "invalid_request",
         "The working directory does not exist.".to_owned(),
     ))?;
-    let grants = vault.exec_grants_for_agent(agent.id).map_err(|_| {
-        (
-            "broker_error",
-            "The broker cannot read the grants.".to_owned(),
-        )
-    })?;
     // ADR 0025 §3f: a connected agent may use each item that its exceptions do not hide.
+    // A process grant is no authority, and the broker does not read it.
     let view = vault.agent_view(agent.id).map_err(|_| {
         (
             "broker_error",
@@ -1158,18 +1423,10 @@ fn check(
     let mut env_names = Vec::new();
     let mut unique_env_names = BTreeSet::new();
     let mut placeholder_names = Vec::new();
-    let mut any_ask = false;
     let mut declarations = Vec::new();
     let mut provider_hosts = Vec::new();
     let mut authorization = Vec::new();
     let mut facts = Vec::new();
-    let mut instructions: Vec<String> = Vec::new();
-    let mut project_dir = None;
-    let command_text = request.command.join(" ");
-    let command_lower = command_text.to_lowercase();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs());
     for item_id in request.items {
         // A hidden item and an unknown item give the same answer, so a refusal does
         // not tell which items exist.
@@ -1195,21 +1452,6 @@ fn check(
         // An archived item stays in the vault, but agents cannot use it.
         if vault.is_archived(*item_id).unwrap_or(true) {
             return Err(("item_archived", archived_reason(*item_id)));
-        }
-        // A grant is no authority (ADR 0025). One that covers the working directory
-        // keeps its hard rule, its instruction, and "Ask me each time".
-        let grant = grants
-            .iter()
-            .find(|grant| grant.item_id == *item_id && covers(grant, &cwd));
-        if project_dir.is_none() {
-            project_dir = Some(
-                grant
-                    .and_then(|grant| grant.place.folder())
-                    .and_then(|folder| canonical_dir(Path::new(folder)))
-                    .or_else(|| project.as_ref().map(|project| project.root.clone()))
-                    .filter(|dir| cwd.starts_with(dir))
-                    .unwrap_or_else(|| cwd.clone()),
-            );
         }
         let binding = vault.process_binding(*item_id).map_err(|_| {
             ("broker_error", "The broker cannot read the process field.".to_owned())
@@ -1244,25 +1486,39 @@ fn check(
         let sources = vault
             .declaration_sources(*item_id)
             .map_err(settings_error)?;
-        if let Some(grant) = grant {
-            check_rule(
-                vault,
-                agent,
-                grant,
-                *item_id,
-                &command_text,
-                &command_lower,
-                now,
-            )?;
-            if !grant.rule.instruction.is_empty() {
-                instructions.push(grant.rule.instruction.clone());
-            }
-            any_ask |= grant.mode == ExecMode::Ask;
-            // ADR 0012: in any folder, a process with the real value waits for the owner.
-            any_ask |=
-                grant.place == GrantPlace::AnyFolder && binding.delivery == EnvDelivery::Value;
-        }
+        let host_field = vault.item_host_field(*item_id).map_err(settings_error)?;
         let standing = view.standing(*item_id);
+        let is_production = declaration.as_ref().is_some_and(Declaration::is_production);
+        // ADR 0025 §4: production from a value signal, usage, or the owner is strict. A
+        // production value without a signal is only the most careful default.
+        let unconfirmed = is_production && sources.environment == DeclarationSource::Default;
+        let mut known_hosts = Vec::new();
+        push_item(
+            vault,
+            *item_id,
+            binding.clone(),
+            ItemAuthorization {
+                binding,
+                revision: details.summary.revision,
+                declaration: declaration.clone(),
+                sources,
+                provider: None,
+                standing,
+                always_ask,
+                host_field: host_field.clone(),
+            },
+            &mut Collected {
+                env_names: &mut env_names,
+                placeholder_names: &mut placeholder_names,
+                declarations: &mut declarations,
+                provider_hosts: &mut provider_hosts,
+                authorization: &mut authorization,
+                known_hosts: &mut known_hosts,
+            },
+        )?;
+        known_hosts.extend(host_field);
+        known_hosts.sort();
+        known_hosts.dedup();
         facts.push(ItemFacts {
             name: details.summary.title.clone(),
             standing,
@@ -1275,33 +1531,19 @@ fn check(
                     Environment::Local | Environment::Development
                 ) && declaration.risk == RiskLevel::Low
             }),
-            production: declaration.as_ref().is_some_and(Declaration::is_production),
-            granted: grant.is_some(),
+            production: is_production && !unconfirmed,
+            unconfirmed,
+            foreign_project: declaration
+                .as_ref()
+                .and_then(|declaration| foreign_project(&declaration.project, project.as_ref())),
+            known_hosts,
         });
-        push_item(
-            vault,
-            *item_id,
-            binding.clone(),
-            ItemAuthorization {
-                binding,
-                grant: grant.cloned(),
-                revision: details.summary.revision,
-                declaration,
-                sources,
-                provider: None,
-                standing,
-                always_ask,
-            },
-            &mut Collected {
-                env_names: &mut env_names,
-                placeholder_names: &mut placeholder_names,
-                declarations: &mut declarations,
-                provider_hosts: &mut provider_hosts,
-                authorization: &mut authorization,
-            },
-        )?;
     }
-    let project_dir = project_dir.unwrap_or_else(|| cwd.clone());
+    let project_dir = project
+        .as_ref()
+        .map(|project| project.root.clone())
+        .filter(|dir| cwd.starts_with(dir))
+        .unwrap_or_else(|| cwd.clone());
     let relative_dir = cwd
         .strip_prefix(&project_dir)
         .map(|rest| rest.display().to_string())
@@ -1318,70 +1560,11 @@ fn check(
         relative_dir,
         env_names,
         placeholder_names,
-        any_ask,
-        instruction: instructions.join(" "),
         declarations,
         provider_hosts,
         authorization,
         facts,
     })
-}
-
-/// The hard rule of a grant that covers the working directory (ADR 0007).
-fn check_rule(
-    vault: &Vault,
-    agent: &AgentSummary,
-    grant: &ExecGrant,
-    item_id: u64,
-    command_text: &str,
-    command_lower: &str,
-    now: u64,
-) -> Result<(), (&'static str, String)> {
-    let rule = &grant.rule;
-    if rule.expires_at.is_some_and(|at| now >= at) {
-        return Err((
-            "rule_expired",
-            format!("The rule for item {item_id} expired."),
-        ));
-    }
-    let prefix_ok = rule.allowed_prefixes.is_empty()
-        || rule.allowed_prefixes.iter().any(|prefix| {
-            command_text == prefix || command_text.starts_with(&format!("{prefix} "))
-        });
-    if !prefix_ok {
-        return Err((
-            "rule_command_not_permitted",
-            format!(
-                "The rule for item {item_id} permits only commands that start with: {}.",
-                rule.allowed_prefixes.join(", ")
-            ),
-        ));
-    }
-    if let Some(word) = rule
-        .forbidden_words
-        .iter()
-        .find(|word| command_lower.contains(&word.to_lowercase()))
-    {
-        return Err((
-            "rule_forbidden_word",
-            format!("The rule for item {item_id} forbids \"{word}\" in the command."),
-        ));
-    }
-    if let Some(max) = rule.max_runs_per_hour {
-        let used = vault.runs_in_last_hour(agent.id, item_id).map_err(|_| {
-            (
-                "broker_error",
-                "The broker cannot read the run log.".to_owned(),
-            )
-        })?;
-        if used >= max {
-            return Err((
-                "rule_rate_limit",
-                format!("The rule for item {item_id} permits {max} runs in one hour."),
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// The lists that [`check`] collects for each item.
@@ -1391,6 +1574,8 @@ struct Collected<'a> {
     declarations: &'a mut Vec<Option<Declaration>>,
     provider_hosts: &'a mut Vec<ProviderHosts>,
     authorization: &'a mut Vec<ItemAuthorization>,
+    /// The known hosts of this item: its provider and its placeholder hosts.
+    known_hosts: &'a mut Vec<String>,
 }
 
 /// Add the variable, the declaration, the provider hosts, and the authorization of one
@@ -1427,6 +1612,8 @@ fn push_item(
         }
         out.placeholder_names.push(binding.env_name.clone());
     }
+    out.known_hosts
+        .extend(hosts.iter().filter_map(|host| normal_host(host)));
     if !hosts.is_empty() {
         out.provider_hosts.push(ProviderHosts {
             env_name: binding.env_name.clone(),
@@ -1441,16 +1628,22 @@ fn push_item(
 }
 
 /// Save "Allow ACTION in PROJECT" or "Allow production" (ADR 0025 §3, §3b) after the
-/// second check: a production allowance for each production item when the owner allowed
-/// production, and a project answer for each other item. The run passed the second
-/// check, so the items, their declarations, and the project are as the owner saw them.
+/// second check, with the destination hosts of the run and the known hosts of each item:
+/// a production allowance for each production item when the owner allowed production,
+/// and a project answer for each other item (also for an item that is production only
+/// by default). A production item is skipped when the owner answered "Allow ACTION in
+/// PROJECT": it already has its allowance, or the question would have asked for one. The
+/// run passed the second check, so the items, their declarations, and the project are
+/// as the owner saw them. A failed save of one item does not stop the others. Returns
+/// how many answers were saved.
 fn save_answer(
     vault: &mut Vault,
     checked: &Checked,
     items: &[u64],
     choice: &AnswerChoice,
     answered_on: &str,
-) -> Result<(), String> {
+    hosts: &[String],
+) -> Result<usize, String> {
     if checked.project.as_ref() != Some(&choice.project) {
         return Err(
             "The project changed while Apassy checked this run. Nothing was saved. The command did not run."
@@ -1466,24 +1659,23 @@ fn save_answer(
     } else {
         answered_on
     };
+    let mut saved = 0;
     for (item, facts) in items.iter().zip(&checked.facts) {
-        let saved = if facts.production {
+        let mut covered = hosts.to_vec();
+        covered.extend(facts.known_hosts.iter().cloned());
+        let result = if facts.production {
             if !choice.production {
-                return Err(
-                    "A production credential needs \"Allow production\". Nothing more was saved. The command did not run."
-                        .to_owned(),
-                );
+                continue;
             }
-            vault.allow_production(*item, &project, choice.action, on)
+            vault.allow_production(*item, &project, choice.action, on, &covered)
         } else {
-            vault.remember_answer(*item, &project, choice.action, on)
+            vault.remember_answer(*item, &project, choice.action, on, &covered)
         };
-        saved.map_err(|_| {
-            "Apassy could not save the answer. Nothing more was saved. The command did not run."
-                .to_owned()
-        })?;
+        if result.is_ok() {
+            saved += 1;
+        }
     }
-    Ok(())
+    Ok(saved)
 }
 
 /// Refusal text for an item from a restored backup that the owner did not review yet.
@@ -1504,23 +1696,21 @@ fn canonical_dir(path: &Path) -> Option<PathBuf> {
     canonical.is_dir().then_some(canonical)
 }
 
-/// The hosts of the URLs in the command, for the use log. At most 16.
-fn command_hosts(command: &[String]) -> Vec<String> {
-    let words: Vec<String> = command
+/// The database host of the command comes from the command line.
+fn db_host_from_command(analysis: &Analysis) -> bool {
+    analysis.flags.iter().any(|flag| flag == DB_HOST_FLAG)
+}
+
+/// The destination hosts of a run, in normal form ([`normal_host`]): the URLs, the
+/// database hosts, and the HTTP proxies and targets of the command
+/// (`shell_risk::command_hosts`).
+fn run_hosts(command: &[String]) -> Vec<String> {
+    let mut hosts: Vec<String> = shell_risk::command_hosts(command)
         .iter()
-        .flat_map(|arg| {
-            arg.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '(' | ')'))
-                .filter(|word| !word.is_empty())
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
+        .filter_map(|host| normal_host(host))
         .collect();
-    let mut hosts: Vec<String> = Vec::new();
-    for host in super::shell_risk::url_hosts(&words) {
-        if !hosts.contains(&host) && hosts.len() < 16 {
-            hosts.push(host);
-        }
-    }
+    hosts.sort();
+    hosts.dedup();
     hosts
 }
 
@@ -1579,7 +1769,7 @@ fn store_uses(
     decided_by: UseDecidedBy,
     answered_on: &str,
 ) {
-    let hosts = command_hosts(request.command);
+    let hosts = run_hosts(request.command);
     let command_summary = request.label();
     for item_id in request.items {
         // Only an item that exists gets a row.

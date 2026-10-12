@@ -3,14 +3,21 @@
 //!
 //! The broker writes one row for each item of each decided use: allowed, denied,
 //! refused, or timed out, and who decided. A row has no secret value: the command is a
-//! short summary that the agent sent. The bouncer counts a use of an item in a project
-//! with a kind of action that it allowed itself as history (`item_used_in_project`), but
-//! only a use by an agent that is still connected: a restore revokes every agent, so a restored log
-//! never lets a run start without a question.
+//! short summary that the agent sent, and the vault masks the secret values of the item
+//! in it before it stores the row, as in the decision log. The detail of an owner
+//! interaction is masked the same way.
+//!
+//! The bouncer counts a use of an item in a project with a kind of action that it allowed
+//! itself as history (`item_used_in_project`), but only a use by the same agent, while it
+//! is still connected (a restore revokes every agent, so a restored log never counts), and
+//! only a use after the last change that made the declaration of the item stricter.
+//! History never starts a run: it only lets the run reach the model (ADR 0025 §3).
 
 use rusqlite::OptionalExtension;
 
-use super::agents::{from_sql_time, now_unix, to_sql_time};
+use super::agents::{
+    Environment, Reversibility, RiskLevel, Scope, from_sql_time, now_unix, to_sql_time,
+};
 use super::types::{VaultErrorKind, VaultResult, err};
 use super::{Vault, to_public_id, to_sql_id};
 use crate::broker::action_kind::ActionKind;
@@ -245,8 +252,11 @@ fn parse_use(row: UseRow) -> VaultResult<ItemUse> {
 }
 
 impl Vault {
-    /// Store one use. The log drops its oldest rows above [`MAX_ITEM_USE_ROWS`].
+    /// Store one use. The secret values of the item are masked in the command summary.
+    /// The log drops its oldest rows above [`MAX_ITEM_USE_ROWS`].
     pub fn record_item_use(&mut self, item_use: &NewItemUse) -> VaultResult<u64> {
+        let values = self.secret_values(&[item_use.item_id])?;
+        let summary = super::learning::mask_values(&item_use.command_summary, &values);
         let item = to_sql_id(item_use.item_id)?;
         let agent = item_use.agent_id.map(to_sql_id).transpose()?;
         let hosts: Vec<String> = item_use
@@ -276,7 +286,7 @@ impl Vault {
                 clean(&item_use.project_key, 4096),
                 clean(&item_use.project_label, 256),
                 item_use.action.as_str(),
-                clean(&item_use.command_summary, MAX_COMMAND_SUMMARY_BYTES),
+                clean(&summary, MAX_COMMAND_SUMMARY_BYTES),
                 hosts,
                 item_use.outcome.as_str(),
                 item_use.decided_by.as_str(),
@@ -355,32 +365,38 @@ impl Vault {
         })
     }
 
-    /// True when an agent that is still connected used the item in the project with
-    /// this kind of action, and the bouncer allowed the use. This is the history that
-    /// lets the bouncer start a run without a question (ADR 0025 §3). Only a use that the
-    /// bouncer allowed counts: "Allow once" of the owner stays once, and a use by a
-    /// remembered answer or pattern stops when the owner removes the answer or a
-    /// denial blocks the pattern. A use by a revoked agent, for example every use
-    /// before a restore, does not count.
+    /// True when `agent_id`, while still connected, used the item in the project with
+    /// this kind of action, and the bouncer allowed the use. This history lets a run of
+    /// an item that is not development with low risk reach the model; it never starts a
+    /// run by itself (ADR 0025 §3). Only a use that the bouncer allowed counts: "Allow
+    /// once" of the owner stays once, and a use by a remembered answer or pattern stops
+    /// when the owner removes the answer or a denial blocks the pattern. A use of another
+    /// agent does not count, so a new agent has no history. A use by a revoked agent, for
+    /// example every use before a restore, does not count. A use before the last change
+    /// that made the declaration of the item stricter does not count either.
     pub fn item_used_in_project(
         &self,
         item_id: u64,
         project_key: &str,
         action: ActionKind,
+        agent_id: u64,
     ) -> VaultResult<bool> {
         if project_key.is_empty() {
             return Ok(false);
         }
         let item = to_sql_id(item_id)?;
-        let found: Option<i64> = self
-            .conn_ref()?
+        let agent = to_sql_id(agent_id)?;
+        let conn = self.conn_ref()?;
+        let since = stricter_since(conn, item)?;
+        let found: Option<i64> = conn
             .query_row(
                 "SELECT u.id FROM item_use u JOIN agent a ON a.id = u.agent_id
                  WHERE u.item_id = ?1 AND u.project_key = ?2 AND u.action_kind = ?3
+                     AND u.agent_id = ?4 AND u.at > ?5
                      AND u.outcome = 'allowed' AND u.decided_by = 'bouncer'
                      AND a.revoked_at IS NULL
                  LIMIT 1",
-                (item, project_key, action.as_str()),
+                rusqlite::params![item, project_key, action.as_str(), agent, since],
                 |row| row.get(0),
             )
             .optional()
@@ -388,13 +404,20 @@ impl Vault {
         Ok(found.is_some())
     }
 
-    /// Count one owner interaction. `detail` has no secret value.
-    pub fn record_interaction(&mut self, kind: InteractionKind, detail: &str) -> VaultResult<()> {
+    /// Count one owner interaction. The secret values of `items` are masked in `detail`.
+    pub fn record_interaction(
+        &mut self,
+        kind: InteractionKind,
+        detail: &str,
+        items: &[u64],
+    ) -> VaultResult<()> {
+        let values = self.secret_values(items)?;
+        let detail = super::learning::mask_values(detail, &values);
         let at = to_sql_time(now_unix())?;
         let conn = self.conn_mut()?;
         conn.execute(
             "INSERT INTO owner_interaction (at, kind, detail) VALUES (?1, ?2, ?3)",
-            (at, kind.as_str(), clean(detail, 200)),
+            (at, kind.as_str(), clean(&detail, 200)),
         )
         .map_err(|_| err(VaultErrorKind::Storage))?;
         let id = conn.last_insert_rowid();
@@ -433,6 +456,58 @@ impl Vault {
         }
         Ok(out)
     }
+}
+
+/// One declaration as a declaration event of the item history names it:
+/// `ENVIRONMENT, RISK risk, SCOPE, REVERSIBILITY[, provider P]`.
+type EventDeclaration = (Environment, RiskLevel, Scope, Reversibility);
+
+fn event_declaration(detail: &str) -> Option<EventDeclaration> {
+    let mut parts = detail.split(", ");
+    let environment = Environment::parse(parts.next()?).ok()?;
+    let risk = RiskLevel::parse(parts.next()?.strip_suffix(" risk")?).ok()?;
+    let scope = Scope::parse(parts.next()?).ok()?;
+    let reversibility = Reversibility::parse(parts.next()?).ok()?;
+    Some((environment, risk, scope, reversibility))
+}
+
+/// The time of the last declaration event that made the declaration of `item` stricter:
+/// an environment nearer to production, a higher risk, a wider scope, or a less
+/// reversible action. An event that does not read counts as stricter; the first
+/// declaration does not. 0 when there is none, so every use counts.
+fn stricter_since(conn: &rusqlite::Connection, item: i64) -> VaultResult<i64> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT at, detail FROM item_event
+             WHERE item_id = ?1 AND kind = 'declaration' ORDER BY at, id",
+        )
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    let rows = stmt
+        .query_map([item], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|_| err(VaultErrorKind::Storage))?;
+    let mut since = 0;
+    let mut seen = false;
+    let mut before: Option<EventDeclaration> = None;
+    for row in rows {
+        let (at, detail) = row.map_err(|_| err(VaultErrorKind::Storage))?;
+        let now = event_declaration(&detail);
+        let stricter = match (before, now) {
+            (Some(old), Some(new)) => {
+                new.0 > old.0 || new.1 > old.1 || new.2 > old.2 || new.3 > old.3
+            }
+            // The first declaration: no use was allowed without one.
+            (None, Some(_)) if !seen => false,
+            _ => true,
+        };
+        if stricter {
+            since = since.max(at);
+        }
+        seen = true;
+        before = now;
+    }
+    Ok(since)
 }
 
 #[cfg(test)]
@@ -480,7 +555,7 @@ mod tests {
         vault.record_item_use(&new).unwrap();
         assert!(
             !vault
-                .item_used_in_project(item, "/tmp/p/.git", ActionKind::Read)
+                .item_used_in_project(item, "/tmp/p/.git", ActionKind::Read, agent.id)
                 .unwrap(),
             "a denial is no history"
         );
@@ -494,7 +569,7 @@ mod tests {
             vault.record_item_use(&new).unwrap();
             assert!(
                 !vault
-                    .item_used_in_project(item, "/tmp/p/.git", ActionKind::Read)
+                    .item_used_in_project(item, "/tmp/p/.git", ActionKind::Read, agent.id)
                     .unwrap(),
                 "{by:?} is no history"
             );
@@ -504,7 +579,7 @@ mod tests {
         vault.record_item_use(&new).unwrap();
         assert!(
             vault
-                .item_used_in_project(item, "/tmp/p/.git", ActionKind::Read)
+                .item_used_in_project(item, "/tmp/p/.git", ActionKind::Read, agent.id)
                 .unwrap()
         );
         for (key, action) in [
@@ -512,7 +587,7 @@ mod tests {
             ("/tmp/q", ActionKind::Read),
             ("", ActionKind::Read),
         ] {
-            assert!(!vault.item_used_in_project(item, key, action).unwrap());
+            assert!(!vault.item_used_in_project(item, key, action, agent.id).unwrap());
         }
         let uses = vault.item_uses(item, 10).unwrap();
         assert_eq!(uses.len(), 5);
@@ -527,9 +602,139 @@ mod tests {
         vault.revoke_agent(agent.id).unwrap();
         assert!(
             !vault
-                .item_used_in_project(item, "/tmp/p/.git", ActionKind::Read)
+                .item_used_in_project(item, "/tmp/p/.git", ActionKind::Read, agent.id)
                 .unwrap()
         );
+    }
+
+    /// Gate 1 (B-4): the use log and the interaction count mask the secret values of the
+    /// item.
+    #[test]
+    fn summaries_and_interaction_details_are_masked() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut vault = Vault::create(&dir.path().join("usage.db"), PASS).unwrap();
+        vault.unlock(PASS).unwrap();
+        let secret = "SYNTH-mask-me-4471";
+        let item = vault
+            .add(ItemDraft {
+                title: "Synthetic".to_owned(),
+                kind: CredentialKind::ApiKey,
+                notes: String::new(),
+                tags: Vec::new(),
+                fields: vec![Field {
+                    name: "token".to_owned(),
+                    value: SecretValue::new(secret.to_owned()),
+                    secret: true,
+                }],
+            })
+            .unwrap()
+            .id;
+        vault
+            .record_item_use(&NewItemUse {
+                item_id: item,
+                agent_id: None,
+                agent_name: "Synthetic".to_owned(),
+                project_key: String::new(),
+                project_label: String::new(),
+                action: ActionKind::Read,
+                command_summary: format!("run curl -H 'Bearer {secret}'"),
+                hosts: Vec::new(),
+                outcome: UseOutcome::Denied,
+                decided_by: UseDecidedBy::Owner,
+                answered_on: String::new(),
+                decision_log_id: None,
+            })
+            .unwrap();
+        let uses = vault.item_uses(item, 1).unwrap();
+        assert!(!uses[0].command_summary.contains(secret));
+        assert!(uses[0].command_summary.contains("[apassy:secret]"));
+        vault
+            .record_interaction(
+                InteractionKind::Question,
+                &format!("run echo {secret}"),
+                &[item],
+            )
+            .unwrap();
+        let detail: String = vault
+            .conn_ref()
+            .unwrap()
+            .query_row("SELECT detail FROM owner_interaction", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(detail, "run echo [apassy:secret]");
+    }
+
+    /// Gate 1 (A-3): a stricter declaration ends the history of the item; a looser one
+    /// does not.
+    #[test]
+    fn a_stricter_declaration_clears_history() {
+        use crate::vault::Declaration;
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut vault = Vault::create(&dir.path().join("usage.db"), PASS).unwrap();
+        vault.unlock(PASS).unwrap();
+        let item = vault
+            .add(ItemDraft {
+                title: "Synthetic".to_owned(),
+                kind: CredentialKind::ApiKey,
+                notes: String::new(),
+                tags: Vec::new(),
+                fields: vec![Field {
+                    name: "token".to_owned(),
+                    value: SecretValue::new("SYNTH-history".to_owned()),
+                    secret: true,
+                }],
+            })
+            .unwrap()
+            .id;
+        let (agent, _) = vault.register_agent("Synthetic").unwrap();
+        let declaration = |environment, risk| Declaration {
+            project: "p".to_owned(),
+            environment,
+            risk,
+            scope: Scope::ReadWrite,
+            reversibility: Reversibility::Reversible,
+        };
+        vault
+            .set_declaration(item, &declaration(Environment::Staging, RiskLevel::Medium))
+            .unwrap();
+        let use_at = |vault: &mut Vault, at: i64| {
+            vault
+                .conn_mut()
+                .unwrap()
+                .execute(
+                    "INSERT INTO item_use (at, item_id, agent_id, agent_name, project_key,
+                         project_label, action_kind, command_summary, hosts, outcome,
+                         decided_by)
+                     VALUES (?1, ?2, ?3, 'a', '/tmp/p', 'p', 'read', 'run', '[]',
+                         'allowed', 'bouncer')",
+                    rusqlite::params![
+                        at,
+                        i64::try_from(item).unwrap(),
+                        i64::try_from(agent.id).unwrap()
+                    ],
+                )
+                .unwrap();
+        };
+        let used = |vault: &Vault| {
+            vault
+                .item_used_in_project(item, "/tmp/p", ActionKind::Read, agent.id)
+                .unwrap()
+        };
+        // A use long ago: the first declaration is no cutoff.
+        use_at(&mut vault, 1);
+        assert!(used(&vault));
+        // A looser declaration keeps the history.
+        vault
+            .set_declaration(item, &declaration(Environment::Development, RiskLevel::Low))
+            .unwrap();
+        assert!(used(&vault));
+        // A stricter one ends it, also for a later environment change toward production.
+        vault
+            .set_declaration(item, &declaration(Environment::Development, RiskLevel::High))
+            .unwrap();
+        assert!(!used(&vault));
+        // A use after the change counts again.
+        use_at(&mut vault, i64::MAX / 2);
+        assert!(used(&vault));
     }
 
     #[test]
@@ -538,10 +743,10 @@ mod tests {
         let mut vault = Vault::create(&dir.path().join("usage.db"), PASS).unwrap();
         vault.unlock(PASS).unwrap();
         vault
-            .record_interaction(InteractionKind::OwnerCheck, "approve a run")
+            .record_interaction(InteractionKind::OwnerCheck, "approve a run", &[])
             .unwrap();
         vault
-            .record_interaction(InteractionKind::Question, "question")
+            .record_interaction(InteractionKind::Question, "question", &[])
             .unwrap();
         let weeks = vault.interactions_per_week(3).unwrap();
         assert_eq!(weeks.len(), 3);

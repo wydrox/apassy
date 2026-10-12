@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use apassy::agent::client;
 use apassy::agent::wire::{Action, WireResponse};
+use apassy::broker::action_kind::ActionKind;
 use apassy::broker::bouncer::BouncerClient;
 use apassy::broker::http::TlsClient;
 use apassy::broker::shell_risk::{
@@ -22,6 +23,7 @@ use apassy::broker::shell_risk::{
 use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault};
 use apassy::contracts::CredentialKind;
 use apassy::vault::providers;
+use apassy::vault::usage::{NewItemUse, UseDecidedBy, UseOutcome};
 use apassy::vault::{
     Declaration, Environment, ExecMode, Field, ItemDraft, Reversibility, RiskLevel, Scope,
     SecretValue, Vault,
@@ -77,7 +79,7 @@ fn fixture(provider: Option<&str>) -> Fixture {
         )
         .expect("grant");
     let declaration = Declaration {
-        project: "mail".to_owned(),
+        project: "project".to_owned(),
         environment: Environment::Staging,
         risk: RiskLevel::Low,
         scope: Scope::ReadWrite,
@@ -86,6 +88,26 @@ fn fixture(provider: Option<&str>) -> Fixture {
     vault
         .save_declaration(item.id, &declaration, provider, None)
         .expect("declaration");
+    // ADR 0025 §3: the model decides for a staging item that this agent used in the
+    // project before.
+    for action in [ActionKind::Read, ActionKind::Change] {
+        vault
+            .record_item_use(&NewItemUse {
+                item_id: item.id,
+                agent_id: Some(agent.id),
+                agent_name: "Hosts agent".to_owned(),
+                project_key: project.display().to_string(),
+                project_label: "project".to_owned(),
+                action,
+                command_summary: "run earlier".to_owned(),
+                hosts: Vec::new(),
+                outcome: UseOutcome::Allowed,
+                decided_by: UseDecidedBy::Bouncer,
+                answered_on: String::new(),
+                decision_log_id: None,
+            })
+            .expect("history");
+    }
     let shared: SharedVault = Arc::new(Mutex::new(Some(vault)));
     let mut options = BrokerOptions::with_tls(TlsClient::platform().expect("TLS"));
     options.approval_timeout = Duration::from_millis(300);

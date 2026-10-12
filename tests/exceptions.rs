@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 
 use apassy::agent::client;
 use apassy::agent::wire::{Action, WireResponse};
-use apassy::broker::approvals::{ApprovalRefusal, OwnerAction, OwnerCheck, OwnerGate, PendingRun};
+use apassy::broker::approvals::{
+    AnswerKind, ApprovalRefusal, OwnerAction, OwnerCheck, OwnerGate, PendingRun,
+};
 use apassy::broker::bouncer::BouncerClient;
 use apassy::broker::http::TlsClient;
 use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault};
@@ -20,8 +22,8 @@ use apassy::contracts::CredentialKind;
 use apassy::vault::exceptions::{ExceptionKind, Standing};
 use apassy::vault::usage::{UseDecidedBy, UseOutcome};
 use apassy::vault::{
-    Declaration, Environment, Field, ItemDraft, ONLY_MARKER_ITEM, Reversibility, RiskLevel, Scope,
-    SecretValue, Vault,
+    Declaration, Environment, ExecMode, ExecRule, Field, ItemDraft, ONLY_MARKER_ITEM,
+    Reversibility, RiskLevel, Scope, SecretValue, Vault,
 };
 use tempfile::TempDir;
 
@@ -44,7 +46,7 @@ struct Fixture {
 
 fn declaration(environment: Environment, risk: RiskLevel) -> Declaration {
     Declaration {
-        project: "synthetic".to_owned(),
+        project: "project".to_owned(),
         environment,
         risk,
         scope: Scope::ReadWrite,
@@ -482,4 +484,144 @@ fn stricter_answers_deny_and_make_the_agent_stricter_without_an_owner_check() {
         code(&run_in(&fx, &fx.project, &sentry_call())),
         "unauthenticated"
     );
+}
+
+/// Gate 1 (C-F5): a process grant is no authority. A grant in "Ask me each time" made
+/// after the upgrade does not ask, and its rule does not refuse: only exceptions do.
+#[test]
+fn a_process_grant_is_no_authority() {
+    let fx = fixture(Some(declaration(Environment::Development, RiskLevel::Low)));
+    with_vault(&fx, |v| {
+        v.set_exec_grant(
+            fx.agent_id,
+            fx.item_id,
+            &fx.project.display().to_string(),
+            ExecMode::Ask,
+        )?;
+        v.set_exec_rule(
+            fx.agent_id,
+            fx.item_id,
+            ExecRule {
+                forbidden_words: vec!["curl".to_owned()],
+                ..ExecRule::default()
+            },
+        )
+    })
+    .expect("grant");
+    assert_eq!(
+        decided_by(&run_in(&fx, &fx.project, &sentry_call())),
+        "Bouncer allowed"
+    );
+    assert!(fx.broker.approvals().pending().is_empty());
+}
+
+fn connector_call(fx: &Fixture, item: u64) -> std::thread::JoinHandle<WireResponse> {
+    let socket = fx.socket.clone();
+    let token = fx.token.clone();
+    std::thread::spawn(move || {
+        client::send(
+            &socket,
+            &token,
+            Action::Call {
+                item_id: item,
+                operation: "get_sales_summary".to_owned(),
+                params: [
+                    ("project_id", "project-a-synthetic"),
+                    ("period_start", "2026-09-01"),
+                    ("period_end", "2026-09-30"),
+                ]
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect(),
+            },
+        )
+        .expect("broker answer")
+    })
+}
+
+/// Gate 1 (A-5, C-F4): the connector path keeps the standing rules of a run. "Always ask
+/// for this agent", "Always ask me", and a production declaration wait for the owner;
+/// "Not for this agent" refuses. Each decided use is in the use log.
+#[test]
+fn the_connector_path_respects_the_exceptions_and_production() {
+    let fx = fixture(None);
+    let item = with_vault(&fx, |v| {
+        let item = v
+            .add(ItemDraft {
+                title: "Synthetic reporting key".to_owned(),
+                kind: CredentialKind::ApiKey,
+                notes: String::new(),
+                tags: Vec::new(),
+                fields: vec![Field {
+                    name: "token".to_owned(),
+                    value: SecretValue::new("FAKE-reporting-4417".to_owned()),
+                    secret: true,
+                }],
+            })
+            .expect("add")
+            .id;
+        v.set_destination(item, "reporting-api-v0", "https://reports.example.invalid")
+            .expect("destination");
+        v.set_grant(fx.agent_id, item, "get_sales_summary", true)
+            .expect("grant");
+        v.add_agent_exception(fx.agent_id, item, ExceptionKind::AlwaysAsk)
+            .expect("always ask");
+        item
+    });
+    let handle = connector_call(&fx, item);
+    let run = waiting(&fx);
+    assert_eq!(run.command[0], "apassy_use_credential");
+    assert!(run.question.why.contains("always ask for this agent"), "{}", run.question.why);
+    assert_eq!(run.question.item_ids, vec![item]);
+    assert!(
+        !run.question
+            .valid_answers
+            .iter()
+            .any(|answer| matches!(answer, AnswerKind::InProject(_))),
+        "a connector use has no project"
+    );
+    assert!(fx.broker.approvals().deny(run.id));
+    assert_eq!(code(&handle.join().expect("thread")), "approval_denied");
+    let uses = with_vault(&fx, |v| v.item_uses(item, 5)).expect("uses");
+    assert_eq!(uses[0].outcome, UseOutcome::Denied);
+    assert_eq!(uses[0].decided_by, UseDecidedBy::Owner);
+    assert_eq!(uses[0].hosts, vec!["reports.example.invalid".to_owned()]);
+
+    // "Always ask me" of the item and a production declaration ask too.
+    with_vault(&fx, |v| {
+        v.remove_agent_exception(fx.agent_id, item, ExceptionKind::AlwaysAsk)?;
+        v.set_always_ask(item, true)
+    })
+    .expect("always ask item");
+    let handle = connector_call(&fx, item);
+    let run = waiting(&fx);
+    assert!(run.question.why.contains("is set to always ask"), "{}", run.question.why);
+    assert!(fx.broker.approvals().deny(run.id));
+    assert_eq!(code(&handle.join().expect("thread")), "approval_denied");
+    with_vault(&fx, |v| {
+        v.set_always_ask(item, false)?;
+        v.save_declaration(
+            item,
+            &declaration(Environment::Production, RiskLevel::Low),
+            None,
+            None,
+        )
+    })
+    .expect("production");
+    let handle = connector_call(&fx, item);
+    let run = waiting(&fx);
+    assert!(run.question.why.contains("production credential"), "{}", run.question.why);
+    assert!(fx.broker.approvals().deny(run.id));
+    assert_eq!(code(&handle.join().expect("thread")), "approval_denied");
+
+    // "Not for this agent" hides the item: the connector grant does not count.
+    with_vault(&fx, |v| {
+        v.add_agent_exception(fx.agent_id, item, ExceptionKind::Never)
+    })
+    .expect("never");
+    assert_eq!(
+        code(&connector_call(&fx, item).join().expect("thread")),
+        "not_granted"
+    );
+    assert!(fx.broker.approvals().pending().is_empty());
 }

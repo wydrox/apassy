@@ -15,11 +15,14 @@ use apassy::agent::wire::{Action, WireResponse};
 use apassy::broker::approvals::{
     ApprovalRefusal, OwnerAction, OwnerCheck, OwnerGate, OwnerProof, PendingRun,
 };
+use apassy::broker::action_kind::ActionKind;
 use apassy::broker::bouncer::BouncerClient;
 use apassy::broker::http::TlsClient;
 use apassy::broker::model_server::ModelGate;
 use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault};
 use apassy::contracts::CredentialKind;
+use apassy::vault::exceptions::ExceptionKind;
+use apassy::vault::usage::{NewItemUse, UseDecidedBy, UseOutcome};
 use apassy::vault::{
     ActivityDecision, Declaration, EnvDelivery, Environment, ExecMode, ExecRule, Field, ItemDraft,
     Reversibility, RiskLevel, Scope, SecretValue, Vault, VaultErrorKind,
@@ -678,10 +681,10 @@ fn a_changed_process_binding_invalidates_a_pending_approval() {
 
 #[test]
 fn a_changed_grant_declaration_or_item_invalidates_a_pending_approval() {
+    // A process grant is no authority any more (ADR 0025): a change of its mode, place,
+    // or rule changes no decision. An exception of the agent does.
     for change in [
-        "mode",
-        "place",
-        "rule",
+        "exception",
         "declaration",
         "provider",
         "revision",
@@ -693,7 +696,7 @@ fn a_changed_grant_declaration_or_item_invalidates_a_pending_approval() {
                     .save_declaration(
                         fx.item_id,
                         &Declaration {
-                            project: "Demo project".into(),
+                            project: "project".into(),
                             environment: Environment::Development,
                             risk: RiskLevel::Low,
                             scope: Scope::ReadOnly,
@@ -708,37 +711,13 @@ fn a_changed_grant_declaration_or_item_invalidates_a_pending_approval() {
         let vault = Arc::clone(&fx.vault);
         let item_id = fx.item_id;
         let agent_id = fx.agent_id;
-        let project = fx.project.clone();
         decide_later(&fx, true, move || {
             let mut guard = vault.lock().expect("vault");
             let vault = guard.as_mut().expect("open");
             match change {
-                "mode" => vault
-                    .set_exec_grant(
-                        agent_id,
-                        item_id,
-                        &project.display().to_string(),
-                        ExecMode::Bouncer,
-                    )
-                    .expect("mode"),
-                "place" => vault
-                    .set_exec_grants(
-                        agent_id,
-                        &[item_id],
-                        &apassy::vault::GrantPlace::AnyFolder,
-                        ExecMode::Ask,
-                    )
-                    .expect("place"),
-                "rule" => vault
-                    .set_exec_rule(
-                        agent_id,
-                        item_id,
-                        ExecRule {
-                            instruction: "Use this credential only for the revised task.".into(),
-                            ..ExecRule::default()
-                        },
-                    )
-                    .expect("rule"),
+                "exception" => vault
+                    .add_agent_exception(agent_id, item_id, ExceptionKind::AlwaysAsk)
+                    .expect("exception"),
                 "declaration" => vault
                     .set_declaration(
                         item_id,
@@ -849,7 +828,7 @@ fn a_changed_binding_invalidates_a_model_decision_without_an_owner_prompt() {
             .set_declaration(
                 fx.item_id,
                 &Declaration {
-                    project: "Demo project".into(),
+                    project: "project".into(),
                     environment: Environment::Development,
                     risk: RiskLevel::Low,
                     scope: Scope::ReadOnly,
@@ -1156,7 +1135,7 @@ fn restore_needs_owner_review_before_runs() {
         v.set_declaration(
             fx.item_id,
             &Declaration {
-                project: "demo".to_owned(),
+                project: "project".to_owned(),
                 environment: Environment::Staging,
                 risk: RiskLevel::Medium,
                 scope: Scope::ReadWrite,
@@ -1225,6 +1204,26 @@ fn restore_needs_owner_review_before_runs() {
             ExecMode::Bouncer,
         )
         .expect("grant");
+    // ADR 0025 §3: the model decides for a staging item that this agent used in the
+    // project before.
+    for action in [ActionKind::Read, ActionKind::Change] {
+        restored
+            .record_item_use(&NewItemUse {
+                item_id: fx.item_id,
+                agent_id: Some(agent.id),
+                agent_name: "Run agent".to_owned(),
+                project_key: fx.project.display().to_string(),
+                project_label: "project".to_owned(),
+                action,
+                command_summary: "run echo".to_owned(),
+                hosts: Vec::new(),
+                outcome: UseOutcome::Allowed,
+                decided_by: UseDecidedBy::Bouncer,
+                answered_on: String::new(),
+                decision_log_id: None,
+            })
+            .expect("history");
+    }
     let token = token.expose().to_owned();
     let slot: SharedVault = Arc::new(Mutex::new(Some(restored)));
     let bouncer = common::fake_bouncer(&[]);

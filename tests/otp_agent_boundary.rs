@@ -172,7 +172,7 @@ fn the_catalog_has_no_visible_setup_key() {
         Some(3),
         "{details}"
     );
-    assert_eq!(listed["catalog"][0]["access"], "can_request");
+    assert_eq!(listed["catalog"][0]["access"], "can_use");
 }
 
 #[test]
