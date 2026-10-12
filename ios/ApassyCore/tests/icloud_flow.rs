@@ -853,6 +853,21 @@ fn schema_marks(path: &Path) -> (i64, i64) {
     marks
 }
 
+/// What a snapshot of schema 19 has and a snapshot of schema 18 has not; `relay_device`
+/// comes back (empty) with the DDL of schema 16.
+const SCHEMA19_ONLY: &str = "
+DROP TABLE trusted_device; DROP TABLE item_home; DROP TABLE relay_membership;
+CREATE TABLE relay_device (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    relay_url TEXT NOT NULL,
+    team_id TEXT NOT NULL,
+    device_id INTEGER NOT NULL,
+    public_key BLOB NOT NULL,
+    key_pkcs8 BLOB NOT NULL,
+    created_at INTEGER NOT NULL
+);
+";
+
 /// What a snapshot of schema 18 has and a snapshot of schema 17 has not.
 const SCHEMA18_ONLY: &str = "
 DROP TABLE folder; DROP TABLE item_folder; DROP TABLE item_policy;
@@ -865,10 +880,10 @@ ALTER TABLE agent DROP COLUMN note;
 
 /// Give the closed Mac snapshot at `path` the version marks of `version` and the
 /// content digest of the changed rows, as the push of that app does. An earlier version
-/// also loses the tables and the column of schema 18 ([`SCHEMA18_ONLY`]), so the
-/// snapshot is then the snapshot of the app of schema 17.
+/// also loses the parts of the later schemas ([`SCHEMA19_ONLY`], [`SCHEMA18_ONLY`]), so
+/// the snapshot is then the snapshot of the app of that schema.
 fn set_schema(path: &Path, version: i64) {
-    assert_eq!(schema_marks(path), (18, 18));
+    assert_eq!(schema_marks(path), (19, 19));
     let conn = rusqlite::Connection::open(path).unwrap();
     conn.pragma_update(None, "key", PASS).unwrap();
     let stored: Vec<u8> = conn
@@ -879,6 +894,9 @@ fn set_schema(path: &Path, version: i64) {
         )
         .unwrap();
     assert_eq!(stored, content_digest(&conn), "the algorithm of the app");
+    if version < 19 {
+        conn.execute_batch(SCHEMA19_ONLY).unwrap();
+    }
     if version < 18 {
         conn.execute_batch(SCHEMA18_ONLY).unwrap();
     }
@@ -906,14 +924,14 @@ fn old_snapshot(f: &mut Fixture) -> (PathBuf, PathBuf) {
 }
 
 #[test]
-fn a_schema17_snapshot_imports_and_the_next_sync_writes_schema18_with_no_edit() {
+fn a_schema17_snapshot_imports_and_the_next_sync_writes_schema19_with_no_edit() {
     let mut f = Fixture::new();
     f.mac.add(draft("Mac credential")).unwrap();
 
     // A later schema and a wrong passphrase make no vault on the phone.
     let (future, _) = f.paths();
     f.mac.write_sync_copy(&future, "Newer Mac").unwrap();
-    set_schema(&future, 19);
+    set_schema(&future, 20);
     let import = |input: &Path, passphrase: &str| json!({"op":"icloud_import", "name":"Personal", "passphrase":passphrase, "input_path":input});
     assert_eq!(fails(&f.phone, import(&future, PASS)), "unsupported_schema");
     let (input, _) = old_snapshot(&mut f);
@@ -946,7 +964,7 @@ fn a_schema17_snapshot_imports_and_the_next_sync_writes_schema18_with_no_edit() 
     );
     assert_eq!(apassy::sync::file_sha256(&input).unwrap(), input_sha);
     assert_eq!(schema_marks(&input), (17, 17));
-    assert_eq!(schema_marks(&output), (18, 18));
+    assert_eq!(schema_marks(&output), (19, 19));
     let complete = f.complete(&prepared);
     assert_eq!(complete["state"], "ok");
     assert_eq!(complete["merged"]["inserted"], 0);
@@ -955,7 +973,7 @@ fn a_schema17_snapshot_imports_and_the_next_sync_writes_schema18_with_no_edit() 
 
     // The Mac and a new Mac take the output: no duplicate, no conflict.
     let report = f.mac.merge_from(&output, &SyncScope::vault()).unwrap();
-    assert_eq!(report.remote_schema, 18);
+    assert_eq!(report.remote_schema, 19);
     assert!(!report.remote_outdated());
     assert!(!report.changed_local());
     assert!(report.conflicts.is_empty());

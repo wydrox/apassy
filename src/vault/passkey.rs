@@ -1502,6 +1502,8 @@ mod tests {
         // Make it a schema 16 file whose owner fields have reserved names.
         let conn = Connection::open_with_flags(&path, super::super::OPEN_EXISTING).unwrap();
         super::super::apply_key(&conn, PASS).unwrap();
+        conn.execute_batch(super::super::schema19::DOWNGRADE_TO_18_SQL)
+            .unwrap();
         conn.execute_batch(
             "UPDATE sync_device SET applying = 1;
              UPDATE item_field SET name = 'passkey_rp_id' WHERE name = 'aaa';

@@ -452,7 +452,7 @@ impl Vault {
     /// The check is the check of a restore (cipher settings, schema, columns, integrity)
     /// plus the content digest of the last push. A wrong passphrase, a damaged file, or
     /// a file that mixes pages of different copies returns `WrongKeyOrCorrupt`. A copy
-    /// of the current schema or of the schema before it (`merge::UPGRADABLE_SCHEMA`)
+    /// of the current schema or of an earlier schema that it upgrades (17 or 18)
     /// passes; the digest check is on the content of the copy as it is. A copy from
     /// another schema version returns `UnsupportedSchema`. A vault file that was never
     /// pushed (generation 0) has no digest; it passes, so an owner can adopt a vault
@@ -614,7 +614,7 @@ fn inspect_open_copy(conn: &Connection, passphrase: &str) -> VaultResult<(SyncId
     apply_key(conn, passphrase)?;
     verify_cipher_defaults(conn)?;
     let version = verify_readable_schema(conn)?;
-    if version != SCHEMA_VERSION && version != merge::UPGRADABLE_SCHEMA {
+    if !merge::is_mergeable_schema(version) {
         return Err(err(VaultErrorKind::UnsupportedSchema));
     }
     let (identity, stored) = read_sync_row(conn, "main")?;

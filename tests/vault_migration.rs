@@ -1,6 +1,6 @@
 #![cfg(feature = "vault")]
 
-//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 17) to
+//! Goal item V6: unlock migrates a vault from each earlier schema version (1 to 18) to
 //! the current version, with data at each version. Synthetic values only.
 //!
 //! The schema SQL below is a frozen copy of the statements that each earlier version ran
@@ -22,7 +22,7 @@ use apassy::vault::{
 use tempfile::TempDir;
 
 const PASS: &str = "synthetic-migration-passphrase";
-const CURRENT_VERSION: i64 = 18;
+const CURRENT_VERSION: i64 = 19;
 /// The vault ID of the frozen version 13 file.
 const V13_VAULT_ID: &str = "6f1c2d3e-4a5b-4c6d-8e7f-0123456789ab";
 
@@ -1798,7 +1798,9 @@ fn version_15_migration_adds_the_relay_device_table_and_is_atomic() {
     assert_eq!(sync_columns(&path), before, "record IDs and clocks stay");
     drop(vault);
     assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
-    assert!(apassy::vault::LOCAL_TABLES.contains(&"relay_device"));
+    // Schema 19 moved the relay row to the local `relay_membership` table.
+    assert!(apassy::vault::LOCAL_TABLES.contains(&"relay_membership"));
+    assert!(!apassy::vault::LOCAL_TABLES.contains(&"relay_device"));
 }
 
 /// The table of schema version 16 (ADR 0022), as the app made it on 2026-10-06.
@@ -2268,4 +2270,186 @@ fn version_18_puts_connector_grants_in_only() {
 fn version_18_gives_a_narrow_agent_without_grants_only_the_marker() {
     let (rows, now) = migrated_v18_agents();
     assert_eq!(rows[&10], [(marker(), "only".to_owned(), now - 990)]);
+}
+
+/// What a file of schema 19 has and a file of schema 18 has not: the new tables go, and
+/// `relay_device` comes back with the DDL of schema 16 ([`V16_SQL`], whose marks the
+/// statements after it replace).
+const SCHEMA19_ONLY: &str = "
+DROP TABLE trusted_device; DROP TABLE item_home; DROP TABLE relay_membership;
+";
+
+/// The synthetic relay key of the schema 18 file: a P-256 point and a PKCS#8 stand-in.
+fn relay_public_key() -> Vec<u8> {
+    let mut key = vec![0x04];
+    key.extend_from_slice(&[0x5a; 64]);
+    key
+}
+
+/// The schema of the closed file at `path`: (type, name, table, SQL) of each entry.
+fn schema_ddl(path: &Path) -> Vec<(String, String, String, Option<String>)> {
+    let conn = rusqlite::Connection::open(path).expect("open");
+    conn.pragma_update(None, "key", PASS).expect("key");
+    let mut stmt = conn
+        .prepare("SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name")
+        .expect("prepare");
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("rows");
+    drop(stmt);
+    conn.close().map_err(|(_, err)| err).expect("close");
+    rows
+}
+
+/// Tables of schema 19 and `relay_device` that the closed file at `path` has.
+fn schema19_parts(path: &Path) -> Vec<&'static str> {
+    let conn = rusqlite::Connection::open(path).expect("open");
+    conn.pragma_update(None, "key", PASS).expect("key");
+    let parts = [
+        "trusted_device",
+        "item_home",
+        "relay_membership",
+        "relay_device",
+    ]
+    .into_iter()
+    .filter(|table| {
+        conn.prepare(&format!("SELECT * FROM {table} LIMIT 0"))
+            .is_ok()
+    })
+    .collect();
+    conn.close().map_err(|(_, err)| err).expect("close");
+    parts
+}
+
+/// Stage 5 plan §A1: the migration from 18 moves the one `relay_device` row to
+/// `relay_membership` with the purpose `sync` (the key, team, relay address, and device
+/// number stay), drops `relay_device`, and adds `trusted_device` and `item_home`, in one
+/// transaction. A failure late (the version mark) or early (a table name in use) leaves
+/// version 18 with its relay row and without any table of version 19. The migrated file
+/// has the DDL of a new vault.
+#[test]
+fn version_19_migration_moves_relay_device_and_is_atomic() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("v18.db");
+    let mut vault = Vault::create(&path, PASS).expect("create");
+    vault.unlock(PASS).expect("unlock");
+    for (title, _, _, _, _) in &ITEMS[..2] {
+        vault
+            .add(apassy::vault::ItemDraft {
+                title: (*title).to_owned(),
+                kind: CredentialKind::ApiKey,
+                notes: String::new(),
+                tags: Vec::new(),
+                fields: vec![apassy::vault::Field {
+                    name: "token".to_owned(),
+                    value: apassy::vault::SecretValue::new("MIG-SECRET-v18".to_owned()),
+                    secret: true,
+                }],
+            })
+            .expect("item");
+    }
+    let folder = vault.create_folder(None, "MIG folder").expect("folder");
+    vault.set_item_folder(1, Some(&folder.uuid)).expect("move");
+    vault.lock().expect("lock");
+    drop(vault);
+    let conn = rusqlite::Connection::open(&path).expect("open");
+    conn.pragma_update(None, "key", PASS).expect("key");
+    conn.execute_batch(SCHEMA19_ONLY).expect("drop schema 19");
+    conn.execute_batch(V16_SQL).expect("frozen relay_device");
+    conn.execute(
+        "INSERT INTO relay_device
+             (id, relay_url, team_id, device_id, public_key, key_pkcs8, created_at)
+         VALUES (1, 'https://relay.mig.invalid', 't_mig0000001', 7, ?1, ?2, 1700000123)",
+        (relay_public_key(), vec![0x6b_u8; 138]),
+    )
+    .expect("relay row");
+    // Late: a trigger refuses the version mark, after the tables and the move.
+    conn.execute_batch(
+        "UPDATE vault_meta SET schema_version = 18 WHERE id = 1;
+         PRAGMA user_version = 18;
+         CREATE TRIGGER mig_block_v19 BEFORE UPDATE OF schema_version ON vault_meta
+         WHEN NEW.schema_version = 19 BEGIN SELECT RAISE(ABORT, 'blocked'); END;",
+    )
+    .expect("schema 18 marks");
+    conn.close().map_err(|(_, e)| e).unwrap();
+    assert_eq!(raw_versions(&path), (18, 18));
+    assert_eq!(schema19_parts(&path), ["relay_device"]);
+    let before = sync_columns(&path);
+
+    let mut vault = Vault::open(&path).expect("open");
+    assert_eq!(
+        vault.unlock(PASS).unwrap_err().kind(),
+        VaultErrorKind::Storage
+    );
+    drop(vault);
+    assert_eq!(raw_versions(&path), (18, 18), "no partial migration");
+    assert_eq!(schema19_parts(&path), ["relay_device"]);
+
+    // Early: a table with the name of a version 19 table.
+    let conn = rusqlite::Connection::open(&path).expect("open");
+    conn.pragma_update(None, "key", PASS).unwrap();
+    conn.execute_batch("DROP TRIGGER mig_block_v19; CREATE TABLE item_home (x INTEGER);")
+        .unwrap();
+    conn.close().map_err(|(_, e)| e).unwrap();
+    let mut vault = Vault::open(&path).expect("open");
+    assert_eq!(
+        vault.unlock(PASS).unwrap_err().kind(),
+        VaultErrorKind::Storage
+    );
+    drop(vault);
+    assert_eq!(raw_versions(&path), (18, 18));
+    assert_eq!(schema19_parts(&path), ["item_home", "relay_device"]);
+    let conn = rusqlite::Connection::open(&path).expect("open");
+    conn.pragma_update(None, "key", PASS).unwrap();
+    let kept: (String, i64) = conn
+        .query_row(
+            "SELECT team_id, device_id FROM relay_device WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("the relay row stays");
+    assert_eq!(kept, ("t_mig0000001".to_owned(), 7));
+    conn.execute_batch("DROP TABLE item_home;").unwrap();
+    conn.close().map_err(|(_, e)| e).unwrap();
+
+    let mut vault = Vault::open(&path).expect("open");
+    vault.unlock(PASS).expect("schema 18 to current");
+    let device = vault.relay_device().expect("read").expect("the moved row");
+    assert_eq!(device.relay_url, "https://relay.mig.invalid");
+    assert_eq!(device.team_id, "t_mig0000001");
+    assert_eq!(device.device_id, 7);
+    assert_eq!(device.public_key, relay_public_key());
+    assert!(
+        device.key_pkcs8.as_slice() == [0x6b_u8; 138].as_slice(),
+        "the private key moves unchanged"
+    );
+    assert_eq!(device.created_at, 1_700_000_123);
+    let memberships = vault.relay_memberships().expect("memberships");
+    assert_eq!(memberships.len(), 1);
+    assert_eq!(
+        memberships[0].purposes,
+        std::collections::BTreeSet::from([apassy::vault::MembershipPurpose::Sync])
+    );
+    assert!(vault.trusted_devices().expect("devices").is_empty());
+    assert_eq!(vault.item_home(1).expect("home"), None);
+    assert_eq!(vault.item_folder(1).expect("folder"), Some(folder.uuid));
+    drop(vault);
+    assert_eq!(raw_versions(&path), (CURRENT_VERSION, CURRENT_VERSION));
+    assert_eq!(
+        schema19_parts(&path),
+        ["trusted_device", "item_home", "relay_membership"],
+        "relay_device is dropped"
+    );
+    assert_eq!(sync_columns(&path), before, "record IDs and clocks stay");
+
+    // A new vault and the migrated file have the same tables, columns, and triggers.
+    let fresh = dir.path().join("fresh.db");
+    let mut created = Vault::create(&fresh, PASS).expect("create");
+    created.unlock(PASS).expect("unlock");
+    drop(created);
+    assert_eq!(schema_ddl(&path), schema_ddl(&fresh));
 }
