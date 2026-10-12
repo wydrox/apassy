@@ -174,9 +174,17 @@ The rules for an item that an agent creates:
 
 - An agent only creates. It cannot read a value back, delete an item, or change an item that it did not create.
 - The item has "Added by AGENT, in FOLDER, at TIME". Activity shows it, and the owner can archive it with one click.
-- A name that exists gets a suffix. A value that exists returns the existing item and creates nothing.
-- An agent creates at most a limited number of items each hour. Above the limit, the owner is asked.
+- A name that exists gets a suffix. A value that exists among the agent's own items returns that item and creates nothing. The check never looks at other items, so it reveals nothing about them.
+- An agent creates or updates at most 10 items each hour, and opens at most 5 requests to the owner. Above the limit the tool refuses (`too_many_items`, `too_many_requests`) and tells the agent to ask the owner. The owner decided on 2026-10-12 that a refusal is safer than another question.
 - The use of the item goes through the bouncer, as for each other item.
+
+Decisions after the security review (Gate 2, 2026-10-12):
+
+- **Capture runs outside the agent's sandbox, so it is narrow.** A fixed list of commands that print a token runs at once (for example `gh auth token`, `op read op://…`, `aws configure get NAME`, `gcloud auth print-access-token`). The program is found only in the system and Homebrew folders, with a fixed `PATH`; the agent's `PATH` and folder cannot change it. Any other command, and any file outside the project, waits for the owner as a question that shows the full command. The answer is "Allow once" or "Deny", and nothing is remembered. Apassy's own files are always refused. `extract` takes one field of JSON output, one line, or the text after a label.
+- **Rotation keeps the previous value.** `apassy_update_credential` keeps the old value hidden, never delivered to an agent, until the next allowed use of the new value or for 7 days. The owner can restore it. The new value is classified again, and the stricter declaration of the two wins.
+- **`describe` can only narrow where a value goes.** `placeholder_hosts` is refused for databases, SSH keys and custom items, and a variable name of another item, explicit or automatic, is refused.
+- **Requests show their source as text.** "Where to get it" is plain text with the domain shown, never a link.
+- **Delivery.** Providers whose command-line tools do not accept a placeholder get the real value: AWS, Google Cloud, GitHub, Stripe, Supabase, PlanetScale. Their hosts stay known to the bouncer. Cloudflare keeps the placeholder, because Wrangler works with it.
 
 ## Implementation order
 
@@ -194,6 +202,8 @@ Each stage is useful alone and has its own PR. There is no release until the own
 - A value that a weak signal classified as development can be production. The bouncer is then less careful until the usage log shows the difference.
 - An agent can store a credential of an attacker under a plausible name, for example a token for another account. Other agents can then use it. The catalog and Activity show which agent added the item.
 - The catalog shows the names, usernames, hosts and visible details of the credentials to the agent and to the provider of its model (ADR 0012).
+- The commands on the capture list use the network and run outside the agent's sandbox. Someone who can replace a program in the Homebrew folders can change what such a command does.
+- Project identity comes from the folder that the agent names. A `.git` file counts only with a link back from its repository, but an agent can still run in another project's folder on the same Mac.
 
 ## Relation to other records
 
