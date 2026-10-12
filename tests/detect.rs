@@ -134,11 +134,11 @@ fn a_live_value_is_production_from_a_signal_and_never_lower() {
     assert_eq!(both.environment, Environment::Production);
     assert_eq!(both.sources.environment, Source::Signal);
 
-    // A production word of a value without a provider.
+    // A production word of a value without a provider: a weak signal, not a source.
     let word = one("acme_live_0000EXAMPLE0000");
     assert_eq!(word.provider, None);
     assert_eq!(word.environment, Environment::Production);
-    assert_eq!(word.sources.environment, Source::Signal);
+    assert_eq!(word.sources.environment, Source::Default);
     assert_eq!(word.sources.risk, Source::Default);
 }
 
@@ -232,7 +232,7 @@ fn a_dotenv_file_gives_one_item_for_each_line() {
 
     let url = &found[3];
     assert_eq!(url.kind, CredentialKind::Database);
-    assert_eq!(url.sources.environment, Source::Signal);
+    assert_eq!(url.sources.environment, Source::Default);
     assert_eq!(value(url, "password"), "FAKE-pass");
 
     let dev = &found[4];
@@ -307,7 +307,7 @@ fn a_postgres_url_is_split_into_fields() {
     let prod = one("postgresql://billing_rw:FAKE@db.prod.acme.internal:5432/billing");
     assert_eq!(prod.title, "Billing database");
     assert_eq!(prod.environment, Environment::Production);
-    assert_eq!(prod.sources.environment, Source::Signal);
+    assert_eq!(prod.sources.environment, Source::Default);
 
     // A hosted provider wins over the generic PostgreSQL provider.
     let supabase = one("postgresql://postgres:FAKE@db.exampleref.supabase.co:5432/postgres");
@@ -315,9 +315,11 @@ fn a_postgres_url_is_split_into_fields() {
     assert_eq!(supabase.title, "Supabase database");
     assert!(supabase.hosts.is_empty());
 
+    // A localhost host is a weak signal: a tunnel to production looks the same.
     let mysql = one("mysql://app:FAKE@localhost:3306/shop");
     assert_eq!(mysql.title, "Shop database");
-    assert_eq!(mysql.environment, Environment::Local);
+    assert_eq!(mysql.environment, Environment::Production);
+    assert_eq!(mysql.sources, Sources::DEFAULT);
 }
 
 #[test]
@@ -339,13 +341,15 @@ fn mongodb_srv_redis_and_amqp_urls() {
     assert_eq!(redis.title, "Redis database");
     assert_eq!(redis.env_name.as_deref(), Some("REDIS_URL"));
     assert_eq!(redis.env_field.as_deref(), Some(URL_FIELD));
-    assert_eq!(redis.environment, Environment::Local);
+    assert_eq!(redis.environment, Environment::Production);
     assert_eq!(value(&redis, "password"), "FAKE-redis");
 
+    // A staging host is a weak signal too: it never lowers the environment.
     let amqp = one("amqp://guest:FAKE@mq.staging.example.com:5672/%2F");
     assert_eq!(amqp.title, "RabbitMQ broker");
     assert_eq!(amqp.env_name.as_deref(), Some("AMQP_URL"));
-    assert_eq!(amqp.environment, Environment::Staging);
+    assert_eq!(amqp.environment, Environment::Production);
+    assert_eq!(amqp.sources.environment, Source::Default);
     assert_eq!(value(&amqp, "database"), "/");
 }
 
@@ -474,4 +478,299 @@ fn a_multi_line_dotenv_takes_lowercase_keys_and_needs_every_line_to_be_an_assign
     let mixed = one("alpha=EXAMPLE0\nnot an assignment");
     assert_eq!(mixed.line, None);
     assert_eq!(value(&mixed, "secret"), "alpha=EXAMPLE0\nnot an assignment");
+}
+
+// ---- Secret parts in plain fields and titles, weak signals (Gate 1 review) ----
+
+/// The parts of four characters of a secret, in lowercase.
+fn windows(secret: &str) -> Vec<String> {
+    let chars: Vec<char> = secret.to_lowercase().chars().collect();
+    chars
+        .windows(4)
+        .map(|window| window.iter().collect())
+        .collect()
+}
+
+/// No plain field, no title, and no result line has a part of a secret.
+fn assert_no_secret_part(input: &str, detected: &Detected, secrets: &[&str]) {
+    let mut shown: Vec<(String, String)> = vec![
+        ("title".to_owned(), detected.title.to_lowercase()),
+        ("summary".to_owned(), summary_line(detected).to_lowercase()),
+    ];
+    for field in detected.fields.iter().filter(|field| !field.secret) {
+        shown.push((field.name.clone(), field.value.expose().to_lowercase()));
+    }
+    for secret in secrets {
+        for part in windows(secret) {
+            for (name, text) in &shown {
+                assert!(
+                    !text.contains(&part),
+                    "{name} {text:?} has {part:?} of the secret in {input:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_review_examples_keep_the_password_out_of_plain_fields_and_titles() {
+    // `#` in the password: the old split made the host "app:Xk9Qz7".
+    let hash = "postgres://app:Xk9Qz7#mQ2vL7@db.acme-corp.com:5432/app";
+    let detected = one(hash);
+    assert_eq!(names(&detected), [(URL_FIELD, true)]);
+    assert_eq!(value(&detected, URL_FIELD), hash);
+    assert_eq!(detected.kind, CredentialKind::Custom);
+    assert_eq!(detected.title, "PostgreSQL database");
+    assert_eq!(detected.provider.as_deref(), Some("postgres"));
+    assert_eq!(detected.env_name.as_deref(), Some("DATABASE_URL"));
+    assert_eq!(detected.env_field.as_deref(), Some(URL_FIELD));
+    assert_eq!(
+        summary_line(&detected),
+        "PostgreSQL database · DATABASE_URL · production"
+    );
+    assert_no_secret_part(hash, &detected, &["Xk9Qz7#mQ2vL7"]);
+
+    // `/` and `?` in the password: the old split made the title "Qz7 database".
+    let slash = "postgres://app:Xk9/Qz7?mQ2vL7@db.acme-corp.com:5432/app";
+    let detected = one(slash);
+    assert_eq!(names(&detected), [(URL_FIELD, true)]);
+    assert_eq!(detected.title, "PostgreSQL database");
+    assert_no_secret_part(slash, &detected, &["Xk9/Qz7?mQ2vL7"]);
+
+    // A Redis token without `:` is secret, not a user name.
+    let token = "rediss://tKn8ZpW3qR5vY2xA@cache.acme-corp.com:6380";
+    let detected = one(token);
+    assert_eq!(
+        names(&detected),
+        [("host", false), ("password", true), (URL_FIELD, true)]
+    );
+    assert_eq!(value(&detected, "password"), "tKn8ZpW3qR5vY2xA");
+    assert_eq!(value(&detected, "host"), "cache.acme-corp.com:6380");
+    assert_eq!(detected.title, "Redis database");
+    assert_no_secret_part(token, &detected, &["tKn8ZpW3qR5vY2xA"]);
+
+    // The same for RabbitMQ, and for a random user part of any scheme.
+    let amqp = one("amqps://guest@mq.acme-corp.com/vhost");
+    assert!(amqp.field("username").is_none());
+    assert_eq!(value(&amqp, "password"), "guest");
+    let random = one("postgres://Rk7Vb2Mn9Qx4Lp3W@db.acme-corp.com/app");
+    assert!(random.field("username").is_none());
+    assert_eq!(value(&random, "password"), "Rk7Vb2Mn9Qx4Lp3W");
+    // A plain user name without a password stays a user name.
+    let user = one("postgres://billing_rw@db.acme-corp.com/billing");
+    assert_eq!(value(&user, "username"), "billing_rw");
+    assert!(user.field("password").is_none());
+
+    // `@` in the password before the host is certain: the last `@` ends the user part.
+    let at = one("postgres://app:Wq8@Rt5@db.acme-corp.com:5432/shop");
+    assert_eq!(value(&at, "host"), "db.acme-corp.com:5432");
+    assert_eq!(value(&at, "username"), "app");
+    assert_eq!(value(&at, "password"), "Wq8@Rt5");
+    assert_eq!(at.title, "Shop database");
+}
+
+#[test]
+fn no_split_of_a_crafted_url_puts_a_secret_part_in_a_plain_field_or_title() {
+    let schemes = [
+        "postgres",
+        "postgresql",
+        "mysql",
+        "mongodb",
+        "mongodb+srv",
+        "redis",
+        "rediss",
+        "amqp",
+        "amqps",
+    ];
+    // Passwords with the characters that RFC 3986 refuses in the user part.
+    let passwords = [
+        "Xk9Qz7#mQ2vL7",
+        "Xk9/Qz7?mQ2vL7",
+        "Wq8@Rt5:Yu3Lp",
+        "Pz4%40Lm6Kd2Ab",
+        "Hv2/Jn7#Bc9?Df1",
+        "Gs5?Kt8Wm3Zx",
+        "Fy6:Vc1/Rb4Tn",
+        "Qw7Ee9Rr2Ty4",
+        "Jd3@@Ks8#Lu2",
+        "Cv4%2FBn6Mm1",
+    ];
+    let hosts = [
+        "db.acme-corp.com:5432",
+        "localhost:6379",
+        "h1.acme.io:27017,h2.acme.io:27017",
+        "[::1]:5432",
+    ];
+    let tails = [
+        "",
+        "/app",
+        "/app?sslmode=require",
+        "/billing#frag",
+        "?ssl=true",
+        "/app?application_name=http://localhost",
+    ];
+    let mut checked = 0;
+    for scheme in schemes {
+        for password in passwords {
+            let decoded = password.replace("%40", "@").replace("%2F", "/");
+            // A token with `:` is a user and a password, so the lone forms skip it.
+            let mut infos = vec![format!("app:{password}"), format!(":{password}")];
+            if !password.contains(':') {
+                infos.push(password.to_owned());
+                infos.push(format!("{password}:"));
+            }
+            for info in &infos {
+                for host in hosts {
+                    for tail in tails {
+                        let url = format!("{scheme}://{info}@{host}{tail}");
+                        for input in [url.clone(), format!("DATABASE_URL={url}")] {
+                            let found = detect(&input);
+                            assert_eq!(found.len(), 1, "{input:?}");
+                            let detected = &found[0];
+                            assert_no_secret_part(&input, detected, &[password, decoded.as_str()]);
+                            for field in detected.fields.iter().filter(|f| !f.secret) {
+                                let text = field.value.expose();
+                                assert!(!text.contains('@'), "{} of {input:?}", field.name);
+                                if field.name == "username" {
+                                    assert!(!text.contains(':'), "user of {input:?}");
+                                }
+                                if field.name == "host" {
+                                    assert_eq!(text, host, "host of {input:?}");
+                                }
+                            }
+                            assert_eq!(
+                                detected
+                                    .field(URL_FIELD)
+                                    .map(|field| (field.value.expose(), field.secret)),
+                                Some((url.as_str(), true)),
+                                "{input:?}"
+                            );
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(checked >= 5000, "{checked} detections");
+}
+
+#[test]
+fn a_title_or_result_line_never_shows_a_part_of_a_secret() {
+    let token = "Xk9Qz7mQ2vL7Rt5Yu3";
+    let otp = "JBSWY3DPEHPK3PXP";
+    let inputs = [
+        (token.to_owned(), token),
+        (format!("sk_live_{token}"), token),
+        (format!("sk-ant-api03-{token}"), token),
+        (format!("ghp_{token}{token}"), token),
+        (format!("API_SECRET={token}"), token),
+        (format!("export DB_PASSWORD=\"{token}\""), token),
+        (format!("A_KEY={token}\nB_KEY=sk_test_{token}\n"), token),
+        (format!("acme_live_{token}"), token),
+        (
+            format!("otpauth://totp/Acme:alice?secret={otp}&issuer=Acme"),
+            otp,
+        ),
+        (
+            format!(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\n{token}\n-----END OPENSSH PRIVATE KEY-----"
+            ),
+            token,
+        ),
+        (
+            format!("postgres://app:{token}@db.acme-corp.com/app"),
+            token,
+        ),
+        (
+            format!("postgres://app:{token}#x@db.acme-corp.com/app"),
+            token,
+        ),
+        (format!("redis://{token}@cache.acme-corp.com"), token),
+        (format!("mongodb://{token}@db.acme-corp.com/orders"), token),
+    ];
+    for (input, secret) in &inputs {
+        let found = detect(input);
+        assert!(!found.is_empty(), "{input:?}");
+        for detected in &found {
+            assert_no_secret_part(input, detected, &[secret]);
+        }
+    }
+}
+
+fn assert_most_sensitive(detected: &Detected) {
+    assert_eq!(
+        (
+            detected.environment,
+            detected.risk,
+            detected.scope,
+            detected.reversibility
+        ),
+        (
+            Environment::Production,
+            RiskLevel::High,
+            Scope::Admin,
+            Reversibility::Irreversible
+        ),
+        "{}",
+        detected.title
+    );
+    assert_eq!(detected.sources, Sources::DEFAULT, "{}", detected.title);
+}
+
+#[test]
+fn a_loopback_host_or_a_host_word_never_lowers_the_declaration() {
+    // The example of the review: a production database through a tunnel or a proxy.
+    assert_most_sensitive(&one("DATABASE_URL=postgres://app:pw@127.0.0.1:5432/app"));
+    for host in [
+        "localhost:5432",
+        "0.0.0.0:5432",
+        "host.docker.internal:5432",
+        "db.dev.acme.io",
+        "db.staging.acme.io",
+        "db.local.acme.io",
+        "db.test.acme.io",
+    ] {
+        assert_most_sensitive(&one(&format!("postgres://app:Xk9Qz7@{host}/app")));
+        assert_most_sensitive(&one(&format!("REDIS_URL=redis://:Xk9Qz7@{host}/0")));
+    }
+    // A host in the query of a secret value is not read.
+    assert_most_sensitive(&one(
+        "postgres://app:Xk9Qz7@db.acme-corp.com:5432/app?application_name=http://localhost",
+    ));
+    // Words of plain fields (the user, the database) are weak too.
+    assert_most_sensitive(&one("postgres://readonly:Xk9Qz7@db.acme.io:5432/app_dev"));
+    // A variable name condition of a provider is weak.
+    let anon = one("SUPABASE_ANON_KEY=Xk9Qz7mQ2vL7Rt5Yu3");
+    assert_eq!(anon.risk, RiskLevel::High);
+    assert_eq!(anon.sources.risk, Source::Default);
+    // A read-only word of the variable gives no scope: only environment words count.
+    let reader = one("READONLY_API_TOKEN=Xk9Qz7mQ2vL7Rt5Yu3");
+    assert_eq!(reader.scope, Scope::Admin);
+    assert_eq!(reader.sources.scope, Source::Default);
+}
+
+#[test]
+fn an_environment_word_of_the_variable_is_a_signal_and_a_weak_word_only_raises() {
+    // A local word of the variable sets the environment, but the localhost host still
+    // gives no low risk and no reversibility.
+    let local = one("LOCAL_DATABASE_URL=postgres://app:Xk9Qz7@localhost:5432/app");
+    assert_eq!(local.environment, Environment::Local);
+    assert_eq!(local.sources.environment, Source::Signal);
+    assert_eq!(local.risk, RiskLevel::High);
+    assert_eq!(local.sources.risk, Source::Default);
+    assert_eq!(local.reversibility, Reversibility::Irreversible);
+    assert_eq!(local.sources.reversibility, Source::Default);
+
+    let staging = one("STAGING_API_TOKEN=Xk9Qz7mQ2vL7Rt5Yu3");
+    assert_eq!(staging.environment, Environment::Staging);
+    assert_eq!(staging.sources.environment, Source::Signal);
+
+    // A weak production word of the value raises a test key. The raised value is not
+    // a signal; the other values of the test key stay signals.
+    let raised = one("sk_test_live_EXAMPLE0EXAMPLE0");
+    assert_eq!(raised.environment, Environment::Production);
+    assert_eq!(raised.sources.environment, Source::Default);
+    assert_eq!(raised.risk, RiskLevel::Low);
+    assert_eq!(raised.sources.risk, Source::Signal);
 }

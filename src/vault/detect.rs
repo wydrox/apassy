@@ -17,11 +17,25 @@
 //! - The provider of a value comes from a value signal of the catalog (a prefix, a
 //!   shape, a JWT, a JSON key file), then from the longest value prefix, then from a
 //!   host or the variable name.
-//! - Each declaration field comes from the catalog signals ([`super::providers`]). Two
-//!   signals that disagree give the more sensitive value. A field without a signal
-//!   gets the most sensitive default (ADR 0008) with the source [`Source::Default`].
-//! - "live", "prod", or "production" as a word of the value or of the variable name
-//!   makes the environment production. A word never makes a production value lower.
+//! - Each declaration field comes from the strong catalog signals
+//!   ([`super::providers::Suggestion::strong`]): a value signal (`sk_live_`, `sk_test_`,
+//!   a shape, a JWT, a JSON key file), or an environment word of the variable name
+//!   (`STRIPE_LIVE_KEY`, `DEV_API_TOKEN`). Only these have the source [`Source::Signal`].
+//!   Two signals that disagree give the more sensitive value.
+//! - A weak signal (a host, a field name, a word of a plain field or of the value) never
+//!   lowers a value: it can only raise a strong value, and the raised value has the source
+//!   [`Source::Default`]. A field without a strong signal gets the most sensitive default
+//!   (ADR 0008) with the source [`Source::Default`]. So `localhost` or `127.0.0.1` never
+//!   makes a credential local, low-risk, or reversible: a tunnel or a proxy to a
+//!   production database has the same URL.
+//! - "live", "prod", or "production" as a word of the value is a weak production signal.
+//! - A URL is split only when the split is certain (`providers::split_url`): the
+//!   user part ends at the last `@` before the host, and an `@` after the first `/`, `?`,
+//!   or `#` keeps the whole URL as one secret, with no plain field and a title from the
+//!   scheme. A user part without `:` is a token for Redis and RabbitMQ, and for any
+//!   scheme when it looks random; then it is secret, not a plain user name.
+//! - A title and the result line never have a part of a secret value: they come from the
+//!   provider, the scheme, the variable name, or the database name.
 //! - A value without a provider becomes a Custom item. Its title comes from the
 //!   variable name ("Database Password"), or it is "Credential". Without a variable
 //!   name it has no variable: the vault then uses `APASSY_ITEM_<id>`.
@@ -48,9 +62,11 @@ pub const URL_FIELD: &str = "url";
 /// (`declaration_source`, schema 18): `signal` or `default`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
-    /// A signal of the provider catalog, or a production word.
+    /// A strong signal: a value signal of the provider catalog, or an environment word
+    /// of the variable name.
     Signal,
-    /// No signal: the most sensitive value of the declaration form (ADR 0008).
+    /// No strong signal: the most sensitive value of the declaration form (ADR 0008), or
+    /// a value that a weak signal raised above a strong one.
     Default,
 }
 
@@ -263,8 +279,11 @@ fn one_value(
     if has_prefix_ignore_case(value, OTP_SCHEME) {
         return one_time_password(value, line);
     }
-    if let Some(url) = DbUrl::parse(value) {
-        return Some(database_url(catalog, value, &url, key, line));
+    if let Some(scheme) = db_scheme(value) {
+        return Some(match DbUrl::parse(value) {
+            Some(url) => database_url(catalog, value, &url, key, line),
+            None => opaque_url(catalog, value, scheme, key, line),
+        });
     }
     if is_private_key(value) {
         return Some(private_key(catalog, value, key, line));
@@ -368,6 +387,9 @@ struct DbScheme {
     label: &'static str,
     variable: &'static str,
     noun: &'static str,
+    /// A user part without `:` is a token or a password (`rediss://TOKEN@host`), not a
+    /// user name.
+    lone_user_is_secret: bool,
 }
 
 const DB_SCHEMES: &[DbScheme] = &[
@@ -376,32 +398,61 @@ const DB_SCHEMES: &[DbScheme] = &[
         label: "PostgreSQL",
         variable: "DATABASE_URL",
         noun: "database",
+        lone_user_is_secret: false,
     },
     DbScheme {
         names: &["mysql"],
         label: "MySQL",
         variable: "DATABASE_URL",
         noun: "database",
+        lone_user_is_secret: false,
     },
     DbScheme {
         names: &["mongodb", "mongodb+srv"],
         label: "MongoDB",
         variable: "MONGODB_URI",
         noun: "database",
+        lone_user_is_secret: false,
     },
     DbScheme {
         names: &["redis", "rediss"],
         label: "Redis",
         variable: "REDIS_URL",
         noun: "database",
+        lone_user_is_secret: true,
     },
     DbScheme {
         names: &["amqp", "amqps"],
         label: "RabbitMQ",
         variable: "AMQP_URL",
         noun: "broker",
+        lone_user_is_secret: true,
     },
 ];
+
+/// The scheme of a value that starts with a URL with credentials, as one word without
+/// spaces.
+fn db_scheme(value: &str) -> Option<&'static DbScheme> {
+    if value.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return None;
+    }
+    let (name, _) = value.split_once("://")?;
+    DB_SCHEMES
+        .iter()
+        .find(|scheme| scheme.names.iter().any(|n| n.eq_ignore_ascii_case(name)))
+}
+
+/// A user part (as written) that looks like a token: an escape (`%2F`), long, or mixed
+/// case with digits.
+fn looks_random(text: &str) -> bool {
+    let has = |test: fn(&u8) -> bool| text.bytes().any(|b| test(&b));
+    text.contains('%')
+        || text.len() >= 24
+        || (text.len() >= 12
+            && has(u8::is_ascii_uppercase)
+            && has(u8::is_ascii_lowercase)
+            && has(u8::is_ascii_digit))
+}
 
 /// Database names that say nothing about the use, so the title does not use them.
 const PLAIN_DATABASE_NAMES: &[&str] = &["postgres", "defaultdb", "admin", "mysql", "default"];
@@ -417,23 +468,12 @@ struct DbUrl<'a> {
 }
 
 impl<'a> DbUrl<'a> {
+    /// `None` when the split is not certain ([`providers::split_url`]) or the host is
+    /// not a host: the caller keeps the whole URL as one secret.
     fn parse(text: &'a str) -> Option<Self> {
-        if text.chars().any(|c| c.is_whitespace() || c.is_control()) {
-            return None;
-        }
-        let (name, rest) = text.split_once("://")?;
-        let scheme = DB_SCHEMES
-            .iter()
-            .find(|scheme| scheme.names.iter().any(|n| n.eq_ignore_ascii_case(name)))?;
-        // A password may hold `/` that is not encoded: the last `@` before the query
-        // ends the user part.
-        let head = &rest[..rest.find(['?', '#']).unwrap_or(rest.len())];
-        let at = head.rfind('@');
-        let host_start = at.map_or(0, |at| at + 1);
-        let host_end = head[host_start..]
-            .find('/')
-            .map_or(head.len(), |end| host_start + end);
-        let host = &head[host_start..host_end];
+        let scheme = db_scheme(text)?;
+        let parts = providers::split_url(text)?;
+        let host = parts.host;
         let host_ok = !host.is_empty()
             && host
                 .bytes()
@@ -441,19 +481,30 @@ impl<'a> DbUrl<'a> {
         if !host_ok {
             return None;
         }
-        let (user, password) = match at.map(|at| &head[..at]) {
+        let (user, password) = match parts.user_info {
             Some(info) => match info.split_once(':') {
-                Some((user, password)) => (user, Some(password)),
-                None => (info, None),
+                Some((user, password)) if !password.is_empty() => (user, Some(password)),
+                // A user part without a password may be a token.
+                _ => {
+                    let lone = info.strip_suffix(':').unwrap_or(info);
+                    if scheme.lone_user_is_secret || looks_random(lone) {
+                        ("", Some(lone))
+                    } else {
+                        (lone, None)
+                    }
+                }
             },
             None => ("", None),
         };
+        let database = parts.rest.strip_prefix('/').map_or("", |path| {
+            &path[..path.find(['?', '#']).unwrap_or(path.len())]
+        });
         Some(Self {
             scheme,
             user,
             password,
             host,
-            database: head[host_end..].trim_start_matches('/'),
+            database,
         })
     }
 }
@@ -465,7 +516,11 @@ fn database_url(
     key: Option<&str>,
     line: Option<usize>,
 ) -> Detected {
-    let user = decode(url.user);
+    let mut user = decode(url.user);
+    // A user name with `:` or `@` after decoding may hold a part of the password.
+    if user.contains([':', '@']) {
+        user.clear();
+    }
     let database = decode(url.database);
     let password = url.password.map(decode).filter(|p| !p.is_empty());
     let complete = !user.is_empty() && !database.is_empty() && password.is_some();
@@ -529,6 +584,44 @@ fn database_url(
     detected
 }
 
+/// A URL with credentials whose split is not certain: one secret field with the whole
+/// URL, no plain field, and a title from the scheme or a hosted provider.
+fn opaque_url(
+    catalog: &Catalog,
+    value: &str,
+    scheme: &DbScheme,
+    key: Option<&str>,
+    line: Option<usize>,
+) -> Detected {
+    let env_key = key.map(str::to_ascii_uppercase);
+    let facts = ItemFacts {
+        env_name: env_key.clone(),
+        fields: vec![fact(URL_FIELD, value, true)],
+        ..ItemFacts::default()
+    };
+    let suggestion = catalog.suggest(&facts);
+    let provider = suggestion
+        .provider
+        .as_deref()
+        .and_then(|id| catalog.find(id));
+    let title = match provider {
+        Some(provider) if !provider.is_generic() => format!("{} {}", provider.label, scheme.noun),
+        _ => format!("{} {}", scheme.label, scheme.noun),
+    };
+    let mut detected = declared(&suggestion, false);
+    detected.title = clip_title(title);
+    detected.kind = CredentialKind::Custom;
+    detected.provider = provider.map(|provider| provider.id.clone());
+    detected.env_name = match &env_key {
+        Some(name) => valid_env_name(name),
+        None => valid_env_name(scheme.variable),
+    };
+    detected.env_field = Some(URL_FIELD.to_owned());
+    detected.fields = vec![secret_field(URL_FIELD, value)];
+    detected.line = line;
+    detected
+}
+
 // ---- One-time passwords ----
 
 const OTP_SCHEME: &str = "otpauth://";
@@ -576,24 +669,36 @@ fn otp_title(uri: &str) -> String {
 
 // ---- Declaration ----
 
-/// A detection with the declaration of a suggestion and no item data yet. A field
-/// without a signal gets the most sensitive default. `production`: a production word
-/// of the value.
+/// A detection with the declaration of a suggestion and no item data yet. Only a strong
+/// signal sets a value; a weak signal can only raise it. A field without a strong
+/// signal gets the most sensitive default. `production`: a production word of the value
+/// (a weak signal).
 fn declared(suggestion: &Suggestion, production: bool) -> Detected {
-    let source = |found: bool| {
-        if found {
-            Source::Signal
-        } else {
-            Source::Default
-        }
-    };
-    let mut environment = suggestion.environment.as_ref().map(|s| s.value);
-    if production {
-        environment = Some(Environment::Production);
-    }
-    let risk = suggestion.risk.as_ref().map(|s| s.value);
-    let scope = suggestion.scope.as_ref().map(|s| s.value);
-    let reversibility = suggestion.reversibility.as_ref().map(|s| s.value);
+    let weak_environment = suggestion
+        .environment
+        .as_ref()
+        .map(|s| s.value)
+        .max(production.then_some(Environment::Production));
+    let (environment, environment_source) = pick(
+        suggestion.strong.environment,
+        weak_environment,
+        providers::DEFAULT_ENVIRONMENT,
+    );
+    let (risk, risk_source) = pick(
+        suggestion.strong.risk,
+        suggestion.risk.as_ref().map(|s| s.value),
+        providers::DEFAULT_RISK,
+    );
+    let (scope, scope_source) = pick(
+        suggestion.strong.scope,
+        suggestion.scope.as_ref().map(|s| s.value),
+        providers::DEFAULT_SCOPE,
+    );
+    let (reversibility, reversibility_source) = pick(
+        suggestion.strong.reversibility,
+        suggestion.reversibility.as_ref().map(|s| s.value),
+        providers::DEFAULT_REVERSIBILITY,
+    );
     Detected {
         title: String::new(),
         kind: CredentialKind::Custom,
@@ -602,22 +707,35 @@ fn declared(suggestion: &Suggestion, production: bool) -> Detected {
         env_field: None,
         hosts: Vec::new(),
         fields: Vec::new(),
-        environment: environment.unwrap_or(providers::DEFAULT_ENVIRONMENT),
-        risk: risk.unwrap_or(providers::DEFAULT_RISK),
-        scope: scope.unwrap_or(providers::DEFAULT_SCOPE),
-        reversibility: reversibility.unwrap_or(providers::DEFAULT_REVERSIBILITY),
+        environment,
+        risk,
+        scope,
+        reversibility,
         sources: Sources {
-            environment: source(environment.is_some()),
-            risk: source(risk.is_some()),
-            scope: source(scope.is_some()),
-            reversibility: source(reversibility.is_some()),
+            environment: environment_source,
+            risk: risk_source,
+            scope: scope_source,
+            reversibility: reversibility_source,
         },
         line: None,
     }
 }
 
+/// One declaration value. A strong value is a signal. A weak value only raises it, and
+/// a raised value is not a signal. Without a strong value: the most sensitive default.
+/// `weak` is the most sensitive value of all matching signals, strong and weak.
+fn pick<T: Ord + Copy>(strong: Option<T>, weak: Option<T>, default: T) -> (T, Source) {
+    match strong {
+        Some(strong) => match weak {
+            Some(weak) if weak > strong => (weak, Source::Default),
+            _ => (strong, Source::Signal),
+        },
+        None => (default, Source::Default),
+    }
+}
+
 /// "live", "prod", or "production" is a word of the value (`acme_live_...`). The
-/// catalog reads no words from a secret value, so this rule can only raise the
+/// catalog reads no words from a secret value. This weak rule can only raise the
 /// environment to production, never lower it.
 fn says_production(value: &str) -> bool {
     value
@@ -743,6 +861,37 @@ mod tests {
         assert_eq!(decode("p%40ss%2Fw"), "p@ss/w");
         assert_eq!(decode("100%"), "100%");
         assert_eq!(decode("%zz"), "%zz");
+    }
+
+    #[test]
+    fn a_weak_value_only_raises_a_strong_value() {
+        use RiskLevel::{High, Low, Medium};
+        assert_eq!(pick(Some(Low), Some(Low), High), (Low, Source::Signal));
+        assert_eq!(
+            pick(Some(Medium), Some(Low), High),
+            (Medium, Source::Signal)
+        );
+        assert_eq!(
+            pick(Some(Low), Some(Medium), High),
+            (Medium, Source::Default)
+        );
+        assert_eq!(pick(None, Some(Low), High), (High, Source::Default));
+        assert_eq!(pick(None::<RiskLevel>, None, High), (High, Source::Default));
+    }
+
+    #[test]
+    fn a_lone_user_part_is_secret_when_it_looks_random() {
+        assert!(looks_random("Rk7Vb2Mn9Qx4Lp3W"));
+        assert!(looks_random("0123456789abcdef01234567"));
+        assert!(looks_random("a%2Fb"));
+        assert!(!looks_random("billing_rw"));
+        assert!(!looks_random("app_user_2024"));
+        let redis = DbUrl::parse("rediss://tokenvalue@cache.example.com").expect("url");
+        assert_eq!((redis.user, redis.password), ("", Some("tokenvalue")));
+        let user = DbUrl::parse("postgres://billing_rw:@db.example.com/x").expect("url");
+        assert_eq!((user.user, user.password), ("billing_rw", None));
+        assert!(DbUrl::parse("postgres://app:a#b@db.example.com/x").is_none());
+        assert!(DbUrl::parse("postgres://app:a/b@db.example.com/x").is_none());
     }
 
     #[test]
