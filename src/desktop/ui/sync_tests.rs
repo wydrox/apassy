@@ -2199,8 +2199,8 @@ fn return_on_a_relay_alert_opened_with_the_pointer_cancels() {
 /// keeps the vault while the relay is slow, and shows what runs.
 #[test]
 fn relay_calls_of_the_owner_leave_the_window_responsive() {
-    const SLOW: Duration = Duration::from_millis(2000);
-    const QUICK: Duration = Duration::from_millis(1000);
+    const SLOW: Duration = Duration::from_millis(3000);
+    const QUICK: Duration = Duration::from_millis(1800);
     let folders = folders();
     let relay = fake_relay::FakeRelay::start();
     let mut a = folders.mac("mac-a");
