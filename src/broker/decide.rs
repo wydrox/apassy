@@ -12,7 +12,9 @@
 //!    ask for this agent", and a production declaration ask the owner (a connector use
 //!    has no project, so no production allowance covers it). The question waits as a
 //!    question of the agent. The model does not decide a connector use: the operation
-//!    is a fixed read of its profile that the owner set up with an owner check.
+//!    is a fixed read of its profile that the owner set up with an owner check. Without
+//!    a running bouncer (no model is set, or the gate of Settings > Agents refuses),
+//!    each use waits for the owner, as a run does.
 //! 8. The broker checks steps 1 to 6 again; the item, its declaration, and the
 //!    exceptions must be the same as in the first check. Only then does it read the
 //!    secret, release the vault lock, and call the destination. Each decided use is in
@@ -487,6 +489,17 @@ fn connector_rules(checked: &CallChecked) -> Vec<String> {
     why
 }
 
+/// The bouncer runs (ADR 0025 §3): a model is set, and the gate of Settings > Agents
+/// lets it answer. The gate can start the model server.
+fn bouncer_runs(ctx: &BrokerContext, model_set: bool) -> Result<(), String> {
+    if !model_set {
+        return Err("no bouncer is set.".to_owned());
+    }
+    ctx.model_gate
+        .as_ref()
+        .map_or(Ok(()), |gate| gate.before_model())
+}
+
 fn call(
     ctx: &BrokerContext,
     token: &str,
@@ -495,20 +508,34 @@ fn call(
     params: &BTreeMap<String, String>,
 ) -> WireResponse {
     let vault = &ctx.vault;
-    let checked = {
+    let (checked, model_set) = {
         let mut guard = lock(vault);
         let Some(vault) = guard.as_mut().filter(|vault| !vault.is_locked()) else {
             return locked_response();
         };
         match check_call(vault, token, item_id, operation, params) {
-            Ok(checked) => checked,
+            Ok(checked) => {
+                let model_set = super::shadow::models(vault, ctx.bouncer.as_ref())
+                    .active
+                    .is_some();
+                (checked, model_set)
+            }
             Err(response) => return response,
         }
     };
     // ADR 0025 §3: the standing rules of a run. The model does not decide a connector
     // use: the operation is a fixed read of its profile that the owner set up with an
-    // owner check, so a use without a rule that asks runs without the bouncer.
-    let why = connector_rules(&checked);
+    // owner check. A use without a rule that asks starts only while the bouncer runs;
+    // without it, each use waits for the owner. The gate runs without the vault lock,
+    // and only when no rule asks, as for a run.
+    let mut why = connector_rules(&checked);
+    if why.is_empty()
+        && let Err(reason) = bouncer_runs(ctx, model_set)
+    {
+        why.push(format!(
+            "No bouncer runs, so each use waits for you: {reason}"
+        ));
+    }
     let asked = !why.is_empty();
     let mut answered_on = "";
     if asked {

@@ -7,11 +7,12 @@ mod common;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use apassy::agent::client;
 use apassy::agent::wire::{Action, WireResponse};
-use apassy::broker::approvals::{OwnerAction, OwnerCheck, OwnerGate};
+use apassy::broker::action_kind::ActionKind;
+use apassy::broker::approvals::{OwnerAction, OwnerCheck, OwnerGate, PendingRun};
 use apassy::broker::bouncer::{BouncerClient, BouncerRequest};
 use apassy::broker::http::TlsClient;
 use apassy::broker::model_server::{
@@ -19,9 +20,11 @@ use apassy::broker::model_server::{
 };
 use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault};
 use apassy::contracts::CredentialKind;
+use apassy::vault::exceptions::ExceptionKind;
+use apassy::vault::usage::{NewItemUse, UseDecidedBy, UseOutcome};
 use apassy::vault::{
-    Declaration, EnvDelivery, Environment, ExecMode, ExecRule, Field, GrantPlace, ItemDraft,
-    Reversibility, RiskLevel, Scope, SecretValue, Vault,
+    Declaration, EnvDelivery, Environment, ExecMode, ExecRule, Field, ItemDraft, Reversibility,
+    RiskLevel, Scope, SecretValue, Vault,
 };
 use tempfile::TempDir;
 
@@ -39,9 +42,11 @@ struct Fixture {
     broker: BrokerHandle,
 }
 
+/// A staging item of the project of the runs (ADR 0025 §3: the item of another project
+/// asks the owner, so the declared project is the folder `project`).
 fn staging_declaration() -> Declaration {
     Declaration {
-        project: "demo".to_owned(),
+        project: "project".to_owned(),
         environment: Environment::Staging,
         risk: RiskLevel::Medium,
         scope: Scope::ReadWrite,
@@ -49,14 +54,33 @@ fn staging_declaration() -> Declaration {
     }
 }
 
-fn fixture(bouncer: Option<&str>, rule: ExecRule) -> Fixture {
-    fixture_with_gate(bouncer, rule, None)
+/// The owner waits this long in most tests: each question ends at once.
+const SHORT: Duration = Duration::from_millis(400);
+
+fn fixture(bouncer: Option<&str>) -> Fixture {
+    build(bouncer, staging_declaration(), None, SHORT)
 }
 
-fn fixture_with_gate(
+fn fixture_declared(bouncer: Option<&str>, declaration: Declaration) -> Fixture {
+    build(bouncer, declaration, None, SHORT)
+}
+
+fn fixture_with_gate(bouncer: Option<&str>, gate: Option<Arc<dyn ModelGate>>) -> Fixture {
+    build(bouncer, staging_declaration(), gate, SHORT)
+}
+
+/// One item with `declaration` and an agent with history for it in the project.
+///
+/// ADR 0025 §3: a staging item that the agent did not use in the project asks the owner
+/// before the model. These tests are about the model step, so the agent has history
+/// for each kind of action: an earlier use that the bouncer allowed. History never runs
+/// a command by itself; it only lets the model decide. A stricter declaration later in
+/// a test clears it.
+fn build(
     bouncer: Option<&str>,
-    rule: ExecRule,
+    declaration: Declaration,
     gate: Option<Arc<dyn ModelGate>>,
+    approval_timeout: Duration,
 ) -> Fixture {
     let dir = TempDir::new().expect("temp dir");
     let project = dir.path().join("project");
@@ -81,6 +105,8 @@ fn fixture_with_gate(
         .set_env_binding(item.id, "DEMO_KEY", "token")
         .expect("binding");
     let (agent, token) = vault.register_agent("Rule agent").expect("register");
+    // The agent does not see all credentials: the grant lists the item (ADR 0025 §3f).
+    // A grant is no authority: its mode and rule are not read.
     vault
         .set_exec_grant(
             agent.id,
@@ -89,13 +115,35 @@ fn fixture_with_gate(
             ExecMode::Bouncer,
         )
         .expect("grant");
-    vault.set_exec_rule(agent.id, item.id, rule).expect("rule");
     vault
-        .set_declaration(item.id, &staging_declaration())
+        .set_declaration(item.id, &declaration)
         .expect("declaration");
+    for action in [
+        ActionKind::Read,
+        ActionKind::Change,
+        ActionKind::Deploy,
+        ActionKind::Delete,
+    ] {
+        vault
+            .record_item_use(&NewItemUse {
+                item_id: item.id,
+                agent_id: Some(agent.id),
+                agent_name: "Rule agent".to_owned(),
+                project_key: project.display().to_string(),
+                project_label: "project".to_owned(),
+                action,
+                command_summary: "run echo".to_owned(),
+                hosts: Vec::new(),
+                outcome: UseOutcome::Allowed,
+                decided_by: UseDecidedBy::Bouncer,
+                answered_on: String::new(),
+                decision_log_id: None,
+            })
+            .expect("history");
+    }
     let shared: SharedVault = Arc::new(Mutex::new(Some(vault)));
     let mut options = BrokerOptions::with_tls(TlsClient::platform().expect("TLS"));
-    options.approval_timeout = Duration::from_millis(400);
+    options.approval_timeout = approval_timeout;
     options.run_timeout = Duration::from_secs(10);
     options.bouncer = bouncer.map(|url| {
         BouncerClient::new(url)
@@ -114,14 +162,6 @@ fn fixture_with_gate(
         agent_id: agent.id,
         token: token.expose().to_owned(),
         broker,
-    }
-}
-
-/// Bouncer mode decides only inside a command allowlist.
-fn echo_only() -> ExecRule {
-    ExecRule {
-        allowed_prefixes: vec!["echo".to_owned(), "sh -c".to_owned()],
-        ..ExecRule::default()
     }
 }
 
@@ -173,32 +213,68 @@ fn run_in(fx: &Fixture, cwd: &std::path::Path, command: &[&str]) -> WireResponse
     .expect("answer")
 }
 
-/// ADR 0012: a grant for any folder works outside a project. With the real value, each
-/// run waits for the owner. With a placeholder, the bouncer decides.
-#[test]
-fn any_folder_runs_outside_a_project_and_asks_for_a_real_value() {
-    let bouncer = common::fake_bouncer(&[]);
-    let fx = fixture(Some(&bouncer.url), echo_only());
-    let outside = fx.project.parent().expect("parent").to_path_buf();
-    let command = ["sh", "-c", "echo done; node -e 0"];
-    assert_eq!(code(&run_in(&fx, &outside, &command)), "outside_project");
-
-    {
-        let mut guard = fx.vault.lock().expect("vault");
-        let vault = guard.as_mut().expect("open");
-        vault
-            .set_exec_grants(
-                fx.agent_id,
-                &[fx.item_id],
-                &GrantPlace::AnyFolder,
-                ExecMode::Bouncer,
-            )
-            .expect("any folder");
-        let grants = vault.exec_grants_for_agent(fx.agent_id).expect("grants");
-        assert_eq!(grants[0].rule, echo_only(), "the rule stays");
+/// Wait for the first waiting run, within 10 seconds.
+fn waiting(fx: &Fixture) -> PendingRun {
+    let end = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(run) = fx.broker.approvals().pending().into_iter().next() {
+            return run;
+        }
+        assert!(Instant::now() < end, "no run waits");
+        std::thread::sleep(Duration::from_millis(5));
     }
-    // The real value in any folder: the run waits for the owner, here until the timeout.
-    assert_eq!(code(&run_in(&fx, &outside, &command)), "approval_timeout");
+}
+
+fn run_later(fx: &Fixture, command: &[&str]) -> std::thread::JoinHandle<WireResponse> {
+    let socket = fx.socket.clone();
+    let token = fx.token.clone();
+    let item = fx.item_id;
+    let cwd = fx.project.display().to_string();
+    let command: Vec<String> = command.iter().map(|arg| (*arg).to_owned()).collect();
+    std::thread::spawn(move || {
+        client::send(
+            &socket,
+            &token,
+            Action::Run {
+                items: vec![item],
+                command,
+                cwd,
+                purpose: "Print.".to_owned(),
+                path: Some("/usr/bin:/bin".to_owned()),
+                user_request: Some("Run the project checks.".to_owned()),
+            },
+        )
+        .expect("answer")
+    })
+}
+
+fn add_exception(fx: &Fixture, kind: ExceptionKind) {
+    let mut guard = fx.vault.lock().expect("vault");
+    guard
+        .as_mut()
+        .expect("open")
+        .add_agent_exception(fx.agent_id, fx.item_id, kind)
+        .expect("exception");
+}
+
+/// ADR 0025 §3 replaces the folder of a grant (ADR 0012): a grant no longer limits the
+/// folder, and the item of another project asks the owner instead. A placeholder does not
+/// make the item fit another project. In its own project, with history, the bouncer
+/// decides.
+#[test]
+fn an_item_of_another_project_asks_also_with_a_placeholder() {
+    let bouncer = common::fake_bouncer(&[]);
+    let fx = fixture(Some(&bouncer.url));
+    let other = fx.project.parent().expect("parent").join("other");
+    std::fs::create_dir_all(&other).expect("other project");
+    let other = std::fs::canonicalize(other).expect("canonical");
+    let command = ["sh", "-c", "echo done; node -e 0"];
+    assert_eq!(code(&run_in(&fx, &other, &command)), "approval_timeout");
+    let reason = last_reason(&fx);
+    assert!(
+        reason.contains("is declared for the project \"project\""),
+        "{reason}"
+    );
 
     {
         let mut guard = fx.vault.lock().expect("vault");
@@ -213,7 +289,18 @@ fn any_folder_runs_outside_a_project_and_asks_for_a_real_value() {
             )
             .expect("placeholder");
     }
-    let clean = run_in(&fx, &outside, &command);
+    assert_eq!(code(&run_in(&fx, &other, &command)), "approval_timeout");
+    let reason = last_reason(&fx);
+    assert!(
+        reason.contains("is declared for the project \"project\""),
+        "{reason}"
+    );
+    assert!(
+        bouncer.bodies.lock().expect("bodies").is_empty(),
+        "only the owner decides the item of another project"
+    );
+
+    let clean = run_in(&fx, &fx.project, &command);
     assert!(clean.ok, "{clean:?}");
     let result = clean.result.expect("result");
     assert_eq!(result["decided_by"], "Bouncer allowed");
@@ -224,7 +311,7 @@ fn any_folder_runs_outside_a_project_and_asks_for_a_real_value() {
 #[test]
 fn clean_request_runs_without_a_prompt() {
     let bouncer = common::fake_bouncer(&[]);
-    let fx = fixture(Some(&bouncer.url), echo_only());
+    let fx = fixture(Some(&bouncer.url));
     // `sh -c` with a script that is not on the known safe list goes to the model.
     let response = run(&fx, &["sh", "-c", "echo done; node -e 0"], "Print done.");
     assert!(response.ok, "{response:?}");
@@ -259,7 +346,7 @@ fn clean_request_runs_without_a_prompt() {
 fn low_confidence_and_missing_context_wait_for_the_owner() {
     // A task match below 80% certainty asks the owner.
     let unsure = common::fake_bouncer(&[("task_match", 0.7), ("writes", 0.5)]);
-    let fx = fixture(Some(&unsure.url), ExecRule::default());
+    let fx = fixture(Some(&unsure.url));
     assert_eq!(
         code(&run(&fx, &["sh", "-c", "node scripts/report.js"], "Test.")),
         "approval_timeout"
@@ -267,17 +354,12 @@ fn low_confidence_and_missing_context_wait_for_the_owner() {
     assert!(last_reason(&fx).contains("Below the needed certainty: task_match 70% (needs 75%)"));
 
     // A high-risk declaration needs a certain read-only command.
+    // The declaration is high risk from the start: a stricter declaration later would
+    // clear the history, and the run would ask before the model.
     let writes = common::fake_bouncer(&[("writes", 0.9)]);
-    let fx = fixture(Some(&writes.url), ExecRule::default());
-    {
-        let mut guard = fx.vault.lock().expect("vault");
-        let vault = guard.as_mut().expect("open");
-        let mut declaration = staging_declaration();
-        declaration.risk = RiskLevel::High;
-        vault
-            .set_declaration(fx.item_id, &declaration)
-            .expect("declaration");
-    }
+    let mut declaration = staging_declaration();
+    declaration.risk = RiskLevel::High;
+    let fx = fixture_declared(Some(&writes.url), declaration);
     assert_eq!(
         code(&run(&fx, &["sh", "-c", "node scripts/report.js"], "Test.")),
         "approval_timeout"
@@ -286,7 +368,7 @@ fn low_confidence_and_missing_context_wait_for_the_owner() {
 
     // No user request asks the owner.
     let clean = common::fake_bouncer(&[]);
-    let fx = fixture(Some(&clean.url), ExecRule::default());
+    let fx = fixture(Some(&clean.url));
     let response = client::send(
         &fx.socket,
         &fx.token,
@@ -307,7 +389,7 @@ fn low_confidence_and_missing_context_wait_for_the_owner() {
 #[test]
 fn risky_or_unavailable_bouncer_waits_for_the_owner() {
     let risky = common::fake_bouncer(&[("destroy", 0.99)]);
-    let fx = fixture(Some(&risky.url), echo_only());
+    let fx = fixture(Some(&risky.url));
     assert_eq!(
         code(&run(&fx, &["sh", "-c", "node scripts/report.js"], "Test.")),
         "approval_timeout"
@@ -319,22 +401,27 @@ fn risky_or_unavailable_bouncer_waits_for_the_owner() {
     );
 
     // Port 9 has no service. Unavailable is never an allowance.
-    let fx = fixture(Some("http://127.0.0.1:9"), echo_only());
+    let fx = fixture(Some("http://127.0.0.1:9"));
     assert_eq!(
         code(&run(&fx, &["sh", "-c", "node scripts/report.js"], "Test.")),
         "approval_timeout"
     );
     assert!(last_reason(&fx).contains("Bouncer unavailable"));
 
-    let fx = fixture(None, echo_only());
+    let fx = fixture(None);
     assert_eq!(
         code(&run(&fx, &["sh", "-c", "node scripts/report.js"], "Test.")),
         "approval_timeout"
     );
+    assert!(
+        last_reason(&fx).contains("No bouncer runs, so each run waits for you"),
+        "{}",
+        last_reason(&fx)
+    );
 
     // An item without a declaration asks the owner.
     let clean = common::fake_bouncer(&[]);
-    let fx = fixture(Some(&clean.url), ExecRule::default());
+    let fx = fixture(Some(&clean.url));
     {
         let mut guard = fx.vault.lock().expect("vault");
         let vault = guard.as_mut().expect("open");
@@ -424,7 +511,7 @@ fn the_bouncer_off_in_settings_skips_the_model() {
         },
     );
     let gate: Arc<dyn ModelGate> = server.clone();
-    let fx = fixture_with_gate(Some(&bouncer.url), echo_only(), Some(gate));
+    let fx = fixture_with_gate(Some(&bouncer.url), Some(gate));
     assert_eq!(
         code(&run(
             &fx,
@@ -452,7 +539,7 @@ fn a_run_starts_the_model_server_before_the_model() {
         seen: Mutex::new(Vec::new()),
         answer: Ok(()),
     });
-    let fx = fixture_with_gate(Some(&bouncer.url), echo_only(), Some(gate.clone()));
+    let fx = fixture_with_gate(Some(&bouncer.url), Some(gate.clone()));
     let response = run(&fx, &["sh", "-c", "echo done; node -e 0"], "Print done.");
     assert!(response.ok, "{response:?}");
     assert_eq!(
@@ -478,7 +565,7 @@ fn a_run_starts_the_model_server_before_the_model() {
         seen: Mutex::new(Vec::new()),
         answer: Err("the model server did not answer within 25 seconds".to_owned()),
     });
-    let fx = fixture_with_gate(Some(&failing.url), echo_only(), Some(gate.clone()));
+    let fx = fixture_with_gate(Some(&failing.url), Some(gate.clone()));
     assert_eq!(
         code(&run(
             &fx,
@@ -487,8 +574,11 @@ fn a_run_starts_the_model_server_before_the_model() {
         )),
         "approval_timeout"
     );
+    // ADR 0025 §3: without a running bouncer, the run waits for the owner.
     assert!(
-        last_reason(&fx).contains("Bouncer unavailable: the model server did not answer"),
+        last_reason(&fx).contains(
+            "No bouncer runs, so each run waits for you: the model server did not answer"
+        ),
         "{}",
         last_reason(&fx)
     );
@@ -519,7 +609,7 @@ fn production_declaration_always_waits_for_the_owner() {
         ("leak", 0.0),
         ("destroy", 0.0),
     ]);
-    let fx = fixture(Some(&certain.url), ExecRule::default());
+    let fx = fixture(Some(&certain.url));
     // The same fully certain model runs a known safe command on staging without a prompt.
     let staging = run(&fx, &["echo", "hi"], "Print.");
     assert!(staging.ok, "{staging:?}");
@@ -547,7 +637,7 @@ fn production_declaration_always_waits_for_the_owner() {
             "{command:?}"
         );
         let reason = last_reason(&fx);
-        assert!(reason.contains("Production credential"), "{reason}");
+        assert!(reason.contains("is a production credential"), "{reason}");
     }
     assert_eq!(
         certain.bodies.lock().expect("bodies").len(),
@@ -602,7 +692,7 @@ fn production_declaration_always_waits_for_the_owner() {
     )
     .expect("answer");
     assert_eq!(code(&mixed), "approval_timeout");
-    assert!(last_reason(&fx).contains("Production credential"));
+    assert!(last_reason(&fx).contains("is a production credential"));
 
     // The rule asks the owner. It does not deny: the owner can approve the run after a
     // fresh passphrase check (goal item A4).
@@ -611,7 +701,7 @@ fn production_declaration_always_waits_for_the_owner() {
     let approver = std::thread::spawn(move || {
         loop {
             if let Some(pending) = approvals.pending().into_iter().next() {
-                assert!(pending.risk.contains("Production credential"));
+                assert!(pending.risk.contains("is a production credential"));
                 let proof = gate
                     .authorize(
                         OwnerAction::ApproveRun(pending),
@@ -636,7 +726,7 @@ fn production_declaration_always_waits_for_the_owner() {
 #[test]
 fn heuristics_override_a_clean_model() {
     let bouncer = common::fake_bouncer(&[]);
-    let fx = fixture(Some(&bouncer.url), echo_only());
+    let fx = fixture(Some(&bouncer.url));
     let response = run(&fx, &["sh", "-c", "echo $DEMO_KEY | base64"], "Debug.");
     assert_eq!(code(&response), "approval_timeout");
     assert!(last_reason(&fx).contains("secret_output"));
@@ -654,7 +744,7 @@ fn heuristics_override_a_clean_model() {
 #[test]
 fn unknown_code_needs_the_task_match() {
     let read_unmatched = common::fake_bouncer(&[("task_match", 0.3), ("writes", 0.05)]);
-    let fx = fixture(Some(&read_unmatched.url), echo_only());
+    let fx = fixture(Some(&read_unmatched.url));
     // `node scripts/report.js` runs project code: the certain read does not count.
     assert_eq!(
         code(&run(
@@ -686,7 +776,7 @@ fn unknown_code_needs_the_task_match() {
 #[test]
 fn trace_settings_and_personal_data_reads_ask() {
     let read_unmatched = common::fake_bouncer(&[("task_match", 0.3), ("writes", 0.05)]);
-    let fx = fixture(Some(&read_unmatched.url), echo_only());
+    let fx = fixture(Some(&read_unmatched.url));
     for command in [
         "TF_LOG=TRACE terraform plan -input=false 2>&1 | tee plan-trace.log",
         "GIT_TRACE=1 git fetch origin",
@@ -716,42 +806,33 @@ fn trace_settings_and_personal_data_reads_ask() {
     assert_eq!(read_unmatched.bodies.lock().expect("bodies").len(), 2);
 }
 
-/// Policy v7 (dev round 3), on the broker path: with an owner instruction, a run needs
-/// `rule_break` at or below 0.2, also for a known safe command. A known write needs the
-/// task match, whatever the model answers for `writes`.
+/// Policy v7 (dev round 3) asked for a certain `rule_break` when a grant had an owner
+/// instruction. ADR 0025 §3f: a grant is no authority and its instruction no longer
+/// reaches the model; the upgrade to schema 18 turned each grant with a rule into
+/// "Always ask for this agent". So the closest rule on the broker path: an agent with that
+/// exception waits for the owner at each run, also with a model that is fully certain,
+/// and the model is not asked. (The `rule_break` policy itself stays covered by
+/// `bouncer::tests::an_owner_instruction_needs_a_certain_no_rule_break`.) A known write
+/// still needs the task match, whatever the model answers for `writes`.
 #[test]
-fn an_owner_instruction_must_be_certainly_kept() {
-    let rule = |instruction: &str| ExecRule {
-        instruction: instruction.to_owned(),
-        ..ExecRule::default()
-    };
-    // `rule_break` 0.25: the value of the base model for `gh pr comment` on held-out v3.
-    let unsure = common::fake_bouncer(&[("rule_break", 0.25)]);
-    let fx = fixture(
-        Some(&unsure.url),
-        rule("Check with me before any comment, review, or PR."),
-    );
+fn an_owner_instruction_now_asks_and_a_known_write_needs_the_task_match() {
+    let certain = common::fake_bouncer(&[("rule_break", 0.1)]);
+    let fx = fixture(Some(&certain.url));
+    add_exception(&fx, ExceptionKind::AlwaysAsk);
     assert_eq!(
         code(&run(&fx, &["echo", "hi"], "Print a greeting.")),
         "approval_timeout"
     );
     assert!(
-        last_reason(&fx).contains("rule_break not 75% (needs 80%)"),
+        last_reason(&fx).contains("is set to always ask for this agent"),
         "{}",
         last_reason(&fx)
     );
-    // The same rule with a certain "does not break the rule" runs.
-    let certain = common::fake_bouncer(&[("rule_break", 0.1)]);
-    let fx = fixture(
-        Some(&certain.url),
-        rule("Check with me before any comment, review, or PR."),
-    );
-    let response = run(&fx, &["echo", "hi"], "Print a greeting.");
-    assert!(response.ok, "{response:?}");
+    assert!(certain.bodies.lock().expect("bodies").is_empty());
 
     // A known write with a low `writes` answer and a low task match asks.
     let low_writes = common::fake_bouncer(&[("task_match", 0.38), ("writes", 0.08)]);
-    let fx = fixture(Some(&low_writes.url), ExecRule::default());
+    let fx = fixture(Some(&low_writes.url));
     assert_eq!(
         code(&run(
             &fx,
@@ -772,7 +853,7 @@ fn an_owner_instruction_must_be_certainly_kept() {
 #[test]
 fn an_injection_phrase_in_the_user_request_asks_the_owner() {
     let bouncer = common::fake_bouncer(&[]);
-    let fx = fixture(Some(&bouncer.url), echo_only());
+    let fx = fixture(Some(&bouncer.url));
     let response = client::send(
         &fx.socket,
         &fx.token,
@@ -800,68 +881,81 @@ fn an_injection_phrase_in_the_user_request_asks_the_owner() {
     assert!(clean.ok, "{clean:?}");
 }
 
+/// The rules of a grant (allowed prefixes, forbidden words, runs per hour) are gone
+/// (ADR 0025 §3f); the upgrade turned a grant with a rule into "Always ask for this
+/// agent". That exception asks before the bouncer: each run waits for the owner, and the
+/// model is never asked. ADR 0025 §3 limits the prompts instead of a rate: an agent has
+/// at most one waiting question. The owner can still approve a run.
 #[test]
-fn hard_rules_deny_before_the_bouncer() {
+fn always_ask_for_this_agent_asks_before_the_bouncer() {
     let bouncer = common::fake_bouncer(&[]);
-    let rule = ExecRule {
-        allowed_prefixes: vec![
-            "echo".to_owned(),
-            "npm run migrate".to_owned(),
-            "sh -c".to_owned(),
-        ],
-        forbidden_words: vec!["PROD".to_owned()],
-        max_runs_per_hour: Some(2),
-        instruction: "Only staging.".to_owned(),
-        ..ExecRule::default()
-    };
-    let fx = fixture(Some(&bouncer.url), rule);
-    assert_eq!(
-        code(&run(&fx, &["npm", "run", "migrate-all"], "Migrate.")),
-        "rule_command_not_permitted"
+    let fx = build(
+        Some(&bouncer.url),
+        staging_declaration(),
+        None,
+        Duration::from_secs(10),
     );
-    assert_eq!(
-        code(&run(&fx, &["ls"], "List.")),
-        "rule_command_not_permitted"
+    add_exception(&fx, ExceptionKind::AlwaysAsk);
+    let first = run_later(&fx, &["npm", "run", "migrate-all"]);
+    let pending = waiting(&fx);
+    assert!(
+        pending
+            .question
+            .why
+            .contains("is set to always ask for this agent"),
+        "{}",
+        pending.question.why
     );
+    // A second request of the same agent does not get a second question.
     assert_eq!(
         code(&run(&fx, &["echo", "--db", "prod"], "Echo.")),
-        "rule_forbidden_word"
+        "question_waiting"
     );
+    assert_eq!(fx.broker.approvals().pending().len(), 1);
+    assert!(fx.broker.approvals().deny(pending.id));
+    assert_eq!(code(&first.join().expect("thread")), "approval_denied");
+
+    let approved = run_later(&fx, &["sh", "-c", "echo one; node -e 0"]);
+    let pending = waiting(&fx);
+    let proof = OwnerGate::new(Arc::clone(&fx.vault), None)
+        .authorize(
+            OwnerAction::ApproveRun(pending),
+            OwnerCheck::passphrase(PASS),
+        )
+        .expect("owner check");
+    assert_eq!(fx.broker.approvals().approve(proof), Ok(()));
+    let approved = approved.join().expect("thread");
+    assert!(approved.ok, "{approved:?}");
+    let result = approved.result.expect("result");
+    assert_eq!(result["decided_by"], "Owner approved");
+    assert_eq!(result["stdout"], "one\n");
     assert!(
         bouncer.bodies.lock().expect("bodies").is_empty(),
-        "hard denials never reach the model"
+        "an exception asks before the model"
     );
-
-    assert!(run(&fx, &["sh", "-c", "echo one; node -e 0"], "Echo.").ok);
-    assert!(run(&fx, &["sh", "-c", "echo two; node -e 0"], "Echo.").ok);
-    assert_eq!(
-        code(&run(&fx, &["sh", "-c", "echo three; node -e 0"], "Echo.")),
-        "rule_rate_limit"
-    );
-
-    let bodies = bouncer.bodies.lock().expect("bodies");
-    assert!(bodies[0].contains("Owner rule: Only staging."));
-    assert!(bodies[0].contains("rule_break"));
 }
 
+/// An expired rule of a grant refused before (ADR 0012). A grant has no rule now (ADR
+/// 0025 §3f); the refusal without a question is "Not for this agent": the run gets
+/// `not_granted`, the catalog hides the item, and the model is not asked.
 #[test]
-fn expired_rule_denies() {
+fn not_for_this_agent_refuses_without_a_question() {
     let bouncer = common::fake_bouncer(&[]);
-    let rule = ExecRule {
-        expires_at: Some(1),
-        ..ExecRule::default()
+    let fx = fixture(Some(&bouncer.url));
+    let listed = |fx: &Fixture| {
+        let list = client::send(&fx.socket, &fx.token, Action::ListAccess).expect("list");
+        list.result.expect("result")["catalog"]
+            .as_array()
+            .expect("catalog")
+            .iter()
+            .any(|entry| entry["item_id"] == fx.item_id)
     };
-    let fx = fixture(Some(&bouncer.url), rule);
-    assert_eq!(code(&run(&fx, &["echo", "x"], "Echo.")), "rule_expired");
-    let grants = {
-        let guard = fx.vault.lock().expect("vault");
-        guard
-            .as_ref()
-            .expect("open")
-            .exec_grants_for_agent(fx.agent_id)
-            .expect("grants")
-    };
-    assert_eq!(grants[0].rule.expires_at, Some(1));
+    assert!(listed(&fx));
+    add_exception(&fx, ExceptionKind::Never);
+    assert_eq!(code(&run(&fx, &["echo", "x"], "Echo.")), "not_granted");
+    assert!(!listed(&fx));
+    assert!(fx.broker.approvals().pending().is_empty());
+    assert!(bouncer.bodies.lock().expect("bodies").is_empty());
 }
 
 #[test]
@@ -889,12 +983,7 @@ fn rule_validation() {
 #[test]
 #[ignore = "needs a local laya-serve on 127.0.0.1:8770"]
 fn live_laya_broker_path() {
-    let rule = ExecRule {
-        allowed_prefixes: vec!["echo".to_owned(), "sh -c".to_owned()],
-        instruction: "Only run checks. Never print or send keys.".to_owned(),
-        ..ExecRule::default()
-    };
-    let fx = fixture(Some("http://127.0.0.1:8770"), rule);
+    let fx = fixture(Some("http://127.0.0.1:8770"));
     // The fixture uses a short model timeout. Warm the model first.
     let warm = BouncerClient::new("http://127.0.0.1:8770")
         .expect("url")

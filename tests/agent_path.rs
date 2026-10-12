@@ -2,18 +2,29 @@
 
 //! Thin agent path (ADR 0004): vault, broker socket, synthetic service, MCP adapter.
 //! Synthetic tokens only. This does not prove OS isolation. See tests/isolation.
+//!
+//! ADR 0025 §3: a connector use without a rule that asks starts only while a bouncer
+//! runs, so the brokers here have a fake bouncer. The model does not decide a
+//! connector use, so the fake bouncer gets no request.
+
+mod common;
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use apassy::agent::client;
 use apassy::agent::wire::{Action, WireResponse};
+use apassy::broker::approvals::{OwnerAction, OwnerCheck, OwnerGate, PendingRun};
+use apassy::broker::bouncer::BouncerClient;
 use apassy::broker::http::TlsClient;
-use apassy::broker::{self, SharedVault};
+use apassy::broker::model_server::ModelGate;
+use apassy::broker::{self, BrokerOptions, SharedVault};
 use apassy::contracts::CredentialKind;
+use apassy::vault::usage::{UseDecidedBy, UseOutcome};
 use apassy::vault::{ActivityDecision, Field, ItemDraft, SecretValue, Vault, VaultErrorKind};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -66,7 +77,7 @@ struct Fixture {
     agent_id: u64,
     token: String,
     _service: Option<DevService>,
-    _broker: broker::BrokerHandle,
+    broker: broker::BrokerHandle,
 }
 
 fn api_item() -> ItemDraft {
@@ -83,17 +94,27 @@ fn api_item() -> ItemDraft {
     }
 }
 
+/// Broker options with a running fake bouncer. A use that waits for the owner by
+/// mistake fails after one second, not after the default wait.
+fn options(tls: TlsClient) -> BrokerOptions {
+    let bouncer = common::fake_bouncer(&[]);
+    let mut options = BrokerOptions::with_tls(tls);
+    options.bouncer = Some(BouncerClient::new(&bouncer.url).expect("bouncer url"));
+    options.approval_timeout = Duration::from_secs(1);
+    options
+}
+
 fn fixture() -> Fixture {
     let service = start_dev_service();
     let base_url = service.base_url.clone();
     build_fixture(
         &base_url,
-        TlsClient::platform().expect("platform TLS"),
+        options(TlsClient::platform().expect("platform TLS")),
         Some(service),
     )
 }
 
-fn build_fixture(base_url: &str, tls: TlsClient, service: Option<DevService>) -> Fixture {
+fn build_fixture(base_url: &str, options: BrokerOptions, service: Option<DevService>) -> Fixture {
     let dir = TempDir::new().expect("temp dir");
     let vault_dir = dir.path().join("vault");
     std::fs::create_dir(&vault_dir).expect("vault dir");
@@ -109,7 +130,7 @@ fn build_fixture(base_url: &str, tls: TlsClient, service: Option<DevService>) ->
         .expect("grant");
     let shared: SharedVault = Arc::new(Mutex::new(Some(vault)));
     let socket = dir.path().join("run").join("broker.sock");
-    let handle = broker::start_with_tls(Arc::clone(&shared), &socket, tls).expect("start broker");
+    let handle = broker::start_with(Arc::clone(&shared), &socket, options).expect("start broker");
     Fixture {
         vault: shared,
         socket,
@@ -117,7 +138,7 @@ fn build_fixture(base_url: &str, tls: TlsClient, service: Option<DevService>) ->
         agent_id: agent.id,
         token: token.expose().to_owned(),
         _service: service,
-        _broker: handle,
+        broker: handle,
         dir,
     }
 }
@@ -201,6 +222,137 @@ fn permitted_call_returns_only_permitted_fields() {
     assert_eq!(activity[0].operation, OP_SUMMARY);
     assert_eq!(activity[0].agent_id, Some(fx.agent_id));
     assert_no_secret(&activity);
+}
+
+/// The bouncer is off in Settings > Agents: the gate refuses each model request.
+#[derive(Debug)]
+struct OffGate;
+
+impl ModelGate for OffGate {
+    fn before_model(&self) -> Result<(), String> {
+        Err("the bouncer is off in Settings.".to_owned())
+    }
+}
+
+/// The first waiting use, within 5 seconds.
+fn waiting(fx: &Fixture) -> PendingRun {
+    let end = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(run) = fx.broker.approvals().pending().into_iter().next() {
+            return run;
+        }
+        assert!(Instant::now() < end, "no use waits");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// ADR 0025 §3: without a running bouncer, each connector use waits for the owner, as
+/// a run does. No model set: the use waits until the (short) owner time limit. The
+/// gate of Settings > Agents refuses: the use waits, and the owner approves it.
+#[test]
+fn a_connector_use_without_a_running_bouncer_waits_for_the_owner() {
+    let started = Instant::now();
+    let service = start_dev_service();
+    let base_url = service.base_url.clone();
+    let mut no_model = BrokerOptions::with_tls(TlsClient::platform().expect("TLS"));
+    no_model.approval_timeout = Duration::from_millis(300);
+    let fx = build_fixture(&base_url, no_model, Some(service));
+    let timed_out = call(
+        &fx,
+        &fx.token,
+        OP_SUMMARY,
+        summary_params("project-a-synthetic"),
+    );
+    assert_eq!(error_code(&timed_out), "approval_timeout");
+    assert_no_secret(&timed_out);
+    let uses = with_vault(&fx, |vault| vault.item_uses(fx.item_id, 5)).expect("uses");
+    assert_eq!(uses.len(), 1);
+    assert_eq!(uses[0].outcome, UseOutcome::TimedOut);
+    assert_eq!(uses[0].decided_by, UseDecidedBy::Owner);
+    drop(fx);
+
+    let service = start_dev_service();
+    let base_url = service.base_url.clone();
+    let bouncer = common::fake_bouncer(&[]);
+    let mut off = BrokerOptions::with_tls(TlsClient::platform().expect("TLS"));
+    off.bouncer = Some(BouncerClient::new(&bouncer.url).expect("bouncer url"));
+    off.model_gate = Some(Arc::new(OffGate));
+    off.approval_timeout = Duration::from_secs(5);
+    let fx = build_fixture(&base_url, off, Some(service));
+    let handle = std::thread::spawn({
+        let socket = fx.socket.clone();
+        let token = fx.token.clone();
+        let item_id = fx.item_id;
+        move || {
+            client::send(
+                &socket,
+                &token,
+                Action::Call {
+                    item_id,
+                    operation: OP_SUMMARY.to_owned(),
+                    params: summary_params("project-a-synthetic"),
+                },
+            )
+            .expect("broker answer")
+        }
+    });
+    let pending = waiting(&fx);
+    assert_eq!(pending.command[0], "apassy_use_credential");
+    assert!(
+        pending.question.why.contains("No bouncer runs")
+            && pending.question.why.contains("off in Settings"),
+        "{}",
+        pending.question.why
+    );
+    let proof = OwnerGate::new(Arc::clone(&fx.vault), None)
+        .authorize(
+            OwnerAction::ApproveRun(pending),
+            OwnerCheck::passphrase(PASS),
+        )
+        .expect("owner check");
+    assert_eq!(fx.broker.approvals().approve(proof), Ok(()));
+    let approved = handle.join().expect("call thread");
+    assert!(approved.ok, "{approved:?}");
+    assert_eq!(
+        approved.result.as_ref().expect("result")["order_count"],
+        318
+    );
+    assert_no_secret(&approved);
+    let uses = with_vault(&fx, |vault| vault.item_uses(fx.item_id, 5)).expect("uses");
+    assert_eq!(uses[0].outcome, UseOutcome::Allowed);
+    assert_eq!(uses[0].decided_by, UseDecidedBy::Owner);
+    // The model does not decide a connector use.
+    assert!(bouncer.bodies.lock().expect("bodies").is_empty());
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// With a running bouncer, a use without a rule that asks starts without a question,
+/// and the model is not asked.
+#[test]
+fn a_connector_use_with_a_running_bouncer_starts_without_the_model() {
+    let service = start_dev_service();
+    let base_url = service.base_url.clone();
+    let bouncer = common::fake_bouncer(&[]);
+    let mut running = BrokerOptions::with_tls(TlsClient::platform().expect("TLS"));
+    running.bouncer = Some(BouncerClient::new(&bouncer.url).expect("bouncer url"));
+    running.approval_timeout = Duration::from_secs(1);
+    let fx = build_fixture(&base_url, running, Some(service));
+    let response = call(
+        &fx,
+        &fx.token,
+        OP_SUMMARY,
+        summary_params("project-a-synthetic"),
+    );
+    assert!(response.ok, "{response:?}");
+    assert!(fx.broker.approvals().pending().is_empty());
+    assert!(bouncer.bodies.lock().expect("bodies").is_empty());
+    let uses = with_vault(&fx, |vault| vault.item_uses(fx.item_id, 5)).expect("uses");
+    assert_eq!(uses[0].outcome, UseOutcome::Allowed);
+    assert_eq!(uses[0].decided_by, UseDecidedBy::Bouncer);
 }
 
 #[test]
@@ -360,10 +512,10 @@ fn restored_connector_waits_for_the_owner_review() {
     let token = token.expose().to_owned();
     let slot: SharedVault = Arc::new(Mutex::new(Some(restored)));
     let socket = fx.dir.path().join("run2").join("broker.sock");
-    let _broker = broker::start_with_tls(
+    let _broker = broker::start_with(
         Arc::clone(&slot),
         &socket,
-        TlsClient::platform().expect("TLS"),
+        options(TlsClient::platform().expect("TLS")),
     )
     .expect("broker");
     let request = || Action::Call {
@@ -887,7 +1039,7 @@ fn https_destination_with_trusted_test_root() {
     let service = start_tls_service(&pki);
     let fx = build_fixture(
         &format!("https://localhost:{}", service.port),
-        test_root_client(&pki),
+        options(test_root_client(&pki)),
         None,
     );
     let response = call(
@@ -923,7 +1075,7 @@ fn https_refuses_untrusted_or_mismatched_certificates_before_the_request() {
     // The macOS trust store does not trust the test CA.
     let untrusted = build_fixture(
         &format!("https://localhost:{}", service.port),
-        TlsClient::platform().expect("platform TLS"),
+        options(TlsClient::platform().expect("platform TLS")),
         None,
     );
     let refused = call(
@@ -937,7 +1089,7 @@ fn https_refuses_untrusted_or_mismatched_certificates_before_the_request() {
     // The certificate names DNS localhost, not the IP address.
     let mismatch = build_fixture(
         &format!("https://127.0.0.1:{}", service.port),
-        test_root_client(&pki),
+        options(test_root_client(&pki)),
         None,
     );
     let refused = call(

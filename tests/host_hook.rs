@@ -23,11 +23,14 @@ use std::time::{Duration, Instant};
 
 use apassy::agent::client::{self, SendOptions};
 use apassy::agent::wire::{Action, WireResponse};
+use apassy::broker::action_kind::ActionKind;
 use apassy::broker::approvals::{ApprovalQueue, OwnerAction, OwnerCheck, OwnerGate, PendingRun};
 use apassy::broker::bouncer::BouncerClient;
 use apassy::broker::http::TlsClient;
 use apassy::broker::{self, BrokerHandle, BrokerOptions, SharedVault};
 use apassy::contracts::CredentialKind;
+use apassy::vault::exceptions::ExceptionKind;
+use apassy::vault::usage::{NewItemUse, UseDecidedBy, UseOutcome};
 use apassy::vault::{
     Declaration, Environment, ExecMode, Field, ItemDraft, Reversibility, RiskLevel, Scope,
     SecretValue, Vault,
@@ -59,11 +62,16 @@ struct Fixture {
     broker: BrokerHandle,
 }
 
+/// `ExecMode::Ask` stands for an agent that the owner wants to approve each run: the
+/// upgrade to schema 18 turned such a grant into "Always ask for this agent" (ADR 0025
+/// §3f), so the fixture adds that exception. A grant is no authority.
 fn fixture(mode: ExecMode, approval_timeout: Duration) -> Fixture {
     let dir = TempDir::new().expect("temp dir");
     let base = std::fs::canonicalize(dir.path()).expect("canonical temp dir");
     let project = base.join("project");
     std::fs::create_dir_all(project.join("web")).expect("project");
+    // A repository: runs in `web` belong to the project `project` (ADR 0025 §3a).
+    std::fs::create_dir_all(project.join(".git")).expect("git dir");
     let claude_root = base.join("home").join(".claude").join("projects");
     let codex_root = base.join("home").join(".codex").join("sessions");
     std::fs::create_dir_all(&claude_root).expect("claude root");
@@ -94,7 +102,7 @@ fn fixture(mode: ExecMode, approval_timeout: Duration) -> Fixture {
         .set_declaration(
             item.id,
             &Declaration {
-                project: "billing".to_owned(),
+                project: "project".to_owned(),
                 environment: Environment::Staging,
                 risk: RiskLevel::Medium,
                 scope: Scope::ReadWrite,
@@ -106,6 +114,37 @@ fn fixture(mode: ExecMode, approval_timeout: Duration) -> Fixture {
     vault
         .set_exec_grant(agent.id, item.id, &project.display().to_string(), mode)
         .expect("grant");
+    if mode == ExecMode::Ask {
+        vault
+            .add_agent_exception(agent.id, item.id, ExceptionKind::AlwaysAsk)
+            .expect("always ask");
+    }
+    // ADR 0025 §3: a staging item asks the owner at its first use in the project. These
+    // tests are about the user request at the model step, so the agent used the item in
+    // the project before, for each kind of action, and the bouncer allowed it.
+    for action in [
+        ActionKind::Read,
+        ActionKind::Change,
+        ActionKind::Deploy,
+        ActionKind::Delete,
+    ] {
+        vault
+            .record_item_use(&NewItemUse {
+                item_id: item.id,
+                agent_id: Some(agent.id),
+                agent_name: "Hook agent".to_owned(),
+                project_key: project.join(".git").display().to_string(),
+                project_label: "project".to_owned(),
+                action,
+                command_summary: "run echo".to_owned(),
+                hosts: Vec::new(),
+                outcome: UseOutcome::Allowed,
+                decided_by: UseDecidedBy::Bouncer,
+                answered_on: String::new(),
+                decision_log_id: None,
+            })
+            .expect("history");
+    }
     let shared: SharedVault = Arc::new(Mutex::new(Some(vault)));
     let bouncer = common::fake_bouncer(&[]);
     let mut options = BrokerOptions::with_tls(TlsClient::platform().expect("TLS"));
