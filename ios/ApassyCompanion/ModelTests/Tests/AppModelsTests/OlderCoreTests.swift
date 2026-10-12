@@ -153,6 +153,25 @@ struct OlderCoreTests {
         #expect(vault.alert == message)
     }
 
+    @Test("two captures at once keep their own messages, and the alert works after them")
+    func overlappingCaptures() async {
+        let (vault, _) = await quietVault()
+        async let a = vault.capturingAlert {
+            await vault.moveItem(102, to: "missing-a")
+        }
+        async let b = vault.capturingAlert {
+            await vault.moveItem(103, to: "missing-b")
+        }
+        let (messageA, messageB) = await (a, b)
+        #expect(messageA != nil)
+        #expect(messageB != nil)
+        #expect(vault.alert == nil)
+
+        // No capture is left behind: a failure outside of them shows as the alert.
+        await vault.moveItem(102, to: "missing-c")
+        #expect(vault.alert != nil)
+    }
+
     @Test("a move that works reports nothing")
     func capturedMoveSuccess() async {
         let (vault, _) = await quietVault()

@@ -74,26 +74,22 @@ final class VaultModel {
             Task { await closedByCore() }
             return
         }
-        if captured != nil {
-            captured?.append(error.localizedDescription)
+        if let capture = AlertCapture.current {
+            capture.messages.append(error.localizedDescription)
             return
         }
         alert = error.localizedDescription
     }
 
-    /// The messages that `report` gave while `capturingAlert` runs; nil otherwise.
-    @ObservationIgnored private var captured: [String]?
-
     /// Run `work` and return the last message that it reported, instead of putting it in `alert`.
     /// The alert of the tabs cannot show above a sheet, so a sheet such as the folder picker shows
-    /// the message itself and stays open. A `locked` answer still closes the vault.
+    /// the message itself and stays open. A `locked` answer still closes the vault. The capture
+    /// belongs to the task of `work` (a task-local value): two captures at once keep their own
+    /// messages, and a report of another task, such as a sync, still goes to `alert`.
     func capturingAlert(_ work: () async -> Void) async -> String? {
-        let outer = captured
-        captured = []
-        await work()
-        let message = captured?.last
-        captured = outer
-        return message
+        let capture = CapturedAlerts()
+        await AlertCapture.$current.withValue(capture) { await work() }
+        return capture.messages.last
     }
 
     /// The core answered `locked`. While the app is away or the vault is suspended that is
@@ -938,4 +934,14 @@ final class VaultModel {
         stopSync()
         await start()
     }
+}
+
+/// The messages of one `VaultModel.capturingAlert`. Only the main actor reads and writes them.
+private final class CapturedAlerts: @unchecked Sendable {
+    var messages: [String] = []
+}
+
+/// The capture of the current task, if it runs in `VaultModel.capturingAlert`.
+private enum AlertCapture {
+    @TaskLocal static var current: CapturedAlerts?
 }

@@ -371,10 +371,12 @@ final class ItemEditorModel {
         }
     }
 
-    /// The sheet is gone: show a failed move as an alert of the vault.
+    /// The sheet is gone: show a failed move as an alert of the vault. Not when the sheet went
+    /// away because the vault locked: the message would show after the next unlock, out of place.
     func reportMoveFailure(to vault: VaultModel) {
         guard let moveFailure else { return }
         self.moveFailure = nil
+        guard vault.isUnlocked else { return }
         vault.alert = moveFailure
     }
 }

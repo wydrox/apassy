@@ -142,8 +142,9 @@ enum Decisions {
     /// Whether `question` is the same run as `run`: the asking Mac sends each waiting run to the
     /// relay too. The run IDs of two Macs can meet, so the question must come from the paired Mac.
     /// The iPhone knows that Mac by its name only (the relay device of the card is not part of the
-    /// pairing), and both names are the Mac's computer name; a name that does not match keeps both
-    /// rows, which shows a run twice but never hides one.
+    /// pairing). Both names are usually the Mac's computer name, but the owner can rename the Mac's
+    /// relay device; a name that does not match keeps both rows, which shows a run twice but never
+    /// hides one.
     private static func shows(_ question: RemoteQuestion, _ run: PendingRun, pairedMac: String?) -> Bool {
         guard let card = question.card, let pairedMac, sameMac(question.askerName, pairedMac) else { return false }
         return card.run.id == run.id && card.run.agent == run.agent && card.run.command == run.command

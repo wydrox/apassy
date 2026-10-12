@@ -35,6 +35,14 @@ struct DecisionsView: View {
         return nil
     }
 
+    /// Whether a pushed screen shows something that still waits for an answer.
+    private func opensWaiting(_ route: DecisionRoute, questions: QuestionsModel) -> Bool {
+        switch route {
+        case .question(let qid): questions.waiting.contains { $0.qid == qid }
+        case .run(let run): session?.runs.contains { $0.id == run.id } ?? false
+        }
+    }
+
     var body: some View {
         NavigationStack(path: $path) {
             // Each second: the timers, and the rows that expire leave Waiting.
@@ -46,7 +54,8 @@ struct DecisionsView: View {
             .navigationDestination(for: DecisionRoute.self) { route in
                 switch route {
                 case .question(let qid):
-                    if let questions { QuestionDetailView(model: questions, qid: qid) }
+                    // A new view for each question, so that its tap guard starts again.
+                    if let questions { QuestionDetailView(model: questions, qid: qid).id(qid) }
                 case .run(let run):
                     if let session {
                         RunDetailView(session: session, run: run, presentation: .pushed)
@@ -63,13 +72,17 @@ struct DecisionsView: View {
             ApprovalsView(app: companion)
                 .presentationDragIndicator(.visible)
         }
-        // The owner opened a notification: it holds no question, so open the newest one, unless
-        // the owner opened something while the list was read again.
+        // The owner opened a notification: it holds no question, so open the newest one. Only on
+        // a free screen: never when the owner opened something while the list was read again, and
+        // never over a question or a run that still waits, which the owner may be about to answer.
         .onChange(of: questions?.focusRequests ?? 0, initial: true) { _, requests in
             guard requests > 0, let questions else { return }
             let before = path
             Task {
-                if let qid = await questions.takeFocus(stillFree: { path == before }) { path = [.question(qid)] }
+                let qid = await questions.takeFocus(stillFree: {
+                    path == before && !path.contains { opensWaiting($0, questions: questions) }
+                })
+                if let qid { path = [.question(qid)] }
             }
         }
         .alert(
