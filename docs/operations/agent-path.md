@@ -205,6 +205,32 @@ Removing a remembered answer makes Apassy stricter, so it needs no owner check. 
 
 Apassy writes one row for each decided use of each credential: allowed, denied, refused, or timed out, and who decided (bouncer, pattern, answer, owner, or rule). The row has no secret value. Apassy also counts each owner check and each new question.
 
+## 8e. Agents add credentials (ADR 0025 §6)
+
+An agent stores a new credential without seeing it. The full rules are in section 4c of the [broker contract](../contracts/broker-v0.md).
+
+| Tool | What it does |
+| --- | --- |
+| `apassy_capture_credential` | Runs one program in `cwd` (no shell, no secret, no host or URL in the arguments), for example `["gh", "auth", "token"]`, or reads one file, and stores the trimmed output. |
+| `apassy_generate_credential` | Apassy makes a random value: `length` 16 to 128 (default 32), `alphabet` `alnum`, `hex`, `base64url`, or `symbols`. |
+| `apassy_save_credential` | Stores a value that the agent has. The value is already in its transcript; capture is better. |
+| `apassy_ask_owner_for_credential` | Asks you to paste a credential: name, purpose, where to get it. The call waits up to 5 minutes, then `waiting`; the same call again waits again. |
+| `apassy_update_credential` | A new value (capture or generation) for a credential that this agent made. |
+| `apassy_describe_credential` | A new name, notes, variable, or narrower hosts for a credential that this agent made. |
+
+What to expect:
+
+- The agent gets `item_id`, `name`, `env_name`, and a one-line summary such as `GitHub token · GH_TOKEN · production`. Never the value: not in the answer, the activity, the history, or an error.
+- The paste detection (ADR 0025 §4) finds the provider, the variable, the hosts, and the declaration. A value without a signal is production by default, so its first use in a project asks you.
+- The item history says `Added by AGENT in PROJECT (capture).` The bouncer decides each use of the item as for any other item.
+- An agent changes only the credentials that it made with capture, generate, or save. Any other credential gives `not_owner`.
+- The same value again returns the agent's own credential. Values of other credentials are not compared.
+- At most 10 new credentials per agent per hour (`too_many_items`).
+- Capture refuses the Apassy data folder, the vault file, the Keychain folders, a folder, a FIFO, a device, more than 64 KiB, an empty output, and a failed command (`capture_refused`).
+- A request of `apassy_ask_owner_for_credential` waits in the app (`Vault::credential_requests`). Save it (the agent gets the item) or dismiss it (the agent gets `dismissed`).
+
+Corrections: after each allowed run, Apassy compares the use log with the declaration and proposes a correction once: "development" when every use went to a development or test host, "production" when a value declared development has a live prefix (the item is production at once until you answer), and a project when every use was in one project. An ignored correction never comes again.
+
 ## 9. Limits
 
 See section 10 of the [broker contract](../contracts/broker-v0.md). The real-secret gate stays BLOCKED.

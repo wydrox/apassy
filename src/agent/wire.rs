@@ -31,6 +31,70 @@ pub mod codes {
     /// The owner answered "Allow ACTION in PROJECT" or "Allow production", and Apassy
     /// could not save the answer. The command did not run.
     pub const ANSWER_FAILED: &str = "answer_failed";
+    /// ADR 0025 §6: the item was not created by this agent with capture, generate, or
+    /// save. The code is the same for an item that does not exist.
+    pub const NOT_OWNER: &str = "not_owner";
+    /// ADR 0025 §6: this agent created the most items in the last hour.
+    pub const TOO_MANY_ITEMS: &str = "too_many_items";
+    /// Apassy refused to capture: the command, the file, or the output does not meet the
+    /// capture rules. The text never has a part of the output.
+    pub const CAPTURE_REFUSED: &str = "capture_refused";
+    /// The owner has not answered a credential request yet. The request stays open; the
+    /// same request again waits again.
+    pub const WAITING: &str = "waiting";
+    /// The owner dismissed the credential request.
+    pub const DISMISSED: &str = "dismissed";
+}
+
+/// A secret value that an agent sends with `save_credential`. Debug never shows it, and
+/// it is erased on drop. It is a plain JSON string on the wire.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AgentSecret(String);
+
+impl AgentSecret {
+    pub fn new(text: String) -> Self {
+        Self(text)
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Drop for AgentSecret {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl fmt::Debug for AgentSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("AgentSecret([redacted])")
+    }
+}
+
+impl Serialize for AgentSecret {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentSecret {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self)
+    }
+}
+
+/// How Apassy makes a new value (ADR 0025 §6, `generate_credential`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GenerateSpec {
+    /// 16 to 128 characters. Default 32.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<u32>,
+    /// `alnum` (default), `hex`, `base64url`, or `symbols`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alphabet: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -119,6 +183,90 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         truncated: bool,
     },
+    /// ADR 0025 §6: run one command (no secret in its environment) or read one file, and
+    /// save the output as a new credential. Exactly one of `command` and `file`. The
+    /// output never comes back.
+    CaptureCredential {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file: Option<String>,
+        /// The working directory of the command and the project of the new item.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+        /// A folder path as the catalog shows it, such as `Work / Stripe`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        folder: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        purpose: Option<String>,
+        /// `PATH` for the command. The adapter sends its own `PATH`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    /// ADR 0025 §6: Apassy makes a random value and saves it. The value never comes back.
+    GenerateCredential {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        length: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alphabet: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        folder: Option<String>,
+    },
+    /// ADR 0025 §6: save a value that the agent already has. The value is already in the
+    /// transcript of the agent; capture is better.
+    SaveCredential {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        value: AgentSecret,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        folder: Option<String>,
+    },
+    /// ADR 0025 §6: ask the owner to paste a credential. The call waits like a question.
+    AskOwnerForCredential {
+        name: String,
+        purpose: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        where_to_get: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        folder: Option<String>,
+    },
+    /// ADR 0025 §6: a new value for an item that this agent created, by capture or by
+    /// generation. Exactly one of `command`, `file`, and `generate`.
+    UpdateCredential {
+        item_id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generate: Option<GenerateSpec>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    /// ADR 0025 §6: change the name, the notes, the variable, or the hosts of an item
+    /// that this agent created.
+    DescribeCredential {
+        item_id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notes: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        env_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hosts: Option<Vec<String>>,
+    },
 }
 
 impl Action {
@@ -129,7 +277,24 @@ impl Action {
             Self::Run { .. } => "run",
             Self::RequestAccess { .. } => "request_access",
             Self::SubmitUserRequest { .. } => "submit_user_request",
+            Self::CaptureCredential { .. } => "capture_credential",
+            Self::GenerateCredential { .. } => "generate_credential",
+            Self::SaveCredential { .. } => "save_credential",
+            Self::AskOwnerForCredential { .. } => "ask_owner_for_credential",
+            Self::UpdateCredential { .. } => "update_credential",
+            Self::DescribeCredential { .. } => "describe_credential",
         }
+    }
+
+    /// The action can wait for the owner or for a process, so a client waits longer.
+    pub fn waits(&self) -> bool {
+        matches!(
+            self,
+            Self::Run { .. }
+                | Self::CaptureCredential { .. }
+                | Self::AskOwnerForCredential { .. }
+                | Self::UpdateCredential { .. }
+        )
     }
 }
 
@@ -184,6 +349,37 @@ mod tests {
         assert!(serde_json::from_str::<WireRequest>(extra).is_err());
         let nested = r#"{"v":0,"token":"t","action":{"kind":"call","item_id":1,"operation":"op","params":{"a":{"b":1}}}}"#;
         assert!(serde_json::from_str::<WireRequest>(nested).is_err());
+    }
+
+    /// ADR 0025 §6: a saved value is a plain string on the wire, and Debug never shows it.
+    #[test]
+    fn credential_actions_parse_and_a_saved_value_is_redacted() {
+        let canary = "FAKE-wire-canary-8812";
+        let text = format!(
+            r#"{{"v":0,"token":"t","action":{{"kind":"save_credential","value":"{canary}","name":"Hook secret"}}}}"#
+        );
+        let request: WireRequest = serde_json::from_str(&text).expect("valid request");
+        assert!(!format!("{request:?}").contains(canary));
+        let Action::SaveCredential { value, .. } = &request.action else {
+            panic!("wrong action");
+        };
+        assert_eq!(value.expose(), canary);
+        assert!(
+            serde_json::to_string(&request)
+                .expect("json")
+                .contains(canary)
+        );
+        assert_eq!(request.action.name(), "save_credential");
+        let update = r#"{"v":0,"token":"t","action":{"kind":"update_credential","item_id":4,"generate":{"length":20,"alphabet":"hex"}}}"#;
+        let update: WireRequest = serde_json::from_str(update).expect("valid request");
+        assert!(update.action.waits());
+        for bad in [
+            r#"{"v":0,"token":"t","action":{"kind":"update_credential","item_id":4,"generate":{"seed":1}}}"#,
+            r#"{"v":0,"token":"t","action":{"kind":"generate_credential","name":"x","reveal":true}}"#,
+            r#"{"v":0,"token":"t","action":{"kind":"describe_credential","item_id":4,"value":"x"}}"#,
+        ] {
+            assert!(serde_json::from_str::<WireRequest>(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

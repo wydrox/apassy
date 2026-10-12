@@ -7,16 +7,25 @@
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
 use super::client;
-use super::wire::{Action, MAX_LINE_BYTES, WireResponse};
+use super::wire::{Action, AgentSecret, GenerateSpec, MAX_LINE_BYTES, WireResponse};
 
 pub const TOOL_LIST_ACCESS: &str = "apassy_list_access";
 pub const TOOL_USE_CREDENTIAL: &str = "apassy_use_credential";
 pub const TOOL_RUN_WITH_SECRETS: &str = "apassy_run_with_secrets";
 pub const TOOL_REQUEST_ACCESS: &str = "apassy_request_access";
+pub const TOOL_CAPTURE_CREDENTIAL: &str = "apassy_capture_credential";
+pub const TOOL_GENERATE_CREDENTIAL: &str = "apassy_generate_credential";
+pub const TOOL_SAVE_CREDENTIAL: &str = "apassy_save_credential";
+pub const TOOL_ASK_OWNER_FOR_CREDENTIAL: &str = "apassy_ask_owner_for_credential";
+pub const TOOL_UPDATE_CREDENTIAL: &str = "apassy_update_credential";
+pub const TOOL_DESCRIBE_CREDENTIAL: &str = "apassy_describe_credential";
+/// A call that can wait for the owner (5 minutes) or for a command reads this long.
+const WAITING_CALL_TIMEOUT: Duration = Duration::from_secs(600);
 const SUPPORTED_PROTOCOLS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// Claude Code sets this variable for its stdio MCP servers to the session ID. The
@@ -131,7 +140,7 @@ fn initialize_result(params: &Value) -> Value {
         "protocolVersion": version,
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": { "name": "apassy", "version": env!("CARGO_PKG_VERSION") },
-        "instructions": "Apassy lets you use credentials that the owner permits. You never receive secret values. Call apassy_list_access first. The owner does not need to set environment variable names. Use the env_name from process_access for each credential in your command. To run a command that needs secrets, use apassy_run_with_secrets: Apassy starts the command with the secrets in its environment and returns masked output. When apassy_list_access has a catalog, you can also use a credential there with access \"can_use\": put its item_id in apassy_run_with_secrets and use its env_name. The bouncer decides each use, and it can ask the owner in the Apassy app while the call waits (up to 5 minutes). When a call fails with question_waiting, call again with the same request. Do not ask for secret values, and do not try to print them.",
+        "instructions": "Apassy lets you use credentials that the owner permits. You never receive secret values. Call apassy_list_access first. The owner does not need to set environment variable names. Use the env_name from process_access for each credential in your command. To run a command that needs secrets, use apassy_run_with_secrets: Apassy starts the command with the secrets in its environment and returns masked output. When apassy_list_access has a catalog, you can also use a credential there with access \"can_use\": put its item_id in apassy_run_with_secrets and use its env_name. The bouncer decides each use, and it can ask the owner in the Apassy app while the call waits (up to 5 minutes). When a call fails with question_waiting, call again with the same request. To store a new credential, use apassy_capture_credential (a command or a file prints it), apassy_generate_credential (a new password or token), or apassy_ask_owner_for_credential (the owner pastes it); you get its item_id and env_name, never the value. Do not ask for secret values, and do not try to print them.",
     })
 }
 
@@ -197,6 +206,115 @@ pub fn tool_list() -> Value {
                 "required": ["item_id", "reason"],
                 "additionalProperties": false
             }
+        },
+        {
+            "name": TOOL_CAPTURE_CREDENTIAL,
+            "title": "Save a command output or a file as a new credential",
+            "description": "Store a new credential without seeing it. Apassy runs one program in cwd (no shell, no secrets in its environment, no host or URL in its arguments), for example [\"gh\", \"auth\", \"token\"], or reads one file, and saves the trimmed output. You get item_id and env_name, never the value. Refused: Apassy, vault and Keychain paths, a folder, FIFO or device, more than 64 KiB, empty output, or a non-zero exit code. A value that a credential of yours already has returns that credential. At most 10 new credentials per hour.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "command": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Program and arguments that print the credential. Give command or file." },
+                    "file": { "type": "string", "description": "Absolute path of a file that holds the credential. Give command or file." },
+                    "name": { "type": "string", "description": "Name of the new credential. Optional: Apassy finds one from the value." },
+                    "cwd": { "type": "string", "description": "Absolute working directory and project. Default: the folder of this MCP server." },
+                    "folder": { "type": "string", "description": "Folder path as the catalog shows it, such as \"Work / Stripe\". Optional." },
+                    "purpose": { "type": "string", "description": "Why you add it. Optional." }
+                },
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": TOOL_GENERATE_CREDENTIAL,
+            "title": "Generate a new secret",
+            "description": "Apassy makes a random password or token, saves it as a new credential, and returns item_id and env_name. You never see the value. Use it, for example, for a new database password, then set it with apassy_run_with_secrets.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the new credential, such as \"Staging database password\"." },
+                    "length": { "type": "integer", "minimum": 16, "maximum": 128, "description": "Characters. Default 32." },
+                    "alphabet": { "type": "string", "enum": ["alnum", "hex", "base64url", "symbols"], "description": "Default alnum." },
+                    "cwd": { "type": "string", "description": "Absolute project folder. Default: the folder of this MCP server." },
+                    "folder": { "type": "string", "description": "Folder path as the catalog shows it. Optional." }
+                },
+                "required": ["name"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": TOOL_SAVE_CREDENTIAL,
+            "title": "Save a value that you already have",
+            "description": "Save a credential value that you already have, for example from an API answer. The value is already in your transcript: prefer apassy_capture_credential when a command or a file can give it. You get item_id and env_name. A value that a credential of yours already has returns that credential.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "value": { "type": "string", "description": "The secret value. At most 64 KiB." },
+                    "name": { "type": "string", "description": "Name of the new credential. Optional." },
+                    "cwd": { "type": "string", "description": "Absolute project folder. Default: the folder of this MCP server." },
+                    "folder": { "type": "string", "description": "Folder path as the catalog shows it. Optional." }
+                },
+                "required": ["value"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": TOOL_ASK_OWNER_FOR_CREDENTIAL,
+            "title": "Ask the owner to add a credential",
+            "description": "Ask the owner to paste a credential into Apassy. The call waits up to 5 minutes. When the owner saves it, you get item_id and env_name, never the value. On waiting, call again with the same arguments. On dismissed, tell the user. On question_waiting, another question of yours waits: wait for it first.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the credential, such as \"Sentry auth token\"." },
+                    "purpose": { "type": "string", "description": "Why you need it. The owner reads it. At most 500 characters." },
+                    "where_to_get": { "type": "string", "description": "Where the owner gets it, such as a settings page of the provider. Optional." },
+                    "cwd": { "type": "string", "description": "Absolute project folder. Default: the folder of this MCP server." },
+                    "folder": { "type": "string", "description": "Folder path as the catalog shows it. Optional." }
+                },
+                "required": ["name", "purpose"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": TOOL_UPDATE_CREDENTIAL,
+            "title": "Give your credential a new value",
+            "description": "Give a credential that you created with capture, generate, or save a new value: from a command or a file (as apassy_capture_credential) or generated (as apassy_generate_credential). You never see the value. Any other credential gives not_owner: ask the owner.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "item_id": { "type": "integer", "minimum": 1, "description": "A credential that you created." },
+                    "command": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Program and arguments that print the new value." },
+                    "file": { "type": "string", "description": "Absolute path of a file with the new value." },
+                    "generate": {
+                        "type": "object",
+                        "properties": {
+                            "length": { "type": "integer", "minimum": 16, "maximum": 128 },
+                            "alphabet": { "type": "string", "enum": ["alnum", "hex", "base64url", "symbols"] }
+                        },
+                        "additionalProperties": false,
+                        "description": "Generate the new value. Give command, file, or generate."
+                    },
+                    "cwd": { "type": "string", "description": "Absolute working directory of the command. Default: the folder of this MCP server." }
+                },
+                "required": ["item_id"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": TOOL_DESCRIBE_CREDENTIAL,
+            "title": "Describe your credential",
+            "description": "Change the name, the notes, the env_name, or the hosts of a credential that you created with capture, generate, or save. hosts only narrows where the value goes: a placeholder for these HTTPS hosts instead of the real value, or some of its placeholder hosts. Any other credential gives not_owner.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "item_id": { "type": "integer", "minimum": 1 },
+                    "name": { "type": "string" },
+                    "notes": { "type": "string" },
+                    "env_name": { "type": "string", "description": "Like MY_API_KEY. Not a reserved name, and not used by another credential." },
+                    "hosts": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "HTTPS hosts, such as \"api.example.com\"." }
+                },
+                "required": ["item_id"],
+                "additionalProperties": false
+            }
         }
     ])
 }
@@ -215,6 +333,12 @@ fn call_tool(config: &AdapterConfig, params: &Value) -> Value {
         TOOL_USE_CREDENTIAL => call_action(&arguments),
         TOOL_RUN_WITH_SECRETS => run_action(&arguments),
         TOOL_REQUEST_ACCESS => request_action(&arguments),
+        TOOL_CAPTURE_CREDENTIAL => capture_action(&arguments),
+        TOOL_GENERATE_CREDENTIAL => generate_action(&arguments),
+        TOOL_SAVE_CREDENTIAL => save_action(&arguments),
+        TOOL_ASK_OWNER_FOR_CREDENTIAL => ask_owner_action(&arguments),
+        TOOL_UPDATE_CREDENTIAL => update_action(&arguments),
+        TOOL_DESCRIBE_CREDENTIAL => describe_action(&arguments),
         _ => Err("The tool name is not known.".to_owned()),
     };
     let action = match action {
@@ -229,7 +353,7 @@ fn call_tool(config: &AdapterConfig, params: &Value) -> Value {
     };
     let options = client::SendOptions {
         host_session: config.host_session.as_deref(),
-        timeout: None,
+        timeout: action.waits().then_some(WAITING_CALL_TIMEOUT),
     };
     match client::send_with(&config.socket, token, action, options) {
         Ok(response) => tool_result(response),
@@ -370,6 +494,175 @@ fn request_action(arguments: &Value) -> Result<Action, String> {
     })
 }
 
+/// The arguments as an object with only the `allowed` keys.
+fn arguments_object<'a>(
+    arguments: &'a Value,
+    allowed: &[&str],
+) -> Result<&'a Map<String, Value>, String> {
+    let object = arguments
+        .as_object()
+        .ok_or_else(|| "The arguments must be an object.".to_owned())?;
+    if let Some(extra) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err(format!("The argument \"{extra}\" is not permitted."));
+    }
+    Ok(object)
+}
+
+fn optional_text(object: &Map<String, Value>, name: &str) -> Result<Option<String>, String> {
+    match object.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_str()
+            .map(|text| Some(text.to_owned()))
+            .ok_or_else(|| format!("The {name} argument must be a string.")),
+    }
+}
+
+fn required_text(object: &Map<String, Value>, name: &str) -> Result<String, String> {
+    optional_text(object, name)?.ok_or_else(|| format!("The {name} argument must be a string."))
+}
+
+fn optional_strings(
+    object: &Map<String, Value>,
+    name: &str,
+) -> Result<Option<Vec<String>>, String> {
+    match object.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_array()
+            .ok_or_else(|| format!("The {name} argument must be an array of strings."))?
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("Each {name} entry must be a string."))
+            })
+            .collect::<Result<Vec<String>, String>>()
+            .map(Some),
+    }
+}
+
+fn item_id(object: &Map<String, Value>) -> Result<u64, String> {
+    object
+        .get("item_id")
+        .and_then(Value::as_u64)
+        .filter(|id| *id > 0)
+        .ok_or_else(|| "The item_id argument must be a positive integer.".to_owned())
+}
+
+fn length(object: &Map<String, Value>) -> Result<Option<u32>, String> {
+    match object.get("length") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .and_then(|length| u32::try_from(length).ok())
+            .map(Some)
+            .ok_or_else(|| "The length argument must be a positive integer.".to_owned()),
+    }
+}
+
+/// The working directory of the call: the argument, or the folder of this MCP server
+/// (the agent host starts it in the project).
+fn cwd_or_here(object: &Map<String, Value>) -> Result<Option<String>, String> {
+    Ok(optional_text(object, "cwd")?.or_else(|| {
+        std::env::current_dir()
+            .ok()
+            .map(|dir| dir.display().to_string())
+    }))
+}
+
+fn capture_action(arguments: &Value) -> Result<Action, String> {
+    let object = arguments_object(
+        arguments,
+        &["name", "command", "file", "cwd", "folder", "purpose"],
+    )?;
+    Ok(Action::CaptureCredential {
+        name: optional_text(object, "name")?,
+        command: optional_strings(object, "command")?,
+        file: optional_text(object, "file")?,
+        cwd: cwd_or_here(object)?,
+        folder: optional_text(object, "folder")?,
+        purpose: optional_text(object, "purpose")?,
+        path: std::env::var("PATH").ok(),
+    })
+}
+
+fn generate_action(arguments: &Value) -> Result<Action, String> {
+    let object = arguments_object(arguments, &["name", "length", "alphabet", "cwd", "folder"])?;
+    Ok(Action::GenerateCredential {
+        name: required_text(object, "name")?,
+        length: length(object)?,
+        alphabet: optional_text(object, "alphabet")?,
+        cwd: cwd_or_here(object)?,
+        folder: optional_text(object, "folder")?,
+    })
+}
+
+fn save_action(arguments: &Value) -> Result<Action, String> {
+    let object = arguments_object(arguments, &["name", "value", "cwd", "folder"])?;
+    let value = object
+        .get("value")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "The value argument must be a string.".to_owned())?;
+    Ok(Action::SaveCredential {
+        name: optional_text(object, "name")?,
+        value: AgentSecret::new(value.to_owned()),
+        cwd: cwd_or_here(object)?,
+        folder: optional_text(object, "folder")?,
+    })
+}
+
+fn ask_owner_action(arguments: &Value) -> Result<Action, String> {
+    let object = arguments_object(
+        arguments,
+        &["name", "purpose", "where_to_get", "cwd", "folder"],
+    )?;
+    Ok(Action::AskOwnerForCredential {
+        name: required_text(object, "name")?,
+        purpose: required_text(object, "purpose")?,
+        where_to_get: optional_text(object, "where_to_get")?,
+        cwd: cwd_or_here(object)?,
+        folder: optional_text(object, "folder")?,
+    })
+}
+
+fn update_action(arguments: &Value) -> Result<Action, String> {
+    let object = arguments_object(
+        arguments,
+        &["item_id", "command", "file", "generate", "cwd"],
+    )?;
+    let generate = match object.get("generate") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            serde_json::from_value::<GenerateSpec>(value.clone()).map_err(|_| {
+                "The generate argument must be an object with length and alphabet.".to_owned()
+            })?,
+        ),
+    };
+    Ok(Action::UpdateCredential {
+        item_id: item_id(object)?,
+        command: optional_strings(object, "command")?,
+        file: optional_text(object, "file")?,
+        generate,
+        cwd: cwd_or_here(object)?,
+        path: std::env::var("PATH").ok(),
+    })
+}
+
+fn describe_action(arguments: &Value) -> Result<Action, String> {
+    let object = arguments_object(
+        arguments,
+        &["item_id", "name", "notes", "env_name", "hosts"],
+    )?;
+    Ok(Action::DescribeCredential {
+        item_id: item_id(object)?,
+        name: optional_text(object, "name")?,
+        notes: optional_text(object, "notes")?,
+        env_name: optional_text(object, "env_name")?,
+        hosts: optional_strings(object, "hosts")?,
+    })
+}
+
 fn tool_result(response: WireResponse) -> Value {
     if response.ok {
         let result = response.result.unwrap_or(Value::Null);
@@ -453,7 +746,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
         )
         .expect("reply");
-        assert_eq!(reply["result"]["tools"].as_array().map(Vec::len), Some(4));
+        assert_eq!(reply["result"]["tools"].as_array().map(Vec::len), Some(10));
         assert!(
             handle_message(
                 &config(),
@@ -560,5 +853,79 @@ mod tests {
         let hint = tool_result(WireResponse::failure("not_visible", "No."));
         let text = hint["content"][0]["text"].as_str().unwrap_or_default();
         assert!(text.contains("All credentials, without values"), "{text}");
+    }
+
+    /// ADR 0025 §6: the arguments of the tools that add credentials.
+    #[test]
+    fn credential_tool_arguments_are_checked_and_a_saved_value_is_redacted() {
+        let capture = capture_action(&json!({
+            "command": ["gh", "auth", "token"],
+            "cwd": "/Users/me/Dev/app",
+            "name": "GitHub token"
+        }))
+        .expect("capture");
+        let Action::CaptureCredential {
+            command, cwd, path, ..
+        } = &capture
+        else {
+            panic!("wrong action");
+        };
+        assert_eq!(command.as_deref().map(<[String]>::len), Some(3));
+        assert_eq!(cwd.as_deref(), Some("/Users/me/Dev/app"));
+        assert!(path.is_some());
+        assert!(capture.waits());
+        // Without cwd, the folder of the adapter is the project.
+        let Action::CaptureCredential { cwd, .. } =
+            capture_action(&json!({"file": "/tmp/key"})).expect("file")
+        else {
+            panic!("wrong action");
+        };
+        assert!(cwd.is_some());
+        let canary = "FAKE-save-canary-5521";
+        let save = save_action(&json!({"value": canary, "name": "Webhook secret"})).expect("save");
+        assert!(!format!("{save:?}").contains(canary), "{save:?}");
+        assert!(!save.waits());
+        assert!(matches!(
+            generate_action(&json!({"name": "DB password", "length": 24, "alphabet": "hex"})),
+            Ok(Action::GenerateCredential {
+                length: Some(24),
+                ..
+            })
+        ));
+        assert!(
+            ask_owner_action(&json!({"name": "Sentry token", "purpose": "Upload maps."}))
+                .expect("ask")
+                .waits()
+        );
+        let update =
+            update_action(&json!({"item_id": 3, "generate": {"length": 40}})).expect("update");
+        assert!(matches!(
+            update,
+            Action::UpdateCredential {
+                item_id: 3,
+                generate: Some(GenerateSpec {
+                    length: Some(40),
+                    alphabet: None
+                }),
+                ..
+            }
+        ));
+        assert!(describe_action(&json!({"item_id": 3, "hosts": ["api.example.com"]})).is_ok());
+        for bad in [
+            save_action(&json!({"value": 5})),
+            save_action(&json!({"value": "x", "url": "http://x"})),
+            generate_action(&json!({"length": 32})),
+            generate_action(&json!({"name": "x", "length": -1})),
+            ask_owner_action(&json!({"name": "x"})),
+            update_action(&json!({"item_id": 0, "file": "/tmp/x"})),
+            update_action(&json!({"item_id": 1, "generate": {"length": 32, "seed": 1}})),
+            describe_action(&json!({"item_id": 1, "hosts": "api.example.com"})),
+            capture_action(&json!({"command": "gh auth token"})),
+        ] {
+            assert!(bad.is_err(), "{bad:?}");
+        }
+        // The error text of a refused save never repeats the value.
+        let error = save_action(&json!({"value": canary, "extra": canary})).unwrap_err();
+        assert!(!error.contains(canary), "{error}");
     }
 }
