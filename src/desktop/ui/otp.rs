@@ -68,20 +68,19 @@ pub(super) fn exposes_setup_key(detail: &DetailLine) -> bool {
             .is_some_and(|value| otp::is_otp_label(&detail.label) || otp::is_totp_uri(value))
 }
 
-/// The row for a visible detail with a setup key. It has the label and no value.
-pub(super) fn exposed_row(section: &mut Section<'_>, detail: &DetailLine) {
-    section.row(|ui| {
-        ui.label(kit::text(&detail.label, Font::Callout).color(kit::SECONDARY));
-        ui.label(
-            kit::text(MASKED_CODE, Font::Mono)
-                .size(17.0)
-                .color(kit::LABEL),
-        );
-        kit::note(
-            ui,
-            "Apassy hides this setup key. Edit the credential to store it as a one-time password.",
-        );
-    });
+/// The content of the row for a visible detail with a setup key. It has the label and no
+/// value.
+pub(super) fn exposed_content(ui: &mut egui::Ui, detail: &DetailLine) {
+    ui.label(kit::text(&detail.label, Font::Callout).color(kit::SECONDARY));
+    ui.label(
+        kit::text(MASKED_CODE, Font::Mono)
+            .size(17.0)
+            .color(kit::LABEL),
+    );
+    kit::note(
+        ui,
+        "Apassy hides this setup key. Edit the credential to store it as a one-time password.",
+    );
 }
 
 /// Whether the owner must not see this draft detail as plain text: its label is the label

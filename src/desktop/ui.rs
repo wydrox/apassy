@@ -33,6 +33,8 @@ mod decisions_tests;
 #[cfg(not(feature = "vault"))]
 mod demo;
 #[cfg(feature = "vault")]
+mod detail_rows;
+#[cfg(feature = "vault")]
 pub(crate) mod files;
 /// The two first steps of a new vault (ADR 0026 §7).
 #[cfg(feature = "vault")]
@@ -643,14 +645,19 @@ pub(super) fn meta_line(project: &str, service: &str) -> String {
     }
 }
 
-/// The icon and the tile color of a credential kind.
+/// The color of the Postgres tile. A database of an unknown engine gets it too, as in
+/// the mockup.
+const DATABASE_TILE: egui::Color32 = egui::Color32::from_rgb(51, 103, 145);
+
+/// The icon and the tile color of a credential kind, in the colors of the mockup: a
+/// database has the blue Postgres tile and an SSH key the dark gray terminal tile.
 pub(super) fn kind_icon(kind: crate::contracts::CredentialKind) -> (kit::Icon, egui::Color32) {
     use crate::contracts::CredentialKind;
     match kind {
         CredentialKind::ApiKey => (kit::Icon::Key, egui::Color32::from_rgb(255, 149, 0)),
         CredentialKind::Login => (kit::Icon::Person, kit::ACCENT),
-        CredentialKind::SshKey => (kit::Icon::Terminal, egui::Color32::from_rgb(88, 86, 214)),
-        CredentialKind::Database => (kit::Icon::Database, egui::Color32::from_rgb(52, 170, 90)),
+        CredentialKind::SshKey => (kit::Icon::Terminal, egui::Color32::from_rgb(75, 79, 88)),
+        CredentialKind::Database => (kit::Icon::Database, DATABASE_TILE),
         CredentialKind::Custom => (kit::Icon::Asterisk, egui::Color32::from_rgb(142, 142, 147)),
     }
 }
@@ -662,6 +669,16 @@ pub(super) fn credential_tile(
     service: &str,
     name: &str,
 ) -> kit::Tile {
+    if let Some((_, tile)) = named_provider(service, name) {
+        return tile;
+    }
+    let (icon, color) = kind_icon(kind);
+    kit::Tile::icon(color, icon)
+}
+
+/// The provider that the service or the name of a credential names: its label and its
+/// tile, such as "Stripe" and the purple S. None without a known provider.
+pub(super) fn named_provider(service: &str, name: &str) -> Option<(&'static str, kit::Tile)> {
     use egui::Color32;
     const PROVIDERS: [(&str, &str, Color32); 12] = [
         ("anthropic", "Anthropic", Color32::from_rgb(204, 120, 92)),
@@ -679,16 +696,15 @@ pub(super) fn credential_tile(
     ];
     let words = format!("{} {}", service.to_lowercase(), name.to_lowercase());
     if words.contains("postgres") {
-        return kit::Tile::icon(Color32::from_rgb(51, 103, 145), kit::Icon::Database);
+        return Some((
+            "Postgres",
+            kit::Tile::icon(DATABASE_TILE, kit::Icon::Database),
+        ));
     }
-    if let Some((_, provider, color)) = PROVIDERS
+    PROVIDERS
         .iter()
         .find(|(needle, _, _)| words.contains(needle))
-    {
-        return kit::Tile::letter(*color, provider);
-    }
-    let (icon, color) = kind_icon(kind);
-    kit::Tile::icon(color, icon)
+        .map(|(_, provider, color)| (*provider, kit::Tile::letter(*color, provider)))
 }
 
 /// The plural section title of a credential kind, for the demo list.
@@ -1818,21 +1834,22 @@ mod tests {
         app.select_item(item.id.to_string());
         app.ui
             .set_expanded(&format!("credential-history-{}", item.id), true);
-        app.ui
-            .set_expanded(&format!("credential-actions-{}", item.id), true);
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
         for expected in [
             "Account ID",
             "acct_ui",
             "Recovery code",
-            "Add custom detail",
             "History",
             "Added",
             "Agent requests",
             "No agent asked for this credential yet.",
-            "Archive credential…",
         ] {
             assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+        // The rare actions are in the "⋯" menu of the toolbar, not on the page (ADR
+        // 0026 §1).
+        for gone in ["Add custom detail", "More actions", "Archive credential…"] {
+            assert!(!text.contains(gone), "{gone} is on the page: {text}");
         }
         assert!(!text.contains(HIDDEN), "a hidden detail is masked");
         assert_masked(&text);
