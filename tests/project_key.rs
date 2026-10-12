@@ -5,6 +5,10 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use apassy::broker::project::{Project, project_of};
 use tempfile::TempDir;
@@ -125,8 +129,52 @@ fn a_gitdir_without_commondir_is_its_own_common_directory() {
     fs::write(folder.join(".git"), format!("gitdir: {}", gitdir.display())).unwrap();
     let p = project(&folder, &f.home);
     assert_eq!(p.key, gitdir.to_string_lossy());
-    assert_eq!(p.label, "modules");
+    // A submodule has the name of the submodule.
+    assert_eq!(p.label, "lib");
     assert_eq!(p.root, folder);
+}
+
+#[test]
+fn submodule_labels_are_the_submodule_names() {
+    let f = fixture();
+    for (modules, name) in [
+        ("super/.git/modules/libs/foo", "libs/foo"),
+        ("super/.git/modules/outer/modules/inner", "inner"),
+    ] {
+        let gitdir = mkdir(&f.home.join(modules));
+        let folder = mkdir(&f.home.join("checkouts").join(name));
+        // A relative gitdir starts at the folder of `.git`.
+        let up = folder.strip_prefix(&f.home).unwrap().components().count();
+        let relative = (0..up)
+            .fold(PathBuf::new(), |p, _| p.join(".."))
+            .join(modules);
+        fs::write(
+            folder.join(".git"),
+            format!("gitdir: {}\n", relative.display()),
+        )
+        .unwrap();
+        let p = project(&folder, &f.home);
+        assert_eq!(p.key, gitdir.to_string_lossy());
+        assert_eq!(p.label, name);
+    }
+}
+
+#[test]
+fn a_bare_repository_is_labelled_without_dot_git() {
+    let f = fixture();
+    let bare = mkdir(&f.home.join("dev/repo.git"));
+    fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    let gitdir = mkdir(&bare.join("worktrees/main"));
+    fs::write(gitdir.join("commondir"), "../..\n").unwrap();
+    let wt = mkdir(&f.home.join("dev/repo"));
+    fs::write(wt.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
+    let p = project(&wt, &f.home);
+    assert_eq!(p.key, bare.to_string_lossy());
+    assert_eq!(p.label, "repo");
+    assert_eq!(p.root, wt);
+    // A normal repository named `x.git` loses the suffix too.
+    let dotted = repo(&f.home, "site.git");
+    assert_eq!(project(&dotted, &f.home).label, "site");
 }
 
 #[test]
@@ -205,4 +253,161 @@ fn a_filesystem_alias_of_home_follows_the_broad_folder_rules() {
     let root = repo(&f.home, "shop");
     let p = project_of(&alias(&root), Some(&f.home)).expect("project below the alias");
     assert_eq!(p.label, "shop");
+}
+
+/// `project_of` in a thread with a time limit: a `.git` entry written by the agent
+/// must never make it wait (a FIFO) or read without end (a device).
+fn guarded(cwd: &Path, home: &Path) -> Project {
+    let (cwd, home) = (cwd.to_path_buf(), home.to_path_buf());
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(project_of(&cwd, Some(&home)));
+    });
+    rx.recv_timeout(Duration::from_secs(10))
+        .expect("project_of finished in time")
+        .expect("a project")
+}
+
+/// A FIFO at `path`, or `false` where `mkfifo` is not available.
+fn fifo(path: &Path) -> bool {
+    Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// A folder below `root` whose `.git` file names `gitdir`.
+fn gitdir_file(root: &Path, name: &str, gitdir: &str) -> PathBuf {
+    let folder = mkdir(&root.join(name));
+    fs::write(folder.join(".git"), format!("gitdir: {gitdir}\n")).unwrap();
+    folder
+}
+
+#[test]
+fn a_fifo_git_entry_is_skipped_without_a_wait() {
+    let f = fixture();
+    let root = repo(&f.home, "shop");
+    let base = project(&root, &f.home);
+    let inner = mkdir(&root.join("inner"));
+    if !fifo(&inner.join(".git")) {
+        return;
+    }
+    assert_eq!(guarded(&inner, &f.home), base);
+    // A symlink to a FIFO.
+    let pipe = root.join("pipe");
+    assert!(fifo(&pipe));
+    let linked = mkdir(&root.join("linked"));
+    std::os::unix::fs::symlink(&pipe, linked.join(".git")).unwrap();
+    assert_eq!(guarded(&linked, &f.home), base);
+    // A FIFO as `commondir` of a gitdir.
+    let gitdir = mkdir(&f.home.join("meta/wt"));
+    assert!(fifo(&gitdir.join("commondir")));
+    let wt = gitdir_file(&root, "wt", &gitdir.to_string_lossy());
+    assert_eq!(guarded(&wt, &f.home), base);
+}
+
+#[test]
+fn a_device_git_entry_is_skipped() {
+    let f = fixture();
+    let root = repo(&f.home, "shop");
+    let base = project(&root, &f.home);
+    let zero = Path::new("/dev/zero");
+    if !zero.exists() {
+        return;
+    }
+    let inner = mkdir(&root.join("inner"));
+    std::os::unix::fs::symlink(zero, inner.join(".git")).unwrap();
+    assert_eq!(guarded(&inner, &f.home), base);
+    // A gitdir that is a device, and a `commondir` that is a device.
+    let device = gitdir_file(&root, "device", "/dev/zero");
+    assert_eq!(guarded(&device, &f.home), base);
+    let gitdir = mkdir(&f.home.join("meta/wt"));
+    std::os::unix::fs::symlink(zero, gitdir.join("commondir")).unwrap();
+    let wt = gitdir_file(&root, "wt", &gitdir.to_string_lossy());
+    assert_eq!(guarded(&wt, &f.home), base);
+}
+
+#[test]
+fn only_the_start_of_a_git_file_is_read() {
+    let f = fixture();
+    let main = repo(&f.home, "shop");
+    let other = repo(&f.home, "outer");
+    let base = project(&other, &f.home);
+    let line = format!("gitdir: {}\n", main.join(".git").display());
+    // The line after 4096 bytes is not seen: the entry is broken.
+    let late = mkdir(&other.join("late"));
+    fs::write(
+        late.join(".git"),
+        format!("{}\n{line}", "x".repeat(1 << 20)),
+    )
+    .unwrap();
+    assert_eq!(guarded(&late, &f.home), base);
+    // The line at the start of a large file is seen.
+    let early = mkdir(&other.join("early"));
+    fs::write(early.join(".git"), format!("{line}{}", "x".repeat(1 << 20))).unwrap();
+    let p = guarded(&early, &f.home);
+    assert_eq!(p.key, project(&main, &f.home).key);
+    assert_eq!(p.label, "shop");
+}
+
+#[test]
+fn a_gitdir_to_root_or_home_is_never_a_key() {
+    let f = fixture();
+    // Dotfiles: HOME has a repository. Its common directory names HOME.
+    mkdir(&f.home.join(".git"));
+    let work = mkdir(&f.home.join("work"));
+    let above = f.home.parent().unwrap().to_string_lossy().into_owned();
+    for (name, gitdir) in [
+        ("root", "/".to_owned()),
+        ("home", f.home.to_string_lossy().into_owned()),
+        (
+            "dotfiles",
+            f.home.join(".git").to_string_lossy().into_owned(),
+        ),
+        ("above", above),
+        ("relative", "../../..".to_owned()),
+    ] {
+        let folder = gitdir_file(&work, name, &gitdir);
+        let p = guarded(&folder, &f.home);
+        assert_eq!(p.key, folder.to_string_lossy(), "gitdir {gitdir}");
+        assert_eq!(p.root, folder, "gitdir {gitdir}");
+    }
+    // A `.git` symlink to the root or to HOME.
+    for (name, target) in [("link-root", Path::new("/")), ("link-home", &f.home)] {
+        let folder = mkdir(&work.join(name));
+        std::os::unix::fs::symlink(target, folder.join(".git")).unwrap();
+        let p = guarded(&folder, &f.home);
+        assert_eq!(p.key, folder.to_string_lossy(), "{name}");
+    }
+}
+
+#[test]
+fn a_commondir_at_or_above_home_is_never_a_key() {
+    let f = fixture();
+    let root = repo(&f.home, "shop");
+    let base = project(&root, &f.home);
+    // home/meta/NAME/commondir: `../..` is HOME, `../../..` is above HOME, and an
+    // absolute `/` is the root.
+    for (name, commondir) in [("home", "../.."), ("above", "../../.."), ("root", "/")] {
+        let gitdir = mkdir(&f.home.join("meta").join(name));
+        fs::write(gitdir.join("commondir"), format!("{commondir}\n")).unwrap();
+        let wt = gitdir_file(&root, name, &gitdir.to_string_lossy());
+        assert_eq!(guarded(&wt, &f.home), base, "commondir {commondir}");
+        // Without a repository above, the folder is its own project.
+        let alone = gitdir_file(&f.home.join("alone"), name, &gitdir.to_string_lossy());
+        let p = guarded(&alone, &f.home);
+        assert_eq!(p.key, alone.to_string_lossy(), "commondir {commondir}");
+    }
+}
+
+#[test]
+fn a_git_symlink_to_a_repository_is_followed() {
+    let f = fixture();
+    let main = repo(&f.home, "shop");
+    let folder = mkdir(&f.home.join("mirror"));
+    std::os::unix::fs::symlink(main.join(".git"), folder.join(".git")).unwrap();
+    let p = guarded(&folder, &f.home);
+    assert_eq!(p.key, project(&main, &f.home).key);
+    assert_eq!(p.label, "shop");
+    assert_eq!(p.root, folder);
 }
