@@ -694,11 +694,13 @@ fn view_steps() -> Vec<Step> {
         Key(egui::Key::N, cmd),
         Wait(1.0),
         Paste(DOT_ENV),
-        Wait(1.5),
+        Wait(1.0),
+        // The paste shows masked. A click on the left margin of the sheet ends the
+        // keyboard focus of the masked field, as after a paste with the pointer.
+        Click(338.0, 370.0),
+        Wait(1.0),
         Shot("new-credential"),
-        // The first Escape leaves the paste field, the second closes the sheet.
-        Key(egui::Key::Escape, egui::Modifiers::NONE),
-        Wait(0.5),
+        // The paste field no longer has the focus: one Escape closes the sheet.
         Key(egui::Key::Escape, egui::Modifiers::NONE),
         Wait(1.0),
         // Decisions: the question that waits (selected first), a request, a suggestion.

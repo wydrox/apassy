@@ -515,9 +515,9 @@ fn a_new_credential_secret_requires_discard_confirmation() {
     window.idle(&mut app);
     window.press(&mut app, Key::N, Modifiers::COMMAND);
     assert_eq!(app.ui.sheet, Some(Sheet::NewCredential));
-    // The paste field has the focus: Tab reaches "More kinds…", and Return opens the
+    // The paste field has the focus: Tab reaches "Fill in by hand…", and Return opens the
     // kind picker.
-    window.tab_to(&mut app, "More kinds…", 10);
+    window.tab_to(&mut app, "Fill in by hand…", 10);
     window.press(&mut app, Key::Enter, Modifiers::NONE);
     assert_eq!(app.ui.sheet, Some(Sheet::AddItem { kind_chosen: false }));
     window.press(&mut app, Key::Enter, Modifiers::NONE);
@@ -543,7 +543,7 @@ fn change_kind_keeps_typed_data_until_the_owner_confirms_discard() {
     let mut window = Window::new();
     window.idle(&mut app);
     window.press(&mut app, Key::N, Modifiers::COMMAND);
-    window.tab_to(&mut app, "More kinds…", 10);
+    window.tab_to(&mut app, "Fill in by hand…", 10);
     window.press(&mut app, Key::Enter, Modifiers::NONE);
     window.press(&mut app, Key::Enter, Modifiers::NONE);
     window.frame(&mut app, vec![Event::Text("Unsaved credential".to_owned())]);

@@ -1348,7 +1348,7 @@ mod tests {
         );
         let test = suggest(&key_item("Payments", &fake("sk_test_", 24)));
         let environment = test.environment.expect("environment");
-        assert_eq!(environment.value, Environment::Staging);
+        assert_eq!(environment.value, Environment::Development);
         assert!(!environment.conflict);
         assert_eq!(test.risk.expect("risk").value, RiskLevel::Low);
     }
@@ -1363,7 +1363,8 @@ mod tests {
         assert_eq!(environment.value, Environment::Production);
         assert!(environment.conflict);
         assert!(
-            environment.reason.contains("staging") && environment.reason.contains("more sensitive"),
+            environment.reason.contains("development")
+                && environment.reason.contains("more sensitive"),
             "{}",
             environment.reason
         );
