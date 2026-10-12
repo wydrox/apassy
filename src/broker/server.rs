@@ -27,6 +27,8 @@ use crate::agent::wire::{MAX_LINE_BYTES, WireRequest, WireResponse};
 const MAX_CONNECTIONS: usize = 16;
 const MAX_REQUESTS_PER_CONNECTION: usize = 64;
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a question waits for the owner (ADR 0025 §3e: 5 minutes).
+pub const QUESTION_WAIT: Duration = Duration::from_secs(300);
 const ACCEPT_POLL: Duration = Duration::from_millis(50);
 
 /// Broker settings. [`BrokerOptions::platform`] gives the desktop defaults.
@@ -44,7 +46,8 @@ pub struct BrokerOptions {
 }
 
 impl BrokerOptions {
-    /// macOS trust store, 120 s for an owner decision, 300 s for a process, and the
+    /// macOS trust store, 300 s for a question to the owner (ADR 0025 §3e), 300 s for a
+    /// process, and the
     /// bouncer at `APASSY_BOUNCER_URL` or the default local address.
     pub fn platform() -> io::Result<Self> {
         let mut options = Self::with_tls(TlsClient::platform()?);
@@ -55,7 +58,7 @@ impl BrokerOptions {
     pub fn with_tls(tls: TlsClient) -> Self {
         Self {
             tls,
-            approval_timeout: Duration::from_secs(120),
+            approval_timeout: QUESTION_WAIT,
             run_timeout: Duration::from_secs(300),
             bouncer: None,
             model_gate: None,

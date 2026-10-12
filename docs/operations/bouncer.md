@@ -53,7 +53,7 @@ Without the base weights in the Hugging Face cache, the first start downloads th
 
 - The status says "Starting (downloading the model weights, first start only)".
 - The server has 30 minutes to answer, not 180 seconds.
-- In "When a run needs it", the run waits up to 45 seconds, not 25. With the 120 seconds that a run waits for you, the run ends within the 180-second tool time-out of `apassy setup` (`MCP_TOOL_TIMEOUT=180000`, `tool_timeout_sec = 180`). If the server still starts, the run waits for you with the reason "The model server downloads the model weights (first start only). This run waits for you. Later runs use the model." The download goes on. Later runs do not wait for it again: they wait for you with the same reason until the server answers.
+- In "When a run needs it", the run waits up to 45 seconds, not 25. A question waits for you up to 300 seconds (ADR 0025), which is longer than the 180-second tool time-out of `apassy setup` (`MCP_TOOL_TIMEOUT=180000`, `tool_timeout_sec = 180`). If the host ends the call first, the agent sends the same request again and it joins the waiting question. If the server still starts, the run waits for you with the reason "The model server downloads the model weights (first start only). This run waits for you. Later runs use the model." The download goes on. Later runs do not wait for it again: they wait for you with the same reason until the server answers.
 
 "Start now" shows only when the server can start. While the start script or the Laya environment is missing ("Cannot start"), the section has no "Start now", and the rows below the status name what is missing.
 
@@ -100,7 +100,26 @@ The bouncer decides only if the rule has command prefixes. Without prefixes, eve
 
 ## 3. Decision order
 
-Date of this order: 2026-09-26 (ADR 0008, changed by ADR 0010, learning from ADR 0009, and dev rounds 2 and 3). Policy version: `apassy-bouncer-v7`. Code: `decide_learned`, `before_model`, and `owner_required` in `src/broker/bouncer.rs`. Version 4 added step 4a and the calibrated level in step 6. Version 5 changes step 6: a certain read replaces `task_match` only for a known command. See [dev-round2.md](../evaluation/dev-round2.md). Version 6 sets the default `task_match` level to 75%. The other needed answers stay at 80%. The development data for this level is in [dev-round2.md](../evaluation/dev-round2.md).
+### 3.0 Order of the broker (ADR 0025)
+
+A process grant is no longer the authority for a run. A connected agent can use every item that is not archived, unless an exception hides it ("Not for this agent" gives `not_granted`; "Only these items" limits the agent to its list; "Always ask for this agent" asks at each use). A grant that covers the working directory still applies its hard rule and its instruction. After the checks of the request, the broker decides in this order (`src/broker/run.rs`, step 6). The first step that applies decides.
+
+1. Hard rules ask the owner: a rule flag of the command analysis; a production item without an owner allowance for the item, the project, and the kind of action; "Always ask me" of the item, "Always ask for this agent", or a grant in "Ask me each time". An expired grant, a command prefix that is not permitted, a forbidden word, and the hourly limit deny the run before this (`rule_expired`, `rule_command_not_permitted`, `rule_forbidden_word`, `rule_rate_limit`).
+2. No running bouncer: the run asks the owner.
+3. The working directory is no project (the root, the home folder, or a parent of them): the run asks the owner. Nothing can be remembered there.
+4. A remembered answer of the owner exists for each item, the project, and the kind of action (for a production item: a production allowance): the run starts.
+5. A missing user request or a missing declaration asks the owner.
+6. An active remembered pattern starts the run (see [learning](learning.md)).
+7. A declaration value for `environment` or `risk` that comes only from the source `default` asks the owner. A weak signal makes the bouncer stricter.
+8. History: each item was used in this project, with this kind of action, the bouncer allowed that use, and a still connected agent made it. The run starts.
+9. An item without such history asks the owner, unless its declaration is development (or local) with low risk, or a grant of the agent covers the working directory.
+10. The model decides (contract v7, the list below). An unclear answer asks the owner.
+
+A question waits up to 300 seconds. The owner can answer "Allow once", "Allow ACTION in PROJECT" (remembered for all agents), "Allow production for PROJECT: ACTION", or "Deny", and can make the agent stricter. See [the agent path](agent-path.md), section 8d. A model, a pattern, and the usage log never write an answer and never make a production allowance. A restore removes all answers. The history of agents that a restore revoked does not count.
+
+The list below is the detail of the model step (step 10) and of the rules before it. Its step 2 now has the exception of an owner allowance, and its steps 4 and 4a come in the order above.
+
+Date of the list below: 2026-09-26 (ADR 0008, changed by ADR 0010, learning from ADR 0009, and dev rounds 2 and 3). Policy version: `apassy-bouncer-v7`. Code: `decide_learned`, `before_model`, and `owner_required` in `src/broker/bouncer.rs`. Version 4 added step 4a and the calibrated level in step 6. Version 5 changes step 6: a certain read replaces `task_match` only for a known command. See [dev-round2.md](../evaluation/dev-round2.md). Version 6 sets the default `task_match` level to 75%. The other needed answers stay at 80%. The development data for this level is in [dev-round2.md](../evaluation/dev-round2.md).
 
 Version 7 (dev round 3, [dev-round3.md](../evaluation/dev-round3.md)) changes steps 6 and 7:
 
@@ -108,7 +127,7 @@ Version 7 (dev round 3, [dev-round3.md](../evaluation/dev-round3.md)) changes st
 - **A known write is never a certain read.** The packs list the write commands of known tools (`writes`, for example `gh pr comment`, `gh issue close`, `git push`, SQL `INSERT`). For such a command the model's `writes` answer does not replace `task_match`, and a high-risk or irreversible declaration always asks. On held-out v3 the base model gave `writes` 0.08 and 0.10 to `gh pr comment` and `gh issue close`.
 
 1. Hard rule: expiry, prefixes, forbidden words, runs per hour. A failure is a denial.
-2. Production rule (ADR 0010). If an item in the run has a production declaration, the run waits for the owner. The broker does not call the model. This step comes before every model step. The model, remembered patterns, and threshold calibration come after it, so they cannot change it. A known safe command, a read-only command, and a fully certain model answer also wait.
+2. Production rule (ADR 0010, ADR 0025). If an item in the run has a production declaration and the owner has no production allowance for the item, the project, and the kind of action, the run waits for the owner. The broker does not call the model. This step comes before every model step. The model, remembered patterns, and threshold calibration come after it, so they cannot change it. A known safe command, a read-only command, and a fully certain model answer also wait.
 3. Command analysis (`src/broker/shell_risk.rs`). It parses the command like a shell: quotes, pipes, `&&`, redirects, `$( )`, `sh -c`, and `NAME=value` prefixes. Rules for each program and general rules give flags: `secret_output`, `data_loss`, `irreversible`, `production`, `real_recipient`, `remote_code`, `remote_access`, `system_change`, `new_dependency`, `privilege`, `injection_phrase`. The analysis looks for injection phrases in the purpose and in the user request (version 5). A flag always asks the owner. The broker does not call the model. Dev round 4 added `secret_output` for debug and trace settings with a bound secret (`TF_LOG=TRACE`, Git trace variables, `NODE_DEBUG=http`, `DEBUG=*`, `aws --debug`, `gcloud --log-http`, `az --debug`, `kubectl -v=8`, `ansible -vvv`, `bash -x`, and others), and for more secret value reads (`kubectl get secret ... --template`, `helm status -o json`, `aws ecr get-login-password`). See [rule-packs.md](rule-packs.md).
 4. A missing user request or a missing declaration asks the owner.
 4a. Remembered pattern (ADR 0009 step 1, ADR 0010). If an active pattern matches the request, the run starts without a prompt. The broker does not call the model. The pattern replaces only steps 5 to 7. It cannot change steps 1 to 4. See [learning](learning.md).

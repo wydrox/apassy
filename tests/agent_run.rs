@@ -502,14 +502,16 @@ fn a_run_result_stays_in_the_vault_of_the_run() {
     );
 }
 
+/// ADR 0025: a grant is no authority. Outside its folder the grant gives nothing: the
+/// item has no declaration and no history there, so the run waits for the owner.
 #[test]
 fn working_directory_must_stay_in_the_project() {
-    let fx = fixture(ExecMode::Bouncer, Duration::from_secs(2));
-    assert_eq!(code(&run(&fx, fx.dir.path(), "true")), "outside_project");
+    let fx = fixture(ExecMode::Bouncer, Duration::from_millis(500));
+    assert_eq!(code(&run(&fx, fx.dir.path(), "true")), "approval_timeout");
 
     let escape = fx.project.join("escape");
     std::os::unix::fs::symlink(fx.dir.path(), &escape).expect("symlink");
-    assert_eq!(code(&run(&fx, &escape, "true")), "outside_project");
+    assert_eq!(code(&run(&fx, &escape, "true")), "approval_timeout");
 
     assert_eq!(
         code(&run(&fx, &fx.project.join("missing"), "true")),

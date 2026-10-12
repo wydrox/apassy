@@ -195,6 +195,11 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
     let Ok(grants) = vault.grants_for_agent(agent.id) else {
         return WireResponse::failure("broker_error", "The broker cannot read the grants.");
     };
+    // ADR 0025 §3f: an item of a "Not for this agent" exception, or an item that is not
+    // on the list of an agent with "only these items", is hidden everywhere.
+    let Ok(view) = vault.agent_view(agent.id) else {
+        return WireResponse::failure("broker_error", "The broker cannot read the agent settings.");
+    };
     let mut by_item: BTreeMap<u64, Vec<String>> = BTreeMap::new();
     for grant in grants {
         by_item
@@ -205,7 +210,7 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
     let mut items = Vec::new();
     for (item_id, operations) in by_item {
         // An archived item is not for agents. The broker refuses each request with it.
-        if vault.is_archived(item_id).unwrap_or(true) {
+        if vault.is_archived(item_id).unwrap_or(true) || !view.visible(item_id) {
             continue;
         }
         let Ok(details) = vault.details(item_id) else {
@@ -232,7 +237,7 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
     }
     let mut process_access = Vec::new();
     for grant in vault.exec_grants_for_agent(agent.id).unwrap_or_default() {
-        if vault.is_archived(grant.item_id).unwrap_or(true) {
+        if vault.is_archived(grant.item_id).unwrap_or(true) || !view.visible(grant.item_id) {
             continue;
         }
         let Ok(details) = vault.details(grant.item_id) else {
@@ -270,20 +275,15 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
             "owner_review_needed": vault.needs_review(grant.item_id).unwrap_or(true),
         }));
     }
-    let sees_all = vault.agent_sees_all(agent.id).unwrap_or(false);
+    let sees_all = vault.agent_sees_all(agent.id).unwrap_or(false) && !view.restricted;
     let mut answer = json!({
         "agent": agent.name,
         "items": items,
         "process_access": process_access,
         "sees_all_credentials": sees_all,
-        "note": "Secret values are never returned. Use apassy_use_credential for a connector operation. Use apassy_run_with_secrets to run a command with process_access items in its environment.",
+        "catalog": catalog(vault, agent.id),
+        "note": "Secret values are never returned. `catalog` lists the credentials that this agent may use, without secret values, with the folder of each. A credential with access \"can_use\" or \"can_request\" works in apassy_run_with_secrets with its env_name: the bouncer decides each use, and it can ask the owner in the Apassy app while the call waits (up to 5 minutes). When the call fails with question_waiting, another question of this agent waits; the same request again joins the waiting question. Use apassy_use_credential for a connector operation.",
     });
-    if sees_all {
-        answer["catalog"] = catalog(vault, agent.id);
-        answer["note"] = json!(
-            "Secret values are never returned. `catalog` lists every credential of the owner without secret values. A credential with access \"can_request\" works in apassy_run_with_secrets with its env_name: the owner approves its first use in the Apassy app while the call waits, and can give access for the project folder. apassy_request_access asks for access without a run; it does not wait."
-        );
-    }
     let requests: Vec<Value> = vault
         .agent_access_requests(agent.id, 20)
         .unwrap_or_default()
@@ -302,8 +302,9 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
     WireResponse::success(answer)
 }
 
-/// Every credential that is not archived, without values (ADR 0012), with what the
-/// agent can do with it.
+/// Every credential that is not archived and that the exceptions of the agent do not
+/// hide, without values (ADR 0012, ADR 0025 §3f), with its folder and what the agent
+/// can do with it.
 fn catalog(vault: &Vault, agent_id: u64) -> Value {
     let granted: Vec<u64> = vault
         .exec_grants_for_agent(agent_id)
@@ -319,7 +320,7 @@ fn catalog(vault: &Vault, agent_id: u64) -> Value {
         .map(|request| request.item_id)
         .collect();
     let entries: Vec<Value> = vault
-        .catalog()
+        .catalog_for_agent(agent_id)
         .unwrap_or_default()
         .into_iter()
         .map(|entry| {
@@ -343,6 +344,7 @@ fn catalog(vault: &Vault, agent_id: u64) -> Value {
                 "kind": entry.kind,
                 "details": details,
                 "access": access,
+                "folder": entry.folder,
             });
             // ADR 0024: the agent can use the item at once, so it needs the name now.
             if entry.can_use_in_process
@@ -510,9 +512,13 @@ fn prepare(
         WireResponse::failure(code, reason)
     };
 
+    // ADR 0025 §3f: an exception that hides the item wins over a connector grant.
+    let visible = vault
+        .agent_view(agent.id)
+        .is_ok_and(|view| view.visible(item_id));
     match vault.has_grant(agent.id, item_id, operation) {
-        Ok(true) => {}
-        Ok(false) => {
+        Ok(true) if visible => {}
+        Ok(_) => {
             return Err(deny(
                 vault,
                 "not_granted",

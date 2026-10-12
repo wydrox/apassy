@@ -815,6 +815,7 @@ fn a_switch_ends_waiting_runs_and_clears_the_state_of_the_vault() {
                     request_source: String::new(),
                     agent_request: String::new(),
                     remember: None,
+                    question: Default::default(),
                 },
                 Duration::from_secs(20),
                 || true,

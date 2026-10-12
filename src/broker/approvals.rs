@@ -21,6 +21,18 @@
 //! change, and a phone can approve such a run only once. "Allow in this folder"
 //! ([`OwnerAction::ApproveAndGrant`]) names the run and the offer exactly as the owner
 //! saw them. The broker saves the grant after its second check.
+//!
+//! ADR 0025: each waiting run is a question with a [`QuestionInfo`] for the card ("Why you
+//! are asked"). An agent has at most one waiting question
+//! ([`ApprovalQueue::wait_for_question`]). The same request of the same agent again, in
+//! the same vault session, joins the waiting question instead: the newest call gets the
+//! answer, and an older call ends at once, so one answer starts one run. A call never
+//! joins the question of another agent. "Allow ACTION in PROJECT"
+//! ([`OwnerAction::ApproveInProject`]) and "Allow production for PROJECT: ACTION"
+//! ([`OwnerAction::AllowProduction`]) approve the run and give the broker an
+//! [`AnswerChoice`] that it remembers after its second check. The stricter answers
+//! ("Not for this agent", "Always ask for this agent", "Disconnect the agent") deny the
+//! run and need no owner check ([`ApprovalQueue::deny_stricter`]).
 
 mod owner_auth;
 
@@ -30,11 +42,16 @@ use std::path::Path;
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use crate::vault::{Declaration, SuggestedDeclaration};
+use super::action_kind::ActionKind;
+use super::project::Project;
+use crate::vault::exceptions::ExceptionKind;
+use crate::vault::{
+    Declaration, SuggestedDeclaration, Vault, VaultError, VaultErrorKind, VaultResult,
+};
 
 pub use owner_auth::{
     CheckMethod, OwnerAction, OwnerAuthError, OwnerCheck, OwnerGate, OwnerProof, PROOF_LIFETIME,
-    ProofRefusal, grant_declarations, grant_has_production, touch_id_detail,
+    ProofRefusal, action_words, grant_declarations, grant_has_production, touch_id_detail,
 };
 
 /// How often a waiting run checks that its vault session is still valid.
@@ -61,6 +78,49 @@ pub struct PendingRun {
     /// The pattern that "Approve and remember" teaches (ADR 0010). `None` when the run
     /// cannot teach a pattern, for example a production run or a run with a rule flag.
     pub remember: Option<RememberOffer>,
+    /// What the question is about and why the owner is asked (ADR 0025). It is not in
+    /// the digest that an iPhone signs, so a phone approves the run once only.
+    pub question: QuestionInfo,
+}
+
+/// The question of a waiting run (ADR 0025 §3): the items, the project, the kind of
+/// action, and why the owner is asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestionInfo {
+    /// The ID of the waiting run. The queue sets it.
+    pub id: u64,
+    pub item_ids: Vec<u64>,
+    /// The project of the working directory. `None`: the folder is too wide to be a
+    /// project, and no answer can be remembered.
+    pub project: Option<Project>,
+    pub action: ActionKind,
+    /// An item of the run has a production declaration without an allowance.
+    pub production: bool,
+    /// Why the owner is asked, for the card. No secret value.
+    pub why: String,
+}
+
+impl Default for QuestionInfo {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            item_ids: Vec::new(),
+            project: None,
+            action: ActionKind::Change,
+            production: false,
+            why: String::new(),
+        }
+    }
+}
+
+/// What "Allow ACTION in PROJECT" or "Allow production for PROJECT: ACTION" remembers
+/// after the broker checks the run again (ADR 0025 §3, §3b).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnswerChoice {
+    pub project: Project,
+    pub action: ActionKind,
+    /// "Allow production": the production items get a production allowance.
+    pub production: bool,
 }
 
 /// A pattern that the owner can teach with "Approve and remember".
@@ -202,12 +262,16 @@ pub struct GrantChoice {
 }
 
 /// The end of a wait: the outcome, the check that the owner did for an approval, and
-/// for "Allow in this folder" what the broker saves.
+/// for "Allow in this folder" or a remembered answer what the broker saves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settled {
     pub outcome: ApprovalOutcome,
     pub method: Option<CheckMethod>,
     pub grant: Option<GrantChoice>,
+    /// The answer to remember (ADR 0025).
+    pub answer: Option<AnswerChoice>,
+    /// The call joined a question that already waited.
+    pub attached: bool,
 }
 
 impl Settled {
@@ -216,14 +280,37 @@ impl Settled {
             outcome,
             method: None,
             grant: None,
+            answer: None,
+            attached: false,
         }
     }
 }
 
-/// [`ApprovalQueue::wait_for_first_use`] refused the wait: a first use of the same
-/// agent already waits (ADR 0024).
+/// [`ApprovalQueue::wait_for_first_use`] refused the wait: a question of the same
+/// agent already waits (ADR 0024, ADR 0025).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FirstUseBusy;
+
+/// Why [`ApprovalQueue::wait_for_question`] gave no answer to this call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuestionRefusal {
+    /// Another question of the same agent waits.
+    Busy,
+    /// A newer identical call of the same agent joined the question and gets the answer.
+    Superseded,
+}
+
+/// A stricter answer to a question (ADR 0025 §3f). It denies the run and needs no owner
+/// check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StricterAnswer {
+    /// "Not for this agent": each item of the question.
+    NeverForAgent,
+    /// "Always ask for this agent": each item of the question.
+    AlwaysAskForAgent,
+    /// "Disconnect the agent".
+    Disconnect,
+}
 
 /// The owner answer that a waiting run gets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,6 +320,10 @@ enum Answer {
     ApproveAndRemember,
     /// Approve the run and give the agent access at first use (ADR 0024).
     ApproveAndGrant,
+    /// Approve the run and remember a project answer (ADR 0025).
+    ApproveInProject,
+    /// Approve the run and allow production (ADR 0025 §3b).
+    AllowProduction,
     Deny,
 }
 
@@ -269,6 +360,14 @@ pub enum ApprovalRefusal {
     /// The declarations of "Allow in this folder" do not match the first use: each
     /// item without a declaration needs exactly one.
     DeclarationsDoNotMatch,
+    /// A remembered answer for a run without a project, or for another project or
+    /// kind of action than the question names.
+    NoProject,
+    /// "Allow production" for a question without a production item.
+    NotProduction,
+    /// "Allow ACTION in PROJECT" for a question with a production item: production
+    /// needs its own allowance.
+    ProductionNeedsAllowance,
 }
 
 impl ApprovalRefusal {
@@ -289,6 +388,15 @@ impl ApprovalRefusal {
             Self::DeclarationsDoNotMatch => {
                 "Each new credential needs one declaration. Nothing was approved. Review the request again."
             }
+            Self::NoProject => {
+                "This run has no project to remember. Nothing was approved. Use \"Allow once\"."
+            }
+            Self::NotProduction => {
+                "This run uses no production credential. Nothing was approved. Review the request again."
+            }
+            Self::ProductionNeedsAllowance => {
+                "A production credential needs \"Allow production\". Nothing was approved."
+            }
         }
     }
 }
@@ -299,6 +407,28 @@ struct Decision {
     answer: Answer,
     method: Option<CheckMethod>,
     grant: Option<GrantChoice>,
+    remember: Option<AnswerChoice>,
+}
+
+/// The question of one waiting run (ADR 0025).
+#[derive(Debug, Clone)]
+struct Question {
+    agent_id: u64,
+    /// The vault session of the question. A call from another session never joins it.
+    session: [u8; 32],
+    /// The run as it waits, with its IDs set to 0. An identical call joins it.
+    template: PendingRun,
+    deadline: Instant,
+    /// Grows with each call that joins. Only the newest call takes the answer.
+    turn: u64,
+}
+
+/// The run with its IDs at 0, to compare two calls.
+fn template_of(run: &PendingRun) -> PendingRun {
+    let mut template = run.clone();
+    template.id = 0;
+    template.question.id = 0;
+    template
 }
 
 #[derive(Debug, Default)]
@@ -312,6 +442,8 @@ struct QueueState {
     pending: Vec<PendingRun>,
     /// The first-use offer of a waiting run (ADR 0024).
     offers: BTreeMap<u64, FirstUseOffer>,
+    /// The question of each waiting run of a known agent (ADR 0025).
+    questions: BTreeMap<u64, Question>,
     decisions: BTreeMap<u64, Decision>,
     /// When each waiting run started to wait. It is not part of the run, so the
     /// equality of two runs (and an owner proof for one) does not depend on it.
@@ -422,6 +554,8 @@ impl ApprovalQueue {
         let answer = match proof.action() {
             OwnerAction::ApproveAndRemember(_) => Answer::ApproveAndRemember,
             OwnerAction::ApproveAndGrant { .. } => Answer::ApproveAndGrant,
+            OwnerAction::ApproveInProject { .. } => Answer::ApproveInProject,
+            OwnerAction::AllowProduction { .. } => Answer::AllowProduction,
             _ => Answer::Approve,
         };
         let method = proof.method();
@@ -432,7 +566,16 @@ impl ApprovalQueue {
             Some(waiting) if answer == Answer::ApproveAndRemember && waiting.remember.is_none() => {
                 Err(ApprovalRefusal::NothingToRemember)
             }
-            Some(_) => {
+            Some(waiting) => {
+                let remember = match proof.action() {
+                    OwnerAction::ApproveInProject {
+                        project, action, ..
+                    } => Some(Self::answer_choice(waiting, project, *action, false)?),
+                    OwnerAction::AllowProduction {
+                        project, action, ..
+                    } => Some(Self::answer_choice(waiting, project, *action, true)?),
+                    _ => None,
+                };
                 let grant = match proof.action() {
                     OwnerAction::ApproveAndGrant {
                         offer,
@@ -445,10 +588,44 @@ impl ApprovalQueue {
                     )?),
                     _ => None,
                 };
-                Self::settle(&mut state, confirmed.id, answer, Some(method), grant);
+                Self::settle(
+                    &mut state,
+                    confirmed.id,
+                    answer,
+                    Some(method),
+                    grant,
+                    remember,
+                );
                 self.changed.notify_all();
                 Ok(())
             }
+        }
+    }
+
+    /// The answer of "Allow ACTION in PROJECT" or "Allow production": the project and
+    /// the kind of action must be those of the waiting question, and production needs
+    /// its own answer (ADR 0025 §3b).
+    fn answer_choice(
+        waiting: &PendingRun,
+        project: &Project,
+        action: ActionKind,
+        production: bool,
+    ) -> Result<AnswerChoice, ApprovalRefusal> {
+        let question = &waiting.question;
+        if question.item_ids.is_empty()
+            || question.project.as_ref() != Some(project)
+            || question.action != action
+        {
+            return Err(ApprovalRefusal::NoProject);
+        }
+        match (production, question.production) {
+            (true, false) => Err(ApprovalRefusal::NotProduction),
+            (false, true) => Err(ApprovalRefusal::ProductionNeedsAllowance),
+            _ => Ok(AnswerChoice {
+                project: project.clone(),
+                action,
+                production,
+            }),
         }
     }
 
@@ -500,9 +677,64 @@ impl ApprovalQueue {
         if !state.pending.iter().any(|run| run.id == id) {
             return false;
         }
-        Self::settle(&mut state, id, Answer::Deny, None, None);
+        Self::settle(&mut state, id, Answer::Deny, None, None, None);
         self.changed.notify_all();
         true
+    }
+
+    /// Deny a waiting question and make the agent stricter (ADR 0025 §3f): "Not for this
+    /// agent" or "Always ask for this agent" for each item of the question, or
+    /// "Disconnect the agent". It takes authority away and needs no owner check.
+    ///
+    /// The caller holds the vault (the owner thread takes the vault lock, then the queue
+    /// lock). `Ok(false)`: the run no longer waits, and nothing changed. A run without a
+    /// known agent is not denied (`InvalidInput`): use [`Self::deny`]. When the vault
+    /// change fails, the run is still denied and the error is returned.
+    pub fn deny_stricter(
+        &self,
+        id: u64,
+        stricter: StricterAnswer,
+        vault: &mut Vault,
+    ) -> VaultResult<bool> {
+        let mut state = self.state();
+        let Some(run) = state.pending.iter().find(|run| run.id == id).cloned() else {
+            return Ok(false);
+        };
+        let Some(agent) = state.questions.get(&id).map(|question| question.agent_id) else {
+            return Err(VaultError::new(VaultErrorKind::InvalidInput));
+        };
+        let changed = match stricter {
+            StricterAnswer::NeverForAgent | StricterAnswer::AlwaysAskForAgent => {
+                let kind = if stricter == StricterAnswer::NeverForAgent {
+                    ExceptionKind::Never
+                } else {
+                    ExceptionKind::AlwaysAsk
+                };
+                run.question
+                    .item_ids
+                    .iter()
+                    .try_for_each(|item| vault.add_agent_exception(agent, *item, kind))
+            }
+            StricterAnswer::Disconnect => vault.revoke_agent(agent),
+        };
+        Self::settle(&mut state, id, Answer::Deny, None, None, None);
+        self.changed.notify_all();
+        changed.map(|()| true)
+    }
+
+    /// "Deny, and not for this agent".
+    pub fn deny_and_never(&self, id: u64, vault: &mut Vault) -> VaultResult<bool> {
+        self.deny_stricter(id, StricterAnswer::NeverForAgent, vault)
+    }
+
+    /// "Deny, and always ask for this agent".
+    pub fn deny_and_always_ask(&self, id: u64, vault: &mut Vault) -> VaultResult<bool> {
+        self.deny_stricter(id, StricterAnswer::AlwaysAskForAgent, vault)
+    }
+
+    /// "Deny, and disconnect the agent".
+    pub fn deny_and_disconnect(&self, id: u64, vault: &mut Vault) -> VaultResult<bool> {
+        self.deny_stricter(id, StricterAnswer::Disconnect, vault)
     }
 
     fn settle(
@@ -511,16 +743,19 @@ impl ApprovalQueue {
         answer: Answer,
         method: Option<CheckMethod>,
         grant: Option<GrantChoice>,
+        remember: Option<AnswerChoice>,
     ) {
         state.pending.retain(|run| run.id != id);
         state.waiting_since.remove(&id);
         state.offers.remove(&id);
+        state.questions.remove(&id);
         state.decisions.insert(
             id,
             Decision {
                 answer,
                 method,
                 grant,
+                remember,
             },
         );
     }
@@ -530,6 +765,7 @@ impl ApprovalQueue {
         state.pending.retain(|pending| pending.id != id);
         state.waiting_since.remove(&id);
         state.offers.remove(&id);
+        state.questions.remove(&id);
     }
 
     /// End every waiting run and every decision that a run did not use yet. The
@@ -541,6 +777,7 @@ impl ApprovalQueue {
         state.pending.clear();
         state.waiting_since.clear();
         state.offers.clear();
+        state.questions.clear();
         state.decisions.clear();
         self.changed.notify_all();
     }
@@ -574,11 +811,30 @@ impl ApprovalQueue {
         timeout: Duration,
         still_valid: impl Fn() -> bool,
     ) -> (ApprovalOutcome, Option<CheckMethod>) {
-        let settled = match self.wait(run, None, timeout, still_valid) {
+        let settled = match self.wait(run, None, None, timeout, still_valid) {
             Ok(settled) => settled,
-            Err(FirstUseBusy) => Settled::ended(ApprovalOutcome::Invalidated),
+            Err(_) => Settled::ended(ApprovalOutcome::Invalidated),
         };
         (settled.outcome, settled.method)
+    }
+
+    /// Put the question of `agent_id` in the queue and wait for the owner or the timeout
+    /// (ADR 0025). `session` is the vault epoch of the run.
+    ///
+    /// An agent has at most one waiting question: another question of the agent gives
+    /// [`QuestionRefusal::Busy`]. The same run again (equal except for its IDs), from the
+    /// same agent in the same session, joins the waiting question and keeps its time
+    /// limit; the older call then ends with [`QuestionRefusal::Superseded`], so only the
+    /// newest call gets the answer and one answer starts one run.
+    pub fn wait_for_question(
+        &self,
+        run: PendingRun,
+        agent_id: u64,
+        session: [u8; 32],
+        timeout: Duration,
+        still_valid: impl Fn() -> bool,
+    ) -> Result<Settled, QuestionRefusal> {
+        self.wait(run, None, Some((agent_id, session)), timeout, still_valid)
     }
 
     /// Like [`Self::wait_for_decision`], for a run with a first use (ADR 0024). The
@@ -592,41 +848,88 @@ impl ApprovalQueue {
         timeout: Duration,
         still_valid: impl Fn() -> bool,
     ) -> Result<Settled, FirstUseBusy> {
-        self.wait(run, Some(offer), timeout, still_valid)
+        let agent = (offer.agent_id, [0; 32]);
+        self.wait(run, Some(offer), Some(agent), timeout, still_valid)
+            .map_err(|_| FirstUseBusy)
     }
 
     fn wait(
         &self,
         mut run: PendingRun,
         offer: Option<FirstUseOffer>,
+        agent: Option<(u64, [u8; 32])>,
         timeout: Duration,
         still_valid: impl Fn() -> bool,
-    ) -> Result<Settled, FirstUseBusy> {
-        let deadline = Instant::now() + timeout;
+    ) -> Result<Settled, QuestionRefusal> {
         let mut state = self.state();
         if state.closed {
             return Ok(Settled::ended(ApprovalOutcome::Invalidated));
         }
-        if let Some(offer) = &offer
-            && state
-                .offers
-                .values()
-                .any(|waiting| waiting.agent_id == offer.agent_id)
-        {
-            return Err(FirstUseBusy);
-        }
-        state.next_id = state.next_id.wrapping_add(1);
-        let id = state.next_id;
         let generation = state.generation;
-        run.id = id;
-        state.pending.push(run);
-        state.waiting_since.insert(id, Instant::now());
-        if let Some(offer) = offer {
-            state.offers.insert(id, offer);
-        }
+        let template = template_of(&run);
+        let joined = match agent {
+            Some((agent_id, session)) => {
+                match state
+                    .questions
+                    .iter_mut()
+                    .find(|(_, question)| question.agent_id == agent_id)
+                {
+                    Some((id, question))
+                        if offer.is_none()
+                            && question.session == session
+                            && question.template == template =>
+                    {
+                        question.turn = question.turn.wrapping_add(1);
+                        Some((*id, question.turn, question.deadline))
+                    }
+                    Some(_) => return Err(QuestionRefusal::Busy),
+                    None => None,
+                }
+            }
+            None => None,
+        };
+        let attached = joined.is_some();
+        let (id, turn, deadline) = match joined {
+            Some(joined) => joined,
+            None => {
+                let deadline = Instant::now() + timeout;
+                state.next_id = state.next_id.wrapping_add(1);
+                let id = state.next_id;
+                run.id = id;
+                run.question.id = id;
+                state.pending.push(run);
+                state.waiting_since.insert(id, Instant::now());
+                if let Some(offer) = offer {
+                    state.offers.insert(id, offer);
+                }
+                if let Some((agent_id, session)) = agent {
+                    state.questions.insert(
+                        id,
+                        Question {
+                            agent_id,
+                            session,
+                            template,
+                            deadline,
+                            turn: 0,
+                        },
+                    );
+                }
+                (id, 0, deadline)
+            }
+        };
         self.changed.notify_all();
         drop(state);
-        self.notify_owner();
+        if !attached {
+            self.notify_owner();
+        }
+        // The newest call that joined the question takes the answer.
+        let superseded = |state: &QueueState| {
+            agent.is_some()
+                && state
+                    .questions
+                    .get(&id)
+                    .is_some_and(|question| question.turn != turn)
+        };
         loop {
             let mut state = self.state();
             if state.generation != generation {
@@ -634,9 +937,14 @@ impl ApprovalQueue {
                 state.decisions.remove(&id);
                 return Ok(Settled::ended(ApprovalOutcome::Invalidated));
             }
+            if superseded(&state) {
+                return Err(QuestionRefusal::Superseded);
+            }
             if let Some(decision) = state.decisions.remove(&id) {
                 let outcome = match decision.answer {
-                    Answer::Approve => ApprovalOutcome::Approved,
+                    Answer::Approve | Answer::ApproveInProject | Answer::AllowProduction => {
+                        ApprovalOutcome::Approved
+                    }
                     Answer::ApproveAndRemember => ApprovalOutcome::ApprovedAndRemembered,
                     Answer::ApproveAndGrant => ApprovalOutcome::ApprovedAndGranted,
                     Answer::Deny => ApprovalOutcome::Denied,
@@ -645,12 +953,22 @@ impl ApprovalQueue {
                     outcome,
                     method: decision.method,
                     grant: decision.grant,
+                    answer: decision.remember,
+                    attached,
                 });
+            }
+            if !state.pending.iter().any(|pending| pending.id == id) {
+                // The question ended without an answer for this call: the call that
+                // owned it saw an invalid session.
+                return Ok(Settled::ended(ApprovalOutcome::Invalidated));
             }
             let now = Instant::now();
             if now >= deadline {
                 Self::forget(&mut state, id);
-                return Ok(Settled::ended(ApprovalOutcome::TimedOut));
+                return Ok(Settled {
+                    attached,
+                    ..Settled::ended(ApprovalOutcome::TimedOut)
+                });
             }
             let wait = (deadline - now).min(WATCH_INTERVAL);
             drop(
@@ -663,6 +981,9 @@ impl ApprovalQueue {
             // and then the queue lock, so do not hold the queue lock here.
             if !still_valid() {
                 let mut state = self.state();
+                if superseded(&state) {
+                    return Err(QuestionRefusal::Superseded);
+                }
                 Self::forget(&mut state, id);
                 state.decisions.remove(&id);
                 return Ok(Settled::ended(ApprovalOutcome::Invalidated));
@@ -692,6 +1013,7 @@ mod tests {
             request_source: String::new(),
             agent_request: String::new(),
             remember: None,
+            question: QuestionInfo::default(),
         }
     }
 
@@ -1072,6 +1394,53 @@ mod tests {
         assert_eq!(waiter.join().expect("join"), ApprovalOutcome::Invalidated);
         assert!(queue.state().waiting_since.is_empty(), "invalidated");
         assert!(queue.pending_with_age().is_empty());
+    }
+
+    /// ADR 0025: one waiting question per agent. Only the same run of the same agent in
+    /// the same vault session joins it, and then only the newest call gets the answer.
+    #[test]
+    fn a_question_is_joined_only_by_the_same_run_of_the_same_agent_and_session() {
+        let queue = Arc::new(ApprovalQueue::new());
+        let ask = |agent: u64, session: u8, run: PendingRun| {
+            let queue = Arc::clone(&queue);
+            std::thread::spawn(move || {
+                queue.wait_for_question(run, agent, [session; 32], Duration::from_secs(5), || true)
+            })
+        };
+        let first = ask(7, 1, run());
+        let id = wait_until_pending(&queue);
+        assert_eq!(queue.pending()[0].question.id, id);
+        let mut other = run();
+        other.command = vec!["false".to_owned()];
+        let wait = Duration::from_secs(5);
+        assert_eq!(
+            queue.wait_for_question(other, 7, [1; 32], wait, || true),
+            Err(QuestionRefusal::Busy)
+        );
+        assert_eq!(
+            queue.wait_for_question(run(), 7, [2; 32], wait, || true),
+            Err(QuestionRefusal::Busy),
+            "another vault session never joins"
+        );
+        let foreign = ask(8, 1, run());
+        while queue.pending().len() < 2 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let joined = ask(7, 1, run());
+        assert_eq!(
+            first.join().expect("join"),
+            Err(QuestionRefusal::Superseded)
+        );
+        assert_eq!(queue.pending().len(), 2);
+        assert!(queue.deny(id));
+        let settled = joined.join().expect("join").expect("an answer");
+        assert_eq!(settled.outcome, ApprovalOutcome::Denied);
+        assert!(settled.attached);
+        let waiting = queue.pending();
+        assert_eq!(waiting.len(), 1, "the other agent still waits");
+        assert!(queue.deny(waiting[0].id));
+        let settled = foreign.join().expect("join").expect("an answer");
+        assert!(!settled.attached);
     }
 
     #[test]

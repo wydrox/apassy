@@ -89,6 +89,7 @@ mod tests {
                 approvals: 1,
                 needed: 3,
             }),
+            question: Default::default(),
         }
     }
 

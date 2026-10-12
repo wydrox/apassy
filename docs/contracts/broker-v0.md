@@ -54,7 +54,15 @@ The `run` action is in [ADR 0006](../adr/0006-process-secrets.md). Its check ord
 
 A run with a variable in placeholder mode ([ADR 0011](../adr/0011-run-proxy-placeholders.md)) also has `placeholders` (the variable names) and `network`: `proxy` (true), `only_proxy` (true when the macOS network rule was on), and `requests`. Each request has `host`, `port`, `method`, `path` (without the query), `status`, `outcome` (`swapped`, `passed`, `tunneled`, `refused`, or `failed`), `secrets` (the variables whose value went in), and `reason`. When the run proxy cannot start, the code is `proxy_failed` and the command does not run. In `list_access`, each `process_access` entry has `env_holds` ("the real value" or "a placeholder") and `real_value_only_for_hosts`.
 
-[ADR 0012](../adr/0012-agent-visibility-and-access-requests.md) adds to `list_access`: `sees_all_credentials`; for each `process_access` entry `any_folder`, with `project_dir` null for any folder; `catalog` when the owner lets the agent see all credentials (`item_id`, `item_name`, `kind`, `details`, `access`: `can_use`, `can_request`, `requested`, or `no_variable`); and `access_requests` (`request_id`, `item_id`, `state`: `open`, `granted`, or `denied`). The action `request_access` has `item_id`, `reason`, and an optional `cwd`. It answers at once with `request_id`, `state`, and `new`. Its codes are `not_visible`, `invalid_request`, `already_granted`, and `too_many_requests`.
+[ADR 0012](../adr/0012-agent-visibility-and-access-requests.md) adds to `list_access`: `sees_all_credentials`; for each `process_access` entry `any_folder`, with `project_dir` null for any folder; `catalog` (`item_id`, `item_name`, `kind`, `details`, `access`); and `access_requests` (`request_id`, `item_id`, `state`: `open`, `granted`, or `denied`).
+
+[ADR 0025](../adr/0025-low-friction-access.md) changes the catalog:
+
+- `catalog` is always present, for every agent. It lists each credential that is not archived and that no exception hides from the agent (section 4b).
+- Each entry has `folder`: the names of the folders of the credential, from the root. The array is empty for a credential in the root.
+- `access` is `needs_field` (the credential has no secret field to use in a command), `can_use`, `requested`, or `can_request`. Any other connected agent can use a `can_request` credential in a run: the bouncer decides, and it can ask the owner.
+- `sees_all_credentials` is `false` also for an agent that an exception limits to a list ("only these items").
+- `process_access` and `items` do not list a credential that is hidden from the agent. The action `request_access` has `item_id`, `reason`, and an optional `cwd`. It answers at once with `request_id`, `state`, and `new`. Its codes are `not_visible`, `invalid_request`, `already_granted`, and `too_many_requests`.
 
 ```json
 {"v":0,"token":"apassy_agt_<64 hex>","action":{"kind":"request_access","item_id":7,"reason":"The user asked me to deploy the staging app.","cwd":"/Users/me/Dev/shop"}}
@@ -86,7 +94,7 @@ The broker does the checks in this order:
 
 1. The vault is open and unlocked. If not, the code is `vault_locked`.
 2. The token belongs to an active agent of the open vault. If not, the code is `unauthenticated`; the text says that the token is not valid for the vault that is open now, and names no other vault ([ADR 0013](../adr/0013-multiple-vaults.md)). If the token is older than the token lifetime, the code is `token_expired`. The activity log names the agent.
-3. The agent has a grant for the item and the operation. If not, the code is `not_granted`.
+3. The agent has a grant for the item and the operation (a connector call), and no exception hides the item from the agent. If not, the code is `not_granted`. A run does not need a process grant: see section 4b.
 3a. If the item came from a restored backup, the owner confirmed its agent settings. If not, the code is `review_required` (goal item V4, [backup and restore](../operations/backup-restore.md)).
 3b. The item is not archived. If it is, the code is `item_archived` (schema version 10). A process run makes the same check for each item.
 4. The item has a destination. The destination profile is known and has the operation.
@@ -98,6 +106,27 @@ The broker does the checks in this order:
 
 After step 2, the broker records each refusal and each result in the activity log.
 A locked vault cannot record. The broker does not record requests with an unknown token when the vault is locked.
+
+### 4b. Access without a process grant, and questions (ADR 0025)
+
+A process grant is no longer the authority for a run. Every connected agent can use every item that is not archived through `run`, unless an exception of the agent for the item says otherwise (table `agent_exception`):
+
+- `never` ("Not for this agent"): the catalog hides the item and a run gets `not_granted`.
+- `always_ask` ("Always ask for this agent"): each use waits for the owner.
+- `only` ("Only these items"): the agent can use only the items on its list. The row with item 0 is only the marker of the restriction. An agent that does not see all credentials is limited in the same way, and its process grants and connector grants count as items of the list.
+
+An item that does not exist also gives `not_granted`, so the code does not tell which items exist. A connector call (`apassy_use_credential`) still needs a connector grant, and an exception that hides the item wins (`not_granted`).
+
+A process grant that covers the working directory still applies its own hard rule (expiry, `rule_expired`; command prefixes, `rule_command_not_permitted`; forbidden words, `rule_forbidden_word`; hourly limit, `rule_rate_limit`) and its instruction. A grant in "Ask me each time" still asks. A grant gives nothing outside its folder. The order of the bouncer is in [the bouncer](../operations/bouncer.md), section 3.
+
+When the bouncer cannot allow a run, a question waits for the owner:
+
+- The wait is at most 300 seconds. After that the code is `approval_timeout`.
+- An agent has at most one waiting question. A second, different request gets `question_waiting`.
+- The same request of the same agent, in the same vault session, joins the waiting question. The newest call gets the answer. The older call ends at once with `question_waiting` and the text that a newer call took over the question. A call never joins the question of another agent.
+- The code `first_use_waiting` and the offer "Allow in FOLDER" (ADR 0024) are no longer made.
+- If the owner answers "Allow ACTION in PROJECT" or "Allow production for PROJECT: ACTION", the broker saves the answer after its second check, in the same vault session. If the save fails, the code is `answer_failed` and the command does not start.
+- A success response then has `remembered`: a text that says what the owner allowed.
 
 ### 4a. Vault sessions and owner approvals (goal item V3)
 
@@ -118,7 +147,12 @@ A locked vault cannot record. The broker does not record requests with an unknow
 
 ## 6. Error codes
 
-`rule_expired`, `rule_command_not_permitted`, `rule_forbidden_word`, `rule_rate_limit`, `invalid_request`, `outside_project`, `no_env_binding`, `approval_denied`, `approval_timeout`, `approval_invalidated`, `start_failed`, `bad_request`, `unsupported_version`, `busy`, `vault_locked`, `unauthenticated`, `not_granted`, `no_destination`, `unknown_profile`, `unknown_operation`, `invalid_params`, `destination_not_permitted`, `wrong_credential_kind`, `missing_secret`, `destination_unreachable`, `tls_failed`, `destination_refused`, `destination_not_found`, `destination_error`, `bad_output`, `output_blocked`, `broker_error`, `token_expired`, `review_required`, `item_archived`, `proxy_failed`, `not_visible`, `already_granted`, `too_many_requests`.
+`rule_expired`, `rule_command_not_permitted`, `rule_forbidden_word`, `rule_rate_limit`, `invalid_request`, `outside_project`, `no_env_binding`, `approval_denied`, `approval_timeout`, `approval_invalidated`, `start_failed`, `bad_request`, `unsupported_version`, `busy`, `vault_locked`, `unauthenticated`, `not_granted`, `no_destination`, `unknown_profile`, `unknown_operation`, `invalid_params`, `destination_not_permitted`, `wrong_credential_kind`, `missing_secret`, `destination_unreachable`, `tls_failed`, `destination_refused`, `destination_not_found`, `destination_error`, `bad_output`, `output_blocked`, `broker_error`, `token_expired`, `review_required`, `item_archived`, `proxy_failed`, `not_visible`, `already_granted`, `too_many_requests`, `question_waiting`, `answer_failed`.
+
+- `not_granted`: the agent may not use the item. A connector call has no grant for the operation, or an exception hides the item (`never`, or the item is not on the list of an agent with "only these items"), or the item does not exist. The text is the same in each case.
+- `question_waiting`: another question of the agent waits for the owner, or a newer identical call took over the waiting question (section 4b).
+- `answer_failed`: the owner answered "Allow ACTION in PROJECT" or "Allow production", and Apassy could not save the answer. The command did not run.
+- `outside_project`: older code. The broker does not make it for a grant outside its folder any more: such a grant gives nothing, and the bouncer decides (section 4b). The code stays in the list for older clients.
 
 ## 7. Connector profile `reporting-api-v0`
 
@@ -157,12 +191,14 @@ Unlock migrates a version 1 file in one immediate transaction. Create writes ver
 - Token comparison uses constant time over all active agents.
 - Revoke sets `revoked_at` and removes the grants of the agent.
 - Item delete removes the grants and the destination of the item in the same transaction.
-- Restore revokes all agents and removes all grants and rules. The owner must register the agents again. Restore also marks each item with a declaration, an environment variable, or a connector for review (table `restore_review`, schema version 6). The broker refuses a run or a call with a marked item with `review_required` until the owner clicks "Confirm settings".
+- Restore revokes all agents and removes all grants and rules. It also removes every remembered answer of the owner (`owner_answer`), production allowances included. The use history of agents that restore revoked does not count. The owner must register the agents again. Restore also marks each item with a declaration, an environment variable, or a connector for review (table `restore_review`, schema version 6). The broker refuses a run or a call with a marked item with `review_required` until the owner clicks "Confirm settings".
 - The activity log keeps the newest 500 entries.
 - Schema version 4 adds the `rule` column to `exec_grant` and the `run_log` table (ADR 0007). A version 3 grant in "allow" mode becomes "bouncer" mode.
 - Schema version 3 adds `env_binding` and `exec_grant`. Unlock migrates version 1 and 2 files. Item delete, agent revoke, and restore also remove the process grants.
 - Schema version 5 adds the `declaration` table (ADR 0008).
 - Schema version 6 adds `agent.token_issued_at` and `vault_meta.token_lifetime_days` (goal item P1). A token works from its issue time for the token lifetime: 30 days by default, 1 to 365 days. A change of the lifetime applies to every token from its issue time. A rotation replaces the token bytes and sets a new issue time. The old token stops working at once. The migration uses the registration time as the issue time, so a token older than 30 days is expired after the migration. Unlock migrates files of versions 1 to 5 in one transaction.
+
+Schema version 18 (ADR 0025) adds the tables `agent_exception`, `owner_answer`, `item_use`, and `owner_interaction`, with folders and the item policy. `item_use` has one row for each decided use of each item: the outcome (`allowed`, `denied`, `refused`, or `timed_out`), who decided (`bouncer`, `pattern`, `answer`, `owner`, or `rule`), a short summary of the command, and the hosts of its URLs. It has no secret value. `owner_interaction` counts each owner check (`owner_check`) and each new question (`question`).
 
 ## 10. Limits
 
