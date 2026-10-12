@@ -6,7 +6,7 @@ use super::kit::{self, Font, Style, Tone};
 use super::timeline;
 use crate::desktop::DesktopApp;
 use crate::desktop::update::{
-    CHANGELOG_URL, DOWNLOAD_PAGE_URL, Phase, StagedKind, UpdateView, open,
+    CHANGELOG_URL, DOWNLOAD_PAGE_URL, Phase, StagedKind, UpdateView, image_file, open,
 };
 
 /// What the owner clicked.
@@ -199,8 +199,8 @@ fn status(view: &UpdateView, ui: &mut egui::Ui, action: &mut Option<Action>) {
                 *action = Some(Action::Restart);
             }
         }
-        Phase::Ready(_) => {
-            kit::note(ui, IMAGE_NOTE);
+        Phase::Ready(staged) => {
+            kit::note(ui, image_note(&staged.version));
             if kit::small_button(ui, "Open the disk image", Style::Prominent).clicked() {
                 *action = Some(Action::OpenImage);
             }
@@ -210,7 +210,13 @@ fn status(view: &UpdateView, ui: &mut egui::Ui, action: &mut Option<Action>) {
     }
 }
 
-const IMAGE_NOTE: &str = "Apassy cannot replace itself in its folder. Open the disk image, quit Apassy, and drag Apassy to Applications.";
+/// What the owner does with a checked image of `version`.
+fn image_note(version: &str) -> String {
+    format!(
+        "Apassy cannot replace itself in its folder. Open the disk image {}, quit Apassy, and drag Apassy to Applications.",
+        image_file(version)
+    )
+}
 
 /// "Apassy X is ready" on top of each page but Settings > Advanced, which has the same
 /// buttons.
@@ -232,15 +238,16 @@ pub(super) fn banner(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 "It installs when you quit Apassy. Restart now to install it at once."
             } else {
                 "Restart Apassy to install it."
-            },
+            }
+            .to_owned(),
         ),
         StagedKind::Image => (
             format!("Apassy {} is downloaded.", staged.version),
-            IMAGE_NOTE,
+            image_note(&staged.version),
         ),
     };
     let mut action = None;
-    kit::notice(ui, Tone::Accent, &title, Some(message), |ui| {
+    kit::notice(ui, Tone::Accent, &title, Some(&message), |ui| {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             let main = match staged.kind {
@@ -484,6 +491,7 @@ mod tests {
         let text = draw(&mut app, size);
         assert!(text.contains("Apassy 0.3.1 is downloaded."), "{text}");
         assert!(text.contains("Open the disk image"), "{text}");
+        assert!(text.contains("Apassy-0.3.1.dmg"), "{text}");
 
         app.updates.banner_hidden = Some(staged(StagedKind::Image).commit);
         let text = draw(&mut app, size);

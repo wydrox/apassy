@@ -1,9 +1,10 @@
 name: Release
 
 # After each green CI run of a push to main: verify its unsigned binaries,
-# sign and notarize Apassy.dmg, then upload the image and
+# sign and notarize Apassy-<version>.dmg, then upload the image and
 # latest.json to the R2 bucket of apassy.wyderka.cc. The site serves them at
-# /download/Apassy.dmg and /latest.json. See docs/operations/release.md.
+# /download/Apassy-<version>.dmg, at /download/Apassy.dmg for apps before 0.5.0,
+# and at /latest.json. See docs/operations/release.md.
 # The job ready first decides whether the version in Cargo.toml is a released
 # version of CHANGELOG.md. An unreleased version signs and uploads nothing, even for
 # a manual run. The job provider-check is a manual test build of a branch. It never publishes.
@@ -329,7 +330,7 @@ jobs:
         if: steps.head.outputs.publish == 'true'
         run: scripts/build-app.sh
 
-      - name: Notarize and package Apassy.dmg
+      - name: Notarize and package the disk image
         if: steps.head.outputs.publish == 'true'
         env:
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
@@ -354,25 +355,70 @@ jobs:
           fi
 
       # The image first, then latest.json, so latest.json never names a build
-      # that is not there yet.
+      # that is not there yet. The same image goes up twice: as Apassy-<version>.dmg,
+      # and as Apassy.dmg, the only name that apps before 0.5.0 download.
+      # latest.json keeps "file": "Apassy.dmg" for them. Both keys download as
+      # Apassy-<version>.dmg. The bucket keeps only the current versioned image: the
+      # one of the previous latest.json goes after the upload. A failed delete only
+      # warns.
       - name: Upload to R2
         if: steps.publish-head.outputs.publish == 'true'
         working-directory: site
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          RELEASE_VERSION: ${{ needs.ready.outputs.version }}
         run: |
-          npx wrangler r2 object put "$BUCKET/Apassy.dmg" --file ../target/dist/Apassy.dmg --remote \
-            --content-type application/x-apple-diskimage \
-            --content-disposition 'attachment; filename="Apassy.dmg"' \
-            --cache-control no-cache
+          # release_version FILE: the version of a latest.json when it can name an
+          # image (MAJOR.MINOR.PATCH[-PRE]), else nothing.
+          release_version() {
+            python3 - "$1" <<'PY' 2>/dev/null || true
+          import json, re, sys
+          version = json.load(open(sys.argv[1])).get("version")
+          if isinstance(version, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?", version):
+              print(version)
+          PY
+          }
+          version="$(release_version ../target/dist/latest.json)"
+          if [ -z "$version" ] || [ "$version" != "$RELEASE_VERSION" ]; then
+            echo "::error::target/dist/latest.json names version '${version}', but the release is $RELEASE_VERSION."
+            exit 1
+          fi
+          image="Apassy-$version.dmg"
+          if [ ! -s "../target/dist/$image" ]; then
+            echo "::error::target/dist/$image is missing."
+            exit 1
+          fi
+          # The previous release, read before the upload replaces latest.json.
+          previous=""
+          if npx wrangler r2 object get "$BUCKET/latest.json" --file "$RUNNER_TEMP/previous-latest.json" --remote; then
+            previous="$(release_version "$RUNNER_TEMP/previous-latest.json")"
+          fi
+          for key in "$image" Apassy.dmg; do
+            npx wrangler r2 object put "$BUCKET/$key" --file "../target/dist/$image" --remote \
+              --content-type application/x-apple-diskimage \
+              --content-disposition "attachment; filename=\"$image\"" \
+              --cache-control no-cache
+          done
           npx wrangler r2 object put "$BUCKET/latest.json" --file ../target/dist/latest.json --remote \
             --content-type application/json \
             --cache-control no-cache
+          removed="none"
+          if [ -n "$previous" ] && [ "Apassy-$previous.dmg" != "$image" ]; then
+            if npx wrangler r2 object delete "$BUCKET/Apassy-$previous.dmg" --remote; then
+              removed="Apassy-$previous.dmg"
+            else
+              removed="Apassy-$previous.dmg could not be deleted"
+              echo "::warning::Apassy-$previous.dmg is still in the bucket. Delete it by hand: npx wrangler r2 object delete $BUCKET/Apassy-$previous.dmg --remote"
+            fi
+          fi
           {
-            echo "### Apassy.dmg"
+            echo "### $image"
             echo
-            echo "Published to https://apassy.wyderka.cc/download/Apassy.dmg"
+            echo "Published to https://apassy.wyderka.cc/download/$image"
+            echo
+            echo "The same image is at https://apassy.wyderka.cc/download/Apassy.dmg for apps before 0.5.0."
+            echo "Previous versioned image removed: $removed."
             echo
             echo '```json'
             cat ../target/dist/latest.json
@@ -387,7 +433,7 @@ jobs:
             "$RUNNER_TEMP/ApassyAutoFill.provisionprofile" "$RUNNER_TEMP/ApassyProviderApp.provisionprofile"
 
   # A TEST build of a branch, started by hand: gh workflow run release.yml --ref BRANCH
-  # -f ci_run_id=provider-check. It builds, signs, and notarizes Apassy.dmg with the
+  # -f ci_run_id=provider-check. It builds, signs, and notarizes Apassy-<version>.dmg with the
   # AutoFill credential provider, and keeps it as a GitHub Actions artifact for 3 days.
   # It does not use the CI artifact, R2, the site, or the macos job. The artifact is
   # test output, not a release. See docs/operations/release.md.
@@ -554,7 +600,7 @@ jobs:
       - name: Build and sign Apassy.app
         run: scripts/build-app.sh
 
-      - name: Notarize and package Apassy.dmg
+      - name: Notarize and package the disk image
         env:
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
           APASSY_NOTARY_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
@@ -569,9 +615,13 @@ jobs:
         run: |
           python3 - <<'PY'
           import hashlib, json, os, pathlib, subprocess
-          dmg = pathlib.Path("target/dist/Apassy.dmg")
+          dmgs = sorted(pathlib.Path("target/dist").glob("Apassy-*.dmg"))
+          if len(dmgs) != 1:
+              raise SystemExit(f"expected one Apassy-<version>.dmg in target/dist, found {[d.name for d in dmgs]}")
+          dmg = dmgs[0]
           data = {
               "purpose": "test build, not a release",
+              "dmg": dmg.name,
               "commit": os.environ["GITHUB_SHA"],
               "ref": os.environ["GITHUB_REF_NAME"],
               "run_id": os.environ["GITHUB_RUN_ID"],
@@ -598,7 +648,7 @@ jobs:
         with:
           name: apassy-provider-test-${{ github.sha }}-${{ github.run_attempt }}
           path: |
-            target/dist/Apassy.dmg
+            target/dist/Apassy-*.dmg
             target/dist/test-build.json
           if-no-files-found: error
           retention-days: 3

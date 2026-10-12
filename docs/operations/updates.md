@@ -6,7 +6,7 @@ Scope: the macOS app from <https://apassy.wyderka.cc>. Decision: [ADR 0015](../a
 ## 1. What the app does
 
 - About 15 seconds after the start, and then every 6 hours while it runs, the app reads <https://apassy.wyderka.cc/latest.json>.
-- When `latest.json` names a newer build, the app downloads `Apassy.dmg`, checks it, and keeps the new app in `~/Library/Application Support/Apassy/update/Apassy.app`.
+- When `latest.json` names a newer build, the app downloads the image that `latest.json` names (`/download/<file>`), checks it, and keeps the new app in `~/Library/Application Support/Apassy/update/Apassy.app`.
 - The main window then shows "Apassy X is ready." with "Restart now". Settings > Advanced > Updates shows the same.
 - "Restart now" locks the vault, ends each run that waits for you (as a quit does), installs the new version, and opens it.
 - Without "Restart now", the new version installs when you quit Apassy. It opens at your next start.
@@ -42,7 +42,7 @@ On Linux, Settings says that updates are available only for the macOS app. The a
 
 - HTTPS only, at most 16 KiB, with `/usr/bin/curl` and the macOS trust store.
 - `version` has the form `1.2.3` or `1.2.3-rc.1`. `commit` has 40 lowercase hex digits, and `build` is its start. `date` is `YYYY-MM-DDTHH:MM:SSZ`.
-- `file` is `Apassy.dmg`. `size` is more than 0 and at most 1 GiB. `sha256` has 64 lowercase hex digits.
+- `file` is `Apassy.dmg`, or `Apassy-<version>.dmg` with exactly the `version` of `latest.json`. Any other name, version, or path is refused. The app downloads `/download/<file>`. Apps 0.3.0 to 0.4.1 accept only `Apassy.dmg`, so the release keeps that name in `latest.json` for now ([release](release.md#image-names)). `size` is more than 0 and at most 1 GiB. `sha256` has 64 lowercase hex digits.
 - `notarized` is `true`. `arch` is `arm64`. `minimum_macos` is not later than the macOS of this Mac.
 - The app ignores unknown fields, so a release can add one.
 
@@ -70,7 +70,7 @@ The installer is a constant `/bin/sh` script (`src/desktop/update/install.rs`). 
 
 The next start reads the log. After a failure, the log stays as `update/install-failed.log`, and the next check downloads the version again.
 
-When Apassy cannot replace itself (the folder is not writable, the bundle belongs to another user, or macOS runs the app from a translocated or read-only place), the app keeps the checked disk image in `update/Apassy.dmg`. The banner says "Apassy X is downloaded" with "Open the disk image". Quit Apassy and drag the new app to Applications.
+When Apassy cannot replace itself (the folder is not writable, the bundle belongs to another user, or macOS runs the app from a translocated or read-only place), the app keeps the checked disk image in `update/Apassy-<version>.dmg`, whatever name `latest.json` gives. The banner says "Apassy X is downloaded", names the image, and has "Open the disk image". Quit Apassy and drag the new app to Applications.
 
 ## 6. Files
 
@@ -79,16 +79,18 @@ In `~/Library/Application Support/Apassy/` (the agent profile denies the whole f
 | File | What it is |
 | --- | --- |
 | `update.json` | The settings and the last results. |
-| `update/Apassy.dmg.part` | A download in progress. |
+| `update/Apassy-<version>.dmg.part` | A download in progress. |
 | `update/mount-*` | The mount point of the image during the check. |
 | `update/Apassy.app` | The checked new version. |
-| `update/Apassy.dmg` | The checked image, when Apassy cannot replace itself. |
+| `update/Apassy-<version>.dmg` | The checked image, when Apassy cannot replace itself. |
 | `update/install.log` | The log of the last install, until the next start reads it. |
 | `update/install-failed.log` | The log of the last failed install. |
 
+Before a download, and when no version is staged, the app removes every image and partial download in `update/`: the versioned names, and `Apassy.dmg` and `Apassy.dmg.part` of 0.3.0 to 0.4.1.
+
 ## 7. Development
 
-A debug build takes another HTTPS server from `APASSY_UPDATE_BASE`, for example `https://localhost:8443`. It reads `<base>/latest.json` and `<base>/download/Apassy.dmg`. A release build does not have this code. Every check of the image still applies.
+A debug build takes another HTTPS server from `APASSY_UPDATE_BASE`, for example `https://localhost:8443`. It reads `<base>/latest.json` and `<base>/download/<file>` (`Apassy.dmg` or `Apassy-<version>.dmg`). A release build does not have this code. Every check of the image still applies.
 
 Tests (no network; a fake system and test doubles of the tools):
 

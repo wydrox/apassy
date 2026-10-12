@@ -15,8 +15,9 @@ const MAX_FILE_BYTES: u64 = 64 * 1024;
 pub(crate) enum StagedKind {
     /// The checked app in `update/Apassy.app`. The installer moves it into place.
     App,
-    /// The checked disk image in `update/Apassy.dmg`. Apassy cannot replace itself
-    /// in its folder, so the owner copies the app from the image in Finder.
+    /// The checked disk image in `update/Apassy-<version>.dmg`. Apassy cannot
+    /// replace itself in its folder, so the owner copies the app from the image in
+    /// Finder.
     Image,
 }
 

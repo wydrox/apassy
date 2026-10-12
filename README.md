@@ -18,7 +18,7 @@
 
 <p align="center">
   <a href="https://apassy.wyderka.cc"><b>Website</b></a> ·
-  <a href="https://apassy.wyderka.cc/download/Apassy.dmg">Download</a> ·
+  <a href="https://apassy.wyderka.cc/download">Download</a> ·
   <a href="CHANGELOG.md">Changelog</a> ·
   <a href="docs/operations/daily-use.md">Get started</a> ·
   <a href="docs">Docs</a>
@@ -79,7 +79,7 @@ Apassy took real credentials only after this test passed.
 
 ## Install
 
-When it is published, download the signed and notarized `Apassy.dmg` from **[apassy.wyderka.cc](https://apassy.wyderka.cc)**, open it, and drag Apassy to Applications; until then, use [the command below](#install-from-source-with-one-command). Each push to `main` that passes CI publishes a new build ([release](docs/operations/release.md)). From 0.3.0, Apassy updates itself when the version number goes up: it installs only a build that is signed by the same developer and notarized by Apple, and asks you to restart ([updates](docs/operations/updates.md)).
+When it is published, download the signed and notarized `Apassy-<version>.dmg` from **[apassy.wyderka.cc](https://apassy.wyderka.cc)**, open it, and drag Apassy to Applications; until then, use [the command below](#install-from-source-with-one-command). Each push to `main` that passes CI publishes a new build ([release](docs/operations/release.md)). From 0.3.0, Apassy updates itself when the version number goes up: it installs only a build that is signed by the same developer and notarized by Apple, and asks you to restart ([updates](docs/operations/updates.md)).
 
 Requirements: macOS 15 or later on Apple silicon. Linux is not supported yet: the isolation of agents uses macOS Seatbelt, and Linux needs its own version first. Apassy already builds and passes its tests on Linux, and CI checks it there.
 

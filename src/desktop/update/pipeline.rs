@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use super::manifest::{BuildIdentity, Manifest, is_newer};
+use super::manifest::{BuildIdentity, IMAGE_FILE, Manifest, image_file, is_newer};
 use super::store::{Staged, StagedKind, private_dir};
 use super::system::{BUNDLE_ID, Location, UpdateSystem};
 
@@ -25,26 +25,39 @@ pub(crate) fn staged_app(dir: &Path) -> PathBuf {
     dir.join("Apassy.app")
 }
 
-/// The checked image in the update folder, when Apassy cannot replace itself.
-pub(crate) fn staged_image(dir: &Path) -> PathBuf {
-    dir.join("Apassy.dmg")
+/// The checked image of `version` in the update folder, when Apassy cannot replace
+/// itself: `Apassy-<version>.dmg`, whatever name `latest.json` gives.
+pub(crate) fn staged_image(dir: &Path, version: &str) -> PathBuf {
+    dir.join(image_file(version))
+}
+
+/// The download of the image of `version` while it runs.
+fn image_part(dir: &Path, version: &str) -> PathBuf {
+    dir.join(format!("{}.part", image_file(version)))
+}
+
+/// An image or a partial download in the update folder: the names of 0.3.0 to
+/// 0.4.1 (`Apassy.dmg`, `Apassy.dmg.part`) and the versioned names from 0.5.0.
+fn is_image_name(name: &str) -> bool {
+    let name = name.strip_suffix(".part").unwrap_or(name);
+    name == IMAGE_FILE || (name.starts_with("Apassy-") && name.ends_with(".dmg"))
 }
 
 /// True when the files of `staged` are in `dir`.
 pub(crate) fn staged_present(dir: &Path, staged: &Staged) -> bool {
     match staged.kind {
         StagedKind::App => fs::symlink_metadata(staged_app(dir)).is_ok_and(|meta| meta.is_dir()),
-        StagedKind::Image => {
-            fs::symlink_metadata(staged_image(dir)).is_ok_and(|meta| meta.is_file())
-        }
+        StagedKind::Image => fs::symlink_metadata(staged_image(dir, &staged.version))
+            .is_ok_and(|meta| meta.is_file()),
     }
 }
 
-/// The addresses of `latest.json` and of the image.
+/// The addresses of `latest.json` and of the folder of the images.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Urls {
     pub(crate) manifest: String,
-    pub(crate) image: String,
+    /// `<base>/download`, without a slash at the end.
+    pub(crate) download: String,
 }
 
 impl Urls {
@@ -52,8 +65,14 @@ impl Urls {
         let base = base.trim_end_matches('/');
         Self {
             manifest: format!("{base}/latest.json"),
-            image: format!("{base}/download/Apassy.dmg"),
+            download: format!("{base}/download"),
         }
+    }
+
+    /// The address of the image that `latest.json` names. The manifest check allows
+    /// only [`IMAGE_FILE`] or the versioned name, so `file` is never a path.
+    pub(crate) fn image(&self, file: &str) -> String {
+        format!("{}/{file}", self.download)
     }
 
     /// The release server. A debug build takes another HTTPS server from
@@ -187,17 +206,20 @@ pub(crate) fn run(
     }))
 }
 
-/// Remove what an earlier check left in the update folder. A mount folder is
-/// removed only when it is empty, so a volume that is still attached stays.
+/// Remove what an earlier check left in the update folder: each image and partial
+/// download, under the old and the versioned names. A mount folder is removed only
+/// when it is empty, so a volume that is still attached stays.
 pub(crate) fn clean(dir: &Path) {
-    let _ = fs::remove_file(dir.join("Apassy.dmg.part"));
-    let _ = fs::remove_file(staged_image(dir));
     let _ = fs::remove_dir_all(dir.join("Apassy.app.part"));
     let _ = fs::remove_dir_all(staged_app(dir));
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
-            if entry.file_name().to_string_lossy().starts_with("mount-") {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("mount-") {
                 let _ = fs::remove_dir(entry.path());
+            } else if is_image_name(&name) {
+                let _ = fs::remove_file(entry.path());
             }
         }
     }
@@ -244,16 +266,15 @@ fn download_and_verify(
     }
     private_dir(dir).map_err(|err| format!("Apassy cannot make {}: {err}", dir.display()))?;
     clean(dir);
-    let part = dir.join("Apassy.dmg.part");
-    let downloaded = check
-        .sys
-        .download(&check.urls.image, &part, total, &mut |received| {
-            report(Phase::Downloading {
-                version: version.clone(),
-                received,
-                total,
-            })
-        });
+    let part = image_part(dir, &manifest.version);
+    let url = check.urls.image(&manifest.file);
+    let downloaded = check.sys.download(&url, &part, total, &mut |received| {
+        report(Phase::Downloading {
+            version: version.clone(),
+            received,
+            total,
+        })
+    });
     let checked = downloaded.and_then(|()| {
         let size = fs::metadata(&part)
             .map_err(|err| format!("The download is missing: {err}"))?
@@ -277,7 +298,7 @@ fn download_and_verify(
         let _ = fs::remove_file(&part);
         return Err(err);
     }
-    let image = staged_image(dir);
+    let image = staged_image(dir, &manifest.version);
     fs::rename(&part, &image).map_err(|err| format!("Apassy cannot keep the download: {err}"))?;
     let _ = report(Phase::Verifying {
         version: version.clone(),
@@ -421,6 +442,8 @@ pub(crate) mod tests {
         pub(crate) gatekeeper_ok: bool,
         pub(crate) fetch_error: Option<String>,
         pub(crate) calls: Mutex<Vec<String>>,
+        /// The address of each download.
+        pub(crate) downloads: Mutex<Vec<String>>,
     }
 
     impl Fake {
@@ -452,6 +475,7 @@ pub(crate) mod tests {
                 gatekeeper_ok: true,
                 fetch_error: None,
                 calls: Mutex::new(Vec::new()),
+                downloads: Mutex::new(Vec::new()),
             }
         }
 
@@ -461,6 +485,10 @@ pub(crate) mod tests {
 
         pub(crate) fn calls(&self) -> Vec<String> {
             self.calls.lock().expect("calls").clone()
+        }
+
+        pub(crate) fn downloads(&self) -> Vec<String> {
+            self.downloads.lock().expect("downloads").clone()
         }
     }
 
@@ -482,7 +510,15 @@ pub(crate) mod tests {
             progress: &mut dyn FnMut(u64) -> bool,
         ) -> Result<(), String> {
             self.call("download");
-            assert!(url.ends_with("/download/Apassy.dmg"));
+            self.downloads
+                .lock()
+                .expect("downloads")
+                .push(url.to_owned());
+            let name = dest.file_name().expect("name").to_string_lossy();
+            assert!(
+                name.starts_with("Apassy-") && name.ends_with(".dmg.part"),
+                "{name}"
+            );
             let bytes = &self.image[..self.image.len().min(max_bytes as usize + 1)];
             let half = bytes.len() / 2;
             fs::write(dest, &bytes[..half]).expect("write");
@@ -647,6 +683,11 @@ pub(crate) mod tests {
         assert_eq!(staged.commit, COMMIT);
         assert_eq!(staged.kind, StagedKind::App);
         assert_eq!(staged.team, TEAM);
+        // The image of the old name in latest.json, as for apps before 0.5.0.
+        assert_eq!(
+            fake.downloads(),
+            ["https://apassy.wyderka.cc/download/Apassy.dmg"]
+        );
         // The app is staged; the image and the mount folder are gone.
         assert_eq!(files(&dir), ["Apassy.app"]);
         assert!(staged_present(&dir, &staged));
@@ -875,10 +916,49 @@ pub(crate) mod tests {
             panic!("ready: {result:?}");
         };
         assert_eq!(staged.kind, StagedKind::Image);
-        assert_eq!(files(&dir), ["Apassy.dmg"]);
-        assert_eq!(fs::read(staged_image(&dir)).expect("image"), fake.image);
+        // The local image has the version in its name, also when latest.json uses
+        // the old name.
+        assert_eq!(files(&dir), ["Apassy-0.3.1.dmg"]);
+        assert_eq!(
+            fs::read(staged_image(&dir, "0.3.1")).expect("image"),
+            fake.image
+        );
+        assert!(staged_present(&dir, &staged));
         assert!(!fake.calls().contains(&"copy".to_owned()));
         assert!(fake.calls().contains(&"assess".to_owned()), "checked first");
+    }
+
+    /// A `latest.json` with the versioned name: the app downloads that file and keeps
+    /// the image under the same name.
+    #[test]
+    fn a_versioned_image_is_downloaded_by_its_name() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let dir = temp.path().join("update");
+        let mut fake = Fake::new(temp.path());
+        fake.manifest = manifest_json(&[
+            ("file", serde_json::json!("Apassy-0.3.1.dmg")),
+            ("size", serde_json::json!(fake.image.len())),
+            ("sha256", serde_json::json!(digest_of(&fake.image))),
+        ]);
+        fake.location = Location::Bundle {
+            bundle: PathBuf::from("/Applications/Apassy.app"),
+            writable: false,
+        };
+        let (result, _) = check_with(&fake, &dir, true, None);
+        let Ok(Outcome::Ready(staged)) = result else {
+            panic!("ready: {result:?}");
+        };
+        assert_eq!(
+            fake.downloads(),
+            ["https://apassy.wyderka.cc/download/Apassy-0.3.1.dmg"]
+        );
+        assert_eq!(staged.kind, StagedKind::Image);
+        assert_eq!(files(&dir), ["Apassy-0.3.1.dmg"]);
+        assert!(staged_present(&dir, &staged));
+
+        // A staged image under the old name of 0.4.1 is not the staged version.
+        fs::rename(staged_image(&dir, "0.3.1"), dir.join("Apassy.dmg")).expect("rename");
+        assert!(!staged_present(&dir, &staged));
     }
 
     #[test]
@@ -905,10 +985,18 @@ pub(crate) mod tests {
         fs::create_dir_all(dir.join("mount-old")).expect("mount");
         fs::create_dir_all(dir.join("mount-busy").join("Apassy.app")).expect("busy");
         fs::create_dir_all(dir.join("Apassy.app.part")).expect("part");
+        // The names of 0.3.0 to 0.4.1, and the versioned names.
         fs::write(dir.join("Apassy.dmg.part"), b"old").expect("part");
+        fs::write(dir.join("Apassy.dmg"), b"old").expect("image");
+        fs::write(dir.join("Apassy-0.3.0.dmg"), b"old").expect("image");
+        fs::write(dir.join("Apassy-0.3.1.dmg.part"), b"old").expect("part");
         fs::write(dir.join("install.log"), b"result: ok\n").expect("log");
+        fs::write(dir.join("install-failed.log"), b"result: failed\n").expect("log");
         clean(&dir);
-        assert_eq!(files(&dir), ["install.log", "mount-busy"]);
+        assert_eq!(
+            files(&dir),
+            ["install-failed.log", "install.log", "mount-busy"]
+        );
     }
 
     #[test]
@@ -938,6 +1026,14 @@ pub(crate) mod tests {
         }
         let urls = Urls::for_base("https://apassy.wyderka.cc/");
         assert_eq!(urls.manifest, "https://apassy.wyderka.cc/latest.json");
-        assert_eq!(urls.image, "https://apassy.wyderka.cc/download/Apassy.dmg");
+        assert_eq!(urls.download, "https://apassy.wyderka.cc/download");
+        assert_eq!(
+            urls.image("Apassy.dmg"),
+            "https://apassy.wyderka.cc/download/Apassy.dmg"
+        );
+        assert_eq!(
+            urls.image("Apassy-0.5.0.dmg"),
+            "https://apassy.wyderka.cc/download/Apassy-0.5.0.dmg"
+        );
     }
 }

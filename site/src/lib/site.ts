@@ -1,7 +1,8 @@
 import changelog from "../../../CHANGELOG.md?raw";
 
 export const REPO = "https://github.com/wydrox/apassy";
-export const DOWNLOAD = "/download/Apassy.dmg";
+/** The Worker redirects it to the versioned image, `/download/Apassy-<version>.dmg`. */
+export const DOWNLOAD = "/download";
 /** The browser extension in the Chrome Web Store (ADR 0021, D5). */
 export const EXTENSION_STORE = "https://chromewebstore.google.com/detail/apassy/bbnpgnjnfjlbgggmpnhejpmfjhmmhiih";
 /**

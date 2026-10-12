@@ -2,7 +2,7 @@
 
 Date: 2026-10-09.
 
-Each push to `main` that passes CI and names a released version (see [Release eligibility](#release-eligibility)) publishes a signed and notarized `Apassy.dmg` at <https://apassy.wyderka.cc/download/Apassy.dmg>. A push that changes only `site/` or `design/` runs no CI, so it publishes no new build.
+Each push to `main` that passes CI and names a released version (see [Release eligibility](#release-eligibility)) publishes a signed and notarized `Apassy-<version>.dmg`. <https://apassy.wyderka.cc/download> redirects to it, for example `/download/Apassy-0.5.0.dmg`. The same image stays at `/download/Apassy.dmg` for apps before 0.5.0 ([Image names](#image-names)). A push that changes only `site/` or `design/` runs no CI, so it publishes no new build.
 The site is a static Astro page in `site/`, served by a Cloudflare Worker on the same domain.
 
 ## How it works
@@ -14,11 +14,11 @@ The site is a static Astro page in `site/`, served by a Cloudflare Worker on the
 | Site version | `site/src/lib/site.ts` | `VERSION` is the first dated release section of `CHANGELOG.md`, not the version of `Cargo.toml`. The site never advertises a version that is not released. |
 | Installer | `scripts/install.sh`, served at `/install.sh` (`site/src/pages/install.sh.ts`, `site/public/_headers`) | Builds the newest release from source, signs it with the Apple Development identity of the person who runs it, and installs it in `/Applications`. Until `/latest.json` exists, the "Coming soon for macOS" button opens a note with its command. |
 | Screenshots | `scripts/screenshots.sh` | Takes `docs/images/app-*.png` from the real app with synthetic data (`examples/screenshots.rs`). The README and the site use them. |
-| Worker | `site/worker/index.ts` | Serves the files of the site. Adds `/download` (302), `/download/Apassy.dmg`, and `/latest.json` from the R2 bucket `apassy-downloads`. |
+| Worker | `site/worker/index.ts` | Serves the files of the site. Adds `/download` (302 to the versioned image of `latest.json`), `/download/Apassy-<version>.dmg`, `/download/Apassy.dmg`, and `/latest.json` from the R2 bucket `apassy-downloads`. |
 | Site workflow | `.github/workflows/site.yml` | On a change in `site/` or in a file that the site builds from (`scripts/install.sh`, `Cargo.toml`, `CHANGELOG.md`, `docs/images/`): type check and build. On `main`, for an eligible released version: `wrangler deploy`. Makes the bucket on the first deploy. |
 | Release workflow | `.github/workflows/release.yml` | After each green CI run of a push to `main`: check that the version is released, verify the CI binaries, sign, notarize, and upload. |
 | Release eligibility | `scripts/ci-release-ready.py` | Decides whether `Cargo.toml` names a released version of `CHANGELOG.md`. Runs in the job `ready`, before any signing. |
-| Disk image | `scripts/build-dmg.sh`, `scripts/layout-dmg.sh` | Packages `target/Apassy.app` into `target/dist/Apassy.dmg`, saves the Finder install window, and writes `target/dist/latest.json`. |
+| Disk image | `scripts/build-dmg.sh`, `scripts/layout-dmg.sh` | Packages `target/Apassy.app` into `target/dist/Apassy-<version>.dmg` (the version of `Cargo.toml`), saves the Finder install window, and writes `target/dist/latest.json`. |
 
 Before the owner adds the Apple secrets, the release workflow publishes nothing and shows a warning. If only some of the Apple secrets exist, the workflow fails. Without `CLOUDFLARE_API_TOKEN`, the site workflow builds the site and skips the deploy with a warning. The site then says "Coming soon for macOS", because `/latest.json` does not exist.
 
@@ -37,12 +37,12 @@ The release workflow first runs the job `ready` on `ubuntu-24.04`, then the job 
 5. If the secret `MACOS_KEYCHAIN_PROFILE` is set, it embeds the keychain profile for Touch ID unlock. See [Touch ID unlock](#touch-id-unlock).
 6. It decodes the two provider profiles `MACOS_AUTOFILL_PROFILE` and `MACOS_PROVIDER_APP_PROFILE` into private files, and sets `APASSY_REQUIRE_PROVIDER=1`. See [AutoFill provider profiles](#autofill-provider-profiles).
 7. `scripts/build-app.sh` checks the binary artifact again, builds the native helpers and the AutoFill provider, and signs the app with the hardened runtime and a secure timestamp. It runs all existing bundle and signature checks. With `APASSY_REQUIRE_PROVIDER=1`, the build stops if the provider is not in the app. The program and the signed `Info.plist` use the commit and build date from CI ([updates](updates.md)).
-8. `scripts/build-dmg.sh --notarize` checks the provider in the app and in the mounted image, notarizes the app, staples it, makes the disk image, signs it, notarizes it, and staples it. `spctl` must accept both.
-9. It checks the head of `main` again. If the commit still matches, it uploads `Apassy.dmg`, then `latest.json`, to the bucket. The run summary shows `latest.json`.
+8. `scripts/build-dmg.sh --notarize` checks the provider in the app and in the mounted image, notarizes the app, staples it, makes the disk image `Apassy-<version>.dmg`, signs it, notarizes it, and staples it. `spctl` must accept both. The script stops when the version of the app is not the version of `Cargo.toml`, or has build metadata (`+...`), which the image name cannot carry.
+9. It checks the head of `main` again. If the commit still matches, it reads the version of the `latest.json` in the bucket, uploads the image as `Apassy-<version>.dmg` and as `Apassy.dmg`, then uploads `latest.json`. Then it deletes the versioned image of the previous `latest.json`, unless that is the image it just uploaded. A failed delete is a warning, not a failure. The run summary names the versioned URL and shows `latest.json`.
 
-The bucket keeps only the latest build. The Worker serves only `Apassy.dmg` and `latest.json`. Other keys, such as `models/`, stay private. The upload sets `Cache-Control: no-cache` on both, and the Worker passes it on, so the app and the site get a new `latest.json` at once.
+The bucket keeps only the latest build: `Apassy-<version>.dmg`, the same bytes as `Apassy.dmg`, and `latest.json`. The Worker serves only these keys. Other keys, such as `models/`, stay private. Both image keys download as `Apassy-<version>.dmg` (`Content-Disposition`). The upload sets `Cache-Control: no-cache` on each key, and the Worker passes it on, so the app and the site get a new `latest.json` at once. The redirect of `/download` has `Cache-Control: no-store`.
 
-`latest.json`. The site reads `version` and `build`. The app checks every field before an update ([updates](updates.md)) and ignores fields it does not know:
+`latest.json`. The site reads `version` and `build`. The app checks every field before an update ([updates](updates.md)) and ignores fields it does not know. `file` stays `Apassy.dmg` ([Image names](#image-names)):
 
 ```json
 {
@@ -58,6 +58,21 @@ The bucket keeps only the latest build. The Worker serves only `Apassy.dmg` and 
   "arch": "arm64"
 }
 ```
+
+### Image names
+
+Date: 2026-10-12.
+
+From 0.5.0, the disk image has the version in its name: `Apassy-<version>.dmg`. Apps 0.3.0 to 0.4.1 accept only `"file": "Apassy.dmg"` in `latest.json`, and they download only `/download/Apassy.dmg`. So that they still update:
+
+- `latest.json` keeps `"file": "Apassy.dmg"`.
+- The bucket has the same image under the key `Apassy.dmg`, and the Worker serves it at `/download/Apassy.dmg`.
+
+Apps from 0.5.0 accept `"file"` equal to `Apassy.dmg` or to `Apassy-<version>.dmg` with the exact `version` of `latest.json`, and they download `/download/<file>`. They keep the checked image as `update/Apassy-<version>.dmg` ([updates](updates.md)).
+
+`/download` reads the version of `latest.json` and redirects to `/download/Apassy-<version>.dmg`. When `latest.json` cannot be read, or the versioned key is not in the bucket (a release before 0.5.0), it redirects to `/download/Apassy.dmg`. The Worker serves only `/download/Apassy-MAJOR.MINOR.PATCH[-PRE].dmg`. Other names get the 404 page.
+
+Later step, not done yet: when every installed app runs 0.5.0 or later, one release can change `latest.json` to `"file": "Apassy-<version>.dmg"` (in `scripts/build-dmg.sh`). After that release, the workflow can stop uploading `Apassy.dmg`, the Worker can drop `/download/Apassy.dmg` and the fallback of `/download`, and the bucket key `Apassy.dmg` can go. An app before 0.5.0 then no longer updates itself: its owner downloads the new version from the site once.
 
 ## CI duration and binary artifacts
 
@@ -225,7 +240,7 @@ To test the signed provider without a release, start the job `provider-check` of
 gh workflow run release.yml --ref BRANCH -f ci_run_id=provider-check
 ```
 
-The value `provider-check` of `ci_run_id` is a switch. It only works for a branch of this repository that is not `main`. The job builds the exact commit of the branch (Rust included), signs it with a private, temporary keychain, embeds the profiles, notarizes the app and the image, and keeps `Apassy.dmg` and `test-build.json` (commit, SHA-256, SDK, run) as a GitHub Actions artifact for 3 days. It does not use R2, the site, or the CI artifact, and the job `macos` does not run. The artifact is test output. It is not a release, and it does not prove that macOS lists Apassy as a provider. That needs a manual check on a Mac.
+The value `provider-check` of `ci_run_id` is a switch. It only works for a branch of this repository that is not `main`. The job builds the exact commit of the branch (Rust included), signs it with a private, temporary keychain, embeds the profiles, notarizes the app and the image, and keeps `Apassy-<version>.dmg` and `test-build.json` (image name, commit, SHA-256, SDK, run) as a GitHub Actions artifact for 3 days. It does not use R2, the site, or the CI artifact, and the job `macos` does not run. The artifact is test output. It is not a release, and it does not prove that macOS lists Apassy as a provider. That needs a manual check on a Mac.
 
 ## App icon
 
@@ -272,7 +287,7 @@ npm run dev       # the page only, http://localhost:4321
 npm run preview   # the page and the Worker, with a local bucket, http://localhost:8787
 ```
 
-For `npm run preview`, put test files in the local bucket with `npx wrangler r2 object put apassy-downloads/Apassy.dmg --file <file> --local`, and the same for `latest.json`.
+For `npm run preview`, put test files in the local bucket with `npx wrangler r2 object put apassy-downloads/Apassy-<version>.dmg --file <file> --local`, the same for `Apassy.dmg`, and for a `latest.json` with that version.
 
 ## Limits
 
