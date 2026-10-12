@@ -1147,14 +1147,17 @@ fn suggestions_accept_a_stricter_value_at_once_and_a_looser_one_after_the_check(
     );
     let correction = correction_of(&app, item_id, development);
     assert!(decisions::suggestion_needs_check(
+        &app,
         &correction,
         SuggestionAnswer::Environment(crate::vault::Environment::Development)
     ));
     assert!(!decisions::suggestion_needs_check(
+        &app,
         &correction,
         SuggestionAnswer::Environment(crate::vault::Environment::Production)
     ));
     assert!(!decisions::suggestion_needs_check(
+        &app,
         &correction,
         SuggestionAnswer::Ignore
     ));
@@ -1318,6 +1321,7 @@ fn ignore_needs_the_check_only_when_it_restores_a_looser_environment() {
     );
     let correction = correction_of(&app, item_id, raised);
     assert!(decisions::suggestion_needs_check(
+        &app,
         &correction,
         SuggestionAnswer::Ignore
     ));
@@ -1480,4 +1484,66 @@ fn connect_an_agent_lists_the_hosts() {
         assert!(text.contains(expected), "{expected}: {text}");
     }
     assert!(past.is_empty(), "{past:?}");
+}
+
+/// The unlock erases a previous value that is no longer valid (an allowed use came after
+/// the new value), so no stale secret waits in the file.
+#[test]
+fn unlock_prunes_the_previous_values_that_are_no_longer_valid() {
+    use crate::vault::usage::{NewItemUse, UseDecidedBy, UseOutcome};
+    use crate::vault::{ItemOrigin, OriginTool};
+
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, item_id) = unlocked_app_with_item(&dir);
+    let (agent, _) = app
+        .owner_ui
+        .session
+        .register_agent("Prune agent")
+        .expect("agent");
+    app.owner_ui
+        .session
+        .with_vault(|vault| {
+            vault
+                .set_item_origin(
+                    item_id,
+                    &ItemOrigin {
+                        agent_id: agent.id,
+                        agent_name: "Prune agent".to_owned(),
+                        project_key: String::new(),
+                        project_label: String::new(),
+                        tool: OriginTool::Generate,
+                    },
+                )
+                .expect("origin");
+            vault
+                .replace_own_item_value(agent.id, item_id, "FAKE-new-value-0002")
+                .expect("replace");
+            assert!(vault.previous_value(item_id).expect("read").is_some());
+            vault
+                .record_item_use(&NewItemUse {
+                    item_id,
+                    agent_id: Some(agent.id),
+                    agent_name: "Prune agent".to_owned(),
+                    project_key: String::new(),
+                    project_label: String::new(),
+                    action: ActionKind::Read,
+                    command_summary: "synthetic".to_owned(),
+                    hosts: Vec::new(),
+                    outcome: UseOutcome::Allowed,
+                    decided_by: UseDecidedBy::Bouncer,
+                    answered_on: String::new(),
+                    decision_log_id: None,
+                })
+                .expect("use");
+        })
+        .expect("open");
+    app.owner_ui.session.lock().expect("lock");
+    app.owner_ui.session.unlock(PASS).expect("unlock");
+    let left = app
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.prune_previous_values())
+        .expect("open")
+        .expect("prune");
+    assert_eq!(left, 0, "the unlock pruned it already");
 }

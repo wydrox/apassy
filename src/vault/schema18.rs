@@ -145,7 +145,11 @@ CREATE TABLE item_origin (
     project_key TEXT NOT NULL,
     project_label TEXT NOT NULL,
     tool TEXT NOT NULL CHECK (tool IN ('capture', 'generate', 'save', 'ask_owner')),
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    previous_value TEXT,
+    previous_field TEXT,
+    previous_at INTEGER,
+    previous_use INTEGER
 );
 CREATE INDEX item_origin_agent ON item_origin(agent_id, created_at);
 CREATE TABLE credential_request (
@@ -211,7 +215,7 @@ pub(super) const SCHEMA_V18_COLUMNS: [&str; 15] = [
     "SELECT agent_id, item_id, kind, created_at FROM agent_exception LIMIT 0",
     "SELECT id, item_id, project_key, project_label, action_kind, scope, created_at, answered_on, hosts FROM owner_answer LIMIT 0",
     "SELECT id, at, item_id, agent_id, agent_name, project_key, project_label, action_kind, command_summary, hosts, outcome, decided_by, answered_on, decision_log_id FROM item_use LIMIT 0",
-    "SELECT item_id, agent_id, agent_name, project_key, project_label, tool, created_at FROM item_origin LIMIT 0",
+    "SELECT item_id, agent_id, agent_name, project_key, project_label, tool, created_at, previous_value, previous_field, previous_at, previous_use FROM item_origin LIMIT 0",
     "SELECT id, agent_id, agent_name, project_key, project_label, name, purpose, where_to_get, folder_uuid, created_at, state, item_id, decided_at FROM credential_request LIMIT 0",
     "SELECT id, item_id, kind, proposed, facts, created_at, state, decided_at FROM correction LIMIT 0",
     "SELECT id, at, kind, detail FROM owner_interaction LIMIT 0",

@@ -593,7 +593,11 @@ impl OwnerSession {
         let vault = slot
             .as_mut()
             .ok_or_else(|| fail("vault_locked", "No vault file is open."))?;
-        vault.unlock(passphrase).map_err(map_err)
+        vault.unlock(passphrase).map_err(map_err)?;
+        // Previous values that are no longer valid go now. A failure leaves them for the
+        // next unlock; each reader treats an invalid one as gone already.
+        let _ = vault.prune_previous_values();
+        Ok(())
     }
 
     /// Change the master passphrase (goal item V5). The owner types the new passphrase

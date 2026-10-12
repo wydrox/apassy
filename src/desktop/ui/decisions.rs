@@ -472,10 +472,7 @@ pub(super) fn suggestion_choices(correction: &Correction) -> Vec<(String, Sugges
 
 /// What an answer to a suggestion does: the answer to the correction, the environment
 /// that the owner chose instead of the proposal, and the environment that the
-/// credential gets. An environment other than production needs the owner check.
-///
-/// TODO(gate2/tools): switch to the vault helper `needs_owner_check_for_correction`
-/// when it lands; this is the same matrix.
+/// credential gets. The owner check is [`suggestion_needs_check`].
 pub(super) fn suggestion_outcome(
     correction: &Correction,
     answer: SuggestionAnswer,
@@ -498,10 +495,16 @@ pub(super) fn suggestion_outcome(
 }
 
 /// True when the answer passes the owner check first: the bouncer is then less careful.
-pub(super) fn suggestion_needs_check(correction: &Correction, answer: SuggestionAnswer) -> bool {
-    suggestion_outcome(correction, answer)
-        .2
-        .is_some_and(|environment| environment != Environment::Production)
+/// The vault decides (`Vault::needs_owner_check_for_correction`).
+pub(super) fn suggestion_needs_check(
+    app: &DesktopApp,
+    correction: &Correction,
+    answer: SuggestionAnswer,
+) -> bool {
+    let (settle, chosen, _) = suggestion_outcome(correction, answer);
+    app.owner_ui
+        .session
+        .answer_needs_check(correction.id, settle, chosen)
 }
 
 /// The facts of a correction as rows for the owner, the signal first. Lists are joined,
@@ -1809,7 +1812,7 @@ fn suggestion_detail(
                 .fill(kit::SURFACE)
                 .inner_margin(Margin::symmetric(16, 10)),
         )
-        .show(ui, |ui| suggestion_bar(ui, correction, &mut answer));
+        .show(ui, |ui| suggestion_bar(ui, app, correction, &mut answer));
     columns::detail_body(ui, ("suggestion", correction.id), |ui| {
         super::shell::banners(app, ui, pending);
         notifications_notice(app, ui);
@@ -1873,16 +1876,17 @@ fn suggestion_note(correction: &Correction) -> String {
 /// the main button.
 fn suggestion_bar(
     ui: &mut egui::Ui,
+    app: &DesktopApp,
     correction: &Correction,
     answer: &mut Option<SuggestionAnswer>,
 ) {
     let choices = suggestion_choices(correction);
     let mut checked: Vec<&str> = choices
         .iter()
-        .filter(|(_, choice)| suggestion_needs_check(correction, *choice))
+        .filter(|(_, choice)| suggestion_needs_check(app, correction, *choice))
         .map(|(label, _)| label.as_str())
         .collect();
-    if suggestion_needs_check(correction, SuggestionAnswer::Ignore) {
+    if suggestion_needs_check(app, correction, SuggestionAnswer::Ignore) {
         checked.push("Ignore");
     }
     let caption = match checked.as_slice() {
@@ -1912,7 +1916,7 @@ fn suggestion_bar(
 }
 
 /// Answer a suggestion. An answer that leaves the credential at an environment other
-/// than production opens the owner check; the others act at once.
+/// the vault finds too loose opens the owner check; the others act at once.
 pub(super) fn apply_suggestion(
     app: &mut DesktopApp,
     ctx: &egui::Context,
@@ -1921,7 +1925,8 @@ pub(super) fn apply_suggestion(
     answer: SuggestionAnswer,
 ) {
     let (settle, chosen, result) = suggestion_outcome(correction, answer);
-    if let Some(environment) = result.filter(|environment| *environment != Environment::Production)
+    if suggestion_needs_check(app, correction, answer)
+        && let Some(environment) = result
     {
         app.ask_owner(
             OwnerRequest::AnswerSuggestion {

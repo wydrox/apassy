@@ -23,10 +23,9 @@
 //!   an ignored proposal is never made again. Accepting applies the change through the
 //!   declaration API, as an answer of the owner.
 //!
-//! The previous value lives in columns of the local table `item_origin` that this module
-//! adds when it first needs them (`previous_value`, `previous_field`, `previous_at`,
-//! `previous_use`), so no schema version changes. A later schema version should create
-//! them. `item_origin` is local: a pushed copy of the vault has no row of it.
+//! The previous value lives in columns of the local table `item_origin` that schema 18
+//! creates (`previous_value`, `previous_field`, `previous_at`, `previous_use`).
+//! `item_origin` is local: a pushed copy of the vault has no row of it.
 //!
 //! No function here returns or logs a secret value. The value check compares in memory.
 
@@ -493,44 +492,6 @@ fn normal_hosts(hosts: &[String]) -> VaultResult<Vec<String>> {
         }
     }
     Ok(lines)
-}
-
-const PREVIOUS_COLUMNS: [(&str, &str); 4] = [
-    ("previous_value", "TEXT"),
-    ("previous_field", "TEXT"),
-    ("previous_at", "INTEGER"),
-    ("previous_use", "INTEGER"),
-];
-
-/// The previous-value columns that `item_origin` has.
-fn previous_columns(conn: &Connection) -> VaultResult<Vec<String>> {
-    let mut stmt = conn
-        .prepare("SELECT name FROM pragma_table_info('item_origin')")
-        .map_err(storage)?;
-    let names = stmt
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(storage)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(storage)?;
-    Ok(names
-        .into_iter()
-        .filter(|name| PREVIOUS_COLUMNS.iter().any(|(column, _)| column == name))
-        .collect())
-}
-
-/// Add the previous-value columns to `item_origin` when they are missing (see the
-/// module documentation).
-fn ensure_previous_columns(conn: &Connection) -> VaultResult<()> {
-    let present = previous_columns(conn)?;
-    for (column, kind) in PREVIOUS_COLUMNS {
-        if !present.iter().any(|name| name == column) {
-            conn.execute_batch(&format!(
-                "ALTER TABLE item_origin ADD COLUMN {column} {kind}"
-            ))
-            .map_err(storage)?;
-        }
-    }
-    Ok(())
 }
 
 /// SQL: the previous value of the origin row `o` is still valid at `?now`: younger than
@@ -1030,7 +991,6 @@ impl Vault {
             return Err(err(VaultErrorKind::InvalidInput));
         }
         // The previous value: never delivered, dropped after the next allowed use.
-        ensure_previous_columns(&tx)?;
         let last_use: i64 = tx
             .query_row("SELECT COALESCE(MAX(id), 0) FROM item_use", [], |row| {
                 row.get(0)
@@ -1083,9 +1043,6 @@ impl Vault {
     pub fn previous_value(&self, item_id: u64) -> VaultResult<Option<PreviousValue>> {
         let item = to_sql_id(item_id)?;
         let conn = self.conn_ref()?;
-        if previous_columns(conn)?.len() != PREVIOUS_COLUMNS.len() {
-            return Ok(None);
-        }
         let row: Option<(String, i64, String)> = conn
             .query_row(
                 &format!(
@@ -1128,9 +1085,6 @@ impl Vault {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage)?;
-        if previous_columns(&tx)?.len() != PREVIOUS_COLUMNS.len() {
-            return Err(err(VaultErrorKind::NotFound));
-        }
         let found: Option<(Zeroizing<String>, String)> = tx
             .query_row(
                 &format!(
@@ -1198,9 +1152,6 @@ impl Vault {
     /// each function here treats a value that is no longer valid as gone already.
     pub fn prune_previous_values(&mut self) -> VaultResult<usize> {
         let conn = self.conn_mut()?;
-        if previous_columns(conn)?.len() != PREVIOUS_COLUMNS.len() {
-            return Ok(0);
-        }
         conn.execute(
             &format!(
                 "UPDATE item_origin SET previous_value = NULL, previous_field = NULL,
