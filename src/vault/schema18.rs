@@ -15,23 +15,36 @@
 //! `owner_interaction`.
 //!
 //! The migration from schema 17 turns the agent settings of ADR 0012 into exceptions
-//! (ADR 0025 §3f), in the same transaction, so nothing gets looser without the owner:
+//! (ADR 0025 §3f), in the same transaction, so nothing gets looser without the owner.
+//! Revoked agents, and grants of items that are gone, get nothing.
 //!
 //! - An active agent that does not see all items (`see_all = 0`) gets the exception
-//!   "only these items": one `only` row with item [`ONLY_MARKER_ITEM`], and one `only` row
-//!   for each item of its process grants. The marker keeps an agent without grants
-//!   restricted to no item.
-//! - A grant of an active agent in "Ask me each time" (`mode = 'ask'`) becomes
-//!   "Always ask for this agent" (`always_ask`).
-//! - A grant in "Bouncer decides" becomes nothing. Grants, rules, requests, and
-//!   remembered patterns stay as history; nothing is deleted.
+//!   "only these items": one `only` row with item [`ONLY_MARKER_ITEM`], one `only` row
+//!   for each item of its process grants that still works (not expired, rule readable),
+//!   and one for each item of its connector grants (`grant_rule`). The marker keeps an
+//!   agent without grants restricted to no item.
+//! - A process grant of an active agent becomes "Always ask for this agent"
+//!   (`always_ask`) when today a run with it waits for the owner or meets a limit that the
+//!   new model cannot hold: "Ask me each time" (`mode = 'ask'`); a rule with a command
+//!   prefix, a forbidden word, a run limit, an expiry (past or future), or an
+//!   instruction; a rule that does not read; or "any folder" with a variable that gets
+//!   the real value (no binding counts as the real value).
+//! - Any other grant in "Bouncer decides" becomes nothing: it is the default now.
+//!   Grants, rules, requests, and remembered patterns stay as history; nothing is
+//!   deleted.
 
 use super::types::{SCHEMA_VERSION, VaultErrorKind, VaultResult, err};
-use super::{merge, verify_expected_columns_in};
+use super::{agents, merge, verify_expected_columns_in};
 
 /// The item ID of the `only` row that marks the exception "only these items" of an
 /// agent. Item IDs start at 1, so the marker names no item. The other `only` rows of
 /// the agent are the items that it may use.
+///
+/// `to_sql_id` refuses 0, so the code that removes the exception "only these items"
+/// (stream B1, `exceptions.rs`) deletes the agent's rows by kind,
+/// `DELETE FROM agent_exception WHERE agent_id = ?1 AND kind = 'only'`, marker included.
+/// Removing the `only` row of one item keeps the marker, so an agent whose last item
+/// goes stays restricted to no item.
 pub const ONLY_MARKER_ITEM: u64 = 0;
 
 /// Tables, columns, the exception derivation, and the version marks of schema 18. The
@@ -168,17 +181,10 @@ CREATE TABLE owner_interaction (
     detail TEXT NOT NULL
 );
 CREATE INDEX owner_interaction_at ON owner_interaction(at);
-INSERT INTO agent_exception (agent_id, item_id, kind, created_at)
-    SELECT a.id, 0, 'only', a.created_at FROM agent a
-    WHERE a.see_all = 0 AND a.revoked_at IS NULL;
-INSERT OR IGNORE INTO agent_exception (agent_id, item_id, kind, created_at)
-    SELECT g.agent_id, g.item_id, 'only', g.created_at FROM exec_grant g
-    JOIN agent a ON a.id = g.agent_id
-    WHERE a.see_all = 0 AND a.revoked_at IS NULL;
-INSERT OR IGNORE INTO agent_exception (agent_id, item_id, kind, created_at)
-    SELECT g.agent_id, g.item_id, 'always_ask', g.created_at FROM exec_grant g
-    JOIN agent a ON a.id = g.agent_id
-    WHERE g.mode = 'ask' AND a.revoked_at IS NULL;
+";
+
+/// The version marks of schema 18. They run after the exception derivation.
+const SCHEMA_V18_MARKS_SQL: &str = "
 UPDATE vault_meta SET schema_version = 18 WHERE id = 1;
 PRAGMA user_version = 18;
 ";
@@ -228,8 +234,108 @@ fn add_schema_v18_with(
     tx.execute_batch(SCHEMA_V18_SQL).map_err(storage)?;
     tx.execute_batch(&merge::child_triggers_sql(&CHILD_TABLES_V18))
         .map_err(storage)?;
+    derive_exceptions(tx, agents::now_unix())?;
+    tx.execute_batch(SCHEMA_V18_MARKS_SQL).map_err(storage)?;
     before_marks(tx)?;
     verify_expected_columns_in(tx, "main", SCHEMA_VERSION)
+}
+
+/// One process grant of an active agent, as the derivation reads it.
+struct LegacyGrant {
+    agent_id: i64,
+    item_id: i64,
+    ask_mode: bool,
+    rule: String,
+    any_folder: bool,
+    placeholder: bool,
+    created_at: i64,
+    see_all: bool,
+}
+
+/// Turn the agent settings of ADR 0012 into exceptions (see the module documentation).
+/// `now` is the Unix time at which a rule expiry counts as past.
+fn derive_exceptions(tx: &rusqlite::Transaction<'_>, now: u64) -> VaultResult<()> {
+    let storage = |_: rusqlite::Error| err(VaultErrorKind::Storage);
+    let marker = i64::try_from(ONLY_MARKER_ITEM).map_err(|_| err(VaultErrorKind::Storage))?;
+    // "Only these items": the marker for each active agent that does not see all items.
+    tx.execute(
+        "INSERT INTO agent_exception (agent_id, item_id, kind, created_at)
+         SELECT a.id, ?1, 'only', a.created_at FROM agent a
+         WHERE a.see_all = 0 AND a.revoked_at IS NULL",
+        [marker],
+    )
+    .map_err(storage)?;
+    let grants: Vec<LegacyGrant> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT g.agent_id, g.item_id, g.mode, g.rule, g.any_folder,
+                     b.placeholder_hosts IS NOT NULL, g.created_at, a.see_all
+                 FROM exec_grant g
+                 JOIN agent a ON a.id = g.agent_id
+                 JOIN item i ON i.id = g.item_id
+                 LEFT JOIN env_binding b ON b.item_id = g.item_id
+                 WHERE a.revoked_at IS NULL",
+            )
+            .map_err(storage)?;
+        stmt.query_map([], |row| {
+            Ok(LegacyGrant {
+                agent_id: row.get(0)?,
+                item_id: row.get(1)?,
+                ask_mode: row.get::<_, String>(2)? != "allow",
+                rule: row.get(3)?,
+                any_folder: row.get::<_, i64>(4)? != 0,
+                placeholder: row.get(5)?,
+                created_at: row.get(6)?,
+                see_all: row.get::<_, i64>(7)? != 0,
+            })
+        })
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?
+    };
+    for grant in grants {
+        // A rule that does not read fails the grant today: it counts as expired.
+        let rule = serde_json::from_str::<agents::ExecRule>(&grant.rule).ok();
+        let usable = rule
+            .as_ref()
+            .is_some_and(|rule| rule.expires_at.is_none_or(|at| now < at));
+        let limited = rule.as_ref().is_none_or(|rule| {
+            !rule.allowed_prefixes.is_empty()
+                || !rule.forbidden_words.is_empty()
+                || rule.max_runs_per_hour.is_some()
+                || rule.expires_at.is_some()
+                || !rule.instruction.trim().is_empty()
+        });
+        // ADR 0012: in any folder, a run with the real value waits for the owner.
+        let real_value_anywhere = grant.any_folder && !grant.placeholder;
+        let mut kinds = Vec::new();
+        if !grant.see_all && usable {
+            kinds.push("only");
+        }
+        if grant.ask_mode || limited || real_value_anywhere {
+            kinds.push("always_ask");
+        }
+        for kind in kinds {
+            tx.execute(
+                "INSERT OR IGNORE INTO agent_exception (agent_id, item_id, kind, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                (grant.agent_id, grant.item_id, kind, grant.created_at),
+            )
+            .map_err(storage)?;
+        }
+    }
+    // The items of connector grants are in "only these items" too, once per item.
+    tx.execute(
+        "INSERT OR IGNORE INTO agent_exception (agent_id, item_id, kind, created_at)
+         SELECT r.agent_id, r.item_id, 'only', min(r.created_at) FROM grant_rule r
+         JOIN agent a ON a.id = r.agent_id
+         JOIN item i ON i.id = r.item_id
+         WHERE a.see_all = 0 AND a.revoked_at IS NULL
+         GROUP BY r.agent_id, r.item_id",
+        [],
+    )
+    .map_err(storage)?;
+    Ok(())
 }
 
 /// Remove the schema 18 rows of a deleted item: its child rows and the local exceptions,

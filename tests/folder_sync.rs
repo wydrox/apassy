@@ -17,8 +17,8 @@ use apassy::sync::{
     file_name_for, icloud_folder, list_folder_vaults,
 };
 use apassy::vault::{
-    ActivityDecision, EnvDelivery, Field, ItemDraft, ItemEventKind, LOCAL_TABLES, MAX_ITEM_EVENTS,
-    NewActivity, SYNCED_TABLES, SecretValue, SyncScope, Vault, VaultErrorKind,
+    ActivityDecision, EnvDelivery, Field, ItemDraft, ItemEventKind, LOCAL_TABLES, MAX_FOLDER_DEPTH,
+    MAX_ITEM_EVENTS, NewActivity, SYNCED_TABLES, SecretValue, SyncScope, Vault, VaultErrorKind,
 };
 use tempfile::TempDir;
 
@@ -1067,4 +1067,80 @@ fn folders_merge_last_writer_wins_and_tombstone_wins() {
         vault_a.sync_content(&SyncScope::vault()).expect("content"),
         vault_b.sync_content(&SyncScope::vault()).expect("content")
     );
+}
+
+/// ADR 0026 §5: two moves on two Macs can make a subtree deeper than
+/// `MAX_FOLDER_DEPTH`. It can still move up, step by step; a move that keeps it as deep
+/// or makes a cycle is refused.
+#[test]
+fn a_subtree_made_too_deep_on_two_macs_can_move_up() {
+    let world = world();
+    let (a, mut vault_a, b, mut vault_b) = two_macs(&world);
+    let top = vault_a.create_folder(None, "Top").expect("folder");
+    let mid = vault_a
+        .create_folder(Some(&top.uuid), "Mid")
+        .expect("folder");
+    let side = vault_a
+        .create_folder(Some(&top.uuid), "Side")
+        .expect("folder");
+    let q1 = vault_a.create_folder(None, "Q1").expect("folder");
+    let q2 = vault_a.create_folder(Some(&q1.uuid), "Q2").expect("folder");
+    assert!(a.sync.sync(&mut vault_a).expect("sync a").pushed);
+    b.sync.sync(&mut vault_b).expect("sync b");
+    assert_eq!(folder_tree(&vault_a), folder_tree(&vault_b));
+
+    // A moves Q1 under Top / Mid (4 levels); B adds two levels below Q2 (4 levels).
+    vault_a
+        .move_folder(&q1.uuid, Some(&mid.uuid))
+        .expect("move a");
+    let q3 = vault_b
+        .create_folder(Some(&q2.uuid), "Q3")
+        .expect("folder b");
+    let q4 = vault_b
+        .create_folder(Some(&q3.uuid), "Q4")
+        .expect("folder b");
+    assert!(a.sync.sync(&mut vault_a).expect("sync a").pushed);
+    assert!(b.sync.sync(&mut vault_b).expect("sync b").pushed);
+    a.sync.sync(&mut vault_a).expect("sync a again");
+    for vault in [&vault_a, &vault_b] {
+        let path = vault.folder_path(Some(&q4.uuid)).expect("path");
+        assert_eq!(path, ["Top", "Mid", "Q1", "Q2", "Q3", "Q4"]);
+        assert!(path.len() > MAX_FOLDER_DEPTH, "deeper than the limit");
+    }
+
+    // As deep as now, or a cycle: refused.
+    for (parent, why) in [(&side.uuid, "as deep"), (&q4.uuid, "a cycle")] {
+        assert_eq!(
+            vault_a
+                .move_folder(&q1.uuid, Some(parent))
+                .unwrap_err()
+                .kind(),
+            VaultErrorKind::InvalidInput,
+            "{why}"
+        );
+    }
+    // One level up is still too deep, but higher than now: allowed.
+    vault_a
+        .move_folder(&q1.uuid, Some(&top.uuid))
+        .expect("one level up");
+    assert_eq!(
+        vault_a.folder_path(Some(&q4.uuid)).expect("path"),
+        ["Top", "Q1", "Q2", "Q3", "Q4"]
+    );
+    // It cannot go back down; the top level is within the limit.
+    assert_eq!(
+        vault_a
+            .move_folder(&q1.uuid, Some(&mid.uuid))
+            .unwrap_err()
+            .kind(),
+        VaultErrorKind::InvalidInput
+    );
+    vault_a.move_folder(&q1.uuid, None).expect("to the top");
+    assert_eq!(
+        vault_a.folder_path(Some(&q4.uuid)).expect("path"),
+        ["Q1", "Q2", "Q3", "Q4"]
+    );
+    assert!(a.sync.sync(&mut vault_a).expect("sync a").pushed);
+    b.sync.sync(&mut vault_b).expect("sync b");
+    assert_eq!(folder_tree(&vault_a), folder_tree(&vault_b));
 }
