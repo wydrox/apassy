@@ -1325,3 +1325,440 @@ fn folder_sheets_create_nested_rename_move_and_delete() {
     assert_eq!(folder_of(&app, filed), None);
     assert_eq!(app.place, Place::CREDENTIALS);
 }
+
+// ---- The credential page (ADR 0025, ADR 0026 §2). ----
+
+/// Three frames of the whole app at `size`, in a new context. Returns the painted text
+/// of the last frame.
+fn frames_at(app: &mut DesktopApp, size: Vec2) -> String {
+    let ctx = egui::Context::default();
+    let mut text = String::new();
+    for _ in 0..3 {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| draw(app, ui));
+        text.clear();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut text);
+        }
+        output.drop_without_applying_deltas();
+    }
+    text
+}
+
+/// A synthetic value with a provider prefix, as in `tests/detect.rs`.
+fn fake_key(prefix: &str, len: usize) -> String {
+    format!("{prefix}{}", &"EXAMPLE0".repeat(len / 8 + 1)[..len])
+}
+
+/// Paste `text` as the owner does in New Credential, at the top level.
+fn paste(app: &mut DesktopApp, text: &str) -> u64 {
+    app.owner_ui
+        .session
+        .add_detected(text, None)
+        .expect("add pasted credential")[0]
+        .id
+}
+
+fn register(app: &mut DesktopApp, name: &str) -> u64 {
+    app.owner_ui
+        .session
+        .with_vault(|vault| vault.register_agent(name))
+        .expect("open")
+        .expect("register")
+        .0
+        .id
+}
+
+fn record_use(app: &mut DesktopApp, item_id: u64, agent_id: u64, command: &str) {
+    use crate::broker::action_kind::ActionKind;
+    use crate::vault::usage::{NewItemUse, UseDecidedBy, UseOutcome};
+    app.owner_ui
+        .session
+        .with_vault(|vault| {
+            vault.record_item_use(&NewItemUse {
+                item_id,
+                agent_id: Some(agent_id),
+                agent_name: "Claude Code".to_owned(),
+                project_key: "/synthetic/apassy".to_owned(),
+                project_label: "apassy".to_owned(),
+                action: ActionKind::Read,
+                command_summary: command.to_owned(),
+                hosts: vec!["api.example.com".to_owned()],
+                outcome: UseOutcome::Allowed,
+                decided_by: UseDecidedBy::Bouncer,
+                answered_on: String::new(),
+                decision_log_id: None,
+            })
+        })
+        .expect("open")
+        .expect("record use");
+}
+
+/// The rules of a credential: an answer of the owner and an exception of an agent. The
+/// page lists both and the agent use. Removing the exception gives authority back, so
+/// it asks for the owner check first; removing the answer makes the bouncer ask again,
+/// so it needs no check (ADR 0025 §3b, §3f).
+#[test]
+fn the_credential_page_lists_rules_and_removing_an_exception_asks_for_the_owner() {
+    use crate::broker::action_kind::ActionKind;
+    use crate::desktop::owner_check::OwnerRequest;
+    use crate::vault::answers::ProjectRef;
+    use crate::vault::exceptions::ExceptionKind;
+
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = app_in(&dir);
+    create(&mut app, "Personal", PASS_A);
+    let id = add_item(&mut app, "Deploy key");
+    let agent = register(&mut app, "Claude Code");
+    app.owner_ui
+        .session
+        .with_vault(|vault| -> crate::vault::VaultResult<()> {
+            vault.add_agent_exception(agent, id, ExceptionKind::Never)?;
+            let project = ProjectRef {
+                key: "/synthetic/apassy".to_owned(),
+                label: "apassy".to_owned(),
+            };
+            vault.remember_answer(id, &project, ActionKind::Change, "this Mac")?;
+            Ok(())
+        })
+        .expect("open")
+        .expect("rules");
+    for command in [
+        "gh api user",
+        "gh pr list",
+        "gh run list",
+        "gh release view",
+    ] {
+        record_use(&mut app, id, agent, command);
+    }
+    app.select_item(id.to_string());
+    let text = frames(&mut app);
+    for expected in [
+        "Agent use",
+        "Show All",
+        "Claude Code in apassy",
+        "gh release view",
+        " · Allowed automatically",
+        "Rules from your answers",
+        "Allow changes in apassy",
+        "Never for Claude Code",
+        "Always ask me",
+        "Environment",
+        "Hosts and risk",
+        "Folder",
+        "Shared in",
+        "Not shared",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    assert!(
+        !text.contains("gh api user"),
+        "only the 3 newest uses: {text}"
+    );
+    assert!(!text.contains(CANARY), "the secret stays masked");
+
+    // "Show All" lists every use.
+    click_text(&mut app, "Show All");
+    let text = frames(&mut app);
+    assert!(
+        text.contains("gh api user") && text.contains("Show Less"),
+        "{text}"
+    );
+
+    // The exception row is the last Remove: the owner check first.
+    click_text(&mut app, "Remove");
+    let check = app.owner.check.as_ref().expect("the owner check opens");
+    assert!(
+        matches!(
+            &check.request,
+            OwnerRequest::RemoveAgentException { agent_id, item_id, kind: ExceptionKind::Never, .. }
+                if *agent_id == agent && *item_id == id
+        ),
+        "{:?}",
+        check.request
+    );
+    let still = app
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.item_exceptions(id))
+        .expect("open")
+        .expect("exceptions");
+    assert_eq!(still.len(), 1, "nothing changes before the check");
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS_A))
+        .expect("owner check");
+    let left = app
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.item_exceptions(id))
+        .expect("open")
+        .expect("exceptions");
+    assert!(left.is_empty(), "{left:?}");
+    let text = frames(&mut app);
+    assert!(!text.contains("Never for Claude Code"), "{text}");
+
+    // The answer: removed at once, without a check.
+    click_text(&mut app, "Remove");
+    assert!(
+        app.owner.check.is_none(),
+        "a stricter change needs no check"
+    );
+    let answers = app
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.answers_for_item(id))
+        .expect("open")
+        .expect("answers");
+    assert!(answers.is_empty(), "{answers:?}");
+    let text = frames(&mut app);
+    assert!(
+        text.contains("None. The bouncer decides each use."),
+        "{text}"
+    );
+}
+
+/// "Always ask me": on at once (stricter), off only after the owner check.
+#[test]
+fn always_ask_turns_on_at_once_and_off_after_the_owner_check() {
+    use crate::desktop::owner_check::OwnerRequest;
+
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = app_in(&dir);
+    create(&mut app, "Personal", PASS_A);
+    let id = add_item(&mut app, "Careful key");
+    app.select_item(id.to_string());
+    let always_ask = |app: &DesktopApp| {
+        app.owner_ui
+            .session
+            .with_vault(|vault| vault.always_ask(id))
+            .expect("open")
+            .expect("read")
+    };
+    let details = app.owner_ui.session.details(id).expect("details");
+    let ctx = egui::Context::default();
+    super::items::set_always_ask(&mut app, &ctx, &details, true);
+    assert!(app.owner.check.is_none(), "turning it on needs no check");
+    assert!(always_ask(&app));
+
+    super::items::set_always_ask(&mut app, &ctx, &details, false);
+    let check = app.owner.check.as_ref().expect("the owner check opens");
+    assert!(
+        matches!(&check.request, OwnerRequest::AlwaysAskOff { item_id, .. } if *item_id == id),
+        "{:?}",
+        check.request
+    );
+    assert!(always_ask(&app), "still on before the check");
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS_A))
+        .expect("owner check");
+    assert!(!always_ask(&app));
+}
+
+/// "Is this a development key?" shows while only a default found the environment.
+/// "Production" is stricter: no check. "Development" waits for the owner check. Each
+/// answer counts as the owner's (the source "owner"), and the question goes away.
+#[test]
+fn the_development_key_question_and_its_answers() {
+    use crate::desktop::owner_check::OwnerRequest;
+    use crate::vault::{DeclarationSource, Environment};
+
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = app_in(&dir);
+    create(&mut app, "Personal", PASS_A);
+    let first = paste(&mut app, &fake_key("sk-ant-api03-", 40));
+    let second = paste(&mut app, &fake_key("sk-ant-api03-", 41));
+    let state = |app: &DesktopApp, id: u64| {
+        let declaration = app
+            .owner_ui
+            .session
+            .declaration(id)
+            .expect("read")
+            .expect("declaration");
+        let sources = app
+            .owner_ui
+            .session
+            .with_vault(|vault| vault.declaration_sources(id))
+            .expect("open")
+            .expect("sources");
+        (declaration.environment, sources.environment, sources.risk)
+    };
+    let (_, _, risk_before) = state(&app, first);
+
+    app.select_item(first.to_string());
+    let text = frames(&mut app);
+    assert!(text.contains("Is this a development key?"), "{text}");
+    assert!(text.contains("api.anthropic.com"), "{text}");
+    assert!(text.contains("Not confirmed"), "{text}");
+    click_text(&mut app, "Production");
+    assert!(
+        app.owner.check.is_none(),
+        "production is stricter: no check"
+    );
+    assert_eq!(
+        state(&app, first),
+        (
+            Environment::Production,
+            DeclarationSource::Owner,
+            risk_before
+        )
+    );
+    let text = frames(&mut app);
+    assert!(!text.contains("Is this a development key?"), "{text}");
+    assert!(text.contains("Production"), "the red cap: {text}");
+
+    app.select_item(second.to_string());
+    let text = frames(&mut app);
+    assert!(text.contains("Is this a development key?"), "{text}");
+    click_text(&mut app, "Development");
+    let check = app.owner.check.as_ref().expect("the owner check opens");
+    assert!(
+        matches!(
+            &check.request,
+            OwnerRequest::SetEnvironment { item_id, environment: Environment::Development, .. }
+                if *item_id == second
+        ),
+        "{:?}",
+        check.request
+    );
+    assert_eq!(state(&app, second).1, DeclarationSource::Default);
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS_A))
+        .expect("owner check");
+    let (environment, source, risk) = state(&app, second);
+    assert_eq!(environment, Environment::Development);
+    assert_eq!(source, DeclarationSource::Owner);
+    assert_eq!(risk, risk_before, "the other sources stay");
+    let text = frames(&mut app);
+    assert!(!text.contains("Is this a development key?"), "{text}");
+    assert!(text.contains("Development"), "{text}");
+
+    // A login is no key: no question.
+    let mut secrets = SecretForm::default();
+    secrets.password = CANARY.to_owned();
+    let login = app
+        .owner_ui
+        .session
+        .add(
+            &ItemDraft {
+                kind: crate::contracts::CredentialKind::Login,
+                name: "Router".to_owned(),
+                username: "admin".to_owned(),
+                ..ItemDraft::default()
+            },
+            &secrets,
+        )
+        .expect("add login")
+        .id;
+    app.select_item(login.to_string());
+    let text = frames(&mut app);
+    assert!(!text.contains("Is this a development key?"), "{text}");
+}
+
+/// Every variant of the credential page draws at the default and the minimum window
+/// size, with the sidebar full and collapsed: a plain key, a pasted key with the
+/// question, a production key, a login, a one-time password, an archived credential, a
+/// credential with rules, uses, "Always ask me", and "Hosts and risk" open. No value
+/// shows.
+#[test]
+fn every_variant_of_the_credential_page_draws_at_default_and_minimum_sizes() {
+    use crate::broker::action_kind::ActionKind;
+    use crate::vault::answers::ProjectRef;
+    use crate::vault::exceptions::ExceptionKind;
+
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = app_in(&dir);
+    create(&mut app, "Personal", PASS_A);
+    let plain = add_item(&mut app, "Plain key");
+    let question = paste(&mut app, &fake_key("sk-ant-api03-", 40));
+    let production = paste(
+        &mut app,
+        &format!("STRIPE_SECRET_KEY={}", fake_key("sk_live_", 24)),
+    );
+    let mut secrets = SecretForm::default();
+    secrets.password = CANARY.to_owned();
+    let login = app
+        .owner_ui
+        .session
+        .add(
+            &ItemDraft {
+                kind: crate::contracts::CredentialKind::Login,
+                name: "Router login".to_owned(),
+                username: "admin".to_owned(),
+                website: "https://router.example".to_owned(),
+                ..ItemDraft::default()
+            },
+            &secrets,
+        )
+        .expect("add login")
+        .id;
+    let code = paste(
+        &mut app,
+        "otpauth://totp/Example:alice@example.com?secret=JBSWY3DPEHPK3PXP&issuer=Example",
+    );
+    let archived = add_item(&mut app, "Old key");
+    app.owner_ui.session.archive(archived).expect("archive");
+    let ruled = add_item(&mut app, "Ruled key");
+    let agent = register(&mut app, "Claude Code");
+    app.owner_ui
+        .session
+        .with_vault(|vault| -> crate::vault::VaultResult<()> {
+            vault.add_agent_exception(agent, ruled, ExceptionKind::AlwaysAsk)?;
+            let project = ProjectRef {
+                key: "/synthetic/a-very-long-project-name-for-the-narrow-window".to_owned(),
+                label: "a-very-long-project-name-for-the-narrow-window".to_owned(),
+            };
+            vault.remember_answer(ruled, &project, ActionKind::Deploy, "this Mac")?;
+            vault.set_always_ask(ruled, true)?;
+            Ok(())
+        })
+        .expect("open")
+        .expect("rules");
+    for index in 0..5 {
+        record_use(
+            &mut app,
+            ruled,
+            agent,
+            &format!("curl --silent https://api.example.com/v1/items/{index}"),
+        );
+    }
+    app.ui
+        .set_expanded(&format!("credential-access-{ruled}"), true);
+    app.ui
+        .set_expanded(&format!("credential-uses-{ruled}"), true);
+
+    let pages = [
+        (plain, "Plain key"),
+        (question, "Anthropic API key"),
+        (production, "Stripe live"),
+        (login, "Router login"),
+        (code, "Example"),
+        (archived, "Old key"),
+        (ruled, "Ruled key"),
+    ];
+    for (id, name) in pages {
+        for size in [Vec2::new(1180.0, 800.0), Vec2::new(900.0, 600.0)] {
+            for collapsed in [false, true] {
+                app.ui.sidebar_hidden = collapsed;
+                app.select_item(id.to_string());
+                let text = frames_at(&mut app, size);
+                assert!(text.contains(name), "{name} at {size:?}: {text}");
+                assert!(!text.contains(CANARY), "{name}: a value is visible");
+                assert!(!text.contains("EXAMPLE0"), "{name}: a value is visible");
+                assert!(
+                    !text.contains("JBSWY3DPEHPK3PXP"),
+                    "{name}: the seed is visible"
+                );
+            }
+        }
+    }
+    app.ui.sidebar_hidden = false;
+    app.select_item(ruled.to_string());
+    let text = frames(&mut app);
+    for expected in ["Always ask me", "Agent use"] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    app.select_item(production.to_string());
+    let text = frames_at(&mut app, Vec2::new(1180.0, 800.0));
+    assert!(text.contains("Production"), "{text}");
+    assert!(!text.contains("Is this a development key?"), "{text}");
+}

@@ -93,6 +93,28 @@ impl FolderTree {
         }
     }
 
+    /// The places of a folder menu: "Personal" (the top level), then each folder in
+    /// tree order with its path, such as "Work › Acme".
+    pub(crate) fn choices(&self) -> Vec<(Option<String>, String)> {
+        std::iter::once((None, self.path_label(None)))
+            .chain(self.folders.iter().map(|folder| {
+                (
+                    Some(folder.uuid.clone()),
+                    self.path_label(Some(&folder.uuid)),
+                )
+            }))
+            .collect()
+    }
+
+    /// The folder of a place: the folder of a folder place that still exists, else the
+    /// top level. New credentials go there (ADR 0026 §4).
+    pub(crate) fn folder_of_place(&self, place: &Place) -> Option<String> {
+        match place {
+            Place::Folder(Some(uuid)) if self.get(uuid).is_some() => Some(uuid.clone()),
+            _ => None,
+        }
+    }
+
     /// The level of a folder: 0 at the top level.
     pub(crate) fn level(&self, uuid: &str) -> usize {
         self.path(uuid).len().saturating_sub(1)
