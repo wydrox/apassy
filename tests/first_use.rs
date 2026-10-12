@@ -230,7 +230,9 @@ fn a_first_use_without_history_asks_the_owner_and_says_why() {
     assert_eq!(question.action, ActionKind::Change);
     assert!(!question.production);
     assert!(
-        question.why.contains("did not use \"Synthetic Sentry key\" in \"project\""),
+        question
+            .why
+            .contains("did not use \"Synthetic Sentry key\" in \"project\""),
         "{}",
         question.why
     );

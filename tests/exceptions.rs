@@ -571,7 +571,11 @@ fn the_connector_path_respects_the_exceptions_and_production() {
     let handle = connector_call(&fx, item);
     let run = waiting(&fx);
     assert_eq!(run.command[0], "apassy_use_credential");
-    assert!(run.question.why.contains("always ask for this agent"), "{}", run.question.why);
+    assert!(
+        run.question.why.contains("always ask for this agent"),
+        "{}",
+        run.question.why
+    );
     assert_eq!(run.question.item_ids, vec![item]);
     assert!(
         !run.question
@@ -595,7 +599,11 @@ fn the_connector_path_respects_the_exceptions_and_production() {
     .expect("always ask item");
     let handle = connector_call(&fx, item);
     let run = waiting(&fx);
-    assert!(run.question.why.contains("is set to always ask"), "{}", run.question.why);
+    assert!(
+        run.question.why.contains("is set to always ask"),
+        "{}",
+        run.question.why
+    );
     assert!(fx.broker.approvals().deny(run.id));
     assert_eq!(code(&handle.join().expect("thread")), "approval_denied");
     with_vault(&fx, |v| {
@@ -610,7 +618,11 @@ fn the_connector_path_respects_the_exceptions_and_production() {
     .expect("production");
     let handle = connector_call(&fx, item);
     let run = waiting(&fx);
-    assert!(run.question.why.contains("production credential"), "{}", run.question.why);
+    assert!(
+        run.question.why.contains("production credential"),
+        "{}",
+        run.question.why
+    );
     assert!(fx.broker.approvals().deny(run.id));
     assert_eq!(code(&handle.join().expect("thread")), "approval_denied");
 

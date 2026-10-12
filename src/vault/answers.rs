@@ -206,10 +206,14 @@ impl Vault {
             )
             .optional()
             .map_err(|_| err(VaultErrorKind::Storage))?;
-        let mut all = known.as_deref().map(parse_hosts).transpose()?.unwrap_or_default();
+        let mut all = known
+            .as_deref()
+            .map(parse_hosts)
+            .transpose()?
+            .unwrap_or_default();
         all.extend(hosts.iter().cloned());
-        let all = serde_json::to_string(&normal_hosts(&all))
-            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let all =
+            serde_json::to_string(&normal_hosts(&all)).map_err(|_| err(VaultErrorKind::Storage))?;
         tx.execute(
             "INSERT INTO owner_answer
                  (item_id, project_key, project_label, action_kind, scope, created_at, answered_on,
@@ -301,7 +305,17 @@ impl Vault {
     }
 }
 
-type AnswerRow = (i64, i64, String, String, String, String, i64, String, String);
+type AnswerRow = (
+    i64,
+    i64,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    String,
+    String,
+);
 
 fn parse_hosts(text: &str) -> VaultResult<Vec<String>> {
     serde_json::from_str(text).map_err(|_| err(VaultErrorKind::Storage))

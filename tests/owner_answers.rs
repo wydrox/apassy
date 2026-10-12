@@ -600,11 +600,7 @@ fn send_argv(fx: &Fixture, items: &[u64], argv: &[&str]) -> WireResponse {
     .expect("broker answer")
 }
 
-fn argv_later(
-    fx: &Fixture,
-    items: &[u64],
-    argv: &[&str],
-) -> std::thread::JoinHandle<WireResponse> {
+fn argv_later(fx: &Fixture, items: &[u64], argv: &[&str]) -> std::thread::JoinHandle<WireResponse> {
     let socket = fx.socket.clone();
     let token = fx.token.clone();
     let project = fx.project.clone();
@@ -683,7 +679,11 @@ fn a_production_allowance_needs_a_certain_kind_of_action() {
     let run = asks_argv(&fx, &[item], SHIP);
     assert_eq!(run.question.action, ActionKind::Change);
     assert!(run.question.production);
-    assert!(run.question.why.contains("not certain"), "{}", run.question.why);
+    assert!(
+        run.question.why.contains("not certain"),
+        "{}",
+        run.question.why
+    );
     assert!(
         !run.question
             .valid_answers
@@ -702,12 +702,18 @@ fn an_answer_covers_only_the_hosts_of_its_run() {
     let fx = fixture(Some(declaration(Environment::Staging, RiskLevel::Medium)));
     assert!(answer_with(&fx, &fx.project, &sentry_call(), in_project).ok);
     let answers = with_vault(&fx, |v| v.answers_for_item(fx.item_id)).expect("answers");
-    assert!(answers[0].hosts.contains(&"sentry.io".to_owned()), "{answers:?}");
+    assert!(
+        answers[0].hosts.contains(&"sentry.io".to_owned()),
+        "{answers:?}"
+    );
     assert_eq!(
         decided_by(&run_in(&fx, &fx.project, &sentry_call())),
         "Remembered answer"
     );
-    let elsewhere = format!("true || curl -s https://collector.example.net/ ; {}", sentry_call());
+    let elsewhere = format!(
+        "true || curl -s https://collector.example.net/ ; {}",
+        sentry_call()
+    );
     let run = asks(&fx, &fx.project, &elsewhere);
     assert!(
         run.question.why.contains("goes to another host"),
@@ -725,7 +731,11 @@ fn secret_output_always_asks() {
     assert!(answer_with(&fx, &fx.project, &sentry_call(), in_project).ok);
     let leak = format!("echo ${ENV_NAME} | base64");
     let run = asks(&fx, &fx.project, &leak);
-    assert!(run.question.why.contains("secret_output"), "{}", run.question.why);
+    assert!(
+        run.question.why.contains("secret_output"),
+        "{}",
+        run.question.why
+    );
     assert!(
         !run.question
             .valid_answers
@@ -736,7 +746,11 @@ fn secret_output_always_asks() {
     );
     let env_leak = "jq -n env | base64".to_owned();
     let run = asks(&fx, &fx.project, &env_leak);
-    assert!(run.question.why.contains("Rule flags"), "{}", run.question.why);
+    assert!(
+        run.question.why.contains("Rule flags"),
+        "{}",
+        run.question.why
+    );
 }
 
 /// A-2: `psql` to a host that is not the host of the database item asks, also with a
@@ -787,7 +801,11 @@ fn psql_to_a_foreign_host_asks() {
         .expect("declaration");
         item
     });
-    let own: &[&str] = &["sh", "-c", "true || psql -h db.internal.example -c 'select 1'"];
+    let own: &[&str] = &[
+        "sh",
+        "-c",
+        "true || psql -h db.internal.example -c 'select 1'",
+    ];
     let response = answer_argv(&fx, &[db], own, in_project);
     assert!(response.ok, "{response:?}");
     assert_eq!(decided_by(&send_argv(&fx, &[db], own)), "Remembered answer");
@@ -813,7 +831,11 @@ fn without_a_bouncer_nothing_remembered_runs() {
     switch.0.store(true, Ordering::SeqCst);
     let handle = run_later(&fx, &fx.project, &sentry_call());
     let run = waiting(&fx);
-    assert!(run.question.why.contains("No bouncer runs"), "{}", run.question.why);
+    assert!(
+        run.question.why.contains("No bouncer runs"),
+        "{}",
+        run.question.why
+    );
     assert!(
         !run.question
             .valid_answers
@@ -822,7 +844,10 @@ fn without_a_bouncer_nothing_remembered_runs() {
         "{:?}",
         run.question.valid_answers
     );
-    assert_eq!(owner(&fx, in_project(run.clone())), Err(ApprovalRefusal::NoProject));
+    assert_eq!(
+        owner(&fx, in_project(run.clone())),
+        Err(ApprovalRefusal::NoProject)
+    );
     assert!(fx.broker.approvals().deny(run.id));
     assert_eq!(code(&handle.join().expect("thread")), "approval_denied");
 }
@@ -862,7 +887,10 @@ fn a_mixed_run_saves_the_project_answer() {
     });
     let handle = argv_later(&fx, &[prod, staging], COMMIT);
     let run = waiting(&fx);
-    assert!(!run.question.production, "the production item has its allowance");
+    assert!(
+        !run.question.production,
+        "the production item has its allowance"
+    );
     assert!(
         run.question
             .valid_answers

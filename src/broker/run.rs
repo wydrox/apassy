@@ -99,8 +99,8 @@ use crate::vault::providers;
 use crate::vault::usage::{InteractionKind, NewItemUse, UseDecidedBy, UseOutcome};
 use crate::vault::{
     ActivityDecision, AgentSummary, DecisionEntry, Declaration, DeclarationSource,
-    DeclarationSources, EnvBinding, EnvDelivery, Environment, NewActivity, OwnerLabel,
-    RealOutcome, RiskLevel, Vault, VaultErrorKind,
+    DeclarationSources, EnvBinding, EnvDelivery, Environment, NewActivity, OwnerLabel, RealOutcome,
+    RiskLevel, Vault, VaultErrorKind,
 };
 
 /// A shadow thread waits this long after the owner time limit for the real outcome.
@@ -362,9 +362,7 @@ fn hard_rules(checked: &Checked, run: &RunFacts<'_>, known: &Known, place: &str)
                 action_words(run.action)
             );
             if let Some(Some(unfit)) = known.unfit.get(index) {
-                text.push_str(&format!(
-                    " The allowance does not cover this run: {unfit}."
-                ));
+                text.push_str(&format!(" The allowance does not cover this run: {unfit}."));
             }
             why.push(text);
         }
@@ -827,7 +825,13 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         .any(|(facts, answer)| facts.production && !answer);
     // ADR 0025 §3: the card offers only the answers that can take effect.
     let (valid, remember) = if needs_approval {
-        let valid = valid_answers(&checked, &run_facts, certain, production_waiting, &mut ready);
+        let valid = valid_answers(
+            &checked,
+            &run_facts,
+            certain,
+            production_waiting,
+            &mut ready,
+        );
         // A pattern acts only with a running bouncer.
         let remember = learned
             .offer(pattern.as_ref(), &context, always_asks)
@@ -1161,14 +1165,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
         // ADR 0025: "Allow ACTION in PROJECT" and "Allow production" are saved now, in
         // the session of the decision and after the second check.
         if let Some(choice) = &answer_choice {
-            let saved = save_answer(
-                vault,
-                &checked,
-                request.items,
-                choice,
-                &answered_on,
-                &hosts,
-            );
+            let saved = save_answer(vault, &checked, request.items, choice, &answered_on, &hosts);
             if let Err(reason) = saved {
                 record(
                     vault,
@@ -1389,9 +1386,8 @@ pub(super) fn foreign_project(declared: &str, project: Option<&Project>) -> Opti
     }
     let path = Path::new(declared);
     if path.is_absolute() {
-        let fits = canonical_dir(path).is_some_and(|dir| {
-            dir == project.root || dir.display().to_string() == project.key
-        });
+        let fits = canonical_dir(path)
+            .is_some_and(|dir| dir == project.root || dir.display().to_string() == project.key);
         return (!fits).then(|| declared.to_owned());
     }
     let wanted = project_words(declared);

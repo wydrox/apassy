@@ -12,10 +12,10 @@ use std::time::{Duration, Instant};
 
 use apassy::agent::client;
 use apassy::agent::wire::{Action, WireResponse};
+use apassy::broker::action_kind::ActionKind;
 use apassy::broker::approvals::{
     ApprovalRefusal, OwnerAction, OwnerCheck, OwnerGate, OwnerProof, PendingRun,
 };
-use apassy::broker::action_kind::ActionKind;
 use apassy::broker::bouncer::BouncerClient;
 use apassy::broker::http::TlsClient;
 use apassy::broker::model_server::ModelGate;
@@ -683,12 +683,7 @@ fn a_changed_process_binding_invalidates_a_pending_approval() {
 fn a_changed_grant_declaration_or_item_invalidates_a_pending_approval() {
     // A process grant is no authority any more (ADR 0025): a change of its mode, place,
     // or rule changes no decision. An exception of the agent does.
-    for change in [
-        "exception",
-        "declaration",
-        "provider",
-        "revision",
-    ] {
+    for change in ["exception", "declaration", "provider", "revision"] {
         let fx = fixture(ExecMode::Ask, Duration::from_secs(5));
         if change == "provider" {
             with_vault(&fx, |vault| {

@@ -13,10 +13,10 @@ use std::time::Duration;
 
 use apassy::agent::client;
 use apassy::agent::wire::{Action, WireResponse};
+use apassy::broker::action_kind::ActionKind;
 use apassy::broker::approvals::{
     ApprovalRefusal, OwnerAction, OwnerCheck, OwnerGate, OwnerProof, PendingRun,
 };
-use apassy::broker::action_kind::ActionKind;
 use apassy::broker::bouncer::{BouncerClient, Thresholds};
 use apassy::broker::http::TlsClient;
 use apassy::broker::learning::{self, RunScope};
@@ -25,9 +25,9 @@ use apassy::contracts::CredentialKind;
 use apassy::vault::exceptions::ExceptionKind;
 use apassy::vault::usage::{NewItemUse, UseDecidedBy, UseOutcome};
 use apassy::vault::{
-    DecidedBy, DecisionEntry, Declaration, Environment, ExecMode, Field, ItemDraft,
-    LoggedDecision, PATTERN_APPROVALS_NEEDED, PatternState, RequestSource, Reversibility,
-    RiskLevel, Scope, SecretValue, Vault,
+    DecidedBy, DecisionEntry, Declaration, Environment, ExecMode, Field, ItemDraft, LoggedDecision,
+    PATTERN_APPROVALS_NEEDED, PatternState, RequestSource, Reversibility, RiskLevel, Scope,
+    SecretValue, Vault,
 };
 use tempfile::TempDir;
 

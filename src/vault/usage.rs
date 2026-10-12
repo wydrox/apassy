@@ -587,7 +587,11 @@ mod tests {
             ("/tmp/q", ActionKind::Read),
             ("", ActionKind::Read),
         ] {
-            assert!(!vault.item_used_in_project(item, key, action, agent.id).unwrap());
+            assert!(
+                !vault
+                    .item_used_in_project(item, key, action, agent.id)
+                    .unwrap()
+            );
         }
         let uses = vault.item_uses(item, 10).unwrap();
         assert_eq!(uses.len(), 5);
@@ -729,7 +733,10 @@ mod tests {
         assert!(used(&vault));
         // A stricter one ends it, also for a later environment change toward production.
         vault
-            .set_declaration(item, &declaration(Environment::Development, RiskLevel::High))
+            .set_declaration(
+                item,
+                &declaration(Environment::Development, RiskLevel::High),
+            )
             .unwrap();
         assert!(!used(&vault));
         // A use after the change counts again.

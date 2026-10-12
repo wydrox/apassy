@@ -676,7 +676,14 @@ fn call(
         };
         if rechecked != checked {
             let reason = "The credential or its access changed while Apassy checked this use. Send the request again.";
-            record_call_use(vault, &checked, item_id, UseOutcome::Refused, UseDecidedBy::Rule, "");
+            record_call_use(
+                vault,
+                &checked,
+                item_id,
+                UseOutcome::Refused,
+                UseDecidedBy::Rule,
+                "",
+            );
             return WireResponse::failure("authorization_changed", reason);
         }
         match read_call_secret(vault, &checked, item_id, operation, params) {
@@ -818,7 +825,14 @@ fn ask_owner(
             if let Some(vault) = vault
                 && refusal == QuestionRefusal::Busy
             {
-                record_call_use(vault, checked, item_id, UseOutcome::Refused, UseDecidedBy::Rule, "");
+                record_call_use(
+                    vault,
+                    checked,
+                    item_id,
+                    UseOutcome::Refused,
+                    UseDecidedBy::Rule,
+                    "",
+                );
             }
             return Err(WireResponse::failure(
                 codes::QUESTION_WAITING,
