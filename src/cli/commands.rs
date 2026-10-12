@@ -106,7 +106,7 @@ Agent commands. AGENT is an ID or the exact name.
   apassy agent add NAME               Register. Prints the token one time.
   apassy agent revoke AGENT [--yes]
   apassy agent rotate AGENT           Owner check. Prints the new token one time.
-  apassy agent see-all AGENT on|off   on: owner check.
+  apassy agent see-all AGENT on|off   on: owner check; removes \"Only these items\".
   apassy agent lifetime [DAYS]        Read, or set (owner check), the token lifetime.
   apassy setup claude|codex           Register and connect an agent host. See apassy help setup.
 ";
@@ -114,23 +114,32 @@ Agent commands. AGENT is an ID or the exact name.
 pub const GRANT_HELP: &str = "\
 Grant commands. Each change that gives access asks for the owner check in the window.
 
+An agent needs no grant to run a command: the bouncer decides each use, and asks you in
+Decisions when it is not sure. A process grant does not approve runs, and its mode, folder,
+and rule have no effect on a run.
+
   apassy grant set AGENT ITEM... [--folder DIR | --any-folder] [--mode ask|bouncer]
-                              Process access. The default folder is the current one, and
-                              the default mode is ask (you approve each run). Each ITEM
-                              variable names are optional.
+                              Save a process grant. It adds ITEM to the list of an agent
+                              with \"Only these items\" and shows in process_access of
+                              apassy_list_access. The default folder is the current one.
   apassy grant remove AGENT ITEM      No owner check.
   apassy grant rule AGENT ITEM [--allow PREFIX]... [--forbid WORD]... [--expires HOURS]
                               [--max-runs N] [--instruction TEXT]
-                              Replaces the rule of the grant.
+                              Replaces the rule of the grant. The broker does not apply it.
   apassy grant operation AGENT ITEM OPERATION [--remove]
-                              A connector operation, for example get_sales_summary.
+                              Let the agent use a connector operation, for example
+                              get_sales_summary, with apassy_use_credential. The app has
+                              no switch for it.
 ";
 
 pub const REQUEST_HELP: &str = "\
-Access requests of agents.
+Notes of agents from apassy_request_access. An agent does not need one: it uses each
+credential of its catalog at once, and the bouncer decides. The app does not show them.
 
   apassy request list [--all]
   apassy request grant ID [--folder DIR | --any-folder] [--mode ask|bouncer]   Owner check.
+                              Saves a process grant (see apassy help grant) and closes the
+                              request. It approves no run.
   apassy request deny ID
 ";
 
@@ -143,7 +152,7 @@ Runs that wait for you.
 ";
 
 pub const PATTERN_HELP: &str = "\
-Remembered approvals (\"Approve and remember\").
+Remembered patterns. Only apassy runs approve ID --remember teaches one.
 
   apassy pattern list
   apassy pattern remove ID            Matching runs ask you again.
@@ -1230,13 +1239,13 @@ pub fn agent(cli: &Cli, mut args: Args) -> Outcome {
                 if view.agent.sees_all {
                     "yes: names and plain fields of every credential"
                 } else {
-                    "no: only the credentials it can use"
+                    "no: only its listed credentials (\"Only these items\")"
                 },
             );
             print!("{}", block.render());
             if !view.grants.is_empty() {
-                println!("\nProcess access:");
-                let mut table = Table::new(&["ITEM", "NAME", "FOLDER", "DECIDES", "RULE"]);
+                println!("\nProcess grants (no effect on runs; the bouncer decides each use):");
+                let mut table = Table::new(&["ITEM", "NAME", "FOLDER", "MODE", "RULE"]);
                 for grant in &view.grants {
                     let mut rule = Vec::new();
                     if !grant.rule.allow.is_empty() {
@@ -1262,7 +1271,7 @@ pub fn agent(cli: &Cli, mut args: Args) -> Outcome {
                             .clone()
                             .unwrap_or_else(|| "any folder".to_owned()),
                         match grant.mode {
-                            GrantMode::Ask => "you",
+                            GrantMode::Ask => "ask",
                             GrantMode::Bouncer => "bouncer",
                         }
                         .to_owned(),
@@ -1422,12 +1431,8 @@ pub fn grant(cli: &Cli, mut args: Args) -> Outcome {
                 return Err(Failure::Usage(usage("Name at least one credential.")));
             }
             terminal::tell(&format!(
-                "Folder: {}. Decides: {}.",
+                "Folder: {}. The grant approves no run: the bouncer decides each use, and the mode has no effect.",
                 folder.as_deref().unwrap_or("any folder"),
-                match mode {
-                    GrantMode::Ask => "you, for each run",
-                    GrantMode::Bouncer => "the bouncer; a risky run waits for you",
-                }
             ));
             owner_check_call(
                 cli,

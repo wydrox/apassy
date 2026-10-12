@@ -117,6 +117,8 @@ The owner accepted on 2026-10-12 ("pasuje"). The owner did not like levels of tr
   - "Not for this agent": the agent never gets this item.
   - "Always ask for this agent": each use of this item by the agent waits for the owner.
   - "Disconnect the agent".
+
+  In the Mac app, the "⋯" menu of a question labels the first two "Never for AGENT" and "Always Ask for AGENT", with the name of the agent.
 - **The agent screen shows, it does not configure.** It lists what the agent used lately and its exceptions. The owner removes an exception with one click. "Disconnect" is the only other action.
 - **An optional sentence about the agent**, for example "CI agent for client X, only the Stripe test key". The bouncer reads it as context. It is a hint, not a hard limit.
 - Making an exception stricter needs no owner check. Removing one needs an owner check.

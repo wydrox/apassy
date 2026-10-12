@@ -280,9 +280,9 @@ Agents and access:
   setup claude|codex          Register an agent and write the MCP server and the prompt hook.
   setup browser               Connect the browser extension. Each fill asks for Touch ID.
   grant set|remove|rule|operation
-  request list|grant|deny     Access requests of agents.
+  request list|grant|deny     Notes of agents from apassy_request_access.
   runs list|approve|deny      Runs that wait for you.
-  pattern list|remove         Remembered approvals.
+  pattern list|remove         Remembered patterns (apassy runs approve --remember).
 
 History and vault:
   activity                    Agent requests and decisions.

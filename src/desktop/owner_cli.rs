@@ -817,7 +817,7 @@ impl DesktopApp {
                     .session
                     .set_agent_sees_all(agent.id, false, None)?;
                 self.cli_wrote(&format!(
-                    "{} sees only the credentials it can use. Its open requests are denied.",
+                    "{} has \"Only these items\" now: it sees only its listed credentials. Its open requests are denied.",
                     agent.name
                 ))
             }
@@ -848,7 +848,7 @@ impl DesktopApp {
                     .session
                     .remove_exec_grant(agent.id, found.id)?;
                 self.cli_wrote(&format!(
-                    "{} has no process access to {} now.",
+                    "{} has no process grant for {} now.",
                     agent.name, found.name
                 ))
             }
@@ -1728,7 +1728,7 @@ impl DesktopApp {
             .any(|grant| grant.item_id == found.id);
         if !has_grant {
             return Err(invalid(format!(
-                "{} has no process access to {}. Give it first: apassy grant set.",
+                "{} has no process grant for {}. Save one first: apassy grant set.",
                 agent.name, found.name
             )));
         }
