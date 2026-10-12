@@ -212,7 +212,8 @@ impl LoggedRequest<'_> {
                 },
                 false,
             ),
-            Outcome::Remembered => (false, LoggedDecision::Allow, DecidedBy::Owner, false),
+            // The owner did not see this request: it is not an owner label (ADR 0025).
+            Outcome::Remembered => (false, LoggedDecision::Allow, DecidedBy::Answer, false),
             Outcome::Owner(ApprovalOutcome::Approved | ApprovalOutcome::ApprovedAndGranted) => {
                 (true, LoggedDecision::Allow, DecidedBy::Owner, false)
             }

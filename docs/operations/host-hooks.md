@@ -166,10 +166,10 @@ Set the MCP server in `~/.codex/config.toml`:
 [mcp_servers.apassy]
 command = "/path/to/target/release/apassy-mcp"
 env = { APASSY_AGENT_TOKEN = "apassy_agt_..." }
-tool_timeout_sec = 180
+tool_timeout_sec = 330
 ```
 
-`tool_timeout_sec` must be higher than the approval wait of 120 seconds.
+`tool_timeout_sec` must be higher than the wait of a question, 300 seconds (5 minutes). When the host ends the call first, the agent gets the time-out of its host; it calls again with the same request, which joins the waiting question (`question_waiting` for another request).
 
 ### Check the installation
 

@@ -116,6 +116,7 @@ CREATE TABLE owner_answer (
     scope TEXT NOT NULL CHECK (scope IN ('project', 'production')),
     created_at INTEGER NOT NULL,
     answered_on TEXT NOT NULL,
+    hosts TEXT NOT NULL DEFAULT '[]',
     UNIQUE (item_id, project_key, action_kind, scope)
 );
 CREATE INDEX owner_answer_item ON owner_answer(item_id);
@@ -208,7 +209,7 @@ pub(super) const SCHEMA_V18_COLUMNS: [&str; 15] = [
     "SELECT name, value, updated_at, updated_by FROM vault_secret LIMIT 0",
     "SELECT note FROM agent LIMIT 0",
     "SELECT agent_id, item_id, kind, created_at FROM agent_exception LIMIT 0",
-    "SELECT id, item_id, project_key, project_label, action_kind, scope, created_at, answered_on FROM owner_answer LIMIT 0",
+    "SELECT id, item_id, project_key, project_label, action_kind, scope, created_at, answered_on, hosts FROM owner_answer LIMIT 0",
     "SELECT id, at, item_id, agent_id, agent_name, project_key, project_label, action_kind, command_summary, hosts, outcome, decided_by, answered_on, decision_log_id FROM item_use LIMIT 0",
     "SELECT item_id, agent_id, agent_name, project_key, project_label, tool, created_at FROM item_origin LIMIT 0",
     "SELECT id, agent_id, agent_name, project_key, project_label, name, purpose, where_to_get, folder_uuid, created_at, state, item_id, decided_at FROM credential_request LIMIT 0",

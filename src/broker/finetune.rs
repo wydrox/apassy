@@ -152,7 +152,7 @@ impl TrainingGate {
 pub fn gate(records: &[DecisionRecord], power: Power) -> TrainingGate {
     let owner = records
         .iter()
-        .filter(|record| record.entry.decided_by == DecidedBy::Owner);
+        .filter(|record| record.entry.decided_by == DecidedBy::Owner && record.entry.asked);
     let (decisions, denials) = owner.fold((0, 0), |(all, denied), record| {
         (all + 1, denied + usize::from(record.entry.owner_denied()))
     });
@@ -284,7 +284,11 @@ pub fn examples_from_export(jsonl: &str) -> Result<ExampleSet, String> {
                 index + 1
             ));
         }
-        if text(&value, "decided_by")? != DecidedBy::Owner.as_str() {
+        // Only a request that the owner saw is an owner label. A remembered answer
+        // (`answer`, or `asked` false) is not (ADR 0025). An older export has no `asked`.
+        if text(&value, "decided_by")? != DecidedBy::Owner.as_str()
+            || value.get("asked").and_then(Value::as_bool) == Some(false)
+        {
             continue;
         }
         stats.owner_decisions += 1;
@@ -912,6 +916,63 @@ mod tests {
             "remembered": false,
         })
         .to_string()
+    }
+
+    /// Gate 1 (B-3): a run that a remembered answer allowed is no owner label. Its
+    /// export line (`answer`, or `owner` with `asked` false) gives no example, and the
+    /// gate does not count it.
+    #[test]
+    fn remembered_answers_are_no_owner_labels() {
+        let mut asked_false: Value =
+            serde_json::from_str(&line("allow", "owner", "npm test", "Run the tests.", &[]))
+                .expect("json");
+        asked_false["asked"] = json!(false);
+        let lines = [
+            line("allow", "answer", "npm test", "Run the tests.", &[]),
+            asked_false.to_string(),
+            line("allow", "owner", "npm test", "Run the tests.", &[]),
+            line("allow", "owner", "npm run lint", "Lint the code.", &[]),
+        ]
+        .join("\n");
+        let set = examples_from_export(&lines).expect("examples");
+        assert_eq!(set.stats.lines, 4);
+        assert_eq!(set.stats.owner_decisions, 2, "only the lines the owner saw");
+
+        let entry = |decided_by: DecidedBy, asked: bool| DecisionRecord {
+            id: 1,
+            entry: crate::vault::DecisionEntry {
+                at: 1,
+                agent_id: 1,
+                agent_name: "Agent".to_owned(),
+                project_dir: String::new(),
+                cwd_rel: ".".to_owned(),
+                items: vec![1],
+                user_request: "Run the tests.".to_owned(),
+                user_request_source: crate::vault::RequestSource::Agent,
+                command: vec!["npm".to_owned(), "test".to_owned()],
+                purpose: "Do it.".to_owned(),
+                env_names: Vec::new(),
+                declarations: Vec::new(),
+                rule_flags: Vec::new(),
+                known_safe: false,
+                model_facts: Vec::new(),
+                pattern: String::new(),
+                grant_asks: false,
+                asked,
+                decision: crate::vault::LoggedDecision::Allow,
+                decided_by,
+                remembered: false,
+                policy: String::new(),
+                note: String::new(),
+                instruction: String::new(),
+            },
+        };
+        let records = [
+            entry(DecidedBy::Answer, false),
+            entry(DecidedBy::Owner, false),
+            entry(DecidedBy::Owner, true),
+        ];
+        assert_eq!(gate(&records, Power::Ac).owner_decisions, 1);
     }
 
     /// The label mapping of `docs/operations/fine-tune.md`.

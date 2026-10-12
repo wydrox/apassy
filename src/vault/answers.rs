@@ -12,6 +12,11 @@
 //! `OwnerAction::AllowProduction`). The bouncer, a remembered pattern, and the usage log
 //! never write an answer. Removing an answer is stricter and needs no owner check.
 //! A restore from a backup removes every answer (`forget_all`).
+//!
+//! Each answer keeps the destination hosts of the runs that the owner saw (`hosts`, a
+//! JSON array): the hosts of the command and the known hosts of the item then. A later
+//! run with a host outside them and outside the known hosts of the item asks the owner
+//! again (`broker::run`). The same answer again adds the hosts of its run.
 
 use rusqlite::{OptionalExtension, TransactionBehavior};
 
@@ -26,6 +31,10 @@ pub const MAX_PROJECT_KEY_BYTES: usize = 4096;
 pub const MAX_PROJECT_LABEL_BYTES: usize = 256;
 /// The longest name of the device that answered, in bytes.
 pub const MAX_ANSWERED_ON_BYTES: usize = 64;
+/// An answer keeps at most this many destination hosts.
+pub const MAX_ANSWER_HOSTS: usize = 64;
+/// The longest host name, in bytes.
+const MAX_HOST_BYTES: usize = 253;
 
 /// A project as the vault stores it: the key of `broker::project::Project` and its label.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +80,40 @@ pub struct OwnerAnswer {
     pub created_at: u64,
     /// The device where the owner answered, for example "this Mac".
     pub answered_on: String,
+    /// The destination hosts that the answer covers, lowercase, sorted.
+    pub hosts: Vec<String>,
+}
+
+/// A host in the form that answers store and compare: lowercase, without a port and a
+/// trailing dot. `None` for a text that is no host name.
+pub fn normal_host(host: &str) -> Option<String> {
+    let host = host.trim().to_ascii_lowercase();
+    let host = host.strip_prefix('[').map_or(host.as_str(), |rest| {
+        rest.split(']').next().unwrap_or_default()
+    });
+    // A port goes, but an IPv6 address keeps its colons.
+    let host = if host.matches(':').count() == 1 {
+        host.split(':').next().unwrap_or_default()
+    } else {
+        host
+    };
+    let host = host.trim_end_matches('.');
+    let valid = !host.is_empty()
+        && host.len() <= MAX_HOST_BYTES
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '*'));
+    valid.then(|| host.to_owned())
+}
+
+/// Each host of `hosts` in normal form, without doubles, sorted, at most
+/// [`MAX_ANSWER_HOSTS`].
+fn normal_hosts<'a>(hosts: impl IntoIterator<Item = &'a String>) -> Vec<String> {
+    let mut out: Vec<String> = hosts.into_iter().filter_map(|h| normal_host(h)).collect();
+    out.sort();
+    out.dedup();
+    out.truncate(MAX_ANSWER_HOSTS);
+    out
 }
 
 /// Plain text without control characters, at most `max` bytes. `InvalidInput` when it
@@ -101,8 +144,16 @@ impl Vault {
         project: &ProjectRef,
         action: ActionKind,
         answered_on: &str,
+        hosts: &[String],
     ) -> VaultResult<u64> {
-        self.store_answer(item_id, project, action, AnswerScope::Project, answered_on)
+        self.store_answer(
+            item_id,
+            project,
+            action,
+            AnswerScope::Project,
+            answered_on,
+            hosts,
+        )
     }
 
     /// Allow production for `item_id`, `project`, and `action`. Only the broker calls
@@ -114,6 +165,7 @@ impl Vault {
         project: &ProjectRef,
         action: ActionKind,
         answered_on: &str,
+        hosts: &[String],
     ) -> VaultResult<u64> {
         self.store_answer(
             item_id,
@@ -121,6 +173,7 @@ impl Vault {
             action,
             AnswerScope::Production,
             answered_on,
+            hosts,
         )
     }
 
@@ -131,6 +184,7 @@ impl Vault {
         action: ActionKind,
         scope: AnswerScope,
         answered_on: &str,
+        hosts: &[String],
     ) -> VaultResult<u64> {
         let item = to_sql_id(item_id)?;
         let key = checked(&project.key, MAX_PROJECT_KEY_BYTES)?;
@@ -142,13 +196,28 @@ impl Vault {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| err(VaultErrorKind::Storage))?;
         require_item(&tx, item)?;
+        // The same answer again adds the hosts of its run.
+        let known: Option<String> = tx
+            .query_row(
+                "SELECT hosts FROM owner_answer
+                 WHERE item_id = ?1 AND project_key = ?2 AND action_kind = ?3 AND scope = ?4",
+                (item, key.as_str(), action.as_str(), scope.as_str()),
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let mut all = known.as_deref().map(parse_hosts).transpose()?.unwrap_or_default();
+        all.extend(hosts.iter().cloned());
+        let all = serde_json::to_string(&normal_hosts(&all))
+            .map_err(|_| err(VaultErrorKind::Storage))?;
         tx.execute(
             "INSERT INTO owner_answer
-                 (item_id, project_key, project_label, action_kind, scope, created_at, answered_on)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 (item_id, project_key, project_label, action_kind, scope, created_at, answered_on,
+                  hosts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(item_id, project_key, action_kind, scope)
-             DO UPDATE SET project_label = excluded.project_label",
-            (
+             DO UPDATE SET project_label = excluded.project_label, hosts = excluded.hosts",
+            rusqlite::params![
                 item,
                 key.as_str(),
                 label.as_str(),
@@ -156,7 +225,8 @@ impl Vault {
                 scope.as_str(),
                 at,
                 on.as_str(),
-            ),
+                all,
+            ],
         )
         .map_err(|_| err(VaultErrorKind::Storage))?;
         let id: i64 = tx
@@ -185,7 +255,7 @@ impl Vault {
             .conn_ref()?
             .query_row(
                 "SELECT id, item_id, project_key, project_label, action_kind, scope,
-                     created_at, answered_on
+                     created_at, answered_on, hosts
                  FROM owner_answer
                  WHERE item_id = ?1 AND project_key = ?2 AND action_kind = ?3 AND scope = ?4",
                 (item, project_key, action.as_str(), scope.as_str()),
@@ -203,7 +273,7 @@ impl Vault {
         let mut stmt = conn
             .prepare(
                 "SELECT id, item_id, project_key, project_label, action_kind, scope,
-                     created_at, answered_on
+                     created_at, answered_on, hosts
                  FROM owner_answer WHERE item_id = ?1 ORDER BY id DESC",
             )
             .map_err(|_| err(VaultErrorKind::Storage))?;
@@ -231,7 +301,11 @@ impl Vault {
     }
 }
 
-type AnswerRow = (i64, i64, String, String, String, String, i64, String);
+type AnswerRow = (i64, i64, String, String, String, String, i64, String, String);
+
+fn parse_hosts(text: &str) -> VaultResult<Vec<String>> {
+    serde_json::from_str(text).map_err(|_| err(VaultErrorKind::Storage))
+}
 
 fn answer_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnswerRow> {
     Ok((
@@ -243,11 +317,12 @@ fn answer_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnswerRow> {
         row.get(5)?,
         row.get(6)?,
         row.get(7)?,
+        row.get(8)?,
     ))
 }
 
 fn parse_answer(row: AnswerRow) -> VaultResult<OwnerAnswer> {
-    let (id, item, key, label, action, scope, at, on) = row;
+    let (id, item, key, label, action, scope, at, on, hosts) = row;
     Ok(OwnerAnswer {
         id: to_public_id(id)?,
         item_id: to_public_id(item)?,
@@ -256,6 +331,7 @@ fn parse_answer(row: AnswerRow) -> VaultResult<OwnerAnswer> {
         scope: AnswerScope::parse(&scope)?,
         created_at: from_sql_time(at)?,
         answered_on: on,
+        hosts: parse_hosts(&hosts)?,
     })
 }
 
@@ -291,11 +367,11 @@ mod tests {
             label: "synthetic".to_owned(),
         };
         let id = vault
-            .remember_answer(item, &project, ActionKind::Read, "this Mac")
+            .remember_answer(item, &project, ActionKind::Read, "this Mac", &[])
             .unwrap();
         assert_eq!(
             vault
-                .remember_answer(item, &project, ActionKind::Read, "this Mac")
+                .remember_answer(item, &project, ActionKind::Read, "this Mac", &[])
                 .unwrap(),
             id,
             "the same answer keeps its row"
@@ -317,7 +393,7 @@ mod tests {
             );
         }
         let production = vault
-            .allow_production(item, &project, ActionKind::Deploy, "this Mac")
+            .allow_production(item, &project, ActionKind::Deploy, "this Mac", &[])
             .unwrap();
         assert_ne!(production, id);
         assert_eq!(vault.answers_for_item(item).unwrap().len(), 2);
@@ -325,18 +401,37 @@ mod tests {
         assert!(!vault.remove_answer(production).unwrap());
         assert_eq!(
             vault
-                .remember_answer(999, &project, ActionKind::Read, "this Mac")
+                .remember_answer(999, &project, ActionKind::Read, "this Mac", &[])
                 .unwrap_err()
                 .kind(),
             VaultErrorKind::NotFound
         );
+        // The hosts of each answer add up, in normal form.
+        let hosts = vec!["API.Example.test:443".to_owned(), "bad host".to_owned()];
+        vault
+            .remember_answer(item, &project, ActionKind::Read, "this Mac", &hosts)
+            .unwrap();
+        vault
+            .remember_answer(
+                item,
+                &project,
+                ActionKind::Read,
+                "this Mac",
+                &["db.example.test".to_owned()],
+            )
+            .unwrap();
+        let found = vault
+            .answer_for(item, &project.key, ActionKind::Read, AnswerScope::Project)
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.hosts, vec!["api.example.test", "db.example.test"]);
         let empty = ProjectRef {
             key: String::new(),
             label: "x".to_owned(),
         };
         assert_eq!(
             vault
-                .remember_answer(item, &empty, ActionKind::Read, "this Mac")
+                .remember_answer(item, &empty, ActionKind::Read, "this Mac", &[])
                 .unwrap_err()
                 .kind(),
             VaultErrorKind::InvalidInput

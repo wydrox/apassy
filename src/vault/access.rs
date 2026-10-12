@@ -233,6 +233,23 @@ impl Vault {
         Ok(catalog)
     }
 
+    /// The `host` field of an item (a database), in the form of
+    /// [`super::answers::normal_host`]. Only a plain field counts. `None` when the item
+    /// has none.
+    pub fn item_host_field(&self, item_id: u64) -> VaultResult<Option<String>> {
+        let item = to_sql_id(item_id)?;
+        let value: Option<String> = self
+            .conn_ref()?
+            .query_row(
+                "SELECT value FROM item_field WHERE item_id = ?1 AND name = 'host' AND secret = 0",
+                [item],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        Ok(value.and_then(|value| super::answers::normal_host(&value)))
+    }
+
     /// The catalog that one agent sees (ADR 0025 §3f): [`Vault::catalog`] without the
     /// items of its `never` exceptions, and for an agent with "only these items", only
     /// its listed items. A revoked agent sees nothing.

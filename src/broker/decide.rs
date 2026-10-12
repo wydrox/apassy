@@ -2,11 +2,21 @@
 //!
 //! 1. The vault is open and unlocked.
 //! 2. The token belongs to an active agent, and the token has not expired.
-//! 3. The agent has a grant for the item and the operation.
+//! 3. The agent may see the item (ADR 0025 §3f: no "Not for this agent", and the item is
+//!    listed for an agent with "only these items"), and the owner set up the operation
+//!    for the item (a connector grant).
 //! 4. After a restore, the owner reviewed the agent settings of the item (goal item V4).
 //! 5. The item has a destination with a known profile and a loopback URL.
 //! 6. The parameters match the operation.
-//! 7. Only then does the broker read the secret, release the vault lock, and call the destination.
+//! 7. The standing rules of ADR 0025 §3 decide, as for a run: "Always ask me", "Always
+//!    ask for this agent", and a production declaration ask the owner (a connector use
+//!    has no project, so no production allowance covers it). The question waits as a
+//!    question of the agent. The model does not decide a connector use: the operation
+//!    is a fixed read of its profile that the owner set up with an owner check.
+//! 8. The broker checks steps 1 to 6 again; the item, its declaration, and the
+//!    exceptions must be the same as in the first check. Only then does it read the
+//!    secret, release the vault lock, and call the destination. Each decided use is in
+//!    the use log (`item_use`).
 //!
 //! Each refusal after step 2 and each call result is stored in the activity log.
 //! Process runs (ADR 0006) have their own check order in [`super::run`].
@@ -20,15 +30,23 @@ use serde_json::{Map, Value, json};
 use zeroize::Zeroizing;
 
 use super::SharedVault;
-use super::approvals::ApprovalQueue;
+use super::action_kind::ActionKind;
+use super::approvals::{
+    AnswerKind, ApprovalOutcome, ApprovalQueue, CheckMethod, PendingRun, QuestionInfo,
+    QuestionItem, QuestionRefusal,
+};
 use super::bouncer::BouncerClient;
 use super::http::{self, HttpFailure, TlsClient, parse_destination};
 use super::model_server::ModelGate;
 use super::profile::{self, OperationSpec};
 use super::prompts::PromptStore;
-use crate::agent::wire::{Action, WIRE_VERSION, WireRequest, WireResponse};
+use crate::agent::wire::{Action, WIRE_VERSION, WireRequest, WireResponse, codes};
+use crate::vault::answers::normal_host;
+use crate::vault::exceptions::Standing;
+use crate::vault::usage::{InteractionKind, NewItemUse, UseDecidedBy, UseOutcome};
 use crate::vault::{
-    ActivityDecision, AgentSummary, NewActivity, Vault, VaultErrorKind, format_utc,
+    ActivityDecision, AgentSummary, Declaration, DeclarationSource, DeclarationSources,
+    NewActivity, Vault, VaultErrorKind, format_utc,
 };
 
 const MAX_OUTPUT_TEXT_BYTES: usize = 256;
@@ -282,7 +300,7 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
         "process_access": process_access,
         "sees_all_credentials": sees_all,
         "catalog": catalog(vault, agent.id),
-        "note": "Secret values are never returned. `catalog` lists the credentials that this agent may use, without secret values, with the folder of each. A credential with access \"can_use\" or \"can_request\" works in apassy_run_with_secrets with its env_name: the bouncer decides each use, and it can ask the owner in the Apassy app while the call waits (up to 5 minutes). When the call fails with question_waiting, another question of this agent waits; the same request again joins the waiting question. Use apassy_use_credential for a connector operation.",
+        "note": "Secret values are never returned. `catalog` lists the credentials that this agent may use, without secret values, with the folder of each. A credential with access \"can_use\" works in apassy_run_with_secrets with its env_name: the bouncer decides each use, and it can ask the owner in the Apassy app while the call waits (up to 5 minutes). When the call fails with question_waiting, another question of this agent waits: wait, then call again with the same request, which joins the waiting question. Use apassy_use_credential for a connector operation.",
     });
     let requests: Vec<Value> = vault
         .agent_access_requests(agent.id, 20)
@@ -304,34 +322,18 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
 
 /// Every credential that is not archived and that the exceptions of the agent do not
 /// hide, without values (ADR 0012, ADR 0025 §3f), with its folder and what the agent
-/// can do with it.
+/// can do with it. A process grant is no authority (ADR 0025): each credential with a
+/// process field is `can_use`, and the bouncer decides each use.
 fn catalog(vault: &Vault, agent_id: u64) -> Value {
-    let granted: Vec<u64> = vault
-        .exec_grants_for_agent(agent_id)
-        .unwrap_or_default()
-        .iter()
-        .map(|grant| grant.item_id)
-        .collect();
-    let open: Vec<u64> = vault
-        .agent_access_requests(agent_id, crate::vault::MAX_OPEN_REQUESTS)
-        .unwrap_or_default()
-        .iter()
-        .filter(|request| request.state == crate::vault::RequestState::Open)
-        .map(|request| request.item_id)
-        .collect();
     let entries: Vec<Value> = vault
         .catalog_for_agent(agent_id)
         .unwrap_or_default()
         .into_iter()
         .map(|entry| {
-            let access = if !entry.can_use_in_process {
-                "needs_field"
-            } else if granted.contains(&entry.item_id) {
+            let access = if entry.can_use_in_process {
                 "can_use"
-            } else if open.contains(&entry.item_id) {
-                "requested"
             } else {
-                "can_request"
+                "needs_field"
             };
             let details: serde_json::Map<String, Value> = entry
                 .details
@@ -438,6 +440,53 @@ struct Prepared {
     op: &'static OperationSpec,
 }
 
+/// A connector use that passed the checks, before the decision (ADR 0025 §3). It has no
+/// secret value.
+#[derive(PartialEq, Eq)]
+struct CallChecked {
+    agent: AgentSummary,
+    /// The vault session and the vault file of the check.
+    epoch: [u8; 32],
+    vault_file: std::path::PathBuf,
+    destination: String,
+    profile: &'static str,
+    secret_field: &'static str,
+    op_name: &'static str,
+    /// The state of the item that the decision used. A later check must match it.
+    revision: u64,
+    name: String,
+    declaration: Option<Declaration>,
+    sources: DeclarationSources,
+    standing: Standing,
+    always_ask: bool,
+}
+
+/// The connector rules of ADR 0025 §3 that do not need the model: "Always ask me",
+/// "Always ask for this agent", and production (a connector use has no project, so no
+/// production allowance can cover it) ask the owner. Each sentence is for the card.
+fn connector_rules(checked: &CallChecked) -> Vec<String> {
+    let mut why = Vec::new();
+    if checked.standing == Standing::AlwaysAsk {
+        why.push(format!(
+            "\"{}\" is set to always ask for this agent.",
+            checked.name
+        ));
+    } else if checked.always_ask {
+        why.push(format!("\"{}\" is set to always ask.", checked.name));
+    }
+    if checked
+        .declaration
+        .as_ref()
+        .is_some_and(Declaration::is_production)
+    {
+        why.push(format!(
+            "\"{}\" is a production credential: you approve each connector use.",
+            checked.name
+        ));
+    }
+    why
+}
+
 fn call(
     ctx: &BrokerContext,
     token: &str,
@@ -446,13 +495,66 @@ fn call(
     params: &BTreeMap<String, String>,
 ) -> WireResponse {
     let vault = &ctx.vault;
-    let (prepared, vault_file) = {
+    let checked = {
         let mut guard = lock(vault);
         let Some(vault) = guard.as_mut().filter(|vault| !vault.is_locked()) else {
             return locked_response();
         };
-        match prepare(vault, token, item_id, operation, params) {
-            Ok(prepared) => (prepared, vault.path().to_path_buf()),
+        match check_call(vault, token, item_id, operation, params) {
+            Ok(checked) => checked,
+            Err(response) => return response,
+        }
+    };
+    // ADR 0025 §3: the standing rules of a run. The model does not decide a connector
+    // use: the operation is a fixed read of its profile that the owner set up with an
+    // owner check, so a use without a rule that asks runs without the bouncer.
+    let why = connector_rules(&checked);
+    let asked = !why.is_empty();
+    let mut answered_on = "";
+    if asked {
+        match ask_owner(ctx, &checked, item_id, params, &why.join(" ")) {
+            Ok(on) => answered_on = on,
+            Err(response) => return response,
+        }
+    }
+    let decided_by = if asked {
+        UseDecidedBy::Owner
+    } else {
+        UseDecidedBy::Bouncer
+    };
+    let prepared = {
+        let mut guard = lock(vault);
+        let Some(vault) = guard
+            .as_mut()
+            .filter(|vault| !vault.is_locked() && vault.epoch() == checked.epoch)
+        else {
+            return WireResponse::failure(
+                "approval_invalidated",
+                "The vault was locked while Apassy checked this use. Send the request again.",
+            );
+        };
+        // The owner can change the item or the agent while a use waits. Check again.
+        let rechecked = match check_call(vault, token, item_id, operation, params) {
+            Ok(rechecked) => rechecked,
+            Err(response) => return response,
+        };
+        if rechecked != checked {
+            let reason = "The credential or its access changed while Apassy checked this use. Send the request again.";
+            record_call_use(vault, &checked, item_id, UseOutcome::Refused, UseDecidedBy::Rule, "");
+            return WireResponse::failure("authorization_changed", reason);
+        }
+        match read_call_secret(vault, &checked, item_id, operation, params) {
+            Ok(prepared) => {
+                record_call_use(
+                    vault,
+                    &checked,
+                    item_id,
+                    UseOutcome::Allowed,
+                    decided_by,
+                    answered_on,
+                );
+                prepared
+            }
             Err(response) => return response,
         }
     };
@@ -474,7 +576,7 @@ fn call(
         let mut guard = lock(vault);
         if let Some(vault) = guard
             .as_mut()
-            .filter(|vault| !vault.is_locked() && vault.path() == vault_file)
+            .filter(|vault| !vault.is_locked() && vault.path() == checked.vault_file)
         {
             let _ = vault.record_activity(&NewActivity {
                 agent_id: Some(prepared.agent.id),
@@ -492,13 +594,192 @@ fn call(
     }
 }
 
-fn prepare(
+/// A connector use waits for the owner, as a question of the agent (ADR 0025 §3). The
+/// question has no project, so only "Allow once" and the stricter answers can take
+/// effect. Returns the device where the owner answered.
+fn ask_owner(
+    ctx: &BrokerContext,
+    checked: &CallChecked,
+    item_id: u64,
+    params: &BTreeMap<String, String>,
+    why: &str,
+) -> Result<&'static str, WireResponse> {
+    let unconfirmed = checked
+        .declaration
+        .as_ref()
+        .is_some_and(Declaration::is_production)
+        && checked.sources.environment == DeclarationSource::Default;
+    let mut valid_answers = vec![
+        AnswerKind::Once,
+        AnswerKind::NeverForAgent,
+        AnswerKind::AlwaysAskForAgent,
+        AnswerKind::Disconnect,
+    ];
+    if unconfirmed {
+        valid_answers.push(AnswerKind::CorrectEnvironment);
+    }
+    let mut command = vec![
+        "apassy_use_credential".to_owned(),
+        checked.profile.to_owned(),
+        checked.op_name.to_owned(),
+    ];
+    command.extend(params.iter().map(|(name, value)| format!("{name}={value}")));
+    let pending = PendingRun {
+        id: 0,
+        agent: checked.agent.name.clone(),
+        command,
+        cwd: String::new(),
+        env_names: Vec::new(),
+        purpose: format!(
+            "Connector operation {} of {} on {}.",
+            checked.op_name, checked.profile, checked.destination
+        ),
+        risk: why.to_owned(),
+        user_request: String::new(),
+        request_source: String::new(),
+        agent_request: String::new(),
+        remember: None,
+        question: QuestionInfo {
+            id: 0,
+            item_ids: vec![item_id],
+            project: None,
+            action: ActionKind::Read,
+            production: false,
+            why: why.to_owned(),
+            items: vec![QuestionItem {
+                item_id,
+                name: checked.name.clone(),
+                production: !unconfirmed
+                    && checked
+                        .declaration
+                        .as_ref()
+                        .is_some_and(Declaration::is_production),
+                unconfirmed,
+                always_ask: checked.always_ask || checked.standing == Standing::AlwaysAsk,
+            }],
+            valid_answers,
+        },
+    };
+    let same_session = || {
+        lock(&ctx.vault)
+            .as_ref()
+            .is_some_and(|vault| !vault.is_locked() && vault.epoch() == checked.epoch)
+    };
+    let settled = ctx.approvals.wait_for_question(
+        pending,
+        checked.agent.id,
+        checked.epoch,
+        ctx.approval_timeout,
+        same_session,
+    );
+    let mut guard = lock(&ctx.vault);
+    let vault = guard
+        .as_mut()
+        .filter(|vault| !vault.is_locked() && vault.path() == checked.vault_file);
+    let settled = match settled {
+        Ok(settled) => settled,
+        Err(refusal) => {
+            if let Some(vault) = vault
+                && refusal == QuestionRefusal::Busy
+            {
+                record_call_use(vault, checked, item_id, UseOutcome::Refused, UseDecidedBy::Rule, "");
+            }
+            return Err(WireResponse::failure(
+                codes::QUESTION_WAITING,
+                super::run::QUESTION_WAITING,
+            ));
+        }
+    };
+    let on = match settled.method {
+        Some(CheckMethod::Companion) => "iPhone",
+        Some(_) => "this Mac",
+        None => "",
+    };
+    let refusal = match settled.outcome {
+        ApprovalOutcome::Approved
+        | ApprovalOutcome::ApprovedAndRemembered
+        | ApprovalOutcome::ApprovedAndGranted => None,
+        ApprovalOutcome::Denied => Some((
+            "approval_denied",
+            "The owner denied this use.".to_owned(),
+            UseOutcome::Denied,
+            UseDecidedBy::Owner,
+        )),
+        ApprovalOutcome::TimedOut => Some((
+            "approval_timeout",
+            format!(
+                "The owner did not decide in {:.1} seconds. Call again with the same request.",
+                ctx.approval_timeout.as_secs_f32()
+            ),
+            UseOutcome::TimedOut,
+            UseDecidedBy::Owner,
+        )),
+        ApprovalOutcome::Invalidated => Some((
+            "approval_invalidated",
+            "The vault was locked, or Apassy stopped, before the use. Send the request again after the owner unlocks the vault.".to_owned(),
+            UseOutcome::Refused,
+            UseDecidedBy::Rule,
+        )),
+    };
+    if let Some(vault) = vault {
+        if !settled.attached {
+            let _ = vault.record_interaction(
+                InteractionKind::Question,
+                &format!("use {}", checked.op_name),
+                &[item_id],
+            );
+        }
+        if let Some((_, reason, outcome, by)) = &refusal {
+            record_call_use(vault, checked, item_id, *outcome, *by, on);
+            let _ = vault.record_activity(&NewActivity {
+                agent_id: Some(checked.agent.id),
+                agent_name: checked.agent.name.clone(),
+                item_id: Some(item_id),
+                operation: checked.op_name.to_owned(),
+                decision: ActivityDecision::Deny,
+                reason: reason.clone(),
+            });
+        }
+    }
+    match refusal {
+        Some((code, reason, ..)) => Err(WireResponse::failure(code, reason)),
+        None => Ok(on),
+    }
+}
+
+/// Store one connector use in the use log (ADR 0025 §5). A connector use has no project.
+fn record_call_use(
+    vault: &mut Vault,
+    checked: &CallChecked,
+    item_id: u64,
+    outcome: UseOutcome,
+    decided_by: UseDecidedBy,
+    answered_on: &str,
+) {
+    let _ = vault.record_item_use(&NewItemUse {
+        item_id,
+        agent_id: Some(checked.agent.id),
+        agent_name: checked.agent.name.clone(),
+        project_key: String::new(),
+        project_label: String::new(),
+        action: ActionKind::Read,
+        command_summary: format!("use {} {}", checked.profile, checked.op_name),
+        hosts: vec![checked.destination.clone()],
+        outcome,
+        decided_by,
+        answered_on: answered_on.to_owned(),
+        decision_log_id: None,
+    });
+}
+
+/// The checks of a connector use, before the decision. No secret is read.
+fn check_call(
     vault: &mut Vault,
     token: &str,
     item_id: u64,
     operation: &str,
     params: &BTreeMap<String, String>,
-) -> Result<Prepared, WireResponse> {
+) -> Result<CallChecked, WireResponse> {
     let agent = authenticate(vault, token, operation)?;
     let deny = |vault: &mut Vault, code: &str, reason: &str| {
         let _ = vault.record_activity(&NewActivity {
@@ -512,10 +793,11 @@ fn prepare(
         WireResponse::failure(code, reason)
     };
 
-    // ADR 0025 §3f: an exception that hides the item wins over a connector grant.
-    let visible = vault
-        .agent_view(agent.id)
-        .is_ok_and(|view| view.visible(item_id));
+    // ADR 0025 §3f: an exception that hides the item wins over a connector grant. The
+    // connector grant names the operations that the owner set up for the item; it is
+    // no process grant, and the rules below still apply to each use.
+    let view = vault.agent_view(agent.id).ok();
+    let visible = view.as_ref().is_some_and(|view| view.visible(item_id));
     match vault.has_grant(agent.id, item_id, operation) {
         Ok(true) if visible => {}
         Ok(_) => {
@@ -565,24 +847,98 @@ fn prepare(
     if let Err(message) = op.validate(params) {
         return Err(deny(vault, "invalid_params", &message));
     }
-    let Ok(target) = parse_destination(&destination.base_url) else {
+    if parse_destination(&destination.base_url).is_err() {
         return Err(deny(
             vault,
             "destination_not_permitted",
             "The destination must be https://, or http:// on this computer.",
         ));
+    }
+    let Ok(details) = vault.details(item_id) else {
+        return Err(deny(
+            vault,
+            "wrong_credential_kind",
+            "The item category does not match the connector profile.",
+        ));
     };
-    let kind_matches = vault
-        .details(item_id)
-        .is_ok_and(|details| details.summary.kind == profile.credential_kind);
-    if !kind_matches {
+    if details.summary.kind != profile.credential_kind {
         return Err(deny(
             vault,
             "wrong_credential_kind",
             "The item category does not match the connector profile.",
         ));
     }
-    let Ok(secret) = vault.reveal(item_id, profile.secret_field) else {
+    let declaration = vault.declaration(item_id);
+    let sources = vault.declaration_sources(item_id);
+    let always_ask = vault.always_ask(item_id);
+    let (Ok(declaration), Ok(sources), Ok(always_ask), Some(view)) =
+        (declaration, sources, always_ask, view)
+    else {
+        return Err(deny(
+            vault,
+            "broker_error",
+            "The broker cannot read the settings of the credential.",
+        ));
+    };
+    let host = destination
+        .base_url
+        .split("://")
+        .nth(1)
+        .and_then(|rest| rest.split(['/', '?', '#']).next())
+        .and_then(normal_host)
+        .unwrap_or_default();
+    Ok(CallChecked {
+        epoch: vault.epoch(),
+        vault_file: vault.path().to_path_buf(),
+        destination: host,
+        profile: profile.id,
+        secret_field: profile.secret_field,
+        op_name: op.name,
+        revision: details.summary.revision,
+        name: details.summary.title,
+        declaration,
+        sources,
+        standing: view.standing(item_id),
+        always_ask,
+        agent,
+    })
+}
+
+/// Read the secret of a connector use that the decision allowed.
+fn read_call_secret(
+    vault: &mut Vault,
+    checked: &CallChecked,
+    item_id: u64,
+    operation: &str,
+    params: &BTreeMap<String, String>,
+) -> Result<Prepared, WireResponse> {
+    let deny = |vault: &mut Vault, code: &str, reason: &str| {
+        let _ = vault.record_activity(&NewActivity {
+            agent_id: Some(checked.agent.id),
+            agent_name: checked.agent.name.clone(),
+            item_id: Some(item_id),
+            operation: operation.to_owned(),
+            decision: ActivityDecision::Deny,
+            reason: reason.to_owned(),
+        });
+        WireResponse::failure(code, reason)
+    };
+    let destination = vault
+        .destination(item_id)
+        .ok()
+        .flatten()
+        .and_then(|destination| parse_destination(&destination.base_url).ok());
+    let (Some(destination), Some(op)) = (
+        destination,
+        profile::find(checked.profile).and_then(|profile| profile.operation(operation)),
+    ) else {
+        return Err(deny(
+            vault,
+            "authorization_changed",
+            "The connector changed while Apassy checked this use. Send the request again.",
+        ));
+    };
+    let Ok(secret) = vault.reveal(item_id, checked.secret_field) else {
         return Err(deny(
             vault,
             "missing_secret",
@@ -590,8 +946,8 @@ fn prepare(
         ));
     };
     Ok(Prepared {
-        agent,
-        destination: target,
+        agent: checked.agent.clone(),
+        destination,
         path: op.path(params),
         secret: secret.into_zeroizing(),
         op,

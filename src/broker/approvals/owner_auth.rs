@@ -907,14 +907,19 @@ impl OwnerGate {
         }
     }
 
-    /// Count a passed owner check (ADR 0025 §1). A failure to count changes nothing.
+    /// Count a passed owner check (ADR 0025 §1). An answer to a waiting run is not
+    /// counted here: the broker counts the question, and one answer is one interaction.
+    /// A failure to count changes nothing.
     fn count_check(&self, action: &OwnerAction, path: &std::path::Path, epoch: [u8; 32]) {
+        if action.run().is_some() {
+            return;
+        }
         let mut guard = self.vault.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(vault) = guard
             .as_mut()
             .filter(|vault| !vault.is_locked() && vault.path() == path && vault.epoch() == epoch)
         {
-            let _ = vault.record_interaction(InteractionKind::OwnerCheck, &action.reason());
+            let _ = vault.record_interaction(InteractionKind::OwnerCheck, &action.reason(), &[]);
         }
     }
 

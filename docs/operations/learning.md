@@ -21,9 +21,8 @@ The broker stores one entry for each decision in the encrypted vault (schema 7, 
 | --- | --- | --- | --- |
 | A hard rule or a request check denies the request | `rule` | `deny` | no |
 | The model allows the run | `model` | `allow` | no |
-| The history allows the run (section 3a) | `model` | `allow` | no |
 | An active remembered pattern allows the run | `pattern` | `allow` | no |
-| A remembered answer of the owner allows the run (`Outcome::Remembered`, section 3a) | `owner` | `allow` | no |
+| A remembered answer of the owner allows the run (`Outcome::Remembered`, section 3a) | `answer` (stored as `owner` with `asked` = no) | `allow` | no |
 | The owner approves or denies | `owner` | `allow` or `deny` | yes |
 | The owner does not answer in time, or a lock ends the wait | `no_answer` | `deny` | yes |
 
@@ -113,8 +112,8 @@ See [the bouncer](bouncer.md), section 3, step 4a, and section 3.0, step 6 (ADR 
 
 ADR 0025 adds two more ways to run without a question. They are not patterns, and they do not use the pattern table. The full order is in [the bouncer](bouncer.md), section 3.0.
 
-- **Remembered answer.** The owner answers a question with "Allow ACTION in PROJECT", or with "Allow production for PROJECT: ACTION". Apassy stores the answer for the item, the project, and the kind of action, for all agents (`src/vault/answers.rs`, table `owner_answer`). A later run with the same item, project, and kind of action starts without a question. This step comes before the check of the user request and the pattern. For a production item, only a production allowance counts. The decision log gets an entry with `decided_by` = `owner` and `asked` = no (`Outcome::Remembered`). The entry has no owner check of its own: the owner checked when the answer was given. A restore removes every answer, production allowances included. Removing an answer makes the bouncer stricter and needs no owner check.
-- **History.** Apassy counts a use of an item in a project with a kind of action as history when the bouncer allowed it (not a pattern, not the owner), and a still connected agent made it. A restore revokes every agent, so a restored log never lets a run start without a question. History is checked after the remembered pattern and after the check of a default declaration. When each item of the run has history, the run starts, and the entry has `decided_by` = `model`. The history never makes a production allowance, and it does not replace the hard rules.
+- **Remembered answer.** The owner answers a question with "Allow ACTION in PROJECT", or with "Allow production for PROJECT: ACTION". Apassy stores the answer for the item, the project, and the kind of action, for all agents (`src/vault/answers.rs`, table `owner_answer`). A later run with the same item, project, and kind of action starts without a question. This step comes before the check of the user request and the pattern. For a production item, only a production allowance counts. The decision log gets an entry with `decided_by` = `answer` (`DecidedBy::Answer`, `Outcome::Remembered`). The column of schema 7 has no `answer`, so the row stores `owner` with `asked` = no; no other entry has this pair, and a read gives `answer` again. The entry has no owner check of its own, and the owner did not see this run: it is no owner label, so a calibration and a fine-tune skip it. The answer fits a run only when each destination host of the run is a host of the answer or a known host of the item, and for a production item only when the rules are certain of the kind of action. A restore removes every answer, production allowances included. Removing an answer makes the bouncer stricter and needs no owner check.
+- **History.** Apassy counts a use of an item in a project with a kind of action as history when the bouncer allowed it (not a pattern, not the owner), the same agent made it, that agent is still connected, and the use came after the last change that made the declaration of the item stricter. A new agent has no history. A restore revokes every agent, so a restored log never counts. History is checked after the remembered pattern and after the check of a default declaration. History never starts a run: an item with history goes to the model, and an item without it asks the owner unless its declaration is development (or local) with low risk. The history never makes a production allowance, and it does not replace the hard rules.
 - **Pattern.** It still needs 3 approvals of the same generalized command (section 2). It is checked after the remembered answer and the check of the user request and the declaration, and before the check of a default declaration, the history, and the model.
 
 A pattern knows a command. An answer and history know an item, a project, and a kind of action. So an answer or history can start a new command of a known kind that no pattern knows. They cannot change a hard rule, a rule flag, a production item without an allowance, "Always ask me", or an exception of the agent.
@@ -181,13 +180,14 @@ Tests: `learning_view_shows_the_ask_rate_decisions_patterns_and_candidate_slot`,
 | `rule_flags` | array of string | Flags of the command analysis |
 | `model_facts` | object | Model answers by name, each a probability. Empty when the model did not answer |
 | `decision` | string | `allow` or `deny` |
-| `decided_by` | string | `rule`, `model`, `pattern`, `owner`, or `no_answer` |
+| `decided_by` | string | `rule`, `model`, `pattern`, `owner`, `answer`, or `no_answer` |
+| `asked` | boolean | The request waited for the owner |
 | `remembered` | boolean | The owner used "Approve and remember" |
 | `model_version` | string, optional | The version of the model that answered, for example `apassy-base-v1+1a2b3c4d` or `laya-rl-agent`. Only when the model answered with a version. Added on 2026-10-07; older lines and readers without it stay valid |
 
 The decision log keeps the version at the end of its `policy` text (`...; model apassy-base-v1+1a2b3c4d`), so the vault schema does not change. The Learning view shows it in "Policy".
 
-The owner labels are the lines with `decided_by` = `owner`. A line of a remembered answer (section 3a) also has `decided_by` = `owner`, but the owner did not decide that run. The export has no `asked` field, so such a line looks like an owner approval. [The fine-tune study](fine-tune.md), section 5, names some fields differently: `relative_dir` is `cwd_rel`, `owner_decision` is `decision` of an owner line, and `source` is `remembered`.
+The owner labels are the lines with `decided_by` = `owner` and `asked` = true. A line of a remembered answer (section 3a) has `decided_by` = `answer` and `asked` = false: the owner did not see that run, so the fine-tune and its gate skip it (`broker::finetune`). An export of an older Apassy has no `asked` field. [The fine-tune study](fine-tune.md), section 5, names some fields differently: `relative_dir` is `cwd_rel`, `owner_decision` is `decision` of an owner line, and `source` is `remembered`.
 
 The local fine-tune (goal item B9) reads this export. `broker::finetune::examples_from_export` turns it into training examples. The label mapping is in [the fine-tune](fine-tune.md), section 6.2.
 

@@ -186,7 +186,8 @@ fn an_agent_sees_only_what_it_can_use_until_the_owner_lets_it_see_all() {
     );
     let stripe = &catalog[1];
     assert_eq!(stripe["kind"], "api_key");
-    assert_eq!(stripe["access"], "can_request");
+    // ADR 0025: no grant is needed; the bouncer decides each use.
+    assert_eq!(stripe["access"], "can_use");
     assert_eq!(stripe["details"]["username"], "ops@example.invalid");
     assert_eq!(stripe["details"]["Region"], "eu-west");
     assert_eq!(
@@ -194,7 +195,7 @@ fn an_agent_sees_only_what_it_can_use_until_the_owner_lets_it_see_all() {
         Some(2),
         "no secret field and no hidden detail"
     );
-    assert_eq!(catalog[0]["access"], "can_request");
+    assert_eq!(catalog[0]["access"], "can_use");
     assert_eq!(catalog[2]["access"], "needs_field");
 }
 
@@ -221,7 +222,8 @@ fn an_access_request_waits_for_the_owner_and_a_grant_answers_it() {
     );
     assert_eq!(code(&ask(&fx, fx.archived, "Archived.")), "not_visible");
     assert_eq!(code(&ask(&fx, fx.bound, " ")), "invalid_request");
-    assert_eq!(list(&fx)["catalog"][1]["access"], "requested");
+    // An open request changes nothing: the credential is usable without a grant.
+    assert_eq!(list(&fx)["catalog"][1]["access"], "can_use");
 
     let open = with_vault(&fx, |v| v.access_requests(true, 10)).expect("requests");
     assert_eq!(open.len(), 1);

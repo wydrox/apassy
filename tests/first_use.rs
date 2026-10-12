@@ -13,7 +13,7 @@ use apassy::agent::client;
 use apassy::agent::wire::{Action, WireResponse};
 use apassy::broker::action_kind::ActionKind;
 use apassy::broker::approvals::{
-    ApprovalRefusal, OwnerAction, OwnerAuthError, OwnerCheck, OwnerGate, PendingRun,
+    AnswerKind, ApprovalRefusal, OwnerAction, OwnerAuthError, OwnerCheck, OwnerGate, PendingRun,
     folder_is_broad, shown_path,
 };
 use apassy::broker::bouncer::BouncerClient;
@@ -46,7 +46,7 @@ struct Fixture {
 
 fn declaration(environment: Environment, risk: RiskLevel) -> Declaration {
     Declaration {
-        project: "synthetic".to_owned(),
+        project: "project".to_owned(),
         environment,
         risk,
         scope: Scope::ReadWrite,
@@ -230,7 +230,7 @@ fn a_first_use_without_history_asks_the_owner_and_says_why() {
     assert_eq!(question.action, ActionKind::Change);
     assert!(!question.production);
     assert!(
-        question.why.contains("was not used in \"project\""),
+        question.why.contains("did not use \"Synthetic Sentry key\" in \"project\""),
         "{}",
         question.why
     );
@@ -248,8 +248,8 @@ fn a_first_use_without_history_asks_the_owner_and_says_why() {
 }
 
 /// ADR 0025 §3: a development key of a known provider that goes to its hosts goes to the
-/// model at first use; the next use with the same kind of action in the project runs
-/// from its history, without a question and without the model.
+/// model at first use. History never bypasses the model (Gate 1, A-3): the next use
+/// with the same kind of action in the project goes to the model again.
 #[test]
 fn a_development_item_with_a_provider_host_and_history_runs_without_a_question() {
     let fx = fixture(Some(declaration(Environment::Development, RiskLevel::Low)));
@@ -258,7 +258,7 @@ fn a_development_item_with_a_provider_host_and_history_runs_without_a_question()
     assert_eq!(model_calls(&fx), 1);
     let second = run_in(&fx, &fx.project, &sentry_call());
     assert_eq!(decided_by(&second), "Bouncer allowed");
-    assert_eq!(model_calls(&fx), 1, "history decided, not the model");
+    assert_eq!(model_calls(&fx), 2, "history goes to the model");
     assert!(fx.broker.approvals().pending().is_empty());
     let uses = with_vault(&fx, |v| v.item_uses(fx.item_id, 10)).expect("uses");
     assert_eq!(uses.len(), 2);
@@ -270,10 +270,11 @@ fn a_development_item_with_a_provider_host_and_history_runs_without_a_question()
     assert!(!text.contains(SECRET));
 }
 
-/// The history of a project counts for every connected agent (ADR 0025 §3, §3c): a
-/// staging key that the bouncer allowed in the project before runs for a new agent.
+/// History counts only for the agent that made it (Gate 1, A-3): a staging key that the
+/// bouncer allowed in the project for one agent goes to the model for that agent, and a
+/// new agent has no history, so it asks. History never runs without the model.
 #[test]
-fn history_in_the_project_lets_another_agent_run_without_a_question() {
+fn history_counts_only_for_the_same_agent_and_goes_to_the_model() {
     let fx = fixture(Some(declaration(Environment::Staging, RiskLevel::Medium)));
     let project_key = std::fs::canonicalize(fx.project.join(".git"))
         .expect("git")
@@ -299,23 +300,30 @@ fn history_in_the_project_lets_another_agent_run_without_a_question() {
         .expect("history");
         token.expose().to_owned()
     });
-    let response = send_run(
-        &fx.socket,
-        &other_token,
-        fx.item_id,
-        &fx.project,
-        &sentry_call(),
-    );
+    // The agent of the history: the model decides.
+    let response = run_in(&fx, &fx.project, &sentry_call());
     assert_eq!(decided_by(&response), "Bouncer allowed");
-    assert_eq!(model_calls(&fx), 0);
-    // Another kind of action has no history: it asks.
-    let fx_deploy = format!("true deploy || {}", sentry_call());
+    assert_eq!(model_calls(&fx), 1, "history goes to the model");
+    // A new agent has no history: it asks, and the model is not asked.
     let handle = std::thread::spawn({
         let socket = fx.socket.clone();
         let item = fx.item_id;
         let cwd = fx.project.clone();
-        move || send_run(&socket, &other_token, item, &cwd, &fx_deploy)
+        let token = other_token.clone();
+        move || send_run(&socket, &token, item, &cwd, &sentry_call())
     });
+    let run = waiting(&fx);
+    assert!(
+        run.question.why.contains("This agent did not use"),
+        "{}",
+        run.question.why
+    );
+    assert!(fx.broker.approvals().deny(run.id));
+    assert_eq!(code(&handle.join().expect("thread")), "approval_denied");
+    assert_eq!(model_calls(&fx), 1);
+    // Another kind of action has no history: it asks.
+    let fx_deploy = format!("true deploy || {}", sentry_call());
+    let handle = run_later(&fx, &fx.project, &fx_deploy);
     let run = waiting(&fx);
     assert_eq!(run.question.action, ActionKind::Deploy);
     assert!(fx.broker.approvals().deny(run.id));
@@ -409,7 +417,9 @@ fn the_same_request_again_joins_the_question_and_gets_only_its_own_answer() {
     assert_eq!(code(&foreign.join().expect("thread")), "approval_denied");
 }
 
-/// "Always ask me" of an item asks at each use, also with a remembered answer.
+/// "Always ask me" of an item asks at each use. Nothing can be remembered for it, so the
+/// question does not offer "Allow ACTION in PROJECT", and the queue refuses it (Gate 1,
+/// C-F6).
 #[test]
 fn an_always_ask_item_asks_each_time() {
     let fx = fixture(Some(declaration(Environment::Development, RiskLevel::Low)));
@@ -422,16 +432,27 @@ fn an_always_ask_item_asks_each_time() {
             "{}",
             run.question.why
         );
+        assert!(run.question.items[0].always_ask);
+        assert!(
+            !run.question
+                .valid_answers
+                .contains(&AnswerKind::InProject(ActionKind::Change)),
+            "{:?}",
+            run.question.valid_answers
+        );
         let project = run.question.project.clone().expect("project");
-        owner(
-            &fx,
-            OwnerAction::ApproveInProject {
-                run,
-                project,
-                action: ActionKind::Change,
-            },
-        )
-        .expect("approved");
+        assert_eq!(
+            owner(
+                &fx,
+                OwnerAction::ApproveInProject {
+                    run: run.clone(),
+                    project,
+                    action: ActionKind::Change,
+                },
+            ),
+            Err(ApprovalRefusal::NoProject)
+        );
+        owner(&fx, OwnerAction::ApproveRun(run)).expect("approved");
         assert!(handle.join().expect("thread").ok);
     }
     assert_eq!(model_calls(&fx), 0);
@@ -567,7 +588,7 @@ fn the_catalog_names_the_variable_and_the_folder_of_each_usable_credential() {
     assert!(response.ok, "{response:?}");
     let data = response.result.expect("result");
     let entry = &data["catalog"][0];
-    assert_eq!(entry["access"], "can_request");
+    assert_eq!(entry["access"], "can_use");
     assert_eq!(entry["env_name"], ENV_NAME);
     assert_eq!(entry["folder"], serde_json::json!(["Work", "Sentry"]));
     assert!(!data.to_string().contains(SECRET));
@@ -624,4 +645,48 @@ fn otp_only_items_are_needs_field_in_the_broker_catalog_and_cannot_be_used() {
         assert_eq!(code(&run_in(&fx, &fx.project, "true")), "needs_field");
         assert!(fx.broker.approvals().pending().is_empty());
     }
+}
+
+/// Gate 1 (A-4): an item whose declaration names another project asks the owner, also
+/// for a development key with low risk. The model is not asked. An answer of the owner
+/// for this project covers it.
+#[test]
+fn an_item_declared_for_another_project_asks() {
+    let mut declared = declaration(Environment::Development, RiskLevel::Low);
+    declared.project = "another-repo".to_owned();
+    let fx = fixture(Some(declared));
+    let handle = run_later(&fx, &fx.project, &sentry_call());
+    let run = waiting(&fx);
+    assert!(
+        run.question
+            .why
+            .contains("is declared for the project \"another-repo\""),
+        "{}",
+        run.question.why
+    );
+    assert_eq!(model_calls(&fx), 0);
+    let project = run.question.project.clone().expect("project");
+    let action = run.question.action;
+    owner(
+        &fx,
+        OwnerAction::ApproveInProject {
+            run,
+            project,
+            action,
+        },
+    )
+    .expect("approved");
+    assert!(handle.join().expect("thread").ok);
+    assert_eq!(
+        decided_by(&run_in(&fx, &fx.project, &sentry_call())),
+        "Remembered answer"
+    );
+    // The name of the project folder in another form fits.
+    let mut fits = declaration(Environment::Development, RiskLevel::Low);
+    fits.project = "Project".to_owned();
+    let fx = fixture(Some(fits));
+    assert_eq!(
+        decided_by(&run_in(&fx, &fx.project, &sentry_call())),
+        "Bouncer allowed"
+    );
 }
