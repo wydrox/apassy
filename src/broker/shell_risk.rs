@@ -28,6 +28,11 @@
 //! pipeline that names a bound secret of such an item and a URL host outside its
 //! provider hosts and the global known hosts gets the flag [`FOREIGN_HOST_FLAG`].
 //! Without provider hosts, the analysis is the same as [`analyze`].
+//!
+//! [`command_hosts`] lists the destination hosts that a command names (Gate 1 review):
+//! the hosts of URLs, of database clients, and of HTTP tools. The broker compares them
+//! with the hosts of the item. A database client with such a host gets the flag
+//! [`DB_HOST_FLAG`].
 
 use std::borrow::Cow;
 
@@ -35,6 +40,14 @@ use super::packs::{self, Check, Command, DryRun, Role, RuleSet};
 
 /// A bound secret goes to a host outside the known hosts of its provider (goal item B4).
 pub const FOREIGN_HOST_FLAG: &str = "foreign_host";
+
+/// Gate 1 review: a database client gets its host from the command line or an inline
+/// setting (`psql -h HOST`, `psql postgres://user@HOST/db`, `PGHOST=HOST psql`,
+/// `mysql --host=HOST`, `mongosh mongodb://HOST`, `redis-cli -h HOST`), not from the
+/// item. A host of this computer (`localhost`, `127.0.0.1`, `::1`) does not raise it. The
+/// flag says nothing about the item: the broker compares [`command_hosts`] with the
+/// hosts of the item and asks the owner when they differ.
+pub const DB_HOST_FLAG: &str = "db_host_from_command";
 
 /// Result of the analysis.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1559,11 +1572,19 @@ fn words(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// A reference to the variable `name`: `$NAME`, `${NAME}`, `process.env.NAME`,
-/// `os.environ['NAME']`, or `getenv('NAME')`.
+/// A reference to the variable `name`: `$NAME`, `${NAME}`, a parameter expansion such as
+/// `${NAME:0:8}` or `${NAME//a/b}` (a part of the value is not masked in the output),
+/// `process.env.NAME`, `os.environ['NAME']`, or `getenv('NAME')`. The length
+/// `${#NAME}` is not a reference.
 fn names_secret(text: &str, name: &str) -> bool {
+    let braced = format!("${{{name}");
     text.contains(&format!("${name}"))
-        || text.contains(&format!("${{{name}}}"))
+        || text.match_indices(&braced).any(|(at, _)| {
+            text[at + braced.len()..]
+                .chars()
+                .next()
+                .is_some_and(|c| !(c.is_ascii_alphanumeric() || c == '_'))
+        })
         || text.contains(&format!("env.{name}"))
         || text.contains(&format!("environ['{name}']"))
         || text.contains(&format!("environ[\"{name}\"]"))
@@ -1719,10 +1740,13 @@ fn check_pipeline(
     }
 }
 
+/// The segment prints the environment or a part of it: `env`, `printenv`, `set`,
+/// `export -p`, and (Gate 1 review) the program after a wrapper by
+/// [`reads_environment`], or an input from `/proc/PID/environ`.
 fn dumps_environment(segment: &Segment) -> bool {
     let argv = &segment.argv;
     let prog = program(segment);
-    match prog.as_str() {
+    let dump = match prog.as_str() {
         "env" => argv.len() == 1 || argv[1..].iter().all(|arg| arg.starts_with('-')),
         "printenv" => true,
         "set" | "declare" | "typeset" => {
@@ -1730,7 +1754,136 @@ fn dumps_environment(segment: &Segment) -> bool {
         }
         "export" => argv.len() == 1 || argv[1..].iter().all(|arg| arg == "-p"),
         _ => false,
+    };
+    dump || reads_environment(&effective_argv(segment))
+        || segment
+            .redirect_targets
+            .iter()
+            .any(|target| is_process_environment(target))
+}
+
+/// Programs of the jq family. Their filters can read the environment (`env.NAME`,
+/// `$ENV.NAME`, yq `env(NAME)` and `strenv(NAME)`) and encode it (`@base64`), so the
+/// output masking does not see the value (Gate 1 review).
+const JQ_PROGRAMS: &[&str] = &["jq", "gojq", "jaq", "yq", "xq", "tomlq"];
+
+/// Gate 1 review: a command that prints the environment or a part of it, also with a
+/// tool that is otherwise known safe:
+///
+/// - `printenv` (all or one variable) and `env` without a command,
+/// - a filter of the jq family that reads the environment: `jq -n 'env.KEY|@base64'`,
+///   `jq -r '$ENV.KEY'`, `yq '.. | env(KEY)'`, `yq 'strenv(KEY)'`, `yq envsubst`,
+/// - any argument that is `/proc/PID/environ`: `cat /proc/self/environ`.
+///
+/// `argv` is the program and its arguments after the wrappers.
+pub(crate) fn reads_environment(argv: &[String]) -> bool {
+    let Some(first) = argv.first() else {
+        return false;
+    };
+    let args = &argv[1..];
+    let reads = match base_name(first).as_str() {
+        "printenv" => true,
+        "env" => args.iter().all(|arg| arg.starts_with('-')),
+        // The filter is an operand; an option (`--env=production`) is not code.
+        name if JQ_PROGRAMS.contains(&name) => args
+            .iter()
+            .any(|arg| !arg.starts_with('-') && jq_reads_env(arg)),
+        _ => false,
+    };
+    reads || args.iter().any(|arg| is_process_environment(arg))
+}
+
+/// The environment of a process: a path such as `/proc/self/environ` or
+/// `/proc/1/task/1/environ`.
+pub(crate) fn is_process_environment(arg: &str) -> bool {
+    arg.find("/proc/")
+        .is_some_and(|at| arg[at..].contains("/environ"))
+}
+
+/// A jq or yq filter that reads the environment: the builtins `env`, `$ENV`, `strenv`,
+/// and `envsubst` in the code of the filter (also inside a string interpolation
+/// `"\(env.KEY)"`). A field `.env` and a text `"env"` are data, not the environment.
+pub(crate) fn jq_reads_env(filter: &str) -> bool {
+    // The code of the filter: string texts become spaces, interpolations stay code.
+    let mut code = String::new();
+    let mut in_string = false;
+    // The open parentheses of each interpolation that is open.
+    let mut interpolations: Vec<u32> = Vec::new();
+    let mut chars = filter.chars().peekable();
+    while let Some(c) = chars.next() {
+        if in_string {
+            match c {
+                '\\' if chars.peek() == Some(&'(') => {
+                    chars.next();
+                    interpolations.push(0);
+                    in_string = false;
+                    code.push('(');
+                }
+                '\\' => {
+                    chars.next();
+                }
+                '"' => {
+                    in_string = false;
+                    code.push(' ');
+                }
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                in_string = true;
+                code.push(' ');
+            }
+            '(' => {
+                if let Some(depth) = interpolations.last_mut() {
+                    *depth += 1;
+                }
+                code.push(c);
+            }
+            ')' => {
+                match interpolations.last_mut() {
+                    Some(0) => {
+                        interpolations.pop();
+                        in_string = true;
+                    }
+                    Some(depth) => *depth -= 1,
+                    None => {}
+                }
+                code.push(c);
+            }
+            // A comment runs to the end of the line.
+            '#' => {
+                while chars.peek().is_some_and(|d| *d != '\n') {
+                    chars.next();
+                }
+            }
+            _ => code.push(c),
+        }
     }
+    let bytes = code.as_bytes();
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut i = 0;
+    while i < bytes.len() {
+        if !(bytes[i].is_ascii_alphabetic() || bytes[i] == b'_') || (i > 0 && ident(bytes[i - 1])) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && ident(bytes[i]) {
+            i += 1;
+        }
+        let word = &code[start..i];
+        let before = start.checked_sub(1).map(|at| bytes[at]);
+        // `$ENV` is the environment object; `.env` is a field and `$env` a variable.
+        if word == "ENV" && before == Some(b'$') {
+            return true;
+        }
+        if matches!(word, "env" | "strenv" | "envsubst") && !matches!(before, Some(b'.' | b'$')) {
+            return true;
+        }
+    }
+    false
 }
 
 fn check_segment(
@@ -1815,6 +1968,18 @@ fn check_segment(
     }
     if segment.redirect_out && dumps_environment(segment) {
         flags.push("secret_output".to_owned());
+    }
+    // Gate 1 review: a jq filter can encode its input (`--arg k "$KEY" '$k|@base64'`),
+    // so a secret in its arguments leaves the output masking.
+    if cmd.secret && JQ_PROGRAMS.contains(&prog) {
+        flags.push("secret_output".to_owned());
+    }
+    // Gate 1 review: a database client with a host of the command line or an inline
+    // setting. The broker compares [`command_hosts`] with the hosts of the item.
+    if db_client_hosts(&argv, &segment.environment)
+        .is_some_and(|hosts| hosts.iter().any(|host| !is_loopback(host)))
+    {
+        flags.push(DB_HOST_FLAG.to_owned());
     }
     if rules.has_role(prog, Role::HttpClient) {
         check_http(&argv, secret_names, hosts, flags);
@@ -4393,6 +4558,862 @@ fn http_reads(argv: &[String], secret_names: &[String]) -> bool {
     matches!(http_method(argv).as_str(), "GET" | "HEAD") || is_search_post(argv, secret_names)
 }
 
+// ---- Destination hosts (Gate 1 review) ----
+
+/// The destination hosts that `command` names, in the order found, without repeats.
+///
+/// The broker compares them with the hosts of the item (its known hosts and its host
+/// field) and asks the owner when the command names another host. The list has:
+///
+/// - the host of each `scheme://` URL in the words, the `NAME=value` prefixes, the
+///   redirect targets, and the here-documents (`https://`, `postgres://`, `mysql://`,
+///   `mongodb://` and `mongodb+srv://` with each host of a list, `redis://`, `jdbc:...`),
+/// - the hosts of a database client: `-h`/`--host` (also `-hHOST` and `--host=HOST`),
+///   a connection URL or a libpq `host=`/`hostaddr=` text as an operand or after
+///   `-d`/`--dbname`/`--uri`/`-u`, and the inline settings `PGHOST`, `PGHOSTADDR`,
+///   `MYSQL_HOST`, `CLICKHOUSE_HOST`, `SQLCMDSERVER`, `CQLSH_HOST` (a prefix,
+///   `env NAME=...`, or an `export` of the command line). Clients: `psql` and the
+///   PostgreSQL tools, `mysql`, `mariadb`, `mysqldump`, `mysqlsh` and the MySQL tools,
+///   `mongosh`, `mongo` and the MongoDB tools, `redis-cli`, `valkey-cli`, `keydb-cli`,
+///   `clickhouse-client`, `sqlcmd`, `cqlsh`,
+/// - the hosts of an HTTP tool (`curl`, `wget`, `http`, `xh`): a URL operand without a
+///   scheme (`curl api.example.com/v1`, httpie `:3000/x` is `localhost`), a proxy
+///   (`-x`, `--proxy`, `--preproxy`, `--socks5`...), `--connect-to` and `--resolve`
+///   targets, `--dns-servers`, and the inline settings `http_proxy`, `https_proxy`,
+///   `all_proxy` (any case).
+///
+/// Hosts are lowercase, without the user, the port, the brackets of an IPv6 address,
+/// and a trailing dot. A host that comes from a variable (`-h "$DB_HOST"`,
+/// `postgres://$HOST/db`) or from a file is not seen. A Unix socket (`-h /tmp`) is not
+/// a host. A host of this computer (`localhost`, `127.0.0.1`) is in the list.
+pub fn command_hosts(command: &[String]) -> Vec<String> {
+    let rules = packs::active();
+    let mut hosts: Vec<String> = Vec::new();
+    for segment in parse_command(&rules, command).iter().flatten() {
+        let argv = effective_argv(segment);
+        let mut found: Vec<String> = segment
+            .assignments
+            .iter()
+            .chain(&segment.argv)
+            .chain(&segment.redirect_targets)
+            .flat_map(|text| scheme_url_hosts(text))
+            .collect();
+        found.extend(scheme_url_hosts(&segment.heredoc));
+        found.extend(db_client_hosts(&argv, &segment.environment).unwrap_or_default());
+        found.extend(http_client_hosts(&argv, &segment.environment));
+        for host in found {
+            if !hosts.contains(&host) {
+                hosts.push(host);
+            }
+        }
+    }
+    hosts
+}
+
+/// A host of this computer: `localhost` and `*.localhost`, `127.0.0.0/8`, `::1`,
+/// `0.0.0.0`, and `host.docker.internal`.
+fn is_loopback(host: &str) -> bool {
+    matches!(
+        host,
+        "localhost" | "::1" | "0.0.0.0" | "host.docker.internal" | "0:0:0:0:0:0:0:1"
+    ) || host.ends_with(".localhost")
+        || host.strip_prefix("127.").is_some_and(|rest| {
+            rest.split('.').count() == 3 && rest.split('.').all(|part| part.parse::<u8>().is_ok())
+        })
+}
+
+/// A host from a word: lowercase, without a user, a port, the brackets of an IPv6
+/// address, and a trailing dot. `None` for a variable, a socket path, or a word that is
+/// not a host name or an address.
+fn clean_host(text: &str) -> Option<String> {
+    let text = text.trim().trim_matches(['"', '\'']);
+    if text.is_empty() || text.contains(['$', '`']) || text.starts_with('/') {
+        return None;
+    }
+    let text = text.rsplit('@').next().unwrap_or(text);
+    let host = if let Some(v6) = text.strip_prefix('[') {
+        v6.split(']').next().unwrap_or("")
+    } else if text.matches(':').count() >= 2 {
+        // A bare IPv6 address.
+        text
+    } else {
+        text.split(':').next().unwrap_or("")
+    };
+    let host = host.trim_end_matches('.').to_lowercase();
+    let good = !host.is_empty()
+        && !host.starts_with(['.', '-'])
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '%'));
+    good.then_some(host)
+}
+
+/// The hosts of a list `a,b:2,[::1]:3` (MongoDB `--host rs0/a,b` with a replica set
+/// name before `/`).
+fn host_list(text: &str) -> Vec<String> {
+    let text = text.trim().trim_matches(['"', '\'']);
+    let text = match text.split_once('/') {
+        Some((set, hosts)) if !set.contains(':') && !set.is_empty() => hosts,
+        _ => text,
+    };
+    text.split(',').filter_map(clean_host).collect()
+}
+
+/// The hosts of the `scheme://` URLs in a text, each host of a host list
+/// (`mongodb://a:1,b:2/db`), also a bracketed IPv6 address. A host from a variable is
+/// not a host.
+fn scheme_url_hosts(text: &str) -> Vec<String> {
+    let mut hosts = Vec::new();
+    let mut rest = text;
+    while let Some(pos) = rest.find("://") {
+        let has_scheme = rest[..pos]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric());
+        let after = &rest[pos + 3..];
+        let authority = after
+            .split(|c: char| c.is_whitespace() || "/?#\"'`<>();|\\".contains(c))
+            .next()
+            .unwrap_or_default();
+        if has_scheme {
+            // The last `@` ends the user and the password.
+            let host_part = authority.rsplit('@').next().unwrap_or_default();
+            hosts.extend(host_part.split(',').filter_map(clean_host));
+        }
+        rest = after;
+    }
+    hosts
+}
+
+/// The hosts of a libpq connection text: `host=a,b hostaddr=1.2.3.4 dbname=x`.
+fn conninfo_hosts(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .filter_map(|word| {
+            let lower = word.to_lowercase();
+            ["host=", "hostaddr="]
+                .iter()
+                .find_map(|key| lower.strip_prefix(key).map(str::to_owned))
+        })
+        .flat_map(|value| host_list(&value))
+        .collect()
+}
+
+/// The options of one family of database clients.
+struct DbFamily {
+    /// Options with a host or a host list as the value.
+    host: &'static [&'static str],
+    /// Options with a connection URL or a connection text as the value.
+    uri: &'static [&'static str],
+    /// Other options with a separate value (the value is not an operand).
+    with_value: &'static [&'static str],
+    /// Inline settings with a host, in lowercase.
+    env: &'static [&'static str],
+    /// The operands can be a libpq connection text.
+    conninfo: bool,
+    /// The first operand is the host (`cqlsh HOST`) or `user@host` (`mysqlsh`).
+    operand_host: bool,
+}
+
+const PG_TOOLS: &[&str] = &[
+    "psql",
+    "pg_dump",
+    "pg_dumpall",
+    "pg_restore",
+    "pgcli",
+    "pg_isready",
+    "createdb",
+    "dropdb",
+    "createuser",
+    "dropuser",
+    "vacuumdb",
+    "reindexdb",
+    "clusterdb",
+    "pg_basebackup",
+    "pg_receivewal",
+    "pg_amcheck",
+];
+const MYSQL_TOOLS: &[&str] = &[
+    "mysql",
+    "mariadb",
+    "mysqldump",
+    "mariadb-dump",
+    "mysqladmin",
+    "mariadb-admin",
+    "mysqlimport",
+    "mysqlshow",
+    "mysqlcheck",
+    "mysqlpump",
+    "mycli",
+    "mysqlsh",
+];
+const MONGO_TOOLS: &[&str] = &[
+    "mongosh",
+    "mongo",
+    "mongodump",
+    "mongorestore",
+    "mongoexport",
+    "mongoimport",
+    "mongostat",
+    "mongotop",
+    "mongofiles",
+];
+const REDIS_TOOLS: &[&str] = &["redis-cli", "valkey-cli", "keydb-cli"];
+
+/// The hosts that a database client gets from its arguments and its inline settings.
+/// `None` when the program is not a database client. `environment` is the lowercase
+/// `NAME=value` list of the segment.
+fn db_client_hosts(argv: &[String], environment: &[String]) -> Option<Vec<String>> {
+    let name = base_name(argv.first()?);
+    let family = match name.as_str() {
+        n if PG_TOOLS.contains(&n) => DbFamily {
+            host: &["-h", "--host"],
+            uri: &["-d", "--dbname", "--maintenance-db"],
+            with_value: &[
+                "-c",
+                "--command",
+                "-f",
+                "--file",
+                "-U",
+                "--username",
+                "-p",
+                "--port",
+                "-v",
+                "--set",
+                "--variable",
+                "-P",
+                "--pset",
+                "-F",
+                "--field-separator",
+                "-R",
+                "--record-separator",
+                "-o",
+                "--output",
+                "-L",
+                "--log-file",
+                "-T",
+                "--table-attr",
+                "-t",
+                "--table",
+                "-n",
+                "--schema",
+                "-N",
+                "--exclude-schema",
+                "-j",
+                "--jobs",
+                "-Z",
+                "--compress",
+                "-E",
+                "--encoding",
+                "--role",
+            ],
+            env: &["pghost", "pghostaddr"],
+            conninfo: true,
+            operand_host: false,
+        },
+        n if MYSQL_TOOLS.contains(&n) => DbFamily {
+            host: &["-h", "--host"],
+            uri: &["--uri", "--url"],
+            with_value: &[
+                "-e",
+                "--execute",
+                "-u",
+                "--user",
+                "-P",
+                "--port",
+                "-D",
+                "--database",
+                "--protocol",
+                "-S",
+                "--socket",
+                "--default-character-set",
+                "--ssl-ca",
+                "--ssl-cert",
+                "--ssl-key",
+                "--ssl-mode",
+                "--defaults-file",
+                "--defaults-extra-file",
+                "--result-file",
+                "-r",
+                "--where",
+                "-w",
+                "--tables",
+            ],
+            env: &["mysql_host"],
+            conninfo: false,
+            operand_host: name == "mysqlsh",
+        },
+        n if MONGO_TOOLS.contains(&n) => DbFamily {
+            // `mongosh -h` is the help; the database tools take `-h` as the host.
+            host: if matches!(n, "mongosh" | "mongo") {
+                &["--host"]
+            } else {
+                &["-h", "--host"]
+            },
+            uri: &["--uri"],
+            with_value: &[
+                "--eval",
+                "-u",
+                "--username",
+                "-p",
+                "--password",
+                "--port",
+                "-f",
+                "--file",
+                "-d",
+                "--db",
+                "-c",
+                "--collection",
+                "-o",
+                "--out",
+                "-q",
+                "--query",
+                "--authenticationDatabase",
+                "--authenticationMechanism",
+                "--archive",
+                "--gzip-file",
+                "--type",
+                "--fields",
+            ],
+            env: &[],
+            conninfo: false,
+            operand_host: false,
+        },
+        n if REDIS_TOOLS.contains(&n) => DbFamily {
+            host: &["-h"],
+            uri: &["-u"],
+            with_value: &[
+                "-p",
+                "-a",
+                "--pass",
+                "--user",
+                "-n",
+                "-r",
+                "-i",
+                "-s",
+                "-d",
+                "--rdb",
+                "--pattern",
+                "--count",
+                "--eval",
+                "--tls-cert",
+                "--key",
+                "--cacert",
+            ],
+            env: &[],
+            conninfo: false,
+            operand_host: false,
+        },
+        "clickhouse-client" => DbFamily {
+            host: &["-h", "--host"],
+            uri: &[],
+            with_value: &[
+                "-q",
+                "--query",
+                "-u",
+                "--user",
+                "--password",
+                "--port",
+                "-d",
+                "--database",
+                "-f",
+                "--format",
+                "--queries-file",
+            ],
+            env: &["clickhouse_host"],
+            conninfo: false,
+            operand_host: false,
+        },
+        "sqlcmd" => DbFamily {
+            host: &["-S", "--server"],
+            uri: &[],
+            with_value: &[
+                "-Q", "-q", "-U", "-P", "-d", "-i", "-o", "-v", "-s", "-W", "-h", "-l", "-t",
+            ],
+            env: &["sqlcmdserver"],
+            conninfo: false,
+            operand_host: false,
+        },
+        "cqlsh" => DbFamily {
+            host: &[],
+            uri: &[],
+            with_value: &[
+                "-u",
+                "--username",
+                "-p",
+                "--password",
+                "-k",
+                "--keyspace",
+                "-f",
+                "--file",
+                "-e",
+                "--execute",
+                "--cqlshrc",
+                "--cqlversion",
+                "--protocol-version",
+                "--connect-timeout",
+                "--request-timeout",
+            ],
+            env: &["cqlsh_host"],
+            conninfo: false,
+            operand_host: true,
+        },
+        _ => return None,
+    };
+    let args = &argv[1..];
+    let mut hosts = Vec::new();
+    let value_of = |value: &str| -> Vec<String> {
+        let mut out = scheme_url_hosts(value);
+        if out.is_empty() && family.conninfo {
+            out = conninfo_hosts(value);
+        }
+        out
+    };
+    let mut first_operand = true;
+    let mut i = 0;
+    while let Some(arg) = args.get(i) {
+        i += 1;
+        let (option, attached) = match arg.split_once('=') {
+            Some((option, value)) if option.starts_with("--") => (option, Some(value)),
+            _ => (arg.as_str(), None),
+        };
+        let wants = |list: &[&str]| list.contains(&option);
+        if wants(family.host) || wants(family.uri) || wants(family.with_value) {
+            let value = match attached {
+                Some(value) => Some(value),
+                None => {
+                    i += 1;
+                    args.get(i - 1).map(String::as_str)
+                }
+            };
+            let Some(value) = value else {
+                break;
+            };
+            if wants(family.host) {
+                // `sqlcmd -S tcp:host,1433`.
+                let value = value.strip_prefix("tcp:").unwrap_or(value);
+                hosts.extend(scheme_url_hosts(value));
+                hosts.extend(if name == "sqlcmd" {
+                    clean_host(value.split(',').next().unwrap_or_default())
+                        .into_iter()
+                        .collect()
+                } else {
+                    host_list(value)
+                });
+            } else if wants(family.uri) {
+                hosts.extend(value_of(value));
+                if family.operand_host {
+                    // `mysqlsh --uri user@host:3306`.
+                    hosts.extend(value.split_once('@').and_then(|(_, h)| clean_host(h)));
+                }
+            }
+            continue;
+        }
+        // A short host option with the value attached: `-hdb.example.net`.
+        if let Some(value) = family.host.iter().find_map(|short| {
+            (short.len() == 2 && !short.starts_with("--"))
+                .then(|| arg.strip_prefix(short))
+                .flatten()
+                .filter(|value| !value.is_empty())
+        }) {
+            hosts.extend(host_list(value));
+            continue;
+        }
+        if arg.starts_with('-') && arg.len() > 1 {
+            continue;
+        }
+        hosts.extend(value_of(arg));
+        if family.operand_host && first_operand {
+            let host = arg.split_once('@').map_or(arg.as_str(), |(_, host)| host);
+            if !arg.contains("://") {
+                hosts.extend(clean_host(host));
+            }
+        }
+        first_operand = false;
+    }
+    for setting in environment {
+        if let Some((key, value)) = setting.split_once('=')
+            && family.env.contains(&key)
+        {
+            hosts.extend(host_list(value));
+        }
+    }
+    Some(hosts)
+}
+
+/// HTTP tools for [`http_client_hosts`].
+const HTTP_TOOLS: &[&str] = &[
+    "curl", "curlie", "wget", "wget2", "http", "https", "httpie", "xh", "xhs",
+];
+/// HTTP tool options with a host or an address as the value.
+const HTTP_HOST_OPTIONS: &[&str] = &[
+    "-x",
+    "--proxy",
+    "--preproxy",
+    "--socks4",
+    "--socks4a",
+    "--socks5",
+    "--socks5-hostname",
+    "--connect-to",
+    "--resolve",
+    "--dns-servers",
+];
+/// `curl` options with a separate value (the value is not a URL operand).
+const CURL_VALUE_OPTIONS: &[&str] = &[
+    "-A",
+    "--user-agent",
+    "-b",
+    "--cookie",
+    "-c",
+    "--cookie-jar",
+    "-C",
+    "--continue-at",
+    "-d",
+    "--data",
+    "--data-ascii",
+    "--data-binary",
+    "--data-raw",
+    "--data-urlencode",
+    "-D",
+    "--dump-header",
+    "-E",
+    "--cert",
+    "--cert-type",
+    "--cacert",
+    "--capath",
+    "--ciphers",
+    "-K",
+    "--config",
+    "--connect-timeout",
+    "-e",
+    "--referer",
+    "-F",
+    "--form",
+    "--form-string",
+    "-H",
+    "--header",
+    "--proxy-header",
+    "-m",
+    "--max-time",
+    "--max-filesize",
+    "--max-redirs",
+    "-o",
+    "--output",
+    "--output-dir",
+    "-P",
+    "--ftp-port",
+    "-Q",
+    "--quote",
+    "-r",
+    "--range",
+    "--retry",
+    "--retry-delay",
+    "--retry-max-time",
+    "-T",
+    "--upload-file",
+    "-t",
+    "--telnet-option",
+    "-u",
+    "--user",
+    "-U",
+    "--proxy-user",
+    "--oauth2-bearer",
+    "-w",
+    "--write-out",
+    "-X",
+    "--request",
+    "-Y",
+    "--speed-limit",
+    "-y",
+    "--speed-time",
+    "-z",
+    "--time-cond",
+    "--limit-rate",
+    "--interface",
+    "--local-port",
+    "--doh-url",
+    "--unix-socket",
+    "--abstract-unix-socket",
+    "--key",
+    "--key-type",
+    "--pass",
+    "--pinnedpubkey",
+    "--json",
+    "--url-query",
+    "--variable",
+    "--aws-sigv4",
+    "--stderr",
+    "--trace",
+    "--trace-ascii",
+    "--keepalive-time",
+    "--expect100-timeout",
+    "--netrc-file",
+    "--noproxy",
+    "--proto",
+    "--proto-default",
+    "--proto-redir",
+    "--proxy-cacert",
+    "--proxy-cert",
+    "--proxy-key",
+    "--proxy-pass",
+    "--request-target",
+    "--tls-max",
+    "--create-file-mode",
+    "--mail-from",
+    "--mail-rcpt",
+    "--mail-auth",
+    "--max-filesize",
+    "--rate",
+    "--parallel-max",
+];
+/// `curl` short options with a value, also at the end of a group (`-sSo out`).
+const CURL_VALUE_SHORTS: &str = "AbcCdDeEFHKmoPQrtTuUwxXyYz";
+/// `wget` options with a separate value.
+const WGET_VALUE_OPTIONS: &[&str] = &[
+    "-O",
+    "--output-document",
+    "-o",
+    "--output-file",
+    "-a",
+    "--append-output",
+    "-e",
+    "--execute",
+    "-U",
+    "--user-agent",
+    "--header",
+    "--user",
+    "--password",
+    "--http-user",
+    "--http-password",
+    "--post-data",
+    "--post-file",
+    "--body-data",
+    "--body-file",
+    "--method",
+    "-P",
+    "--directory-prefix",
+    "-t",
+    "--tries",
+    "-T",
+    "--timeout",
+    "-w",
+    "--wait",
+    "-Q",
+    "--quota",
+    "-i",
+    "--input-file",
+    "-B",
+    "--base",
+    "--load-cookies",
+    "--save-cookies",
+    "--ca-certificate",
+    "--certificate",
+    "--private-key",
+    "--bind-address",
+    "-l",
+    "--level",
+];
+const WGET_VALUE_SHORTS: &str = "OoaeUPtTwQiBl";
+/// httpie and `xh` options with a separate value.
+const HTTPIE_VALUE_OPTIONS: &[&str] = &[
+    "-a",
+    "--auth",
+    "-A",
+    "--auth-type",
+    "-o",
+    "--output",
+    "-p",
+    "--print",
+    "--pretty",
+    "-s",
+    "--style",
+    "--verify",
+    "--cert",
+    "--cert-key",
+    "--timeout",
+    "--session",
+    "--session-read-only",
+    "--format-options",
+    "--default-scheme",
+    "--max-redirects",
+    "--max-headers",
+    "--raw",
+    "--boundary",
+    "--response-charset",
+    "--response-mime",
+    "--ssl",
+    "--ciphers",
+];
+const HTTPIE_VALUE_SHORTS: &str = "aAops";
+
+/// The hosts that an HTTP tool names besides its `scheme://` URLs: a URL operand without
+/// a scheme, the proxy, `--connect-to` and `--resolve` targets, DNS servers, and the
+/// proxy settings of the environment. Empty for another program.
+fn http_client_hosts(argv: &[String], environment: &[String]) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    let name = base_name(first);
+    if !HTTP_TOOLS.contains(&name.as_str()) {
+        return Vec::new();
+    }
+    let httpie = matches!(name.as_str(), "http" | "https" | "httpie" | "xh" | "xhs");
+    let (value_options, value_shorts) = match name.as_str() {
+        "wget" | "wget2" => (WGET_VALUE_OPTIONS, WGET_VALUE_SHORTS),
+        _ if httpie => (HTTPIE_VALUE_OPTIONS, HTTPIE_VALUE_SHORTS),
+        _ => (CURL_VALUE_OPTIONS, CURL_VALUE_SHORTS),
+    };
+    let args = &argv[1..];
+    let mut hosts = Vec::new();
+    let mut seen_operand = false;
+    let mut i = 0;
+    while let Some(arg) = args.get(i) {
+        i += 1;
+        if arg == "--" {
+            continue;
+        }
+        if arg.starts_with('-') && arg.len() > 1 {
+            // (option, value or `None` for the next argument)
+            let (option, attached): (String, Option<&str>) = if arg.starts_with("--") {
+                match arg.split_once('=') {
+                    Some((option, value)) => (option.to_owned(), Some(value)),
+                    None => (arg.clone(), None),
+                }
+            } else {
+                // A group of short options: the first one with a value takes the rest.
+                let group = &arg[1..];
+                match group
+                    .char_indices()
+                    .find(|(_, c)| value_shorts.contains(*c))
+                {
+                    Some((at, c)) => {
+                        let rest = &group[at + c.len_utf8()..];
+                        (format!("-{c}"), (!rest.is_empty()).then_some(rest))
+                    }
+                    None => (arg.clone(), Some("")),
+                }
+            };
+            let host_option = HTTP_HOST_OPTIONS.contains(&option.as_str());
+            let url_option = option == "--url";
+            if !(host_option || url_option || value_options.contains(&option.as_str())) {
+                continue;
+            }
+            let value = match attached {
+                Some(value) => value,
+                None => {
+                    i += 1;
+                    args.get(i - 1).map_or("", String::as_str)
+                }
+            };
+            if host_option {
+                hosts.extend(http_option_hosts(&option, value));
+            } else if url_option && !value.contains("://") {
+                hosts.extend(bare_url_host(value));
+            }
+            continue;
+        }
+        // httpie: `http [METHOD] URL [ITEMS]`; the items after the URL are data.
+        if httpie {
+            if seen_operand {
+                continue;
+            }
+            if arg.chars().all(|c| c.is_ascii_uppercase()) {
+                continue;
+            }
+            seen_operand = true;
+            if let Some(path) = arg.strip_prefix(':') {
+                // `:3000/x` and `:/x` are localhost.
+                if path.is_empty() || path.starts_with(|c: char| c.is_ascii_digit() || c == '/') {
+                    hosts.push("localhost".to_owned());
+                }
+                continue;
+            }
+        }
+        if !arg.contains("://") {
+            hosts.extend(bare_url_host(arg));
+        }
+    }
+    for setting in environment {
+        if let Some((key, value)) = setting.split_once('=')
+            && matches!(
+                key,
+                "http_proxy" | "https_proxy" | "all_proxy" | "ftp_proxy"
+            )
+        {
+            hosts.extend(scheme_url_hosts(value));
+            if !value.contains("://") {
+                hosts.extend(clean_host(value));
+            }
+        }
+    }
+    hosts
+}
+
+/// The hosts in the value of a host option of an HTTP tool.
+fn http_option_hosts(option: &str, value: &str) -> Vec<String> {
+    match option {
+        // `HOST1:PORT1:HOST2:PORT2`: the request goes to HOST2.
+        "--connect-to" => split_host_fields(value)
+            .get(2)
+            .and_then(|host| clean_host(host))
+            .into_iter()
+            .collect(),
+        // `HOST:PORT:ADDRESS[,ADDRESS]`: the request goes to the addresses.
+        "--resolve" => split_host_fields(value)
+            .get(2..)
+            .map(|rest| rest.join(":"))
+            .map(|addresses| host_list(&addresses))
+            .unwrap_or_default(),
+        "--dns-servers" => host_list(value),
+        // A proxy: `host:port`, `user@host`, or a URL (found by the URL scan).
+        _ if value.contains("://") => Vec::new(),
+        _ => clean_host(value).into_iter().collect(),
+    }
+}
+
+/// The fields of `a:b:[::1]:d` at `:`, with a bracketed IPv6 address as one field.
+fn split_host_fields(value: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut field = String::new();
+    let mut bracket = false;
+    for c in value.chars() {
+        match c {
+            '[' => {
+                bracket = true;
+                field.push(c);
+            }
+            ']' => {
+                bracket = false;
+                field.push(c);
+            }
+            ':' if !bracket => fields.push(std::mem::take(&mut field)),
+            _ => field.push(c),
+        }
+    }
+    fields.push(field);
+    fields
+}
+
+/// The host of a URL operand without a scheme: `api.example.com/v1`,
+/// `user@db.example.net:8080/x`, `localhost:3000`. A word that does not look like a host
+/// name with a dot, `localhost`, or an address is not a host (a file name such as
+/// `data.json` can look like one; an extra host only makes the broker ask).
+fn bare_url_host(arg: &str) -> Option<String> {
+    if arg.starts_with('@') || arg.contains('=') {
+        return None;
+    }
+    let authority = arg.split(['/', '?', '#']).next()?;
+    let host = clean_host(authority)?;
+    let looks_like_host = host == "localhost"
+        || host.contains(':')
+        || host.rsplit('.').next().is_some_and(|tld| {
+            host.contains('.')
+                && tld.len() >= 2
+                && (tld.chars().all(|c| c.is_ascii_alphabetic())
+                    || host.split('.').all(|part| part.parse::<u8>().is_ok()))
+        });
+    looks_like_host.then_some(host)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5737,5 +6758,252 @@ mod tests {
         assert!(!sql_personal_read(
             "select status, count(*) from jobs group by status"
         ));
+    }
+
+    /// Gate 1 review: tools that are otherwise known safe can print the environment or
+    /// encode a secret past the output masking. Each such command has `secret_output`
+    /// and is not known safe or known.
+    #[test]
+    fn printing_the_environment_is_a_secret_output() {
+        let secrets = vec!["STRIPE_KEY".to_owned(), "X".to_owned()];
+        for line in [
+            "jq -n 'env.STRIPE_KEY|@base64'",
+            "jq -n '@base64 \"\\(env.STRIPE_KEY)\"'",
+            "jq -r '$ENV.X'",
+            "jq -n env",
+            "jq -n '[env | keys[]]'",
+            "gojq -n '$ENV.X | explode'",
+            "jaq -n 'env.X'",
+            "yq '.. | env(X)'",
+            "yq -n 'strenv(X)'",
+            "yq envsubst config.yml",
+            "printenv",
+            "printenv X",
+            "env",
+            "env -0",
+            "sudo printenv",
+            "echo $X",
+            "echo \"${X:0:8}\"",
+            "echo \"${X//a/b}\"",
+            "printf %s $STRIPE_KEY",
+            "cat /proc/self/environ",
+            "cat /proc/1/environ",
+            "strings /proc/self/environ",
+            "sh -c 'tr \"\\0\" \"\\n\" < /proc/self/environ'",
+            "jq -n --arg k \"$STRIPE_KEY\" '$k|@base64'",
+        ] {
+            let argv = command_line_to_argv(line);
+            let a = analyze(&argv, "Do the work.", &secrets);
+            assert!(
+                a.flags.contains(&"secret_output".to_owned()) && !a.known_safe && !a.known_command,
+                "{line}: {a:?}"
+            );
+        }
+        // Fields and texts named `env` are data; the length of a secret is not a secret.
+        for line in [
+            "jq .config.env settings.json",
+            "jq '.services.web.env' compose.json",
+            "jq '.[] | select(.name == \"env\")' list.json",
+            "jq -r '$env' x.json",
+            "jq -r '.name # env' package.json",
+            "yq '.app.env.FOO' config.yml",
+            "echo \"${#X}\"",
+        ] {
+            let a = analyze(&command_line_to_argv(line), "Do the work.", &secrets);
+            assert!(
+                !a.flags.contains(&"secret_output".to_owned()),
+                "{line}: {a:?}"
+            );
+        }
+        assert!(jq_reads_env("[env][0]"));
+        assert!(jq_reads_env("\"\\(\"a\" + (env.X))\""));
+        assert!(!jq_reads_env("\"env \\(.a) env\""));
+        assert!(!jq_reads_env(".environment"));
+        assert!(is_process_environment("/proc/self/environ"));
+        assert!(is_process_environment("--rawfile=x=/proc/1/task/1/environ"));
+        assert!(!is_process_environment("/proc/cpuinfo"));
+    }
+
+    fn hosts_of(line: &str) -> Vec<String> {
+        command_hosts(&command_line_to_argv(line))
+    }
+
+    /// Gate 1 review: the destination hosts that a command names, for the broker.
+    #[test]
+    fn command_hosts_of_database_clients_and_http_tools() {
+        let cases: &[(&str, &[&str])] = &[
+            // PostgreSQL.
+            (
+                "psql postgres://u@db.evil.example/x -c 'SELECT 1'",
+                &["db.evil.example"],
+            ),
+            (
+                "psql postgresql://app:pw@db.example.net:5432/app",
+                &["db.example.net"],
+            ),
+            ("psql -h other -c 'SELECT 1'", &["other"]),
+            ("psql -hother.example -c 'SELECT 1'", &["other.example"]),
+            (
+                "psql --host=Db.Example.Net. -c 'select 1'",
+                &["db.example.net"],
+            ),
+            ("psql --host db1,db2:5433 -c 'select 1'", &["db1", "db2"]),
+            (
+                "psql 'host=db.example.net dbname=app' -c 'select 1'",
+                &["db.example.net"],
+            ),
+            (
+                "psql -d 'hostaddr=203.0.113.9 dbname=app'",
+                &["203.0.113.9"],
+            ),
+            ("psql --dbname=postgres://x.example/app", &["x.example"]),
+            ("PGHOST=x.example psql -c 'select 1'", &["x.example"]),
+            ("env PGHOST=x.example psql -c 'select 1'", &["x.example"]),
+            (
+                "sh -c 'export PGHOST=x.example; psql -c \"select 1\"'",
+                &["x.example"],
+            ),
+            ("pg_dump -h db.example.net app", &["db.example.net"]),
+            ("psql -h localhost -c 'select 1'", &["localhost"]),
+            // MySQL and MariaDB.
+            ("mysql -h db.example.net -e 'SELECT 1'", &["db.example.net"]),
+            ("mysql -hdb.example.net -e 'SELECT 1'", &["db.example.net"]),
+            (
+                "mysql --host=db.example.net -e 'SELECT 1'",
+                &["db.example.net"],
+            ),
+            (
+                "MYSQL_HOST=db.example.net mysql -e 'SELECT 1'",
+                &["db.example.net"],
+            ),
+            ("mysqldump -h 10.0.0.5 app", &["10.0.0.5"]),
+            ("mysqlsh root@db.example.net:3306", &["db.example.net"]),
+            // MongoDB, Redis, and others.
+            ("mongosh mongodb://db.example.net/app", &["db.example.net"]),
+            (
+                "mongosh 'mongodb://u:p@a.example:27017,b.example:27017/app?replicaSet=rs0'",
+                &["a.example", "b.example"],
+            ),
+            (
+                "mongosh 'mongodb+srv://cluster0.example.mongodb.net/x'",
+                &["cluster0.example.mongodb.net"],
+            ),
+            ("mongosh --host db.example.net", &["db.example.net"]),
+            (
+                "mongodump --host rs0/a.example:27017,b.example:27017",
+                &["a.example", "b.example"],
+            ),
+            ("mongosh mongodb://[::1]:27017/app", &["::1"]),
+            (
+                "redis-cli -h cache.example.net GET k",
+                &["cache.example.net"],
+            ),
+            (
+                "redis-cli -u redis://:pw@cache.example.net:6379 GET k",
+                &["cache.example.net"],
+            ),
+            (
+                "clickhouse-client --host ch.example.net -q 'select 1'",
+                &["ch.example.net"],
+            ),
+            ("cqlsh cass.example.net 9042", &["cass.example.net"]),
+            (
+                "sqlcmd -S tcp:sql.example.net,1433 -Q 'select 1'",
+                &["sql.example.net"],
+            ),
+            // HTTP tools.
+            (
+                "curl https://api.stripe.com/v1/charges",
+                &["api.stripe.com"],
+            ),
+            ("curl -s api.example.com/v1", &["api.example.com"]),
+            (
+                "curl -H 'X-A: b' -o page.html evil.example",
+                &["evil.example"],
+            ),
+            (
+                "curl -x proxy.example:8080 https://api.stripe.com",
+                &["api.stripe.com", "proxy.example"],
+            ),
+            (
+                "curl --connect-to ::evil.example:443 https://api.stripe.com",
+                &["api.stripe.com", "evil.example"],
+            ),
+            (
+                "curl --resolve api.stripe.com:443:203.0.113.5 https://api.stripe.com",
+                &["api.stripe.com", "203.0.113.5"],
+            ),
+            (
+                "HTTPS_PROXY=evil.example:3128 curl https://api.stripe.com",
+                &["api.stripe.com", "evil.example"],
+            ),
+            ("http POST :3000/x a=b", &["localhost"]),
+            (
+                "http GET api.example.com/x Authorization:x",
+                &["api.example.com"],
+            ),
+            ("wget -O out.html evil.example/x", &["evil.example"]),
+            // No literal host.
+            ("psql -h \"$DB_HOST\" -c 'select 1'", &[]),
+            ("psql postgresql://$DB_HOST/app -c 'select 1'", &[]),
+            ("psql -h /var/run/postgresql -c 'select 1'", &[]),
+            ("psql -c 'select 1'", &[]),
+            ("ls -la", &[]),
+        ];
+        let mut failures = Vec::new();
+        for (line, expected) in cases {
+            let mut got = hosts_of(line);
+            got.sort();
+            let mut want: Vec<String> = expected.iter().map(|h| (*h).to_owned()).collect();
+            want.sort();
+            if got != want {
+                failures.push(format!("{line}: got {got:?}, want {want:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// Gate 1 review: a database client with a host of the command line or an inline
+    /// setting gets `db_host_from_command`. A host of this computer does not.
+    #[test]
+    fn a_database_host_of_the_command_is_flagged() {
+        for line in [
+            "psql postgres://u@db.evil.example/x -c 'SELECT 1'",
+            "psql -h other -c 'SELECT 1'",
+            "psql --host=other.example -c 'SELECT 1'",
+            "psql 'host=db.example.net dbname=app' -c 'select 1'",
+            "env PGHOST=x.example psql -c 'select 1'",
+            "PGHOST=x.example psql -c 'select 1'",
+            "mysql -h db.example.net -e 'SELECT 1'",
+            "MYSQL_HOST=db.example.net mysql -e 'SELECT 1'",
+            "mongosh mongodb://db.example.net/app",
+            "mongosh --host db.example.net",
+            "redis-cli -h cache.example.net GET k",
+            "sh -c 'psql -h db.example.net -c \"select 1\"'",
+        ] {
+            let a = analysis_of(line);
+            assert!(
+                a.flags.contains(&DB_HOST_FLAG.to_owned()) && !a.known_safe,
+                "{line}: {a:?}"
+            );
+        }
+        for line in [
+            "psql -c 'select 1'",
+            "psql -h localhost -c 'select 1'",
+            "psql -h 127.0.0.1 -c 'select 1'",
+            "mysql -h 127.0.0.1 -u app -e 'SHOW TABLES' app_dev",
+            "mongosh mongodb://[::1]:27017/app",
+            "psql postgresql://$DB_HOST/app -c 'select 1'",
+            "psql -h /var/run/postgresql -c 'select 1'",
+            "curl https://evil.example",
+        ] {
+            assert!(
+                !has_flag(line, DB_HOST_FLAG),
+                "{line}: {:?}",
+                flags_of(line)
+            );
+        }
+        assert!(is_loopback("127.0.0.1") && is_loopback("127.1.2.3") && is_loopback("::1"));
+        assert!(!is_loopback("127.example.com") && !is_loopback("10.0.0.1"));
     }
 }

@@ -7,10 +7,23 @@
 //! library, so the answer is the same on every machine and in tests.
 //!
 //! The agent can write files in its working directory, so a `.git` entry is not
-//! trusted: only a directory or a regular file counts (never a FIFO or a device), a
-//! file is read up to 4096 bytes, and a common directory that is the root, the home
-//! folder, or one of their parents makes the entry broken, never a project key.
+//! trusted: only a real directory or a regular file counts (never a symlink, a FIFO, or
+//! a device), a file is read up to 4096 bytes, and a common directory that is the root,
+//! the home folder, or one of their parents makes the entry broken, never a project key.
+//!
+//! A project key carries the owner's answers and production allowances (ADR 0025
+//! §3b), so a folder must never claim the key of another repository (Gate 1 review).
+//! A `.git` file is only a pointer that anyone can write (`gitdir: ~/Dev/acme/.git` in
+//! `/tmp/x`), so it counts only with a back-link that git keeps inside the repository:
+//!
+//! - a linked worktree: the gitdir is `COMMON/worktrees/NAME`, and the file
+//!   `COMMON/worktrees/NAME/gitdir` names this folder's `.git` file;
+//! - a submodule: the gitdir is `SUPER/.git/modules/NAME` (also nested), and this folder
+//!   is inside the working tree `SUPER`.
+//!
+//! A `.git` file without such a back-link is ignored, as if the folder had no git.
 
+use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read};
 use std::os::unix::fs::OpenOptionsExt;
@@ -36,16 +49,17 @@ pub struct Project {
 /// The project of `cwd`, or `None` when the folder is too wide to be one.
 ///
 /// The search walks up from `cwd` to the nearest folder with a usable `.git` and never
-/// goes to `home` or above. `.git` is either the common directory itself (also as a
-/// symlink to a directory), or a regular file `gitdir: PATH` of a linked worktree or a
-/// submodule (the path may be relative to the folder). The gitdir of a linked worktree
-/// has a regular file `commondir` (relative to the gitdir) that names the common
-/// directory. The resolution reads at most these two files, so it has no loop. A
-/// `.git` entry of another type, an unreadable or missing target, or a common
-/// directory that is broad is skipped, and the search goes on to the parent. Without
-/// `.git`, the project is `cwd` itself. The root, `home`, its parents, and aliases of
-/// them give `None`, by [`folder_is_broad_with`]. Without `home`, only the root is
-/// known to be broad.
+/// goes to `home` or above. `.git` is either the common directory itself (a real
+/// directory, not a symlink), or a regular file `gitdir: PATH` of a linked worktree or a
+/// submodule (the path may be relative to the folder) with a back-link (see the module
+/// documentation). The gitdir of a linked worktree has a regular file `commondir`
+/// (relative to the gitdir) that names the common directory, and a regular file
+/// `gitdir` that names the `.git` file of its worktree. The resolution reads at most
+/// these three files, so it has no loop. A `.git` entry of another type, a `.git` file
+/// without a back-link, an unreadable or missing target, or a common directory that is
+/// broad is skipped, and the search goes on to the parent. Without `.git`, the project
+/// is `cwd` itself. The root, `home`, its parents, and aliases of them give `None`, by
+/// [`folder_is_broad_with`]. Without `home`, only the root is known to be broad.
 pub fn project_of(cwd: &Path, home: Option<&Path>) -> Option<Project> {
     let cwd = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     if folder_is_broad_with(&cwd, home) {
@@ -80,18 +94,27 @@ const O_NONBLOCK: i32 = 0x0004;
 const O_NONBLOCK: i32 = 0o4000;
 
 /// The canonical git common directory for the `.git` entry of `folder`. `None`
-/// when there is no usable `.git`: the search then goes on to the parent.
+/// when there is no usable `.git`: the search then goes on to the parent. `folder` is
+/// canonical (an ancestor of the canonical working directory).
 fn git_common_dir(folder: &Path, home: Option<&Path>) -> Option<PathBuf> {
     let dot_git = folder.join(".git");
-    // `metadata` follows a symlink: its target must be a directory or a regular file.
-    let metadata = fs::metadata(&dot_git).ok()?;
+    // `symlink_metadata` does not follow a symlink: a `.git` symlink to the `.git` of
+    // another repository (a directory or a worktree's file) is a pointer that the agent
+    // can write, as a `.git` file is, and it has no back-link.
+    let metadata = fs::symlink_metadata(&dot_git).ok()?;
     let common = if metadata.is_dir() {
         dot_git
     } else if metadata.is_file() {
         let gitdir = canonical_dir(&folder.join(gitdir_line(&dot_git)?))?;
         let commondir = gitdir.join("commondir");
         match fs::symlink_metadata(&commondir) {
-            Err(error) if error.kind() == ErrorKind::NotFound => gitdir,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                // Without `commondir`, only a submodule is its own common directory.
+                if !submodule_contains(&gitdir, folder) {
+                    return None;
+                }
+                gitdir
+            }
             Err(_) => return None,
             Ok(_) => {
                 let text = read_small(&commondir)?;
@@ -99,7 +122,11 @@ fn git_common_dir(folder: &Path, home: Option<&Path>) -> Option<PathBuf> {
                 if line.is_empty() {
                     return None;
                 }
-                gitdir.join(line)
+                let common = canonical_dir(&gitdir.join(line))?;
+                if !worktree_links_back(&gitdir, &common, &dot_git) {
+                    return None;
+                }
+                common
             }
         }
     } else {
@@ -109,6 +136,48 @@ fn git_common_dir(folder: &Path, home: Option<&Path>) -> Option<PathBuf> {
     let broad = folder_is_broad_with(&common, home)
         || folder_is_broad_with(&repository_folder(&common), home);
     (!broad).then_some(common)
+}
+
+/// The gitdir of a linked worktree is `COMMON/worktrees/NAME`, and its file `gitdir`
+/// names `dot_git` (the `.git` file of the folder). Both sides are canonical: a path
+/// with a symlink in the back-link still names the same file.
+fn worktree_links_back(gitdir: &Path, common: &Path, dot_git: &Path) -> bool {
+    if gitdir.parent() != Some(common.join("worktrees").as_path()) {
+        return false;
+    }
+    let Some(text) = read_small(&gitdir.join("gitdir")) else {
+        return false;
+    };
+    let Some(line) = text.lines().next().map(str::trim).filter(|l| !l.is_empty()) else {
+        return false;
+    };
+    // Git writes an absolute path. A relative one (`worktree.useRelativePaths`) starts
+    // at the gitdir.
+    let Ok(target) = fs::canonicalize(gitdir.join(line)) else {
+        return false;
+    };
+    let Ok(own) = fs::canonicalize(dot_git) else {
+        return false;
+    };
+    target == own
+}
+
+/// The gitdir is `SUPER/.git/modules/NAME` (or a nested `.../modules/A/modules/B`) and
+/// `folder` is inside the working tree `SUPER`, below it.
+fn submodule_contains(gitdir: &Path, folder: &Path) -> bool {
+    let parts: Vec<Component<'_>> = gitdir.components().collect();
+    let Some(git) = parts.iter().position(|part| part.as_os_str() == ".git") else {
+        return false;
+    };
+    if parts.get(git + 1).map(|part| part.as_os_str()) != Some(OsStr::new("modules"))
+        || parts.len() <= git + 2
+    {
+        return false;
+    }
+    let superproject: PathBuf = parts[..git].iter().collect();
+    // The superproject is a working tree: its `.git` is a real directory.
+    let real_git = fs::symlink_metadata(superproject.join(".git")).is_ok_and(|m| m.is_dir());
+    real_git && folder != superproject && folder.starts_with(&superproject)
 }
 
 /// The canonical form of `path` when it is a directory.

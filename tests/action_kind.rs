@@ -2,7 +2,7 @@
 
 //! The kind of action of a command (ADR 0025 §3a). Synthetic commands only.
 
-use apassy::broker::action_kind::{ActionKind, classify};
+use apassy::broker::action_kind::{ActionKind, classify, classify_certain};
 use apassy::broker::shell_risk::{Analysis, analyze, command_line_to_argv};
 
 use ActionKind::{Change, Delete, Deploy, Read};
@@ -107,10 +107,16 @@ fn analysis_can_only_raise_the_kind() {
     };
     assert_eq!(classify(&command, &loss), Delete);
     let other = Analysis {
-        flags: vec!["secret_output".to_owned()],
+        flags: vec!["production".to_owned()],
         ..Analysis::default()
     };
     assert_eq!(classify(&command, &other), Read);
+    // Gate 1 review: an output of secrets is never a read.
+    let secret = Analysis {
+        flags: vec!["secret_output".to_owned()],
+        ..Analysis::default()
+    };
+    assert_eq!(classify(&command, &secret), Change);
 }
 
 #[test]
@@ -184,7 +190,7 @@ fn only_a_certain_read_is_a_read() {
         ("fly status -a web", Read),
         ("vercel ls --prod", Read),
         ("wrangler kv key list --namespace-id 1", Read),
-        ("heroku config -a web", Read),
+        ("heroku apps:info -a web", Read),
         ("psql -c 'select 1'", Read),
         (
             "psql -h db -U app -c 'SELECT id, name FROM users WHERE id IN (1, 2)'",
@@ -262,6 +268,9 @@ fn only_a_certain_read_is_a_read() {
         ("gh api repos/o/r/pulls -f title=x", Change),
         ("gh api -X POST repos/o/r/issues", Change),
         ("gh myext list", Change),
+        // Config variables are secrets (Gate 1 review).
+        ("heroku config -a web", Change),
+        ("heroku config:get STRIPE_KEY -a web", Change),
         ("gh run download 1", Change),
         ("git branch new-feature", Change),
         ("git config user.name x", Change),
@@ -440,13 +449,14 @@ fn neutral_flags_keep_a_read_and_other_flags_raise_it() {
     };
     for flag in [
         "production",
-        "secret_output",
         "injection_phrase",
         "foreign_host",
+        "db_host_from_command",
     ] {
         assert_eq!(classify(&command, &with_flag(flag)), Read, "{flag}");
     }
     for flag in [
+        "secret_output",
         "system_change",
         "remote_code",
         "privilege",
@@ -469,5 +479,333 @@ fn neutral_flags_keep_a_read_and_other_flags_raise_it() {
         "op run -- psql",
     ] {
         assert_ne!(classify(&command_line_to_argv(line), &safe), Read, "{line}");
+    }
+}
+
+fn words(command: &[&str]) -> Vec<String> {
+    command.iter().map(|word| (*word).to_owned()).collect()
+}
+
+/// `classify_certain` with an empty analysis and with the real analysis of the active
+/// packs.
+fn certain(argv: &[String]) -> (Option<ActionKind>, Option<ActionKind>) {
+    let secrets = ["STRIPE_KEY".to_owned(), "X".to_owned()];
+    (
+        classify_certain(argv, &Analysis::default()),
+        classify_certain(argv, &analyze(argv, "Do the work.", &secrets)),
+    )
+}
+
+/// Gate 1 review: a production allowance must not cover a command whose kind comes
+/// only from the fallback ("everything else is a change").
+#[test]
+fn the_fallback_is_never_certain() {
+    let lines = [
+        "./ship.sh",
+        "./ship.sh --prod",
+        "bin/deploy production",
+        "make deploy",
+        "make",
+        "make all",
+        "sh -c true",
+        "bash -c 'git push'",
+        "sh -c 'rm -rf x'",
+        "eval ls",
+        "python -c 'print(1)'",
+        "python3 -c 'import os; os.remove(\"x\")'",
+        "python main.py",
+        "node script.js",
+        "node -e 'console.log(1)'",
+        "ruby -e 'puts 1'",
+        "frobnicate",
+        "rake db:migrate",
+        "npm run deploy",
+        "npm test",
+        "npx some-tool",
+        "pnpm dlx x",
+        "sudo ls",
+        "xargs rm",
+        "PAGER=less git log",
+        "git -c core.pager=less log",
+        "git my-alias",
+        "git rebase -x ./x main",
+        "git clone -u ./x repo",
+        "kubectl exec web -- ls",
+        "kubectl run x --image alpine",
+        "kubectl --kubeconfig ./k delete pod x",
+        "docker run alpine ls",
+        "docker build .",
+        "docker compose up",
+        "terraform plan",
+        "terraform init",
+        "gh workflow run deploy.yml",
+        "gh pr merge 12",
+        "gh api -X POST repos/o/r/dispatches",
+        "heroku run rails console",
+        "heroku pg:psql",
+        "helm install web ./chart --post-renderer ./x",
+        "aws lambda invoke --function-name f out.json",
+        "aws ssm send-command --document-name x",
+        "aws codebuild start-build --project-name x",
+        "wrangler dev",
+        "wrangler d1 execute db --file x.sql",
+        "vercel build",
+        "vercel dev",
+        "stripe listen",
+        "stripe trigger payment_intent.created",
+        "psql -f migrate.sql",
+        "psql",
+        "psql -c 'COPY users TO PROGRAM ''sh'''",
+        "psql -c 'DO $$ BEGIN END $$'",
+        "psql -c 'select dblink_exec(1)'",
+        "psql -c 'INSERT INTO t SELECT pg_read_file(1)'",
+        "psql -c 'CREATE FUNCTION f() RETURNS int AS 1'",
+        "psql -c 'ALTER SYSTEM SET archive_command = 1'",
+        "psql -c 'select count(*) from users'",
+        "sqlite3 app.db '.output x'",
+        "sqlite3 app.db \"select writefile('x', 'y')\"",
+        "printenv",
+        "printenv STRIPE_KEY",
+        "env",
+        "jq -n env",
+        "cat /proc/self/environ",
+    ];
+    let mut failures = Vec::new();
+    for line in lines {
+        let argv = command_line_to_argv(line);
+        let (plain, real) = certain(&argv);
+        if plain.is_some() || real.is_some() {
+            failures.push(format!("{line}: empty {plain:?}, real {real:?}"));
+        }
+    }
+    // Argument lists that an agent sends without a shell.
+    for command in [
+        &["./ship.sh"][..],
+        &["sh", "-c", "true"],
+        &["python", "-c", "print(1)"],
+        &["node", "script.js"],
+        &["kubectl", "get", "pods", "|", "sh"],
+        &["cat", "a", ">", "b"],
+        &["echo", "$X"],
+    ] {
+        let argv = words(command);
+        let (plain, real) = certain(&argv);
+        if plain.is_some() || real.is_some() {
+            failures.push(format!("{argv:?}: empty {plain:?}, real {real:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Gate 1 review: a rule that identifies the command gives its kind.
+#[test]
+fn a_rule_gives_a_certain_kind() {
+    let lines: &[(&str, ActionKind)] = &[
+        // Read.
+        ("stripe payouts list", Read),
+        ("stripe customers retrieve cus_1", Read),
+        ("kubectl get pods -n prod", Read),
+        ("git log --oneline -5", Read),
+        ("gh pr view 12", Read),
+        ("aws ec2 describe-instances", Read),
+        ("ls -la", Read),
+        ("cat README.md", Read),
+        ("jq .config.env settings.json", Read),
+        ("psql -c 'select 1'", Read),
+        ("psql -h db -U app -c 'SELECT id FROM users'", Read),
+        ("mysql -e 'SELECT id FROM users'", Read),
+        ("sqlite3 app.db 'select * from users'", Read),
+        ("terraform output", Read),
+        ("node --version", Read),
+        ("/bin/ls", Change),
+        // Change.
+        ("git commit -m x", Change),
+        ("git add -A", Change),
+        ("git checkout -b feature", Change),
+        ("git fetch origin", Change),
+        ("git branch new-feature", Change),
+        ("npm install", Change),
+        ("npm ci", Change),
+        ("pnpm add zod", Change),
+        ("pip install requests", Change),
+        ("cargo add serde", Change),
+        ("stripe customers create", Change),
+        ("stripe customers update cus_1 -d name=x", Change),
+        ("stripe post /v1/customers", Change),
+        ("gh pr create --fill", Change),
+        ("gh issue comment 1 --body x", Change),
+        ("kubectl scale deploy/web --replicas 2", Change),
+        ("kubectl label pod web a=b", Change),
+        ("aws s3 cp ./a s3://b/a", Change),
+        ("aws ec2 create-tags --resources i-1", Change),
+        ("docker pull alpine", Change),
+        ("docker stop web", Change),
+        ("fly secrets set A=1", Change),
+        ("heroku config:set A=1 -a web", Change),
+        ("terraform fmt", Change),
+        ("mkdir -p x", Change),
+        ("sort -o out.txt in.txt", Change),
+        ("psql -c 'INSERT INTO t VALUES (1)'", Change),
+        ("psql -c 'UPDATE t SET a = 1 WHERE id = 2'", Change),
+        ("psql -c 'CREATE TABLE t (id int)'", Change),
+        ("mysql -e 'INSERT INTO t VALUES (1)'", Change),
+        ("sqlite3 app.db 'update t set a = 1'", Change),
+        // Deploy.
+        ("git push", Deploy),
+        ("git push origin main", Deploy),
+        ("vercel", Deploy),
+        ("vercel --prod", Deploy),
+        ("wrangler deploy", Deploy),
+        ("fly deploy", Deploy),
+        ("helm upgrade --install web ./chart", Deploy),
+        ("kubectl apply -f k8s.yaml", Deploy),
+        ("terraform apply", Deploy),
+        ("pulumi up --yes", Deploy),
+        ("docker push ghcr.io/acme/api:1", Deploy),
+        ("npm publish", Deploy),
+        ("cargo publish", Deploy),
+        ("gh release create v1", Deploy),
+        ("timeout 60 git push", Deploy),
+        // Delete.
+        ("git push --force", Delete),
+        ("git push -f origin main", Delete),
+        ("git push origin :feature", Delete),
+        ("git reset --hard HEAD~1", Delete),
+        ("git clean -fdx", Delete),
+        ("git branch -D old", Delete),
+        ("rm -rf build", Delete),
+        ("/bin/rm file", Delete),
+        ("rmdir x", Delete),
+        ("dropdb app", Delete),
+        ("kubectl delete pod web", Delete),
+        ("helm uninstall web", Delete),
+        ("terraform destroy", Delete),
+        ("aws s3 rb s3://b", Delete),
+        ("aws ec2 terminate-instances --instance-ids i-1", Delete),
+        ("docker system prune -a", Delete),
+        ("gh repo delete o/r --yes", Delete),
+        ("gh api -X DELETE repos/o/r", Delete),
+        ("npm install --force", Delete),
+        ("find . -name '*.log' -delete", Delete),
+        ("psql -c 'DROP TABLE users'", Delete),
+        ("psql -c 'DELETE FROM users'", Delete),
+        ("psql -c 'select 1; DROP TABLE x'", Delete),
+        ("mysql -e 'DROP DATABASE app'", Delete),
+        ("sqlite3 app.db 'delete from users'", Delete),
+    ];
+    let mut failures = Vec::new();
+    for (line, expected) in lines {
+        let argv = command_line_to_argv(line);
+        let (plain, real) = certain(&argv);
+        let wanted = Some(*expected);
+        // The real analysis may only make a certain kind uncertain or a delete.
+        let real_ok = real == wanted || real.is_none() || real == Some(Delete);
+        if plain != wanted || !real_ok {
+            failures.push(format!(
+                "{line}: expected {expected:?}, empty {plain:?}, real {real:?}"
+            ));
+        }
+        // The certain kind is always the kind of `classify`.
+        assert_eq!(plain, Some(classify(&argv, &Analysis::default())), "{line}");
+    }
+    // The exact cases of the review, with the real analysis too.
+    for (command, expected) in [
+        (&["stripe", "payouts", "list"][..], Read),
+        (&["git", "push", "--force"], Delete),
+    ] {
+        assert_eq!(certain(&words(command)), (Some(expected), Some(expected)));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The analysis can make a certain kind uncertain, never lower it.
+#[test]
+fn the_analysis_can_make_a_certain_kind_uncertain() {
+    let command = words(&["kubectl", "get", "pods"]);
+    let with = |flags: &[&str], known_write: bool| Analysis {
+        flags: flags.iter().map(|f| (*f).to_owned()).collect(),
+        known_write,
+        ..Analysis::default()
+    };
+    assert_eq!(classify_certain(&command, &with(&[], false)), Some(Read));
+    // A neutral flag keeps the kind (the flag itself still asks the owner).
+    assert_eq!(
+        classify_certain(&command, &with(&["production"], false)),
+        Some(Read)
+    );
+    // A flag or a known write that the rules do not explain: the kind is not certain.
+    for analysis in [
+        with(&["secret_output"], false),
+        with(&["system_change"], false),
+        with(&[], true),
+    ] {
+        assert_eq!(classify_certain(&command, &analysis), None, "{analysis:?}");
+    }
+    // Data loss is the most dangerous kind: it is certain.
+    assert_eq!(
+        classify_certain(&command, &with(&["data_loss"], false)),
+        Some(Delete)
+    );
+    // A change stays a change with a flag of a change.
+    let commit = words(&["git", "commit", "-m", "x"]);
+    assert_eq!(
+        classify_certain(&commit, &with(&["new_dependency"], false)),
+        Some(Change)
+    );
+}
+
+/// Gate 1 review: a command that prints the environment, also with a tool that is
+/// otherwise a read, is never a read and never known safe.
+#[test]
+fn printing_the_environment_is_never_a_read() {
+    let secrets = ["STRIPE_KEY".to_owned(), "X".to_owned()];
+    let lines = [
+        "jq -n 'env.STRIPE_KEY|@base64'",
+        "jq -n '@base64 \"\\(env.STRIPE_KEY)\"'",
+        "jq -r '$ENV.X'",
+        "jq -n env",
+        "gojq -n '$ENV'",
+        "yq '.. | env(X)'",
+        "yq -n 'strenv(X)'",
+        "printenv",
+        "printenv STRIPE_KEY",
+        "env",
+        "env -0",
+        "echo $X",
+        "echo \"${X:0:8}\"",
+        "printf %s $STRIPE_KEY",
+        "cat /proc/self/environ",
+        "cat /proc/1/environ",
+        "sh -c 'tr \"\\0\" \"\\n\" < /proc/self/environ'",
+        "heroku config -a web",
+    ];
+    let mut failures = Vec::new();
+    for line in lines {
+        let argv = command_line_to_argv(line);
+        let analysis = analyze(&argv, "Do the work.", &secrets);
+        let plain = classify(&argv, &Analysis::default());
+        let real = classify(&argv, &analysis);
+        if plain == Read || real == Read || analysis.known_safe {
+            failures.push(format!(
+                "{line}: empty {plain:?}, real {real:?}, {analysis:?}"
+            ));
+        }
+    }
+    // As argument lists too.
+    for command in [&["echo", "$X"][..], &["jq", "-r", "$ENV.X"], &["printenv"]] {
+        let argv = words(command);
+        assert_ne!(classify(&argv, &Analysis::default()), Read, "{argv:?}");
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    // A field named `env` and a text "env" are data.
+    for line in [
+        "jq .config.env settings.json",
+        "jq '.services.web.env' compose.json",
+        "jq -r '.name' package.json",
+    ] {
+        let argv = command_line_to_argv(line);
+        assert_eq!(classify(&argv, &Analysis::default()), Read, "{line}");
+        let analysis = analyze(&argv, "Do the work.", &secrets);
+        assert!(analysis.flags.is_empty(), "{line}: {analysis:?}");
     }
 }
