@@ -349,9 +349,9 @@ fn hard_rules(checked: &Checked, run: &RunFacts<'_>, known: &Known, place: &str)
     if !run.analysis.flags.is_empty() {
         why.push(format!("Rule flags: {}.", run.analysis.flags.join(", ")));
     }
-    if let Some(host) = foreign_db_host(checked, run) {
+    if let Some((host, name)) = foreign_db_host(checked, run) {
         why.push(format!(
-            "The command connects to the database host {host}, which is not a host of these credentials."
+            "The command connects to the database host {host}, which is not a host of \"{name}\"."
         ));
     }
     for (index, facts) in checked.facts.iter().enumerate() {
@@ -380,21 +380,36 @@ fn hard_rules(checked: &Checked, run: &RunFacts<'_>, known: &Known, place: &str)
     why
 }
 
-/// A database host from the command that is not a known host of any item of the run.
-fn foreign_db_host(checked: &Checked, run: &RunFacts<'_>) -> Option<String> {
+/// A database host from the command that is not a known host of each item of the run,
+/// with the name of an item that does not know it ([`uncovered_host`]).
+fn foreign_db_host(checked: &Checked, run: &RunFacts<'_>) -> Option<(String, String)> {
     if !db_host_from_command(run.analysis) {
         return None;
     }
-    run.hosts
-        .iter()
-        .find(|host| {
-            !checked
-                .facts
-                .iter()
-                .flat_map(|facts| &facts.known_hosts)
-                .any(|known| host_matches(host, known))
-        })
-        .cloned()
+    uncovered_host(&checked.facts, run.hosts)
+        .map(|(host, facts)| (host.clone(), facts.name.clone()))
+}
+
+/// A destination host of the run that an item of the run does not know, with that item
+/// (Gate 1, NEW-1). The secret of each item goes to the process, so each item must know
+/// each host by its own known hosts. One item never vouches for another: an item that an
+/// agent added, with its own `host` field, does not bring that host to an item of the
+/// owner.
+fn uncovered_host<'a, 'b>(
+    facts: &'b [ItemFacts],
+    hosts: &'a [String],
+) -> Option<(&'a String, &'b ItemFacts)> {
+    hosts.iter().find_map(|host| {
+        facts
+            .iter()
+            .find(|facts| {
+                !facts
+                    .known_hosts
+                    .iter()
+                    .any(|known| host_matches(host, known))
+            })
+            .map(|facts| (host, facts))
+    })
 }
 
 /// The decision order of ADR 0025 §3 up to the model step.
@@ -652,17 +667,9 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
     let certain = classify_certain(request.command, &analysis);
     let hosts = run_hosts(request.command);
     // `db_host_from_command` says only that the command names its database host. A
-    // known host of the items settles it; another host keeps the flag, so the owner
-    // decides (Gate 1, A-2).
-    if db_host_from_command(&analysis)
-        && hosts.iter().all(|host| {
-            checked
-                .facts
-                .iter()
-                .flat_map(|facts| &facts.known_hosts)
-                .any(|known| host_matches(host, known))
-        })
-    {
+    // known host of each item settles it; a host that one item does not know keeps the
+    // flag, so the owner decides (Gate 1, A-2, NEW-1).
+    if db_host_from_command(&analysis) && uncovered_host(&checked.facts, &hosts).is_none() {
         analysis.flags.retain(|flag| flag != DB_HOST_FLAG);
     }
     let context = DecisionContext {
