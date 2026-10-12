@@ -52,6 +52,7 @@ One version, 0.5.0, for the Mac app, the iPhone app, and the browser extension. 
 
 ### Changed
 
+- The Mac disk image has the version in its name (`Apassy-0.5.0.dmg`), and <https://apassy.wyderka.cc/download> redirects to it. `latest.json` and `/download/Apassy.dmg` stay as before, so apps from 0.3.0 still update. From 0.5.0, the app also accepts the versioned name in `latest.json`.
 - An agent needs no grant. Connecting it is the only setup. Every agent gets the catalog of credential names without values, with folder paths, less the credentials that its exceptions hide. This replaces "a first use always waits for the owner" of [ADR 0024](docs/adr/0024-access-at-first-use.md).
 - Without a running bouncer, each run and each connector use waits for you. An agent still has at most one waiting question.
 - New credentials of AWS, Google Cloud, GitHub, Stripe, Supabase, and PlanetScale get the real value, because the command-line tools of these providers do not accept a placeholder. Apassy keeps their hosts for the bouncer. Cloudflare keeps the placeholder.
