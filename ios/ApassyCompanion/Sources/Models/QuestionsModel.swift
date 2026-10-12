@@ -45,6 +45,8 @@ protocol PushPermission: AnyObject {
     func registerForPushes()
     /// The APNs environment of this build.
     var environment: PushEnvironment { get }
+    /// Call `handler` when the owner opens a notification of a question.
+    func observeOpens(_ handler: @escaping @MainActor () -> Void)
 }
 
 /// The buttons of a question, as on the Mac (ADR 0026): Deny · Allow Once · the main answer, and
@@ -54,13 +56,16 @@ struct AnswerBar: Equatable {
         let answer: RemoteAnswer
         let label: String
         var destructive = false
+        /// The answer in the Face ID prompt, when it says more than the button.
+        var prompt: String?
 
         var id: String { "\(answer.kind.rawValue)-\(answer.itemID ?? "")-\(answer.environment?.rawValue ?? "")" }
     }
 
     var deny: Choice
     var allowOnce: Choice?
-    /// "Allow production: Deploy in shop", "Allow Deploy in shop", or "Development".
+    /// "Allow Deploy in shop" (for production too, as in the mockup; the Face ID prompt says
+    /// "Allow production: Deploy in shop"), or "Development".
     var primary: Choice?
     var menu: [Choice]
 
@@ -82,7 +87,8 @@ struct AnswerBar: Equatable {
         var primary: Choice?
         if let project, offered.contains("production:\(action.rawValue)") {
             primary = Choice(
-                answer: RemoteAnswer(kind: .allowProduction), label: "Allow production: \(action.label) in \(project)")
+                answer: RemoteAnswer(kind: .allowProduction), label: "Allow \(action.label) in \(project)",
+                prompt: "Allow production: \(action.label) in \(project)")
         } else if let project, offered.contains("in_project:\(action.rawValue)") {
             primary = Choice(answer: RemoteAnswer(kind: .approveInProject), label: "Allow \(action.label) in \(project)")
         }
@@ -117,6 +123,28 @@ struct AnswerBar: Equatable {
                 ? Choice(answer: RemoteAnswer(kind: .approveOnce), label: "Allow Once") : nil,
             primary: primary, menu: menu)
     }
+
+    /// The line under the bar: what the main answer remembers.
+    static func note(_ primary: Choice?, _ card: QuestionCard) -> String? {
+        guard let primary, let project = card.question.project?.label else { return nil }
+        switch primary.answer.kind {
+        case .approveInProject, .allowProduction: return "Remembered for all agents in \(project)"
+        case .correctEnvironment: return "Remembered for this credential"
+        default: return nil
+        }
+    }
+}
+
+/// How a question ended, or what this iPhone did with it: it takes the place of the answer bar.
+struct QuestionOutcome: Equatable {
+    enum Tone: Equatable {
+        case allowed
+        case denied
+        case neutral
+    }
+
+    var text: String
+    var tone: Tone
 }
 
 /// Questions through the relay on this iPhone (contract relay-questions-v1, section 13): the list
@@ -161,6 +189,8 @@ final class QuestionsModel {
     /// A problem with the answer key or the notifications, for a line under the list.
     private(set) var notice: String?
     private(set) var notificationsOn: Bool
+    /// Counts the notifications that the owner opened; Decisions then opens the newest question.
+    private(set) var focusRequests = 0
 
     @ObservationIgnored private let service: any VaultService
     @ObservationIgnored private let signer: any AnswerSigner
@@ -171,6 +201,7 @@ final class QuestionsModel {
     @ObservationIgnored private let retryInterval: Duration
     @ObservationIgnored private var attachTask: Task<Void, Never>?
     @ObservationIgnored private var askedForToken = false
+    @ObservationIgnored private var focusPending = false
 
     init(
         service: any VaultService, signer: any AnswerSigner, push: (any PushPermission)?, deviceName: String,
@@ -185,6 +216,7 @@ final class QuestionsModel {
         self.now = now
         self.retryInterval = retryInterval
         notificationsOn = defaults.bool(forKey: Self.notificationsKey)
+        push?.observeOpens { [weak self] in self?.notificationOpened() }
     }
 
     /// The questions that wait for an answer now.
@@ -293,7 +325,7 @@ final class QuestionsModel {
             if prepared.needsFaceID {
                 signature = try await signer.sign(
                     Data(prepared.answerString.utf8),
-                    reason: Self.faceIDReason(agent: card.run.agent, answer: choice.label))
+                    reason: Self.faceIDReason(agent: card.run.agent, answer: choice.prompt ?? choice.label))
             }
             let sent = try await post(question.qid, choice.answer, prepared, signature)
             deliveries[question.qid] = .sent(sent.kind)
@@ -349,13 +381,55 @@ final class QuestionsModel {
         }
         switch deliveries[question.qid] {
         case .sending: return "Sending…"
-        case .sent: return "Sent. The Mac checks it; if the run does not continue within a minute, the answer was refused."
+        case .sent: return Self.sentText
         case .failed(let message): return message
         case nil:
-            if question.answered != nil { return "Sent. The Mac checks it; if the run does not continue within a minute, the answer was refused." }
+            if question.answered != nil { return Self.sentText }
             if question.state == .expired { return "Expired" }
             return question.problem
         }
+    }
+
+    /// What takes the place of the answer bar: how the question ended, the answer this iPhone
+    /// sent, or its expiry. Nil while the owner can answer.
+    func outcome(for question: RemoteQuestion) -> QuestionOutcome? {
+        if let settle = question.settle {
+            let place = settle.deviceName.map { " on \($0)" } ?? ""
+            switch settle.outcome {
+            case "approved": return QuestionOutcome(text: "Allowed\(place)", tone: .allowed)
+            case "denied": return QuestionOutcome(text: "Denied\(place)", tone: .denied)
+            case "timed_out": return QuestionOutcome(text: "Expired", tone: .neutral)
+            case "replaced":
+                return QuestionOutcome(text: "The request changed. A new question follows.", tone: .neutral)
+            default: return QuestionOutcome(text: "Ended on \(question.askerName)", tone: .neutral)
+            }
+        }
+        if case .sent = deliveries[question.qid] { return QuestionOutcome(text: Self.sentText, tone: .neutral) }
+        if question.answered != nil, deliveries[question.qid] == nil {
+            return QuestionOutcome(text: Self.sentText, tone: .neutral)
+        }
+        if question.state != .open || question.expiresAt <= Int64(now().timeIntervalSince1970) {
+            return QuestionOutcome(text: "Expired", tone: .neutral)
+        }
+        return nil
+    }
+
+    static let sentText = "Sent. The Mac checks it; if the run does not continue within a minute, the answer was refused."
+
+    // MARK: Opening a notification
+
+    /// The owner opened a notification. It holds no question (contract section 14.1), so
+    /// Decisions opens the newest one that waits.
+    func notificationOpened() {
+        focusPending = true
+        focusRequests += 1
+    }
+
+    /// The question to open after a notification, once: the newest that waits, or nil.
+    func takeFocus() -> String? {
+        guard focusPending else { return nil }
+        focusPending = false
+        return waiting.max { $0.createdAt < $1.createdAt }?.qid
     }
 
     // MARK: Notifications

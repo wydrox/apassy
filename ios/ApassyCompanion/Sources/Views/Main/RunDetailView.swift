@@ -1,15 +1,23 @@
 import ApassyCompanionKit
-import LocalAuthentication
 import SwiftUI
 
-/// Every field of a run, and the buttons to decide it.
+/// A run of the Mac on this Wi-Fi as a decision: the same layout as a question through the relay
+/// (mockup screen 6), with the fixed glass bar where the actions of the companion map: Allow and
+/// Remember (when the Mac offers it), Deny, Allow Once.
 ///
 /// The view keeps the run as the owner opened it and sends that run's digest. When the inbox
-/// later shows another digest for the same run, the view shows the new run and Approve stays off
+/// later shows another digest for the same run, the view shows the new run and Allow stays off
 /// until the owner confirms that they read it (`RunSnapshot`), so the owner never approves
 /// something that the screen did not show.
 struct RunDetailView: View {
+    /// A sheet of the companion's Inbox, or a screen pushed in Decisions.
+    enum Presentation {
+        case sheet
+        case pushed
+    }
+
     let session: SessionModel
+    let presentation: Presentation
     @State private var snapshot: RunSnapshot
     @State private var phase = Phase.idle
     @State private var approvals = 0
@@ -18,16 +26,16 @@ struct RunDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var typeSize
-    @Namespace private var glass
 
-    init(session: SessionModel, run: PendingRun) {
+    init(session: SessionModel, run: PendingRun, presentation: Presentation = .sheet) {
         self.session = session
+        self.presentation = presentation
         _snapshot = State(initialValue: RunSnapshot(run))
     }
 
     private static let topID = "top"
     private static let changedNotice =
-        "The Mac changed this run. The new version is shown. Read it again before you approve."
+        "The Mac changed this run. The new version is shown. Read it again before you allow it."
 
     enum Action: Equatable {
         case deny
@@ -71,47 +79,73 @@ struct RunDetailView: View {
         snapshot.needsReview || availability == .changed
     }
 
+    /// When the Mac ends the run, from the run on the Mac now: the snapshot's own seconds are from
+    /// when it was taken, while `fetchedAt` moves with each poll.
+    private var deadline: Date? {
+        let run = live ?? shown
+        guard availability != .gone, !phase.isDone, let fetchedAt = session.fetchedAt,
+            let waited = run.waitingSeconds
+        else { return nil }
+        return fetchedAt.addingTimeInterval(TimeInterval(max(0, session.approvalTimeout - max(0, waited))))
+    }
+
     var body: some View {
-        NavigationStack {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
-                        banner
-                            .id(Self.topID)
-                        fields
+        switch presentation {
+        case .sheet:
+            NavigationStack {
+                content
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button(role: .close) { dismiss() }
+                                .disabled(phase.isWorking)
+                        }
                     }
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .scrollEdgeEffectStyle(.soft, for: .bottom)
-                // The digest of the run on the Mac decides. The time left changes each poll and is
-                // not part of it. `initial: true` also checks the first appearance: a poll can land
-                // between the last inbox render (the run that the row passed in) and the sheet's
-                // first body, and then the digest never changes again while the sheet is open, so
-                // a plain `onChange` would leave the old run on the screen with no way to confirm.
-                // `observe` returns true only when the digest differs, so the scroll and the
-                // announcement run for a real change and not for an unchanged first appearance.
-                .onChange(of: live?.digest, initial: true) {
-                    if snapshot.observe(live) {
-                        withAnimation(reduceMotion ? nil : .snappy) { proxy.scrollTo(Self.topID, anchor: .top) }
-                        AccessibilityNotification.Announcement(Self.changedNotice).post()
-                    }
-                }
             }
-            .navigationTitle("Run")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button(role: .close) { dismiss() }
-                        .disabled(phase.isWorking)
-                }
-            }
-            .safeAreaInset(edge: .bottom) { actionBar }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .interactiveDismissDisabled(phase.isWorking)
+        case .pushed:
+            content
+                .navigationBarBackButtonHidden(phase.isWorking)
+                // The bar takes the place of the tab bar, as in the mockup.
+                .toolbar(.hidden, for: .tabBar)
         }
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
-        .interactiveDismissDisabled(phase.isWorking)
+    }
+
+    private var content: some View {
+        let agent = AgentName.display(shown.agent)
+        return ScrollViewReader { proxy in
+            List {
+                Section {
+                    DecisionHeader(
+                        agent: agent, sentence: "\(agent) wants to run a command",
+                        detail: shown.cwd?.split(separator: "/").last.map(String.init), deadline: deadline)
+                }
+                .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                .id(Self.topID)
+                banner
+                fields
+            }
+            .contentMargins(.bottom, 24, for: .scrollContent)
+            .scrollEdgeEffectStyle(.soft, for: .bottom)
+            // The digest of the run on the Mac decides. The time left changes each poll and is
+            // not part of it. `initial: true` also checks the first appearance: a poll can land
+            // between the last inbox render (the run that the row passed in) and the view's
+            // first body, and then the digest never changes again while the view is open, so
+            // a plain `onChange` would leave the old run on the screen with no way to confirm.
+            // `observe` returns true only when the digest differs, so the scroll and the
+            // announcement run for a real change and not for an unchanged first appearance.
+            .onChange(of: live?.digest, initial: true) {
+                if snapshot.observe(live) {
+                    withAnimation(reduceMotion ? nil : .snappy) { proxy.scrollTo(Self.topID, anchor: .top) }
+                    AccessibilityNotification.Announcement(Self.changedNotice).post()
+                }
+            }
+        }
+        .navigationTitle("Run")
+        .navigationBarTitleDisplayMode(.inline)
+        .safeAreaInset(edge: .bottom) { actionBar }
         .sensoryFeedback(.success, trigger: approvals)
         .sensoryFeedback(.impact(flexibility: .soft), trigger: denials)
         .sensoryFeedback(.error, trigger: failures)
@@ -121,61 +155,45 @@ struct RunDetailView: View {
 
     @ViewBuilder
     private var banner: some View {
-        if availability == .gone {
-            if !phase.isDone {
+        if availability != .gone, showsReviewNotice {
+            Section {
                 CalloutView(
-                    symbol: "clock.badge.exclamationmark.fill",
+                    symbol: "exclamationmark.triangle.fill",
                     text:
-                        "This run no longer waits. It was decided on your Mac, or its time ran out. Nothing more can be approved here."
+                        "The Mac changed this run. The new version is shown below. Read it again, then confirm, before you allow it."
                 )
             }
-        } else if showsReviewNotice {
-            CalloutView(
-                symbol: "exclamationmark.triangle.fill",
-                text:
-                    "The Mac changed this run. The new version is shown below. Read it again, then confirm, before you approve."
-            )
+            .listRowBackground(Color.clear)
+            .listRowInsets(EdgeInsets())
         }
     }
 
+    @ViewBuilder
     private var fields: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack(spacing: 8) {
-                Image(systemName: "terminal")
-                    .accessibilityHidden(true)
-                Text(shown.agent)
-                    .font(.title3.weight(.semibold))
-            }
-            if availability != .gone {
-                // The time left comes from the run on the Mac now: the snapshot's own seconds are
-                // from when it was taken, while `fetchedAt` moves with each poll.
-                TimeLeftView(run: live ?? shown, timeout: session.approvalTimeout, fetchedAt: session.fetchedAt)
-            }
-            Field("Your request") {
-                if shown.userRequest.isEmpty {
-                    Text("The Mac has no request text for this run.")
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text(shown.userRequest)
-                }
-                if !shown.requestSource.isEmpty {
-                    Text("Source: \(shown.requestSource)")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+        Section {
+            LabeledContent("Agent", value: shown.agent)
+            if let cwd = shown.cwd, !cwd.isEmpty {
+                LabeledContent("Folder") {
+                    Text(cwd).font(.callout.monospaced()).lineLimit(2).truncationMode(.head)
                 }
             }
-            if !shown.agentRequest.isEmpty && shown.agentRequest != shown.userRequest {
-                Field("What the agent says") {
-                    Text(shown.agentRequest)
-                }
+            LabeledContent("Asked on", value: session.macName)
+        }
+        Section("Command") {
+            DecisionCommand(line: CommandDisplay.line(shown.command))
+        }
+        if !shown.envNames.isEmpty {
+            Section {
+                VariableCapsules(names: shown.envNames)
+            } header: {
+                Text("Variables")
+            } footer: {
+                Text("Names only. Apassy never sends a value to this iPhone.")
             }
-            if !shown.purpose.isEmpty {
-                Field("Purpose") {
-                    Text(shown.purpose)
-                }
-            }
-            if !shown.risk.isEmpty {
-                Field("Risk") {
+        }
+        if !shown.risk.isEmpty || !shown.purpose.isEmpty {
+            Section("Why you are asked") {
+                if !shown.risk.isEmpty {
                     Label {
                         Text(shown.risk)
                     } icon: {
@@ -183,121 +201,114 @@ struct RunDetailView: View {
                             .foregroundStyle(.orange)
                     }
                 }
-            }
-            if let cwd = shown.cwd, !cwd.isEmpty {
-                Field("Folder") {
-                    Text(cwd)
-                        .font(.system(.callout, design: .monospaced))
+                if !shown.purpose.isEmpty {
+                    labeled("Purpose", shown.purpose)
                 }
             }
-            Field("Command") {
-                Text(CommandDisplay.line(shown.command))
-                    .font(.system(.callout, design: .monospaced))
-            }
-            if !shown.envNames.isEmpty {
-                Field("Variables") {
-                    VariableCapsules(names: shown.envNames)
-                    Text("Names only. Apassy never sends a value to this iPhone.")
+        }
+        Section("Requests") {
+            if shown.userRequest.isEmpty {
+                Text("The Mac has no request text for this run.")
+                    .foregroundStyle(.secondary)
+            } else {
+                labeled("You asked", shown.userRequest)
+                if !shown.requestSource.isEmpty {
+                    Text("Source: \(shown.requestSource)")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
             }
-            if let offer = shown.remember {
-                Field("Approve and remember") {
-                    Text(
-                        "Approve and remember teaches \(Text(offer.pattern).font(.system(.body, design: .monospaced))) (\(offer.approvals) of \(offer.needed))"
-                    )
-                }
+            if !shown.agentRequest.isEmpty && shown.agentRequest != shown.userRequest {
+                labeled("The agent says", shown.agentRequest)
             }
         }
+    }
+
+    private func labeled(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.caption).foregroundStyle(.secondary)
+            Text(value)
+        }
+        .accessibilityElement(children: .combine)
     }
 
     // MARK: Actions
 
+    @ViewBuilder
     private var actionBar: some View {
-        VStack(spacing: 10) {
-            if case .failed(let message) = phase {
-                Label {
-                    Text(message)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } icon: {
-                    Image(systemName: "xmark.octagon.fill")
-                        .foregroundStyle(.red)
+        if case .done(let text, let approved) = phase {
+            DecisionOutcomeBar(outcome: QuestionOutcome(text: text, tone: approved ? .allowed : .denied))
+        } else if availability == .gone {
+            DecisionOutcomeBar(
+                outcome: QuestionOutcome(text: "Decided on your Mac, or the time ran out", tone: .neutral))
+        } else {
+            DecisionBar {
+                if case .failed(let message) = phase {
+                    Label {
+                        Text(message)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } icon: {
+                        Image(systemName: "xmark.octagon.fill")
+                            .foregroundStyle(.red)
+                    }
+                    .font(.footnote)
                 }
-                .font(.callout)
-                .padding(12)
-                .background(.red.opacity(0.12), in: .rect(cornerRadius: 14, style: .continuous))
-            }
-            GlassEffectContainer(spacing: 12) {
-                if case .done(let text, let approved) = phase {
-                    Label(text, systemImage: approved ? "checkmark.circle.fill" : "xmark.circle.fill")
-                        .font(.headline)
-                        .padding(.horizontal, 24)
-                        .padding(.vertical, 14)
-                        .frame(maxWidth: .infinity)
-                        .glassEffect(.regular.tint((approved ? Color.green : Color.red).opacity(0.3)), in: .capsule)
-                        .glassEffectID("result", in: glass)
-                } else {
-                    buttons
-                }
+                buttons
             }
         }
-        .controlSize(.large)
-        .padding(.horizontal, 20)
-        .padding(.bottom, 8)
     }
 
+    @ViewBuilder
     private var buttons: some View {
-        VStack(spacing: 12) {
-            if snapshot.needsReview && availability == .current && !isBusy {
-                Button {
-                    withAnimation(reduceMotion ? nil : .snappy) { snapshot.confirmReading() }
-                } label: {
-                    Label("I have read the new version", systemImage: "checkmark")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.glassProminent)
-                .glassEffectID("review", in: glass)
+        if snapshot.needsReview && availability == .current && !isBusy {
+            Button {
+                withAnimation(reduceMotion ? nil : .snappy) { snapshot.confirmReading() }
+            } label: {
+                Label("I have read the new version", systemImage: "checkmark")
+                    .frame(maxWidth: .infinity)
             }
-            let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(spacing: 12)) : AnyLayout(HStackLayout(spacing: 12))
-            layout {
-                Button(role: .destructive) {
-                    perform(.deny)
-                } label: {
-                    label("Deny", symbol: "xmark", action: .deny)
-                }
-                .buttonStyle(.glass)
-                .tint(.red)
-                .disabled(!canDeny)
-                .glassEffectID("deny", in: glass)
-                Button {
-                    perform(.approve)
-                } label: {
-                    label("Approve", symbol: BiometryIcon.symbol, action: .approve)
-                }
-                .buttonStyle(.glassProminent)
-                .disabled(!canApprove)
-                .glassEffectID("approve", in: glass)
+            .decisionButton(.primary)
+        } else if shown.remember != nil {
+            Button {
+                perform(.approveAndRemember)
+            } label: {
+                label("Allow and Remember", action: .approveAndRemember)
             }
-            if shown.remember != nil {
-                Button {
-                    perform(.approveAndRemember)
-                } label: {
-                    label("Approve and remember", symbol: BiometryIcon.symbol, action: .approveAndRemember)
-                }
-                .buttonStyle(.glass)
-                .disabled(!canApprove)
-                .glassEffectID("remember", in: glass)
+            .decisionButton(.primary)
+            .disabled(!canApprove)
+        }
+        let layout =
+            typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(spacing: 8)) : AnyLayout(HStackLayout(spacing: 8))
+        layout {
+            Button(role: .destructive) {
+                perform(.deny)
+            } label: {
+                label("Deny", action: .deny)
             }
+            .decisionButton(.deny)
+            .disabled(!canDeny)
+            Button {
+                perform(.approve)
+            } label: {
+                label("Allow Once", action: .approve)
+            }
+            .decisionButton(.secondary)
+            .disabled(!canApprove)
+        }
+        if let offer = shown.remember {
+            Text("Allow and Remember teaches \(offer.pattern) (\(offer.approvals) of \(offer.needed))")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
         }
     }
 
-    private func label(_ title: String, symbol: String, action: Action) -> some View {
+    private func label(_ title: String, action: Action) -> some View {
         Group {
             if phase == .working(action) {
                 ProgressView()
             } else {
-                Label(title, systemImage: symbol)
+                Text(title)
             }
         }
         .frame(maxWidth: .infinity)
@@ -315,10 +326,10 @@ struct RunDetailView: View {
                     finish("Denied", approved: false)
                 case .approve:
                     _ = try await session.approve(run, remember: false)
-                    finish("Approved", approved: true)
+                    finish("Allowed", approved: true)
                 case .approveAndRemember:
                     let outcome = try await session.approve(run, remember: true)
-                    finish(outcome == .approvedAndRemembered ? "Approved and remembered" : "Approved", approved: true)
+                    finish(outcome == .approvedAndRemembered ? "Allowed and remembered" : "Allowed", approved: true)
                 }
             } catch is CancellationError {
                 phase = .idle
@@ -329,7 +340,7 @@ struct RunDetailView: View {
         }
     }
 
-    /// Show the result in the bar, give the haptic, and close the sheet a moment later.
+    /// Show the result in the bar, give the haptic, and close the view a moment later.
     private func finish(_ text: String, approved: Bool) {
         withAnimation(reduceMotion ? nil : .bouncy) {
             phase = .done(text, approved: approved)
@@ -342,42 +353,6 @@ struct RunDetailView: View {
     }
 }
 
-/// A titled block of a run.
-private struct Field<Content: View>: View {
-    let title: LocalizedStringKey
-    @ViewBuilder let content: Content
-
-    init(_ title: LocalizedStringKey, @ViewBuilder content: () -> Content) {
-        self.title = title
-        self.content = content()
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .textCase(.uppercase)
-                .accessibilityAddTraits(.isHeader)
-            content
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-/// The symbol of the biometry of this iPhone, for the Approve buttons.
-enum BiometryIcon {
-    static let symbol: String = {
-        let context = LAContext()
-        _ = context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
-        switch context.biometryType {
-        case .touchID: return "touchid"
-        case .opticID: return "opticid"
-        default: return "faceid"
-        }
-    }()
-}
-
 #if DEBUG
     #Preview("Run") {
         RunDetailView(session: .preview(), run: PreviewData.migrateRun)
@@ -385,5 +360,11 @@ enum BiometryIcon {
 
     #Preview("Run with a long command") {
         RunDetailView(session: .preview(), run: PreviewData.quotedRun)
+    }
+
+    #Preview("Run in Decisions") {
+        NavigationStack {
+            RunDetailView(session: .preview(), run: PreviewData.migrateRun, presentation: .pushed)
+        }
     }
 #endif
