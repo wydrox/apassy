@@ -714,6 +714,11 @@ A code works once. A typo in a name does not use it. The owner then invites memb
 | `sync_transfers` | 2 |
 | `open_questions` | 20 |
 | `questions_per_hour` | 300 |
+| `member_open_questions` | 15 |
+| `member_questions_per_hour` | 225 |
+| `device_open_questions` | 10 |
+| `device_questions_per_hour` | 150 |
+| `question_bytes` | 8388608 (8 MiB) |
 
 Read all effective values:
 
@@ -728,9 +733,12 @@ docker compose exec relay apassy-relay admin limits t_7k2m5q4x3c --members 25 --
 docker compose exec relay apassy-relay admin limits t_7k2m5q4x3c --agents 40 --runs-per-hour 500 --pending-runs 20 --agent-requests 28
 docker compose exec relay apassy-relay admin limits t_7k2m5q4x3c --sync-bytes 33554432 --sync-pushes-per-hour 300 --sync-transfers 4
 docker compose exec relay apassy-relay admin limits t_7k2m5q4x3c --open-questions 40 --questions-per-hour 600
+docker compose exec relay apassy-relay admin limits t_7k2m5q4x3c --device-open-questions 20 --member-open-questions 30 --question-bytes 16777216
 ```
 
-The command prints all eleven effective values. If a field has no flag, its value stays the same. Values must be integers from 1 to 1000000. The `agent_requests` range is 1 to 224. The `sync_bytes` range is 1048576 to 67108864 (the largest vault snapshot, in bytes; 64 MiB is also the most that the app and the head grammar allow), and the `sync_transfers` range is 1 to 8 (snapshot uploads and downloads of the team at once; over it, 503 `busy`). The relay also allows at most 16 snapshot transfers of all teams at once. The `open_questions` range is 1 to 1000 (questions that wait for an answer; over it, 403 `too_many_questions`, see section 19); `questions_per_hour` is 1 to 1000000.
+The command prints all sixteen effective values. If a field has no flag, its value stays the same. Values must be integers from 1 to 1000000. The `agent_requests` range is 1 to 224. The `sync_bytes` range is 1048576 to 67108864 (the largest vault snapshot, in bytes; 64 MiB is also the most that the app and the head grammar allow), and the `sync_transfers` range is 1 to 8 (snapshot uploads and downloads of the team at once; over it, 503 `busy`). The relay also allows at most 16 snapshot transfers of all teams at once. The `open_questions` range is 1 to 1000 (questions that wait for an answer; over it, 403 `too_many_questions`, see section 19); `questions_per_hour` is 1 to 1000000. `member_open_questions` and `device_open_questions` (1 to 1000) and `member_questions_per_hour` and `device_questions_per_hour` (1 to 1000000) are the shares of one member and of one asking device, so one Mac cannot use the team's whole quota. `question_bytes` (1048576 to 268435456) bounds the sealed questions and answers that the team file holds at once.
+
+A question limit changed away from its default is stored in `relay.db` in a form the image before questions cannot read: a rollback to it then needs the backup of `relay.db` (section 19.3). Change question limits only when no rollback is planned, or note the change.
 
 Use the command for active or suspended teams. A change adds `limits_changed` with actor `operator` to the team audit and relay audit.
 
@@ -816,7 +824,10 @@ What changes at the first start of this version:
 
 - Each team file moves to schema version 5: the relay copies it to `teams/<id>.db.pre-v5` (the way back for an older image, mode 0600), then adds the tables `question`, `question_answer`, `push_token`, `device_wrapped_key`, and the column `team.question_seq` in one transaction. The change is additive: no table is rebuilt, sync rows stay. A team whose copy cannot be made stays at version 4 and does not open; free disk space and start again. The previous image (`sync-*`, schema 4) refuses a version 5 file.
 - New routes in the member lane: `/v1/questions`, `/v1/questions/{qid}/answers`, `/v1/questions/{qid}/settle`, `/v1/push/token`. Question long polls have their own 128 threads, apart from the 256 of section 15, so they never take the member reserve.
-- New team limits `open_questions` (20) and `questions_per_hour` (300), section 17. Over either: 403 `too_many_questions`, and the question stays on the asking Mac.
+- New team limits, section 17: `open_questions` (20) and `questions_per_hour` (300) of the team, the shares of one member (15, 225) and of one asking device (10, 150), and `question_bytes` (8 MiB of sealed questions and answers at once). Over any: 403 `too_many_questions` (for an answer over `question_bytes`: 403 `too_many_answers`), and the question stays on the asking Mac. A question has at most 20 answers.
+- Ten minutes after a question is settled or expired, the relay deletes its answers and its sealed card and settle; the row (devices, times, state) goes 24 hours after the post.
+- One team holds at most 32 of the 128 question long-poll threads; more polls of that team return at once. A long poll of a device that is revoked, or whose member's role changes, ends with 401 at once.
+- `to: "approvers"` questions are refused (403 `not_routed`) until shared vaults. `APASSY_RELAY_QUESTIONS_TO_APPROVERS=1` turns them on; leave it unset.
 - The audit gets `question_*` and `push_*` rows with device ids and counts only.
 
 ### 19.1 Push: what is where
@@ -922,15 +933,34 @@ Run them in this order. Steps 1 to 4 change nothing on the live relay.
 
 - **Push only.** Remove the three `APASSY_RELAY_PUSH_*` lines from `compose.yaml` and `docker compose up -d --wait`: push is off, questions still work. Or leave the relay and remove `PUSH_SECRET` from the Worker (`npx wrangler secret delete PUSH_SECRET`): `/internal/push` answers 404 and the relay records `push_failed`.
 - **The Worker.** The new Worker serves every old route as before. To go back: `npx wrangler rollback` (to the previous version), or deploy the previous commit of `deploy/worker/`.
-- **The relay image.** The previous image refuses the version 5 team files, so a rollback puts the version 4 copies back. It loses every change of the teams since the migration: questions and push tokens (the iPhones send their tokens again), and also members, devices, and vault sync heads made after it. A Mac that pushed a snapshot after the migration then sees an older copy on the relay (section 13). Prefer a fix forward when the problem is not the migration itself.
+- **The relay image.** The previous image refuses the version 5 team files, so a rollback puts the version 4 copies back. It also refuses a `limits` column in `relay.db` with a field it does not know: the new relay writes the question limits there only when one differs from its default (section 17). If any `admin limits` call changed a question limit after the deploy, restore `relay.db` from the backup of step 5 too (below), or set every question limit back to its default with the new image still running before you stop it:
+
+  ```sh
+  docker compose exec relay apassy-relay admin limits <team id> --open-questions 20 --questions-per-hour 300 \
+    --member-open-questions 15 --member-questions-per-hour 225 --device-open-questions 10 \
+    --device-questions-per-hour 150 --question-bytes 8388608
+  ```
+
+  Restoring `relay.db` from the backup also undoes every other change of the directory since step 5 (teams made, suspended, or deleted, other limits).
+
+  Putting the version 4 copies back loses every change of the teams since the migration: questions and push tokens (the iPhones send their tokens again), and also members, devices, and vault sync heads made after it. A Mac that pushed a snapshot after the migration then sees an older copy on the relay (section 13). Prefer a fix forward when the problem is not the migration itself.
 
   On the VPS (`ssh ottervibe`, then `cd /opt/apassy`):
 
   ```sh
   docker compose stop relay
-  docker compose run --rm --no-deps --entrypoint bash relay \
-    -c 'for f in /data/teams/*.db.pre-v5; do cp -p "$f" "${f%.pre-v5}"; done; ls -l /data/teams'
+  docker compose run --rm --no-deps --entrypoint bash relay -c '
+    set -e
+    for j in /data/teams/*.db-journal /data/relay.db-journal; do
+      if [ -e "$j" ]; then echo "$j is left: the relay did not stop cleanly. Stop here." >&2; exit 1; fi
+    done
+    for f in /data/teams/*.db.pre-v5; do cp -p "$f" "${f%.pre-v5}"; done
+    ls -l /data/teams'
   ```
+
+  A `*.db-journal` next to a file means a write was cut off (the relay uses `journal_mode=DELETE`). SQLite would replay it into the copied version 4 file at the next open and break it. Do not delete it and do not copy over it: start the new image once (`docker compose up -d --wait`), let it open and close the files cleanly, stop it, and run the step again. If the journal stays, restore the backup of step 5 instead.
+
+  When a question limit was changed after the deploy (above), also put `relay.db` of the step 5 backup into the volume now, with the relay stopped (section 13).
 
   Then set the image noted in step 5 (for example `apassy-relay:sync-4208643`) in `/opt/apassy/compose.yaml`, remove the three `APASSY_RELAY_PUSH_*` lines, and start:
 
@@ -938,4 +968,4 @@ Run them in this order. Steps 1 to 4 change nothing on the live relay.
   ssh ottervibe 'cd /opt/apassy && docker compose up -d --wait && docker compose exec relay apassy-relay admin teams'
   ```
 
-  Every team must be `"open": true`. A team made after the migration has no `.pre-v5` and is version 5 from the start: the old image cannot open it; suspend it, or restore the backup of step 5 instead (section 13: put `relay.db` and `teams/` of that folder into the volume with the relay stopped). The backup of step 5 is the same state as the `.pre-v5` files, plus `relay.db` and the snapshots.
+  Every team must be `"open": true`. If the relay does not start and the log names the directory or a team's limits, `relay.db` holds a question limit (above): restore it from the backup of step 5. A team made after the migration has no `.pre-v5` and is version 5 from the start: the old image cannot open it; suspend it, or restore the backup of step 5 instead (section 13: put `relay.db` and `teams/` of that folder into the volume with the relay stopped). The backup of step 5 is the same state as the `.pre-v5` files, plus `relay.db` and the snapshots.
