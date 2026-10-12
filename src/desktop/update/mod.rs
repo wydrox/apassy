@@ -33,7 +33,7 @@ use self::system::{Commands, Location, UpdateSystem};
 use super::owner_store::ENDED_BY_QUIT;
 use super::{BrokerState, DesktopApp};
 
-pub(crate) use self::manifest::BuildIdentity;
+pub(crate) use self::manifest::{BuildIdentity, image_file};
 pub(crate) use self::pipeline::{CHANGELOG_URL, DOWNLOAD_PAGE_URL, Phase};
 pub(crate) use self::store::{InstallReport, Staged, StagedKind};
 
@@ -336,7 +336,14 @@ impl Updater {
     /// Open the checked disk image in Finder, when Apassy cannot replace itself.
     pub(crate) fn open_image(&self) -> Result<(), String> {
         let paths = self.paths.as_ref().ok_or("Updates are not running.")?;
-        open(pipeline::staged_image(&paths.dir).as_os_str())
+        let staged = self
+            .shared
+            .lock()
+            .file
+            .staged
+            .clone()
+            .ok_or("No new version is ready.")?;
+        open(pipeline::staged_image(&paths.dir, &staged.version).as_os_str())
     }
 
     /// The install job for the staged app, or why there is none.
