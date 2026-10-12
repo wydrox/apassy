@@ -6,12 +6,12 @@ Use only synthetic values for tests. This document does not open the real-secret
 
 ## 1. Status
 
-The sources for passkeys and one-time codes are in the branch `feat/passkeys-totp`. The target release is 0.4.1 (Mac app, browser extension, iPhone core, and iPhone app). It is not released: the package versions are 0.4.1, and the changelog keeps the target note under "Unreleased". Nothing is published, tagged, or uploaded to a store. Do not tell users that these features work on their devices until the [acceptance checklist](#9-acceptance-checklist) is complete.
+Passkeys and one-time codes are in release 0.4.1 of 2026-10-12. The release workflow publishes the Mac app and the site. The iPhone app goes through TestFlight, and the browser extension through the Chrome Web Store, each separately. The owner released 0.4.1 with the open checks of the [acceptance checklist](#9-acceptance-checklist) and accepted that risk on 2026-10-12. Do not tell users that these features work on their devices until the checklist is complete.
 
 Source integration and release validation are different things:
 
 - **Source integration.** The source merge to `main` requires the owner's final approval. A merge is a source decision. It is not a release, and it does not accept any build.
-- **Release validation.** The checks below, and the open ones in section 9. The release workflow now holds production until `Cargo.toml` names a version that has a dated section in `CHANGELOG.md` and the `Unreleased` section is empty ([release](release.md#release-eligibility)). While 0.4.1 is under "Unreleased", a green CI run on `main` signs and publishes nothing. The site derives its version from the dated sections, so it still shows 0.3.6.
+- **Release validation.** The checks below, and the open ones in section 9. The release workflow now holds production until `Cargo.toml` names a version that has a dated section in `CHANGELOG.md` and the `Unreleased` section is empty ([release](release.md#release-eligibility)). 0.4.1 has a dated section, so the green CI run on `main` after the release commit signs and publishes the Mac app, and the site shows 0.4.1.
 
 Current evidence, at source commit `82c641d11aa186c73def49e47a6ce22aabc6291c` (version 0.4.1), by level. The results for `11ca5b6` and `29ea550` that follow are historical and are kept with their own labels.
 
@@ -86,7 +86,7 @@ Passkeys need vault schema 17. Earlier builds use schema 16.
 3. Unlock the vault on one device. The build migrates the file. You cannot undo this with a build of schema 16: it cannot open a vault of schema 17. Restore the backup if you must go back.
 4. Sync the other devices. A device of schema 17 reads a copy of schema 16 and uploads a copy of schema 17.
 
-For release 0.4.1, do not do these steps on a real vault until the open checks in section 9 pass. The backup must be encrypted. An older client cannot sync or read a vault of schema 17, so update all clients before you upgrade the vault.
+Before a real vault opens in 0.4.1, make an encrypted backup. The open checks of section 9 are not done. An older client cannot sync or read a vault of schema 17, so update all clients before you upgrade the vault.
 
 After the first schema 17 upload, a device of schema 16 cannot sync that vault. It shows that the schema is not supported. Update it. Local tests cover schema 17 publication over a schema 16 copy on the relay, in the iCloud core, and in a folder. Device acceptance remains open (check D9).
 
