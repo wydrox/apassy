@@ -40,6 +40,7 @@ mod add;
 mod browser;
 mod decisions;
 pub use browser::{FillValues, PageCode, PageLogin, PasskeyItem, SYSTEM_FILL_ORIGIN, SystemLogin};
+pub use decisions::{AgentOverview, ExceptionRow, RecentUse, WeekCounts};
 
 const MAX_TAG_BYTES: usize = 64;
 /// The most tags on one item (`MAX_TAG_COUNT` in `src/vault/types.rs`).

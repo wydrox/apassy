@@ -15,6 +15,10 @@
 //! [`ENDED_BY_RESTART`]. The run did not start.
 //!
 //! An acknowledgment only marks an event as seen. It is not an approval (N4).
+//!
+//! The Decisions view of ADR 0026 shows the waiting questions itself; [`collect`] stays
+//! for the history of the ended waits and the blocked requests. [`EventKey`] names each
+//! event that a macOS notification can name (ADR 0025 §3e).
 
 use crate::broker::approvals::PendingRun;
 use crate::desktop::model::ModelResult;
@@ -45,17 +49,24 @@ const OWNER_APPROVED: &str = "Owner approved";
 /// One event key. A notification uses it as its identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EventKey {
-    /// A run that waits in the approval queue.
+    /// A question that waits in the approval queue (ADR 0025 §3e).
     Run(u64),
+    /// A credential request of an agent (ADR 0025 §6).
+    Request(u64),
+    /// A correction that Apassy proposes (ADR 0025 §5).
+    Correction(u64),
     /// An entry of the activity log.
     Activity(u64),
 }
 
 impl EventKey {
-    /// The notification identifier: `run-<id>` or `activity-<id>`.
+    /// The notification identifier: `run-<id>`, `request-<id>`, `correction-<id>`, or
+    /// `activity-<id>`.
     pub fn notification_id(self) -> String {
         match self {
             Self::Run(id) => format!("run-{id}"),
+            Self::Request(id) => format!("request-{id}"),
+            Self::Correction(id) => format!("correction-{id}"),
             Self::Activity(id) => format!("activity-{id}"),
         }
     }
@@ -213,7 +224,18 @@ mod tests {
 
     #[test]
     fn notification_ids_follow_the_helper_rule() {
-        assert_eq!(EventKey::Run(7).notification_id(), "run-7");
-        assert_eq!(EventKey::Activity(12).notification_id(), "activity-12");
+        for (key, id) in [
+            (EventKey::Run(7), "run-7"),
+            (EventKey::Request(8), "request-8"),
+            (EventKey::Correction(9), "correction-9"),
+            (EventKey::Activity(12), "activity-12"),
+        ] {
+            assert_eq!(key.notification_id(), id);
+            // The helper takes 1 to 64 characters from A-Z, a-z, 0-9, '.', '_', '-'.
+            assert!(
+                id.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || ".-_".contains(c))
+            );
+        }
     }
 }

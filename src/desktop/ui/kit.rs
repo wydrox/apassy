@@ -1004,24 +1004,6 @@ pub(crate) fn mono_input(
     response
 }
 
-/// A narrow field for a number.
-pub(crate) fn number_input(
-    ui: &mut Ui,
-    value: &mut String,
-    salt: &str,
-    placeholder: &str,
-) -> Response {
-    let response = ui.add(
-        TextEdit::singleline(value)
-            .id_salt(salt)
-            .hint_text(text(placeholder, Font::Body).color(TERTIARY))
-            .margin(FIELD_MARGIN)
-            .desired_width(90.0),
-    );
-    claim_first_field(&response);
-    response
-}
-
 /// A multi-line field.
 pub(crate) fn text_area(
     ui: &mut Ui,
@@ -2676,7 +2658,6 @@ pub(crate) enum Icon {
     Database,
     Asterisk,
     Lock,
-    Tray,
     Chart,
     Plus,
     ChevronRight,
@@ -2810,24 +2791,6 @@ pub(crate) fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color
             shackle.extend(arc(0.5, 0.32, 0.2, 0.2, PI, TAU));
             shackle.push((0.7, 0.44));
             line(&shackle);
-        }
-        Icon::Tray => {
-            closed(&[
-                (0.1, 0.56),
-                (0.26, 0.18),
-                (0.74, 0.18),
-                (0.9, 0.56),
-                (0.9, 0.84),
-                (0.1, 0.84),
-            ]);
-            line(&[
-                (0.1, 0.56),
-                (0.34, 0.56),
-                (0.4, 0.66),
-                (0.6, 0.66),
-                (0.66, 0.56),
-                (0.9, 0.56),
-            ]);
         }
         Icon::Chart => {
             for (x, top) in [(0.2, 0.5), (0.5, 0.26), (0.8, 0.1)] {

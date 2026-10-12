@@ -1421,7 +1421,7 @@ fn the_credential_page_lists_rules_and_removing_an_exception_asks_for_the_owner(
                 key: "/synthetic/apassy".to_owned(),
                 label: "apassy".to_owned(),
             };
-            vault.remember_answer(id, &project, ActionKind::Change, "this Mac")?;
+            vault.remember_answer(id, &project, ActionKind::Change, "this Mac", &[])?;
             Ok(())
         })
         .expect("open")
@@ -1767,7 +1767,7 @@ fn every_variant_of_the_credential_page_draws_at_default_and_minimum_sizes() {
                 key: "/synthetic/a-very-long-project-name-for-the-narrow-window".to_owned(),
                 label: "a-very-long-project-name-for-the-narrow-window".to_owned(),
             };
-            vault.remember_answer(ruled, &project, ActionKind::Deploy, "this Mac")?;
+            vault.remember_answer(ruled, &project, ActionKind::Deploy, "this Mac", &[])?;
             vault.set_always_ask(ruled, true)?;
             Ok(())
         })

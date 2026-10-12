@@ -2,9 +2,10 @@
 //!
 //! Two worker threads:
 //!
-//! - The watcher wakes when a run starts to wait (the approval queue calls it) and
-//!   every [`POLL_INTERVAL`]. It finds new waiting runs and new blocked requests in
-//!   the activity log.
+//! - The watcher wakes when a question starts to wait (the approval queue calls it) and
+//!   every [`POLL_INTERVAL`]. It finds new waiting questions and new blocked requests in
+//!   the activity log. Each new question gets one notification ([`OwnerEvent`],
+//!   ADR 0025 §3e).
 //! - The sender posts each notification through the notifier
 //!   (`Contents/Helpers/ApassyNotify.app`, see `apassy::native`). A call can block up
 //!   to 40 s, so the sender never delays the watcher.
@@ -73,6 +74,45 @@ impl Delivery {
             Self::Failed(text) => {
                 format!("Notification failed: {text} The event stays in this inbox.")
             }
+        }
+    }
+}
+
+/// Something new that waits for the owner in Decisions (ADR 0025 §3e, §5, §6). Each one
+/// gets one notification. The preview has the agent name and the kind of event only: no
+/// item name, command, project, or value (N2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerEvent {
+    /// A question of an agent waits in the approval queue.
+    QuestionWaiting,
+    /// An agent asks the owner to paste a credential (`credential_request`).
+    CredentialRequested,
+    /// Apassy proposes a correction of a declaration (`correction`).
+    CorrectionProposed,
+}
+
+impl OwnerEvent {
+    /// The key of the event with the ID of its question, request, or correction.
+    pub fn key(self, id: u64) -> EventKey {
+        match self {
+            Self::QuestionWaiting => EventKey::Run(id),
+            Self::CredentialRequested => EventKey::Request(id),
+            Self::CorrectionProposed => EventKey::Correction(id),
+        }
+    }
+
+    /// The template of the notifier. It has two fixed templates; each of these events
+    /// waits for a decision of the owner, so each uses "waits for your decision".
+    pub fn native(self) -> NotificationEvent {
+        NotificationEvent::ApprovalWaiting
+    }
+
+    /// The name in the preview: the agent, or "Apassy" for a correction, which no agent
+    /// asked for.
+    pub fn preview_name(self, agent: &str) -> String {
+        match self {
+            Self::CorrectionProposed => "Apassy".to_owned(),
+            Self::QuestionWaiting | Self::CredentialRequested => preview_name(agent),
         }
     }
 }
@@ -315,6 +355,16 @@ impl NotificationCenter {
             .update(|view| view.channel = ChannelState::Problem(text));
     }
 
+    /// Post one notification for `event` with the ID of its question, request, or
+    /// correction. The same key again replaces the notification. The text has no secret
+    /// value ([`OwnerEvent::preview_name`]).
+    pub fn announce(&self, event: OwnerEvent, id: u64, agent: &str) {
+        let jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(jobs) = jobs.as_ref() {
+            queue_event(&self.shared, jobs, event, id, agent);
+        }
+    }
+
     /// Show the macOS permission prompt when the owner has not decided. The channel
     /// shows [`ChannelState::Asking`] until the notifier answers.
     pub fn request_permission(&self) {
@@ -378,12 +428,12 @@ fn watch_loop(shared: &Shared, approvals: &ApprovalQueue, vault: &SharedVault, j
         let pending = approvals.pending();
         for run in &pending {
             if notified_runs.insert(run.id) {
-                queue_notification(
+                queue_event(
                     shared,
                     jobs,
-                    EventKey::Run(run.id),
+                    OwnerEvent::QuestionWaiting,
+                    run.id,
                     &run.agent,
-                    NotificationEvent::ApprovalWaiting,
                 );
             }
         }
@@ -427,6 +477,17 @@ fn watch_loop(shared: &Shared, approvals: &ApprovalQueue, vault: &SharedVault, j
             return;
         }
     }
+}
+
+fn queue_event(shared: &Shared, jobs: &Sender<Job>, event: OwnerEvent, id: u64, agent: &str) {
+    shared.update(|view| {
+        view.deliveries.insert(event.key(id), Delivery::Sending);
+    });
+    let _ = jobs.send(Job::Notify {
+        key: event.key(id),
+        agent: event.preview_name(agent),
+        event: event.native(),
+    });
 }
 
 fn queue_notification(
@@ -564,6 +625,38 @@ mod tests {
             lock_screen: NotificationSetting::Enabled,
             sound: NotificationSetting::Enabled,
         }
+    }
+
+    /// ADR 0025 §3e: each question, request, and correction has its own key, and the
+    /// preview names only the agent (N2).
+    #[test]
+    fn owner_events_have_their_own_keys_and_name_only_the_agent() {
+        assert_eq!(OwnerEvent::QuestionWaiting.key(4), EventKey::Run(4));
+        assert_eq!(OwnerEvent::CredentialRequested.key(4), EventKey::Request(4));
+        assert_eq!(
+            OwnerEvent::CorrectionProposed.key(4),
+            EventKey::Correction(4)
+        );
+        for event in [
+            OwnerEvent::QuestionWaiting,
+            OwnerEvent::CredentialRequested,
+            OwnerEvent::CorrectionProposed,
+        ] {
+            let name = event.preview_name("Claude\u{7}Code");
+            let preview = Notification::new(&event.key(4).notification_id(), &name, event.native())
+                .expect("a valid preview");
+            assert!(!preview.body().contains('\u{7}'), "{}", preview.body());
+            assert_eq!(preview.title(), "Approval waiting");
+        }
+        assert_eq!(
+            OwnerEvent::QuestionWaiting.preview_name("Claude Code"),
+            "Claude Code"
+        );
+        assert_eq!(
+            OwnerEvent::CorrectionProposed.preview_name("Codex"),
+            "Apassy"
+        );
+        assert_eq!(OwnerEvent::QuestionWaiting.preview_name("  "), "unknown");
     }
 
     #[test]

@@ -15,6 +15,9 @@ use eframe::egui;
 
 use super::DesktopApp;
 
+/// The whole Learning view. Decisions no longer shows it (ADR 0026 §2); Settings >
+/// Advanced takes what stays.
+#[allow(dead_code)]
 pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     super::ui::kit::page_header(
         ui,

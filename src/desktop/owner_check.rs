@@ -27,12 +27,13 @@ use super::unlock::{
     self, PASSPHRASE_CHANGED_NOTE, TouchIdUnlockError, UnlockMethod, UnlockSetting,
 };
 use super::{BrokerState, DesktopApp};
+use crate::broker::action_kind::ActionKind;
 use crate::broker::approvals::{
-    ApprovalQueue, CheckMethod, FirstUseDeclaration, FirstUseOffer, OwnerAction, OwnerAuthError,
-    OwnerCheck, OwnerGate, OwnerProof, PendingRun, grant_declarations, grant_has_production,
-    shown_path, touch_id_detail,
+    ApprovalQueue, CheckMethod, OwnerAction, OwnerAuthError, OwnerCheck, OwnerGate, OwnerProof,
+    PendingRun, action_words, touch_id_detail,
 };
 use crate::broker::profile::REPORTING_API_V0;
+use crate::broker::project::Project;
 use crate::native::{AuthCancel, Biometry, CancelOnDrop, NativeHelper};
 use crate::vault::{EnvDelivery, ExecMode, ExecRule, GrantPlace};
 
@@ -85,6 +86,21 @@ pub(crate) fn page_text(text: &str) -> String {
         .filter(|c| !crate::browser::wire::hides_text(*c))
         .collect();
     dialog_cut(clean.trim())
+}
+
+/// The credentials of a question for the dialog: their names, or else the variables.
+fn question_items(run: &PendingRun) -> String {
+    let names: Vec<String> = run
+        .question
+        .items
+        .iter()
+        .map(|item| format!("\"{}\"", page_text(&item.name)))
+        .collect();
+    if names.is_empty() {
+        run.env_names.join(", ")
+    } else {
+        names.join(", ")
+    }
 }
 
 /// At most 64 characters of a username from the browser, for the dialog.
@@ -300,15 +316,34 @@ pub enum OwnerRequest {
         name: String,
         delete_login: bool,
     },
+    /// "Allow Once": approve one waiting question, exactly as the owner saw it.
     ApproveRun(PendingRun),
-    /// Approve one run and add one approval to its pattern (ADR 0010).
+    /// Approve one run and add one approval to its pattern (ADR 0010). Only the command
+    /// line asks for it.
     ApproveAndRemember(PendingRun),
-    /// Approve a first use and give the agent access in the folder of the offer, with
-    /// the declarations of the card (ADR 0024).
-    ApproveAndGrant {
+    /// "Allow ACTION in PROJECT" (ADR 0025 §3): approve the question and remember the
+    /// answer for its credentials, the project, and the kind of action, for every agent.
+    ApproveInProject {
         run: PendingRun,
-        offer: FirstUseOffer,
-        declarations: Vec<FirstUseDeclaration>,
+        project: Project,
+        action: ActionKind,
+    },
+    /// "Allow production: ACTION in PROJECT" (ADR 0025 §3b): approve the question and
+    /// allow production for the project and the kind of action.
+    AllowProduction {
+        run: PendingRun,
+        project: Project,
+        action: ActionKind,
+    },
+    /// "Development" on a question about a credential that is production only by default
+    /// (ADR 0025 §3, §5). The bouncer is then less careful with it, so it needs the
+    /// check. The question still waits. "Production" is stricter and needs none.
+    CorrectEnvironment {
+        run_id: u64,
+        agent: String,
+        item_id: u64,
+        name: String,
+        environment: crate::vault::Environment,
     },
     /// Apply a calibrated `task_match` level, in hundredths (ADR 0009 step 3).
     ApplyCalibration {
@@ -612,14 +647,23 @@ impl OwnerRequest {
             },
             Self::ApproveRun(run) => OwnerAction::ApproveRun(run.clone()),
             Self::ApproveAndRemember(run) => OwnerAction::ApproveAndRemember(run.clone()),
-            Self::ApproveAndGrant {
+            Self::ApproveInProject {
                 run,
-                offer,
-                declarations,
-            } => OwnerAction::ApproveAndGrant {
+                project,
+                action,
+            } => OwnerAction::ApproveInProject {
                 run: run.clone(),
-                offer: offer.clone(),
-                declarations: declarations.clone(),
+                project: project.clone(),
+                action: *action,
+            },
+            Self::AllowProduction {
+                run,
+                project,
+                action,
+            } => OwnerAction::AllowProduction {
+                run: run.clone(),
+                project: project.clone(),
+                action: *action,
             },
             Self::ApplyCalibration { level } => OwnerAction::ChangeCalibration { level: *level },
             Self::PromoteModel {
@@ -683,6 +727,7 @@ impl OwnerRequest {
             | Self::ConfirmReview { item_id }
             | Self::Unarchive { item_id, .. }
             | Self::SetEnvironment { item_id, .. }
+            | Self::CorrectEnvironment { item_id, .. }
             | Self::AlwaysAskOff { item_id, .. } => {
                 OwnerAction::ChangeItemRules { item_id: *item_id }
             }
@@ -849,39 +894,29 @@ impl OwnerRequest {
                 run.agent,
                 run.command.join(" ")
             ),
-            Self::ApproveAndGrant {
+            Self::ApproveInProject {
                 run,
-                offer,
-                declarations,
+                project,
+                action,
             } => format!(
-                "Give agent \"{}\" access to {} in {} and its subfolders, and approve this run: {}. Apassy saves {}. {}",
+                "Allow {} in \"{}\" for every agent, and approve this run of agent \"{}\": {}. Apassy remembers the answer for {}. A later run of that kind there asks you no question.",
+                action_words(*action),
+                page_text(&project.label),
                 run.agent,
-                offer
-                    .items
-                    .iter()
-                    .map(|item| format!("\"{}\"", item.name))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                shown_path(&offer.folder, 120),
                 run.command.join(" "),
-                grant_declarations(offer, declarations)
-                    .map(|(name, declaration)| match declaration {
-                        Some(declaration) => format!(
-                            "the declaration of \"{name}\": {}, {} risk, {}, {}",
-                            declaration.environment.as_str(),
-                            declaration.risk.as_str(),
-                            declaration.scope.as_str(),
-                            declaration.reversibility.as_str()
-                        ),
-                        None => format!("no declaration for \"{name}\""),
-                    })
-                    .collect::<Vec<_>>()
-                    .join("; "),
-                if grant_has_production(offer, declarations) {
-                    "A production credential still waits for you at each run; the access saves no approval for it. Other runs there that the bouncer finds clean may start without asking."
-                } else {
-                    "Later runs there that the bouncer finds clean may start without asking."
-                }
+                question_items(run)
+            ),
+            Self::AllowProduction {
+                run,
+                project,
+                action,
+            } => format!(
+                "Allow production for \"{}\": {}, for every agent, and approve this run of agent \"{}\": {}. Apassy remembers it for {}. Another kind of action still waits for you.",
+                page_text(&project.label),
+                action_words(*action),
+                run.agent,
+                run.command.join(" "),
+                question_items(run)
             ),
             Self::ApproveAndRemember(run) => format!(
                 "Approve one run of agent \"{}\" and remember its pattern{}: {}",
@@ -980,6 +1015,15 @@ impl OwnerRequest {
                 name, environment, ..
             } => format!(
                 "Mark \"{name}\" as {}. The bouncer is less careful with it than with production.",
+                environment.as_str()
+            ),
+            Self::CorrectEnvironment {
+                agent,
+                name,
+                environment,
+                ..
+            } => format!(
+                "Mark \"{name}\" as {}. The bouncer is less careful with it than with production. The question of agent \"{agent}\" still waits for your answer.",
                 environment.as_str()
             ),
             Self::AlwaysAskOff { name, .. } => format!(
@@ -1416,38 +1460,53 @@ impl DesktopApp {
                     Err(message) => self.set_err(message),
                 }
             }
-            OwnerRequest::ApproveAndGrant {
-                run,
-                offer,
-                declarations,
+            OwnerRequest::ApproveInProject {
+                project, action, ..
             } => {
-                // The same queue path as "Approve once". The broker saves the access after
-                // its second check (ADR 0024). Here the queue only took the answer: the
-                // access is saved when the run starts, and not if that step fails.
+                // The same queue path as "Allow Once". The broker remembers the answer
+                // after its second check (ADR 0025 §3).
                 let result = match self.approvals() {
                     Some(approvals) => approvals.approve(proof).map_err(|r| r.message()),
                     None => Err("The broker is not running. Nothing was approved."),
                 };
                 match result {
                     Ok(()) => self.set_ok(format!(
-                        "The run of {} is approved. Apassy saves the access to {} in {} when the run starts; check Agents. {}",
-                        run.agent,
-                        offer
-                            .items
-                            .iter()
-                            .map(|item| item.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                        shown_path(&offer.folder, 80),
-                        if grant_has_production(&offer, &declarations) {
-                            "A production credential still asks you at each run."
-                        } else {
-                            "Later clean runs there may start without asking."
-                        }
+                        "Allowed. Apassy remembers {} in {} for all agents.",
+                        action_words(action),
+                        project.label
                     )),
                     Err(message) => self.set_err(message),
                 }
             }
+            OwnerRequest::AllowProduction {
+                project, action, ..
+            } => {
+                let result = match self.approvals() {
+                    Some(approvals) => approvals.approve(proof).map_err(|r| r.message()),
+                    None => Err("The broker is not running. Nothing was approved."),
+                };
+                match result {
+                    Ok(()) => self.set_ok(format!(
+                        "Allowed. Production is allowed for {} in {}. Other kinds of action still ask you.",
+                        action_words(action),
+                        project.label
+                    )),
+                    Err(message) => self.set_err(message),
+                }
+            }
+            OwnerRequest::CorrectEnvironment {
+                agent,
+                item_id,
+                name,
+                environment,
+                ..
+            } => match session.correct_environment(item_id, environment, proof) {
+                Ok(()) => self.set_ok(format!(
+                    "{name} is marked as {}. The question of {agent} still waits: allow it or deny it.",
+                    environment.as_str()
+                )),
+                Err(err) => self.set_err(err.message),
+            },
             OwnerRequest::ApproveAndRemember(run) => {
                 // The same queue path as "Approve once". The proof names this action.
                 let result = match self.approvals() {

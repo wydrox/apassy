@@ -1,18 +1,22 @@
-//! Agents: the list, one agent with its access, and the token sheets (vault build).
+//! Agents (ADR 0026 §2, ADR 0025 §3f): the connected agents, read-only.
 //!
-//! An agent uses a credential through the Apassy broker (ADR 0004). The list shows
-//! each agent and its token state. The agent page shows its token, what it can see
-//! (ADR 0012), its process access for each credential with an environment variable,
-//! and its API operations.
+//! The list shows each agent, where it runs, and its uses this week. The page of an agent
+//! shows, it does not configure: its uses and projects, an optional note for the bouncer,
+//! its exceptions, and "Disconnect…". An exception comes from an answer in Decisions;
+//! removing one gives authority back, so it needs the owner check. Saving the note and
+//! disconnecting take no authority, so they need none. "+" opens "Connect an Agent"
+//! ([`super::agent_onboarding`]), the only setup, with one owner check.
 
-use eframe::egui::{self, Align, Layout};
+use eframe::egui::{self, Align, Label, Layout};
 
+use super::agent_onboarding::{self, ConnectHost};
 use super::kit::{self, Font, Icon, Style, Tone};
-use super::{Sheet, ask_owner_from_sheet, close_sheet};
+use super::{Sheet, close_sheet};
 use crate::desktop::owner_check::OwnerRequest;
-use crate::desktop::owner_store::{FreshToken, RuleForm, format_utc};
+use crate::desktop::owner_store::{AgentOverview, ExceptionRow, format_utc};
 use crate::desktop::{DesktopApp, Place};
-use crate::vault::{AgentSummary, EnvDelivery, ExecMode, GrantPlace};
+use crate::vault::AgentSummary;
+use crate::vault::exceptions::{ExceptionKind, MAX_AGENT_NOTE_BYTES};
 
 fn now() -> u64 {
     std::time::SystemTime::now()
@@ -27,6 +31,16 @@ fn date(unix: u64) -> String {
         .next()
         .unwrap_or_default()
         .to_owned()
+}
+
+/// Where an agent runs. Agents reach the broker through its socket on this Mac.
+const WHERE: &str = "This Mac";
+
+/// The state of the view: the note that the owner edits.
+#[derive(Debug, Default)]
+pub(crate) struct State {
+    /// The agent of the note field and its text.
+    pub(super) note: Option<(u64, String)>,
 }
 
 /// The detail column of Agents: the selected agent, or with none, an empty state.
@@ -46,8 +60,8 @@ pub(super) fn detail_column(
     });
 }
 
-/// No agent is selected. With no active agent, the empty state has the one main
-/// action, "Connect agent".
+/// No agent is selected. With no connected agent, the empty state has the one main
+/// action, "Connect an Agent".
 fn draw_empty(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let agents = app.owner_ui.session.agents().unwrap_or_default();
     let revoked = agents.iter().filter(|agent| agent.revoked).count();
@@ -61,39 +75,20 @@ fn draw_empty(app: &mut DesktopApp, ui: &mut egui::Ui) {
         );
         return;
     }
-    // Revoked agents stay in the folded list, for their history. A restore revokes every
-    // agent, so the owner registers them again here.
+    // A restore disconnects every agent, so the owner connects them again here.
     let (title, message) = if revoked == 0 {
         (
             "No agents yet",
-            "Connect Claude Code or Codex. Then select the credentials it can use.",
+            "Connect Claude Code, Codex, or another agent. The bouncer decides each use of a credential, and asks you when it is not sure.",
         )
     } else {
         (
-            "No active agents",
-            "Every agent of this vault is revoked, for example after a restore. Register each agent host again; it gets a new token.",
+            "No connected agents",
+            "Every agent of this vault is disconnected, for example after a restore. Connect each agent host again; it gets a new token.",
         )
     };
-    if kit::empty_state(ui, Icon::Person, title, message, Some("Connect agent")) {
-        open_register(app);
-    }
-}
-
-/// Open the sheet that registers an agent, for the host of the setup.
-fn open_register(app: &mut DesktopApp) {
-    app.owner_ui.new_agent_name = super::agent_setup::Host::from_index(app.ui.setup_host)
-        .name()
-        .to_owned();
-    app.ui.sheet = Some(Sheet::RegisterAgent);
-}
-
-fn status(agent: &AgentSummary, now: u64) -> (&'static str, Tone) {
-    if agent.revoked {
-        ("Revoked", Tone::Neutral)
-    } else if agent.token_expired_at(now) {
-        ("Token expired", Tone::Critical)
-    } else {
-        ("Token valid", Tone::Good)
+    if kit::empty_state(ui, Icon::Agent, title, message, Some("Connect an Agent")) {
+        agent_onboarding::open(app);
     }
 }
 
@@ -154,30 +149,21 @@ pub(super) fn next_steps_panel(app: &mut DesktopApp, ui: &mut egui::Ui) -> bool 
         cli_guidance(app, ui);
     }
     if let Some(host) = host {
-        choose_host(app, host);
+        let ctx = ui.ctx().clone();
+        choose_host(app, &ctx, host);
         return true;
     }
     skip
 }
 
-fn choose_host(app: &mut DesktopApp, host: usize) {
-    let name = if host == 0 { "Claude Code" } else { "Codex" };
-    app.ui.setup_host = host;
-    app.ui.set_expanded("agent-setup", true);
-    let existing = app.owner_ui.session.agents().ok().and_then(|agents| {
-        agents
-            .into_iter()
-            .find(|agent| !agent.revoked && agent.name == name)
-    });
-    app.place = Place::Agents;
-    if let Some(agent) = existing {
-        app.owner_ui.selected_agent = Some(agent.id);
-        app.ui.sheet = None;
+/// "Claude Code" or "Codex" in the panel: connect that host, with one owner check.
+fn choose_host(app: &mut DesktopApp, ctx: &egui::Context, host: usize) {
+    let host = if host == 1 {
+        ConnectHost::Codex
     } else {
-        app.owner_ui.selected_agent = None;
-        app.owner_ui.new_agent_name = name.to_owned();
-        app.ui.sheet = Some(Sheet::RegisterAgent);
-    }
+        ConnectHost::Claude
+    };
+    agent_onboarding::connect(app, Some(ctx), host, host.agent_name());
 }
 
 /// The app knows the first three stages. A settings file or an allowed activity
@@ -257,19 +243,19 @@ fn cli_guidance(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
 }
 
-/// The list column of Agents: the active agents with their token state, then the
-/// revoked ones, folded. "+" connects an agent.
+/// The list column of Agents: the connected agents, then the disconnected ones, folded.
+/// "+" connects an agent.
 pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let agents = app.owner_ui.session.agents();
     let count = agents.as_ref().map_or(0, |agents| {
         agents.iter().filter(|agent| !agent.revoked).count()
     });
-    let mut register = false;
+    let mut connect = false;
     super::columns::list_toolbar(ui, "Agents", &format!("{count} connected"), |ui| {
-        register = kit::plain_icon_button(ui, Icon::Plus, "Connect agent").clicked();
+        connect = kit::plain_icon_button(ui, Icon::Plus, "Connect an Agent").clicked();
     });
-    if register {
-        open_register(app);
+    if connect {
+        agent_onboarding::open(app);
     }
     let agents = match agents {
         Ok(agents) => agents,
@@ -280,19 +266,20 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
     };
     let now = now();
     let (revoked, active): (Vec<_>, Vec<_>) = agents.into_iter().partition(|agent| agent.revoked);
-    let rows: Vec<(u64, String, String, &'static str, Tone)> = active
+    let rows: Vec<(u64, String, String, Option<&'static str>)> = active
         .iter()
         .map(|agent| {
-            let (label, tone) = status(agent, now);
-            let subtitle = if agent.token_expired_at(now) {
-                format!(
-                    "The token expired on {}. Rotate it.",
-                    date(agent.token_expires_at)
-                )
-            } else {
-                format!("Token until {}", date(agent.token_expires_at))
-            };
-            (agent.id, agent.name.clone(), subtitle, label, tone)
+            let uses = app
+                .owner_ui
+                .session
+                .agent_uses_this_week(agent.id)
+                .unwrap_or(0);
+            let subtitle = format!(
+                "{WHERE} · {}",
+                super::columns::count_label(uses, "use this week", "uses this week")
+            );
+            let meta = agent.token_expired_at(now).then_some("Token expired");
+            (agent.id, agent.name.clone(), subtitle, meta)
         })
         .collect();
     let groups = if rows.is_empty() {
@@ -311,7 +298,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
         "agent-list",
         &groups,
         false,
-        |ui, (id, name, subtitle, label, _tone)| {
+        |ui, (id, name, subtitle, meta)| {
             let response = ui
                 .push_id(("agent-row", id), |ui| {
                     kit::list_row(
@@ -320,7 +307,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
                             tile: kit::Tile::letter(agent_color(name), name),
                             title: name,
                             subtitle,
-                            meta: Some(label),
+                            meta: *meta,
                             production: false,
                             selected: selected == Some(*id),
                         },
@@ -342,17 +329,17 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     kit::disclosure(
                         ui,
                         &mut expanded,
-                        &format!("Revoked agents ({})", revoked.len()),
+                        &format!("Disconnected agents ({})", revoked.len()),
                     );
                 });
                 if expanded {
                     ui.add_space(4.0);
-                    kit::section(ui, None, Some("A revoked token does not work."), |s| {
+                    kit::section(ui, None, Some("A disconnected token does not work."), |s| {
                         for agent in &revoked {
                             s.labeled(
                                 &agent.name,
                                 kit::text(
-                                    format!("Registered {}", date(agent.created_at)),
+                                    format!("Connected {}", date(agent.created_at)),
                                     Font::Callout,
                                 )
                                 .color(kit::SECONDARY),
@@ -370,7 +357,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
 }
 
 /// A steady color for the tile of an agent, from its name.
-fn agent_color(name: &str) -> egui::Color32 {
+pub(super) fn agent_color(name: &str) -> egui::Color32 {
     const COLORS: [egui::Color32; 5] = [
         egui::Color32::from_rgb(217, 119, 87),
         egui::Color32::from_rgb(16, 163, 127),
@@ -384,14 +371,30 @@ fn agent_color(name: &str) -> egui::Color32 {
     COLORS[sum % COLORS.len()]
 }
 
-fn draw_agent(app: &mut DesktopApp, ui: &mut egui::Ui, agent_id: u64) {
-    if app.ui.grant.resume_agent == Some(agent_id)
-        && app.ui.sheet.is_none()
-        && app.owner.check.is_none()
-    {
-        app.ui.grant.resume_agent = None;
-        app.ui.sheet = Some(Sheet::GrantMany { agent_id });
+/// The words of an exception in its row.
+fn exception_words(kind: ExceptionKind) -> &'static str {
+    match kind {
+        ExceptionKind::Never => "Never",
+        ExceptionKind::AlwaysAsk => "Always ask",
+        ExceptionKind::Only => "Only",
     }
+}
+
+/// What a use came to, in a few words.
+fn use_words(item_use: &crate::vault::usage::ItemUse) -> &'static str {
+    use crate::vault::usage::{UseDecidedBy, UseOutcome};
+    match (item_use.outcome, item_use.decided_by) {
+        (UseOutcome::Allowed, UseDecidedBy::Owner) => "you allowed it",
+        (UseOutcome::Allowed, UseDecidedBy::Answer) => "allowed by your answer",
+        (UseOutcome::Allowed, _) => "allowed automatically",
+        (UseOutcome::Denied, UseDecidedBy::Owner) => "you denied it",
+        (UseOutcome::Denied, _) => "denied",
+        (UseOutcome::Refused, _) => "refused",
+        (UseOutcome::TimedOut, _) => "no answer in time",
+    }
+}
+
+fn draw_agent(app: &mut DesktopApp, ui: &mut egui::Ui, agent_id: u64) {
     let Some(agent) = app
         .owner_ui
         .session
@@ -403,70 +406,62 @@ fn draw_agent(app: &mut DesktopApp, ui: &mut egui::Ui, agent_id: u64) {
         return;
     };
     let now = now();
-    let (label, tone) = status(&agent, now);
     ui.horizontal(|ui| {
-        kit::icon_tile_sized(ui, Icon::Person, kit::ACCENT, 40.0);
-        ui.add_space(4.0);
+        kit::tile(
+            ui,
+            &kit::Tile::letter(agent_color(&agent.name), &agent.name),
+            48.0,
+        );
+        ui.add_space(6.0);
         ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            ui.label(kit::text(&agent.name, Font::Title).color(kit::LABEL));
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.add(Label::new(kit::text(&agent.name, Font::Title).color(kit::LABEL)).wrap());
             ui.label(
                 kit::text(
-                    format!("Registered {}", date(agent.created_at)),
+                    format!("{WHERE} · connected {}", date(agent.created_at)),
                     Font::Callout,
                 )
                 .color(kit::SECONDARY),
             );
         });
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            kit::tag(ui, label, tone);
-        });
     });
-    ui.add_space(20.0);
+    ui.add_space(16.0);
     if agent.revoked {
         kit::notice(
             ui,
             Tone::Neutral,
-            "Revoked. The token does not work.",
-            Some("Register the agent again to give it a new token."),
+            "Disconnected. The token does not work.",
+            Some("Connect the agent again with \"+\" to give it a new token."),
             |_| {},
         );
         return;
     }
-    super::agent_onboarding::draw(app, ui, &agent);
-    visibility_section(app, ui, &agent);
-    process_access_section(app, ui, &agent);
-    operations_section(app, ui, agent_id);
-    let mut advanced = app.ui.is_expanded("agent-advanced-details");
-    kit::disclosure(ui, &mut advanced, "Token and manual setup");
-    app.ui.set_expanded("agent-advanced-details", advanced);
-    if advanced {
-        token_section(app, ui, &agent, now);
-        setup_guidance(&mut app.ui, ui, false);
-    }
-    let requests = app
-        .owner_ui
-        .session
-        .agent_activity(agent_id, crate::vault::MAX_ACTIVITY_ROWS)
-        .unwrap_or_default();
-    super::timeline::access_timeline(
-        app,
-        ui,
-        &requests,
-        &format!("agent-access-{agent_id}"),
-        "Recent requests",
-        "This agent did not send a request yet.",
-        true,
-    );
-    let mut revoke = false;
+    let overview = match app.owner_ui.session.agent_overview(agent_id) {
+        Ok(overview) => overview,
+        Err(err) => {
+            kit::tone_note(ui, err.message, Tone::Critical);
+            return;
+        }
+    };
+    let reconnect = stats_group(ui, &agent, &overview, now);
+    note_group(app, ui, agent_id, &overview);
+    exceptions_group(app, ui, &agent, &overview.exceptions);
+    recent_group(ui, &overview, now);
+    let mut disconnect = false;
     kit::section(ui, None, None, |s| {
-        revoke = s
-            .clickable_row("Revoke agent…", |ui| {
-                ui.label(kit::text("Revoke agent…", Font::Body).color(Tone::Critical.text()));
+        disconnect = s
+            .clickable_row(&format!("Disconnect {}…", agent.name), |ui| {
+                ui.label(
+                    kit::text(format!("Disconnect {}…", agent.name), Font::Body)
+                        .color(Tone::Critical.text()),
+                );
             })
             .clicked();
     });
-    if revoke {
+    if reconnect {
+        let ctx = ui.ctx().clone();
+        agent_onboarding::reconnect(app, &ctx, &agent.name);
+    } else if disconnect {
         app.ui.sheet = Some(Sheet::RevokeAgent {
             agent_id,
             name: agent.name.clone(),
@@ -474,322 +469,270 @@ fn draw_agent(app: &mut DesktopApp, ui: &mut egui::Ui, agent_id: u64) {
     }
 }
 
-/// The token expiry and rotation (goal item P1).
-fn token_section(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary, now: u64) {
-    let lifetime = app.owner_ui.session.token_lifetime_days().ok();
-    let footer = lifetime.map(|days| {
-        format!("Token lifetime: {days} days after issue. You change it in Settings > Agents.")
-    });
-    let mut rotate = false;
-    kit::section(ui, Some("Token"), footer.as_deref(), |s| {
+/// Uses, projects, what the agent sees, and its token. Returns true on "Reconnect…".
+fn stats_group(
+    ui: &mut egui::Ui,
+    agent: &AgentSummary,
+    overview: &AgentOverview,
+    now: u64,
+) -> bool {
+    let mut reconnect = false;
+    kit::section(ui, None, None, |s| {
+        s.labeled(
+            "Uses this week",
+            kit::text(overview.uses_this_week.to_string(), Font::Body).color(kit::SECONDARY),
+        );
+        s.labeled(
+            "Projects",
+            kit::text(
+                if overview.projects.is_empty() {
+                    "None yet".to_owned()
+                } else {
+                    overview.projects.join(", ")
+                },
+                Font::Body,
+            )
+            .color(kit::SECONDARY),
+        );
+        let listed = overview
+            .exceptions
+            .iter()
+            .filter(|row| row.exception.kind == ExceptionKind::Only)
+            .count();
+        s.labeled(
+            "Sees",
+            kit::text(
+                if overview.restricted {
+                    format!(
+                        "Only {}, never values",
+                        super::columns::count_label(listed, "credential", "credentials")
+                    )
+                } else {
+                    "Credential names, never values".to_owned()
+                },
+                Font::Body,
+            )
+            .color(kit::SECONDARY),
+        );
         let expired = agent.token_expired_at(now);
-        let when = format_utc(agent.token_expires_at);
-        if expired {
-            s.status(
-                "Expired",
-                Some("The agent gets token_expired. Rotate the token to give it a new one."),
-                kit::text(when, Font::Callout).color(Tone::Critical.text()),
-            );
-        } else {
-            s.labeled(
-                "Expires",
-                kit::text(when, Font::Callout).color(kit::SECONDARY),
-            );
-        }
         s.row(|ui| {
-            egui::Sides::new().shrink_left().wrap().show(
+            egui::Sides::new().shrink_left().show(
                 ui,
                 |ui| {
-                    kit::note(ui, "A new token replaces the old one at once.");
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.label(kit::text("Token", Font::Body).color(kit::LABEL));
+                        let (text, tone) = if expired {
+                            (
+                                format!(
+                                    "Expired {}. Reconnect to give it a new one.",
+                                    date(agent.token_expires_at)
+                                ),
+                                Tone::Critical,
+                            )
+                        } else {
+                            (
+                                format!("Valid until {}", date(agent.token_expires_at)),
+                                Tone::Neutral,
+                            )
+                        };
+                        ui.add(
+                            Label::new(kit::text(text, Font::Callout).color(tone.text())).wrap(),
+                        );
+                    });
                 },
                 |ui| {
-                    rotate = kit::small_button(ui, "Rotate token…", Style::Bordered).clicked();
+                    let style = if expired {
+                        Style::Prominent
+                    } else {
+                        Style::Bordered
+                    };
+                    reconnect = kit::small_button(ui, "Reconnect…", style).clicked();
                 },
             );
         });
     });
-    if rotate {
-        let ctx = ui.ctx().clone();
-        app.ask_owner(
-            OwnerRequest::RotateToken {
-                agent_id: agent.id,
-                agent_name: agent.name.clone(),
-            },
-            Some(&ctx),
-        );
-    }
+    reconnect
 }
 
-/// Process access belongs to credentials, independently of named variables.
-fn process_access_section(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary) {
-    let items = match app.owner_ui.session.agent_credentials() {
-        Ok(items) => items,
-        Err(err) => {
-            kit::tone_note(ui, err.message, Tone::Critical);
+/// "Note for the bouncer": a hint, not a limit (ADR 0025 §3f). Saving it needs no check.
+fn note_group(app: &mut DesktopApp, ui: &mut egui::Ui, agent_id: u64, overview: &AgentOverview) {
+    let state = &mut app.ui.agents;
+    if state.note.as_ref().is_none_or(|(id, _)| *id != agent_id) {
+        state.note = Some((agent_id, overview.note.clone()));
+    }
+    let mut save = false;
+    {
+        let Some((_, text)) = state.note.as_mut() else {
             return;
-        }
-    };
-    let grants = app
-        .owner_ui
-        .session
-        .exec_grants(agent.id)
-        .unwrap_or_default();
-    let kinds: std::collections::BTreeMap<u64, crate::contracts::CredentialKind> = app
-        .owner_ui
-        .session
-        .search("")
-        .unwrap_or_default()
-        .into_iter()
-        .map(|item| (item.id, item.kind))
-        .collect();
-    let mut open = None;
-    let mut open_many = false;
-    let mut go_to_credentials = false;
-    kit::section(
-        ui,
-        Some("Process access"),
-        Some(
-            "Choose which credentials this agent can use and where it can use them. Variable names are optional.",
-        ),
-        |s| {
-            if items.is_empty() {
+        };
+        kit::section(
+            ui,
+            Some("Note for the bouncer"),
+            Some(&format!(
+                "The bouncer reads it as a hint, not as a limit. At most {MAX_AGENT_NOTE_BYTES} bytes."
+            )),
+            |s| {
                 s.row(|ui| {
-                    kit::note(
+                    kit::text_area(
                         ui,
-                        "Add a credential with a secret value, then give this agent access.",
+                        text,
+                        &format!("agent-note-{agent_id}"),
+                        "Optional. For example: CI agent for Acme, only the Stripe test key.",
+                        2,
                     );
-                    go_to_credentials =
-                        kit::small_button(ui, "Go to Credentials", Style::Link).clicked();
                 });
-                return;
-            }
-            for (item_id, item_name) in &items {
-                let grant = grants.iter().find(|grant| grant.item_id == *item_id);
-                let (detail, tone) = match grant.map(|grant| grant.mode) {
-                    Some(ExecMode::Ask) => ("Asks you each time", Tone::Accent),
-                    Some(ExecMode::Bouncer) => ("Bouncer decides", Tone::Good),
-                    None => ("Off", Tone::Neutral),
-                };
-                let subtitle = match grant {
-                    Some(grant) => grant.place.describe(),
-                    None => "No access yet",
-                };
-                // The icon of the credential kind, as in the credential list.
-                let icon = kinds
-                    .get(item_id)
-                    .map_or((Icon::Terminal, kit::TERTIARY), |kind| {
-                        super::kind_icon(*kind)
+                if text.trim() != overview.note.trim() {
+                    s.row(|ui| {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            save = kit::small_button(ui, "Save Note", Style::Prominent).clicked();
+                        });
                     });
-                if s.nav(
-                    Some(icon),
-                    item_name,
-                    Some(subtitle),
-                    Some(kit::text(detail, Font::Callout).color(tone.text())),
-                )
-                .clicked()
-                {
-                    let mode = grant.map_or(ExecMode::Ask, |grant| grant.mode);
-                    open = Some((*item_id, mode, grant.cloned()));
                 }
-            }
-            if items.len() > 1 {
-                let clicked = s
-                    .clickable_row("Give access to several credentials…", |ui| {
-                        ui.label(
-                            kit::text("Give access to several credentials…", Font::Body)
-                                .color(kit::ACCENT_TEXT),
-                        );
-                    })
-                    .clicked();
-                if clicked {
-                    open_many = true;
-                }
-            }
-        },
-    );
-    if go_to_credentials {
-        app.show_credentials();
+            },
+        );
     }
-    if open_many {
-        app.ui.grant = GrantForm::default();
-        app.ui.sheet = Some(Sheet::GrantMany { agent_id: agent.id });
-    }
-    if let Some((item_id, mode, grant)) = open {
-        if app
-            .owner_ui
-            .session
-            .process_binding(item_id)
-            .ok()
-            .flatten()
-            .is_none()
-        {
-            open_command_settings(app, item_id);
-            return;
-        }
-        let key = (agent.id, item_id);
-        let any_folder = grant
-            .as_ref()
-            .is_some_and(|grant| grant.place == GrantPlace::AnyFolder);
-        let dir = grant
-            .as_ref()
-            .and_then(|grant| grant.place.folder().map(str::to_owned))
-            .unwrap_or_default();
-        app.owner_ui.exec_dir_inputs.insert(key, dir);
-        match &grant {
-            Some(grant) => {
-                app.owner_ui
-                    .rule_inputs
-                    .insert(key, RuleForm::from_rule(&grant.rule, now()));
-            }
-            None => {
-                app.owner_ui.rule_inputs.remove(&key);
-            }
-        }
-        app.ui.sheet = Some(Sheet::ProcessAccess {
-            agent_id: agent.id,
-            item_id,
-            mode,
-            any_folder,
-        });
+    if save {
+        save_note(app, agent_id);
     }
 }
 
-/// Connector operations as switches. A new grant needs the owner check.
-fn operations_section(app: &mut DesktopApp, ui: &mut egui::Ui, agent_id: u64) {
-    let Ok(connectors) = app.owner_ui.session.connectors() else {
+/// Save the note of the field. It is a hint for the bouncer and moves no authority, so
+/// it needs no owner check.
+pub(super) fn save_note(app: &mut DesktopApp, agent_id: u64) {
+    let Some((_, text)) = app.ui.agents.note.clone().filter(|(id, _)| *id == agent_id) else {
         return;
     };
-    if connectors.is_empty() {
-        return;
+    let result = app.owner_ui.session.set_agent_note(agent_id, &text);
+    if app.apply(result, "The note is saved.").is_some() {
+        app.ui.agents.note = None;
     }
-    let granted = app.owner_ui.session.grants(agent_id).unwrap_or_default();
-    let mut allow = None;
+}
+
+/// The exceptions of the agent, each with Remove. Removing "Never" or "Always ask" gives
+/// authority back: the owner check. Removing a listed item ("Only") takes it away: none.
+fn exceptions_group(
+    app: &mut DesktopApp,
+    ui: &mut egui::Ui,
+    agent: &AgentSummary,
+    exceptions: &[ExceptionRow],
+) {
     let mut remove = None;
-    kit::section(
-        ui,
-        Some("API operations"),
-        Some("Apassy calls the API for the agent and adds the token. The agent never receives it."),
-        |s| {
-            for row in &connectors {
-                for (operation, description) in &row.operations {
-                    let was = granted.contains(&(row.item_id, (*operation).to_owned()));
-                    let mut allowed = was;
-                    let title = format!("{} · {operation}", row.item_name);
-                    s.toggle(&title, Some(description), &mut allowed);
-                    if allowed && !was {
-                        allow = Some((row.item_id, (*operation).to_owned()));
-                    } else if !allowed && was {
-                        remove = Some((row.item_id, *operation));
-                    }
-                }
-            }
-        },
-    );
-    if let Some((item_id, operation)) = allow {
-        // A new grant needs an owner check (goal item A4).
+    kit::section(ui, Some("Exceptions"), None, |s| {
+        if exceptions.is_empty() {
+            s.row(|ui| {
+                kit::note(ui, "None. Exceptions come from your answers in Decisions.");
+            });
+        }
+        for row in exceptions {
+            let name = row.item.as_ref().map_or_else(
+                || format!("Credential {}", row.exception.item_id),
+                |item| item.name.clone(),
+            );
+            let tile = row.item.as_ref().map_or_else(
+                || kit::Tile::icon(Tone::Neutral.mark(), Icon::Key),
+                |item| super::credential_tile(item.kind, &item.service, &item.name),
+            );
+            let words = exception_words(row.exception.kind);
+            s.row(|ui| {
+                egui::Sides::new().shrink_left().show(
+                    ui,
+                    |ui| {
+                        ui.horizontal(|ui| {
+                            kit::tile(ui, &tile, 20.0);
+                            ui.add(
+                                Label::new(
+                                    kit::text(format!("{words}: {name}"), Font::Body)
+                                        .color(kit::LABEL),
+                                )
+                                .truncate(),
+                            );
+                        });
+                    },
+                    |ui| {
+                        let button = kit::small_button(ui, "Remove", Style::Bordered);
+                        let label = format!("Remove the exception {words}: {name}");
+                        ui.ctx()
+                            .accesskit_node_builder(button.id, |node| node.set_label(label));
+                        if button.clicked() {
+                            remove = Some(row.exception.clone());
+                        }
+                    },
+                );
+            });
+        }
+    });
+    if let Some(exception) = remove {
         let ctx = ui.ctx().clone();
-        app.ask_owner(
-            OwnerRequest::AllowOperation {
-                agent_id,
-                item_id,
-                operation,
-            },
-            Some(&ctx),
-        );
+        remove_exception(app, &ctx, agent, &exception);
     }
-    if let Some((item_id, operation)) = remove {
-        // A removal only takes authority away.
+}
+
+/// Remove an exception. "Never" and "Always ask" give authority back: the owner check
+/// first. A listed item ("Only") goes at once: the agent then sees less.
+pub(super) fn remove_exception(
+    app: &mut DesktopApp,
+    ctx: &egui::Context,
+    agent: &AgentSummary,
+    exception: &crate::vault::exceptions::AgentException,
+) {
+    if exception.kind == ExceptionKind::Only {
         let result = app
             .owner_ui
             .session
-            .remove_operation(agent_id, item_id, operation);
-        let _ = app.apply(result, &format!("The agent can no longer use {operation}."));
+            .remove_listed_item(agent.id, exception.item_id);
+        let _ = app.apply(
+            result,
+            &format!("{} no longer sees this credential.", agent.name),
+        );
+        return;
     }
+    app.ask_owner(
+        OwnerRequest::RemoveAgentException {
+            agent_id: agent.id,
+            agent_name: agent.name.clone(),
+            item_id: exception.item_id,
+            kind: exception.kind,
+        },
+        Some(ctx),
+    );
+}
+
+/// "Recent uses": what the agent used lately and how each use ended.
+fn recent_group(ui: &mut egui::Ui, overview: &AgentOverview, now: u64) {
+    kit::section(ui, Some("Recent uses"), None, |s| {
+        if overview.recent.is_empty() {
+            s.row(|ui| kit::note(ui, "This agent did not use a credential yet."));
+        }
+        for recent in &overview.recent {
+            let item_use = &recent.item_use;
+            let place = if item_use.project_label.is_empty() {
+                String::new()
+            } else {
+                format!(" in {}", item_use.project_label)
+            };
+            s.row(|ui| {
+                ui.add(
+                    Label::new(
+                        kit::text(format!("{}{place}", recent.item_name), Font::Body)
+                            .color(kit::LABEL),
+                    )
+                    .truncate(),
+                );
+                kit::note(
+                    ui,
+                    format!(
+                        "{} · {}",
+                        use_words(item_use),
+                        kit::relative_time(item_use.at, now)
+                    ),
+                );
+            });
+        }
+    });
 }
 
 // ---- Sheets. ----
-
-pub(super) fn register_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool {
-    let mut register = false;
-    let mut cancel = false;
-    let response = kit::sheet(ctx, "register-agent", 440.0, |ui| {
-        kit::sheet_title(
-            ui,
-            "Connect an agent",
-            Some(
-                "Select your agent. Next, save its connection settings and choose its credentials.",
-            ),
-        );
-        kit::section(ui, None, None, |s| {
-            s.field("Agent", |ui| {
-                let before = super::agent_setup::Host::from_index(app.ui.setup_host);
-                let response = kit::picker(
-                    ui,
-                    "register-host",
-                    &mut app.ui.setup_host,
-                    &[(0, "Claude Code".to_owned()), (1, "Codex".to_owned())],
-                    before.name(),
-                    220.0,
-                );
-                let selected = super::agent_setup::Host::from_index(app.ui.setup_host);
-                if app.owner_ui.new_agent_name.is_empty()
-                    || app.owner_ui.new_agent_name == before.name()
-                {
-                    app.owner_ui.new_agent_name = selected.name().to_owned();
-                }
-                response
-            });
-            let field = s.field("Name", |ui| {
-                kit::text_input(
-                    ui,
-                    &mut app.owner_ui.new_agent_name,
-                    "agent-name",
-                    "Claude Code",
-                )
-            });
-            if field.lost_focus() && field.ctx.input(|input| input.key_pressed(egui::Key::Enter)) {
-                register = true;
-            }
-        });
-        kit::sheet_buttons(
-            ui,
-            |_| {},
-            |ui| {
-                register |= kit::button(ui, "Continue", Style::Prominent)
-                    .on_hover_text("⌘S")
-                    .clicked();
-                cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
-            },
-        );
-    });
-    register |= super::save_pressed(app, ctx);
-    if register {
-        let name = app.owner_ui.new_agent_name.clone();
-        match app.owner_ui.session.register_agent(&name) {
-            Ok((agent, token)) => {
-                app.owner_ui.new_agent_name.clear();
-                app.owner_ui.selected_agent = Some(agent.id);
-                // The explicit host choice takes precedence over a custom agent name.
-                app.ui
-                    .agent_setup
-                    .prepare(token.expose(), "", &mut app.ui.setup_host);
-                app.owner_ui.fresh_token = Some(FreshToken {
-                    agent_name: agent.name.clone(),
-                    token,
-                    rotated: false,
-                });
-                app.ui.sheet = None;
-                app.place = Place::Agents;
-                app.set_ok(format!("{} is ready for connection settings.", agent.name));
-            }
-            Err(err) => app.set_err(err.message),
-        }
-    }
-    if cancel {
-        close_sheet(app, ctx);
-    }
-    response.escape
-}
 
 fn shell_word(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
@@ -802,39 +745,24 @@ fn cli_path() -> String {
         .unwrap_or_else(|| "apassy".to_owned())
 }
 
-/// These steps stay available after the one-time token sheet closes.
-fn setup_guidance(state: &mut super::UiState, ui: &mut egui::Ui, fresh: bool) {
-    let mut expanded = fresh || state.is_expanded("agent-setup");
-    if !fresh {
-        kit::disclosure(ui, &mut expanded, "Connect to an agent host");
-    }
-    state.set_expanded("agent-setup", expanded);
-    if !expanded {
-        // The gap of a section, so the next section header does not touch the label.
-        ui.add_space(14.0);
-        return;
-    }
-    let selected = if state.setup_host == 0 {
-        "Claude Code"
-    } else {
-        "Codex"
-    };
+/// The manual steps for a host, in "Advanced setup" of the token sheet.
+fn setup_guidance(state: &mut super::UiState, ui: &mut egui::Ui) {
+    let selected = super::agent_setup::Host::from_index(state.setup_host);
     kit::picker(
         ui,
         "setup-host",
         &mut state.setup_host,
         &[(0, "Claude Code".to_owned()), (1, "Codex".to_owned())],
-        selected,
+        selected.name(),
         200.0,
     );
-    let host = if state.setup_host == 0 {
-        "claude"
-    } else {
-        "codex"
-    };
+    let host = selected.id();
     kit::note(
         ui,
-        format!("First, install {selected}. Make sure `{host} --version` works in Terminal."),
+        format!(
+            "First, install {}. Make sure `{host} --version` works in Terminal.",
+            selected.name()
+        ),
     );
     kit::note(
         ui,
@@ -849,38 +777,27 @@ fn setup_guidance(state: &mut super::UiState, ui: &mut egui::Ui, fresh: bool) {
         ui,
         "This writes the MCP server and prompt hook settings. It does not check the connection. Apassy keeps a copy of changed settings.",
     );
-    if host == "codex" {
-        kit::note(
-            ui,
-            "2. Restart Codex. Use /hooks to trust the Apassy hook. Check the Apassy server with /mcp.",
-        );
-    } else {
-        kit::note(
-            ui,
-            "2. Restart Claude Code. Use /mcp to check that Apassy is connected.",
-        );
-    }
     kit::note(
         ui,
-        "3. When the agent sees credential names, it uses a credential when it needs one, and you approve the first use in Apassy (ADR 0024). To give access before the first use, select credentials in the agent guide.",
+        if host == "codex" {
+            "2. Restart Codex. Use /hooks to trust the Apassy hook. Check the Apassy server with /mcp."
+        } else {
+            "2. Restart Claude Code. Use /mcp to check that Apassy is connected."
+        },
     );
     kit::note(
         ui,
-        "4. In your project folder, start the host with this command. Ask the agent to use a credential. Approve the first use in Apassy.",
+        "3. In your project folder, start the host with this command. A question waits up to 5 minutes for you, so the host waits at least 330 seconds for a tool.",
     );
-    let launch = if host == "claude" {
-        "MCP_TOOL_TIMEOUT=180000 claude".to_owned()
-    } else {
-        "codex".to_owned()
-    };
-    kit::code_block(ui, &launch, 2);
+    kit::code_block(ui, &agent_onboarding::launch_command(selected), 2);
     let sandbox = std::path::Path::new(&cli_path())
         .parent()
         .map(|p| p.join("apassy-sandbox").display().to_string())
         .unwrap_or_else(|| "apassy-sandbox".to_owned());
     let protected = if host == "claude" {
         format!(
-            "MCP_TOOL_TIMEOUT=180000 {} -- claude --settings '{{\"sandbox\":{{\"enabled\":false}}}}'",
+            "{} {} -- claude --settings '{{\"sandbox\":{{\"enabled\":false}}}}'",
+            agent_onboarding::CLAUDE_TOOL_TIMEOUT,
             shell_word(&sandbox)
         )
     } else {
@@ -896,19 +813,33 @@ fn setup_guidance(state: &mut super::UiState, ui: &mut egui::Ui, fresh: bool) {
     kit::code_block(ui, &protected, 2);
     kit::note(
         ui,
-        "Check the result of the test request. Then check its entry in Activity. An Allowed entry alone does not prove success.",
+        "4. Ask the agent to use a credential. The bouncer decides; when it asks you, the question shows in Decisions.",
     );
-    if !fresh {
-        kit::note(
-            ui,
-            "Use the token you saved. If you lost it, select Rotate token to get a new one. The old token will stop working.",
-        );
-    }
 }
 
-/// A new token after registration or rotation. The main action saves host
-/// settings. The token and manual commands stay in a closed disclosure group.
-/// Escape does not discard the one-time token.
+/// The manual MCP configuration for another host, with the token.
+fn manual_config(ui: &mut egui::Ui, token: &str) {
+    let adapter = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.join("apassy-mcp")))
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "apassy-mcp".to_owned());
+    let config = zeroize::Zeroizing::new(
+        serde_json::to_string_pretty(&serde_json::json!({
+            "mcpServers": { "apassy": { "command": adapter, "env": { "APASSY_AGENT_TOKEN": token } } }
+        }))
+        .unwrap_or_default(),
+    );
+    kit::code_block(ui, &config, 7);
+    kit::note(
+        ui,
+        "Add this server to your host. Keep the token private. Give the host a tool time-out of at least 330 seconds: a question waits up to 5 minutes for you. Manual MCP setup does not install the prompt hook.",
+    );
+}
+
+/// The token after "Connect" or a new token: Apassy saves the host settings at once
+/// (ADR 0025 §2). For Other, the sheet shows the token and the MCP configuration one
+/// time. Escape does not discard the one-time token.
 pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
     let Some(fresh) = &app.owner_ui.fresh_token else {
         return;
@@ -918,10 +849,23 @@ pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
         if fresh.rotated { "" } else { &fresh.agent_name },
         &mut app.ui.setup_host,
     );
-    app.ui.agent_setup.poll(ctx);
-    let token = fresh.token.expose();
+    let (host, start_now) = agent_onboarding::token_shown(app);
+    let Some(fresh) = &app.owner_ui.fresh_token else {
+        return;
+    };
+    let token = zeroize::Zeroizing::new(fresh.token.expose().to_owned());
     let rotated = fresh.rotated;
     let title = format!("Connect {}", fresh.agent_name);
+    // The settings are saved at once after the check, in the app only: a test never
+    // writes host settings.
+    if start_now
+        && !cfg!(test)
+        && let Some(setup) = host.setup()
+    {
+        app.ui.setup_host = setup.index();
+        app.ui.agent_setup.start(setup, &token, ctx);
+    }
+    app.ui.agent_setup.poll(ctx);
     let mut dismiss = false;
     let mut connect = false;
     let busy = app.ui.agent_setup.busy();
@@ -932,13 +876,16 @@ pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
         .as_ref()
         .and_then(|result| result.as_ref().ok())
         .copied();
+    let other = host == ConnectHost::Other;
     kit::sheet(ctx, "fresh-token", 480.0, |ui| {
         kit::sheet_title(
             ui,
             &title,
-            Some(
-                "Step 1 of 3: save the connection settings. Next, select credentials and check a request.",
-            ),
+            Some(if other {
+                "Use this token in the host. Apassy shows it one time."
+            } else {
+                "Apassy saves the settings of the host. There is nothing else to set."
+            }),
         );
         kit::sheet_body(ui, |ui| {
             if rotated {
@@ -947,38 +894,32 @@ pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
                     "The old token does not work. Save the new settings for your host.",
                 );
             }
-            if let Some(host) = saved {
+            if other {
+                let heading = ui.label(kit::text("Token", Font::Headline).color(kit::LABEL));
+                kit::code_block(ui, &token, 1).labelled_by(heading.id);
+                manual_config(ui, &token);
+                kit::note(
+                    ui,
+                    "For the command line on another computer, set APASSY_AGENT_TOKEN to this token.",
+                );
+                return;
+            }
+            if saved.is_some() {
                 kit::tone_note(ui, "Connection settings saved.", Tone::Good);
+                agent_onboarding::after_setup_notes(ui, host);
                 kit::note(
                     ui,
-                    format!(
-                        "Restart {}. Keep Apassy open and the vault unlocked.",
-                        host.name()
-                    ),
-                );
-                kit::note(
-                    ui,
-                    if host == super::agent_setup::Host::Codex {
-                        "Use /hooks to trust the Apassy hook. Use /mcp to check the Apassy connection."
-                    } else {
-                        "Use /mcp to check the Apassy connection."
-                    },
-                );
-                kit::note(ui, "The connection and first request are not checked.");
-                kit::note(ui, "Next, choose credentials and set access in Apassy.");
-                kit::note(
-                    ui,
-                    "The final step shows how to start the agent and check a request.",
+                    "Saved settings do not prove a connection. Check it in the host.",
                 );
             } else {
-                let host = super::agent_setup::Host::from_index(app.ui.setup_host);
+                let setup = super::agent_setup::Host::from_index(app.ui.setup_host);
                 ui.add_enabled_ui(!busy, |ui| {
                     kit::picker(
                         ui,
                         "fresh-setup-host",
                         &mut app.ui.setup_host,
                         &[(0, "Claude Code".to_owned()), (1, "Codex".to_owned())],
-                        host.name(),
+                        setup.name(),
                         200.0,
                     );
                 });
@@ -989,7 +930,7 @@ pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
                 if busy {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        kit::note(ui, "Please wait. Apassy will save the host settings.");
+                        kit::note(ui, "Please wait. Apassy saves the host settings.");
                     });
                 }
                 if let Some(Err(error)) = &app.ui.agent_setup.result {
@@ -1001,25 +942,13 @@ pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
             if app.ui.agent_setup.advanced {
                 kit::note(ui, "Apassy shows this token one time. Keep it private.");
                 let heading = ui.label(kit::text("Token", Font::Headline).color(kit::LABEL));
-                kit::code_block(ui, token, 1).labelled_by(heading.id);
-                ui.add_enabled_ui(!busy, |ui| setup_guidance(&mut app.ui, ui, true));
+                kit::code_block(ui, &token, 1).labelled_by(heading.id);
+                ui.add_enabled_ui(!busy, |ui| setup_guidance(&mut app.ui, ui));
                 let mut manual = app.ui.is_expanded("manual-mcp-config");
                 kit::disclosure(ui, &mut manual, "Other hosts: manual MCP configuration");
                 app.ui.set_expanded("manual-mcp-config", manual);
                 if manual {
-                    let adapter = std::env::current_exe()
-                        .ok()
-                        .and_then(|p| p.parent().map(|p| p.join("apassy-mcp")))
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "apassy-mcp".to_owned());
-                    let config = zeroize::Zeroizing::new(serde_json::to_string_pretty(&serde_json::json!({
-                        "mcpServers": { "apassy": { "command": adapter, "env": { "APASSY_AGENT_TOKEN": token } } }
-                    })).unwrap_or_default());
-                    kit::code_block(ui, &config, 7);
-                    kit::note(
-                        ui,
-                        "Add this server to your host. Keep the token private. Manual MCP setup does not install the prompt hook.",
-                    );
+                    manual_config(ui, &token);
                 }
                 if saved.is_none() {
                     ui.add_enabled_ui(!busy, |ui| {
@@ -1032,13 +961,13 @@ pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
             ui,
             |_| {},
             |ui| {
-                if saved.is_some() {
-                    dismiss = kit::button(ui, "Choose credentials", Style::Prominent).clicked();
+                if saved.is_some() || other {
+                    dismiss = kit::button(ui, "Done", Style::Prominent).clicked();
                 } else {
-                    let host = super::agent_setup::Host::from_index(app.ui.setup_host);
+                    let setup = super::agent_setup::Host::from_index(app.ui.setup_host);
                     ui.add_enabled_ui(!busy, |ui| {
                         connect =
-                            kit::button(ui, &format!("Connect {}", host.name()), Style::Prominent)
+                            kit::button(ui, &format!("Connect {}", setup.name()), Style::Prominent)
                                 .clicked();
                     });
                 }
@@ -1048,24 +977,25 @@ pub(super) fn draw_fresh_token(app: &mut DesktopApp, ctx: &egui::Context) {
     if connect {
         app.ui.agent_setup.start(
             super::agent_setup::Host::from_index(app.ui.setup_host),
-            token,
+            &token,
             ctx,
         );
     }
     if dismiss {
-        if let (Some(host), Some(agent_id)) = (saved, app.owner_ui.selected_agent) {
-            super::agent_onboarding::connected(app, agent_id, host);
-        }
         app.owner_ui.fresh_token = None;
         app.ui.agent_setup = Default::default();
-        app.set_ok(if saved.is_some() {
-            "Connection settings are saved. Select the credentials for this agent."
+        app.ui.agent_onboarding.shown = None;
+        app.place = Place::Agents;
+        app.set_ok(if saved.is_some() || other {
+            "The agent is connected. The bouncer decides each use; a question shows in Decisions."
         } else {
             "The token is hidden. Apassy cannot show it again."
         });
     }
 }
 
+/// "Disconnect AGENT…": its token stops working. It takes authority away, so it needs no
+/// owner check.
 pub(super) fn revoke_sheet(
     app: &mut DesktopApp,
     ctx: &egui::Context,
@@ -1077,22 +1007,20 @@ pub(super) fn revoke_sheet(
     let response = kit::sheet(ctx, "revoke-agent", 400.0, |ui| {
         kit::sheet_title(
             ui,
-            &format!("Revoke {name}?"),
-            Some(
-                "Its token stops working at once, and its grants end. You can register the agent again later.",
-            ),
+            &format!("Disconnect {name}?"),
+            Some("Its token stops working at once. You can connect the agent again later."),
         );
         kit::sheet_buttons(
             ui,
             |_| {},
             |ui| {
-                revoke = kit::button(ui, "Revoke", Style::DestructiveProminent).clicked();
+                revoke = kit::button(ui, "Disconnect", Style::DestructiveProminent).clicked();
                 cancel = kit::alert_cancel(ui).clicked();
             },
         );
     });
     if revoke {
-        let message = format!("{name} is revoked. Its token does not work.");
+        let message = format!("{name} is disconnected. Its token does not work.");
         let result = app.owner_ui.session.revoke_agent(agent_id);
         if app.apply(result, &message).is_some() {
             app.ui.sheet = None;
@@ -1102,626 +1030,4 @@ pub(super) fn revoke_sheet(
         close_sheet(app, ctx);
     }
     response.escape
-}
-
-/// Process access for one agent and one credential, with its optional rule (ADR 0007).
-pub(super) fn access_sheet(
-    app: &mut DesktopApp,
-    ctx: &egui::Context,
-    agent_id: u64,
-    item_id: u64,
-    mode: ExecMode,
-    any_folder: bool,
-) -> bool {
-    let session = &app.owner_ui.session;
-    let agent_name = session
-        .agents()
-        .ok()
-        .and_then(|agents| agents.into_iter().find(|agent| agent.id == agent_id))
-        .map(|agent| agent.name)
-        .unwrap_or_default();
-    let Some((_, item_name)) = session
-        .agent_credentials()
-        .ok()
-        .and_then(|items| items.into_iter().find(|(id, _)| *id == item_id))
-    else {
-        app.ui.sheet = None;
-        return false;
-    };
-    let grant = session
-        .exec_grants(agent_id)
-        .ok()
-        .and_then(|grants| grants.into_iter().find(|grant| grant.item_id == item_id));
-    let key = (agent_id, item_id);
-    let real_value = session
-        .process_binding(item_id)
-        .ok()
-        .flatten()
-        .is_some_and(|binding| binding.delivery == EnvDelivery::Value);
-    let mut chosen = mode;
-    let mut anywhere = any_folder;
-    let mut save = false;
-    let mut remove = false;
-    let mut save_rule = false;
-    let mut cancel = false;
-    let response = kit::sheet(ctx, "process-access", 560.0, |ui| {
-        kit::sheet_title(
-            ui,
-            &format!("{item_name} for {agent_name}"),
-            Some("Set where this agent can use the credential and when it needs your approval."),
-        );
-        kit::sheet_body(ui, |ui| {
-            let dir = app.owner_ui.exec_dir_inputs.entry(key).or_default();
-            place_section(
-                ui,
-                ("exec", agent_id, item_id),
-                dir,
-                &mut anywhere,
-                &mut chosen,
-                usize::from(real_value),
-            );
-            if let Some(grant) = &grant {
-                let rule_key = format!("rule-{agent_id}-{item_id}");
-                let mut open = app.ui.is_expanded(&rule_key);
-                if kit::disclosure(ui, &mut open, "Rule").changed() {
-                    app.ui.set_expanded(&rule_key, open);
-                }
-                if open {
-                    ui.add_space(6.0);
-                    let form = app
-                        .owner_ui
-                        .rule_inputs
-                        .entry(key)
-                        .or_insert_with(|| RuleForm::from_rule(&grant.rule, now()));
-                    save_rule = rule_form(ui, form);
-                }
-            }
-        });
-        kit::sheet_buttons(
-            ui,
-            |ui| {
-                if grant.is_some() {
-                    remove = kit::button(ui, "Remove access", Style::Destructive).clicked();
-                }
-            },
-            |ui| {
-                save = kit::button(ui, "Save", Style::Prominent)
-                    .on_hover_text("⌘S")
-                    .clicked();
-                cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
-            },
-        );
-    });
-    if chosen != mode || anywhere != any_folder {
-        app.ui.sheet = Some(Sheet::ProcessAccess {
-            agent_id,
-            item_id,
-            mode: chosen,
-            any_folder: anywhere,
-        });
-    }
-    save |= super::save_pressed(app, ctx);
-    if save {
-        let place = if anywhere {
-            GrantPlace::AnyFolder
-        } else {
-            GrantPlace::Folder(
-                app.owner_ui
-                    .exec_dir_inputs
-                    .get(&key)
-                    .cloned()
-                    .unwrap_or_default(),
-            )
-        };
-        // A new or changed grant needs an owner check (goal item A4).
-        ask_owner_from_sheet(
-            app,
-            OwnerRequest::SetProcessAccess {
-                agent_id,
-                item_id,
-                place,
-                mode: effective_mode(chosen, anywhere, usize::from(real_value)),
-            },
-            ctx,
-        );
-    }
-    if save_rule && let Some(form) = app.owner_ui.rule_inputs.get(&key).cloned() {
-        match form.to_rule(now()) {
-            // A rule change needs an owner check (goal item A4).
-            Ok(rule) => ask_owner_from_sheet(
-                app,
-                OwnerRequest::SaveRule {
-                    agent_id,
-                    item_id,
-                    rule,
-                },
-                ctx,
-            ),
-            Err(message) => app.set_err(message),
-        }
-    }
-    if remove {
-        let result = app.owner_ui.session.remove_exec_grant(agent_id, item_id);
-        if app.apply(result, "Process access is removed.").is_some() {
-            app.ui.sheet = None;
-        }
-    }
-    if cancel {
-        close_sheet(app, ctx);
-    }
-    response.escape
-}
-
-/// The form of "Give access to several credentials" and of an access request (ADR 0012).
-#[derive(Debug, Clone, Default)]
-pub(crate) struct GrantForm {
-    pub(crate) selection: std::collections::BTreeSet<u64>,
-    pub(crate) dir: String,
-    pub(crate) any_folder: bool,
-    pub(crate) mode: Decision,
-    /// Return to the same batch selection after the optional field/settings sheet.
-    pub(crate) resume_agent: Option<u64>,
-}
-
-/// The decision of a grant in a form. `Ask` is the default.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum Decision {
-    #[default]
-    Ask,
-    Bouncer,
-}
-
-impl Decision {
-    fn mode(self) -> ExecMode {
-        match self {
-            Self::Ask => ExecMode::Ask,
-            Self::Bouncer => ExecMode::Bouncer,
-        }
-    }
-}
-
-impl GrantForm {
-    pub(crate) fn place(&self) -> GrantPlace {
-        if self.any_folder {
-            GrantPlace::AnyFolder
-        } else {
-            GrantPlace::Folder(self.dir.trim().to_owned())
-        }
-    }
-}
-
-/// In any folder, a variable with the real value makes each run ask the owner, so a
-/// grant with such a variable is saved as "Ask me each time" (ADR 0012).
-fn effective_mode(mode: ExecMode, any_folder: bool, real_values: usize) -> ExecMode {
-    if any_folder && real_values > 0 {
-        ExecMode::Ask
-    } else {
-        mode
-    }
-}
-
-/// "Where" and "Decision" of a grant. `real_values` counts the credentials whose
-/// variable holds the real value.
-pub(super) fn place_section(
-    ui: &mut egui::Ui,
-    salt: impl std::hash::Hash + std::fmt::Debug + Copy,
-    dir: &mut String,
-    any_folder: &mut bool,
-    mode: &mut ExecMode,
-    real_values: usize,
-) {
-    let forced = *any_folder && real_values > 0;
-    let footer = if forced {
-        "In any folder, a process with the real value of a secret can use it anywhere, so you approve each run with it. A variable in placeholder mode lets the bouncer decide."
-    } else if *any_folder {
-        match mode {
-            ExecMode::Ask => {
-                "The agent can use the credentials from any working directory. You approve each run."
-            }
-            ExecMode::Bouncer => {
-                "The agent can use the credentials from any working directory. The bouncer decides; a risky run and a production run wait for you. The placeholders go only to their hosts."
-            }
-        }
-    } else {
-        match mode {
-            ExecMode::Ask => {
-                "You approve each run with your passphrase. Start here for a new project."
-            }
-            ExecMode::Bouncer => {
-                "The bouncer decides from your declarations and rules. A risky run waits for you. A production run always waits for you."
-            }
-        }
-    };
-    kit::section(ui, None, Some(footer), |s| {
-        s.field("Where", |ui| {
-            kit::segmented(
-                ui,
-                ("grant-where", salt),
-                any_folder,
-                &[(false, "This folder"), (true, "Any folder")],
-            )
-        });
-        if !*any_folder {
-            s.field("Project folder", |ui| {
-                kit::text_input(ui, dir, "exec-dir", "/Users/you/Dev/project")
-            });
-        }
-        s.field("Decision", |ui| {
-            if forced {
-                *mode = ExecMode::Ask;
-            }
-            ui.add_enabled_ui(!forced, |ui| {
-                kit::segmented(
-                    ui,
-                    ("exec-mode", salt),
-                    mode,
-                    &[
-                        (ExecMode::Ask, "Ask me each time"),
-                        (ExecMode::Bouncer, "Bouncer decides"),
-                    ],
-                )
-            })
-            .inner
-        });
-    });
-}
-
-/// "Give access to several credentials": one owner check for all of them (ADR 0012).
-pub(super) fn grant_many_sheet(app: &mut DesktopApp, ctx: &egui::Context, agent_id: u64) -> bool {
-    let session = &app.owner_ui.session;
-    let agent_name = session
-        .agents()
-        .ok()
-        .and_then(|agents| agents.into_iter().find(|agent| agent.id == agent_id))
-        .map(|agent| agent.name)
-        .unwrap_or_default();
-    let items: Vec<(u64, String, bool, bool)> = session
-        .agent_credentials()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(id, name)| {
-            let binding = session.process_binding(id).ok().flatten();
-            let real = binding
-                .as_ref()
-                .is_some_and(|binding| binding.delivery == EnvDelivery::Value);
-            (id, name, binding.is_some(), real)
-        })
-        .collect();
-    let granted: Vec<u64> = session
-        .exec_grants(agent_id)
-        .unwrap_or_default()
-        .iter()
-        .map(|grant| grant.item_id)
-        .collect();
-    let mut save = false;
-    let mut cancel = false;
-    let mut configure = None;
-    let mut mode = app.ui.grant.mode.mode();
-    let response = kit::sheet(ctx, "grant-many", 560.0, |ui| {
-        kit::sheet_title(
-            ui,
-            &format!("Give {agent_name} access"),
-            Some("Select the credentials this agent can use. You confirm access once."),
-        );
-        kit::sheet_body(ui, |ui| {
-            let form = &mut app.ui.grant;
-            kit::section(
-                ui,
-                Some("Credentials"),
-                Some(
-                    "Variable names are optional. Existing access gets the new folder and decision.",
-                ),
-                |s| {
-                    for (id, name, ready, _) in &items {
-                        let mut on = form.selection.contains(id);
-                        let mut subtitle = if *ready {
-                            "Ready for agent access"
-                        } else {
-                            "Choose the secret field to use"
-                        }
-                        .to_owned();
-                        if granted.contains(id) {
-                            subtitle.push_str(" · has access");
-                        }
-                        if s.toggle(name, Some(&subtitle), &mut on).changed() {
-                            if on {
-                                form.selection.insert(*id);
-                            } else {
-                                form.selection.remove(id);
-                            }
-                        }
-                        if on && !ready {
-                            s.row(|ui| {
-                                if kit::small_button(
-                                    ui,
-                                    &format!("Choose field for {name}…"),
-                                    Style::Link,
-                                )
-                                .clicked()
-                                {
-                                    configure = Some(*id);
-                                }
-                            });
-                        }
-                    }
-                },
-            );
-            let real_values = items
-                .iter()
-                .filter(|(id, _, _, real)| *real && form.selection.contains(id))
-                .count();
-            place_section(
-                ui,
-                ("many", agent_id),
-                &mut form.dir,
-                &mut form.any_folder,
-                &mut mode,
-                real_values,
-            );
-        });
-        kit::sheet_buttons(
-            ui,
-            |_| {},
-            |ui| {
-                let count = app.ui.grant.selection.len();
-                let label = if count == 1 {
-                    "Give access to 1 credential".to_owned()
-                } else {
-                    format!("Give access to {count} credentials")
-                };
-                let ready = count > 0
-                    && app.ui.grant.selection.iter().all(|selected| {
-                        items
-                            .iter()
-                            .any(|(id, _, ready, _)| id == selected && *ready)
-                    });
-                ui.add_enabled_ui(ready, |ui| {
-                    save = kit::button(ui, &label, Style::Prominent)
-                        .on_hover_text("⌘S")
-                        .clicked();
-                });
-                cancel = kit::button(ui, "Cancel", Style::Bordered).clicked();
-            },
-        );
-    });
-    app.ui.grant.mode = match mode {
-        ExecMode::Ask => Decision::Ask,
-        ExecMode::Bouncer => Decision::Bouncer,
-    };
-    let ready = !app.ui.grant.selection.is_empty()
-        && app.ui.grant.selection.iter().all(|selected| {
-            items
-                .iter()
-                .any(|(id, _, ready, _)| id == selected && *ready)
-        });
-    save |= super::save_pressed(app, ctx) && ready;
-    if save {
-        let form = app.ui.grant.clone();
-        let item_ids: Vec<u64> = form.selection.iter().copied().collect();
-        let real_values = items
-            .iter()
-            .filter(|(id, _, _, real)| *real && form.selection.contains(id))
-            .count();
-        // A new or changed grant needs an owner check (goal item A4).
-        ask_owner_from_sheet(
-            app,
-            OwnerRequest::GrantMany {
-                agent_id,
-                item_ids,
-                place: form.place(),
-                mode: effective_mode(form.mode.mode(), form.any_folder, real_values),
-            },
-            ctx,
-        );
-    }
-    if cancel {
-        close_sheet(app, ctx);
-    }
-    if let Some(item_id) = configure {
-        app.ui.grant.resume_agent = Some(agent_id);
-        open_command_settings(app, item_id);
-    }
-    response.escape
-}
-
-fn open_command_settings(app: &mut DesktopApp, item_id: u64) {
-    app.select_item(item_id.to_string());
-    super::items::prepare_sheet(app, item_id, &Sheet::Variable);
-    app.ui.sheet = Some(Sheet::Variable);
-    app.place = Place::Agents;
-}
-
-/// What the agent can see (ADR 0012). "All credentials" needs the owner check; turning
-/// it off takes authority away and needs none.
-fn visibility_section(app: &mut DesktopApp, ui: &mut egui::Ui, agent: &AgentSummary) {
-    let was = app
-        .owner_ui
-        .session
-        .agent_sees_all(agent.id)
-        .unwrap_or(false);
-    let mut on = was;
-    kit::section(
-        ui,
-        Some("What it can see"),
-        Some(if was {
-            "The agent sees each credential that is not archived: its name, kind, and plain details such as username, host, and visible custom details. It never sees a secret, a hidden detail, or the notes. The provider of the agent model sees this list too. The agent can ask you for access in Activity."
-        } else {
-            "The agent sees only the credentials that it can use."
-        }),
-        |s| {
-            s.toggle(
-                "All credentials, without values",
-                Some("The agent can find a credential and ask you for access."),
-                &mut on,
-            );
-        },
-    );
-    if on && !was {
-        let ctx = ui.ctx().clone();
-        app.ask_owner(
-            OwnerRequest::ShowAllCredentials {
-                agent_id: agent.id,
-                agent_name: agent.name.clone(),
-            },
-            Some(&ctx),
-        );
-    } else if !on && was {
-        let result = app
-            .owner_ui
-            .session
-            .set_agent_sees_all(agent.id, false, None);
-        let _ = app.apply(
-            result,
-            "The agent sees only the credentials that it can use. Its open requests are denied.",
-        );
-    }
-}
-
-/// The rule of one process grant. Returns true on "Save rule".
-fn rule_form(ui: &mut egui::Ui, form: &mut RuleForm) -> bool {
-    kit::section(
-        ui,
-        Some("Hard limits"),
-        Some(
-            "Apassy checks hard limits before the bouncer. A request that fails a hard limit is denied.",
-        ),
-        |s| {
-            s.row(|ui| {
-                let label =
-                    ui.label(kit::text("Allowed command prefixes", Font::Body).color(kit::LABEL));
-                kit::note(ui, "One per line. Empty permits any command.");
-                kit::text_area(
-                    ui,
-                    &mut form.prefixes,
-                    "rule-prefixes",
-                    "npm run migrate\nnpm test",
-                    2,
-                )
-                .labelled_by(label.id);
-            });
-            s.row(|ui| {
-                let label = ui.label(kit::text("Forbidden words", Font::Body).color(kit::LABEL));
-                kit::note(ui, "One per line.");
-                kit::text_area(
-                    ui,
-                    &mut form.forbidden,
-                    "rule-forbidden",
-                    "prod\n--force",
-                    2,
-                )
-                .labelled_by(label.id);
-            });
-            s.field("Expires after", |ui| {
-                let field = kit::number_input(ui, &mut form.expires_hours, "rule-expiry", "never");
-                ui.label(kit::text("hours", Font::Body).color(kit::SECONDARY));
-                field
-            });
-            s.field("Runs per hour", |ui| {
-                kit::number_input(ui, &mut form.max_runs, "rule-runs", "no limit")
-            });
-        },
-    );
-    kit::section(
-        ui,
-        Some("Your instruction"),
-        Some("In plain words. The bouncer checks each request against it."),
-        |s| {
-            s.row(|ui| {
-                let field = kit::text_area(
-                    ui,
-                    &mut form.instruction,
-                    "rule-instruction",
-                    "Only run migrations and tests on staging. Never print or send keys.",
-                    2,
-                );
-                ui.ctx()
-                    .accesskit_node_builder(field.id, |node| node.set_label("Your instruction"));
-            });
-        },
-    );
-    kit::button(ui, "Save rule", Style::Bordered).clicked()
-}
-
-#[cfg(test)]
-mod onboarding_tests {
-    use super::*;
-
-    #[test]
-    fn rotation_and_background_guide_preserve_the_explicit_host_choice() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let (mut app, _) = super::super::owner_tests::unlocked_app_with_item(&dir);
-        let (agent, token) = app.owner_ui.session.register_agent("Codex").unwrap();
-        app.place = Place::Agents;
-        app.owner_ui.selected_agent = Some(agent.id);
-        app.ui.setup_host = super::super::agent_setup::Host::Claude.index();
-        app.owner_ui.fresh_token = Some(FreshToken {
-            agent_name: agent.name,
-            token,
-            rotated: true,
-        });
-        let ctx = egui::Context::default();
-        super::super::owner_tests::app_frame(&ctx, &mut app);
-        assert_eq!(
-            app.ui.setup_host,
-            super::super::agent_setup::Host::Claude.index()
-        );
-        app.ui.setup_host = super::super::agent_setup::Host::Codex.index();
-        super::super::owner_tests::app_frame(&ctx, &mut app);
-        assert_eq!(
-            app.ui.setup_host,
-            super::super::agent_setup::Host::Codex.index()
-        );
-        assert!(app.owner_ui.fresh_token.is_some());
-    }
-
-    #[test]
-    fn setup_result_does_not_consume_the_fresh_token() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let (mut app, _) = super::super::owner_tests::unlocked_app_with_item(&dir);
-        let (agent, token) = app.owner_ui.session.register_agent("Codex").unwrap();
-        app.owner_ui.fresh_token = Some(FreshToken {
-            agent_name: agent.name,
-            token,
-            rotated: false,
-        });
-        let ctx = egui::Context::default();
-        let draw = |app: &mut DesktopApp| {
-            ctx.run_ui(egui::RawInput::default(), |ui| {
-                draw_fresh_token(app, ui.ctx())
-            })
-            .drop_without_applying_deltas();
-        };
-        draw(&mut app);
-        assert_eq!(app.ui.setup_host, 1);
-        assert!(!app.ui.agent_setup.advanced);
-        app.ui.agent_setup.result = Some(Err("Test failure".to_owned()));
-        draw(&mut app);
-        assert!(app.owner_ui.fresh_token.is_some());
-        app.ui.agent_setup.result = Some(Ok(super::super::agent_setup::Host::Codex));
-        draw(&mut app);
-        assert!(app.owner_ui.fresh_token.is_some());
-    }
-
-    #[test]
-    fn host_choice_prepares_registration_and_reuses_an_existing_agent() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let (mut app, _) = super::super::owner_tests::unlocked_app_with_item(&dir);
-        choose_host(&mut app, 1);
-        assert_eq!(app.ui.setup_host, 1);
-        assert_eq!(app.owner_ui.new_agent_name, "Codex");
-        assert!(matches!(app.ui.sheet, Some(Sheet::RegisterAgent)));
-        assert!(app.owner_ui.session.agents().unwrap().is_empty());
-        assert!(app.owner_ui.fresh_token.is_none());
-
-        let (agent, _token) = app.owner_ui.session.register_agent("Codex").unwrap();
-        choose_host(&mut app, 1);
-        assert_eq!(app.owner_ui.selected_agent, Some(agent.id));
-        assert!(app.ui.sheet.is_none());
-        assert!(app.ui.is_expanded("agent-setup"));
-        assert_eq!(app.owner_ui.session.agents().unwrap(), vec![agent]);
-        assert!(
-            app.owner_ui.fresh_token.is_none(),
-            "the token did not rotate"
-        );
-    }
 }
