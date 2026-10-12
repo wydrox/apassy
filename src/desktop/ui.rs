@@ -1142,10 +1142,10 @@ mod tests {
             "{text}"
         );
 
-        open_settings(&mut app, SettingsTab::Agents);
+        // Settings has no token lifetime (ADR 0025 §3f); the command line sets it.
+        open_settings(&mut app, SettingsTab::Advanced);
         let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
-        assert!(text.contains("Token lifetime"), "{text}");
-        assert!(text.contains("Current lifetime: 30 days."), "{text}");
+        assert!(!text.contains("Current lifetime"), "{text}");
 
         app.settings_open = false;
         app.place = Place::Agents;

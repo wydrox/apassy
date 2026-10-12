@@ -1,4 +1,4 @@
-//! Settings > Notifications > iPhone companion: the iPhone listener, the pairing QR code, the code the owner
+//! Settings > Devices > iPhone companion: the iPhone listener, the pairing QR code, the code the owner
 //! types, and the paired iPhones (ADR 0020).
 //!
 //! The Mac never shows the 6-digit code: only the iPhone does, and the owner types it
@@ -269,7 +269,7 @@ pub(super) fn keep_code_characters(code: &mut String) {
 /// points, so the code is about `size` points wide and stays sharp. A run of dark
 /// modules in a row is one rectangle, so no seam shows between two modules. `label` names
 /// the image for VoiceOver. The pairing QR code here and the link of "Add a device…" in
-/// Settings > General > Sync use it.
+/// Settings > Devices > Sync use it.
 pub(super) fn draw_qr(ui: &mut Ui, qr: &QrModules, size: f32, label: &str) -> Response {
     let total = qr.width() + 2 * QUIET_ZONE;
     let unit = (size / total as f32).floor().max(1.0);

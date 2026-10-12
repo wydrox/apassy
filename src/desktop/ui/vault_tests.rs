@@ -215,7 +215,7 @@ fn create_asks_for_a_name_and_lists_the_vault() {
     }
 }
 
-/// Settings has five tabs. Only the sections of the selected tab show.
+/// Settings has four tabs (ADR 0026 §3). Only the sections of the selected tab show.
 #[test]
 fn settings_show_the_sections_of_the_selected_tab_only() {
     let dir = TempDir::new().expect("temp dir");
@@ -223,7 +223,7 @@ fn settings_show_the_sections_of_the_selected_tab_only() {
     create(&mut app, "Personal", PASS_A);
     app.settings_open = true;
     let text = frames(&mut app);
-    for tab in ["General", "Security", "Agents", "Notifications", "About"] {
+    for tab in ["General", "Devices", "Security", "Advanced"] {
         assert!(text.contains(tab), "tab {tab}: {text}");
     }
     let cases = [
@@ -233,23 +233,27 @@ fn settings_show_the_sections_of_the_selected_tab_only() {
             &["Keyboard shortcuts", "Back up now", "Broker and bouncer"][..],
         ),
         (
+            SettingsTab::Devices,
+            &[
+                "Questions go to every device",
+                "A waiting approval or a blocked request causes a macOS notification.",
+            ][..],
+            &["Lock now", "Back up now", "Keyboard shortcuts"][..],
+        ),
+        (
             SettingsTab::Security,
             &["Change passphrase", "Back up now"][..],
             &["Lock now", "Token lifetime", "Updates"][..],
         ),
         (
-            SettingsTab::Agents,
-            &["Token lifetime", "Broker and bouncer", "Command line"][..],
-            &["Lock now", "Back up now", "Keyboard shortcuts"][..],
-        ),
-        (
-            SettingsTab::Notifications,
-            &["A waiting approval or a blocked request causes a macOS notification."][..],
-            &["Lock now", "Token lifetime", "Keyboard shortcuts"][..],
-        ),
-        (
-            SettingsTab::About,
-            &["Updates", "Keyboard shortcuts", "Contract"][..],
+            SettingsTab::Advanced,
+            &[
+                "Broker and bouncer",
+                "Command line",
+                "Updates",
+                "Keyboard shortcuts",
+                "Contract",
+            ][..],
             &["Lock now", "Back up now", "Token lifetime"][..],
         ),
     ];
@@ -295,7 +299,7 @@ fn settings_show_how_the_bouncer_model_starts() {
     );
     app.model_server = Some(Arc::clone(&server));
     app.settings_open = true;
-    app.ui.settings_tab = SettingsTab::Agents;
+    app.ui.settings_tab = SettingsTab::Advanced;
     let text = frames(&mut app);
     for expected in [
         "Broker and bouncer",
@@ -440,7 +444,7 @@ fn settings_offer_the_model_install_and_name_a_launch_agent() {
     }
     app.model_server = Some(Arc::clone(&server));
     app.settings_open = true;
-    app.ui.settings_tab = SettingsTab::Agents;
+    app.ui.settings_tab = SettingsTab::Advanced;
     let remove = format!(
         "launchctl bootout gui/$(id -u)/com.example.bouncer\nrm {}",
         plist.display()
@@ -582,7 +586,7 @@ fn settings_show_start_now_and_the_first_start_download() {
     );
     app.model_server = Some(Arc::clone(&server));
     app.settings_open = true;
-    app.ui.settings_tab = SettingsTab::Agents;
+    app.ui.settings_tab = SettingsTab::Advanced;
 
     // laya-serve is missing: "Cannot start" and no "Start now".
     let text = frames(&mut app);
@@ -668,7 +672,7 @@ fn settings_offer_the_weights_download_again_after_it_failed() {
     );
     app.model_server = Some(Arc::clone(&server));
     app.settings_open = true;
-    app.ui.settings_tab = SettingsTab::Agents;
+    app.ui.settings_tab = SettingsTab::Advanced;
     // A run finds no environment.
     assert!(crate::broker::model_server::ModelGate::before_model(&*server).is_err());
     assert!(matches!(server.state(), ServerState::Failed { .. }));
@@ -714,7 +718,7 @@ fn settings_show_the_vault_file_one_time() {
         "{text}"
     );
 
-    app.ui.settings_tab = SettingsTab::About;
+    app.ui.settings_tab = SettingsTab::Advanced;
     let text = frames(&mut app);
     assert_eq!(
         text.lines().filter(|line| *line == "Version").count(),

@@ -173,7 +173,7 @@ pub(crate) struct Notice {
     pub(crate) vault: String,
 }
 
-/// A sync sheet in Settings > General > Sync.
+/// A sync sheet in Settings > Devices > Sync.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SyncSheet {
     /// "Choose folder…": a folder path for the vault.
@@ -312,6 +312,63 @@ fn folder_label(folders: &[SyncFolder], path: &Path) -> String {
         .map_or_else(|| path.display().to_string(), |folder| folder.label.clone())
 }
 
+/// Where a vault syncs, in a few words, for Settings > General > Vaults: "Not synced",
+/// "Apassy relay", or the synced folder.
+pub(super) fn method_words(app: &DesktopApp, entry: &VaultEntry) -> String {
+    match entry.sync.as_ref().filter(|_| entry.sync_state().is_some()) {
+        None => "Not synced".to_owned(),
+        Some(link) if link.is_relay() => relay::LABEL.to_owned(),
+        Some(link) => sidebar_folder_label(&app.sync.folders, &link.folder),
+    }
+}
+
+/// How the open vault reaches the other Macs, for Settings > Devices.
+pub(super) struct OtherMacs {
+    /// The way in a few words.
+    pub(super) words: String,
+    /// The list ID of the open vault while it syncs through the relay and this Mac is in
+    /// its relay team: "Add a device…" and "Devices…" work.
+    pub(super) relay: Option<String>,
+}
+
+pub(super) fn other_macs(app: &DesktopApp) -> OtherMacs {
+    let entry = app
+        .vault_list
+        .current
+        .as_deref()
+        .and_then(|id| app.vault_list.registry.get(id));
+    let Some(entry) = entry else {
+        return OtherMacs {
+            words: "No vault is open".to_owned(),
+            relay: None,
+        };
+    };
+    match entry.sync.as_ref().filter(|_| entry.sync_state().is_some()) {
+        None => OtherMacs {
+            words: "Not synced".to_owned(),
+            relay: None,
+        },
+        Some(link) if link.is_relay() => {
+            let removed = app.relay_removed(&entry.id);
+            OtherMacs {
+                words: if removed {
+                    "Removed from the relay".to_owned()
+                } else {
+                    format!("Through the {}", relay::LABEL)
+                },
+                relay: (!removed).then(|| entry.id.clone()),
+            }
+        }
+        Some(link) => OtherMacs {
+            words: format!(
+                "Through {}",
+                sidebar_folder_label(&app.sync.folders, &link.folder)
+            ),
+            relay: None,
+        },
+    }
+}
+
 /// The path of the sync state file `state` in `data_dir`, as in
 /// [`SyncConfig::in_data_dir`].
 fn state_path(data_dir: &Path, state: &str) -> PathBuf {
@@ -397,7 +454,7 @@ pub(crate) fn relink_states(data_dir: &Path, registry: &mut Registry) -> Option<
             line.push(' ');
         }
         line.push_str(
-            "Apassy could not link the sync of a vault in another folder. Open that vault, then choose its synced folder again in Settings > General > Sync; Apassy then merges with the same file.",
+            "Apassy could not link the sync of a vault in another folder. Open that vault, then choose its synced folder again in Settings > Devices > Sync; Apassy then merges with the same file.",
         );
     }
     Some(line)
@@ -725,7 +782,7 @@ impl DesktopApp {
         if self.is_relay(id) {
             self.sync.notice = Some(Notice {
                 title: format!("The copy of “{vault}” on the relay fails a check"),
-                text: "Apassy did not merge it, and the vault on this Mac did not change. Apassy does not download that copy again until it changes. If no other Mac can repair it, replace it with this Mac's vault. Also look at the Macs in Settings > General > Sync > Devices…, and remove a Mac that you do not know.".to_owned(),
+                text: "Apassy did not merge it, and the vault on this Mac did not change. Apassy does not download that copy again until it changes. If no other Mac can repair it, replace it with this Mac's vault. Also look at the Macs in Settings > Devices > Sync > Devices…, and remove a Mac that you do not know.".to_owned(),
                 warning: true,
                 vault: id.to_owned(),
             });
@@ -733,7 +790,7 @@ impl DesktopApp {
         }
         self.sync.notice = Some(Notice {
             title: format!("The synced copy of “{vault}” is damaged"),
-            text: "The file in the synced folder fails a check, so Apassy did not merge it. The vault on this Mac did not change. If no other Mac can repair it, replace it with this Mac's vault in Settings > General > Sync.".to_owned(),
+            text: "The file in the synced folder fails a check, so Apassy did not merge it. The vault on this Mac did not change. If no other Mac can repair it, replace it with this Mac's vault in Settings > Devices > Sync.".to_owned(),
             warning: true,
             vault: id.to_owned(),
         });
@@ -854,7 +911,7 @@ impl DesktopApp {
         }
     }
 
-    /// "Sync now" in Settings > General > Sync.
+    /// "Sync now" in Settings > Devices > Sync.
     pub(crate) fn sync_now(&mut self) {
         let Some((id, sync)) = self.sync_current() else {
             return;
@@ -1444,7 +1501,7 @@ fn sync_picker(
     pick
 }
 
-/// Settings > General > Sync: each vault, its folder or the relay, its status, and its
+/// Settings > Devices > Sync: each vault, its folder or the relay, its status, and its
 /// actions.
 pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     if !app.sync.offered {
@@ -2059,7 +2116,7 @@ pub(super) fn after_create(app: &mut DesktopApp) -> Result<Option<String>, Strin
             folder_label(&app.sync.folders, &folder)
         ))),
         Err(message) => Err(format!(
-            "The vault is ready, but sync is off: {message} Turn it on later in Settings > General > Sync."
+            "The vault is ready, but sync is off: {message} Turn it on later in Settings > Devices > Sync."
         )),
     }
 }

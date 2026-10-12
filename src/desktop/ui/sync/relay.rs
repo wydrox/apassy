@@ -2714,7 +2714,7 @@ fn link_fields(app: &mut DesktopApp, s: &mut kit::Section<'_>, focus: bool) -> b
     link.lost_focus() && link.ctx.input(|input| input.key_pressed(egui::Key::Enter))
 }
 
-/// "Apassy relay" in Settings > General > Sync: a new relay copy with a team code, or a
+/// "Apassy relay" in Settings > Devices > Sync: a new relay copy with a team code, or a
 /// link from a Mac that syncs this vault through the relay already.
 pub(super) fn setup_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &VaultEntry) -> bool {
     app.relay_join_step(Some(ctx));
@@ -3331,7 +3331,7 @@ pub(super) fn open_screen(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let view = app.sync.relay.join_view(None);
     kit::paragraph(
         ui,
-        "On the Mac that has the vault, open Settings > General > Sync, select “Add a device…”, and copy the link. Paste it here. Both Macs then show the same two words.",
+        "On the Mac that has the vault, open Settings > Devices > Sync, select “Add a device…”, and copy the link. Paste it here. Both Macs then show the same two words.",
         Font::Callout,
         kit::SECONDARY,
     );

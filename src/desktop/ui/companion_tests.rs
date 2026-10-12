@@ -90,10 +90,10 @@ fn can_connect(port: u16) -> bool {
     .is_ok()
 }
 
-/// The text of Settings > Notifications after three frames, and the output commands of
+/// The text of Settings > Devices after three frames, and the output commands of
 /// the last one (a copy to the pasteboard would be one).
 fn settings_frame(ctx: &egui::Context, app: &mut DesktopApp) -> (String, Vec<OutputCommand>) {
-    super::open_settings(app, super::SettingsTab::Notifications);
+    super::open_settings(app, super::SettingsTab::Devices);
     let mut text = String::new();
     let mut commands = Vec::new();
     for _ in 0..3 {
