@@ -1213,6 +1213,7 @@ pub(super) fn run(ctx: &BrokerContext, token: &str, request: &RunRequest<'_>) ->
             use_decided_by,
             &answered_on,
         );
+        super::corrections::consider_items(vault, request.items);
         match read_secrets(vault, request.items) {
             Ok(secrets) => {
                 for item_id in request.items {

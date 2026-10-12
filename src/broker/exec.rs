@@ -99,6 +99,92 @@ pub fn run_with(
     network: Network<'_>,
     timeout: Duration,
 ) -> io::Result<RunOutput> {
+    let mut raw = spawn_collect(command, cwd, path, secrets, network, timeout)?;
+    let all: Vec<&SecretEnv> = secrets.iter().chain(masks).collect();
+    let masked_out = mask_output(&raw.stdout, &all);
+    let masked_err = mask_output(&raw.stderr, &all);
+    // The raw output can contain a secret. Only the masked text leaves.
+    raw.stdout.zeroize();
+    raw.stderr.zeroize();
+    Ok(RunOutput {
+        exit_code: raw.exit_code,
+        stdout: masked_out,
+        stderr: masked_err,
+        truncated: raw.truncated,
+        timed_out: raw.timed_out,
+    })
+}
+
+/// The standard output of a capture run (ADR 0025 §6). It becomes a new credential, so
+/// Debug never shows it and it is erased on drop. The standard error is read and erased:
+/// it never leaves the broker.
+pub struct Captured {
+    pub exit_code: Option<i32>,
+    /// At most [`MAX_OUTPUT_BYTES`]; `truncated` says that there was more.
+    pub stdout: Zeroizing<Vec<u8>>,
+    pub truncated: bool,
+    pub timed_out: bool,
+}
+
+impl std::fmt::Debug for Captured {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Captured")
+            .field("exit_code", &self.exit_code)
+            .field("stdout", &"[redacted]")
+            .field("truncated", &self.truncated)
+            .field("timed_out", &self.timed_out)
+            .finish()
+    }
+}
+
+impl ZeroizeOnDrop for Captured {}
+
+/// Capture mode (ADR 0025 §6): run `command` in `cwd` with the base environment and
+/// `path` and without a secret, as [`run`] does, and keep the standard output as it
+/// came. The caller validates the command. The output is a secret from now on.
+pub fn capture(
+    command: &[String],
+    cwd: &Path,
+    path: Option<&str>,
+    timeout: Duration,
+) -> io::Result<Captured> {
+    let mut raw = spawn_collect(command, cwd, path, &[], Network::default(), timeout)?;
+    raw.stderr.zeroize();
+    Ok(Captured {
+        exit_code: raw.exit_code,
+        stdout: Zeroizing::new(std::mem::take(&mut raw.stdout)),
+        truncated: raw.stdout_cut,
+        timed_out: raw.timed_out,
+    })
+}
+
+/// The output of a process as it came. The caller masks or keeps it. Erased on drop.
+struct Raw {
+    exit_code: Option<i32>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    /// The standard output was longer than [`MAX_OUTPUT_BYTES`].
+    stdout_cut: bool,
+    /// A stream was longer than [`MAX_OUTPUT_BYTES`].
+    truncated: bool,
+    timed_out: bool,
+}
+
+impl Drop for Raw {
+    fn drop(&mut self) {
+        self.stdout.zeroize();
+        self.stderr.zeroize();
+    }
+}
+
+fn spawn_collect(
+    command: &[String],
+    cwd: &Path,
+    path: Option<&str>,
+    secrets: &[SecretEnv],
+    network: Network<'_>,
+    timeout: Duration,
+) -> io::Result<Raw> {
     let (program, args) = command
         .split_first()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty command"))?;
@@ -162,22 +248,17 @@ pub fn run_with(
         thread::sleep(POLL);
     };
 
-    let (mut out, out_cut) = collect(&stdout, &mut child);
-    let (mut err, err_cut) = collect(&stderr, &mut child);
+    let (out, out_cut) = collect(&stdout, &mut child);
+    let (err, err_cut) = collect(&stderr, &mut child);
     // The run ends with the main process. A descendant that stays in the group
     // keeps the secrets in its environment, and a same-user process can read that
     // environment (key-memory review K12, F11). So stop the group.
     stop_group(&mut child);
-    let all: Vec<&SecretEnv> = secrets.iter().chain(masks).collect();
-    let masked_out = mask_output(&out, &all);
-    let masked_err = mask_output(&err, &all);
-    // The raw output can contain a secret. Only the masked text leaves.
-    out.zeroize();
-    err.zeroize();
-    Ok(RunOutput {
+    Ok(Raw {
         exit_code: status.and_then(|status| status.code()),
-        stdout: masked_out,
-        stderr: masked_err,
+        stdout: out,
+        stderr: err,
+        stdout_cut: out_cut,
         truncated: out_cut || err_cut,
         timed_out,
     })
@@ -406,6 +487,31 @@ mod tests {
             );
         }
         assert!(out.stdout.contains("DEMO_TOKEN=[apassy:DEMO_TOKEN]"));
+    }
+
+    /// ADR 0025 §6: capture mode keeps the standard output as it came, drops the
+    /// standard error, gets no secret, and Debug shows no output.
+    #[test]
+    fn capture_keeps_stdout_only_and_hides_it_in_debug() {
+        let command = [
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "printf 'FAKE-captured-4410\\n'; echo FAKE-stderr-4410 >&2; echo \"n=${DEMO_TOKEN:-none}\"".to_owned(),
+        ];
+        let out =
+            capture(&command, Path::new("/tmp"), None, Duration::from_secs(10)).expect("capture");
+        assert_eq!(out.exit_code, Some(0));
+        assert!(!out.truncated && !out.timed_out);
+        assert_eq!(&out.stdout[..], b"FAKE-captured-4410\nn=none\n");
+        assert!(!format!("{out:?}").contains("FAKE-captured"));
+        let big = [
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "head -c 70000 /dev/zero | tr '\\0' 'a'".to_owned(),
+        ];
+        let out = capture(&big, Path::new("/tmp"), None, Duration::from_secs(10)).expect("big");
+        assert!(out.truncated);
+        assert_eq!(out.stdout.len(), MAX_OUTPUT_BYTES);
     }
 
     #[test]

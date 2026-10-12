@@ -130,6 +130,50 @@ When the bouncer cannot allow a run, a question waits for the owner:
 - The question names the answers that can take effect (`valid_answers`). If the owner answers "Allow ACTION in PROJECT" or "Allow production for PROJECT: ACTION", the broker saves the answer after its second check, in the same vault session, with the destination hosts of the run and the known hosts of each item. A production item that already has its allowance is skipped, and the failed save of one item does not stop the others. If the project changed, the code is `answer_failed` and the command does not start.
 - A success response then has `remembered`: a text that says what the owner allowed.
 
+### 4c. Agents add credentials (ADR 0025 §6)
+
+Six actions add or change credentials. The code is in `src/broker/agent_items.rs`, the vault part in `src/vault/agent_items.rs`.
+
+```json
+{"v":0,"token":"apassy_agt_<64 hex>","action":{"kind":"capture_credential","command":["gh","auth","token"],"cwd":"/Users/me/Dev/shop","name":"GitHub token","path":"/usr/bin:/bin"}}
+{"v":0,"token":"apassy_agt_<64 hex>","action":{"kind":"capture_credential","file":"/Users/me/Dev/shop/.secrets/key.pem"}}
+{"v":0,"token":"apassy_agt_<64 hex>","action":{"kind":"generate_credential","name":"Staging database password","length":32,"alphabet":"alnum","cwd":"/Users/me/Dev/shop"}}
+{"v":0,"token":"apassy_agt_<64 hex>","action":{"kind":"save_credential","value":"<secret>","name":"Webhook secret"}}
+{"v":0,"token":"apassy_agt_<64 hex>","action":{"kind":"ask_owner_for_credential","name":"Sentry token","purpose":"Upload source maps.","where_to_get":"Sentry > Settings > Auth tokens"}}
+{"v":0,"token":"apassy_agt_<64 hex>","action":{"kind":"update_credential","item_id":12,"generate":{"length":40}}}
+{"v":0,"token":"apassy_agt_<64 hex>","action":{"kind":"describe_credential","item_id":12,"env_name":"STAGING_DB_PASSWORD","hosts":["api.example.com"]}}
+```
+
+Each optional field: `name`, `cwd` (absolute; the working directory of a command and the project of the item), `folder` (a folder path as the catalog shows it, `Work / Stripe`; `unknown_folder` when no folder has it), `purpose`, `path`. `capture_credential` has exactly one of `command` and `file`; `update_credential` exactly one of `command`, `file`, and `generate`.
+
+A success has `item_id`, `name`, `env_name` (null for a one-time-code setup key), `env_holds`, `real_value_only_for_hosts`, `summary` (such as `Stripe live · STRIPE_SECRET_KEY · production`), `created`, and `note`; `update_credential` adds `updated: true`. **No answer, error text, activity entry, decision log entry, item history event, use row, request, correction, or Debug output has the value.** A `save_credential` value is erased on drop and redacted in Debug.
+
+Rules:
+
+- The value goes through the paste detection (ADR 0025 §4): provider, variable, hosts, and a declaration with sources; a value without a signal gets the most careful default. A value with more than one credential (a `.env` text) is refused. Without a detected variable, a `name` gives one (`Staging database password` → `STAGING_DATABASE_PASSWORD`).
+- A title that exists gets a number. The item history says `Added by AGENT in PROJECT (TOOL).`; the item origin (`item_origin`) names the agent, the project, and the tool.
+- An agent's **own** items are those whose value it made: `capture`, `generate`, or `save`. A value that an own item has returns that item with `created: false` and creates nothing. Only own items are compared, so the answer tells nothing about other items.
+- An agent creates at most 10 items in one hour (`too_many_items`); the check comes before a capture runs.
+- `update_credential` and `describe_credential` work only on own items that are not archived and not waiting for a review. Any other item, also one that does not exist, gives `not_owner`. This version makes no proposal to the owner for another item. An item that the owner saved for `ask_owner_for_credential` is not an own item.
+- `describe_credential`: `name`, `notes`, `env_name` (valid, not reserved, not used by another item: else `invalid_request` or `env_name_taken`), and `hosts`. `hosts` only narrows where the value goes: a placeholder for these hosts instead of the real value (the value must be long enough, and the provider must not sign requests), or a subset of the placeholder hosts.
+- An agent with "only these items" gets its new item on its list.
+- The new item is a normal item: the bouncer decides each use.
+
+Capture (`capture_refused` for each rule, and nothing is saved):
+
+- A command runs like a run (`exec`), in `cwd`, with the base environment and `path`, and no secret. It gets no credential decision. It must be one program: no shell, script interpreter, or wrapper (`sh`, `bash`, `env`, `sudo`, `xargs`, `python`, `node`, `awk`, `osascript`, ...), and not `security`. It must name no host or URL, have no rule flag of the analysis except `secret_output`, not be a deploy or a delete, and name no path of Apassy (the data folder, the open vault file and its sidecars, the Keychain folders). The standard output, trimmed, is the value: UTF-8, at most 64 KiB, not empty, exit code 0, within the run time limit. The standard error is erased.
+- A file is an absolute path (`~/` is the home folder) of a regular file of at most 64 KiB. A folder, a FIFO, a device, a socket, or a path of Apassy is refused. The file is opened without blocking and without following a last symbolic link, and must be the file that was checked. Other files, also keys in `~/.ssh`, are allowed.
+
+`ask_owner_for_credential` stores a credential request (`credential_request`, state `open`) and waits like a question (section 4b), at most the question time:
+
+- The owner saves the credential: the answer is the item. The owner dismisses it: `dismissed`. No answer in time: `waiting`; the request stays open, and the same request again (same name, purpose, place to get it, folder, and project) waits again. The same request after a save returns the item; after a dismissal within one hour, `dismissed`.
+- A different request while a request of the agent younger than the question time is open, or while a run question of the agent waits, gives `question_waiting`. An agent has at most 5 open requests (`too_many_requests`).
+- A locked vault ends the wait with `waiting`.
+
+Vault API for the app: `Vault::credential_requests(open_only)`, `credential_request(id)`, `CredentialRequest::origin()` (pass it to `add_detected`), `settle_credential_request(id, RequestOutcome::Saved { item_id } | Dismissed)` (one owner interaction; a saved item is listed for an agent with "only these items").
+
+Corrections (ADR 0025 §5, `src/broker/corrections.rs`): after each allowed run, the broker proposes `correction` rows: `environment` `development` (production only by default, at least 3 uses, each to a development or test host such as `*.sandbox.*`, `dev.*`, `*.test`; `localhost` counts for nothing), `environment` `production` (a declaration that is not production and a value with a production prefix of its provider; the environment becomes production at once with the source `usage`, and an ignore gives the old environment back), and `project` (no project in the declaration, at least 5 uses, all in one project). Each `(item, kind, proposed)` exists once, so an ignored correction never comes again. API: `propose_correction`, `corrections(open_only)`, `item_corrections`, `settle_correction(id, Accepted | Ignored)` (accepting sets the environment as the owner's answer, or the project; one owner interaction; the caller does the owner check).
+
 ### 4a. Vault sessions and owner approvals (goal item V3)
 
 - The desktop app starts with no open vault. An opened, created, or restored vault starts locked. The broker refuses every request with `vault_locked` until the owner unlocks the vault.
@@ -149,7 +193,9 @@ When the bouncer cannot allow a run, a question waits for the owner:
 
 ## 6. Error codes
 
-`rule_expired`, `rule_command_not_permitted`, `rule_forbidden_word`, `rule_rate_limit`, `invalid_request`, `outside_project`, `no_env_binding`, `approval_denied`, `approval_timeout`, `approval_invalidated`, `start_failed`, `bad_request`, `unsupported_version`, `busy`, `vault_locked`, `unauthenticated`, `not_granted`, `no_destination`, `unknown_profile`, `unknown_operation`, `invalid_params`, `destination_not_permitted`, `wrong_credential_kind`, `missing_secret`, `destination_unreachable`, `tls_failed`, `destination_refused`, `destination_not_found`, `destination_error`, `bad_output`, `output_blocked`, `broker_error`, `token_expired`, `review_required`, `item_archived`, `proxy_failed`, `not_visible`, `already_granted`, `too_many_requests`, `question_waiting`, `answer_failed`.
+`rule_expired`, `rule_command_not_permitted`, `rule_forbidden_word`, `rule_rate_limit`, `invalid_request`, `outside_project`, `no_env_binding`, `approval_denied`, `approval_timeout`, `approval_invalidated`, `start_failed`, `bad_request`, `unsupported_version`, `busy`, `vault_locked`, `unauthenticated`, `not_granted`, `no_destination`, `unknown_profile`, `unknown_operation`, `invalid_params`, `destination_not_permitted`, `wrong_credential_kind`, `missing_secret`, `destination_unreachable`, `tls_failed`, `destination_refused`, `destination_not_found`, `destination_error`, `bad_output`, `output_blocked`, `broker_error`, `token_expired`, `review_required`, `item_archived`, `proxy_failed`, `not_visible`, `already_granted`, `too_many_requests`, `question_waiting`, `answer_failed`, `not_owner`, `too_many_items`, `capture_refused`, `waiting`, `dismissed`, `unknown_folder`, `env_name_taken`.
+
+- `not_owner`, `too_many_items`, `capture_refused`, `waiting`, `dismissed`, `unknown_folder`, `env_name_taken`: the agent tools of section 4c.
 
 - `not_granted`: the agent may not use the item. A connector call has no grant for the operation, or an exception hides the item (`never`, or the item is not on the list of an agent with "only these items"), or the item does not exist. The text is the same in each case.
 - `question_waiting`: another question of the agent waits for the owner, or a newer identical call took over the waiting question (section 4b).
@@ -174,7 +220,7 @@ The broker sends `Authorization: Bearer <token field>`. The agent cannot set a h
 - `APASSY_AGENT_TOKEN` holds the agent token. The adapter does not accept the token as an argument, because other local processes can read process arguments.
 - Protocol versions: `2025-06-18`, `2025-03-26`, `2024-11-05`.
 - Methods: `initialize`, `ping`, `tools/list`, `tools/call`. Other methods give JSON-RPC error `-32601`.
-- Tools: `apassy_list_access` and `apassy_use_credential`.
+- Tools: `apassy_list_access`, `apassy_use_credential`, `apassy_run_with_secrets`, `apassy_request_access`, and the tools that add credentials (section 4c): `apassy_capture_credential`, `apassy_generate_credential`, `apassy_save_credential`, `apassy_ask_owner_for_credential`, `apassy_update_credential`, and `apassy_describe_credential`. Without `cwd`, the adapter sends its own working directory (the agent host starts it in the project). A call that can wait (a run, a capture, an update, a request to the owner) reads the answer for up to 10 minutes.
 - A broker refusal is a tool result with `isError: true`. The text starts with the error code.
 - For `token_expired`, the text also tells the user the next step: rotate the token in the Apassy app, put the new token in `APASSY_AGENT_TOKEN`, and restart the MCP server.
 - For `review_required`, the text tells the user to confirm the agent settings of the restored item in the app.

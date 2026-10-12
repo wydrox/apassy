@@ -57,6 +57,23 @@ impl OriginTool {
             Self::AskOwner => "ask_owner",
         }
     }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "capture" => Some(Self::Capture),
+            "generate" => Some(Self::Generate),
+            "save" => Some(Self::Save),
+            "ask_owner" => Some(Self::AskOwner),
+            _ => None,
+        }
+    }
+
+    /// The agent made the value: capture, generate, or save. Only such an item is the
+    /// agent's own for `update_credential`, `describe_credential`, and the value check
+    /// (ADR 0025 §6). The owner pasted the value of an `ask_owner` item.
+    pub fn is_agent_value(self) -> bool {
+        !matches!(self, Self::AskOwner)
+    }
 }
 
 /// The agent and the project of an item that an agent added. The owner adds items
@@ -68,6 +85,25 @@ pub struct ItemOrigin {
     pub project_key: String,
     pub project_label: String,
     pub tool: OriginTool,
+}
+
+impl ItemOrigin {
+    /// The detail of the "created" event of the item history (ADR 0025 §6): "Added by
+    /// AGENT in PROJECT (capture)." It has no secret value.
+    pub fn history_detail(&self) -> String {
+        let place = if self.project_label.is_empty() {
+            String::new()
+        } else {
+            format!(" in {}", self.project_label)
+        };
+        match self.tool {
+            OriginTool::AskOwner => format!(
+                "Saved by the owner for {}{place} (asked by the agent).",
+                self.agent_name
+            ),
+            tool => format!("Added by {}{place} ({}).", self.agent_name, tool.as_str()),
+        }
+    }
 }
 
 /// The folder of the new items: its UUID and its path for the "moved" event.
@@ -151,7 +187,12 @@ fn add_one(
     .map_err(storage)?;
     let item = tx.last_insert_rowid();
     insert_tags_and_fields(tx, item, &draft)?;
-    history::record(tx, item, ItemEventKind::Created, "")?;
+    history::record(
+        tx,
+        item,
+        ItemEventKind::Created,
+        &origin.map_or_else(String::new, ItemOrigin::history_detail),
+    )?;
 
     bind_variable(tx, item, detected)?;
 

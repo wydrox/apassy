@@ -6,9 +6,11 @@
 //! They are not the rule engine from P3.
 
 pub mod action_kind;
+pub mod agent_items;
 pub mod approvals;
 pub mod bouncer;
 pub mod calibration;
+pub mod corrections;
 pub mod decide;
 pub mod exec;
 pub mod finetune;

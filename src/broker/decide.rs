@@ -128,6 +128,111 @@ pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
                 truncated: *truncated,
             },
         ),
+        // ADR 0025 §6: agents add credentials (`super::agent_items`).
+        Action::CaptureCredential {
+            name,
+            command,
+            file,
+            cwd,
+            folder,
+            purpose,
+            path,
+        } => super::agent_items::capture(
+            ctx,
+            &request.token,
+            &super::agent_items::CaptureRequest {
+                name: name.as_deref(),
+                command: command.as_deref(),
+                file: file.as_deref(),
+                cwd: cwd.as_deref(),
+                folder: folder.as_deref(),
+                purpose: purpose.as_deref(),
+                path: path.as_deref(),
+            },
+        ),
+        Action::GenerateCredential {
+            name,
+            length,
+            alphabet,
+            cwd,
+            folder,
+        } => super::agent_items::generate(
+            ctx,
+            &request.token,
+            name,
+            &crate::agent::wire::GenerateSpec {
+                length: *length,
+                alphabet: alphabet.clone(),
+            },
+            cwd.as_deref(),
+            folder.as_deref(),
+        ),
+        Action::SaveCredential {
+            name,
+            value,
+            cwd,
+            folder,
+        } => super::agent_items::save(
+            ctx,
+            &request.token,
+            name.as_deref(),
+            value.expose(),
+            cwd.as_deref(),
+            folder.as_deref(),
+        ),
+        Action::AskOwnerForCredential {
+            name,
+            purpose,
+            where_to_get,
+            cwd,
+            folder,
+        } => super::agent_items::ask_owner(
+            ctx,
+            &request.token,
+            &super::agent_items::AskRequest {
+                name,
+                purpose,
+                where_to_get: where_to_get.as_deref(),
+                cwd: cwd.as_deref(),
+                folder: folder.as_deref(),
+            },
+        ),
+        Action::UpdateCredential {
+            item_id,
+            command,
+            file,
+            generate,
+            cwd,
+            path,
+        } => super::agent_items::update(
+            ctx,
+            &request.token,
+            &super::agent_items::UpdateRequest {
+                item_id: *item_id,
+                command: command.as_deref(),
+                file: file.as_deref(),
+                generate: generate.as_ref(),
+                cwd: cwd.as_deref(),
+                path: path.as_deref(),
+            },
+        ),
+        Action::DescribeCredential {
+            item_id,
+            name,
+            notes,
+            env_name,
+            hosts,
+        } => super::agent_items::describe(
+            ctx,
+            &request.token,
+            *item_id,
+            &crate::vault::agent_items::ItemDescription {
+                title: name.clone(),
+                notes: notes.clone(),
+                env_name: env_name.clone(),
+                hosts: hosts.clone(),
+            },
+        ),
     }
 }
 
