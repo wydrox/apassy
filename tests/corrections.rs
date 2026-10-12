@@ -12,16 +12,21 @@ use apassy::agent::client;
 use apassy::agent::wire::{Action, WireResponse};
 use apassy::broker::action_kind::ActionKind;
 use apassy::broker::bouncer::BouncerClient;
-use apassy::broker::corrections::{self, MIN_ENVIRONMENT_USES, MIN_PROJECT_USES};
+use apassy::broker::corrections::{
+    self, APPLIED_FACT, MIN_ENVIRONMENT_USES, MIN_PROJECT_USES, PREVIOUS_ENVIRONMENT_FACT,
+    RECHECK_USES, UNVERIFIED_FACT,
+};
 use apassy::broker::http::TlsClient;
 use apassy::broker::{self, BrokerOptions, SharedVault};
 use apassy::contracts::CredentialKind;
-use apassy::vault::agent_items::{CorrectionAnswer, CorrectionKind, CorrectionState};
+use apassy::vault::agent_items::{
+    CorrectionAnswer, CorrectionKind, CorrectionState, RAISED_FROM_FACT,
+};
 use apassy::vault::detect::{self, Source};
 use apassy::vault::usage::{NewItemUse, UseDecidedBy, UseOutcome};
 use apassy::vault::{
-    Declaration, DeclarationSource, Environment, Field, ItemDraft, Reversibility, RiskLevel, Scope,
-    SecretValue, Vault,
+    Declaration, DeclarationSource, DeclarationSources, Environment, Field, ItemDraft,
+    Reversibility, RiskLevel, Scope, SecretValue, Vault,
 };
 use tempfile::TempDir;
 
@@ -65,6 +70,37 @@ fn uses(vault: &mut Vault, item: u64, count: usize, project: &str, hosts: &[&str
                 decision_log_id: None,
             })
             .expect("use");
+    }
+}
+
+/// An API key item that the owner added, with the variable `variable`.
+fn owner_key(vault: &mut Vault, title: &str, value: &str, variable: &str) -> u64 {
+    let item = vault.add(key_draft(title, value)).unwrap().id;
+    vault.set_env_binding(item, variable, "token").unwrap();
+    item
+}
+
+fn key_draft(title: &str, value: &str) -> ItemDraft {
+    ItemDraft {
+        title: title.to_owned(),
+        kind: CredentialKind::ApiKey,
+        notes: String::new(),
+        tags: Vec::new(),
+        fields: vec![Field {
+            name: "token".to_owned(),
+            value: SecretValue::new(value.to_owned()),
+            secret: true,
+        }],
+    }
+}
+
+/// Every declaration value from `source`.
+fn all_from(source: DeclarationSource) -> DeclarationSources {
+    DeclarationSources {
+        environment: source,
+        risk: source,
+        scope: source,
+        reversibility: source,
     }
 }
 
@@ -113,6 +149,10 @@ fn development_hosts_propose_development_once_and_never_after_an_ignore() {
     assert_eq!(open[0].kind, CorrectionKind::Environment);
     assert_eq!(open[0].proposed, "development");
     assert_eq!(open[0].facts["hosts"][0], "api.sandbox.example.com");
+    // The agent chose the hosts: the facts say so.
+    assert_eq!(open[0].facts[UNVERIFIED_FACT], true);
+    assert_eq!(open[0].facts[PREVIOUS_ENVIRONMENT_FACT], "production");
+    assert_eq!(open[0].facts[APPLIED_FACT], false);
     // Looser: nothing changes before the owner answers.
     assert!(vault.declaration(item).unwrap().unwrap().is_production());
     vault
@@ -175,23 +215,13 @@ fn a_live_value_declared_development_becomes_production_until_the_owner_answers(
     let found = detect::detect(&live);
     assert_eq!(found[0].environment, Environment::Production);
     assert_eq!(found[0].sources.environment, Source::Signal);
-    let item = vault
-        .add(ItemDraft {
-            title: "Synthetic key".to_owned(),
-            kind: CredentialKind::ApiKey,
-            notes: String::new(),
-            tags: Vec::new(),
-            fields: vec![Field {
-                name: "token".to_owned(),
-                value: SecretValue::new(live.clone()),
-                secret: true,
-            }],
-        })
-        .unwrap()
-        .id;
-    vault.set_env_binding(item, "SYNTH_KEY", "token").unwrap();
+    let item = owner_key(&mut vault, "Synthetic key", &live, "SYNTH_KEY");
     vault
         .set_declaration(item, &development("synthetic"))
+        .unwrap();
+    // A signal, not the owner, gave the environment (a test key whose value changed).
+    vault
+        .set_declaration_sources(item, &all_from(DeclarationSource::Signal))
         .unwrap();
     uses(&mut vault, item, 1, "", &["api.stripe.com"]);
     let proposed = corrections::consider(&mut vault, item);
@@ -204,8 +234,12 @@ fn a_live_value_declared_development_becomes_production_until_the_owner_answers(
     );
     let correction = &vault.corrections(true).unwrap()[0];
     assert_eq!(correction.proposed, "production");
+    assert_eq!(correction.facts[APPLIED_FACT], true);
+    assert_eq!(correction.facts[PREVIOUS_ENVIRONMENT_FACT], "development");
+    assert_eq!(correction.facts[RAISED_FROM_FACT], "development");
+    assert_eq!(correction.facts["previous_source"], "signal");
     assert!(!format!("{correction:?}").contains(&live));
-    // Ignore: the owner keeps development, and it is not proposed again.
+    // Ignore: the item gets development back (looser), and it is not proposed again.
     vault
         .settle_correction(proposed[0], CorrectionAnswer::Ignored)
         .unwrap();
@@ -313,6 +347,154 @@ fn an_allowed_run_proposes_a_correction() {
     let open = vault.corrections(true).unwrap();
     assert_eq!(open.len(), 1, "{open:?}");
     assert_eq!(open[0].proposed, "production");
-    assert!(vault.declaration(item).unwrap().unwrap().is_production());
+    // The owner declared development: it stays until the owner answers.
+    assert_eq!(open[0].facts[APPLIED_FACT], false);
+    assert_eq!(
+        vault.declaration(item).unwrap().unwrap().environment,
+        Environment::Development
+    );
     assert!(!format!("{open:?}").contains(&live));
+}
+
+#[test]
+fn an_environment_from_the_owner_is_never_raised_automatically() {
+    let dir = TempDir::new().unwrap();
+    let mut vault = vault(&dir);
+    let live = fake("sk_live_", 24);
+    let item = owner_key(&mut vault, "Owner key", &live, "OWNER_KEY");
+    vault
+        .set_declaration(item, &development("synthetic"))
+        .unwrap();
+    assert_eq!(
+        vault.declaration_sources(item).unwrap().environment,
+        DeclarationSource::Owner
+    );
+    uses(&mut vault, item, 1, "", &["api.stripe.com"]);
+    let proposed = corrections::consider(&mut vault, item);
+    assert_eq!(proposed.len(), 1, "a proposal for the owner");
+    let correction = &vault.corrections(true).unwrap()[0];
+    assert_eq!(correction.proposed, "production");
+    assert_eq!(correction.facts[APPLIED_FACT], false);
+    assert_eq!(correction.facts[PREVIOUS_ENVIRONMENT_FACT], "development");
+    assert_eq!(correction.facts["previous_source"], "owner");
+    assert!(correction.facts.get(RAISED_FROM_FACT).is_none());
+    assert_eq!(
+        vault.declaration(item).unwrap().unwrap().environment,
+        Environment::Development,
+        "the owner's environment stays"
+    );
+    assert_eq!(
+        vault.declaration_sources(item).unwrap().environment,
+        DeclarationSource::Owner
+    );
+    // The same for a new value (update_credential calls raise_for_value).
+    let staged = owner_key(
+        &mut vault,
+        "Owner staging key",
+        &fake("sk_test_", 24),
+        "STAGED_KEY",
+    );
+    let mut staging = development("synthetic");
+    staging.environment = Environment::Staging;
+    vault.set_declaration(staged, &staging).unwrap();
+    let staged_id = corrections::raise_for_value(&mut vault, staged, &live).expect("proposed");
+    assert_eq!(
+        vault.declaration(staged).unwrap().unwrap().environment,
+        Environment::Staging
+    );
+    // Ignore: nothing to give back. Accept: production as the owner's answer.
+    vault
+        .settle_correction(proposed[0], CorrectionAnswer::Ignored)
+        .unwrap();
+    assert_eq!(
+        vault.declaration(item).unwrap().unwrap().environment,
+        Environment::Development
+    );
+    vault
+        .settle_correction(staged_id, CorrectionAnswer::Accepted)
+        .unwrap();
+    assert!(vault.declaration(staged).unwrap().unwrap().is_production());
+}
+
+#[test]
+fn development_hosts_never_beat_a_live_value() {
+    let dir = TempDir::new().unwrap();
+    let mut vault = vault(&dir);
+    // Production only by default, but the value is live.
+    let item = owner_key(
+        &mut vault,
+        "Default key",
+        &fake("sk_live_", 24),
+        "DEFAULT_KEY",
+    );
+    let mut production = development("synthetic");
+    production.environment = Environment::Production;
+    vault.set_declaration(item, &production).unwrap();
+    vault
+        .set_declaration_sources(item, &all_from(DeclarationSource::Default))
+        .unwrap();
+    uses(&mut vault, item, 5, "", &["api.sandbox.example.com"]);
+    assert!(corrections::consider(&mut vault, item).is_empty());
+    assert!(vault.corrections(false).unwrap().is_empty());
+}
+
+#[test]
+fn consider_reveals_and_reads_the_log_only_after_a_change_or_every_recheck() {
+    let dir = TempDir::new().unwrap();
+    let mut vault = vault(&dir);
+    let item = owner_key(
+        &mut vault,
+        "Staging key",
+        &fake("sk_test_", 24),
+        "STAGING_KEY",
+    );
+    let mut staging = development("synthetic");
+    staging.environment = Environment::Staging;
+    vault.set_declaration(item, &staging).unwrap();
+    vault
+        .set_declaration_sources(item, &all_from(DeclarationSource::Signal))
+        .unwrap();
+    // Enough uses that the log is not read at each run.
+    uses(
+        &mut vault,
+        item,
+        MIN_PROJECT_USES,
+        "billing",
+        &["api.stripe.com"],
+    );
+    uses(&mut vault, item, 1, "shop", &["api.stripe.com"]);
+    assert!(corrections::consider(&mut vault, item).is_empty());
+    let first = corrections::checks(&vault, item);
+    assert_eq!((first.values, first.uses), (1, 1));
+    for _ in 1..RECHECK_USES {
+        uses(&mut vault, item, 1, "shop", &["api.stripe.com"]);
+        assert!(corrections::consider(&mut vault, item).is_empty());
+    }
+    let skipped = corrections::checks(&vault, item);
+    assert_eq!(skipped.values, 1, "no reveal without a change");
+    assert_eq!(skipped.uses, 1, "no log read before the recheck");
+    uses(&mut vault, item, 1, "shop", &["api.stripe.com"]);
+    assert!(corrections::consider(&mut vault, item).is_empty());
+    let rechecked = corrections::checks(&vault, item);
+    assert_eq!(
+        (rechecked.values, rechecked.uses),
+        (1, 2),
+        "every RECHECK_USES"
+    );
+
+    // A new value is a change: the next run checks it, and a live value raises.
+    let revision = vault.details(item).unwrap().summary.revision;
+    vault
+        .update(
+            item,
+            revision,
+            key_draft("Staging key", &fake("sk_live_", 24)),
+        )
+        .unwrap();
+    assert_eq!(corrections::consider(&mut vault, item).len(), 1);
+    assert!(vault.declaration(item).unwrap().unwrap().is_production());
+    assert_eq!(corrections::checks(&vault, item).values, 2);
+    // Its own raise is no change for the next run.
+    assert!(corrections::consider(&mut vault, item).is_empty());
+    assert_eq!(corrections::checks(&vault, item).values, 2);
 }
