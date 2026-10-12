@@ -582,6 +582,7 @@ fn waiting_run(agent: &str) -> PendingRun {
         request_source: String::new(),
         agent_request: String::new(),
         remember: None,
+        question: Default::default(),
     }
 }
 

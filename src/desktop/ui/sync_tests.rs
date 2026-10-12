@@ -847,6 +847,7 @@ fn the_worker_does_not_sync_while_a_run_waits_for_the_owner() {
                     request_source: String::new(),
                     agent_request: String::new(),
                     remember: None,
+                    question: Default::default(),
                 },
                 Duration::from_secs(20),
                 || true,

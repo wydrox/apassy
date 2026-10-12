@@ -19,6 +19,20 @@ pub const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 /// Largest user prompt that a host hook sends, in bytes (goal item B6).
 pub const MAX_HOOK_PROMPT_BYTES: usize = 32 * 1024;
 
+/// Error codes of the access model of ADR 0025 (`docs/contracts/broker-v0.md`).
+pub mod codes {
+    /// The agent may not use the item: a "Not for this agent" exception, an item that
+    /// is not on the list of an agent with "only these items", or no such item. The
+    /// code is the same in each case, so it does not tell which items exist.
+    pub const NOT_GRANTED: &str = "not_granted";
+    /// Another question of this agent waits for the owner, or a newer identical call
+    /// joined the waiting question. The same request again joins the waiting question.
+    pub const QUESTION_WAITING: &str = "question_waiting";
+    /// The owner answered "Allow ACTION in PROJECT" or "Allow production", and Apassy
+    /// could not save the answer. The command did not run.
+    pub const ANSWER_FAILED: &str = "answer_failed";
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WireRequest {

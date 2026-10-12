@@ -512,7 +512,7 @@ fn an_active_pattern_never_overrides_the_earlier_steps() {
     teach(&fx, &items, &[Some(production)], "", &report("5"));
     let card = expect_prompt(&fx, || run(&fx, &report("6")));
     assert!(
-        card.risk.starts_with("Production credential"),
+        card.risk.contains("is a production credential"),
         "{}",
         card.risk
     );
@@ -894,7 +894,7 @@ fn calibration_proposal_passes_the_replay_gate_and_the_owner_applies_it() {
             .expect("declaration");
     });
     let card = expect_prompt(&fx, || run(&fx, &report("3")));
-    assert!(card.risk.starts_with("Production credential"));
+    assert!(card.risk.contains("is a production credential"));
 
     // A denial at 70% after the proposal: the gate fails on all past decisions.
     with_vault(&fx, |vault| {

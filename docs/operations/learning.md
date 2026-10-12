@@ -1,13 +1,13 @@
 # Learning: decision log, remembered patterns, and calibration
 
-Date: 2026-09-26. Decisions: [ADR 0009](../adr/0009-general-by-default-and-learning.md), [ADR 0010](../adr/0010-closing-open-decisions.md). Goal items: B3, B5, B10, and the wait record of N3.
+Date: 2026-09-26. Decisions: [ADR 0009](../adr/0009-general-by-default-and-learning.md), [ADR 0010](../adr/0010-closing-open-decisions.md), [ADR 0025](../adr/0025-low-friction-access.md) (answers, history, and the new order, section 3a). Goal items: B3, B5, B10, and the wait record of N3.
 
 Apassy learns from the owner decisions in two ways:
 
 - A remembered pattern lets a command that the owner approved 3 times run without a prompt (ADR 0009 step 1).
 - A calibration lowers the `task_match` level of the model step when the decision log supports it (ADR 0009 step 3).
 
-Both act only at the model step. They never change a hard rule, the production rule, a rule flag, a missing declaration, or a missing user request. The owner makes each change. Nothing changes the active policy without the owner (`docs/concept.md`).
+Both act only at the model step. They never change a hard rule, the production rule (a production item without an owner allowance), a rule flag, a missing declaration, or a missing user request. The owner makes each change. Nothing changes the active policy without the owner (`docs/concept.md`).
 
 A third way is a local fine-tune of the model (ADR 0009 step 5c, goal item B9). The candidate model runs in shadow mode with no effect, and only the owner promotes it. See [the fine-tune](fine-tune.md), sections 6 to 12, and section 5 below.
 
@@ -21,7 +21,9 @@ The broker stores one entry for each decision in the encrypted vault (schema 7, 
 | --- | --- | --- | --- |
 | A hard rule or a request check denies the request | `rule` | `deny` | no |
 | The model allows the run | `model` | `allow` | no |
+| The history allows the run (section 3a) | `model` | `allow` | no |
 | An active remembered pattern allows the run | `pattern` | `allow` | no |
+| A remembered answer of the owner allows the run (`Outcome::Remembered`, section 3a) | `owner` | `allow` | no |
 | The owner approves or denies | `owner` | `allow` or `deny` | yes |
 | The owner does not answer in time, or a lock ends the wait | `no_answer` | `deny` | yes |
 
@@ -96,7 +98,7 @@ Tests: `approve_and_remember_three_times_then_the_pattern_runs_without_a_prompt`
 
 ## 3. Place in the decision order
 
-See [the bouncer](bouncer.md), section 3, step 4a. A pattern replaces only the model step. Tests:
+See [the bouncer](bouncer.md), section 3, step 4a, and section 3.0, step 6 (ADR 0025). A pattern replaces only the model step. Tests:
 
 | What must not change | Test |
 | --- | --- |
@@ -106,6 +108,18 @@ See [the bouncer](bouncer.md), section 3, step 4a. A pattern replaces only the m
 | Missing user request | same two tests |
 | Missing declaration | same two tests |
 | A grant in "ask" mode | `decision_log_and_export_have_no_secret_values` (no offer, the owner decides) |
+
+## 3a. Answers, history, and patterns (ADR 0025)
+
+ADR 0025 adds two more ways to run without a question. They are not patterns, and they do not use the pattern table. The full order is in [the bouncer](bouncer.md), section 3.0.
+
+- **Remembered answer.** The owner answers a question with "Allow ACTION in PROJECT", or with "Allow production for PROJECT: ACTION". Apassy stores the answer for the item, the project, and the kind of action, for all agents (`src/vault/answers.rs`, table `owner_answer`). A later run with the same item, project, and kind of action starts without a question. This step comes before the check of the user request and the pattern. For a production item, only a production allowance counts. The decision log gets an entry with `decided_by` = `owner` and `asked` = no (`Outcome::Remembered`). The entry has no owner check of its own: the owner checked when the answer was given. A restore removes every answer, production allowances included. Removing an answer makes the bouncer stricter and needs no owner check.
+- **History.** Apassy counts a use of an item in a project with a kind of action as history when the bouncer allowed it (not a pattern, not the owner), and a still connected agent made it. A restore revokes every agent, so a restored log never lets a run start without a question. History is checked after the remembered pattern and after the check of a default declaration. When each item of the run has history, the run starts, and the entry has `decided_by` = `model`. The history never makes a production allowance, and it does not replace the hard rules.
+- **Pattern.** It still needs 3 approvals of the same generalized command (section 2). It is checked after the remembered answer and the check of the user request and the declaration, and before the check of a default declaration, the history, and the model.
+
+A pattern knows a command. An answer and history know an item, a project, and a kind of action. So an answer or history can start a new command of a known kind that no pattern knows. They cannot change a hard rule, a rule flag, a production item without an allowance, "Always ask me", or an exception of the agent.
+
+The use log (`item_use`) records every decided use of every item, whoever decided: `bouncer`, `pattern`, `answer`, `owner`, or `rule`. It is separate from the decision log. It has no secret value.
 
 ## 4. Threshold calibration (goal item B5)
 
@@ -173,7 +187,7 @@ Tests: `learning_view_shows_the_ask_rate_decisions_patterns_and_candidate_slot`,
 
 The decision log keeps the version at the end of its `policy` text (`...; model apassy-base-v1+1a2b3c4d`), so the vault schema does not change. The Learning view shows it in "Policy".
 
-The owner labels are the lines with `decided_by` = `owner`. [The fine-tune study](fine-tune.md), section 5, names some fields differently: `relative_dir` is `cwd_rel`, `owner_decision` is `decision` of an owner line, and `source` is `remembered`.
+The owner labels are the lines with `decided_by` = `owner`. A line of a remembered answer (section 3a) also has `decided_by` = `owner`, but the owner did not decide that run. The export has no `asked` field, so such a line looks like an owner approval. [The fine-tune study](fine-tune.md), section 5, names some fields differently: `relative_dir` is `cwd_rel`, `owner_decision` is `decision` of an owner line, and `source` is `remembered`.
 
 The local fine-tune (goal item B9) reads this export. `broker::finetune::examples_from_export` turns it into training examples. The label mapping is in [the fine-tune](fine-tune.md), section 6.2.
 

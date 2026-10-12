@@ -36,16 +36,16 @@ It adds one extra field to each response. The broker must drop that field.
 
 ## 4. Connect an agent host
 
-For Claude Code or Codex, use the guided setup ([ADR 0024](../adr/0024-access-at-first-use.md)):
+For Claude Code or Codex, use the guided setup ([ADR 0024](../adr/0024-access-at-first-use.md), changed by [ADR 0025](../adr/0025-low-friction-access.md)):
 
 1. Click "Connect agent", select the host, and click "Continue".
 2. Keep "Let the agent see credential names, without values" on. Click "Connect Claude Code…" or "Connect Codex…". One owner check gives the new token and the names. Then click "Connect Claude Code" or "Connect Codex" in the token sheet to save the host settings.
-3. Optional: in "2. Access (optional)", select credentials and click "Set access…" to give access before the first use.
+3. Optional: in "2. Access (optional)", select credentials and click "Set access…" to give a rule before the first use. A connected agent does not need it: it can use every credential that is not archived, and the bouncer decides (section 8d).
 4. Start the host from the project folder: `MCP_TOOL_TIMEOUT=180000 claude` or `codex`. The Apassy sandbox is optional ("More protection").
 5. In Codex, use `/hooks` to trust the hook. Use `/mcp` to check the connection.
-6. Ask the agent for a task that needs a credential. Apassy shows the first-use card in Activity: "Allow in FOLDER", "Allow once", or "Deny".
+6. Ask the agent for a task that needs a credential. When the bouncer cannot allow the run, Apassy shows a question in Activity (section 8d).
 
-At a first use, the card shows the declaration that Apassy suggests for each new credential, and you can change its environment. "Allow in FOLDER" saves the declaration and a grant in "Bouncer decides" for the folder with `.git` (or the working directory), and starts the run. One owner check covers all of it. Later runs in the folder that the bouncer finds clean start without a prompt. A production credential waits for you at each run. A model never approves a first use. An agent has at most one waiting first use (`first_use_waiting`).
+A process grant is no longer needed for a run. The bouncer decides each use. It asks you when a hard rule applies, when the credential has no history in the project, or when it is not sure. Your answer is remembered for the credential, the project, and the kind of action. A production credential waits for you at each run, unless you allowed production for the project and the kind of action. A model never approves the first use of a credential that has no history, unless its declaration is development or local with low risk.
 
 The guide stays on the agent page while you select credentials and set access. Detailed rules remain under each credential's process access. Saved settings do not prove a connection. The test prompt lists permitted credentials without secret values; it does not test a command that uses a secret. An Allowed activity entry does not prove that a command succeeded.
 
@@ -69,8 +69,10 @@ The agent can then call `apassy_list_access` and `apassy_use_credential`.
 
 | Action | Result |
 | --- | --- |
-| Call before the grant, agent sees only its grants | `not_granted` |
-| Call before the grant, agent sees all credentials | The run waits for the first-use card (ADR 0024) |
+| Connector call before the connector grant | `not_granted` |
+| Run with a credential that an exception hides from the agent ("Not for this agent", or not on the list of "Only these items"), or with an unknown credential | `not_granted` |
+| Run with a credential without history in the project | The run waits for a question (section 8d), at most 300 seconds |
+| Second different request while a question of the agent waits | `question_waiting` |
 | Call after the grant | Six output fields. No token. No `internal_debug_note`. |
 | Call with `project_id` `echo-token-canary` | `output_blocked` |
 | Call with a locked vault | `vault_locked` |
@@ -135,19 +137,19 @@ Access belongs to the credential. A variable name is an optional command setting
 
 The broker checks access again after a pending decision. A changed secret field, delivery mode, credential revision, or access rule invalidates the earlier decision. Removing explicit command settings also removes existing process grants.
 
-Without setup, an agent that sees all credentials can name a catalog credential in `apassy_run_with_secrets`. The owner decides at the first use (section 4, ADR 0024).
+Without setup, an agent can name any credential of its `catalog` in `apassy_run_with_secrets`. The bouncer decides, and it can ask the owner (section 8d, ADR 0025). A process grant is not the authority for a run. If a grant covers the working directory, its hard rule (expiry, command prefixes, forbidden words, hourly limit) and its instruction still apply, and "Ask me each time" still asks. A grant gives nothing outside its folder.
 
-Setup in the desktop app, to give access before the first use:
+Setup in the desktop app, to add a rule for a credential and a folder:
 
 1. Select the credential in Agents. A saved environment variable is not required. For a custom credential with several secret fields, select the field under "Command settings". Leave the variable name empty for automatic use.
 2. In Agents, open the agent. Under "Process access", click the credential. Type the project folder.
 3. Under "Decision", select "Ask me each time" or "Bouncer decides". Click "Save".
 
-The agent must send `user_request`: the user's own words that led to the command. For a decision of the bouncer, each item needs a declaration (ADR 0008). The first-use card saves one. To change it, open the credential, and under "Agent access" click "Declaration".
+The agent must send `user_request`: the user's own words that led to the command. For a decision of the bouncer, each item needs a declaration (ADR 0008). Apassy suggests one when you add the credential. To change it, open the credential, and under "Agent access" click "Declaration". A declaration value that is only a default makes the bouncer ask.
 
-When an agent calls `apassy_run_with_secrets` in "ask" mode, a banner shows on every view, and the Activity view shows the approval card. "Review" in the banner opens the same card. The card shows the agent, the purpose, the command, the directory, and the variable names. Click "Approve once" or "Deny". The request waits a maximum of 120 seconds. A lock, a backup, a restore, or a stop of the app ends every waiting run with `approval_invalidated`. An approval that the broker did not use before a lock is not valid after the unlock. The agent must send the request again.
+When an agent calls `apassy_run_with_secrets` in "ask" mode, a banner shows on every view, and the Activity view shows the approval card. "Review" in the banner opens the same card. The card shows the agent, the purpose, the command, the directory, and the variable names. Click "Approve once" or "Deny". The request waits a maximum of 300 seconds. A lock, a backup, a restore, or a stop of the app ends every waiting run with `approval_invalidated`. An approval that the broker did not use before a lock is not valid after the unlock. The agent must send the request again.
 
-For Claude Code, set `MCP_TOOL_TIMEOUT` to a value higher than 120000, because a run can wait for your approval.
+For Claude Code, set `MCP_TOOL_TIMEOUT` to a value higher than 300000, because a run can wait 300 seconds for your answer. The value 180000 of the setup command is shorter than that wait. If the host ends the call first, the agent can send the same request again: it joins the waiting question (section 8d).
 
 ### Run with a real agent host on 2026-09-25
 
@@ -180,8 +182,28 @@ Select "Real value" for:
 
 - **Several credentials at once:** in Agents, open the agent. Under "Process access", click "Give access to several credentials…". Switch on each credential, choose "This folder" (and type it) or "Any folder", choose the decision, and click "Give access to N credentials". You confirm once.
 - **Any folder:** in the same sheet, or in the sheet of one credential, choose "Any folder". The agent can then run a command from any working directory. A credential whose variable holds the real value asks you at each run. With a placeholder, the bouncer can decide.
-- **See all credentials:** under "What it can see", switch on "All credentials, without values" and confirm. `apassy_list_access` then has a catalog without values. The agent can call `apassy_request_access` for a credential with access `can_request`.
+- **What the agent sees (ADR 0025):** `apassy_list_access` always has a `catalog` without values, for every agent. Each entry has `folder`: the folder names from the root. An exception hides a credential from the catalog and from runs: "Not for this agent", or "Only these items" (the agent sees only its list). The agent can call `apassy_request_access` for a credential with access `can_request`, but it can also run a command with it at once, and the bouncer decides.
 - **Access requests:** a request shows in Activity under "Access requests" with the reason of the agent. "Give access…" asks for the folder and the decision, then the owner check. "Deny" closes it. The agent sees the state in `apassy_list_access`.
+
+## 8d. Questions and answers (ADR 0025)
+
+The bouncer decides each use of each credential in this order (full list: [the bouncer](bouncer.md), section 3): hard rules, no running bouncer, a folder that is no project, a remembered answer, a missing user request or declaration, a remembered pattern, a default declaration, history, a credential without history, and then the model. Anything unclear asks you.
+
+A question waits for you up to 300 seconds. The card says why you are asked. Your answers:
+
+- **Allow once**: the run starts. Nothing is remembered. An iPhone can only give this answer.
+- **Allow ACTION in PROJECT**: the run starts, and Apassy remembers the answer for each credential of the run, the project, and the kind of action, for all agents. Later uses start without a question.
+- **Allow production for PROJECT: ACTION**: the same for a production credential. This is the only way to a production allowance.
+- **Deny**: the run does not start. A denial blocks the pattern of the request.
+- **Not for this agent**, **Always ask for this agent**, or **Disconnect the agent**: these deny the run and make the agent stricter. They need no owner check.
+
+Each answer that gives access needs an owner check (Touch ID or the passphrase). Apassy saves the answer after it checks the vault, the agent, and the rules a second time, in the same vault session. If the save fails, the agent gets `answer_failed` and the command does not start. A run that starts after such an answer has the field `remembered` in its result.
+
+An agent has at most one waiting question. A second, different request gets `question_waiting`. The same request of the same agent again, in the same vault session, joins the waiting question. The newest call gets the answer. The older call ends at once with `question_waiting` and the text that a newer call took over the question. A call never joins the question of another agent. So an agent host that ends a call after its time-out can send the request again without a second question.
+
+Removing a remembered answer makes Apassy stricter, so it needs no owner check. Removing an exception of an agent ("Not for this agent" or "Always ask for this agent") gives authority back, so it needs an owner check (`OwnerAction::RemoveAgentException`). A restore from a backup removes every remembered answer, production allowances included.
+
+Apassy writes one row for each decided use of each credential: allowed, denied, refused, or timed out, and who decided (bouncer, pattern, answer, owner, or rule). The row has no secret value. Apassy also counts each owner check and each new question.
 
 ## 9. Limits
 

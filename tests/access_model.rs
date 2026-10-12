@@ -166,7 +166,9 @@ fn an_agent_sees_only_what_it_can_use_until_the_owner_lets_it_see_all() {
     let fx = fixture();
     let before = list(&fx);
     assert_eq!(before["sees_all_credentials"], false);
-    assert!(before.get("catalog").is_none());
+    // ADR 0025 §3f: an agent that does not see all credentials has the exception "only
+    // these items". It has no grant, so its catalog is empty.
+    assert_eq!(before["catalog"], serde_json::json!([]));
     assert_eq!(code(&ask(&fx, fx.bound, "Deploy the app.")), "not_visible");
 
     with_vault(&fx, |v| v.set_agent_sees_all(fx.agent_id, true)).expect("see all");

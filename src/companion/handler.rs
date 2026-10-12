@@ -511,11 +511,15 @@ fn approve(shared: &Shared, device_id: &str, id: &str, request: &Request) -> Res
         Err(ApprovalRefusal::Changed) => error(ErrorCode::Changed),
         Err(ApprovalRefusal::NothingToRemember) => error(ErrorCode::NothingToRemember),
         Err(ApprovalRefusal::Stale) => error(ErrorCode::Stale),
-        // A phone approves a run only once. It cannot give access (ADR 0024).
+        // A phone approves a run only once. It cannot give access (ADR 0024) or
+        // remember an answer (ADR 0025, until the iPhone stage).
         Err(
             ApprovalRefusal::NotAnApproval
             | ApprovalRefusal::NothingToGrant
-            | ApprovalRefusal::DeclarationsDoNotMatch,
+            | ApprovalRefusal::DeclarationsDoNotMatch
+            | ApprovalRefusal::NoProject
+            | ApprovalRefusal::NotProduction
+            | ApprovalRefusal::ProductionNeedsAllowance,
         ) => error(ErrorCode::Internal),
     }
 }

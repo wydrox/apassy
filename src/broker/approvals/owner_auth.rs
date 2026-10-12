@@ -42,12 +42,16 @@ use zeroize::Zeroizing;
 
 use super::{FirstUseDeclaration, FirstUseOffer, PendingRun};
 use crate::broker::SharedVault;
+use crate::broker::action_kind::ActionKind;
+use crate::broker::project::Project;
 use crate::companion::crypto::{ApproveAction, approve_string, verify_ecdsa};
 use crate::companion::digest::run_digest_hex;
 use crate::companion::wire::valid_device_id;
 use crate::native::{
     AuthCancel, HelperErrorCode, MAX_AGENT_NAME_CHARS, MAX_REASON_CHARS, NativeError, NativeHelper,
 };
+use crate::vault::exceptions::ExceptionKind;
+use crate::vault::usage::InteractionKind;
 use crate::vault::{Declaration, Vault, VaultErrorKind};
 
 /// How long a proof stays valid after the owner check.
@@ -157,6 +161,31 @@ pub enum OwnerAction {
         offer: FirstUseOffer,
         declarations: Vec<FirstUseDeclaration>,
     },
+    /// Approve one waiting question and remember "Allow ACTION in PROJECT" for its items
+    /// (ADR 0025 §3). The answer covers every agent in the project. `project` and
+    /// `action` must be those of the question. A phone cannot make it.
+    ApproveInProject {
+        run: PendingRun,
+        project: Project,
+        action: ActionKind,
+    },
+    /// Approve one waiting question with a production item and allow production for
+    /// the project and the kind of action (ADR 0025 §3b). This is the only way to make a
+    /// production allowance. A phone cannot make it.
+    AllowProduction {
+        run: PendingRun,
+        project: Project,
+        action: ActionKind,
+    },
+    /// Remove an exception of an agent (ADR 0025 §3f). It gives authority back.
+    RemoveAgentException {
+        agent_id: u64,
+        item_id: u64,
+        kind: ExceptionKind,
+    },
+    /// Remove a remembered answer (ADR 0025 §3b). Removing is stricter and needs no
+    /// check; the variant exists for a caller that confirms it anyway.
+    RemoveOwnerAnswer { answer_id: u64 },
     /// Give an agent access to an item or change that access: a connector operation
     /// or process access.
     ChangeGrant { agent_id: u64, item_id: u64 },
@@ -284,6 +313,28 @@ impl OwnerAction {
                 offer,
                 declarations,
             } => grant_reason(run, offer, declarations),
+            Self::ApproveInProject {
+                run,
+                project,
+                action,
+            } => format!(
+                "approve a run of agent \"{}\" and allow {} in \"{}\" for all agents",
+                short_name(run),
+                action_words(*action),
+                short_device_name(&project.label)
+            ),
+            Self::AllowProduction {
+                run,
+                project,
+                action,
+            } => format!(
+                "allow production for \"{}\": {} (run of agent \"{}\")",
+                short_device_name(&project.label),
+                action_words(*action),
+                short_name(run)
+            ),
+            Self::RemoveAgentException { .. } => "remove an exception of an agent".to_owned(),
+            Self::RemoveOwnerAnswer { .. } => "remove a remembered answer".to_owned(),
             Self::ChangeGrant { .. } => "change the access of an agent".to_owned(),
             Self::ChangeGrants { item_ids, .. } => {
                 format!("give an agent access to {} credentials", item_ids.len())
@@ -338,9 +389,21 @@ impl OwnerAction {
         match self {
             Self::ApproveRun(run)
             | Self::ApproveAndRemember(run)
-            | Self::ApproveAndGrant { run, .. } => Some(run),
+            | Self::ApproveAndGrant { run, .. }
+            | Self::ApproveInProject { run, .. }
+            | Self::AllowProduction { run, .. } => Some(run),
             _ => None,
         }
+    }
+}
+
+/// The kind of action for a prompt (ADR 0025 §3a).
+pub fn action_words(action: ActionKind) -> &'static str {
+    match action {
+        ActionKind::Read => "reading",
+        ActionKind::Change => "changes",
+        ActionKind::Deploy => "deploys",
+        ActionKind::Delete => "deleting or irreversible actions",
     }
 }
 
@@ -837,9 +900,21 @@ impl OwnerGate {
         // A lock, an unlock, or another vault during the check ends the session.
         match self.session() {
             Ok((now_path, now_epoch)) if now_path == path && now_epoch == epoch => {
+                self.count_check(&action, &path, epoch);
                 Ok(OwnerProof::issue(action, method, epoch))
             }
             _ => Err(OwnerAuthError::SessionChanged),
+        }
+    }
+
+    /// Count a passed owner check (ADR 0025 §1). A failure to count changes nothing.
+    fn count_check(&self, action: &OwnerAction, path: &std::path::Path, epoch: [u8; 32]) {
+        let mut guard = self.vault.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(vault) = guard
+            .as_mut()
+            .filter(|vault| !vault.is_locked() && vault.path() == path && vault.epoch() == epoch)
+        {
+            let _ = vault.record_interaction(InteractionKind::OwnerCheck, &action.reason());
         }
     }
 
