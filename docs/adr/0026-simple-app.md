@@ -1,7 +1,7 @@
 # ADR 0026 — A simple app: three columns, folders, shared vaults
 
 Date: 2026-10-12.
-Status: ACCEPTED by the owner on 2026-10-12 ("jest już ok. działaj z implementacją"). Not in the code. The approved mockup is [docs/design/app-v2-mockup.html](../design/app-v2-mockup.html). It goes with [ADR 0025](0025-low-friction-access.md).
+Status: ACCEPTED by the owner on 2026-10-12 ("jest już ok. działaj z implementacją"). The Mac app (§1–§7) and the iPhone app (§8) are on the branch `feat/low-friction-access` (draft PR #15) since 2026-10-12; not released. Shared vaults (§6) are not built yet. The approved mockup is [docs/design/app-v2-mockup.html](../design/app-v2-mockup.html). It goes with [ADR 0025](0025-low-friction-access.md).
 
 ## Context
 

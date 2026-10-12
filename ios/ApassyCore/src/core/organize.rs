@@ -578,7 +578,11 @@ mod tests {
 
     #[test]
     fn a_preview_has_no_part_of_a_secret() {
-        let found = detect::detect(concat!("sk_", "live_", "51SyntheticStripeKeyValue0000000000"));
+        let found = detect::detect(concat!(
+            "sk_",
+            "live_",
+            "51SyntheticStripeKeyValue0000000000"
+        ));
         let answer = serde_json::to_string(&super::found(0, &found[0])).unwrap();
         assert!(!answer.contains("51SyntheticStripeKeyValue"), "{answer}");
         assert!(answer.contains(MASK));
