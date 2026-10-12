@@ -15,6 +15,7 @@ mod generate;
 mod icloud;
 mod items;
 mod join;
+mod organize;
 mod otp;
 mod passkey;
 mod questions;
@@ -503,6 +504,11 @@ impl Core {
             // imports and removes.
             "passkey_list" | "passkey_assert" | "passkey_register" | "passkey_import"
             | "passkey_remove" => self.passkey_call(&op, request),
+            // 5.11 Folders, adding by paste, and the options of a credential.
+            "folders" | "folder_create" | "folder_rename" | "folder_move" | "folder_delete"
+            | "item_folder_set" | "detect" | "add_pasted" | "item_options_set" => {
+                self.organize_call(&op, request)
+            }
             // 5.10 Questions through the relay: the app only.
             "questions_list"
             | "questions_wait"
