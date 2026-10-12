@@ -21,6 +21,7 @@ use apassy::contracts::CredentialKind;
 use apassy::desktop::inbox::{self, EventKey, InboxKind};
 use apassy::desktop::notify::{Delivery, NotificationCenter};
 use apassy::desktop::owner_store::{ENDED_BY_QUIT, OwnerSession};
+use apassy::vault::exceptions::ExceptionKind;
 use apassy::vault::{ExecMode, Field, ItemDraft, SecretValue};
 use fake_native::{ALLOWED_STATUS, FakeNative};
 use serde_json::Value;
@@ -42,11 +43,15 @@ struct Fixture {
     socket: PathBuf,
     project: PathBuf,
     item_id: u64,
+    /// An item that the agent never gets ("Not for this agent", ADR 0025 §3f).
+    hidden_id: u64,
     token: String,
     broker: BrokerHandle,
 }
 
-/// An unlocked vault with one process grant in "ask" mode, and a started broker.
+/// An unlocked vault with one process grant in "ask" mode, one item hidden from the
+/// agent, and a started broker. No bouncer runs, so each run of the visible item waits
+/// for the owner (ADR 0025 §3).
 fn fixture(approval_timeout: Duration) -> Fixture {
     let dir = TempDir::new().expect("temp dir");
     let project = dir.path().join("project");
@@ -58,33 +63,40 @@ fn fixture(approval_timeout: Duration) -> Fixture {
         .expect("create");
     session.unlock(PASS).expect("unlock");
     let vault = session.shared_vault();
-    let (item_id, token) = {
+    let (item_id, hidden_id, token) = {
         let mut guard = vault.lock().expect("vault");
         let open = guard.as_mut().expect("open");
-        let item = open
-            .add(ItemDraft {
-                title: "Notify key".to_owned(),
-                kind: CredentialKind::ApiKey,
-                notes: String::new(),
-                tags: Vec::new(),
-                fields: vec![Field {
-                    name: "token".to_owned(),
-                    value: SecretValue::new(SECRET.to_owned()),
-                    secret: true,
-                }],
-            })
-            .expect("add");
-        open.set_env_binding(item.id, "NOTIFY_KEY", "token")
-            .expect("binding");
+        let mut add_item = |title: &str, env_name: &str| {
+            let item = open
+                .add(ItemDraft {
+                    title: title.to_owned(),
+                    kind: CredentialKind::ApiKey,
+                    notes: String::new(),
+                    tags: Vec::new(),
+                    fields: vec![Field {
+                        name: "token".to_owned(),
+                        value: SecretValue::new(SECRET.to_owned()),
+                        secret: true,
+                    }],
+                })
+                .expect("add");
+            open.set_env_binding(item.id, env_name, "token")
+                .expect("binding");
+            item.id
+        };
+        let item_id = add_item("Notify key", "NOTIFY_KEY");
+        let hidden_id = add_item("Hidden key", "HIDDEN_KEY");
         let (agent, token) = open.register_agent(AGENT).expect("register");
         open.set_exec_grant(
             agent.id,
-            item.id,
+            item_id,
             &project.display().to_string(),
             ExecMode::Ask,
         )
         .expect("grant");
-        (item.id, token.expose().to_owned())
+        open.add_agent_exception(agent.id, hidden_id, ExceptionKind::Never)
+            .expect("exception");
+        (item_id, hidden_id, token.expose().to_owned())
     };
     let socket = dir.path().join("run").join("broker.sock");
     let mut options = BrokerOptions::with_tls(TlsClient::platform().expect("TLS"));
@@ -97,14 +109,31 @@ fn fixture(approval_timeout: Duration) -> Fixture {
         socket,
         project,
         item_id,
+        hidden_id,
         token,
         broker,
     }
 }
 
-/// Send a run request on another thread. The purpose and the user request are canaries.
+/// Send a run request for the visible item on another thread. Without a bouncer it
+/// waits for the owner (ADR 0025 §3), also outside the folder of the old grant: a grant
+/// is no authority any more (`docs/contracts/broker-v0.md`, `outside_project`).
 fn send_run(fx: &Fixture, cwd: PathBuf) -> std::thread::JoinHandle<WireResponse> {
-    let (socket, token, item_id) = (fx.socket.clone(), fx.token.clone(), fx.item_id);
+    send_run_for(fx, fx.item_id, cwd)
+}
+
+/// Send a run request for the hidden item. The broker refuses it at once with
+/// `not_granted`: a blocked request (N1).
+fn send_blocked(fx: &Fixture) {
+    let response = send_run_for(fx, fx.hidden_id, fx.project.clone())
+        .join()
+        .expect("request");
+    assert_eq!(code(&response), "not_granted");
+}
+
+/// Send a run request on another thread. The purpose and the user request are canaries.
+fn send_run_for(fx: &Fixture, item_id: u64, cwd: PathBuf) -> std::thread::JoinHandle<WireResponse> {
+    let (socket, token) = (fx.socket.clone(), fx.token.clone());
     let marker = fx.project.join("ran");
     std::thread::spawn(move || {
         client::send(
@@ -245,8 +274,9 @@ fn waiting_approval_notifies_within_five_seconds() {
     );
 }
 
-/// N1, N2: a blocked request causes a notification within 5 seconds. A denial by the
-/// owner causes none.
+/// N1, N2: a blocked request causes a notification within 5 seconds. A run outside the
+/// folder of the old grant is a question now (ADR 0025 §3), and it notifies as one
+/// (ADR 0025 §3e). A denial by the owner causes no notification.
 #[test]
 fn blocked_request_notifies_within_five_seconds() {
     let fx = fixture(Duration::from_secs(10));
@@ -261,11 +291,9 @@ fn blocked_request_notifies_within_five_seconds() {
     );
     let center = start_center(&fx, &fake);
 
-    // The working directory is outside the granted project, so the broker refuses.
-    let outside = fx.dir.path().to_path_buf();
-    let response = send_run(&fx, outside).join().expect("request");
+    // The item is "Not for this agent", so the broker refuses.
+    send_blocked(&fx);
     let blocked_at = Instant::now();
-    assert!(!response.ok, "{response:?}");
     let entry = {
         let guard = fx.vault.lock().expect("vault");
         guard
@@ -289,15 +317,22 @@ fn blocked_request_notifies_within_five_seconds() {
         Delivery::Delivered
     );
 
-    // The owner denies a waiting run. The activity entry of that denial is not a
-    // blocked request, so only the "Approval waiting" notification comes.
-    let response = send_run(&fx, fx.project.clone());
-    let (run, _) = first_pending(&fx);
-    notify_request(
+    // A run outside the folder of the grant is no refusal any more: without a bouncer
+    // it waits for the owner, and the question notifies within 5 seconds.
+    let outside = fx.dir.path().to_path_buf();
+    let response = send_run(&fx, outside);
+    let (run, waiting_since) = first_pending(&fx);
+    let (request, took) = notify_request(
         &fake,
         &EventKey::Run(run.id).notification_id(),
-        Instant::now(),
+        waiting_since,
     );
+    eprintln!("N1: question outside the grant folder -> notify request after {took:?}");
+    assert!(took < LIMIT, "the notification took {took:?}");
+    assert_preview_fields(&request, "approval_waiting");
+
+    // The owner denies the waiting run. The activity entry of that denial is not a
+    // blocked request, so only the "Approval waiting" notification comes.
     assert!(fx.broker.approvals().deny(run.id));
     assert_eq!(code(&response.join().expect("waiter")), "approval_denied");
     std::thread::sleep(Duration::from_millis(2500));
@@ -402,8 +437,7 @@ fn another_vault_starts_a_new_notification_baseline() {
     let center = start_center(&fx, &fake);
 
     // A blocked request in the first vault gets its notification.
-    let outside = fx.dir.path().to_path_buf();
-    assert!(!send_run(&fx, outside).join().expect("request").ok);
+    send_blocked(&fx);
     let entry = {
         let guard = fx.vault.lock().expect("vault");
         guard
@@ -453,9 +487,7 @@ fn inbox_keeps_events_after_a_restart() {
     let mut fx = fixture(Duration::from_secs(20));
     let path = fx.session.vault_path().expect("path");
 
-    let outside = fx.dir.path().to_path_buf();
-    let blocked = send_run(&fx, outside).join().expect("request");
-    assert!(!blocked.ok);
+    send_blocked(&fx);
     let waiting = send_run(&fx, fx.project.clone());
     let (run, _) = first_pending(&fx);
 
