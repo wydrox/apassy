@@ -1,6 +1,6 @@
 # iPhone vault core contract v1
 
-Date: 2026-10-07. Passkeys, one-time password rules, and schema 17 (sections 5.8, 5.9, 7, 10, and 11) added 2026-10-09.
+Date: 2026-10-07. Passkeys, one-time password rules, and schema 17 (sections 5.8, 5.9, 7, 10, and 11) added 2026-10-09. Questions through the relay (section 5.10) added 2026-10-12.
 Status: experimental. This contract supports the iPhone app in [ADR 0023](../adr/0023-iphone-vault.md). The Rust side (`ios/ApassyCore`, crate `apassy-core`) and the Swift side (`ios/ApassyVaultKit`) implement it. A change to this document changes both sides in the same pull request.
 
 Status of the passkey and one-time password work (branch `feat/passkeys-totp`): the sources are in the branch. Integration, signed builds, and native device acceptance are pending. Section 12 lists what is not yet confirmed. Do not read this document as a statement that a release or a device accepted these calls.
@@ -324,6 +324,65 @@ The app calls it after a fresh owner check and gives the answer straight to the 
 - `totp`: the first one-time password field of the item that Apassy reads as TOTP. A counter-based (HOTP) or unreadable value is not exported. `algorithm` is `sha1`, `sha256`, or `sha512`. A period or digit count that does not fit 16 bits is not exported. `issuer` and `user` come from the label and the `issuer` parameter of an `otpauth://totp` URI. A bare Base32 secret has neither.
 - `passkey`: only a canonical, parsable passkey. A stored key that does not parse is left out and the other data of the login still goes. A failure of the vault is an error: an export never drops data in silence.
 - One history event without values (kind `revealed`, detail "Credential Exchange export prepared") is recorded for each exported item, before the answer is returned. The event says that the owner prepared the export. It does not prove that the other app took the data.
+
+### 5.10 Questions through the relay (contract relay-questions-v1)
+
+Added 2026-10-12 (stage 5, stream M3). The iPhone is an answering device of [relay-questions-v1](relay-questions-v1.md): it reads the questions of the vault that wait on a Mac, opens and checks each card, and posts the owner's answer. All these calls are of the app only (`not_allowed` in the AutoFill extension) and need the vault unlocked.
+
+The **questions team** of the selected vault is its relay membership with the purpose `questions`, else its relay sync membership (relay-questions-v1 section 3). An iCloud vault gets a notifications-only team with `join_attach` (plan §A7). The question key is the vault secret `question-key-v1` that a Mac made; the iPhone never makes one, and gets it with the sync of the vault. The iPhone's `trusted_device` row (kind `iphone`) has the relay key of the questions team as `sign_key`, the Secure Enclave answer key as `answer_key`, and its device number in that team; the core finds its own row by `sign_key`.
+
+| Op | Parameters | Result |
+| --- | --- | --- |
+| `questions_list` | | `{"status": Status, "questions": [Question]}` |
+| `questions_wait` | `timeout` (1 to 25 s) | `{"changed": bool}` |
+| `question_open` | `qid` | `Question` with its card |
+| `question_answer_string` | `qid`, `kind`, `item_id`?, `environment`?, `action`?, `project_key`?, `time`? | `{"time": n, "answer_string": "…", "needs_face_id": bool}` |
+| `question_answer` | the same, `time`, `signature`? | `{"id": n, "at": n, "kind": "…"}` |
+| `answer_key_register` | `public_key` (b64u X9.63) | `{"device_uuid": "…", "team_id": "…", "relay_device_id": n}` |
+| `push_token_set` | `token` (lowercase hex, 32 to 200), `environment` (`development` or `production`), `bundle_id`? (default `com.wydrox.apassy.companion`) | `{"device_id": n, "updated_at": n}` |
+| `push_token_clear` | | `{}` |
+| `join_attach` | `link`, `device_name`? | `{"state": "waiting", "team": "…", "words": [w1, w2], "expires_at": n}` |
+| `join_attach_poll` | | the same, `state` `waiting` or `attached` |
+| `join_attach_cancel` | | `{}` |
+
+`Status`: `{"enabled": bool, "team_id": "…"|null, "relay_device_id": n|null, "device_uuid": "…"|null, "answer_key": "<b64u>"|null, "has_key": bool}`. Without a questions team `enabled` is false and the list is empty; `questions_wait` answers `changed: false` at once.
+
+`Question`:
+
+```json
+{"qid": "oKGio6SlpqeoqaqrrK2urw", "state": "open", "asker_name": "MacBook Pro",
+ "created_at": 1790000001, "expires_at": 1790000300, "problem": null, "answered": null,
+ "card": {"asker_device": "0b7e5c3a-…", "created_at": 1790000000, "digest": "f3b3…",
+          "run": {"id": "123456789012345", "agent": "claude-code", "command": ["npm", "run", "migrate"],
+                  "cwd": "/tmp/synthetic-shop", "env_names": ["DATABASE_URL"], "purpose": "…", "risk": "…",
+                  "user_request": "…", "request_source": "…", "agent_request": "…", "remember": null},
+          "question": {"items": [{"item_id": "9", "name": "API token", "production": false,
+                                  "unconfirmed": true, "always_ask": false}],
+                       "project": {"key": "/tmp/synthetic-shop/.git", "label": "synthetic-shop"},
+                       "action": "deploy", "production": true, "why": "…",
+                       "valid_answers": ["once", "production:deploy", "correct_environment"]}},
+ "settle": null}
+```
+
+- `state` is `open`, `settled`, or `expired` (an open question past its `expires_at` on the iPhone's clock is `expired`). A question leaves the list 10 minutes after it ended.
+- `card` is present only when every check of relay-questions-v1 section 7.3 passed: the envelope opens with the key of its `key_id` and the AAD of the relay's clear values; the JSON has exactly the fields within the limits; `v` is 1 and `qid` matches; the core computes the digest v2 itself and gets `digest`; `asker.device` is a live `trusted_device` whose device number in the questions team, when set, equals the relay's `from_device_id`. Else `card` is null and `problem` says why: "Sync this vault to read this question." (no key with that `key_id`), "Update Apassy to read this question." (another `v`, an unknown or a missing field, an unknown answer text), or "This question could not be read." (anything else).
+- Every text of `card` is for display: control and format characters replaced by `?`, the folder and the project key shortened (the rules of `shown_path`). The core keeps the exact card; an answer never sends display text back.
+- `settle` is `{"outcome", "device_name", "device_kind", "kind", "at", "replaced_by"}` when the settle envelope opens, else null. `answered` is the kind of the answer that this process sent, while it remembers it.
+
+Answers (relay-questions-v1 sections 5.3, 9, and 13):
+
+- `kind` is one of section 9.1. The core checks it against the card: `approve_in_project` and `allow_production` need the matching entry of `valid_answers` and a project, and the core fills in `action` and the exact `project_key` from the card (when the request names them, they must match); `correct_environment` needs `item_id` of an item with `unconfirmed: true` and `environment`; `deny` is always valid; the other kinds need their entry. No other field may come with a kind.
+- `question_answer_string` builds the exact answer string of section 9.3 with this iPhone's device UUID, the team, the `qid`, the choice, the digest, and `time` (default: now). `needs_face_id` is true for `approve_once`, `approve_in_project`, `allow_production`, and `correct_environment` to `development`.
+- For such an answer the app signs `answer_string` with the Secure Enclave answer key after Face ID for this answer (`SecureEnclaveKeys.signApproval`, a new `LAContext` with no reuse), and calls `question_answer` with the same `time` and the DER `signature` as b64u. The core checks the signature with the registered `answer_key` before anything is sent (`not_registered` when it does not verify: the key changed).
+- For the other kinds `signature` must be absent: the core signs with the relay key of the questions team (`sign_key`), without Face ID.
+- `time` more than 55 s old is `stale_answer` (answer again); a retry after a network error sends the same `time` and `signature` in a new envelope (section 13 step 4). A time more than 60 s ahead is `invalid_input`.
+- The core seals the answer of section 9.2 (fields in the contract's order) with the question key, a new random nonce, and the AAD with this iPhone's device number, and posts it. The relay taking it does not mean that it counted: the settle says that.
+
+`answer_key_register` writes this iPhone's own `trusted_device` row (a new random UUID the first time; the same UUID while the relay key is the same), and its device number in the questions team. The row syncs to the Macs; an approval counts only after the vault synced once. `join_attach` writes the membership (purpose `questions`) and the row without an answer key at the confirmation, and downloads nothing: a notifications-only team has no copy. It refuses a vault that has a questions team already. A refusal of the Mac, an expired link, or a cancel ends the join; the relay removes a device that was confirmed but not stored.
+
+Errors of these calls, besides those of section 4: `no_questions` (the vault has no questions team), `not_registered` (no row, no answer key, or the signature does not verify with it), `unreadable` (the card failed a check; the message is the `problem`), `already_answered` (`409 question_settled`), `expired` (`409 question_expired`, `404`, or past `expires_at`), `not_routed`, `too_many_answers`, `stale_answer`, `push_unavailable` (`409` on `PUT /v1/push/token`).
+
+The app asks for notification permission only when the owner turns notifications on, sends the device token with `push_token_set` at each launch with notifications on, and `push_token_clear` when they are turned off. The notification has the fixed text of relay-questions-v1 section 14.1; opening it shows the questions.
 
 ## 6. `phone.json`
 

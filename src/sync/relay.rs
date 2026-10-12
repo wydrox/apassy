@@ -30,8 +30,10 @@
 //! [`devices`].
 
 mod devices;
+mod member;
 
 pub use devices::{DeviceView, KeySource, LinkCode, PendingLink};
+pub use member::{RelayCallError, RelayMember};
 
 use std::collections::BTreeMap;
 use std::fmt;

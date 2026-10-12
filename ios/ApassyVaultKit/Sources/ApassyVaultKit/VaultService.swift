@@ -37,6 +37,20 @@ public struct VaultError: Error, Sendable, Equatable, LocalizedError {
         case exists
         /// A passkey key that is not a P-256 PKCS#8 key.
         case badKey = "bad_key"
+        // Questions through the relay (section 5.10).
+        /// The vault has no questions team.
+        case noQuestions = "no_questions"
+        /// This iPhone has no `trusted_device` row or answer key in the vault yet, or its key changed.
+        case notRegistered = "not_registered"
+        /// The card did not pass a check; the message says what to do.
+        case unreadable
+        case alreadyAnswered = "already_answered"
+        case expired
+        case notRouted = "not_routed"
+        case tooManyAnswers = "too_many_answers"
+        /// The time of the answer is too old to send again: answer again.
+        case staleAnswer = "stale_answer"
+        case pushUnavailable = "push_unavailable"
     }
 
     public var code: Code
@@ -135,6 +149,25 @@ public protocol VaultService: Sendable {
     /// The app only, after the owner check: what Apple's credential exchange hands to another
     /// app, passkey keys included. Never written to a file.
     func credentialExport() async throws -> CredentialExport
+
+    // 5.10 Questions through the relay (contract relay-questions-v1). The app only.
+    func questionsList() async throws -> QuestionsList
+    /// True when the relay has new or changed questions (a long poll of at most 25 s).
+    func questionsWait(timeout: Int) async throws -> Bool
+    func questionOpen(qid: String) async throws -> RemoteQuestion
+    /// The exact answer string and its time, to sign with the answer key after Face ID.
+    func questionAnswerString(qid: String, answer: RemoteAnswer) async throws -> PreparedAnswer
+    /// Seal and post an answer. `signature` (DER, by the answer key) for an answer that needs Face
+    /// ID; nil for the others, which the core signs with the relay key of this iPhone.
+    func questionAnswer(qid: String, answer: RemoteAnswer, time: Int64, signature: Data?) async throws -> SentAnswer
+    /// Register this iPhone in the vault with its Secure Enclave answer key (X9.63).
+    func answerKeyRegister(publicKey: Data) async throws -> AnswerKeyRegistration
+    func pushTokenSet(token: Data, environment: PushEnvironment) async throws
+    func pushTokenClear() async throws
+    /// Join the notifications-only team of the selected vault with the device link of the Mac.
+    func joinAttach(link: String, deviceName: String) async throws -> AttachInfo
+    func joinAttachPoll() async throws -> AttachInfo
+    func joinAttachCancel() async throws
 }
 
 public extension VaultService {

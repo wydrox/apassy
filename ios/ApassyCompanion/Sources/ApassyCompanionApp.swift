@@ -11,6 +11,7 @@ import SwiftUI
 
 @main
 struct ApassyCompanionApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var root = RootModel()
 
     var body: some Scene {

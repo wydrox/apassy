@@ -40,6 +40,8 @@ enum VaultSheet: Identifiable {
 @Observable
 final class VaultUI {
     var tab = VaultTab.home
+    /// Questions or the companion, in the Approvals tab.
+    var approvals = ApprovalsHub.Source.questions
     var sheet: VaultSheet?
     var homePath: [VaultRoute] = []
     var itemsPath: [VaultRoute] = []

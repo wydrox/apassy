@@ -1,7 +1,8 @@
 import ApassyVaultKit
 import SwiftUI
 
-/// The unlocked vault: Home, Items, Watchtower, Approvals, and Search.
+/// The unlocked vault: Home, Items, Watchtower, Approvals (the questions through the relay and the
+/// companion), and Search.
 struct VaultTabView: View {
     @Environment(VaultModel.self) private var vault
     @Environment(RootModel.self) private var root
@@ -21,7 +22,9 @@ struct VaultTabView: View {
             }
             .badge(vault.watchtower?.issueCount ?? 0)
             Tab("Approvals", systemImage: "checkmark.seal", value: VaultTab.approvals) {
-                ApprovalsView(app: root.companion, onSettings: { ui.sheet = .settings })
+                ApprovalsHub(
+                    questions: root.questions, companion: root.companion, onSettings: { ui.sheet = .settings },
+                    source: $ui.approvals)
             }
             .badge(waitingCount)
             Tab(value: VaultTab.search, role: .search) {
@@ -62,6 +65,14 @@ struct VaultTabView: View {
             Text(vault.alert ?? "")
         }
         .companionPolling(root.companion)
+        .questionsPolling(root.questions)
+        // The owner opened the notification of a question.
+        .onChange(of: root.questionsRequested, initial: true) { _, requested in
+            guard requested else { return }
+            ui.tab = .approvals
+            ui.approvals = .questions
+            root.questionsRequested = false
+        }
         // Another app sent its logins: offer the import once the vault is open (it is, here).
         .onChange(of: root.exchange?.state, initial: true) { _, state in
             if state == .importWaiting, ui.sheet?.id != VaultSheet.exchange.id { ui.sheet = .exchange }
@@ -72,13 +83,14 @@ struct VaultTabView: View {
     }
 
     private var waitingCount: Int {
-        if case .paired(let session) = root.companion.phase { return session.waitingCount }
-        return 0
+        let questions = root.questions?.waitingCount ?? 0
+        if case .paired(let session) = root.companion.phase { return session.waitingCount + questions }
+        return questions
     }
 
     #if targetEnvironment(simulator)
         /// A development aid of the Simulator, to reach a screen without taps:
-        /// `-ApassyOpen items|watchtower|approvals|settings|generator|search:<text>|new:<kind>|edit:<id>|item:<id>[:reveal|:large]`.
+        /// `-ApassyOpen items|watchtower|approvals|questions|settings|generator|search:<text>|new:<kind>|edit:<id>|item:<id>[:reveal|:large]`.
         private func openFromLaunchArgument() {
             guard let route = UserDefaults.standard.string(forKey: "ApassyOpen") else { return }
             let parts = route.split(separator: ":").map(String.init)
@@ -86,6 +98,9 @@ struct VaultTabView: View {
             case "items": ui.tab = .items
             case "watchtower": ui.tab = .watchtower
             case "approvals": ui.tab = .approvals
+            case "questions":
+                ui.tab = .approvals
+                ui.approvals = .questions
             case "settings": ui.sheet = .settings
             case "generator": ui.sheet = .generator
             case "search":
