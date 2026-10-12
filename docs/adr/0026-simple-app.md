@@ -40,6 +40,8 @@ The app follows the layout of Mail and 1Password: sidebar, list, detail.
 | Decisions | Waiting (with a timer), Requests, Suggestions | the question, its facts, the command, why the owner is asked; a bottom bar: Deny · Allow Once · Allow ACTION in PROJECT |
 | Agents | connected agents | uses, projects, an optional note for the bouncer, exceptions, Disconnect |
 
+The "⋯" menu of a question has the stricter answers of ADR 0025 §3f ("Not for this agent", "Always ask for this agent"). The app labels them "Never for AGENT" and "Always Ask for AGENT", with the name of the agent.
+
 The old views go away:
 
 - **Activity** and **Learning** become Decisions. The weekly counts move into a single line under the Decisions title.

@@ -62,7 +62,8 @@ A run with a variable in placeholder mode ([ADR 0011](../adr/0011-run-proxy-plac
 - Each entry has `folder`: the names of the folders of the credential, from the root. The array is empty for a credential in the root.
 - `access` is `needs_field` (the credential has no secret field to use in a command) or `can_use`. A process grant is no authority, so each other credential is `can_use`: the bouncer decides each use, and it can ask the owner. `requested` and `can_request` are no longer made.
 - `sees_all_credentials` is `false` also for an agent that an exception limits to a list ("only these items").
-- `process_access` and `items` do not list a credential that is hidden from the agent. The action `request_access` has `item_id`, `reason`, and an optional `cwd`. It answers at once with `request_id`, `state`, and `new`. Its codes are `not_visible`, `invalid_request`, `already_granted`, and `too_many_requests`.
+- `process_access` and `items` do not list a credential that is hidden from the agent. The action `request_access` has `item_id`, `reason`, and an optional `cwd`. It answers at once with `request_id`, `state`, and `new`. Its codes are `not_visible`, `invalid_request`, `already_granted`, and `too_many_requests`. The request is only a note for the owner (`apassy request list`); the app does not show it, and the agent does not need it.
+- `approval` of a `process_access` entry follows the standing rules, not the mode of the grant: "the owner approves each run" for "Always ask me" or "Always ask for this agent", a production text for a production credential, and otherwise "the bouncer decides each run; when it is not sure, it asks the owner in Decisions".
 
 ```json
 {"v":0,"token":"apassy_agt_<64 hex>","action":{"kind":"request_access","item_id":7,"reason":"The user asked me to deploy the staging app.","cwd":"/Users/me/Dev/shop"}}

@@ -380,6 +380,10 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
             .ok()
             .flatten()
             .is_some_and(|declaration| declaration.is_production());
+        // ADR 0025: the mode of a grant is no authority. Only "Always ask me", an
+        // "Always ask for this agent" exception, and production make each run wait.
+        let always_ask = view.always_ask.contains(&grant.item_id)
+            || vault.always_ask(grant.item_id).unwrap_or(true);
         let (holds, hosts) = match &binding.delivery {
             crate::vault::EnvDelivery::Value => ("the real value", Vec::new()),
             crate::vault::EnvDelivery::Placeholder(hosts) => ("a placeholder", hosts.clone()),
@@ -394,12 +398,12 @@ fn list_access(vault: &SharedVault, token: &str) -> WireResponse {
             "any_folder": grant.place == crate::vault::GrantPlace::AnyFolder,
             "permitted_command_prefixes": grant.rule.allowed_prefixes,
             "owner_instruction": grant.rule.instruction,
-            "approval": match grant.mode {
-                crate::vault::ExecMode::Ask => "the owner approves each run",
-                crate::vault::ExecMode::Bouncer if production => {
-                    "production credential: the owner approves each run"
-                }
-                crate::vault::ExecMode::Bouncer => "the bouncer decides; a risky run waits for the owner",
+            "approval": if always_ask {
+                "the owner approves each run"
+            } else if production {
+                "production credential: the owner approves each run, unless the owner allowed production for the project and the kind of action"
+            } else {
+                "the bouncer decides each run; when it is not sure, it asks the owner in Decisions"
             },
             "owner_review_needed": vault.needs_review(grant.item_id).unwrap_or(true),
         }));
@@ -471,7 +475,8 @@ fn catalog(vault: &Vault, agent_id: u64) -> Value {
     json!(entries)
 }
 
-/// An agent asks for process access to one item (ADR 0012). The answer comes at once.
+/// An agent leaves a note for the owner about one item (ADR 0012). The answer comes at
+/// once. Since ADR 0025 the agent needs no grant, so the note gives nothing by itself.
 fn request_access(
     ctx: &BrokerContext,
     token: &str,
@@ -496,7 +501,7 @@ fn request_access(
                 "request_id": request_id,
                 "state": "open",
                 "new": created,
-                "note": "The owner decides in the Apassy app. This call does not wait. Tell the user that the request waits in Apassy (Activity). When the owner gives access, the credential shows in process_access of apassy_list_access.",
+                "note": "Apassy recorded a note for the owner. This call does not wait, and you do not need to wait: a credential with access \"can_use\" in the catalog works in apassy_run_with_secrets now, and the bouncer decides each use (it asks the owner in Decisions when it is not sure). The owner reads these notes with apassy request list. For a credential that is not in Apassy, use apassy_ask_owner_for_credential.",
             })),
         ),
         Err(err) => {
@@ -507,11 +512,11 @@ fn request_access(
                 ),
                 VaultErrorKind::InvalidInput => (
                     "invalid_request",
-                    "State the reason in 1 to 500 characters, use an absolute cwd, and ask only for a credential whose access is \"can_request\". For access \"needs_field\", the owner must select one secret field in Apassy first.",
+                    "State the reason in 1 to 500 characters and use an absolute cwd. For access \"needs_field\", the owner must select one secret field in Apassy first.",
                 ),
                 VaultErrorKind::AlreadyExists => (
                     "already_granted",
-                    "The agent already has process access to this credential. See process_access.",
+                    "The agent already has a process grant for this credential. See process_access. No request is needed: the bouncer decides each use.",
                 ),
                 VaultErrorKind::Busy => (
                     "too_many_requests",
@@ -524,7 +529,7 @@ fn request_access(
     };
     let reason_text = match &answer.error {
         Some(error) => error.message.clone(),
-        None => "The agent asked for process access. It waits for the owner.".to_owned(),
+        None => "The agent left a note about this credential (apassy request list).".to_owned(),
     };
     let _ = vault.record_activity(&NewActivity {
         agent_id: Some(agent.id),

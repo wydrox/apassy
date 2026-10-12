@@ -114,12 +114,9 @@ fn dialog_cut(text: &str) -> String {
 }
 
 /// The decision of a process grant, for the owner check dialog.
-fn decides(mode: ExecMode) -> &'static str {
-    match mode {
-        ExecMode::Ask => "You approve each run.",
-        ExecMode::Bouncer => "The bouncer decides.",
-    }
-}
+/// What a process grant does since ADR 0025: it adds the item to the list of an agent
+/// with "Only these items", and it approves no run. Its mode has no effect.
+const GRANT_EFFECT: &str = "It adds the credential to the list of an agent with \"Only these items\". It approves no run: the bouncer decides each use.";
 
 /// Whether `field` is a custom detail with the label of a one-time password. The value
 /// can also show a setup key: [`DesktopApp::ask_owner`] reads it before the dialog.
@@ -1000,35 +997,28 @@ impl OwnerRequest {
             Self::AllowOperation { operation, .. } => {
                 format!("Let the agent use the operation {operation}.")
             }
-            Self::SetProcessAccess { place, mode, .. } => format!(
-                "Give the agent process access in {}. {}",
-                place.describe(),
-                decides(*mode)
+            Self::SetProcessAccess { place, .. } => format!(
+                "Save a process grant in {}. {GRANT_EFFECT}",
+                place.describe()
             ),
             Self::GrantMany {
-                item_ids,
-                place,
-                mode,
-                ..
+                item_ids, place, ..
             } => format!(
-                "Give the agent process access to {} credentials in {}. {}",
+                "Save process grants for {} credentials in {}. {GRANT_EFFECT}",
                 item_ids.len(),
-                place.describe(),
-                decides(*mode)
+                place.describe()
             ),
             Self::ShowAllCredentials { agent_name, .. } => format!(
-                "Let {agent_name} see all your credentials without values: names, usernames, hosts, and visible details. It can ask for access to each."
+                "Remove \"Only these items\" from {agent_name}. It sees all your credentials without values: names, usernames, hosts, and visible details. The bouncer decides each use."
             ),
             Self::GrantRequest {
                 agent_name,
                 item_name,
                 place,
-                mode,
                 ..
             } => format!(
-                "Give {agent_name} process access to {item_name} in {}. {}",
-                place.describe(),
-                decides(*mode)
+                "Save a process grant for {agent_name} to {item_name} in {}. {GRANT_EFFECT}",
+                place.describe()
             ),
             Self::SaveRule { .. } => "Save the rule of this process grant.".to_owned(),
             Self::SaveDeclaration { form, .. } => format!(
@@ -1066,7 +1056,7 @@ impl OwnerRequest {
                 "Confirm the agent settings of this restored item.".to_owned()
             }
             Self::Unarchive { name, .. } => format!(
-                "Bring \"{name}\" back from the archive. Agents with a grant can use it again."
+                "Bring \"{name}\" back from the archive. Agents can use it again; the bouncer decides each use."
             ),
             Self::SetEnvironment {
                 name, environment, ..
@@ -1712,13 +1702,10 @@ impl DesktopApp {
                 mode,
             } => {
                 let result = session.set_exec_grant(agent_id, item_id, &place, mode, proof);
-                let message = match mode {
-                    ExecMode::Ask => "Process access is saved. You approve each run.",
-                    ExecMode::Bouncer => {
-                        "Process access is saved. The bouncer decides. A risky run waits for you."
-                    }
-                };
-                let _ = self.apply(result, message);
+                let _ = self.apply(
+                    result,
+                    "The process grant is saved. It approves no run: the bouncer decides each use, and asks you in Decisions when it is not sure.",
+                );
             }
             OwnerRequest::GrantMany {
                 agent_id,
@@ -1730,14 +1717,16 @@ impl DesktopApp {
                 let result = session.set_exec_grants(agent_id, &item_ids, &place, mode, proof);
                 let _ = self.apply(
                     result,
-                    &format!("Process access to {count} credentials is saved."),
+                    &format!(
+                        "Process grants for {count} credentials are saved. The bouncer decides each use."
+                    ),
                 );
             }
             OwnerRequest::ShowAllCredentials { agent_id, .. } => {
                 let result = session.set_agent_sees_all(agent_id, true, Some(proof));
                 let _ = self.apply(
                     result,
-                    "The agent sees all credentials without values. It can ask for access.",
+                    "\"Only these items\" is removed. The agent sees all credentials without values, and the bouncer decides each use.",
                 );
             }
             OwnerRequest::GrantRequest {
@@ -1748,7 +1737,12 @@ impl DesktopApp {
                 ..
             } => {
                 let result = session.grant_access_request(request_id, &place, mode, proof);
-                let _ = self.apply(result, &format!("Access to {item_name} is given."));
+                let _ = self.apply(
+                    result,
+                    &format!(
+                        "The process grant for {item_name} is saved, and the request is closed. The bouncer decides each use."
+                    ),
+                );
             }
             OwnerRequest::SaveRule {
                 agent_id,
@@ -1802,7 +1796,7 @@ impl DesktopApp {
                 let _ = self.apply(
                     result,
                     &format!(
-                        "{name} is back from the archive. Agents with a grant can use it again."
+                        "{name} is back from the archive. Agents can use it again; the bouncer decides each use."
                     ),
                 );
             }
@@ -1860,7 +1854,7 @@ impl DesktopApp {
                 let result = session.confirm_review(item_id, proof);
                 let _ = self.apply(
                     result,
-                    "The agent settings are confirmed. Agents with a grant can use the item again.",
+                    "The agent settings are confirmed. Agents can use the item again; the bouncer decides each use.",
                 );
             }
             OwnerRequest::ConnectAgent {

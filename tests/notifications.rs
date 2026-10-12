@@ -364,14 +364,20 @@ fn delivery_failure_is_visible_and_the_request_stays() {
         panic!("expected a failure, got {delivery:?}");
     };
     assert!(text.contains("not allowed"), "{text}");
-    assert!(delivery.label().contains("The event stays in this inbox"));
+    assert!(
+        delivery
+            .label()
+            .contains("A question still waits in Decisions")
+    );
     let view = center.view();
     assert!(!view.channel.can_deliver());
     // macOS shows no new prompt after a denial: the app offers System Settings.
     assert!(view.channel.needs_settings(), "{:?}", view.channel);
     assert!(!view.channel.needs_permission());
     assert!(
-        view.channel.summary().contains("Events stay in the inbox"),
+        view.channel
+            .summary()
+            .contains("Questions still wait in Decisions"),
         "{}",
         view.channel.summary()
     );

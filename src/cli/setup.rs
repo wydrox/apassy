@@ -33,10 +33,12 @@ Prepare an agent host for Apassy:
 
 Apassy.app includes the MCP server, prompt hook, and sandbox.
 Use --hook PATH only to select a different prompt hook.
-Agents, tokens, and grants stay on this Mac. A synced vault does not copy them.
+Agents, tokens, exceptions, and your answers stay on this Mac. A synced vault does not
+copy them.
 This command writes configuration. It does not check the host connection or a first request.
 
-Then give the agent access: apassy grant set AGENT ITEM --folder DIR
+Then there is nothing to give: the agent lists your credentials without values and uses
+them, and the bouncer decides each use. When it asks you, the question is in Decisions.
 Start the host in the Apassy sandbox (see docs/operations/isolation.md):
   claude: MCP_TOOL_TIMEOUT=330000 apassy-sandbox -- claude --settings '{\"sandbox\":{\"enabled\":false}}'
   codex:  apassy-sandbox -- codex -c sandbox_mode=danger-full-access
@@ -325,11 +327,10 @@ fn run_host(cli: &Cli, mut args: Args) -> Outcome {
     if host == Host::Codex {
         println!("Use /hooks to trust the Apassy hook before the first request.");
     }
-    println!("Next: select credentials and give the agent access. Variable names are optional.");
     println!(
-        "Give {name} access: apassy grant set {} ITEM --folder DIR",
-        quote(&name)
+        "Next: nothing to give. {name} lists your credentials without values and uses them; the bouncer decides each use."
     );
+    println!("When the bouncer asks you, answer in Decisions in the Apassy window.");
     println!("From the project folder, start the host in the Apassy sandbox:");
     match host {
         Host::Claude => println!(

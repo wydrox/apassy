@@ -619,7 +619,7 @@ fn production_declaration_always_waits_for_the_owner() {
     let list = client::send(&fx.socket, &fx.token, Action::ListAccess).expect("list");
     assert_eq!(
         list.result.as_ref().expect("result")["process_access"][0]["approval"],
-        "production credential: the owner approves each run"
+        "production credential: the owner approves each run, unless the owner allowed production for the project and the kind of action"
     );
     let commands: [&[&str]; 4] = [
         // Known safe by the command analysis.

@@ -1178,12 +1178,9 @@ impl Vault {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| err(VaultErrorKind::Storage))?;
         require_active_agent(&tx, agent)?;
-        let decides = match mode {
-            ExecMode::Ask => "the owner approves each run",
-            ExecMode::Bouncer => "the bouncer decides",
-        };
+        // ADR 0025: the mode of a grant approves nothing, so the history does not name it.
         let detail = format!(
-            "{} · {decides} · {}",
+            "{} · {}",
             history::agent_name(&tx, agent)?,
             place.describe().trim()
         );

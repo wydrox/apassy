@@ -2910,7 +2910,7 @@ pub(super) fn setup_sheet(app: &mut DesktopApp, ctx: &egui::Context, entry: &Vau
             ui,
             &format!("Sync “{}” through the Apassy relay", entry.name),
             Some(
-                "The relay keeps one encrypted copy of this vault and passes the changes of each Mac to the others within seconds. It never gets the passphrase, so it cannot open the vault. Agents, grants, rules, and activity stay on each Mac.",
+                "The relay keeps one encrypted copy of this vault and passes the changes of each Mac to the others within seconds. It never gets the passphrase, so it cannot open the vault. Agents, their exceptions, your answers, and the activity stay on each Mac.",
             ),
         );
         if joining.is_none() {

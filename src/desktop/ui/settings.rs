@@ -586,7 +586,7 @@ fn notifications_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 s.row(|ui| {
                     kit::tone_note(
                         ui,
-                        "Notifications: not running. The notification center starts with the Apassy window and the broker. Events stay in the inbox.",
+                        "Notifications: not running. The notification center starts with the Apassy window and the broker. Questions still wait in Decisions.",
                         Tone::Warning,
                     );
                 });
@@ -611,7 +611,7 @@ fn notifications_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 s.row(|ui| {
                     kit::tone_note(
                         ui,
-                        format!("{failed} notification(s) failed. The events stay in the inbox."),
+                        format!("{failed} notification(s) failed. Questions still wait in Decisions, and the other events are in the activity log (apassy activity)."),
                         Tone::Critical,
                     );
                 });
@@ -1281,7 +1281,7 @@ fn command_line_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         ui,
         Some("Command line"),
         Some(
-            "The apassy command talks to this window. apassy login asks you here first. Commands never show a secret value, and grants, approvals, and new tokens ask you here each time.",
+            "The apassy command talks to this window. apassy login asks you here first. Commands never show a secret value. Approvals, new tokens, and changes that give access ask you here each time. Agents need no grant: the bouncer decides each use.",
         ),
         |s| {
             s.row(|ui| {

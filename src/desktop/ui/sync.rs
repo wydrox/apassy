@@ -1541,7 +1541,7 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         ui,
         Some("Sync"),
         Some(
-            "Apassy keeps an encrypted copy of a vault in a folder that iCloud Drive, Dropbox, Google Drive, OneDrive, Syncthing, or a network share keeps in step, or on the Apassy relay. Changes from each Mac merge by credential. Agents, grants, rules, and activity stay on each Mac: register the agents of each Mac there. Turning sync off keeps the synced copy.",
+            "Apassy keeps an encrypted copy of a vault in a folder that iCloud Drive, Dropbox, Google Drive, OneDrive, Syncthing, or a network share keeps in step, or on the Apassy relay. Changes from each Mac merge by credential. Agents, their exceptions, your answers, and the activity stay on each Mac: connect the agents of each Mac there. Turning sync off keeps the synced copy.",
         ),
         |s| {
             for entry in app.vault_list.registry.entries() {

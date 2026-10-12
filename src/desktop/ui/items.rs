@@ -598,7 +598,7 @@ fn review_notice(app: &mut DesktopApp, ui: &mut egui::Ui) {
         Tone::Warning,
         "Review after restore",
         Some(
-            "This vault came from a backup. Agents cannot use these credentials until you confirm their agent settings: the declaration, the environment variable, and the connector. The restore also revoked every agent. Register the agents again.",
+            "This vault came from a backup. Agents cannot use these credentials until you confirm their agent settings: the declaration, the environment variable, and the connector. The restore also revoked every agent. Connect the agents again.",
         ),
         |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -3715,7 +3715,7 @@ pub(super) fn connector_sheet(app: &mut DesktopApp, ctx: &egui::Context) -> bool
             ui,
             None,
             Some(
-                "Use https://, or http:// on this computer only. The broker does not follow redirects. You let each agent use an operation in Agents.",
+                "Use https://, or http:// on this computer only. The broker does not follow redirects. The app has no switch for an operation: let an agent use one with apassy grant operation AGENT ITEM OPERATION.",
             ),
             |s| {
                 s.labeled(

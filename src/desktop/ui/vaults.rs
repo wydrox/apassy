@@ -692,7 +692,7 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         ui,
         Some("Vaults"),
         Some(
-            "Each vault is its own encrypted file with its own passphrase, agents, grants, and rules. One vault is open at a time. A switch locks the open vault and ends the runs that wait for you. \"Remove from list\" never deletes a file. A lock ends every run that waits for you. The broker refuses all agent requests while the vault is locked.",
+            "Each vault is its own encrypted file with its own passphrase, agents, and answers. One vault is open at a time. A switch locks the open vault and ends the runs that wait for you. \"Remove from list\" never deletes a file. A lock ends every run that waits for you. The broker refuses all agent requests while the vault is locked.",
         ),
         |s| {
             for entry in app.vault_list.registry.entries() {

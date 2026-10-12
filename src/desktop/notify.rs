@@ -72,7 +72,9 @@ impl Delivery {
             Self::Sending => "Notification: sending.".to_owned(),
             Self::Delivered => "Notification: delivered.".to_owned(),
             Self::Failed(text) => {
-                format!("Notification failed: {text} The event stays in this inbox.")
+                format!(
+                    "Notification failed: {text} A question still waits in Decisions; other events are in the activity log."
+                )
             }
         }
     }
@@ -164,17 +166,17 @@ impl ChannelState {
         match self {
             Self::Unknown => "Apassy is checking the notification settings.".to_owned(),
             Self::Asking => {
-                "macOS asks you now: select \"Allow\" in the Apassy notification at the top right of the screen. Until then, events stay in the inbox only.".to_owned()
+                "macOS asks you now: select \"Allow\" in the Apassy notification at the top right of the screen. Until then, questions wait in Decisions without a notification.".to_owned()
             }
             Self::Problem(text) => {
-                format!("Notifications do not work: {text} Events stay in the inbox.")
+                format!("Notifications do not work: {text} Questions still wait in Decisions.")
             }
             Self::Ready(status) => match status.authorization {
                 NotificationAuthorization::NotDetermined => {
-                    "You did not allow notifications yet. Select \"Allow notifications\". Until then, events stay in the inbox only.".to_owned()
+                    "You did not allow notifications yet. Select \"Allow notifications\". Until then, questions wait in Decisions without a notification.".to_owned()
                 }
                 NotificationAuthorization::Denied => {
-                    "Notifications are not allowed for Apassy. macOS does not ask again: allow them in System Settings > Notifications > Apassy. Events stay in the inbox.".to_owned()
+                    "Notifications are not allowed for Apassy. macOS does not ask again: allow them in System Settings > Notifications > Apassy. Questions still wait in Decisions.".to_owned()
                 }
                 NotificationAuthorization::Authorized | NotificationAuthorization::Provisional
                     if status.can_deliver() =>
@@ -187,10 +189,10 @@ impl ChannelState {
                     format!("Notifications are allowed. {banners}")
                 }
                 NotificationAuthorization::Authorized | NotificationAuthorization::Provisional => {
-                    "Notifications are allowed, but alerts and Notification Center are off for Apassy. Turn them on in System Settings > Notifications > Apassy. Events stay in the inbox.".to_owned()
+                    "Notifications are allowed, but alerts and Notification Center are off for Apassy. Turn them on in System Settings > Notifications > Apassy. Questions still wait in Decisions.".to_owned()
                 }
                 NotificationAuthorization::Unknown => {
-                    "macOS gave an unknown notification permission. Events stay in the inbox.".to_owned()
+                    "macOS gave an unknown notification permission. Questions still wait in Decisions.".to_owned()
                 }
             },
         }
