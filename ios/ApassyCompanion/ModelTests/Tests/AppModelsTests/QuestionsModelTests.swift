@@ -419,27 +419,18 @@ struct QuestionsModelTests {
         #expect(await fixture.model.takeFocus(stillFree: { true }) == nil)
     }
 
-    @Test("the target is picked before the refresh; a question that arrives with it opens only when none waited")
-    func notificationPicksBeforeTheRefresh() async {
+    @Test("the target is picked after the refresh: the question the notification announced opens")
+    func notificationOpensTheQuestionAfterTheRefresh() async {
         let fixture = Fixture()
         let older = PreviewVaultService.sampleQuestion(qid: "older", now: Date().addingTimeInterval(-60))
         await fixture.service.setQuestions(enabled: true, questions: [older])
         await fixture.model.refresh()
-        // A newer question reaches the relay while the list is read again: the one the owner was
-        // told about (the newest when the notification opened) stays the target.
+        // The list on the iPhone is old: the newer question reaches it only with the refresh.
         let newer = PreviewVaultService.sampleQuestion(qid: "newer")
         await fixture.service.setQuestions(enabled: true, questions: [older, newer])
         fixture.push.open()
-        #expect(await fixture.model.takeFocus(stillFree: { true }) == "older")
+        #expect(await fixture.model.takeFocus(stillFree: { true }) == "newer")
         #expect(fixture.model.waiting.count == 2)
-
-        // Nothing waited before the refresh: the newest after it opens.
-        let empty = Fixture()
-        await empty.service.setQuestions(enabled: true, questions: [])
-        await empty.model.refresh()
-        await empty.service.setQuestions(enabled: true, questions: [older, newer])
-        empty.push.open()
-        #expect(await empty.model.takeFocus(stillFree: { true }) == "newer")
     }
 
     @Test("an opened notification opens nothing when the owner opened something during the refresh")

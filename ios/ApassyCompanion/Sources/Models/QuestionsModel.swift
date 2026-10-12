@@ -425,22 +425,17 @@ final class QuestionsModel {
         focusRequests += 1
     }
 
-    /// The question to open after a notification, once, or nil. The target is picked before the
-    /// list is read again: the newest question that waits now, or, when none waits yet (the push
-    /// came before the list had it) or it ended meanwhile, the newest after the refresh.
-    /// `stillFree` is asked after the refresh: false when the owner opened something meanwhile, and
-    /// then nothing opens, so a question never changes under the owner's finger.
+    /// The question to open after a notification, once, or nil: the newest that waits after the
+    /// list is read again, so the question the notification announced opens even when the list
+    /// was old. `stillFree` is asked after the refresh: false when the owner opened something
+    /// meanwhile, and then nothing opens, so a question never changes under the owner's finger.
     func takeFocus(stillFree: () -> Bool) async -> String? {
         guard focusPending else { return nil }
         focusPending = false
-        let early = newestWaiting
         await refresh()
         guard stillFree() else { return nil }
-        if let early, waiting.contains(where: { $0.qid == early }) { return early }
-        return newestWaiting
+        return waiting.max { $0.createdAt < $1.createdAt }?.qid
     }
-
-    private var newestWaiting: String? { waiting.max { $0.createdAt < $1.createdAt }?.qid }
 
     // MARK: Notifications
 
