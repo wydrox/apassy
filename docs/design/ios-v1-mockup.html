@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apassy for iPhone — mockups</title>
+<style>
+:root{
+  --bg:#f2f2f7;--card:#fff;--label:#000;--sec:rgba(60,60,67,.6);--ter:rgba(60,60,67,.3);
+  --sep:rgba(60,60,67,.18);--fill:rgba(120,120,128,.12);--accent:#007aff;--red:#ff3b30;--orange:#ff9500;--green:#34c759;
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:28px 18px;padding:4px 0 10px;justify-items:center}
+figure{margin:0;display:flex;flex-direction:column;align-items:center;gap:10px}
+figcaption{font-size:13px;line-height:1.35;color:var(--muted-foreground,#666);max-width:330px;text-align:center}
+figcaption b{color:var(--foreground,#111);display:block;font-size:14px;margin-bottom:2px}
+.phone{width:390px;height:844px;zoom:.82;border-radius:54px;background:var(--bg);position:relative;overflow:hidden;
+  box-shadow:0 0 0 11px #1c1c1e,0 0 0 12.5px #3a3a3c,0 20px 50px rgba(0,0,0,.35);color:var(--label);font-size:17px;line-height:1.29}
+.island{position:absolute;top:11px;left:50%;transform:translateX(-50%);width:124px;height:36px;background:#000;border-radius:20px;z-index:20}
+.status{height:54px;display:flex;align-items:flex-end;justify-content:space-between;padding:0 30px 8px 44px;font-weight:600;font-size:16px;position:relative;z-index:10}
+.status .r{display:flex;gap:6px;align-items:center}
+.status svg{height:12px}
+.scroll{position:absolute;top:54px;left:0;right:0;bottom:0;overflow:hidden;padding-bottom:110px}
+.nav{display:flex;align-items:center;justify-content:space-between;padding:4px 16px 0;height:44px}
+.nav .back{color:var(--accent);display:flex;align-items:center;gap:2px;font-size:17px}
+.nav .icons{display:flex;gap:10px;margin-left:auto}
+.gbtn{width:38px;height:38px;border-radius:50%;background:rgba(255,255,255,.75);box-shadow:0 1px 3px rgba(0,0,0,.08),inset 0 0 0 .5px rgba(0,0,0,.06);display:grid;place-items:center;color:var(--label);backdrop-filter:blur(20px)}
+.gbtn svg{width:19px;height:19px}
+.gbtn.acc{background:var(--accent);color:#fff}
+.big{font-size:34px;font-weight:700;letter-spacing:.2px;padding:2px 16px 6px}
+.subt{color:var(--sec);font-size:15px;padding:0 16px 10px;margin-top:-4px}
+.search{margin:4px 16px 12px;height:38px;border-radius:12px;background:var(--fill);display:flex;align-items:center;gap:7px;padding:0 10px;color:var(--sec)}
+.search svg{width:16px;height:16px}
+.sh{font-size:13px;color:var(--sec);text-transform:uppercase;letter-spacing:.2px;padding:14px 32px 6px}
+.sh.big2{text-transform:none;font-size:20px;font-weight:700;color:var(--label);padding:16px 20px 8px;letter-spacing:0}
+.list{margin:0 16px;background:var(--card);border-radius:26px;overflow:hidden}
+.row{display:flex;align-items:center;gap:12px;padding:11px 16px;min-height:52px;position:relative}
+.row+.row::before{content:"";position:absolute;top:0;right:0;left:60px;border-top:.5px solid var(--sep)}
+.list.plain .row+.row::before{left:16px}
+.row .tx{flex:1;min-width:0}
+.row .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .s{font-size:15px;color:var(--sec);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .v{color:var(--sec);text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60%}
+.chev{color:var(--ter);font-size:20px;font-weight:500}
+.ic{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:#fff;flex:none}
+.ic svg{width:17px;height:17px}
+.tile{width:38px;height:38px;border-radius:10px;display:grid;place-items:center;color:#fff;font-weight:700;font-size:17px;flex:none;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.1)}
+.tile.l{width:72px;height:72px;border-radius:18px;font-size:32px}
+.tile.s{width:26px;height:26px;border-radius:7px;font-size:12px}
+.tile svg{width:20px;height:20px}.tile.l svg{width:36px;height:36px}
+.ava{width:38px;height:38px;border-radius:50%;display:grid;place-items:center;color:#fff;font-weight:600;flex:none}
+.ava.l{width:72px;height:72px;font-size:30px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--red);flex:none}
+.cnt{color:var(--sec)}
+.badge{background:var(--red);color:#fff;font-size:13px;font-weight:600;border-radius:10px;min-width:20px;height:20px;padding:0 6px;display:grid;place-items:center}
+.tm{color:var(--orange);font-variant-numeric:tabular-nums;font-size:15px;font-weight:500}
+.cap{font-size:12px;font-weight:600;border-radius:7px;padding:2px 8px;background:var(--fill);color:var(--sec);display:inline-flex;gap:4px;align-items:center}
+.cap.red{background:rgba(255,59,48,.12);color:#d70015}
+.cap svg{width:12px;height:12px}
+.hdr{display:flex;flex-direction:column;align-items:center;text-align:center;gap:8px;padding:6px 16px 18px}
+.hdr h1{font-size:24px;font-weight:700;margin:4px 0 0;line-height:1.15}
+.hdr .s{color:var(--sec);font-size:15px}
+.mono{font-family:var(--mono);font-size:15px}
+.secret{letter-spacing:3px;font-size:17px}
+.pill{border:0;border-radius:16px;background:var(--fill);color:var(--accent);font-weight:600;font-size:15px;padding:5px 12px}
+.toggle{width:51px;height:31px;border-radius:16px;background:#e9e9ea;position:relative;flex:none}
+.toggle::after{content:"";position:absolute;left:2px;top:2px;width:27px;height:27px;border-radius:50%;background:#fff;box-shadow:0 3px 8px rgba(0,0,0,.15)}
+.toggle.on{background:var(--green)}.toggle.on::after{left:22px}
+.foot{font-size:13px;color:var(--sec);padding:7px 32px 0;line-height:1.35}
+.cmd{font-family:var(--mono);font-size:14px;background:#f2f2f7;border-radius:12px;padding:10px 12px;margin:4px 0;word-break:break-all;line-height:1.4}
+.st{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;color:#fff;flex:none}
+.st svg{width:12px;height:12px}
+.st.ok{background:var(--green)}.st.you{background:var(--accent)}.st.no{background:var(--red)}
+/* liquid glass tab bar */
+.tabbar{position:absolute;left:16px;right:16px;bottom:24px;height:62px;display:flex;gap:10px;align-items:center;z-index:15}
+.tabs{flex:1;height:62px;border-radius:31px;background:rgba(255,255,255,.72);backdrop-filter:blur(24px) saturate(180%);box-shadow:0 6px 24px rgba(0,0,0,.12),inset 0 0 0 .5px rgba(255,255,255,.8),inset 0 0 0 1px rgba(0,0,0,.04);display:flex;align-items:center;justify-content:space-around;padding:0 6px}
+.tab{display:flex;flex-direction:column;align-items:center;gap:1px;font-size:10px;font-weight:600;color:#1c1c1e;width:76px;height:52px;justify-content:center;border-radius:26px;position:relative}
+.tab svg{width:24px;height:24px}
+.tab.on{color:var(--accent);background:rgba(120,120,128,.12)}
+.tab .bd{position:absolute;top:3px;right:16px;background:var(--red);color:#fff;font-size:11px;border-radius:9px;min-width:17px;height:17px;display:grid;place-items:center;padding:0 4px}
+.tabs-search{width:62px;height:62px;border-radius:31px;background:rgba(255,255,255,.72);backdrop-filter:blur(24px);box-shadow:0 6px 24px rgba(0,0,0,.12),inset 0 0 0 .5px rgba(255,255,255,.8);display:grid;place-items:center;color:#1c1c1e}
+.tabs-search svg{width:24px;height:24px}
+/* bottom action glass */
+.actions{position:absolute;left:12px;right:12px;bottom:24px;border-radius:32px;background:rgba(255,255,255,.78);backdrop-filter:blur(24px) saturate(180%);box-shadow:0 8px 30px rgba(0,0,0,.14),inset 0 0 0 .5px rgba(255,255,255,.8);padding:12px;z-index:15;display:flex;flex-direction:column;gap:8px}
+.actions .row2{display:flex;gap:8px}
+.btn{flex:1;height:50px;border-radius:25px;border:0;font-size:17px;font-weight:600;display:grid;place-items:center}
+.btn.pri{background:var(--accent);color:#fff}
+.btn.sec{background:rgba(120,120,128,.14);color:var(--accent)}
+.btn.des{background:rgba(255,59,48,.12);color:#d70015}
+.actions .note{font-size:12px;color:var(--sec);text-align:center}
+/* sheet */
+.sheet{position:absolute;left:0;right:0;bottom:0;top:62px;background:var(--bg);border-radius:38px 38px 0 0;box-shadow:0 -8px 30px rgba(0,0,0,.18);z-index:16;padding-top:8px}
+.grab{width:36px;height:5px;border-radius:3px;background:var(--ter);margin:0 auto 6px}
+.dim{position:absolute;inset:0;background:rgba(0,0,0,.25);z-index:15}
+.shnav{display:flex;align-items:center;justify-content:space-between;padding:6px 16px 10px}
+.shnav b{font-size:17px}
+.paste{margin:0 16px;background:var(--card);border-radius:22px;padding:14px 16px;min-height:96px;font-family:var(--mono);font-size:15px;color:var(--sec);line-height:1.5}
+.chk{width:24px;height:24px;border-radius:50%;background:var(--accent);display:grid;place-items:center;color:#fff;flex:none}
+.chk svg{width:13px;height:13px}
+.chk.off{background:transparent;box-shadow:inset 0 0 0 1.5px var(--ter)}
+/* lock screen */
+.lock{background:linear-gradient(160deg,#5b7cfa 0%,#9b5de5 45%,#f15bb5 100%);color:#fff}
+.lock .clock{text-align:center;margin-top:40px}
+.lock .clock .d{font-size:20px;font-weight:600;opacity:.9}
+.lock .clock .t{font-size:96px;font-weight:700;letter-spacing:-2px;line-height:1}
+.notif{margin:200px 12px 0;border-radius:24px;background:rgba(255,255,255,.55);backdrop-filter:blur(30px);color:#000;padding:12px 14px;display:flex;gap:11px;box-shadow:0 4px 20px rgba(0,0,0,.12)}
+.notif .ai{width:38px;height:38px;border-radius:9px;background:#0f1115;display:grid;place-items:center;color:#fff;font-weight:800;flex:none}
+.notif .tx{flex:1;min-width:0}.notif .tt{display:flex;justify-content:space-between;font-size:15px;font-weight:600}.notif .tt span{font-weight:400;color:rgba(0,0,0,.5);font-size:13px}
+.notif .b{font-size:15px}
+.faceid{position:absolute;left:50%;top:68%;transform:translate(-50%,-50%);width:160px;height:160px;border-radius:32px;background:rgba(242,242,247,.92);backdrop-filter:blur(20px);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;z-index:30;box-shadow:0 10px 40px rgba(0,0,0,.2);color:#000;font-size:15px}
+.faceid svg{width:64px;height:64px;color:var(--accent)}
+.banner{margin:0 16px 12px;background:var(--card);border-radius:22px;padding:12px 14px;display:flex;gap:12px;align-items:center}
+.banner .bi{width:34px;height:34px;border-radius:9px;background:#fff4e5;color:var(--orange);display:grid;place-items:center;flex:none}
+.banner .bi svg{width:20px;height:20px}
+.banner .tx{flex:1;font-size:15px}.banner .tx b{display:block;font-size:16px}
+</style>
+</head>
+<body>
+<div class="gallery" id="g"></div>
+<script>
+const ic=(p,x='')=>`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" ${x}>${p}</svg>`;
+const I={
+ key:ic('<circle cx="7.5" cy="12" r="3.5"/><path d="M11 12h10M17 12v3M20 12v2"/>'),
+ folder:ic('<path d="M3.5 7.5a2 2 0 0 1 2-2h3.6l2 2h7.4a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/>'),
+ people:ic('<circle cx="9" cy="8.5" r="3.2"/><path d="M3 19c.8-3.2 3.2-5 6-5s5.2 1.8 6 5"/><circle cx="17" cy="9.5" r="2.4"/><path d="M16.5 14.2c2.3.2 3.8 1.6 4.5 4.3"/>'),
+ checkc:ic('<circle cx="12" cy="12" r="9"/><path d="M8 12.3l2.8 2.8L16.2 9.5"/>'),
+ check:ic('<path d="M5 12.5l4.5 4.5L19 7.5"/>','stroke-width="3"'),
+ agent:ic('<rect x="4.5" y="7" width="15" height="12" rx="3"/><path d="M12 3.5V7M9.5 12.5v1M14.5 12.5v1"/>'),
+ search:ic('<circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.3-4.3"/>','stroke-width="2.2"'),
+ plus:ic('<path d="M12 5v14M5 12h14"/>','stroke-width="2.2"'),
+ more:ic('<circle cx="6" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="18" cy="12" r="1.4"/>','fill="currentColor"'),
+ shield:ic('<path d="M12 3l7 3v5.5c0 4.5-3 8-7 9.5-4-1.5-7-5-7-9.5V6z"/><path d="M9 12l2 2 4-4"/>'),
+ db:ic('<ellipse cx="12" cy="6" rx="7" ry="2.8"/><path d="M5 6v12c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8V6M5 12c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8"/>'),
+ person:ic('<circle cx="12" cy="8.5" r="3.6"/><path d="M5 20c1.2-3.8 3.8-5.5 7-5.5s5.8 1.7 7 5.5"/>','stroke-width="2.6"'),
+ x:ic('<path d="M7 7l10 10M17 7L7 17"/>','stroke-width="3"'),
+ gear:ic('<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>','stroke-width="1.6"'),
+ laptop:ic('<rect x="5" y="5" width="14" height="10" rx="1.5"/><path d="M3 18.5h18"/>'),
+ phone:ic('<rect x="7.5" y="3" width="9" height="18" rx="2"/><path d="M11 18h2"/>'),
+ lock:ic('<rect x="5.5" y="10.5" width="13" height="10" rx="2"/><path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3"/>'),
+ sliders:ic('<path d="M5 7h9M18 7h1M5 17h3M12 17h7"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>'),
+ bulb:ic('<path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z"/>'),
+ face:ic('<path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2"/><path d="M9 9v1.5M15 9v1.5M12 9v4h-1M9.5 16c1.5 1 3.5 1 5 0"/>','stroke-width="1.6"'),
+ clip:ic('<rect x="7" y="4" width="10" height="4" rx="1"/><path d="M7 6H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-1"/>'),
+ wifi:ic('<path d="M4 9.5a12 12 0 0 1 16 0M7 13a7.5 7.5 0 0 1 10 0M10 16.5a3 3 0 0 1 4 0"/>'),
+};
+const PV={Anthropic:['#cc785c','A'],GitHub:['#1f2328','G'],Stripe:['#635bff','S'],Postgres:['#336791',null,'db'],Cloudflare:['#f48120','C'],OpenAI:['#10a37f','O'],Netflix:['#e50914','N'],Resend:['#111','R'],Sentry:['#362d59','S']};
+const tile=(p,c='')=>{const d=PV[p];return `<div class="tile ${c}" style="background:${d[0]}">${d[1]||I[d[2]]}</div>`};
+const ava=(n,col,c='')=>`<div class="ava ${c}" style="background:${col}">${n[0]}</div>`;
+const status=`<div class="island"></div><div class="status"><span>9:41</span><span class="r"><svg viewBox="0 0 18 12"><rect x="0" y="8" width="3" height="4" rx="1" fill="currentColor"/><rect x="5" y="5" width="3" height="7" rx="1" fill="currentColor"/><rect x="10" y="2" width="3" height="10" rx="1" fill="currentColor"/><rect x="15" y="0" width="3" height="12" rx="1" fill="currentColor"/></svg><svg viewBox="0 0 26 12"><rect x=".5" y=".5" width="22" height="11" rx="3.5" fill="none" stroke="currentColor" opacity=".4"/><rect x="2" y="2" width="17" height="8" rx="2" fill="currentColor"/></svg></span></div>`;
+const tabbar=(on,badge=3)=>`<div class="tabbar"><div class="tabs">
+ <div class="tab ${on==='vault'?'on':''}">${I.key}Vault</div>
+ <div class="tab ${on==='dec'?'on':''}">${I.checkc}Decisions${badge?`<span class="bd">${badge}</span>`:''}</div>
+ <div class="tab ${on==='agents'?'on':''}">${I.agent}Agents</div></div>
+ <div class="tabs-search">${I.search}</div></div>`;
+const row=(l,r='',ch=false,extra='')=>`<div class="row" ${extra}>${l}${r}${ch?'<span class="chev">›</span>':''}</div>`;
+const S=[];
+
+/* 1 Vault root */
+S.push(['Vault','The root of the vault: Watchtower as a card, folders and shared vaults like the Mac sidebar. "+" opens Paste.',`
+<div class="phone">${status}<div class="scroll">
+ <div class="nav"><div class="gbtn">${I.gear}</div><div class="icons"><div class="gbtn acc">${I.plus}</div></div></div>
+ <div class="big">Vault</div><div class="subt">Personal · 11 items · unlocked</div>
+ <div class="banner"><div class="bi" style="background:#e8f7ec;color:#1e9e44">${I.shield}</div><div class="tx"><b>Watchtower</b>2 weak passwords · 1 reused</div><span class="chev">›</span></div>
+ <div class="list">
+  ${row(`<div class="ic" style="background:var(--accent)">${I.key}</div><div class="tx"><div class="t">All credentials</div></div>`,'<span class="cnt">11</span>',true)}
+ </div>
+ <div class="sh">Folders</div>
+ <div class="list">
+  ${row(`<div class="ic" style="background:#5ac8fa">${I.folder}</div><div class="tx"><div class="t">Work</div><div class="s">Acme · Apassy</div></div>`,'<span class="cnt">5</span>',true)}
+  ${row(`<div class="ic" style="background:#5ac8fa">${I.folder}</div><div class="tx"><div class="t">Infra</div></div>`,'<span class="cnt">3</span>',true)}
+  ${row(`<div class="ic" style="background:#5ac8fa">${I.folder}</div><div class="tx"><div class="t">Side projects</div></div>`,'<span class="cnt">1</span>',true)}
+  ${row(`<div class="ic" style="background:#5ac8fa">${I.folder}</div><div class="tx"><div class="t">Home</div></div>`,'<span class="cnt">2</span>',true)}
+ </div>
+ <div class="sh">Shared</div>
+ <div class="list">
+  ${row(`<div class="ic" style="background:#0a84ff;font-weight:700;font-size:15px">A</div><div class="tx"><div class="t">Acme team</div><div class="s">3 people</div></div>`,'<span class="cnt">6</span>',true)}
+  ${row(`<div class="ic" style="background:#ff375f;font-weight:700;font-size:15px">F</div><div class="tx"><div class="t">Family</div><div class="s">2 people</div></div>`,'<span class="cnt">3</span>',true)}
+ </div>
+</div>${tabbar('vault')}</div>`]);
+
+/* 2 Folder list */
+S.push(['Folder','A folder lists its credentials with provider tiles. Red dot = production, people icon = shared.',`
+<div class="phone">${status}<div class="scroll">
+ <div class="nav"><span class="back">‹ Work</span><div class="icons"><div class="gbtn">${I.more}</div><div class="gbtn acc">${I.plus}</div></div></div>
+ <div class="big">Acme</div><div class="subt">Work › Acme · 3 items</div>
+ <div class="list">
+  ${row(`${tile('Stripe')}<div class="tx"><div class="t">Stripe live</div><div class="s">Secret key · Acme team</div></div>`,'<span class="dot"></span>',true)}
+  ${row(`${tile('Stripe')}<div class="tx"><div class="t">Stripe test</div><div class="s">Secret key · Acme team</div></div>`,'',true)}
+  ${row(`${tile('Postgres')}<div class="tx"><div class="t">Billing database</div><div class="s">billing_rw</div></div>`,'<span class="dot"></span>',true)}
+ </div>
+ <div class="foot">Agents see these names, never the values. The bouncer decides each use.</div>
+</div>${tabbar('vault')}</div>`]);
+
+/* 3 Credential detail */
+S.push(['Credential','Same groups as the Mac: secret, where it lives, agent use, rules from your answers, options.',`
+<div class="phone">${status}<div class="scroll">
+ <div class="nav"><span class="back">‹ Acme</span><div class="icons"><div class="gbtn">${I.people}</div><div class="gbtn">${I.more}</div></div></div>
+ <div class="hdr">${tile('Stripe','l')}<h1>Stripe live</h1><div class="s">Stripe · Secret key</div><div style="display:flex;gap:6px"><span class="cap red">Production</span><span class="cap">${I.people}Acme team</span></div></div>
+ <div class="list plain">
+  ${row(`<div class="tx"><div class="t">Secret</div></div>`,`<span class="secret">••••••••••</span><button class="pill">Show</button>`)}
+  ${row(`<div class="tx"><div class="t">Variable</div></div>`,`<span class="v mono" style="font-size:13px">STRIPE_SECRET_KEY</span>`)}
+  ${row(`<div class="tx"><div class="t">Folder</div></div>`,`<span class="v">Work › Acme</span>`,true)}
+ </div>
+ <div class="sh">Agent use</div>
+ <div class="list plain">
+  ${row(`<span class="st ok">${I.check}</span><div class="tx"><div class="t">Claude Code in apassy</div><div class="s mono" style="font-size:13px">stripe payouts list</div></div>`,'<span class="cnt" style="font-size:14px">2h</span>')}
+  ${row(`<span class="st you">${I.person}</span><div class="tx"><div class="t">Codex in acme-billing</div><div class="s">You allowed once</div></div>`,'<span class="cnt" style="font-size:14px">1d</span>')}
+ </div>
+ <div class="sh">Rules from your answers</div>
+ <div class="list plain">
+  ${row(`<div class="tx"><div class="t">Allow read in acme-billing</div><div class="s">All agents · production</div></div>`,'<button class="pill" style="color:#d70015">Remove</button>')}
+ </div>
+</div>${tabbar('vault')}</div>`]);
+
+/* 4 Paste */
+S.push(['New credential: paste, then Add','Two steps. A .env with several lines gives one row each; uncheck what you do not want.',`
+<div class="phone">${status}<div class="dim"></div><div class="sheet"><div class="grab"></div>
+ <div class="shnav"><span style="color:var(--accent)">Cancel</span><b>New Credential</b><span style="color:var(--accent);font-weight:600">Add 3</span></div>
+ <div class="paste">RESEND_API_KEY=re_••••••••<br>STRIPE_SECRET_KEY=sk_test_••••<br>SENTRY_AUTH_TOKEN=sntrys_••••</div>
+ <div style="display:flex;gap:8px;padding:10px 16px"><button class="pill">${''}Paste from Clipboard</button><button class="pill">Scan QR</button></div>
+ <div class="sh">Found</div>
+ <div class="list">
+  ${row(`<span class="chk">${I.check}</span>${tile('Resend','s')}<div class="tx"><div class="t">Resend API key</div><div class="s mono" style="font-size:12px">RESEND_API_KEY · api.resend.com</div></div>`)}
+  ${row(`<span class="chk">${I.check}</span>${tile('Stripe','s')}<div class="tx"><div class="t">Stripe test</div><div class="s mono" style="font-size:12px">STRIPE_SECRET_KEY · real value</div></div>`)}
+  ${row(`<span class="chk off"></span>${tile('Sentry','s')}<div class="tx"><div class="t">Sentry auth token</div><div class="s mono" style="font-size:12px">SENTRY_AUTH_TOKEN</div></div>`)}
+ </div>
+ <div class="list plain" style="margin-top:12px">${row(`<div class="tx"><div class="t">Folder</div></div>`,`<span class="v">Side projects</span>`,true)}</div>
+ <div class="foot">Everything else is set automatically. Recognition runs on this iPhone.</div>
+</div></div>`]);
+
+/* 5 Decisions list */
+S.push(['Decisions','What waits for you: questions with a timer, requests from agents, suggestions. The tab badge counts what blocks agents.',`
+<div class="phone">${status}<div class="scroll">
+ <div class="nav"><div class="icons"></div></div>
+ <div class="big">Decisions</div><div class="subt">7 by you · 128 automatic this week</div>
+ <div class="sh">Waiting</div>
+ <div class="list">
+  ${row(`${ava('C','#d97757')}<div class="tx"><div class="t">Stripe live</div><div class="s">Claude Code · acme-billing</div></div>`,'<span class="dot"></span><span class="tm">4:52</span>',true)}
+  ${row(`${ava('C','#10a37f')}<div class="tx"><div class="t">OpenAI API</div><div class="s">Codex · newsletter</div></div>`,'<span class="tm">3:59</span>',true)}
+ </div>
+ <div class="sh">Requests</div>
+ <div class="list">
+  ${row(`${ava('C','#10a37f')}<div class="tx"><div class="t">Resend API key</div><div class="s">Codex · newsletter</div></div>`,'',true)}
+ </div>
+ <div class="sh">Suggestions</div>
+ <div class="list">
+  ${row(`${tile('OpenAI')}<div class="tx"><div class="t">OpenAI API</div><div class="s">Development or production?</div></div>`,'',true)}
+ </div>
+</div>${tabbar('dec')}</div>`]);
+
+/* 6 Decision detail */
+S.push(['Decision','Facts, the command and why you are asked. Allowing asks for Face ID; denying does not. "⋯" holds the agent exceptions.',`
+<div class="phone">${status}<div class="scroll">
+ <div class="nav"><span class="back">‹ Decisions</span><div class="icons"><div class="gbtn">${I.more}</div></div></div>
+ <div class="hdr">${ava('C','#d97757','l')}<h1>Claude Code wants to use Stripe live</h1><div class="s">acme-billing · <span class="tm">4:52</span> left</div></div>
+ <div class="list plain">
+  ${row(`<div class="tx"><div class="t">Credential</div></div>`,`${tile('Stripe','s')}<span class="cap red">Production</span>`)}
+  ${row(`<div class="tx"><div class="t">Action</div></div>`,`<span class="v">Read</span>`)}
+  ${row(`<div class="tx"><div class="t">Sends to</div></div>`,`<span class="v">api.stripe.com</span>`)}
+ </div>
+ <div class="sh">Command</div>
+ <div class="list plain"><div class="row"><div class="cmd" style="flex:1;margin:0">stripe payouts list --limit 10</div></div></div>
+ <div class="sh">Why you are asked</div>
+ <div class="list plain"><div class="row"><div class="tx" style="font-size:15px">This is a production key, and there is no rule for reading in acme-billing yet.</div></div></div>
+</div>
+<div class="actions"><button class="btn pri">Allow Read in acme-billing</button><div class="row2"><button class="btn des">Deny</button><button class="btn sec">Allow Once</button></div><div class="note">Remembered for all agents in acme-billing</div></div></div>`]);
+
+/* 7 Lock screen + Face ID */
+S.push(['From a notification','The push says only "A question is waiting". The content arrives encrypted and opens in Decisions after Face ID.',`
+<div class="phone lock">${status}
+ <div class="clock"><div class="d">Monday, October 12</div><div class="t">9:41</div></div>
+ <div class="notif"><div class="ai">a</div><div class="tx"><div class="tt">Apassy<span>now</span></div><div class="b">A question is waiting</div></div></div>
+ <div class="faceid">${I.face}Face ID</div>
+</div>`]);
+
+/* 8 Request detail */
+S.push(['Request from an agent','The agent never sees the value. The source is plain text with the domain shown, not a link.',`
+<div class="phone">${status}<div class="scroll">
+ <div class="nav"><span class="back">‹ Decisions</span></div>
+ <div class="hdr">${ava('C','#10a37f','l')}<h1>Codex asks for a Resend API key</h1><div class="s">newsletter</div></div>
+ <div class="list plain">
+  ${row(`<div class="tx"><div class="t">For</div></div>`,`<span class="v">Send the test email</span>`)}
+  ${row(`<div class="tx"><div class="t">Get it at</div></div>`,`<span class="v"><b style="color:#000">resend.com</b>/api-keys</span>`)}
+  ${row(`<div class="tx"><div class="t">Saves to</div></div>`,`<span class="v">Side projects</span>`,true)}
+ </div>
+ <div class="sh">Key</div>
+ <div class="paste" style="min-height:64px">re_••••••••••••••</div>
+ <div class="foot">Resend API key · RESEND_API_KEY · api.resend.com</div>
+</div>
+<div class="actions"><div class="row2"><button class="btn sec">Not Now</button><button class="btn pri">Save</button></div></div></div>`]);
+
+/* 9 Agents */
+S.push(['Agents','Read only. Exceptions come from your answers; removing one asks for Face ID.',`
+<div class="phone">${status}<div class="scroll">
+ <div class="nav"><div class="icons"><div class="gbtn acc">${I.plus}</div></div></div>
+ <div class="big">Agents</div><div class="subt">4 connected</div>
+ <div class="list">
+  ${row(`${ava('C','#d97757')}<div class="tx"><div class="t">Claude Code</div><div class="s">This Mac · 54 uses this week</div></div>`,'',true)}
+  ${row(`${ava('C','#10a37f')}<div class="tx"><div class="t">Codex</div><div class="s">This Mac · 21 uses</div></div>`,'<span class="cap">1 exception</span>',true)}
+  ${row(`${ava('T','#6e5ae6')}<div class="tx"><div class="t">T3 Code</div><div class="s">This Mac · 12 uses</div></div>`,'',true)}
+  ${row(`${ava('C','#24292f')}<div class="tx"><div class="t">CI on GitHub</div><div class="s">Remote · asks more often</div></div>`,'<span class="cap">2</span>',true)}
+ </div>
+ <div class="sh">CI on GitHub</div>
+ <div class="list plain">
+  ${row(`${tile('Stripe','s')}<div class="tx"><div class="t">Never: Stripe live</div></div>`,'<button class="pill" style="color:#d70015">Remove</button>')}
+  ${row(`${tile('Postgres','s')}<div class="tx"><div class="t">Never: Billing database</div></div>`,'<button class="pill" style="color:#d70015">Remove</button>')}
+ </div>
+ <div class="foot">Note for the bouncer: "CI agent for Acme, only the Stripe test key."</div>
+</div>${tabbar('agents')}</div>`]);
+
+/* 10 Settings */
+S.push(['Settings','The four groups of the Mac Settings window: General, Devices, Security, Advanced.',`
+<div class="phone">${status}<div class="scroll">
+ <div class="nav"><span class="back">‹ Vault</span></div>
+ <div class="big">Settings</div>
+ <div class="list">
+  ${row(`<div class="ic" style="background:#8e8e93">${I.gear}</div><div class="tx"><div class="t">General</div><div class="s">Vault, import, AutoFill</div></div>`,'',true)}
+  ${row(`<div class="ic" style="background:#007aff">${I.laptop}</div><div class="tx"><div class="t">Devices</div><div class="s">Questions go to every device</div></div>`,'',true)}
+  ${row(`<div class="ic" style="background:#34c759">${I.lock}</div><div class="tx"><div class="t">Security</div><div class="s">Face ID, auto-lock, backup</div></div>`,'',true)}
+  ${row(`<div class="ic" style="background:#5856d6">${I.sliders}</div><div class="tx"><div class="t">Advanced</div><div class="s">Watchtower, licenses</div></div>`,'',true)}
+ </div>
+ <div class="sh">Devices</div>
+ <div class="list plain">
+  ${row(`<div class="tx"><div class="t">Mac mini</div><div class="s">Online</div></div>`)}
+  ${row(`<div class="tx"><div class="t">This iPhone</div><div class="s">Push on · Face ID answers</div></div>`)}
+  ${row(`<div class="tx"><div class="t">Questions through the relay</div></div>`,'<span class="toggle on"></span>')}
+ </div>
+ <div class="foot">The relay carries encrypted questions and answers only. Your vault syncs through iCloud.</div>
+</div>${tabbar('vault')}</div>`]);
+
+document.getElementById('g').innerHTML=S.map(([t,c,h])=>`<figure>${h}<figcaption><b>${t}</b>${c}</figcaption></figure>`).join('');
+</script>
+</body>
+</html>

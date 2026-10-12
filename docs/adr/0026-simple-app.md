@@ -78,6 +78,19 @@ Settings opens as its own window from the sidebar and ⌘,. It has 4 tabs:
 
 Two steps: paste the first credential, and connect an agent. The "Get started" panel and the agent onboarding go away.
 
+### 8. The iPhone app
+
+The owner approved the iPhone mockup on 2026-10-12 ([docs/design/ios-v1-mockup.html](../design/ios-v1-mockup.html)). The iPhone follows the same model as the Mac:
+
+- **Tabs:** Vault, Decisions, Agents, and search, with the iOS 26 tab bar. Watchtower is a card at the top of Vault, not a tab (owner decision: "Tak").
+- **Vault:** "All credentials", the folders, and the shared vaults, as in the Mac sidebar. A folder lists its credentials with provider tiles; a red dot marks production.
+- **Adding:** "+" opens New Credential: paste (or scan a QR code), then Add. Detection runs on the iPhone.
+- **Editing:** the full editor stays (owner decision: "Pełen zakres").
+- **Credential:** the same groups as on the Mac: secret, variable, folder, agent use, rules from the owner's answers, options.
+- **Decisions:** Waiting, Requests, and Suggestions, with a fixed bottom bar: Allow ACTION in PROJECT, Deny, Allow Once. Allowing asks for Face ID; stricter answers do not. Questions arrive through the relay (ADR 0025 §3e), not only on the local network.
+- **Agents:** read only, with exceptions; removing an exception asks for Face ID.
+- **Settings:** General, Devices, Security, Advanced, like the Mac window.
+
 ## Implementation
 
 The work is split into parallel streams with disjoint files, after one foundation step for the schema. The plan and the review gates are in the PRs. There is no release until the owner asks.
