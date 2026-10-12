@@ -1,11 +1,11 @@
 import ApassyVaultKit
 import SwiftUI
 
+/// The tabs of the unlocked vault (ADR 0026 §8).
 enum VaultTab: Hashable {
-    case home
-    case items
-    case watchtower
-    case approvals
+    case vault
+    case decisions
+    case agents
     case search
 }
 
@@ -39,7 +39,7 @@ enum VaultSheet: Identifiable {
 @MainActor
 @Observable
 final class VaultUI {
-    var tab = VaultTab.home
+    var tab = VaultTab.vault
     /// Questions or the companion, in the Approvals tab.
     var approvals = ApprovalsHub.Source.questions
     var sheet: VaultSheet?
