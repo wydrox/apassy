@@ -8,8 +8,8 @@
 use apassy::contracts::CredentialKind;
 use apassy::vault::detect::{Detected, detect};
 use apassy::vault::{
-    DeclarationSource, EnvDelivery, Environment, ItemEventKind, ItemOrigin, OriginTool, RiskLevel,
-    Vault, VaultErrorKind,
+    DeclarationSource, EnvDelivery, Environment, ItemEventKind, ItemOrigin, OriginTool,
+    Reversibility, RiskLevel, Scope, Vault, VaultErrorKind,
 };
 use tempfile::TempDir;
 
@@ -193,6 +193,51 @@ fn a_postgres_url_is_a_database_item_with_fields_and_the_url_variable() {
         vault.declaration_provider(summary.id).unwrap().as_deref(),
         Some("postgres")
     );
+}
+
+#[test]
+fn a_loopback_url_is_stored_with_the_sensitive_defaults_and_default_sources() {
+    let dir = TempDir::new().unwrap();
+    let mut vault = vault(&dir);
+    // A production database through a tunnel or a proxy has this shape too.
+    let detected = one("DATABASE_URL=postgres://app:pw@127.0.0.1:5432/app");
+    let summary = vault.add_detected(&detected, None, None).expect("add");
+    let declaration = vault.declaration(summary.id).unwrap().expect("declared");
+    assert_eq!(declaration.environment, Environment::Production);
+    assert_eq!(declaration.risk, RiskLevel::High);
+    assert_eq!(declaration.scope, Scope::Admin);
+    assert_eq!(declaration.reversibility, Reversibility::Irreversible);
+    let sources = vault.declaration_sources(summary.id).unwrap();
+    for source in [
+        sources.environment,
+        sources.risk,
+        sources.scope,
+        sources.reversibility,
+    ] {
+        assert_eq!(source, DeclarationSource::Default);
+    }
+}
+
+#[test]
+fn an_uncertain_url_split_is_stored_as_one_secret() {
+    let dir = TempDir::new().unwrap();
+    let mut vault = vault(&dir);
+    let url = "postgres://app:Xk9Qz7#mQ2vL7@db.acme-corp.com:5432/app";
+    let summary = vault.add_detected(&one(url), None, None).expect("add");
+    assert_eq!(summary.title, "PostgreSQL database");
+    assert_eq!(summary.kind, CredentialKind::Custom);
+    let details = vault.details(summary.id).unwrap();
+    let fields: Vec<(&str, bool)> = details
+        .fields
+        .iter()
+        .map(|field| (field.name.as_str(), field.secret))
+        .collect();
+    assert_eq!(fields, [("url", true)]);
+    assert_eq!(vault.reveal(summary.id, "url").unwrap().expose(), url);
+    let binding = vault.env_binding(summary.id).unwrap().unwrap();
+    assert_eq!(binding.env_name, "DATABASE_URL");
+    assert_eq!(binding.field, "url");
+    assert_eq!(binding.delivery, EnvDelivery::Value);
 }
 
 #[test]

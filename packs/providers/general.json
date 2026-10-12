@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "provider_version": 1,
+  "provider_version": 2,
   "id": "general",
   "kind": "general",
   "label": "General",
@@ -38,9 +38,12 @@
     },
     {
       "id": "local-host",
-      "when": { "hosts": ["localhost", "127.0.0.1", "0.0.0.0", "host.docker.internal"] },
+      "when": {
+        "hosts": ["localhost", "127.0.0.1", "0.0.0.0", "host.docker.internal"],
+        "words": ["local"]
+      },
       "suggest": { "environment": "local", "risk": "low", "reversibility": "reversible" },
-      "reason": "A host of the item is this computer (localhost). Local data is for development."
+      "reason": "A name or a label says local, and a host of the item is this computer (localhost). Local data is for development. A localhost host alone says nothing: a tunnel or a proxy to production also has one."
     },
     {
       "id": "read-only-word",
