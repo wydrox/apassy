@@ -1,17 +1,17 @@
 #![cfg(feature = "vault")]
 
-//! Sync copies of schema 16 (before passkeys) on Macs of schema 17: adoption on a new
+//! Sync copies of schema 17 (before folders) on Macs of schema 18: adoption on a new
 //! Mac, a new passphrase, the folder, and the relay. Synthetic values only.
 //!
-//! Schema 17 adds no table and no column: a passkey is an item field with a reserved
-//! `passkey_` name. So a copy of schema 17 without passkey fields is the copy that the
-//! app of schema 16 pushed, except the two version marks and the content digest. The
-//! fixture changes the marks and stores a new digest. The digest is a copy of the
-//! app's algorithm (`content_digest` in `src/vault/sync.rs`); each fixture first checks
-//! the copy against the digest that the app stored.
+//! Schema 18 adds tables and one column of the local `agent` table. A copy of schema 18
+//! without them ([`SCHEMA18_ONLY`]) is the copy that the app of schema 17 pushed, except
+//! the two version marks and the content digest. The fixture drops them, changes the
+//! marks, and stores a new digest. The digest is a copy of the app's algorithm
+//! (`content_digest` in `src/vault/sync.rs`); each fixture first checks the copy against
+//! the digest that the app stored.
 //!
-//! The merge itself (the reserved names, a mixed file, a header-only change) is in
-//! `vault::merge::schema16_tests`.
+//! The merge itself (the values of schema 18 of this vault, a mixed file, a header-only
+//! change) is in `vault::merge::schema17_tests`.
 
 #[path = "common/fake_relay.rs"]
 mod fake_relay;
@@ -37,10 +37,20 @@ use tempfile::TempDir;
 const PASS: &str = "synthetic-upgrade-pass";
 const NEW_PASS: &str = "synthetic-upgrade-new-pass";
 const WRONG: &str = "synthetic-upgrade-wrong";
-const CURRENT: i64 = 17;
-const OLD: i64 = 16;
+const CURRENT: i64 = 18;
+const OLD: i64 = 17;
 
-// ---- Fixture: a copy of schema 16 ----
+/// What a copy of schema 18 has and a copy of schema 17 has not.
+const SCHEMA18_ONLY: &str = "
+DROP TABLE folder; DROP TABLE item_folder; DROP TABLE item_policy;
+DROP TABLE declaration_source; DROP TABLE shared_vault; DROP TABLE item_share;
+DROP TABLE vault_secret; DROP TABLE agent_exception; DROP TABLE owner_answer;
+DROP TABLE item_use; DROP TABLE item_origin; DROP TABLE credential_request;
+DROP TABLE correction; DROP TABLE owner_interaction;
+ALTER TABLE agent DROP COLUMN note;
+";
+
+// ---- Fixture: a copy of schema 17 ----
 
 /// The content digest of a sync copy: the algorithm of `content_digest` in
 /// `src/vault/sync.rs` ("apassy-sync-content-v1"), over `main`.
@@ -135,10 +145,11 @@ fn versions(path: &Path, passphrase: &str) -> (i64, i64) {
     (header, meta)
 }
 
-/// Give the closed sync copy at `path` (schema 17, written by the app) the version
-/// marks of `version`. `digest`: store the content digest of the changed rows, as the
-/// push of that app does; else the old digest stays. The copy must have no passkey
-/// field, and the stored digest must be the one of this copy of the algorithm.
+/// Give the closed sync copy at `path` (schema 18, written by the app) the version
+/// marks of `version`; an earlier version also loses the tables of schema 18.
+/// `digest`: store the content digest of the changed rows, as the push of that app does;
+/// else the old digest stays. The stored digest must be the one of this copy of the
+/// algorithm.
 fn set_schema(path: &Path, passphrase: &str, version: i64, digest: bool) {
     let conn = open_raw(path, passphrase);
     let marks: (i64, i64) = conn
@@ -154,14 +165,6 @@ fn set_schema(path: &Path, passphrase: &str, version: i64, digest: bool) {
         (CURRENT, CURRENT),
         "the app writes the current schema"
     );
-    let passkeys: i64 = conn
-        .query_row(
-            "SELECT count(*) FROM item_field WHERE substr(name, 1, 8) = 'passkey_'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(passkeys, 0, "a schema 16 copy has no passkey field");
     let stored: Vec<u8> = conn
         .query_row(
             "SELECT content_digest FROM sync_meta WHERE id = 1",
@@ -174,6 +177,9 @@ fn set_schema(path: &Path, passphrase: &str, version: i64, digest: bool) {
         content_digest(&conn),
         "the test digest is the algorithm of the app"
     );
+    if version < CURRENT {
+        conn.execute_batch(SCHEMA18_ONLY).unwrap();
+    }
     conn.execute_batch(&format!(
         "UPDATE vault_meta SET schema_version = {version} WHERE id = 1;
          PRAGMA user_version = {version};"
@@ -243,7 +249,7 @@ fn content(vault: &Vault) -> [u8; 32] {
     vault.sync_content(&SyncScope::vault()).unwrap()
 }
 
-/// Mac A with two items, unlocked, and a sync copy of it with schema 16 marks.
+/// Mac A with two items, unlocked, and a sync copy of it with schema 17 marks.
 fn mac_a_and_old_copy(root: &Path) -> (Vault, PathBuf) {
     let mut a = Vault::create(&root.join("a.db"), PASS).unwrap();
     a.unlock(PASS).unwrap();
@@ -258,7 +264,7 @@ fn mac_a_and_old_copy(root: &Path) -> (Vault, PathBuf) {
 // ---- Vault: adopt and new passphrase ----
 
 #[test]
-fn a_new_mac_adopts_a_schema16_copy_without_a_change_to_the_copy() {
+fn a_new_mac_adopts_a_schema17_copy_without_a_change_to_the_copy() {
     let root = TempDir::new().unwrap();
     let (mut a, copy) = mac_a_and_old_copy(root.path());
     let before = sha(&copy);
@@ -300,7 +306,7 @@ fn a_new_mac_adopts_a_schema16_copy_without_a_change_to_the_copy() {
 }
 
 #[test]
-fn schema16_adoption_keeps_the_key_digest_and_schema_checks() {
+fn schema17_adoption_keeps_the_key_digest_and_schema_checks() {
     let root = TempDir::new().unwrap();
     let (mut a, copy) = mac_a_and_old_copy(root.path());
     let refuse = |source: &Path, passphrase: &str, kind: VaultErrorKind| {
@@ -320,7 +326,7 @@ fn schema16_adoption_keeps_the_key_digest_and_schema_checks() {
 
     refuse(&copy, WRONG, VaultErrorKind::WrongKeyOrCorrupt);
 
-    // The marks of schema 16 without the digest of a push.
+    // The marks of schema 17 without the digest of a push.
     let stale = root.path().join("stale.apassy");
     a.write_sync_copy(&stale, "Mac A").unwrap();
     set_schema(&stale, PASS, OLD, false);
@@ -334,13 +340,13 @@ fn schema16_adoption_keeps_the_key_digest_and_schema_checks() {
         refuse(&path, PASS, VaultErrorKind::UnsupportedSchema);
     }
 
-    // The schema 16 copy still adopts after the refusals.
+    // The schema 17 copy still adopts after the refusals.
     let (_, adopted) = Vault::adopt_sync_copy(&copy, &root.path().join("b.db"), PASS).unwrap();
     assert!(adopted.outdated());
 }
 
 #[test]
-fn a_new_passphrase_comes_from_a_schema16_copy() {
+fn a_new_passphrase_comes_from_a_schema17_copy() {
     let root = TempDir::new().unwrap();
     let mut a = Vault::create(&root.path().join("a.db"), PASS).unwrap();
     a.unlock(PASS).unwrap();
@@ -376,7 +382,7 @@ fn folder_sync(root: &Path, mac: &str, vault_path: &Path, folder: &Path) -> Fold
 }
 
 #[test]
-fn folder_sync_adopts_a_schema16_file_and_a_new_passphrase_replaces_it() {
+fn folder_sync_adopts_a_schema17_file_and_a_new_passphrase_replaces_it() {
     let root = TempDir::new().unwrap();
     let folder = root.path().join("Dropbox").join("Apassy");
     fs::create_dir_all(&folder).unwrap();
@@ -386,7 +392,7 @@ fn folder_sync_adopts_a_schema16_file_and_a_new_passphrase_replaces_it() {
     let sync_a = folder_sync(root.path(), "a-data", a.path(), &folder);
     let name = sync_a.enable(&mut a, "Personal").unwrap().file_name;
     let file = folder.join(&name);
-    // An old Mac pushed this file: schema 16.
+    // An old Mac pushed this file: schema 17.
     set_schema(&file, PASS, OLD, true);
     let before = sha(&file);
 
@@ -414,7 +420,7 @@ fn folder_sync_adopts_a_schema16_file_and_a_new_passphrase_replaces_it() {
     assert!(!merge.remote_outdated());
     assert!(!outcome.pushed);
 
-    // The old Mac changes the passphrase and pushes schema 16 again.
+    // The old Mac changes the passphrase and pushes schema 17 again.
     let (mut old, _) = Vault::adopt_sync_copy(&file, &root.path().join("old.db"), PASS).unwrap();
     old.unlock(PASS).unwrap();
     old.change_passphrase(PASS, NEW_PASS).unwrap();
@@ -505,7 +511,7 @@ fn team() -> Team {
     }
 }
 
-/// The old Mac pushes its vault as a schema 16 copy: the next version, signed with its
+/// The old Mac pushes its vault as a schema 17 copy: the next version, signed with its
 /// device key.
 fn old_mac_push(team: &mut Team) {
     let path = team.root.path().join("old-push.apassy");
@@ -537,7 +543,7 @@ fn old_mac_push(team: &mut Team) {
 }
 
 #[test]
-fn a_schema16_relay_copy_is_replaced_also_with_the_same_content_and_after_a_failed_push() {
+fn a_schema17_relay_copy_is_replaced_also_with_the_same_content_and_after_a_failed_push() {
     let mut t = team();
     old_mac_push(&mut t);
     assert_eq!(t.relay.version(), 2);
@@ -562,7 +568,7 @@ fn a_schema16_relay_copy_is_replaced_also_with_the_same_content_and_after_a_fail
     assert!(!again.pushed);
     assert!(again.merge.is_none());
 
-    // Another Mac of schema 17 reads version 3 with the current schema.
+    // Another Mac of schema 18 reads version 3 with the current schema.
     let c = mac(&t.root, "c", &t.relay.url);
     let joined = join(&t.a, &t.vault_a, "Synthetic Mac mini");
     let download = joined.download(&c.data.join("sync")).unwrap();
@@ -576,7 +582,7 @@ fn a_schema16_relay_copy_is_replaced_also_with_the_same_content_and_after_a_fail
 }
 
 #[test]
-fn a_schema16_relay_copy_merges_an_edit_and_the_schema_in_the_report() {
+fn a_schema17_relay_copy_merges_an_edit_and_the_schema_in_the_report() {
     let mut t = team();
     let alpha = t.vault_b.search("").unwrap()[0].clone();
     t.vault_b
@@ -600,7 +606,7 @@ fn a_schema16_relay_copy_merges_an_edit_and_the_schema_in_the_report() {
 }
 
 #[test]
-fn a_new_mac_adopts_a_schema16_relay_copy_and_its_first_sync_upgrades_it() {
+fn a_new_mac_adopts_a_schema17_relay_copy_and_its_first_sync_upgrades_it() {
     let mut t = team();
     old_mac_push(&mut t);
     let c = mac(&t.root, "c", &t.relay.url);
@@ -632,4 +638,77 @@ fn a_new_mac_adopts_a_schema16_relay_copy_and_its_first_sync_upgrades_it() {
     assert_eq!(merge.remote_schema, CURRENT);
     assert!(!merge.changed_local());
     assert!(!outcome.pushed);
+}
+
+// ---- Schema 18 values and a copy of schema 17 ----
+
+fn id_of(vault: &Vault, title: &str) -> u64 {
+    let found = vault.search("").unwrap();
+    let matches: Vec<_> = found.iter().filter(|item| item.title == title).collect();
+    assert_eq!(matches.len(), 1, "one item {title}");
+    matches[0].id
+}
+
+/// Mac A puts a credential in a folder with "Always ask"; an old Mac (schema 17) changes
+/// another one and adds one. Its copy merges: the edit and the new credential come, the
+/// folder and "Always ask" of Mac A stay. Mac A then writes a copy of schema 18 that
+/// replaces the old one, and a new Mac gets the folder and the policy from it.
+#[test]
+fn a_17_copy_merges_and_is_replaced_by_an_18_copy() {
+    let root = TempDir::new().unwrap();
+    let (mut a, copy) = mac_a_and_old_copy(root.path());
+    let (mut old, adopted) =
+        Vault::adopt_sync_copy(&copy, &root.path().join("old.db"), PASS).unwrap();
+    assert!(adopted.outdated());
+    old.unlock(PASS).unwrap();
+
+    let acme = a.create_folder(None, "Acme").unwrap();
+    let alpha = id_of(&a, "Alpha");
+    a.set_item_folder(alpha, Some(&acme.uuid)).unwrap();
+    a.set_always_ask(alpha, true).unwrap();
+    let beta = id_of(&old, "Beta");
+    let revision = old.details(beta).unwrap().summary.revision;
+    old.update(beta, revision, item("Beta", "SYNTH-beta-old-mac"))
+        .unwrap();
+    old.add(item("Gamma", "SYNTH-gamma")).unwrap();
+    let push = root.path().join("old-push.apassy");
+    old.write_sync_copy(&push, "Old Mac").unwrap();
+    set_schema(&push, PASS, OLD, true);
+    let before = sha(&push);
+
+    let report = a.merge_from(&push, &SyncScope::vault()).unwrap();
+    assert_eq!((report.inserted, report.updated, report.deleted), (1, 1, 0));
+    assert!(report.conflicts.is_empty());
+    assert_eq!(report.remote_schema, OLD);
+    assert!(report.remote_outdated());
+    assert_eq!(sha(&push), before, "the merge reads the copy only");
+    assert_eq!(versions(&push, PASS), (OLD, OLD));
+    assert_eq!(titles(&a), ["Alpha", "Beta", "Gamma"]);
+    assert_eq!(token(&a, "Beta"), "SYNTH-beta-old-mac");
+    assert_eq!(a.item_folder(alpha).unwrap(), Some(acme.uuid.clone()));
+    assert!(a.always_ask(alpha).unwrap());
+    let gamma = id_of(&a, "Gamma");
+    assert_eq!(a.item_folder(gamma).unwrap(), None);
+    assert!(!a.always_ask(gamma).unwrap());
+
+    // The copy of schema 18 replaces the old one.
+    let current = root.path().join("a-copy.apassy");
+    a.write_sync_copy(&current, "Mac A").unwrap();
+    assert_eq!(versions(&current, PASS), (CURRENT, CURRENT));
+    let (mut b, adopted) =
+        Vault::adopt_sync_copy(&current, &root.path().join("b.db"), PASS).unwrap();
+    assert!(!adopted.outdated());
+    b.unlock(PASS).unwrap();
+    assert_eq!(content(&b), content(&a));
+    let b_alpha = id_of(&b, "Alpha");
+    assert_eq!(b.item_folder(b_alpha).unwrap(), Some(acme.uuid.clone()));
+    assert!(b.always_ask(b_alpha).unwrap());
+    assert_eq!(b.folder_path(Some(&acme.uuid)).unwrap(), ["Acme"]);
+
+    // The old copy again: nothing to take, and it is still outdated.
+    let again = a.merge_from(&push, &SyncScope::vault()).unwrap();
+    assert!(!again.changed_local());
+    assert!(again.remote_outdated());
+    assert!(a.always_ask(alpha).unwrap());
+    assert_eq!(content(&b), content(&a));
 }

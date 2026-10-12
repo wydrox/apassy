@@ -17,8 +17,8 @@ use apassy::sync::{
     file_name_for, icloud_folder, list_folder_vaults,
 };
 use apassy::vault::{
-    ActivityDecision, EnvDelivery, Field, ItemDraft, LOCAL_TABLES, NewActivity, SYNCED_TABLES,
-    SecretValue, SyncScope, Vault, VaultErrorKind,
+    ActivityDecision, EnvDelivery, Field, ItemDraft, ItemEventKind, LOCAL_TABLES, MAX_ITEM_EVENTS,
+    NewActivity, SYNCED_TABLES, SecretValue, SyncScope, Vault, VaultErrorKind,
 };
 use tempfile::TempDir;
 
@@ -923,5 +923,148 @@ fn a_variable_name_that_is_taken_here_is_left_out_and_reported() {
             .expect("some")
             .env_name,
         "GITHUB_TOKEN"
+    );
+}
+
+/// Folder names by parent name, sorted, for comparing two Macs.
+fn folder_tree(vault: &Vault) -> Vec<(String, Option<String>)> {
+    let folders = vault.folders().expect("folders");
+    let mut out: Vec<(String, Option<String>)> = folders
+        .iter()
+        .map(|folder| {
+            let parent = folder.parent.as_ref().map(|uuid| {
+                folders
+                    .iter()
+                    .find(|other| &other.uuid == uuid)
+                    .expect("parent")
+                    .name
+                    .clone()
+            });
+            (folder.name.clone(), parent)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// A pause, so the next change has a later time than the one before.
+fn later() {
+    std::thread::sleep(std::time::Duration::from_millis(20));
+}
+
+/// ADR 0026 §5: folders sync row by row. A folder change alone is a change to push; the
+/// later rename wins; a delete wins over an older edit; a credential in a folder that the
+/// other Mac deleted is at the top level, and no credential is deleted.
+#[test]
+fn folders_merge_last_writer_wins_and_tombstone_wins() {
+    let world = world();
+    let (a, mut vault_a, b, mut vault_b) = two_macs(&world);
+    let alpha_a = id_of(&vault_a, "Alpha");
+
+    // A folder alone is synced content.
+    let work = vault_a.create_folder(None, "Work").expect("folder");
+    assert!(a.sync.local_changed(&vault_a).expect("changed"));
+    let home = vault_a.create_folder(None, "Home").expect("folder");
+    vault_a
+        .set_item_folder(alpha_a, Some(&work.uuid))
+        .expect("move");
+    assert!(a.sync.sync(&mut vault_a).expect("sync a").pushed);
+    let merge = b
+        .sync
+        .sync(&mut vault_b)
+        .expect("sync b")
+        .merge
+        .expect("merge");
+    assert_eq!((merge.folders, merge.updated), (2, 1));
+    assert!(merge.changed_local());
+    let alpha_b = id_of(&vault_b, "Alpha");
+    assert_eq!(
+        vault_b.item_folder(alpha_b).expect("folder"),
+        Some(work.uuid.clone())
+    );
+    let events = vault_b
+        .item_events(alpha_b, MAX_ITEM_EVENTS)
+        .expect("events");
+    assert!(
+        events
+            .iter()
+            .any(|event| event.kind == ItemEventKind::Moved && event.detail == "Work"),
+        "the moved event syncs"
+    );
+    assert_eq!(folder_tree(&vault_a), folder_tree(&vault_b));
+
+    // Last writer wins: B renames first, A renames later.
+    vault_b
+        .rename_folder(&work.uuid, "Office")
+        .expect("rename b");
+    later();
+    vault_a.rename_folder(&work.uuid, "Job").expect("rename a");
+    assert!(b.sync.sync(&mut vault_b).expect("sync b").pushed);
+    let outcome = a.sync.sync(&mut vault_a).expect("sync a");
+    assert_eq!(outcome.merge.expect("merge").folders, 0, "the older rename");
+    assert!(outcome.pushed, "A has the later rename");
+    let merge = b
+        .sync
+        .sync(&mut vault_b)
+        .expect("sync b")
+        .merge
+        .expect("merge");
+    assert_eq!(merge.folders, 1);
+    for vault in [&vault_a, &vault_b] {
+        assert_eq!(
+            folder_tree(vault),
+            [("Home".to_owned(), None), ("Job".to_owned(), None)]
+        );
+    }
+
+    // The delete wins over an older edit: A renames "Home", then B deletes it.
+    vault_a
+        .rename_folder(&home.uuid, "House")
+        .expect("rename a");
+    later();
+    assert_eq!(vault_b.delete_folder(&home.uuid).expect("delete b"), 0);
+    assert!(a.sync.sync(&mut vault_a).expect("sync a").pushed);
+    let outcome = b.sync.sync(&mut vault_b).expect("sync b");
+    assert_eq!(outcome.merge.expect("merge").folders, 0, "the older rename");
+    assert!(outcome.pushed);
+    let merge = a
+        .sync
+        .sync(&mut vault_a)
+        .expect("sync a")
+        .merge
+        .expect("merge");
+    assert_eq!(merge.folders, 1, "the delete");
+    for vault in [&vault_a, &vault_b] {
+        assert_eq!(folder_tree(vault), [("Job".to_owned(), None)]);
+        assert_eq!(
+            vault.folder_path(Some(&home.uuid)).unwrap_err().kind(),
+            VaultErrorKind::NotFound
+        );
+    }
+
+    // B deletes "Job" (Alpha goes to the top level there); A puts a new credential in
+    // "Job" at the same time. After the sync, both credentials are at the top level on
+    // both Macs, and none is deleted.
+    assert_eq!(vault_b.delete_folder(&work.uuid).expect("delete b"), 1);
+    vault_a.add(item("Beta", "SYNTH-beta")).expect("add");
+    let beta_a = id_of(&vault_a, "Beta");
+    vault_a
+        .set_item_folder(beta_a, Some(&work.uuid))
+        .expect("move");
+    assert!(b.sync.sync(&mut vault_b).expect("sync b").pushed);
+    assert!(a.sync.sync(&mut vault_a).expect("sync a").pushed);
+    b.sync.sync(&mut vault_b).expect("sync b");
+    for vault in [&vault_a, &vault_b] {
+        assert!(vault.folders().expect("folders").is_empty());
+        assert_eq!(titles(vault), vec!["Alpha", "Beta"]);
+        let alpha = id_of(vault, "Alpha");
+        let beta = id_of(vault, "Beta");
+        assert_eq!(vault.item_folder(alpha).expect("folder"), None);
+        assert_eq!(vault.item_folder(beta).expect("folder"), None);
+        assert_eq!(vault.items_in_folder(None, false).expect("items").len(), 2);
+    }
+    assert_eq!(
+        vault_a.sync_content(&SyncScope::vault()).expect("content"),
+        vault_b.sync_content(&SyncScope::vault()).expect("content")
     );
 }

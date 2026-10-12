@@ -442,6 +442,8 @@ pub fn history(vault: &Vault, id: u64) -> CoreResult<Vec<Event>> {
                 ItemEventKind::OperationRemoved => format!("Operation removed: {detail}"),
                 ItemEventKind::Restored => "Restored from a backup".to_owned(),
                 ItemEventKind::ReviewConfirmed => "Agent settings confirmed".to_owned(),
+                ItemEventKind::Moved if event.detail.is_empty() => "Moved to the top".to_owned(),
+                ItemEventKind::Moved => format!("Moved to {}", event.detail),
             };
             Event {
                 at: event.at,

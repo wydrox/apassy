@@ -36,7 +36,9 @@ use crate::vault::{
     VaultError, VaultErrorKind, checked_env_name, parse_placeholder_host,
 };
 
+mod add;
 mod browser;
+mod decisions;
 pub use browser::{FillValues, PageCode, PageLogin, PasskeyItem, SYSTEM_FILL_ORIGIN, SystemLogin};
 
 const MAX_TAG_BYTES: usize = 64;

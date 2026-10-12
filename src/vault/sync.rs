@@ -274,7 +274,7 @@ pub(super) fn content_digest(conn: &Connection, schema: &str) -> VaultResult<[u8
     Ok(out)
 }
 
-fn hash_value(ctx: &mut digest::Context, value: ValueRef<'_>) {
+pub(super) fn hash_value(ctx: &mut digest::Context, value: ValueRef<'_>) {
     let len = |bytes: &[u8]| u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes();
     match value {
         ValueRef::Null => ctx.update(b"n"),
@@ -430,7 +430,8 @@ impl Vault {
             .map_err(|_| err(VaultErrorKind::Storage))?;
         let stripped = merge::strip_attached(conn, PUSH).and_then(|()| {
             let (identity, _) = read_sync_row(conn, PUSH)?;
-            let content = merge::sync_content_digest(conn, PUSH, &SyncScope::vault())?;
+            let content =
+                merge::sync_content_digest(conn, PUSH, &SyncScope::vault(), SCHEMA_VERSION)?;
             Ok((identity, content))
         });
         let _ = conn.execute_batch(&format!("DETACH DATABASE {PUSH}"));
@@ -510,7 +511,9 @@ impl Vault {
                 tx.commit().map_err(|_| err(VaultErrorKind::Storage))
             })()
             .and_then(|()| merge::mark_seen(&mut conn))
-            .and_then(|()| merge::sync_content_digest(&conn, "main", &SyncScope::vault()));
+            .and_then(|()| {
+                merge::sync_content_digest(&conn, "main", &SyncScope::vault(), SCHEMA_VERSION)
+            });
             let closed = close_conn(conn);
             result.and_then(|content| closed.map(|()| content))
         });
@@ -606,7 +609,7 @@ fn companion(path: &Path, suffix: &str) -> std::path::PathBuf {
 
 /// The checks of a copy that `conn` opened read-only. Returns the sync record and the
 /// schema version. `verify_readable_schema` checks the columns of that version. The
-/// digest is of the content as it is, so a schema 16 copy keeps the digest of its push.
+/// digest is of the content as it is, so a schema 17 copy keeps the digest of its push.
 fn inspect_open_copy(conn: &Connection, passphrase: &str) -> VaultResult<(SyncIdentity, i64)> {
     apply_key(conn, passphrase)?;
     verify_cipher_defaults(conn)?;
