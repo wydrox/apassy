@@ -36,6 +36,7 @@ mod sync;
 mod trusted_device;
 mod types;
 pub mod usage;
+mod vault_secret;
 mod waiting;
 
 use std::fs::{self, File, OpenOptions};

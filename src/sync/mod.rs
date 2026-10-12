@@ -51,8 +51,8 @@ pub use folder::{
 };
 pub use relay::{
     DeviceView, JoinedDevice, KeySource, LinkCode, PendingJoin, PendingLink, Receipt,
-    RelayAdoptReport, RelayConfig, RelayDownload, RelayEnableReport, RelayPoll, RelaySync,
-    RelayTransport, clear_relay_work,
+    RelayAdoptReport, RelayCallError, RelayConfig, RelayDownload, RelayEnableReport,
+    RelayMember, RelayPoll, RelaySync, RelayTransport, clear_relay_work,
 };
 pub use relay_crypto::{
     DeviceKey, HeadFields, MAX_SNAPSHOT_BYTES, NO_PREVIOUS, SignedHead, WORDS, decode_b64u,
