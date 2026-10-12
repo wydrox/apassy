@@ -1067,7 +1067,6 @@ mod tests {
                 }
                 app.settings_open = true;
                 let (text, _) = draw_frames(&mut app, size, 3);
-                assert!(text.contains("Settings"), "{size:?}: {text}");
                 #[cfg(feature = "vault")]
                 assert!(text.contains("General"), "{size:?}: {text}");
                 #[cfg(not(feature = "vault"))]

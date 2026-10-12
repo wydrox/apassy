@@ -1537,13 +1537,13 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let mut sheet = None;
     let mut sync_now = false;
     let mut open_synced = false;
-    kit::section(
+    super::settings::rows::section(
         ui,
         Some("Sync"),
         Some(
-            "Apassy keeps an encrypted copy of a vault in a folder that iCloud Drive, Dropbox, Google Drive, OneDrive, Syncthing, or a network share keeps in step, or on the Apassy relay. Changes from each Mac merge by credential. Agents, their exceptions, your answers, and the activity stay on each Mac: connect the agents of each Mac there. Turning sync off keeps the synced copy.",
+            "An encrypted copy syncs through a folder (iCloud Drive, Dropbox, a network share) or the Apassy relay. Agents and your answers stay on each Mac.",
         ),
-        |s| {
+        |g| {
             for entry in app.vault_list.registry.entries() {
                 let open_unlocked = unlocked && Some(&entry.id) == current.as_ref();
                 let status = app.sync.statuses.get(&entry.id);
@@ -1555,18 +1555,9 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 let refused = on_relay && status.is_some_and(relay::refused_copy);
                 // Removed from the relay: the line says to turn relay sync off.
                 let removed = on_relay && app.relay_removed(&entry.id);
-                s.row(|ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.add(
-                            Label::new(kit::medium(&entry.name, Font::Body).color(kit::LABEL))
-                                .wrap(),
-                        );
-                        if let (Some(status), Some(link)) = (status, link) {
-                            let (tag, tone) = status_tag(link, status);
-                            kit::tag(ui, tag, tone);
-                        }
-                    });
-                    ui.horizontal_wrapped(|ui| {
+                g.row(|ui| {
+                    let label = super::settings::rows::label_text(&entry.name);
+                    super::settings::rows::one_line(ui, label.into(), None, |ui| {
                         if open_unlocked {
                             let now = match link {
                                 None => Current::Off,
@@ -1587,36 +1578,16 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                             if let Some(pick) = picked {
                                 action = Some((entry.id.clone(), pick));
                             }
-                            if link.is_some()
-                                && !removed
-                                && ui
-                                    .add_enabled_ui(!syncing, |ui| {
-                                        kit::small_button(ui, "Sync now", Style::Bordered)
-                                    })
-                                    .inner
-                                    .clicked()
-                            {
-                                sync_now = true;
-                            }
-                            if on_relay && !removed {
-                                if kit::small_button(ui, "Add a device…", Style::Bordered).clicked()
-                                {
-                                    sheet = Some(SyncSheet::AddMac {
-                                        id: entry.id.clone(),
-                                    });
-                                }
-                                if kit::small_button(ui, "Devices…", Style::Bordered).clicked() {
-                                    sheet = Some(SyncSheet::Devices {
-                                        id: entry.id.clone(),
-                                    });
-                                }
-                            }
                         } else if link.is_some()
-                            && kit::small_button(ui, "Turn off…", Style::Link).clicked()
+                            && kit::small_button(ui, "Turn off…", Style::Bordered).clicked()
                         {
                             sheet = Some(SyncSheet::TurnOff {
                                 id: entry.id.clone(),
                             });
+                        }
+                        if let (Some(status), Some(link)) = (status, link) {
+                            let (tag, tone) = status_tag(link, status);
+                            kit::tag(ui, tag, tone);
                         }
                     });
                     let icloud =
@@ -1648,33 +1619,64 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
                             "Sync is off. Open and unlock this vault to turn it on.".to_owned()
                         }
                     };
-                    ui.add(
-                        Label::new(kit::text(line, Font::Footnote).color(kit::SECONDARY)).wrap(),
-                    );
-                    if status == Some(&UiStatus::NeedsPassphrase)
-                        && open_unlocked
-                        && kit::small_button(ui, passphrase_button(app, entry), Style::Prominent)
-                            .clicked()
-                    {
-                        sheet = Some(SyncSheet::NewPassphrase {
-                            id: entry.id.clone(),
-                        });
-                    }
-                    if refused
-                        && open_unlocked
-                        && kit::small_button(ui, "Use the relay copy…", Style::Prominent).clicked()
-                    {
-                        sheet = Some(SyncSheet::UseRelayCopy {
-                            id: entry.id.clone(),
+                    ui.add(Label::new(super::settings::rows::note(&line)).wrap());
+                    // The actions of a synced vault, under its state.
+                    let actions = open_unlocked
+                        && ((link.is_some() && !removed)
+                            || status == Some(&UiStatus::NeedsPassphrase)
+                            || refused);
+                    if actions {
+                        ui.add_space(2.0);
+                        ui.horizontal_wrapped(|ui| {
+                            if status == Some(&UiStatus::NeedsPassphrase)
+                                && kit::small_button(
+                                    ui,
+                                    passphrase_button(app, entry),
+                                    Style::Prominent,
+                                )
+                                .clicked()
+                            {
+                                sheet = Some(SyncSheet::NewPassphrase {
+                                    id: entry.id.clone(),
+                                });
+                            }
+                            if refused
+                                && kit::small_button(ui, "Use the relay copy…", Style::Prominent)
+                                    .clicked()
+                            {
+                                sheet = Some(SyncSheet::UseRelayCopy {
+                                    id: entry.id.clone(),
+                                });
+                            }
+                            if link.is_some()
+                                && !removed
+                                && ui
+                                    .add_enabled_ui(!syncing, |ui| {
+                                        kit::small_button(ui, "Sync now", Style::Bordered)
+                                    })
+                                    .inner
+                                    .clicked()
+                            {
+                                sync_now = true;
+                            }
+                            if on_relay && !removed {
+                                if kit::small_button(ui, "Add a device…", Style::Bordered).clicked()
+                                {
+                                    sheet = Some(SyncSheet::AddMac {
+                                        id: entry.id.clone(),
+                                    });
+                                }
+                                if kit::small_button(ui, "Devices…", Style::Bordered).clicked() {
+                                    sheet = Some(SyncSheet::Devices {
+                                        id: entry.id.clone(),
+                                    });
+                                }
+                            }
                         });
                     }
                 });
             }
-            if s.clickable_row("Open a synced vault…", |ui| {
-                ui.label(kit::text("Open a synced vault…", Font::Body).color(kit::ACCENT_TEXT));
-            })
-            .clicked()
-            {
+            if g.link("Open a synced vault…").clicked() {
                 open_synced = true;
             }
         },

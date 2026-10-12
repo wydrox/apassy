@@ -2727,12 +2727,10 @@ pub(crate) enum Icon {
     Warning,
     Info,
     Xmark,
-    Clock,
     #[cfg(not(feature = "vault"))]
     List,
     Folder,
     Eye,
-    Phone,
     /// A window with a sidebar, for "Hide sidebar" and "Show sidebar".
     Sidebar,
     /// The Settings gear with teeth, as SF Symbols `gearshape`.
@@ -2894,10 +2892,6 @@ pub(crate) fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color
             line(&[(0.24, 0.24), (0.76, 0.76)]);
             line(&[(0.76, 0.24), (0.24, 0.76)]);
         }
-        Icon::Clock => {
-            circle(0.5, 0.5, 0.4);
-            line(&[(0.5, 0.26), (0.5, 0.5), (0.68, 0.6)]);
-        }
         #[cfg(not(feature = "vault"))]
         Icon::List => {
             for y in [0.26, 0.5, 0.74] {
@@ -2925,15 +2919,6 @@ pub(crate) fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color
                 StrokeKind::Middle,
             );
             line(&[(0.38, 0.16), (0.38, 0.84)]);
-        }
-        Icon::Phone => {
-            painter.rect_stroke(
-                Rect::from_min_max(p(0.27, 0.08), p(0.73, 0.92)),
-                size * 0.12,
-                stroke,
-                StrokeKind::Middle,
-            );
-            line(&[(0.42, 0.79), (0.58, 0.79)]);
         }
         Icon::Gearshape => {
             let step = TAU / 8.0;

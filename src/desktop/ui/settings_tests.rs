@@ -10,7 +10,7 @@ use super::super::owner_tests::{PASS, WRONG, unlocked_app_with_item};
 use super::super::settings_window::{MIN_SIZE, content};
 use super::{
     ADD_IPHONE, RELAY_QUESTIONS, RELAY_QUESTIONS_NEW_TEAM, RELAY_QUESTIONS_OFF, RELAY_QUESTIONS_ON,
-    SettingsTab,
+    RELAY_ROW, SettingsTab,
 };
 use crate::broker::approvals::{OwnerAction, OwnerAuthError, OwnerCheck};
 use crate::desktop::DesktopApp;
@@ -89,17 +89,8 @@ fn cases() -> [(
     [
         (
             SettingsTab::General,
-            &[
-                "Vaults",
-                "Lock now",
-                "Import from 1Password…",
-                "Browser extension",
-            ],
-            &[
-                "Back up now",
-                "Broker and bouncer",
-                "Questions go to every device",
-            ],
+            &["Vault", "1Password", "Import…", "Browser extension"],
+            &["Back up now", "Bouncer", "Questions go to every device"],
         ),
         (
             SettingsTab::Devices,
@@ -108,10 +99,10 @@ fn cases() -> [(
                 "This Mac",
                 "Other Macs",
                 "iPhones",
-                RELAY_QUESTIONS,
-                "Add a Device…",
+                RELAY_ROW,
+                "Add device…",
                 "Notifications",
-                "iPhone companion",
+                "iPhone app",
                 "Paired iPhones",
             ],
             &["Lock now", "Back up now", "Keyboard shortcuts"],
@@ -124,19 +115,19 @@ fn cases() -> [(
                 "Back up now",
                 "Restore from a backup",
             ],
-            &["Lock now", "Broker and bouncer", "Updates"],
+            &["Lock now", "Bouncer", "Updates"],
         ),
         (
             SettingsTab::Advanced,
             &[
-                "Broker and bouncer",
+                "Bouncer",
                 "Calibration and learning",
                 "Command line",
                 "Updates",
                 "Keyboard shortcuts",
                 "Contract",
             ],
-            &["Lock now", "Back up now", "iPhone companion"],
+            &["Lock now", "Back up now", "iPhone app"],
         ),
     ]
 }
@@ -171,8 +162,8 @@ fn each_tab_shows_its_sections() {
     }
 }
 
-/// At the minimum size of the window, each tab draws its tab bar and its first section,
-/// and no text goes past the right edge of the window.
+/// At the minimum size of the window, each tab draws its tab bar, its first group, and
+/// "Done", and no text goes past the right edge of the window.
 #[test]
 fn each_tab_draws_at_the_minimum_window_size() {
     let dir = TempDir::new().expect("temp dir");
@@ -184,6 +175,7 @@ fn each_tab_draws_at_the_minimum_window_size() {
             assert!(text.contains(label), "{tab:?}: {label}: {text}");
         }
         assert!(text.contains(shown[0]), "{tab:?}: {}: {text}", shown[0]);
+        assert!(text.contains("Done"), "{tab:?}: Done: {text}");
         for (painted, rect) in &texts {
             assert!(
                 rect.right() <= MIN_SIZE.x + 0.5 && rect.left() >= -0.5,

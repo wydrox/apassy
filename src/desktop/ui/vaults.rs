@@ -674,114 +674,202 @@ pub(super) fn name_field(
     })
 }
 
-/// Settings > General > Vaults: each vault with its file and where it syncs, "Rename…",
-/// and "Remove from list…", and "Lock now". The sync controls are in Settings > Devices.
+/// Where a vault file lives, in short words for Settings: "On this Mac" for the default
+/// folder, "iCloud Drive › Apassy" for a folder in iCloud Drive, "Dropbox › Vaults" for
+/// a cloud folder, "Home › Documents" in the home folder, and the folder path elsewhere.
+/// The folder names under the place are the last two, after "…" for more.
+pub(super) fn short_location(path: &Path, home: Option<&Path>, data_dir: &Path) -> String {
+    let Some(folder) = path.parent() else {
+        return shown_path(path);
+    };
+    if folder == data_dir {
+        return "On this Mac".to_owned();
+    }
+    let names = |rest: &Path| -> Vec<String> {
+        rest.components()
+            .map(|part| part.as_os_str().to_string_lossy().into_owned())
+            .collect()
+    };
+    let join = |place: &str, rest: Vec<String>| -> String {
+        let mut parts = vec![place.to_owned()];
+        if rest.len() > 2 {
+            parts.push("…".to_owned());
+        }
+        let skip = rest.len().saturating_sub(2);
+        parts.extend(rest.into_iter().skip(skip));
+        parts.join(" › ")
+    };
+    if let Some(home) = home {
+        let icloud = home.join("Library/Mobile Documents/com~apple~CloudDocs");
+        if let Ok(rest) = folder.strip_prefix(&icloud) {
+            return join("iCloud Drive", names(rest));
+        }
+        let cloud = home.join("Library/CloudStorage");
+        if let Ok(rest) = folder.strip_prefix(&cloud) {
+            let mut rest = names(rest);
+            if !rest.is_empty() {
+                // "GoogleDrive-name@example.com" is the place "Google Drive".
+                let provider = rest.remove(0);
+                let provider = provider.split('-').next().unwrap_or_default();
+                let provider = match provider {
+                    "GoogleDrive" => "Google Drive",
+                    "OneDrive" => "OneDrive",
+                    other => other,
+                };
+                return join(provider, rest);
+            }
+        }
+        if let Ok(rest) = folder.strip_prefix(home) {
+            return join("Home", names(rest));
+        }
+    }
+    if let Ok(rest) = folder.strip_prefix("/Volumes") {
+        let mut rest = names(rest);
+        if !rest.is_empty() {
+            let volume = rest.remove(0);
+            return join(&volume, rest);
+        }
+    }
+    shown_path(folder)
+}
+
+/// Show a file in the Finder with `/usr/bin/open -R`. A thread waits for `open`.
+fn show_in_finder(path: &Path) -> std::io::Result<()> {
+    let mut child = std::process::Command::new("/usr/bin/open")
+        .arg("-R")
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+/// What the owner chose in the menu of a vault row.
+enum RowAction {
+    Open(String),
+    Sheet(VaultSheet),
+    Finder(PathBuf),
+    Lock,
+    Leave(Step),
+}
+
+/// Settings > General > Vault: one row for each vault with its name and where it lives,
+/// in short words (the whole path on hover), as in the mockup. Its menu has "Show in
+/// Finder", "Rename…", "Lock now" or "Open", "Remove from list…", "New vault…", and
+/// "Open vault file…". Another vault also has "Open" on its row. The sync controls are
+/// in Settings > Devices.
 pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    use super::settings::rows;
+
     list_note(app, ui);
     let current = app.vault_list.current.clone();
-    let mut open = None;
-    let mut sheet = None;
-    let mut leave = None;
-    let mut lock = false;
-    kit::section(
-        ui,
-        Some("Vaults"),
-        Some(
-            "Each vault is its own encrypted file with its own passphrase, agents, and answers. One vault is open at a time. A switch locks the open vault and ends the runs that wait for you. \"Remove from list\" never deletes a file. A lock ends every run that waits for you. The broker refuses all agent requests while the vault is locked.",
-        ),
-        |s| {
-            for entry in app.vault_list.registry.entries() {
-                let is_open = Some(&entry.id) == current.as_ref();
-                let present = file_present(entry);
-                s.row(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(kit::medium(&entry.name, Font::Body).color(kit::LABEL));
-                        if is_open {
+    let several = app.vault_list.registry.entries().len() > 1;
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut action = None;
+    let header = if several { "Vaults" } else { "Vault" };
+    rows::group(ui, Some(header), |g| {
+        for entry in app.vault_list.registry.entries() {
+            let is_open = Some(&entry.id) == current.as_ref();
+            let present = file_present(entry);
+            // Where it lives, and where it syncs: "On this Mac · iCloud Drive".
+            let mut place = short_location(&entry.path, home.as_deref(), &app.vault_list.data_dir);
+            if app.sync.offered && entry.sync_state().is_some() {
+                place = format!("{place} · {}", super::sync::method_words(app, entry));
+            }
+            g.row(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), rows::LINE),
+                    egui::Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.label(rows::label_text(&entry.name));
+                        if is_open && several {
                             kit::tag(ui, "Open", Tone::Good);
                         } else if !present {
                             kit::tag(ui, "File missing", Tone::Warning);
                         }
                         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                            if !is_open
-                                && kit::small_button(ui, "Remove from list…", Style::Link).clicked()
-                            {
-                                sheet = Some(VaultSheet::Remove {
-                                    id: entry.id.clone(),
-                                });
-                            }
-                            if kit::small_button(ui, "Rename…", Style::Link).clicked() {
-                                sheet = Some(VaultSheet::Rename {
-                                    id: entry.id.clone(),
-                                });
-                            }
+                            let more = kit::icon_button(
+                                ui,
+                                Icon::More,
+                                &format!("{} actions", entry.name),
+                                kit::Size::Small,
+                            );
+                            egui::Popup::menu(&more).show(|ui| {
+                                ui.set_min_width(180.0);
+                                let item = |ui: &mut egui::Ui, enabled: bool, label: &str| {
+                                    ui.add_enabled(enabled, egui::Button::selectable(false, label))
+                                        .clicked()
+                                };
+                                if item(ui, present, "Show in Finder") {
+                                    action = Some(RowAction::Finder(entry.path.clone()));
+                                }
+                                if item(ui, true, "Rename…") {
+                                    action = Some(RowAction::Sheet(VaultSheet::Rename {
+                                        id: entry.id.clone(),
+                                    }));
+                                }
+                                if is_open {
+                                    if item(ui, true, "Lock now") {
+                                        action = Some(RowAction::Lock);
+                                    }
+                                } else {
+                                    if item(ui, present, "Open") {
+                                        action = Some(RowAction::Open(entry.id.clone()));
+                                    }
+                                    if item(ui, true, "Remove from list…") {
+                                        action = Some(RowAction::Sheet(VaultSheet::Remove {
+                                            id: entry.id.clone(),
+                                        }));
+                                    }
+                                }
+                                ui.separator();
+                                if item(ui, true, "New vault…") {
+                                    action = Some(RowAction::Leave(Step::Create));
+                                }
+                                if item(ui, true, "Open vault file…") {
+                                    action = Some(RowAction::Leave(Step::Open));
+                                }
+                            });
                             if !is_open
                                 && present
                                 && kit::small_button(ui, "Open", Style::Bordered).clicked()
                             {
-                                open = Some(entry.id.clone());
+                                action = Some(RowAction::Open(entry.id.clone()));
                             }
+                            ui.add(Label::new(rows::value(&place)).truncate())
+                                .on_hover_text(shown_path(&entry.path));
                         });
-                    });
-                    ui.add(
-                        Label::new(
-                            kit::text(shown_path(&entry.path), Font::MonoSmall)
-                                .color(kit::SECONDARY),
-                        )
-                        .truncate(),
-                    );
-                    // Where it syncs. Settings > Devices changes it.
-                    if app.sync.offered {
-                        ui.add(
-                            Label::new(
-                                kit::text(
-                                    format!("Sync: {}", super::sync::method_words(app, entry)),
-                                    Font::Footnote,
-                                )
-                                .color(kit::SECONDARY),
-                            )
-                            .truncate(),
-                        );
-                    }
-                });
-            }
-            if s.clickable_row("New vault…", |ui| {
-                ui.label(kit::text("New vault…", Font::Body).color(kit::ACCENT_TEXT));
-            })
-            .clicked()
-            {
-                leave = Some(Step::Create);
-            }
-            if s.clickable_row("Open vault file…", |ui| {
-                ui.label(kit::text("Open vault file…", Font::Body).color(kit::ACCENT_TEXT));
-            })
-            .clicked()
-            {
-                leave = Some(Step::Open);
-            }
-            lock = s
-                .clickable_row("Lock now", |ui| {
-                    ui.label(kit::text("Lock now", Font::Body).color(kit::ACCENT_TEXT));
-                })
-                .clicked();
-        },
-    );
-    let ctx = ui.ctx().clone();
-    if lock {
-        app.lock_vault(Some(&ctx));
-    } else if let Some(id) = open {
-        app.switch_vault(&id, Some(&ctx));
-    } else if let Some(step) = leave {
-        app.leave_vault_for(step, Some(&ctx));
-    } else if let Some(sheet) = sheet {
-        if let VaultSheet::Rename { id } = &sheet {
-            app.vault_list.name_input = app
-                .vault_list
-                .registry
-                .get(id)
-                .map(|entry| entry.name.clone())
-                .unwrap_or_default();
+                    },
+                );
+            });
         }
-        app.ui.sheet = Some(Sheet::Vault(sheet));
+    });
+    let ctx = ui.ctx().clone();
+    match action {
+        Some(RowAction::Lock) => app.lock_vault(Some(&ctx)),
+        Some(RowAction::Open(id)) => app.switch_vault(&id, Some(&ctx)),
+        Some(RowAction::Leave(step)) => app.leave_vault_for(step, Some(&ctx)),
+        Some(RowAction::Finder(path)) => {
+            if let Err(err) = show_in_finder(&path) {
+                app.set_err(format!("Apassy cannot show {} ({err}).", path.display()));
+            }
+        }
+        Some(RowAction::Sheet(sheet)) => {
+            if let VaultSheet::Rename { id } = &sheet {
+                app.vault_list.name_input = app
+                    .vault_list
+                    .registry
+                    .get(id)
+                    .map(|entry| entry.name.clone())
+                    .unwrap_or_default();
+            }
+            app.ui.sheet = Some(Sheet::Vault(sheet));
+        }
+        None => {}
     }
 }
 
