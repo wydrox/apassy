@@ -187,7 +187,7 @@ pub fn detect_with(catalog: &Catalog, text: &str) -> Vec<Detected> {
         return Vec::new();
     }
     if !is_private_key(text)
-        && let Some(lines) = env_lines(text)
+        && let Some(lines) = env_lines(catalog, text)
     {
         return lines
             .iter()
@@ -206,31 +206,51 @@ pub fn detect_with(catalog: &Catalog, text: &str) -> Vec<Detected> {
 
 /// The entries of a `.env` text, or `None` when the text is not one.
 ///
-/// A text with two or more entries is a `.env` file when its entries outnumber its
-/// other lines. A single line needs `export`, or a key in uppercase (`API_KEY`) or in
-/// lowercase with `_` (`api_key`), so that a password with `=` stays one value. A value
-/// that starts with `=` is Base64 padding, not a `.env` entry.
-fn env_lines(text: &str) -> Option<Vec<dotenv::Line>> {
+/// Two or more entries are a `.env` file when every non-comment line is an assignment
+/// (lowercase keys are fine). A single entry is `KEY=value` only when it has `export`,
+/// a key like `API_KEY` ([`is_variable_style`]), or the `variable` of a provider. Else
+/// the whole text is one raw secret, so that `AB12=xyz` does not make `AB12` a title or
+/// a variable. A value that starts with `=` is Base64 padding, not a `.env` entry.
+fn env_lines(catalog: &Catalog, text: &str) -> Option<Vec<dotenv::Line>> {
     let (lines, skipped) = dotenv::parse(text);
     if lines.is_empty() || lines.iter().any(|line| line.value.starts_with('=')) {
         return None;
     }
-    let other = skipped.iter().filter(|skip| skip.not_env).count();
-    let file = if lines.len() + skipped.len() >= 2 || text.contains('\n') {
-        other == 0 || (lines.len() >= 2 && lines.len() > other)
-    } else {
-        let exported = text.starts_with("export ");
-        let key = &lines[0].key;
-        let upper = key
-            .bytes()
-            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_');
-        let lower = key.contains('_')
-            && key
+    if skipped.iter().any(|skip| skip.not_env) {
+        return None;
+    }
+    // An empty value or an open quote is still an assignment.
+    if lines.len() + skipped.len() >= 2 {
+        return Some(lines);
+    }
+    let exported = text
+        .lines()
+        .map(str::trim_start)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .is_some_and(|line| line.starts_with("export "));
+    let key = lines[0].key.as_str();
+    let known = catalog
+        .providers()
+        .iter()
+        .any(|provider| provider.variable == key);
+    (exported || is_variable_style(key) || known).then_some(lines)
+}
+
+/// A key like `API_KEY`: `^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$`, four characters or more.
+fn is_variable_style(key: &str) -> bool {
+    let mut parts = key.split('_');
+    let head = parts.next().unwrap_or_default();
+    let valid = |part: &str| {
+        !part.is_empty()
+            && part
                 .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
-        exported || upper || lower
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
     };
-    file.then_some(lines)
+    key.len() >= 4
+        && head.as_bytes().first().is_some_and(u8::is_ascii_uppercase)
+        && valid(head)
+        && parts.clone().next().is_some()
+        && parts.all(valid)
 }
 
 /// One value, with the variable name of its `.env` line.

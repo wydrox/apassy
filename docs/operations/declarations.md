@@ -57,6 +57,7 @@ A file is one JSON object. The loader rejects unknown fields at every level, and
 | `known_hosts` | Provider API hosts in lowercase. A provider needs one or more, unless it is generic. A general file has none. |
 | `variable` | The default environment variable of a detected credential, such as `STRIPE_SECRET_KEY`. A provider needs one. The loader refuses a reserved name (`PATH`, `APASSY_*`, ...). A general file has none. |
 | `title` | Optional. The title of a detected credential, such as `GitHub token`. The default is the label and "API key". |
+| `real_value` | Optional, default `false`. `true` for a provider that signs requests with the secret (AWS, Google Cloud): a detected credential then gets the real value, never a placeholder, and the known hosts stay recorded for the bouncer. A general file has none. |
 | `prefixes` | Optional. Value prefixes of the keys of the provider, such as `sk_live_`. Case matters. Two or more characters, no space, and one provider for each prefix. The paste detection (section 3a) names the provider of a value by the longest prefix. |
 | `signals` | A list of signals: `id`, `when`, `suggest`, `reason`. |
 

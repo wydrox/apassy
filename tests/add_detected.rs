@@ -389,3 +389,48 @@ fn an_agent_origin_is_accepted_and_a_locked_vault_refuses() {
         VaultErrorKind::Locked
     );
 }
+
+#[test]
+fn signing_providers_get_the_real_value_and_keep_their_hosts() {
+    let dir = TempDir::new().unwrap();
+    let mut vault = vault(&dir);
+    let secret = format!("AWS_SECRET_ACCESS_KEY={}", fake("", 40));
+    let access = fake("AKIA", 12);
+    let gcp_key = fake("AIza", 35);
+    let gcp_json = r#"{"type":"service_account","project_id":"demo-project","private_key_id":"0000","client_email":"bot@demo-project.iam.gserviceaccount.com"}"#;
+    let cases = [
+        (secret.as_str(), "aws"),
+        (access.as_str(), "aws"),
+        (gcp_key.as_str(), "gcp"),
+        (gcp_json, "gcp"),
+    ];
+    for (text, provider) in cases {
+        let detected = one(text);
+        assert_eq!(detected.provider.as_deref(), Some(provider), "{text}");
+        // The detection still lists the hosts for the bouncer.
+        assert!(!detected.hosts.is_empty(), "{text}");
+        let summary = vault.add_detected(&detected, None, None).expect("add");
+        let binding = vault.env_binding(summary.id).unwrap().expect("a variable");
+        assert_eq!(binding.delivery, EnvDelivery::Value, "{text}");
+        let stored = vault.declaration_provider(summary.id).unwrap();
+        assert_eq!(stored.as_deref(), Some(provider));
+        assert!(
+            !apassy::vault::providers::known_hosts(provider).is_empty(),
+            "the provider keeps its hosts"
+        );
+    }
+}
+
+#[test]
+fn stripe_and_github_still_get_a_placeholder() {
+    let dir = TempDir::new().unwrap();
+    let mut vault = vault(&dir);
+    for text in [fake("sk_live_", 24), fake("ghp_", 36)] {
+        let summary = vault.add_detected(&one(&text), None, None).expect("add");
+        let binding = vault.env_binding(summary.id).unwrap().expect("a variable");
+        assert!(
+            matches!(binding.delivery, EnvDelivery::Placeholder(_)),
+            "{text}"
+        );
+    }
+}

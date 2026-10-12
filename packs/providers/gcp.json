@@ -1,12 +1,13 @@
 {
   "schema_version": 1,
-  "provider_version": 2,
+  "provider_version": 3,
   "id": "gcp",
   "kind": "provider",
   "label": "Google Cloud",
   "description": "Google Cloud service account keys (JSON), Google API keys (AIza), and the standard variable names.",
   "known_hosts": ["googleapis.com"],
   "variable": "GOOGLE_API_KEY",
+  "real_value": true,
   "prefixes": ["AIza"],
   "signals": [
     {

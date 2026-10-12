@@ -13,7 +13,9 @@
 //!   item or fails on it. A setup key of a one-time password is never bound.
 //! - The delivery (ADR 0011): a placeholder for the known hosts of the provider when
 //!   the detection gives hosts and the value is long enough for a placeholder, as a new
-//!   variable in the app starts. Else the real value.
+//!   variable in the app starts. Else the real value: also for a provider that signs
+//!   requests with the secret (`real_value` in the pack: AWS, Google Cloud). The
+//!   known hosts stay recorded through the declaration's provider.
 //! - No owner check: a new item moves no authority that an existing item has. The
 //!   bouncer decides each use of it (ADR 0025 §3).
 
@@ -261,8 +263,16 @@ fn bind_variable(tx: &Transaction<'_>, item: i64, detected: &Detected) -> VaultR
         .map_err(|_| err(VaultErrorKind::Storage))?;
     let env_name = if taken.is_some() { "" } else { wanted };
     let hosts = placeholder_hosts(&detected.hosts)?;
+    // A provider that signs requests with the secret (AWS, Google Cloud) needs the real value.
+    let signs = detected
+        .provider
+        .as_deref()
+        .and_then(providers::find)
+        .is_some_and(|provider| provider.real_value);
     let delivery = match hosts {
-        Some(hosts) if crate::broker::proxy::mint_placeholder(field.value.expose()).is_some() => {
+        Some(hosts)
+            if !signs && crate::broker::proxy::mint_placeholder(field.value.expose()).is_some() =>
+        {
             EnvDelivery::Placeholder(hosts)
         }
         _ => EnvDelivery::Value,

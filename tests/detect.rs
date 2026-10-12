@@ -413,3 +413,65 @@ fn debug_output_hides_every_value() {
         }
     }
 }
+
+#[test]
+fn a_short_key_with_equals_is_a_raw_value_not_a_key_value_line() {
+    let detected = one("AB12=xyz");
+    assert_eq!(detected.kind, CredentialKind::Custom);
+    assert_eq!(detected.title, FALLBACK_TITLE);
+    assert!(!detected.title.contains("AB12") && !detected.title.contains("xyz"));
+    assert_eq!(detected.env_name, None);
+    assert_eq!(detected.line, None);
+    assert_eq!(value(&detected, "secret"), "AB12=xyz");
+    // A lowercase key with an underscore needs `export` for a single line.
+    assert_eq!(
+        value(&one("api_key=EXAMPLE0"), "secret"),
+        "api_key=EXAMPLE0"
+    );
+}
+
+#[test]
+fn a_single_line_is_key_value_for_a_variable_style_key_a_provider_variable_or_export() {
+    let openai = one(&format!("OPENAI_API_KEY={}", fake("sk-", 40)));
+    assert_eq!(openai.line, Some(1));
+    assert_eq!(openai.env_name.as_deref(), Some("OPENAI_API_KEY"));
+    assert_eq!(openai.provider.as_deref(), Some("openai"));
+    let exported = one("export foo=bar");
+    assert_eq!(exported.line, Some(1));
+    assert_eq!(exported.env_name.as_deref(), Some("FOO"));
+    assert_eq!(value(&exported, "foo"), "bar");
+    let custom = one("DB_PASS2=EXAMPLE0");
+    assert_eq!(custom.line, Some(1));
+    assert_eq!(custom.title, "Db Pass2");
+    // No underscore: the key is part of the value, unless a provider names it.
+    assert_eq!(one("TOKEN=EXAMPLE0").line, None);
+    assert_eq!(one("PATH=/opt/fake/bin").line, None);
+    let by_provider = providers::builtin()
+        .expect("catalog")
+        .providers()
+        .iter()
+        .map(|provider| provider.variable.as_str())
+        .find(|variable| !variable.contains('_'));
+    if let Some(variable) = by_provider {
+        assert_eq!(one(&format!("{variable}=EXAMPLE0")).line, Some(1));
+    }
+    // A trailing or double underscore is not the shape.
+    assert_eq!(one("API_=EXAMPLE0").line, None);
+    assert_eq!(one("API__KEY=EXAMPLE0").line, None);
+}
+
+#[test]
+fn a_multi_line_dotenv_takes_lowercase_keys_and_needs_every_line_to_be_an_assignment() {
+    let found = detect("alpha=EXAMPLE0\nbeta=EXAMPLE1\n");
+    assert_eq!(found.len(), 2);
+    assert_eq!(found[0].line, Some(1));
+    assert_eq!(found[1].line, Some(2));
+    assert_eq!(found[1].env_name.as_deref(), Some("BETA"));
+    // A comment is not a line. One assignment after it follows the single-line rule.
+    assert_eq!(one("# note\nab=EXAMPLE0").line, None);
+    assert_eq!(one("# note\nAB_CD=EXAMPLE0").line, Some(2));
+    // A line that is no assignment makes the whole text one secret.
+    let mixed = one("alpha=EXAMPLE0\nnot an assignment");
+    assert_eq!(mixed.line, None);
+    assert_eq!(value(&mixed, "secret"), "alpha=EXAMPLE0\nnot an assignment");
+}

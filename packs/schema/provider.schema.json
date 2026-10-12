@@ -51,6 +51,10 @@
       "maxLength": 64,
       "pattern": "^[A-Z_][A-Z0-9_]*$"
     },
+    "real_value": {
+      "description": "The provider signs requests with the secret (AWS SigV4, Google service-account keys), so a placeholder cannot stand for it. A detected credential of the provider is delivered as the real value, never as a placeholder. The known hosts stay recorded for the bouncer. Default false. Not for a general file.",
+      "type": "boolean"
+    },
     "title": {
       "description": "The title of a detected credential, such as `GitHub token`. The default is the label and `API key`. Not for a general file.",
       "type": "string",
@@ -74,7 +78,7 @@
     {
       "if": { "properties": { "kind": { "const": "general" } } },
       "then": {
-        "not": { "anyOf": [{ "required": ["known_hosts"] }, { "properties": { "generic": { "const": true } }, "required": ["generic"] }, { "required": ["variable"] }, { "required": ["title"] }, { "required": ["prefixes"] }] }
+        "not": { "anyOf": [{ "required": ["known_hosts"] }, { "properties": { "generic": { "const": true } }, "required": ["generic"] }, { "required": ["variable"] }, { "required": ["title"] }, { "required": ["real_value"] }, { "required": ["prefixes"] }] }
       }
     },
     {

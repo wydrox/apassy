@@ -167,6 +167,10 @@ struct ProviderFile {
     /// names the provider of a value by the longest prefix. Case matters.
     #[serde(default)]
     prefixes: Vec<String>,
+    /// The provider signs requests with the secret (AWS SigV4, Google service-account
+    /// keys), so a placeholder cannot stand for it. Default false.
+    #[serde(default)]
+    real_value: bool,
     signals: Vec<SignalFile>,
 }
 
@@ -287,6 +291,9 @@ pub struct Provider {
     pub title: String,
     /// Value prefixes of the keys of the provider. Case matters.
     pub prefixes: Vec<String>,
+    /// The provider signs requests with the secret, so the credential is delivered as
+    /// the real value, never as a placeholder (the known hosts stay for the bouncer).
+    pub real_value: bool,
     generic: bool,
     signals: Vec<Signal>,
 }
@@ -403,11 +410,12 @@ impl Catalog {
                     || !file.known_hosts.is_empty()
                     || file.variable.is_some()
                     || file.title.is_some()
+                    || file.real_value
                     || !file.prefixes.is_empty() =>
             {
                 return Err(
                     "a general file has no provider, so it has no `known_hosts`, \
-                     `generic`, `variable`, `title`, or `prefixes`"
+                     `generic`, `variable`, `title`, `real_value`, or `prefixes`"
                         .to_owned(),
                 );
             }
@@ -500,6 +508,7 @@ impl Catalog {
                 known_hosts: file.known_hosts,
                 variable: file.variable.unwrap_or_default(),
                 prefixes: file.prefixes,
+                real_value: file.real_value,
                 generic: file.generic,
                 signals,
             }),
@@ -1391,6 +1400,7 @@ mod tests {
             GOOD.replace(r#""prefixes""#, r#""title": "", "prefixes""#),
             GOOD.replace(r#""prefixes""#, r#""title": " Demo", "prefixes""#),
             GOOD.replace(r#""prefixes""#, r#""variables": "X", "prefixes""#),
+            GOOD.replace(r#""prefixes""#, r#""real_value": "yes", "prefixes""#),
         ];
         for text in &bad {
             assert!(load_one(text).is_err(), "must be rejected: {text}");
@@ -1412,6 +1422,10 @@ mod tests {
         assert_eq!(demo.variable, "DEMO_API_KEY");
         assert_eq!(demo.title, "Demo API key");
         assert_eq!(demo.prefixes, ["demo_"]);
+        assert!(!demo.real_value);
+        let signing = load_one(&GOOD.replace(r#""prefixes""#, r#""real_value": true, "prefixes""#))
+            .expect("real_value loads");
+        assert!(signing.find("demo").expect("demo").real_value);
         let titled =
             load_one(&GOOD.replace(r#""prefixes""#, r#""title": "Demo token", "prefixes""#))
                 .expect("a title loads");
