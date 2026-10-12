@@ -3,7 +3,7 @@
 Date: 2026-10-09. Updated 2026-10-11.
 Host: macOS 27.0, Xcode 27.0 (27A266a), MacOSX27.0.sdk, Swift 6.4. Deployment target macOS 15.0.
 Scope: the native side of the Mac credential provider (passkeys, passwords, one-time codes). The app side is `src/desktop/passkey_socket.rs`.
-Branch: `feat/passkeys-totp`, version 0.4.1, not released (the target stays under "Unreleased"). Current evidence is at `82c641d`: [native registration and sign-in](#native-registration-and-sign-in-on-82c641d-2026-10-11). The checks at `11ca5b6` are history ([Checks on a Mac](#checks-on-a-mac-2026-10-09)), and the passkey flag correction is at `1ad43fb`. Source integration into `main` is separate from a release: the release workflow holds production until the version is dated in the changelog ([release](release.md#release-eligibility)).
+Released in 0.4.1 on 2026-10-12 (the checks below were made before the release). Current evidence is at `82c641d`: [native registration and sign-in](#native-registration-and-sign-in-on-82c641d-2026-10-11). The checks at `11ca5b6` are history ([Checks on a Mac](#checks-on-a-mac-2026-10-09)), and the passkey flag correction is at `1ad43fb`. Source integration into `main` is separate from a release: the release workflow holds production until the version is dated in the changelog ([release](release.md#release-eligibility)).
 This document does not open the real-secret gate.
 
 ## What this is

@@ -4,9 +4,14 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
-Target release 0.4.1 for the Mac app, iPhone app, and browser extension. This version is not published. Signed and notarized Mac packaging, optimized iPhone packaging, and native Mac passkey registration and sign-in have passed. Newly created Mac passkeys are immediately available to sign in without an AutoFill refresh. The official browser extension and physical iPhone passkey checks remain open ([status and checks](docs/operations/passkeys-and-codes.md#1-status)).
+## [0.4.1] - 2026-10-12
 
-Before you upgrade a shared vault, make an encrypted backup and update all its devices. The new apps migrate schema 16 to schema 17 when you unlock the vault. Older apps cannot open or sync the upgraded vault.
+One version, 0.4.1, for the Mac app, the iPhone app, and the browser extension. Signed and notarized Mac packaging, optimized iPhone packaging, and native Mac passkey registration and sign-in have passed. Newly created Mac passkeys are immediately available to sign in without an AutoFill refresh. Acceptance on a physical iPhone and of the browser extension from the Chrome Web Store is still open ([status and checks](docs/operations/passkeys-and-codes.md#1-status)).
+
+### Upgrade notes
+
+- Make an encrypted backup first. Then update every Mac and iPhone that shares the vault through a folder, iCloud Drive, or the relay.
+- The new apps migrate schema 16 to schema 17 when you unlock the vault. Older apps cannot open or sync the upgraded vault.
 
 ### Added
 
@@ -16,7 +21,7 @@ Before you upgrade a shared vault, make an encrypted backup and update all its d
 
 - The Apassy app for the iPhone holds your vault, like a second Mac ([ADR 0023](docs/adr/0023-iphone-vault.md)). Add the iPhone with "Add a device…" on the Mac: scan the QR code, compare the two safety words, confirm on the Mac with Touch ID, and type the passphrase on the iPhone. The vault syncs both ways through the Apassy relay. The app has Home (favorites, recently changed, kinds), Items, Search, item details, new and edited items, the password generator (random, memorable, PIN), Watchtower (weak, reused, and old passwords, conflict copies), Face ID unlock, auto-lock, and Settings. Each reveal, copy, one-time code, or large type of a secret needs Face ID or the passphrase; a copy stays on the iPhone and expires after 60 seconds. Password AutoFill fills logins and one-time codes in Safari and apps after Face ID. The companion of ADR 0020 is the Approvals tab. The app is in TestFlight.
 - The vault core of the iPhone app (`ios/ApassyCore`) runs the same vault and relay sync code as the Mac (contract `docs/contracts/ios-core-v1.md`). `scripts/build-ios-core.sh` builds it, and `scripts/ios-testflight.sh` archives and uploads the app.
-- Passkeys (WebAuthn, ES256) and one-time codes (RFC 6238 TOTP) in the vault, the iPhone core, the Mac app, and the browser extension. The sources are in the branch `feat/passkeys-totp`. Public availability on Mac and iPhone and acceptance on real devices are open, and nothing here is published ([guide](docs/operations/passkeys-and-codes.md), [iPhone core contract](docs/contracts/ios-core-v1.md)).
+- Passkeys (WebAuthn, ES256) and one-time codes (RFC 6238 TOTP) in the vault, the iPhone core, the Mac app, and the browser extension. Acceptance on a physical iPhone and with the store build of the extension is open ([guide](docs/operations/passkeys-and-codes.md), [iPhone core contract](docs/contracts/ios-core-v1.md)).
   - A login can hold one passkey. The iPhone core has the calls `passkey_list`, `passkey_assert`, `passkey_register`, `passkey_import`, and `passkey_remove`. Sign-in and registration need a fresh owner check. The key never appears in an item, a reveal, a list, or an agent read.
   - Codes accept SHA-1, SHA-256, and SHA-512, 6 to 8 digits, and a period of 15 to 120 seconds. HOTP and Steam codes are not supported. A field with a custom title counts as a code when its value is an `otpauth://totp` link.
   - The iPhone AutoFill suggests passkeys and codes beside passwords. A login that has only a passkey offers no password.
