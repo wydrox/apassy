@@ -104,27 +104,15 @@ enum CredentialOptions {
         detail.environment == nil ? "Not set" : "Not confirmed"
     }
 
-    /// How careful the bouncer is with an environment: production most.
-    static func strictness(_ environment: CredentialEnvironment) -> Int {
-        switch environment {
-        case .production: 3
-        case .staging: 2
-        case .development: 1
-        case .local: 0
-        }
-    }
-
     /// Turning "Always ask me" off makes each use wait less: the owner check first. On is stricter.
     static func alwaysAskNeedsOwner(from current: Bool, to new: Bool) -> Bool {
         current && !new
     }
 
-    /// Whether choosing `new` makes the bouncer less careful than now. Without a declaration, or
-    /// with an environment that is not confirmed, the bouncer treats the credential as production,
-    /// so anything but production loosens it. Production never needs the check.
+    /// Whether choosing `new` needs the owner check first. As on the Mac (contract ios-core-v1
+    /// §5.11), every environment but production does: the owner, not a passer-by with an unlocked
+    /// iPhone, says that a credential is not production. Production never needs the check.
     static func environmentNeedsOwner(_ detail: ItemDetail, to new: CredentialEnvironment) -> Bool {
-        guard new != .production else { return false }
-        let current = shownEnvironment(detail) ?? .production
-        return strictness(new) < strictness(current)
+        new != .production
     }
 }

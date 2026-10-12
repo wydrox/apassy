@@ -288,7 +288,9 @@ private struct FoundRow: View {
                 .accessibilityLabel("Add \(row.found.title)")
                 .accessibilityValue(keep ? "On" : "Off")
             }
-            PasteProviderTile(found: row.found)
+            ProviderTile(
+                style: .of(provider: row.found.provider, title: row.found.title, kind: row.found.kind),
+                scale: 30 / 38)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 8) {
                     TextField(row.found.title, text: $title)
@@ -325,48 +327,6 @@ private struct EnvironmentCap: View {
             .foregroundStyle(red ? Color.red : Color.secondary)
             .background(red ? Color.red.opacity(0.12) : Color.secondary.opacity(0.12), in: .rect(cornerRadius: 7))
             .fixedSize()
-    }
-}
-
-/// The provider of a detected credential in a rounded square: its letter on its color, the
-/// database symbol for PostgreSQL, else the symbol of the kind. The shared `ProviderTile` of the
-/// vault lists replaces it when the streams merge.
-private struct PasteProviderTile: View {
-    let found: DetectedCredential
-    @ScaledMetric(relativeTo: .body) private var side: CGFloat = 30
-
-    var body: some View {
-        content
-            .foregroundStyle(.white)
-            .frame(width: side, height: side)
-            .background(color.gradient, in: .rect(cornerRadius: side * 0.26, style: .continuous))
-            .accessibilityHidden(true)
-    }
-
-    @ViewBuilder
-    private var content: some View {
-        if let provider = found.provider, found.kind != .database, let letter = provider.first {
-            Text(String(letter).uppercased())
-                .font(.system(size: side * 0.5, weight: .bold))
-        } else {
-            Image(systemName: found.kind.symbol)
-                .font(.system(size: side * 0.46, weight: .medium))
-        }
-    }
-
-    private var color: Color {
-        switch found.provider?.lowercased() {
-        case "stripe": Color(red: 0.39, green: 0.36, blue: 1.0)
-        case "github": Color(red: 0.12, green: 0.14, blue: 0.16)
-        case "postgresql", "postgres": Color(red: 0.2, green: 0.4, blue: 0.57)
-        case "anthropic": Color(red: 0.8, green: 0.47, blue: 0.36)
-        case "openai": Color(red: 0.06, green: 0.64, blue: 0.5)
-        case "cloudflare": Color(red: 0.96, green: 0.51, blue: 0.13)
-        case "sentry": Color(red: 0.21, green: 0.18, blue: 0.35)
-        case "resend": Color(red: 0.07, green: 0.07, blue: 0.07)
-        case nil: found.kind.tint
-        default: Color.gray
-        }
     }
 }
 

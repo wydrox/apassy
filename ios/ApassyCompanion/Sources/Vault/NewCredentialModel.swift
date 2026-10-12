@@ -241,7 +241,7 @@ final class NewCredentialModel {
 }
 
 /// A place of a folder menu (ADR 0026 §5): the top level, or a folder with its depth.
-struct FolderChoice: Identifiable, Hashable {
+struct FolderMenuChoice: Identifiable, Hashable {
     /// The folder UUID; nil for the top level.
     let id: String?
     let name: String
@@ -254,10 +254,10 @@ enum FolderMenu {
     static let noFolder = "No folder"
 
     /// "No folder", then each folder in tree order (the core's order is depth first).
-    static func choices(_ folders: [Folder]) -> [FolderChoice] {
-        [FolderChoice(id: nil, name: noFolder, depth: 0)]
+    static func choices(_ folders: [Folder]) -> [FolderMenuChoice] {
+        [FolderMenuChoice(id: nil, name: noFolder, depth: 0)]
             + folders.map { folder in
-                FolderChoice(id: folder.uuid, name: folder.name, depth: max(folders.path(to: folder.uuid).count - 1, 0))
+                FolderMenuChoice(id: folder.uuid, name: folder.name, depth: max(folders.path(to: folder.uuid).count - 1, 0))
             }
     }
 

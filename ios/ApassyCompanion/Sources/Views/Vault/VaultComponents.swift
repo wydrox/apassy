@@ -110,7 +110,11 @@ struct ProviderTile: View {
     var scale: CGFloat = 1
 
     init(_ row: ItemRow, scale: CGFloat = 1) {
-        self.style = ProviderTileStyle.of(row)
+        self.init(style: ProviderTileStyle.of(row), scale: scale)
+    }
+
+    init(style: ProviderTileStyle, scale: CGFloat = 1) {
+        self.style = style
         self.scale = scale
     }
 

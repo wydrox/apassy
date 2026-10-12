@@ -80,21 +80,20 @@ struct CredentialOptionsTests {
         #expect(!CredentialOptions.alwaysAskNeedsOwner(from: false, to: false))
     }
 
-    @Test("a less careful environment needs the owner, a stricter one does not")
+    @Test("every environment but production needs the owner, as on the Mac")
     func environmentNeedsOwner() async throws {
         let production = try await detail(environment: .production, source: .owner)
         #expect(CredentialOptions.environmentNeedsOwner(production, to: .development))
         #expect(!CredentialOptions.environmentNeedsOwner(production, to: .production))
 
         let development = try await detail(environment: .development, source: .owner)
-        #expect(!CredentialOptions.environmentNeedsOwner(development, to: .staging))
+        #expect(CredentialOptions.environmentNeedsOwner(development, to: .staging))
         #expect(CredentialOptions.environmentNeedsOwner(development, to: .local))
 
-        // An environment that is not confirmed counts as production.
         let unconfirmed = try await detail(environment: .development, source: .default)
         #expect(CredentialOptions.environmentNeedsOwner(unconfirmed, to: .development))
 
-        // Without a declaration, production is the only environment that does not loosen.
+        // Without a declaration, too, production is the only choice without the check.
         let none = try await detail(environment: nil, source: nil)
         #expect(!CredentialOptions.environmentNeedsOwner(none, to: .production))
         #expect(CredentialOptions.environmentNeedsOwner(none, to: .staging))
