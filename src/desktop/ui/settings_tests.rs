@@ -1,17 +1,27 @@
 //! Headless tests of the Settings window (ADR 0026 §3): the four tabs of the toolbar,
 //! the sections of each tab at the minimum and a tall window size, the relay row of
-//! Devices, and the keys that close the window. Synthetic values only.
+//! Devices with its owner check, and the keys that close the window. Synthetic values
+//! only; the relay is the in-process fake relay on 127.0.0.1.
 
 use eframe::egui::{self, Event, Key, Modifiers, Pos2, RawInput, Rect, Vec2};
 use tempfile::TempDir;
 
-use super::super::owner_tests::unlocked_app_with_item;
+use super::super::owner_tests::{PASS, WRONG, unlocked_app_with_item};
 use super::super::settings_window::{MIN_SIZE, content};
 use super::{
-    RELAY_QUESTIONS, RELAY_QUESTIONS_NEEDS_RELAY, RELAY_QUESTIONS_OFF, RELAY_QUESTIONS_ON,
+    ADD_IPHONE, RELAY_QUESTIONS, RELAY_QUESTIONS_NEW_TEAM, RELAY_QUESTIONS_OFF, RELAY_QUESTIONS_ON,
     SettingsTab,
 };
+use crate::broker::approvals::{OwnerAction, OwnerAuthError, OwnerCheck};
 use crate::desktop::DesktopApp;
+use crate::desktop::owner_check::OwnerRequest;
+
+/// The fake relay reads the app's sync module under this name.
+use crate::sync as relay_api;
+/// The sync tests load the same file for their own use.
+#[allow(clippy::duplicate_mod)]
+#[path = "../../../tests/common/fake_relay.rs"]
+mod fake_relay;
 
 const TALL: Vec2 = Vec2::new(MIN_SIZE.x, 6000.0);
 
@@ -241,25 +251,39 @@ fn relay_switch(app: &mut DesktopApp) -> (bool, Option<egui::accesskit::Toggled>
 }
 
 /// "Send questions through the relay" is on the Devices tab and off by default. A vault
-/// that is not on the relay cannot turn it on: the switch is disabled.
+/// that is not on the relay can turn it on too: through a notifications-only team, so
+/// the switch says so. A locked vault cannot change it.
 #[test]
-fn the_relay_questions_switch_needs_the_relay() {
+fn the_relay_questions_switch_offers_a_team_without_relay_sync() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&dir);
     app.ui.settings_tab = SettingsTab::Devices;
     let (disabled, toggled) = relay_switch(&mut app);
-    assert!(disabled, "the relay switch is disabled");
+    assert!(!disabled, "the relay switch is enabled");
     assert_eq!(toggled, Some(egui::accesskit::Toggled::False), "and off");
     let (text, _) = frames(&mut app, TALL);
-    assert!(text.contains(RELAY_QUESTIONS_NEEDS_RELAY), "{text}");
+    assert!(text.contains(RELAY_QUESTIONS_NEW_TEAM), "{text}");
+    assert!(
+        !text.contains(ADD_IPHONE),
+        "no iPhone before it is on: {text}"
+    );
+
+    app.owner_ui.session.lock().expect("lock");
+    let (disabled, toggled) = relay_switch(&mut app);
+    assert!(disabled, "a locked vault cannot change it");
+    assert_eq!(toggled, Some(egui::accesskit::Toggled::False));
 }
 
-/// With relay sync, the switch is enabled and still off by default. On adds the purpose
-/// `questions` to the sync membership, makes the question key, and registers this Mac;
-/// off takes the purpose away and keeps relay sync.
+/// With relay sync, the switch is enabled and still off by default. On is a new channel
+/// that can approve runs: it opens the owner check for exactly the sync team, and nothing
+/// changes before it passes. Then the sync membership has the purpose `questions`, the
+/// vault has its question key, and this Mac is a trusted device. Off needs no check,
+/// takes the purpose away, and keeps relay sync.
 #[test]
-fn the_relay_questions_switch_goes_on_and_off_with_relay_sync() {
+fn the_relay_questions_switch_needs_the_owner_check_to_go_on() {
     use crate::relay::membership::{QuestionsAvailability, questions_availability};
+    // The device list of Devices goes to this relay on 127.0.0.1, never to the network.
+    let relay = fake_relay::FakeRelay::start();
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&dir);
     app.ui.settings_tab = SettingsTab::Devices;
@@ -271,7 +295,7 @@ fn the_relay_questions_switch_goes_on_and_off_with_relay_sync() {
         .as_mut()
         .expect("open vault")
         .set_relay_device(&crate::vault::RelayDevice {
-            relay_url: "https://relay.example.test".to_owned(),
+            relay_url: relay.url.clone(),
             team_id: "t_7k2m5q4x3c".to_owned(),
             device_id: 2,
             public_key: key.public_key().to_vec(),
@@ -285,7 +309,68 @@ fn the_relay_questions_switch_goes_on_and_off_with_relay_sync() {
     let (text, _) = frames(&mut app, TALL);
     assert!(text.contains(RELAY_QUESTIONS_OFF), "{text}");
 
-    super::set_relay_questions(&mut app, true);
+    let unchanged = |app: &DesktopApp| {
+        let shared = app.owner_ui.session.shared_vault();
+        let guard = shared.lock().unwrap();
+        let open = guard.as_ref().expect("open vault");
+        assert_eq!(
+            questions_availability(open).unwrap(),
+            QuestionsAvailability::CanTurnOn {
+                team_id: "t_7k2m5q4x3c".to_owned()
+            }
+        );
+        assert!(open.question_key().unwrap().is_none());
+        assert!(open.trusted_devices().unwrap().is_empty());
+    };
+    super::set_relay_questions(&mut app, true, None);
+    let request = app
+        .owner
+        .check
+        .as_ref()
+        .expect("owner check")
+        .request
+        .clone();
+    let expected = OwnerAction::EnableRelayQuestions {
+        relay_url: relay.url.clone(),
+        team_id: Some("t_7k2m5q4x3c".to_owned()),
+    };
+    assert_eq!(request.action(), expected);
+    assert!(matches!(request, OwnerRequest::EnableRelayQuestions { .. }));
+    assert_eq!(
+        expected.reason(),
+        "send the questions of this vault through the relay"
+    );
+    assert!(
+        request
+            .describe()
+            .starts_with("Send the questions of this vault through the Apassy relay"),
+        "{}",
+        request.describe()
+    );
+    unchanged(&app);
+    assert_eq!(
+        app.confirm_owner_now(OwnerCheck::passphrase(WRONG)),
+        Err(OwnerAuthError::WrongPassphrase)
+    );
+    unchanged(&app);
+    // A proof for another action changes nothing.
+    let other = app
+        .owner_gate()
+        .authorize(
+            OwnerAction::EnableRelayQuestions {
+                relay_url: relay.url.clone(),
+                team_id: None,
+            },
+            OwnerCheck::passphrase(PASS),
+        )
+        .expect("proof");
+    super::set_relay_questions(&mut app, true, None);
+    app.finish_owner_check_with(other);
+    unchanged(&app);
+
+    super::set_relay_questions(&mut app, true, None);
+    app.confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("owner check");
     let (_, toggled) = relay_switch(&mut app);
     assert_eq!(toggled, Some(egui::accesskit::Toggled::True));
     {
@@ -298,12 +383,20 @@ fn the_relay_questions_switch_goes_on_and_off_with_relay_sync() {
             }
         );
         assert!(open.question_key().unwrap().is_some());
-        assert_eq!(open.trusted_devices().unwrap().len(), 1);
+        let devices = open.trusted_devices().unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].sign_key, key.public_key());
     }
     let (text, _) = frames(&mut app, TALL);
     assert!(text.contains(RELAY_QUESTIONS_ON), "{text}");
+    assert!(
+        text.contains("This Mac") && text.contains(ADD_IPHONE),
+        "{text}"
+    );
 
-    super::set_relay_questions(&mut app, false);
+    // Off: stricter, no check.
+    super::set_relay_questions(&mut app, false, None);
+    assert!(app.owner.check.is_none(), "off needs no owner check");
     let (_, toggled) = relay_switch(&mut app);
     assert_eq!(toggled, Some(egui::accesskit::Toggled::False));
     let guard = vault.lock().unwrap();
@@ -314,6 +407,55 @@ fn the_relay_questions_switch_goes_on_and_off_with_relay_sync() {
             .expect("relay sync stays")
             .team_id,
         "t_7k2m5q4x3c"
+    );
+    assert_eq!(
+        questions_availability(open).unwrap(),
+        QuestionsAvailability::CanTurnOn {
+            team_id: "t_7k2m5q4x3c".to_owned()
+        }
+    );
+}
+
+/// What Devices says of each device of the questions: its kind, how it answers, and the
+/// push state of an iPhone only when the relay tells it.
+#[test]
+fn device_rows_say_how_each_device_answers() {
+    use super::super::sync::questions::device_words;
+    use crate::vault::{TrustedDevice, TrustedDeviceKind};
+    let device = |kind, answer_key: Option<Vec<u8>>| TrustedDevice {
+        uuid: "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d".to_owned(),
+        name: "Synthetic device".to_owned(),
+        kind,
+        relay_devices: Default::default(),
+        sign_key: vec![4; 65],
+        answer_key,
+        created_at: 0,
+        updated_at: 0,
+        updated_by: String::new(),
+    };
+    let mac = device(TrustedDeviceKind::Mac, None);
+    assert_eq!(device_words(&mac, true, None), "This Mac");
+    assert_eq!(
+        device_words(&mac, false, None),
+        "Mac · answers after Touch ID"
+    );
+    let phone = device(TrustedDeviceKind::Iphone, Some(vec![4; 65]));
+    assert_eq!(
+        device_words(&phone, false, None),
+        "iPhone · answers with Face ID"
+    );
+    assert_eq!(
+        device_words(&phone, false, Some(true)),
+        "iPhone · answers with Face ID · Push on"
+    );
+    assert_eq!(
+        device_words(&phone, false, Some(false)),
+        "iPhone · answers with Face ID · Push off"
+    );
+    let waiting = device(TrustedDeviceKind::Iphone, None);
+    assert_eq!(
+        device_words(&waiting, false, None),
+        "iPhone · its Face ID key has not synced yet"
     );
 }
 

@@ -35,6 +35,7 @@ use crate::broker::approvals::{
 use crate::broker::profile::REPORTING_API_V0;
 use crate::broker::project::Project;
 use crate::native::{AuthCancel, Biometry, CancelOnDrop, NativeHelper};
+use crate::questions::{Choice, RemoteEnvironment};
 use crate::vault::{EnvDelivery, ExecMode, ExecRule, GrantPlace};
 
 /// The result of a poll of a [`Task`].
@@ -503,6 +504,33 @@ pub enum OwnerRequest {
         device_name: String,
         public_key: Vec<u8>,
     },
+    /// Add an iPhone to the notifications-only questions team of the vault `vault` (plan
+    /// §A7): the same proof as [`OwnerRequest::ConfirmSyncDevice`] for the link exactly as
+    /// the "Add an iPhone…" sheet showed it with its safety words. The iPhone gets the
+    /// questions and can answer them; it gets no vault.
+    ConfirmQuestionsDevice {
+        vault: String,
+        link_id: u64,
+        device_name: String,
+        public_key: Vec<u8>,
+    },
+    /// Turn "Send questions through the relay" on (relay-questions-v1): through the relay
+    /// sync team `team_id` of the vault, or through a new notifications-only team on
+    /// `relay_url` (`team_id` `None`, with the team code of the sheet). It opens a new
+    /// channel that can approve runs.
+    EnableRelayQuestions {
+        relay_url: String,
+        team_id: Option<String>,
+    },
+    /// An approving answer of this Mac to the question of another Mac (relay-questions-v1
+    /// section 5.3): `remote_id` is the question in the view of the questions waiter,
+    /// `choice` the answer, and `action` the [`OwnerAction::AnswerRemoteQuestion`] of
+    /// both, as the card showed them.
+    AnswerRemoteQuestion {
+        remote_id: u64,
+        choice: Choice,
+        action: OwnerAction,
+    },
 }
 
 impl OwnerRequest {
@@ -788,11 +816,24 @@ impl OwnerRequest {
                 device_name,
                 public_key,
                 ..
+            }
+            | Self::ConfirmQuestionsDevice {
+                link_id,
+                device_name,
+                public_key,
+                ..
             } => OwnerAction::ConfirmSyncDevice {
                 link_id: *link_id,
                 device_name: device_name.clone(),
                 public_key: public_key.clone(),
             },
+            Self::EnableRelayQuestions { relay_url, team_id } => {
+                OwnerAction::EnableRelayQuestions {
+                    relay_url: relay_url.clone(),
+                    team_id: team_id.clone(),
+                }
+            }
+            Self::AnswerRemoteQuestion { action, .. } => action.clone(),
         }
     }
 
@@ -1101,7 +1142,57 @@ impl OwnerRequest {
             Self::ConfirmSyncDevice { device_name, .. } => format!(
                 "Add the device \"{device_name}\" to the sync of this vault through the Apassy relay. It gets the encrypted copy and can send changes. It still needs the passphrase to open the vault."
             ),
+            Self::ConfirmQuestionsDevice { device_name, .. } => format!(
+                "Add the iPhone \"{device_name}\" to the questions of this vault through the Apassy relay. It can then see the questions of your agents and answer them with Face ID. It gets no vault and no secret value."
+            ),
+            Self::EnableRelayQuestions {
+                relay_url,
+                team_id: Some(_),
+            } => format!(
+                "Send the questions of this vault through the Apassy relay at {relay_url}. Your other devices of this vault can then answer them, and an Allow there needs Face ID or Touch ID. The relay sees no command and no credential."
+            ),
+            Self::EnableRelayQuestions {
+                relay_url,
+                team_id: None,
+            } => format!(
+                "Make a team for the questions of this vault on the Apassy relay at {relay_url}, with the team code. Your other devices of this vault can then answer the questions, and an Allow there needs Face ID or Touch ID. The relay sees no command and no credential."
+            ),
+            Self::AnswerRemoteQuestion { choice, action, .. } => {
+                let (agent, asker) = match action {
+                    OwnerAction::AnswerRemoteQuestion { asker, answer, .. } => (
+                        answer.run().map_or("the agent", |run| run.agent.as_str()),
+                        asker.as_str(),
+                    ),
+                    _ => ("the agent", "another Mac"),
+                };
+                format!(
+                    "Answer \"{}\" to the question of {} on {}. Apassy signs the answer with the key of this Mac and sends it, end-to-end encrypted, through the relay.",
+                    choice_words(choice),
+                    page_text(agent),
+                    page_text(asker)
+                )
+            }
         }
+    }
+}
+
+/// The words of a remote answer for the owner check dialog.
+fn choice_words(choice: &Choice) -> String {
+    match choice {
+        Choice::ApproveOnce => "Allow Once".to_owned(),
+        Choice::ApproveInProject { action, .. } => format!("Allow {}", action_words(*action)),
+        Choice::AllowProduction { action, .. } => {
+            format!("Allow production: {}", action_words(*action))
+        }
+        Choice::CorrectEnvironment {
+            environment: RemoteEnvironment::Development,
+            ..
+        } => "Development".to_owned(),
+        Choice::CorrectEnvironment { .. } => "Production".to_owned(),
+        Choice::Deny => "Deny".to_owned(),
+        Choice::NeverForAgent => "Never".to_owned(),
+        Choice::AlwaysAskForAgent => "Always Ask".to_owned(),
+        Choice::Disconnect => "Disconnect".to_owned(),
     }
 }
 
@@ -1805,9 +1896,16 @@ impl DesktopApp {
             OwnerRequest::OpenCliSession => self.open_cli_session(proof),
             OwnerRequest::BindVariables { variables } => self.bind_variables(variables, proof),
             OwnerRequest::PairCompanion { .. } => self.complete_pairing(proof),
-            OwnerRequest::ConfirmSyncDevice { vault, link_id, .. } => {
+            OwnerRequest::ConfirmSyncDevice { vault, link_id, .. }
+            | OwnerRequest::ConfirmQuestionsDevice { vault, link_id, .. } => {
                 self.relay_confirm_link(&vault, link_id, proof);
             }
+            OwnerRequest::EnableRelayQuestions { relay_url, team_id } => {
+                self.questions_enable_with(relay_url, team_id, proof);
+            }
+            OwnerRequest::AnswerRemoteQuestion {
+                remote_id, choice, ..
+            } => self.answer_remote_question(remote_id, choice, Some(proof)),
         }
     }
 
@@ -2004,6 +2102,8 @@ impl DesktopApp {
         self.expire_platform_check(ctx);
         self.poll_unlock(ctx);
         self.poll_companion(ctx);
+        self.questions_poll(ctx);
+        self.poll_remote_answers(ctx);
         self.owner_ui.session.expire_reveals();
         if let Some(left) = self.owner_ui.session.next_reveal_expiry() {
             ctx.request_repaint_after(left);

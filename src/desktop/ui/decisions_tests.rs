@@ -1547,3 +1547,236 @@ fn unlock_prunes_the_previous_values_that_are_no_longer_valid() {
         .expect("prune");
     assert_eq!(left, 0, "the unlock pruned it already");
 }
+
+// ---- Questions of other Macs (relay-questions-v1 section 13). ----
+
+/// A question of the Mac "Synthetic Mac mini" for `run`, as the lister opens it.
+fn remote_opened(pending: &PendingRun) -> crate::questions::OpenedQuestion {
+    use crate::questions::{Card, OpenedQuestion, QuestionRecord};
+    use crate::vault::{TrustedDevice, TrustedDeviceKind};
+    let qid = "oKGio6SlpqeoqaqrrK2urw";
+    let asker = "0b7e5c3a-9d1f-4a2b-8c6d-4e0f1a2b3c4d";
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    let card = Card::from_run(qid, asker, "Synthetic Mac mini", now, pending);
+    let run = card.to_run().expect("the card names a run");
+    OpenedQuestion {
+        team_id: "t_7k2m5q4x3c".to_owned(),
+        record: QuestionRecord {
+            qid: qid.to_owned(),
+            seq: 1,
+            to: "member".to_owned(),
+            from_device_id: 2,
+            from_device_name: "Synthetic Mac mini".to_owned(),
+            key_id: "630dcd2966c43366".to_owned(),
+            nonce: String::new(),
+            ciphertext: String::new(),
+            created_at: now,
+            expires_at: now + 240,
+            state: "open".to_owned(),
+            settled_at: None,
+            settle: None,
+        },
+        card,
+        run,
+        asker: TrustedDevice {
+            uuid: asker.to_owned(),
+            name: "Synthetic Mac mini".to_owned(),
+            kind: TrustedDeviceKind::Mac,
+            relay_devices: Default::default(),
+            sign_key: vec![4; 65],
+            answer_key: None,
+            created_at: 0,
+            updated_at: 0,
+            updated_by: String::new(),
+        },
+    }
+}
+
+/// A question of another Mac waits in Waiting after the questions of this Mac, "from
+/// MAC", with the same detail and bar, and counts in the badge. "Allow Once" opens the
+/// owner check for `OwnerAction::AnswerRemoteQuestion` of exactly this question and
+/// answer; a stricter answer opens none, and "Disconnect" asks once. (The relay round
+/// trip is in `tests/relay_questions.rs`.)
+#[test]
+fn a_question_of_another_mac_waits_from_that_mac_and_allow_needs_the_owner_check() {
+    use crate::broker::approvals::OwnerAction;
+    use crate::desktop::owner_check::OwnerRequest;
+    use crate::questions::{QuestionsConfig, QuestionsWorker};
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, item_id) = unlocked_app_with_item(&dir);
+    let queue = queue_of(&mut app, &dir);
+    // The questions waiter of the app, without a relay membership: it calls no relay.
+    let worker = QuestionsWorker::start(
+        Arc::clone(&queue),
+        app.owner_ui.session.shared_vault(),
+        app.owner_gate(),
+        QuestionsConfig {
+            question_wait: Duration::from_secs(300),
+            tick: Duration::from_millis(50),
+            device_name: "Synthetic MacBook".to_owned(),
+        },
+    );
+    let mut pending = run(
+        "claude-code",
+        question(vec![item(item_id, "Guarded key")], &[]),
+    );
+    pending.id = 41;
+    let opened = remote_opened(&pending);
+    let remote_id = worker.insert_remote_for_test(opened.clone());
+    app.owner.questions = Some(worker);
+    app.place = Place::Decisions;
+    let ctx = egui::Context::default();
+
+    let (text, past) = frames(&mut app, DEFAULT, 3);
+    assert!(text.contains("Waiting"), "{text}");
+    assert!(
+        text.contains("claude-code · acme-billing · from Synthetic Mac mini"),
+        "{text}"
+    );
+    assert!(past.is_empty(), "{past:?}");
+    assert_eq!(decisions::badge_count(&app, &[]), 1);
+    assert_eq!(decisions::selected_key(&app), Some(Key::Remote(remote_id)));
+    for expected in [
+        "claude-code wants to use Guarded key",
+        "Asked on Synthetic Mac mini.",
+        "Allow Once",
+        "Deny",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    let (_, past) = frames(&mut app, SMALLEST, 3);
+    assert!(past.is_empty(), "{past:?}");
+
+    // "Allow Once": the owner check of this Mac for exactly this answer.
+    let remote = app.owner.questions.as_ref().expect("worker").view().remote[0].clone();
+    decisions::apply_remote(&mut app, &ctx, &remote, Answer::Once);
+    let request = app
+        .owner
+        .check
+        .as_ref()
+        .expect("owner check")
+        .request
+        .clone();
+    assert!(matches!(
+        request,
+        OwnerRequest::AnswerRemoteQuestion { remote_id: id, .. } if id == remote_id
+    ));
+    let action = request.action();
+    assert_eq!(
+        action,
+        OwnerAction::AnswerRemoteQuestion {
+            qid: opened.record.qid.clone(),
+            asker: "Synthetic Mac mini".to_owned(),
+            answer: Box::new(OwnerAction::ApproveRun(opened.run.clone())),
+        }
+    );
+    assert!(
+        action.reason().ends_with(" on Synthetic Mac mini"),
+        "{}",
+        action.reason()
+    );
+    assert!(
+        request.describe().starts_with(
+            "Answer \"Allow Once\" to the question of claude-code on Synthetic Mac mini."
+        ),
+        "{}",
+        request.describe()
+    );
+    // A wrong passphrase sends nothing.
+    assert!(
+        app.confirm_owner_now(crate::broker::approvals::OwnerCheck::passphrase(WRONG))
+            .is_err()
+    );
+    app.settle_remote_answers_for_test();
+    assert!(app.owner.check.is_none());
+
+    // A stricter answer: no owner check. Without a relay session it goes nowhere, and
+    // says so.
+    decisions::apply_remote(&mut app, &ctx, &remote, Answer::Never);
+    assert!(app.owner.check.is_none(), "no owner check");
+    app.settle_remote_answers_for_test();
+    assert_eq!(
+        app.status_text, "This question no longer waits on this Mac.",
+        "{}",
+        app.status_text
+    );
+    decisions::apply_remote(&mut app, &ctx, &remote, Answer::Disconnect);
+    assert!(decisions::disconnecting(&app), "Disconnect asks once");
+    assert!(app.owner.check.is_none());
+    let (text, _) = frames(&mut app, DEFAULT, 3);
+    assert!(text.contains("Disconnect claude-code?"), "{text}");
+    assert_eq!(queue.pending().len(), 0, "the local queue is untouched");
+}
+
+/// Each answer on the bar is the answer kind of the card (section 9.1).
+#[test]
+fn the_answers_of_the_bar_map_to_the_answer_kinds() {
+    use crate::questions::{Choice, RemoteEnvironment};
+    let pending = run(
+        "claude-code",
+        question(
+            vec![item(7, "Guarded key")],
+            &[AnswerKind::InProject(ActionKind::Read)],
+        ),
+    );
+    let key = "/synthetic/acme-billing".to_owned();
+    let cases = [
+        (Answer::Deny, Choice::Deny),
+        (Answer::Once, Choice::ApproveOnce),
+        (
+            Answer::InProject(ActionKind::Read),
+            Choice::ApproveInProject {
+                action: ActionKind::Read,
+                project_key: key.clone(),
+            },
+        ),
+        (
+            Answer::Production(ActionKind::Read),
+            Choice::AllowProduction {
+                action: ActionKind::Read,
+                project_key: key,
+            },
+        ),
+        (
+            Answer::Development {
+                item_id: 7,
+                name: "Guarded key".to_owned(),
+            },
+            Choice::CorrectEnvironment {
+                item_id: 7,
+                environment: RemoteEnvironment::Development,
+            },
+        ),
+        (
+            Answer::MarkProduction {
+                item_id: 7,
+                name: "Guarded key".to_owned(),
+            },
+            Choice::CorrectEnvironment {
+                item_id: 7,
+                environment: RemoteEnvironment::Production,
+            },
+        ),
+        (Answer::Never, Choice::NeverForAgent),
+        (Answer::AlwaysAsk, Choice::AlwaysAskForAgent),
+        (Answer::Disconnect, Choice::Disconnect),
+    ];
+    for (answer, choice) in cases {
+        let mapped = decisions::remote_choice(&pending, &answer).expect("an answer kind");
+        assert_eq!(mapped, choice, "{answer:?}");
+        let approving = matches!(
+            answer,
+            Answer::Once
+                | Answer::InProject(_)
+                | Answer::Production(_)
+                | Answer::Development { .. }
+        );
+        assert_eq!(mapped.needs_owner_check(), approving, "{answer:?}");
+    }
+    let mut no_project = pending.clone();
+    no_project.question.project = None;
+    assert!(decisions::remote_choice(&no_project, &Answer::InProject(ActionKind::Read)).is_none());
+}

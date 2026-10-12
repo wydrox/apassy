@@ -146,7 +146,9 @@ pub fn enable_questions(vault: &mut Vault, device_name: &str) -> Result<TrustedD
 /// Turn the questions on through a new notifications-only team (plan A6): a new device
 /// key, `POST /v1/teams` with the operator team code, and a membership with the purpose
 /// `questions` only, so relay sync stays as it is and the team never gets a snapshot.
-/// Then the question key and the trusted device, as [`enable_questions`].
+/// Then the question key and the trusted device, as [`enable_questions`]. It holds the
+/// vault across the relay call: the app uses [`new_questions_team`] on a thread of its
+/// own, then [`adopt_questions_team`].
 pub fn create_questions_team(
     vault: &mut Vault,
     relay_url: &str,
@@ -160,6 +162,19 @@ pub fn create_questions_team(
     if questions_membership(vault)?.is_some() {
         return Err(SyncError::AlreadyEnabled);
     }
+    let membership = new_questions_team(relay_url, team_code, vault_name, device_name)?;
+    adopt_questions_team(vault, &membership, device_name)
+}
+
+/// The relay part of [`create_questions_team`], with no vault: a new device key and
+/// `POST /v1/teams` with the operator team code. The membership has the purpose
+/// `questions` only. The team code must have its form (`InviteInvalid` otherwise).
+pub fn new_questions_team(
+    relay_url: &str,
+    team_code: &str,
+    vault_name: &str,
+    device_name: &str,
+) -> Result<RelayMembership, SyncError> {
     let url = RelayUrl::parse(relay_url)?;
     let team_code = team_code.trim();
     if !valid_team_code(team_code) {
@@ -168,7 +183,7 @@ pub fn create_questions_team(
     let key = DeviceKey::generate()?;
     let team = clean_name(vault_name, "Vault");
     let created = create_team_on_relay(&url, team_code, &team, device_name, &key)?;
-    let membership = RelayMembership {
+    Ok(RelayMembership {
         team_id: created.team_id,
         relay_url: url.as_str().to_owned(),
         device_id: created.device_id,
@@ -179,10 +194,36 @@ pub fn create_questions_team(
             .unwrap_or_else(|| Zeroizing::new(Vec::new())),
         purposes: BTreeSet::from([MembershipPurpose::Questions]),
         created_at: 0,
-    };
-    vault.add_relay_membership(&membership)?;
+    })
+}
+
+/// The vault part of [`create_questions_team`], with no relay call: keep `membership`
+/// (from [`new_questions_team`]), make the question key when the vault has none, and
+/// register this Mac. `AlreadyEnabled` when the vault got a questions membership in the
+/// meantime: the new team then stays unused on the relay.
+pub fn adopt_questions_team(
+    vault: &mut Vault,
+    membership: &RelayMembership,
+    device_name: &str,
+) -> Result<TrustedDevice, SyncError> {
+    if vault.is_locked() {
+        return Err(SyncError::Vault(VaultErrorKind::Locked));
+    }
+    if questions_membership(vault)?.is_some() {
+        return Err(SyncError::AlreadyEnabled);
+    }
+    vault.add_relay_membership(membership)?;
     vault.ensure_question_key()?;
-    Ok(register_this_device(vault, &membership, device_name)?)
+    Ok(register_this_device(vault, membership, device_name)?)
+}
+
+/// Whether the questions membership of the vault is a notifications-only team: it has
+/// no other purpose, so no snapshot goes through it.
+pub fn questions_only(membership: &RelayMembership) -> bool {
+    membership
+        .purposes
+        .iter()
+        .all(|purpose| *purpose == MembershipPurpose::Questions)
 }
 
 /// Turn the questions off on this Mac: the membership loses the purpose `questions`; a

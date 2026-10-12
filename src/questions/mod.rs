@@ -11,9 +11,11 @@
 //!
 //! - [`envelope`]: the card, the answer, and the settle; the AAD, ChaCha20-Poly1305, and
 //!   the answer string.
-//! - [`client`]: the relay endpoints of the contract (section 10).
+//! - [`client`]: the relay endpoints of the contract (section 10), and the device links
+//!   of a notifications-only team ("Add an iPhone…").
 //! - [`answer`]: the answering device (section 13).
-//! - [`worker`]: the asker, a waiter of its own next to the sync waiter (section 12).
+//! - [`worker`]: the asker, a waiter of its own next to the sync waiter (section 12), and
+//!   the lister of the questions of the other devices (section 13).
 //!
 //! The local card and the local-network companion (companion-v1, digest v1) stay as
 //! they are.
@@ -29,9 +31,10 @@ pub use answer::{
 };
 pub use client::{
     AnswerList, AnswerReceipt, AnswerRecord, Posted, QuestionList, QuestionRecord, QuestionsClient,
-    QuestionsError,
+    QuestionsError, TeamDevice,
 };
 pub use envelope::{AnswerBody, Card, Choice, RemoteEnvironment, Sealed, SettleBody};
 pub use worker::{
-    QUESTION_WAIT, QuestionsConfig, QuestionsView, QuestionsWorker, RemoteAnswered, RemoteRefused,
+    QUESTION_WAIT, QuestionsConfig, QuestionsView, QuestionsWorker, RemoteAnswered,
+    RemoteAnswering, RemoteQuestion, RemoteRefused,
 };

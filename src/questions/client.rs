@@ -15,12 +15,18 @@ use serde_json::Value;
 use zeroize::Zeroizing;
 
 use super::envelope::{Sealed, VERSION, valid_qid};
+use crate::sync::relay::{ApiError, sync_error};
 use crate::sync::relay_http::Cancel;
-use crate::sync::{RelayCallError, RelayMember, SyncError};
+use crate::sync::{
+    LinkCode, PendingLink, RelayCallError, RelayMember, RelayRefusal, SyncError, decode_b64u,
+    link_code_team, safety_words,
+};
 use crate::vault::{RelayMembership, VaultErrorKind};
 
 /// The longest long poll that the relay holds (section 10.4).
 pub const MAX_WAIT: Duration = Duration::from_secs(25);
+/// A link code works this long after the relay made it (relay-sync-v1 section 7.1).
+const LINK_CODE_SECONDS: u64 = 10 * 60;
 
 /// Why a call of the questions failed. No variant holds a secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -338,6 +344,142 @@ impl QuestionsClient {
             .map_err(QuestionsError::from_call)?;
         // A result that does not have the shape of the contract is not the relay's.
         serde_json::from_value(result).map_err(|_| QuestionsError::Unreachable)
+    }
+}
+
+/// A live device of the questions team (`GET /v1/devices`), with the push state when the
+/// relay tells it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct TeamDevice {
+    pub id: u64,
+    pub name: String,
+    /// Whether the relay holds a push token of the device that did not fail. `None`:
+    /// the relay does not say.
+    #[serde(default)]
+    pub push: Option<bool>,
+    #[serde(default)]
+    pub last_seen_at: Option<u64>,
+    #[serde(default)]
+    pub current: bool,
+}
+
+/// A link of a device that asks to join (`LinkView`, relay-sync-v1 section 7.1).
+#[derive(Deserialize)]
+struct LinkView {
+    id: u64,
+    device_name: String,
+    public_key: String,
+    #[serde(default)]
+    created_at: u64,
+    #[serde(default)]
+    expires_at: u64,
+}
+
+/// The device calls of a notifications-only team on the Mac that made it (plan §A7):
+/// "Add an iPhone…" makes a link, shows the iPhones that ask with their safety words,
+/// and confirms one after the owner check (`OwnerAction::ConfirmSyncDevice`), as relay
+/// sync does for its own team (`RelaySync::create_link`). The iPhone joins with
+/// `join_attach` and downloads nothing: the team carries no snapshot.
+impl QuestionsClient {
+    /// `POST /v1/devices/links`: a new link code for an iPhone.
+    pub fn create_link(&self) -> Result<LinkCode, SyncError> {
+        #[derive(Deserialize)]
+        struct Created {
+            secret: String,
+            expires_at: u64,
+        }
+        let created: Created =
+            self.device_call("POST", "/v1/devices/links", Some(&serde_json::json!({})))?;
+        let code = Zeroizing::new(created.secret);
+        if link_code_team(&code) != Some(self.team_id()) {
+            return Err(SyncError::RelayUnreachable);
+        }
+        let link = Zeroizing::new(format!(
+            "{}/link#{}",
+            self.member.relay_url(),
+            code.as_str()
+        ));
+        Ok(LinkCode {
+            code,
+            link,
+            expires_at: created.expires_at,
+        })
+    }
+
+    /// `GET /v1/devices/links`: the devices that wait for a confirmation. With the code
+    /// that this Mac holds, each link that the relay made after that code gets its
+    /// safety words; an older link is of an older code and can only be refused.
+    pub fn pending_links(&self, held: Option<&LinkCode>) -> Result<Vec<PendingLink>, SyncError> {
+        let views: Vec<LinkView> = self.device_call("GET", "/v1/devices/links", None)?;
+        let team = self.team_id().to_owned();
+        Ok(views
+            .into_iter()
+            .filter_map(|view| {
+                let public_key = decode_b64u(&view.public_key)
+                    .filter(|key| key.len() == 65 && key[0] == 0x04)?;
+                let safety = held
+                    .filter(|code| {
+                        view.created_at >= code.expires_at.saturating_sub(LINK_CODE_SECONDS)
+                    })
+                    .map(|code| safety_words(&team, &code.code, &public_key));
+                Some(PendingLink {
+                    id: view.id,
+                    device_name: view.device_name,
+                    public_key,
+                    created_at: view.created_at,
+                    expires_at: view.expires_at,
+                    safety,
+                })
+            })
+            .collect())
+    }
+
+    /// `POST /v1/devices/links/{id}/confirm` with the words that this Mac computed. The
+    /// caller ran the owner check first. A `409` means that the relay's record of the
+    /// device differs: nothing is added.
+    pub fn confirm_link(&self, link: &PendingLink) -> Result<TeamDevice, SyncError> {
+        let safety = link
+            .safety
+            .as_deref()
+            .ok_or(SyncError::Relay(RelayRefusal::Conflict))?;
+        let path = format!("/v1/devices/links/{}/confirm", link.id);
+        self.device_call("POST", &path, Some(&serde_json::json!({"safety": safety})))
+    }
+
+    /// `POST /v1/devices/links/{id}/refuse`.
+    pub fn refuse_link(&self, link_id: u64) -> Result<(), SyncError> {
+        let path = format!("/v1/devices/links/{link_id}/refuse");
+        self.device_call::<serde::de::IgnoredAny>("POST", &path, Some(&serde_json::json!({})))
+            .map(|_| ())
+    }
+
+    /// `GET /v1/devices`: the live devices of the team.
+    pub fn devices(&self) -> Result<Vec<TeamDevice>, SyncError> {
+        self.device_call("GET", "/v1/devices", None)
+    }
+
+    /// One device call, with the errors of relay sync.
+    fn device_call<T: DeserializeOwned>(
+        &self,
+        method: &'static str,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<T, SyncError> {
+        let result = self
+            .member
+            .call(method, path, body, Duration::ZERO)
+            .map_err(|error| {
+                sync_error(match error {
+                    RelayCallError::Unreachable => ApiError::Unreachable,
+                    RelayCallError::Relay { status, code } => ApiError::Relay {
+                        status,
+                        code,
+                        retry_after: None,
+                    },
+                    RelayCallError::Sync(error) => ApiError::Sync(error),
+                })
+            })?;
+        serde_json::from_value(result).map_err(|_| SyncError::RelayUnreachable)
     }
 }
 

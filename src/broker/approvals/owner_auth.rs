@@ -273,6 +273,15 @@ pub enum OwnerAction {
         asker: String,
         answer: Box<OwnerAction>,
     },
+    /// Turn "Send questions through the relay" on for the open vault on this Mac
+    /// (relay-questions-v1 section 12): a relay membership, the question key, and this
+    /// Mac as a trusted device. It opens a new channel that can approve runs. The proof
+    /// names the relay and the team: the relay sync team of the vault, or `None` for a
+    /// new notifications-only team. Turning it off is stricter and needs no check.
+    EnableRelayQuestions {
+        relay_url: String,
+        team_id: Option<String>,
+    },
 }
 
 /// The words for the Touch ID prompt after the relying party of a passkey. `None` is
@@ -407,6 +416,9 @@ impl OwnerAction {
             ),
             Self::AnswerRemoteQuestion { asker, answer, .. } => {
                 format!("{} on {}", answer.reason(), short_device_name(asker))
+            }
+            Self::EnableRelayQuestions { .. } => {
+                "send the questions of this vault through the relay".to_owned()
             }
         }
     }

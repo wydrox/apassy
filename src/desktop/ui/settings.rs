@@ -25,9 +25,7 @@ use crate::desktop::notify::{self, Delivery};
 use crate::desktop::owner_store::Ephemeral;
 use crate::desktop::unlock::UnlockMethod;
 use crate::desktop::{BrokerState, DesktopApp};
-use crate::relay::membership::{
-    QuestionsAvailability, disable_questions, enable_questions, questions_availability,
-};
+use crate::relay::membership::{QuestionsAvailability, questions_availability};
 
 #[cfg(test)]
 #[path = "settings_tests.rs"]
@@ -205,8 +203,10 @@ pub(super) const RELAY_QUESTIONS: &str = "Send questions through the relay";
 pub(super) const RELAY_QUESTIONS_ON: &str = "On. Each question also goes, end-to-end encrypted, to your other devices of this vault. The relay sees no command and no credential.";
 pub(super) const RELAY_QUESTIONS_OFF: &str =
     "Off. Turn it on to answer on your other Macs and iPhones away from this network.";
-pub(super) const RELAY_QUESTIONS_NEEDS_RELAY: &str =
-    "First sync this vault through the Apassy relay in Sync below.";
+pub(super) const RELAY_QUESTIONS_NEW_TEAM: &str = "Off. This vault does not sync through the relay: turning it on makes a team on the relay for its questions only, with a team code from the operator.";
+pub(super) const RELAY_QUESTIONS_LOCKED: &str = "Unlock the vault to change it.";
+/// The button that links an iPhone to the questions team.
+pub(super) const ADD_IPHONE: &str = "Add an iPhone…";
 
 /// What the relay row shows: the availability of the open, unlocked vault, or `None`.
 fn relay_questions_state(app: &DesktopApp) -> Option<QuestionsAvailability> {
@@ -221,36 +221,14 @@ fn relay_questions_state(app: &DesktopApp) -> Option<QuestionsAvailability> {
 }
 
 /// Turn "Send questions through the relay" on or off for the open vault on this Mac. On
-/// adds the purpose `questions` to the relay sync membership, makes the question key,
-/// and registers this Mac as a trusted device; no relay call. Off takes the purpose away.
-pub(super) fn set_relay_questions(app: &mut DesktopApp, on: bool) {
-    let vault = app.owner_ui.session.shared_vault();
-    let result = {
-        let mut guard = vault
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match guard.as_mut().filter(|vault| !vault.is_locked()) {
-            None => Err("Unlock the vault first.".to_owned()),
-            Some(vault) if on => enable_questions(vault, &crate::sync::device_name())
-                .map(|_| ())
-                .map_err(|_| RELAY_QUESTIONS_NEEDS_RELAY.to_owned()),
-            Some(vault) => disable_questions(vault)
-                .map(|_| ())
-                .map_err(|error| format!("Apassy could not turn it off: {error}")),
-        }
-    };
-    match result {
-        Ok(()) => {
-            if let Some(questions) = &app.owner.questions {
-                questions.wake();
-            }
-            app.set_note(if on {
-                "Questions now also go to your other devices through the relay."
-            } else {
-                "Questions stay on this Mac and the paired iPhones on this network."
-            });
-        }
-        Err(message) => app.set_err(message),
+/// is a new channel that can approve runs: the owner check first, for the relay sync team
+/// of the vault, or the sheet of a notifications-only team. Off needs no check and takes
+/// the purpose `questions` away; relay sync never changes.
+pub(super) fn set_relay_questions(app: &mut DesktopApp, on: bool, ctx: Option<&egui::Context>) {
+    if on {
+        app.questions_turn_on(ctx);
+    } else {
+        app.questions_turn_off();
     }
 }
 
@@ -270,7 +248,13 @@ fn devices_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     };
     let mut list = None;
     let relay_state = relay_questions_state(app);
+    let relay_devices = if matches!(relay_state, Some(QuestionsAvailability::On { .. })) {
+        app.questions_devices()
+    } else {
+        Vec::new()
+    };
     let mut switch_relay = None;
+    let mut add_relay_iphone = false;
     kit::section(
         ui,
         Some("Questions go to every device"),
@@ -309,7 +293,8 @@ fn devices_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             let (mut on, enabled, note) = match &relay_state {
                 Some(QuestionsAvailability::On { .. }) => (true, true, RELAY_QUESTIONS_ON),
                 Some(QuestionsAvailability::CanTurnOn { .. }) => (false, true, RELAY_QUESTIONS_OFF),
-                _ => (false, false, RELAY_QUESTIONS_NEEDS_RELAY),
+                Some(QuestionsAvailability::NeedsTeam) => (false, true, RELAY_QUESTIONS_NEW_TEAM),
+                None => (false, false, RELAY_QUESTIONS_LOCKED),
             };
             let was = on;
             s.row(|ui| {
@@ -334,6 +319,30 @@ fn devices_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
             if on != was {
                 switch_relay = Some(on);
             }
+            // The devices that get the questions through the relay, and a new iPhone.
+            for device in &relay_devices {
+                s.labeled(
+                    &device.name,
+                    kit::text(&device.words, Font::Body).color(kit::SECONDARY),
+                );
+            }
+            if was {
+                s.row(|ui| {
+                    egui::Sides::new().shrink_left().truncate().show(
+                        ui,
+                        |ui| {
+                            kit::note(
+                                ui,
+                                "An iPhone answers the questions with Face ID, also away from this network.",
+                            )
+                        },
+                        |ui| {
+                            add_relay_iphone =
+                                kit::small_button(ui, ADD_IPHONE, Style::Bordered).clicked();
+                        },
+                    );
+                });
+            }
         },
     );
     let mut add_mac = false;
@@ -355,11 +364,13 @@ fn devices_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
         });
     });
     ui.add_space(20.0);
-    if let Some(on) = switch_relay {
-        set_relay_questions(app, on);
-    }
     let ctx = ui.ctx().clone();
-    if let Some(id) = list {
+    if let Some(on) = switch_relay {
+        set_relay_questions(app, on, Some(&ctx));
+    }
+    if add_relay_iphone {
+        app.questions_add_iphone(Some(&ctx));
+    } else if let Some(id) = list {
         app.sync_open_sheet(super::sync::SyncSheet::Devices { id }, Some(&ctx));
     } else if add_mac && let Some(id) = others.relay {
         app.sync_open_sheet(super::sync::SyncSheet::AddMac { id }, Some(&ctx));

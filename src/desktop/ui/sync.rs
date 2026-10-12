@@ -24,6 +24,7 @@
 //! [`BEFORE_LOCK_LIMIT`]. Each relay call that the owner starts runs on its own thread
 //! (see [`relay`]).
 
+pub(super) mod questions;
 pub(super) mod relay;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -195,6 +196,12 @@ pub(crate) enum SyncSheet {
     AddMac { id: String },
     /// "Devices…": the Macs of the relay team.
     Devices { id: String },
+    /// "Send questions through the relay" for a vault that does not sync through the
+    /// relay: a notifications-only team with the relay address and a team code.
+    QuestionsTeam { id: String },
+    /// "Add an iPhone…" of a notifications-only team: the link as a QR code, then the
+    /// safety words and the owner check, as "Add a device…".
+    AddIphone { id: String },
 }
 
 impl SyncSheet {
@@ -207,7 +214,9 @@ impl SyncSheet {
         | Self::UseRelayCopy { id }
         | Self::RelaySetup { id }
         | Self::AddMac { id }
-        | Self::Devices { id }) = self;
+        | Self::Devices { id }
+        | Self::QuestionsTeam { id }
+        | Self::AddIphone { id }) = self;
         id
     }
 }
@@ -1725,7 +1734,9 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context, sheet: &SyncSheet
     | SyncSheet::UseRelayCopy { id }
     | SyncSheet::RelaySetup { id }
     | SyncSheet::AddMac { id }
-    | SyncSheet::Devices { id }) = sheet;
+    | SyncSheet::Devices { id }
+    | SyncSheet::QuestionsTeam { id }
+    | SyncSheet::AddIphone { id }) = sheet;
     let Some(entry) = app.vault_list.registry.get(id).cloned() else {
         close_sheet(app, ctx);
         return false;
@@ -1740,7 +1751,9 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context, sheet: &SyncSheet
         SyncSheet::ReplaceDamaged { .. } => replace_sheet(app, ctx, &entry),
         SyncSheet::UseRelayCopy { .. } => relay::use_copy_sheet(app, ctx, &entry),
         SyncSheet::RelaySetup { .. } => relay::setup_sheet(app, ctx, &entry),
-        SyncSheet::AddMac { .. } => relay::add_mac_sheet(app, ctx, &entry),
+        SyncSheet::AddMac { .. } => relay::add_mac_sheet(app, ctx, &entry, false),
+        SyncSheet::AddIphone { .. } => relay::add_mac_sheet(app, ctx, &entry, true),
+        SyncSheet::QuestionsTeam { .. } => questions::team_sheet(app, ctx, &entry),
         SyncSheet::Devices { .. } => relay::devices_sheet(app, ctx, &entry),
     };
     if escape {

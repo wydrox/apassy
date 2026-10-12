@@ -1,6 +1,6 @@
 # Questions through the relay
 
-Stage 5 of [ADR 0025](../adr/0025-low-friction-access.md) (§3d, §3e), contract [relay-questions-v1](../contracts/relay-questions-v1.md). The app side is `src/questions/`, `src/vault/questions.rs`, `src/relay/membership.rs`, the question digest v2 in `src/companion/digest.rs`, and `OwnerCheck::Remote` in `src/broker/approvals/owner_auth.rs`.
+Stage 5 of [ADR 0025](../adr/0025-low-friction-access.md) (§3d, §3e), contract [relay-questions-v1](../contracts/relay-questions-v1.md). The app side is `src/questions/`, `src/vault/questions.rs`, `src/relay/membership.rs`, the question digest v2 in `src/companion/digest.rs`, and `OwnerCheck::Remote` in `src/broker/approvals/owner_auth.rs`. The window side is Settings > Devices (`src/desktop/ui/settings.rs`, `src/desktop/ui/sync/questions.rs`, and "Add a device…" in `src/desktop/ui/sync/relay.rs`) and Decisions (`src/desktop/ui/decisions.rs`).
 
 ## What it does
 
@@ -17,11 +17,24 @@ The relay sees only the routing: the team, the devices, the times, the sizes, an
 
 ## Turning it on
 
-The switch is **off by default**. It is on exactly when the open vault has, on this Mac, a relay membership with the purpose `questions` (`relay_membership`, a local table).
+The switch is **off by default**. It is on exactly when the open vault has, on this Mac, a relay membership with the purpose `questions` (`relay_membership`, a local table). It is disabled only while the vault is locked.
 
-- A vault that syncs through the relay: the switch adds the purpose `questions` to the sync membership (`relay::membership::enable_questions`). No relay call. It also makes the question key (`vault_secret 'question-key-v1'`, `Vault::ensure_question_key`) when the vault has none, and registers this Mac as a `trusted_device` (kind `mac`, `sign_key` = the public key of the membership, its device number in the team). The key and the row reach the other devices through the sync.
-- A vault without relay sync: the switch is disabled ("First sync this vault through the Apassy relay in Sync below."). The API for a notifications-only team exists (`relay::membership::create_questions_team`, with an operator team code); the app has no sheet for it yet.
-- Off removes the purpose `questions`; relay sync never changes. A notifications-only membership goes with its key.
+On opens a new channel that can approve runs, so it needs the **owner check** (Touch ID or the passphrase) for `OwnerAction::EnableRelayQuestions { relay_url, team_id }` before anything changes. The proof names the relay and the team, and the app checks it in the vault session before it acts.
+
+- A vault that syncs through the relay: the check names its sync team. Then the switch adds the purpose `questions` to the sync membership (`relay::membership::enable_questions`). No relay call. It also makes the question key (`vault_secret 'question-key-v1'`, `Vault::ensure_question_key`) when the vault has none, and registers this Mac as a `trusted_device` (kind `mac`, `sign_key` = the public key of the membership, its device number in the team). The key and the row reach the other devices through the sync.
+- A vault without relay sync (iCloud Drive, a folder, or none): the switch opens the sheet "Questions of VAULT through the Apassy relay" with the relay address (the Apassy relay by default), the operator team code (masked, as in "Turn on" of relay sync), and the name of this Mac. "Turn On…" checks the fields, then the owner check names the relay and no team (`team_id: None`). After it passes, `POST /v1/teams` runs on a thread of its own with no vault (`relay::membership::new_questions_team`): a new device key and a team that never gets a snapshot. Then the vault keeps the membership with the purpose `questions` only (`adopt_questions_team`), makes the question key, and registers this Mac. The team code stays in memory only from "Turn On…" to that call; a lock, another sync sheet, a failed check, and Cancel erase it. `create_questions_team` does both steps in one call for a caller without a window.
+- **Off needs no check**: it takes authority away. It removes the purpose `questions`; relay sync never changes. A notifications-only membership goes with its key. The trusted device row stays, so an answer on its way still verifies.
+
+## Devices and "Add an iPhone…"
+
+While it is on, Settings > Devices lists each live `trusted_device` of the vault: "This Mac", "Mac · answers after Touch ID", "iPhone · answers with Face ID", or "iPhone · its Face ID key has not synced yet" (no `answer_key` yet). It reads `GET /v1/devices` of the questions team every 30 seconds while the tab shows and adds "Push on" or "Push off" to a device when the relay says so (an optional `push` field of the device; the relay of R4 does not send it yet, so the state shows only when it does). The relay's device list is never the source of a key.
+
+"Add an iPhone…" links an iPhone to the questions team:
+
+- A notifications-only team: the "Add an iPhone to the questions of VAULT" sheet (the "Add a device…" sheet in its questions mode, `SyncSheet::AddIphone`). It makes a link with the key of the membership (`QuestionsClient::create_link`, `POST /v1/devices/links`) and shows it as a QR code and as text. On the iPhone, Questions scans it and joins with `join_attach` (`PendingJoin`, nothing to download). The sheet asks the relay every 5 seconds for the iPhones that wait, with the safety words that this Mac computes from its code; "Confirm…" needs the owner check `OwnerRequest::ConfirmQuestionsDevice`, whose proof is `OwnerAction::ConfirmSyncDevice` for exactly that link, name, and key; "Refuse" and closing the sheet refuse. A lock closes the client of the sheet at once.
+- A vault that syncs through the relay: "Add a device…" of relay sync, unchanged.
+
+The iPhone then registers its own row with its answer key (`answer_key_register`); the row reaches the Macs through the sync of the vault, and Devices lists it.
 
 ## Keys
 
@@ -31,12 +44,19 @@ The switch is **off by default**. It is on exactly when the open vault has, on t
 
 ## Answering from another Mac
 
-`questions::open_question` checks a card (contract 7.3); `questions::answer_from_mac` signs with the relay key of the Mac. An approving answer needs a fresh owner check for `OwnerAction::AnswerRemoteQuestion` (Touch ID; its reason is the reason of the matching local answer with " on ASKER"). The relay answers `409 question_settled` ("Already answered") or `409 question_expired` ("Expired") after the end. The Decisions view of a Mac does not list remote questions yet.
+With the questions on, the questions waiter of each Mac also lists the questions of the other devices of the vault (contract section 13): a third thread, the lister, long-polls `GET /v1/questions?since=N&wait=25` with the client of the session, opens and checks each open card (`questions::open_question`, contract 7.3: the key, the fields, the digest v2, the asker as a live `trusted_device` with the relay number that the relay stamped, the expiry), and keeps the open ones in `QuestionsView::remote`. A settled or expired question, and a card that this Mac cannot read, leave the list. A lock, off, and another vault empty it.
+
+Decisions lists them in **Waiting** after the questions of this Mac, as "AGENT · PROJECT · from MAC" with the time left until they end on the relay, and counts them in the badge. The detail and the bottom bar are those of a local question, with "Asked on MAC.". The answer goes through `QuestionsWorker::answering` and `RemoteAnswering::send` on a thread of its own, signed with the relay key of this Mac (`questions::answer_from_mac`):
+
+- An approving answer (Allow Once, the remembered answers, Development) needs a fresh owner check on this Mac for `OwnerAction::AnswerRemoteQuestion` of exactly that question and answer (`OwnerRequest::AnswerRemoteQuestion`; Touch ID; its reason is the reason of the matching local answer with " on ASKER"). A proof for another question or answer does not count.
+- A stricter answer (Deny, Production, Never, Always Ask, Disconnect after its confirmation) needs no check.
+
+The asking Mac checks each answer and decides; this Mac shows "Sent. Waiting for MAC…" until the settle takes the question from the list. The relay answers `409 question_settled` ("Already answered"), `409 question_expired` ("Expired"), or `403 not_routed`; each takes the question from the list at once.
 
 ## Lock and stop
 
-A lock drops the relay token and ends the long poll at once (`QuestionsWorker::forget`); the open questions expire on the relay. The worker reads the vault again after the next unlock. Quit stops both threads.
+A lock drops the relay token and ends the long polls at once (`QuestionsWorker::forget`); the open questions expire on the relay, and the questions of the other devices leave Decisions. The worker reads the vault again after the next unlock. Quit stops the three threads.
 
 ## Tests
 
-`tests/relay_questions.rs` runs against the in-process fake relay (`tests/common/fake_relay.rs`, contract section 10): the contract test vectors, the window of an answer, off by default, a two-Mac round trip, an iPhone answer with a P-256 answer key, refused answers (signature, kind, digest, team, age) in Activity, the first valid answer, expiry and late answers, key rotation, and no plaintext in any request body. No test calls a real relay.
+`tests/relay_questions.rs` runs against the in-process fake relay (`tests/common/fake_relay.rs`, contract section 10): the contract test vectors, the window of an answer, off by default, a two-Mac round trip, an iPhone answer with a P-256 answer key, refused answers (signature, kind, digest, team, age) in Activity, the first valid answer, expiry and late answers, key rotation, no plaintext in any request body, a question of Mac B on the list of Mac A with its Allow (only with the owner check of A, not with a proof for another question) and a stricter answer (no check) reaching the queue of B, and a notifications-only team that goes with off. The headless app tests cover the window: the switch and its owner check (`src/desktop/ui/settings_tests.rs`), the team sheet, its owner check before the relay call, and "Add an iPhone…" with the QR code, the safety words, and the owner check (`src/desktop/ui/sync_tests.rs`), and a question of another Mac in Decisions with its owner check and the stricter answers without one (`src/desktop/ui/decisions_tests.rs`). No test calls a real relay.

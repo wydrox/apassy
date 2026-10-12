@@ -1,6 +1,6 @@
 //! The asker (contract relay-questions-v1, section 12): the questions waiter of this Mac.
 //!
-//! Two threads, apart from the sync waiter:
+//! Three threads, apart from the sync waiter:
 //!
 //! - The poster watches the approval queue (a wake from the queue notifier, and every
 //!   [`QuestionsConfig::tick`]). When the open vault is unlocked and has a membership
@@ -14,6 +14,12 @@
 //!   through the queue with a [`CheckMethod::Remote`] proof from the owner gate, or as a
 //!   stricter answer, and the question settles. An answer that does not count gets a
 //!   line in Activity, with the device and the reason and no value.
+//! - The lister long-polls the questions of the other devices of the vault (section 13,
+//!   `GET /v1/questions`), opens and checks each card ([`open_question`]), and keeps the
+//!   open ones in the view ([`QuestionsView::remote`]): Decisions lists them next to the
+//!   questions of this Mac. [`QuestionsWorker::answering`] gives what it takes to answer
+//!   one from this Mac ([`RemoteAnswering::send`], signed with the relay key of this Mac,
+//!   an approving answer only with a fresh owner check).
 //!
 //! The local card and the local-network companion are unchanged: the card shows at once,
 //! and whichever answer the queue takes first counts. A lock drops the relay token and
@@ -27,11 +33,12 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use super::client::{AnswerRecord, QuestionsClient, QuestionsError};
+use super::answer::{AnswerError, OpenedQuestion, answer_from_mac, open_question};
+use super::client::{AnswerReceipt, AnswerRecord, MAX_WAIT, QuestionsClient, QuestionsError};
 use super::envelope::{
     AnswerBody, Card, CardError, Choice, RemoteEnvironment, Sealed, SettleBody, SettleOutcome,
     TO_APPROVERS, TO_MEMBER, VERSION, answer_aad, card_aad, new_qid, settle_aad,
@@ -39,7 +46,7 @@ use super::envelope::{
 use crate::broker::SharedVault;
 use crate::broker::approvals::{
     ApprovalOutcome, ApprovalQueue, ApprovalRefusal, CheckMethod, OwnerAction, OwnerAuthError,
-    OwnerCheck, OwnerGate, PendingRun, RunEnd, StricterAnswer, verify_remote_answer,
+    OwnerCheck, OwnerGate, OwnerProof, PendingRun, RunEnd, StricterAnswer, verify_remote_answer,
 };
 use crate::companion::digest::question_digest_v2_hex;
 use crate::relay::membership::{questions_membership, register_this_device, this_device};
@@ -63,6 +70,11 @@ const MEMBERSHIP_EVERY: Duration = Duration::from_secs(2);
 const MAX_VIEW_LINES: usize = 20;
 /// The operation of an Activity line about an answer through the relay.
 pub const ACTIVITY_OPERATION: &str = "answer through the relay";
+/// The relay lists at most this many questions in one answer (section 10.4).
+const LIST_PAGE: usize = 100;
+/// The shortest time between two list calls that brought nothing: a relay that does not
+/// hold the long poll is not asked in a loop.
+const LIST_AT_LEAST: Duration = Duration::from_secs(1);
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -139,6 +151,112 @@ pub struct QuestionsView {
     pub refused: Vec<RemoteRefused>,
     /// A problem of the relay for the window, in words.
     pub problem: Option<String>,
+    /// The open questions of the other devices of the vault, opened and checked, the
+    /// soonest end first.
+    pub remote: Vec<RemoteQuestion>,
+}
+
+/// A question of another device of the vault, opened and checked (section 13): it shows
+/// in Decisions next to the questions of this Mac, "from ASKER".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteQuestion {
+    /// The number of the question on this Mac, for the window.
+    pub id: u64,
+    pub question: OpenedQuestion,
+    /// After an answer of this Mac: "Sent. Waiting for ASKER…".
+    pub sent: Option<String>,
+}
+
+impl RemoteQuestion {
+    /// The name of the asking Mac, as its card names it.
+    pub fn asker(&self) -> &str {
+        &self.question.card.asker.name
+    }
+
+    /// When the question ends on the relay (Unix seconds).
+    pub fn expires_at(&self) -> u64 {
+        self.question.record.expires_at
+    }
+}
+
+/// The questions of the other devices, as the lister keeps them.
+#[derive(Default)]
+struct Remote {
+    /// The team of the list. Another team starts the list again.
+    team_id: Option<String>,
+    /// The last question sequence seen (section 10.4).
+    since: u64,
+    /// The number of the next new question.
+    next_id: u64,
+    /// The open questions, by `qid`.
+    open: BTreeMap<String, RemoteQuestion>,
+}
+
+/// An answer of this Mac to a question of another device, ready to send on a thread of
+/// its own ([`QuestionsWorker::answering`]). It holds the relay key of this Mac in memory
+/// while it lives.
+pub struct RemoteAnswering {
+    id: u64,
+    client: QuestionsClient,
+    question: OpenedQuestion,
+    /// The trusted device UUID of this Mac.
+    by: String,
+    keys: Vec<QuestionKey>,
+    epoch: [u8; 32],
+    shared: Weak<Shared>,
+}
+
+impl std::fmt::Debug for RemoteAnswering {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteAnswering")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RemoteAnswering {
+    /// The question as this Mac opened and checked it.
+    pub fn question(&self) -> &OpenedQuestion {
+        &self.question
+    }
+
+    /// Sign, seal, and post `choice` (section 13 step 3). An approving choice needs
+    /// `proof` for `remote_owner_action` of this question and choice, in the vault
+    /// session of this Mac; a stricter one needs none. It calls the relay: run it on a
+    /// thread of its own. Success shows "Sent. Waiting for ASKER…" on the question until
+    /// the settle takes it from the list; "Already answered", "Expired", and "cannot
+    /// answer" take it at once.
+    pub fn send(
+        &self,
+        choice: Choice,
+        proof: Option<OwnerProof>,
+    ) -> Result<AnswerReceipt, AnswerError> {
+        let result = answer_from_mac(
+            &self.client,
+            &self.question,
+            &self.by,
+            choice,
+            unix_now(),
+            &self.keys,
+            proof,
+            &self.epoch,
+        );
+        if let Some(shared) = self.shared.upgrade() {
+            match &result {
+                Ok(_) => shared.remote_sent(
+                    &self.question.record.qid,
+                    format!("Sent. Waiting for {}…", self.question.card.asker.name),
+                ),
+                Err(
+                    AnswerError::AlreadyAnswered | AnswerError::Expired | AnswerError::NotRouted,
+                ) => {
+                    shared.remote_gone(&self.question.record.qid);
+                }
+                Err(_) => {}
+            }
+        }
+        result
+    }
 }
 
 /// The session of the open vault: its relay client, its team, and this Mac.
@@ -197,6 +315,8 @@ struct Shared {
     poll: Mutex<Option<Arc<Cancel>>>,
     view: Mutex<QuestionsView>,
     on_change: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    /// The questions of the other devices.
+    remote: Mutex<Remote>,
 }
 
 /// The questions waiter of the app. It stops when dropped.
@@ -232,11 +352,13 @@ impl QuestionsWorker {
             poll: Mutex::new(None),
             view: Mutex::new(QuestionsView::default()),
             on_change: Mutex::new(None),
+            remote: Mutex::new(Remote::default()),
         });
         let mut threads = Vec::new();
         for (name, body) in [
             ("apassy-questions-post", poster as fn(&Shared)),
             ("apassy-questions-read", reader as fn(&Shared)),
+            ("apassy-questions-list", lister as fn(&Shared)),
         ] {
             let worker = Arc::clone(&shared);
             if let Ok(handle) = std::thread::Builder::new()
@@ -280,7 +402,36 @@ impl QuestionsWorker {
         self.shared.forget();
     }
 
-    /// Stop both threads and wait for them.
+    /// What it takes to answer the remote question `id` of the view from this Mac: the
+    /// relay client of the session, this Mac's trusted device, the question key, and the
+    /// vault session. It reads the vault for a moment, with no network; the answer goes
+    /// with [`RemoteAnswering::send`] on a thread of its own.
+    pub fn answering(&self, id: u64) -> Result<RemoteAnswering, AnswerError> {
+        self.shared.answering(&self.shared, id)
+    }
+
+    /// Put a remote question in the view as the lister does, for a test of the window.
+    #[cfg(test)]
+    pub(crate) fn insert_remote_for_test(&self, question: OpenedQuestion) -> u64 {
+        let id = {
+            let mut remote = lock(&self.shared.remote);
+            remote.next_id += 1;
+            let id = remote.next_id;
+            remote.open.insert(
+                question.record.qid.clone(),
+                RemoteQuestion {
+                    id,
+                    question,
+                    sent: None,
+                },
+            );
+            id
+        };
+        self.shared.publish_remote();
+        id
+    }
+
+    /// Stop the threads and wait for them.
     pub fn stop(&mut self) {
         self.shared.stop.store(true, Ordering::SeqCst);
         self.shared.forget();
@@ -371,6 +522,7 @@ impl Shared {
             active.client.close();
         }
         self.end_poll();
+        self.forget_remote();
         let mut view = lock(&self.view);
         if view.on || !view.posted.is_empty() || !view.local_only.is_empty() {
             view.on = false;
@@ -1286,6 +1438,179 @@ impl Shared {
     }
 }
 
+// ---- The lister: the questions of the other devices. ----
+
+impl Shared {
+    /// The questions of the other devices go: the vault locked, changed, or the
+    /// questions went off.
+    fn forget_remote(&self) {
+        {
+            let mut remote = lock(&self.remote);
+            let next_id = remote.next_id;
+            *remote = Remote {
+                next_id,
+                ..Remote::default()
+            };
+        }
+        self.publish_remote();
+    }
+
+    /// Copy the open questions of the other devices to the view.
+    fn publish_remote(&self) {
+        let mut list: Vec<RemoteQuestion> = lock(&self.remote).open.values().cloned().collect();
+        list.sort_by_key(|question| (question.expires_at(), question.id));
+        let mut view = lock(&self.view);
+        if view.remote != list {
+            view.remote = list;
+            drop(view);
+            self.changed();
+        }
+    }
+
+    /// An answer of this Mac to `qid` went to the relay.
+    fn remote_sent(&self, qid: &str, text: String) {
+        if let Some(question) = lock(&self.remote).open.get_mut(qid) {
+            question.sent = Some(text);
+        }
+        self.publish_remote();
+    }
+
+    /// The relay says that `qid` takes no more answers.
+    fn remote_gone(&self, qid: &str) {
+        lock(&self.remote).open.remove(qid);
+        self.publish_remote();
+    }
+
+    /// See [`QuestionsWorker::answering`].
+    fn answering(&self, me: &Arc<Self>, id: u64) -> Result<RemoteAnswering, AnswerError> {
+        let active = lock(&self.state).active.clone().ok_or(AnswerError::Gone)?;
+        let question = lock(&self.remote)
+            .open
+            .values()
+            .find(|question| question.id == id)
+            .map(|question| question.question.clone())
+            .filter(|question| question.team_id == active.team_id)
+            .ok_or(AnswerError::Gone)?;
+        let key = {
+            let mut guard = lock(&self.vault);
+            let vault = Self::vault_of(&mut guard, &active).ok_or(AnswerError::Gone)?;
+            vault.question_key().ok().flatten()
+        };
+        Ok(RemoteAnswering {
+            id,
+            client: active.client.clone(),
+            question,
+            by: active.me.uuid.clone(),
+            keys: key.into_iter().collect(),
+            epoch: active.epoch,
+            shared: Arc::downgrade(me),
+        })
+    }
+
+    /// One step of the lister: one long poll of `GET /v1/questions`, then each question
+    /// that changed is opened and checked again (section 7.3), or leaves the list.
+    fn list_step(&self) {
+        let active = lock(&self.state).active.clone();
+        let Some(active) = active else {
+            if lock(&self.remote).team_id.is_some() {
+                self.forget_remote();
+            }
+            self.sleep(Duration::from_secs(1));
+            return;
+        };
+        let since = {
+            let mut remote = lock(&self.remote);
+            if remote.team_id.as_deref() != Some(active.team_id.as_str()) {
+                let next_id = remote.next_id;
+                *remote = Remote {
+                    team_id: Some(active.team_id.clone()),
+                    next_id,
+                    ..Remote::default()
+                };
+            }
+            remote.since
+        };
+        let started = Instant::now();
+        let list = match active.client.list(since, MAX_WAIT) {
+            Ok(list) => list,
+            Err(error) => {
+                if !matches!(error, QuestionsError::Closed) && !self.stop.load(Ordering::SeqCst) {
+                    self.sleep(Duration::from_secs(2));
+                }
+                return;
+            }
+        };
+        if list.seq < since {
+            // A relay restored from a backup: read again from the start.
+            lock(&self.remote).since = 0;
+            return;
+        }
+        let (keys, devices) = {
+            let mut guard = lock(&self.vault);
+            let Some(vault) = Self::vault_of(&mut guard, &active) else {
+                return;
+            };
+            (
+                vault
+                    .question_key()
+                    .ok()
+                    .flatten()
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                vault.trusted_devices().unwrap_or_default(),
+            )
+        };
+        let now = unix_now();
+        {
+            let mut remote = lock(&self.remote);
+            if remote.team_id.as_deref() != Some(active.team_id.as_str()) {
+                return;
+            }
+            for record in &list.questions {
+                let opened = (record.state == "open")
+                    .then(|| open_question(record, &active.team_id, &keys, &devices, now).ok())
+                    .flatten();
+                match opened {
+                    Some(question) => {
+                        if let Some(known) = remote.open.get_mut(&record.qid) {
+                            known.question = question;
+                        } else {
+                            remote.next_id += 1;
+                            let id = remote.next_id;
+                            remote.open.insert(
+                                record.qid.clone(),
+                                RemoteQuestion {
+                                    id,
+                                    question,
+                                    sent: None,
+                                },
+                            );
+                        }
+                    }
+                    // Settled, expired, or a card that this Mac cannot read: it offers
+                    // no answer here.
+                    None => {
+                        remote.open.remove(&record.qid);
+                    }
+                }
+            }
+            remote
+                .open
+                .retain(|_, question| question.expires_at() > now);
+            let last = list.questions.iter().map(|record| record.seq).max();
+            remote.since = match last {
+                Some(last) if list.questions.len() >= LIST_PAGE => last,
+                Some(last) => last.max(list.seq),
+                None => list.seq.max(since),
+            };
+        }
+        self.publish_remote();
+        if list.questions.is_empty() && started.elapsed() < LIST_AT_LEAST {
+            self.sleep(LIST_AT_LEAST.saturating_sub(started.elapsed()));
+        }
+    }
+}
+
 /// The reason of a failed check for Activity.
 fn remote_reason(error: &OwnerAuthError) -> &'static str {
     match error {
@@ -1318,5 +1643,11 @@ fn poster(shared: &Shared) {
 fn reader(shared: &Shared) {
     while !shared.stop.load(Ordering::SeqCst) {
         shared.read_step();
+    }
+}
+
+fn lister(shared: &Shared) {
+    while !shared.stop.load(Ordering::SeqCst) {
+        shared.list_step();
     }
 }

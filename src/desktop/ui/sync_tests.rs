@@ -2798,3 +2798,319 @@ fn a_lost_link_answer_does_not_use_up_the_code() {
         b.sync.relay.join_error
     );
 }
+
+// ---- Questions through the relay (ADR 0025 §3e, plan §A6 and §A7). ----
+
+/// The membership of the questions of the open vault of `app`.
+fn questions_of(app: &DesktopApp) -> Option<crate::vault::RelayMembership> {
+    app.owner_ui
+        .session
+        .with_vault(|vault| crate::relay::membership::questions_membership(vault).expect("read"))
+        .flatten()
+}
+
+/// A vault that syncs through iCloud Drive, not the relay: "Send questions through the
+/// relay" opens the sheet of a notifications-only team. Its "Turn On…" runs the owner
+/// check before any relay call; then the relay makes the team, and the vault keeps a
+/// membership for the questions only, the question key, and this Mac as a trusted device.
+/// Relay sync stays off. Off needs no check.
+#[test]
+fn questions_through_a_notifications_only_team_need_the_owner_check() {
+    use crate::broker::approvals::{OwnerAction, OwnerAuthError, OwnerCheck};
+    use crate::desktop::owner_check::OwnerRequest;
+    use crate::vault::{MembershipPurpose, TrustedDeviceKind};
+    let folders = folders();
+    let relay = fake_relay::FakeRelay::start();
+    let mut a = folders.mac("mac-a");
+    create(&mut a, "Personal", PASS, Some(&folders.icloud));
+    let id = current_id(&a);
+    a.settings_open = true;
+    a.ui.settings_tab = super::SettingsTab::Devices;
+
+    a.questions_turn_on(None);
+    assert!(a.owner.check.is_none(), "the sheet first");
+    assert!(
+        matches!(
+            &a.ui.sheet,
+            Some(Sheet::Vault(VaultSheet::Sync(SyncSheet::QuestionsTeam { id: shown }))) if *shown == id
+        ),
+        "{:?}",
+        a.ui.sheet
+    );
+    let text = frames(&mut a);
+    for expected in [
+        "Questions of “Personal” through the Apassy relay",
+        "Relay address",
+        "Team code",
+        "Name of this Mac",
+        "Turn On…",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+
+    // A code of the wrong form never reaches the owner check.
+    let entry = a.vault_list.registry.get(&id).cloned().expect("entry");
+    let refused = a.questions_ask_new_team(
+        &entry,
+        &relay.url,
+        Zeroizing::new("not-a-team-code".to_owned()),
+        "Synthetic MacBook",
+        None,
+    );
+    assert!(refused.is_err());
+    assert!(a.owner.check.is_none());
+
+    // "Turn On…": the owner check names the relay and a new team. Nothing changes yet.
+    a.questions_ask_new_team(
+        &entry,
+        &relay.url,
+        Zeroizing::new(relay.team_code()),
+        "Synthetic MacBook",
+        None,
+    )
+    .expect("fields");
+    let request = a.owner.check.as_ref().expect("owner check").request.clone();
+    let OwnerRequest::EnableRelayQuestions {
+        relay_url,
+        team_id: None,
+    } = &request
+    else {
+        panic!("{request:?}");
+    };
+    assert_eq!(
+        request.action(),
+        OwnerAction::EnableRelayQuestions {
+            relay_url: relay_url.clone(),
+            team_id: None
+        }
+    );
+    assert!(
+        request
+            .describe()
+            .starts_with("Make a team for the questions of this vault on the Apassy relay"),
+        "{}",
+        request.describe()
+    );
+    assert_eq!(
+        a.confirm_owner_now(OwnerCheck::passphrase(OTHER_PASS)),
+        Err(OwnerAuthError::WrongPassphrase)
+    );
+    a.questions_settle_for_test();
+    assert!(questions_of(&a).is_none(), "no team without the check");
+    assert!(
+        a.owner_ui
+            .session
+            .with_vault(|vault| vault.question_key().expect("read").is_none())
+            .expect("open")
+    );
+
+    // The check passes: the relay makes the team, and the vault keeps it.
+    a.questions_ask_new_team(
+        &entry,
+        &relay.url,
+        Zeroizing::new(relay.team_code()),
+        "Synthetic MacBook",
+        None,
+    )
+    .expect("fields");
+    a.confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("owner check");
+    a.questions_settle_for_test();
+    assert!(
+        a.status_text
+            .starts_with("Questions now also go to your other devices through the relay."),
+        "{}",
+        a.status_text
+    );
+    assert!(a.ui.sheet.is_none(), "the sheet closes");
+    let membership = questions_of(&a).expect("a questions membership");
+    assert_eq!(
+        membership.purposes,
+        std::collections::BTreeSet::from([MembershipPurpose::Questions]),
+        "notifications only"
+    );
+    let (key, devices, sync) = a
+        .owner_ui
+        .session
+        .with_vault(|vault| {
+            (
+                vault.question_key().expect("read"),
+                vault.trusted_devices().expect("read"),
+                vault.relay_device().expect("read"),
+            )
+        })
+        .expect("open");
+    assert!(key.is_some(), "the question key");
+    assert!(sync.is_none(), "relay sync stays off");
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0].kind, TrustedDeviceKind::Mac);
+    assert_eq!(devices[0].name, "Synthetic MacBook");
+    assert_eq!(devices[0].sign_key, membership.public_key);
+    assert_eq!(
+        devices[0].relay_devices.get(&membership.team_id),
+        Some(&membership.device_id)
+    );
+    let text = frames(&mut a);
+    assert!(text.contains("Add an iPhone…"), "{text}");
+
+    // Off: no check; the membership and its key go, and the vault keeps its sync.
+    a.questions_turn_off();
+    assert!(a.owner.check.is_none(), "off needs no owner check");
+    assert!(questions_of(&a).is_none());
+    assert!(
+        a.vault_list
+            .registry
+            .get(&id)
+            .expect("entry")
+            .sync_relay()
+            .is_none()
+    );
+}
+
+/// "Add an iPhone…" of a notifications-only team shows the link as a QR code. The
+/// iPhone that joins with it (`join_attach`) shows the safety words; "Confirm…" needs the
+/// owner check for exactly that iPhone, and a wrong passphrase adds nothing. After the
+/// check, the iPhone is in the team; once its own row syncs, Devices lists it.
+#[test]
+fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
+    use crate::broker::approvals::{OwnerAction, OwnerAuthError, OwnerCheck};
+    use crate::desktop::owner_check::OwnerRequest;
+    use crate::sync::PendingJoin;
+    use crate::vault::TrustedDeviceKind;
+    let folders = folders();
+    let relay = fake_relay::FakeRelay::start();
+    let mut a = folders.mac("mac-a");
+    create(&mut a, "Personal", PASS, Some(&folders.icloud));
+    let id = current_id(&a);
+    a.settings_open = true;
+    a.ui.settings_tab = super::SettingsTab::Devices;
+    let entry = a.vault_list.registry.get(&id).cloned().expect("entry");
+    a.questions_ask_new_team(
+        &entry,
+        &relay.url,
+        Zeroizing::new(relay.team_code()),
+        "Synthetic MacBook",
+        None,
+    )
+    .expect("fields");
+    a.confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("owner check");
+    a.questions_settle_for_test();
+    let membership = questions_of(&a).expect("on");
+
+    a.questions_add_iphone(None);
+    assert!(
+        matches!(
+            &a.ui.sheet,
+            Some(Sheet::Vault(VaultSheet::Sync(SyncSheet::AddIphone { .. })))
+        ),
+        "{:?}",
+        a.ui.sheet
+    );
+    let text = settled_frames(&mut a);
+    let link = a.relay_add_mac_link_for_test().expect("a link");
+    assert!(
+        link.starts_with(&format!(
+            "{}/link#apassy_lnk_{}",
+            relay.url, membership.team_id
+        )),
+        "{link}"
+    );
+    for expected in [
+        "Add an iPhone to the questions of “Personal”",
+        "On the iPhone, open Apassy, select Questions, and scan this code.",
+        "Copy link",
+        "Waiting for the other device…",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    assert_qr_encodes(a.relay_add_mac_qr_for_test().expect("a QR code"), &link);
+
+    // The iPhone scans the code and asks, as `join_attach` does.
+    let pending = PendingJoin::request(&link, "", "Test iPhone").expect("join");
+    a.relay_add_mac_poll_for_test();
+    let links = a.relay_add_mac_links_for_test();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].device_name, "Test iPhone");
+    assert_eq!(links[0].safety.as_deref(), Some(pending.safety.as_str()));
+    let text = frames(&mut a);
+    assert!(
+        text.contains("“Test iPhone” asks for the questions of “Personal”. Both devices show:"),
+        "{text}"
+    );
+    assert!(text.contains(&pending.safety), "{text}");
+
+    // "Confirm…" opens the owner check for exactly this iPhone.
+    a.relay_ask_confirm_for_test(links[0].id);
+    let request = a.owner.check.as_ref().expect("owner check").request.clone();
+    assert!(
+        matches!(request, OwnerRequest::ConfirmQuestionsDevice { ref vault, .. } if *vault == id),
+        "{request:?}"
+    );
+    assert_eq!(
+        request.action(),
+        OwnerAction::ConfirmSyncDevice {
+            link_id: links[0].id,
+            device_name: "Test iPhone".to_owned(),
+            public_key: links[0].public_key.clone(),
+        }
+    );
+    assert!(
+        request
+            .describe()
+            .starts_with("Add the iPhone \"Test iPhone\" to the questions of this vault"),
+        "{}",
+        request.describe()
+    );
+    assert_eq!(
+        a.confirm_owner_now(OwnerCheck::passphrase(OTHER_PASS)),
+        Err(OwnerAuthError::WrongPassphrase)
+    );
+    a.relay_settle_for_test();
+    assert!(pending.poll().expect("poll").is_none(), "not confirmed");
+
+    a.relay_ask_confirm_for_test(links[0].id);
+    a.confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("owner check");
+    a.relay_settle_for_test();
+    assert_eq!(
+        a.status_text, "Added. Test iPhone gets the questions of this vault now.",
+        "{}",
+        a.status_text
+    );
+    let joined = pending.poll().expect("poll").expect("confirmed");
+    assert_eq!(joined.member().team_id(), membership.team_id);
+
+    // The iPhone registers its own row with its answer key (`answer_key_register`); the
+    // row reaches this Mac through the sync. Devices lists it.
+    let phone_key = crate::sync::DeviceKey::generate().expect("key");
+    a.owner_ui
+        .session
+        .with_vault(|vault| {
+            let uuid = "6f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b";
+            vault
+                .register_trusted_device(
+                    uuid,
+                    "Test iPhone",
+                    TrustedDeviceKind::Iphone,
+                    joined.member().public_key(),
+                    Some(phone_key.public_key()),
+                )
+                .expect("register");
+            vault
+                .set_trusted_device_relay_id(uuid, &membership.team_id, joined.device_id())
+                .expect("relay id");
+        })
+        .expect("open");
+    a.ui.sheet = None;
+    let text = frames(&mut a);
+    a.questions_settle_for_test();
+    for expected in [
+        "Synthetic MacBook",
+        "This Mac",
+        "Test iPhone",
+        "iPhone · answers with Face ID",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+}

@@ -7,7 +7,8 @@
 //! questions waiter. Mac B joined the team and adopted the vault: it answers as a Mac
 //! does, with its relay key after an owner check (the passphrase stands in for Touch ID
 //! in a test). An "iPhone" joins the team with a link and signs with a P-256 answer key,
-//! the key of the contract test vectors.
+//! the key of the contract test vectors. Mac A also lists the questions of Mac B and
+//! answers them from its own waiter, as Decisions does.
 
 #[path = "common/fake_relay.rs"]
 mod fake_relay;
@@ -41,7 +42,8 @@ use apassy::questions::{
     send_answer,
 };
 use apassy::relay::membership::{
-    QuestionsAvailability, enable_questions, questions_availability, questions_membership,
+    QuestionsAvailability, adopt_questions_team, disable_questions, enable_questions,
+    new_questions_team, questions_availability, questions_membership, questions_only,
 };
 use apassy::sync::{DeviceKey, PendingJoin, RelayConfig, RelaySync, decode_b64u, encode_b64u};
 use apassy::vault::{
@@ -1418,4 +1420,165 @@ fn no_request_body_holds_a_command_an_item_name_or_a_secret() {
         .flatten()
         .collect();
     assert!(keys.contains("ciphertext") && keys.contains("key_id"));
+}
+
+// ---- The questions of the other Macs on this Mac (section 13). ----
+
+/// Mac B asks with its own waiter; Mac A lists the question of B, "from" B, and answers
+/// it from its Decisions with its relay key: "Allow once" only with a fresh owner check
+/// of Mac A (`OwnerAction::AnswerRemoteQuestion`), and the run on B goes on with a
+/// remote check. A stricter answer of A needs no check. Then the question leaves the
+/// list of A.
+#[test]
+fn a_question_of_mac_b_shows_on_mac_a_and_its_answers_reach_b() {
+    let world = world(true);
+    let queue_b = Arc::new(ApprovalQueue::new());
+    let _worker_b = QuestionsWorker::start(
+        Arc::clone(&queue_b),
+        Arc::clone(&world.shared_b),
+        OwnerGate::new(Arc::clone(&world.shared_b), None),
+        QuestionsConfig {
+            question_wait: Duration::from_secs(300),
+            tick: Duration::from_millis(50),
+            device_name: "Synthetic Mac mini".to_owned(),
+        },
+    );
+    let agent_b = world.with_b(|vault| vault.register_agent("claude-code").expect("agent").0.id);
+    let ask_b = |run: PendingRun| {
+        let epoch = world.with_b(|vault| vault.epoch());
+        let queue = Arc::clone(&queue_b);
+        std::thread::spawn(move || {
+            queue.wait_for_question(run, agent_b, epoch, Duration::from_secs(60), || true)
+        })
+    };
+    let wait_remote = |count: usize| {
+        let start = Instant::now();
+        loop {
+            let view = world.worker.view();
+            if view.remote.len() == count {
+                return view.remote;
+            }
+            assert!(start.elapsed() < Duration::from_secs(20), "{view:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+
+    let waiting = ask_b(world.run(contract_answers()));
+    let remote = wait_remote(1).remove(0);
+    assert_eq!(remote.asker(), "Synthetic Mac mini");
+    assert_eq!(remote.question.run.agent, "claude-code");
+    assert_eq!(remote.question.record.to, "member");
+    assert!(remote.sent.is_none());
+    assert_eq!(world.relay.questions_posted(), 1, "only B asked");
+
+    // Without the owner check of Mac A, no approving answer goes.
+    let answering = world.worker.answering(remote.id).expect("answering");
+    assert_eq!(
+        answering.send(Choice::ApproveOnce, None).unwrap_err(),
+        AnswerError::NeedsOwnerCheck
+    );
+    // A proof for another answer does not count either.
+    let gate_a = OwnerGate::new(Arc::clone(&world.shared_a), None);
+    let never = gate_a
+        .authorize(
+            remote_owner_action(answering.question(), &Choice::ApproveOnce)
+                .map(|action| match action {
+                    apassy::broker::approvals::OwnerAction::AnswerRemoteQuestion {
+                        asker,
+                        answer,
+                        ..
+                    } => apassy::broker::approvals::OwnerAction::AnswerRemoteQuestion {
+                        qid: "AAAAAAAAAAAAAAAAAAAAAA".to_owned(),
+                        asker,
+                        answer,
+                    },
+                    other => other,
+                })
+                .expect("approving"),
+            OwnerCheck::passphrase(PASS),
+        )
+        .expect("proof");
+    assert_eq!(
+        answering
+            .send(Choice::ApproveOnce, Some(never))
+            .unwrap_err(),
+        AnswerError::NeedsOwnerCheck
+    );
+    let proof = gate_a
+        .authorize(
+            remote_owner_action(answering.question(), &Choice::ApproveOnce).expect("approving"),
+            OwnerCheck::passphrase(PASS),
+        )
+        .expect("owner check on A");
+    answering
+        .send(Choice::ApproveOnce, Some(proof))
+        .expect("sent");
+    let ended = settled(waiting);
+    assert_eq!(ended.outcome, ApprovalOutcome::Approved, "B goes on");
+    assert_eq!(ended.method, Some(CheckMethod::Remote));
+    // The settle takes it from the list of A.
+    wait_remote(0);
+
+    // A stricter answer from A: no owner check.
+    let waiting = ask_b(world.run(contract_answers()));
+    let remote = wait_remote(1).remove(0);
+    world
+        .worker
+        .answering(remote.id)
+        .expect("answering")
+        .send(Choice::NeverForAgent, None)
+        .expect("sent without a check");
+    assert_eq!(settled(waiting).outcome, ApprovalOutcome::Denied);
+    wait_remote(0);
+    assert_eq!(
+        world.worker.answering(remote.id).unwrap_err(),
+        AnswerError::Gone,
+        "an answered question is gone"
+    );
+}
+
+/// A vault that syncs another way gets a notifications-only team: a membership for the
+/// questions only, the question key, and this Mac as a trusted device, with no snapshot
+/// on the relay. Off removes that membership; relay sync was never on.
+#[test]
+fn a_notifications_only_team_carries_the_questions_and_goes_with_off() {
+    let root = TempDir::new().expect("temp dir");
+    let relay = FakeRelay::start();
+    let mut vault = Vault::create(&root.path().join("icloud.db"), PASS).expect("create");
+    vault.unlock(PASS).expect("unlock");
+    assert_eq!(
+        questions_availability(&vault).unwrap(),
+        QuestionsAvailability::NeedsTeam
+    );
+    let membership = new_questions_team(
+        &relay.url,
+        &relay.team_code(),
+        "Personal",
+        "Synthetic MacBook",
+    )
+    .expect("team");
+    assert!(questions_only(&membership));
+    let device = adopt_questions_team(&mut vault, &membership, "Synthetic MacBook").expect("adopt");
+    assert_eq!(device.kind, TrustedDeviceKind::Mac);
+    assert_eq!(device.sign_key, membership.public_key);
+    assert!(vault.question_key().unwrap().is_some());
+    assert!(vault.relay_device().unwrap().is_none(), "no relay sync");
+    assert_eq!(
+        questions_availability(&vault).unwrap(),
+        QuestionsAvailability::On {
+            team_id: membership.team_id.clone()
+        }
+    );
+    assert!(matches!(
+        adopt_questions_team(&mut vault, &membership, "Synthetic MacBook"),
+        Err(apassy::sync::SyncError::AlreadyEnabled)
+    ));
+    // A wrong team code makes no team.
+    assert!(new_questions_team(&relay.url, "apassy_tcd_wrong", "Personal", "Mac").is_err());
+    assert!(disable_questions(&mut vault).unwrap());
+    assert!(questions_membership(&vault).unwrap().is_none());
+    assert!(
+        vault.relay_memberships().unwrap().is_empty(),
+        "the key goes"
+    );
 }

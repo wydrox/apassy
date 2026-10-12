@@ -31,6 +31,13 @@
 //! With "Send questions through the relay" on, a question that another device answered
 //! leaves the list, and the detail says "Answered on DEVICE" for a few minutes
 //! ([`answered_lines`]). A question that stays on this Mac says why.
+//!
+//! The questions of the other Macs of the vault (relay-questions-v1 section 13) wait in
+//! the same section, "from MAC", after the questions of this Mac. They have the same
+//! detail and bar. An answer that gives authority passes the owner check on this Mac for
+//! `OwnerAction::AnswerRemoteQuestion`; a stricter one needs none. This Mac signs the
+//! answer with its relay key and sends it on a thread of its own; the asking Mac checks
+//! it and decides. The question shows "Sent. Waiting for MAC…" until it settles.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -51,9 +58,12 @@ use crate::broker::approvals::{
 };
 use crate::broker::server::QUESTION_WAIT;
 use crate::contracts::CredentialKind;
-use crate::desktop::owner_check::OwnerRequest;
+use crate::desktop::owner_check::{OwnerRequest, Task, TaskPoll};
 use crate::desktop::owner_store::{OwnerSession, OwnerSummary};
 use crate::desktop::{BrokerState, DesktopApp};
+use crate::questions::{
+    AnswerError, AnswerReceipt, Choice, RemoteEnvironment, RemoteQuestion, remote_owner_action,
+};
 use crate::vault::Environment;
 use crate::vault::agent_items::{
     Correction, CorrectionAnswer, CorrectionKind, CredentialRequest, RAISED_FROM_FACT,
@@ -78,6 +88,24 @@ pub(super) enum Key {
     Request(u64),
     /// An open correction, by correction ID.
     Suggestion(u64),
+    /// A question of another Mac of the vault, by its number in the questions waiter.
+    Remote(u64),
+}
+
+/// The answers of this Mac to questions of other Macs, while the relay takes them: the
+/// name of the asking Mac, and the answer of the relay.
+#[derive(Default)]
+struct Sending {
+    tasks: Vec<Task<(String, Result<AnswerReceipt, AnswerError>)>>,
+    repaint: Option<egui::Context>,
+}
+
+impl std::fmt::Debug for Sending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sending")
+            .field("tasks", &self.tasks.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// The paste of a request. It is a secret: Debug shows no value, and a drop erases it.
@@ -112,18 +140,22 @@ pub(crate) struct State {
     /// Its place in the list in the last frame. When it goes (an answer, a time-out), the
     /// decision that takes its place is selected.
     index: usize,
-    /// "Disconnect AGENT…" waits for its confirmation: the run and the agent name.
-    disconnect: Option<(u64, String)>,
+    /// "Disconnect AGENT…" waits for its confirmation: the question and the agent name.
+    disconnect: Option<(Key, String)>,
     /// The request of the paste and its folder: the request ID and the folder UUID
     /// (`None`: the top level).
     form: Option<(u64, Option<String>)>,
     /// The paste of the selected request.
     paste: Paste,
+    /// The answers to questions of other Macs that go to the relay now.
+    sending: Sending,
 }
 
 /// What waits for the owner, in the order of the list.
 pub(super) struct Open {
     pub(super) waiting: Vec<Waiting>,
+    /// The questions of other Macs, after the questions of this Mac.
+    pub(super) remote: Vec<RemoteWaiting>,
     pub(super) requests: Vec<CredentialRequest>,
     pub(super) suggestions: Vec<(Correction, OwnerSummary)>,
 }
@@ -133,6 +165,11 @@ impl Open {
         self.waiting
             .iter()
             .map(|waiting| Key::Run(waiting.run.id))
+            .chain(
+                self.remote
+                    .iter()
+                    .map(|remote| Key::Remote(remote.question.id)),
+            )
             .chain(self.requests.iter().map(|request| Key::Request(request.id)))
             .chain(
                 self.suggestions
@@ -167,6 +204,19 @@ pub(super) enum SuggestionAnswer {
 pub(super) struct Waiting {
     pub(super) run: PendingRun,
     pub(super) left: Duration,
+}
+
+/// One question of another Mac, with the time left until it ends on the relay.
+#[derive(Debug, Clone)]
+pub(super) struct RemoteWaiting {
+    pub(super) question: RemoteQuestion,
+    pub(super) left: Duration,
+}
+
+impl RemoteWaiting {
+    fn run(&self) -> &PendingRun {
+        &self.question.question.run
+    }
 }
 
 /// The remembered answer that the bottom bar offers as its main button.
@@ -625,10 +675,29 @@ fn open_requests(app: &DesktopApp) -> usize {
         .map_or(0, |requests| requests.len())
 }
 
+/// The questions of other Macs of the vault that still wait, the soonest end first.
+pub(super) fn remote_waiting(app: &DesktopApp) -> Vec<RemoteWaiting> {
+    let Some(questions) = &app.owner.questions else {
+        return Vec::new();
+    };
+    let now = unix_now();
+    questions
+        .view()
+        .remote
+        .into_iter()
+        .filter(|question| question.expires_at() > now)
+        .map(|question| RemoteWaiting {
+            left: Duration::from_secs(question.expires_at().saturating_sub(now)),
+            question,
+        })
+        .collect()
+}
+
 /// The red count of Decisions in the sidebar: what blocks an agent, the waiting
-/// questions and the open credential requests. Suggestions do not count.
+/// questions (also those of other Macs) and the open credential requests. Suggestions
+/// do not count.
 pub(super) fn badge_count(app: &DesktopApp, pending: &[PendingRun]) -> usize {
-    pending.len() + open_requests(app)
+    pending.len() + remote_waiting(app).len() + open_requests(app)
 }
 
 /// Everything that waits for the owner, in the order of the list.
@@ -636,6 +705,7 @@ pub(super) fn open(app: &DesktopApp, pending: &[PendingRun]) -> Open {
     let session = &app.owner_ui.session;
     Open {
         waiting: waiting(app, pending),
+        remote: remote_waiting(app),
         requests: session.open_credential_requests().unwrap_or_default(),
         suggestions: session.open_suggestions().unwrap_or_default(),
     }
@@ -698,7 +768,7 @@ fn sync_selection(state: &mut State, open: &Open) {
     if state
         .disconnect
         .as_ref()
-        .is_some_and(|(run_id, _)| !keys.contains(&Key::Run(*run_id)))
+        .is_some_and(|(key, _)| !keys.contains(key))
     {
         state.disconnect = None;
     }
@@ -747,6 +817,17 @@ fn list_rows(open: Open) -> Vec<Group<ListRow>> {
                 left: Some(clock(waiting.left)),
             }
         })
+        .chain(open.remote.into_iter().map(|remote| {
+            let run = remote.run();
+            ListRow {
+                key: Key::Remote(remote.question.id),
+                tile: kit::Tile::letter(super::agents::agent_color(&run.agent), &run.agent),
+                title: item_names(run),
+                subtitle: remote_subtitle(&remote.question),
+                production: production(run),
+                left: Some(clock(remote.left)),
+            }
+        }))
         .collect();
     let requests: Vec<ListRow> = open
         .requests
@@ -955,6 +1036,11 @@ pub(super) fn detail_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[
                 return suggestion_detail(app, ui, pending, &correction, &item);
             }
         }
+        Some(Key::Remote(id)) => {
+            if let Some(remote) = open.remote.into_iter().find(|r| r.question.id == id) {
+                return remote_detail(app, ui, pending, remote);
+            }
+        }
         None => {}
     }
     columns::detail_toolbar(ui, |_| {});
@@ -1032,10 +1118,56 @@ fn question_detail(
     columns::detail_body(ui, ("decision", Some(current.run.id)), |ui| {
         super::shell::banners(app, ui, pending);
         notifications_notice(app, ui);
-        draw_question(app, ui, &current, &mut answer);
+        draw_question(app, ui, &current, &mut answer, None);
     });
     if let Some(answer) = answer {
         apply(app, ui.ctx(), &current.run, answer);
+    }
+    disconnect_sheet(app, ui.ctx());
+}
+
+/// "AGENT · PROJECT · from MAC": the subtitle of a question of another Mac.
+pub(super) fn remote_subtitle(question: &RemoteQuestion) -> String {
+    let run = &question.question.run;
+    format!(
+        "{} · {} · from {}",
+        run.agent,
+        project_text(run),
+        shown_path(question.asker(), 40)
+    )
+}
+
+/// The detail of a question of another Mac: the same facts and bar as a question of this
+/// Mac, with the asking Mac.
+fn remote_detail(
+    app: &mut DesktopApp,
+    ui: &mut egui::Ui,
+    pending: &[PendingRun],
+    remote: RemoteWaiting,
+) {
+    let run = remote.run().clone();
+    let mut answer = None;
+    columns::detail_toolbar(ui, |ui| more_menu(ui, &run, &mut answer));
+    egui::Panel::bottom(egui::Id::new(("decision-remote-bar", remote.question.id)))
+        .resizable(false)
+        .show_separator_line(true)
+        .frame(
+            Frame::NONE
+                .fill(kit::SURFACE)
+                .inner_margin(Margin::symmetric(16, 10)),
+        )
+        .show(ui, |ui| action_bar(ui, &run, &mut answer));
+    let current = Waiting {
+        run,
+        left: remote.left,
+    };
+    columns::detail_body(ui, ("decision-remote", Some(remote.question.id)), |ui| {
+        super::shell::banners(app, ui, pending);
+        notifications_notice(app, ui);
+        draw_question(app, ui, &current, &mut answer, Some(&remote.question));
+    });
+    if let Some(answer) = answer {
+        apply_remote(app, ui.ctx(), &remote.question, answer);
     }
     disconnect_sheet(app, ui.ctx());
 }
@@ -1224,6 +1356,7 @@ fn draw_question(
     ui: &mut egui::Ui,
     waiting: &Waiting,
     answer: &mut Option<Answer>,
+    remote: Option<&RemoteQuestion>,
 ) {
     let run = &waiting.run;
     let question = &run.question;
@@ -1262,9 +1395,27 @@ fn draw_question(
             });
         });
     });
-    if let Some(note) = local_only_note(app, run.id) {
-        ui.add_space(8.0);
-        kit::tone_note(ui, &note, Tone::Warning);
+    match remote {
+        Some(remote) => {
+            ui.add_space(8.0);
+            kit::tone_note(
+                ui,
+                format!(
+                    "Asked on {}. The answer goes there through the relay, end-to-end encrypted.",
+                    shown_path(remote.asker(), 40)
+                ),
+                Tone::Accent,
+            );
+            if let Some(sent) = &remote.sent {
+                kit::tone_note(ui, sent, Tone::Good);
+            }
+        }
+        None => {
+            if let Some(note) = local_only_note(app, run.id) {
+                ui.add_space(8.0);
+                kit::tone_note(ui, &note, Tone::Warning);
+            }
+        }
     }
     ui.add_space(16.0);
     let hosts = command_hosts(&run.command);
@@ -1470,7 +1621,153 @@ pub(super) fn apply(app: &mut DesktopApp, ctx: &egui::Context, run: &PendingRun,
             stricter_answer(app, &queue, run.id, stricter, &message);
         }
         Answer::Disconnect => {
-            app.ui.decisions.disconnect = Some((run.id, run.agent.clone()));
+            app.ui.decisions.disconnect = Some((Key::Run(run.id), run.agent.clone()));
+        }
+    }
+}
+
+/// The answer to a question of another Mac as its card names it (section 9.1). `None`
+/// when the question has no project for a project answer.
+pub(super) fn remote_choice(run: &PendingRun, answer: &Answer) -> Option<Choice> {
+    let project_key = || {
+        run.question
+            .project
+            .as_ref()
+            .map(|project| project.key.clone())
+    };
+    Some(match answer {
+        Answer::Deny => Choice::Deny,
+        Answer::Once => Choice::ApproveOnce,
+        Answer::InProject(action) => Choice::ApproveInProject {
+            action: *action,
+            project_key: project_key()?,
+        },
+        Answer::Production(action) => Choice::AllowProduction {
+            action: *action,
+            project_key: project_key()?,
+        },
+        Answer::Development { item_id, .. } => Choice::CorrectEnvironment {
+            item_id: *item_id,
+            environment: RemoteEnvironment::Development,
+        },
+        Answer::MarkProduction { item_id, .. } => Choice::CorrectEnvironment {
+            item_id: *item_id,
+            environment: RemoteEnvironment::Production,
+        },
+        Answer::Never => Choice::NeverForAgent,
+        Answer::AlwaysAsk => Choice::AlwaysAskForAgent,
+        Answer::Disconnect => Choice::Disconnect,
+    })
+}
+
+/// Do the answer of the owner to a question of another Mac. An answer that gives
+/// authority opens the owner check for `OwnerAction::AnswerRemoteQuestion`; a stricter
+/// one goes at once. "Disconnect" asks once, as on this Mac.
+pub(super) fn apply_remote(
+    app: &mut DesktopApp,
+    ctx: &egui::Context,
+    remote: &RemoteQuestion,
+    answer: Answer,
+) {
+    let run = &remote.question.run;
+    if answer == Answer::Disconnect {
+        app.ui.decisions.disconnect = Some((Key::Remote(remote.id), run.agent.clone()));
+        return;
+    }
+    let Some(choice) = remote_choice(run, &answer) else {
+        app.set_err("This question has no project. Use Allow Once.");
+        return;
+    };
+    if choice.needs_owner_check() {
+        let Some(action) = remote_owner_action(&remote.question, &choice) else {
+            app.set_err("This question does not offer this answer.");
+            return;
+        };
+        app.ask_owner(
+            OwnerRequest::AnswerRemoteQuestion {
+                remote_id: remote.id,
+                choice,
+                action,
+            },
+            Some(ctx),
+        );
+    } else {
+        app.answer_remote_question(remote.id, choice, None);
+    }
+}
+
+impl DesktopApp {
+    /// Send `choice` to the question `remote_id` of another Mac on a thread of its own:
+    /// signed with the relay key of this Mac, with `proof` for an approving answer.
+    pub(crate) fn answer_remote_question(
+        &mut self,
+        remote_id: u64,
+        choice: Choice,
+        proof: Option<crate::broker::approvals::OwnerProof>,
+    ) {
+        let Some(questions) = &self.owner.questions else {
+            self.set_err("Questions through the relay are not running. Nothing was sent.");
+            return;
+        };
+        let answering = match questions.answering(remote_id) {
+            Ok(answering) => answering,
+            Err(error) => {
+                self.set_err(error.message());
+                return;
+            }
+        };
+        let asker = answering.question().card.asker.name.clone();
+        let sending = &mut self.ui.decisions.sending;
+        sending
+            .tasks
+            .push(Task::spawn(sending.repaint.clone(), move || {
+                let result = answering.send(choice, proof);
+                (asker, result)
+            }));
+    }
+
+    /// Each frame: the answers of the relay to the answers of this Mac.
+    pub(crate) fn poll_remote_answers(&mut self, ctx: &egui::Context) {
+        let sending = &mut self.ui.decisions.sending;
+        sending.repaint = Some(ctx.clone());
+        let mut done = Vec::new();
+        sending.tasks.retain(|task| match task.poll() {
+            TaskPoll::Waiting => true,
+            TaskPoll::Done(result) => {
+                done.push(Some(result));
+                false
+            }
+            TaskPoll::Lost => {
+                done.push(None);
+                false
+            }
+        });
+        if !sending.tasks.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(200));
+        }
+        for result in done {
+            match result {
+                Some((asker, Ok(_))) => {
+                    self.set_ok(format!("Sent. Waiting for {}…", shown_path(&asker, 40)));
+                }
+                Some((_, Err(error))) => self.set_err(error.message()),
+                None => self.set_err("The answer did not go to the relay. Try again."),
+            }
+        }
+    }
+
+    /// Wait until the answers of this Mac went to the relay, for a test.
+    #[cfg(test)]
+    pub(crate) fn settle_remote_answers_for_test(&mut self) {
+        let ctx = egui::Context::default();
+        let start = std::time::Instant::now();
+        while !self.ui.decisions.sending.tasks.is_empty() {
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "the answer hangs"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+            self.poll_remote_answers(&ctx);
         }
     }
 }
@@ -1492,7 +1789,7 @@ fn stricter_answer(
 /// "Disconnect AGENT…" asks once. It denies the question and revokes the agent: it
 /// takes authority away, so it needs no owner check.
 fn disconnect_sheet(app: &mut DesktopApp, ctx: &egui::Context) {
-    let Some((run_id, agent)) = app.ui.decisions.disconnect.clone() else {
+    let Some((key, agent)) = app.ui.decisions.disconnect.clone() else {
         return;
     };
     let mut confirm = false;
@@ -1519,6 +1816,14 @@ fn disconnect_sheet(app: &mut DesktopApp, ctx: &egui::Context) {
     }
     if confirm {
         app.ui.decisions.disconnect = None;
+        let run_id = match key {
+            Key::Run(run_id) => run_id,
+            Key::Remote(remote_id) => {
+                app.answer_remote_question(remote_id, Choice::Disconnect, None);
+                return;
+            }
+            _ => return,
+        };
         let Some((queue, _)) = queue(app) else {
             app.set_err("The broker is not running. Nothing changed.");
             return;

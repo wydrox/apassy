@@ -156,6 +156,9 @@ pub enum AnswerError {
     Expired,
     /// `403 not_routed`: "This device cannot answer this question".
     NotRouted,
+    /// The question is not in the list of this Mac any more, or the questions through
+    /// the relay are off or locked.
+    Gone,
     /// Another failure of the relay call.
     Relay(QuestionsError),
 }
@@ -170,6 +173,13 @@ impl AnswerError {
             Self::AlreadyAnswered => "Already answered.".to_owned(),
             Self::Expired => "Expired.".to_owned(),
             Self::NotRouted => "This device cannot answer this question.".to_owned(),
+            Self::Gone => "This question no longer waits on this Mac.".to_owned(),
+            Self::Relay(QuestionsError::Unreachable) => {
+                "The relay did not answer. Try again.".to_owned()
+            }
+            Self::Relay(QuestionsError::Closed) => {
+                "The vault locked. The answer was not sent.".to_owned()
+            }
             Self::Relay(error) => format!("The relay did not take the answer: {error:?}."),
         }
     }
