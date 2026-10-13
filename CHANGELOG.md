@@ -27,7 +27,7 @@ Planned for 0.6.0 (Mac, iPhone, and browser extension carry version 0.6.0 on thi
 - A relay that answers "unknown device" no longer makes the Mac drop its Apassy Connect team: the Mac asks first, and connects again with a new team before it drops the old one.
 - `POST /v1/connect` carries a proof that the caller holds the new device key.
 
-## [0.5.0] - 2026-10-12
+## [0.5.0] - 2026-10-13
 
 One version, 0.5.0, for the Mac app, the iPhone app, and the browser extension. Agents need no setup for each credential: a connected agent sees the names of your credentials, and the bouncer decides each use from the first one or asks you ([ADR 0025](docs/adr/0025-low-friction-access.md)). The Mac app has a new window with folders, Decisions, and Agents, you add a credential by pasting it, and the iPhone app follows the same model ([ADR 0026](docs/adr/0026-simple-app.md)).
 

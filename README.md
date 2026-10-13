@@ -25,7 +25,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/app-vault.png" alt="The Apassy window: credentials grouped by kind, each with the environment variable that agents use." />
+  <img src="docs/images/app-vault.png" alt="The Apassy window: all credentials in folders, and a question of Claude Code that waits for your answer." />
 </p>
 
 ## Why
@@ -50,7 +50,7 @@ flowchart LR
 - **The agent never receives the value.** The broker socket never returns a secret. The secret exists only in the environment of the command ([ADR 0006](docs/adr/0006-process-secrets.md)).
 - **Placeholders.** A variable can hold a placeholder that looks like the key. Apassy's proxy puts the real value only into HTTPS requests to the hosts of that credential, and refuses the placeholder anywhere else ([ADR 0011](docs/adr/0011-run-proxy-placeholders.md)).
 - **The bouncer runs on your Mac.** 64 rule packs and the `apassy-base-v1` model check every command. A production credential waits for you, unless you allowed production for that project and kind of action ([bouncer](docs/operations/bouncer.md), [ADR 0025](docs/adr/0025-low-friction-access.md)).
-- **It learns.** "Approve and remember" turns a routine command into a pattern, and the line under Decisions shows how often you were asked this week ([learning](docs/operations/learning.md)).
+- **It learns.** "Allow ACTION in PROJECT" remembers your answer for the credential, the project, and the kind of action, and the line under Decisions shows how often you were asked this week ([learning](docs/operations/learning.md)).
 - **Agents run in a sandbox.** `apassy-sandbox` starts Claude Code and Codex in a Seatbelt profile that denies the vaults, the backups, the model, and the app ([isolation](docs/operations/isolation.md)).
 - **Several vaults, synced if you want it.** Keep personal and client credentials apart: each vault has its own passphrase, agents, and rules, and one is open at a time. A vault can sync between your Macs through iCloud Drive, Dropbox, Google Drive, OneDrive, or Syncthing, and changes merge one credential at a time ([several vaults](docs/operations/multiple-vaults.md), [sync](docs/operations/sync.md)).
 - **Fill logins in your browser.** The Apassy extension for Chromium browsers fills a login on its website after Touch ID, for each fill. Agents never get the password ([browser](docs/operations/browser.md)).
@@ -60,8 +60,12 @@ flowchart LR
 
 | |
 | :---: |
-| <img src="docs/images/app-requests.png" alt="Recent requests of an agent with the reason for each decision" /> |
-| **Requests.** Every request, with the command and the reason for the decision. These screenshots show the window before 0.5.0; new ones follow. |
+| <img src="docs/images/app-decisions.png" alt="Decisions: Codex asks for a Resend API key; a question and a suggestion wait in the list" /> |
+| **Decisions.** What waits for you: questions of the bouncer, requests of agents, and suggestions. |
+| <img src="docs/images/app-agent.png" alt="Claude Code with its uses this week by kind of action, and its recent uses" /> |
+| **Agents.** Each agent, with its projects and the actions it took this week. |
+| <img src="docs/images/app-settings.png" alt="Settings on Vault: sync, backup, and import from 1Password" /> |
+| **Settings.** A view of the window: vault, security, devices, bouncer, tools, and updates. |
 
 The screenshots show synthetic data. `scripts/screenshots.sh` takes them from the real app.
 

@@ -907,6 +907,11 @@ fn the_page_scrolls_to_the_focus_and_with_page_keys() {
         below_the_fold > 0,
         "the walk reached the lower part of the page"
     );
+    // Without updates (Linux), Updates has only the version row: the page is too short
+    // for Page Down to move its first row by half a window.
+    if !crate::desktop::update::SUPPORTED {
+        return;
+    }
 
     // Page Down and Home with no focus in a field.
     let mut fresh = Window::new();
