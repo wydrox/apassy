@@ -18,6 +18,9 @@ final class ICloudVaultModel {
     private(set) var message: String?
     private(set) var isWorking = false
     let biometry: Biometry
+    /// The connect flow goes on to the safety words at once, without the screen that says the
+    /// vault is here. A problem keeps that screen, with its message.
+    @ObservationIgnored var finishesAtOnce = false
     @ObservationIgnored private let service: any VaultService
     @ObservationIgnored private let store: any PassphraseStore
     @ObservationIgnored private let settings: VaultSettings
@@ -84,7 +87,9 @@ final class ICloudVaultModel {
                     openedWith = passphrase
                     step = .faceID(entry)
                 } else {
-                    step = .done(entry)
+                    // The work is over: `complete` waits for it.
+                    isWorking = false
+                    reachDone(entry)
                 }
             } catch {
                 guard !ended else { return }
@@ -102,7 +107,7 @@ final class ICloudVaultModel {
         do {
             try store.save(passphrase, vaultID: entry.id)
             settings.setFaceIDUnlock(true, vaultID: entry.id)
-            step = .done(entry)
+            reachDone(entry)
         } catch {
             message = error.localizedDescription
             step = .done(entry)
@@ -112,7 +117,12 @@ final class ICloudVaultModel {
     func notNow() {
         guard case .faceID(let entry) = step, !ended else { return }
         openedWith = nil
+        reachDone(entry)
+    }
+
+    private func reachDone(_ entry: VaultEntry) {
         step = .done(entry)
+        if finishesAtOnce { complete() }
     }
 
     func complete() {

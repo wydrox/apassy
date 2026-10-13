@@ -71,7 +71,7 @@ The unlocked app has four tabs: **Vault**, **Decisions**, **Agents**, and **Sear
 
 | Part | What it does |
 | --- | --- |
-| Welcome and join | **iCloud** opens the personal vault file from iCloud Drive with its passphrase. **Join a team** uses the relay QR code from "Add a device…" on the Mac. Both offer Face ID unlock. "Only approve agent runs" goes to companion pairing. |
+| Welcome and connect | One door, **Connect to your Mac**: scan the code of Settings > Devices > Add a device on the Mac, or **Paste a link instead**. The code decides what comes (contract relay-connect-v1, section 7). A paid Mac (`r=sync`, or an old code with no `r`) joins relay sync: name, the two words, the passphrase, Face ID. A Free Mac (`r=connect`) asks to open the vault from iCloud Drive (file, passphrase, Face ID), then joins the notifications team of the Mac with that vault (name, the two words), so this iPhone approves away from the Wi-Fi; "Only on this Wi-Fi" pairs on the local network instead, with the pairing link of the code. A pairing code (`apassy://pair`) pairs on the local network. The parameters of a code are hints for the screens; the trust comes only from the two words and the owner check on the Mac. |
 | Lock | The passphrase, or Face ID when the passphrase is stored behind it. A new Face ID enrollment deletes it, and the screen says so. "Lock after": immediately (the default), 1, 5, 15 minutes, or 1 hour. |
 | Vault tab | The Watchtower card (weak, reused, and old passwords, and conflict copies; "Nothing needs a look" when it is clear), then "All credentials", "Favorites" (only when there are favorites; on this iPhone only), "Archive" (only when something is archived), "Password generator", and the folders, nested, with "New Folder". The sync state shows at the top. "+" opens New Credential. |
 | All credentials | Every credential that is not archived, grouped by folder as on the Mac (A to Z inside), with filters by kind and tag and a sort. |
@@ -83,7 +83,7 @@ The unlocked app has four tabs: **Vault**, **Decisions**, **Agents**, and **Sear
 | Decisions tab | See "Decisions" below. |
 | Agents tab | "Available when the Mac is connected". The agents and their exceptions live in the vault of the Mac and do not sync, so the tab shows nothing else. |
 | Search tab | Searches titles, usernames, tags, and websites. Archived credentials show in their own section. |
-| Settings | Four groups. **General**: the vault (name or vault picker, "Add another vault", remove from this iPhone), "Move to another app" (import and export), and AutoFill. **Devices**: sync (service, state, last sync, "Sync now", team devices, "Select the iCloud file again", the new passphrase of the vault, "Use the relay copy"), questions through the relay, the Mac on Wi-Fi, and "Open Decisions". **Security**: "Unlock with Face ID", "Lock after", "Lock now", and "Clear copied secrets after". **Advanced**: the versions of the app and the vault core, and the licenses. |
+| Settings | Four groups. **General**: the vault (name or vault picker, "Add another vault", remove from this iPhone), "Move to another app" (import and export), and AutoFill. **Devices**: this iPhone (how it approves, and whether it is connected, with "Connect to your Mac" when it is not), how the vault syncs (iCloud Drive or Apassy; "Open your vault from iCloud Drive" when there is none), the plan only when the Mac wrote one into the vault (none does yet; never a price or a purchase), "Open Decisions", the sync (state, last sync, "Sync now", devices, "Select the iCloud file again", the new passphrase of the vault, "Use the relay copy"), and, under Advanced, "Pair on this network". **Security**: "Unlock with Face ID", "Lock after", "Lock now", and "Clear copied secrets after". **Advanced**: the versions of the app and the vault core, and the licenses. |
 | AutoFill | Logins, one-time codes, and passkeys in Safari and apps, after Face ID or the passphrase for each fill or sign-in. New passkeys are saved in a new login or in a login of the website. The QuickType bar shows usernames, hosts, and passkey accounts only. |
 | Passkeys | A login holds at most one passkey (ES256). The credential shows its website, account, and the start of its ID. The ordinary screens never show or copy the key: it is not a field, so no reveal, copy, or large type shows it. After Face ID, the system export can move it to another app. A login with a password and a passkey offers "Remove passkey": Face ID, then the login keeps its fields. A login with a passkey and no password offers "Delete login" instead: removing the passkey of such a login deletes the entire item (notes, tags, websites, one-time passwords, custom details, history, and agent access) on this iPhone and, at the next sync, on the other devices. The dialog says this. To keep the data, add a password with Edit first, or archive the login. |
 | Import and export | Apple's credential exchange (iOS 26): Settings > General > Move to another app exports logins, one-time passwords, and passkeys to an app that the owner picks in the sheet of iOS. To import, start the export in the other app (Passwords, 1Password) and pick Apassy. Both ask for Face ID first; the data goes app to app in memory, never to a file. |
@@ -110,7 +110,7 @@ The Decisions tab shows what blocks an agent now. Its badge counts the rows of W
 | A question | The sentence, the facts, the command, and why the owner is asked. A fixed bar at the bottom has "Allow ACTION in PROJECT", "Deny", and "Allow Once". A production question shows a red "Allow production: ACTION in PROJECT". Its "⋯" menu holds the stricter answers and the environment of a credential. When the question has ended, the outcome takes the place of the bar. |
 | Face ID | An answer that gives authority asks for Face ID, as the core decides. The stricter answers go without it. A changed Face ID enrollment makes a new answer key; the Mac removes the old device, and the owner connects this iPhone again. |
 | Notification | A notification says only "A question is waiting". Opening one shows the newest waiting question. |
-| "⋯" menu | "Notifications" (when the relay is connected), "Connect this iPhone" (when it is not), and "Mac on Wi-Fi" (pairing, Activity, Mac). |
+| "⋯" menu | "Notifications" (when the relay is connected), "Connect to your Mac" (when it is not), and "Pair on this network", or "NAME on Wi-Fi" once paired (pairing, Activity, Mac). |
 
 ### Mac on Wi-Fi (ADR 0020)
 
@@ -144,6 +144,10 @@ A Simulator build (never a device build) takes these development aids:
 | `-ApassyPasteDemo stripe\|env` | Fill New Credential with synthetic values that the preview vault detects: one Stripe key, or a `.env` with three lines. Use it with `-ApassyOpen newcredential`. |
 | `-ApassyPreviewDecisions list\|detail` | With `-ApassyPreviewVault`, give the preview vault synthetic questions. `detail` also opens the newest one, as a notification would. |
 | `-ApassyPairingLink <link>` | The companion pairing, as below. |
+| `-ApassyConnectLink <link>` | With `-ApassyPreviewEmpty`: the connect flow as if the code had been scanned (`-ApassyJoinLink` does the same). A relay join skips its name step. |
+| `-ApassyConnectStep wifi\|vault` | After a Free code: select "Only on this Wi-Fi", or open a synthetic file of the preview vault with `-ApassyJoinPassphrase 'preview passphrase'`, skip Face ID, and send the name, so the two words show and then "Connected". |
+| `-ApassyPreviewPairing code` | In the pairing of the connect flow, show a synthetic 6-digit code. |
+| `-ApassyPreviewCamera denied` | The welcome and the scanner as with a refused camera. |
 
 The `-ApassyOpen` routes:
 
@@ -156,7 +160,8 @@ The `-ApassyOpen` routes:
 | `newcredential` | New Credential. |
 | `decisions`, `questions`, or `approvals` | The Decisions tab (`approvals` is the old name). |
 | `agents` | The Agents tab. |
-| `settings` or `settings:general\|devices\|security\|advanced` | Settings, or one of its groups. |
+| `settings` or `settings:general\|devices\|security\|advanced` | Settings, or one of its groups. `settings:devices:advanced` scrolls Devices to Advanced. |
+| `connect` or `connect:paste` | With `-ApassyPreviewEmpty`: the scanner or the paste step of "Connect to your Mac". |
 | `generator` | The password generator. |
 | `search:<text>` | The Search tab with the text. |
 | `new:<kind>` | The editor for a new credential. The kinds are `login`, `api_key`, `ssh_key`, `database`, and `custom`. |
@@ -243,7 +248,7 @@ The Secure Enclave and Face ID exist only on a device, so an approval can only b
 
 1. On the Mac, unlock Apassy and open Settings > iPhone companion. Turn on "Allow the iPhone app on this network". The iPhone and the Mac must be on the same Wi-Fi network or connected through Tailscale. For Tailscale, connect the Mac before you make the QR code. Existing pairings need a new pairing to store this address.
 2. Select "Pair an iPhone". The Mac shows a QR code. It never puts the link on the pasteboard.
-3. On the iPhone, open Apassy and go to Decisions > "⋯" > Mac on Wi-Fi (an iPhone with no vault starts at the pairing flow with "Only approve agent runs"). Check the name of the iPhone, then select "Scan the code" and point the camera at the QR code. Approve the Face ID prompt: the approval key signs once, to prove that this iPhone holds it.
+3. On the iPhone, open Apassy and go to Decisions > "⋯" > Mac on Wi-Fi (an iPhone with no vault scans the code with "Connect to your Mac" on the welcome). Check the name of the iPhone, then select "Scan the code" and point the camera at the QR code. Approve the Face ID prompt: the approval key signs once, to prove that this iPhone holds it.
 4. The iPhone shows a 6-digit code such as `348 942`. Type it in Apassy on the Mac and select Pair. The Mac then asks for Touch ID or your passphrase.
 5. The iPhone says "Paired". Select Continue. Runs that wait show in the Inbox and in Waiting on the Decisions tab.
 

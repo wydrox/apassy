@@ -42,14 +42,14 @@ struct SettingsView: View {
                     }
                 }
                 Section {
+                    ThisIPhoneRow()
+                    VaultSyncRow()
                     if let vault = root.vault, vault.hasVault, vault.isUnlocked, vault.vault?.syncs == true {
                         LabeledContent("Sync") {
                             Text(vault.syncStatus?.message ?? "Not synced yet")
                                 .multilineTextAlignment(.trailing)
                         }
                     }
-                    MacPairingRow()
-                    QuestionsStateRow()
                 } header: {
                     Text("Devices")
                 }
@@ -79,7 +79,8 @@ struct SettingsView: View {
         private func openFromLaunchArgument() {
             guard let route = UserDefaults.standard.string(forKey: "ApassyOpen"),
                 route.hasPrefix("settings:"),
-                let group = Page(rawValue: String(route.dropFirst("settings:".count)))
+                let name = route.dropFirst("settings:".count).split(separator: ":").first,
+                let group = Page(rawValue: String(name))
             else { return }
             path = [group]
         }
@@ -156,7 +157,7 @@ struct DevicesView: View {
                 ProgressView()
             }
         }
-        .navigationTitle("Team devices")
+        .navigationTitle("Devices")
         .task { await load() }
         .refreshable { await load() }
     }

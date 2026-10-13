@@ -35,9 +35,8 @@ struct JoinFlowView: View {
         PairingScreen {
             VStack(spacing: 20) {
                 PairingHero(
-                    symbol: "macbook.and.iphone", title: "Join a team",
-                    message:
-                        "On your Mac, open Apassy > Settings > Vault > Sync, and select “Add a device…”. The Mac shows a QR code.")
+                    symbol: "macbook.and.iphone", title: "Connect to your Mac",
+                    message: "On your Mac, open Apassy > Settings > Devices > Add a device. Then scan the code.")
                 if let note = model.scanNote {
                     CalloutView(symbol: "exclamationmark.triangle.fill", text: note)
                 }
@@ -83,7 +82,7 @@ struct JoinFlowView: View {
             VStack(spacing: 24) {
                 PairingHero(
                     symbol: "iphone", title: "Name this iPhone",
-                    message: "Your Mac and the relay list this iPhone under this name.")
+                    message: "Your Mac lists this iPhone under this name.")
                 VStack(alignment: .leading, spacing: 6) {
                     TextField("Name of this iPhone", text: $model.deviceName)
                         .textFieldStyle(.roundedBorder)
@@ -118,7 +117,7 @@ struct JoinFlowView: View {
             VStack(spacing: 24) {
                 ProgressView()
                     .controlSize(.extraLarge)
-                PairingHero(symbol: "network", title: "Sending the code to the relay")
+                PairingHero(symbol: "network", title: "Connecting to your Mac")
             }
         } actions: {
             cancelButton
@@ -225,7 +224,7 @@ struct JoinFlowView: View {
             VStack(spacing: 20) {
                 PairingHero(
                     symbol: "checkmark.seal.fill", tint: .green, title: "“\(vault.name)” is on this iPhone",
-                    message: "Apassy syncs it with your Mac through the relay.")
+                    message: "It syncs with your Mac through Apassy.")
                 if let message = model.passphraseMessage {
                     CalloutView(symbol: "exclamationmark.triangle.fill", text: message)
                 }

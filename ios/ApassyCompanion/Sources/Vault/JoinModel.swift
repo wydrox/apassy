@@ -48,6 +48,8 @@ final class JoinModel {
     @ObservationIgnored private let isAway: @MainActor () -> Bool
     @ObservationIgnored private let onFinished: @MainActor (VaultEntry) -> Void
     @ObservationIgnored private let onCancel: @MainActor () -> Void
+    /// "Scan a new code" after a failure goes back to the scanner of the connect flow.
+    @ObservationIgnored var onStartAgain: (@MainActor () -> Void)?
     /// The answer key of this iPhone (X9.63) for the Mac that confirms the join, when there is one.
     @ObservationIgnored private let answerKey: (@Sendable () throws -> Data)?
     @ObservationIgnored private var pollTask: Task<Void, Never>?
@@ -88,7 +90,7 @@ final class JoinModel {
         default: return
         }
         guard let link = VaultText.joinLink(from: text) else {
-            scanNote = "This is not the code of “Add a device…”. On your Mac, open Apassy > Settings > Vault > Sync."
+            scanNote = "This is not the code of “Add a device”. On your Mac, open Apassy > Settings > Devices > Add a device."
             return
         }
         scanNote = nil
@@ -176,7 +178,7 @@ final class JoinModel {
                     pollTask = nil
                     step = .failed(
                         title: "The link has expired",
-                        message: "Select “Add a device…” on your Mac again to make a new code.")
+                        message: "On your Mac, open Apassy > Settings > Devices > Add a device again to make a new code.")
                     return
                 }
             } catch {
@@ -267,12 +269,16 @@ final class JoinModel {
         onCancel()
     }
 
-    /// After a failure: scan a new code.
+    /// After a failure: scan a new code, here or in the connect flow that started this join.
     func startAgain() {
         stopPolling()
         scanNote = nil
         waitNote = nil
-        step = .scan
+        if let onStartAgain {
+            onStartAgain()
+        } else {
+            step = .scan
+        }
     }
 
     private func fail(_ error: any Error) {
@@ -283,7 +289,7 @@ final class JoinModel {
         case .linkInvalid?: title = "This code does not work"
         case .joinRefused?: title = "The Mac did not add this iPhone"
         case .safetyMismatch?: title = "The words do not match"
-        case .relayUnreachable?: title = "The relay does not answer"
+        case .relayUnreachable?: title = "Can’t reach Apassy Connect"
         case .unsupportedSchema?: title = "Update Apassy"
         default: title = "This iPhone was not added"
         }

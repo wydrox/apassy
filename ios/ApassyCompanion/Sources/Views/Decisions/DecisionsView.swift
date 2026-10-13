@@ -26,6 +26,7 @@ struct DecisionsView: View {
     let questions: QuestionsModel?
     let companion: AppModel
     var onSettings: (() -> Void)?
+    @Environment(RootModel.self) private var root: RootModel?
     @State private var path: [DecisionRoute] = []
     @State private var showsConnect = false
     @State private var showsMac = false
@@ -65,8 +66,9 @@ struct DecisionsView: View {
                 }
             }
         }
-        .sheet(isPresented: $showsConnect, onDismiss: { questions?.dismissAttach() }) {
-            if let questions { ConnectQuestionsView(model: questions) }
+        // A swipe down ends a connection that waits for the Mac.
+        .sheet(isPresented: $showsConnect, onDismiss: { questions?.cancelAttach() }) {
+            if let root { ConnectSheet().environment(root) }
         }
         .sheet(isPresented: $showsMac) {
             ApprovalsView(app: companion)
@@ -182,11 +184,11 @@ struct DecisionsView: View {
                 Label("Nothing waits", systemImage: "checkmark.circle")
                     .font(.headline)
                 Text(
-                    "To answer agents on this iPhone, open Apassy on your Mac, choose Settings > Devices > Notifications through the relay, add an iPhone, and scan the code here."
+                    "To answer agents on this iPhone, connect it to your Mac: on your Mac, open Apassy > Settings > Devices > Add a device, and scan the code here."
                 )
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-                Button("Connect this iPhone") { showsConnect = true }
+                Button("Connect to your Mac") { showsConnect = true }
                     .buttonStyle(.borderedProminent)
             }
             .padding(.vertical, 4)
@@ -243,12 +245,12 @@ struct DecisionsView: View {
                             Text("A notification says only \u{201C}A question is waiting\u{201D}. Apple sees no question.")
                         }
                     case .off, .failed:
-                        Button("Connect this iPhone", systemImage: "qrcode.viewfinder") { showsConnect = true }
+                        Button("Connect to your Mac", systemImage: "qrcode.viewfinder") { showsConnect = true }
                     case .loading:
                         EmptyView()
                     }
                 }
-                Button(session.map { "\($0.macName) on Wi-Fi" } ?? "Mac on Wi-Fi", systemImage: "wifi") {
+                Button(session.map { "\($0.macName) on Wi-Fi" } ?? "Pair on this network", systemImage: "wifi") {
                     showsMac = true
                 }
             } label: {

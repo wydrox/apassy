@@ -16,9 +16,13 @@ struct GeneralSettingsView: View {
             } else {
                 Section {
                     Text("No vault is on this iPhone. Add the vault of your Mac to see your logins and keys here.")
-                    Button("Add your vault", systemImage: "plus") {
+                    Button("Connect to your Mac", systemImage: "qrcode.viewfinder") {
                         close()
-                        root.addVault()
+                        root.connect()
+                    }
+                    Button("Open your vault from iCloud Drive", systemImage: "icloud") {
+                        close()
+                        root.connect(.openVault)
                     }
                 } header: {
                     Text("Vault")
@@ -62,7 +66,7 @@ private struct GeneralVaultSections: View {
                 }
                 Button("Add another vault", systemImage: "plus") {
                     close()
-                    root.addVault()
+                    root.connect()
                 }
                 Button("Remove “\(vault.vault?.name ?? "")” from this iPhone", role: .destructive) {
                     confirmingRemove = true

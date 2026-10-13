@@ -5,7 +5,7 @@ import Foundation
 import Observation
 import UIKit
 
-/// Which part of the app shows: the welcome, the join flow, the companion alone, or the vault
+/// Which part of the app shows: the welcome, the connect flow, the companion alone, or the vault
 /// (its lock screen or its tabs). It owns the vault model and the companion model.
 @MainActor
 @Observable
@@ -16,10 +16,9 @@ final class RootModel {
         case failed(String)
         /// No vault and no pairing.
         case welcome
-        case addVault
-        case iCloud(ICloudVaultModel)
-        case join(JoinModel)
-        /// No vault: only the approval of agent runs.
+        /// "Connect to your Mac": the code of the Mac decides what comes (`ConnectModel`).
+        case connect(ConnectModel)
+        /// No vault: only the approval of agent runs on this Wi-Fi.
         case companion
         /// The lock screen or the tabs of the vault.
         case vault
@@ -87,41 +86,51 @@ final class RootModel {
 
     // MARK: Actions
 
-    /// "Add your vault" on the welcome, and "Add another vault" in Settings.
-    func addVault() {
+    /// "Connect to your Mac" and "Paste a link instead" on the welcome, "Add another vault" in
+    /// Settings, and "Open your vault from iCloud Drive" in Settings > Devices.
+    func connect(_ start: ConnectModel.Start = .scan) {
         guard let vault else { return }
-        switch screen {
-        case .addVault, .iCloud, .join: return
-        default: break
-        }
+        if case .connect = screen { return }
         vault.stopSync()
         beforeJoin = screen
         vaultBeforeAdd = vault.vault?.id
         if case .failed = beforeJoin { beforeJoin = .welcome }
-        screen = .addVault
-    }
-
-    func joinTeam() {
-        guard case .addVault = screen, let vault else { return }
-        screen = .join(
-            JoinModel(
-                service: vault.service, passphraseStore: vault.passphraseStore, settings: settings,
-                biometry: vault.gate.biometry, deviceName: settings.deviceName ?? DeviceName.current(),
-                isAway: { [weak vault] in vault?.isInBackground ?? false },
-                answerKey: { try EnclaveAnswerSigner().publicKey() },
+        screen = .connect(
+            makeConnect(
+                vault: vault, start: start, attachesSelectedVault: false,
                 onFinished: { [weak self] _ in self?.finishAddVault() },
                 onCancel: { [weak self] in self?.cancelAddVault() }))
     }
 
-    func addICloudVault() {
-        guard case .addVault = screen, let vault else { return }
-        screen = .iCloud(
-            ICloudVaultModel(
-                service: vault.service, passphraseStore: vault.passphraseStore, settings: settings,
-                biometry: vault.gate.biometry,
-                isAway: { [weak vault] in vault?.isInBackground ?? false },
-                onFinished: { [weak self] _ in self?.finishAddVault() },
-                onCancel: { [weak self] in self?.cancelAddVault() }))
+    /// "Connect to your Mac" for the vault that is open (Decisions, Settings > Devices): it joins
+    /// the notifications team of the Mac. The caller shows the flow in a sheet and closes it at the end.
+    func connectSelectedVault(onEnd: @escaping @MainActor () -> Void) -> ConnectModel? {
+        guard let vault, vault.hasVault, vault.isUnlocked else { return nil }
+        return makeConnect(
+            vault: vault, start: .scan, attachesSelectedVault: true, onFinished: { _ in onEnd() },
+            onCancel: { onEnd() })
+    }
+
+    private func makeConnect(
+        vault: VaultModel, start: ConnectModel.Start, attachesSelectedVault: Bool,
+        onFinished: @escaping @MainActor (VaultEntry?) -> Void, onCancel: @escaping @MainActor () -> Void
+    ) -> ConnectModel {
+        let companion = companion
+        return ConnectModel(
+            start: start, attachesSelectedVault: attachesSelectedVault, service: vault.service,
+            passphraseStore: vault.passphraseStore, settings: settings, biometry: vault.gate.biometry,
+            deviceName: settings.deviceName ?? DeviceName.current(), questions: questions,
+            isAway: { [weak vault] in vault?.isInBackground ?? false },
+            answerKey: { try EnclaveAnswerSigner().publicKey() },
+            pairing: {
+                switch companion.phase {
+                case .pairing(let model): return .ready(model)
+                case .paired: return .paired
+                case .loadFailed(let message): return .unavailable(message)
+                case .starting: return .unavailable("Apassy is still reading the pairing of this iPhone. Try again.")
+                }
+            },
+            onFinished: onFinished, onCancel: onCancel)
     }
 
     private func finishAddVault() {
@@ -141,7 +150,7 @@ final class RootModel {
         }
     }
 
-    /// "Only approve agent runs" on the welcome.
+    /// "Pair on this network" when the vault core cannot start: the approval of runs on this Wi-Fi.
     func approveOnly() {
         screen = .companion
     }
@@ -157,10 +166,10 @@ final class RootModel {
         guard let vault else { return }
         switch phase {
         case .background:
-            if case .iCloud(let model) = screen { model.enterBackground() }
+            if case .connect(let model) = screen { model.enterBackground() }
             vault.enterBackground()
         case .active:
-            if case .iCloud(let model) = screen { model.enterForeground() }
+            if case .connect(let model) = screen { model.enterForeground() }
             vault.enterForeground()
         case .inactive: break
         }

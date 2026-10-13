@@ -40,17 +40,13 @@ struct RootView: View {
                 } actions: {
                     Button("Try again") { Task { await root.start() } }
                         .buttonStyle(.borderedProminent)
-                    Button("Only approve agent runs") { root.approveOnly() }
+                    Button("Pair on this network") { root.approveOnly() }
                         .buttonStyle(.bordered)
                 }
             case .welcome:
                 AppWelcomeView()
-            case .addVault:
-                AddVaultChoiceView()
-            case .iCloud(let model):
-                ICloudVaultFlowView(model: model)
-            case .join(let model):
-                JoinFlowView(model: model)
+            case .connect(let model):
+                ConnectFlowView(model: model)
             case .companion:
                 CompanionOnlyView()
             case .vault:
@@ -95,7 +91,7 @@ struct CompanionOnlyView: View {
                     HStack {
                         Button("Back", systemImage: "chevron.backward") { root.route() }
                         Spacer()
-                        Button("Add your vault") { root.addVault() }
+                        Button("Connect to your Mac") { root.connect() }
                     }
                     .buttonStyle(.glass)
                     .padding(.horizontal, 16)

@@ -157,7 +157,7 @@ struct SessionModelTests {
         await f.session.unpair()
         #expect((try? f.store.load()) == nil)
         #expect(f.ended.count == 1)
-        #expect(f.ended[0]?.contains("Remove it in Settings > iPhone companion") == true)
+        #expect(f.ended[0]?.contains("Remove it in Settings > Devices") == true)
     }
 
     @Test("forget deletes the record and does not ask the Mac")

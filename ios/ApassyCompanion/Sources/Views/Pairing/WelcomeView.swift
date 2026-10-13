@@ -15,11 +15,11 @@ struct WelcomeView: View {
                     .clipShape(.rect(cornerRadius: 22, style: .continuous))
                     .accessibilityHidden(true)
                 VStack(spacing: 12) {
-                    Text("Approve agent runs")
+                    Text("Pair on this network")
                         .font(.largeTitle.bold())
                         .multilineTextAlignment(.center)
                     Text(
-                        "Approve the runs that wait for you on your Mac, with Face ID, from your iPhone. An approval never carries a secret: the iPhone shows what an agent wants to run and sends your decision."
+                        "Approve the runs that wait for you on your Mac, with Face ID, while this iPhone is on the same Wi-Fi. An approval never carries a secret: the iPhone shows what an agent wants to run and sends your decision."
                     )
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
@@ -34,7 +34,7 @@ struct WelcomeView: View {
                 }
                 deviceName
                 Text(
-                    "On your Mac, open Apassy, select Settings > iPhone companion, and select \"Pair an iPhone\". A code shows on the Mac."
+                    "On your Mac, open Apassy > Settings > Devices > Add a device. A code shows on the Mac."
                 )
                 .font(.footnote)
                 .foregroundStyle(.secondary)

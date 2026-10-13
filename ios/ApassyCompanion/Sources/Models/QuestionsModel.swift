@@ -483,7 +483,9 @@ final class QuestionsModel {
         text.trimmingCharacters(in: .whitespacesAndNewlines).contains("apassy_lnk_")
     }
 
-    func startAttach(link: String, pollInterval: Duration = .seconds(2)) async {
+    /// Join the notifications team of the Mac with `link`. `deviceName` is the name that the owner
+    /// typed in the connect flow; else the name of this iPhone.
+    func startAttach(link: String, deviceName: String? = nil, pollInterval: Duration = .seconds(2)) async {
         guard Self.isLink(link) else {
             attach = .failed("This is not a device link of the Apassy relay. On the Mac, make a new link.")
             return
@@ -493,7 +495,8 @@ final class QuestionsModel {
             // The core rejects a key that belonged to a removed row: a removed iPhone gets a new one.
             let key = try status.removed ? signer.renew() : signer.publicKey()
             let info = try await service.joinAttach(
-                link: link.trimmingCharacters(in: .whitespacesAndNewlines), deviceName: deviceName, answerKey: key)
+                link: link.trimmingCharacters(in: .whitespacesAndNewlines), deviceName: deviceName ?? self.deviceName,
+                answerKey: key)
             attach = .waiting(info)
             attachTask?.cancel()
             attachTask = Task { [weak self] in await self?.pollAttach(every: pollInterval) }

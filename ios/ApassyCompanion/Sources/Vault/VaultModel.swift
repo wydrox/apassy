@@ -49,6 +49,9 @@ final class VaultModel {
     private(set) var itemsVersion = 0
     private(set) var syncStatus: SyncStatus?
     private(set) var isSyncing = false
+    /// The plan that the Mac wrote into the vault (`plan-v1`). Nil until the core reads it, and
+    /// then Settings > Devices shows no Plan row.
+    private(set) var planSummary: PlanSummary?
     private(set) var watchtower: WatchtowerReport?
     /// The folders of the vault, depth first, while it is unlocked (ADR 0026 §5).
     private(set) var folders: [Folder] = []
