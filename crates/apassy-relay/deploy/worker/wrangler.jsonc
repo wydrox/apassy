@@ -12,7 +12,11 @@
     { "name": "CREATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 10, "period": 60 } },
     { "name": "AUTH_LIMITER", "namespace_id": "1002", "simple": { "limit": 60, "period": 60 } },
     // Vault snapshot pushes (PUT /v1/sync/snapshot): each holds a relay thread for its body.
-    { "name": "SYNC_LIMITER", "namespace_id": "1003", "simple": { "limit": 60, "period": 60 } }
+    { "name": "SYNC_LIMITER", "namespace_id": "1003", "simple": { "limit": 60, "period": 60 } },
+    // Codeless Connect teams (POST /v1/connect, SPEC 26), per IPv4 address or IPv6 /64. The
+    // binding counts per 10 or 60 seconds only, so 1 a minute is its strictest form; the
+    // relay caps the Connect teams of 24 hours for everyone (APASSY_RELAY_CONNECT_TEAMS_PER_DAY).
+    { "name": "CONNECT_LIMITER", "namespace_id": "1004", "simple": { "limit": 1, "period": 60 } }
   ],
   // /guide explicitly fetches /guide.html; do not redirect that asset back to /guide.
   "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true, "html_handling": "none" },

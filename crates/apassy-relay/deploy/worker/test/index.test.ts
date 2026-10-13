@@ -623,6 +623,136 @@ describe("creation rate limit", () => {
   });
 });
 
+describe("connect rate limit", () => {
+  /** Every limiter of the Worker, recording `<name>:<key>`; CONNECT_LIMITER answers `connect`. */
+  function limiters(connect: boolean) {
+    const used: string[] = [];
+    const limiter = (name: string, success: boolean) => ({
+      async limit({ key }: { key: string }) {
+        used.push(`${name}:${key}`);
+        return { success };
+      },
+    });
+    return {
+      used,
+      env: {
+        CONNECT_LIMITER: limiter("connect", connect),
+        CREATE_LIMITER: limiter("create", true),
+        AUTH_LIMITER: limiter("auth", true),
+        SYNC_LIMITER: limiter("sync", true),
+      },
+    };
+  }
+
+  it("uses CONNECT_LIMITER, and no other, for POST /v1/connect", async () => {
+    const refused = limiters(false);
+    const response = await call("/v1/connect", {
+      method: "POST",
+      body: "{}",
+      headers: { "cf-connecting-ip": "198.51.100.42" },
+    }, { ...refused.env, RELAY: vpc() });
+    assert.equal(response.status, 429);
+    assert.equal(response.headers.get("retry-after"), "60");
+    assert.equal(await response.text(), '{"ok":false,"error":{"code":"rate_limited","message":"Too many requests. Try again in a minute."}}');
+    assert.deepEqual(refused.used, ["connect:198.51.100.42"]);
+    assert.equal(seen.length, 0);
+    assert.equal(vpcTargets.length, 0);
+
+    const allowed = limiters(true);
+    const passed = await call("/v1/connect", { method: "POST", body: '{"v":1}' }, allowed.env);
+    assert.equal(passed.status, 201);
+    assert.equal(await passed.text(), 'echo:{"v":1}');
+    assert.deepEqual(allowed.used, ["connect:unknown"]);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0]!.url, "/v1/connect");
+    assert.deepEqual(values(seen[0]!, "x-apassy-edge"), [SECRET]);
+  });
+
+  it("keys an IPv6 client by its /64", async () => {
+    for (const [address, key] of [
+      ["2001:db8:1:2:3:4:5:6", "2001:db8:1:2::/64"],
+      ["2001:0DB8:0001:0002:ffff:ffff:ffff:ffff", "2001:db8:1:2::/64"],
+      ["2001:db8:1:2::7", "2001:db8:1:2::/64"],
+      ["2001:db8::1", "2001:db8:0:0::/64"],
+      ["2001:db8::", "2001:db8:0:0::/64"],
+      ["::1", "0:0:0:0::/64"],
+      ["::ffff:192.0.2.1", "::ffff:192.0.2.1"],
+      ["2001:db8::1::2", "2001:db8::1::2"],
+      ["2001:db8:1:2:3:4:5", "2001:db8:1:2:3:4:5"],
+      ["2001:db8:1:2:3:4:5:6:7", "2001:db8:1:2:3:4:5:6:7"],
+      ["2001:db8:zz::1", "2001:db8:zz::1"],
+      ["192.0.2.1", "192.0.2.1"],
+    ]) {
+      const recorded = limiters(false);
+      const response = await call("/v1/connect", {
+        method: "POST",
+        body: "{}",
+        headers: { "cf-connecting-ip": address! },
+      }, recorded.env);
+      assert.equal(response.status, 429, address);
+      assert.deepEqual(recorded.used, [`connect:${key}`], address);
+    }
+  });
+
+  it("keeps the other limiters keyed by the full address", async () => {
+    const recorded = limiters(true);
+    await call("/v1/teams", {
+      method: "POST",
+      body: "{}",
+      headers: { "cf-connecting-ip": "2001:db8:1:2:3:4:5:6" },
+    }, recorded.env);
+    assert.deepEqual(recorded.used, ["create:2001:db8:1:2:3:4:5:6"]);
+  });
+
+  it("passes POST /v1/connect when the limiter is missing or fails", async () => {
+    for (const CONNECT_LIMITER of [
+      undefined,
+      { async limit() { throw new Error("limiter unavailable"); } },
+    ]) {
+      const response = await call("/v1/connect", { method: "POST", body: "{}" }, {
+        CONNECT_LIMITER,
+        CREATE_LIMITER: { async limit() { return { success: false }; } },
+      });
+      assert.equal(response.status, 201);
+      assert.equal(await response.text(), "echo:{}");
+      assert.equal(seen.length, 1);
+    }
+  });
+
+  it("does not use CONNECT_LIMITER for other methods or paths", async () => {
+    for (const [method, path, other] of [
+      ["GET", "/v1/connect", ""],
+      ["HEAD", "/v1/connect", ""],
+      ["PUT", "/v1/connect", ""],
+      ["DELETE", "/v1/connect", ""],
+      ["POST", "/v1/connect/", ""],
+      ["POST", "/v1/connect/teams", ""],
+      ["POST", "/v1/teams", "create"],
+      ["POST", "/v1/join", "create"],
+      ["POST", "/v1/auth/challenge", "auth"],
+      ["POST", "/p/session/example.com/v1/connect", ""],
+    ]) {
+      const recorded = limiters(false);
+      const response = await call(path!, { method }, recorded.env);
+      assert.equal(response.status, 201, `${method} ${path}`);
+      assert.equal(seen.length, 1, `${method} ${path}`);
+      assert.deepEqual(recorded.used, other ? [`${other}:unknown`] : [], `${method} ${path}`);
+    }
+  });
+
+  it("bounds the body of POST /v1/connect like any JSON route, before the limiter", async () => {
+    const recorded = limiters(true);
+    const response = await call("/v1/connect", {
+      method: "POST",
+      body: "x",
+      headers: { "content-length": String(MAX_JSON_LENGTH + 1) },
+    }, recorded.env);
+    assert.equal(response.status, 413);
+    assert.deepEqual(recorded.used, []);
+    assert.equal(seen.length, 0);
+  });
+});
+
 function assets(response: (request: Request) => Response = () => new Response("asset")) {
   const requests: Request[] = [];
   return {

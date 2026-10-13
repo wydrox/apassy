@@ -1,5 +1,5 @@
 // The edge Worker of apassy-relay: it serves static files, limits creation
-// requests and snapshot pushes, bounds the declared length of every body, and
+// requests (a codeless Connect team the most) and snapshot pushes, bounds the declared length of every body, and
 // forwards relay requests with the required edge secret. `/internal/` routes (the APNs
 // sender, apns.ts) are handled here and never forwarded.
 // Erasable TypeScript only (no enums, namespaces, or parameter properties), so
@@ -36,6 +36,8 @@ export interface Env extends PushEnv {
   AUTH_LIMITER?: CreateLimiter;
   /** A per-IP guard for vault snapshot pushes (`PUT /v1/sync/snapshot`). */
   SYNC_LIMITER?: CreateLimiter;
+  /** The strictest per-IP guard: codeless Connect teams (`POST /v1/connect`, SPEC 26). */
+  CONNECT_LIMITER?: CreateLimiter;
   /** Static files served without the relay or its edge secret. */
   ASSETS?: AssetService;
 }
@@ -97,6 +99,22 @@ function lengthError(request: Request, path: string): Response | undefined {
   return undefined;
 }
 
+// The limiter key of `POST /v1/connect`: an IPv4 address as it is, an IPv6 address as
+// its /64, because one client usually holds a whole /64. Nothing is stored here: the
+// key goes to the rate limiter binding only, as every other limiter key does.
+function connectKey(address: string): string {
+  if (!address.includes(":") || address.includes(".")) return address;
+  const [head, tail, extra] = address.toLowerCase().split("::");
+  if (extra !== undefined) return address;
+  const left = head ? head.split(":") : [];
+  const right = tail === undefined ? [] : tail ? tail.split(":") : [];
+  const missing = 8 - left.length - right.length;
+  if (tail === undefined ? missing !== 0 : missing < 1) return address;
+  const groups = [...left, ...Array<string>(missing).fill("0"), ...right];
+  if (!groups.every((group) => /^[0-9a-f]{1,4}$/.test(group))) return address;
+  return groups.slice(0, 4).map((group) => group.replace(/^0+(?=.)/, "")).join(":") + "::/64";
+}
+
 function unsafeDownloadPath(path: string): boolean {
   if (/\.\.|\/\/|%2f|%5c|\\/i.test(path)) return true;
   try {
@@ -115,13 +133,18 @@ function staticResponse(response: Response, noStore: boolean): Response {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
+/** The codeless team route (SPEC 26): anyone can call it, so its limiter is the strictest. */
+const CONNECT_PATH = "/v1/connect";
+
 // The per-IP limiter of a route. Creation (a team, a join, a device link) is rare;
 // sign-in is frequent (a waiting CLI asks every 5 s); a snapshot push holds a relay
-// thread for its whole body.
+// thread for its whole body. A Connect team needs no code at all.
 function limiterFor(method: string, path: string, env: Env): CreateLimiter | undefined {
   if (method === "PUT" && path === SNAPSHOT_PATH) return env.SYNC_LIMITER;
   if (method !== "POST") return undefined;
   switch (path) {
+    case CONNECT_PATH:
+      return env.CONNECT_LIMITER;
     case "/v1/join":
     case "/v1/teams":
     case "/v1/devices/link":
@@ -172,8 +195,11 @@ export default {
     if (limiter) {
       // Fail open if the binding fails: the relay itself checks codes, keys, and
       // signatures; this limit is a guard against floods, not an authorization check.
+      // For Connect the relay also caps the teams of a day for everyone.
+      const address = request.headers.get("cf-connecting-ip") ?? "unknown";
+      const key = url.pathname === CONNECT_PATH ? connectKey(address) : address;
       try {
-        const { success } = await limiter.limit({ key: request.headers.get("cf-connecting-ip") ?? "unknown" });
+        const { success } = await limiter.limit({ key });
         if (!success) {
           return jsonError(429, "rate_limited", "Too many requests. Try again in a minute.", { "retry-after": "60" });
         }
