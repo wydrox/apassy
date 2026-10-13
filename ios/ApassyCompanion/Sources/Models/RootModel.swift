@@ -117,7 +117,8 @@ final class RootModel {
     ) -> ConnectModel {
         let companion = companion
         return ConnectModel(
-            start: start, attachesSelectedVault: attachesSelectedVault, service: vault.service,
+            start: start, attachesSelectedVault: attachesSelectedVault,
+            selectedVaultName: attachesSelectedVault ? vault.vault?.name : nil, service: vault.service,
             passphraseStore: vault.passphraseStore, settings: settings, biometry: vault.gate.biometry,
             deviceName: settings.deviceName ?? DeviceName.current(), questions: questions,
             isAway: { [weak vault] in vault?.isInBackground ?? false },

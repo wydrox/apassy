@@ -15,7 +15,8 @@ import Observation
 /// - A pairing link of the local network: the pairing of `PairingModel`.
 ///
 /// The parameters of a code are hints for the screens. The trust comes only from the safety words
-/// and the owner check on the Mac.
+/// and the owner check on the Mac. Anyone can make a code, so the screens never say that a code
+/// comes from the owner's Mac: the name in a code (`n`) shows only as "Code from “n”".
 @MainActor
 @Observable
 final class ConnectModel {
@@ -46,7 +47,8 @@ final class ConnectModel {
         case name
         /// The code goes to the relay, then the Mac shows the same two words (`QuestionsModel.attach`).
         case words
-        case connected(macName: String)
+        /// The vault whose questions now come to this iPhone.
+        case connected(vaultName: String)
         /// A paid Mac, or an old code: the copy of the vault comes from the relay.
         case join(JoinModel)
         /// "Pair on this network", for a code without a pairing link.
@@ -82,6 +84,8 @@ final class ConnectModel {
     private(set) var openedVault: VaultEntry?
     /// The vault on this iPhone joins the notifications team (Decisions and Settings > Devices).
     let attachesSelectedVault: Bool
+    /// The name of that vault.
+    let selectedVaultName: String?
     let biometry: Biometry
 
     @ObservationIgnored private let service: any VaultService
@@ -100,7 +104,8 @@ final class ConnectModel {
     @ObservationIgnored private var ended = false
 
     init(
-        start: Start = .scan, attachesSelectedVault: Bool = false, service: any VaultService,
+        start: Start = .scan, attachesSelectedVault: Bool = false, selectedVaultName: String? = nil,
+        service: any VaultService,
         passphraseStore: any PassphraseStore, settings: VaultSettings, biometry: Biometry, deviceName: String,
         questions: QuestionsModel?, isAway: @escaping @MainActor () -> Bool = { false },
         answerKey: (@Sendable () throws -> Data)? = nil,
@@ -113,6 +118,7 @@ final class ConnectModel {
         case .openVault: step = .openVault
         }
         self.attachesSelectedVault = attachesSelectedVault
+        self.selectedVaultName = selectedVaultName
         self.service = service
         self.passphraseStore = passphraseStore
         self.settings = settings
@@ -127,8 +133,15 @@ final class ConnectModel {
         self.onCancel = onCancel
     }
 
-    /// The name of the Mac for the screens: from the code, else "your Mac".
+    /// The name of the Mac in the code, for "Code from “n”" only: anyone can make a code, so it
+    /// never stands for the owner's Mac. "your Mac" without one.
     var macName: String { link?.macName ?? "your Mac" }
+
+    /// "Code from “n”", the line under a screen of a code that names its Mac; nil without one.
+    var codeFrom: String? { link?.macName.map { "Code from “\($0)”" } }
+
+    /// The vault that joins: the one this flow opened, else the selected one.
+    var vaultName: String { openedVault?.name ?? selectedVaultName ?? "this vault" }
 
     /// The connection that waits for the Mac, while the words show.
     var attach: QuestionsModel.AttachStep? { questions?.attach }
@@ -268,7 +281,7 @@ final class ConnectModel {
         switch questions.attach {
         case .attached?:
             questions.dismissAttach()
-            step = .connected(macName: macName)
+            step = .connected(vaultName: vaultName)
         case .failed(let message)?:
             questions.dismissAttach()
             step = .failed(title: "This iPhone was not connected", message: message)

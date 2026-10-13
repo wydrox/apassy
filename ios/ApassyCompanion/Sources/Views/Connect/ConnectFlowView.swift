@@ -22,7 +22,7 @@ struct ConnectFlowView: View {
             case .iCloud(let iCloud): ICloudVaultFlowView(model: iCloud)
             case .name: name
             case .words: words
-            case .connected(let macName): connected(macName)
+            case .connected(let vaultName): connected(vaultName)
             case .join(let join): JoinFlowView(model: join)
             case .pairHelp: pairHelp
             case .pairing(let pairing):
@@ -141,9 +141,10 @@ struct ConnectFlowView: View {
                         message: "Select the file of your vault, then type its passphrase.")
                 } else {
                     PairingHero(
-                        symbol: "macbook.and.iphone", title: "Connect to \(model.macName)",
+                        symbol: "macbook.and.iphone", title: "Connect to your Mac",
                         message:
                             "One more step: open your vault from iCloud Drive, so this iPhone can approve away from your Wi-Fi.")
+                    codeFromLine
                 }
                 CalloutView(
                     symbol: "folder.fill", tint: .accentColor,
@@ -205,7 +206,8 @@ struct ConnectFlowView: View {
             VStack(spacing: 24) {
                 PairingHero(
                     symbol: "iphone", title: "Name this iPhone",
-                    message: "\(model.link?.macName ?? "Your Mac") lists this iPhone under this name.")
+                    message: "The Mac that made the code lists this iPhone under this name.")
+                codeFromLine
                 VStack(alignment: .leading, spacing: 6) {
                     TextField("Name of this iPhone", text: $model.deviceName)
                         .textFieldStyle(.roundedBorder)
@@ -245,10 +247,9 @@ struct ConnectFlowView: View {
                         .font(.title2.bold())
                         .multilineTextAlignment(.center)
                     SafetyWords(words: info.words)
-                    Text(
-                        "\(model.link?.macName ?? "Your Mac") shows the same two words. Confirm “\(model.trimmedDeviceName)” on the Mac only if they match."
-                    )
-                    .multilineTextAlignment(.center)
+                    Text("The Mac that made this code shows the same two words. Confirm there only if they match.")
+                        .multilineTextAlignment(.center)
+                    codeFromLine
                     VStack(spacing: 8) {
                         HStack(spacing: 10) {
                             ProgressView()
@@ -278,7 +279,8 @@ struct ConnectFlowView: View {
                 VStack(spacing: 24) {
                     ProgressView()
                         .controlSize(.extraLarge)
-                    PairingHero(symbol: "network", title: "Connecting to \(model.macName)")
+                    PairingHero(symbol: "network", title: "Connecting…")
+                    codeFromLine
                 }
             } actions: {
                 cancelButton
@@ -286,12 +288,15 @@ struct ConnectFlowView: View {
         }
     }
 
-    private func connected(_ macName: String) -> some View {
+    private func connected(_ vaultName: String) -> some View {
         PairingScreen {
-            PairingHero(
-                symbol: "checkmark.seal.fill", tint: .green, title: "Connected to \(macName)",
-                message:
-                    "This iPhone approves with \(model.biometry == .none ? "Face ID" : model.biometry.name), also away from your Wi-Fi. Each question goes to your Mac and to this iPhone. The first answer counts.")
+            VStack(spacing: 20) {
+                PairingHero(
+                    symbol: "checkmark.seal.fill", tint: .green, title: "Connected. Questions of “\(vaultName)” come here",
+                    message:
+                        "This iPhone approves with \(model.biometry == .none ? "Face ID" : model.biometry.name), also away from your Wi-Fi. Each question goes to your Macs and to this iPhone. The first answer counts.")
+                codeFromLine
+            }
         } actions: {
             Button {
                 model.complete()
@@ -319,6 +324,17 @@ struct ConnectFlowView: View {
     }
 
     // MARK: Parts
+
+    /// "Code from “n”": the name in the code, as secondary text only. Anyone can make a code.
+    @ViewBuilder
+    private var codeFromLine: some View {
+        if let codeFrom = model.codeFrom {
+            Text(codeFrom)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+    }
 
     private var cancelButton: some View {
         Button {

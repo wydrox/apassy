@@ -173,6 +173,9 @@ public protocol VaultService: Sendable {
     func joinAttach(link: String, deviceName: String, answerKey: Data) async throws -> AttachInfo
     func joinAttachPoll() async throws -> AttachInfo
     func joinAttachCancel() async throws
+    /// "Disconnect from Apassy Connect": this iPhone leaves the questions team of the selected
+    /// vault (its relay device and its key go). No Face ID: it takes authority away.
+    func questionsDisconnect() async throws
 
     // 5.11 Folders, adding by paste, and the options of a credential. The app syncs after each
     // change, as after `save`.

@@ -248,4 +248,12 @@ extension PreviewVaultService {
     }
 
     public func joinAttachCancel() async throws { questionsState.attach = nil }
+
+    public func questionsDisconnect() async throws {
+        questionsState.attach = nil
+        questionsState.enabled = false
+        questionsState.questions = []
+        questionsState.registered = false
+        questionsState.removed = false
+    }
 }
