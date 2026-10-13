@@ -63,7 +63,7 @@ The detected folders are iCloud Drive, each folder in `~/Library/CloudStorage` (
 - **Before each lock**: "Lock now", the lock button, a switch to another vault, "New vault…" or "Open vault file…" from an open vault, a backup, a restore over an open vault, a quit, and "Restart now" for an update.
 - **"Sync now"** in Settings > Vault > Sync.
 
-Never while an agent run waits for you. A sync never stops a lock or a quit: a failure shows once as a note, and the changes stay on this Mac until the next sync.
+A question that waits for you in Decisions does not hold sync. When a merge changes a credential of that question, the run does not start after your answer: the agent is told to send the request again, so you answer for the credential as it is now. A sync never stops a lock or a quit: a failure shows once as a note, and the changes stay on this Mac until the next sync.
 
 Agent use writes the activity log, but that is not synced content: it does not start a push.
 
@@ -108,7 +108,7 @@ Settings > Vault > Sync shows each synced vault with a tag and a line:
 | --- | --- | --- |
 | Up to date | Up to date. Last sync 5 minutes ago. | nothing |
 | Syncing | a change waits to sync | nothing: it syncs within seconds |
-| Downloading | Waiting for iCloud to download the synced file. | wait; Apassy asked iCloud for the file (`brctl download`) |
+| Downloading | Waiting for iCloud to download the synced file. | wait; Apassy asked iCloud for the file (`brctl download`), and asks again every 30 seconds while the file stays in iCloud |
 | Needs the new passphrase | The passphrase changed on another Mac. Type the new passphrase. | section 8 |
 | Folder not available | The synced folder is not available. | connect the drive or the share, or turn the sync service on; Apassy syncs when it is back |
 | Damaged copy | The synced copy is damaged. | section 10 |
@@ -218,8 +218,9 @@ The app (`src/desktop/ui/sync_tests.rs`):
 | `remove_from_list_stops_sync_and_keeps_the_synced_file` | The texts; the state goes; the file stays. |
 | `without_sync_the_app_shows_no_sync_control` | A unit test never uses a real synced folder. |
 | `the_worker_pushes_and_merges_without_any_frame` | The worker pushes and merges with no frame of the window. |
-| `the_worker_does_not_sync_while_a_run_waits_for_the_owner` | No sync while a run waits; the change syncs after. |
+| `the_worker_syncs_while_a_run_waits_for_the_owner` | While a run waits for the owner, the worker pushes a change of this Mac and merges a change of another Mac; the merge raises the revision that the broker checks after the answer. |
 | `the_worker_does_not_sync_a_locked_vault` | A locked vault neither pushes nor merges; the unlock syncs. |
+| `the_worker_asks_icloud_again_for_a_file_that_stays_in_icloud` | A change of another Mac stays in iCloud; the first download request goes nowhere; the worker asks again 30 seconds later and merges the change, with no "Sync now". |
 | `a_new_passphrase_found_by_the_worker_opens_the_sheet_in_the_next_frame` | The worker finds a new passphrase; the next frame asks for it. |
 | `the_worker_thread_starts_only_with_sync_and_stops` | No thread without sync; the thread stops. |
 | `the_picker_offers_the_relay_after_the_detected_folders` | The Sync menu: Off, the folders, "Apassy relay", "Choose folder…"; the Create screen has no relay. |
@@ -339,7 +340,7 @@ The message says what stays on the relay. When this Mac cannot leave the team (t
 - The sync state of a relay vault has format 3: the relay, the team, the device, and the version and head hash that the Mac saw last. A folder state stays format 2. A rebuilt vault list links a relay state again, as in section 13.
 - The vault list keeps `sync.relay` (the relay address, the team ID, and the device number) and no folder or file. `apassy-sandbox` skips such a vault: there is no synced file to deny. An older launcher stops on such a list, so the app and the launcher ship together.
 - The worker pulls a relay vault at the first step after an unlock, every 5 minutes, and at the retry time after a failed pull. A waiter thread holds a long poll on the relay (25 seconds) and makes the worker pull at once when another Mac pushed.
-- Nothing asks the relay again and again. A relay sync of the worker that fails waits 5 seconds before the next one, then 10, 20, 40, and 60 (60 at least when the relay asked to wait with `429`); a command of the window starts again at once. The waiter tells the worker of one new version once, and waits the same way after an error or an answer that brought nothing new. A copy that needs the new passphrase, whose bytes are damaged, that is too large, that holds another vault, or that has a newer schema (another Mac runs a newer Apassy) is downloaded once: the next syncs say so from the head alone, until the head changes, you act, or the vault locks. A new passphrase checks the copy and merges it with one download. While an agent run waits for you, the pull waits too.
+- Nothing asks the relay again and again. A relay sync of the worker that fails waits 5 seconds before the next one, then 10, 20, 40, and 60 (60 at least when the relay asked to wait with `429`); a command of the window starts again at once. The waiter tells the worker of one new version once, and waits the same way after an error or an answer that brought nothing new. A copy that needs the new passphrase, whose bytes are damaged, that is too large, that holds another vault, or that has a newer schema (another Mac runs a newer Apassy) is downloaded once: the next syncs say so from the head alone, until the head changes, you act, or the vault locks. A new passphrase checks the copy and merges it with one download.
 - The worker takes the vault only to read it, to merge, and to write the copy to push. The downloads and the uploads run without it, so the window and the agents keep the vault while a copy goes to or comes from the relay.
 - A lock ends the long poll and a download or an upload in flight at once, and drops the key and the access token. The worker also looks at the lock every second while the key is in memory. A download or an upload ends after 10 minutes in any case. A quit stops the worker without waiting for a transfer, and ends the relay calls of the owner that run.
 - Receipts ("Received by …") are read from the version that this Mac saw, so the answer has no chain of older heads.

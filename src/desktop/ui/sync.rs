@@ -14,9 +14,10 @@
 //! a credential, on the thread of [`crate::desktop::sync_worker`], also while the window
 //! is hidden; and in the step before each lock of the session
 //! ([`crate::desktop::owner_store::BeforeLock`]), so a lock, a switch, a backup, a quit,
-//! and a restart for an update sync too. Never while an agent run waits for the owner. A
-//! failure never stops a lock; the app shows it once as a note. Each frame only shows
-//! what the worker did: see [`DesktopApp::poll_sync`].
+//! and a restart for an update sync too. A run that waits for the owner does not hold it
+//! (see [`crate::desktop::sync_worker`]). A failure never stops a lock; the app shows it
+//! once as a note. Each frame only shows what the worker did: see
+//! [`DesktopApp::poll_sync`].
 //!
 //! A vault on the relay syncs on the worker after an unlock, so an unlock never waits for
 //! the network. The step before a lock pushes it only when a change waits, no other sync
@@ -625,11 +626,9 @@ impl DesktopApp {
             .unwrap_or_else(PoisonError::into_inner)
             .sync = current.as_ref().map(|(_, sync)| sync.clone());
         self.sync_send_list();
-        self.sync.worker.track_sync(
-            current,
-            self.owner_ui.session.shared_vault(),
-            self.approvals(),
-        );
+        self.sync
+            .worker
+            .track_sync(current, self.owner_ui.session.shared_vault());
     }
 
     /// No sync of the open vault before a lock, in the background, or by an owner call
@@ -646,7 +645,7 @@ impl DesktopApp {
             .sync = None;
         self.sync
             .worker
-            .track_sync(None, self.owner_ui.session.shared_vault(), self.approvals());
+            .track_sync(None, self.owner_ui.session.shared_vault());
     }
 
     /// The open vault is gone: no sync before a lock or in the background, no typed
@@ -659,7 +658,7 @@ impl DesktopApp {
             .sync = None;
         self.sync
             .worker
-            .track(None, self.owner_ui.session.shared_vault(), self.approvals());
+            .track(None, self.owner_ui.session.shared_vault());
         let _ = self.sync.worker.take_events();
         self.sync_forget_secrets(ctx);
         self.sync.notice = None;

@@ -59,7 +59,7 @@ A merge and a push use the key of the unlocked vault. When the synced file does 
 
 ### 6. When it runs
 
-At each unlock, before the list shows; while unlocked, every 30 seconds for the file (by its hash) and 5 to 8 seconds after a change of a credential; before each lock of the session, including a switch, a backup, a quit, and the restart for an update (the step before a lock of `OwnerSession`, after waiting runs end); and at "Sync now". Never while an agent run waits for the owner. A failure never stops a lock or a quit. An evicted iCloud file is requested with `brctl download`; a missing or unreachable folder shows "Folder not available" and syncs when it is back.
+At each unlock, before the list shows; while unlocked, every 30 seconds for the file (by its hash) and 5 to 8 seconds after a change of a credential; before each lock of the session, including a switch, a backup, a quit, and the restart for an update (the step before a lock of `OwnerSession`, after waiting runs end); and at "Sync now". A run that waits for the owner does not hold it (2026-10-13; until then no sync ran while a run waited): the broker checks each credential of the run again after the answer (its revision, variable, declaration, and hosts), and a merge that takes another version of a credential raises its revision, so the run does not start with a version that the owner did not see. A failure never stops a lock or a quit. An evicted iCloud file is requested with `brctl download`, again every 30 seconds while it stays in iCloud (a change from another device leaves the file there, and iCloud can drop a request); a missing or unreachable folder shows "Folder not available" and syncs when it is back.
 
 ### 7. A sync scope
 

@@ -822,14 +822,18 @@ fn the_worker_pushes_and_merges_without_any_frame() {
     ));
 }
 
+/// A question that waits for the owner (Decisions, up to 5 minutes) does not hold sync:
+/// the worker pushes a change of this Mac and merges a change of another Mac while it
+/// waits, as "Sync now" does. A merge that takes another version of a credential raises
+/// its revision, and the broker checks the revision of each credential of the question
+/// again after the answer, so a run never starts with a version the owner did not see.
 #[test]
-fn the_worker_does_not_sync_while_a_run_waits_for_the_owner() {
+fn the_worker_syncs_while_a_run_waits_for_the_owner() {
     let folders = folders();
-    let (mut a, _b) = two_macs(&folders);
+    let (mut a, mut b) = two_macs(&folders);
     let dir = TempDir::new().expect("temp dir");
     a.start_broker(&super::owner_tests::socket_dir(&dir));
     let approvals = a.approvals().expect("the broker runs");
-    // The worker gets the approval queue with the open vault.
     a.sync_track_open_vault();
     let waiter = {
         let approvals = Arc::clone(&approvals);
@@ -863,20 +867,45 @@ fn the_worker_does_not_sync_while_a_run_waits_for_the_owner() {
     let start = Instant::now();
     a.sync.worker.tick(start);
     a.sync.worker.tick(start + SETTLE + Duration::from_secs(1));
-    assert_eq!(
-        fs::read(&file).expect("file"),
-        before,
-        "no sync while a run waits for the owner"
-    );
-    assert!(a.sync_change_waits_for_test(), "the change still waits");
-    approvals.invalidate_all();
-    let _ = waiter.join();
-    a.sync.worker.tick(start + SETTLE + Duration::from_secs(5));
     assert_ne!(
         fs::read(&file).expect("file"),
         before,
-        "the change syncs when no run waits"
+        "the change of this Mac went up while the run waits"
     );
+    assert!(!a.sync_change_waits_for_test());
+
+    // Mac B changes "Alpha" and adds a credential; Mac A merges both while the run
+    // still waits.
+    let alpha = |app: &DesktopApp| app.owner_ui.session.search("Alpha").expect("search")[0].id;
+    let (alpha_a, alpha_b) = (alpha(&a), alpha(&b));
+    let revision_a = a
+        .owner_ui
+        .session
+        .details(alpha_a)
+        .expect("details")
+        .revision;
+    let details = b.owner_ui.session.details(alpha_b).expect("details");
+    let mut draft = details.to_draft();
+    draft.service = "billing".to_owned();
+    b.owner_ui
+        .session
+        .update(alpha_b, details.revision, &draft, &SecretForm::default())
+        .expect("update");
+    add_item(&mut b, "From B", "SYNTH-from-b");
+    assert!(matches!(b.sync_quietly(), Some(Ok(_))));
+    a.sync
+        .worker
+        .tick(start + CHECK_EVERY + Duration::from_secs(1));
+    assert_eq!(names(&a), vec!["Alpha", "From B", "While waiting"]);
+    let merged = a.owner_ui.session.details(alpha_a).expect("details");
+    assert_eq!(merged.service, "billing");
+    assert!(
+        merged.revision > revision_a,
+        "the broker sees the merge in the revision"
+    );
+    assert_eq!(approvals.pending().len(), 1, "the run still waits");
+    approvals.invalidate_all();
+    let _ = waiter.join();
 }
 
 #[test]
@@ -909,6 +938,46 @@ fn the_worker_does_not_sync_a_locked_vault() {
     unlock(&mut a, PASS);
     assert_eq!(names(&a), vec!["Alpha", "From B", "Unsynced"]);
     assert_ne!(fs::read(&file).expect("file"), moved, "the unlock syncs");
+}
+
+/// A change from another device leaves the synced file in iCloud only (dataless) until
+/// it downloads, and iCloud can drop a request (a failed or a cancelled download). The
+/// worker asks again while the file stays in iCloud, so the change merges with no "Sync
+/// now".
+#[test]
+fn the_worker_asks_icloud_again_for_a_file_that_stays_in_icloud() {
+    let folders = folders();
+    let (mut a, b) = two_macs(&folders);
+    add_item(&mut a, "From A", "SYNTH-from-a");
+    assert!(matches!(a.sync_quietly(), Some(Ok(_))));
+    // Mac B sees only the placeholder of the new copy.
+    let file = folders.icloud.join("Personal.apassy");
+    let placeholder = folders.icloud.join(".Personal.apassy.icloud");
+    let in_icloud = folders.root.path().join("in-icloud.apassy");
+    fs::rename(&file, &in_icloud).expect("evict");
+    fs::write(&placeholder, b"").expect("placeholder");
+    let id = current_id(&b);
+    let start = Instant::now();
+    b.sync.worker.tick(start);
+    assert_eq!(b.sync.worker.statuses().get(&id), Some(&UiStatus::Waiting));
+    assert_eq!(b.sync.worker.downloads_asked(), 1);
+    // The first request goes nowhere. iCloud downloads the file at the next request.
+    let mut downloaded = false;
+    for second in 1..=90 {
+        b.sync.worker.tick(start + Duration::from_secs(second));
+        if !downloaded && b.sync.worker.downloads_asked() > 1 {
+            fs::remove_file(&placeholder).expect("placeholder goes");
+            fs::rename(&in_icloud, &file).expect("download");
+            downloaded = true;
+        }
+    }
+    assert!(downloaded, "the worker asked iCloud for the file again");
+    assert!(
+        b.sync.worker.downloads_asked() <= 4,
+        "no request at each look: {}",
+        b.sync.worker.downloads_asked()
+    );
+    assert_eq!(names(&b), vec!["Alpha", "From A"]);
 }
 
 #[test]

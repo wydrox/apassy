@@ -11,7 +11,9 @@
 //!   vault, and pushes it [`SETTLE`] after it first saw it;
 //! - every [`CHECK_EVERY`] (every [`DOWNLOAD_EVERY`] while iCloud downloads the file of
 //!   the open vault) it reads the status of each synced vault of the list, asks iCloud
-//!   once for a download, and merges the synced file of the open vault when it changed.
+//!   for a download (again every [`DOWNLOAD_AGAIN`] while the file stays in iCloud: a
+//!   change from another device leaves it there, and iCloud can drop a request), and
+//!   merges the synced file of the open vault when it changed.
 //!
 //! A vault that syncs through the relay has no file to look at. The worker pulls it at
 //! the first step after an unlock, every [`RELAY_PULL_EVERY`] as a fallback, at the
@@ -26,8 +28,8 @@
 //! Nothing spins on the relay. A relay sync that fails waits 5 seconds, then 10, 20,
 //! 40, and 60 (at least 60 after a `429`), whatever asks for it; a command of the window
 //! starts again at once. The waiter signals one version once: when the relay still
-//! answers at once with the same versions (the pull failed, a run waits for the owner,
-//! or the relay answers every poll at once), it waits 5 seconds, then doubles up to 60.
+//! answers at once with the same versions (the pull failed or backs off, or the relay
+//! answers every poll at once), it waits 5 seconds, then doubles up to 60.
 //!
 //! A Mac that another Mac removed from the relay stops at once
 //! ([`crate::sync::RelaySync::is_removed`]): the first refusal, of the waiter or of a
@@ -41,10 +43,13 @@
 //! ([`crate::sync::RelaySync::sync_shared`]): the window and the agent broker keep the
 //! vault during a download or an upload.
 //!
-//! It syncs only the open vault that the window tracks, only while that vault is
-//! unlocked, and never while an agent run waits for the owner. The window reads the
-//! statuses and takes the events ([`SyncEvent`]) in each frame; it shows them, and it
-//! does no sync I/O for the schedule.
+//! It syncs only the open vault that the window tracks, and only while that vault is
+//! unlocked. A run that waits for the owner does not hold it: the broker checks each
+//! credential of the run again after the answer (its revision, variable, declaration,
+//! and hosts), and a merge that takes another version of a credential raises its
+//! revision, so the run does not start with a version that the owner did not see. The
+//! window reads the statuses and takes the events ([`SyncEvent`]) in each frame; it
+//! shows them, and it does no sync I/O for the schedule.
 //!
 //! Lock order. A folder sync takes the sync op lock ([`SyncWorker::op_lock`]) first and
 //! the vault mutex second, here and in the window (`sync_quietly`, `sync_enable`,
@@ -67,7 +72,7 @@
 //! the wake mutex, or takes the output mutex alone to show a removal. Its own sleep uses
 //! the waiter mutex, which nothing else holds with another lock.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
@@ -76,7 +81,6 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 
 use crate::broker::SharedVault;
-use crate::broker::approvals::ApprovalQueue;
 use crate::sync::{
     FileStatus, FolderSync, RelayPoll, RelayRefusal, RelaySync, SyncError, SyncOutcome, VaultSync,
 };
@@ -86,6 +90,9 @@ use crate::vault::{Vault, VaultErrorKind};
 pub(crate) const CHECK_EVERY: Duration = Duration::from_secs(30);
 /// How often it looks again while iCloud downloads the file of the open vault.
 pub(crate) const DOWNLOAD_EVERY: Duration = Duration::from_secs(2);
+/// How long it waits for a download that it asked iCloud for before it asks again:
+/// iCloud can drop a request (a failed or a cancelled download).
+pub(crate) const DOWNLOAD_AGAIN: Duration = Duration::from_secs(30);
 /// How often it looks for a change of a credential in the open vault.
 pub(crate) const LOCAL_EVERY: Duration = Duration::from_secs(3);
 /// A change of a credential syncs this long after the worker first saw it: 5 to 8
@@ -187,8 +194,6 @@ struct Plan {
     synced: Vec<(String, VaultSync)>,
     /// The vault slot of the session.
     vault: Option<SharedVault>,
-    /// The runs that wait for the owner.
-    approvals: Option<Arc<ApprovalQueue>>,
 }
 
 /// The schedule. Only a step holds it.
@@ -199,8 +204,8 @@ struct Schedule {
     next_local_check: Option<Instant>,
     /// A change of a credential that waits to sync, and when the worker saw it.
     changed_since: Option<Instant>,
-    /// List IDs of vaults for which the worker asked iCloud for a download.
-    downloads: BTreeSet<String>,
+    /// List IDs of vaults for which the worker asked iCloud for a download, and when.
+    downloads: BTreeMap<String, Instant>,
     /// When the worker pulls the open vault from the relay next. `None`: at once.
     next_relay_pull: Option<Instant>,
     /// Relay syncs that failed in a row, and when the next one may run.
@@ -247,6 +252,9 @@ struct Shared {
     /// Wakes the waiter: a stop, or another open vault. The waiter resets it.
     waiter_wake: Mutex<bool>,
     waiter_woken: Condvar,
+    /// The download requests of the worker, for the tests.
+    #[cfg(test)]
+    downloads_asked: std::sync::atomic::AtomicUsize,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -261,10 +269,6 @@ fn is_unlocked(vault: &SharedVault) -> bool {
 /// before the window tracks the new vault.
 fn same_vault(sync: &VaultSync, vault: &Vault) -> bool {
     std::fs::canonicalize(sync.vault_path()).is_ok_and(|path| path == vault.path())
-}
-
-fn runs_wait(approvals: Option<&Arc<ApprovalQueue>>) -> bool {
-    approvals.is_some_and(|queue| !queue.pending().is_empty())
 }
 
 /// The wait after `failures` failed relay syncs in a row: 5 seconds, doubling up to 60.
@@ -332,14 +336,9 @@ impl Shared {
     /// One step: see [`SyncWorker::tick`].
     fn tick(&self, now: Instant) -> Option<Instant> {
         let mut schedule = lock(&self.schedule);
-        let (generation, open, vault, approvals) = {
+        let (generation, open, vault) = {
             let plan = lock(&self.plan);
-            (
-                plan.generation,
-                plan.open.clone(),
-                plan.vault.clone(),
-                plan.approvals.clone(),
-            )
+            (plan.generation, plan.open.clone(), plan.vault.clone())
         };
         self.catch_up(&mut schedule, generation);
         let unlocked = vault.as_ref().is_some_and(is_unlocked);
@@ -351,7 +350,6 @@ impl Shared {
             relay.forget();
             self.pull.store(false, Ordering::SeqCst);
         }
-        let waits = runs_wait(approvals.as_ref());
         // A removed Mac asks the relay only at its next try (contract section 13).
         let removed_until = relay.and_then(RelaySync::removed_until);
         let removed = removed_until.is_some_and(|until| now < until);
@@ -368,10 +366,9 @@ impl Shared {
             relay.is_none() || (!removed && schedule.relay_retry_at.is_none_or(|at| now >= at));
         // A relay pull: the waiter heard of a new version, or its time came (the first
         // step after an unlock, the retry after a failure, or RELAY_PULL_EVERY). The pull
-        // flag stays set while a run waits or the relay sync backs off.
+        // flag stays set while the relay sync backs off.
         if unlocked
             && relay.is_some()
-            && !waits
             && relay_due
             && (self.pull.swap(false, Ordering::SeqCst)
                 || schedule.next_relay_pull.is_none_or(|at| now >= at))
@@ -409,21 +406,20 @@ impl Shared {
             relay.is_none() || (!removed && schedule.relay_retry_at.is_none_or(|at| now >= at));
         if settled
             && unlocked
-            && !waits
             && relay_due
             && let (Some((id, sync)), Some(vault)) = (&open, &vault)
         {
             self.sync_open(now, &mut schedule, id, sync, vault);
         }
         if schedule.next_check.is_none_or(|at| now >= at) {
-            self.check(now, &mut schedule, open.as_ref(), vault.as_ref(), approvals);
+            self.check(now, &mut schedule, open.as_ref(), vault.as_ref());
         }
         let unlocked = vault.as_ref().is_some_and(is_unlocked);
         let local = schedule
             .next_local_check
             .filter(|_| open.is_some() && unlocked);
-        // A pull time that passed waits for a run of the owner: the next step after it
-        // comes from the other times, not every MIN_WAIT.
+        // A pull time that passed (the vault locked or changed during the pull) asks for
+        // no step: the next step comes from the other times, not every MIN_WAIT.
         let relay_pull = schedule
             .next_relay_pull
             .filter(|at| relay.is_some() && !removed && unlocked && *at > now);
@@ -453,7 +449,6 @@ impl Shared {
         schedule: &mut Schedule,
         open: Option<&(String, VaultSync)>,
         vault: Option<&SharedVault>,
-        approvals: Option<Arc<ApprovalQueue>>,
     ) {
         self.refresh();
         // "Synced 2 minutes ago" changes with the time.
@@ -476,15 +471,22 @@ impl Shared {
         };
         if status != Some(UiStatus::Waiting) {
             schedule.downloads.remove(id);
-        } else if schedule.downloads.insert(id.clone()) {
+        } else if schedule
+            .downloads
+            .get(id)
+            .is_none_or(|asked| now.saturating_duration_since(*asked) >= DOWNLOAD_AGAIN)
+        {
+            schedule.downloads.insert(id.clone(), now);
             let _ = sync.request_download();
+            #[cfg(test)]
+            self.downloads_asked.fetch_add(1, Ordering::SeqCst);
         }
         let unlocked = is_unlocked(vault);
         let file_moved = matches!(
             sync.status().map(|report| report.status),
             Ok(FileStatus::Changed | FileStatus::Missing)
         );
-        if unlocked && file_moved && !runs_wait(approvals.as_ref()) {
+        if unlocked && file_moved {
             self.sync_open(now, schedule, id, any_sync, vault);
         }
     }
@@ -705,7 +707,7 @@ fn wait_for_relay(shared: &Shared) {
             Ok(poll) if poll.changed() => {
                 if signalled == Some(poll) {
                     // This Mac did not move since the last word: the pull failed,
-                    // waits for a run, or is still on its way.
+                    // backs off, or is still on its way.
                     false
                 } else {
                     signalled = Some(poll);
@@ -841,27 +843,16 @@ impl SyncWorker {
     }
 
     /// Sync `open` from now on: the open vault, or `None`. The schedule starts again.
-    pub(crate) fn track(
-        &self,
-        open: Option<(String, FolderSync)>,
-        vault: SharedVault,
-        approvals: Option<Arc<ApprovalQueue>>,
-    ) {
-        self.track_sync(open.map(|(id, sync)| (id, sync.into())), vault, approvals);
+    pub(crate) fn track(&self, open: Option<(String, FolderSync)>, vault: SharedVault) {
+        self.track_sync(open.map(|(id, sync)| (id, sync.into())), vault);
     }
 
     /// [`Self::track`] for a vault that syncs through a folder or through the relay.
-    pub(crate) fn track_sync(
-        &self,
-        open: Option<(String, VaultSync)>,
-        vault: SharedVault,
-        approvals: Option<Arc<ApprovalQueue>>,
-    ) {
+    pub(crate) fn track_sync(&self, open: Option<(String, VaultSync)>, vault: SharedVault) {
         let (old, same) = {
             let mut plan = lock(&self.shared.plan);
             plan.generation += 1;
             plan.vault = Some(vault);
-            plan.approvals = approvals;
             let old = std::mem::replace(&mut plan.open, open);
             let same = match (&old, &plan.open) {
                 (Some((old_id, old)), Some((id, new))) => old_id == id && old.same_as(new),
@@ -964,6 +955,12 @@ impl SyncWorker {
     pub(crate) fn running(&self) -> bool {
         self.thread.is_some()
     }
+
+    /// How often the worker asked iCloud for the synced file of the open vault.
+    #[cfg(test)]
+    pub(crate) fn downloads_asked(&self) -> usize {
+        self.shared.downloads_asked.load(Ordering::SeqCst)
+    }
 }
 
 impl Drop for SyncWorker {
@@ -1039,7 +1036,6 @@ mod tests {
         worker.track_sync(
             Some(("v1".to_owned(), VaultSync::Relay(relay.clone()))),
             Arc::clone(&vault),
-            None,
         );
         worker.set_synced_all(vec![("v1".to_owned(), VaultSync::Relay(relay.clone()))]);
         let now = Instant::now();
@@ -1099,7 +1095,6 @@ mod tests {
         worker.track_sync(
             Some(("v1".to_owned(), VaultSync::Relay(relay.clone()))),
             Arc::clone(&vault),
-            None,
         );
         let start = Instant::now();
         let mut now = start;
@@ -1188,7 +1183,6 @@ mod tests {
             worker.track_sync(
                 Some((id.to_owned(), VaultSync::Relay(relay.clone()))),
                 Arc::clone(vault),
-                None,
             );
             worker.start(&egui::Context::default());
             worker
@@ -1271,7 +1265,6 @@ mod tests {
             worker.track_sync(
                 Some(("b".to_owned(), VaultSync::Relay(b.clone()))),
                 Arc::clone(&vault),
-                None,
             );
             let challenges = relay.count("POST /v1/auth/challenge");
             std::thread::scope(|scope| {
@@ -1357,7 +1350,6 @@ mod tests {
             worker.track_sync(
                 Some(("b".to_owned(), VaultSync::Relay(b.clone()))),
                 Arc::clone(&vault),
-                None,
             );
             worker.set_synced_all(vec![("b".to_owned(), VaultSync::Relay(b.clone()))]);
             let challenges = relay.count("POST /v1/auth/challenge");
@@ -1396,7 +1388,6 @@ mod tests {
             worker.track_sync(
                 Some(("c".to_owned(), VaultSync::Relay(a.clone()))),
                 Arc::clone(&vault_c),
-                None,
             );
             worker.set_synced_all(vec![
                 ("b".to_owned(), VaultSync::Relay(b.clone())),
@@ -1447,7 +1438,6 @@ mod tests {
             worker.track_sync(
                 Some(("b".to_owned(), VaultSync::Relay(b.clone()))),
                 Arc::clone(&vault),
-                None,
             );
             let op = worker.op_lock();
             let now = Instant::now();
@@ -1481,7 +1471,6 @@ mod tests {
             worker.track_sync(
                 Some(("b".to_owned(), VaultSync::Relay(b.clone()))),
                 Arc::clone(&vault),
-                None,
             );
             let now = Instant::now();
             let waited = std::thread::scope(|scope| {
