@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{OwnerSession, OwnerSummary, fail, map_err};
+use crate::broker::action_kind::ActionKind;
 use crate::broker::approvals::{ApprovalQueue, OwnerAction, OwnerProof, StricterAnswer};
 use crate::desktop::model::ModelResult;
 use crate::vault::agent_items::{
@@ -28,7 +29,7 @@ use crate::vault::agent_items::{
 };
 use crate::vault::detect::Detected;
 use crate::vault::exceptions::{AgentException, ExceptionKind, MAX_AGENT_NOTE_BYTES};
-use crate::vault::usage::{InteractionKind, ItemUse};
+use crate::vault::usage::{InteractionKind, ItemUse, UseOutcome};
 use crate::vault::{Environment, ItemSummary, Vault, VaultErrorKind};
 
 const DAY: u64 = 86_400;
@@ -82,11 +83,25 @@ pub struct RecentUse {
     pub item_name: String,
 }
 
+/// One kind of action that an agent used in the last 7 days (ADR 0025 §3a).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionUse {
+    pub action: ActionKind,
+    /// The uses that were allowed.
+    pub allowed: usize,
+    /// The uses that were denied, refused, or not answered in time.
+    pub not_allowed: usize,
+    /// The projects of its uses, the most used first.
+    pub projects: Vec<String>,
+}
+
 /// What the agent page shows about one agent (ADR 0025 §3f: it shows, it does not
 /// configure).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentOverview {
     pub uses_this_week: usize,
+    /// The kinds of action of its uses this week, the most used first.
+    pub actions: Vec<ActionUse>,
     /// The projects of its uses, the most used first.
     pub projects: Vec<String>,
     /// The sentence of the owner for the bouncer. Empty when there is none.
@@ -114,6 +129,58 @@ fn projects_by_use<'a>(labels: impl Iterator<Item = &'a str>) -> Vec<String> {
         .collect()
 }
 
+/// The danger of a kind of action, for the order of equal counts: the more dangerous
+/// first.
+fn danger(action: ActionKind) -> u8 {
+    match action {
+        ActionKind::Read => 0,
+        ActionKind::Change => 1,
+        ActionKind::Deploy => 2,
+        ActionKind::Delete => 3,
+    }
+}
+
+/// The kinds of action of `uses` at or after `since`: the most allowed uses first, then
+/// the most uses that were not allowed, then the more dangerous kind.
+fn actions_by_use(uses: &[ItemUse], since: u64) -> Vec<ActionUse> {
+    let mut by_kind: Vec<(ActionKind, usize, usize, Vec<&str>)> = Vec::new();
+    for item_use in uses.iter().filter(|item_use| item_use.at >= since) {
+        let index = match by_kind
+            .iter()
+            .position(|(action, ..)| *action == item_use.action)
+        {
+            Some(index) => index,
+            None => {
+                by_kind.push((item_use.action, 0, 0, Vec::new()));
+                by_kind.len() - 1
+            }
+        };
+        let entry = &mut by_kind[index];
+        if item_use.outcome == UseOutcome::Allowed {
+            entry.1 += 1;
+        } else {
+            entry.2 += 1;
+        }
+        entry.3.push(item_use.project_label.as_str());
+    }
+    let mut actions: Vec<ActionUse> = by_kind
+        .into_iter()
+        .map(|(action, allowed, not_allowed, labels)| ActionUse {
+            action,
+            allowed,
+            not_allowed,
+            projects: projects_by_use(labels.into_iter()),
+        })
+        .collect();
+    actions.sort_by(|a, b| {
+        b.allowed
+            .cmp(&a.allowed)
+            .then(b.not_allowed.cmp(&a.not_allowed))
+            .then(danger(b.action).cmp(&danger(a.action)))
+    });
+    actions
+}
+
 impl OwnerSession {
     /// The owner interactions and the automatic decisions of the last 7 days.
     pub fn week_counts(&self) -> ModelResult<WeekCounts> {
@@ -134,7 +201,8 @@ impl OwnerSession {
         Ok(WeekCounts { by_you, automatic })
     }
 
-    /// The uses, the projects, the note, and the exceptions of one agent.
+    /// The uses, the kinds of action, the projects, the note, and the exceptions of one
+    /// agent.
     pub fn agent_overview(&self, agent_id: u64) -> ModelResult<AgentOverview> {
         let since = now().saturating_sub(WEEK);
         let (uses, note, view, exceptions) = {
@@ -165,6 +233,7 @@ impl OwnerSession {
             .collect();
         Ok(AgentOverview {
             uses_this_week: uses.iter().filter(|item_use| item_use.at >= since).count(),
+            actions: actions_by_use(&uses, since),
             projects: projects_by_use(uses.iter().map(|item_use| item_use.project_label.as_str())),
             note,
             restricted: view.restricted,
@@ -469,5 +538,92 @@ mod tests {
             projects_by_use(["apassy", "", "acme", "apassy", "zeta", "acme", "apassy"].into_iter()),
             ["apassy", "acme", "zeta"]
         );
+    }
+
+    fn item_use(at: u64, action: ActionKind, project: &str, outcome: UseOutcome) -> ItemUse {
+        ItemUse {
+            id: at,
+            at,
+            item_id: 1,
+            agent_id: Some(1),
+            agent_name: "Claude Code".to_owned(),
+            project_key: format!("/code/{project}"),
+            project_label: project.to_owned(),
+            action,
+            command_summary: String::new(),
+            hosts: Vec::new(),
+            outcome,
+            decided_by: crate::vault::usage::UseDecidedBy::Bouncer,
+            answered_on: String::new(),
+            decision_log_id: None,
+        }
+    }
+
+    #[test]
+    fn the_actions_count_allowed_uses_apart_and_put_the_most_used_first() {
+        use ActionKind::{Change, Delete, Deploy, Read};
+        let uses = [
+            item_use(100, Deploy, "acme-billing", UseOutcome::Allowed),
+            item_use(101, Read, "apassy", UseOutcome::Allowed),
+            item_use(102, Deploy, "apassy", UseOutcome::Allowed),
+            item_use(103, Deploy, "acme-billing", UseOutcome::Allowed),
+            item_use(104, Delete, "apassy", UseOutcome::Denied),
+            item_use(105, Change, "", UseOutcome::TimedOut),
+            item_use(106, Delete, "apassy", UseOutcome::Refused),
+            item_use(107, Read, "apassy", UseOutcome::Allowed),
+            item_use(108, Deploy, "zeta", UseOutcome::TimedOut),
+            // Older than the week: left out.
+            item_use(10, Change, "old", UseOutcome::Allowed),
+        ];
+        let actions = actions_by_use(&uses, 50);
+        assert_eq!(
+            actions,
+            [
+                ActionUse {
+                    action: Deploy,
+                    allowed: 3,
+                    not_allowed: 1,
+                    projects: vec![
+                        "acme-billing".to_owned(),
+                        "apassy".to_owned(),
+                        "zeta".to_owned()
+                    ],
+                },
+                ActionUse {
+                    action: Read,
+                    allowed: 2,
+                    not_allowed: 0,
+                    projects: vec!["apassy".to_owned()],
+                },
+                ActionUse {
+                    action: Delete,
+                    allowed: 0,
+                    not_allowed: 2,
+                    projects: vec!["apassy".to_owned()],
+                },
+                ActionUse {
+                    action: Change,
+                    allowed: 0,
+                    not_allowed: 1,
+                    projects: Vec::new(),
+                },
+            ]
+        );
+        assert!(actions_by_use(&uses, 1_000).is_empty());
+    }
+
+    #[test]
+    fn equal_counts_put_the_more_dangerous_action_first() {
+        use ActionKind::{Change, Delete, Read};
+        let uses = [
+            item_use(1, Read, "a", UseOutcome::Allowed),
+            item_use(2, Delete, "a", UseOutcome::Allowed),
+            item_use(3, Change, "a", UseOutcome::Allowed),
+        ];
+        let order: Vec<ActionKind> = actions_by_use(&uses, 0)
+            .into_iter()
+            .map(|action| action.action)
+            .collect();
+        assert_eq!(order, [Delete, Change, Read]);
     }
 }

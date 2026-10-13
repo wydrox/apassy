@@ -1356,7 +1356,7 @@ const RECENT_USES: usize = 3;
 const ALL_USES: usize = 200;
 
 /// What a use of a credential came to, for its row: the round mark and the words.
-fn use_outcome(item_use: &ItemUse) -> (rows::Mark, String) {
+pub(super) fn use_outcome(item_use: &ItemUse) -> (rows::Mark, String) {
     use rows::Mark;
     let on = if item_use.answered_on.is_empty() {
         String::new()

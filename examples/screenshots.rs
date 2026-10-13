@@ -391,8 +391,10 @@ fn seed(home: &Path) {
     v.add_agent_exception(codex, id("Billing database"), ExceptionKind::Never)
         .expect("exception");
 
-    // Agent use: the newest uses of each key, with their result.
-    let uses: [SeedUse; 9] = [
+    // Agent use: the newest uses of each key, with their result. Claude Code, the first
+    // agent of the tour, has each kind of action, a denied use, and one with no answer in
+    // time, for "Actions this week" and "Recent" of its page.
+    let uses: [SeedUse; 11] = [
         (
             t3,
             "T3 Code",
@@ -440,6 +442,17 @@ fn seed(home: &Path) {
         (
             claude,
             "Claude Code",
+            "GitHub deploy bot",
+            "apassy",
+            ActionKind::Deploy,
+            "gh release create v0.5.1",
+            UseOutcome::TimedOut,
+            UseDecidedBy::Owner,
+            "",
+        ),
+        (
+            claude,
+            "Claude Code",
             "Anthropic API",
             "apassy",
             ActionKind::Read,
@@ -447,6 +460,17 @@ fn seed(home: &Path) {
             UseOutcome::Allowed,
             UseDecidedBy::Bouncer,
             "",
+        ),
+        (
+            claude,
+            "Claude Code",
+            "Billing database",
+            "acme-billing",
+            ActionKind::Delete,
+            "psql -c drop table invoices_2019",
+            UseOutcome::Denied,
+            UseDecidedBy::Owner,
+            "this Mac",
         ),
         (
             codex,
