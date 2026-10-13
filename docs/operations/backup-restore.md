@@ -14,7 +14,7 @@ Use only synthetic values for tests. The real-secret gate stays BLOCKED.
 ## 2. Make a backup
 
 1. Unlock the vault.
-2. Open Settings > Security > Backup, and click "Back up now".
+2. Open Settings > Vault > Backup, and click "Back up now".
 3. In "Backup file", type the full path of a new file. The file must not exist. The name cannot end in `.lock`, `-journal`, `-wal`, or `-shm`.
 4. Click "Back up".
 
@@ -29,7 +29,7 @@ Keep backups on a disk that only you can read. The Seatbelt profile for agents (
 
 ## 3. Restore a backup
 
-1. Open Settings > Security > Backup, and click "Restore from a backup". In "Backup file", type the path of the backup file.
+1. Open Settings > Vault > Backup, and click "Restore from a backup". In "Backup file", type the path of the backup file.
 2. In "New vault file", type the path of a new file, or leave it empty for the default folder. Apassy does not overwrite a file.
 3. In "Passphrase", type the passphrase that the vault had at the time of the backup.
 4. Click "Restore".
@@ -61,7 +61,7 @@ Until you confirm an item, the broker refuses each run and each connector call w
 
 ## 5. Passphrase and backups
 
-- A backup keeps the passphrase of its time. A change of the passphrase (Settings > Security > Unlock, "Change passphrase") does not change old backups. To restore an old backup, type the old passphrase.
+- A backup keeps the passphrase of its time. A change of the passphrase (Settings > Security, "Change passphrase") does not change old backups. To restore an old backup, type the old passphrase.
 - If you change the passphrase because it leaked, delete the old backups, or keep them in a place that nobody else can read.
 - A lost passphrase makes each backup with that passphrase unrecoverable.
 

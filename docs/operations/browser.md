@@ -7,7 +7,7 @@ The Apassy extension fills a login on a website in Helium, Google Chrome, Chromi
 
 ## 1. Set up
 
-1. Open Apassy.app and go to Settings > General > Browser extension.
+1. Open Apassy.app and go to Settings > Tools > Browser extension.
 2. Click **Connect** next to your browser. Apassy connects the browser and opens the Apassy page of the Chrome Web Store in it: <https://chromewebstore.google.com/detail/apassy/bbnpgnjnfjlbgggmpnhejpmfjhmmhiih>.
 3. Click **Add to Chrome**.
 4. Pin the Apassy button to the toolbar, open a login page, and click it. Settings shows "Last request just now" when the extension reached Apassy.
@@ -62,7 +62,7 @@ The app checks the site when the popup opens, before the owner check, and again 
 
 | The popup says | Do this |
 | --- | --- |
-| Apassy is not connected to this browser. | Click Connect in Settings > General > Browser extension, then restart the browser. |
+| Apassy is not connected to this browser. | Click Connect in Settings > Tools > Browser extension, then restart the browser. |
 | Open Apassy to fill logins. | Open Apassy.app. |
 | Unlock Apassy to fill logins. | Click "Open Apassy" and unlock the vault. |
 | Apassy fills logins on https pages only. | The page is not `https:`. |

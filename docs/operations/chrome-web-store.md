@@ -80,7 +80,7 @@ Done on 2026-10-08: the draft item is `bbnpgnjnfjlbgggmpnhejpmfjhmmhiih` of the 
   The extension needs the Apassy app for macOS 15 or later on Apple silicon.
   1. Download Apassy from https://apassy.wyderka.cc/download and open it. Create a vault with any passphrase.
   2. Add a credential: kind Login, any username and password, Website https://github.com/login.
-  3. In Apassy, open Settings > General > Browser extension and click Connect next to Chrome. This installs the native messaging host manifest for the browser.
+  3. In Apassy, open Settings > Tools > Browser extension and click Connect next to Chrome. This installs the native messaging host manifest for the browser.
   4. Open https://github.com/login, click the Apassy button, and choose the login. Confirm with Touch ID or the passphrase in the Apassy window. The username and the password appear in the form.
   Without the app the popup says "Apassy is not connected to this browser."
   ```
@@ -91,5 +91,5 @@ Done on 2026-10-08: the draft item is `bbnpgnjnfjlbgggmpnhejpmfjhmmhiih` of the 
 
 Published on 2026-10-09: <https://chromewebstore.google.com/detail/apassy/bbnpgnjnfjlbgggmpnhejpmfjhmmhiih>. The first submission was rejected for "excessive keywords" (section 3); the second passed.
 
-- Done: "Connect" in Settings > General > Browser extension, `apassy setup browser`, and the site open the store page and offer "Add to Chrome" (`install::STORE_URL`, `EXTENSION_STORE` in `site/src/lib/site.ts`).
+- Done: "Connect" in Settings > Tools > Browser extension, `apassy setup browser`, and the site open the store page and offer "Add to Chrome" (`install::STORE_URL`, `EXTENSION_STORE` in `site/src/lib/site.ts`).
 - New versions: build the package with the new version of `Cargo.toml` and upload it. The store needs a higher version for each upload. The Chrome Web Store API v2 can upload and publish with a service account. CI can do it after the owner gives the service account access to the publisher and stores its key as a GitHub secret.

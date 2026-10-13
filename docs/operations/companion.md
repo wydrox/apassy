@@ -21,10 +21,10 @@ An approval on the iPhone is as strong as Touch ID on the Mac: your Face ID, now
 ## 2. Turn it on
 
 1. Unlock the vault.
-2. Open Settings > Devices > iPhone companion.
+2. Open Settings > Devices > iPhone.
 3. Turn on "Allow the iPhone app on this network".
 
-The status then says "Listening on port 48620". Turning it on gives no access: an iPhone must pair first, and pairing needs your owner check.
+The switch then stays on with no error under it; the listener uses port 48620. Turning it on gives no access: an iPhone must pair first, and pairing needs your owner check.
 
 The listener runs only while the setting is on and the vault is unlocked. A lock, a quit, a backup, a restore, opening another vault file, and a passphrase change stop it at once and drop its key from memory. It starts again after the next unlock when the setting is on. A restore from a backup turns the setting off and removes the paired iPhones and the certificate.
 
@@ -38,7 +38,7 @@ For Tailscale, connect the Mac before you select "Pair an iPhone". The new QR co
 
 Install the updated Mac app to include Tailscale in new QR codes. For mobile data, install the updated iPhone app too. The iPhone permits cellular connections to Tailscale IPv4 addresses from the pairing link. Certificate pin checks still apply to each connection. Apassy reads Tailscale status from its standard installation paths. If Tailscale is absent, stopped, or has no locally assigned IPv4 address, the QR code contains only the available local network hosts.
 
-1. In Settings > Pair an iPhone, select "Pair an iPhone". The Mac shows a QR code, its name, and a countdown. The code works for 5 minutes and for one pairing.
+1. In Settings > Devices > iPhone, select "Pair…". The Mac shows a QR code, its name, and a countdown. The code works for 5 minutes and for one pairing.
 2. In the iPhone app, select "Scan the code" and scan the QR code. Give the iPhone a name if the app asks. The app asks for Face ID once, and then shows a 6-digit code.
 3. On the Mac, the page now says `"NAME" wants to pair. Type the 6-digit code that the iPhone shows.` Type the code and select "Pair". Spaces are ignored. The Mac never shows the code: only the iPhone does.
 4. The Mac asks for your owner check (Touch ID or the passphrase). It names the iPhone.
@@ -70,7 +70,7 @@ Open the app on the iPhone. The waiting runs of the Mac show in the Waiting list
 
 ## 5. Remove an iPhone, and reset
 
-- **Remove**: in Settings > Paired iPhones, select "Remove" next to the device. It needs no owner check, because it only takes authority away. It works at once: the iPhone gets `unpaired` and deletes its pairing. An iPhone can also remove its own pairing: "Unpair this iPhone" in its app.
+- **Remove**: in Settings > Devices > iPhone, select "Remove" next to the device. It needs no owner check, because it only takes authority away. It works at once: the iPhone gets `unpaired` and deletes its pairing. An iPhone can also remove its own pairing: "Unpair this iPhone" in its app.
 - **Reset pairing**: select "Reset pairing…" and confirm. It removes every iPhone and makes a new certificate. The listener restarts with the new certificate. Use it when you lost an iPhone and do not know which one it was, or when you doubt the certificate. Each iPhone must pair again.
 - **A new Face ID enrollment** on the iPhone makes its approval key unusable, by design. The app then asks you to pair again. Remove the old entry on the Mac first.
 
@@ -84,7 +84,7 @@ It never gets a secret value, a placeholder, an agent token, a note, or a hidden
 
 | Symptom | What to check |
 | --- | --- |
-| The iPhone says the Mac is not reachable | The Mac and the iPhone are on the same Wi-Fi, or both are connected to Tailscale. For Tailscale, make a new pairing code after the Mac connects and check that the network permits the listener port. The vault is unlocked (a lock stops the listener). Settings > Devices > iPhone companion says "Listening on port …". Some guest and hotel networks stop devices from talking to each other. |
+| The iPhone says the Mac is not reachable | The Mac and the iPhone are on the same Wi-Fi, or both are connected to Tailscale. For Tailscale, make a new pairing code after the Mac connects and check that the network permits the listener port. The vault is unlocked (a lock stops the listener). In Settings > Devices > iPhone, "Allow the iPhone app on this network" is on and shows no error. Some guest and hotel networks stop devices from talking to each other. |
 | The iPhone app says to allow local network access | In the iPhone Settings > Privacy & Security > Local Network, turn on Apassy. iOS asks the first time the app connects. If you refused, turn it on there. |
 | The Mac asks "Do you want the application Apassy to accept incoming network connections?" | Select "Allow". macOS asks once, the first time the listener starts. If the firewall is on and you refused, open System Settings > Network > Firewall, and allow incoming connections for Apassy. |
 | "Nothing listens on the network", or "another program already uses port 48620" | Another program uses the port. Close it, then select "Try again". |

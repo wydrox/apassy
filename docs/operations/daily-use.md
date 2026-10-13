@@ -17,14 +17,14 @@ This page is the first-day checklist. The other pages have the details.
 2. Copy `target/Apassy.app` to `/Applications`. The agent profile protects `/Applications/Apassy.app` by default.
 3. Make sure that the data directory has mode `0700`: `chmod 700 "$HOME/Library/Application Support/Apassy"`. The broker does not start in a directory with a wider mode.
 4. Start the bouncer with the base model: [bouncer](bouncer.md), "Start command with the base model". Keep it on `127.0.0.1`.
-5. Prefer Settings > Advanced > "Start the model": "With Apassy" or "When a run needs it" ([bouncer](bouncer.md), "Start from Apassy"). If the Laya environment is missing, click "Install the model". Apassy runs the `uv` commands of step 4 for you and shows each step ([bouncer](bouncer.md), "Install from Apassy"). It needs `uv`: `brew install uv`. A LaunchAgent is now optional. If one already answers on the port, Apassy uses it and starts no second server. To start the bouncer at login without Apassy, use a LaunchAgent. On 2026-09-27 this Mac got `~/Library/LaunchAgents/com.wydrox.apassy.bouncer.plist`. It runs `/Applications/Apassy.app/Contents/Resources/tools/basemodel/start.sh` with the base model on `127.0.0.1:8770`. The log is `~/Library/Logs/Apassy/bouncer.log`. Settings shows a note when such a LaunchAgent names a missing model, or when "Start the model" is "With Apassy" or "When a run needs it". The note has the commands that remove it: `launchctl bootout gui/$(id -u)/com.wydrox.apassy.bouncer`, then delete the file. Apassy does not remove it.
+5. Prefer Settings > Bouncer > "Start the model": "With Apassy" or "When a run needs it" ([bouncer](bouncer.md), "Start from Apassy"). If the Laya environment is missing, click "Install the model". Apassy runs the `uv` commands of step 4 for you and shows each step ([bouncer](bouncer.md), "Install from Apassy"). It needs `uv`: `brew install uv`. A LaunchAgent is now optional. If one already answers on the port, Apassy uses it and starts no second server. To start the bouncer at login without Apassy, use a LaunchAgent. On 2026-09-27 this Mac got `~/Library/LaunchAgents/com.wydrox.apassy.bouncer.plist`. It runs `/Applications/Apassy.app/Contents/Resources/tools/basemodel/start.sh` with the base model on `127.0.0.1:8770`. The log is `~/Library/Logs/Apassy/bouncer.log`. Settings shows a note when such a LaunchAgent names a missing model, or when "Start the model" is "With Apassy" or "When a run needs it". The note has the commands that remove it: `launchctl bootout gui/$(id -u)/com.wydrox.apassy.bouncer`, then delete the file. Apassy does not remove it.
 
 ## 2. Set up the vault
 
 1. Open `Apassy.app`. Click "Create a new vault". Type a name, or leave "Personal". Type a strong passphrase that you can remember, two times. A lost passphrase can make the data unrecoverable (ADR 0003). The vault file is `~/Library/Application Support/Apassy/vaults/personal.db`. A vault from Apassy 0.2 stays at `~/Library/Application Support/Apassy/vault.db` with the name "Personal". At the next start, Apassy opens the last used vault and shows the unlock screen.
    To keep credentials apart, for example for one client, make another vault with its own passphrase: [several vaults](multiple-vaults.md). One vault is open at a time. An agent works only with the vault where you registered it.
-2. Make an encrypted backup and keep it in a safe place: Settings > Security > "Back up now", and [backup and restore](backup-restore.md).
-3. Click "+" and paste a credential, a `.env` file, or a database URL, then "Add". Apassy finds the kind, the provider, the variable, the hosts, and the declaration ([ADR 0025](../adr/0025-low-friction-access.md) §4). Or import from 1Password with Settings > General > Import: [import from 1Password](import-1password.md).
+2. Make an encrypted backup and keep it in a safe place: Settings > Vault > "Back up now", and [backup and restore](backup-restore.md).
+3. Click "+" and paste a credential, a `.env` file, or a database URL, then "Add". Apassy finds the kind, the provider, the variable, the hosts, and the declaration ([ADR 0025](../adr/0025-low-friction-access.md) §4). Or import from 1Password with Settings > Vault > Import: [import from 1Password](import-1password.md).
 4. Optional: open a credential to check its environment ("Is this a development key?") or to set "Always ask me": [declarations](declarations.md).
 
 The app layout is in [desktop UI](desktop-ui.md).
@@ -46,7 +46,7 @@ The app layout is in [desktop UI](desktop-ui.md).
 - The "⋯" menu of a question has the stricter answers "Never for AGENT", "Always Ask for AGENT", and "Disconnect AGENT…". They need no owner check. The credential page lists your remembered answers under "Rules from your answers"; "Remove" takes one away.
 - Decisions also shows Requests (an agent asks you to paste a credential) and Suggestions (corrections from how agents use a credential).
 - The line under the Decisions title shows how often Apassy asked you this week. Goal item B12: after two weeks, you are asked on 10% or fewer of the runs, over the last seven days.
-- Settings > Devices > Notifications has the "Allow notifications" button.
+- Settings > Devices > This Mac has the "Allow notifications" button.
 
 ## 5. What Apassy does not protect
 

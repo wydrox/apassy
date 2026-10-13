@@ -25,7 +25,7 @@ If Laya does not answer in 3 seconds, the bouncer is unavailable. Then every run
 
 ### Install from Apassy
 
-You do not need Terminal for these commands. In Settings > Advanced > Broker and bouncer, choose "With Apassy" or "When a run needs it". While the Laya environment is missing, the section shows "Install the model":
+You do not need Terminal for these commands. In Settings > Bouncer, choose "With Apassy" or "When a run needs it". While the Laya environment is missing, the section shows "Install the model":
 
 - Apassy runs the same `uv` commands: `uv venv --python 3.12 .venv` (only when `.venv/bin/python` is missing, with `--clear` when `.venv` exists without it), `uv pip install --python .venv/bin/python "laya[serve]==0.3.20"`, and `uv pip install --python .venv/bin/python -r tools/basemodel/requirements.txt`. The requirements come from `Apassy.app/Contents/Resources/tools/basemodel`, or from the repository when Apassy runs from `target/`.
 - The last step, "Downloading the model weights", runs `.venv/bin/python -B tools/basemodel/fetch_weights.py`. It downloads the pinned base weights (about 800 MB) into the Hugging Face cache of the user, so the first start of the server does not wait for them. Weights that are already there are not downloaded again. `-B`, and the scripts themselves, write no `__pycache__` next to the scripts: in `Apassy.app` it would break the code signature.
@@ -40,7 +40,7 @@ You do not need Terminal for these commands. In Settings > Advanced > Broker and
 
 ### Start from Apassy
 
-Settings > Advanced > Broker and bouncer > "Start the model" sets how Apassy starts the model server on this Mac:
+Settings > Bouncer > "Start the model" sets how Apassy starts the model server on this Mac:
 
 - **With Apassy**: Apassy starts it when the app starts and stops it when the app quits. The vault does not need to be unlocked.
 - **When a run needs it** (the default, [ADR 0024](../adr/0024-access-at-first-use.md)): the first run that needs the model starts it. The run waits up to 25 seconds for the first answer. "Stop after" (10, 30, or 60 minutes without a run, default 30) stops it again. Apassy stops only a server that it started.

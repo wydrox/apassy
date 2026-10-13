@@ -94,7 +94,7 @@ So the extension replaces the whole list from `credential_identities` in two cas
 The app cannot start a refresh, so a new passkey shows up in the system suggestions after the next run of the provider.
 The app routes `credential_identities`, so the store is filled at those two moments. If the store is empty or old, the owner still picks Apassy in the passkey sheet. The store writes only if AutoFill is turned on for Apassy in System Settings.
 
-`ASSettingsHelper` must be called from the containing app, which is Rust. The Settings tab can open System Settings > General > AutoFill & Passwords instead. Check the URL on a device.
+`ASSettingsHelper` must be called from the containing app, which is Rust. The Settings view can open System Settings > General > AutoFill & Passwords instead. Check the URL on a device.
 
 ## Build
 

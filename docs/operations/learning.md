@@ -134,13 +134,13 @@ Proposal:
 4. The held-out part gives the ask rate now and with the proposal, and the misses: owner denials that the proposal allows.
 5. The gate: a replay on all past decisions. The proposal is valid only if it allows no request that the owner denied.
 
-Apply: in Settings > Advanced, the owner opens "Calibration and models" under "Calibration and learning", clicks "Compute a proposal", then "Apply N%". This is a rule change, so it needs the owner check (`OwnerAction::ChangeCalibration`). `calibration::apply` computes the proposal and the gate again at this time, so a denial after the proposal counts. A lower level must be at or above a valid proposal. "Back to the default (75%)" removes the calibration. It needs no check. The vault keeps the last 100 changes with their replay numbers.
+Apply: in Settings > Bouncer, the owner opens "Calibration and models" under "Calibration and learning", clicks "Compute a proposal", then "Apply N%". This is a rule change, so it needs the owner check (`OwnerAction::ChangeCalibration`). `calibration::apply` computes the proposal and the gate again at this time, so a denial after the proposal counts. A lower level must be at or above a valid proposal. "Back to the default (75%)" removes the calibration. It needs no check. The vault keeps the last 100 changes with their replay numbers.
 
 Test: `calibration_proposal_passes_the_replay_gate_and_the_owner_applies_it` (`tests/learning.rs`). The owner approves 45 general requests at `task_match` 0.7 and denies 5 at 0.3. The proposal is 0.7, the held-out misses are 0, and the held-out ask rate falls. Before the owner applies it, the broker asks for a request at 0.7. After, the model allows it. A production item still waits. A new owner denial at 0.72 makes the same level invalid, and `apply` refuses it.
 
 ## 5. Visibility (goal item B10)
 
-Since 0.5.0 the Learning view is not in the window ([ADR 0026](../adr/0026-simple-app.md) §2). The line under the Decisions title and "Asked you" in Settings > Advanced > Broker and bouncer count how often Apassy asked you this week. Settings > Advanced > Calibration and learning (`settings_panel` in `src/desktop/learning_ui.rs`) shows:
+Since 0.5.0 the Learning view is not in the window ([ADR 0026](../adr/0026-simple-app.md) §2). The line under the Decisions title counts how often Apassy asked you this week. Settings > Bouncer > Calibration and learning (`settings_panel` in `src/desktop/learning_ui.rs`) shows:
 
 - "Ran without you": the runs of this week that the model or a pattern allowed.
 - "Remembered patterns": the number of active patterns and of patterns that still learn. `apassy pattern list` lists each pattern with its state (learning with its approvals, active, blocked, or expired) and runs. `apassy pattern remove ID` removes one.
@@ -156,7 +156,7 @@ Measured on this Mac with a candidate from 300 synthetic owner decisions: 46 of 
 
 The data shape is `vault::CandidateAgreement`: model version, start time, shadow decisions, agreements, and owner denials that the candidate would allow. `Vault::shadow_summary` computes it from the shadow rows of schema 9. An agreement is a candidate "run" of an owner approval, or a candidate "ask" of an owner denial. A candidate "ask" of an owner approval is a disagreement. A candidate "run" of an owner denial is a disagreement and an allowed denial.
 
-Tests: `learning_view_shows_the_ask_rate_decisions_patterns_and_candidate_slot`, `candidate_card_says_no_candidate_until_shadow_mode`, `training_card_shows_the_gate_and_the_active_model`, and `promotion_and_rollback_in_the_view_need_the_owner_check` (`src/desktop/learning_ui.rs`), `candidate_promotion_needs_100_decisions_95_percent_and_no_allowed_denial` (`src/vault/learning.rs`), `shadow_summary_counts_agreement_with_the_owner` (`src/vault/candidate.rs`). `the_settings_panel_shows_the_week_and_the_calibration` (`src/desktop/learning_ui.rs`) draws the panel of Settings > Advanced; the first test still draws the old view, which the window no longer opens. The panel has no GUI check on a real screen.
+Tests: `learning_view_shows_the_ask_rate_decisions_patterns_and_candidate_slot`, `candidate_card_says_no_candidate_until_shadow_mode`, `training_card_shows_the_gate_and_the_active_model`, and `promotion_and_rollback_in_the_view_need_the_owner_check` (`src/desktop/learning_ui.rs`), `candidate_promotion_needs_100_decisions_95_percent_and_no_allowed_denial` (`src/vault/learning.rs`), `shadow_summary_counts_agreement_with_the_owner` (`src/vault/candidate.rs`). `the_settings_panel_shows_the_week_and_the_calibration` (`src/desktop/learning_ui.rs`) draws the panel of Settings > Bouncer; the first test still draws the old view, which the window no longer opens. The panel has no GUI check on a real screen.
 
 ## 6. Export for fine-tuning
 
