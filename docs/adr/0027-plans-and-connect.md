@@ -30,7 +30,7 @@ The owner decided the following on 2026-10-13:
 | **Personal** (paid) | Sync through the Apassy relay. Shared vaults with a few people. |
 | **Team** (paid) | Shared vaults, roles, member management, and billing per seat. |
 
-Prices are not decided. The documents write `PRICE`.
+The owner set the prices on 2026-10-13: Personal €1 a month for one person, and Team €2 a month for each member. They exist as Stripe products in the "Apassy" sandbox; a live Stripe account is not activated yet, and EU VAT (Stripe Tax) is not set up.
 
 The code also has `Plan::Operator`. It is a sync membership whose relay team has `kind` `operator`: a vault on a relay that its owner runs, or a vault made before this record. It keeps working as before.
 

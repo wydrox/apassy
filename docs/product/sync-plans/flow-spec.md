@@ -70,7 +70,7 @@ Information 1/3 · Meaning 1/3 · Time 1/3 · Memory 1/3 · Ethics PASS (no pers
   - The Mac app is sold outside the Mac App Store (Developer ID), so a web checkout is possible. The iPhone app is in the App Store and sells nothing (Gate A): it shows the plan only.
   - iOS asks the user to pick the iCloud file (the sandbox), so a free iPhone vault needs one file pick.
   - Backend work this flow needs is listed in section 9.
-  - Prices are not decided: the spec writes `PRICE`.
+  - Prices (owner, 2026-10-13): Personal €1 a month, Team €2 a member a month. No yearly price yet.
 
 ## 1. Experience targets
 
@@ -184,7 +184,7 @@ Plan sits near the end (**Serial Position**: the top tasks first). It is never a
 
 ```
 [Sync: "Apassy" on Free | Shared: "Share a vault…" on Free | Settings > Plan]
-  → [C1 sheet: what you get, PRICE, "Continue to checkout", "Not now"]
+  → [C1 sheet: what you get, €1 a month, "Continue to checkout", "Not now"]
   → [C2 browser checkout (account made here) → back to the app (apassy:// link)]
   → [C3 "Personal is on" → "Switch “Personal” to Apassy now?" (primary) | "Later"]
   → [Done: Sync shows "Apassy · instant on all devices"; receipt email]
@@ -292,7 +292,7 @@ Shared vaults are not built (ADR 0026 §6). This spec covers only the entry:
      - "Changes on every device in seconds";
      - "Works without iCloud";
      - "End-to-end encrypted. Apassy can't read your vault."
-  3. Price: "PRICE a month, or PRICE a year". The plan name: "Personal".
+  3. Price: "€1 a month" (", or … a year" when a yearly price exists). The plan name: "Personal".
   4. Primary: "Continue to checkout". It opens the browser.
   5. Secondary, with the same weight as text: "Not now". A link: "Compare plans".
   6. Reassurance: "Cancel any time in Settings > Plan. Your vault stays on your devices."

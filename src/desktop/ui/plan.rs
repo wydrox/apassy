@@ -395,7 +395,8 @@ fn upgrade_words(from: UpgradeFrom) -> (&'static str, [&'static str; 3]) {
     }
 }
 
-/// The price as the sheet shows it: "Personal · €X a month, or €X a year".
+/// The price as the sheet shows it: "Personal · €1 a month", with ", or …" when there is
+/// a yearly price.
 pub(crate) fn price_line(offer: &Offer) -> String {
     match &offer.yearly {
         Some(yearly) => format!("{} · {}, or {yearly}", offer.plan.label(), offer.monthly),
@@ -605,8 +606,12 @@ pub(super) fn sheet(app: &mut DesktopApp, ctx: &egui::Context, sheet: &PlanSheet
 /// What each plan has (ADR 0027 §1), for Compare plans. No plan is preselected, and none
 /// is marked as the one to pick.
 fn plan_columns(app: &DesktopApp) -> [(Plan, String, Vec<&'static str>); 3] {
-    let personal = offer(app, UpgradeFrom::Plan)
-        .filter(|offer| offer.plan == Plan::Personal)
+    let offer = offer(app, UpgradeFrom::Plan).filter(|offer| offer.plan == Plan::Personal);
+    let team = offer
+        .as_ref()
+        .and_then(|offer| offer.team.clone())
+        .unwrap_or_else(|| "Billed per person".to_owned());
+    let personal = offer
         .map(|offer| match offer.yearly {
             Some(yearly) => format!("{}, or {yearly}", offer.monthly),
             None => offer.monthly,
@@ -633,7 +638,7 @@ fn plan_columns(app: &DesktopApp) -> [(Plan, String, Vec<&'static str>); 3] {
         ),
         (
             Plan::Team,
-            "Billed per person".to_owned(),
+            team,
             vec![
                 "Everything in Personal",
                 "Shared vaults with roles",

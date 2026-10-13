@@ -293,7 +293,7 @@ fn free_shows_the_tag_and_apassy_opens_the_upgrade() {
         "Changes on every device in seconds",
         "Works without iCloud",
         "End-to-end encrypted. Apassy can't read your vault.",
-        "Personal · €X a month, or €X a year",
+        "Personal · €1 a month",
         "Continue to checkout",
         "Not now",
         "Compare plans",
@@ -694,7 +694,7 @@ fn compare_plans_has_three_honest_columns() {
         "Your plan",
         "Sync through iCloud Drive",
         "Approvals on all your devices",
-        "€X a month, or €X a year",
+        "€1 a month",
         "Shared vaults with roles",
         "Choose Personal…",
     ] {

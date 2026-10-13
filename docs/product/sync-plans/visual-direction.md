@@ -67,7 +67,7 @@ For one second after the add, the row is selected, then it settles. The status l
 │  ✓ Works without iCloud                                    │
 │  ✓ End-to-end encrypted. Apassy can't read your vault.     │
 │                                                            │
-│  Personal · PRICE a month, or PRICE a year                 │
+│  Personal · €1 a month                                     │
 │  Includes shared vaults with a few people.                 │
 │                                                            │
 │  Cancel any time in Settings > Plan.                       │

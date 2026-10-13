@@ -169,10 +169,13 @@ pub enum UpgradeFrom {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Offer {
     pub plan: Plan,
-    /// For example "€X a month".
+    /// For example "€1 a month".
     pub monthly: String,
-    /// For example "€X a year". `None` when there is no yearly price.
+    /// For example "€10 a year". `None` when there is no yearly price.
     pub yearly: Option<String>,
+    /// The price of Team for Compare plans, for example "€2 a member a month". `None`
+    /// when the service gives none.
+    pub team: Option<String>,
 }
 
 /// Why the account service did not answer as asked.
@@ -248,7 +251,8 @@ impl PlanProvider for NoPlanProvider {
 }
 
 /// A provider with a fixed plan and synthetic data, for the tests and the screenshot
-/// tour. It offers Personal at "€X a month". The app never makes one.
+/// tour. It offers Personal at "€1 a month" and Team at "€2 a member a month", the
+/// prices of 2026-10-13. The app never makes one.
 #[derive(Debug)]
 pub struct FakePlanProvider {
     entitlement: Mutex<Entitlement>,
@@ -331,8 +335,9 @@ impl PlanProvider for FakePlanProvider {
     fn offer(&self, _from: UpgradeFrom) -> Option<Offer> {
         Some(Offer {
             plan: Plan::Personal,
-            monthly: "€X a month".to_owned(),
-            yearly: Some("€X a year".to_owned()),
+            monthly: "€1 a month".to_owned(),
+            yearly: None,
+            team: Some("€2 a member a month".to_owned()),
         })
     }
 
@@ -505,7 +510,7 @@ mod tests {
         let fake = FakePlanProvider::new(personal(NOW, PlanStatus::Active));
         let offer = fake.offer(UpgradeFrom::Shared).unwrap();
         assert_eq!(offer.plan, Plan::Personal);
-        assert_eq!(offer.monthly, "€X a month");
+        assert_eq!(offer.monthly, "€1 a month");
         assert_eq!(
             fake.checkout_url(UpgradeFrom::Sync).as_deref(),
             Some("https://accounts.example.test/checkout?from=sync")
