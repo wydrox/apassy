@@ -65,6 +65,9 @@ use crate::sync::{
 use crate::vault::{Vault, VaultErrorKind};
 use crate::vaults::{self, Registry, SyncLink, VaultEntry};
 
+/// Sync through Apassy on the vault's own membership, for a paid plan (flow spec Flow B).
+pub(crate) mod plan_switch;
+
 /// The name of the relay in the picker, the sidebar, and "Use a vault from another Mac".
 pub(crate) const LABEL: &str = "Apassy relay";
 /// How often a sheet asks the relay about a Mac that joins (contract section 7).

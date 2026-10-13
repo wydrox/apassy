@@ -302,22 +302,6 @@ fn settings_list_plan_only_with_an_offer() {
     assert_eq!(app.ui.settings_section, SettingsSection::Plan);
 }
 
-/// The sheets of the plan are not built yet: each closes as soon as it opens, so nothing
-/// shows.
-#[test]
-fn sheets_that_are_not_built_yet_close_at_once() {
-    use crate::plan::UpgradeFrom;
-
-    let dir = TempDir::new().expect("temp dir");
-    let mut app = app_in(&dir);
-    create(&mut app, "Personal", PASS_A);
-    for sheet in [Sheet::Upgrade(UpgradeFrom::Sync), Sheet::PlanEnded] {
-        app.ui.sheet = Some(sheet.clone());
-        let _ = frames(&mut app);
-        assert_eq!(app.ui.sheet, None, "{sheet:?}");
-    }
-}
-
 /// Settings > Bouncer: how the bouncer model starts. "When a run needs it" is the
 /// default (ADR 0024) and starts nothing before a run. Each mode shows its label, its
 /// status, and its actions, and a missing start script shows the install commands.

@@ -30,6 +30,11 @@
 #   ui-settings-updates.png ui-first-steps.png ui-settings-devices-empty.png
 #   ui-devices-add.png ui-devices-add-words.png ui-devices-add-done.png
 #   ui-settings-devices-added.png
+#   ui-plan-sync-free.png ui-plan-upgrade.png ui-plan-upgrade-waiting.png
+#   ui-plan-settings-free.png ui-plan-compare.png ui-plan-shared-free.png
+#   ui-plan-settings-personal.png ui-plan-sync-personal.png ui-plan-switch-check.png
+#   ui-plan-sync-apassy.png ui-plan-settings-past-due.png ui-plan-settings-offline.png
+#   ui-plan-ended.png (fake plans of the example only; the app ships with none)
 #   app-vault.png app-credential.png app-agent.png app-requests.png app-activity.png
 #   app-learning.png (copies of ui-* images, for the README and the site)
 set -euo pipefail

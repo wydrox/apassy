@@ -1107,14 +1107,39 @@ pub(crate) fn segmented<T: PartialEq + Copy>(
     value: &mut T,
     options: &[(T, &str)],
 ) -> Response {
+    let tagged: Vec<_> = options
+        .iter()
+        .map(|(option, label)| (*option, *label, None))
+        .collect();
+    segmented_tagged(ui, salt, value, &tagged)
+}
+
+/// [`segmented`] where an option can carry a small gray tag after its label, as the
+/// "Personal" of the Apassy sync choice (flow spec M3). The tag is part of the name of
+/// the option for VoiceOver.
+pub(crate) fn segmented_tagged<T: PartialEq + Copy>(
+    ui: &mut Ui,
+    salt: impl std::hash::Hash + std::fmt::Debug,
+    value: &mut T,
+    options: &[(T, &str, Option<&str>)],
+) -> Response {
     let galleys: Vec<_> = options
         .iter()
-        .map(|(_, label)| galley(ui, text(*label, Font::Callout)))
+        .map(|(_, label, _)| galley(ui, text(*label, Font::Callout)))
         .collect();
-    let widest = galleys
+    let tags: Vec<_> = options
         .iter()
-        .map(|galley| galley.size().x)
-        .fold(0.0, f32::max);
+        .map(|(_, _, tag)| tag.map(|tag| galley(ui, medium(tag, Font::Footnote).size(10.0))))
+        .collect();
+    // A tag sits 5 points after its label, in a capsule 5 points wider on each side.
+    let widths: Vec<f32> = galleys
+        .iter()
+        .zip(&tags)
+        .map(|(label, tag)| {
+            label.size().x + tag.as_ref().map_or(0.0, |tag| 5.0 + tag.size().x + 10.0)
+        })
+        .collect();
+    let widest = widths.iter().copied().fold(0.0, f32::max);
     let segment = widest + 20.0;
     let height = 24.0;
     let total = Vec2::new(segment * options.len() as f32 + 4.0, height);
@@ -1123,7 +1148,7 @@ pub(crate) fn segmented<T: PartialEq + Copy>(
     let mut response = ui.interact(rect, id, Sense::click());
     let enabled = ui.is_enabled();
     let count = options.len();
-    let selected = options.iter().position(|(option, _)| option == value);
+    let selected = options.iter().position(|(option, _, _)| option == value);
     let segment_at = |pos: Pos2| {
         let index = ((pos.x - rect.left() - 2.0) / segment).floor();
         (index >= 0.0)
@@ -1174,9 +1199,11 @@ pub(crate) fn segmented<T: PartialEq + Copy>(
     }
     let current = options
         .iter()
-        .find(|(option, _)| option == value)
-        .map_or("", |(_, label)| *label)
-        .to_owned();
+        .find(|(option, _, _)| option == value)
+        .map_or(String::new(), |(_, label, tag)| match tag {
+            Some(tag) => format!("{label}, {tag}"),
+            None => (*label).to_owned(),
+        });
     // No label here: a form row names the picker with `labelled_by`, and VoiceOver
     // reads the selected option as the value.
     response.widget_info(|| WidgetInfo {
@@ -1190,11 +1217,11 @@ pub(crate) fn segmented<T: PartialEq + Copy>(
     if !ui.is_rect_visible(rect) {
         return response;
     }
-    let selected = options.iter().position(|(option, _)| option == value);
+    let selected = options.iter().position(|(option, _, _)| option == value);
     let hovered = response.hover_pos().and_then(segment_at);
     let painter = ui.painter();
     painter.rect_filled(rect, 7, Color32::from_rgb(234, 234, 238));
-    for (index, galley) in galleys.into_iter().enumerate() {
+    for (index, (galley, tag)) in galleys.into_iter().zip(tags).enumerate() {
         let segment_rect = Rect::from_min_size(
             Pos2::new(rect.left() + 2.0 + segment * index as f32, rect.top() + 2.0),
             Vec2::new(segment, height - 4.0),
@@ -1216,7 +1243,28 @@ pub(crate) fn segmented<T: PartialEq + Copy>(
             );
         }
         let color = if enabled { LABEL } else { TERTIARY };
-        painter.galley(segment_rect.center() - galley.size() / 2.0, galley, color);
+        let width = widths[index];
+        let left = segment_rect.center().x - width / 2.0;
+        let label_width = galley.size().x;
+        painter.galley(
+            Pos2::new(left, segment_rect.center().y - galley.size().y / 2.0),
+            galley,
+            color,
+        );
+        if let Some(tag) = tag {
+            let capsule = Rect::from_min_size(
+                Pos2::new(left + label_width + 5.0, segment_rect.center().y - 7.0),
+                Vec2::new(tag.size().x + 10.0, 14.0),
+            );
+            painter.rect_filled(capsule, 7.0, Tone::Neutral.tint());
+            painter.rect_stroke(
+                capsule,
+                7.0,
+                Stroke::new(0.5, Color32::from_black_alpha(20)),
+                StrokeKind::Inside,
+            );
+            painter.galley(capsule.center() - tag.size() / 2.0, tag, SECONDARY);
+        }
     }
     if response.has_focus() {
         focus_ring(painter, rect, 7);

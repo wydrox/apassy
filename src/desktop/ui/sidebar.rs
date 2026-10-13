@@ -412,7 +412,12 @@ fn shared_section(app: &mut DesktopApp, ui: &mut egui::Ui, rail: bool) {
     let shared = shared_vaults(app);
     if !rail {
         kit::sidebar_section(ui, "Shared", None);
-        if shared.is_empty() {
+        // With an offer, the empty state says which plans share (flow spec Flow D).
+        #[cfg(feature = "vault")]
+        let offered = shared.is_empty() && super::plan::shared_empty(app, ui);
+        #[cfg(not(feature = "vault"))]
+        let offered = false;
+        if shared.is_empty() && !offered {
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
                 ui.label(kit::text("No shared vaults", kit::Font::Callout).color(kit::TERTIARY));

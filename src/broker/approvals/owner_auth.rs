@@ -282,6 +282,14 @@ pub enum OwnerAction {
         relay_url: String,
         team_id: Option<String>,
     },
+    /// Turn sync through Apassy on in the team `team_id` of the vault (ADR 0027 §5, a
+    /// paid plan): every device of the team, also one that was added for the questions
+    /// only, then gets the encrypted copy of the vault. The proof names the team and the
+    /// devices that the owner saw, so a device that joins after the check is not covered.
+    SyncThroughApassy {
+        team_id: String,
+        devices: Vec<String>,
+    },
 }
 
 /// The words for the Touch ID prompt after the relying party of a passkey. `None` is
@@ -419,6 +427,9 @@ impl OwnerAction {
             }
             Self::EnableRelayQuestions { .. } => {
                 "send the questions of this vault through the relay".to_owned()
+            }
+            Self::SyncThroughApassy { .. } => {
+                "sync this vault through Apassy with its devices".to_owned()
             }
         }
     }

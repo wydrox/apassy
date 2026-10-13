@@ -70,6 +70,8 @@ mod owner_tests;
 /// M4, M5, E).
 #[cfg(feature = "vault")]
 mod plan;
+#[cfg(all(test, feature = "vault"))]
+mod plan_tests;
 #[cfg(feature = "vault")]
 mod settings;
 /// Settings as a view of the window (ADR 0026 §3).
@@ -321,6 +323,10 @@ pub(crate) struct UiState {
     /// The first field of a start screen takes the focus, after a step change.
     #[cfg(feature = "vault")]
     pub(crate) focus_start_field: bool,
+    /// The plan: the wait of the Upgrade sheet, a switch to Apassy, and "Personal
+    /// ended" (flow spec M4, Flow B, Flow E).
+    #[cfg(feature = "vault")]
+    pub(crate) plan: plan::PlanUi,
 }
 
 #[cfg_attr(not(feature = "vault"), allow(dead_code))]
@@ -461,15 +467,14 @@ pub(crate) enum Sheet {
     #[cfg_attr(not(test), allow(dead_code))]
     Devices(devices::DevicesSheet),
     /// The Upgrade sheet at a paid pick (flow spec M4). Only with an offer.
-    // S2 opens it; until then only the tests do.
     #[cfg(feature = "vault")]
-    #[cfg_attr(not(test), allow(dead_code))]
     Upgrade(crate::plan::UpgradeFrom),
     /// A paid plan ended: move sync to iCloud Drive or turn it off (flow spec E).
-    // S2 opens it; until then only the tests do.
     #[cfg(feature = "vault")]
-    #[cfg_attr(not(test), allow(dead_code))]
     PlanEnded,
+    /// Compare plans, the switch of a vault to Apassy, and "Sign out of this Mac".
+    #[cfg(feature = "vault")]
+    Plan(plan::PlanSheet),
 }
 
 pub(crate) fn apply_style(ctx: &egui::Context) {
@@ -483,6 +488,7 @@ pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
     {
         app.poll_owner_flows(&ctx);
         app.poll_sync(&ctx);
+        app.plan_poll(&ctx);
         if let Some(id) = app.sync.adopted_vault.take() {
             app.ui.setup_vault = Some(id);
         }

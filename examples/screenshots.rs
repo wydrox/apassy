@@ -757,6 +757,9 @@ enum Step {
     /// An iPhone asks to join with the code that "Add a device" shows, through the
     /// fake relay ([`TourRelay::phone_asks`]).
     PhoneAsks,
+    /// The window takes the fake plan of this name, with an offer
+    /// ([`FakePlanProvider::for_screenshots`]): the plan screens show.
+    Plan(&'static str),
     Quit,
 }
 
@@ -845,6 +848,8 @@ impl TourRelay {
         }
         vault.lock().expect("lock");
         drop(vault);
+        // A paid plan can switch the vault to sync in its team (the Plan steps).
+        relay.lift_plan(&membership.team_id);
         Some(Self {
             relay,
             asking: None,
@@ -889,6 +894,9 @@ fn run() {
             cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             let mut app = DesktopApp::from_creation_context(cc);
             tour_plan(&mut app);
+            // "Continue to checkout" and "Manage subscription" stay in the window: the
+            // synthetic account service has no page.
+            app.hold_plan_links();
             if let Some(relay) = &relay {
                 assert!(app.set_connect_relay_url(&relay.relay.url));
             }
@@ -912,14 +920,19 @@ fn run() {
 /// offer, so the plan screens show. Without it the window has the plan of the app as it
 /// ships: none.
 fn tour_plan(app: &mut DesktopApp) {
-    let Ok(name) = std::env::var("APASSY_PLAN") else {
-        return;
-    };
+    if let Ok(name) = std::env::var("APASSY_PLAN") {
+        set_plan(app, &name);
+    }
+}
+
+/// Give the window the fake plan `name`, checked now. Only this example makes one; the
+/// app as it ships has no plan to offer.
+fn set_plan(app: &mut DesktopApp, name: &str) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
-    let provider = FakePlanProvider::for_screenshots(&name, now)
-        .expect("APASSY_PLAN is free, personal, team, operator, or ended");
+    let provider = FakePlanProvider::for_screenshots(name, now)
+        .expect("the plan is free, personal, team, operator, ended, past-due, or offline");
     app.set_plan_provider(std::sync::Arc::new(provider));
 }
 
@@ -1041,6 +1054,85 @@ fn view_steps() -> Vec<Step> {
         Wait(1.5),
         Shot("settings-devices-added"),
     ]
+    .into_iter()
+    .chain(plan_steps())
+    .collect()
+}
+
+/// The plan screens (flow spec M3 to M5, Flows B to E), with the fake plans of this
+/// example. The steps before them run with no plan, as the app ships.
+fn plan_steps() -> Vec<Step> {
+    use Step::*;
+    let cmd = egui::Modifiers::COMMAND;
+    let none = egui::Modifiers::NONE;
+    // With an offer, Settings lists Plan before Updates.
+    let section = |index: f32| {
+        Click(
+            LAYOUT.settings_list.0,
+            LAYOUT.settings_list.1 + index * 48.0,
+        )
+    };
+    vec![
+        // Free: Vault > Sync with the "Personal" tag, and the Shared empty state.
+        Plan("free"),
+        section(0.0),
+        Wait(1.5),
+        Shot("plan-sync-free"),
+        // "Apassy" on Free: the Upgrade sheet, then the wait for the browser.
+        Click(LAYOUT.sync_apassy_free.0, LAYOUT.sync_apassy_free.1),
+        Wait(1.0),
+        Shot("plan-upgrade"),
+        Click(LAYOUT.checkout.0, LAYOUT.checkout.1),
+        Wait(1.0),
+        Shot("plan-upgrade-waiting"),
+        Key(egui::Key::Escape, none),
+        Wait(1.0),
+        // Settings > Plan on Free, and Compare plans.
+        section(5.0),
+        Wait(1.0),
+        Shot("plan-settings-free"),
+        Click(LAYOUT.compare.0, LAYOUT.compare.1),
+        Wait(1.0),
+        Shot("plan-compare"),
+        Key(egui::Key::Escape, none),
+        Wait(1.0),
+        Key(egui::Key::Num1, cmd),
+        Wait(1.0),
+        Shot("plan-shared-free"),
+        // Personal: Settings > Plan, then Vault > Sync and "Apassy": the owner check
+        // lists the devices that start to sync. It passes, and the vault syncs through
+        // Apassy in its own team.
+        Plan("personal"),
+        Key(egui::Key::Comma, cmd),
+        Wait(1.5),
+        section(5.0),
+        Wait(1.0),
+        Shot("plan-settings-personal"),
+        section(0.0),
+        Wait(1.0),
+        Shot("plan-sync-personal"),
+        Click(LAYOUT.sync_apassy_paid.0, LAYOUT.sync_apassy_paid.1),
+        Wait(1.5),
+        Shot("plan-switch-check"),
+        Type(PASS),
+        Key(egui::Key::Enter, none),
+        Wait(5.0),
+        Shot("plan-sync-apassy"),
+        // Payment failed, and offline.
+        Plan("past-due"),
+        section(5.0),
+        Wait(1.0),
+        Shot("plan-settings-past-due"),
+        Plan("offline"),
+        Wait(1.0),
+        Shot("plan-settings-offline"),
+        // The plan ended while the vault syncs through Apassy: "Personal ended" once.
+        Plan("ended"),
+        Wait(1.5),
+        Shot("plan-ended"),
+        Key(egui::Key::Escape, none),
+        Wait(1.0),
+    ]
 }
 
 /// The positions that the tour clicks, in points of the 1180 x 740 window.
@@ -1057,6 +1149,14 @@ struct Layout {
     add_device: (f32, f32),
     /// "Confirm with Touch ID" of "Add a device" while an iPhone asks.
     confirm_device: (f32, f32),
+    /// The "Apassy" segment of Vault > Sync on Free, with its "Personal" tag.
+    sync_apassy_free: (f32, f32),
+    /// The same segment on a paid plan, with no tag.
+    sync_apassy_paid: (f32, f32),
+    /// "Continue to checkout" of the Upgrade sheet.
+    checkout: (f32, f32),
+    /// "Compare plans" of Settings > Plan on Free.
+    compare: (f32, f32),
 }
 
 const LAYOUT: Layout = Layout {
@@ -1069,6 +1169,10 @@ const LAYOUT: Layout = Layout {
     settings_list: (450.0, 70.0),
     add_device: (1093.0, 154.0),
     confirm_device: (412.0, 575.0),
+    sync_apassy_free: (904.0, 268.0),
+    sync_apassy_paid: (977.0, 268.0),
+    checkout: (740.0, 478.0),
+    compare: (602.0, 206.0),
 };
 
 /// The tour. `APASSY_TOUR` names a file with other steps after the unlock, one per
@@ -1141,6 +1245,7 @@ fn parse_steps(text: &str) -> Vec<Step> {
             Some("embed") => steps.push(Embed(parts.get(1) != Some(&"off"))),
             Some("ask") => steps.push(Ask),
             Some("phone-asks") => steps.push(PhoneAsks),
+            Some("plan") => steps.push(Plan(name(1))),
             Some("quit") => steps.push(Quit),
             Some("minimize") => steps.push(Minimize(true)),
             Some("restore") => steps.push(Minimize(false)),
@@ -1320,6 +1425,7 @@ impl Tour {
             }
             Step::Embed(on) => ctx.set_embed_viewports(on),
             Step::Ask => ask_in_background(),
+            Step::Plan(name) => set_plan(&mut self.app, name),
             Step::PhoneAsks => {
                 if let Some(relay) = self.relay.as_mut() {
                     relay.phone_asks();
