@@ -1238,6 +1238,24 @@ fn legacy_name(name: &str, taken: &BTreeSet<String>) -> String {
         .unwrap_or_default()
 }
 
+/// Plan the schema-16 reserved-field conversion in stored field order. Both the
+/// local SQL migration and read-only sync merge use this exact collision handling.
+pub(super) fn legacy_field_renames<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+) -> Vec<(String, String)> {
+    let names: Vec<&str> = names.into_iter().collect();
+    let mut taken: BTreeSet<String> = names.iter().map(|name| (*name).to_owned()).collect();
+    let mut renames = Vec::new();
+    for name in names {
+        if name.starts_with(PASSKEY_FIELD_PREFIX) {
+            let new = legacy_name(name, &taken);
+            taken.insert(new.clone());
+            renames.push((name.to_owned(), new));
+        }
+    }
+    renames
+}
+
 /// Add schema version 17 in the migration or create transaction. Each ordinary field
 /// with a reserved name gets a free name; its value and secret flag stay. An environment
 /// binding of the old name gets the new name, so an agent run still reads the value.
@@ -1285,17 +1303,17 @@ pub(super) fn add_schema_v17(tx: &rusqlite::Transaction<'_>) -> VaultResult<()> 
             )
             .optional()
             .map_err(storage)?;
-        let mut taken: BTreeSet<String> = {
+        let names: Vec<String> = {
             let mut stmt = tx
-                .prepare("SELECT name FROM item_field WHERE item_id = ?1")
+                .prepare("SELECT name FROM item_field WHERE item_id = ?1 ORDER BY position, rowid")
                 .map_err(storage)?;
             stmt.query_map([item], |row| row.get(0))
                 .map_err(storage)?
                 .collect::<Result<_, _>>()
                 .map_err(storage)?
         };
-        for (rowid, name) in fields {
-            let new = legacy_name(&name, &taken);
+        let renames = legacy_field_renames(names.iter().map(String::as_str));
+        for ((rowid, name), (_, new)) in fields.into_iter().zip(renames) {
             tx.execute(
                 "UPDATE item_field SET name = ?1 WHERE rowid = ?2",
                 (&new, rowid),
@@ -1306,7 +1324,6 @@ pub(super) fn add_schema_v17(tx: &rusqlite::Transaction<'_>) -> VaultResult<()> 
                 (&new, item, &name),
             )
             .map_err(storage)?;
-            taken.insert(new);
         }
         if let Some((at, by)) = version {
             tx.execute(

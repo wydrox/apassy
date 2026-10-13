@@ -4,10 +4,13 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-14
+
 ### Fixed
 
 - **iPhone pairing:** a companion QR scanned in a device connection flow opens companion pairing with the usual owner confirmation, instead of being rejected as an invalid relay link. A late response from a cancelled relay connection cannot interrupt the new pairing flow.
 - **iCloud sync:** connected vaults merge authenticated conflicting file versions, retain encrypted recovery copies, and check for intervening changes before resolving the captured versions. Unreadable or incompatible copies remain unresolved.
+- **Older iCloud copies:** sync accepts verified schema-16 snapshots from earlier releases and preserves their fields and variable bindings during migration. Unsupported or inconsistent copies identify whether the current iCloud file or a conflict copy stopped sync.
 - **iPhone sync status:** long errors wrap fully; tapping a problem opens Settings > Devices.
 
 ## [0.5.0] - 2026-10-13

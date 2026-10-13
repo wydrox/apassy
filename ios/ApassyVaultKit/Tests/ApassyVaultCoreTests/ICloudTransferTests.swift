@@ -502,4 +502,110 @@ private struct TransferFixture: Sendable {
         #expect(fixture.files.resolved.count == 1)
     }
 
+    @Test(arguments: ["conflict", "current"], [false, true])
+    func unsupportedFormatIdentifiesSnapshotAndPreservesError(source: String, rekeyed: Bool) async throws {
+        let fixture = try TransferFixture()
+        defer { fixture.cleanup() }
+        try await fixture.register()
+        _ = try fixture.addConflict("supported encrypted conflict")
+        if source == "conflict" { _ = try fixture.addConflict("unsupported encrypted conflict") }
+        _ = try fixture.addConflict("later encrypted conflict")
+        let versions = [fixture.provider] + fixture.files.conflicts
+        let originals = try versions.map { try CoordinatedICloudFileAccess.hash($0) }
+        let probe = TransferProbe()
+        let expectedMessage = source == "conflict"
+            ? "An iCloud conflict copy uses an unsupported or inconsistent vault format. Sync stopped; all iCloud versions are kept."
+            : "The current iCloud file uses an unsupported or inconsistent vault format. Sync stopped; all iCloud versions are kept."
+        do {
+            _ = try await fixture.transfer.sync(id: "test", passphrase: nil, epoch: fixture.session.capture(),
+                prepare: { _, input, output, _ in
+                    let value = String(decoding: try Data(contentsOf: input), as: UTF8.self)
+                    if (source == "current" && input.lastPathComponent == "input") || value == "unsupported encrypted conflict" {
+                        throw VaultError(.unsupportedSchema, "Generic version error.", rekeyed: rekeyed)
+                    }
+                    return try await probe.prepared(input: input, output: output)
+                }, complete: { _, _ in await probe.complete() })
+            Issue.record("unsupported format must stop sync")
+        } catch let error as VaultError {
+            #expect(error.code == .unsupportedSchema)
+            #expect(error.message == expectedMessage)
+            #expect(error.rekeyed == rekeyed)
+        }
+        let status = await fixture.transfer.status("test")
+        #expect(status.state == .error)
+        #expect(status.message == expectedMessage)
+        #expect(await probe.seen == (source == "conflict"
+            ? ["supported encrypted conflict"]
+            : ["supported encrypted conflict", "later encrypted conflict"]))
+        #expect(fixture.files.publications == 0)
+        #expect(fixture.files.resolved.isEmpty)
+        #expect(fixture.files.conflicts == Array(versions.dropFirst()))
+        #expect(try versions.map { try CoordinatedICloudFileAccess.hash($0) } == originals)
+        #expect(await probe.completes == 0)
+        #expect(fixture.files.bookmarks == 1)
+    }
+
+    @Test(arguments: [false, true])
+    func unsupportedConflictFormatAfterPassphraseRetryKeepsRekeyFlag(rekeyed: Bool) async throws {
+        let fixture = try TransferFixture()
+        defer { fixture.cleanup() }
+        try await fixture.register()
+        let conflict = try fixture.addConflict()
+        let originals = try [fixture.provider, conflict].map { try CoordinatedICloudFileAccess.hash($0) }
+        let probe = TransferProbe()
+        let message = "An iCloud conflict copy uses an unsupported or inconsistent vault format. Sync stopped; all iCloud versions are kept."
+        var result: PassphraseChange?
+        do {
+            result = try await fixture.transfer.sync(id: "test", passphrase: "new synthetic passphrase",
+                epoch: fixture.session.capture(), prepare: { _, _, _, key in
+                    await probe.recordKey(key)
+                    if key == nil { throw VaultError(.needsPassphrase, "Needs new key.") }
+                    throw VaultError(.unsupportedSchema, "Generic version error.", rekeyed: rekeyed)
+                }, complete: { _, _ in await probe.complete() })
+            #expect(rekeyed)
+        } catch let error as VaultError {
+            #expect(!rekeyed)
+            #expect(error.code == .unsupportedSchema)
+            #expect(error.message == message)
+            #expect(!error.rekeyed)
+        }
+        if rekeyed {
+            #expect(result?.rekeyed == true)
+            #expect(result?.status.state == .error)
+            #expect(result?.status.message == message)
+        }
+        #expect(await probe.keys == ["local-key", "new synthetic passphrase"])
+        #expect(await fixture.transfer.status("test").state == .error)
+        #expect(await fixture.transfer.status("test").message == message)
+        #expect(fixture.files.publications == 0)
+        #expect(fixture.files.resolved.isEmpty)
+        #expect(fixture.files.conflicts == [conflict])
+        #expect(try [fixture.provider, conflict].map { try CoordinatedICloudFileAccess.hash($0) } == originals)
+        #expect(await probe.completes == 0)
+    }
+
+    @Test func unsupportedCurrentFormatPreservesRekeyFromEarlierConflict() async throws {
+        let fixture = try TransferFixture()
+        defer { fixture.cleanup() }
+        try await fixture.register()
+        let conflict = try fixture.addConflict()
+        let originals = try [fixture.provider, conflict].map { try CoordinatedICloudFileAccess.hash($0) }
+        let probe = TransferProbe()
+        let result = try await fixture.transfer.sync(id: "test", passphrase: "new synthetic passphrase",
+            epoch: fixture.session.capture(), prepare: { _, input, output, _ in
+                if input.lastPathComponent == "input" {
+                    throw VaultError(.unsupportedSchema, "Generic version error.")
+                }
+                return try await probe.prepared(input: input, output: output, rekey: true)
+            }, complete: { _, _ in await probe.complete() })
+        #expect(result.rekeyed)
+        #expect(result.status.state == .error)
+        #expect(result.status.message == "The current iCloud file uses an unsupported or inconsistent vault format. Sync stopped; all iCloud versions are kept.")
+        #expect(fixture.files.publications == 0)
+        #expect(fixture.files.resolved.isEmpty)
+        #expect(fixture.files.conflicts == [conflict])
+        #expect(try [fixture.provider, conflict].map { try CoordinatedICloudFileAccess.hash($0) } == originals)
+        #expect(await probe.completes == 0)
+    }
+
 }

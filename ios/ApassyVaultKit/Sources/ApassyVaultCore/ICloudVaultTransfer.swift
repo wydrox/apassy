@@ -201,6 +201,28 @@ actor ICloudVaultTransfer {
                                   version: 0, lastSyncAt: nil, pushed: false, merged: nil)
     }
 
+    private enum SnapshotSource {
+        case conflictCopy, currentFile
+
+        var unsupportedFormatMessage: String {
+            switch self {
+            case .conflictCopy:
+                "An iCloud conflict copy uses an unsupported or inconsistent vault format. Sync stopped; all iCloud versions are kept."
+            case .currentFile:
+                "The current iCloud file uses an unsupported or inconsistent vault format. Sync stopped; all iCloud versions are kept."
+            }
+        }
+    }
+
+    private func prepareForSync(id: String, input: URL, output: URL, passphrase: String?,
+                                source: SnapshotSource, prepare: Prepare) async throws -> ICloudPrepared {
+        do {
+            return try await prepare(id, input, output, passphrase)
+        } catch let error as VaultError where error.code == .unsupportedSchema {
+            throw VaultError(error.code, source.unsupportedFormatMessage, rekeyed: error.rekeyed)
+        }
+    }
+
     func sync(id: String, passphrase: String?, epoch: UInt64, prepare: Prepare,
               complete: Complete) async throws -> PassphraseChange {
         await enter()
@@ -226,10 +248,12 @@ actor ICloudVaultTransfer {
                     do {
                         // An older conflict may still use the current local key,
                         // while the provider current copy uses a new passphrase.
-                        merged = try await prepare(id, conflict.url, conflictOutput, nil)
+                        merged = try await prepareForSync(id: id, input: conflict.url, output: conflictOutput,
+                            passphrase: nil, source: .conflictCopy, prepare: prepare)
                     } catch let error as VaultError where error.code == .needsPassphrase && passphrase != nil {
                         try session.check(epoch)
-                        merged = try await prepare(id, conflict.url, conflictOutput, passphrase)
+                        merged = try await prepareForSync(id: id, input: conflict.url, output: conflictOutput,
+                            passphrase: passphrase, source: .conflictCopy, prepare: prepare)
                     }
                     rekeyed = rekeyed || merged.rekeyed
                     try session.check(epoch)
@@ -243,7 +267,8 @@ actor ICloudVaultTransfer {
                     }
                 }
                 // Prepare current LAST so its token/output includes every merge.
-                let prepared = try await prepare(id, input, output, passphrase)
+                let prepared = try await prepareForSync(id: id, input: input, output: output,
+                    passphrase: passphrase, source: .currentFile, prepare: prepare)
                 rekeyed = rekeyed || prepared.rekeyed
                 try session.check(epoch)
                 // Trust neither the input path nor an unverified Rust output hash.
@@ -307,7 +332,7 @@ actor ICloudVaultTransfer {
             case .staleCopy: state = .staleCopy
             case .forkedCopy: state = .forkedCopy
             case .busy: state = .busy
-            case .conflict, .safetyMismatch, .invalidInput: state = .error
+            case .conflict, .safetyMismatch, .invalidInput, .unsupportedSchema: state = .error
             default: state = .offline
             }
             statuses[id] = SyncStatus(enabled: true, state: state,

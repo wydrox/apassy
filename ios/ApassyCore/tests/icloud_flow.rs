@@ -1023,3 +1023,113 @@ fn a_schema17_snapshot_imports_and_the_next_sync_writes_schema19_with_no_edit() 
     assert_eq!(prepared["write_required"], false);
     assert!(!output.exists());
 }
+
+#[test]
+fn already_connected_phone_accepts_a_released_schema16_conflict_snapshot() {
+    let mut f = Fixture::new();
+    let (input, output) = f.paths();
+    // A provider conflict can retain bytes written by a released schema-16 app
+    // even though both connected apps have since upgraded to schema 19.
+    let conn = rusqlite::Connection::open(&input).unwrap();
+    conn.pragma_update(None, "key", PASS).unwrap();
+    conn.execute_batch(include_str!("../../../tests/vault_schema16_fixture.sql"))
+        .unwrap();
+    conn.execute(
+        "UPDATE sync_meta SET vault_id = ?1, generation = 1, pushed_by = 'Old Mac'",
+        [&f.id],
+    )
+    .unwrap();
+    let digest = content_digest(&conn);
+    conn.execute(
+        "UPDATE sync_meta SET content_digest = ?1",
+        [digest.as_slice()],
+    )
+    .unwrap();
+    conn.close().map_err(|(_, e)| e).unwrap();
+    // Both generations descend from one encrypted vault (including its salt/key).
+    // Merely assigning the same passphrase to independent files is not that lineage.
+    let (mut upgraded, _) =
+        Vault::adopt_sync_copy(&input, &f.root.path().join("upgraded-mac.apassy"), PASS).unwrap();
+    upgraded.unlock(PASS).unwrap();
+    f.mac = upgraded;
+    f.mac.add(draft("Current Mac credential")).unwrap();
+    f.import();
+    f.save("Current phone credential");
+    let (current_input, final_output) = f.paths();
+    f.mac
+        .write_sync_copy(&current_input, "Current Mac")
+        .unwrap();
+    let current_sha = apassy::sync::file_sha256(&current_input).unwrap();
+    let conn = rusqlite::Connection::open(&input).unwrap();
+    conn.pragma_update(None, "key", PASS).unwrap();
+    conn.execute_batch(
+        "UPDATE sync_device SET applying = 1;
+         INSERT INTO item (id, title, kind, notes, revision, uuid, updated_at, updated_by, clock)
+             VALUES (1, 'Recovered legacy credential', 'custom', '', 1,
+                     '66666666666666666666666666666666', 1000, 'legacy-device', 'legacy-device=1');
+         INSERT INTO item_field VALUES (1, 0, 'passkey_key', 'synthetic-legacy-value', 1);
+         INSERT INTO env_binding (item_id, env_name, field) VALUES (1, 'LEGACY_VALUE', 'passkey_key');
+         DELETE FROM sync_device;"
+    ).unwrap();
+    let digest = content_digest(&conn);
+    conn.execute(
+        "UPDATE sync_meta SET content_digest = ?1",
+        [digest.as_slice()],
+    )
+    .unwrap();
+    conn.close().map_err(|(_, e)| e).unwrap();
+    let input_sha = apassy::sync::file_sha256(&input).unwrap();
+    let prepared = f.prepare(&input, &output);
+    assert_eq!(prepared["write_required"], true);
+    assert_eq!(schema_marks(&output), (19, 19));
+    assert_eq!(f.titles().len(), 3);
+    // Swift processes provider conflicts first, the current file last, and completes
+    // only the final preparation. All recovered records must survive that chain.
+    let final_prepared = f.prepare(&current_input, &final_output);
+    assert_eq!(final_prepared["write_required"], true);
+    assert_eq!(schema_marks(&final_output), (19, 19));
+    let status = f.complete(&final_prepared);
+    assert_eq!(status["state"], "ok");
+    assert_eq!(status["merged"]["inserted"], 0);
+    assert_eq!(
+        apassy::sync::file_sha256(&current_input).unwrap(),
+        current_sha
+    );
+    assert_eq!(apassy::sync::file_sha256(&input).unwrap(), input_sha);
+    assert_eq!(schema_marks(&input), (16, 16));
+    let mut titles = f.titles();
+    titles.sort();
+    assert_eq!(
+        titles,
+        [
+            "Current Mac credential",
+            "Current phone credential",
+            "Recovered legacy credential"
+        ]
+    );
+    let report = f
+        .mac
+        .merge_from(&final_output, &SyncScope::vault())
+        .unwrap();
+    assert!(report.conflicts.is_empty());
+    let legacy = f.mac.search("Recovered legacy credential").unwrap()[0].id;
+    let details = f.mac.details(legacy).unwrap();
+    let renamed = &details.fields[0].name;
+    assert_eq!(
+        apassy::vault::custom_detail_label(renamed).as_deref(),
+        Some("passkey_key")
+    );
+    assert_eq!(
+        f.mac.reveal(legacy, renamed).unwrap().expose(),
+        "synthetic-legacy-value"
+    );
+    // Reprocessing a stale provider version is idempotent.
+    let (_, second_output) = f.paths();
+    let prepared = f.prepare(&input, &second_output);
+    let status = f.complete(&prepared);
+    assert_eq!(status["merged"]["inserted"], 0);
+    assert_eq!(status["merged"]["updated"], 0);
+    assert_eq!(status["merged"]["conflicts"], 0);
+    assert_eq!(f.titles().len(), 3);
+    assert_eq!(apassy::sync::file_sha256(&input).unwrap(), input_sha);
+}
