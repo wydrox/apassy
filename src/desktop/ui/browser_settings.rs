@@ -1,4 +1,4 @@
-//! Settings > General > Browser extension (ADR 0021): connect a browser with one click.
+//! Settings > Tools > Browser extension (ADR 0021): connect a browser with one click.
 //!
 //! "Connect" writes the host manifest of the browser ([`crate::browser::install`]) and
 //! opens the page of the extension in the Chrome Web Store in that browser, where the
@@ -13,7 +13,8 @@ use crate::browser::install::{self, BROWSERS, Browser, Install, State};
 use crate::desktop::DesktopApp;
 
 /// The note of a source build. Tests read it.
-pub(super) const SOURCE_BUILD_NOTE: &str = "The browser extension works with Apassy.app. A source build is not protected from agents, so it does not connect a browser.";
+pub(super) const SOURCE_BUILD_NOTE: &str =
+    "A source build is not protected from agents, so it connects no browser.";
 
 #[derive(Clone, Copy)]
 enum Action {
@@ -37,7 +38,7 @@ fn last_seen_text(seen: Option<Instant>) -> String {
     }
 }
 
-/// Settings > General > Browser extension: a row for each Chromium browser on this Mac
+/// Settings > Tools > Browser extension: a row for each Chromium browser on this Mac
 /// with its state and "Connect", and when the extension last asked.
 pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     use super::settings::rows;

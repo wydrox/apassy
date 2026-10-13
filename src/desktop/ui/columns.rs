@@ -5,7 +5,7 @@
 //! column. The top row of both toolbars is the row of the traffic lights
 //! ([`kit::LIGHTS_Y`]). Both toolbars hold the title bar of the window, so a drag on them moves it.
 //! A place draws its own rows and its own body ([`super::items`], [`super::agents`],
-//! [`super::decisions`]); this module has their frame.
+//! [`super::decisions`], [`super::settings_view`]); this module has their frame.
 
 use std::hash::Hash;
 
@@ -273,6 +273,7 @@ pub(super) fn place_title(app: &DesktopApp) -> String {
         Place::Shared(uuid) => super::sidebar::shared_vault(app, uuid).name,
         Place::Decisions => "Decisions".to_owned(),
         Place::Agents => "Agents".to_owned(),
+        Place::Settings => "Settings".to_owned(),
     }
 }
 

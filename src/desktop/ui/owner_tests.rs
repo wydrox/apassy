@@ -471,7 +471,7 @@ fn text_pos(shape: &egui::Shape, needle: &str) -> Option<Pos2> {
 }
 
 /// "Open Settings" in the "macOS notifications are off" notice of Decisions opens
-/// Settings > Notifications, also when another tab was open before.
+/// Settings > Devices, also when another section was open before.
 #[test]
 fn open_settings_from_decisions_shows_the_notifications_tab() {
     let dir = TempDir::new().expect("temp dir");
@@ -485,7 +485,7 @@ fn open_settings_from_decisions_shows_the_notifications_tab() {
         || {},
     ));
     app.place = Place::Decisions;
-    app.ui.settings_tab = super::SettingsTab::Advanced;
+    app.ui.settings_section = super::SettingsSection::Updates;
     let ctx = egui::Context::default();
     let text = app_frame(&ctx, &mut app);
     assert!(text.contains("macOS notifications are off"), "{text}");
@@ -512,11 +512,11 @@ fn open_settings_from_decisions_shows_the_notifications_tab() {
         let output = ctx.run_ui(input(time, events), |ui| draw(&mut app, ui));
         output.drop_without_applying_deltas();
     }
-    assert!(app.settings_open);
-    assert_eq!(app.ui.settings_tab, super::SettingsTab::Notifications);
+    assert_eq!(app.place, Place::Settings);
+    assert_eq!(app.ui.settings_section, super::SettingsSection::Devices);
     let text = app_frame(&egui::Context::default(), &mut app);
     assert!(
-        text.contains("Questions go to every device") && text.contains("Notifications"),
+        text.contains("This Mac") && text.contains("Notifications"),
         "{text}"
     );
     assert!(!text.contains("Keyboard shortcuts"), "{text}");

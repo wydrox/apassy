@@ -3,7 +3,7 @@
 //! The extension comes from the Chrome Web Store ([`STORE_URL`]), or from the folder in
 //! Apassy.app with Developer mode. A browser finds the native messaging host through the
 //! manifest
-//! `com.wydrox.apassy.json` in its `NativeMessagingHosts` folder. Settings > General >
+//! `com.wydrox.apassy.json` in its `NativeMessagingHosts` folder. Settings > Tools >
 //! Browser extension in the app and `apassy setup browser` write it. The manifest names
 //! `apassy-browser-host` of the running Apassy.app and allows only the Apassy extension.
 //!

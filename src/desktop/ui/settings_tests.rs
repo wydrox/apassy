@@ -1,20 +1,21 @@
-//! Headless tests of the Settings window (ADR 0026 §3): the four tabs of the toolbar,
-//! the sections of each tab at the minimum and a tall window size, the relay row of
-//! Devices with its owner check, and the keys that close the window. Synthetic values
-//! only; the relay is the in-process fake relay on 127.0.0.1.
+//! Headless tests of Settings as a view of the window (ADR 0026 §3): the gear and ⌘,
+//! open it, the list column names each section, a click selects one, a sidebar click
+//! leaves; each section shows its groups at a tall and at the minimum window size; the
+//! relay row of Devices with its owner check; and a sheet of Settings over the window.
+//! Synthetic values only; the relay is the in-process fake relay on 127.0.0.1.
 
 use eframe::egui::{self, Event, Key, Modifiers, Pos2, RawInput, Rect, Vec2};
 use tempfile::TempDir;
 
 use super::super::owner_tests::{PASS, WRONG, unlocked_app_with_item};
-use super::super::settings_window::{MIN_SIZE, content};
+use super::super::settings_view::SettingsSection;
 use super::{
     ADD_IPHONE, RELAY_QUESTIONS, RELAY_QUESTIONS_NEW_TEAM, RELAY_QUESTIONS_OFF, RELAY_QUESTIONS_ON,
-    RELAY_ROW, SettingsTab,
+    RELAY_ROW,
 };
 use crate::broker::approvals::{OwnerAction, OwnerAuthError, OwnerCheck};
-use crate::desktop::DesktopApp;
 use crate::desktop::owner_check::OwnerRequest;
+use crate::desktop::{DesktopApp, Place};
 
 /// The fake relay reads the app's sync module under this name.
 use crate::sync as relay_api;
@@ -23,9 +24,13 @@ use crate::sync as relay_api;
 #[path = "../../../tests/common/fake_relay.rs"]
 mod fake_relay;
 
-const TALL: Vec2 = Vec2::new(MIN_SIZE.x, 6000.0);
+/// The default window, a tall one that shows each group of a section, and the smallest
+/// window ([`super::super::MIN_WINDOW`]).
+const DEFAULT: Vec2 = Vec2::new(1180.0, 800.0);
+const TALL: Vec2 = Vec2::new(1180.0, 6000.0);
+const MIN: Vec2 = Vec2::new(super::super::MIN_WINDOW.0, super::super::MIN_WINDOW.1);
 
-/// One frame of the Settings content at `size`. Returns the painted texts with their
+/// One frame of the whole window at `size`. Returns the painted texts with their
 /// rectangles.
 fn frame(
     ctx: &egui::Context,
@@ -38,11 +43,7 @@ fn frame(
         events,
         ..Default::default()
     };
-    let output = ctx.run_ui(input, |ui| {
-        egui::CentralPanel::default()
-            .frame(egui::Frame::NONE)
-            .show(ui, |ui| content(app, ui));
-    });
+    let output = ctx.run_ui(input, |ui| super::super::draw(app, ui));
     let mut texts = Vec::new();
     for clipped in &output.shapes {
         texts_of(&clipped.shape, clipped.clip_rect, &mut texts);
@@ -80,140 +81,247 @@ fn frames(app: &mut DesktopApp, size: Vec2) -> (String, Vec<(String, Rect)>) {
     (joined, texts)
 }
 
-/// What each tab shows first, and what it never shows.
+/// A click at `at`: the pointer moves there, presses, and releases.
+fn click(ctx: &egui::Context, app: &mut DesktopApp, size: Vec2, at: Pos2) {
+    let button = |pressed| Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Modifiers::NONE,
+    };
+    frame(ctx, app, size, vec![Event::PointerMoved(at)]);
+    frame(ctx, app, size, vec![button(true)]);
+    frame(ctx, app, size, vec![button(false)]);
+}
+
+/// A key press, after a frame that settles the window.
+fn press(ctx: &egui::Context, app: &mut DesktopApp, key: Key, modifiers: Modifiers) {
+    frame(ctx, app, DEFAULT, Vec::new());
+    frame(
+        ctx,
+        app,
+        DEFAULT,
+        vec![Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }],
+    );
+    frame(ctx, app, DEFAULT, Vec::new());
+}
+
+/// The center of the first painted `text` left of `right`.
+fn center_of(texts: &[(String, Rect)], text: &str, right: f32) -> Option<Pos2> {
+    texts
+        .iter()
+        .find(|(painted, rect)| painted == text && rect.right() < right)
+        .map(|(_, rect)| rect.center())
+}
+
+/// What each section shows, and what it never shows: the groups of another section.
+/// The list column names every section, so no section name is in the second list.
 fn cases() -> [(
-    SettingsTab,
+    SettingsSection,
     &'static [&'static str],
     &'static [&'static str],
-); 4] {
+); 6] {
     [
         (
-            SettingsTab::General,
-            &["Vault", "1Password", "Import…", "Browser extension"],
-            &["Back up now", "Bouncer", "Questions go to every device"],
-        ),
-        (
-            SettingsTab::Devices,
+            SettingsSection::Vault,
             &[
-                "Questions go to every device",
-                "This Mac",
-                "Other Macs",
-                "iPhones",
-                RELAY_ROW,
-                "Add device…",
-                "Notifications",
-                "iPhone app",
-                "Paired iPhones",
+                "Vault",
+                "Backup",
+                "Back up now…",
+                "Restore…",
+                "Import",
+                "1Password",
             ],
-            &["Lock now", "Back up now", "Keyboard shortcuts"],
+            &["Change passphrase…", "Install tools…", "Pair…"],
         ),
         (
-            SettingsTab::Security,
+            SettingsSection::Security,
             &[
                 "Unlock",
-                "Change passphrase",
-                "Back up now",
-                "Restore from a backup",
+                "Touch ID",
+                "Owner checks use",
+                "Change passphrase…",
             ],
-            &["Lock now", "Bouncer", "Updates"],
+            &["Back up now…", "Install tools…", "Owner checks\n"],
         ),
         (
-            SettingsTab::Advanced,
+            SettingsSection::Devices,
             &[
-                "Bouncer",
-                "Calibration and learning",
-                "Command line",
-                "Updates",
-                "Keyboard shortcuts",
-                "Contract",
+                "This Mac",
+                "Notifications",
+                "iPhone",
+                "Allow the iPhone app on this network",
+                "Pair an iPhone",
+                RELAY_ROW,
+                "Questions reach every device.",
             ],
-            &["Lock now", "Back up now", "iPhone app"],
+            &[
+                "Back up now…",
+                "Questions go to every device",
+                "Add device…",
+                "None paired",
+                "Not synced",
+            ],
+        ),
+        (
+            SettingsSection::Bouncer,
+            &["Model", "Calibration and learning"],
+            &[
+                "Back up now…",
+                "Asked you",
+                "Accepts agent requests",
+                "Address",
+            ],
+        ),
+        (
+            SettingsSection::Tools,
+            &[
+                "Command line",
+                "apassy",
+                "Install tools…",
+                "Browser extension",
+            ],
+            &["Back up now…", "Socket", "Sessions", "None open"],
+        ),
+        (
+            SettingsSection::Updates,
+            &["Updates", "Version", "Keyboard shortcuts"],
+            &["Back up now…", "Contract", "Install tools…"],
         ),
     ]
 }
 
-/// Each tab shows its sections and no section of another tab. The settings of single
-/// agents are gone (ADR 0025 §3f).
+/// Each section shows its groups and no group of another section. The list column names
+/// every section. The settings of single agents are gone (ADR 0025 §3f), and Settings has
+/// no "Done": it is no window.
 #[test]
-fn each_tab_shows_its_sections() {
+fn each_section_shows_its_groups() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&dir);
-    for (tab, shown, hidden) in cases() {
-        app.ui.settings_tab = tab;
+    for (section, shown, hidden) in cases() {
+        super::super::open_settings(&mut app, section);
         let (text, _) = frames(&mut app, TALL);
-        for label in SettingsTab::ALL.map(SettingsTab::label) {
+        for listed in SettingsSection::ALL {
             assert!(
-                text.contains(label),
-                "{tab:?}: the tab bar has {label}: {text}"
+                text.contains(listed.label()),
+                "{section:?}: the list has {listed:?}: {text}"
             );
         }
         for expected in shown {
-            assert!(text.contains(expected), "{tab:?} shows {expected}: {text}");
+            assert!(
+                text.contains(expected),
+                "{section:?} shows {expected}: {text}"
+            );
         }
         for unexpected in hidden {
             assert!(
                 !text.contains(unexpected),
-                "{tab:?} hides {unexpected}: {text}"
+                "{section:?} hides {unexpected}: {text}"
             );
         }
-        for gone in ["Token lifetime", "Current lifetime"] {
-            assert!(!text.contains(gone), "{tab:?}: {gone} is gone: {text}");
+        for gone in ["Token lifetime", "Current lifetime", "Done"] {
+            assert!(!text.contains(gone), "{section:?}: {gone} is gone: {text}");
         }
     }
 }
 
-/// At the minimum size of the window, each tab draws its tab bar, its first group, and
-/// "Done", and no text goes past the right edge of the window.
+/// At the smallest window, with the sidebar full, as a rail, and floating, each section
+/// draws its list and its first group, and no text goes past the right edge.
 #[test]
-fn each_tab_draws_at_the_minimum_window_size() {
+fn each_section_draws_at_the_minimum_window_size() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&dir);
-    for (tab, shown, _) in cases() {
-        app.ui.settings_tab = tab;
-        let (text, texts) = frames(&mut app, MIN_SIZE);
-        for label in SettingsTab::ALL.map(SettingsTab::label) {
-            assert!(text.contains(label), "{tab:?}: {label}: {text}");
-        }
-        assert!(text.contains(shown[0]), "{tab:?}: {}: {text}", shown[0]);
-        assert!(text.contains("Done"), "{tab:?}: Done: {text}");
-        for (painted, rect) in &texts {
-            assert!(
-                rect.right() <= MIN_SIZE.x + 0.5 && rect.left() >= -0.5,
-                "{tab:?}: \"{painted}\" at {rect:?} is outside the window"
-            );
+    for (hidden, float) in [(false, false), (true, false), (false, true)] {
+        app.ui.sidebar_hidden = hidden;
+        for (section, shown, _) in cases() {
+            super::super::open_settings(&mut app, section);
+            app.ui.sidebar_float = float;
+            let (text, texts) = frames(&mut app, MIN);
+            assert!(text.contains("Settings"), "{section:?}: {text}");
+            assert!(text.contains(shown[0]), "{section:?}: {}: {text}", shown[0]);
+            for (painted, rect) in &texts {
+                assert!(
+                    rect.right() <= MIN.x + 0.5 && rect.left() >= -0.5,
+                    "{section:?}: \"{painted}\" at {rect:?} is outside the window"
+                );
+            }
         }
     }
 }
 
-/// A click on a tab of the toolbar selects it.
+/// The gear at the bottom of the sidebar and ⌘, open Settings, with the section that was
+/// open last. A click on a section in the list selects it. A click on a sidebar row
+/// leaves Settings for that place.
 #[test]
-fn a_click_on_a_tab_selects_it() {
+fn the_gear_and_command_comma_open_settings_and_the_sidebar_leaves_it() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&dir);
     let ctx = egui::Context::default();
+    let texts = frame(&ctx, &mut app, DEFAULT, Vec::new());
+    assert!(app.place.is_credentials());
+    // The gear is the last control of the sidebar footer, at its right edge.
+    let gear = Pos2::new(
+        super::super::kit::SIDEBAR_WIDTH - 10.0 - 14.0,
+        DEFAULT.y - 10.0 - 26.0,
+    );
+    drop(texts);
+    click(&ctx, &mut app, DEFAULT, gear);
+    assert_eq!(app.place, Place::Settings, "the gear opens Settings");
+    assert_eq!(app.ui.settings_section, SettingsSection::Vault);
+
+    // A click on each section in the list selects it.
+    let list_right = super::super::kit::SIDEBAR_WIDTH + super::super::kit::LIST_WIDTH;
     for target in [
-        SettingsTab::Devices,
-        SettingsTab::Security,
-        SettingsTab::Advanced,
-        SettingsTab::General,
+        SettingsSection::Devices,
+        SettingsSection::Updates,
+        SettingsSection::Security,
     ] {
-        let texts = frame(&ctx, &mut app, MIN_SIZE, Vec::new());
-        let at = texts
-            .iter()
-            .find(|(text, _)| text == target.label())
-            .map(|(_, rect)| rect.center())
-            .unwrap_or_else(|| panic!("{} is on the tab bar", target.label()));
-        let button = |pressed| Event::PointerButton {
-            pos: at,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: Modifiers::NONE,
-        };
-        frame(&ctx, &mut app, MIN_SIZE, vec![Event::PointerMoved(at)]);
-        frame(&ctx, &mut app, MIN_SIZE, vec![button(true)]);
-        frame(&ctx, &mut app, MIN_SIZE, vec![button(false)]);
-        assert_eq!(app.ui.settings_tab, target);
+        let texts = frame(&ctx, &mut app, DEFAULT, Vec::new());
+        let at = center_of(&texts, target.label(), list_right)
+            .unwrap_or_else(|| panic!("{} is in the list", target.label()));
+        click(&ctx, &mut app, DEFAULT, at);
+        assert_eq!(app.ui.settings_section, target);
+        assert_eq!(app.place, Place::Settings);
     }
+
+    // A sidebar row leaves Settings.
+    let texts = frame(&ctx, &mut app, DEFAULT, Vec::new());
+    let decisions = center_of(&texts, "Decisions", super::super::kit::SIDEBAR_WIDTH)
+        .expect("the sidebar has Decisions");
+    click(&ctx, &mut app, DEFAULT, decisions);
+    assert_eq!(app.place, Place::Decisions, "the sidebar leaves Settings");
+
+    // ⌘, comes back to the section that was open last; ⌘1 leaves.
+    press(&ctx, &mut app, Key::Comma, Modifiers::COMMAND);
+    assert_eq!(app.place, Place::Settings, "⌘, opens Settings");
+    assert_eq!(app.ui.settings_section, SettingsSection::Security);
+    press(&ctx, &mut app, Key::Num1, Modifiers::COMMAND);
+    assert_eq!(app.place, Place::CREDENTIALS);
+}
+
+/// A sheet that a section opens shows over the main window, with Settings behind it.
+/// Esc closes the sheet and Settings stays.
+#[test]
+fn a_sheet_of_settings_shows_over_the_window() {
+    let dir = TempDir::new().expect("temp dir");
+    let (mut app, _) = unlocked_app_with_item(&dir);
+    super::super::open_settings(&mut app, SettingsSection::Vault);
+    app.ui.sheet = Some(super::Sheet::Backup);
+    let (text, _) = frames(&mut app, DEFAULT);
+    assert!(text.contains("Back up the vault"), "{text}");
+    assert!(text.contains("Settings"), "{text}");
+    let ctx = egui::Context::default();
+    press(&ctx, &mut app, Key::Escape, Modifiers::NONE);
+    assert!(app.ui.sheet.is_none(), "Esc closes the sheet");
+    assert_eq!(app.place, Place::Settings, "and Settings stays");
+    press(&ctx, &mut app, Key::Escape, Modifiers::NONE);
+    assert_eq!(app.place, Place::Settings, "Esc does not leave a view");
 }
 
 /// The state of the relay switch in the AccessKit tree of three frames: disabled, and
@@ -227,9 +335,7 @@ fn relay_switch(app: &mut DesktopApp) -> (bool, Option<egui::accesskit::Toggled>
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, TALL)),
             ..Default::default()
         };
-        let output = ctx.run_ui(input, |ui| {
-            egui::CentralPanel::default().show(ui, |ui| content(app, ui));
-        });
+        let output = ctx.run_ui(input, |ui| super::super::draw(app, ui));
         if let Some(update) = &output.platform_output.accesskit_update {
             for (_, node) in &update.nodes {
                 if node.label() == Some(RELAY_QUESTIONS) {
@@ -242,14 +348,14 @@ fn relay_switch(app: &mut DesktopApp) -> (bool, Option<egui::accesskit::Toggled>
     switch.expect("the relay switch is in the AccessKit tree")
 }
 
-/// "Send questions through the relay" is on the Devices tab and off by default. A vault
+/// "Send questions through the relay" is in Settings > Devices and off by default. A vault
 /// that is not on the relay can turn it on too: through a notifications-only team, so
 /// the switch says so. A locked vault cannot change it.
 #[test]
 fn the_relay_questions_switch_offers_a_team_without_relay_sync() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&dir);
-    app.ui.settings_tab = SettingsTab::Devices;
+    super::super::open_settings(&mut app, SettingsSection::Devices);
     let (disabled, toggled) = relay_switch(&mut app);
     assert!(!disabled, "the relay switch is enabled");
     assert_eq!(toggled, Some(egui::accesskit::Toggled::False), "and off");
@@ -260,10 +366,11 @@ fn the_relay_questions_switch_offers_a_team_without_relay_sync() {
         "no iPhone before it is on: {text}"
     );
 
+    // A lock leaves Settings, and a locked vault has no relay state to change.
     app.owner_ui.session.lock().expect("lock");
-    let (disabled, toggled) = relay_switch(&mut app);
-    assert!(disabled, "a locked vault cannot change it");
-    assert_eq!(toggled, Some(egui::accesskit::Toggled::False));
+    assert_eq!(super::relay_questions_state(&app), None);
+    frames(&mut app, TALL);
+    assert!(app.place.is_credentials(), "a lock leaves Settings");
 }
 
 /// With relay sync, the switch is enabled and still off by default. On is a new channel
@@ -278,7 +385,7 @@ fn the_relay_questions_switch_needs_the_owner_check_to_go_on() {
     let relay = fake_relay::FakeRelay::start();
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&dir);
-    app.ui.settings_tab = SettingsTab::Devices;
+    super::super::open_settings(&mut app, SettingsSection::Devices);
     let vault = app.owner_ui.session.shared_vault();
     let key = crate::sync::DeviceKey::generate().expect("key");
     vault
@@ -449,59 +556,4 @@ fn device_rows_say_how_each_device_answers() {
         device_words(&waiting, false, None),
         "iPhone · its Face ID key has not synced yet"
     );
-}
-
-/// Settings in place of the main window: Esc and ⌘W close it. Esc with a sheet open
-/// closes the sheet only.
-#[test]
-fn escape_and_command_w_close_settings() {
-    let dir = TempDir::new().expect("temp dir");
-    let (mut app, _) = unlocked_app_with_item(&dir);
-    let ctx = egui::Context::default();
-    let run = |app: &mut DesktopApp, mut events: Vec<Event>| {
-        for _ in 0..3 {
-            let input = RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1180.0, 760.0))),
-                events: std::mem::take(&mut events),
-                ..Default::default()
-            };
-            let output = ctx.run_ui(input, |ui| super::super::draw(app, ui));
-            output.drop_without_applying_deltas();
-        }
-    };
-    let press = |app: &mut DesktopApp, key: Key, modifiers: Modifiers| {
-        // The window draws first: a new sheet is invisible in its first frame.
-        run(app, Vec::new());
-        run(
-            app,
-            vec![Event::Key {
-                key,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers,
-            }],
-        );
-    };
-    super::open(&mut app, SettingsTab::Security);
-    press(&mut app, Key::Escape, Modifiers::NONE);
-    assert!(!app.settings_open, "Esc closes Settings");
-
-    super::open(&mut app, SettingsTab::Security);
-    press(&mut app, Key::W, Modifiers::COMMAND);
-    assert!(!app.settings_open, "⌘W closes Settings");
-
-    super::open(&mut app, SettingsTab::Security);
-    app.ui.sheet = Some(super::Sheet::Backup);
-    press(&mut app, Key::Escape, Modifiers::NONE);
-    assert!(app.ui.sheet.is_none(), "Esc closes the sheet");
-    assert!(app.settings_open, "and Settings stays");
-    press(&mut app, Key::Escape, Modifiers::NONE);
-    assert!(!app.settings_open, "the next Esc closes Settings");
-}
-
-/// The old Notifications tab opens Devices, which has its sections.
-#[test]
-fn the_old_notifications_tab_opens_devices() {
-    assert_eq!(SettingsTab::Notifications, SettingsTab::Devices);
 }

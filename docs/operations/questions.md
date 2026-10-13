@@ -31,7 +31,7 @@ Only these steps, after the owner check, write the row of a Mac. The questions w
 
 ## Devices, "Add an iPhone or a Mac…", and "Remove…"
 
-While it is on, Settings > Devices lists each live `trusted_device` of the vault: "This Mac", "Mac · answers after Touch ID", "iPhone · answers with Face ID", or "iPhone · its Face ID key has not synced yet" (no `answer_key` yet). It reads `GET /v1/devices` of the questions team every 30 seconds while the tab shows and adds "Push on" or "Push off" to a device when the relay says so (an optional `push` field of the device; the relay of R4 does not send it yet, so the state shows only when it does). The relay's device list is never the source of a key.
+While it is on, Settings > Devices lists each live `trusted_device` of the vault: "This Mac", "Mac · answers after Touch ID", "iPhone · answers with Face ID", or "iPhone · its Face ID key has not synced yet" (no `answer_key` yet). It reads `GET /v1/devices` of the questions team every 30 seconds while the section shows and adds "Push on" or "Push off" to a device when the relay says so (an optional `push` field of the device; the relay of R4 does not send it yet, so the state shows only when it does). The relay's device list is never the source of a key.
 
 "Add an iPhone or a Mac…" links a device to the questions team:
 

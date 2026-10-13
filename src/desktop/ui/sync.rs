@@ -174,7 +174,7 @@ pub(crate) struct Notice {
     pub(crate) vault: String,
 }
 
-/// A sync sheet in Settings > Devices > Sync.
+/// A sync sheet in Settings > Vault > Sync.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SyncSheet {
     /// "Choose folder…": a folder path for the vault.
@@ -324,7 +324,7 @@ fn folder_label(folders: &[SyncFolder], path: &Path) -> String {
         .map_or_else(|| path.display().to_string(), |folder| folder.label.clone())
 }
 
-/// Where a vault syncs, in a few words, for Settings > General > Vaults: "Not synced",
+/// Where a vault syncs, in a few words, for Settings > Vault: "Not synced",
 /// "Apassy relay", or the synced folder.
 pub(super) fn method_words(app: &DesktopApp, entry: &VaultEntry) -> String {
     match entry.sync.as_ref().filter(|_| entry.sync_state().is_some()) {
@@ -466,7 +466,7 @@ pub(crate) fn relink_states(data_dir: &Path, registry: &mut Registry) -> Option<
             line.push(' ');
         }
         line.push_str(
-            "Apassy could not link the sync of a vault in another folder. Open that vault, then choose its synced folder again in Settings > Devices > Sync; Apassy then merges with the same file.",
+            "Apassy could not link the sync of a vault in another folder. Open that vault, then choose its synced folder again in Settings > Vault > Sync; Apassy then merges with the same file.",
         );
     }
     Some(line)
@@ -794,7 +794,7 @@ impl DesktopApp {
         if self.is_relay(id) {
             self.sync.notice = Some(Notice {
                 title: format!("The copy of “{vault}” on the relay fails a check"),
-                text: "Apassy did not merge it, and the vault on this Mac did not change. Apassy does not download that copy again until it changes. If no other Mac can repair it, replace it with this Mac's vault. Also look at the Macs in Settings > Devices > Sync > Devices…, and remove a Mac that you do not know.".to_owned(),
+                text: "Apassy did not merge it, and the vault on this Mac did not change. Apassy does not download that copy again until it changes. If no other Mac can repair it, replace it with this Mac's vault. Also look at the Macs in Settings > Vault > Sync > Devices…, and remove a Mac that you do not know.".to_owned(),
                 warning: true,
                 vault: id.to_owned(),
             });
@@ -802,7 +802,7 @@ impl DesktopApp {
         }
         self.sync.notice = Some(Notice {
             title: format!("The synced copy of “{vault}” is damaged"),
-            text: "The file in the synced folder fails a check, so Apassy did not merge it. The vault on this Mac did not change. If no other Mac can repair it, replace it with this Mac's vault in Settings > Devices > Sync.".to_owned(),
+            text: "The file in the synced folder fails a check, so Apassy did not merge it. The vault on this Mac did not change. If no other Mac can repair it, replace it with this Mac's vault in Settings > Vault > Sync.".to_owned(),
             warning: true,
             vault: id.to_owned(),
         });
@@ -923,7 +923,7 @@ impl DesktopApp {
         }
     }
 
-    /// "Sync now" in Settings > Devices > Sync.
+    /// "Sync now" in Settings > Vault > Sync.
     pub(crate) fn sync_now(&mut self) {
         let Some((id, sync)) = self.sync_current() else {
             return;
@@ -1513,7 +1513,7 @@ fn sync_picker(
     pick
 }
 
-/// Settings > Devices > Sync: each vault, its folder or the relay, its status, and its
+/// Settings > Vault > Sync: each vault, its folder or the relay, its status, and its
 /// actions.
 pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     if !app.sync.offered {
@@ -1540,9 +1540,7 @@ pub(super) fn settings_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     super::settings::rows::section(
         ui,
         Some("Sync"),
-        Some(
-            "An encrypted copy syncs through a folder (iCloud Drive, Dropbox, a network share) or the Apassy relay. Agents and your answers stay on each Mac.",
-        ),
+        Some("An encrypted copy syncs. Agents and your answers stay on each Mac."),
         |g| {
             for entry in app.vault_list.registry.entries() {
                 let open_unlocked = unlocked && Some(&entry.id) == current.as_ref();
@@ -2138,7 +2136,7 @@ pub(super) fn after_create(app: &mut DesktopApp) -> Result<Option<String>, Strin
             folder_label(&app.sync.folders, &folder)
         ))),
         Err(message) => Err(format!(
-            "The vault is ready, but sync is off: {message} Turn it on later in Settings > Devices > Sync."
+            "The vault is ready, but sync is off: {message} Turn it on later in Settings > Vault > Sync."
         )),
     }
 }

@@ -1121,7 +1121,7 @@ impl DesktopApp {
                 // An open sheet closes first, and its typed secrets are erased.
                 super::ui::close_sheet(self, ctx);
                 self.owner_ui.restore_source = path.display().to_string();
-                super::ui::open_settings(self, super::ui::SettingsTab::Security);
+                super::ui::open_settings(self, super::ui::SettingsSection::Vault);
                 self.ui.sheet = Some(super::ui::Sheet::Restore);
                 bring_to_front(ctx);
                 done(

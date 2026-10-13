@@ -1,4 +1,4 @@
-//! Import from 1Password: Settings > General > Import. A sheet with three steps: the path of the
+//! Import from 1Password: Settings > Vault > Import. A sheet with three steps: the path of the
 //! export file, a preview with a switch for each item, and the result.
 //!
 //! The parsed preview holds the secrets of the export in erasing buffers. The app drops
@@ -193,7 +193,7 @@ fn existing_items(
 
 // ---- Settings section. ----
 
-/// Settings > General > Import: one row with "Import…".
+/// Settings > Vault > Import: one row with "Import…".
 pub(super) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     use super::settings::rows;
 
@@ -750,8 +750,8 @@ mod tests {
         );
         let ctx = egui::Context::default();
 
-        // Settings > General has the section.
-        crate::desktop::ui::open_settings(&mut app, crate::desktop::ui::SettingsTab::General);
+        // Settings > Vault has the section.
+        crate::desktop::ui::open_settings(&mut app, crate::desktop::ui::SettingsSection::Vault);
         let text = frames(&ctx, &mut app, Vec::new());
         assert!(
             text.contains("1Password") && text.contains("Import…"),

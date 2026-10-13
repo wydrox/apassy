@@ -2,7 +2,7 @@
 //!
 //! The command writes the native messaging host manifest `com.wydrox.apassy.json` into
 //! the `NativeMessagingHosts` folder of each Chromium browser that it finds
-//! ([`crate::browser::install`]). Settings > General > Browser extension in the app does the same.
+//! ([`crate::browser::install`]). Settings > Tools > Browser extension in the app does the same.
 //! It needs no session: it gives no access to the vault.
 
 use std::path::Path;
@@ -14,7 +14,7 @@ use crate::browser::install::{self, BROWSERS, Browser, Install, State};
 pub const HELP: &str = "\
 apassy setup browser [--browser NAME] [--remove]
 
-Connect the Apassy browser extension. Settings > General > Browser extension in the app does the
+Connect the Apassy browser extension. Settings > Tools > Browser extension in the app does the
 same with one click for each browser.
   1. Write the native messaging host manifest com.wydrox.apassy.json for each browser
      that is on this Mac: helium, chrome, chromium, brave, edge, arc, vivaldi.

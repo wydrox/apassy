@@ -837,8 +837,8 @@ fn arrows_change_a_picker_without_moving_the_focus() {
     );
 }
 
-/// ⌘1 to ⌘3 switch the place, ⌘, opens the Settings window, ⌘[ leaves the credential,
-/// and ⌘L locks.
+/// ⌘1 to ⌘3 switch the place, ⌘, opens Settings, ⌘[ leaves the credential, and ⌘L
+/// locks.
 #[test]
 fn shortcuts_switch_places_open_settings_go_back_and_lock() {
     let dir = TempDir::new().expect("temp dir");
@@ -862,27 +862,31 @@ fn shortcuts_switch_places_open_settings_go_back_and_lock() {
         );
     }
     window.press(&mut app, Key::Comma, Modifiers::COMMAND);
-    assert!(app.settings_open, "⌘, opens the Settings window");
-    assert!(window.text.contains("General"), "{}", window.text);
-    // Settings stands in place of the window here: ⌘2 goes on to Decisions.
+    assert_eq!(app.place, Place::Settings, "⌘, opens Settings");
+    assert!(window.text.contains("Security"), "{}", window.text);
+    assert!(
+        window.focused().is_some(),
+        "the list of the sections took the focus"
+    );
+    // Settings is a place: ⌘2 goes on to Decisions.
     window.press(&mut app, Key::Num2, Modifiers::COMMAND);
     assert_eq!(app.place, Place::Decisions);
-    assert!(!app.settings_open);
     window.press(&mut app, Key::Comma, Modifiers::COMMAND);
-    window.press(&mut app, Key::W, Modifiers::COMMAND);
-    assert!(!app.settings_open, "⌘W closes Settings");
+    assert_eq!(app.place, Place::Settings);
     window.press(&mut app, Key::L, Modifiers::COMMAND);
     assert!(app.owner_ui.session.is_locked(), "⌘L locks");
 }
 
-/// Tab through Settings > Advanced, which is longer than the window: the page scrolls,
-/// so each focused control is on screen. Page Down scrolls it without a focus.
+/// Tab through Settings > Updates with the keyboard shortcuts shown, which is longer
+/// than the window: the page scrolls, so each focused control is on screen. Page Down
+/// scrolls it without a focus.
 #[test]
 fn the_page_scrolls_to_the_focus_and_with_page_keys() {
     let dir = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&dir);
-    super::open_settings(&mut app, super::SettingsTab::Advanced);
+    super::open_settings(&mut app, super::SettingsSection::Updates);
     let mut window = Window::new();
+    show_shortcuts(&window);
     window.idle(&mut app);
     let screen = Rect::from_min_size(Pos2::ZERO, SIZE);
     let mut below_the_fold = 0;
@@ -908,32 +912,36 @@ fn the_page_scrolls_to_the_focus_and_with_page_keys() {
     let mut fresh = Window::new();
     let second = TempDir::new().expect("temp dir");
     let (mut app, _) = unlocked_app_with_item(&second);
-    super::open_settings(&mut app, super::SettingsTab::Advanced);
+    super::open_settings(&mut app, super::SettingsSection::Updates);
+    show_shortcuts(&fresh);
     fresh.idle(&mut app);
-    let top = text_top(&fresh, "Bouncer").expect("the top of Settings shows");
-    assert_eq!(
-        text_top(&fresh, "Contract"),
-        None,
-        "the bottom is out of view"
-    );
+    // The first row of Updates, and the last shortcut.
+    const TOP: &str = "Check for updates automatically";
+    const BOTTOM: &str = "Close the sheet, a menu, or an error";
+    let top = text_top(&fresh, TOP).expect("the top of Settings shows");
+    assert_eq!(text_top(&fresh, BOTTOM), None, "the bottom is out of view");
     fresh.press(&mut app, Key::PageDown, Modifiers::NONE);
-    let after = text_top(&fresh, "Bouncer");
+    let after = text_top(&fresh, TOP);
     assert!(
         after.is_none_or(|after| after < top - SIZE.y / 2.0),
         "Page Down scrolled: {top} -> {after:?}"
     );
     fresh.press(&mut app, Key::PageUp, Modifiers::NONE);
-    let back = text_top(&fresh, "Bouncer").expect("Page Up came back");
+    let back = text_top(&fresh, TOP).expect("Page Up came back");
     assert!((back - top).abs() < 2.0, "{top} -> {back}");
     fresh.press(&mut app, Key::End, Modifiers::NONE);
-    assert!(
-        text_top(&fresh, "Contract").is_some(),
-        "End shows the bottom"
-    );
-    assert_eq!(text_top(&fresh, "Bouncer"), None);
+    assert!(text_top(&fresh, BOTTOM).is_some(), "End shows the bottom");
+    assert_eq!(text_top(&fresh, TOP), None);
     fresh.press(&mut app, Key::Home, Modifiers::NONE);
-    let home = text_top(&fresh, "Bouncer").expect("Home scrolled back up");
+    let home = text_top(&fresh, TOP).expect("Home scrolled back up");
     assert!((home - top).abs() < 2.0, "{top} -> {home}");
+}
+
+/// "Show" of Settings > Updates > Keyboard shortcuts, as a click leaves it.
+fn show_shortcuts(window: &Window) {
+    window.ctx.data_mut(|data| {
+        data.insert_temp(egui::Id::new(("apassy-settings-more", "shortcuts")), true);
+    });
 }
 
 /// Escape closes an error message when no sheet is open.

@@ -43,7 +43,7 @@ For a new vault: on the Create screen, pick a folder in "Sync". It is off by def
 For a vault that you have:
 
 1. Open and unlock the vault.
-2. In Settings > Devices, find the section "Sync". Open the menu in the row of the vault (it says "Off").
+2. In Settings > Vault, find the group "Sync". Open the menu in the row of the vault (it says "Off").
 3. Pick "iCloud Drive", another detected folder (Dropbox, Google Drive, OneDrive), or "Choose folder…" and type the path of any folder that a sync service keeps in step.
 
 Apassy then:
@@ -61,7 +61,7 @@ The detected folders are iCloud Drive, each folder in `~/Library/CloudStorage` (
 - **At unlock**, before you see the list. A merge that brought changes says so: "Sync brought 2 changed credentials from Mac mini."
 - **While the vault is unlocked**: every 30 seconds Apassy looks at the synced file and merges it when it changed. A few seconds (5 to 8) after you stop changing credentials, it pushes. This runs in the background, also when the window is hidden, minimized, or covered, or the display sleeps.
 - **Before each lock**: "Lock now", the lock button, a switch to another vault, "New vault…" or "Open vault file…" from an open vault, a backup, a restore over an open vault, a quit, and "Restart now" for an update.
-- **"Sync now"** in Settings > Devices > Sync.
+- **"Sync now"** in Settings > Vault > Sync.
 
 Never while an agent run waits for you. A sync never stops a lock or a quit: a failure shows once as a note, and the changes stay on this Mac until the next sync.
 
@@ -102,7 +102,7 @@ An old copy of the synced file (for example from a backup of the folder) has onl
 
 ## 7. Status
 
-Settings > Devices > Sync shows each synced vault with a tag and a line:
+Settings > Vault > Sync shows each synced vault with a tag and a line:
 
 | Tag | Line | What to do |
 | --- | --- | --- |
@@ -130,7 +130,7 @@ If you do not know the old passphrase any more, you cannot unlock this Mac's cop
 ## 9. Another Mac, or a teammate
 
 1. The synced folder must be on the Mac: sign in to iCloud Drive, or set up Dropbox, Syncthing, or the share.
-2. In Apassy, click "Open a synced vault…" on the welcome screen or the unlock screen, or in Settings > Devices > Sync.
+2. In Apassy, click "Open a synced vault…" on the welcome screen or the unlock screen, or in Settings > Vault > Sync.
 3. Pick a file from the list (the `.apassy` files in the detected folders that are not in your list), or type the path of any `.apassy` file.
 4. Type a name and the passphrase of the vault, and click "Open synced vault".
 
@@ -272,7 +272,7 @@ The tests use temporary folders. They do not test a sync service itself.
 
 ### 17.1 Turn it on
 
-1. Open and unlock the vault. In Settings > Devices > Sync, open the menu of the vault and pick "Apassy relay". It is after the detected folders.
+1. Open and unlock the vault. In Settings > Vault > Sync, open the menu of the vault and pick "Apassy relay". It is after the detected folders.
 2. The sheet "Sync “<vault>” through the Apassy relay" has two ways:
    - "New relay copy": the relay address (`https://apassy-relay.wyderka.cc` by default), the team code from the operator of the relay (`apassy_tcd_…`; it works once, so the field is masked and its text goes after each try), and the name of this Mac. "Turn on" makes a team for the vault on the relay and a key for this Mac, and pushes the first copy. A wrong, used, or expired code changes nothing. A vault that syncs with a folder keeps its folder sync until relay sync is on, and keeps it when the relay refuses ("Folder sync stays on."). While relay sync turns on or off, the Sync menu of the vault waits.
    - "Join from another Mac": for a vault that is on the relay already, for example after relay sync was off on this Mac. Paste a link of "Add a device…" from a Mac that syncs the vault, select "Send link", and confirm on that Mac (17.2). Apassy merges the relay copy with this vault and pushes. A relay copy of another vault is refused. When the relay copy has another passphrase than this vault, the sheet asks for it: "The relay copy of “<vault>” uses another passphrase than this vault", with the field "Passphrase of the copy" and "Merge". The relay copy is the copy of your other Macs, so, as in section 8, the vault takes that passphrase, then merges the copy and uploads the result: you unlock it with the passphrase of the copy from then on. Touch ID unlock has the old passphrase: turn it on again in Settings > Security. An old passphrase of this Mac, maybe one that leaked, does not come back, and your other Macs go on with no question. A wrong passphrase changes nothing; type it again. The step stays on the screen while the merge runs. When the merge fails after the passphrase opened the copy (the network, a lock), the message says that the vault uses the passphrase of the copy now; join again, with no passphrase step. "Cancel" removes the new device of this Mac from the relay again.
@@ -305,7 +305,7 @@ The tests use temporary folders. They do not test a sync service itself.
 | Sync paused | The relay limits the pushes of this vault for this hour. The changes stay on this Mac and sync later. |
 | Damaged copy | The copy on the relay fails a check. Apassy did not use it, and does not download it again until it changes. |
 | Removed from the relay | Removed from the relay. This Mac keeps its vault. Turn relay sync off, then join again with a link from another Mac. |
-| Relay copy refused | The relay served a copy that does not include this Mac's last change (or an older copy than this Mac saw). To go on, select “Use the relay copy…” in Settings > Devices > Sync. |
+| Relay copy refused | The relay served a copy that does not include this Mac's last change (or an older copy than this Mac saw). To go on, select “Use the relay copy…” in Settings > Vault > Sync. |
 | Needs a passphrase | as in section 8; after "Use the relay copy": The copy on the relay uses another passphrase than this vault. It can be from before a passphrase change. Type the passphrase of that copy. |
 
 A Mac that another Mac removed shows "Removed from the relay" as soon as the relay refuses it: at its next sync, or when its long poll ends (at most 25 seconds later). From then on Apassy makes no relay call for that vault: no sign-in, no long poll, no sync, no device call, also after a lock and an unlock, and the step before a lock does not push. The vault on this Mac stays, and folder sync and the other vaults go on. A relay that is suspended or stops refuses a Mac the same way, so Apassy asks once more 15 minutes after the last refusal, and after a new start of the app: when the relay knows the Mac again, sync goes on and the status goes. Turn relay sync off ("Off" in the menu: Apassy asks the relay to remove this Mac, and the message says when it was no longer in the team), then use "Join from another Mac" with a new link to sync again. While the vault shows "Removed from the relay", Settings has only the sync menu for it: "Sync now", "Add a device…", and "Devices…" do not show, since each of them would fail at once.

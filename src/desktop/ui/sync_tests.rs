@@ -227,8 +227,7 @@ fn create_with_sync_writes_the_file_and_settings_shows_the_status() {
         Some(file)
     );
 
-    app.settings_open = true;
-    app.ui.settings_tab = super::SettingsTab::Devices;
+    super::open_settings(&mut app, super::SettingsSection::Vault);
     let text = frames(&mut app);
     for expected in [
         "Sync",
@@ -249,8 +248,7 @@ fn the_sync_picker_turns_on_moves_and_turns_off() {
     create(&mut app, "Personal", PASS, None);
     assert!(!folders.icloud.exists() && !folders.dropbox.exists());
     let id = current_id(&app);
-    app.settings_open = true;
-    app.ui.settings_tab = super::SettingsTab::Devices;
+    super::open_settings(&mut app, super::SettingsSection::Vault);
     let text = frames(&mut app);
     assert!(text.contains("Sync is off."), "{text}");
 
@@ -584,8 +582,7 @@ fn an_unreachable_folder_never_blocks_a_lock_or_an_unlock() {
     a.sync_refresh();
     let id = current_id(&a);
     assert_eq!(a.sync.statuses.get(&id), Some(&UiStatus::FolderUnavailable));
-    a.settings_open = true;
-    a.ui.settings_tab = super::SettingsTab::Devices;
+    super::open_settings(&mut a, super::SettingsSection::Vault);
     let text = frames(&mut a);
     assert!(text.contains("Folder not available"), "{text}");
     fs::rename(&away, &drive).expect("sign in");
@@ -633,8 +630,7 @@ fn without_sync_the_app_shows_no_sync_control() {
     let text = frames(&mut app);
     assert!(!text.contains("synced vault"), "{text}");
     create(&mut app, "Personal", PASS, None);
-    app.settings_open = true;
-    app.ui.settings_tab = super::SettingsTab::Devices;
+    super::open_settings(&mut app, super::SettingsSection::Vault);
     let text = frames(&mut app);
     assert!(!text.contains("Sync now"), "{text}");
     app.start_sync_worker(&egui::Context::default());
@@ -1041,8 +1037,7 @@ fn add_a_device_shows_the_link_as_a_qr_code_for_the_iphone() {
     let folders = folders();
     let relay = fake_relay::FakeRelay::start();
     let (mut a, id) = relay_mac_a(&folders, &relay);
-    a.settings_open = true;
-    a.ui.settings_tab = super::SettingsTab::Devices;
+    super::open_settings(&mut a, super::SettingsSection::Vault);
     a.sync_open_sheet(SyncSheet::AddMac { id: id.clone() }, None);
     let text = settled_frames(&mut a);
     let link = a.relay_add_mac_link_for_test().expect("a link");
@@ -1138,8 +1133,7 @@ fn the_relay_setup_sheet_asks_for_the_address_the_team_code_and_the_name() {
     let mut a = folders.mac("mac-a");
     create(&mut a, "Personal", PASS, None);
     let id = current_id(&a);
-    a.settings_open = true;
-    a.ui.settings_tab = super::SettingsTab::Devices;
+    super::open_settings(&mut a, super::SettingsSection::Vault);
     a.sync_open_sheet(SyncSheet::RelaySetup { id: id.clone() }, None);
     assert_eq!(a.sync.relay.url_input, crate::sync::DEFAULT_RELAY_URL);
     assert!(!a.sync.relay.device_input.is_empty(), "this Mac's name");
@@ -1229,8 +1223,7 @@ fn add_a_mac_shows_a_link_then_the_safety_words_and_confirm_needs_the_owner_chec
     let folders = folders();
     let relay = fake_relay::FakeRelay::start();
     let (mut a, id) = relay_mac_a(&folders, &relay);
-    a.settings_open = true;
-    a.ui.settings_tab = super::SettingsTab::Devices;
+    super::open_settings(&mut a, super::SettingsSection::Vault);
     let text = frames(&mut a);
     for expected in [
         "Saved to the relay",
@@ -1513,8 +1506,7 @@ fn relay_statuses_read_as_in_the_adr() {
         a.sync.statuses.get(&id),
         Some(&problem(SyncError::RelayUnreachable))
     );
-    a.settings_open = true;
-    a.ui.settings_tab = super::SettingsTab::Devices;
+    super::open_settings(&mut a, super::SettingsSection::Vault);
     let text = frames(&mut a);
     assert!(
         text.contains("Relay not reachable. Apassy syncs when it is back."),
@@ -1587,8 +1579,7 @@ fn a_removed_mac_offers_only_turning_relay_sync_off() {
     let relay = fake_relay::FakeRelay::start();
     let (mut a, id) = relay_mac_a(&folders, &relay);
     let (mut b, id_b) = join_b(&folders, &mut a, &id);
-    b.settings_open = true;
-    b.ui.settings_tab = super::SettingsTab::Devices;
+    super::open_settings(&mut b, super::SettingsSection::Vault);
     let text = settled_frames(&mut b);
     for expected in ["Sync now", "Add a device…", "Devices…"] {
         assert!(text.contains(expected), "{expected}: {text}");
@@ -1647,8 +1638,7 @@ fn turning_relay_sync_off_keeps_the_copy_and_the_last_mac_can_delete_it() {
     let folders = folders();
     let relay = fake_relay::FakeRelay::start();
     let (mut a, id) = relay_mac_a(&folders, &relay);
-    a.settings_open = true;
-    a.ui.settings_tab = super::SettingsTab::Devices;
+    super::open_settings(&mut a, super::SettingsSection::Vault);
     a.sync_open_sheet(SyncSheet::TurnOff { id: id.clone() }, None);
     let text = settled_frames(&mut a);
     assert!(
@@ -1832,8 +1822,7 @@ fn joining_a_relay_copy_under_another_passphrase_asks_for_it() {
         2,
         "the new device waits for the step"
     );
-    b.settings_open = true;
-    b.ui.settings_tab = super::SettingsTab::Devices;
+    super::open_settings(&mut b, super::SettingsSection::Vault);
     let text = frames(&mut b);
     for expected in [
         "uses another passphrase than this vault",
@@ -1913,8 +1902,7 @@ fn the_team_code_field_is_masked_and_erased_after_each_try() {
     let mut a = folders.mac("mac-a");
     create(&mut a, "Personal", PASS, None);
     let id = current_id(&a);
-    a.settings_open = true;
-    a.ui.settings_tab = super::SettingsTab::Devices;
+    super::open_settings(&mut a, super::SettingsSection::Vault);
     a.sync_open_sheet(SyncSheet::RelaySetup { id: id.clone() }, None);
     let ctx = egui::Context::default();
     let _ = frames_in(&ctx, &mut a, Vec::new());
@@ -1986,8 +1974,7 @@ fn removing_a_mac_asks_first_and_return_keeps_it() {
             .expect("number of B");
         vault.ensure_question_key().expect("key").key_id()
     };
-    a.settings_open = true;
-    a.ui.settings_tab = super::SettingsTab::Devices;
+    super::open_settings(&mut a, super::SettingsSection::Vault);
     a.sync_open_sheet(SyncSheet::Devices { id: id.clone() }, None);
     let _ = settled_frames(&mut a);
     let ctx = egui::Context::default();
@@ -2103,8 +2090,7 @@ fn a_quick_click_on_confirm_opens_the_owner_check_on_top_each_time() {
     let folders = folders();
     let relay = fake_relay::FakeRelay::start();
     let (mut a, id) = relay_mac_a(&folders, &relay);
-    a.settings_open = true;
-    a.ui.settings_tab = super::SettingsTab::Devices;
+    super::open_settings(&mut a, super::SettingsSection::Vault);
     let link = new_link(&mut a, &id);
     let mut b = folders.mac("mac-b");
     super::sync::begin_open(&mut b);
@@ -2215,8 +2201,7 @@ fn return_on_a_relay_alert_opened_with_the_pointer_cancels() {
         repeat: false,
         modifiers: egui::Modifiers::NONE,
     };
-    a.settings_open = true;
-    a.ui.settings_tab = super::SettingsTab::Devices;
+    super::open_settings(&mut a, super::SettingsSection::Vault);
     a.sync_open_sheet(SyncSheet::Devices { id: id.clone() }, None);
     let _ = settled_frames(&mut a);
     let ctx = egui::Context::default();
@@ -2262,8 +2247,7 @@ fn relay_calls_of_the_owner_leave_the_window_responsive() {
     create(&mut a, "Personal", PASS, None);
     add_item(&mut a, "Alpha", "SYNTH-alpha");
     let id = current_id(&a);
-    a.settings_open = true;
-    a.ui.settings_tab = super::SettingsTab::Devices;
+    super::open_settings(&mut a, super::SettingsSection::Vault);
 
     // "Turn on" with a slow first upload.
     relay.delay("PUT /v1/sync/snapshot", SLOW);
@@ -2389,8 +2373,7 @@ fn switching_a_relay_vault_to_a_folder_leaves_the_relay_team() {
     let (mut b, id_b) = join_b(&folders, &mut a, &id);
     assert_eq!(relay.devices().len(), 2);
 
-    b.settings_open = true;
-    b.ui.settings_tab = super::SettingsTab::Devices;
+    super::open_settings(&mut b, super::SettingsSection::Vault);
     b.relay_switch_to_folder(&id_b, folders.dropbox.clone(), None);
     let text = settled_frames(&mut b);
     assert!(
@@ -2455,8 +2438,7 @@ fn a_damaged_relay_copy_offers_replace_with_this_macs_vault() {
     a.sync_now();
     a.relay_settle_for_test();
     assert_eq!(a.sync.statuses.get(&id), Some(&UiStatus::Damaged));
-    a.settings_open = true;
-    a.ui.settings_tab = super::SettingsTab::Devices;
+    super::open_settings(&mut a, super::SettingsSection::Vault);
     let text = frames(&mut a);
     assert!(
         text.contains("The copy of “Personal” on the relay fails a check"),
@@ -2514,8 +2496,7 @@ fn received_by_shows_the_receipt_of_the_other_mac() {
     b.relay_settle_for_test();
     assert_eq!(names(&b), vec!["Alpha", "Gamma"]);
 
-    a.settings_open = true;
-    a.ui.settings_tab = super::SettingsTab::Devices;
+    super::open_settings(&mut a, super::SettingsSection::Vault);
     let text = settled_frames(&mut a);
     // The fake relay sends no device names; the real relay does (contract section 9).
     assert!(
@@ -2581,8 +2562,7 @@ fn a_lone_mac_after_a_relay_rollback_uses_the_relay_copy() {
     a.relay_settle_for_test();
     let status = a.sync.statuses.get(&id).cloned().expect("status");
     assert!(super::sync::relay::refused_copy(&status), "{status:?}");
-    a.settings_open = true;
-    a.ui.settings_tab = super::SettingsTab::Devices;
+    super::open_settings(&mut a, super::SettingsSection::Vault);
     let text = frames(&mut a);
     assert!(text.contains("Use the relay copy…"), "{text}");
 
@@ -2649,8 +2629,7 @@ fn use_the_relay_copy_asks_for_the_passphrase_of_an_older_copy() {
     assert!(text.contains("keeps its passphrase"), "{text}");
     assert!(!text.contains("changed on another Mac"), "{text}");
     a.ui.sheet = None;
-    a.settings_open = true;
-    a.ui.settings_tab = super::SettingsTab::Devices;
+    super::open_settings(&mut a, super::SettingsSection::Vault);
     let text = frames(&mut a);
     assert!(text.contains("Type the passphrase of the copy…"), "{text}");
     assert!(
@@ -2863,8 +2842,7 @@ fn questions_through_a_notifications_only_team_need_the_owner_check() {
     let mut a = folders.mac("mac-a");
     create(&mut a, "Personal", PASS, Some(&folders.icloud));
     let id = current_id(&a);
-    a.settings_open = true;
-    a.ui.settings_tab = super::SettingsTab::Devices;
+    super::open_settings(&mut a, super::SettingsSection::Devices);
 
     a.questions_turn_on(None);
     assert!(a.owner.check.is_none(), "the sheet first");
@@ -3021,8 +2999,7 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
     let mut a = folders.mac("mac-a");
     create(&mut a, "Personal", PASS, Some(&folders.icloud));
     let id = current_id(&a);
-    a.settings_open = true;
-    a.ui.settings_tab = super::SettingsTab::Devices;
+    super::open_settings(&mut a, super::SettingsSection::Devices);
     let entry = a.vault_list.registry.get(&id).cloned().expect("entry");
     a.questions_ask_new_team(
         &entry,
@@ -3284,8 +3261,7 @@ fn a_second_mac_joins_the_questions_team_with_a_link() {
             team_id: team.clone()
         }
     );
-    b.settings_open = true;
-    b.ui.settings_tab = super::SettingsTab::Devices;
+    super::open_settings(&mut b, super::SettingsSection::Devices);
     let text = frames(&mut b);
     assert!(
         text.contains(super::settings::RELAY_QUESTIONS_JOIN),
@@ -3298,8 +3274,7 @@ fn a_second_mac_joins_the_questions_team_with_a_link() {
     }
 
     // Mac A makes a link; B pastes it. A link of another team is refused at once.
-    a.settings_open = true;
-    a.ui.settings_tab = super::SettingsTab::Devices;
+    super::open_settings(&mut a, super::SettingsSection::Devices);
     a.questions_add_iphone(None);
     let _ = settled_frames(&mut a);
     let link = a.relay_add_mac_link_for_test().expect("a link");

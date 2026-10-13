@@ -1,6 +1,7 @@
 //! The sidebar (ADR 0026 §1): Personal (all credentials and the folders), Shared (the
 //! shared vaults), Agents (Decisions and Agents), and at the bottom the open vault with
-//! its lock and the Settings button.
+//! its lock and the Settings button. While Settings shows, no row is selected and the
+//! Settings button is.
 //!
 //! The sidebar is full, a rail of icons, or, in a narrow window, a full sidebar that
 //! floats over the list until a choice or a click outside it. The button in its top row
@@ -559,14 +560,20 @@ fn agents_section(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &Pending, ra
     }
 }
 
+/// The Settings button: selected while Settings shows. A click shows Settings.
+fn settings_button(app: &mut DesktopApp, ui: &mut egui::Ui) {
+    let selected = app.place == Place::Settings;
+    if kit::plain_icon_toggle(ui, Icon::Gearshape, "Settings  ⌘,", selected).clicked() {
+        super::settings_view::show(app);
+    }
+}
+
 /// The bottom of the sidebar: the open vault with its lock state and its menu, and the
 /// Settings button. On the rail: the lock and the Settings button.
 fn footer(app: &mut DesktopApp, ui: &mut egui::Ui, rail: bool) {
     ui.add_space(6.0);
     if rail {
-        if kit::plain_icon_button(ui, Icon::Gearshape, "Settings  ⌘,").clicked() {
-            app.open_settings_window();
-        }
+        settings_button(app, ui);
         #[cfg(feature = "vault")]
         if kit::plain_icon_button(ui, Icon::Lock, "Lock the vault  ⌘L").clicked() {
             let ctx = ui.ctx().clone();
@@ -595,14 +602,9 @@ fn footer(app: &mut DesktopApp, ui: &mut egui::Ui, rail: bool) {
             .layout(Layout::top_down(Align::Min)),
         |ui| vault_footer(app, ui),
     );
-    let settings = ui
-        .scope_builder(egui::UiBuilder::new().max_rect(gear), |ui| {
-            kit::plain_icon_button(ui, Icon::Gearshape, "Settings  ⌘,")
-        })
-        .inner;
-    if settings.clicked() {
-        app.open_settings_window();
-    }
+    ui.scope_builder(egui::UiBuilder::new().max_rect(gear), |ui| {
+        settings_button(app, ui);
+    });
 }
 
 /// The open vault, its status, its lock, and its menu (ADR 0013).

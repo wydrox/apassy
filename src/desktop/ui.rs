@@ -65,8 +65,8 @@ mod owner_check_view;
 mod owner_tests;
 #[cfg(feature = "vault")]
 mod settings;
-/// Settings in its own window (ADR 0026 §3).
-mod settings_window;
+/// Settings as a view of the window (ADR 0026 §3).
+mod settings_view;
 mod shell;
 /// The sidebar: full, as a rail of icons, or floating over the list.
 mod sidebar;
@@ -97,7 +97,9 @@ use crate::desktop::{DesktopApp, StatusKind};
 
 pub(crate) use kit::WINDOW as WINDOW_COLOR;
 #[cfg(feature = "vault")]
-pub(crate) use settings::{SettingsTab, open as open_settings};
+pub(crate) use settings::rows as settings_rows;
+#[cfg(feature = "vault")]
+pub(crate) use settings_view::{SettingsSection, open as open_settings};
 
 /// Byte capacity of a passphrase field. A field holds at most `MAX_PASSPHRASE_BYTES`
 /// characters, and a character has at most 4 bytes, so typing never moves the text
@@ -268,12 +270,8 @@ pub(crate) struct UiState {
     /// The shared vaults in the sidebar (ADR 0026 §6). Nothing fills it until the vault
     /// keeps shared vaults; the tests draw synthetic ones.
     pub(crate) shared_vaults: Vec<sidebar::SharedVaultRow>,
-    /// The Settings window comes to the front in the next frame.
-    pub(crate) raise_settings: bool,
-    /// The open sheet belongs to the Settings window: it opened there.
-    pub(crate) settings_sheet: bool,
-    /// The owner check belongs to the Settings window: it opened there.
-    pub(crate) settings_check: bool,
+    /// The section that Settings shows.
+    pub(crate) settings_section: settings_view::SettingsSection,
     /// The selected question of Decisions.
     #[cfg(feature = "vault")]
     pub(crate) decisions: decisions::State,
@@ -289,9 +287,6 @@ pub(crate) struct UiState {
     /// `ui.json`. Only the window sets it, so a test never writes the real folder.
     #[cfg(feature = "vault")]
     prefs_path: Option<std::path::PathBuf>,
-    /// The tab of the Settings view.
-    #[cfg(feature = "vault")]
-    pub(crate) settings_tab: settings::SettingsTab,
     /// The filter of the credential list.
     #[cfg(feature = "vault")]
     pub(crate) credential_filter: items::Filter,
@@ -475,37 +470,28 @@ pub(crate) fn draw(app: &mut DesktopApp, ui: &mut egui::Ui) {
         close_sheet_after_check(app);
         let session = &app.owner_ui.session;
         if !session.has_file() || session.is_locked() {
-            // A lock also hides a token that the owner did not dismiss, and closes the
-            // Settings window: it shows the settings of the open vault.
+            // A lock also hides a token that the owner did not dismiss, and leaves
+            // Settings: it shows the settings of the open vault.
             app.owner_ui.fresh_token = None;
             app.ui.agent_setup = Default::default();
             app.ui.agent_onboarding = Default::default();
             app.ui.agents = Default::default();
             app.ui.decisions = Default::default();
             app.ui.sheet = None;
-            app.settings_open = false;
+            if app.place == crate::desktop::Place::Settings {
+                app.place = crate::desktop::Place::CREDENTIALS;
+            }
             app.import.forget();
             start::draw(app, ui);
-        } else if settings_window::in_place(app, &ctx) {
-            settings_window::draw_in_place(app, ui);
         } else {
             shell::draw(app, ui);
-            settings_window::show(app, &ctx);
         }
     }
     #[cfg(not(feature = "vault"))]
-    if settings_window::in_place(app, &ctx) {
-        settings_window::draw_in_place(app, ui);
-    } else {
-        shell::draw(app, ui);
-        settings_window::show(app, &ctx);
-    }
+    shell::draw(app, ui);
     draw_toast(app, &ctx);
-    // The owner check that opened in the Settings window shows there.
     #[cfg(feature = "vault")]
-    if !settings_window::owns_check(app, &ctx) {
-        owner_check_view::draw(app, &ctx);
-    }
+    owner_check_view::draw(app, &ctx);
     focus::end_frame(&mut app.ui.focus, &ctx);
 }
 
@@ -1029,7 +1015,7 @@ mod tests {
 
     /// Each place draws in three columns at the default and the smallest window size,
     /// with the sidebar full, collapsed to a rail, and floating in a narrow window; and
-    /// the Settings window draws.
+    /// Settings draws as a place, with its sections in the list column.
     #[test]
     fn every_place_draws_at_default_and_minimum_sizes() {
         #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1081,13 +1067,17 @@ mod tests {
                         assert!(text.contains("Drawn folder"), "{at}: {text}");
                     }
                 }
-                app.settings_open = true;
+                app.place = Place::Settings;
                 let (text, _) = draw_frames(&mut app, size, 3);
                 #[cfg(feature = "vault")]
-                assert!(text.contains("General"), "{size:?}: {text}");
+                for section in [
+                    "Vault", "Security", "Devices", "Bouncer", "Tools", "Updates",
+                ] {
+                    assert!(text.contains(section), "{section} at {size:?}: {text}");
+                }
                 #[cfg(not(feature = "vault"))]
                 assert!(text.contains("Rules"), "{size:?}: {text}");
-                assert!(text.contains("Done"), "Settings in place has Done: {text}");
+                assert!(!text.contains("Done"), "Settings is no window: {text}");
                 assert_masked(&text);
             }
         }
@@ -1122,11 +1112,12 @@ mod tests {
         assert!(!text.contains("Reconnect…"), "{text}");
 
         // Settings has no token lifetime (ADR 0025 §3f); the command line sets it.
-        open_settings(&mut app, SettingsTab::Advanced);
-        let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
-        assert!(!text.contains("Current lifetime"), "{text}");
+        for section in SettingsSection::ALL {
+            open_settings(&mut app, section);
+            let (text, _) = draw_frames(&mut app, TALL_SIZE, 3);
+            assert!(!text.contains("Current lifetime"), "{section:?}: {text}");
+        }
 
-        app.settings_open = false;
         app.place = Place::Agents;
         // The command line rotates a token; the sheet saves the settings of the host.
         app.ask_owner(
@@ -1173,7 +1164,7 @@ mod tests {
     fn passphrase_sheet_asks_for_the_new_passphrase_two_times() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let mut app = app_with_vault(&dir);
-        app.settings_open = true;
+        app.place = Place::Settings;
         app.ui.sheet = Some(Sheet::ChangePassphrase);
         let (text, _) = draw_frames(&mut app, DEFAULT_SIZE, 3);
         for label in [

@@ -387,7 +387,7 @@ fn listed_sync_files(data_dir: &Path) -> Result<Vec<PathBuf>, String> {
             None if entry.sync_relay().is_some() => {}
             None => {
                 return Err(format!(
-                    "the vault “{}” syncs, but the vault list has no valid synced file for it, so the host does not start. In Apassy, turn its sync off and on again (Settings > General > Sync).",
+                    "the vault “{}” syncs, but the vault list has no valid synced file for it, so the host does not start. In Apassy, turn its sync off and on again (Settings > Vault > Sync).",
                     entry.name
                 ));
             }
@@ -416,7 +416,7 @@ fn sync_file_params(
     }
     if files.len() > MAX_SYNC_FILES {
         return Err(format!(
-            "the vault list has {} synced vault files outside iCloud Drive. The profile can deny at most {MAX_SYNC_FILES}, so the host does not start. Sync some vaults through iCloud Drive, or turn their sync off in Apassy (Settings > General > Sync).",
+            "the vault list has {} synced vault files outside iCloud Drive. The profile can deny at most {MAX_SYNC_FILES}, so the host does not start. Sync some vaults through iCloud Drive, or turn their sync off in Apassy (Settings > Vault > Sync).",
             files.len()
         ));
     }
@@ -441,7 +441,7 @@ fn extra_vault_files(
     }
     if extra.len() > MAX_EXTRA_VAULTS {
         return Err(format!(
-            "the vault list has {} vault files outside {}. The profile can deny at most {MAX_EXTRA_VAULTS}, so the host does not start. Move vaults into the data directory, or remove vaults from the list in Apassy (Settings > General > Vaults).",
+            "the vault list has {} vault files outside {}. The profile can deny at most {MAX_EXTRA_VAULTS}, so the host does not start. Move vaults into the data directory, or remove vaults from the list in Apassy (Settings > Vault).",
             extra.len(),
             data_dir.display()
         ));

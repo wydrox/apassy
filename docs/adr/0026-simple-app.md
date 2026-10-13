@@ -46,16 +46,22 @@ The old views go away:
 
 - **Activity** and **Learning** become Decisions. The weekly counts move into a single line under the Decisions title.
 - **Agents** loses grants, modes, folders and the "see all" switch (ADR 0025 §3f).
-- **Rules** (demo build) moves to Settings > Advanced.
+- **Rules** (demo build) moves to Settings, as its only section there.
 
-### 3. Settings is a window
+### 3. Settings is a view
 
-Settings opens as its own window from the sidebar and ⌘,. It has 4 tabs:
+Owner decision of 2026-10-13: "napraw ekran ustawień (otwieraj go jak każdy inny (nie jak osobne okno), wyczyść zbędne ustawienia oraz popraw grupowanie ustawień bo aktualnie nie jest czytelny" (fix the settings screen: open it like any other view, not as a separate window; clean out unneeded settings; and fix the grouping, because it is not readable now). It replaces the first version of this section, "Settings is a window" with four tabs.
 
-- **General**: vault, import, browser extension.
-- **Devices**: Macs, iPhones and the relay. Questions go to every device (ADR 0025 §3e).
-- **Security**: Touch ID, passphrase, auto-lock, backup.
-- **Advanced**: bouncer and calibration, command line, updates.
+Settings is a view of the main window, as Decisions and Agents are. The gear at the bottom of the sidebar and ⌘, open it; the gear then shows selected and no sidebar row does. The list column lists the sections, each with a tile, its name, and one short status line, as macOS System Settings does. The detail column shows the selected section as groups of rows. A click on a sidebar row (or ⌘1 to ⌘3) leaves Settings. Sheets and owner checks show over the window, as all others. A lock leaves Settings.
+
+- **Vault**: the open vault (where it lives, its "⋯" actions), Sync (off, a folder such as iCloud Drive, or the relay; its state; "Open a synced vault…"), Backup ("Back up now…", "Restore…"), and Import (1Password).
+- **Security**: the Touch ID switch, whose note says whether owner checks use Touch ID, and "Change passphrase…". There is no auto-lock setting yet.
+- **Devices**: This Mac (its notifications; the buttons and the reason only when they do not work), the iPhone (the listener, the paired iPhones, "Pair…"), the other Macs while the vault syncs, and the relay switch for the questions. Questions reach every device (ADR 0025 §3e).
+- **Bouncer**: the model with its state and its actions, "Start the model", "Stop after", and Calibration and learning. A broker that does not take agent requests shows a warning row.
+- **Tools**: the command line (install, and the open sessions with "End all") and the browser extension.
+- **Updates**: the updater with the version, and the keyboard shortcuts.
+
+A status that needs nothing from the owner does not show: the broker address, its socket, "Accepts agent requests", the weekly "Asked you" count (Decisions has it), and the contract version left Settings. Each group has at most one short note.
 
 ### 4. Adding
 
@@ -91,7 +97,7 @@ The owner approved the iPhone mockup on 2026-10-12 ([docs/design/ios-v1-mockup.h
 - **Credential:** the same groups as on the Mac: secret, variable, folder, agent use, rules from the owner's answers, options.
 - **Decisions:** Waiting, Requests, and Suggestions, with a fixed bottom bar: Allow ACTION in PROJECT, Deny, Allow Once. Allowing asks for Face ID; stricter answers do not. Questions arrive through the relay (ADR 0025 §3e), not only on the local network.
 - **Agents:** read only, with exceptions; removing an exception asks for Face ID.
-- **Settings:** General, Devices, Security, Advanced, like the Mac window.
+- **Settings:** the groups of the 2026-10-12 mockup (General, Devices, Security, Advanced). The Mac regrouped its Settings on 2026-10-13 (§3); the iPhone follows when it changes next.
 
 ## Implementation
 
