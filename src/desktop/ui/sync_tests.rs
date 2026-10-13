@@ -3288,6 +3288,94 @@ fn add_an_iphone_to_the_questions_shows_a_qr_code_and_needs_the_owner_check() {
     assert!(no_iphone(&a));
 }
 
+/// "Add an iPhone…" twice (B1: an iPhone and an iPad, or two iPhones): each run makes a
+/// new link, needs its own owner check, and writes the row of its device with its own
+/// answer key. Devices then lists both, and each has its own device on the relay.
+#[test]
+fn add_an_iphone_twice_adds_two_answering_devices() {
+    use crate::broker::approvals::OwnerCheck;
+    use crate::sync::PendingJoin;
+    use crate::vault::TrustedDeviceKind;
+    let folders = folders();
+    let relay = fake_relay::FakeRelay::start();
+    let mut a = folders.mac("mac-a");
+    create(&mut a, "Personal", PASS, Some(&folders.icloud));
+    let id = current_id(&a);
+    super::open_settings(&mut a, super::SettingsSection::Devices);
+    let entry = a.vault_list.registry.get(&id).cloned().expect("entry");
+    a.questions_ask_new_team(
+        &entry,
+        &relay.url,
+        Zeroizing::new(relay.team_code()),
+        "Synthetic MacBook",
+        None,
+    )
+    .expect("fields");
+    a.confirm_owner_now(OwnerCheck::passphrase(PASS))
+        .expect("owner check");
+    a.questions_settle_for_test();
+
+    let mut links_seen = Vec::new();
+    let mut joined_ids = Vec::new();
+    for (name, key) in [
+        (
+            "Test iPhone",
+            crate::sync::DeviceKey::generate().expect("key"),
+        ),
+        (
+            "Test iPad",
+            crate::sync::DeviceKey::generate().expect("key"),
+        ),
+    ] {
+        a.ui.sheet = None;
+        a.questions_add_iphone(None);
+        settled_frames(&mut a);
+        let link = a.relay_add_mac_link_for_test().expect("a link");
+        assert!(!links_seen.contains(&link), "a new link each time");
+        links_seen.push(link.clone());
+        let link_name =
+            crate::questions::device_link::link_device_name(name, key.public_key()).expect("name");
+        let pending = PendingJoin::request(&link, "", &link_name).expect("join");
+        a.relay_add_mac_poll_for_test();
+        let links = a.relay_add_mac_links_for_test();
+        assert_eq!(links.len(), 1, "{name}: only the link of this run waits");
+        a.relay_ask_confirm_for_test(links[0].id);
+        a.confirm_owner_now(OwnerCheck::passphrase(PASS))
+            .expect("owner check");
+        a.relay_settle_for_test();
+        assert!(
+            a.status_text
+                .starts_with(&format!("Added. {name} gets the questions")),
+            "{}",
+            a.status_text
+        );
+        let joined = pending.poll().expect("poll").expect("confirmed");
+        joined_ids.push(joined.device_id());
+    }
+    assert_ne!(joined_ids[0], joined_ids[1], "two devices on the relay");
+    let rows = a
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.trusted_devices().expect("read"))
+        .expect("open");
+    let iphones: Vec<_> = rows
+        .iter()
+        .filter(|row| row.kind == TrustedDeviceKind::Iphone)
+        .collect();
+    assert_eq!(iphones.len(), 2, "{rows:?}");
+    assert_ne!(iphones[0].answer_key, iphones[1].answer_key);
+    a.ui.sheet = None;
+    a.questions_settle_for_test();
+    // Devices lists rows by registration time, then name.
+    let mut names: Vec<String> = a
+        .questions_devices()
+        .into_iter()
+        .map(|row| row.name)
+        .collect();
+    names.sort();
+    assert_eq!(names, ["Synthetic MacBook", "Test iPad", "Test iPhone"]);
+}
+
 /// A second Mac of a vault in iCloud Drive that has a questions team: "Send questions
 /// through the relay" joins that team, never makes another one. Its owner check names
 /// the team of the link; Mac A confirms with the safety words and its own check; then
