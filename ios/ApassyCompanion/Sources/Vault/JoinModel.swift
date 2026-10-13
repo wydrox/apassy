@@ -49,8 +49,9 @@ final class JoinModel {
     @ObservationIgnored private let isAway: @MainActor () -> Bool
     @ObservationIgnored private let onFinished: @MainActor (VaultEntry) -> Void
     @ObservationIgnored private let onCancel: @MainActor () -> Void
-    /// The answer key of this iPhone (X9.63) for the Mac that confirms the join, when there is one.
-    @ObservationIgnored private let answerKey: (@Sendable () throws -> Data)?
+    /// The answer key of this iPhone (X9.63) for the team of the link (nil: the link names none), for
+    /// the Mac that confirms the join, when there is one.
+    @ObservationIgnored private let answerKey: (@Sendable (_ team: String?) throws -> Data)?
     /// A companion QR scanned here belongs to the approval flow, not the relay.
     @ObservationIgnored private let onCompanionCode: @MainActor (String) -> String?
     @ObservationIgnored private var pollTask: Task<Void, Never>?
@@ -61,7 +62,7 @@ final class JoinModel {
         service: any VaultService, passphraseStore: any PassphraseStore, settings: VaultSettings, biometry: Biometry,
         deviceName: String, pollInterval: Duration = .seconds(2), now: @escaping @MainActor () -> Date = { Date() },
         isAway: @escaping @MainActor () -> Bool = { false },
-        answerKey: (@Sendable () throws -> Data)? = nil,
+        answerKey: (@Sendable (_ team: String?) throws -> Data)? = nil,
         onFinished: @escaping @MainActor (VaultEntry) -> Void, onCancel: @escaping @MainActor () -> Void,
         onCompanionCode: @escaping @MainActor (String) -> String? = { _ in
             "This code pairs the iPhone companion. Open Decisions to pair with your Mac."
@@ -124,8 +125,11 @@ final class JoinModel {
     }
 
     /// Why the name cannot be used, or nil. The core takes at most 64 bytes.
-    var deviceNameProblem: String? {
-        let name = trimmedDeviceName
+    var deviceNameProblem: String? { Self.deviceNameProblem(deviceName) }
+
+    /// Why `name` cannot be the name of this iPhone, or nil.
+    static func deviceNameProblem(_ name: String) -> String? {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         if name.isEmpty { return "Type a name for this iPhone." }
         if name.utf8.count > 64 { return "Use a shorter name." }
         if name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) {
@@ -143,7 +147,7 @@ final class JoinModel {
         waitNote = nil
         do {
             let join = try await service.joinStart(
-                link: link, deviceName: trimmedDeviceName, answerKey: try? answerKey?())
+                link: link, deviceName: trimmedDeviceName, answerKey: try? answerKey?(VaultText.linkTeam(link)))
             settings.deviceName = trimmedDeviceName
             show(join)
         } catch {

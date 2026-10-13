@@ -86,6 +86,7 @@
 		E5563D793FCE2A84945961EE /* FolderPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 206B8AB6FD1966B5CCE4E60A /* FolderPicker.swift */; };
 		E92DDF171CBCAB2694A5C0DD /* PairingModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8A7940F84FC12C29393A036 /* PairingModel.swift */; };
 		EE66CB21B35E83A303A648E2 /* GeneratorModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C03D253B246ED503A21556A3 /* GeneratorModel.swift */; };
+		EEEECFDF4E3661F119562534 /* AnswerSigners.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB4A7BA9C612A81A002BFFDC /* AnswerSigners.swift */; };
 		F076F449DEDCF35058629720 /* JoinFlowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF384FB7C7A9E213F181560D /* JoinFlowView.swift */; };
 		F3D5C01F585A08880162E5C5 /* AdvancedSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94464EB492A4DD83D9AC9C29 /* AdvancedSettingsView.swift */; };
 		F5C0E088EB98729A9BEEB891 /* CredentialLooks.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA344DB5652B1982DBA3DA0C /* CredentialLooks.swift */; };
@@ -177,6 +178,7 @@
 		B210B98EF4836F5C25B4F8E9 /* CredentialProviderViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialProviderViewController.swift; sourceTree = "<group>"; };
 		B8A7940F84FC12C29393A036 /* PairingModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingModel.swift; sourceTree = "<group>"; };
 		BA1978BE1A25B04CCD8F98DB /* LockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LockView.swift; sourceTree = "<group>"; };
+		BB4A7BA9C612A81A002BFFDC /* AnswerSigners.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnswerSigners.swift; sourceTree = "<group>"; };
 		BB933AE905E8B9227A343AAB /* DecisionComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionComponents.swift; sourceTree = "<group>"; };
 		BCDF2D0D076678612EDDA49F /* ICloudVaultFlowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ICloudVaultFlowView.swift; sourceTree = "<group>"; };
 		BF2A79F57FF5990313CBF219 /* FolderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderView.swift; sourceTree = "<group>"; };
@@ -344,6 +346,7 @@
 		851D92E78BC2F2B7FEB466DE /* Models */ = {
 			isa = PBXGroup;
 			children = (
+				BB4A7BA9C612A81A002BFFDC /* AnswerSigners.swift */,
 				684F437C25C8B450F56C714A /* AppModel.swift */,
 				F822347FA7AB2283110B8D02 /* CoverPolicy.swift */,
 				21DF2C3E82CF25DF1F22D21D /* Decisions.swift */,
@@ -578,6 +581,7 @@
 				B9E78C434584B11B6067254E /* ActivityView.swift in Sources */,
 				F3D5C01F585A08880162E5C5 /* AdvancedSettingsView.swift in Sources */,
 				CD5D1BA5A01624F519B225F8 /* AgentsView.swift in Sources */,
+				EEEECFDF4E3661F119562534 /* AnswerSigners.swift in Sources */,
 				3EB151FA4F3F4C95FDA98FE8 /* ApassyCompanionApp.swift in Sources */,
 				674F78210B56608BDFDE6D0D /* AppModel.swift in Sources */,
 				57F6005A3BA458D149AD653A /* AppWelcomeView.swift in Sources */,

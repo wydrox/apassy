@@ -3,39 +3,6 @@ import ApassyVaultKit
 import Foundation
 import Observation
 
-/// Signs the answers that give authority with the answer key, after Face ID for each answer
-/// (contract relay-questions-v1, section 5.3).
-protocol AnswerSigner: Sendable {
-    /// The public key (X9.63), made on first use.
-    func publicKey() throws -> Data
-    /// A signature (DER). The owner sees `reason` in the Face ID prompt.
-    func sign(_ message: Data, reason: String) async throws -> Data
-    /// A new key, after a new Face ID enrollment made the old one unusable.
-    func renew() throws -> Data
-}
-
-/// The answer key in the Secure Enclave, bound to the current biometric set with no passcode
-/// fallback (as the companion approval key), under a keychain service of its own so the companion
-/// pairing keeps its keys. The Simulator has software keys.
-struct EnclaveAnswerSigner: AnswerSigner {
-    static let service = "com.wydrox.apassy.questions"
-
-    func publicKey() throws -> Data { try keys().approvalPublicKey }
-
-    func sign(_ message: Data, reason: String) async throws -> Data {
-        try await keys().signApproval(message, reason: reason)
-    }
-
-    func renew() throws -> Data {
-        try CompanionKeyStore.createNew(service: Self.service).approvalPublicKey
-    }
-
-    private func keys() throws -> any CompanionKeys {
-        if let keys = try CompanionKeyStore.loadExisting(service: Self.service) { return keys }
-        return try CompanionKeyStore.createNew(service: Self.service)
-    }
-}
-
 /// Notification permission and the APNs registration (`PushRegistrar` in the app).
 @MainActor
 protocol PushPermission: AnyObject {
@@ -148,9 +115,13 @@ struct QuestionOutcome: Equatable {
 }
 
 /// Questions through the relay on this iPhone (contract relay-questions-v1, section 13): the list
-/// of the questions of the vault, the answer bar, Face ID for the answers that give authority, the
-/// answer key in the vault, the notifications, and the connection of a vault from iCloud Drive to
-/// its notifications team.
+/// of the questions of the vaults, the answer bar, Face ID for the answers that give authority, the
+/// answer key of each questions team, the notifications, and the connection of a vault from iCloud
+/// Drive to its notifications team.
+///
+/// A core that keeps the questions of every unlocked vault lists them all (`vaults`), and each
+/// answer names the vault of its question. An older core lists the selected vault only; then the
+/// push token and its removal reach the team of each vault when that vault is selected.
 @MainActor
 @Observable
 final class QuestionsModel {
@@ -159,6 +130,8 @@ final class QuestionsModel {
         /// The vault has no questions team: connect this iPhone.
         case off
         case ready
+        /// The vault is locked: its questions show after the unlock.
+        case locked
         case failed(String)
     }
 
@@ -182,10 +155,19 @@ final class QuestionsModel {
     }
 
     static let notificationsKey = "ApassyQuestionNotifications"
+    /// Notifications were turned off: the token must leave every questions team, also the teams
+    /// of the vaults that are not open now.
+    static let pushClearKey = "ApassyQuestionPushClear"
+    /// The teams that the token already left since then.
+    static let pushClearedKey = "ApassyQuestionPushCleared"
 
     private(set) var phase = Phase.loading
+    /// The selected vault.
     private(set) var status = QuestionsStatus.off
+    /// The questions of every vault in the list.
     private(set) var questions: [RemoteQuestion] = []
+    /// The vaults whose questions the core keeps; empty with an older core (the selected vault).
+    private(set) var vaults: [QuestionsVault] = []
     private(set) var deliveries: [String: Delivery] = [:]
     private(set) var attach: AttachStep?
     /// A problem with the answer key or the notifications, for a line under the list.
@@ -193,12 +175,15 @@ final class QuestionsModel {
     private(set) var notificationsOn: Bool
     /// Counts the notifications that the owner opened; Decisions then opens the newest question.
     private(set) var focusRequests = 0
+    /// The name of this iPhone that a connection gives the Mac, so that two devices are told apart.
+    var deviceName: String
 
     @ObservationIgnored private let service: any VaultService
-    @ObservationIgnored private let signer: any AnswerSigner
+    @ObservationIgnored private let signers: any AnswerSigners
     @ObservationIgnored private weak var push: (any PushPermission)?
     @ObservationIgnored private let defaults: UserDefaults
-    @ObservationIgnored private let deviceName: String
+    /// Keeps the name of a connection for the next one.
+    @ObservationIgnored private let onDeviceName: @MainActor (String) -> Void
     @ObservationIgnored private let now: @MainActor () -> Date
     @ObservationIgnored private let retryInterval: Duration
     @ObservationIgnored private let onCompanionCode: @MainActor (String) -> String?
@@ -207,9 +192,37 @@ final class QuestionsModel {
     /// invalidates even a service call that cannot be cancelled while it awaits the relay.
     @ObservationIgnored private var attachGeneration = 0
     @ObservationIgnored private var askedForToken = false
+    /// The APNs token of this launch, and the questions teams that got it.
+    @ObservationIgnored private var pushToken: Data?
+    @ObservationIgnored private var tokenTeams: Set<String> = []
+    /// Whether the core lists every vault that it keeps (`QuestionsList.vaults`).
+    @ObservationIgnored private var listsEveryVault = false
     @ObservationIgnored private var focusPending = false
 
     init(
+        service: any VaultService, signers: any AnswerSigners, push: (any PushPermission)?, deviceName: String,
+        defaults: UserDefaults = .standard, now: @escaping @MainActor () -> Date = { Date() },
+        retryInterval: Duration = .seconds(2),
+        onCompanionCode: @escaping @MainActor (String) -> String? = { _ in
+            "This code pairs the iPhone companion. Open Decisions > Devices > Mac on Wi-Fi to pair with your Mac."
+        },
+        onDeviceName: @escaping @MainActor (String) -> Void = { _ in }
+    ) {
+        self.service = service
+        self.signers = signers
+        self.push = push
+        self.deviceName = deviceName
+        self.onDeviceName = onDeviceName
+        self.defaults = defaults
+        self.now = now
+        self.retryInterval = retryInterval
+        self.onCompanionCode = onCompanionCode
+        notificationsOn = defaults.bool(forKey: Self.notificationsKey)
+        push?.observeOpens { [weak self] in self?.notificationOpened() }
+    }
+
+    /// One answer key for every team: the tests with one vault.
+    convenience init(
         service: any VaultService, signer: any AnswerSigner, push: (any PushPermission)?, deviceName: String,
         defaults: UserDefaults = .standard, now: @escaping @MainActor () -> Date = { Date() },
         retryInterval: Duration = .seconds(2),
@@ -217,16 +230,33 @@ final class QuestionsModel {
             "This code pairs the iPhone companion. Open Decisions > Devices > Mac on Wi-Fi to pair with your Mac."
         }
     ) {
-        self.service = service
-        self.signer = signer
-        self.push = push
-        self.deviceName = deviceName
-        self.defaults = defaults
-        self.now = now
-        self.retryInterval = retryInterval
-        self.onCompanionCode = onCompanionCode
-        notificationsOn = defaults.bool(forKey: Self.notificationsKey)
-        push?.observeOpens { [weak self] in self?.notificationOpened() }
+        self.init(
+            service: service, signers: SharedAnswerSigners(signer: signer), push: push, deviceName: deviceName,
+            defaults: defaults, now: now, retryInterval: retryInterval, onCompanionCode: onCompanionCode)
+    }
+
+    /// The vaults of the list: each vault that the core keeps, or the selected vault.
+    var contexts: [QuestionsVault] {
+        vaults.isEmpty ? [QuestionsVault(vaultID: "", vaultName: "", status: status)] : vaults
+    }
+
+    /// Whether the rows name their vault: the questions of two vaults or more show.
+    var namesVaults: Bool { vaults.count >= 2 }
+
+    /// Whether "Connect this iPhone" is offered: the selected vault has no questions team, or this
+    /// iPhone was removed from it.
+    var canConnect: Bool {
+        switch phase {
+        case .off, .failed: true
+        case .ready: !status.enabled || status.removed
+        case .loading, .locked: false
+        }
+    }
+
+    /// The vault of `question`, with this iPhone's row in its team.
+    func vault(of question: RemoteQuestion) -> QuestionsVault? {
+        guard let id = question.vaultID else { return vaults.isEmpty ? contexts.first : nil }
+        return vaults.first { $0.vaultID == id }
     }
 
     /// The questions that wait for an answer now.
@@ -239,17 +269,24 @@ final class QuestionsModel {
 
     // MARK: The list
 
-    /// Read the list. With a questions team, register the answer key of this iPhone when the vault
-    /// does not have it.
+    /// Read the list. For each vault with a questions team, check the answer key of this iPhone in
+    /// its row, then bring the push token to the teams that do not have it, or take it away.
     func refresh() async {
         do {
             let list = try await service.questionsList()
             status = list.status
+            vaults = list.vaults ?? []
+            listsEveryVault = list.vaults != nil
             questions = list.questions
-            phase = list.status.enabled ? .ready : .off
-            if list.status.enabled { await registerAnswerKey() }
+            let enabled = contexts.contains { $0.status.enabled }
+            phase = enabled ? .ready : .off
+            if enabled { await checkAnswerKeys() }
+            await updatePushToken()
         } catch let error as VaultError where error.code == .locked {
+            // Nothing can be answered while the vault is locked: say so, never an empty list.
             questions = []
+            vaults = []
+            phase = .locked
         } catch {
             if case .ready = phase {
                 notice = error.localizedDescription
@@ -262,16 +299,13 @@ final class QuestionsModel {
     /// Read the list, then wait for changes with the long poll while the task runs.
     func watch() async {
         await refresh()
-        // Each launch with notifications on sends the token again (contract section 10.8), once
-        // the vault is open, so the token can reach the relay.
-        if phase == .ready, !askedForToken {
-            askedForToken = true
-            registerPushesIfOn()
-        }
+        askForTokenOnce()
         while !Task.isCancelled {
             guard phase == .ready else {
-                try? await Task.sleep(for: .seconds(30))
+                // A locked vault opens soon after the owner returns: look again shortly.
+                try? await Task.sleep(for: phase == .locked ? retryInterval : .seconds(30))
                 await refresh()
+                askForTokenOnce()
                 continue
             }
             do {
@@ -284,33 +318,65 @@ final class QuestionsModel {
         }
     }
 
-    /// The answer key of this iPhone in the vault. The Mac that confirmed this iPhone wrote the
-    /// row, so this only checks that the row is there with this key. The core writes nothing.
-    private func registerAnswerKey() async {
-        if status.removed {
-            notice = "This device was removed from questions. To answer again, connect it again with a new link from a Mac."
-            return
+    /// Each launch with notifications on asks iOS for the token again (contract section 10.8),
+    /// once a vault is open, so the token can reach the relay.
+    private func askForTokenOnce() {
+        guard phase == .ready, !askedForToken else { return }
+        askedForToken = true
+        registerPushesIfOn()
+    }
+
+    /// The answer key of this iPhone in the row of each vault, in one notice. With two vaults or
+    /// more, each line names its vault.
+    private func checkAnswerKeys() async {
+        var problems: [String] = []
+        for context in contexts where context.status.enabled {
+            guard let problem = await checkAnswerKey(context) else { continue }
+            problems.append(namesVaults ? "\(context.vaultName): \(problem)" : problem)
         }
-        guard status.registered else {
-            notice = "Waiting for the Mac that confirmed this iPhone: its vault must sync to this iPhone before it can answer."
-            return
+        notice = problems.isEmpty ? nil : problems.joined(separator: "\n")
+    }
+
+    /// The Mac that confirmed this iPhone wrote the row, so this only checks that the row is there
+    /// with the key of its team. The core writes nothing, and it checks the selected vault only.
+    private func checkAnswerKey(_ context: QuestionsVault) async -> String? {
+        let row = context.status
+        if row.removed {
+            return "This device was removed from questions. To answer again, connect it again with a new link from a Mac."
+        }
+        guard row.registered else {
+            return "Waiting for the Mac that confirmed this iPhone: its vault must sync to this iPhone before it can answer."
+        }
+        guard let signer = signers.signer(team: row.teamID, registered: row.answerKey) else {
+            return Self.noKeyText
         }
         do {
             let key = try signer.publicKey()
-            if status.answerKey == key {
-                notice = nil
-                return
+            if row.answerKey == key { return nil }
+            guard !listsEveryVault || row.teamID == status.teamID else {
+                return row.answerKey == nil ? nil : Self.keyChangedText
             }
             _ = try await service.answerKeyRegister(publicKey: key)
-            status.answerKey = key
+            setAnswerKey(key, team: row.teamID)
+            return nil
         } catch let error as CompanionKeyError {
-            notice = "To answer here, Apassy needs Face ID on this iPhone. \(error.localizedDescription)"
+            return "To answer here, Apassy needs Face ID on this iPhone. \(error.localizedDescription)"
         } catch let error as VaultError {
-            notice = error.message
+            return error.message
         } catch {
-            notice = error.localizedDescription
+            return error.localizedDescription
         }
     }
+
+    private func setAnswerKey(_ key: Data, team: String?) {
+        if status.teamID == team { status.answerKey = key }
+        for at in vaults.indices where vaults[at].status.teamID == team { vaults[at].status.answerKey = key }
+    }
+
+    static let noKeyText =
+        "This iPhone has no answer key for this vault. On a Mac, remove this iPhone in Settings › Devices, then connect it again."
+    static let keyChangedText =
+        "The answer key of this iPhone changed. On a Mac, remove this iPhone in Settings › Devices, then connect it again."
 
     // MARK: Answers
 
@@ -329,22 +395,29 @@ final class QuestionsModel {
     func send(_ choice: AnswerBar.Choice, for question: RemoteQuestion) async {
         guard deliveries[question.qid] != .sending, let card = question.card else { return }
         deliveries[question.qid] = .sending
+        // The row of this iPhone in the team of the question's vault: its key signs.
+        let row = vault(of: question)?.status ?? status
         do {
-            let prepared = try await service.questionAnswerString(qid: question.qid, answer: choice.answer)
+            let prepared = try await service.questionAnswerString(
+                qid: question.qid, answer: choice.answer, vaultID: question.vaultID)
             var signature: Data?
             if prepared.needsFaceID {
+                guard let signer = signers.signer(team: row.teamID, registered: row.answerKey) else {
+                    throw VaultError(.notRegistered, Self.noKeyText)
+                }
                 signature = try await signer.sign(
                     Data(prepared.answerString.utf8),
                     reason: Self.faceIDReason(agent: card.run.agent, answer: choice.label))
             }
-            let sent = try await post(question.qid, choice.answer, prepared, signature)
+            let sent = try await post(question, choice.answer, prepared, signature)
             deliveries[question.qid] = .sent(sent.kind)
         } catch CompanionKeyError.cancelled {
             deliveries[question.qid] = nil
         } catch CompanionKeyError.biometryChanged {
             deliveries[question.qid] = .failed(
                 "Face ID changed on this iPhone, so Apassy made a new answer key. On a Mac, remove this iPhone in Settings › Devices, then connect it again. Answer on the Mac for now.")
-            _ = try? signer.renew()
+            // A new key for this team only: the rows of the other vaults keep theirs.
+            _ = try? signers.renew(team: row.teamID)
         } catch let error as VaultError {
             deliveries[question.qid] = .failed(Self.message(for: error, asker: question.askerName))
         } catch {
@@ -355,13 +428,14 @@ final class QuestionsModel {
 
     /// Post, and post again after a network failure while the time of the answer is younger than
     /// 55 s (contract section 13, step 4).
-    private func post(_ qid: String, _ answer: RemoteAnswer, _ prepared: PreparedAnswer, _ signature: Data?)
-        async throws -> SentAnswer
-    {
+    private func post(
+        _ question: RemoteQuestion, _ answer: RemoteAnswer, _ prepared: PreparedAnswer, _ signature: Data?
+    ) async throws -> SentAnswer {
         while true {
             do {
                 return try await service.questionAnswer(
-                    qid: qid, answer: answer, time: prepared.time, signature: signature)
+                    qid: question.qid, answer: answer, time: prepared.time, signature: signature,
+                    vaultID: question.vaultID)
             } catch let error as VaultError
                 where error.code == .relayUnreachable
                 && Int64(now().timeIntervalSince1970) - prepared.time < 55 && !Task.isCancelled
@@ -461,11 +535,20 @@ final class QuestionsModel {
             }
             notificationsOn = true
             defaults.set(true, forKey: Self.notificationsKey)
+            defaults.removeObject(forKey: Self.pushClearKey)
+            defaults.removeObject(forKey: Self.pushClearedKey)
+            tokenTeams = []
             push.registerForPushes()
+            await updatePushToken()
         } else {
             notificationsOn = false
             defaults.set(false, forKey: Self.notificationsKey)
-            try? await service.pushTokenClear()
+            // Every team, also those of the vaults that are not open now: each is cleared when
+            // its vault is in the list.
+            defaults.set(true, forKey: Self.pushClearKey)
+            defaults.set([String](), forKey: Self.pushClearedKey)
+            tokenTeams = []
+            await refresh()
         }
     }
 
@@ -474,16 +557,57 @@ final class QuestionsModel {
         if notificationsOn { push?.registerForPushes() }
     }
 
-    /// A device token from iOS: it goes to the relay of the questions team.
+    /// A device token from iOS. It is kept for this launch and goes to the relay of each questions
+    /// team in the list, now and when another vault opens.
     func receivePushToken(_ token: Data) async {
-        guard notificationsOn, let push else { return }
+        if token != pushToken { tokenTeams = [] }
+        pushToken = token
+        await updatePushToken()
+    }
+
+    /// The teams of the list that can get a token: a questions team, and this iPhone not removed.
+    private var pushTeams: Set<String> {
+        Set(contexts.filter { $0.status.enabled && !$0.status.removed }.compactMap(\.status.teamID))
+    }
+
+    private func updatePushToken() async {
+        await clearPushToken()
+        await sendPushToken()
+    }
+
+    /// Send the token to the teams of the list that do not have it in this launch. A core that keeps
+    /// every unlocked vault sends it to the team of each at once; an older core to the team of the
+    /// selected vault, so the other teams get it when their vault is selected.
+    private func sendPushToken() async {
+        guard notificationsOn, let push, let token = pushToken else { return }
+        let teams = pushTeams
+        guard !teams.isSubset(of: tokenTeams) else { return }
         do {
             try await service.pushTokenSet(token: token, environment: push.environment)
+            tokenTeams.formUnion(teams)
         } catch let error as VaultError where error.code == .noQuestions || error.code == .locked {
-            // No team yet, or the vault locked: the token goes at the next launch.
+            // No team yet, or the vault locked: the token goes at the next refresh.
         } catch {
             notice = error.localizedDescription
         }
+    }
+
+    /// After notifications were turned off: take the token away from the teams of the list that
+    /// still have it. A team that is not in the list now is remembered until its vault is.
+    private func clearPushToken() async {
+        guard !notificationsOn, defaults.bool(forKey: Self.pushClearKey) else { return }
+        var cleared = Set(defaults.stringArray(forKey: Self.pushClearedKey) ?? [])
+        let teams = Set(contexts.filter { $0.status.enabled }.compactMap(\.status.teamID))
+        guard !teams.isSubset(of: cleared) else { return }
+        do {
+            try await service.pushTokenClear()
+        } catch let error as VaultError where error.code == .noQuestions || error.code == .removed {
+            // Nothing to take away.
+        } catch {
+            return  // The next refresh tries again.
+        }
+        cleared.formUnion(teams)
+        defaults.set(cleared.sorted(), forKey: Self.pushClearedKey)
     }
 
     // MARK: Connecting a vault from iCloud Drive
@@ -528,12 +652,20 @@ final class QuestionsModel {
             attach = .failed("This is not a device link of the Apassy relay. On the Mac, make a new link.")
             return
         }
+        if let problem = JoinModel.deviceNameProblem(deviceName) {
+            attach = .failed(problem)
+            return
+        }
+        let name = deviceName.trimmingCharacters(in: .whitespacesAndNewlines)
         attach = .starting
         do {
-            // The core rejects a key that belonged to a removed row: a removed iPhone gets a new one.
-            let key = try status.removed ? signer.renew() : signer.publicKey()
-            let info = try await service.joinAttach(
-                link: trimmed, deviceName: deviceName, answerKey: key)
+            // Each questions team has its own answer key. The core rejects a key that belonged to a
+            // removed row: a removed iPhone gets a new key for that team only.
+            let team = VaultText.linkTeam(trimmed) ?? status.teamID
+            let renews = status.removed && (status.teamID == nil || team == status.teamID)
+            let key = try renews ? signers.renew(team: team) : signers.joinKey(team: team)
+            let info = try await service.joinAttach(link: trimmed, deviceName: name, answerKey: key)
+            onDeviceName(name)
             guard isCurrentAttach(generation), attach == .starting else { return }
             attach = .waiting(info)
             attachTask?.cancel()

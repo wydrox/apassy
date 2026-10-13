@@ -24,9 +24,24 @@ import SwiftUI
             ]
         }
 
+        /// The questions of a second vault, "Work", asked by another Mac.
+        static func workQuestions(now: Date = Date()) -> [RemoteQuestion] {
+            [
+                question(
+                    qid: "Y2xvdWRmbGFyZS13b3JrLXF1ZXN0", agent: "claude-code", item: "Cloudflare API", production: true,
+                    project: "edge-worker", command: ["wrangler", "deploy"], env: ["CLOUDFLARE_API_TOKEN"],
+                    why: "This is a production key, and there is no rule for reading in edge-worker yet.",
+                    answers: ["once", "production:read", "never_for_agent", "always_ask_for_agent", "disconnect"],
+                    waited: 25, asker: "MacBook Pro", now: now)
+            ]
+        }
+
+        /// The second vault of `-ApassyPreviewDecisions vaults`.
+        static let workVault = (id: "8e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b", name: "Work", team: "t_wq3k7m2p5x")
+
         private static func question(
             qid: String, agent: String, item: String, production: Bool, project: String, command: [String],
-            env: [String], why: String, answers: [String], waited: Int64, now: Date
+            env: [String], why: String, answers: [String], waited: Int64, asker: String = "Mac mini", now: Date
         ) -> RemoteQuestion {
             let at = Int64(now.timeIntervalSince1970) - waited
             let card = QuestionCard(
@@ -41,7 +56,7 @@ import SwiftUI
                     production: production, why: why, validAnswers: answers),
                 digest: String(repeating: "0", count: 64))
             return RemoteQuestion(
-                qid: qid, state: .open, askerName: "Mac mini", createdAt: at,
+                qid: qid, state: .open, askerName: asker, createdAt: at,
                 expiresAt: at + Int64(Decisions.questionLifetime), card: card)
         }
     }
@@ -49,8 +64,9 @@ import SwiftUI
     #if targetEnvironment(simulator)
         extension View {
             /// A development aid of the Simulator: with `-ApassyPreviewVault -ApassyPreviewDecisions
-            /// list|detail`, the preview vault gets the synthetic questions; `detail` opens the newest
-            /// as a notification would.
+            /// list|detail|vaults`, the preview vault gets the synthetic questions; `detail` opens the
+            /// newest as a notification would; `vaults` adds a second vault, "Work", with its own
+            /// questions team, as a core that keeps every unlocked vault lists it.
             func decisionsPreviewSeed(_ model: QuestionsModel?) -> some View {
                 modifier(DecisionsPreviewSeed(model: model))
             }
@@ -59,13 +75,25 @@ import SwiftUI
         private struct DecisionsPreviewSeed: ViewModifier {
             let model: QuestionsModel?
             @Environment(VaultModel.self) private var vault: VaultModel?
+            @Environment(RootModel.self) private var root: RootModel?
 
             func body(content: Content) -> some View {
                 content.task {
                     guard let mode = UserDefaults.standard.string(forKey: "ApassyPreviewDecisions"),
                         let model, let service = vault?.service as? PreviewVaultService
                     else { return }
-                    await service.setQuestions(enabled: true, questions: DecisionsPreview.questions())
+                    // The rows of this iPhone hold the answer key of each team (software keys in
+                    // the Simulator), as after a confirmed connection.
+                    let signers = root?.answerSigners
+                    await service.setQuestions(
+                        enabled: true, questions: DecisionsPreview.questions(),
+                        answerKey: try? signers?.joinKey(team: "t_7k2m5q4x3c"))
+                    if mode == "vaults" {
+                        let work = DecisionsPreview.workVault
+                        await service.addQuestionsVault(
+                            id: work.id, name: work.name, team: work.team, questions: DecisionsPreview.workQuestions(),
+                            answerKey: try? signers?.joinKey(team: work.team))
+                    }
                     await model.refresh()
                     if mode == "detail" { model.notificationOpened() }
                 }
