@@ -153,7 +153,7 @@ https://apassy-relay.wyderka.cc/link#apassy_lnk_t_7k2m5q4x3c_0123456789abcdef012
 **Vector 2: a new form with `r=connect`.**
 
 ```
-https://apassy-relay.wyderka.cc/link#apassy_lnk_t_7k2m5q4x3c_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&r=connect&n=Mac%20mini&e=1790000600&p=YXBhc3N5Oi8vcGFpcj92PTEmaD0xOTIuMC4yLjEwJnA9NDg2MjAmYz1BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBJnM9QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQiZuPU1hYyUyMG1pbmkmZT0xNzkwMDAwMzAw
+https://apassy-relay.wyderka.cc/link#apassy_lnk_t_7k2m5q4x3c_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&r=connect&n=Mac%20mini&e=1790000600&p=YXBhc3N5Oi8vcGFpcj92PTEmaD0xOTIuMC4yLjEwJnA9NDg2MjAmYz1BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBJnM9QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQSZuPU1hYyUyMG1pbmkmZT0xNzkwMDAwMzAw
 ```
 
 | Field | Value |
@@ -164,7 +164,7 @@ https://apassy-relay.wyderka.cc/link#apassy_lnk_t_7k2m5q4x3c_0123456789abcdef012
 | `r` | `connect` |
 | `n` | `Mac mini` |
 | `e` | `1790000600` |
-| `p` | `apassy://pair?v=1&h=192.0.2.10&p=48620&c=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&s=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB&n=Mac%20mini&e=1790000300` |
+| `p` | `apassy://pair?v=1&h=192.0.2.10&p=48620&c=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&s=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA&n=Mac%20mini&e=1790000300` |
 
 **Vector 3: a bare code.** The relay address comes from the field above the paste box; here it is `https://apassy-relay.wyderka.cc`.
 
