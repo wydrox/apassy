@@ -25,13 +25,24 @@
 //! (the owner removed this iPhone on a Mac) is final: the iPhone says so and needs a new
 //! `join_attach` with a new relay key, confirmed on a Mac.
 //!
+//! A link names its team. When the vault names its questions team already (the synced
+//! `questions-team-v1` of the Mac that connected it), a link of another team is refused
+//! before any relay call: a link that the owner did not make cannot bind this iPhone,
+//! with the owner's vault, to a stranger's team. "Disconnect from Apassy Connect"
+//! (`questions_disconnect`) takes this iPhone out of its questions team, with no Face
+//! ID: it takes authority away.
+//!
+//! A join that is given up is cancelled on the relay. A cancel that the relay did not
+//! hear (no network) keeps its key and is tried again at the next call, so a Mac never
+//! confirms an iPhone whose key is gone.
+//!
 //! The relay calls run without the vault mutex. A lock ends them ([`Core::close`]).
 
 mod envelope;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -39,7 +50,7 @@ use zeroize::Zeroizing;
 
 use apassy::sync::{
     DEFAULT_RELAY_URL, PendingJoin, RelayCallError, RelayMember, SyncError, decode_b64u,
-    encode_b64u, verify_signature,
+    encode_b64u, link_code_team, verify_signature,
 };
 use apassy::vault::{MembershipPurpose, RelayMembership, TrustedDevice, Vault};
 
@@ -62,6 +73,13 @@ const MAX_PAGES: usize = 10;
 const SHOWN_PATH: usize = 80;
 const SHOWN_NAME: usize = 64;
 
+/// At most this many cancels wait for the network; an older one is dropped.
+const MAX_CANCELS: usize = 8;
+/// The least time between two tries of the cancels that wait.
+const RETRY_CANCELS_EVERY: Duration = Duration::from_secs(10);
+/// A link whose team is not the questions team that the vault names.
+const OTHER_VAULT_LINK: &str = "This code is for another vault's devices. On your Mac, open Settings > Devices > Add a device.";
+
 const READ_FAILED: &str = "This question could not be read.";
 const UPDATE: &str = "Update Apassy to read this question.";
 const SYNC_FIRST: &str = "Sync this vault to read this question.";
@@ -78,6 +96,11 @@ pub struct State {
     records: BTreeMap<String, Record>,
     /// A join of a notifications-only team that waits for the Mac.
     attach: Option<Attaching>,
+    /// Joins that were given up but whose cancel the relay did not hear: tried again at
+    /// the next call, with their keys, until the relay hears it.
+    cancels: Vec<PendingJoin>,
+    /// When those cancels were last tried again.
+    cancels_tried: Option<Instant>,
 }
 
 /// A question as the relay returned it.
@@ -593,7 +616,11 @@ fn state_of(record: &Record, at: u64) -> &'static str {
 impl Core {
     pub(super) fn questions_call(&self, op: &str, request: &str) -> CoreResult<String> {
         match op {
-            "questions_list" => Ok(ok(&self.questions_list()?)),
+            "questions_list" => {
+                // A cancel that waits for the network goes now when it can.
+                self.retry_cancels();
+                Ok(ok(&self.questions_list()?))
+            }
             "questions_wait" => {
                 #[derive(Deserialize)]
                 struct Wait {
@@ -681,8 +708,12 @@ impl Core {
             "join_attach_cancel" => {
                 let attaching = guard(&self.questions).attach.take();
                 if let Some(attaching) = attaching {
-                    let _ = attaching.pending.cancel();
+                    self.cancel_join(attaching.pending);
                 }
+                Ok(ok(&Empty {}))
+            }
+            "questions_disconnect" => {
+                self.questions_disconnect()?;
                 Ok(ok(&Empty {}))
             }
             _ => Err(CoreError::invalid("This call is not known.")),
@@ -696,15 +727,115 @@ impl Core {
             let mut state = guard(&self.questions);
             let member = state.member.take();
             let attach = state.attach.take();
-            *state = State::default();
+            // The cancels that wait for the network outlive the lock.
+            let cancels = std::mem::take(&mut state.cancels);
+            let cancels_tried = state.cancels_tried;
+            *state = State {
+                cancels,
+                cancels_tried,
+                ..State::default()
+            };
             (member, attach)
         };
         if let Some(member) = member {
             member.close();
         }
         if let Some(attach) = attach {
-            let _ = attach.pending.cancel();
+            self.cancel_join(attach.pending);
         }
+    }
+
+    /// Give up the join `pending` on the relay. When the relay does not hear it, the join
+    /// waits with its key and is cancelled again at the next call ([`Self::retry_cancels`]).
+    fn cancel_join(&self, pending: PendingJoin) {
+        if pending.cancel_now().is_ok() {
+            return;
+        }
+        let mut state = guard(&self.questions);
+        if state.cancels.len() >= MAX_CANCELS {
+            state.cancels.remove(0);
+        }
+        state.cancels.push(pending);
+    }
+
+    /// Cancel again the joins whose cancel the relay did not hear. The relay calls run
+    /// without the mutex; a cancel that fails again waits for the next call.
+    fn retry_cancels(&self) {
+        let cancels = {
+            let mut state = guard(&self.questions);
+            // A relay that does not answer is asked at most every RETRY_CANCELS_EVERY.
+            if state.cancels.is_empty()
+                || state
+                    .cancels_tried
+                    .is_some_and(|at| at.elapsed() < RETRY_CANCELS_EVERY)
+            {
+                return;
+            }
+            state.cancels_tried = Some(Instant::now());
+            std::mem::take(&mut state.cancels)
+        };
+        let left: Vec<PendingJoin> = cancels
+            .into_iter()
+            .filter(|pending| pending.cancel_now().is_err())
+            .collect();
+        let mut state = guard(&self.questions);
+        let mut kept = left;
+        kept.append(&mut state.cancels);
+        let over = kept.len().saturating_sub(MAX_CANCELS);
+        kept.drain(..over);
+        state.cancels = kept;
+    }
+
+    /// "Disconnect from Apassy Connect": this iPhone leaves the questions team of the
+    /// selected vault. The relay removes its device when it answers (best effort), then the
+    /// vault drops the membership and its key. No Face ID: it takes authority away. A
+    /// vault that syncs through the relay keeps its membership (`invalid_input`): its
+    /// questions go through the sync team. A vault with no questions team changes nothing.
+    fn questions_disconnect(&self) -> CoreResult<()> {
+        self.require_app()?;
+        let Some(membership) = self.with_vault(questions_membership)? else {
+            return Ok(());
+        };
+        let questions_only = membership
+            .purposes
+            .iter()
+            .all(|purpose| *purpose == MembershipPurpose::Questions);
+        if !questions_only {
+            return Err(CoreError::invalid(
+                "This iPhone gets questions through the sync of the vault. Turn sync through the relay off on this iPhone instead.",
+            ));
+        }
+        // A join that waits ends too.
+        let (member, attach) = {
+            let mut state = guard(&self.questions);
+            (state.member.take(), state.attach.take())
+        };
+        if let Some(member) = member {
+            member.close();
+        }
+        if let Some(attach) = attach {
+            self.cancel_join(attach.pending);
+        }
+        // The relay removes this device, best effort: the key leaves the vault anyway.
+        if let Ok(member) = RelayMember::new(
+            &membership.relay_url,
+            &membership.team_id,
+            membership.device_id,
+            membership.key_pkcs8.clone(),
+        ) {
+            let path = format!("/v1/devices/{}", membership.device_id);
+            let _ = member.call("DELETE", &path, None, Duration::ZERO);
+            member.close();
+        }
+        self.with_vault_mut(|vault| {
+            vault.remove_relay_membership(&membership.team_id)?;
+            Ok(())
+        })?;
+        let mut state = guard(&self.questions);
+        state.member = None;
+        state.since = 0;
+        state.records.clear();
+        Ok(())
     }
 
     /// The device of the questions team: the one in memory, or one from the membership
@@ -1117,9 +1248,21 @@ impl Core {
     fn attach_start(&self, link: &str, device_name: &str) -> CoreResult<AttachOut> {
         self.require_app()?;
         let entry = self.selected()?;
+        self.retry_cancels();
+        // The team of the link, before any relay call.
+        let link_team = PendingJoin::parse_link(link, DEFAULT_RELAY_URL)
+            .ok()
+            .and_then(|(_, code)| link_code_team(&code).map(str::to_owned));
         // A vault with a questions team on this iPhone joins again only after the owner
         // removed this iPhone: the new key replaces the removed one.
         let replaces = self.with_vault(|vault| {
+            // A vault that names its questions team takes links of that team only: a link
+            // that the owner did not make cannot join this iPhone to another team.
+            if let (Some(team), Some(link_team)) = (vault.questions_team()?, &link_team)
+                && team != *link_team
+            {
+                return Err(CoreError::new("link_invalid", OTHER_VAULT_LINK));
+            }
             let Some(membership) = questions_membership(vault)? else {
                 return Ok(None);
             };
@@ -1140,7 +1283,7 @@ impl Core {
         })?;
         let previous = guard(&self.questions).attach.take();
         if let Some(previous) = previous {
-            let _ = previous.pending.cancel();
+            self.cancel_join(previous.pending);
         }
         let pending = PendingJoin::request(link, DEFAULT_RELAY_URL, device_name).map_err(
             |error| match CoreError::from(error) {
@@ -1170,6 +1313,7 @@ impl Core {
 
     fn attach_poll(&self) -> CoreResult<AttachOut> {
         self.require_app()?;
+        self.retry_cancels();
         // The relay call runs with the join taken out, as `join_poll` does.
         let attaching = guard(&self.questions).attach.take().ok_or_else(|| {
             CoreError::invalid("No connection waits. Scan the code of the Mac again.")
@@ -1182,7 +1326,7 @@ impl Core {
                     state.attach = Some(attaching);
                 } else {
                     drop(state);
-                    let _ = attaching.pending.cancel();
+                    self.cancel_join(attaching.pending);
                 }
                 return Ok(view);
             }
@@ -1190,7 +1334,7 @@ impl Core {
             Err(error) => {
                 let error = CoreError::from(error);
                 if matches!(error.code, "join_refused" | "link_invalid") {
-                    let _ = attaching.pending.cancel();
+                    self.cancel_join(attaching.pending);
                 } else {
                     guard(&self.questions).attach.get_or_insert(attaching);
                 }
