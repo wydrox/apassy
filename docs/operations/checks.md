@@ -43,7 +43,7 @@ Do not skip a target that fails.
 Core contracts:
 
 ```
-cargo test --locked --test contracts
+cargo test --locked --all-features --test it contracts::
 ```
 
 iPhone companion, Swift client against the Rust listener over the loopback wire (needs macOS and Xcode 27, synthetic data only):
@@ -55,19 +55,20 @@ scripts/companion-interop.sh
 Desktop model:
 
 ```
-cargo test --locked --features desktop --test desktop_model
+cargo test --locked --all-features --test it desktop_model::
 ```
 
 SQLCipher probe:
 
 ```
-cargo test --locked --features storage-probe --test sqlcipher_probe
+cargo test --locked --all-features --test it sqlcipher_probe::
 ```
 
 Experimental passphrase vault, with temporary synthetic data only:
 
 ```
-cargo test --locked --offline --features vault --lib --test vault_lifecycle --test vault_passphrase -- --test-threads=1
+cargo test --locked --offline --all-features --lib -- --test-threads=1
+cargo test --locked --offline --all-features --test it -- --test-threads=1 vault_lifecycle:: vault_passphrase::
 cargo test --offline --locked --features vault --doc
 cargo clippy --locked --offline --features vault --all-targets -- -D warnings
 ```
@@ -75,7 +76,7 @@ cargo clippy --locked --offline --features vault --all-targets -- -D warnings
 Owner vault and item views call this API when both `desktop` and `vault` are enabled. See [desktop vault integration](desktop-vault.md). The tests do not permit real-secret use.
 
 ```
-cargo test --locked --offline --features desktop,vault --test owner_vault -- --test-threads=1
+cargo test --locked --offline --all-features --test it owner_vault:: -- --test-threads=1
 ```
 
 P0 Node model:

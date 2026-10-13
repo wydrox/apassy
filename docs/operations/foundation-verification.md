@@ -22,10 +22,10 @@ All commands below exited with code 0.
 
 The parent also ran focused checks before the combined suite:
 
-- `cargo test --locked --offline --test contracts`: 14 passed.
-- `cargo clippy --locked --offline --features storage-probe --test contracts --test sqlcipher_probe -- -D warnings`: passed.
-- `cargo test --locked --offline --features desktop --lib --test desktop_model`: three drawing tests and 29 model tests passed.
-- `cargo test --locked --offline --features storage-probe --test contracts --test sqlcipher_probe -- --test-threads=1 --nocapture`: the 12 SQLCipher tests passed. The contract task was still in progress at this earlier check.
+- `cargo test --locked --offline --all-features --test it contracts::`: 14 passed.
+- `cargo clippy --locked --offline --all-features --test it -- -D warnings`: passed.
+- `cargo test --locked --offline --all-features --lib` and `cargo test --locked --offline --all-features --test it desktop_model::`: three drawing tests and 29 model tests passed.
+- `cargo test --locked --offline --all-features --test it -- --test-threads=1 --nocapture contracts:: sqlcipher_probe::`: the 12 SQLCipher tests passed. The contract task was still in progress at this earlier check.
 
 ## SQLCipher observations
 

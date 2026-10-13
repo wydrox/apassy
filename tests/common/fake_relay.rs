@@ -20,10 +20,11 @@
 //! The chain answer follows the relay's rule: the oldest 1000 heads after `since`, with
 //! the signers of the page (a removed device with the newest version it pushed).
 //!
-//! The engine tests (`tests/relay_sync.rs`) and the headless app tests
-//! (`src/desktop/ui/sync_tests.rs`) both include this file with `#[path]`. Each names the
-//! sync module of the app `relay_api` in the parent module: `apassy::sync` in an
-//! integration test, `crate::sync` in the library.
+//! The integration tests (`tests/common/mod.rs`, for the relay and sync modules of
+//! `tests/it.rs`) and the headless app tests (`src/desktop/ui/sync_tests.rs`,
+//! `src/desktop/ui/settings_tests.rs`, `src/desktop/sync_worker.rs`) include this file.
+//! Each names the sync module of the app `relay_api` in the parent module:
+//! `apassy::sync` in the integration tests, `crate::sync` in the library.
 
 #![allow(dead_code)]
 

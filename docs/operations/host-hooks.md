@@ -223,7 +223,7 @@ The `hook_channel` check is the built-in pack `host-hooks` (`packs/host-hooks.js
 
 ### Tests
 
-`cargo test --locked --features desktop,vault --test host_hook` starts a real broker and runs the real `apassy-hook` program. The transcripts are synthetic files in the formats of section 2.
+`cargo test --locked --all-features --test it host_hook::` starts a real broker and runs the real `apassy-hook` program. The transcripts are synthetic files in the formats of section 2.
 
 | Test | Shows |
 | --- | --- |
@@ -247,7 +247,7 @@ Checks on 2026-09-26, macOS 27.0, arm64:
 
 ### Real Claude Code session
 
-Test: `cargo test --locked --features vault --test host_hook real_claude_code_session_sends_the_user_request -- --ignored --nocapture`. It is ignored by default, because it needs the `claude` program, an account, and the network.
+Test: `cargo test --locked --all-features --test it host_hook::real_claude_code_session_sends_the_user_request -- --ignored --nocapture`. It is ignored by default, because it needs the `claude` program, an account, and the network.
 
 On 2026-09-26, Claude Code 2.1.283 (`--model haiku`, headless) ran inside the Apassy profile through `apassy-sandbox`, with the Bash sandbox off. The hook was the wrapper script of section 6. The vault, the item `DEMO_KEY`, and the command `sh -c 'test -n "$DEMO_KEY" && echo key-present'` were synthetic. The grant was in "ask" mode. The test approved the run.
 
@@ -263,7 +263,7 @@ On 2026-09-26, Claude Code 2.1.283 (`--model haiku`, headless) ran inside the Ap
 
 ### Real Codex session
 
-Test: `cargo test --locked --features vault --test host_hook real_codex_session_sends_the_user_request -- --ignored --nocapture`.
+Test: `cargo test --locked --all-features --test it host_hook::real_codex_session_sends_the_user_request -- --ignored --nocapture`.
 
 On 2026-09-26, Codex 0.156.1 (`codex exec`) ran inside the Apassy profile with `sandbox_mode="danger-full-access"`, the hook as a `-c` override, and `--dangerously-bypass-hook-trust`.
 

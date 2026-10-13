@@ -7,11 +7,7 @@
 //! 127.0.0.1 with plain HTTP, which the app allows only for a loopback address. Each
 //! "Mac" is a separate data folder with its own local vault file and device key.
 
-#[path = "common/fake_relay.rs"]
-mod fake_relay;
-
-/// The fake relay reads the app's sync module under this name.
-use apassy::sync as relay_api;
+use crate::common::fake_relay;
 
 use std::fs;
 use std::path::PathBuf;

@@ -351,13 +351,13 @@ APASSY_EVAL_MODEL=http://127.0.0.1:8773 APASSY_EVAL_DUMP=/tmp/v3-B1.jsonl target
 # The out-of-sample estimate: the same runs on v3 with the binary of commit fece794.
 
 # The analysis of each case (flags, known safe, known command), without a model.
-APASSY_EVAL_SET=tests/evals/heldout-v3.jsonl cargo test --locked --features vault --test bouncer_eval set_analysis -- --ignored --nocapture
+APASSY_EVAL_SET=tests/evals/heldout-v3.jsonl cargo test --locked --all-features --test it bouncer_eval::set_analysis -- --ignored --nocapture
 
 # A replay of recorded answers with the current analysis and policy, case by case.
 APASSY_EVAL_SET=tests/evals/heldout-v3.jsonl APASSY_REPLAY_IN=/tmp/v3-B1.jsonl APASSY_REPLAY_LEVELS=0.75 APASSY_REPLAY_CASES=1 \
-  cargo test --locked --features vault --test bouncer_eval dump_replay -- --ignored --nocapture
+  cargo test --locked --all-features --test it bouncer_eval::dump_replay -- --ignored --nocapture
 
 # The golden replay and a dump of the generated set.
-cargo test --locked --features vault --test analysis_replay
-APASSY_REPLAY_DUMP=/tmp/generated.tsv cargo test --locked --features vault --test analysis_replay
+cargo test --locked --all-features --test it analysis_replay::
+APASSY_REPLAY_DUMP=/tmp/generated.tsv cargo test --locked --all-features --test it analysis_replay::
 ```

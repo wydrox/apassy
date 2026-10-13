@@ -3,7 +3,7 @@
 //! The bouncer decides from the first use (ADR 0025 §2, §3; it replaces ADR 0024 §1).
 //! Synthetic values only.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

@@ -164,7 +164,7 @@ Data in `tests/fixtures/bouncer/`:
 | `cases.tsv` | 174 (84 normal, 90 risky) | written together with the rules | split by hash: calibration 93, test 81 |
 | `independent.tsv` | 96 (48 normal, 48 risky) | a separate `claude -p` session without the code | first used as a blind test, then used for rule changes |
 
-Run: `cargo test --features vault --test bouncer_eval -- --nocapture` for the rules, and `APASSY_EVAL_MODEL=http://127.0.0.1:8770 cargo test --features vault --test bouncer_eval -- --ignored --nocapture` with the model.
+Run: `cargo test --all-features --test it bouncer_eval:: -- --nocapture` for the rules, and `APASSY_EVAL_MODEL=http://127.0.0.1:8770 cargo test --all-features --test it bouncer_eval:: -- --ignored --nocapture` with the model.
 
 ### Blind result before the hardening changes
 
@@ -268,6 +268,6 @@ General secret, store, irreversible, SQL, HTTP, and injection rules, 13 new pack
 | Command | Result |
 | --- | --- |
 | `cargo test --offline --locked --all-features --all-targets -- --test-threads=1` | PASS. A fake Jev-compatible bouncer runs in `tests/common`. |
-| `cargo test --offline --locked --features vault --test bouncer_rules -- --ignored` | PASS with `laya-serve` running. Broker path: a known safe command ran without a prompt, and `echo $KEY \| base64` waited for the owner. |
+| `cargo test --offline --locked --all-features --test it bouncer_rules:: -- --ignored` | PASS with `laya-serve` running. Broker path: a known safe command ran without a prompt, and `echo $KEY \| base64` waited for the owner. |
 
 The GUI run on 2026-09-25 showed the bouncer address in the Broker card. The GUI run stopped before the rule editor, because the owner was using the computer. The rule editor has no GUI check.

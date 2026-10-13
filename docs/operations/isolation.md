@@ -370,8 +370,8 @@ socket in the denied data directory.
 | `apassy_list_access` | one grant for `get_sales_summary`. No secret. |
 | `apassy_use_credential` (`get_sales_summary`) | 318 orders, permitted fields only. No secret. |
 
-The evidence for these checks is `cargo test --locked --features desktop,vault
---test isolation_profile`. It has 27 tests. All pass. If `sandbox-exec` is
+The evidence for these checks is `cargo test --locked --all-features --test it
+isolation_profile::`. It has 27 tests. All pass. If `sandbox-exec` is
 absent, or the host is not macOS, the test fails. There is no skip (goal I4).
 
 ### The Apassy app bundle

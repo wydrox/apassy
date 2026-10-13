@@ -3,7 +3,7 @@
 //! Remembered answers of the owner and production allowances (ADR 0025 §3, §3b, §3c).
 //! Synthetic values only.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};

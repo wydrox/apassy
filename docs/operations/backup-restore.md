@@ -70,7 +70,7 @@ Until you confirm an item, the broker refuses each run and each connector call w
 Run the tests from the repository root:
 
 ```
-cargo test --locked --features desktop,vault --test owner_vault --test agent_run --test agent_path
+cargo test --locked --all-features --test it -- owner_vault:: agent_run:: agent_path::
 cargo test --locked --features desktop,vault --lib restored_item_shows_the_review_and_confirm_action
 ```
 

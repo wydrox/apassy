@@ -6,7 +6,7 @@
 //! The commands start with `true ||`, so the shell never runs `curl` or `git`. The
 //! analysis still reads the whole command.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

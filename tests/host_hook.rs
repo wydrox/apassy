@@ -8,9 +8,9 @@
 //!
 //! Two tests use real hosts and are ignored by default. They need the `claude` or
 //! `codex` program, an account, and network access:
-//! `cargo test --locked --features vault --test host_hook -- --ignored --nocapture`.
+//! `cargo test --locked --all-features --test it host_hook:: -- --ignored --nocapture`.
 
-mod common;
+use crate::common;
 
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;

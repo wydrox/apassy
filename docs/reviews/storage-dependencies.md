@@ -13,7 +13,7 @@ Host: macOS 27.0 (build 26A428), arm64, Rust 1.97.0. SIP is on.
 - I read the build scripts, the license files, and the bundled C sources in `~/.cargo/registry/src/`.
 - I compared the bundled sources with the upstream releases (§3).
 - A throwaway program in `/tmp` with the same pinned rusqlite and the Apassy `Cargo.lock` read the runtime values (§5). It used a synthetic key and synthetic data only.
-- `cargo test --locked --features storage-probe --test sqlcipher_probe -- --test-threads=1` passed: 12 tests, 0 failed, exit code 0.
+- `cargo test --locked --all-features --test it sqlcipher_probe:: -- --test-threads=1` passed: 12 tests, 0 failed, exit code 0.
 - `cargo-audit` 0.22.2 checked `Cargo.lock` against the RustSec database (§6). I installed it in a temporary `CARGO_HOME` in `/tmp`. The repository toolchain did not change.
 - I read the upstream security pages of OpenSSL, SQLCipher, and SQLite on 2026-09-26 (§6).
 
@@ -242,8 +242,9 @@ The CI workflow runs `cargo audit` with `cargo-audit` 0.22.2 (commit `50b31a2`).
 5. Run these commands. Each must pass with exit code 0:
 
    ```
-   cargo test --locked --features storage-probe --test sqlcipher_probe -- --test-threads=1
-   cargo test --locked --offline --features vault --lib --test vault_lifecycle --test vault_passphrase -- --test-threads=1
+   cargo test --locked --all-features --test it sqlcipher_probe:: -- --test-threads=1
+   cargo test --locked --offline --all-features --lib -- --test-threads=1
+   cargo test --locked --offline --all-features --test it -- --test-threads=1 vault_lifecycle:: vault_passphrase::
    cargo test --offline --locked --all-features --all-targets -- --test-threads=1
    cargo clippy --offline --locked --all-features --all-targets -- -D warnings
    cargo audit

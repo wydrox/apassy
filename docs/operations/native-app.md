@@ -455,7 +455,7 @@ All commands ran from the repository root in the worktree.
 | `cargo clippy --locked --all-features --all-targets -- -D warnings` | PASS. No warnings. |
 | `cargo clippy --locked --all-targets -- -D warnings` | PASS. No warnings. `apassy::native` has no feature gate. |
 | `cargo test --locked --features desktop,vault` | PASS. lib 41, agent_path 8, agent_run 8, bouncer_eval 2, bouncer_rules 7, contracts 14, desktop_model 29, native_helper 15, owner_vault 7, vault_lifecycle 28, vault_passphrase 5, doc tests 6. No failures. The 5 ignored tests are earlier tests outside this task (network and model evaluation). |
-| `cargo test --locked --test native_helper` | PASS. 15 tests. Two tests build the real Swift helper and check the protocol. None is ignored. |
+| `cargo test --locked --all-features --test it native_helper::` | PASS. 15 tests. Two tests build the real Swift helper and check the protocol. None is ignored. |
 | `cargo test --locked --lib native` | PASS. 9 tests: base64 vectors, error codes, redaction, limits, paths, the environment override, delivery status. |
 | `scripts/build-app.sh` | PASS, exit 0. See below. The script ran four times in this task: three passes, and one intended failure with a wrong profile. Each run started from an empty bundle. |
 
@@ -542,7 +542,7 @@ Worktree branch of the isolation worker, after a fast-forward to `goal-v1` at `8
 | `cargo fmt --check` | PASS |
 | `cargo clippy --locked --all-targets --features desktop,vault -- -D warnings` | PASS. No warnings. |
 | `cargo test --locked --features desktop,vault` | PASS. 283 tests passed, 0 failed, 8 ignored (the earlier tests that need the network, a live Laya model, or a real host). `isolation_profile` 16, `native_helper` 17. |
-| `cargo test --locked --features desktop,vault --test native_helper` | PASS. New: `real_helper_refuses_a_parent_that_is_not_apassy` (each request, also `ping` and a malformed request, gets `caller_not_allowed`; the Rust client maps it to `HelperErrorCode::CallerNotAllowed`), `a_helper_built_without_the_dev_flag_ignores_the_override`. `swift_and_rust_error_codes_match` includes `caller_not_allowed`. |
+| `cargo test --locked --all-features --test it native_helper::` | PASS. New: `real_helper_refuses_a_parent_that_is_not_apassy` (each request, also `ping` and a malformed request, gets `caller_not_allowed`; the Rust client maps it to `HelperErrorCode::CallerNotAllowed`), `a_helper_built_without_the_dev_flag_ignores_the_override`. `swift_and_rust_error_codes_match` includes `caller_not_allowed`. |
 | `scripts/build-app.sh` | PASS, exit 0. See the lines below. "Keychain: DISABLED (no provisioning profile)." |
 
 `scripts/build-app.sh`, the new lines:
@@ -729,7 +729,7 @@ Use a vault file with synthetic values. Start the app with `open target/Apassy.a
 5. Fingerprint change (A3). Add a fingerprint in System Settings. Open the vault file again. Expect "The fingerprints on this Mac changed ..." without a prompt, and passphrase unlock. Expect "Unlock method: Passphrase" in Settings > Security after unlock.
 6. Turn off (A3). Turn Touch ID unlock on again, then select "Turn off Touch ID unlock". Expect "Apassy deleted the unlock key", and after a lock, no "Unlock with Touch ID" button.
 7. Passphrase change (A3). With Touch ID unlock on, change the passphrase. Expect "Touch ID unlock is off, because the passphrase changed."
-8. Agent profile (I2). After owner step 1, run `APASSY_REQUIRE_KEYCHAIN=1 scripts/build-app.sh` and `cargo test --locked --features desktop,vault --test isolation_profile`. Expect the lines under "Check the agent profile with the signed bundle", and "keychain helper with the signed parent" with `"keychain_access_group":"<TEAM_ID>.com.wydrox.apassy"`. The provisioned keychain helper does not start in the agent profile, and a copy outside the bundle answers `caller_not_allowed`. Record the result.
+8. Agent profile (I2). After owner step 1, run `APASSY_REQUIRE_KEYCHAIN=1 scripts/build-app.sh` and `cargo test --locked --all-features --test it isolation_profile::`. Expect the lines under "Check the agent profile with the signed bundle", and "keychain helper with the signed parent" with `"keychain_access_group":"<TEAM_ID>.com.wydrox.apassy"`. The provisioned keychain helper does not start in the agent profile, and a copy outside the bundle answers `caller_not_allowed`. Record the result.
 
 ## Limits
 

@@ -39,7 +39,7 @@ cargo build --locked --features vault --example basemodel_labels
 
 if [ ! -s "$WORK/replay-dump.tsv" ]; then
   step "Write the replay dump (60000 generated commands, fixed seed)"
-  APASSY_REPLAY_DUMP="$WORK/replay-dump.tsv" cargo test --locked --features desktop,vault --test analysis_replay
+  APASSY_REPLAY_DUMP="$WORK/replay-dump.tsv" cargo test --locked --all-features --test it analysis_replay::
 fi
 
 step "Compose the data set"

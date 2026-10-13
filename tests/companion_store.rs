@@ -4,8 +4,7 @@
 //! the certificate, and the paired devices. A device is added only with an owner proof
 //! for `OwnerAction::PairCompanion`. All data is synthetic.
 
-#[path = "support/companion.rs"]
-mod companion_support;
+use crate::support::companion as companion_support;
 
 use std::sync::Arc;
 

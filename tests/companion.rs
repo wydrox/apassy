@@ -5,8 +5,7 @@
 //! only the pinned certificate, as the phone does, and a phone that signs with ring keys.
 //! All data is synthetic.
 
-#[path = "support/companion.rs"]
-mod companion_support;
+use crate::support::companion as companion_support;
 
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};

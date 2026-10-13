@@ -1,8 +1,7 @@
 //! Import from 1Password: the zip reader, the 1PUX and CSV parsers, and the mapping to
 //! Apassy items. Synthetic data only. Each synthetic secret starts with `SYNTH-OP-`.
 
-#[path = "support/zip_fixture.rs"]
-mod zip_fixture;
+use crate::support::zip_fixture;
 
 use std::io::Cursor;
 

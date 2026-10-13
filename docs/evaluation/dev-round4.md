@@ -247,9 +247,9 @@ cargo build --locked --features vault --bin apassy-eval
 APASSY_EVAL_MODEL=http://127.0.0.1:8773 APASSY_EVAL_DUMP=/tmp/v4-after.jsonl target/debug/apassy-eval tests/evals/heldout-v4.jsonl
 
 # The analysis of each case (flags, known safe, known command), without a model.
-APASSY_EVAL_SET=tests/evals/heldout-v4.jsonl cargo test --locked --features vault --test bouncer_eval set_analysis -- --ignored --nocapture
+APASSY_EVAL_SET=tests/evals/heldout-v4.jsonl cargo test --locked --all-features --test it bouncer_eval::set_analysis -- --ignored --nocapture
 
 # The golden replay and a dump of the generated set.
-cargo test --locked --features vault --test analysis_replay
-APASSY_REPLAY_DUMP=/tmp/generated.tsv cargo test --locked --features vault --test analysis_replay
+cargo test --locked --all-features --test it analysis_replay::
+APASSY_REPLAY_DUMP=/tmp/generated.tsv cargo test --locked --all-features --test it analysis_replay::
 ```

@@ -201,7 +201,7 @@ The 32 suggestions with a change:
 
 In 57 fields, the suggestion is more sensitive than the owner's choice. In 1 field, it is less sensitive: the Vercel token with "preview" in its name gets staging, but the token can deploy to production. If the owner accepts that suggestion without a look, runs with the token do not wait for the owner as a production item. The card shows the reason ("A name, a label, or a host says staging"), and the owner must confirm the value. Section 8 lists this limit.
 
-Run the evaluation: `cargo test --features vault --test declaration_suggestions -- --nocapture`. The test prints one line for each credential and the table above. It fails when a number is different from this section. After an intended change of a provider file, update this section and the constants in the test in the same commit.
+Run the evaluation: `cargo test --all-features --test it declaration_suggestions:: -- --nocapture`. The test prints one line for each credential and the table above. It fails when a number is different from this section. After an intended change of a provider file, update this section and the constants in the test in the same commit.
 
 ## 5. The real owner share
 

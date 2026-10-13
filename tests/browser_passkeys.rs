@@ -990,7 +990,7 @@ fn check_peer_runs_the_guard_and_refuses() {
     let Some(guard) = guard_binary() else { return };
     let output = Command::new(std::env::current_exe().unwrap())
         .args([
-            "check_peer_child",
+            "browser_passkeys::check_peer_child",
             "--exact",
             "--nocapture",
             "--test-threads=1",
@@ -1412,7 +1412,7 @@ fn the_release_guard_has_no_self_test_mode() {
 
 /// Opt-in: the real signed Helium, headless, with a new profile in a temporary folder
 /// and a mock keychain, so no window opens and no real profile or keychain changes.
-/// Run with `cargo test --test browser_passkeys -- --ignored real_helium`.
+/// Run with `cargo test --all-features --test it browser_passkeys::the_guard_checks_real_helium -- --ignored`.
 #[test]
 #[ignore = "starts the real Helium headless"]
 fn the_guard_checks_real_helium_arguments() {

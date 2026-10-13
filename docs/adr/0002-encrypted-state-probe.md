@@ -146,8 +146,8 @@ Production use is not permitted until that review is complete.
 ## 8. Parent commands
 
 ```
-cargo test --locked --features storage-probe --test sqlcipher_probe -- --test-threads=1
-cargo clippy --locked --features storage-probe --test sqlcipher_probe -- -D warnings
+cargo test --locked --all-features --test it sqlcipher_probe:: -- --test-threads=1
+cargo clippy --locked --all-features --test it -- -D warnings
 ```
 
 Record pass, fail, and unsupported outcomes separately.

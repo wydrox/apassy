@@ -31,13 +31,13 @@ Decisions taken by the integrator for open points (record in the ADRs when the c
 **F0 Foundation (schema 18)** — implementer.
 Owns: `src/vault/types.rs`, `src/vault/mod.rs`, `src/vault/merge.rs`, `src/vault/sync.rs`, `src/vault/history.rs` (adds `ItemEventKind::Moved`, kind `"moved"` in `SYNCED_EVENT_KINDS`), new `src/vault/schema18.rs`, `src/vault/folders.rs`, `src/vault/policy.rs`, empty stub modules `src/vault/{exceptions,answers,usage,agent_items}.rs` (doc comment only, `pub mod` lines in mod.rs), `src/desktop/owner_store.rs` only for `mod add; mod decisions;` + two empty files `src/desktop/owner_store/{add,decisions}.rs`, `tests/vault_migration.rs`, `tests/sync_schema_upgrade.rs`, new `tests/folder_sync.rs`, and `ios/ApassyCore` only if the schema bump needs a mechanical change there.
 Provides: §3 DDL, migration, merge support, folders API, policy API.
-Acceptance: new tests `version_18_migration_derives_exceptions_and_is_atomic`, `a_17_copy_merges_and_is_replaced_by_an_18_copy`, `folders_merge_last_writer_wins_and_tombstone_wins`; "every table is in SYNCED or LOCAL" still passes; `cargo test --features vault --test vault_migration --test sync_schema_upgrade --test relay_sync --test folder_sync`, `cargo test --features vault --lib vault::`, `cargo test -p apassy-core`.
+Acceptance: new tests `version_18_migration_derives_exceptions_and_is_atomic`, `a_17_copy_merges_and_is_replaced_by_an_18_copy`, `folders_merge_last_writer_wins_and_tombstone_wins`; "every table is in SYNCED or LOCAL" still passes; `cargo test --all-features --test it -- vault_migration:: sync_schema_upgrade:: relay_sync:: folder_sync::`, `cargo test --all-features --lib vault::`, `cargo test -p apassy-core`.
 Out of scope: any UI, broker, CRUD for local tables beyond the DDL.
 
 **F1 Broker helpers** — worker.
 Owns: new `src/broker/project.rs`, `src/broker/action_kind.rs`, two `pub mod` lines in `src/broker/mod.rs`, new `tests/project_key.rs`, `tests/action_kind.rs`.
 Provides: `pub struct Project { pub key: String, pub label: String, pub root: PathBuf }`; `pub fn project_of(cwd: &Path, home: Option<&Path>) -> Option<Project>` (git common dir via `.git` file → `gitdir:` → `commondir`, no git2; root/home/parents → `None`, reuse `approvals::folder_is_broad_with`); `pub enum ActionKind { Read, Change, Deploy, Delete }` with `as_str`/`parse`; `pub fn classify(command: &[String], analysis: &Analysis) -> ActionKind` (hard words `DELETE|drop|--force|rm|destroy|prune|reset --hard` → Delete; `deploy|push|publish|apply|release` → Deploy; unknown → Change, never Read).
-Acceptance: table tests incl. a worktree fixture and `/`, `$HOME`, `/System/Volumes/Data/Users/x`; `cargo test --features vault --test project_key --test action_kind`.
+Acceptance: table tests incl. a worktree fixture and `/`, `$HOME`, `/System/Volumes/Data/Users/x`; `cargo test --all-features --test it -- project_key:: action_kind::`.
 
 ### Wave 1 (3 parallel), after Gate 0
 

@@ -16,3 +16,17 @@
 # (src/vault/mod.rs, require_build_options).
 [env]
 LIBSQLITE3_FLAGS = { value = "-USQLITE_ENABLE_LOAD_EXTENSION -DSQLITE_OMIT_LOAD_EXTENSION -USQLITE_USE_URI -DSQLITE_DEFAULT_LOOKASIDE=0,0", force = true }
+
+# One feature set for everyday work: the --all-features set that CI tests and lints
+# with. Each other feature set builds another copy of the crate, of its test program,
+# and of each dependency whose features change, and target/ keeps every copy. Use
+# these aliases, or pass --all-features yourself (CONTRIBUTING.md, "Code").
+#   cargo t                        all tests: library, programs, tests/it.rs, doc tests
+#   cargo t --test it companion::  one module of the integration tests
+#   cargo clippy-all -- -D warnings
+[alias]
+t = "test --all-features"
+b = "build --all-features"
+c = "check --all-features --all-targets"
+r = "run --all-features"
+clippy-all = "clippy --all-features --all-targets"

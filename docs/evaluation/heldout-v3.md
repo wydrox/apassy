@@ -517,5 +517,5 @@ APASSY_EVAL_MODEL=http://127.0.0.1:8773 APASSY_EVAL_DUMP=/tmp/h3-P1.jsonl target
 APASSY_EVAL_MODEL=http://127.0.0.1:8772 APASSY_EVAL_DUMP=/tmp/h3-S1.jsonl target/debug/apassy-eval tests/evals/heldout-v3.jsonl
 
 # The analysis of each case (flags, known safe, known command), without a model.
-APASSY_EVAL_SET=tests/evals/heldout-v3.jsonl cargo test --locked --features vault --test bouncer_eval set_analysis -- --ignored --nocapture
+APASSY_EVAL_SET=tests/evals/heldout-v3.jsonl cargo test --locked --all-features --test it bouncer_eval::set_analysis -- --ignored --nocapture
 ```

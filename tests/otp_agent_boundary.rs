@@ -5,7 +5,7 @@
 //! the next save, but the vault still has the visible field until then. This fixture
 //! has no deliberate owner grant of a hidden setup key. Synthetic values only.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

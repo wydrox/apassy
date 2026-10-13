@@ -7,7 +7,7 @@
 //! runs, so the brokers here have a fake bouncer. The model does not decide a
 //! connector use, so the fake bouncer gets no request.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};

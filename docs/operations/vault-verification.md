@@ -26,7 +26,7 @@ All commands in this table exited with code 0 after the repairs below.
 
 | Command | Result |
 | --- | --- |
-| `cargo test --locked --offline --features vault --lib --test vault_lifecycle --test vault_passphrase -- --test-threads=1` | PASS. One payload-counter test, 28 lifecycle tests, and five passphrase/redaction tests. No failures or skips. |
+| `cargo test --locked --offline --all-features --lib -- --test-threads=1` and `cargo test --locked --offline --all-features --test it -- --test-threads=1 vault_lifecycle:: vault_passphrase::` | PASS. One payload-counter test, 28 lifecycle tests, and five passphrase/redaction tests. No failures or skips. |
 | `cargo clippy --offline --locked --features vault --all-targets -- -D warnings` | PASS. No warnings. |
 | `cargo fmt --all -- --check` | PASS. No format differences. |
 | `cargo clippy --offline --locked --all-features --all-targets -- -D warnings` | PASS. No warnings. |
@@ -99,7 +99,7 @@ All commands ran from the repository root and exited with code 0.
 | `cargo clippy --locked --all-targets --all-features -- -D warnings` | PASS. No warnings. |
 | `cargo test --locked --features desktop,vault` | PASS. 167 tests and 6 doc tests. 5 tests are ignored: they need network access or a running `laya-serve`. |
 | `cargo test --locked --all-features --all-targets -- --test-threads=1` | PASS. 179 tests, 5 ignored, as above. |
-| `cargo test --locked --features storage-probe --test sqlcipher_probe` | PASS. 12 tests. |
+| `cargo test --locked --all-features --test it sqlcipher_probe::` | PASS. 12 tests. |
 | `cargo run --locked --features desktop,vault --bin apassy -- --smoke-test` | PASS. `smoke-test: owner vault round trip passed.` |
 
 ### Evidence for each item

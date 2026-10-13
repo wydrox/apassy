@@ -362,8 +362,8 @@ is an owner decision. `tests/evals/*` and `independent.tsv` were not used.
 
 ```
 APASSY_TOOLS_DIR=<repo>/tools APASSY_FINETUNE_MODELS=/tmp/apassy-b9/models \
-cargo test --locked --release --features vault --test local_finetune \
-local_training_on_a_synthetic_log -- --ignored --nocapture
+cargo test --locked --release --all-features --test it \
+local_finetune::local_training_on_a_synthetic_log -- --ignored --nocapture
 ```
 
 The test runs the real `finetune::train` (gate, examples, supervisor, registration)
@@ -413,8 +413,8 @@ the owner check.
 APASSY_EVAL_MODEL=http://127.0.0.1:8774 APASSY_CANDIDATE_MODEL=http://127.0.0.1:8775 \
 APASSY_CANDIDATE_DIR=<candidate folder> [APASSY_SHADOW_ASK=1] \
 [APASSY_SHADOW_CASES=tests/fixtures/bouncer/cases.tsv] \
-cargo test --locked --release --features vault --test shadow_mode \
-shadow_session_on_synthetic_requests -- --ignored --nocapture
+cargo test --locked --release --all-features --test it \
+shadow_mode::shadow_session_on_synthetic_requests -- --ignored --nocapture
 ```
 
 | Run | Requests | Time | At the model step | Owner decisions there | Candidate agreement | Owner denials that the candidate allows | Active model agreement, same decisions |

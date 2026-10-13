@@ -5,8 +5,7 @@
 //! string from the action, checks the time, and verifies the signature. A good signature
 //! gives a proof that `ApprovalQueue::approve` accepts. All data is synthetic.
 
-#[path = "support/companion.rs"]
-mod companion_support;
+use crate::support::companion as companion_support;
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

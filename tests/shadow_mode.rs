@@ -717,7 +717,7 @@ fn fixture_cases(path: &str) -> Vec<(bool, String, String)> {
 ///
 /// `APASSY_EVAL_MODEL=http://127.0.0.1:8774 APASSY_CANDIDATE_DIR=<candidate folder>
 /// APASSY_CANDIDATE_MODEL=http://127.0.0.1:8775 cargo test --locked --release
-/// --features vault --test shadow_mode shadow_session_on_synthetic_requests --
+/// --all-features --test it shadow_mode::shadow_session_on_synthetic_requests --
 /// --ignored --nocapture`
 #[test]
 #[ignore = "needs two model servers: APASSY_EVAL_MODEL and APASSY_CANDIDATE_MODEL"]

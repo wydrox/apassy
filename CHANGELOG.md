@@ -4,6 +4,10 @@ All notable changes to Apassy. The format follows [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+### Changed
+
+- Development: the integration tests are one test program, `tests/it.rs`, with one module for each `tests/<name>.rs` file (`cargo test --all-features --test it companion::`), and the aliases in `.cargo/config.toml` (`cargo t`, `cargo clippy-all`) use one feature set. `target/` keeps one copy of the crate and its dependencies instead of one per test file and feature set. CI still runs four serial test groups, now by module.
+
 ## [0.5.3] - 2026-10-15
 
 ### Upgrade notes

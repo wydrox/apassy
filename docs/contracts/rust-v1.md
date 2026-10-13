@@ -177,4 +177,4 @@ This module does not:
 - isolate real secrets from an agent
 
 P1 and MVP are not complete because this schema exists.
-The parent runs `cargo test --locked --test contracts` and `cargo clippy --locked --lib --test contracts -- -D warnings`.
+The parent runs `cargo test --locked --all-features --test it contracts::` and `cargo clippy --locked --all-features --lib --test it -- -D warnings`.
