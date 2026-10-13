@@ -806,21 +806,27 @@ describe("connect rate limit", () => {
     }
   });
 
-  it("sends the client prefix of POST /v1/connect to the relay, once, over any client copy", async () => {
-    for (const [address, prefix] of [
-      ["198.51.100.42", "198.51.100.0/24"],
-      ["2001:db8:1:2:3:4:5:6", "2001:db8:1::/48"],
-      [undefined, "unknown"],
+  it("sends the client prefix of POST /v1/connect and its MAC to the relay, once, over any client copy", async () => {
+    // Fixed vectors: HMAC-SHA256 under SECRET of "apassy-relay client prefix v1\0" + prefix,
+    // computed independently of the Worker.
+    for (const [address, prefix, mac] of [
+      ["198.51.100.42", "198.51.100.0/24", "554af02c577b0770299175aff6f2a86f7082585a1abab1dcabcce44a54549490"],
+      ["2001:db8:1:2:3:4:5:6", "2001:db8:1::/48", "a5fd13e4d4baf530dab6b69b5893250bc1fd59e1959799b6c3ef27afd11bf3c7"],
+      [undefined, "unknown", "c911db78ab276b0c75ee2abe45235ae0d275e3032609166865a198d978e42279"],
     ]) {
       for (const forged of [undefined, "203.0.113.0/24"]) {
         const recorded = limiters(true);
         const headers: Record<string, string> = {};
         if (address) headers["cf-connecting-ip"] = address;
-        if (forged) headers["X-Apassy-Client-Prefix"] = forged;
+        if (forged) {
+          headers["X-Apassy-Client-Prefix"] = forged;
+          headers["X-Apassy-Client-Prefix-Mac"] = "ffff";
+        }
         const response = await call("/v1/connect", { method: "POST", body: "{}", headers }, recorded.env);
         assert.equal(response.status, 201, `${address} ${forged}`);
         assert.equal(seen.length, 1);
         assert.deepEqual(values(seen[0]!, "x-apassy-client-prefix"), [prefix], `${address} ${forged}`);
+        assert.deepEqual(values(seen[0]!, "x-apassy-client-prefix-mac"), [mac], `${address} ${forged}`);
         assert.deepEqual(values(seen[0]!, "x-apassy-edge"), [SECRET]);
       }
     }
@@ -832,9 +838,10 @@ describe("connect rate limit", () => {
     });
     assert.equal(bare.status, 201);
     assert.deepEqual(values(seen[0]!, "x-apassy-client-prefix"), ["198.51.100.0/24"]);
+    assert.deepEqual(values(seen[0]!, "x-apassy-client-prefix-mac"), ["554af02c577b0770299175aff6f2a86f7082585a1abab1dcabcce44a54549490"]);
   });
 
-  it("drops a client x-apassy-client-prefix on every other request", async () => {
+  it("drops a client x-apassy-client-prefix and its MAC on every other request", async () => {
     for (const [method, path] of [
       ["POST", "/v1/teams"],
       ["GET", "/v1/me"],
@@ -850,12 +857,14 @@ describe("connect rate limit", () => {
         headers: {
           "cf-connecting-ip": "198.51.100.42",
           "X-Apassy-Client-Prefix": "203.0.113.0/24",
+          "X-Apassy-Client-Prefix-Mac": "554af02c577b0770299175aff6f2a86f7082585a1abab1dcabcce44a54549490",
           ...(method === "PUT" ? { "content-length": "0" } : {}),
         },
       }, recorded.env);
       assert.equal(response.status, 201, `${method} ${path}`);
       assert.equal(seen.length, 1, `${method} ${path}`);
       assert.deepEqual(values(seen[0]!, "x-apassy-client-prefix"), [], `${method} ${path}`);
+      assert.deepEqual(values(seen[0]!, "x-apassy-client-prefix-mac"), [], `${method} ${path}`);
       assert.ok(!recorded.used.some((entry) => entry.startsWith("prefix:")), `${method} ${path}`);
     }
   });

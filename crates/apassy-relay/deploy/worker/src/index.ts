@@ -1,7 +1,7 @@
 // The edge Worker of apassy-relay: it serves static files, limits creation
 // requests (a codeless Connect team the most, by two keys: the client's /64 or IPv4 address
-// and a coarser /48 or /24 prefix, which also travels to the relay in a header; nothing is
-// stored) and snapshot pushes, bounds the declared length of every body, and
+// and a coarser /48 or /24 prefix, which also travels to the relay in a header with its
+// HMAC; nothing is stored) and snapshot pushes, bounds the declared length of every body, and
 // forwards relay requests with the required edge secret. `/internal/` routes (the APNs
 // sender, apns.ts) are handled here and never forwarded.
 // Erasable TypeScript only (no enums, namespaces, or parameter properties), so
@@ -48,8 +48,11 @@ export interface Env extends PushEnv {
 
 const EDGE_HEADER = "x-apassy-edge";
 // The coarse client prefix of `POST /v1/connect` for the relay. The relay trusts it only
-// together with the edge secret; the Worker always removes the client's copy.
+// together with its MAC (below); the Worker always removes the client's copy of both.
 const CLIENT_PREFIX_HEADER = "x-apassy-client-prefix";
+// The HMAC of that prefix under the edge secret. The relay trusts the prefix only when this
+// verifies: a Worker before this one forwarded a client's copy of the prefix.
+const CLIENT_PREFIX_MAC_HEADER = "x-apassy-client-prefix-mac";
 
 // The VPC service config picks the target and the port. The host of the URL only
 // fills the Host header.
@@ -147,6 +150,15 @@ function connectPrefix(address: string): string {
   return groups.slice(0, 3).map(trimGroup).join(":") + "::/48";
 }
 
+// The proof of a prefix for the relay: lowercase hex of HMAC-SHA256 under the edge secret.
+// Module-private: workerd accepts only handlers as exports of this main module.
+async function prefixMac(secret: string, prefix: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = await crypto.subtle.sign("HMAC", key, encoder.encode("apassy-relay client prefix v1\0" + prefix));
+  return [...new Uint8Array(mac)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 function unsafeDownloadPath(path: string): boolean {
   if (/\.\.|\/\/|%2f|%5c|\\/i.test(path)) return true;
   try {
@@ -214,6 +226,7 @@ export default {
       const headers = new Headers(request.headers);
       headers.delete(EDGE_HEADER);
       headers.delete(CLIENT_PREFIX_HEADER);
+      headers.delete(CLIENT_PREFIX_MAC_HEADER);
       const assetRequest = new Request(url, { method: request.method, headers });
       return staticResponse(await env.ASSETS.fetch(assetRequest), noStore);
     }
@@ -269,8 +282,11 @@ export default {
     headers.delete(EDGE_HEADER);
     headers.set(EDGE_HEADER, env.EDGE_SECRET);
     headers.delete(CLIENT_PREFIX_HEADER);
-    if (request.method === "POST" && url.pathname === CONNECT_PATH) {
-      headers.set(CLIENT_PREFIX_HEADER, connectPrefix(request.headers.get("cf-connecting-ip") ?? "unknown"));
+    headers.delete(CLIENT_PREFIX_MAC_HEADER);
+    if (isConnect) {
+      const prefix = connectPrefix(request.headers.get("cf-connecting-ip") ?? "unknown");
+      headers.set(CLIENT_PREFIX_HEADER, prefix);
+      headers.set(CLIENT_PREFIX_MAC_HEADER, await prefixMac(env.EDGE_SECRET, prefix));
     }
     if (!hasBody) {
       // No body is forwarded, so no length either: a declared one would make the
