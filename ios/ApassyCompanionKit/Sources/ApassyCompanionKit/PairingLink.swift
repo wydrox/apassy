@@ -41,13 +41,13 @@ public enum PairingLinkError: Error, Equatable, LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .notAPairingLink:
-            return "This is not an Apassy pairing code. Select \"Pair an iPhone\" in Settings > iPhone companion on your Mac."
+            return "This is not an Apassy pairing code. On your Mac, open Apassy > Settings > Devices > Add a device."
         case .unsupportedVersion:
             return "This pairing code is from another version of Apassy. Update Apassy on the Mac and on the iPhone."
         case .missingParameter, .badParameter, .tooManyHosts, .badPinOrSecret:
-            return "This pairing code is not valid. Select \"Pair an iPhone\" on your Mac to make a new one."
+            return "This pairing code is not valid. On your Mac, open Apassy > Settings > Devices > Add a device to make a new one."
         case .expired:
-            return "This pairing code has expired. Select \"Pair an iPhone\" on your Mac to make a new one."
+            return "This pairing code has expired. On your Mac, open Apassy > Settings > Devices > Add a device to make a new one."
         }
     }
 }
