@@ -21,6 +21,15 @@
 //!   one from this Mac ([`RemoteAnswering::send`], signed with the relay key of this Mac,
 //!   an approving answer only with a fresh owner check).
 //!
+//! A long poll that comes back early with nothing new (a Connect team holds at most 2
+//! waiting question polls, relay-connect-v1 section 5) starts a pause before the next poll
+//! of its kind: 5 s, doubling to 60 s, ±20% ([`PollBackoff`]). A poll that waited its full
+//! time or brought something ends the pause; the next one goes at once, as before. In a
+//! Connect team this Mac also holds one question poll at a time: while the reader
+//! long-polls the answers of its one open question, the lister asks for the list without
+//! a wait every [`CONNECT_LIST_EVERY`], and the reader ends a list poll in flight. An
+//! operator team keeps both long polls.
+//!
 //! The local card and the local-network companion are unchanged: the card shows at once,
 //! and whichever answer the queue takes first counts. A lock drops the relay token and
 //! ends the long poll; the open questions then expire on the relay. Each question keeps
@@ -38,6 +47,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::answer::{AnswerError, OpenedQuestion, answer_from_mac, open_question};
+use super::backoff::{PollBackoff, random_jitter};
 use super::client::{AnswerReceipt, AnswerRecord, MAX_WAIT, QuestionsClient, QuestionsError};
 use super::envelope::{
     AnswerBody, Card, CardError, Choice, RemoteEnvironment, Sealed, SettleBody, SettleOutcome,
@@ -89,9 +99,10 @@ pub const SENT: &str = "Sent. The Mac checks it; if the run does not continue wi
 /// decision 1).
 pub const TEAM_PRODUCTION: &str =
     "Remote answers for team production come with shared vaults; answer on this Mac.";
-/// The shortest time between two list calls that brought nothing: a relay that does not
-/// hold the long poll is not asked in a loop.
-const LIST_AT_LEAST: Duration = Duration::from_secs(1);
+/// In a Connect team, while the reader long-polls the answers, the lister asks for the
+/// list without a wait this often: one question poll per device (relay-connect-v1
+/// section 5).
+const CONNECT_LIST_EVERY: Duration = Duration::from_secs(5);
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -366,6 +377,22 @@ struct Shared {
     on_change: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     /// The questions of the other devices.
     remote: Mutex<Remote>,
+    /// Which long poll of this Mac waits on the relay now.
+    slot: Mutex<PollSlot>,
+    /// The pause of the answer poll of the reader after an early empty answer.
+    answer_pace: Mutex<PollBackoff>,
+    /// The pause of the list poll of the lister after an early empty answer.
+    list_pace: Mutex<PollBackoff>,
+}
+
+/// The long polls of this Mac on the relay: a Connect team holds one at a time.
+#[derive(Default)]
+struct PollSlot {
+    /// The reader long-polls the answers of its one open question now.
+    reader: bool,
+    /// Ends the list long poll in flight: the reader takes the one poll of a Connect
+    /// team, or a lock. A call with its own cancel ends by that cancel only.
+    lister: Option<Arc<Cancel>>,
 }
 
 /// The questions waiter of the app. It stops when dropped.
@@ -402,6 +429,9 @@ impl QuestionsWorker {
             view: Mutex::new(QuestionsView::default()),
             on_change: Mutex::new(None),
             remote: Mutex::new(Remote::default()),
+            slot: Mutex::new(PollSlot::default()),
+            answer_pace: Mutex::new(PollBackoff::default()),
+            list_pace: Mutex::new(PollBackoff::default()),
         });
         let mut threads = Vec::new();
         for (name, body) in [
@@ -558,6 +588,13 @@ impl Shared {
         self.wake();
     }
 
+    /// End the list long poll of the lister, so it plans again.
+    fn end_list_poll(&self) {
+        if let Some(cancel) = lock(&self.slot).lister.take() {
+            cancel.close();
+        }
+    }
+
     /// The vault locked or changed: drop the client, the token, and the open questions.
     fn forget(&self) {
         let active = {
@@ -571,6 +608,9 @@ impl Shared {
         if let Some(active) = active {
             active.client.close();
         }
+        self.end_list_poll();
+        lock(&self.answer_pace).reset();
+        lock(&self.list_pace).reset();
         self.end_poll();
         self.forget_remote();
         let mut view = lock(&self.view);
@@ -1161,14 +1201,34 @@ impl Shared {
                 self.sleep(Duration::from_secs(1));
             }
             [one] => {
+                // After an early empty answer: no poll before the pause ends. A wake
+                // plans again, and the pause still holds.
+                let pause = lock(&self.answer_pace).left(Instant::now());
+                if !pause.is_zero() {
+                    self.sleep(pause);
+                    return;
+                }
                 let cancel = Arc::new(Cancel::default());
                 *lock(&self.poll) = Some(Arc::clone(&cancel));
+                {
+                    // In a Connect team this poll is the one question poll of this Mac.
+                    let mut slot = lock(&self.slot);
+                    slot.reader = true;
+                    if active.client.is_connect()
+                        && let Some(lister) = slot.lister.take()
+                    {
+                        lister.close();
+                    }
+                }
                 let left = one.expires_at.saturating_sub(unix_now()).max(1);
                 let wait = Duration::from_secs(left).min(super::client::MAX_WAIT);
+                let started = Instant::now();
                 let result =
                     active
                         .client
                         .answers_with(&one.qid, one.last_answer, wait, Some(&cancel));
+                let took = started.elapsed();
+                lock(&self.slot).reader = false;
                 {
                     let mut poll = lock(&self.poll);
                     if poll.as_ref().is_some_and(|held| Arc::ptr_eq(held, &cancel)) {
@@ -1179,7 +1239,27 @@ impl Shared {
                 if result.is_err() && cancel.is_closed() {
                     return;
                 }
+                // Something new: an answer after the last one, or the end of the question.
+                let news = result.as_ref().ok().map(|list| {
+                    list.state != "open"
+                        || list
+                            .answers
+                            .iter()
+                            .any(|answer| answer.id > one.last_answer)
+                });
                 self.take_answers(&active, one, result);
+                if let Some(news) = news {
+                    let pause = lock(&self.answer_pace).polled(
+                        Instant::now(),
+                        wait,
+                        took,
+                        news,
+                        random_jitter(),
+                    );
+                    if !pause.is_zero() {
+                        self.sleep(pause);
+                    }
+                }
             }
             many => {
                 for reading in many {
@@ -1738,9 +1818,44 @@ impl Shared {
             self.sleep(Duration::from_secs(5));
             return;
         }
+        // After an early empty answer: no list before the pause ends.
+        let pause = lock(&self.list_pace).left(Instant::now());
+        if !pause.is_zero() {
+            self.sleep(pause);
+            return;
+        }
+        // A Connect team holds one question poll per device: while the reader waits for
+        // answers (or is about to), the list goes without a wait. The reader ends a list
+        // poll that started before it.
+        let connect = active.client.is_connect();
+        let reader_next = connect && self.reader_long_polls();
+        let cancel = Arc::new(Cancel::default());
+        let short = {
+            let mut slot = lock(&self.slot);
+            let short = reader_next || (connect && slot.reader);
+            if !short {
+                slot.lister = Some(Arc::clone(&cancel));
+            }
+            short
+        };
+        let wait = if short { Duration::ZERO } else { MAX_WAIT };
         let started = Instant::now();
-        let list = match active.client.list(since, MAX_WAIT) {
+        let result = active.client.list_with(since, wait, Some(&cancel));
+        let took = started.elapsed();
+        {
+            let mut slot = lock(&self.slot);
+            if slot
+                .lister
+                .as_ref()
+                .is_some_and(|held| Arc::ptr_eq(held, &cancel))
+            {
+                slot.lister = None;
+            }
+        }
+        let list = match result {
             Ok(list) => list,
+            // The reader took the one poll of a Connect team, or a lock: plan again.
+            Err(_) if cancel.is_closed() => return,
             Err(error) if error.status() == Some(404) => {
                 self.mark_unsupported(&active, "Apassy");
                 return;
@@ -1755,6 +1870,7 @@ impl Shared {
         if list.seq < since {
             // A relay restored from a backup: read again from the start.
             lock(&self.remote).since = 0;
+            lock(&self.list_pace).reset();
             return;
         }
         let (keys, devices) = {
@@ -1817,9 +1933,32 @@ impl Shared {
             };
         }
         self.publish_remote();
-        if list.questions.is_empty() && started.elapsed() < LIST_AT_LEAST {
-            self.sleep(LIST_AT_LEAST.saturating_sub(started.elapsed()));
+        if short {
+            self.sleep(CONNECT_LIST_EVERY);
+            return;
         }
+        let pause = lock(&self.list_pace).polled(
+            Instant::now(),
+            wait,
+            took,
+            !list.questions.is_empty(),
+            random_jitter(),
+        );
+        if !pause.is_zero() {
+            self.sleep(pause);
+        }
+    }
+
+    /// Whether the reader long-polls the answers of one open question now or next: in a
+    /// Connect team the lister then leaves it the one question poll of this Mac.
+    fn reader_long_polls(&self) -> bool {
+        let state = lock(&self.state);
+        state
+            .asked
+            .values()
+            .filter(|asked| asked.posted && !asked.applying && !asked.finished)
+            .count()
+            == 1
     }
 }
 

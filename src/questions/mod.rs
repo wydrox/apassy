@@ -14,6 +14,8 @@
 //! - [`client`]: the relay endpoints of the contract (section 10), and the device links
 //!   of a notifications-only team ("Add an iPhone…").
 //! - [`answer`]: the answering device (section 13).
+//! - [`backoff`]: the pause of a long poll after an early empty answer (relay-connect-v1
+//!   section 5), for the Mac and the iPhone core.
 //! - [`device_link`]: the answer key of an iPhone in its device link, for the row that
 //!   the confirming Mac writes.
 //! - [`worker`]: the asker, a waiter of its own next to the sync waiter (section 12), and
@@ -23,6 +25,7 @@
 //! they are.
 
 pub mod answer;
+pub mod backoff;
 pub mod client;
 pub mod device_link;
 pub mod envelope;
@@ -32,6 +35,7 @@ pub use answer::{
     AnswerError, OpenedQuestion, PreparedAnswer, Unreadable, answer_from_mac, local_action,
     open_question, open_settle, prepare_answer, remote_owner_action, seal_answer, send_answer,
 };
+pub use backoff::PollBackoff;
 pub use client::{
     AnswerList, AnswerReceipt, AnswerRecord, Posted, QuestionList, QuestionRecord, QuestionsClient,
     QuestionsError, TeamDevice,

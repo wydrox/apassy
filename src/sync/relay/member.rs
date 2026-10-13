@@ -91,6 +91,13 @@ impl RelayMember {
         self.session.device_id()
     }
 
+    /// The kind of the team, `operator` or `connect` (relay-connect-v1 section 2), as the
+    /// last sign-in said it. `None` before the first sign-in, and from a relay that does
+    /// not say it.
+    pub fn team_kind(&self) -> Option<String> {
+        self.session.team_kind()
+    }
+
     /// The public key, X9.63 (65 bytes).
     pub fn public_key(&self) -> &[u8] {
         self.session.key.public_key()

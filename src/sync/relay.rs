@@ -393,6 +393,9 @@ struct TokenAnswer {
     expires_at: u64,
     team_id: String,
     device_id: u64,
+    /// `operator` or `connect` (relay-connect-v1 section 2); an older relay omits it.
+    #[serde(default)]
+    team_kind: Option<String>,
 }
 
 struct Token {
@@ -461,6 +464,8 @@ pub(crate) struct Session {
     key: DeviceKey,
     device_id: Mutex<Option<u64>>,
     token: Mutex<Option<Token>>,
+    /// The kind of the team as the last sign-in said it: `operator` or `connect`.
+    team_kind: Mutex<Option<String>>,
     devices: Mutex<Option<Vec<DeviceView>>>,
     /// Ends every call in flight and refuses every later one: the vault locked.
     cancel: Cancel,
@@ -491,6 +496,7 @@ impl Session {
             key,
             device_id: Mutex::new(device_id),
             token: Mutex::new(None),
+            team_kind: Mutex::new(None),
             devices: Mutex::new(None),
             cancel: Cancel::default(),
             removed: Arc::new(Removal::new(REMOVED_PROBE_EVERY)),
@@ -505,6 +511,11 @@ impl Session {
 
     pub(crate) fn device_id(&self) -> Option<u64> {
         *lock(&self.device_id)
+    }
+
+    /// The kind of the team (`operator` or `connect`) as the last sign-in said it.
+    pub(crate) fn team_kind(&self) -> Option<String> {
+        lock(&self.team_kind).clone()
     }
 
     /// Let the next sign-in ask the relay, also when it refused this device a moment
@@ -597,6 +608,7 @@ impl Session {
             _ => *device_id = Some(answer.device_id),
         }
         drop(device_id);
+        *lock(&self.team_kind) = answer.team_kind;
         // The relay knows this device: a mark of an earlier refusal goes.
         self.removed.clear();
         let left = answer.expires_at.saturating_sub(unix_now());

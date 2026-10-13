@@ -2312,3 +2312,123 @@ fn a_vault_has_at_most_one_questions_membership() {
         BTreeSet::from([MembershipPurpose::Sync])
     );
 }
+
+// ---- The pace of the question long polls (relay-connect-v1 section 5). ----
+
+/// A vault with a Connect team, two items, and the agent `claude-code`, with its
+/// questions waiter running.
+struct ConnectMac {
+    _root: TempDir,
+    shared: SharedVault,
+    queue: Arc<ApprovalQueue>,
+    worker: QuestionsWorker,
+    agent: u64,
+    items: [u64; 2],
+}
+
+fn connect_mac(relay: &FakeRelay) -> ConnectMac {
+    let root = TempDir::new().expect("temp dir");
+    let mut vault = Vault::create(&root.path().join("local.db"), PASS).expect("create");
+    vault.unlock(PASS).expect("unlock");
+    let shop = vault
+        .add(secret_item("Shop database", SHOP_SECRET))
+        .expect("add")
+        .id;
+    let api = vault
+        .add(secret_item("API token", API_SECRET))
+        .expect("add")
+        .id;
+    let agent = vault.register_agent("claude-code").expect("agent").0.id;
+    new_connect_team(&mut vault, &relay.url, "Personal", "Synthetic MacBook")
+        .expect("connect team");
+    let shared: SharedVault = Arc::new(Mutex::new(Some(vault)));
+    let queue = Arc::new(ApprovalQueue::new());
+    let worker = QuestionsWorker::start(
+        Arc::clone(&queue),
+        Arc::clone(&shared),
+        OwnerGate::new(Arc::clone(&shared), None),
+        QuestionsConfig {
+            question_wait: Duration::from_secs(300),
+            tick: Duration::from_millis(50),
+            device_name: "Synthetic MacBook".to_owned(),
+        },
+    );
+    ConnectMac {
+        _root: root,
+        shared,
+        queue,
+        worker,
+        agent,
+        items: [shop, api],
+    }
+}
+
+/// Wait up to 20 s until `ready`.
+fn wait_until(what: &str, ready: impl Fn() -> bool) {
+    let start = Instant::now();
+    while !ready() {
+        assert!(start.elapsed() < Duration::from_secs(20), "{what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A list poll that comes back early with nothing new pauses the next one (5 s ±20%);
+/// before, the lister asked again after a second.
+#[test]
+fn an_early_empty_list_poll_pauses_the_lister() {
+    let relay = FakeRelay::start();
+    relay.answer_polls_at_once(true);
+    let mac = connect_mac(&relay);
+    wait_until("a first list poll", || !relay.list_waits().is_empty());
+    std::thread::sleep(Duration::from_millis(3500));
+    assert_eq!(relay.list_waits(), [25], "one long poll, then the pause");
+    drop(mac);
+}
+
+/// In a Connect team the Mac holds one question poll: while the reader long-polls the
+/// answers of its question, the list goes without a wait.
+#[test]
+fn a_connect_team_keeps_one_question_poll_per_device() {
+    let relay = FakeRelay::start();
+    let mac = connect_mac(&relay);
+    wait_until("a first list poll", || !relay.list_waits().is_empty());
+    assert_eq!(
+        relay.list_waits()[0],
+        25,
+        "no question yet: the list long-polls"
+    );
+
+    let epoch = mac.shared.lock().unwrap().as_ref().unwrap().epoch();
+    let queue = Arc::clone(&mac.queue);
+    let (agent, items) = (mac.agent, mac.items);
+    let _waiting = std::thread::spawn(move || {
+        queue.wait_for_question(
+            contract_run(0, items, contract_answers()),
+            agent,
+            epoch,
+            [0; 32],
+            Duration::from_secs(20),
+            || true,
+        )
+    });
+    let answer_polls = || {
+        relay
+            .log()
+            .iter()
+            .filter(|line| line.starts_with("GET /v1/questions/") && line.ends_with("/answers"))
+            .count()
+    };
+    wait_until("the reader long-polls the answers", || answer_polls() >= 1);
+    std::thread::sleep(Duration::from_secs(1));
+    let before = relay.list_waits().len();
+    std::thread::sleep(Duration::from_millis(6500));
+    let during = relay.list_waits()[before..].to_vec();
+    assert!(!during.is_empty(), "the list goes on");
+    assert!(
+        during.iter().all(|wait| *wait == 0),
+        "no list long poll next to the answer poll: {during:?}"
+    );
+    // The poster may end a first poll that started as the question was posted.
+    assert!(answer_polls() <= 2, "the answer poll waits");
+    drop(mac.worker);
+}

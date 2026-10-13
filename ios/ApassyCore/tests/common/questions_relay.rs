@@ -84,6 +84,8 @@ struct Relay {
     log: Vec<String>,
     /// The relay does not answer: each connection closes with no answer.
     offline: bool,
+    /// The list long poll answers at once, as a Connect team over its waiting polls.
+    polls_at_once: bool,
 }
 
 impl Relay {
@@ -233,6 +235,12 @@ impl QuestionsRelay {
     /// The relay stops answering, or answers again.
     pub fn set_offline(&self, offline: bool) {
         lock(&self.shared.0).offline = offline;
+    }
+
+    /// Answer every list long poll at once, as the relay does for a Connect team that
+    /// holds its waiting polls already (relay-connect-v1 section 5).
+    pub fn answer_polls_at_once(&self, at_once: bool) {
+        lock(&self.shared.0).polls_at_once = at_once;
     }
 
     /// The relay revokes device `id`.
@@ -564,6 +572,7 @@ fn route(shared: &Arc<(Mutex<Relay>, Condvar)>, request: &Incoming) -> (u16, Val
                     if wait > 25 {
                         return fail(400, "invalid_request");
                     }
+                    let wait = if relay.polls_at_once { 0 } else { wait };
                     let end = Instant::now() + Duration::from_secs(wait);
                     loop {
                         let found: Vec<Value> = relay
