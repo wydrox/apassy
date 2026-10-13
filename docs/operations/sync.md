@@ -63,7 +63,7 @@ The detected folders are iCloud Drive, each folder in `~/Library/CloudStorage` (
 - **Before each lock**: "Lock now", the lock button, a switch to another vault, "New vault…" or "Open vault file…" from an open vault, a backup, a restore over an open vault, a quit, and "Restart now" for an update.
 - **"Sync now"** in Settings > Vault > Sync.
 
-A question that waits for you in Decisions does not hold sync. When a merge changes a credential of that question, the run does not start after your answer: the agent is told to send the request again, so you answer for the credential as it is now. A sync never stops a lock or a quit: a failure shows once as a note, and the changes stay on this Mac until the next sync.
+A question that waits for you in Decisions does not hold sync. When a merge changes a credential of that question (its value, variable, declaration, or hosts), the run does not start after your answer: the agent is told to send the request again. When the agent sends the same request again, the old question goes away and a new one shows, and you answer again. So a run starts only with the credentials as they were when its question showed. A sync never stops a lock or a quit: a failure shows once as a note, and the changes stay on this Mac until the next sync.
 
 Agent use writes the activity log, but that is not synced content: it does not start a push.
 
@@ -246,6 +246,13 @@ The app (`src/desktop/ui/sync_tests.rs`):
 | `a_refused_team_code_keeps_the_folder_sync` | A used team code keeps the folder sync and says so; a good code then moves the vault from the folder to the relay. |
 | `the_sync_setting_waits_while_relay_sync_turns_on` | A folder pick while "Turn on" runs is refused at once; relay sync then turns on and syncs. |
 | `a_lock_drops_the_relay_key_at_once` | A lock drops the relay key without a step of the worker. |
+
+A run that waits while a merge comes (`tests/agent_run.rs`, `cargo test --locked --features vault --test agent_run -- merged`):
+
+| Test | What it shows |
+| --- | --- |
+| `a_merged_change_from_another_mac_refuses_a_waiting_run` | Another Mac changes the value or widens the hosts, and this Mac merges it while a run waits; your approval then refuses the run with `authorization_changed`, without a secret in the answer. |
+| `the_same_request_after_a_merged_change_asks_again` | After the merge, the same request again does not join the old question: the old question ends and its approval does nothing; the new question starts the run. |
 
 The app tests use the fake relay of the engine tests (`tests/common/fake_relay.rs`, included with `#[path]`).
 

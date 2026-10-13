@@ -330,8 +330,7 @@ const MAX_EXTRACT_BYTES: usize = 128;
 const POLL: Duration = Duration::from_millis(100);
 /// A dismissed request, asked again within this time, is still dismissed.
 const DISMISSED_REPEAT_SECONDS: u64 = 3600;
-const QUESTION_SUPERSEDED: &str =
-    "A newer call with the same request joined the waiting question. The answer goes to that call.";
+const QUESTION_SUPERSEDED: &str = "A newer call with the same request took over the waiting question. The answer goes to that call.";
 
 const ALNUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 const HEX: &[u8] = b"0123456789abcdef";
@@ -1400,10 +1399,13 @@ fn ask_first(
             .as_ref()
             .is_some_and(|vault| !vault.is_locked() && vault.epoch() == caller.epoch)
     };
+    // A capture uses no credential, so there is nothing to check again but the agent:
+    // every call of the agent has the same baseline.
     let settled = ctx.approvals.wait_for_question(
         pending,
         caller.agent.id,
         caller.epoch,
+        [0; 32],
         ctx.approval_timeout,
         same_session,
     );

@@ -571,7 +571,9 @@ impl World {
         let epoch = self.shared_a.lock().unwrap().as_ref().unwrap().epoch();
         let queue = Arc::clone(&self.queue);
         let agent = self.agent;
-        std::thread::spawn(move || queue.wait_for_question(run, agent, epoch, timeout, || true))
+        std::thread::spawn(move || {
+            queue.wait_for_question(run, agent, epoch, [0; 32], timeout, || true)
+        })
     }
 
     fn with_a<T>(&self, f: impl FnOnce(&mut Vault) -> T) -> T {
@@ -1448,7 +1450,14 @@ fn a_question_of_mac_b_shows_on_mac_a_and_its_answers_reach_b() {
         let epoch = world.with_b(|vault| vault.epoch());
         let queue = Arc::clone(&queue_b);
         std::thread::spawn(move || {
-            queue.wait_for_question(run, agent_b, epoch, Duration::from_secs(60), || true)
+            queue.wait_for_question(
+                run,
+                agent_b,
+                epoch,
+                [0; 32],
+                Duration::from_secs(60),
+                || true,
+            )
         })
     };
     let wait_remote = |count: usize| {
@@ -2033,7 +2042,7 @@ fn an_iphone_link_carries_its_answer_key_and_the_mac_writes_its_row() {
     let waiting = {
         let queue = Arc::clone(&queue);
         std::thread::spawn(move || {
-            queue.wait_for_question(run, agent, epoch, Duration::from_secs(60), || true)
+            queue.wait_for_question(run, agent, epoch, [0; 32], Duration::from_secs(60), || true)
         })
     };
     let phone = {

@@ -38,11 +38,17 @@
 //! The queue refuses a remembered answer that the question does not offer, for example
 //! "Allow ACTION in PROJECT" without a running bouncer or for a kind of action that the
 //! rules are not sure of. A call joins a waiting question when its run is the same
-//! except for the IDs, the bouncer text (`risk`, `question.why`), and the pattern offer.
+//! except for the IDs, the bouncer text (`risk`, `question.why`), and the pattern offer,
+//! and when its credentials are as they were at the first check of the call that asked
+//! ([`baseline_of`]). The broker checks each credential again after the answer, against
+//! the first check of the call that takes the answer. So when a credential changed (an
+//! edit, or a merge of a sync) the new call does not join: the old question ends, and
+//! the new call asks again. An answer never covers a version of a credential that came
+//! after its question showed.
 
 mod owner_auth;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
@@ -362,7 +368,8 @@ pub struct FirstUseBusy;
 pub enum QuestionRefusal {
     /// Another question of the same agent waits.
     Busy,
-    /// A newer identical call of the same agent joined the question and gets the answer.
+    /// A newer identical call of the same agent joined the question and gets the answer,
+    /// or replaced it with a new question because a credential changed.
     Superseded,
 }
 
@@ -487,9 +494,21 @@ struct Question {
     session: [u8; 32],
     /// The run as it waits, with its IDs set to 0. An identical call joins it.
     template: PendingRun,
+    /// The credentials at the first check of the call that asked ([`baseline_of`]). A
+    /// call with another baseline does not join: it replaces the question.
+    baseline: Baseline,
     deadline: Instant,
     /// Grows with each call that joins. Only the newest call takes the answer.
     turn: u64,
+}
+
+/// The agent of a call that waits as a question, its vault session, and its
+/// [`Baseline`].
+#[derive(Debug, Clone, Copy)]
+struct Asker {
+    agent_id: u64,
+    session: [u8; 32],
+    baseline: Baseline,
 }
 
 /// The run with its IDs at 0 and without the text of the bouncer and the pattern offer,
@@ -505,6 +524,20 @@ fn template_of(run: &PendingRun) -> PendingRun {
     template
 }
 
+/// A digest of what the broker checks again after the answer of a question: the
+/// credentials of the call and their access ([`ApprovalQueue::wait_for_question`]).
+pub type Baseline = [u8; 32];
+
+/// The [`Baseline`] of `state`: SHA-256 of its debug text. `state` is plain data (no
+/// hash map), so equal state gives equal text.
+pub fn baseline_of(state: &impl std::fmt::Debug) -> Baseline {
+    let text = format!("{state:?}");
+    let digest = ring::digest::digest(&ring::digest::SHA256, text.as_bytes());
+    let mut baseline = [0; 32];
+    baseline.copy_from_slice(digest.as_ref());
+    baseline
+}
+
 #[derive(Debug, Default)]
 struct QueueState {
     next_id: u64,
@@ -518,6 +551,9 @@ struct QueueState {
     offers: BTreeMap<u64, FirstUseOffer>,
     /// The question of each waiting run of a known agent (ADR 0025).
     questions: BTreeMap<u64, Question>,
+    /// Questions that a call with another baseline replaced. The call that waits on one
+    /// ends with [`QuestionRefusal::Superseded`].
+    replaced: BTreeSet<u64>,
     decisions: BTreeMap<u64, Decision>,
     /// When each waiting run started to wait. It is not part of the run, so the
     /// equality of two runs (and an owner proof for one) does not depend on it.
@@ -947,18 +983,32 @@ impl ApprovalQueue {
     ///
     /// An agent has at most one waiting question: another question of the agent gives
     /// [`QuestionRefusal::Busy`]. The same run again (equal except for its IDs), from the
-    /// same agent in the same session, joins the waiting question and keeps its time
-    /// limit; the older call then ends with [`QuestionRefusal::Superseded`], so only the
-    /// newest call gets the answer and one answer starts one run.
+    /// same agent in the same session, with the same `baseline`, joins the waiting
+    /// question and keeps its time limit; the older call then ends with
+    /// [`QuestionRefusal::Superseded`], so only the newest call gets the answer and one
+    /// answer starts one run.
+    ///
+    /// `baseline` is the digest of what the broker checks again after the answer
+    /// ([`baseline_of`]). The same run with another baseline (a credential changed after
+    /// the question showed) does not join: the waiting question ends, its call ends with
+    /// [`QuestionRefusal::Superseded`], and this call asks again with a new question and
+    /// a new time limit. So an answer always covers the credentials as they were when its
+    /// question showed.
     pub fn wait_for_question(
         &self,
         run: PendingRun,
         agent_id: u64,
         session: [u8; 32],
+        baseline: Baseline,
         timeout: Duration,
         still_valid: impl Fn() -> bool,
     ) -> Result<Settled, QuestionRefusal> {
-        self.wait(run, None, Some((agent_id, session)), timeout, still_valid)
+        let asker = Asker {
+            agent_id,
+            session,
+            baseline,
+        };
+        self.wait(run, None, Some(asker), timeout, still_valid)
     }
 
     /// Like [`Self::wait_for_decision`], for a run with a first use (ADR 0024). The
@@ -972,8 +1022,12 @@ impl ApprovalQueue {
         timeout: Duration,
         still_valid: impl Fn() -> bool,
     ) -> Result<Settled, FirstUseBusy> {
-        let agent = (offer.agent_id, [0; 32]);
-        self.wait(run, Some(offer), Some(agent), timeout, still_valid)
+        let asker = Asker {
+            agent_id: offer.agent_id,
+            session: [0; 32],
+            baseline: [0; 32],
+        };
+        self.wait(run, Some(offer), Some(asker), timeout, still_valid)
             .map_err(|_| FirstUseBusy)
     }
 
@@ -981,7 +1035,7 @@ impl ApprovalQueue {
         &self,
         mut run: PendingRun,
         offer: Option<FirstUseOffer>,
-        agent: Option<(u64, [u8; 32])>,
+        agent: Option<Asker>,
         timeout: Duration,
         still_valid: impl Fn() -> bool,
     ) -> Result<Settled, QuestionRefusal> {
@@ -991,20 +1045,26 @@ impl ApprovalQueue {
         }
         let generation = state.generation;
         let template = template_of(&run);
+        let mut replaced = None;
         let joined = match agent {
-            Some((agent_id, session)) => {
+            Some(asker) => {
                 match state
                     .questions
                     .iter_mut()
-                    .find(|(_, question)| question.agent_id == agent_id)
+                    .find(|(_, question)| question.agent_id == asker.agent_id)
                 {
                     Some((id, question))
                         if offer.is_none()
-                            && question.session == session
+                            && question.session == asker.session
                             && question.template == template =>
                     {
-                        question.turn = question.turn.wrapping_add(1);
-                        Some((*id, question.turn, question.deadline))
+                        if question.baseline == asker.baseline {
+                            question.turn = question.turn.wrapping_add(1);
+                            Some((*id, question.turn, question.deadline))
+                        } else {
+                            replaced = Some(*id);
+                            None
+                        }
                     }
                     Some(_) => return Err(QuestionRefusal::Busy),
                     None => None,
@@ -1012,6 +1072,12 @@ impl ApprovalQueue {
             }
             None => None,
         };
+        if let Some(old) = replaced {
+            // A credential changed after the old question showed. The old question ends,
+            // and this call asks again, so the owner answers for the credential as it is.
+            Self::forget(&mut state, old, ApprovalOutcome::Invalidated);
+            state.replaced.insert(old);
+        }
         let attached = joined.is_some();
         let (id, turn, deadline) = match joined {
             Some(joined) => joined,
@@ -1026,13 +1092,14 @@ impl ApprovalQueue {
                 if let Some(offer) = offer {
                     state.offers.insert(id, offer);
                 }
-                if let Some((agent_id, session)) = agent {
+                if let Some(asker) = agent {
                     state.questions.insert(
                         id,
                         Question {
-                            agent_id,
-                            session,
+                            agent_id: asker.agent_id,
+                            session: asker.session,
                             template,
+                            baseline: asker.baseline,
                             deadline,
                             turn: 0,
                         },
@@ -1056,6 +1123,9 @@ impl ApprovalQueue {
         };
         loop {
             let mut state = self.state();
+            if state.replaced.remove(&id) {
+                return Err(QuestionRefusal::Superseded);
+            }
             if state.generation != generation {
                 Self::forget(&mut state, id, ApprovalOutcome::Invalidated);
                 state.decisions.remove(&id);
@@ -1098,7 +1168,7 @@ impl ApprovalQueue {
             // and then the queue lock, so do not hold the queue lock here.
             if !still_valid() {
                 let mut state = self.state();
-                if superseded(&state) {
+                if state.replaced.remove(&id) || superseded(&state) {
                     return Err(QuestionRefusal::Superseded);
                 }
                 Self::forget(&mut state, id, ApprovalOutcome::Invalidated);
@@ -1521,7 +1591,14 @@ mod tests {
         let ask = |agent: u64, session: u8, run: PendingRun| {
             let queue = Arc::clone(&queue);
             std::thread::spawn(move || {
-                queue.wait_for_question(run, agent, [session; 32], Duration::from_secs(5), || true)
+                queue.wait_for_question(
+                    run,
+                    agent,
+                    [session; 32],
+                    [0; 32],
+                    Duration::from_secs(5),
+                    || true,
+                )
             })
         };
         let first = ask(7, 1, run());
@@ -1531,11 +1608,11 @@ mod tests {
         other.command = vec!["false".to_owned()];
         let wait = Duration::from_secs(5);
         assert_eq!(
-            queue.wait_for_question(other, 7, [1; 32], wait, || true),
+            queue.wait_for_question(other, 7, [1; 32], [0; 32], wait, || true),
             Err(QuestionRefusal::Busy)
         );
         assert_eq!(
-            queue.wait_for_question(run(), 7, [2; 32], wait, || true),
+            queue.wait_for_question(run(), 7, [2; 32], [0; 32], wait, || true),
             Err(QuestionRefusal::Busy),
             "another vault session never joins"
         );
@@ -1571,7 +1648,7 @@ mod tests {
                 let mut run = run();
                 run.risk = "The model was not sure.".to_owned();
                 run.question.why = run.risk.clone();
-                queue.wait_for_question(run, 7, [1; 32], Duration::from_secs(5), || true)
+                queue.wait_for_question(run, 7, [1; 32], [0; 32], Duration::from_secs(5), || true)
             })
         };
         let id = wait_until_pending(&queue);
@@ -1586,7 +1663,7 @@ mod tests {
                     approvals: 1,
                     needed: 3,
                 });
-                queue.wait_for_question(run, 7, [1; 32], Duration::from_secs(5), || true)
+                queue.wait_for_question(run, 7, [1; 32], [0; 32], Duration::from_secs(5), || true)
             })
         };
         assert_eq!(
@@ -1598,6 +1675,67 @@ mod tests {
         let settled = joined.join().expect("join").expect("an answer");
         assert!(settled.attached);
         assert_eq!(settled.outcome, ApprovalOutcome::Denied);
+    }
+
+    /// The same request after a change of a credential (another baseline) does not
+    /// join: the old question ends, and an approval of its card does nothing. The new
+    /// call asks again, and only an answer to the new card counts.
+    #[test]
+    fn a_question_is_asked_again_when_the_credentials_changed() {
+        let queue = Arc::new(ApprovalQueue::new());
+        let ask = |baseline: u8| {
+            let queue = Arc::clone(&queue);
+            std::thread::spawn(move || {
+                queue.wait_for_question(
+                    run(),
+                    7,
+                    [1; 32],
+                    [baseline; 32],
+                    Duration::from_secs(5),
+                    || true,
+                )
+            })
+        };
+        let first = ask(1);
+        let old = wait_until_pending(&queue);
+        let old_card = proof_for(&queue, old);
+        let _ = queue.take_ended();
+
+        let second = ask(2);
+        assert_eq!(
+            first.join().expect("join"),
+            Err(QuestionRefusal::Superseded)
+        );
+        let new = loop {
+            if let Some(run) = queue.pending().into_iter().find(|run| run.id != old) {
+                break run.id;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(queue.pending().len(), 1, "the old question ended");
+        assert_eq!(
+            queue.take_ended(),
+            vec![RunEnd {
+                id: old,
+                outcome: ApprovalOutcome::Invalidated,
+                method: None,
+            }]
+        );
+        assert!(queue.state().replaced.is_empty());
+        assert_eq!(queue.approve(old_card), Err(ApprovalRefusal::NotWaiting));
+
+        // The same request with the new baseline joins the new question.
+        let third = ask(2);
+        assert_eq!(
+            second.join().expect("join"),
+            Err(QuestionRefusal::Superseded)
+        );
+        assert_eq!(queue.pending().len(), 1);
+        assert_eq!(queue.pending()[0].id, new);
+        queue.approve(proof_for(&queue, new)).expect("approve");
+        let settled = third.join().expect("join").expect("an answer");
+        assert_eq!(settled.outcome, ApprovalOutcome::Approved);
+        assert!(settled.attached);
     }
 
     #[test]

@@ -826,7 +826,8 @@ fn the_worker_pushes_and_merges_without_any_frame() {
 /// the worker pushes a change of this Mac and merges a change of another Mac while it
 /// waits, as "Sync now" does. A merge that takes another version of a credential raises
 /// its revision, and the broker checks the revision of each credential of the question
-/// again after the answer, so a run never starts with a version the owner did not see.
+/// again after the answer. That the approval then refuses the run, and that the same
+/// request again asks again, is in `tests/agent_run.rs` (`merged`).
 #[test]
 fn the_worker_syncs_while_a_run_waits_for_the_owner() {
     let folders = folders();
