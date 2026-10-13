@@ -13,18 +13,20 @@ mod fake_relay;
 /// The fake relay reads the app's sync module under this name.
 use apassy::sync as relay_api;
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use apassy::contracts::CredentialKind;
+use apassy::relay::membership::new_connect_team;
 use apassy::sync::{
     DeviceKey, HeadFields, JoinedDevice, LinkCode, PendingJoin, RelayConfig, RelayRefusal,
     RelaySync, SignedHead, SyncError, SyncTransport, TransportKind, decode_b64u, head_hash,
     safety_words, sha256_hex, sign_in_message,
 };
-use apassy::vault::{Field, ItemDraft, SecretValue, Vault, VaultErrorKind};
+use apassy::vault::{Field, ItemDraft, MembershipPurpose, SecretValue, Vault, VaultErrorKind};
 use fake_relay::{FakeRelay, StoredHead};
 use ring::signature::{ECDSA_P256_SHA256_ASN1, UnparsedPublicKey};
 use tempfile::TempDir;
@@ -1912,4 +1914,108 @@ fn an_upload_signs_in_again_when_the_token_ends_before_the_transfer_could() {
         sign_ins + 1,
         "a new token for the upload"
     );
+}
+
+// ---- Apassy Connect: sync turns on in the team that is already there. ----
+
+/// A vault with a Connect team (the questions only) on a Mac of its own.
+fn connect_vault(relay: &FakeRelay, root: &TempDir) -> (Mac, Vault, String) {
+    let a = mac(root, "a", &relay.url);
+    let mut vault = a.create();
+    vault.add(item("Alpha", "SYNTH-alpha")).expect("add");
+    new_connect_team(&mut vault, &relay.url, "Personal", "Synthetic MacBook")
+        .expect("connect team");
+    let team = vault.relay_memberships().expect("memberships")[0]
+        .team_id
+        .clone();
+    (a, vault, team)
+}
+
+#[test]
+fn sync_turns_on_in_the_connect_team_without_a_second_team() {
+    let root = TempDir::new().expect("temp dir");
+    let relay = FakeRelay::start();
+    let (a, mut vault, team) = connect_vault(&relay, &root);
+    let before = vault.relay_memberships().expect("memberships").remove(0);
+    assert_eq!(
+        before.purposes,
+        BTreeSet::from([MembershipPurpose::Questions])
+    );
+    relay.lift_plan(&team);
+
+    let report = a
+        .sync
+        .enable_on_membership(&mut vault, &team, "Personal")
+        .expect("enable on the membership");
+    assert!(report.outcome.pushed);
+    assert_eq!(report.link.team_id, team);
+
+    let memberships = vault.relay_memberships().expect("memberships");
+    assert_eq!(memberships.len(), 1, "no second team");
+    let after = &memberships[0];
+    assert_eq!(after.team_id, team);
+    assert_eq!(after.public_key, before.public_key);
+    assert_eq!(after.device_id, before.device_id);
+    assert_eq!(
+        after.purposes,
+        BTreeSet::from([MembershipPurpose::Sync, MembershipPurpose::Questions])
+    );
+    let row = vault.relay_device().expect("row").expect("a row");
+    assert_eq!(row.team_id, team);
+    assert_eq!(row.device_id, before.device_id);
+    assert_eq!(relay.team_ids(), vec![team.clone()]);
+    assert_eq!(relay.version(), 1);
+    assert!(a.sync.state().expect("state").is_some());
+}
+
+#[test]
+fn plan_required_refuses_the_first_push_and_changes_nothing() {
+    let root = TempDir::new().expect("temp dir");
+    let relay = FakeRelay::start();
+    let (a, mut vault, team) = connect_vault(&relay, &root);
+
+    assert_eq!(
+        a.sync
+            .enable_on_membership(&mut vault, &team, "Personal")
+            .unwrap_err(),
+        SyncError::Relay(RelayRefusal::TeamLimit)
+    );
+    let memberships = vault.relay_memberships().expect("memberships");
+    assert_eq!(memberships.len(), 1);
+    assert_eq!(
+        memberships[0].purposes,
+        BTreeSet::from([MembershipPurpose::Questions])
+    );
+    assert!(vault.relay_device().expect("row").is_none());
+    assert_eq!(a.sync.state(), Ok(None));
+    assert_eq!(relay.version(), 0, "nothing was stored");
+
+    // Nothing half-done is left in the way: with the plan lifted it works.
+    relay.lift_plan(&team);
+    a.sync
+        .enable_on_membership(&mut vault, &team, "Personal")
+        .expect("enable after the plan");
+    assert_eq!(relay.version(), 1);
+    assert_eq!(
+        vault.relay_memberships().expect("memberships")[0].purposes,
+        BTreeSet::from([MembershipPurpose::Sync, MembershipPurpose::Questions])
+    );
+}
+
+#[test]
+fn enable_on_membership_refuses_an_unknown_team() {
+    let root = TempDir::new().expect("temp dir");
+    let relay = FakeRelay::start();
+    let (a, mut vault, team) = connect_vault(&relay, &root);
+    relay.lift_plan(&team);
+
+    assert_eq!(
+        a.sync
+            .enable_on_membership(&mut vault, "t_unknownsyn", "Personal")
+            .unwrap_err(),
+        SyncError::NotEnabled
+    );
+    assert_eq!(relay.version(), 0);
+    assert!(vault.relay_device().expect("row").is_none());
+    assert_eq!(a.sync.state(), Ok(None));
 }

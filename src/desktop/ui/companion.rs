@@ -1,5 +1,6 @@
-//! Settings > Devices > iPhone: the iPhone listener, the paired iPhones, the pairing QR
-//! code, and the code the owner types (ADR 0020).
+//! Settings > Devices > "Pair on this network" (L3): the iPhone listener, the pairing QR
+//! code, and the code the owner types (ADR 0020). The paired iPhones show in the list of
+//! devices of the hub (`super::devices`), as "Approves on this Wi-Fi only".
 //!
 //! The Mac never shows the 6-digit code: only the iPhone does, and the owner types it
 //! here. The QR code is drawn from its modules. The link is never a text on the screen
@@ -9,12 +10,10 @@ use eframe::egui::{self, Color32, Key, Rect, Response, Sense, Ui, Vec2, WidgetIn
 
 use super::kit::{self, Font, Style, Tone};
 use super::settings::rows;
-use super::timeline::relative_time;
 use super::{Sheet, close_sheet};
 use crate::companion::pairing::PairingView;
 use crate::desktop::DesktopApp;
 use crate::desktop::companion::{Listener, QUIET_ZONE, QrModules, now};
-use crate::desktop::owner_store::format_utc;
 
 /// The width of the QR code in points, about. The modules are whole points.
 const QR_POINTS: f32 = 200.0;
@@ -24,27 +23,29 @@ const CODE_DIGITS: usize = 6;
 /// A bound on the whole text, so that a paste of spaces does not fill the field.
 const CODE_MAX_CHARS: usize = 32;
 
-/// Settings > Devices > iPhone: the listener switch, "Pair…", and the paired iPhones in
-/// one group, and the pairing code below it while a pairing runs.
+/// "Pair on this network": the listener switch, "Pair…", and "Reset pairing…" in one
+/// group, and the pairing code below it while a pairing runs.
 pub(super) fn draw(app: &mut DesktopApp, ui: &mut Ui) {
-    iphone_group(app, ui);
+    listener_group(app, ui);
     if app.companion_controller().is_some() {
         pairing_section(app, ui);
     }
 }
 
-fn iphone_group(app: &mut DesktopApp, ui: &mut Ui) {
+fn listener_group(app: &mut DesktopApp, ui: &mut Ui) {
     let enabled = app
         .owner_ui
         .session
         .companion_status()
         .is_ok_and(|(setting, _)| setting.enabled);
-    let devices = app.owner_ui.session.companion_devices().unwrap_or_default();
-    let now = now();
+    let paired = app
+        .owner_ui
+        .session
+        .companion_devices()
+        .is_ok_and(|devices| !devices.is_empty());
     let mut on = enabled;
     let mut retry = false;
     let mut pair = false;
-    let mut remove = None;
     let mut reset = false;
     // "Pair…" is a row here while no pairing runs and the listener did not fail.
     let pairing = app
@@ -54,8 +55,10 @@ fn iphone_group(app: &mut DesktopApp, ui: &mut Ui) {
     let opening = app.companion.opening_window();
     rows::section(
         ui,
-        Some("iPhone"),
-        Some("The iPhone app approves runs with Face ID. It never shows a secret value."),
+        None,
+        Some(
+            "Without Apassy Connect: an iPhone on the same Wi-Fi as this Mac approves with Face ID. It never shows a secret value.",
+        ),
         |g| {
             // The state of the listener only when it is not plainly on or off.
             let subtitle = match &app.companion.listener {
@@ -70,21 +73,6 @@ fn iphone_group(app: &mut DesktopApp, ui: &mut Ui) {
                     Some(kit::text(message, Font::Callout).color(Tone::Critical.text())),
                     |ui| {
                         retry = kit::small_button(ui, "Try again", Style::Bordered).clicked();
-                    },
-                );
-            }
-            for device in &devices {
-                let date = format_utc(device.paired_at);
-                let paired = date.split(' ').next().unwrap_or_default();
-                let seen = device
-                    .last_seen_at
-                    .map_or_else(|| "never".to_owned(), |at| relative_time(at, now));
-                device_row(
-                    g,
-                    &device.name,
-                    &format!("Paired {paired}. Last seen {seen}."),
-                    || {
-                        remove = Some((device.device_id.clone(), device.name.clone()));
                     },
                 );
             }
@@ -107,7 +95,7 @@ fn iphone_group(app: &mut DesktopApp, ui: &mut Ui) {
                     notice(app, ui);
                 });
             }
-            if !devices.is_empty() {
+            if paired {
                 reset = g
                     .clickable_row("Reset pairing…", |ui| {
                         ui.label(
@@ -131,26 +119,9 @@ fn iphone_group(app: &mut DesktopApp, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         super::settings::add_an_iphone(app, &ctx);
     }
-    if let Some((id, name)) = remove {
-        app.remove_companion_device(&id, &name);
-    }
     if reset {
         app.ui.sheet = Some(Sheet::ResetCompanion);
     }
-}
-
-/// A paired iPhone: its name, when it paired and was last seen, and "Remove". Removing
-/// an iPhone takes effect at once.
-fn device_row(g: &mut rows::Group<'_>, name: &str, note: &str, mut remove: impl FnMut()) {
-    g.line_note(name, None, Some(rows::note(note)), |ui| {
-        let button = kit::small_button(ui, "Remove", Style::Destructive);
-        let spoken = format!("Remove {name}");
-        ui.ctx()
-            .accesskit_node_builder(button.id, |node| node.set_label(spoken));
-        if button.clicked() {
-            remove();
-        }
-    });
 }
 
 /// "4:32" for 272 seconds.
@@ -280,6 +251,62 @@ fn pairing_section(app: &mut DesktopApp, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         app.submit_pairing_code(&ctx);
     }
+}
+
+/// The name of the iPhone that asks to pair on this network and the wrong codes so far,
+/// while one asks.
+pub(super) fn asking_to_pair(app: &DesktopApp) -> Option<(String, u32)> {
+    match app.companion_controller()?.view() {
+        PairingView::Waiting {
+            device_name,
+            wrong_codes,
+            ..
+        } => Some((device_name, wrong_codes)),
+        _ => None,
+    }
+}
+
+/// The 6-digit code field of a pairing on this network and "Pair", for the sheet of
+/// "Add a device" when the iPhone fell back to this network. Returns whether the owner
+/// submitted the code.
+pub(super) fn code_entry(app: &mut DesktopApp, ui: &mut Ui, device_name: &str, wrong: u32) -> bool {
+    let check_open = app.owner.check.is_some();
+    let mut submit = false;
+    kit::paragraph(
+        ui,
+        format!(
+            "“{device_name}” wants to pair on this network. Type the 6-digit code that it shows."
+        ),
+        Font::Body,
+        kit::LABEL,
+    );
+    if wrong > 0 {
+        kit::tone_note(
+            ui,
+            format!("Wrong codes so far: {wrong} of 3."),
+            Tone::Warning,
+        );
+    }
+    ui.horizontal(|ui| {
+        let field = kit::mono_input(
+            ui,
+            &mut app.companion.code,
+            "companion-code-sheet",
+            "6 digits",
+        );
+        keep_code_characters(&mut app.companion.code);
+        if !check_open
+            && field.lost_focus()
+            && field.ctx.input(|input| input.key_pressed(Key::Enter))
+        {
+            submit = true;
+        }
+        ui.add_enabled_ui(!check_open, |ui| {
+            submit |= kit::small_button(ui, "Pair", Style::Prominent).clicked();
+        });
+    });
+    notice(app, ui);
+    submit
 }
 
 /// The line under the pairing controls, if there is one.

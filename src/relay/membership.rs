@@ -37,7 +37,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use crate::sync::relay::{call, clean_name, json_request, sync_error};
+use crate::sync::relay::{ApiError, call, call_once, clean_name, json_request, sync_error};
 use crate::sync::relay_crypto::valid_team_id;
 use crate::sync::{DeviceKey, RelayRefusal, RelayUrl, SyncError, valid_team_code};
 use crate::vault::{
@@ -254,17 +254,76 @@ pub fn new_questions_team(
     let key = DeviceKey::generate()?;
     let team = clean_name(vault_name, "Vault");
     let created = create_team_on_relay(&url, team_code, &team, device_name, &key)?;
-    Ok(RelayMembership {
+    Ok(questions_membership_of(&url, &created, &key))
+}
+
+/// Why `POST /v1/connect` made no team, before it maps to a [`SyncError`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectRefused {
+    /// `409 connect_key_used`: this key made a Connect team before (relay-connect-v1
+    /// section 4). A new key can try again.
+    KeyUsed,
+    Other(SyncError),
+}
+
+/// `POST /v1/connect` (contract relay-connect-v1 section 2): a new Connect team named
+/// `team` with the key `key` as its first device, named `device`, with no team code.
+/// No retry after `503 busy`: the daily cap of the relay lasts hours.
+fn create_connect_on_relay(
+    url: &RelayUrl,
+    team: &str,
+    device: &str,
+    key: &DeviceKey,
+) -> Result<CreatedTeam, ConnectRefused> {
+    #[derive(Serialize)]
+    struct Connect<'a> {
+        v: u8,
+        team: &'a str,
+        device_name: &'a str,
+        public_key: &'a str,
+    }
+    #[derive(Deserialize)]
+    struct Created {
+        team_id: String,
+        device_id: u64,
+    }
+    let answer: Result<Created, _> = call_once(
+        url,
+        &json_request(
+            "POST",
+            "/v1/connect",
+            None,
+            &Connect {
+                v: 1,
+                team,
+                device_name: &clean_name(device, "Mac"),
+                public_key: &key.public_key_b64u(),
+            },
+        ),
+    );
+    let created = match answer {
+        Ok(created) => created,
+        Err(ApiError::Relay {
+            status: 409, code, ..
+        }) if code == "connect_key_used" => {
+            return Err(ConnectRefused::KeyUsed);
+        }
+        // A relay without the endpoint (before relay-connect-v1): the route is unknown.
+        Err(ApiError::Relay {
+            status: 404 | 405, ..
+        }) => {
+            return Err(ConnectRefused::Other(SyncError::Relay(
+                RelayRefusal::NotFound,
+            )));
+        }
+        Err(error) => return Err(ConnectRefused::Other(sync_error(error))),
+    };
+    if !valid_team_id(&created.team_id) || created.device_id == 0 {
+        return Err(ConnectRefused::Other(SyncError::RelayUnreachable));
+    }
+    Ok(CreatedTeam {
         team_id: created.team_id,
-        relay_url: url.as_str().to_owned(),
         device_id: created.device_id,
-        public_key: key.public_key().to_vec(),
-        key_pkcs8: key
-            .pkcs8()
-            .cloned()
-            .unwrap_or_else(|| Zeroizing::new(Vec::new())),
-        purposes: BTreeSet::from([MembershipPurpose::Questions]),
-        created_at: 0,
     })
 }
 
@@ -275,18 +334,70 @@ pub fn new_questions_team(
 /// has the purpose `questions` only; the app keeps it with [`adopt_questions_team`].
 /// Only a Mac calls it.
 ///
-/// Not built yet: it fails with `Relay(NotFound)`, as a relay without the endpoint
-/// answers, and makes no key.
+/// A key that made a team before (`409 connect_key_used`, as after an answer that got
+/// lost) gets one more try with a new key. The errors:
+///
+/// - `Relay(NotFound)`: the relay has no Apassy Connect (an older relay).
+/// - `Relay(Busy)`: the relay made as many teams today as it takes; no retry.
+/// - `Relay(RateLimited)`: too many tries from this network.
+/// - `Relay(Conflict)`: the new key was refused too.
 pub fn create_connect_team(
     relay_url: &str,
     vault_name: &str,
     device_name: &str,
 ) -> Result<RelayMembership, SyncError> {
-    // S1: as `new_questions_team` without the team code, with a `create_connect_on_relay`
-    // next to `create_team_on_relay` for the call. S4 builds the endpoint.
-    let _url = RelayUrl::parse(relay_url)?;
-    let _ = (vault_name, device_name);
-    Err(SyncError::Relay(RelayRefusal::NotFound))
+    let url = RelayUrl::parse(relay_url)?;
+    let team = clean_name(vault_name, "Vault");
+    for _ in 0..2 {
+        let key = DeviceKey::generate()?;
+        match create_connect_on_relay(&url, &team, device_name, &key) {
+            Ok(created) => return Ok(questions_membership_of(&url, &created, &key)),
+            Err(ConnectRefused::KeyUsed) => continue,
+            Err(ConnectRefused::Other(error)) => return Err(error),
+        }
+    }
+    Err(SyncError::Relay(RelayRefusal::Conflict))
+}
+
+/// The first "Add a device…" of a vault with no team, in one call: [`create_connect_team`],
+/// then [`adopt_questions_team`]. The caller checked the owner on this Mac for
+/// `OwnerAction::EnableRelayQuestions` on `relay_url` with no team. It holds the vault
+/// across the relay call: the app uses [`create_connect_team`] on a thread of its own,
+/// then [`adopt_questions_team`]. `AlreadyEnabled`: the vault has a questions team.
+pub fn new_connect_team(
+    vault: &mut Vault,
+    relay_url: &str,
+    vault_name: &str,
+    device_name: &str,
+) -> Result<TrustedDevice, SyncError> {
+    if vault.is_locked() {
+        return Err(SyncError::Vault(VaultErrorKind::Locked));
+    }
+    if questions_membership(vault)?.is_some() || existing_questions_team(vault)?.is_some() {
+        return Err(SyncError::AlreadyEnabled);
+    }
+    let membership = create_connect_team(relay_url, vault_name, device_name)?;
+    adopt_questions_team(vault, &membership, device_name)
+}
+
+/// The membership of a new team for the questions only, with the key `key`.
+fn questions_membership_of(
+    url: &RelayUrl,
+    created: &CreatedTeam,
+    key: &DeviceKey,
+) -> RelayMembership {
+    RelayMembership {
+        team_id: created.team_id.clone(),
+        relay_url: url.as_str().to_owned(),
+        device_id: created.device_id,
+        public_key: key.public_key().to_vec(),
+        key_pkcs8: key
+            .pkcs8()
+            .cloned()
+            .unwrap_or_else(|| Zeroizing::new(Vec::new())),
+        purposes: BTreeSet::from([MembershipPurpose::Questions]),
+        created_at: 0,
+    }
 }
 
 /// The vault part of [`create_questions_team`], with no relay call: keep `membership`

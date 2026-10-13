@@ -27,7 +27,9 @@
 #   ui-decisions-suggestion.png ui-agents.png ui-sidebar-collapsed.png ui-narrow.png
 #   ui-narrow-float.png ui-settings-vault.png ui-settings-security.png
 #   ui-settings-devices.png ui-settings-bouncer.png ui-settings-tools.png
-#   ui-settings-updates.png ui-first-steps.png
+#   ui-settings-updates.png ui-first-steps.png ui-settings-devices-empty.png
+#   ui-devices-add.png ui-devices-add-words.png ui-devices-add-done.png
+#   ui-settings-devices-added.png
 #   app-vault.png app-credential.png app-agent.png app-requests.png app-activity.png
 #   app-learning.png (copies of ui-* images, for the README and the site)
 set -euo pipefail

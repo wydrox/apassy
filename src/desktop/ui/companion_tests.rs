@@ -1,4 +1,5 @@
-//! Headless tests of Settings > iPhone companion (ADR 0020): the listener follows the setting and
+//! Headless tests of Settings > Devices > "Pair on this network" (ADR 0020, the L3 fallback
+//! of the hub): the listener follows the setting and
 //! the lock, the QR code is drawn from its modules, a pairing goes from the QR code to a
 //! stored device through the code and the owner check, and "Remove" and "Reset pairing"
 //! act at once. A real listener runs on a temporary vault. The phone is a rustls client
@@ -90,10 +91,11 @@ fn can_connect(port: u16) -> bool {
     .is_ok()
 }
 
-/// The text of Settings > Devices after three frames, and the output commands of
-/// the last one (a copy to the pasteboard would be one).
+/// The text of Settings > Devices with "Pair on this network" open, after three frames,
+/// and the output commands of the last one (a copy to the pasteboard would be one).
 fn settings_frame(ctx: &egui::Context, app: &mut DesktopApp) -> (String, Vec<OutputCommand>) {
     super::open_settings(app, super::SettingsSection::Devices);
+    ctx.data_mut(|data| data.insert_temp(egui::Id::new(super::devices::PAIR_HERE_ID), true));
     let mut text = String::new();
     let mut commands = Vec::new();
     for _ in 0..3 {
@@ -460,7 +462,7 @@ fn the_settings_page_shows_the_companion() {
     let ctx = egui::Context::default();
     let (text, _) = settings_frame(&ctx, &mut app);
     for expected in [
-        "iPhone",
+        super::devices::PAIR_HERE,
         "Allow the iPhone app on this network",
         "It never shows a secret value",
         "Pair an iPhone",
@@ -742,16 +744,30 @@ fn a_pairing_goes_from_the_phone_through_the_code_and_the_owner_check() {
     assert!(app.companion.notice.is_none());
     let (text, _) = settings_frame(&ctx, &mut app);
     assert!(text.contains("Test iPhone"), "{text}");
-    assert!(text.contains("Last seen never"), "{text}");
-    assert!(text.contains("Remove"), "{text}");
+    assert!(text.contains(super::devices::WIFI_ONLY), "{text}");
     assert!(!text.contains("No iPhone is paired."), "{text}");
+    // Its row in the list of devices offers "Remove…", and says it was never seen.
+    let row = app
+        .devices_hub()
+        .rows
+        .into_iter()
+        .find(|row| row.name == "Test iPhone")
+        .expect("the row of the iPhone");
+    assert_eq!(row.seen, None);
+    assert!(matches!(
+        row.remove,
+        Some(super::devices::Removal::Wifi { .. })
+    ));
 
     // The phone is paired: a signed request works.
     let (status, body) = phone.status(port, &pin(&app)).expect("status");
     assert_eq!(status, 200, "{body}");
     assert!(body.contains(DEVICE), "{body}");
     let (text, _) = settings_frame(&ctx, &mut app);
-    assert!(text.contains("Last seen just now"), "{text}");
+    assert!(
+        text.contains(&format!("{} · just now", super::devices::WIFI_ONLY)),
+        "{text}"
+    );
 
     // "Remove" needs no owner check and works at once.
     app.remove_companion_device(DEVICE, DEVICE_NAME);

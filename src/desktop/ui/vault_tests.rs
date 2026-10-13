@@ -231,8 +231,8 @@ fn settings_show_the_groups_of_the_selected_section_only() {
         ),
         (
             SettingsSection::Devices,
-            &["This Mac", "Allow the iPhone app on this network", "Relay"][..],
-            &["Back up now…", "Change passphrase…", "Other Macs"][..],
+            &["This Mac", "Add a device…", "Pair on this network"][..],
+            &["Back up now…", "Change passphrase…", "Other Macs", "Relay"][..],
         ),
         (
             SettingsSection::Bouncer,
@@ -302,8 +302,8 @@ fn settings_list_plan_only_with_an_offer() {
     assert_eq!(app.ui.settings_section, SettingsSection::Plan);
 }
 
-/// The sheets of the plan and of the Devices hub are not built yet: each closes as
-/// soon as it opens, so nothing shows.
+/// The sheets of the plan are not built yet: each closes as soon as it opens, so nothing
+/// shows.
 #[test]
 fn sheets_that_are_not_built_yet_close_at_once() {
     use crate::plan::UpgradeFrom;
@@ -311,11 +311,7 @@ fn sheets_that_are_not_built_yet_close_at_once() {
     let dir = TempDir::new().expect("temp dir");
     let mut app = app_in(&dir);
     create(&mut app, "Personal", PASS_A);
-    for sheet in [
-        Sheet::Devices(super::devices::DevicesSheet::AddDevice),
-        Sheet::Upgrade(UpgradeFrom::Sync),
-        Sheet::PlanEnded,
-    ] {
+    for sheet in [Sheet::Upgrade(UpgradeFrom::Sync), Sheet::PlanEnded] {
         app.ui.sheet = Some(sheet.clone());
         let _ = frames(&mut app);
         assert_eq!(app.ui.sheet, None, "{sheet:?}");

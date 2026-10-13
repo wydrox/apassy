@@ -42,12 +42,14 @@ use apassy::questions::{
     send_answer,
 };
 use apassy::relay::membership::{
-    QuestionsAvailability, adopt_questions_team, disable_questions, enable_questions,
-    new_questions_team, questions_availability, questions_membership, questions_only,
+    QuestionsAvailability, adopt_questions_team, create_connect_team, disable_questions,
+    enable_questions, new_connect_team, new_questions_team, questions_availability,
+    questions_membership, questions_only,
 };
 use apassy::sync::{DeviceKey, PendingJoin, RelayConfig, RelaySync, decode_b64u, encode_b64u};
 use apassy::vault::{
-    Field, ItemDraft, QuestionKey, SecretValue, TrustedDevice, TrustedDeviceKind, Vault,
+    Field, ItemDraft, MembershipPurpose, QuestionKey, RelayMembership, SecretValue, TrustedDevice,
+    TrustedDeviceKind, Vault, VaultErrorKind,
 };
 use fake_relay::FakeRelay;
 use tempfile::TempDir;
@@ -2145,4 +2147,165 @@ fn a_second_mac_joins_the_questions_team_of_the_vault() {
         }
     );
     assert_eq!(client_a.devices().unwrap().len(), 2, "one team, two Macs");
+}
+
+// ---- Apassy Connect: a team with no team code (relay-connect-v1). ----
+
+/// The first "Add a device" of a vault with no team: `POST /v1/connect` with no code, one
+/// membership for the questions only, the question key, and this Mac as a trusted device.
+/// A second call finds the team and makes none.
+#[test]
+fn a_connect_team_needs_no_team_code_and_carries_the_questions() {
+    let root = TempDir::new().expect("temp dir");
+    let relay = FakeRelay::start();
+    let mut vault = Vault::create(&root.path().join("local.db"), PASS).expect("create");
+    vault.unlock(PASS).expect("unlock");
+    assert_eq!(
+        questions_availability(&vault).unwrap(),
+        QuestionsAvailability::NeedsTeam
+    );
+    let device = new_connect_team(&mut vault, &relay.url, "Personal", "Synthetic MacBook")
+        .expect("connect team");
+    assert_eq!(device.kind, TrustedDeviceKind::Mac);
+
+    let memberships = vault.relay_memberships().unwrap();
+    assert_eq!(memberships.len(), 1);
+    let membership = &memberships[0];
+    assert_eq!(
+        membership.purposes,
+        BTreeSet::from([MembershipPurpose::Questions])
+    );
+    assert_eq!(device.sign_key, membership.public_key);
+    assert_eq!(relay.team_ids(), vec![membership.team_id.clone()]);
+    assert_eq!(
+        relay.team_kind(&membership.team_id).as_deref(),
+        Some("connect")
+    );
+    assert!(vault.question_key().unwrap().is_some());
+    assert!(vault.relay_device().unwrap().is_none(), "no relay sync");
+    assert_eq!(
+        questions_availability(&vault).unwrap(),
+        QuestionsAvailability::On {
+            team_id: membership.team_id.clone()
+        }
+    );
+
+    // The call has exactly four fields: no team code, no owner.
+    assert_eq!(relay.count("POST /v1/connect"), 1);
+    let bodies = relay.request_bodies();
+    assert_eq!(bodies.len(), 1);
+    let body: serde_json::Value = serde_json::from_str(&bodies[0]).expect("json body");
+    let mut keys: Vec<&str> = body
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["device_name", "public_key", "team", "v"]);
+    assert!(body.get("code").is_none() && body.get("owner").is_none());
+
+    // A second call makes no new team.
+    assert!(matches!(
+        new_connect_team(&mut vault, &relay.url, "Personal", "Synthetic MacBook"),
+        Err(apassy::sync::SyncError::AlreadyEnabled)
+    ));
+    assert_eq!(relay.team_ids().len(), 1);
+    assert_eq!(relay.count("POST /v1/connect"), 1, "no call to the relay");
+}
+
+/// `409 connect_key_used` (a key that made a team before, as after a lost answer) gets one
+/// more try with a new key; a second refusal is a conflict, and no team is made.
+#[test]
+fn a_used_connect_key_gets_one_retry_with_a_new_key() {
+    let relay = FakeRelay::start();
+    relay.refuse_next_connect_keys(1);
+    let membership =
+        create_connect_team(&relay.url, "Personal", "Synthetic MacBook").expect("one retry");
+    assert_eq!(relay.count("POST /v1/connect"), 2);
+    assert_eq!(relay.team_ids(), vec![membership.team_id.clone()]);
+    assert_eq!(
+        relay.team_kind(&membership.team_id).as_deref(),
+        Some("connect")
+    );
+    assert!(questions_only(&membership));
+
+    relay.refuse_next_connect_keys(2);
+    assert_eq!(
+        create_connect_team(&relay.url, "Personal", "Synthetic MacBook").unwrap_err(),
+        apassy::sync::SyncError::Relay(apassy::sync::RelayRefusal::Conflict)
+    );
+    assert_eq!(relay.count("POST /v1/connect"), 4);
+    assert_eq!(relay.team_ids().len(), 1, "no new team");
+}
+
+/// A relay without the endpoint answers 404 and a relay at its daily cap answers 503;
+/// each is told as it is, the busy one with no retry, and no team is made.
+#[test]
+fn connect_on_an_old_or_busy_relay_fails_honestly() {
+    let relay = FakeRelay::start();
+    relay.set_connect_available(false);
+    assert_eq!(
+        create_connect_team(&relay.url, "Personal", "Synthetic MacBook").unwrap_err(),
+        apassy::sync::SyncError::Relay(apassy::sync::RelayRefusal::NotFound)
+    );
+    assert_eq!(relay.count("POST /v1/connect"), 1);
+    assert!(relay.team_ids().is_empty());
+
+    relay.set_connect_available(true);
+    relay.set_connect_busy(true);
+    assert_eq!(
+        create_connect_team(&relay.url, "Personal", "Synthetic MacBook").unwrap_err(),
+        apassy::sync::SyncError::Relay(apassy::sync::RelayRefusal::Busy)
+    );
+    assert_eq!(relay.count("POST /v1/connect"), 2, "one request, no retry");
+    assert!(relay.team_ids().is_empty());
+}
+
+/// A vault has at most one membership with `questions`: a second one is refused when it
+/// is added and when a purpose is set on it.
+#[test]
+fn a_vault_has_at_most_one_questions_membership() {
+    let root = TempDir::new().expect("temp dir");
+    let relay = FakeRelay::start();
+    let mut vault = Vault::create(&root.path().join("local.db"), PASS).expect("create");
+    vault.unlock(PASS).expect("unlock");
+    new_connect_team(&mut vault, &relay.url, "Personal", "Synthetic MacBook")
+        .expect("connect team");
+    let first = vault.relay_memberships().unwrap().remove(0);
+
+    let other = |purposes: &[MembershipPurpose]| RelayMembership {
+        team_id: "t_othersynth".to_owned(),
+        relay_url: first.relay_url.clone(),
+        device_id: 5,
+        public_key: first.public_key.clone(),
+        key_pkcs8: first.key_pkcs8.clone(),
+        purposes: purposes.iter().copied().collect(),
+        created_at: 0,
+    };
+    let refused = vault
+        .add_relay_membership(&other(&[MembershipPurpose::Questions]))
+        .unwrap_err();
+    assert_eq!(refused.kind(), VaultErrorKind::AlreadyExists);
+    assert_eq!(vault.relay_memberships().unwrap().len(), 1);
+
+    // A second team for sync only is fine; the purpose `questions` on it is not.
+    vault
+        .add_relay_membership(&other(&[MembershipPurpose::Sync]))
+        .expect("a sync-only team");
+    let refused = vault
+        .set_membership_purposes(
+            "t_othersynth",
+            &BTreeSet::from([MembershipPurpose::Sync, MembershipPurpose::Questions]),
+        )
+        .unwrap_err();
+    assert_eq!(refused.kind(), VaultErrorKind::AlreadyExists);
+    assert_eq!(
+        vault
+            .relay_membership("t_othersynth")
+            .unwrap()
+            .unwrap()
+            .purposes,
+        BTreeSet::from([MembershipPurpose::Sync])
+    );
 }

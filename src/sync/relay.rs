@@ -154,7 +154,9 @@ pub(crate) fn sync_error(error: ApiError) -> SyncError {
             (403, "join_pending") => SyncError::Relay(RelayRefusal::JoinPending),
             (403, "join_refused") => SyncError::Relay(RelayRefusal::JoinRefused),
             (403, "sync_head_invalid") => SyncError::Relay(RelayRefusal::HeadInvalid),
-            (403, "team_limit") => SyncError::Relay(RelayRefusal::TeamLimit),
+            // A Connect team without a paid plan takes no snapshot (relay-connect-v1
+            // section 5): a limit of the team, as the pushes of an hour are.
+            (403, "team_limit" | "plan_required") => SyncError::Relay(RelayRefusal::TeamLimit),
             (403, _) => SyncError::Relay(RelayRefusal::Forbidden),
             (400, _) => SyncError::Relay(RelayRefusal::InvalidRequest),
             (404, _) => SyncError::Relay(RelayRefusal::NotFound),
@@ -305,6 +307,24 @@ pub(crate) fn call<T: DeserializeOwned>(
     url: &RelayUrl,
     request: &Request<'_>,
 ) -> Result<T, ApiError> {
+    call_with(url, request, BUSY_RETRIES)
+}
+
+/// [`call`] that does not ask again after `503 busy`: for a call whose busy answer
+/// lasts (the daily cap of `POST /v1/connect`, `Retry-After: 3600`), so the refusal
+/// shows at once and no retry adds to the load.
+pub(crate) fn call_once<T: DeserializeOwned>(
+    url: &RelayUrl,
+    request: &Request<'_>,
+) -> Result<T, ApiError> {
+    call_with(url, request, 0)
+}
+
+fn call_with<T: DeserializeOwned>(
+    url: &RelayUrl,
+    request: &Request<'_>,
+    busy_retries: usize,
+) -> Result<T, ApiError> {
     let mut attempt = 0;
     loop {
         if let Some(left) = rate_limited(url) {
@@ -317,7 +337,7 @@ pub(crate) fn call<T: DeserializeOwned>(
             retry_after,
             ..
         }) = &result
-            && attempt < BUSY_RETRIES
+            && attempt < busy_retries
         {
             let wait = Duration::from_secs(retry_after.unwrap_or(2)).min(MAX_BUSY_WAIT);
             if !pause(request, wait) {
@@ -2123,7 +2143,12 @@ impl RelaySync {
     /// keeps one team and one device list. The relay must have lifted the team's preset
     /// (`POST /v1/teams/entitlement`) first. `vault_name` names the team in the report.
     ///
-    /// Not built yet: it fails with `Relay(NotFound)` and changes nothing.
+    /// - `NotEnabled`: the vault has no membership of `team_id`.
+    /// - `AlreadyEnabled`: the vault syncs already, through this or another team.
+    /// - `Relay(TeamLimit)`: the relay refused the first push because sync is not in
+    ///   the team's plan (`403 plan_required`, contract relay-connect-v1 section 5).
+    ///
+    /// A failure leaves the vault, its membership, and the state as they were.
     pub fn enable_on_membership(
         &self,
         vault: &mut Vault,
@@ -2154,12 +2179,48 @@ impl RelaySync {
         team_id: &str,
         vault_name: &str,
     ) -> Result<RelayEnableReport, SyncError> {
-        // S1: read the membership of `team_id` (`Vault::relay_membership`), build a
-        // session with its key and device number, call `finish_enable` (which reuses
-        // `finish_enable_with`), then add the purpose `sync`
-        // (`Vault::set_membership_purposes`). Never `create_team_in`.
-        let _ = (vault, team_id, vault_name);
-        Err(SyncError::Relay(RelayRefusal::NotFound))
+        if self.state()?.is_some() {
+            return Err(SyncError::AlreadyEnabled);
+        }
+        let (local, membership) = vault.with(|vault| {
+            self.require_unlocked(vault)?;
+            let membership = vault
+                .relay_membership(team_id)?
+                .ok_or(SyncError::NotEnabled)?;
+            // Another team syncs this vault: one team per vault, never a second sync.
+            if vault
+                .relay_device()?
+                .is_some_and(|device| device.team_id != team_id)
+            {
+                return Err(SyncError::AlreadyEnabled);
+            }
+            Ok((vault.sync_identity()?, membership))
+        })?;
+        let url = RelayUrl::parse(&self.config.url)?;
+        if url.as_str() != RelayUrl::parse(&membership.relay_url)?.as_str() {
+            return Err(SyncError::WrongVault);
+        }
+        let key = DeviceKey::from_pkcs8(membership.key_pkcs8.clone())?;
+        if key.public_key() != membership.public_key.as_slice() {
+            return Err(SyncError::Damaged);
+        }
+        *lock(&self.refused) = None;
+        let session = Arc::new(Session::new(
+            url,
+            &membership.team_id,
+            key,
+            Some(membership.device_id),
+        ));
+        // The push of version 1 comes first: `set_relay_device` at its end adds the
+        // purpose `sync` to this membership, with its own key, and keeps `questions`. A
+        // refused push (`403 plan_required`) changes nothing in the vault.
+        self.finish_enable(
+            vault,
+            session,
+            &local.vault_id,
+            clean_name(vault_name, "Vault"),
+            None,
+        )
     }
 
     /// Turn relay sync on for a vault that is already on the relay, with a device that

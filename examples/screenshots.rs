@@ -16,6 +16,17 @@
 //!
 //! After the unlock, the tour sends one run of an agent to the broker of the app (the
 //! token is in `HOME/tour-agent-token`), so Decisions has a question that waits.
+//!
+//! Settings > Devices and "Add a device" use the fake relay of the tests
+//! (`tests/common/fake_relay.rs`) on 127.0.0.1: before the window opens, `run` makes an
+//! Apassy Connect team for the vault there, with an iPhone and a Mac in it, and points
+//! the window's Apassy Connect at it. Nothing goes to the network.
+
+#[path = "../tests/common/fake_relay.rs"]
+mod fake_relay;
+
+/// The fake relay reads the app's sync module under this name.
+use apassy::sync as relay_api;
 
 use std::collections::VecDeque;
 use std::io::Write as _;
@@ -743,6 +754,9 @@ enum Step {
     Embed(bool),
     /// Send the run that waits for the owner ([`ask_in_background`]).
     Ask,
+    /// An iPhone asks to join with the code that "Add a device" shows, through the
+    /// fake relay ([`TourRelay::phone_asks`]).
+    PhoneAsks,
     Quit,
 }
 
@@ -758,10 +772,111 @@ struct Tour {
     next_frame: Vec<egui::Event>,
     /// Live mode: the last batch ended and `done` is written.
     live_idle: bool,
+    /// The fake relay of Settings > Devices, while the window runs.
+    relay: Option<TourRelay>,
+}
+
+/// The fake relay of the tour with the Connect team of the vault, and the iPhone that
+/// asks to join in "Add a device".
+struct TourRelay {
+    relay: fake_relay::FakeRelay,
+    asking: Option<apassy::sync::PendingJoin>,
+}
+
+impl TourRelay {
+    /// Start the fake relay and give the vault of `$HOME` a Connect team on it: this Mac,
+    /// "iPhone 17" (with its Face ID answer key), and "Mac mini", each confirmed by a link
+    /// as on the real relay. All keys are new and synthetic.
+    fn start() -> Option<Self> {
+        use apassy::questions::QuestionsClient;
+        use apassy::questions::device_link::link_device_name;
+        use apassy::relay::membership::{
+            adopt_questions_team, create_connect_team, register_linked_device,
+        };
+        use apassy::sync::{DeviceKey, PendingJoin};
+        let home = PathBuf::from(std::env::var_os("HOME")?);
+        let path = home.join("Library/Application Support/Apassy/vault.db");
+        if !path.exists() {
+            return None;
+        }
+        let relay = fake_relay::FakeRelay::start();
+        let mut vault = Vault::open(&path).expect("open the vault");
+        vault.unlock(PASS).expect("unlock");
+        let membership =
+            create_connect_team(&relay.url, "Personal", "MacBook Pro").expect("connect team");
+        adopt_questions_team(&mut vault, &membership, "MacBook Pro").expect("adopt");
+        let client = QuestionsClient::from_membership(&membership).expect("client");
+        let answer_key = DeviceKey::generate().expect("key");
+        for name in ["iPhone 17", "Mac mini"] {
+            let shown = if name.starts_with("iPhone") {
+                link_device_name(name, answer_key.public_key()).expect("name")
+            } else {
+                name.to_owned()
+            };
+            let code = client.create_link().expect("link");
+            let pending = PendingJoin::request(&code.link, "", &shown).expect("join");
+            let links = client.pending_links(Some(&code)).expect("links");
+            let device = client.confirm_link(&links[0]).expect("confirm");
+            let _ = pending.poll();
+            if name.starts_with("iPhone") {
+                register_linked_device(
+                    &mut vault,
+                    &membership.team_id,
+                    device.id,
+                    &links[0].device_name,
+                    &links[0].public_key,
+                )
+                .expect("the row of the iPhone");
+            } else {
+                let uuid = apassy::relay::membership::new_device_uuid().expect("uuid");
+                vault
+                    .register_trusted_device(
+                        &uuid,
+                        name,
+                        apassy::vault::TrustedDeviceKind::Mac,
+                        &links[0].public_key,
+                        None,
+                    )
+                    .expect("the row of the Mac");
+                vault
+                    .set_trusted_device_relay_id(&uuid, &membership.team_id, device.id)
+                    .expect("its number");
+            }
+        }
+        vault.lock().expect("lock");
+        drop(vault);
+        Some(Self {
+            relay,
+            asking: None,
+        })
+    }
+
+    /// An iPhone scans the code that "Add a device" shows and asks to join: the safety
+    /// words then show on the Mac.
+    fn phone_asks(&mut self) {
+        let Some(code) = self.relay.last_link_code() else {
+            eprintln!("tour: no link to join");
+            return;
+        };
+        let key = apassy::sync::DeviceKey::generate().expect("key");
+        let name =
+            apassy::questions::device_link::link_device_name("iPhone 17 Pro", key.public_key())
+                .expect("name");
+        let link = format!("{}/link#{code}", self.relay.url);
+        match apassy::sync::PendingJoin::request(&link, "", &name) {
+            Ok(pending) => self.asking = Some(pending),
+            Err(error) => eprintln!("tour: the iPhone did not ask: {error}"),
+        }
+    }
 }
 
 fn run() {
     let steps = VecDeque::from(tour_steps());
+    // The first steps run on an empty vault with no team.
+    let relay = std::env::var_os("APASSY_TOUR_FIRST_STEPS")
+        .is_none()
+        .then(TourRelay::start)
+        .flatten();
     // A fixed size, so the positions of the tour hold on each screen.
     let mut options = native_options();
     options.viewport = options.viewport.with_inner_size(egui::vec2(1180.0, 740.0));
@@ -774,6 +889,9 @@ fn run() {
             cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             let mut app = DesktopApp::from_creation_context(cc);
             tour_plan(&mut app);
+            if let Some(relay) = &relay {
+                assert!(app.set_connect_relay_url(&relay.relay.url));
+            }
             Ok(Box::new(Tour {
                 app,
                 steps,
@@ -783,6 +901,7 @@ fn run() {
                 snapping: None,
                 next_frame: Vec::new(),
                 live_idle: false,
+                relay,
             }))
         }),
     )
@@ -902,6 +1021,25 @@ fn view_steps() -> Vec<Step> {
         Click(LAYOUT.settings_list.0, LAYOUT.settings_list.1 + 5.0 * 48.0),
         Wait(1.0),
         Shot("settings-updates"),
+        // Settings > Devices, then "Add a device": the QR code, an iPhone that asks with
+        // the safety words, the owner check, and the end. The relay is the fake one.
+        Click(LAYOUT.settings_list.0, LAYOUT.settings_list.1 + 2.0 * 48.0),
+        Wait(3.0),
+        Click(LAYOUT.add_device.0, LAYOUT.add_device.1),
+        Wait(3.0),
+        Shot("devices-add"),
+        PhoneAsks,
+        Wait(7.0),
+        Shot("devices-add-words"),
+        Click(LAYOUT.confirm_device.0, LAYOUT.confirm_device.1),
+        Wait(1.5),
+        Type(PASS),
+        Key(egui::Key::Enter, egui::Modifiers::NONE),
+        Wait(4.0),
+        Shot("devices-add-done"),
+        Key(egui::Key::Escape, egui::Modifiers::NONE),
+        Wait(1.5),
+        Shot("settings-devices-added"),
     ]
 }
 
@@ -915,6 +1053,10 @@ struct Layout {
     first_agent: (f32, f32),
     /// The first section in the list of Settings; each next one is 48 points lower.
     settings_list: (f32, f32),
+    /// "Add a device…" of Settings > Devices with devices in the list.
+    add_device: (f32, f32),
+    /// "Confirm with Touch ID" of "Add a device" while an iPhone asks.
+    confirm_device: (f32, f32),
 }
 
 const LAYOUT: Layout = Layout {
@@ -925,6 +1067,8 @@ const LAYOUT: Layout = Layout {
     decision_suggestion: (450.0, 250.0),
     first_agent: (450.0, 70.0),
     settings_list: (450.0, 70.0),
+    add_device: (1093.0, 154.0),
+    confirm_device: (412.0, 575.0),
 };
 
 /// The tour. `APASSY_TOUR` names a file with other steps after the unlock, one per
@@ -941,7 +1085,16 @@ fn tour_steps() -> Vec<Step> {
         vec![Type(PASS), Wait(0.5), Click(590.0, 461.0), Wait(3.5)]
     };
     if std::env::var_os("APASSY_TOUR_FIRST_STEPS").is_some() {
-        steps.extend([Wait(1.0), Shot("first-steps")]);
+        // The first steps, then Settings > Devices with only this Mac.
+        steps.extend([
+            Wait(1.0),
+            Shot("first-steps"),
+            Key(egui::Key::Comma, egui::Modifiers::COMMAND),
+            Wait(1.5),
+            Click(LAYOUT.settings_list.0, LAYOUT.settings_list.1 + 2.0 * 48.0),
+            Wait(1.5),
+            Shot("settings-devices-empty"),
+        ]);
     } else {
         match std::env::var("APASSY_TOUR") {
             Ok(file) => steps.extend(parse_steps(
@@ -987,6 +1140,7 @@ fn parse_steps(text: &str) -> Vec<Step> {
             }
             Some("embed") => steps.push(Embed(parts.get(1) != Some(&"off"))),
             Some("ask") => steps.push(Ask),
+            Some("phone-asks") => steps.push(PhoneAsks),
             Some("quit") => steps.push(Quit),
             Some("minimize") => steps.push(Minimize(true)),
             Some("restore") => steps.push(Minimize(false)),
@@ -1166,6 +1320,11 @@ impl Tour {
             }
             Step::Embed(on) => ctx.set_embed_viewports(on),
             Step::Ask => ask_in_background(),
+            Step::PhoneAsks => {
+                if let Some(relay) = self.relay.as_mut() {
+                    relay.phone_asks();
+                }
+            }
             Step::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
         }
         self.next_at = Instant::now() + Duration::from_secs_f64(pause);
